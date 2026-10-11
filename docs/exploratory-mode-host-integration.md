@@ -60,6 +60,11 @@ transcriptPath, observedAt}`——只在三个身份字段变化时真正写（`
 不碰 facet 三元组、不参与 superRefine。它是 B.2 组装核心包 `sessions[]`
 （`nativeSessionId` / `transcriptPath`）的唯一身份来源。
 
+Cursor 例外（task 203f3）：cursor-agent 没有可供 kanban 安装的会话级 hook，身份改由 kanban 在 spawn 前分配
+（`identityEstablishmentMethod = kanban_assigned_before_agent_launch`，`transcriptPath` 恒为 null——transcript 路径只能由
+路径拼出，身份 sidecar 不收推断值）。Cursor 不支持 fork（`agentSessionForkReplayLaunchArguments` 为 null），所以它不会进入
+thread graph 的 fork 作业；身份只服务于按 id 续跑。见 `docs/agent-harness-cursor.md`。
+
 ## 3b. 启动参数快照（fork 重放用）
 
 核心包 fork 出的分身要逐字复用主会话的启动参数，因此 `launchArgvTemplate` 的三项一律**在启动那一刻快照**，

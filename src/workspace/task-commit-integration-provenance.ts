@@ -11,6 +11,15 @@ import type {
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "../state/workspace-state";
 import { computeStablePatchId, readGitHeadInfo, runGit } from "./git-utils";
+import {
+	evaluateSharedTaskCommitLandingCriterionAgainstLocalBaseCommits,
+	matchTaskCommitsOneToOneIntoBaseRefCommits,
+	type TaskCommitIntegrationIntoBaseRefMatchKind,
+} from "./shared-task-commit-landing-criterion-against-local-base";
+import {
+	type LastKnownTaskHeadObservationSourceForSharedLandingCriterion,
+	reportSharedTaskCommitLandingCriterionSatisfiedObservation,
+} from "./shared-task-commit-landing-criterion-satisfied-observation-port";
 import { proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation } from "./task-worktree-head-reflog-fast-forward-only-evidence";
 
 const TASK_COMMIT_INTEGRATION_PROVENANCE_FILENAME = "task-commit-integration-provenance.json";
@@ -44,6 +53,13 @@ const persistedTaskWorkspaceGitSnapshotSchema = z.object({
 	commitsBehindBaseRef: z.number().int().nonnegative(),
 	taskCommitsIntegratedIntoBaseRef: z.number().int().nonnegative(),
 	isDetached: z.boolean(),
+	// dd2db 1a 落地数据保全（§R3 Y-PHASE-3）：每次探测都记下「从最后已知 HEAD 可达的非 merge 自有提交」，
+	// 共享落地判据（exact SHA → patch-id 一对一进 base）在 1c 求值。可达集合必须在探测时采集，worktree 删掉后
+	// 就再也算不出来。旧文件没有这个字段（optional）。
+	// 「自有」= 最新一世观测到的 task 提交（旧世提交经 base 被新一世吸收时不属于新一世）；「可达」= 从 HEAD 可达、
+	// 且不可从最新一世的创建锚点到达。1c 之前的代码误取了 `baseRef..HEAD`，提交一旦以 merge 方式进了 base，
+	// 下一次探测就把它清空——persisted 分支会按需重算纠正。
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: z.array(observedTaskCommitSchema).optional(),
 	observedAt: z.number(),
 });
 type PersistedTaskWorkspaceGitSnapshot = z.infer<typeof persistedTaskWorkspaceGitSnapshotSchema>;
@@ -74,48 +90,26 @@ export interface CountTaskCommitsIntegratedIntoBaseRefResult {
 }
 
 /**
- * 对两个已解析的 commit identity 集合做一对一关联。先消费 exact SHA，再消费 stable patch-id；
+ * 对两个已解析的 commit identity 集合做一对一关联（与 dd2db 共享落地判据同一个匹配器，见
+ * shared-task-commit-landing-criterion-against-local-base.ts）：先消费 exact SHA，再消费 stable patch-id；
  * base 侧每个 commit 最多消费一次，防止重复 patch 被虚高计数。merge / 空提交没有 patch-id，天然只走 exact。
  */
 export function countTaskCommitsIntegratedIntoBaseRef(input: {
 	observedTaskCommits: readonly TaskCommitIdentity[];
 	baseRefCommits: readonly TaskCommitIdentity[];
 }): CountTaskCommitsIntegratedIntoBaseRefResult {
-	const unconsumedBaseCommitIndexes = new Set(input.baseRefCommits.map((_commit, index) => index));
-	const exactHashMatchedTaskCommitShas: string[] = [];
-	const patchIdMatchedTaskCommitShas: string[] = [];
-	const unmatchedTaskCommits: TaskCommitIdentity[] = [];
-
-	for (const taskCommit of input.observedTaskCommits) {
-		const exactBaseCommitIndex = input.baseRefCommits.findIndex(
-			(baseCommit, index) => unconsumedBaseCommitIndexes.has(index) && baseCommit.commitSha === taskCommit.commitSha,
-		);
-		if (exactBaseCommitIndex >= 0) {
-			unconsumedBaseCommitIndexes.delete(exactBaseCommitIndex);
-			exactHashMatchedTaskCommitShas.push(taskCommit.commitSha);
-		} else {
-			unmatchedTaskCommits.push(taskCommit);
-		}
-	}
-
-	for (const taskCommit of unmatchedTaskCommits) {
-		if (taskCommit.stablePatchId === null) {
-			continue;
-		}
-		const patchEquivalentBaseCommitIndex = input.baseRefCommits.findIndex(
-			(baseCommit, index) =>
-				unconsumedBaseCommitIndexes.has(index) && baseCommit.stablePatchId === taskCommit.stablePatchId,
-		);
-		if (patchEquivalentBaseCommitIndex >= 0) {
-			unconsumedBaseCommitIndexes.delete(patchEquivalentBaseCommitIndex);
-			patchIdMatchedTaskCommitShas.push(taskCommit.commitSha);
-		}
-	}
-
+	const { taskCommitsIntegratedIntoBaseRef } = matchTaskCommitsOneToOneIntoBaseRefCommits({
+		taskCommits: input.observedTaskCommits,
+		baseRefCommits: input.baseRefCommits,
+	});
+	const shasMatchedBy = (matchKind: TaskCommitIntegrationIntoBaseRefMatchKind): string[] =>
+		taskCommitsIntegratedIntoBaseRef
+			.filter((match) => match.taskCommitIntegrationIntoBaseRefMatchKind === matchKind)
+			.map((match) => match.taskCommitSha);
 	return {
-		integratedTaskCommitCount: exactHashMatchedTaskCommitShas.length + patchIdMatchedTaskCommitShas.length,
-		exactHashMatchedTaskCommitShas,
-		patchIdMatchedTaskCommitShas,
+		integratedTaskCommitCount: taskCommitsIntegratedIntoBaseRef.length,
+		exactHashMatchedTaskCommitShas: shasMatchedBy("exact_commit_sha"),
+		patchIdMatchedTaskCommitShas: shasMatchedBy("stable_patch_id_equivalent"),
 	};
 }
 
@@ -235,6 +229,25 @@ async function listCommitShas(cwd: string, revisionRange: string, firstParent = 
 		.filter(Boolean);
 }
 
+// 同一次 rev-list 里用 --parents 顺带判定 merge，不为「非 merge」多起一个 git 进程。
+async function listCommitShasWithMergeCommitFlag(
+	cwd: string,
+	revisionRange: string,
+): Promise<Array<{ commitSha: string; isMergeCommit: boolean }> | null> {
+	const result = await runGit(cwd, ["rev-list", "--reverse", "--parents", revisionRange]);
+	if (!result.ok) {
+		return null;
+	}
+	return result.stdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => {
+			const [commitSha = "", ...parentShas] = line.split(/\s+/);
+			return { commitSha, isMergeCommit: parentShas.length > 1 };
+		});
+}
+
 const commitIdentityPromiseByRepositoryPathAndCommitSha = new Map<string, Promise<TaskCommitIdentity>>();
 
 function rememberCommitIdentityPromise(cacheKey: string, identityPromise: Promise<TaskCommitIdentity>): void {
@@ -276,6 +289,87 @@ function deduplicateObservedTaskCommits(
 		}
 	}
 	return [...commitsBySha.values()];
+}
+
+/**
+ * 共享落地判据的 S：**最新一世**观测到的自有提交里，从 task HEAD 可达、不可从最新一世创建锚点到达、且非 merge 的那些。
+ * 不取各世累积：旧世提交若经 base 被新一世吸收，HEAD 可达它、锚点又不可达它，会被误算进新一世的 S（新一世没有自有提交
+ * 也被判「全部落地」）。跨世累积只用于集成计数 `countTaskCommitsIntegratedIntoBaseRef`。
+ * 不能用 `baseRef..HEAD`：提交以 merge 方式进了 base 之后它就是空的，判据会把「已落地」看成「没产出提交」。
+ * 已知可达集合（本次探测的 `baseRef..HEAD`）覆盖全部自有提交时不再起 git；否则补一次 `<锚点>..HEAD`。
+ * 返回 null 表示 git 读不出（HEAD 或锚点对象不在了）。
+ */
+async function resolveTaskOwnedNonMergeCommitsReachableFromTaskHead(input: {
+	gitCwd: string;
+	taskHeadCommit: string;
+	latestTaskCommitProvenanceIncarnationInitialBaseCommit: string;
+	taskOwnedCommitsObservedInLatestIncarnation: readonly ObservedTaskCommit[];
+	commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag: ReadonlyArray<{
+		commitSha: string;
+		isMergeCommit: boolean;
+	}>;
+}): Promise<ObservedTaskCommit[] | null> {
+	let isMergeCommitByReachableCommitSha = new Map(
+		input.commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag.map((commit) => [
+			commit.commitSha,
+			commit.isMergeCommit,
+		]),
+	);
+	const someOwnedCommitOutsideKnownReachableSet = input.taskOwnedCommitsObservedInLatestIncarnation.some(
+		(commit) => !isMergeCommitByReachableCommitSha.has(commit.commitSha),
+	);
+	if (someOwnedCommitOutsideKnownReachableSet) {
+		const reachableSinceLatestIncarnationAnchor = await listCommitShasWithMergeCommitFlag(
+			input.gitCwd,
+			`${input.latestTaskCommitProvenanceIncarnationInitialBaseCommit}..${input.taskHeadCommit}`,
+		);
+		if (reachableSinceLatestIncarnationAnchor === null) {
+			return null;
+		}
+		isMergeCommitByReachableCommitSha = new Map(
+			reachableSinceLatestIncarnationAnchor.map((commit) => [commit.commitSha, commit.isMergeCommit]),
+		);
+	}
+	return input.taskOwnedCommitsObservedInLatestIncarnation.filter(
+		(commit) => isMergeCommitByReachableCommitSha.get(commit.commitSha) === false,
+	);
+}
+
+// 判据满足才上报（经端口交给 runtime 的账本记录；未注册的进程不记账）。不满足的结局留给阶段 3 的门评估器按需求值。
+function reportSharedTaskCommitLandingCriterionSatisfiedObservationWhenSatisfied(input: {
+	workspaceId: string;
+	taskId: string;
+	taskCommitProvenanceIncarnationId: string;
+	localBaseRef: string;
+	localBaseRefTipCommitAtObservation: string;
+	localBaseRefCommits: readonly TaskCommitIdentity[];
+	lastKnownTaskHeadCommit: string;
+	lastTaskWorktreeGitSnapshotObservedAt: number;
+	lastKnownTaskHeadObservationSource: LastKnownTaskHeadObservationSourceForSharedLandingCriterion;
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: readonly ObservedTaskCommit[];
+}): void {
+	const evaluation = evaluateSharedTaskCommitLandingCriterionAgainstLocalBaseCommits({
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead:
+			input.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+		localBaseRefCommits: input.localBaseRefCommits,
+	});
+	if (
+		evaluation.sharedTaskCommitLandingCriterionOutcome !==
+		"all_task_owned_non_merge_commits_integrated_into_local_base"
+	) {
+		return;
+	}
+	reportSharedTaskCommitLandingCriterionSatisfiedObservation({
+		workspaceId: input.workspaceId,
+		taskId: input.taskId,
+		taskCommitProvenanceIncarnationId: input.taskCommitProvenanceIncarnationId,
+		localBaseRef: input.localBaseRef,
+		localBaseRefTipCommitAtObservation: input.localBaseRefTipCommitAtObservation,
+		lastKnownTaskHeadCommit: input.lastKnownTaskHeadCommit,
+		lastTaskWorktreeGitSnapshotObservedAt: input.lastTaskWorktreeGitSnapshotObservedAt,
+		lastKnownTaskHeadObservationSource: input.lastKnownTaskHeadObservationSource,
+		taskOwnedNonMergeCommitsIntegratedIntoLocalBase: evaluation.taskCommitsIntegratedIntoBaseRef,
+	});
 }
 
 const baseRefCommitIdentityCache = new Map<string, Promise<TaskCommitIdentity[] | null>>();
@@ -349,8 +443,14 @@ function snapshotFactsEqual(
 		left.commitsAheadOfBaseRef === right.commitsAheadOfBaseRef &&
 		left.commitsBehindBaseRef === right.commitsBehindBaseRef &&
 		left.taskCommitsIntegratedIntoBaseRef === right.taskCommitsIntegratedIntoBaseRef &&
-		left.isDetached === right.isDetached
+		left.isDetached === right.isDetached &&
+		describeObservedTaskCommitsForEquality(left.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead) ===
+			describeObservedTaskCommitsForEquality(right.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead)
 	);
+}
+
+function describeObservedTaskCommitsForEquality(commits: readonly ObservedTaskCommit[] | undefined): string {
+	return (commits ?? []).map((commit) => `${commit.commitSha}:${commit.stablePatchId ?? ""}`).join(",");
 }
 
 export interface RefreshTaskCommitIntegrationProvenanceInput {
@@ -415,10 +515,31 @@ export async function refreshTaskCommitIntegrationProvenance(
 				provenanceFloorCommit,
 			});
 			if (baseRefCommits !== null) {
+				const taskOwnedCommitsObservedAcrossIncarnations = deduplicateObservedTaskCommits(entry.incarnations);
 				const integration = countTaskCommitsIntegratedIntoBaseRef({
-					observedTaskCommits: deduplicateObservedTaskCommits(entry.incarnations),
+					observedTaskCommits: taskOwnedCommitsObservedAcrossIncarnations,
 					baseRefCommits,
 				});
+				const latestIncarnation = entry.incarnations.at(-1);
+				const lastTaskWorktreeGitSnapshotObservedAtBeforeThisRefresh = snapshot.observedAt;
+				let taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead =
+					snapshot.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
+				// 1c 之前的探测按 `baseRef..HEAD` 取值，merge 落地后被清成空；最新一世有自有提交却记成空的，用仓库里的对象重算一次
+				// （只看最新一世：旧世提交经 base 被吸收进本世时不属于本世，不得因此触发重算）。
+				if (
+					taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead?.length === 0 &&
+					latestIncarnation &&
+					latestIncarnation.observedTaskCommits.length > 0
+				) {
+					taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead =
+						(await resolveTaskOwnedNonMergeCommitsReachableFromTaskHead({
+							gitCwd: input.repoPath,
+							taskHeadCommit: snapshot.headCommit,
+							latestTaskCommitProvenanceIncarnationInitialBaseCommit: latestIncarnation.initialBaseCommit,
+							taskOwnedCommitsObservedInLatestIncarnation: latestIncarnation.observedTaskCommits,
+							commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag: [],
+						})) ?? taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
+				}
 				const nextSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
 					...snapshot,
 					baseRefTipCommit: input.baseRefTipCommit,
@@ -426,6 +547,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 						snapshot.taskCommitsIntegratedIntoBaseRef,
 						integration.integratedTaskCommitCount,
 					),
+					taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 				};
 				const observedAt = snapshotFactsEqual(snapshot, nextSnapshotFacts)
 					? snapshot.observedAt
@@ -444,6 +566,21 @@ export async function refreshTaskCommitIntegrationProvenance(
 						};
 					}
 				});
+				// 没有该字段的快照来自 1a 之前的探测，S 无从得知：不求值（激活补发扫描也不覆盖它们，留给 2b 回填）。
+				if (taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead !== undefined && latestIncarnation) {
+					reportSharedTaskCommitLandingCriterionSatisfiedObservationWhenSatisfied({
+						workspaceId: input.workspaceId,
+						taskId: input.taskId,
+						taskCommitProvenanceIncarnationId: latestIncarnation.incarnationId,
+						localBaseRef: input.baseRef,
+						localBaseRefTipCommitAtObservation: input.baseRefTipCommit,
+						localBaseRefCommits: baseRefCommits,
+						lastKnownTaskHeadCommit: snapshot.headCommit,
+						lastTaskWorktreeGitSnapshotObservedAt: lastTaskWorktreeGitSnapshotObservedAtBeforeThisRefresh,
+						lastKnownTaskHeadObservationSource: "persisted_last_task_worktree_snapshot_after_worktree_removal",
+						taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+					});
+				}
 			}
 		}
 		return {
@@ -510,10 +647,14 @@ export async function refreshTaskCommitIntegrationProvenance(
 	const observedTaskCommitsBySha = new Map(
 		deduplicateObservedTaskCommits(entry.incarnations).map((commit) => [commit.commitSha, commit]),
 	);
-	const candidateCommitShas = await listCommitShas(input.worktreePath, `${input.baseRef}..HEAD`);
-	if (candidateCommitShas === null) {
+	const candidateCommitsWithMergeFlag = await listCommitShasWithMergeCommitFlag(
+		input.worktreePath,
+		`${input.baseRef}..HEAD`,
+	);
+	if (candidateCommitsWithMergeFlag === null) {
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 	}
+	const candidateCommitShas = candidateCommitsWithMergeFlag.map((commit) => commit.commitSha);
 	// 从未观察到 task commit 时，baseRef..HEAD 为空无法区分「task commits 已 handback」与
 	// 「worktree 只是 fast-forward 吸收了 base」。creation floor 只能证明提交在何时出现，不能证明所有权；
 	// 唯有「单一创建 incarnation + HEAD reflog 自创建起只有 fast-forward」能证明是后者，回流计数如实为 0。
@@ -542,6 +683,18 @@ export async function refreshTaskCommitIntegrationProvenance(
 	for (const commit of newCommitIdentities) {
 		observedTaskCommitsBySha.set(commit.commitSha, commit);
 	}
+	// 本次探测 `baseRef..HEAD` 的全部候选都归当前活动世（含旧世已观测过、又出现在本世的，例如复用了旧分支），身份复用
+	// 已有观测、不重算 patch-id。从 base 吸收进来的提交从不出现在 `baseRef..HEAD`，因此不会被记成任何一世的自有提交。
+	const candidateCommitIdentities = candidateCommitShas.flatMap((commitSha) => {
+		const identity = observedTaskCommitsBySha.get(commitSha);
+		return identity ? [identity] : [];
+	});
+	const taskOwnedCommitsObservedInActiveIncarnationBySha = new Map(
+		[...activeIncarnation.observedTaskCommits, ...candidateCommitIdentities].map((commit) => [
+			commit.commitSha,
+			commit,
+		]),
+	);
 
 	const provenanceFloorCommit = entry.incarnations[0]?.initialBaseCommit;
 	if (!provenanceFloorCommit) {
@@ -567,7 +720,22 @@ export async function refreshTaskCommitIntegrationProvenance(
 		entry.lastWorkspaceGitSnapshot?.taskCommitsIntegratedIntoBaseRef ?? 0,
 		integration.integratedTaskCommitCount,
 	);
+	const taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead =
+		await resolveTaskOwnedNonMergeCommitsReachableFromTaskHead({
+			gitCwd: input.worktreePath,
+			taskHeadCommit: input.headCommit,
+			latestTaskCommitProvenanceIncarnationInitialBaseCommit: activeIncarnation.initialBaseCommit,
+			taskOwnedCommitsObservedInLatestIncarnation: [...taskOwnedCommitsObservedInActiveIncarnationBySha.values()],
+			commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag: candidateCommitsWithMergeFlag,
+		});
+	if (taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead === null) {
+		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable", {
+			commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
+			commitsBehindBaseRef: input.commitsBehindBaseRef,
+		});
+	}
 	const candidateSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 		path: input.worktreePath,
 		headCommit: input.headCommit,
 		baseRefTipCommit: input.baseRefTipCommit,
@@ -587,7 +755,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 			const freshObservedTaskCommitsBySha = new Map(
 				nextActiveIncarnation.observedTaskCommits.map((commit) => [commit.commitSha, commit]),
 			);
-			for (const commit of newCommitIdentities) {
+			for (const commit of candidateCommitIdentities) {
 				freshObservedTaskCommitsBySha.set(commit.commitSha, commit);
 			}
 			nextActiveIncarnation.observedTaskCommits = [...freshObservedTaskCommitsBySha.values()];
@@ -612,6 +780,19 @@ export async function refreshTaskCommitIntegrationProvenance(
 		nextEntry.lastWorkspaceGitSnapshot = { ...mergedSnapshotFacts, observedAt: mergedObservedAt };
 		nextFile.tasks[input.taskId] = nextEntry;
 		return nextEntry.lastWorkspaceGitSnapshot;
+	});
+	// 按本次探测读到的事实求值（不按合并后的持久快照）：观测就是「此刻在 worktree 上看到的」，与快照的时序取舍无关。
+	reportSharedTaskCommitLandingCriterionSatisfiedObservationWhenSatisfied({
+		workspaceId: input.workspaceId,
+		taskId: input.taskId,
+		taskCommitProvenanceIncarnationId: activeIncarnation.incarnationId,
+		localBaseRef: input.baseRef,
+		localBaseRefTipCommitAtObservation: input.baseRefTipCommit,
+		localBaseRefCommits: baseRefCommits,
+		lastKnownTaskHeadCommit: input.headCommit,
+		lastTaskWorktreeGitSnapshotObservedAt: liveObservationTimestamp,
+		lastKnownTaskHeadObservationSource: "live_task_worktree_probe",
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 	});
 
 	return {
@@ -675,6 +856,41 @@ export async function probeAndRefreshTaskCommitIntegrationProvenance(input: {
 async function resolveBaseRefTipCommit(repoPath: string, baseRef: string): Promise<string | null> {
 	const result = await runGit(repoPath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
 	return result.ok && result.stdout ? result.stdout : null;
+}
+
+// 原始落地快照（Y-EVENT-14 PDV 事件、1c 落地判据的输入）：只搬运已持久化的事实，不在这里判定是否已落地。
+export async function readRawTaskCommitLandingSnapshotForRelationLedgerEvent(
+	workspaceId: string,
+	taskId: string,
+): Promise<{
+	lastKnownTaskHeadCommit: string | null;
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: ObservedTaskCommit[] | null;
+	lastKnownTaskHeadObservedAt: number | null;
+	taskCommitIntegrationProvenanceBaseRef: string | null;
+}> {
+	const entry = (await readProvenanceFile(workspaceId)).tasks[taskId] ?? null;
+	const snapshot = entry?.lastWorkspaceGitSnapshot ?? null;
+	return {
+		lastKnownTaskHeadCommit: snapshot?.headCommit ?? null,
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead:
+			snapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead ?? null,
+		lastKnownTaskHeadObservedAt: snapshot?.observedAt ?? null,
+		taskCommitIntegrationProvenanceBaseRef: entry?.baseRef ?? null,
+	};
+}
+
+// 激活补发扫描的范围（§R3 Y-PHASE-3「对 1a–1c 期间的快照补发」）：快照带自有提交集合字段的条目，即 1a 起被探测过的 task，
+// 含已删卡（provenance 不再随删卡、删 worktree 删除）。更早的条目没有 S，交给 2b 回填。
+export async function listTaskCommitIntegrationProvenanceEntriesProbedSinceLandingDataPreservation(
+	workspaceId: string,
+): Promise<Array<{ taskId: string; baseRef: string }>> {
+	const file = await readProvenanceFile(workspaceId);
+	return Object.values(file.tasks)
+		.filter(
+			(entry) =>
+				entry.lastWorkspaceGitSnapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead !== undefined,
+		)
+		.map((entry) => ({ taskId: entry.taskId, baseRef: entry.baseRef }));
 }
 
 export async function removeTaskCommitIntegrationProvenance(workspaceId: string, taskId: string): Promise<boolean> {

@@ -2,13 +2,27 @@ import type { ReactNode } from "react";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import { notifyError } from "@/components/app-toaster";
 import { BoardCard } from "@/components/board-card";
+import { TaskCardBody } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 
+class DeferredClipboardItem {
+	constructor(readonly representations: { "text/plain": Promise<Blob> }) {}
+}
+
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
+let mockPolledWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | null = null;
+let mockTaskWorkspaceInfo: RuntimeTaskWorkspaceInfoResponse | null = null;
+
+vi.mock("@/stores/cross-project-task-worktree-git-metadata-store", () => ({
+	useCrossProjectTaskWorktreeGitMetadataSnapshotValue: (workspaceId: string, _taskId: string, isEnabled: boolean) =>
+		isEnabled && workspaceId === "project-a" ? mockPolledWorkspaceSnapshot : null,
+}));
+
+vi.mock("@/components/app-toaster", () => ({ notifyError: vi.fn() }));
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
@@ -29,6 +43,7 @@ vi.mock("@hello-pangea/dnd", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => mockWorkspaceSnapshot,
+	useTaskWorkspaceInfoValue: () => mockTaskWorkspaceInfo,
 }));
 
 vi.mock("@/utils/task-prompt", async () => {
@@ -120,7 +135,10 @@ describe("BoardCard", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		vi.mocked(notifyError).mockClear();
 		mockWorkspaceSnapshot = undefined;
+		mockPolledWorkspaceSnapshot = null;
+		mockTaskWorkspaceInfo = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -151,6 +169,7 @@ describe("BoardCard", () => {
 			root.unmount();
 		});
 		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
 		container.remove();
 		if (previousActEnvironment === undefined) {
 			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -205,6 +224,74 @@ describe("BoardCard", () => {
 				/>,
 			);
 		});
+		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
+	});
+
+	function createNeverStartedPlaceholderSummary(): RuntimeTaskSessionSummary {
+		return createSummary("idle", {
+			agentId: null,
+			workspacePath: null,
+			startedAt: null,
+			lastOutputAt: null,
+			lastHookAt: null,
+		});
+	}
+
+	function createTaskWorkspaceInfo(exists: boolean): RuntimeTaskWorkspaceInfoResponse {
+		return {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			exists,
+			baseRef: "main",
+			branch: null,
+			isDetached: true,
+			headCommit: null,
+		};
+	}
+
+	it("offers the in-place retry for a placeholder session when the task worktree was never created", async () => {
+		// 终端面板一挂上运行时就回一份占位 summary；启动前段失败（建 worktree 锁等待超时等）后卡片上留下的正是它。
+		// worktree 根本不存在是「从没启动过」的正面证据，这时以原 prompt 重新启动才是对的。
+		mockTaskWorkspaceInfo = createTaskWorkspaceInfo(false);
+		const onStart = vi.fn();
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createNeverStartedPlaceholderSummary()}
+					onStart={onStart}
+				/>,
+			);
+		});
+
+		const retryButton = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task start"]');
+		expect(retryButton).not.toBeNull();
+		await act(async () => {
+			retryButton?.click();
+		});
+		expect(onStart).toHaveBeenCalledWith("task-1");
+	});
+
+	it.each([
+		["the task worktree exists (launch history unknown)", { worktreeExists: true, launchedAgentId: undefined }],
+		["the card records a previous launch", { worktreeExists: false, launchedAgentId: "claude" as const }],
+	])("does not offer the prompt-resending retry for a placeholder session when %s", async (_label, evidence) => {
+		// 占位形状也可能是硬中断后退化的老会话：没有正面证据时，看板上不给「以原 prompt 重新启动」。
+		mockTaskWorkspaceInfo = createTaskWorkspaceInfo(evidence.worktreeExists);
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard({ mostRecentlyLaunchedAgentSessionAgentId: evidence.launchedAgentId })}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createNeverStartedPlaceholderSummary()}
+					onStart={vi.fn()}
+				/>,
+			);
+		});
+
 		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
 	});
 
@@ -656,37 +743,374 @@ describe("BoardCard", () => {
 		expect(document.body.querySelector("[role='dialog'] pre")).not.toBeNull();
 	});
 
-	it("does not start dependency linking from cmd+mousedown inside the prompt dialog", async () => {
-		const onDependencyPointerDown = vi.fn();
+	it.each(["backlog", "in_progress", "review", "validation", "trash"] as const)(
+		"%s 卡片没有 Git 元数据时仍提供目录复制按钮",
+		async (columnId) => {
+			await act(async () => {
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId={columnId}
+						resolveTaskWorkspaceAbsoluteDirectoryPath={async () => "/Users/alice/.cline/worktrees/task-1/kanban"}
+					/>,
+				);
+			});
+			expect(container.querySelector('button[aria-label="Copy directory path"]')).not.toBeNull();
+			if (columnId === "backlog") {
+				expect(container.querySelector("[data-task-directory]")).toBeNull();
+			}
+		},
+	);
 
-		await act(async () => {
-			root.render(
-				<BoardCard
-					card={createCard()}
-					index={0}
-					columnId="backlog"
-					onDependencyPointerDown={onDependencyPointerDown}
-				/>,
+	it.each(["clipboard", "http"] as const)("已知路径的 %s 复制不等待延迟 resolver", async (clipboardTransport) => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/Users/alice/.cline/worktrees/task-1/kanban",
+			branch: null,
+			isDetached: false,
+			headCommit: null,
+			baseCommit: null,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
+			changedFiles: null,
+			additions: null,
+			deletions: null,
+		};
+		let isHandlingClick = false;
+		const copyDuringUserGesture = vi.fn(() => {
+			if (!isHandlingClick) throw new Error("User gesture expired");
+			return clipboardTransport === "http" ? true : Promise.resolve();
+		});
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		const previousExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: clipboardTransport === "clipboard" ? { writeText: copyDuringUserGesture } : undefined,
+		});
+		Object.defineProperty(document, "execCommand", { configurable: true, value: copyDuringUserGesture });
+		try {
+			const resolver = vi.fn(() => new Promise<string | null>(() => {}));
+			await act(async () =>
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={resolver}
+					/>,
+				),
 			);
-		});
-
-		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
-		await act(async () => {
-			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			viewPromptButton?.click();
-		});
-
-		const promptBlock = document.body.querySelector<HTMLElement>("[role='dialog'] pre");
-		expect(promptBlock).not.toBeNull();
-
-		await act(async () => {
-			promptBlock?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, metaKey: true }));
-		});
-
-		expect(onDependencyPointerDown).not.toHaveBeenCalled();
+			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			await act(async () => {
+				isHandlingClick = true;
+				button?.click();
+				isHandlingClick = false;
+				expect(copyDuringUserGesture).toHaveBeenCalledOnce();
+			});
+			expect(resolver).not.toHaveBeenCalled();
+			expect(button?.querySelector("svg.lucide-check")).not.toBeNull();
+		} finally {
+			for (const [target, property, descriptor] of [
+				[navigator, "clipboard", previousClipboard],
+				[document, "execCommand", previousExecCommand],
+			] as const) {
+				if (descriptor) Object.defineProperty(target, property, descriptor);
+				else Reflect.deleteProperty(target, property);
+			}
+		}
 	});
 
-	it("reconstructs and shows trashed worktree path when workspace metadata is not tracked", async () => {
+	it("Backlog 延迟 resolver 的 ClipboardItem 写入在点击内同步发起", async () => {
+		let resolveDirectoryPath!: (path: string) => void;
+		const delayedDirectoryPath = new Promise<string>((resolve) => {
+			resolveDirectoryPath = resolve;
+		});
+		let isHandlingClick = false;
+		vi.stubGlobal("ClipboardItem", DeferredClipboardItem);
+		const writeClipboardItems = vi.fn((items: [DeferredClipboardItem]) => {
+			if (!isHandlingClick) return Promise.reject(new Error("User gesture expired"));
+			return items[0].representations["text/plain"].then(() => undefined);
+		});
+		const writeText = vi.fn(() => Promise.reject(new Error("User gesture expired")));
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: { write: writeClipboardItems, writeText },
+		});
+		try {
+			await act(async () =>
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={() => delayedDirectoryPath}
+					/>,
+				),
+			);
+			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			act(() => {
+				isHandlingClick = true;
+				button?.click();
+				isHandlingClick = false;
+			});
+			expect(writeClipboardItems).toHaveBeenCalledOnce();
+			expect(writeText).not.toHaveBeenCalled();
+			expect(button?.querySelector("svg.lucide-check")).toBeNull();
+			await act(async () => resolveDirectoryPath("/Users/alice/.cline/worktrees/task-1/kanban"));
+			expect(button?.querySelector("svg.lucide-check")).not.toBeNull();
+			expect(notifyError).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
+			else Reflect.deleteProperty(navigator, "clipboard");
+		}
+	});
+
+	it("HTTP 延迟预取完成后只在新的点击手势内原生复制", async () => {
+		let resolveDirectoryPath!: (path: string) => void;
+		const delayedDirectoryPath = new Promise<string>((resolve) => {
+			resolveDirectoryPath = resolve;
+		});
+		let isHandlingClick = false;
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		const previousExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+		const executeNativeClipboardCopy = vi.fn(() => isHandlingClick);
+		Object.defineProperty(document, "execCommand", { configurable: true, value: executeNativeClipboardCopy });
+		try {
+			await act(async () =>
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={() => delayedDirectoryPath}
+					/>,
+				),
+			);
+			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			act(() => button?.focus());
+			await act(async () => {
+				isHandlingClick = true;
+				button?.click();
+				isHandlingClick = false;
+			});
+			expect(executeNativeClipboardCopy).not.toHaveBeenCalled();
+			expect(notifyError).toHaveBeenCalledWith("Directory path is still loading. Please try copying again.");
+			await act(async () => resolveDirectoryPath("/Users/alice/.cline/worktrees/task-1/kanban"));
+			expect(executeNativeClipboardCopy).not.toHaveBeenCalled();
+			await act(async () => {
+				isHandlingClick = true;
+				button?.click();
+				isHandlingClick = false;
+				expect(executeNativeClipboardCopy).toHaveBeenCalledWith("copy");
+			});
+			expect(button?.querySelector("svg.lucide-check")).not.toBeNull();
+		} finally {
+			for (const [target, property, descriptor] of [
+				[navigator, "clipboard", previousClipboard],
+				[document, "execCommand", previousExecCommand],
+			] as const) {
+				if (descriptor) Object.defineProperty(target, property, descriptor);
+				else Reflect.deleteProperty(target, property);
+			}
+		}
+	});
+
+	it.each(["baseRef", "worktreeMode", "workspacePath", "resolver_identity"] as const)(
+		"预取按路径参数失效并忽略旧请求，变化字段 %s",
+		async (changedParameter) => {
+			let resolveOldDirectoryPath!: (path: string) => void;
+			const oldDirectoryPath = new Promise<string>((resolve) => {
+				resolveOldDirectoryPath = resolve;
+			});
+			const oldResolver = vi.fn(() => oldDirectoryPath);
+			const newResolver = vi.fn().mockResolvedValue("/Users/alice/new-workspace");
+			const copyDirectoryPath = vi.fn().mockResolvedValue(undefined);
+			const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+			Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copyDirectoryPath } });
+			try {
+				await act(async () =>
+					root.render(
+						<BoardCard
+							card={createCard()}
+							index={0}
+							columnId="backlog"
+							workspacePath="/Users/alice/project"
+							resolveTaskWorkspaceAbsoluteDirectoryPath={oldResolver}
+						/>,
+					),
+				);
+				const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+				act(() => button?.focus());
+				expect(oldResolver).toHaveBeenCalledOnce();
+				await act(async () =>
+					root.render(
+						<BoardCard
+							card={createCard(
+								changedParameter === "baseRef"
+									? { baseRef: "next-base" }
+									: changedParameter === "worktreeMode"
+										? { worktreeMode: "branch" }
+										: {},
+							)}
+							index={0}
+							columnId="backlog"
+							workspacePath={
+								changedParameter === "workspacePath" ? "/Users/alice/other-project" : "/Users/alice/project"
+							}
+							resolveTaskWorkspaceAbsoluteDirectoryPath={newResolver}
+						/>,
+					),
+				);
+				await act(async () => resolveOldDirectoryPath("/Users/alice/old-workspace"));
+				if (changedParameter !== "resolver_identity") {
+					await act(async () => button?.click());
+					expect(copyDirectoryPath).not.toHaveBeenCalled();
+					expect(newResolver).toHaveBeenCalledOnce();
+				}
+				await act(async () => button?.click());
+				expect(copyDirectoryPath).toHaveBeenCalledWith(
+					changedParameter === "resolver_identity" ? "/Users/alice/old-workspace" : "/Users/alice/new-workspace",
+				);
+				if (changedParameter === "resolver_identity") expect(newResolver).not.toHaveBeenCalled();
+			} finally {
+				if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
+				else Reflect.deleteProperty(navigator, "clipboard");
+			}
+		},
+	);
+
+	it("Backlog 复制运行时解析的绝对路径，不触发卡片编辑或启动", async () => {
+		const copyDirectoryPath = vi.fn().mockResolvedValue(undefined);
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: { writeText: copyDirectoryPath },
+		});
+		try {
+			const resolveTaskWorkspaceAbsoluteDirectoryPath = vi
+				.fn()
+				.mockResolvedValue("/Users/alice/.cline/worktrees/task-1/kanban");
+			const onEditTask = vi.fn();
+			const onStartTask = vi.fn();
+			await act(async () => {
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
+						onClick={onEditTask}
+						onStart={onStartTask}
+					/>,
+				);
+			});
+			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			expect(copyButton).not.toBeNull();
+			await act(async () => copyButton?.focus());
+			await act(async () => {
+				copyButton?.click();
+			});
+			expect(resolveTaskWorkspaceAbsoluteDirectoryPath).toHaveBeenCalledWith(
+				expect.objectContaining({ id: "task-1" }),
+			);
+			expect(copyDirectoryPath).toHaveBeenCalledWith("/Users/alice/.cline/worktrees/task-1/kanban");
+			expect(onEditTask).not.toHaveBeenCalled();
+			expect(onStartTask).not.toHaveBeenCalled();
+			expect(copyButton?.querySelector("svg.lucide-check")).not.toBeNull();
+		} finally {
+			if (previousClipboard) {
+				Object.defineProperty(navigator, "clipboard", previousClipboard);
+			} else {
+				Reflect.deleteProperty(navigator, "clipboard");
+			}
+		}
+	});
+
+	it.each(["path_query", "clipboard_write"] as const)("%s 失败时不显示复制成功", async (failureStage) => {
+		const copyDirectoryPath = vi.fn().mockRejectedValue(new Error("clipboard unavailable"));
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		vi.stubGlobal("ClipboardItem", DeferredClipboardItem);
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: {
+				writeText: copyDirectoryPath,
+				write: (items: [DeferredClipboardItem]) =>
+					items[0].representations["text/plain"].then(() => copyDirectoryPath()),
+			},
+		});
+		try {
+			const resolveTaskWorkspaceAbsoluteDirectoryPath =
+				failureStage === "path_query"
+					? vi.fn().mockRejectedValue(new Error("workspace unavailable"))
+					: vi.fn().mockResolvedValue("/Users/alice/.cline/worktrees/task-1/kanban");
+			await act(async () => {
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
+					/>,
+				);
+			});
+			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			await act(async () => copyButton?.click());
+			expect(copyButton?.querySelector("svg.lucide-check")).toBeNull();
+			expect(notifyError).toHaveBeenCalledWith(
+				failureStage === "path_query" ? "workspace unavailable" : "clipboard unavailable",
+			);
+			if (failureStage === "path_query") {
+				expect(copyDirectoryPath).not.toHaveBeenCalled();
+			}
+		} finally {
+			if (previousClipboard) {
+				Object.defineProperty(navigator, "clipboard", previousClipboard);
+			} else {
+				Reflect.deleteProperty(navigator, "clipboard");
+			}
+		}
+	});
+
+	it.each([true, false])("HTTP 原生复制返回 %s 时反馈与实际结果一致", async (copySucceeded) => {
+		const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		const previousExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+		const executeNativeClipboardCopy = vi.fn().mockReturnValue(copySucceeded);
+		Object.defineProperty(document, "execCommand", { configurable: true, value: executeNativeClipboardCopy });
+		try {
+			await act(async () => {
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						resolveTaskWorkspaceAbsoluteDirectoryPath={async () => "/Users/alice/.cline/worktrees/task-1/kanban"}
+					/>,
+				);
+			});
+			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			await act(async () => copyButton?.focus());
+			await act(async () => copyButton?.click());
+			expect(executeNativeClipboardCopy).toHaveBeenCalledWith("copy");
+			expect(copyButton?.querySelector("svg.lucide-check") !== null).toBe(copySucceeded);
+			expect(document.body.querySelector("textarea")).toBeNull();
+			expect(vi.mocked(notifyError).mock.calls.length).toBe(copySucceeded ? 0 : 1);
+		} finally {
+			for (const [target, property, descriptor] of [
+				[navigator, "clipboard", previousClipboard],
+				[document, "execCommand", previousExecCommand],
+			] as const) {
+				if (descriptor) Object.defineProperty(target, property, descriptor);
+				else Reflect.deleteProperty(target, property);
+			}
+		}
+	});
+
+	it("目录行不再提供显示完整路径的原生 title", async () => {
 		await act(async () => {
 			root.render(
 				<TooltipProvider>
@@ -700,9 +1124,57 @@ describe("BoardCard", () => {
 			);
 		});
 
-		// 完整 worktree 路径由目录行 title（hover）揭示；复制按钮钉在该行右下角，仅行 hover 时显现。
 		const directoryRow = container.querySelector("[data-task-directory]");
-		expect(directoryRow?.getAttribute("title")).toContain("~/.cline/worktrees/trash-task-1/kanban");
+		expect(directoryRow).not.toBeNull();
+		expect(directoryRow?.hasAttribute("title")).toBe(false);
+	});
+
+	it("All projects 当前项目非焦点完整卡用轮询补齐目录行，并优先采用之后收到的推流", async () => {
+		mockPolledWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/isolated/worktrees/current-project-non-focused-task",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "fedcba0987654321",
+			commitsAheadOfBaseRef: 3,
+			commitsBehindBaseRef: 12,
+			changedFiles: 2,
+			additions: 5,
+			deletions: 1,
+		};
+		const renderExpandedCard = () =>
+			root.render(
+				<TaskCardBody
+					taskCardWorkspaceIdForCrossProjectGitMetadataPolling="project-a"
+					card={createCard()}
+					columnId="review"
+					renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
+				/>,
+			);
+		await act(async () => renderExpandedCard());
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow).not.toBeNull();
+		expect(directoryRow?.hasAttribute("title")).toBe(false);
+		expect(directoryRow?.textContent).toContain("2 files");
+		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).not.toBeNull();
+		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).not.toBeNull();
+
+		mockWorkspaceSnapshot = { ...mockPolledWorkspaceSnapshot, changedFiles: 4 };
+		await act(async () => renderExpandedCard());
+		expect(container.querySelector("[data-task-directory]")?.textContent).toContain("4 files");
+
+		await act(async () => {
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="review"
+					taskCardOwnedByOtherProjectWorkspaceId="project-b"
+					renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
+				/>,
+			);
+		});
+		expect(container.querySelector("[data-task-directory]")).toBeNull();
 	});
 
 	it("目录行展示与 base 分支的双向分歧，且不再展示 HEAD 短 SHA", async () => {

@@ -1,48 +1,29 @@
-import pLimit from "p-limit";
 import type {
 	RuntimeBoardData,
 	RuntimeGitSyncSummary,
 	RuntimeTaskWorkspaceMetadata,
-	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceMetadata,
+	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 } from "../core/api-contract";
 import { computeWorktreeGitChangeToken } from "../workspace/git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
-import { runGit } from "../workspace/git-utils";
-import { refreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
-import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
+import {
+	type CachedTaskWorkspaceMetadata,
+	createBaseRefTipResolver,
+	GIT_METADATA_FULL_REFRESH_INTERVAL_MS,
+	loadTaskWorkspaceMetadata,
+	type TaskWorktreeGitMetadataProbeTarget,
+	workspaceMetadataGitSpawnConcurrencyLimiter,
+} from "../workspace/task-worktree-git-metadata-probe";
+
+// 单任务探针与 git spawn 并发上限都在 task-worktree-git-metadata-probe.ts（跨项目切换面板的按需缓存共用同一份）。
+export { workspaceMetadataGitSpawnConcurrencyLimiter };
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 3_000;
-
-/**
- * 兜底全量刷新窗口：即使廉价变更 token 未变，距上次真探针超过此时长也强制跑一次 `probeGitWorkspaceState`，
- * 以补上廉价 token 捕获不到的「就地未暂存编辑」。看板 git 元数据可接受这点最坏延迟，换取每 poll 不再无条件 spawn git。
- */
-const GIT_METADATA_FULL_REFRESH_INTERVAL_MS = 10_000;
-
-/**
- * 周期性后台 git 探针的**并发 spawn 上限**（保守小常数，可调）。
- *
- * 动机：`refreshWorkspace` 每个 poll 周期用 `Promise.all(trackedTasks.map(loadTaskWorkspaceMetadata))`
- * 对所有被追踪任务并发跑元数据加载。当廉价 fs-stat 门控放行（首次连接全部缓存为 null、或所有任务的兜底窗口
- * 同一 poll tick 同步到期）时，`probeGitWorkspaceState → runGit → execFileAsync('git', ...)` 会在同一 tick
- * 里同步 spawn，且并发数**随任务数/工作区数线性增长**。`spawn` 的 fork/exec syscall + env 复制 + stdio 管道
- * 建立都同步跑在 Node 单事件循环主线程，这种线性放大的周期性 burst 会短时占满事件循环，退化为 Agent TUI 键盘卡顿。
- *
- * 参照 `src/workspace/git-concurrency.ts` 的模式：把真正 spawn git 的探针工作钳进一个**跨所有工作区共享的
- * 模块级 p-limit 单例**，使热路径 git spawn 并发恒为常数、不再随任务/工作区数增长。共享是关键——即便多个工作区
- * 各自的定时器 burst 叠加，总并发 git spawn 也被钳成 WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT。
- * 廉价 fs-stat 门控（computeWorktreeGitChangeToken）留在限流器**之外**，只有门控判定需要真探针后才入队。
- */
-const WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT = 4;
-
-export const workspaceMetadataGitSpawnConcurrencyLimiter = pLimit(WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT);
-
-interface TrackedTaskWorkspace {
-	taskId: string;
-	baseRef: string;
-	worktreeMode?: RuntimeTaskWorktreeMode;
-}
+// 最后一个订阅断开后，缓存再留这么久才删：切回这个项目（或 ⌘E 来回切范围）时，没变的 worktree 只需一条
+// git status 复核，不必五条命令重新探。期间不轮询。
+// EXPERIMENT_NODE: 最后一个订阅断开后元数据缓存保留多久（5 分钟）
+const WORKSPACE_METADATA_CACHE_RETENTION_AFTER_LAST_SUBSCRIBER_DISCONNECTED_MS = 5 * 60_000;
 
 interface CachedHomeGitMetadata {
 	summary: RuntimeGitSyncSummary | null;
@@ -54,24 +35,23 @@ interface CachedHomeGitMetadata {
 	lastFullRefreshAtMs: number;
 }
 
-interface CachedTaskWorkspaceMetadata {
-	data: RuntimeTaskWorkspaceMetadata;
-	stateToken: string | null;
-	cheapChangeToken: string | null;
-	// 上次算出这份数据时 base 分支的 tip commit。**门控必读**：廉价 fs-stat token 与 probe 的 stateToken
-	// 都只反映 worktree 自身，捕获不到 base 分支单方面推进；不比对这一项，commitsBehindBaseRef 会被永久冻结。
-	baseRefTipCommit: string | null;
-	lastFullRefreshAtMs: number;
-}
-
 interface WorkspaceMetadataEntry {
 	workspacePath: string;
-	trackedTasks: TrackedTaskWorkspace[];
-	subscriberCount: number;
+	trackedTasks: TaskWorktreeGitMetadataProbeTarget[];
+	// Review 列里开了 auto-review 的卡（由 board 推出）：按焦点任务探测时也总要探，自动提交 / 自动 PR 要看
+	// 它们有没有未提交改动。
+	autoReviewTaskIdsInReviewColumn: ReadonlySet<string>;
+	// 每个订阅（一个状态流连接）声明的探测范围，键是 hub 分配的订阅 id。实际探测范围取并集。
+	probeScopeBySubscriberId: Map<string, RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient>;
 	pollTimer: NodeJS.Timeout | null;
 	refreshPromise: Promise<RuntimeWorkspaceMetadata> | null;
 	homeGit: CachedHomeGitMetadata;
+	// 已跟踪任务的最近一次探测结果，包括当前不在探测范围里的（留着，范围扩大时只需廉价复核）。
 	taskMetadataByTaskId: Map<string, CachedTaskWorkspaceMetadata>;
+	// 上一轮刷新结束时的快照，判「这一轮有没有变化、要不要推」的基准。不能在刷新开始时现算：范围刚收窄时现算的
+	// 已经是新范围，和这一轮结果一样，收窄就永远推不出去。
+	workspaceMetadataSnapshotAsOfLastRefresh: RuntimeWorkspaceMetadata | null;
+	evictionTimerAfterLastSubscriberDisconnected: NodeJS.Timeout | null;
 }
 
 export interface CreateWorkspaceMetadataMonitorDependencies {
@@ -79,23 +59,70 @@ export interface CreateWorkspaceMetadataMonitorDependencies {
 }
 
 export interface WorkspaceMetadataMonitor {
+	// 只读缓存，不登记订阅、不启动 git；首帧之后再 connectWorkspace，避免元数据抢在快照之前广播。
+	readCachedWorkspaceMetadataSnapshot: (input: {
+		workspaceId: string;
+		board: RuntimeBoardData;
+		probeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient;
+	}) => RuntimeWorkspaceMetadata;
 	connectWorkspace: (input: {
 		workspaceId: string;
 		workspacePath: string;
 		board: RuntimeBoardData;
+		subscriberId: string;
+		probeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient;
 	}) => Promise<RuntimeWorkspaceMetadata>;
 	updateWorkspaceState: (input: {
 		workspaceId: string;
 		workspacePath: string;
 		board: RuntimeBoardData;
 	}) => Promise<RuntimeWorkspaceMetadata>;
-	disconnectWorkspace: (workspaceId: string) => void;
+	// 已连接的订阅改了范围：不等结果，探完有变化照常经 onMetadataUpdated 推送。
+	updateSubscriberProbeScope: (input: {
+		workspaceId: string;
+		subscriberId: string;
+		probeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient;
+	}) => void;
+	disconnectWorkspace: (workspaceId: string, subscriberId: string) => void;
 	disposeWorkspace: (workspaceId: string) => void;
 	close: () => void;
 }
 
-function collectTrackedTasks(board: RuntimeBoardData): TrackedTaskWorkspace[] {
-	const tracked: TrackedTaskWorkspace[] = [];
+function collectAutoReviewTaskIdsInReviewColumn(board: RuntimeBoardData): Set<string> {
+	const taskIds = new Set<string>();
+	for (const column of board.columns) {
+		if (column.id !== "review") {
+			continue;
+		}
+		for (const card of column.cards) {
+			if (card.autoReviewEnabled === true) {
+				taskIds.add(card.id);
+			}
+		}
+	}
+	return taskIds;
+}
+
+// 所有订阅声明的范围的并集。任一订阅要整个项目（含不声明的旧客户端）就探整个项目；没有订阅时（只剩保留的缓存）
+// 也按整个项目算——此时不轮询，只用来拼快照。
+function resolveTrackedTasksInProbeScope(entry: WorkspaceMetadataEntry): TaskWorktreeGitMetadataProbeTarget[] {
+	if (entry.probeScopeBySubscriberId.size === 0) {
+		return entry.trackedTasks;
+	}
+	const taskIdsInProbeScope = new Set<string>(entry.autoReviewTaskIdsInReviewColumn);
+	for (const probeScope of entry.probeScopeBySubscriberId.values()) {
+		if (probeScope.workspaceMetadataProbeScopeKind === "all_tracked_task_worktrees_of_workspace") {
+			return entry.trackedTasks;
+		}
+		for (const focusedTaskId of probeScope.focusedTaskIds) {
+			taskIdsInProbeScope.add(focusedTaskId);
+		}
+	}
+	return entry.trackedTasks.filter((task) => taskIdsInProbeScope.has(task.taskId));
+}
+
+function collectTrackedTasks(board: RuntimeBoardData): TaskWorktreeGitMetadataProbeTarget[] {
+	const tracked: TaskWorktreeGitMetadataProbeTarget[] = [];
 	for (const column of board.columns) {
 		// Backlog 尚未拥有 task worktree，不需要探针；Done 则必须保留在投影中，以便在
 		// worktree 删除后继续展示 handback 前持久化的最后快照。
@@ -190,7 +217,9 @@ function createWorkspaceEntry(workspacePath: string): WorkspaceMetadataEntry {
 	return {
 		workspacePath,
 		trackedTasks: [],
-		subscriberCount: 0,
+		autoReviewTaskIdsInReviewColumn: new Set<string>(),
+		probeScopeBySubscriberId: new Map<string, RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient>(),
+		evictionTimerAfterLastSubscriberDisconnected: null,
 		pollTimer: null,
 		refreshPromise: null,
 		homeGit: {
@@ -201,14 +230,16 @@ function createWorkspaceEntry(workspacePath: string): WorkspaceMetadataEntry {
 			lastFullRefreshAtMs: 0,
 		},
 		taskMetadataByTaskId: new Map<string, CachedTaskWorkspaceMetadata>(),
+		workspaceMetadataSnapshotAsOfLastRefresh: null,
 	};
 }
 
+// 只放探测范围里的任务：范围外的缓存可能已经很旧，不发给浏览器。
 function buildWorkspaceMetadataSnapshot(entry: WorkspaceMetadataEntry): RuntimeWorkspaceMetadata {
 	return {
 		homeGitSummary: entry.homeGit.summary,
 		homeGitStateVersion: entry.homeGit.stateVersion,
-		taskWorkspaces: entry.trackedTasks
+		taskWorkspaces: resolveTrackedTasksInProbeScope(entry)
 			.map((task) => entry.taskMetadataByTaskId.get(task.taskId)?.data ?? null)
 			.filter((task): task is RuntimeTaskWorkspaceMetadata => task !== null),
 	};
@@ -253,252 +284,6 @@ async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<Cache
 	}
 }
 
-/**
- * 任务从 base 分叉时的提交（fork-point）。`git merge-base HEAD <baseRef>` 在任务 worktree 内现算：
- * 该提交稳定不随 base 分支推进而变（base 前进时公共祖先不变）。inplace 任务 HEAD 即在 base 上，
- * merge-base 退化为当前 HEAD，符合预期。任何失败（baseRef 不可解析、git 出错）→ null，优雅降级。
- */
-async function loadTaskForkPointCommit(workspacePath: string, baseRef: string): Promise<string | null> {
-	const result = await runGit(workspacePath, ["merge-base", "HEAD", baseRef]);
-	return result.ok && result.stdout ? result.stdout : null;
-}
-
-interface TaskBaseRefDivergence {
-	/** HEAD 独有的提交数（任务开工后落在这个 worktree 上的提交）。 */
-	commitsAheadOfBaseRef: number | null;
-	/** base 分支独有、任务尚未吸收的提交数。 */
-	commitsBehindBaseRef: number | null;
-}
-
-const UNKNOWN_TASK_BASE_REF_DIVERGENCE: TaskBaseRefDivergence = {
-	commitsAheadOfBaseRef: null,
-	commitsBehindBaseRef: null,
-};
-
-/**
- * 任务 worktree 与 base 分支的双向分歧，一条命令同出：
- * `git rev-list --left-right --count <baseRef>...HEAD`（三个点 = 对称差）输出 `<behind>\t<ahead>`，
- * 左侧为 baseRef 独有、右侧为 HEAD 独有。ahead 与旧的 `merge-base..HEAD` 计数是同一个集合，
- * 所以这条命令**顶替**了原先的 rev-list，per-task git spawn 数不增加。
- * baseRef 不可解析 / git 失败 / 输出不合预期 → 两项皆 null，优雅降级。
- */
-async function loadTaskBaseRefDivergence(workspacePath: string, baseRef: string): Promise<TaskBaseRefDivergence> {
-	const result = await runGit(workspacePath, ["rev-list", "--left-right", "--count", `${baseRef}...HEAD`]);
-	if (!result.ok || !result.stdout) {
-		return UNKNOWN_TASK_BASE_REF_DIVERGENCE;
-	}
-	const [behindText, aheadText] = result.stdout.split(/\s+/);
-	const behind = Number.parseInt(behindText ?? "", 10);
-	const ahead = Number.parseInt(aheadText ?? "", 10);
-	if (!Number.isFinite(behind) || !Number.isFinite(ahead)) {
-		return UNKNOWN_TASK_BASE_REF_DIVERGENCE;
-	}
-	return { commitsAheadOfBaseRef: ahead, commitsBehindBaseRef: behind };
-}
-
-/**
- * 解析 base 分支当前 tip。**按 workspace 去重、每个刷新周期每个 distinct baseRef 只解析一次**，
- * 而不是每个任务各跑一遍——实际几乎总是只有一个 baseRef（如 `main`），于是每 poll tick 每仓库 ≈1 次
- * `rev-parse`，与任务数无关。`rev-parse` 不读 index、不扫工作树，是最廉价的 git 命令之一。
- * 该 tip 只用于门控失效判定（见 CachedTaskWorkspaceMetadata.baseRefTipCommit），不直接下发前端。
- */
-function createBaseRefTipResolver(workspacePath: string): (baseRef: string) => Promise<string | null> {
-	const tipByBaseRef = new Map<string, Promise<string | null>>();
-	return (baseRef: string) => {
-		const cached = tipByBaseRef.get(baseRef);
-		if (cached) {
-			return cached;
-		}
-		const pending = workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
-			const result = await runGit(workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
-			return result.ok && result.stdout ? result.stdout : null;
-		});
-		tipByBaseRef.set(baseRef, pending);
-		return pending;
-	};
-}
-
-async function loadTaskWorkspaceMetadata(
-	workspaceId: string,
-	workspacePath: string,
-	task: TrackedTaskWorkspace,
-	current: CachedTaskWorkspaceMetadata | null,
-	resolveBaseRefTip: (baseRef: string) => Promise<string | null>,
-): Promise<CachedTaskWorkspaceMetadata | null> {
-	const pathInfo = await getTaskWorkspacePathInfo({
-		cwd: workspacePath,
-		taskId: task.taskId,
-		baseRef: task.baseRef,
-		...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
-	});
-
-	if (!pathInfo.exists) {
-		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
-		if (
-			current &&
-			current.data.exists === false &&
-			current.data.path === pathInfo.path &&
-			current.data.baseRef === pathInfo.baseRef &&
-			current.baseRefTipCommit === baseRefTipCommit
-		) {
-			return current;
-		}
-		const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
-			workspaceId,
-			taskId: task.taskId,
-			repoPath: workspacePath,
-			worktreePath: pathInfo.path,
-			baseRef: pathInfo.baseRef,
-			...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
-			worktreeExists: false,
-			headCommit: null,
-			baseRefTipCommit,
-			commitsAheadOfBaseRef: null,
-			commitsBehindBaseRef: null,
-			isDetached: false,
-		});
-		return {
-			data: {
-				taskId: task.taskId,
-				path: pathInfo.path,
-				exists: false,
-				baseRef: pathInfo.baseRef,
-				baseCommit: null,
-				commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
-				commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
-				workspaceGitStatus,
-				branch: null,
-				isDetached: false,
-				headCommit: null,
-				changedFiles: null,
-				additions: null,
-				deletions: null,
-				stateVersion: Date.now(),
-			},
-			stateToken: null,
-			cheapChangeToken: null,
-			baseRefTipCommit,
-			lastFullRefreshAtMs: 0,
-		};
-	}
-
-	try {
-		const now = Date.now();
-		// base 分支 tip 必须在两层门控**之前**拿到：worktree 自身的 token 反映不出 base 单方面推进，
-		// 不比对 tip 就会把 commitsBehindBaseRef 永久冻结在首次算出的值。按 baseRef 去重后每周期仅 1 次 spawn。
-		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
-		// 第一层门控（不 spawn git）：廉价 token 与 base tip 均未变、路径/baseRef 一致且未超兜底窗口 → 复用缓存。
-		const cheapTokenBeforeProbe = await computeWorktreeGitChangeToken(pathInfo.path);
-		if (
-			current &&
-			current.cheapChangeToken !== null &&
-			current.cheapChangeToken === cheapTokenBeforeProbe &&
-			current.baseRefTipCommit === baseRefTipCommit &&
-			current.data.path === pathInfo.path &&
-			current.data.baseRef === pathInfo.baseRef &&
-			now - current.lastFullRefreshAtMs < GIT_METADATA_FULL_REFRESH_INTERVAL_MS
-		) {
-			return current;
-		}
-		// 门控放行后才进入限流器：真正 spawn git 的探针工作（probe + getGitSyncSummary +
-		// loadTaskForkPointCommit + loadTaskBaseRefDivergence）钳进共享并发上限。
-		return await workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
-			const probe = await probeGitWorkspaceState(pathInfo.path, { knownRepoRoot: pathInfo.path });
-			// 真探针可能刷新 index 的 stat 缓存，故其后重算 token 存下，保证后续跳过判定稳定。
-			const cheapTokenAfterProbe = await computeWorktreeGitChangeToken(pathInfo.path);
-			if (
-				current &&
-				current.stateToken === probe.stateToken &&
-				current.baseRefTipCommit === baseRefTipCommit &&
-				current.data.path === pathInfo.path &&
-				current.data.baseRef === pathInfo.baseRef
-			) {
-				return {
-					...current,
-					cheapChangeToken: cheapTokenAfterProbe,
-					lastFullRefreshAtMs: now,
-				};
-			}
-			const summary = await getGitSyncSummary(pathInfo.path, { probe });
-			const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
-			const divergence = await loadTaskBaseRefDivergence(pathInfo.path, pathInfo.baseRef);
-			const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
-				workspaceId,
-				taskId: task.taskId,
-				repoPath: workspacePath,
-				worktreePath: pathInfo.path,
-				baseRef: pathInfo.baseRef,
-				...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
-				worktreeExists: true,
-				headCommit: probe.headCommit,
-				baseRefTipCommit,
-				commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
-				commitsBehindBaseRef: divergence.commitsBehindBaseRef,
-				isDetached: probe.headCommit !== null && probe.currentBranch === null,
-				observedAt: now,
-			});
-			return {
-				data: {
-					taskId: task.taskId,
-					path: pathInfo.path,
-					exists: true,
-					baseRef: pathInfo.baseRef,
-					baseCommit,
-					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
-					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
-					workspaceGitStatus,
-					branch: probe.currentBranch,
-					isDetached: probe.headCommit !== null && probe.currentBranch === null,
-					headCommit: probe.headCommit,
-					changedFiles: summary.changedFiles,
-					additions: summary.additions,
-					deletions: summary.deletions,
-					stateVersion: Date.now(),
-				},
-				stateToken: probe.stateToken,
-				cheapChangeToken: cheapTokenAfterProbe,
-				baseRefTipCommit,
-				lastFullRefreshAtMs: now,
-			};
-		});
-	} catch {
-		if (current) {
-			return current;
-		}
-		return {
-			data: {
-				taskId: task.taskId,
-				path: pathInfo.path,
-				exists: true,
-				baseRef: pathInfo.baseRef,
-				baseCommit: null,
-				commitsAheadOfBaseRef: null,
-				commitsBehindBaseRef: null,
-				workspaceGitStatus: {
-					baseRef: pathInfo.baseRef,
-					commitsAheadOfBaseRef: null,
-					commitsBehindBaseRef: null,
-					taskCommitsIntegratedIntoBaseRef: null,
-					taskCommitIntegrationTrackingStatus: "git_probe_unavailable",
-					observationSource: "unavailable",
-					observedAt: null,
-				},
-				branch: null,
-				isDetached: false,
-				headCommit: null,
-				changedFiles: null,
-				additions: null,
-				deletions: null,
-				stateVersion: Date.now(),
-			},
-			stateToken: null,
-			cheapChangeToken: null,
-			baseRefTipCommit: null,
-			lastFullRefreshAtMs: 0,
-		};
-	}
-}
-
 export function createWorkspaceMetadataMonitor(
 	deps: CreateWorkspaceMetadataMonitorDependencies,
 ): WorkspaceMetadataMonitor {
@@ -522,13 +307,15 @@ export function createWorkspaceMetadataMonitor(
 		}
 
 		entry.refreshPromise = (async () => {
-			const previousSnapshot = buildWorkspaceMetadataSnapshot(entry);
+			const previousSnapshot =
+				entry.workspaceMetadataSnapshotAsOfLastRefresh ?? buildWorkspaceMetadataSnapshot(entry);
 			entry.homeGit = await loadHomeGitMetadata(entry);
 
 			// 每个刷新周期一个新的解析器：base tip 在周期内保持一致，且同 baseRef 的所有任务共享一次 rev-parse。
 			const resolveBaseRefTip = createBaseRefTipResolver(entry.workspacePath);
+			const tasksInProbeScope = resolveTrackedTasksInProbeScope(entry);
 			const nextTaskEntries = await Promise.all(
-				entry.trackedTasks.map(async (task) => {
+				tasksInProbeScope.map(async (task) => {
 					const current = entry.taskMetadataByTaskId.get(task.taskId) ?? null;
 					const next = await loadTaskWorkspaceMetadata(
 						workspaceId,
@@ -537,17 +324,26 @@ export function createWorkspaceMetadataMonitor(
 						current,
 						resolveBaseRefTip,
 					);
-					return next ? [task.taskId, next] : null;
+					return [task.taskId, next] as const;
 				}),
 			);
 
-			entry.taskMetadataByTaskId = new Map(
-				nextTaskEntries.filter(
-					(candidate): candidate is [string, CachedTaskWorkspaceMetadata] => candidate !== null,
-				),
+			// 范围外、仍在跟踪的任务保留上次的结果；不再跟踪的任务丢掉。
+			const trackedTaskIds = new Set(entry.trackedTasks.map((task) => task.taskId));
+			const nextTaskMetadataByTaskId = new Map(
+				[...entry.taskMetadataByTaskId].filter(([taskId]) => trackedTaskIds.has(taskId)),
 			);
+			for (const [taskId, next] of nextTaskEntries) {
+				if (next) {
+					nextTaskMetadataByTaskId.set(taskId, next);
+				} else {
+					nextTaskMetadataByTaskId.delete(taskId);
+				}
+			}
+			entry.taskMetadataByTaskId = nextTaskMetadataByTaskId;
 
 			const nextSnapshot = buildWorkspaceMetadataSnapshot(entry);
+			entry.workspaceMetadataSnapshotAsOfLastRefresh = nextSnapshot;
 			if (!areWorkspaceMetadataEqual(previousSnapshot, nextSnapshot)) {
 				deps.onMetadataUpdated(workspaceId, nextSnapshot);
 			}
@@ -570,8 +366,26 @@ export function createWorkspaceMetadataMonitor(
 		const existing = workspaces.get(input.workspaceId) ?? createWorkspaceEntry(input.workspacePath);
 		existing.workspacePath = input.workspacePath;
 		existing.trackedTasks = collectTrackedTasks(input.board);
+		existing.autoReviewTaskIdsInReviewColumn = collectAutoReviewTaskIdsInReviewColumn(input.board);
 		workspaces.set(input.workspaceId, existing);
 		return existing;
+	};
+
+	const cancelEvictionAfterLastSubscriberDisconnected = (entry: WorkspaceMetadataEntry) => {
+		if (!entry.evictionTimerAfterLastSubscriberDisconnected) {
+			return;
+		}
+		clearTimeout(entry.evictionTimerAfterLastSubscriberDisconnected);
+		entry.evictionTimerAfterLastSubscriberDisconnected = null;
+	};
+
+	// 范围变了要按新范围再探一次；正在探的那一轮用的是旧范围，等它结束再来（同时到达的请求并进同一轮）。
+	const refreshWorkspaceWithLatestProbeScope = async (workspaceId: string): Promise<RuntimeWorkspaceMetadata> => {
+		const inFlightRefreshPromise = workspaces.get(workspaceId)?.refreshPromise;
+		if (inFlightRefreshPromise) {
+			await inFlightRefreshPromise.catch(() => undefined);
+		}
+		return await refreshWorkspace(workspaceId);
 	};
 
 	const ensureWorkspaceTimer = (workspaceId: string, entry: WorkspaceMetadataEntry) => {
@@ -585,31 +399,74 @@ export function createWorkspaceMetadataMonitor(
 		entry.pollTimer = timer;
 	};
 
+	// 摘掉一个订阅；摘完一个不剩就停轮询，缓存保留一段时间后淘汰。连接断开与首轮刷新失败的回滚共用这一份收尾。
+	const removeSubscriberAndStopPollingWhenNoSubscriberRemains = (workspaceId: string, subscriberId: string) => {
+		const entry = workspaces.get(workspaceId);
+		if (!entry) {
+			return;
+		}
+		entry.probeScopeBySubscriberId.delete(subscriberId);
+		if (entry.probeScopeBySubscriberId.size > 0) {
+			return;
+		}
+		stopWorkspaceTimer(entry);
+		cancelEvictionAfterLastSubscriberDisconnected(entry);
+		const evictionTimer = setTimeout(() => {
+			if (workspaces.get(workspaceId) === entry && entry.probeScopeBySubscriberId.size === 0) {
+				workspaces.delete(workspaceId);
+			}
+		}, WORKSPACE_METADATA_CACHE_RETENTION_AFTER_LAST_SUBSCRIBER_DISCONNECTED_MS);
+		evictionTimer.unref();
+		entry.evictionTimerAfterLastSubscriberDisconnected = evictionTimer;
+	};
+
 	return {
-		connectWorkspace: async ({ workspaceId, workspacePath, board }) => {
+		readCachedWorkspaceMetadataSnapshot: ({ workspaceId, board, probeScope }) => {
+			const entry = workspaces.get(workspaceId);
+			if (!entry) return createEmptyWorkspaceMetadata();
+			return buildWorkspaceMetadataSnapshot({
+				...entry,
+				trackedTasks: collectTrackedTasks(board),
+				autoReviewTaskIdsInReviewColumn: collectAutoReviewTaskIdsInReviewColumn(board),
+				// 首帧与后续整包广播都用订阅并集；并集不变时不会补推，不能只给新连接自己的范围。
+				probeScopeBySubscriberId: new Map([
+					...entry.probeScopeBySubscriberId,
+					["initial-stream-snapshot", probeScope],
+				]),
+			});
+		},
+		connectWorkspace: async ({ workspaceId, workspacePath, board, subscriberId, probeScope }) => {
 			const entry = updateWorkspaceEntry({ workspaceId, workspacePath, board });
-			entry.subscriberCount += 1;
+			cancelEvictionAfterLastSubscriberDisconnected(entry);
+			entry.probeScopeBySubscriberId.set(subscriberId, probeScope);
 			ensureWorkspaceTimer(workspaceId, entry);
-			return await refreshWorkspace(workspaceId);
+			try {
+				// 别的连接正在探的那一轮可能没覆盖本连接的范围，等它结束按新的并集再探（已探过的只做廉价复核）。
+				return await refreshWorkspaceWithLatestProbeScope(workspaceId);
+			} catch (error) {
+				// 首轮刷新失败：调用方拿不到连接结果，未必登记得上这个订阅去断开它。不在这里摘掉的话它会永远留在范围
+				// 并集里（声明整个项目时把同项目其他连接的范围钉在整个项目），轮询也永不停、缓存永不淘汰。
+				removeSubscriberAndStopPollingWhenNoSubscriberRemains(workspaceId, subscriberId);
+				throw error;
+			}
 		},
 		updateWorkspaceState: async ({ workspaceId, workspacePath, board }) => {
 			const entry = updateWorkspaceEntry({ workspaceId, workspacePath, board });
-			if (entry.subscriberCount === 0) {
+			if (entry.probeScopeBySubscriberId.size === 0) {
 				return buildWorkspaceMetadataSnapshot(entry);
 			}
 			return await refreshWorkspace(workspaceId);
 		},
-		disconnectWorkspace: (workspaceId) => {
+		updateSubscriberProbeScope: ({ workspaceId, subscriberId, probeScope }) => {
 			const entry = workspaces.get(workspaceId);
-			if (!entry) {
+			if (!entry?.probeScopeBySubscriberId.has(subscriberId)) {
 				return;
 			}
-			entry.subscriberCount = Math.max(0, entry.subscriberCount - 1);
-			if (entry.subscriberCount > 0) {
-				return;
-			}
-			stopWorkspaceTimer(entry);
-			workspaces.delete(workspaceId);
+			entry.probeScopeBySubscriberId.set(subscriberId, probeScope);
+			void refreshWorkspaceWithLatestProbeScope(workspaceId);
+		},
+		disconnectWorkspace: (workspaceId, subscriberId) => {
+			removeSubscriberAndStopPollingWhenNoSubscriberRemains(workspaceId, subscriberId);
 		},
 		disposeWorkspace: (workspaceId) => {
 			const entry = workspaces.get(workspaceId);
@@ -617,11 +474,13 @@ export function createWorkspaceMetadataMonitor(
 				return;
 			}
 			stopWorkspaceTimer(entry);
+			cancelEvictionAfterLastSubscriberDisconnected(entry);
 			workspaces.delete(workspaceId);
 		},
 		close: () => {
 			for (const entry of workspaces.values()) {
 				stopWorkspaceTimer(entry);
+				cancelEvictionAfterLastSubscriberDisconnected(entry);
 			}
 			workspaces.clear();
 		},

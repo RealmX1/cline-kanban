@@ -9,6 +9,13 @@
 import { z } from "zod";
 
 import type { RuntimeTaskNameSuggestionRequest, RuntimeTaskNameSuggestionResponse } from "../core/api-contract";
+import {
+	SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY,
+	TASK_NAMING_CONVENTIONS_GUIDANCE,
+} from "../core/task-naming-conventions";
+
+export { SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY } from "../core/task-naming-conventions";
+
 import { DEFAULT_TASK_TITLE_MAX_CHARS } from "../core/task-title";
 import {
 	DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME,
@@ -31,31 +38,6 @@ export const TASK_NAME_SUGGESTION_COUNT_PER_ROUND = 3;
  */
 const TASK_DESCRIPTION_CHARACTERS_SENT_TO_MODEL_LIMIT = 8_000;
 
-/**
- * 名字前缀分类 tag 的**推荐词表**（tag → 给模型看的一句释义）。
- *
- * 前半是 Conventional Commits 的 type（去掉了 `style`：它在 CC 里指代码格式，和界面样式同名易混），外加
- * 看板上常见、CC 没有的 `RESEARCH`（只调研不改代码）；后半是常见的「改动落在哪」领域 tag（对应 CC 的 scope）。
- * 词表是推荐不是闭集：像 CC 的 scope 一样，词表里没有合适的就允许模型自拟一个短 tag（例如子系统名），
- * 只由 {@link readWellFormedTaskCategoryTag} 卡住形状。
- */
-export const SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY: Readonly<Record<string, string>> = {
-	FEAT: "change type: a new feature or capability",
-	FIX: "change type: fixing a defect, an error, or behavior that differs from what is expected",
-	REFACTOR: "change type: restructuring, renaming, or splitting code without changing behavior",
-	PERF: "change type: performance, memory, or latency",
-	TEST: "change type: tests",
-	DOCS: "change type: documentation, context files, or written content",
-	BUILD: "change type: build system, packaging, or dependencies",
-	CI: "change type: CI configuration and scripts",
-	CHORE: "change type: routine maintenance that fits none of the above",
-	REVERT: "change type: reverting an earlier change",
-	RESEARCH:
-		"change type: investigation, root-causing, a question, or evaluating options without a planned code change",
-	UI: "area: user interface, interaction, styling, or presentation",
-	AGENT: "area: agent harness, agent session, hook, or prompt integration",
-};
-
 /** 一个名字最多挂几个 tag。再多就成了关键词堆砌，前缀也会把 80 字的标题挤得没地方写名字。 */
 const TASK_CATEGORY_TAGS_PER_NAME_LIMIT = 3;
 
@@ -75,6 +57,7 @@ const TASK_NAME_SUGGESTION_SYSTEM_PROMPT = [
 	`{"suggestedTaskNames": [{"taskCategoryTags": ["..."], "taskNameWithoutCategoryTags": "..."}, ...]}`,
 	"",
 	"Rules:",
+	TASK_NAMING_CONVENTIONS_GUIDANCE,
 	`- Return exactly ${TASK_NAME_SUGGESTION_COUNT_PER_ROUND} items, ordered from most to least recommended.`,
 	`- taskCategoryTags: 1 to ${TASK_CATEGORY_TAGS_PER_NAME_LIMIT} short uppercase tags, in the spirit of Conventional Commits.`,
 	"  Put the change type first, then optionally the area it touches. Prefer tags from this vocabulary:",

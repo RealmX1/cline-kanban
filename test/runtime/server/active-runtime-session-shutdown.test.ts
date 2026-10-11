@@ -7,6 +7,7 @@ import { persistSafelyStoppedRuntimeSessionsByWorkspaceId } from "../../../src/s
 import { loadWorkspaceContext, loadWorkspaceState, saveWorkspaceState } from "../../../src/state/workspace-state";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createSummary(
 	taskId: string,
@@ -137,7 +138,7 @@ describe("active runtime session shutdown", () => {
 			const initial = await loadWorkspaceState(projectPath);
 			const workspaceContext = await loadWorkspaceContext(projectPath);
 			const persistedBeforeShutdown = createSummary("waiting-user", "idle", "codex");
-			await saveWorkspaceState(projectPath, {
+			await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: initial.board,
 				sessions: { "waiting-user": persistedBeforeShutdown },
 				expectedRevision: initial.revision,

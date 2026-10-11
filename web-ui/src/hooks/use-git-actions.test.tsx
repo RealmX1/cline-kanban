@@ -76,7 +76,6 @@ function createBoard(cardOverrides?: Partial<BoardCard>): BoardData {
 				],
 			},
 		],
-		dependencies: [],
 	};
 }
 

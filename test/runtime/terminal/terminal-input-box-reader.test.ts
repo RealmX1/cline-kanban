@@ -8,7 +8,7 @@ import {
 	type TerminalScreenSnapshot,
 } from "../../../src/terminal/terminal-input-box-reader";
 
-// 真机实测语法（Claude Code v2.1.227，2026-08-11，cols=100）。
+// 真机实测语法（Claude Code v2.1.227，2026-08-11，cols=100；v2.1.289 上边框可嵌 agent 名，见对应 describe）。
 // 这些常数是**外部契约**，会随 Claude 版本漂移——本套件的作用是让漂移在 CI 里炸出来，
 // 而不是在一次「投递躺了 49 分钟」的事故里被发现。
 const COLUMN_COUNT = 100;
@@ -66,6 +66,145 @@ describe("locateTerminalInputBox", () => {
 
 	it("屏上没有输入框时返回 null（TUI 尚未渲染 / 被全屏输出覆盖）", () => {
 		const snapshot = screen(["agent 正在输出", "还没有画出输入框"]);
+
+		expect(locateTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)).toBeNull();
+	});
+});
+
+// 真机实测（Claude Code v2.1.289，2026-10-05）：会话有 agent 名时，Claude 把它嵌进输入框上边框、
+// 贴右，右侧只留 1 个横线；下边框仍是整行横线。旧判据认不出这种上边框，面板答案投递因此硬失败
+// （task df9d8，`terminal_input_box_still_not_visible_after_escape_key`）。
+describe("上边框嵌入 agent 名的输入框（Claude Code v2.1.289）", () => {
+	const LABELED_SCREEN_COLUMN_COUNT = 120;
+	const LABELED_SCREEN_BOUNDARY_LINE = "─".repeat(LABELED_SCREEN_COLUMN_COUNT);
+
+	function labeledTopBoundaryLine(agentName: string): string {
+		// 两个空格 + 右侧 1 个横线占 3 列，其余都给左侧横线。
+		const leadingRunLength = LABELED_SCREEN_COLUMN_COUNT - measureTerminalDisplayColumnWidth(agentName) - 3;
+		return `${"─".repeat(leadingRunLength)} ${agentName} ─`;
+	}
+
+	it("df9d8 实测屏幕：定位到输入框并读出空文本", () => {
+		// 逐行抄自 3484 上 df9d8 的只读快照（cols=120）。行尾的空白是 translateToString(false) 保留下来的。
+		const snapshot = screen(
+			[
+				"  ⎿  Stop says: === REVIEW-VALIDATE-FIX HOOK ===",
+				"     status=skipped",
+				"",
+				"✻ Worked for 1m 29s · done 1:03 PM",
+				"",
+				`${"─".repeat(87)} fix-load-sensitive-flaky-tests ─`,
+				`❯ ${" ".repeat(LABELED_SCREEN_COLUMN_COUNT - 2)}`,
+				LABELED_SCREEN_BOUNDARY_LINE,
+				"  Ctx: 101.3k | ⎇ no git | Opus 5.5 xhigh | [PONYTAIL:LITE]",
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents",
+			],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+
+		const reading = readTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+
+		expect(reading?.location).toEqual({ topBoundaryLineIndex: 5, bottomBoundaryLineIndex: 7 });
+		expect(reading?.text).toBe("");
+	});
+
+	it("中文 agent 名同样识别，框内文字照常读出", () => {
+		const snapshot = screen(
+			[labeledTopBoundaryLine("修复负载敏感的计时测试"), `${PROMPT_PREFIX}继续落地`, LABELED_SCREEN_BOUNDARY_LINE],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+
+		expect(readTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)?.text).toBe("继续落地");
+	});
+
+	it("带标签的横线后面不是提示符行时不算输入框（agent 打印的小节标题）", () => {
+		const snapshot = screen(
+			[labeledTopBoundaryLine("小节标题"), "  agent 打印的正文", LABELED_SCREEN_BOUNDARY_LINE],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+
+		expect(locateTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)).toBeNull();
+	});
+
+	// 用户在框里敲出的一行 `──── 小节标题 ─`，续行缩进剥掉后正好长成带标签的上边框。它若被当成边界
+	// 候选，就会夹在真实上下边框之间、挡住相邻配对，整个框读不到（加入带标签判据后的回归）。
+	// 中间与紧贴下边框两个位置各放一行，两种挡法都覆盖到。
+	const CONTINUATION_CONTENT_SHAPED_LIKE_LABELED_TOP_BOUNDARY = `${"─".repeat(20)} section title ─`;
+	it.each([
+		["整行横线的上边框", LABELED_SCREEN_BOUNDARY_LINE],
+		["嵌着 agent 名的上边框", labeledTopBoundaryLine("fix-load-sensitive-flaky-tests")],
+	])("%s：框内续行长成 `── 标题 ─` 时不挡住真实边框，读出含该续行的完整文本", (_title, topBoundaryLine) => {
+		const snapshot = screen(
+			[
+				topBoundaryLine,
+				`${PROMPT_PREFIX}first`,
+				`${CONTINUATION_INDENT}${CONTINUATION_CONTENT_SHAPED_LIKE_LABELED_TOP_BOUNDARY}`,
+				`${CONTINUATION_INDENT}middle`,
+				`${CONTINUATION_INDENT}${CONTINUATION_CONTENT_SHAPED_LIKE_LABELED_TOP_BOUNDARY}`,
+				LABELED_SCREEN_BOUNDARY_LINE,
+			],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+
+		const reading = readTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+
+		expect(reading?.location).toEqual({ topBoundaryLineIndex: 0, bottomBoundaryLineIndex: 5 });
+		expect(reading?.text).toBe(
+			[
+				"first",
+				CONTINUATION_CONTENT_SHAPED_LIKE_LABELED_TOP_BOUNDARY,
+				"middle",
+				CONTINUATION_CONTENT_SHAPED_LIKE_LABELED_TOP_BOUNDARY,
+			].join("\n"),
+		);
+	});
+
+	// 下面三条钉住「放宽面越窄越好」：误判输入框已出现，会让面板投递在提问选择器还在屏上时
+	// 粘贴 + 回车，替用户选中高亮项。
+	it("AskUserQuestion 选择器仍在屏上、带标签上边框留在屏底且其下无内容时不算输入框", () => {
+		// 抄自隔离实例真机快照（Claude Code v2.1.289，cols=120，2026-10-05，会话经 `/rename` 起名）的屏幕下半段，
+		// 选项说明行略去了尾部的 ⚖️ 立场。选择器自己有两条整行横线（顶部一条、3 与 4 之间一条）；
+		// 高亮项 `❯ 1. 红色` 本身就匹配提示符前缀，所以这块屏上确实有「像提示符的行」，只是它不紧贴在
+		// 任何边界行下面。输入框那条带标签的上边框此时仍留在屏幕最后一行。
+		const snapshot = screen(
+			[
+				LABELED_SCREEN_BOUNDARY_LINE,
+				" ☐ 颜色",
+				"",
+				"探针选哪个颜色？（本问权衡维度：醒目度 · 视觉冷暖）",
+				"",
+				"❯ 1. 红色",
+				"     把探针的颜色设为红色，属于暖色调、警示感较强的颜色。",
+				"  2. 蓝色",
+				"     把探针的颜色设为蓝色，属于冷色调、观感较沉稳的颜色。",
+				"  3. Type something.",
+				LABELED_SCREEN_BOUNDARY_LINE,
+				"  4. Chat about this",
+				"",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+				labeledTopBoundaryLine("labeled-box-probe"),
+			],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+		expect(CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR.promptPrefixPattern.test(snapshot.lines[5].text)).toBe(true);
+
+		expect(locateTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)).toBeNull();
+	});
+
+	it("只放宽上边框：下边框带标签时不算输入框", () => {
+		const snapshot = screen(
+			[LABELED_SCREEN_BOUNDARY_LINE, `${PROMPT_PREFIX}hello`, labeledTopBoundaryLine("some-agent-name")],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
+
+		expect(locateTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)).toBeNull();
+	});
+
+	it("标签两侧只认 U+2500：`╭─── 标题 ───╮` 式的对话框标题边不算上边框", () => {
+		const snapshot = screen(
+			[`╭${"─".repeat(20)} 对话框标题 ${"─".repeat(20)}╮`, `${PROMPT_PREFIX}hello`, LABELED_SCREEN_BOUNDARY_LINE],
+			LABELED_SCREEN_COLUMN_COUNT,
+		);
 
 		expect(locateTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR)).toBeNull();
 	});

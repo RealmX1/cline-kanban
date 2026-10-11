@@ -662,6 +662,85 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 	});
 });
 
+// ── 回合开始事件：停止事件的对偶边沿（跨项目切换面板 Running 区的排序键）────────────────────────
+// 它要守的不变量与停止事件相同：只在「非 agent → agent」那一次写上盖章，agent 回合内的元数据写
+// （spinner 推进的 lastOutputAt、hook activity、connectionRetry）一律不动它——否则 Running 区会照旧
+// 随 agent 输出每秒重排。
+describe("agentResponseGenerationTurnStarted（边沿触发，与停止事件对偶）", () => {
+	function idleTerminalSession(): RuntimeTaskSessionSummary {
+		return applySessionFacets(
+			makeSummary({ agentId: "claude", updatedAt: 1_000, runtimeSessionIncarnationId: "incarnation-first" }),
+		);
+	}
+
+	it("非 agent → agent 边沿 ⇒ 盖章，startedAt 取本次 updatedAt、turnSequence 取 +1 之后的新序号", () => {
+		const running = mergeSummaryWithFacets(idleTerminalSession(), { state: "running", pid: 7, updatedAt: 2_000 });
+		expect(running.agentResponseGenerationTurnSequence).toBe(1);
+		expect(running.agentResponseGenerationTurnStarted).toEqual({ startedAt: 2_000, turnSequence: 1 });
+	});
+
+	it("agent 回合内的 metadata-only 写（lastOutputAt / hook activity / connectionRetry）⇒ 原对象原样保留", () => {
+		const running = mergeSummaryWithFacets(idleTerminalSession(), { state: "running", pid: 7, updatedAt: 2_000 });
+		const stampedEvent = running.agentResponseGenerationTurnStarted;
+
+		const afterOutputBump = mergeSummaryWithFacets(running, { lastOutputAt: 3_000, updatedAt: 3_000 });
+		const afterHookActivityBump = mergeSummaryWithFacets(afterOutputBump, { lastHookAt: 4_000, updatedAt: 4_000 });
+		const afterConnectionRetryChange = mergeSummaryWithFacets(afterHookActivityBump, {
+			connectionRetry: ACTIVE_RETRY,
+			updatedAt: 5_000,
+		});
+		const afterConnectionRetryCleared = mergeSummaryWithFacets(afterConnectionRetryChange, {
+			connectionRetry: null,
+			updatedAt: 6_000,
+		});
+		expect(afterOutputBump.agentResponseGenerationTurnStarted).toBe(stampedEvent);
+		expect(afterHookActivityBump.agentResponseGenerationTurnStarted).toBe(stampedEvent);
+		expect(afterConnectionRetryChange.agentResponseGenerationTurnStarted).toBe(stampedEvent);
+		expect(afterConnectionRetryCleared.agentResponseGenerationTurnStarted).toBe(stampedEvent);
+	});
+
+	it("agent → user 不清空（离开 Running 后保留原值）；再进入 agent 回合重新盖章", () => {
+		const running = mergeSummaryWithFacets(idleTerminalSession(), { state: "running", pid: 7, updatedAt: 2_000 });
+		const stopped = mergeSummaryWithFacets(running, {
+			state: "awaiting_review",
+			reviewReason: "hook",
+			updatedAt: 5_000,
+		});
+		expect(stopped.agentResponseGenerationTurnStarted).toEqual({ startedAt: 2_000, turnSequence: 1 });
+
+		const resumed = mergeSummaryWithFacets(stopped, { state: "running", reviewReason: null, updatedAt: 9_000 });
+		expect(resumed.agentResponseGenerationTurnStarted).toEqual({ startedAt: 9_000, turnSequence: 2 });
+	});
+
+	it("从未进过 agent 回合的历史 summary + metadata-only 写 ⇒ 字段继续缺失，不凭空补出", () => {
+		const hydratedFromDisk = applySessionFacets(
+			makeSummary({ state: "awaiting_review", reviewReason: "hook", agentId: "claude", pid: 7, updatedAt: 1_000 }),
+		);
+		const afterOutputBump = mergeSummaryWithFacets(hydratedFromDisk, { lastOutputAt: 9_000, updatedAt: 9_000 });
+		expect("agentResponseGenerationTurnStarted" in afterOutputBump).toBe(false);
+	});
+
+	it("patch 显式携带回合开始事件（磁盘水合 / 测试构造）⇒ 按原值采信，不被本次 updatedAt 覆写", () => {
+		const running = mergeSummaryWithFacets(idleTerminalSession(), {
+			state: "running",
+			pid: 7,
+			updatedAt: 2_000,
+			agentResponseGenerationTurnStarted: { startedAt: 111, turnSequence: 4 },
+		});
+		expect(running.agentResponseGenerationTurnStarted).toEqual({ startedAt: 111, turnSequence: 4 });
+	});
+
+	it("patch 显式携带回合序号（磁盘水合）⇒ 不算边沿，不盖章", () => {
+		const hydrated = mergeSummaryWithFacets(idleTerminalSession(), {
+			state: "running",
+			pid: 7,
+			updatedAt: 2_000,
+			agentResponseGenerationTurnSequence: 6,
+		});
+		expect("agentResponseGenerationTurnStarted" in hydrated).toBe(false);
+	});
+});
+
 // 写侧漏斗是「此刻球在不在 agent 手上」这个事实**唯一**能被喂进合并 reducer 的地方，故这道接线必须在
 // 漏斗层面钉死：只在 reducer 单测里断言选项行为，接线一旦漏传（reducer 缺省 fail-open）就无人报警。
 describe("lastConversationProgressObservation（写侧漏斗把「是否在 agent 回合」接进合并 reducer）", () => {

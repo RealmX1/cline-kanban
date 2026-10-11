@@ -7,6 +7,7 @@ import {
 	type TaskConversationSessionSharingExecutionWorkingDirectory,
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
+	RuntimeAgentCurrentWorkPhaseGoal,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
@@ -16,6 +17,11 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import {
+	resolveHomeAgentAppendSystemPrompt,
+	resolveTaskSessionAppendSystemPrompt,
+} from "../prompts/append-system-prompt";
+import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
 import {
 	AcpClientConnectionRuntime,
 	type AcpConnectionClosedDetail,
@@ -48,6 +54,13 @@ import {
 	applyAcpPromptTurnCompletion,
 	applyAcpSessionUpdate,
 } from "./acp-session-update-adapter";
+import {
+	ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+	type AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult,
+	describeAcpTaskSessionAwaitingDispatchedBackgroundWork,
+	parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork,
+	unparkAcpTaskSessionEntry,
+} from "./acp-task-session-park-awaiting-dispatched-background-work";
 import { AcpTaskSessionRegistry } from "./acp-task-session-registry";
 
 export interface StartAcpTaskSessionRequest {
@@ -159,7 +172,13 @@ export class AcpTaskSessionService {
 	private readonly latestStartRequestByTaskId = new Map<string, StartAcpTaskSessionRequest>();
 	private userDecisionBroker: AcpUserDecisionBroker = DENY_ALL_USER_DECISION_BROKER;
 
-	constructor() {
+	constructor(
+		// 所在 workspace 的身份，用于给 omp 进程注入工作单元身份变量（dd2db 1a）；缺省时不注入（单测）。
+		private readonly kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+			workspaceId: string;
+			workspaceRepositoryPath: string;
+		} | null = null,
+	) {
 		this.userDecisionBroker = this.pendingUserDecisionBroker;
 		this.connectionRuntime = new AcpClientConnectionRuntime({
 			onSessionUpdate: (taskId, notification) => {
@@ -280,6 +299,8 @@ export class AcpTaskSessionService {
 					reviewReasonWhileConnectionIsBeingEstablished,
 					{ pid: null, agentId: request.agentId },
 				),
+				// 新活体不继承上一个活体的 park（park 只描述某次回合在等什么）。
+				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
 				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
@@ -327,6 +348,17 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
+				// omp 每张卡一个进程：工作单元身份直接写进进程 env，工具 shell 里的 kanban CLI 才能声明「是哪张卡」。
+				// omp 的卡片只有一条 agent 会话，会话 id 就是 workspace task id。
+				env: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
+					? buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
+							workspaceTaskId: request.taskId,
+							kanbanTaskConversationSessionId: request.taskId,
+							workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
+							workspaceRepositoryPath:
+								this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceRepositoryPath,
+						})
+					: undefined,
 			});
 			if (
 				this.registry.getEntry(request.taskId) !== entry ||
@@ -370,7 +402,14 @@ export class AcpTaskSessionService {
 					}),
 				);
 			} else if (promptText || (request.images?.length ?? 0) > 0) {
-				void this.runPromptTurn(request.taskId, connection, buildAcpPromptBlocks(request.prompt, request.images));
+				void this.runPromptTurn(
+					request.taskId,
+					connection,
+					buildAcpPromptBlocks(
+						`${resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.prompt}`,
+						request.images,
+					),
+				);
 			}
 		} catch (error) {
 			if (
@@ -400,11 +439,50 @@ export class AcpTaskSessionService {
 		);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: connection.agentId }),
+			// 新 prompt 到达 = 编排方回来恢复（或用户亲自接手），等同 PTY 的 UserPromptSubmit 清 park。
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
 		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images));
 		return summary;
+	}
+
+	// dd2db 2x：与 TerminalSessionManager 同名同义的 park 三件套（见 acp-task-session-park-awaiting-dispatched-background-work.ts）。
+	// 编排方须 await park 成功再让 agent 结束这一轮：回合收束读的是此刻内存里的 summary。
+	parkTaskSessionAwaitingDispatchedBackgroundWork(
+		taskId: string,
+		options: { label?: string } = {},
+	): AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult {
+		const result = parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork({
+			taskId,
+			entry: this.registry.getEntry(taskId),
+			hasLiveAcpConnection: this.connectionRuntime.getConnection(taskId) !== null,
+			label: options.label,
+		});
+		if (result.ok) {
+			this.emitSummary(result.summary);
+		}
+		return result;
+	}
+
+	unparkTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) {
+			return null;
+		}
+		const unparkedSummary = unparkAcpTaskSessionEntry(entry);
+		if (unparkedSummary) {
+			this.emitSummary(unparkedSummary);
+			return unparkedSummary;
+		}
+		return cloneAcpSummary(entry.summary);
+	}
+
+	getAwaitingDispatchedBackgroundWork(
+		taskId: string,
+	): ReturnType<typeof describeAcpTaskSessionAwaitingDispatchedBackgroundWork> {
+		return describeAcpTaskSessionAwaitingDispatchedBackgroundWork(this.registry.getEntry(taskId));
 	}
 
 	// 会话被回收之后，registry 里的 entry / summary 仍在（回收只拆连接与子进程、不删账本），
@@ -447,6 +525,7 @@ export class AcpTaskSessionService {
 		await connection.cancel().catch(() => null);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("idle", null, { pid: connection.pid, agentId: connection.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
@@ -463,6 +542,7 @@ export class AcpTaskSessionService {
 		await connection.cancel().catch(() => null);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
@@ -478,6 +558,7 @@ export class AcpTaskSessionService {
 		this.connectionRuntime.disposeTaskConnection(taskId);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			pid: null,
 			runtimeSessionIncarnationId: null,
 			reviewReason: null,
@@ -507,6 +588,7 @@ export class AcpTaskSessionService {
 			this.emitSummary(
 				updateAcpSummary(entry, {
 					...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+					...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 					pid: null,
 					reviewReason: null,
 				}),
@@ -564,6 +646,27 @@ export class AcpTaskSessionService {
 		this.registry.deleteEntry(taskId);
 	}
 
+	applyCurrentWorkPhaseGoal(
+		taskId: string,
+		goal: RuntimeAgentCurrentWorkPhaseGoal | null,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) return null;
+		if (
+			goal &&
+			(goal.owningKanbanTaskConversationSessionId !== taskId ||
+				(goal.owningRuntimeSessionIncarnationId != null &&
+					goal.owningRuntimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId) ||
+				(goal.owningNativeConversationSessionId !== null &&
+					goal.owningNativeConversationSessionId !==
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId))
+		)
+			return null;
+		const summary = updateAcpSummary(entry, { agentCurrentWorkPhaseGoal: goal });
+		this.emitSummary(summary);
+		return summary;
+	}
+
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null {
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
@@ -587,7 +690,12 @@ export class AcpTaskSessionService {
 		promptBlocks: AcpContentBlock[],
 	): Promise<void> {
 		try {
-			const response = await connection.prompt(promptBlocks);
+			const promptTurn = connection.prompt(promptBlocks);
+			const liveEntry = this.registry.getEntry(taskId);
+			if (liveEntry && this.connectionRuntime.getConnection(taskId) === connection) {
+				this.emitSummary(updateAcpSummary(liveEntry, { agentCurrentWorkPhaseGoalInvalidatedAt: now() }));
+			}
+			const response = await promptTurn;
 			// 上下文必须在 await 之后重新取：这段时间里会话可能已被 stop 掉或被 clear 换成新的，
 			// 那时旧回合的结果一律丢弃，否则会把 interrupted 改写回 awaiting_review，
 			// 或者把结果写到刚重建的空会话上。
@@ -625,6 +733,7 @@ export class AcpTaskSessionService {
 		);
 		return updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("failed", "error", { pid: null, agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			pid: null,
 			reviewReason: "error",
 			warningMessage: message,
@@ -700,8 +809,13 @@ function appendStderrDiagnostics(baseMessage: string, trimmedStderrDiagnostics: 
 	return trimmedStderrDiagnostics ? `${baseMessage}\n\n${trimmedStderrDiagnostics}` : baseMessage;
 }
 
-export function createAcpTaskSessionService(): AcpTaskSessionService {
-	return new AcpTaskSessionService();
+export function createAcpTaskSessionService(
+	kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+		workspaceId: string;
+		workspaceRepositoryPath: string;
+	} | null = null,
+): AcpTaskSessionService {
+	return new AcpTaskSessionService(kanbanWorkspaceIdentityForTaskAgentSessionEnvironment);
 }
 
 export type { AcpTaskSessionEntry };

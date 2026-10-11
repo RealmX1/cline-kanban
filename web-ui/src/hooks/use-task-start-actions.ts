@@ -30,32 +30,9 @@ interface PendingStartAllReadyBacklogTasksConfirmation {
 	requestedTaskIds: string[];
 }
 
+// 过渡语义（dd2db 1a）：任务连线已退役、等待门（阶段 3）尚未落地，backlog 里的卡全部视为可启动。
 export function getStartableBacklogTaskIds(board: BoardData): string[] {
-	const allBacklogTasks = new Set<string>();
-	const allInProgressTasks = new Set<string>();
-	const startableTaskIds: string[] = [];
-
-	const backlogCards = board.columns.find((column) => column.id === "backlog")?.cards;
-	const inProgressTasks = board.columns.find((column) => column.id === "in_progress")?.cards;
-
-	backlogCards?.forEach((card) => {
-		allBacklogTasks.add(card.id);
-	});
-	inProgressTasks?.forEach((card) => {
-		allInProgressTasks.add(card.id);
-	});
-
-	backlogCards?.forEach((card) => {
-		const dependency = board.dependencies.find((d) => d.fromTaskId === card.id);
-		const isChildTaskInBacklog = dependency && allBacklogTasks.has(dependency.toTaskId);
-		const isChildTaskInProgress = dependency && allInProgressTasks.has(dependency.toTaskId);
-
-		if (!isChildTaskInBacklog && !isChildTaskInProgress) {
-			startableTaskIds.push(card.id);
-		}
-	});
-
-	return startableTaskIds;
+	return board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
 }
 
 export function useTaskStartActions({

@@ -59,7 +59,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -202,7 +201,6 @@ describe("direct substring search stays free of task id matching", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 		return buildTaskBoardSearchDocuments(board, PROJECT_CONTEXT);
 	}

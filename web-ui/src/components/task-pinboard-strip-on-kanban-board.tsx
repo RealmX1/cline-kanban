@@ -18,8 +18,7 @@ const TASK_PINBOARD_CARD_WIDTH_PX = 280;
  * 🔴 它必须渲染在 `<section className="kb-board">` **之外**：
  * - `globals.css` 的 `.kb-board > section { flex: 0 0 auto !important; width: 92vw }` 会在移动端
  *   把任何直接子 section 当成「一列看板列」处理，横条会被拉成一整列宽；
- * - `.kb-board` 同时是 `DependencyOverlay` 的 containerRef 与 `getPrimaryBoardTaskElement` 的查询根，
- *   放在外面才能保证置顶板里的分身不被这两者扫到。
+ * - `.kb-board` 同时是 `getPrimaryBoardTaskElement` 的查询根，放在外面才能保证置顶板里的分身不被它扫到。
  *
  * 一张都没置顶时整条不渲染——不给从不使用该功能的用户平白占掉 40px 看板高度。
  */

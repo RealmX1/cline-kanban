@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { discardBrowserAnswerDraftsForTaskExceptPendingDecision } from "@/hooks/use-agent-raised-pending-user-decision-answer-draft";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { RuntimeAgentRaisedPendingUserDecision, RuntimeTaskHookActivity } from "@/runtime/types";
+import type {
+	RuntimeAgentRaisedPendingUserDecision,
+	RuntimePendingUserDecisionQuestionAnswerDraft,
+	RuntimeTaskHookActivity,
+} from "@/runtime/types";
 
-export interface PendingUserDecisionQuestionAnswerDraft {
-	decisionQuestionId: string;
-	selectedOptionIds: string[];
-	freeformText: string | null;
-}
+export type PendingUserDecisionQuestionAnswerDraft = RuntimePendingUserDecisionQuestionAnswerDraft;
 
 export function useAgentRaisedPendingUserDecision(input: {
 	workspaceId: string | null;
@@ -45,9 +46,15 @@ export function useAgentRaisedPendingUserDecision(input: {
 				latestQueryIdentityRef.current === queryIdentity &&
 				refreshRequestSequenceRef.current === refreshRequestSequence
 			) {
+				const pendingDecision = response.decisions.find((candidate) => candidate.taskId === input.taskId) ?? null;
+				discardBrowserAnswerDraftsForTaskExceptPendingDecision(
+					input.workspaceId,
+					input.taskId,
+					pendingDecision?.recordedAnswerQuestionAnswers === null ? pendingDecision.decisionId : null,
+				);
 				setDecisionResult({
 					queryIdentity,
-					decision: response.decisions.find((candidate) => candidate.taskId === input.taskId) ?? null,
+					decision: pendingDecision,
 				});
 			}
 		} catch (error) {
@@ -136,5 +143,5 @@ export function useAgentRaisedPendingUserDecision(input: {
 		}
 	}, [decision, input.workspaceId, queryIdentity, refresh]);
 
-	return { decision, isLoading, isSubmitting, answer, dismiss };
+	return { decision, isLoading, isSubmitting, answer, dismiss, refresh };
 }

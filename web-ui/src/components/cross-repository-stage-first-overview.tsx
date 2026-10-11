@@ -1,13 +1,14 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
+import { createComparatorByCurrentAgentTurnStartAscendingThenStableKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "@runtime-session-activity";
-import { Activity, ChevronRight, Clock, MessagesSquare } from "lucide-react";
+import { Activity, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
 import { SESSION_ACTIVITY_COLOR } from "@/components/board-card-session-activity";
+import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeInProgressTaskDetail, RuntimeProjectSummary, RuntimeProjectTaskCounts } from "@/runtime/types";
-import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { useInterval } from "@/utils/react-use";
 
 // Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md / ADR-0001）：把整个看板（Board Scope）所有
@@ -22,6 +23,13 @@ function isActiveInProgressTask(task: RuntimeInProgressTaskDetail, nowMs: number
 		isAgentOutputWithinActiveWindow(task.lastOutputAt, nowMs, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS)
 	);
 }
+
+// 已按 repo 分组，组内 taskId 不会撞号，稳定键用 taskId 即可。
+const compareActiveInProgressTasksByCurrentAgentTurnStartAscendingThenTaskId =
+	createComparatorByCurrentAgentTurnStartAscendingThenStableKey<RuntimeInProgressTaskDetail>(
+		(task) => task,
+		(task) => task.taskId,
+	);
 
 interface RepoTaskGroup {
 	repo: RuntimeProjectSummary;
@@ -44,10 +52,12 @@ export function CrossRepositoryStageFirstOverview({
 	projects,
 	onOpenTask,
 	onOpenStage,
+	onRequestCreateTask,
 }: {
 	projects: RuntimeProjectSummary[];
 	onOpenTask: (repoId: string, taskId: string) => void;
 	onOpenStage?: (repoId: string, stage: keyof RuntimeProjectTaskCounts) => void;
+	onRequestCreateTask?: () => void;
 }): React.ReactElement {
 	// 本地 tick：summary 不会每分钟推送，故自行 tick 让「近期活跃」窗口随时间衰减（同 task-card-body）。
 	const [nowMs, setNowMs] = useState(() => Date.now());
@@ -71,8 +81,9 @@ export function CrossRepositoryStageFirstOverview({
 				}
 			}
 			if (activeTasks.length > 0) {
-				// 活跃组内最近有输出的排前面。
-				activeTasks.sort((a, b) => (b.lastOutputAt ?? 0) - (a.lastOutputAt ?? 0));
+				// 活跃组内先进入 agent 回合的在前，与跨项目切换面板 Running 区同一比较器；不按 lastOutputAt 排，
+				// 否则 spinner 每次重绘都会让组内顺序抖动。
+				activeTasks.sort(compareActiveInProgressTasksByCurrentAgentTurnStartAscendingThenTaskId);
 				active.push({ repo, tasks: activeTasks });
 				activeCount += activeTasks.length;
 			}
@@ -92,6 +103,17 @@ export function CrossRepositoryStageFirstOverview({
 				<header className="flex items-baseline gap-2">
 					<h1 className="text-lg font-semibold text-text-primary">Board Overview</h1>
 					<span className="text-xs text-text-tertiary">across all repositories</span>
+					{/* Board Scope 建卡：对话框带目标项目字段（Task Creation Target Project），不切项目。 */}
+					{onRequestCreateTask ? (
+						<Button
+							icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+							size="sm"
+							className="ml-auto self-center"
+							onClick={onRequestCreateTask}
+						>
+							New task
+						</Button>
+					) : null}
 				</header>
 
 				{/* In-Progress 阶段：stage → {Active, Stale} → repo → task */}
@@ -252,49 +274,7 @@ function OverviewTaskRow({
 			/>
 			<visual.Icon size={14} className={cn("shrink-0", visual.className)} />
 			<span className="min-w-0 flex-1 truncate text-sm text-text-primary">{task.title}</span>
-			{/* 时间元数据（与主看板卡片头部逐字同源、同语义）：Clock=自创建至今（恒显）；
-			    Activity=本轮停止生成至今（agent 回合 / park 期间无值 ⇒ 不显）；
-			    MessagesSquare=对话上次推进至今（低置信来源加 `~` 前缀）。
-			    这两颗刻意不合并成一颗：前者是 per-incarnation 的离散状态转移（会话重开时刷新是**对**的），
-			    后者是跨 incarnation 的历史事实（会话重开时**不该**动）。历史上用一个
-			    lastSubstantiveOutputAt 冒充两者，正是「重开旧会话后时间被刷成 now」的成因。
-			    绝对本地时间走原生 title——避免把 Radix Tooltip 嵌进行按钮产生嵌套交互元素。 */}
-			<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
-				<span
-					className="inline-flex items-center gap-0.5"
-					title={`Created · ${new Date(task.createdAt).toLocaleString()}`}
-				>
-					<Clock size={10} className="shrink-0" />
-					{formatCompactElapsedSince(task.createdAt, nowMs)}
-				</span>
-				{task.agentResponseGenerationStopped != null ? (
-					<span
-						className="inline-flex items-center gap-0.5"
-						title={`Stopped generating · ${new Date(
-							task.agentResponseGenerationStopped.stoppedAt,
-						).toLocaleString()}`}
-					>
-						<Activity size={10} className="shrink-0" />
-						{formatCompactElapsedSince(task.agentResponseGenerationStopped.stoppedAt, nowMs)}
-					</span>
-				) : null}
-				{task.lastConversationProgressObservation != null ? (
-					<span
-						className="inline-flex items-center gap-0.5"
-						title={`Conversation last advanced · ${new Date(
-							task.lastConversationProgressObservation.observedAtMs,
-						).toLocaleString()} · source: ${task.lastConversationProgressObservation.evidenceKind}`}
-					>
-						<MessagesSquare size={10} className="shrink-0" />
-						{isLowConfidenceLastConversationProgressEvidence(
-							task.lastConversationProgressObservation.evidenceKind,
-						)
-							? "~"
-							: ""}
-						{formatCompactElapsedSince(task.lastConversationProgressObservation.observedAtMs, nowMs)}
-					</span>
-				) : null}
-			</span>
+			<TaskActivityElapsedTimePills task={task} nowMs={nowMs} />
 		</button>
 	);
 }

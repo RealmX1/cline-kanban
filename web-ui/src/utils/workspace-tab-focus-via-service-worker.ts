@@ -21,15 +21,20 @@ export interface WorkspaceTabFocusRequestMessage {
 
 // SW 经 MessageChannel 专用 port 回报的 outcome 字面量。
 const SERVICE_WORKER_OUTCOME_FOCUSED = "focused";
+// 只有升级前的旧 SW 还会回这个：它在聚焦被拒时把选中消息投给了后台标签页。
 const SERVICE_WORKER_OUTCOME_TASK_SELECTED_IN_BACKGROUND_TAB = "task-selected-in-background-tab";
+const SERVICE_WORKER_OUTCOME_EXISTING_TAB_FOCUS_DENIED_OPEN_IN_SENDER_TAB =
+	"existing-tab-focus-denied-open-in-sender-tab";
 const SERVICE_WORKER_OUTCOME_NO_TAB_FOUND = "no-tab-found";
 
 export type WorkspaceTabFocusViaServiceWorkerResult =
 	// SW 已聚焦既有目标项目 tab 并送达任务选中消息（当前 Chromium 拒绝 message 上下文的
 	// client.focus()，此结果留给未来平台放宽后自动升级；见 sw.js 内注释）。
 	| "focused-existing-tab"
-	// 任务选中消息已送达既有目标项目 tab（后台就位），但浏览器拒绝跨 tab 聚焦——当前
-	// Chromium 的常态结果；调用方应以 toast 引导用户手动切换标签页。
+	// 有目标项目的 tab，但浏览器拒绝跨 tab 聚焦——当前 Chromium 的常态结果。SW 没有转发选中消息，
+	// 调用方应在发起页原地打开（后台标签页不该自己跳进 Focus View）。
+	| "existing-tab-focus-denied-by-browser"
+	// 旧 SW：任务选中消息已送达后台的目标项目 tab；调用方只能以 toast 引导用户手动切换。
 	| "task-selected-in-background-tab"
 	// 不存在目标项目的 tab：调用方应在用户手势窗口内 window.open 新开深链 tab。
 	| "no-existing-tab"
@@ -47,6 +52,9 @@ function mapServiceWorkerResponseToResult(data: unknown): WorkspaceTabFocusViaSe
 	}
 	if (message.outcome === SERVICE_WORKER_OUTCOME_FOCUSED) {
 		return "focused-existing-tab";
+	}
+	if (message.outcome === SERVICE_WORKER_OUTCOME_EXISTING_TAB_FOCUS_DENIED_OPEN_IN_SENDER_TAB) {
+		return "existing-tab-focus-denied-by-browser";
 	}
 	if (message.outcome === SERVICE_WORKER_OUTCOME_TASK_SELECTED_IN_BACKGROUND_TAB) {
 		return "task-selected-in-background-tab";

@@ -2,7 +2,8 @@
 // 纯委托：读写 verification state 交给 src/deployment/post-deploy-verification-state.ts，
 // 看板当前列 / agent 回复预览由 runtime-server 经 DI 注入。
 // 硬约束（plan 1d）：confirmVerificationComplete **只更新 verification state，绝不移列** —— Web 侧移列由
-// completePostDeployVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
+// completePostDeployVerificationMoveToDone 负责、CLI 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree；
+// 本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
@@ -31,7 +32,9 @@ import {
 	consumePendingConfirmationAndMarkVerified,
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
+	markTaskVerified,
 	reconcileGroup,
+	reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups,
 	setPendingConfirmation,
 	setVerificationRunState,
 	updateTaskChecklist,
@@ -115,9 +118,9 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			const nowIso = new Date().toISOString();
 			// active 组选取顺带触发 state 模块的损坏隔离 + 过期 token GC（读时经 mutate 骨架）。
 			const activeGroup = await getActiveGroup(scope.workspaceId, nowIso);
+			const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 			if (activeGroup) {
 				// 每次轮询对当前组做双向 reconcile：新进 validation 任务动态加入 + 悬挂任务标 droppedReason（plan 数据流）。
-				const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 				await reconcileGroup({
 					deploymentId: activeGroup.deploymentId,
 					workspaceId: scope.workspaceId,
@@ -125,6 +128,13 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 					nowIso,
 				});
 			}
+			// CLI 已授权、已移入 Done、却没来得及写 verifiedAt 的在途完成记录：跨该 workspace 全部组（含已被新部署折叠的组）补写，
+			// 不论有无活跃组——所属组被折叠后 reconcileGroup 不再触达它（RVF-002）。
+			await reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups({
+				workspaceId: scope.workspaceId,
+				currentBoardTasks: boardTasks,
+				nowIso,
+			});
 			// getActiveGroup 已确保盘上为合法 JSON，可安全直读全量并按当前 workspaceId 过滤。
 			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const workspaceGroups = snapshot.deploymentGroups.filter((group) => group.workspaceId === scope.workspaceId);
@@ -303,11 +313,31 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 				input.taskId,
 				input.token,
 				nowIso,
+				{
+					postDeployVerificationCompletionPath: "web_ui_post_deploy_verification_panel_atomic_confirmation",
+					forcedCompletionWithoutAllVerificationsPassed: false,
+					confirmedAcknowledgements: [...pending.requiredAcknowledgements],
+				},
 			);
 			if (!marked.ok) {
 				return { ok: false, task: marked.task, error: describeConsumeFailure(marked.failureReason) };
 			}
 			return { ok: true, task: marked.task };
+		},
+		// CLI 已在自己进程里核对（token / force / validation 直通）并经 runtime procedure 移入 Done；这里只写 verifiedAt，
+		// 让「PDV 通过」由 runtime 记账。归属校验与 confirmVerificationComplete 同形：跨 workspace 的 deploymentId 一律拒绝。
+		markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: async (scope, input) => {
+			const snapshot = await readPostDeployVerificationStateSnapshot();
+			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
+			if (!group || group.workspaceId !== scope.workspaceId) {
+				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
+			}
+			const marked = await markTaskVerified(input.deploymentId, input.taskId, new Date().toISOString(), {
+				postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+				forcedCompletionWithoutAllVerificationsPassed: input.forcedCompletionWithoutAllVerificationsPassed,
+				confirmedAcknowledgements: [...input.confirmedAcknowledgements],
+			});
+			return { ok: marked.ok, task: marked.task, ...(marked.error ? { error: marked.error } : {}) };
 		},
 	};
 }

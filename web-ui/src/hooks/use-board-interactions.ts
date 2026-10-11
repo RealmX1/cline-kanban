@@ -1,36 +1,52 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import {
 	isAgentActivelyProducingOutput,
 	isAwaitingUserReviewTurn,
+	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
+import { classifyTaskCardBoardColumnTransitionRequestedByUserGesture } from "@runtime-task-card-action-board-column-transitions";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { TaskPinboardPinReasonDialogRequest } from "@/components/task-pinboard-pin-reason-dialog";
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
-import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
-import { discardAllTaskEditDraftsForDeletedTask } from "@/runtime/task-edit-draft-store";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import {
-	applyDragResult,
-	clearColumnTasks,
 	disableTaskAutoReview,
 	findCardSelection,
 	getTaskColumnId,
 	moveTaskToColumn,
-	removeTask,
-	updateTask,
+	placeTaskCardIntoBoardColumnAtIndexByTaskId,
+	resolveTaskCardDropFromDragResultByTaskId,
 } from "@/state/board-state";
-import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@/state/task-pinboard-pinning";
+import { waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
+import {
+	moveTaskCardBetweenNonTrashColumnsThroughRuntime,
+	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime,
+	moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime,
+	permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime,
+	restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime,
+	setTaskPinboardPinStateOfTaskCardThroughRuntime,
+	startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime,
+	updateTaskCardFieldValuesThroughRuntime,
+} from "@/state/task-card-action-commands-for-any-workspace";
+import {
+	recordWebUiBoardMutationInitiatorForTaskCardAspect,
+	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
+import { hasPendingTaskCardCommandBoardOverlayEntryForTaskCard } from "@/stores/pending-task-card-command-board-overlay-store";
+import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
+import { readTaskCardActionCommandKindInFlight } from "@/stores/task-card-action-commands-in-flight-store";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
-import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
+import { trackTaskResumedFromTrash } from "@/telemetry/events";
+import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
-import { resolveTaskAutoReviewMode } from "@/types";
 import {
 	getNextDetailTaskIdAfterTrashMove,
 	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
@@ -69,17 +85,8 @@ interface UseBoardInteractionsInput {
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
-	stopTaskSession: (taskId: string) => Promise<void>;
-	transitionTaskToReview: (taskId: string) => Promise<boolean>;
-	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
-	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
-	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
-	sendTaskSessionInput: (
-		taskId: string,
-		input: string,
-		options?: SendTerminalInputOptions,
-	) => Promise<{ ok: boolean; message?: string }>;
+	sendTaskSessionInput: UseTaskSessionsResult["sendTaskSessionInput"];
 	readyForReviewNotificationsEnabled: boolean;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
@@ -87,9 +94,6 @@ interface UseBoardInteractionsInput {
 
 export interface UseBoardInteractionsResult {
 	handleProgrammaticCardMoveReady: ReturnType<typeof useProgrammaticCardMoves>["handleProgrammaticCardMoveReady"];
-	confirmMoveTaskToTrash: (task: BoardCard, currentBoard?: BoardData) => Promise<void>;
-	handleCreateDependency: (fromTaskId: string, toTaskId: string) => void;
-	handleDeleteDependency: (dependencyId: string) => void;
 	handleDragEnd: (result: DropResult, options?: { selectDroppedTask?: boolean }) => void;
 	handleStartTask: (taskId: string) => void;
 	handleStartAllBacklogTasks: (taskIds?: string[]) => void;
@@ -141,11 +145,6 @@ export function useBoardInteractions({
 	setSelectedTaskId,
 	setIsClearTrashDialogOpen,
 	setIsGitHistoryOpen,
-	stopTaskSession,
-	transitionTaskToReview,
-	cleanupTaskWorkspace,
-	ensureTaskWorkspace,
-	startTaskSession,
 	fetchTaskWorkspaceInfo,
 	sendTaskSessionInput,
 	readyForReviewNotificationsEnabled,
@@ -153,8 +152,8 @@ export function useBoardInteractions({
 	runAutoReviewGitAction,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
 	// 事件入口读取最新状态，避免每个 session tick 改变整棵卡片树的 handler 身份。
-	const latestBoardInteractionStateRef = useRef({ board, sessions });
-	latestBoardInteractionStateRef.current = { board, sessions };
+	const latestBoardInteractionStateRef = useRef({ board, sessions, selectedTaskId });
+	latestBoardInteractionStateRef.current = { board, sessions, selectedTaskId };
 	const previousSessionsRef = useRef<Record<string, RuntimeTaskSessionSummary>>({});
 	// B5：Rule A 列自动流转上一帧处理时的 board 引用，配合下方 effect 的 summary 引用短路。
 	// board 自上一帧以来若发生过任何外部写入（用户拖拽等），必须放开全量重估——流转分支由
@@ -292,7 +291,11 @@ export function useBoardInteractions({
 
 	const handleAddReviewComments = useCallback(
 		async (taskId: string, text: string) => {
-			const typed = await sendTaskSessionInput(taskId, text, { appendNewline: false, mode: "paste" });
+			const typed = await sendTaskSessionInput(taskId, text, {
+				appendNewline: false,
+				mode: "paste",
+				requireTerminalPasteSuccess: true,
+			});
 			if (!typed.ok) {
 				showAppToast({
 					intent: "danger",
@@ -354,62 +357,83 @@ export function useBoardInteractions({
 		});
 	}, [readyForReviewNotificationsEnabled]);
 
-	const kickoffTaskInProgress = useCallback(
+	// 启动走 taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress：服务端先移列、再 ensure worktree、再起会话，
+	// 浏览器只叠 overlay（卡立刻显示在 In Progress，不改会被保存的 board）。
+	const startTaskCardAgentSessionInCurrentProject = useCallback(
 		async (
 			task: BoardCard,
-			taskId: string,
-			fromColumnId: BoardColumnId,
-			options?: { optimisticMove?: boolean },
+			options?: {
+				insertAtIndexWithinInProgressBoardColumn?: number;
+				boardMutationInitiator?: WebUiBoardMutationInitiator;
+			},
 		): Promise<boolean> => {
-			const optimisticMove = options?.optimisticMove ?? true;
-			const ensured = await ensureTaskWorkspace(task);
-			if (!ensured.ok) {
-				notifyError(ensured.message ?? "Could not set up task workspace.");
+			if (!currentProjectId) {
 				return false;
 			}
-			if (ensured.response?.warning) {
-				showAppToast({
-					intent: "warning",
-					icon: "warning-sign",
-					message: ensured.response.warning,
-					timeout: 7000,
+			// 整个启动窗口都标成「启动请求进行中」，让终端面板显示「正在启动」，而不是把占位 summary + 空终端误判成
+			// 「会话随上一个运行时没了」、再递出一个会和本次启动抢 per-task 闸门的续跑按钮（详见该 store 顶部注释）。
+			const startRequestInFlight = beginTaskAgentSessionStartRequestInFlight(currentProjectId, task.id);
+			try {
+				// cf427：本页面刚建的卡先等 runtime 确认落盘再启动；runtime 的 startTaskSession 也有同义的门。
+				const persisted = await waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart({
+					workspaceId: currentProjectId,
+					taskCard: task,
 				});
-			}
-			if (selectedTaskId === taskId) {
-				if (ensured.response) {
-					setTaskWorkspaceInfo({
-						taskId,
-						path: ensured.response.path,
-						exists: true,
-						baseRef: ensured.response.baseRef,
-						branch: null,
-						isDetached: true,
-						headCommit: ensured.response.baseCommit,
+				if (!persisted.ok) {
+					notifyError(`Could not save the new task card, so its agent was not started: ${persisted.message}`);
+					return false;
+				}
+				const result = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
+					workspaceId: currentProjectId,
+					taskId: task.id,
+					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(task.id),
+					currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
+					...(options?.insertAtIndexWithinInProgressBoardColumn !== undefined
+						? { insertAtIndexWithinInProgressBoardColumn: options.insertAtIndexWithinInProgressBoardColumn }
+						: {}),
+					...(options?.boardMutationInitiator ? { boardMutationInitiator: options.boardMutationInitiator } : {}),
+				});
+				if (
+					result.taskCardActionCommandExecutionOutcome ===
+					"rejected_because_another_command_is_in_flight_for_task_card"
+				) {
+					return false;
+				}
+				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+					notifyError(`Could not start task session: ${result.commandFailureMessage}`);
+					return false;
+				}
+				const { response } = result;
+				if (response.ensuredTaskWorktreeWarningMessage) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: response.ensuredTaskWorktreeWarningMessage,
+						timeout: 7000,
 					});
 				}
-				const infoAfterEnsure = await fetchTaskWorkspaceInfo(task);
-				if (infoAfterEnsure) {
-					setTaskWorkspaceInfo(infoAfterEnsure);
-				}
-			}
-			const started = await startTaskSession(task);
-			if (!started.ok) {
-				notifyError(started.message ?? "Could not start task session.");
-				return false;
-			}
-			if (!optimisticMove) {
-				setBoard((currentBoard) => {
-					const currentColumnId = getTaskColumnId(currentBoard, taskId);
-					if (currentColumnId !== fromColumnId) {
-						return currentBoard;
+				if (latestBoardInteractionStateRef.current.selectedTaskId === task.id) {
+					const infoAfterStart = await fetchTaskWorkspaceInfo(task);
+					if (infoAfterStart) {
+						setTaskWorkspaceInfo(infoAfterStart);
 					}
-					const moved = moveTaskToColumn(currentBoard, taskId, "in_progress", { insertAtTop: true });
-					return moved.moved ? moved.board : currentBoard;
-				});
+				}
+				if (
+					response.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
+					response.agentSessionStartOutcome === "agent_session_start_failed"
+				) {
+					// 卡片按服务端规则留在 In Progress，会话状态与错误保持可见。
+					notifyError(response.agentSessionStartFailureMessage ?? "Could not start task session.");
+					return false;
+				}
+				return true;
+			} finally {
+				// 成功时 running summary 通常早已经由运行时状态流（spawn 后 150ms 批广播）到达，远早于这条响应，
+				// 所以这里清标记不会让「已死」提示闪一下。
+				startRequestInFlight.finish();
 			}
-			return true;
 		},
-		[ensureTaskWorkspace, fetchTaskWorkspaceInfo, selectedTaskId, setBoard, startTaskSession],
+		[currentProjectId, fetchTaskWorkspaceInfo],
 	);
 
 	const startBacklogTaskImmediately = useCallback(
@@ -419,21 +443,9 @@ export function useBoardInteractions({
 			if (!selection || selection.column.id !== "backlog") {
 				return false;
 			}
-
-			setBoard((currentBoard) => {
-				const currentSelection = findCardSelection(currentBoard, task.id);
-				if (!currentSelection || currentSelection.column.id !== "backlog") {
-					return currentBoard;
-				}
-				const moved = moveTaskToColumn(currentBoard, task.id, "in_progress", { insertAtTop: true });
-				return moved.moved ? moved.board : currentBoard;
-			});
-
-			return kickoffTaskInProgress(task, task.id, "backlog", {
-				optimisticMove: true,
-			});
+			return startTaskCardAgentSessionInCurrentProject(task, { insertAtIndexWithinInProgressBoardColumn: 0 });
 		},
-		[kickoffTaskInProgress, setBoard],
+		[startTaskCardAgentSessionInCurrentProject],
 	);
 
 	const startBacklogTaskWithAnimation = useCallback(
@@ -444,15 +456,15 @@ export function useBoardInteractions({
 
 			await waitForBacklogCardHeightToSettle(task.id);
 
-			const programmaticMoveAttempt = tryProgrammaticCardMove(task.id, "backlog", "in_progress");
+			const programmaticMoveAttempt = tryProgrammaticCardMove(task.id, "backlog", "in_progress", {
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			if (programmaticMoveAttempt === "blocked") {
 				await waitForProgrammaticCardMoveAvailability();
 				return startBacklogTaskWithAnimation(task);
 			}
 			if (programmaticMoveAttempt === "unavailable") {
-				return kickoffTaskInProgress(task, task.id, "backlog", {
-					optimisticMove: false,
-				});
+				return startTaskCardAgentSessionInCurrentProject(task, { insertAtIndexWithinInProgressBoardColumn: 0 });
 			}
 
 			let resolveCompletion: ((started: boolean) => void) | null = null;
@@ -472,15 +484,25 @@ export function useBoardInteractions({
 			return completionPromise;
 		},
 		[
-			kickoffTaskInProgress,
 			resolvePendingProgrammaticStartMove,
 			selectedCard,
 			startBacklogTaskImmediately,
+			startTaskCardAgentSessionInCurrentProject,
 			tryProgrammaticCardMove,
 			waitForBacklogCardHeightToSettle,
 			waitForProgrammaticCardMoveAvailability,
 		],
 	);
+
+	// 下方 level-triggered 列自动流转（会话 facet 驱动）在 updater 里逐卡决定移列；直接落列的分支在这里登记发起方，
+	// 走动画的分支把发起方放进在途移动，由 handleDragEnd 落地时登记。登记是幂等的「按卡覆盖」，updater 重放无害。
+	const recordSessionFacetDrivenColumnAutoflowInitiator = useCallback((taskId: string) => {
+		recordWebUiBoardMutationInitiatorForTaskCardAspect({
+			taskId,
+			boardMutationAspectOfTaskCard: "task_card_column_placement",
+			boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+		});
+	}, []);
 
 	useEffect(() => {
 		setBoard((currentBoard) => {
@@ -502,6 +524,17 @@ export function useBoardInteractions({
 				if (previous && previous.updatedAt > summary.updatedAt) {
 					continue;
 				}
+				// 这张卡正等一条服务端卡片动作命令落定（在途、或已结算等广播回灌）：自动流转不抢在它前面改列——
+				// 否则浏览器保存的自动移列可能先于命令落盘，让命令看到「卡已经在那了」而跳过它的会话副作用。
+				// 不记为已见，命令落定（board 变化）后的下一帧重新评估。
+				if (
+					currentProjectId &&
+					(readTaskCardActionCommandKindInFlight(currentProjectId, summary.taskId) !== null ||
+						hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, summary.taskId))
+				) {
+					deferredRetryTaskIds.add(summary.taskId);
+					continue;
+				}
 				let columnId = getTaskColumnId(nextBoard, summary.taskId);
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
@@ -513,12 +546,15 @@ export function useBoardInteractions({
 				if (columnId === "backlog" && summary.startedAt != null) {
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 						columnId = "in_progress";
 					}
 				}
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
+					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review", {
+						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：本帧未落直接移列（动画接管 / 被在途移动阻塞）的 task 不得记录为已见，
 						// 否则引用短路会吃掉下一 tick 的重试（短路前由 updatedAt guard 放行每 tick 重估）。
@@ -527,6 +563,7 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -547,6 +584,7 @@ export function useBoardInteractions({
 				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
 						skipKickoff: true,
+						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：同 Review 落位分支——动画接管 / 被阻塞的 task 不记录为已见，保留下一 tick 重试。
@@ -555,6 +593,7 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -569,6 +608,7 @@ export function useBoardInteractions({
 					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
 						skipTrashWorkflow: true,
+						boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						if (programmaticMoveAttempt === "blocked") {
@@ -581,6 +621,11 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "trash", { insertAtTop: true });
 					if (moved.moved) {
+						recordWebUiBoardMutationInitiatorForTaskCardAspect({
+							taskId: summary.taskId,
+							boardMutationAspectOfTaskCard: "task_card_column_placement",
+							boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
+						});
 						setSelectedTaskId((currentSelectedTaskId) =>
 							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
 						);
@@ -601,20 +646,61 @@ export function useBoardInteractions({
 			previousAutoFlowBoardRef.current = nextBoard;
 			return nextBoard;
 		});
-	}, [programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
+	}, [currentProjectId, programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
 
-	const { confirmMoveTaskToTrash, handleCreateDependency, handleDeleteDependency, requestMoveTaskToTrash } =
-		useLinkedBacklogTaskActions({
-			board,
-			setBoard,
-			setSelectedTaskId,
-			stopTaskSession,
-			cleanupTaskWorkspace,
-			maybeRequestNotificationPermissionForTaskStart,
-			kickoffTaskInProgress,
-			startBacklogTaskWithAnimation,
-			waitForBacklogStartAnimationAvailability: waitForProgrammaticCardMoveAvailability,
-		});
+	// 移入 Done 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree：服务端移列、停 agent 会话与
+	// 详情 shell 终端、删 worktree。浏览器只叠 overlay、把焦点挪到下一张卡。失败时抛错，让可 await 的调用方（PDV 完成）
+	// 拿到失败；动画路径的完成 Promise 照旧不传播失败（与改动前一致）。
+	const requestMoveTaskToTrash = useCallback(
+		async (
+			taskId: string,
+			_fromColumnId: BoardColumnId,
+			options?: {
+				optimisticMoveApplied?: boolean;
+				skipWorkingChangeWarning?: boolean;
+				boardMutationInitiator?: WebUiBoardMutationInitiator;
+				insertAtIndexWithinDoneBoardColumn?: number;
+			},
+		): Promise<void> => {
+			const { board } = latestBoardInteractionStateRef.current;
+			if (!currentProjectId || !findCardSelection(board, taskId)) {
+				return;
+			}
+			setSelectedTaskId((currentSelectedTaskId) =>
+				currentSelectedTaskId === taskId ? getNextDetailTaskIdAfterTrashMove(board, taskId) : currentSelectedTaskId,
+			);
+			const result = await moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				currentProjectBoardForOptimisticOverlay: board,
+				...(options?.insertAtIndexWithinDoneBoardColumn !== undefined
+					? { insertAtIndexWithinDoneBoardColumn: options.insertAtIndexWithinDoneBoardColumn }
+					: {}),
+				...(options?.boardMutationInitiator ? { boardMutationInitiator: options.boardMutationInitiator } : {}),
+			});
+			if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+				notifyError(`Could not move the task to Done: ${result.commandFailureMessage}`);
+				throw new Error(result.commandFailureMessage);
+			}
+			if (
+				result.taskCardActionCommandExecutionOutcome ===
+				"rejected_because_another_command_is_in_flight_for_task_card"
+			) {
+				throw new Error(`Another action is still running for task "${taskId}".`);
+			}
+			const worktreeDeletionErrorMessage =
+				result.response.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? null;
+			if (worktreeDeletionErrorMessage) {
+				showAppToast({
+					intent: "warning",
+					icon: "warning-sign",
+					message: `Moved to Done, but the task worktree could not be removed: ${worktreeDeletionErrorMessage}`,
+					timeout: 7000,
+				});
+			}
+		},
+		[currentProjectId, setSelectedTaskId],
+	);
 
 	useEffect(() => {
 		setRequestMoveTaskToTrashHandler(requestMoveTaskToTrash);
@@ -628,61 +714,52 @@ export function useBoardInteractions({
 		resetKey: currentProjectId,
 	});
 
-	const resumeTaskFromTrash = useCallback(
-		async (task: BoardCard, taskId: string, options?: { optimisticMoveApplied?: boolean }): Promise<void> => {
-			const ensured = await ensureTaskWorkspace(task);
-			if (!ensured.ok) {
-				notifyError(ensured.message ?? "Could not set up task workspace.");
-				if (!options?.optimisticMoveApplied) {
-					return;
-				}
-				setBoard((currentBoard) => {
-					const currentColumnId = getTaskColumnId(currentBoard, taskId);
-					if (currentColumnId !== "review") {
-						return currentBoard;
-					}
-					const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-						insertAtTop: true,
-					});
-					return reverted.moved ? reverted.board : currentBoard;
-				});
+	// 从 Done 恢复走 taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession：服务端移回 review → ensure
+	// worktree → 续跑会话，任一步失败把卡移回 Done（浏览器不再自己撤回乐观移列），成功后关掉自动 review 动作。
+	const restoreTaskCardFromDoneInCurrentProject = useCallback(
+		async (taskId: string, options?: { insertAtIndexWithinReviewBoardColumn?: number }): Promise<void> => {
+			if (!currentProjectId) {
 				return;
 			}
-			if (ensured.response?.warning) {
+			const result = await restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
+				currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
+				...(options?.insertAtIndexWithinReviewBoardColumn !== undefined
+					? { insertAtIndexWithinReviewBoardColumn: options.insertAtIndexWithinReviewBoardColumn }
+					: {}),
+			});
+			if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+				notifyError(`Could not restore the task: ${result.commandFailureMessage}`);
+				return;
+			}
+			if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
+				return;
+			}
+			const { response } = result;
+			if (response.ensuredTaskWorktreeWarningMessage) {
 				showAppToast({
 					intent: "warning",
 					icon: "warning-sign",
-					message: ensured.response.warning,
+					message: response.ensuredTaskWorktreeWarningMessage,
 					timeout: 7000,
 				});
 			}
-			const resumed = await startTaskSession(task, { resumeFromTrash: true });
-			if (resumed.ok) {
-				setBoard((currentBoard) => {
-					const disabledAutoReview = disableTaskAutoReview(currentBoard, taskId);
-					return disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
-				});
+			if (response.taskCardRestoreFromDoneOutcome !== "agent_session_resumed_and_task_card_kept_in_review") {
+				notifyError(response.taskCardRestoreFromDoneFailureMessage ?? "Could not resume task session.");
 				return;
 			}
-
-			notifyError(resumed.message ?? "Could not resume task session.");
-			if (!options?.optimisticMoveApplied) {
-				return;
-			}
-			setBoard((currentBoard) => {
-				const currentColumnId = getTaskColumnId(currentBoard, taskId);
-				if (currentColumnId !== "review") {
-					return currentBoard;
-				}
-				const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-					insertAtTop: true,
-				});
-				return reverted.moved ? reverted.board : currentBoard;
-			});
+			trackTaskResumedFromTrash();
 		},
-		[ensureTaskWorkspace, setBoard, startTaskSession],
+		[currentProjectId],
 	);
 
+	// 拖放落地（含程序化移动的动画落地）。落点按 taskId 解出（见 resolveTaskCardDropFromDragResultByTaskId）。
+	//   - 跨列且由用户手势 / PDV / auto-review 发起：按 core 的移列分类映射到对应 taskCardAction 命令，浏览器只叠
+	//     overlay，不改会被保存的 board；
+	//   - 浏览器端列自动流转（会话 facet 驱动、会话中断进 Done）与列内重排：仍在浏览器改 board、整板保存——
+	//     自动流转不搬服务端（计划「明确不做」），中断进 Done 刻意不停会话、不删 worktree（保留供恢复）。
 	const handleDragEnd = useCallback(
 		(result: DropResult, options?: { selectDroppedTask?: boolean }) => {
 			const { board } = latestBoardInteractionStateRef.current;
@@ -692,80 +769,149 @@ export function useBoardInteractions({
 			const { behavior: programmaticMoveBehavior, programmaticCardMoveInFlight } = consumeProgrammaticCardMove(
 				result.draggableId,
 			);
-
-			const applied = applyDragResult(board, result, { programmaticCardMoveInFlight });
-
-			const moveEvent = applied.moveEvent;
-			if (!moveEvent) {
+			const drop = resolveTaskCardDropFromDragResultByTaskId(board, result, { programmaticCardMoveInFlight });
+			// 没有在途程序化移动 = 用户真拖拽；程序化移动（动画）落地时用发起入口随行为一起带来的发起方，没带就登记 null。
+			const boardMutationInitiatorForThisDrop: WebUiBoardMutationInitiator | null =
+				programmaticCardMoveInFlight || programmaticMoveBehavior
+					? (programmaticMoveBehavior?.boardMutationInitiator ?? null)
+					: "web_ui_user_gesture";
+			// 这张卡已有命令在途（或已结算正等广播回灌）：本次拖放作废，别让 board 与在途命令打架。
+			const isTaskCardAwaitingTaskCardActionCommand =
+				currentProjectId !== null &&
+				(readTaskCardActionCommandKindInFlight(currentProjectId, result.draggableId) !== null ||
+					hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, result.draggableId));
+			if (drop.taskCardDropKind === "no_effective_task_card_drop" || isTaskCardAwaitingTaskCardActionCommand) {
 				resolvePendingProgrammaticStartMove(result.draggableId, false);
-				setBoard(applied.board);
+				resolvePendingProgrammaticTrashMove(result.draggableId);
 				return;
 			}
 
-			if (moveEvent.toColumnId === "trash") {
-				setBoard(applied.board);
-				if (programmaticMoveBehavior?.skipTrashWorkflow) {
-					resolvePendingProgrammaticTrashMove(moveEvent.taskId);
-					return;
-				}
-				const requestPromise = requestMoveTaskToTrash(moveEvent.taskId, moveEvent.fromColumnId, {
-					optimisticMoveApplied: true,
-					skipWorkingChangeWarning: programmaticMoveBehavior?.skipWorkingChangeWarning,
-				});
-				void requestPromise.finally(() => {
-					resolvePendingProgrammaticTrashMove(moveEvent.taskId);
-				});
+			const placeTaskCardInBrowserBoard = (destinationColumnId: BoardColumnId) => {
+				setBoard(
+					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards(
+						boardMutationInitiatorForThisDrop,
+						(currentBoard) => {
+							const placed = placeTaskCardIntoBoardColumnAtIndexByTaskId(
+								currentBoard,
+								drop.taskId,
+								destinationColumnId,
+								drop.destinationIndex,
+							);
+							return placed.placed ? placed.board : currentBoard;
+						},
+					),
+				);
+			};
+
+			if (drop.taskCardDropKind === "task_card_reordered_within_board_column") {
+				placeTaskCardInBrowserBoard(drop.boardColumnId);
+				resolvePendingProgrammaticStartMove(drop.taskId, false);
 				return;
 			}
 
-			if (moveEvent.fromColumnId === "trash" && moveEvent.toColumnId === "review") {
-				setBoard(applied.board);
-				const movedSelection = findCardSelection(applied.board, moveEvent.taskId);
-				if (!movedSelection) {
-					return;
-				}
-				void resumeTaskFromTrash(movedSelection.card, moveEvent.taskId, { optimisticMoveApplied: true });
+			const columnTransitionClassification = classifyTaskCardBoardColumnTransitionRequestedByUserGesture(
+				drop.fromColumnId,
+				drop.toColumnId,
+			);
+			// 只对在途程序化移动放行的跨列（in_progress ⇄ review、validation → in_progress）都是浏览器端列自动流转，
+			// 不论入口带没带发起方，都留在浏览器（发起方照实登记，没带就是 null）。
+			const isBrowserColumnAutoflowMove =
+				boardMutationInitiatorForThisDrop === "web_ui_client_automation_session_facet_driven_column_autoflow" ||
+				boardMutationInitiatorForThisDrop ===
+					"web_ui_client_automation_interrupted_session_autoflow_into_done_column" ||
+				programmaticMoveBehavior?.skipTrashWorkflow === true ||
+				columnTransitionClassification === "board_column_transition_handing_agent_turn_to_user" ||
+				columnTransitionClassification === "board_column_transition_not_allowed_as_user_gesture";
+			if (isBrowserColumnAutoflowMove) {
+				placeTaskCardInBrowserBoard(drop.toColumnId);
+				resolvePendingProgrammaticStartMove(drop.taskId, false);
+				resolvePendingProgrammaticTrashMove(drop.taskId);
 				return;
 			}
 
-			if (moveEvent.fromColumnId === "review" && moveEvent.toColumnId === "validation") {
-				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, moveEvent.taskId);
-			}
-			setBoard(applied.board);
-
-			if (
-				moveEvent.toColumnId === "in_progress" &&
-				moveEvent.fromColumnId === "backlog" &&
-				!programmaticMoveBehavior?.skipKickoff
-			) {
-				maybeRequestNotificationPermissionForTaskStart();
-				const movedSelection = findCardSelection(applied.board, moveEvent.taskId);
-				if (movedSelection) {
-					void kickoffTaskInProgress(movedSelection.card, moveEvent.taskId, moveEvent.fromColumnId)
-						.then((started) => {
-							resolvePendingProgrammaticStartMove(moveEvent.taskId, started);
-						})
+			const boardMutationInitiatorForCommand = boardMutationInitiatorForThisDrop ?? undefined;
+			switch (columnTransitionClassification) {
+				case "board_column_transition_into_done_stopping_sessions_and_deleting_worktree": {
+					void requestMoveTaskToTrash(drop.taskId, drop.fromColumnId, {
+						optimisticMoveApplied: true,
+						skipWorkingChangeWarning: programmaticMoveBehavior?.skipWorkingChangeWarning,
+						boardMutationInitiator: boardMutationInitiatorForCommand,
+						insertAtIndexWithinDoneBoardColumn: drop.destinationIndex,
+					})
 						.catch(() => {
-							resolvePendingProgrammaticStartMove(moveEvent.taskId, false);
+							// 失败已在 requestMoveTaskToTrash 里提示。
+						})
+						.finally(() => {
+							resolvePendingProgrammaticTrashMove(drop.taskId);
 						});
 					return;
 				}
-				resolvePendingProgrammaticStartMove(moveEvent.taskId, false);
-				return;
+				case "board_column_transition_restoring_from_done_resuming_agent_session":
+					void restoreTaskCardFromDoneInCurrentProject(drop.taskId, {
+						insertAtIndexWithinReviewBoardColumn: drop.destinationIndex,
+					});
+					return;
+				case "board_column_transition_starting_agent_session": {
+					const card = findCardSelection(board, drop.taskId)?.card;
+					if (!card || programmaticMoveBehavior?.skipKickoff) {
+						resolvePendingProgrammaticStartMove(drop.taskId, false);
+						return;
+					}
+					maybeRequestNotificationPermissionForTaskStart();
+					void startTaskCardAgentSessionInCurrentProject(card, {
+						insertAtIndexWithinInProgressBoardColumn: drop.destinationIndex,
+						...(boardMutationInitiatorForCommand
+							? { boardMutationInitiator: boardMutationInitiatorForCommand }
+							: {}),
+					})
+						.then((started) => {
+							resolvePendingProgrammaticStartMove(drop.taskId, started);
+						})
+						.catch(() => {
+							resolvePendingProgrammaticStartMove(drop.taskId, false);
+						});
+					return;
+				}
+				case "board_column_transition_without_session_side_effects":
+					if (!currentProjectId) {
+						return;
+					}
+					if (drop.fromColumnId === "review" && drop.toColumnId === "validation") {
+						moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, drop.taskId);
+					}
+					void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
+						workspaceId: currentProjectId,
+						taskId: drop.taskId,
+						targetBoardColumnId: drop.toColumnId,
+						insertAtIndexWithinTargetBoardColumn: drop.destinationIndex,
+						currentProjectBoardForOptimisticOverlay: board,
+						...(boardMutationInitiatorForCommand
+							? { boardMutationInitiator: boardMutationInitiatorForCommand }
+							: {}),
+					}).then((commandResult) => {
+						if (commandResult.taskCardActionCommandExecutionOutcome === "command_failed") {
+							notifyError(`Could not move the task: ${commandResult.commandFailureMessage}`);
+						}
+					});
+					return;
+				default:
+					// 只对浏览器端自动流转放行的移动已在上面的自动流转分支处理。
+					resolvePendingProgrammaticStartMove(drop.taskId, false);
+					return;
 			}
-			resolvePendingProgrammaticStartMove(moveEvent.taskId, false);
 		},
 		[
 			consumeProgrammaticCardMove,
-			kickoffTaskInProgress,
+			currentProjectId,
 			maybeRequestNotificationPermissionForTaskStart,
 			requestMoveTaskToTrash,
-			resumeTaskFromTrash,
+			restoreTaskCardFromDoneInCurrentProject,
 			resolvePendingProgrammaticStartMove,
 			resolvePendingProgrammaticTrashMove,
 			moveFocusedReviewTaskToNextReviewTaskAfterValidationMove,
 			setBoard,
 			setSelectedTaskId,
+			startTaskCardAgentSessionInCurrentProject,
 		],
 	);
 
@@ -776,9 +922,25 @@ export function useBoardInteractions({
 			if (!selection) {
 				return;
 			}
-			if (selection.column.id === "in_progress" && sessions[taskId] == null) {
+			// 「在 In Progress 但从没真正起过会话」：既包括本地还没有任何 summary，也包括运行时 attach 时造出来的
+			// 占位 summary（终端面板一挂上就会有）。后者此前被当成「已有会话」直接 return，
+			// 于是启动前段失败（如建 worktree 时锁等待超时）后，这张卡再也点不起来。
+			// 但占位形状本身不证明「从没启动过」：硬中断 / 运行时重启后 summary 也会退化成它。卡片上记着
+			// 启动成功过的，这里绝不能以原 prompt 再起一段新对话（那会丢掉本可续跑的旧对话）——留给续跑路径。
+			// 这里刻意只拦「确有启动记录」而不要求「从没启动过」的正面证据：启动史说不清时，详情面板把「启动」
+			// 与「续跑」都摆给人选，人选了启动就走到这里，再要求正面证据会让那个按钮点了没反应。看板 Retry 不是
+			// 人在知情下的选择，所以它在 task-card-body 里另要求正面证据（resolveTaskAgentSessionLaunchHistoryEvidence）。
+			const existingSessionSummary = sessions[taskId];
+			const isExistingSessionSummaryPlaceholderOfNeverLaunchedTask =
+				existingSessionSummary != null &&
+				isNeverStartedPlaceholderTaskSessionSummary(existingSessionSummary) &&
+				selection.card.mostRecentlyLaunchedAgentSessionAgentId == null;
+			if (
+				selection.column.id === "in_progress" &&
+				(existingSessionSummary == null || isExistingSessionSummaryPlaceholderOfNeverLaunchedTask)
+			) {
 				maybeRequestNotificationPermissionForTaskStart();
-				void kickoffTaskInProgress(selection.card, taskId, "in_progress");
+				void startTaskCardAgentSessionInCurrentProject(selection.card);
 				return;
 			}
 			if (selection.column.id !== "backlog") {
@@ -787,7 +949,11 @@ export function useBoardInteractions({
 			maybeRequestNotificationPermissionForTaskStart();
 			void startBacklogTaskWithAnimation(selection.card);
 		},
-		[kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, startBacklogTaskWithAnimation],
+		[
+			maybeRequestNotificationPermissionForTaskStart,
+			startBacklogTaskWithAnimation,
+			startTaskCardAgentSessionInCurrentProject,
+		],
 	);
 
 	const handleStartAllBacklogTasks = useCallback(
@@ -799,42 +965,29 @@ export function useBoardInteractions({
 				return;
 			}
 
-			let nextBoard = board;
 			const pendingStarts: BoardCard[] = [];
 			const startedTaskIds = new Set<string>();
-
 			for (const taskId of requestedTaskIds) {
 				if (!taskId || startedTaskIds.has(taskId)) {
 					continue;
 				}
-				const selection = findCardSelection(nextBoard, taskId);
+				const selection = findCardSelection(board, taskId);
 				if (!selection || selection.column.id !== "backlog") {
 					continue;
 				}
-				const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
-				if (!moved.moved) {
-					continue;
-				}
-				nextBoard = moved.board;
-				const movedSelection = findCardSelection(nextBoard, taskId);
-				if (!movedSelection) {
-					continue;
-				}
-				pendingStarts.push(movedSelection.card);
+				pendingStarts.push(selection.card);
 				startedTaskIds.add(taskId);
 			}
-
 			if (pendingStarts.length === 0) {
 				return;
 			}
-
-			setBoard(nextBoard);
 			maybeRequestNotificationPermissionForTaskStart();
+			// 每张卡一条启动命令（各自的在途闸与 overlay，都插到 In Progress 列顶，与改动前的批量移列一致）。
 			for (const task of pendingStarts) {
-				void kickoffTaskInProgress(task, task.id, "backlog");
+				void startTaskCardAgentSessionInCurrentProject(task, { insertAtIndexWithinInProgressBoardColumn: 0 });
 			}
 		},
-		[kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, setBoard],
+		[maybeRequestNotificationPermissionForTaskStart, startTaskCardAgentSessionInCurrentProject],
 	);
 
 	const handleDetailTaskDragEnd = useCallback(
@@ -865,15 +1018,21 @@ export function useBoardInteractions({
 				return;
 			}
 			setTaskMoveToTrashLoading(taskId, true);
-			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId).finally(() => {
-				setTaskMoveToTrashLoading(taskId, false);
-			});
+			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
+				boardMutationInitiator: "web_ui_user_gesture",
+			})
+				.catch(() => {
+					// 失败已在 requestMoveTaskToTrash 里提示。
+				})
+				.finally(() => {
+					setTaskMoveToTrashLoading(taskId, false);
+				});
 		},
 		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
 
 	// Post-Deploy Verification 全勾入 Done 的移列入口。与 performMoveToTrash 等价——直接走 requestMoveTaskToTrash
-	// WithAnimation（保留 stopTaskSession + worktree 清理副作用），绕过 requestMoveToTrash 对 review/in_progress
+	// WithAnimation（服务端的 Done 命令照常停会话、删 worktree），绕过 requestMoveToTrash 对 review/in_progress
 	// 的 SkipValidationConfirmDialog（Post-Deploy Verification 自有确认框）。关键区别：**awaitable 且返回成败**——
 	// performMoveToTrash 吞掉 Promise（fire-and-forget），本导出 await 之，成功 resolve { ok:true }、抛错 { ok:false }，
 	// 让调用方在移列确实成功后才回写 boardMovedToDoneAt / 调 confirmVerificationComplete。
@@ -885,7 +1044,9 @@ export function useBoardInteractions({
 			}
 			setTaskMoveToTrashLoading(taskId, true);
 			try {
-				await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId);
+				await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
+					boardMutationInitiator: "web_ui_user_gesture_post_deploy_verification_panel_completion",
+				});
 				return { ok: true };
 			} catch {
 				return { ok: false };
@@ -940,38 +1101,44 @@ export function useBoardInteractions({
 	}, []);
 
 	// Pure board move into the manual-validation buffer. No session stop, no worktree teardown —
-	// the developer keeps the running agent/diff while validating. Persisted automatically via
-	// useWorkspacePersistence. Mirrors the manual in_progress/review → validation drag end-state.
+	// the developer keeps the running agent/diff while validating. Goes through taskCardAction (the
+	// overlay shows the move immediately). Mirrors the manual in_progress/review → validation drag end-state.
 	const handleMoveCardToValidation = useCallback(
 		(taskId: string) => {
 			const { board, sessions } = latestBoardInteractionStateRef.current;
 			const fromColumnId = getTaskColumnId(board, taskId);
-			if (fromColumnId !== "in_progress" && fromColumnId !== "review") {
+			if (!currentProjectId || (fromColumnId !== "in_progress" && fromColumnId !== "review")) {
 				return;
 			}
-			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
-			if (moved.moved) {
-				setBoard(moved.board);
-				if (fromColumnId === "review") {
-					moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
+			void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				targetBoardColumnId: "validation",
+				currentProjectBoardForOptimisticOverlay: board,
+			}).then((result) => {
+				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+					notifyError(`Could not move the task to Validation: ${result.commandFailureMessage}`);
 				}
-				// A session that is *actively producing output* in Validation gets auto-migrated back to
-				// In Progress by the level-triggered effect above, so warn the developer instead of leaving
-				// the card looking like it never moved. Idle / already-exited sessions (still flagged
-				// "running") now stay in Validation, so the warning must use the same predicate as the
-				// bounce — keying off bare state === "running" would false-warn on those. Non-blocking,
-				// auto-dismisses after 3s.
-				if (isAgentActivelyProducingOutput(sessions[taskId], Date.now())) {
-					showAppToast({
-						intent: "warning",
-						icon: "info-sign",
-						message: "Task is still running — it will return to In Progress while the agent keeps working.",
-						timeout: 3000,
-					});
-				}
+			});
+			if (fromColumnId === "review") {
+				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
+			}
+			// A session that is *actively producing output* in Validation gets auto-migrated back to
+			// In Progress by the level-triggered effect above, so warn the developer instead of leaving
+			// the card looking like it never moved. Idle / already-exited sessions (still flagged
+			// "running") now stay in Validation, so the warning must use the same predicate as the
+			// bounce — keying off bare state === "running" would false-warn on those. Non-blocking,
+			// auto-dismisses after 3s.
+			if (isAgentActivelyProducingOutput(sessions[taskId], Date.now())) {
+				showAppToast({
+					intent: "warning",
+					icon: "info-sign",
+					message: "Task is still running — it will return to In Progress while the agent keeps working.",
+					timeout: 3000,
+				});
 			}
 		},
-		[moveFocusedReviewTaskToNextReviewTaskAfterValidationMove, setBoard],
+		[currentProjectId, moveFocusedReviewTaskToNextReviewTaskAfterValidationMove],
 	);
 
 	const handleMoveSelectedCardToValidation = useCallback(() => {
@@ -982,20 +1149,27 @@ export function useBoardInteractions({
 	}, [handleMoveCardToValidation, selectedCard]);
 
 	// 手动「移至 Review」：把一个停在 agent 回合（多为卡死/空闲——Stop hook 未触发、进程未退）的终端 agent
-	// 任务翻入「等人审查」回合。不手动挪列：transitionTaskToReview 成功后即时 upsert 的 summary（turnOwner=user）
-	// 触发上方 level-triggered effect 的 Rule A 自动落位 Review，且 review-bounce（要求 turnOwner=agent）不再触发，
-	// 卡片稳定停在 Review。仅 In Progress 卡生效（与按钮渲染门控一致，双重保险）。
+	// 任务翻入「等人审查」回合。走 taskCardAction.moveTaskCardIntoReviewByHandingTurnToUser：服务端翻回合成功后显式
+	// 移列（跨项目时没有浏览器跑 Rule A），浏览器叠 overlay；review-bounce（要求 turnOwner=agent）不再触发，卡片稳定
+	// 停在 Review。仅 In Progress 卡生效（与按钮渲染门控一致，双重保险）。
 	const handleMoveCardToReview = useCallback(
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
-			if (getTaskColumnId(board, taskId) !== "in_progress") {
+			if (!currentProjectId || getTaskColumnId(board, taskId) !== "in_progress") {
 				return;
 			}
 			setMoveToReviewLoadingById((current) => ({ ...current, [taskId]: true }));
 			void (async () => {
 				try {
-					const ok = await transitionTaskToReview(taskId);
-					if (!ok) {
+					const result = await moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime({
+						workspaceId: currentProjectId,
+						taskId,
+						currentProjectBoardForOptimisticOverlay: board,
+					});
+					const handedTurnToUser =
+						result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+						result.response.agentTurnHandoffToUserOutcome === "agent_turn_handed_to_user";
+					if (!handedTurnToUser) {
 						showAppToast({
 							intent: "warning",
 							icon: "info-sign",
@@ -1015,13 +1189,15 @@ export function useBoardInteractions({
 				}
 			})();
 		},
-		[transitionTaskToReview],
+		[currentProjectId],
 	);
 
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
-			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
+			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review", {
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 				return;
 			}
@@ -1030,19 +1206,27 @@ export function useBoardInteractions({
 			if (!selection || selection.column.id !== "trash") {
 				return;
 			}
-
-			const moved = moveTaskToColumn(board, taskId, "review", { insertAtTop: true });
-			if (!moved.moved) {
-				return;
-			}
-			setBoard(moved.board);
-			const movedSelection = findCardSelection(moved.board, taskId);
-			if (!movedSelection) {
-				return;
-			}
-			void resumeTaskFromTrash(movedSelection.card, taskId, { optimisticMoveApplied: true });
+			// 没有可用的拖放动画（例如看板不在屏上）：直接发恢复命令，overlay 把卡放到 Review 列顶。
+			void restoreTaskCardFromDoneInCurrentProject(taskId, { insertAtIndexWithinReviewBoardColumn: 0 });
 		},
-		[resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
+		[restoreTaskCardFromDoneInCurrentProject, tryProgrammaticCardMove],
+	);
+
+	// 永久删除成功后清掉本地会话摘要（服务端已删 sessions 条目；不等下一次快照，免得详情面板还挂着旧会话）。
+	const removeTaskSessionSummariesOfPermanentlyDeletedTaskCards = useCallback(
+		(taskIds: readonly string[]) => {
+			setSessions((currentSessions) => {
+				if (!taskIds.some((taskId) => currentSessions[taskId])) {
+					return currentSessions;
+				}
+				const nextSessions = { ...currentSessions };
+				for (const taskId of taskIds) {
+					delete nextSessions[taskId];
+				}
+				return nextSessions;
+			});
+		},
+		[setSessions],
 	);
 
 	const handleOpenDeleteTask = useCallback((taskId: string) => {
@@ -1064,77 +1248,61 @@ export function useBoardInteractions({
 		}
 
 		const task = deleteTaskTarget;
-		const selection = findCardSelection(board, task.id);
+		const { board } = latestBoardInteractionStateRef.current;
 		setDeleteTaskTarget(null);
-		if (!selection) {
+		if (!currentProjectId || !findCardSelection(board, task.id)) {
 			return;
 		}
-
-		setBoard((currentBoard) => {
-			const currentSelection = findCardSelection(currentBoard, task.id);
-			if (!currentSelection) {
-				return currentBoard;
-			}
-			const deleted = removeTask(currentBoard, task.id);
-			return deleted.removed ? deleted.board : currentBoard;
-		});
-		setSessions((currentSessions) => {
-			if (!currentSessions[task.id]) {
-				return currentSessions;
-			}
-			const nextSessions = { ...currentSessions };
-			delete nextSessions[task.id];
-			return nextSessions;
-		});
 		if (selectedTaskId === task.id) {
 			setSelectedTaskId(null);
 			clearTaskWorkspaceInfo(task.id);
 		}
-
-		// 草稿的真相源在服务端、且刻意不随看板文档一起写，所以任务删除时要显式清一次：任务没了之后，
-		// 留着的草稿再也没有可以认领它的地方，只会变成永远看不见的垃圾。
-		if (currentProjectId) {
-			discardAllTaskEditDraftsForDeletedTask(currentProjectId, task.id);
-		}
-
-		void (async () => {
-			await stopTaskSession(task.id);
-			await cleanupTaskWorkspace(task.id, task.worktreeMode, true);
-		})();
+		// 走 taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup：服务端按固定顺序删卡、清编辑草稿、清排队
+		// prompt、停会话、删 worktree、最后删 checkpoint ref。浏览器叠「已删除」overlay，成功后清掉本地会话摘要。
+		void permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime({
+			workspaceId: currentProjectId,
+			permanentlyDeletedTaskCardSelection: {
+				permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+				selectedTaskIds: [task.id],
+			},
+			taskIdsExpectedToBeDeleted: [task.id],
+			currentProjectBoardForOptimisticOverlay: board,
+		}).then((result) => {
+			if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+				notifyError(`Could not delete the task: ${result.commandFailureMessage}`);
+				return;
+			}
+			if (result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime") {
+				removeTaskSessionSummariesOfPermanentlyDeletedTaskCards([task.id]);
+			}
+		});
 	}, [
-		board,
-		cleanupTaskWorkspace,
-		deleteTaskTarget,
-		selectedTaskId,
-		setBoard,
-		setSelectedTaskId,
-		setSessions,
-		stopTaskSession,
 		currentProjectId,
+		deleteTaskTarget,
+		removeTaskSessionSummariesOfPermanentlyDeletedTaskCards,
+		selectedTaskId,
+		setSelectedTaskId,
 	]);
 
 	const handleCancelAutomaticTaskAction = useCallback(
 		(taskId: string) => {
-			setBoard((currentBoard) => {
-				const selection = findCardSelection(currentBoard, taskId);
-				if (!selection || selection.card.autoReviewEnabled !== true) {
-					return currentBoard;
+			const { board } = latestBoardInteractionStateRef.current;
+			if (!currentProjectId || findCardSelection(board, taskId)?.card.autoReviewEnabled !== true) {
+				return;
+			}
+			void updateTaskCardFieldValuesThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				taskCardFieldValuePatch: { autoReviewEnabled: false },
+				currentProjectBoardForOptimisticOverlay: board,
+				optimisticBoardTransformation: (currentBoard) => disableTaskAutoReview(currentBoard, taskId),
+			}).then((result) => {
+				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+					notifyError(`Could not cancel the automatic action: ${result.commandFailureMessage}`);
 				}
-				const updated = updateTask(currentBoard, taskId, {
-					prompt: selection.card.prompt,
-					startInPlanMode: selection.card.startInPlanMode,
-					autoReviewEnabled: false,
-					autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
-					images: selection.card.images,
-					agentId: selection.card.agentId,
-					clineSettings: selection.card.clineSettings,
-					terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
-					baseRef: selection.card.baseRef,
-				});
-				return updated.updated ? updated.board : currentBoard;
 			});
 		},
-		[setBoard],
+		[currentProjectId],
 	);
 
 	const openTaskPinboardPinReasonDialog = useCallback((taskId: string, isEditingExistingPin: boolean) => {
@@ -1163,26 +1331,48 @@ export function useBoardInteractions({
 
 	const handleCancelTaskPinboardPinReason = useCallback(() => setTaskPinboardPinReasonRequest(null), []);
 
+	// 置顶改走 taskCardAction（同一张卡在三处共用在途闸）。pinTaskToTaskPinboard 对已置顶的卡保留原
+	// pinnedToTaskPinboardAt，所以「编辑原因」不会把它顶到板首——服务端与 overlay 跑的是同一个纯函数。
+	const submitTaskPinboardPinChange = useCallback(
+		(
+			taskId: string,
+			taskPinboardPinChange: Parameters<
+				typeof setTaskPinboardPinStateOfTaskCardThroughRuntime
+			>[0]["taskPinboardPinChange"],
+		) => {
+			if (!currentProjectId) {
+				return;
+			}
+			void setTaskPinboardPinStateOfTaskCardThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				taskPinboardPinChange,
+				currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
+			}).then((result) => {
+				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+					notifyError(`Could not update Pinboard: ${result.commandFailureMessage}`);
+				}
+			});
+		},
+		[currentProjectId],
+	);
+
 	const handleConfirmTaskPinboardPinReason = useCallback(
 		(taskId: string, pinReason: string) => {
 			setTaskPinboardPinReasonRequest(null);
-			// pinTaskToTaskPinboard 对已置顶的卡保留原 pinnedToTaskPinboardAt，所以「编辑原因」不会把它顶到板首。
-			setBoard((currentBoard) => {
-				const pinned = pinTaskToTaskPinboard(currentBoard, taskId, { pinReason });
-				return pinned.updated ? pinned.board : currentBoard;
+			submitTaskPinboardPinChange(taskId, {
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskPinboardPinReason: pinReason,
 			});
 		},
-		[setBoard],
+		[submitTaskPinboardPinChange],
 	);
 
 	const handleUnpinTaskFromTaskPinboard = useCallback(
 		(taskId: string) => {
-			setBoard((currentBoard) => {
-				const unpinned = unpinTaskFromTaskPinboard(currentBoard, taskId);
-				return unpinned.updated ? unpinned.board : currentBoard;
-			});
+			submitTaskPinboardPinChange(taskId, { taskPinboardPinAction: "unpin_task_card" });
 		},
-		[setBoard],
+		[submitTaskPinboardPinChange],
 	);
 
 	const handleOpenClearTrash = useCallback(() => {
@@ -1192,45 +1382,43 @@ export function useBoardInteractions({
 		setIsClearTrashDialogOpen(true);
 	}, [setIsClearTrashDialogOpen, trashTaskCount]);
 
+	// 清空 Done：同一个永久删除命令按「整列」选择，服务端只删取得串行权的卡（RVF-004），收尾链与单卡删除相同。
 	const handleConfirmClearTrash = useCallback(() => {
-		const trashColumn = board.columns.find((column) => column.id === "trash");
-		const trashCards = trashColumn ? [...trashColumn.cards] : [];
-		const taskIds = trashCards.map((card) => card.id);
+		const { board } = latestBoardInteractionStateRef.current;
+		const taskIds = board.columns.find((column) => column.id === "trash")?.cards.map((card) => card.id) ?? [];
 		setIsClearTrashDialogOpen(false);
-		if (taskIds.length === 0) {
+		if (!currentProjectId || taskIds.length === 0) {
 			return;
 		}
-
-		setBoard((currentBoard) => clearColumnTasks(currentBoard, "trash").board);
-		setSessions((currentSessions) => {
-			const nextSessions = { ...currentSessions };
-			for (const taskId of taskIds) {
-				delete nextSessions[taskId];
-			}
-			return nextSessions;
-		});
 		if (selectedTaskId && taskIds.includes(selectedTaskId)) {
 			setSelectedTaskId(null);
 			clearTaskWorkspaceInfo(selectedTaskId);
 		}
-
-		void (async () => {
-			await Promise.all(
-				trashCards.map(async (card) => {
-					await stopTaskSession(card.id);
-					await cleanupTaskWorkspace(card.id, card.worktreeMode, true);
-				}),
-			);
-		})();
+		void permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime({
+			workspaceId: currentProjectId,
+			permanentlyDeletedTaskCardSelection: {
+				permanentlyDeletedTaskCardSelectionKind: "every_task_card_in_board_column",
+				selectedBoardColumnId: "trash",
+			},
+			taskIdsExpectedToBeDeleted: taskIds,
+			currentProjectBoardForOptimisticOverlay: board,
+		}).then((result) => {
+			if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+				notifyError(`Could not clear Done: ${result.commandFailureMessage}`);
+				return;
+			}
+			if (result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime") {
+				removeTaskSessionSummariesOfPermanentlyDeletedTaskCards(
+					result.response.permanentlyDeletedTaskCards.map(({ deletedTaskCard }) => deletedTaskCard.id),
+				);
+			}
+		});
 	}, [
-		board.columns,
-		cleanupTaskWorkspace,
+		currentProjectId,
+		removeTaskSessionSummariesOfPermanentlyDeletedTaskCards,
 		selectedTaskId,
-		setBoard,
 		setIsClearTrashDialogOpen,
 		setSelectedTaskId,
-		setSessions,
-		stopTaskSession,
 	]);
 
 	const resetBoardInteractionsState = useCallback(() => {
@@ -1253,9 +1441,6 @@ export function useBoardInteractions({
 
 	return {
 		handleProgrammaticCardMoveReady,
-		confirmMoveTaskToTrash,
-		handleCreateDependency,
-		handleDeleteDependency,
 		handleDragEnd,
 		handleStartTask,
 		handleStartAllBacklogTasks,

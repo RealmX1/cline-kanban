@@ -19,6 +19,10 @@ import { parsePostDeployVerificationState } from "../core/api-validation";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import type { LockRequest } from "../fs/locked-file-system";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import {
+	type PostDeployVerificationCompletionEvidence,
+	recordPostDeployVerificationPassedObservationWithoutBlocking,
+} from "../inter-work-unit-relation-ledger/post-deploy-verification-passed-observation-recording";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import {
 	AUTHORED_VERIFICATION_ITEM_ID_PREFIX,
@@ -130,7 +134,22 @@ async function readPostDeployVerificationStateCorruptionTolerant(
 	}
 }
 
+// 历史组封顶裁剪：按部署时间保留最新的 MAX_RETAINED_FOLDED_DEPLOYMENT_GROUPS 个折叠组（返回按部署时间升序）。
+// 写盘前归一化与跨组补写共用：后者据此跳过本次写盘就会被裁掉的折叠组（见 reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups）。
+function selectFoldedDeploymentGroupsSurvivingRetentionTrim(
+	deploymentGroups: RuntimePostDeployVerificationDeploymentGroup[],
+): RuntimePostDeployVerificationDeploymentGroup[] {
+	const foldedGroups = deploymentGroups
+		.filter((group) => group.foldedAtIso !== null)
+		.sort((left, right) => Date.parse(left.deployedAtIso) - Date.parse(right.deployedAtIso));
+	return foldedGroups.length > MAX_RETAINED_FOLDED_DEPLOYMENT_GROUPS
+		? foldedGroups.slice(foldedGroups.length - MAX_RETAINED_FOLDED_DEPLOYMENT_GROUPS)
+		: foldedGroups;
+}
+
 // 写盘前归一化：GC 过期 pendingConfirmation + 裁剪历史组至封顶（活跃组永不裁剪）。
+// CLI 已授权的在途完成记录不在这里回收：它要么由 runtime 的跨组补写（覆盖活跃与已折叠组）补写 verifiedAt，
+// 要么在卡没进 Done 时由同一处过期清除（见 reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups）。
 // exemptFromRetentionDeploymentId：本次 mutation 正在触达的组，即使是最旧折叠组也豁免裁剪（finding #4）。
 function normalizeStateForPersistence(
 	state: RuntimePostDeployVerificationState,
@@ -142,6 +161,7 @@ function normalizeStateForPersistence(
 		...group,
 		tasks: group.tasks.map((task) =>
 			task.pendingConfirmation !== null &&
+			task.pendingConfirmation.kanbanCliCompletionAuthorizedBeforeMoveIntoDone === undefined &&
 			Number.isFinite(nowMs) &&
 			isExpired(task.pendingConfirmation.expiresAtIso, nowMs)
 				? { ...task, pendingConfirmation: null }
@@ -150,19 +170,15 @@ function normalizeStateForPersistence(
 	}));
 
 	const activeGroups = gcApplied.filter((group) => group.foldedAtIso === null);
-	const foldedGroups = gcApplied
-		.filter((group) => group.foldedAtIso !== null)
-		.sort((left, right) => Date.parse(left.deployedAtIso) - Date.parse(right.deployedAtIso));
-	const retainedFolded =
-		foldedGroups.length > MAX_RETAINED_FOLDED_DEPLOYMENT_GROUPS
-			? foldedGroups.slice(foldedGroups.length - MAX_RETAINED_FOLDED_DEPLOYMENT_GROUPS)
-			: foldedGroups;
+	const retainedFolded = selectFoldedDeploymentGroupsSurvivingRetentionTrim(gcApplied);
 	// 豁免：若本次 mutation 触达的折叠组被裁掉，补回它——否则该组内的改动会返回 ok 却随裁剪丢失（不落盘）。
 	if (
 		exemptFromRetentionDeploymentId !== undefined &&
 		!retainedFolded.some((group) => group.deploymentId === exemptFromRetentionDeploymentId)
 	) {
-		const exemptGroup = foldedGroups.find((group) => group.deploymentId === exemptFromRetentionDeploymentId);
+		const exemptGroup = gcApplied.find(
+			(group) => group.foldedAtIso !== null && group.deploymentId === exemptFromRetentionDeploymentId,
+		);
 		if (exemptGroup) {
 			retainedFolded.unshift(exemptGroup);
 		}
@@ -584,6 +600,25 @@ export interface ConsumePendingConfirmationAndMarkVerifiedResult {
 	alreadyVerified?: boolean;
 }
 
+// verifiedAt 的两个写入点共用：只有 runtime 进程（已激活关系账本 live 捕获）才真正记账。
+function recordPostDeployVerificationPassedObservationForVerifiedTask(
+	verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null,
+	deploymentId: string,
+	verifiedTask: RuntimePostDeployVerificationTask,
+	completionEvidence: PostDeployVerificationCompletionEvidence,
+): void {
+	if (!verifiedDeploymentGroup) {
+		return;
+	}
+	recordPostDeployVerificationPassedObservationWithoutBlocking({
+		workspaceId: verifiedDeploymentGroup.workspaceId,
+		deploymentId,
+		deployedSourceCommit: verifiedDeploymentGroup.deployedSourceCommit,
+		verifiedPostDeployVerificationTask: verifiedTask,
+		completionEvidence,
+	});
+}
+
 /**
  * 原子「消费 token + 标记完成」：在单次 state 锁内校验并一次性消费 pendingConfirmation token，随后立即置
  * verifiedAt / boardMovedToDoneAt / 清 pendingConfirmation / 清误标 droppedReason。issue B：把 consume 与 mark
@@ -596,11 +631,18 @@ export async function consumePendingConfirmationAndMarkVerified(
 	taskId: string,
 	token: string,
 	nowIso: string,
+	completionEvidence: PostDeployVerificationCompletionEvidence = {
+		postDeployVerificationCompletionPath: "web_ui_post_deploy_verification_panel_atomic_confirmation",
+		forcedCompletionWithoutAllVerificationsPassed: false,
+		confirmedAcknowledgements: [],
+	},
 ): Promise<ConsumePendingConfirmationAndMarkVerifiedResult> {
+	let verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null = null;
 	const result = await mutatePostDeployVerificationState(
 		nowIso,
 		(state) => {
 			const task = findTask(state, deploymentId, taskId);
+			verifiedDeploymentGroup = findGroup(state, deploymentId) ?? null;
 			if (!task) {
 				return { ok: false, task: null, failureReason: "task_not_found" as const };
 			}
@@ -629,6 +671,12 @@ export async function consumePendingConfirmationAndMarkVerified(
 	);
 	// 仅在本次真正完成核对（非幂等命中）时触发自动清理，避免重复对已清理项做无谓 fs/锁操作。
 	if (result.ok && result.task && result.alreadyVerified !== true) {
+		recordPostDeployVerificationPassedObservationForVerifiedTask(
+			verifiedDeploymentGroup,
+			deploymentId,
+			result.task,
+			completionEvidence,
+		);
 		await runAutomaticCleanupForVerifiedTask(result.task, nowIso);
 	}
 	return result;
@@ -642,11 +690,18 @@ export async function markTaskVerified(
 	deploymentId: string,
 	taskId: string,
 	nowIso: string,
+	completionEvidence: PostDeployVerificationCompletionEvidence = {
+		postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+		forcedCompletionWithoutAllVerificationsPassed: false,
+		confirmedAcknowledgements: [],
+	},
 ): Promise<PostDeployVerificationTaskMutationResult> {
+	let verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null = null;
 	const result = await mutatePostDeployVerificationState(
 		nowIso,
 		(state) => {
 			const task = findTask(state, deploymentId, taskId);
+			verifiedDeploymentGroup = findGroup(state, deploymentId) ?? null;
 			if (!task) {
 				return { ok: false, task: null, error: taskNotFoundError(deploymentId, taskId) };
 			}
@@ -664,6 +719,12 @@ export async function markTaskVerified(
 		deploymentId,
 	);
 	if (result.ok && result.task && result.wasAlreadyVerified !== true) {
+		recordPostDeployVerificationPassedObservationForVerifiedTask(
+			verifiedDeploymentGroup,
+			deploymentId,
+			result.task,
+			completionEvidence,
+		);
 		await runAutomaticCleanupForVerifiedTask(result.task, nowIso);
 	}
 	return { ok: result.ok, task: result.task, ...(result.error ? { error: result.error } : {}) };
@@ -683,11 +744,17 @@ export interface ReconcileGroupInput {
 	nowIso: string;
 }
 
+// EXPERIMENT_NODE: CLI 已授权的在途完成记录写下后，runtime 至少等 60s 才自行补写 verifiedAt——给 CLI 自己的补记调用留出时间，
+// 免得两边抢写、把「PDV 通过」的完成路径记成 runtime 对账；太长则 runtime 恢复后要多等一个轮询周期才补上。
+const KANBAN_CLI_COMPLETION_AUTHORIZED_BUT_LEFT_IN_FLIGHT_RUNTIME_FINALIZATION_GRACE_MS = 60_000;
+
 /**
  * 双向 reconcile 当前组（plan「任务纳入规则」）：
  *  - 方向一：组内未核对任务已从看板删除 → droppedReason="task_deleted"；未经核对被手动移入 trash/backlog → "moved_out_manually"。
  *  - 方向二：deploy 后新进 validation 列的任务动态加入本组（inclusionReason="validation_column"，seed 未勾 checklist）。
- * 找不到组返回 null。
+ * CLI 已授权、已移入 Done、却没来得及写 verifiedAt 的任务不在这里补写：所属组被新部署折叠后就不再走本函数，
+ * 补写由 reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups 跨该 workspace 全部组进行。
+ * 只由 runtime 调用。找不到组返回 null。
  */
 export async function reconcileGroup(
 	input: ReconcileGroupInput,
@@ -734,6 +801,7 @@ export async function reconcileGroup(
 				}
 				// confirmation 在途（pendingConfirmation !== null）= Web 已「先移入 trash、正要 confirm」，不算手动移出（finding #3）；
 				// 跳过标记，避免与 confirmVerificationComplete 竞态出「同时带 verifiedAt 与 droppedReason」的坏态。
+				// CLI 已授权的在途完成记录同理：卡在 trash 时等跨组补写写 verifiedAt，不在这里标手动移出。
 				if ((currentColumn === "trash" || currentColumn === "backlog") && task.pendingConfirmation === null) {
 					task.droppedReason = "moved_out_manually";
 				}
@@ -763,4 +831,103 @@ export async function reconcileGroup(
 		},
 		input.deploymentId,
 	);
+}
+
+export interface ReconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroupsInput {
+	workspaceId: string;
+	// 当前看板上该 workspace 的任务快照；缺席某 taskId 即视为卡已不在看板。
+	currentBoardTasks: ReconcileGroupBoardTask[];
+	nowIso: string;
+}
+
+/**
+ * CLI 已授权、已移入 Done、却没来得及写 verifiedAt 的在途完成记录（RVF-004 遗留）由 runtime 自行收尾，覆盖该 workspace 的
+ * **全部**部署组（活跃 + 已被新部署折叠）——记录所在组被折叠后不再走 reconcileGroup，只看活跃组会让它永远补不上（RVF-002）：
+ *  - 卡在 Done（trash）且授权已过宽限期 → 补写 verifiedAt / boardMovedToDoneAt、清 pendingConfirmation 与 droppedReason，
+ *    锁外按 runtime 对账记「PDV 通过」（取该任务所在组的 workspace / 部署信息）并跑自动清理；
+ *  - 记录已过期、卡却不在 Done（移列从没成功）或已不在看板 → 清掉记录，回到普通在途确认的处理。
+ * 普通待确认 token（无授权标记）一律不碰。由 runtime 的 getPostDeployVerificationState 每次轮询调用（不论有无活跃组）；
+ * 只由 runtime 调用（verifiedAt 只由 runtime 写）。
+ */
+export async function reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups(
+	input: ReconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroupsInput,
+): Promise<void> {
+	const nowMs = Date.parse(input.nowIso);
+	const columnByTaskId = new Map(input.currentBoardTasks.map((boardTask) => [boardTask.taskId, boardTask.columnId]));
+	const tasksVerifiedByRuntimeFinalizingAuthorizedKanbanCliCompletion: Array<{
+		verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string };
+		deploymentId: string;
+		verifiedTask: RuntimePostDeployVerificationTask;
+		completionEvidence: PostDeployVerificationCompletionEvidence;
+	}> = [];
+	await mutatePostDeployVerificationState(input.nowIso, (state) => {
+		// mutate 的裁剪豁免只覆盖一个 deploymentId：本次写盘就会被历史组封顶裁掉的折叠组，改动会随整组一起丢失，
+		// 照样补写就会在锁外记下盘上并不存在的「PDV 通过」。这类组整组消失、不留滞留记录，直接跳过。
+		const foldedDeploymentIdsSurvivingRetentionTrim = new Set(
+			selectFoldedDeploymentGroupsSurvivingRetentionTrim(state.deploymentGroups).map((group) => group.deploymentId),
+		);
+		for (const group of state.deploymentGroups) {
+			if (group.workspaceId !== input.workspaceId) {
+				continue;
+			}
+			if (group.foldedAtIso !== null && !foldedDeploymentIdsSurvivingRetentionTrim.has(group.deploymentId)) {
+				continue;
+			}
+			for (const task of group.tasks) {
+				const inFlightCompletionRecord = task.pendingConfirmation;
+				const kanbanCliCompletionAuthorization =
+					inFlightCompletionRecord?.kanbanCliCompletionAuthorizedBeforeMoveIntoDone;
+				if (task.verifiedAt !== null || !inFlightCompletionRecord || !kanbanCliCompletionAuthorization) {
+					continue;
+				}
+				const currentColumn = columnByTaskId.get(task.taskId);
+				const authorizedAtMs = Date.parse(kanbanCliCompletionAuthorization.authorizedAtIso);
+				if (
+					currentColumn === "trash" &&
+					Number.isFinite(authorizedAtMs) &&
+					nowMs - authorizedAtMs >=
+						KANBAN_CLI_COMPLETION_AUTHORIZED_BUT_LEFT_IN_FLIGHT_RUNTIME_FINALIZATION_GRACE_MS
+				) {
+					task.verifiedAt = input.nowIso;
+					task.boardMovedToDoneAt = input.nowIso;
+					task.pendingConfirmation = null;
+					// 同 markTaskVerified：核对完成宽容清除误标 droppedReason（finding #3）。
+					task.droppedReason = null;
+					tasksVerifiedByRuntimeFinalizingAuthorizedKanbanCliCompletion.push({
+						verifiedDeploymentGroup: {
+							workspaceId: group.workspaceId,
+							deployedSourceCommit: group.deployedSourceCommit,
+						},
+						deploymentId: group.deploymentId,
+						verifiedTask: structuredClone(task),
+						completionEvidence: {
+							postDeployVerificationCompletionPath:
+								"kanban_runtime_reconciliation_finalizing_kanban_cli_completion_authorized_but_left_in_flight",
+							forcedCompletionWithoutAllVerificationsPassed:
+								kanbanCliCompletionAuthorization.forcedCompletionWithoutAllVerificationsPassed,
+							confirmedAcknowledgements: [...inFlightCompletionRecord.requiredAcknowledgements],
+						},
+					});
+					continue;
+				}
+				if (currentColumn !== "trash" && isExpired(inFlightCompletionRecord.expiresAtIso, nowMs)) {
+					task.pendingConfirmation = null;
+				}
+			}
+		}
+	});
+	for (const {
+		verifiedDeploymentGroup,
+		deploymentId,
+		verifiedTask,
+		completionEvidence,
+	} of tasksVerifiedByRuntimeFinalizingAuthorizedKanbanCliCompletion) {
+		recordPostDeployVerificationPassedObservationForVerifiedTask(
+			verifiedDeploymentGroup,
+			deploymentId,
+			verifiedTask,
+			completionEvidence,
+		);
+		await runAutomaticCleanupForVerifiedTask(verifiedTask, input.nowIso);
+	}
 }

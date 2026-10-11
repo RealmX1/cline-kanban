@@ -43,7 +43,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [card("task-done", "Done task", "shared archive")] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -56,7 +55,6 @@ function createOtherProjectBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -275,7 +273,6 @@ describe("useTaskSpotlightSearchController", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 
@@ -288,7 +285,6 @@ describe("useTaskSpotlightSearchController", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 

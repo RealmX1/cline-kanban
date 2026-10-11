@@ -49,7 +49,7 @@
     "install:all": "npm install && npm --prefix web-ui install && npm --prefix packages/desktop install",
     "install:agent-skills": "node scripts/install-globally-invocable-cline-kanban-agent-skills.mjs",
     "prebuild": "node scripts/verify-notification-archive-native-runtime.mjs",
-    "build": "npm run clean && npm run web:build && node scripts/build.mjs && shx mkdir -p dist/web-ui && shx cp -r web-ui/dist/* dist/web-ui && node scripts/upload-sentry-sourcemaps.mjs && shx chmod +x dist/cli.js",
+    "build": "npm run web:build && node scripts/build.mjs",
     "dogfood": "node scripts/dogfood.mjs",
     "link": "npm run build && npm link",
     "unlink": "npm unlink -g kanban",
@@ -84,6 +84,7 @@
     "esbuild": "^0.27.4",
     "husky": "^9.1.7",
     "shx": "^0.4.0",
+    "std-env": "^4.0.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"

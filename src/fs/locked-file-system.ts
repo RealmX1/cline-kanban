@@ -8,14 +8,42 @@ import { logFileLockError, logFileLockWarning } from "./lock-diagnostics-logger"
 // proper-lockfile 每 stale/2 刷新一次锁的 mtime；一旦刷新定时器因事件循环停摆而错过、锁即被判 stale
 // 并 compromise。10s 太紧，重负载下的偶发 GC/IO/停摆抖动就会误判。放宽到 30s（刷新周期 15s）以吸收
 // 这些抖动。注意：这只是纵深防御的调参，真正的停摆根因在 workspace diff 的并发治理（见 git-concurrency）。
-const DEFAULT_LOCK_STALE_MS = 30_000;
-const DEFAULT_LOCK_RETRIES: NonNullable<LockOptions["retries"]> = {
+export const DEFAULT_LOCK_STALE_MS = 30_000;
+
+// 取锁等待预算必须**覆盖** stale 阈值（再留余量），这是不变式而非调参。
+//
+// 旧值 200×25ms ≈ 5s，远短于 30s 的 stale 阈值，语义自相矛盾：一个已经死掉的持有者要 30s 才被判 stale，
+// 一个**活着但慢**的持有者却只要持锁超过 5s 就让等待方直接抛 ELOCKED。高负载下这是常态——worktree
+// setup 锁跨 `git worktree add` + submodule + ignored-path 镜像，index 锁里跑同步 git，event loop 一停就是
+// 数秒到十几秒；实测（2026-10-02 运行时日志）一上午就有 24 次 hook 身份持久化因此失败，而新任务的
+// ensureWorktree 失败时只有一条 toast、卡片停在 In Progress、服务端零记录，表现为「新任务起不来」。
+//
+// 形状：先 25ms 起步按 1.05 倍缓慢退避（短争用仍然快速拿到锁），封顶 250ms 轮询（长争用时不空转 fs）。
+// 总预算由 sumLockAcquisitionRetryWaitBudgetMs 计算，测试钉住「≥ stale + 余量」。
+// EXPERIMENT_NODE: 取锁等待预算（当前 ≈43s）与退避形状；更长 = 极端争用下更晚报错，更短 = 慢持有者再次让等待方先失败。
+export const LOCK_ACQUISITION_WAIT_BUDGET_MARGIN_BEYOND_STALE_THRESHOLD_MS = 10_000;
+export const DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD = {
 	retries: 200,
-	factor: 1,
+	factor: 1.05,
 	minTimeout: 25,
-	maxTimeout: 50,
+	maxTimeout: 250,
 	randomize: false,
-};
+} as const satisfies NonNullable<LockOptions["retries"]>;
+
+// 按 proper-lockfile 所用 `retry` 包的退避公式（randomize=false 时确定）求和：第 i 次重试前等待
+// min(round(minTimeout × factor^i), maxTimeout)。不含每次尝试本身的耗时，所以是下界。
+export function sumLockAcquisitionRetryWaitBudgetMs(schedule: {
+	retries: number;
+	factor: number;
+	minTimeout: number;
+	maxTimeout: number;
+}): number {
+	let totalWaitMs = 0;
+	for (let attempt = 0; attempt < schedule.retries; attempt += 1) {
+		totalWaitMs += Math.min(Math.round(schedule.minTimeout * schedule.factor ** attempt), schedule.maxTimeout);
+	}
+	return totalWaitMs;
+}
 
 interface BaseLockRequest {
 	path: string;
@@ -71,7 +99,7 @@ function isBenignReleaseFailure(error: unknown): boolean {
 function createLockOptions(request: LockRequest, lockfilePath: string): LockOptions {
 	const options: LockOptions = {
 		stale: request.staleMs ?? DEFAULT_LOCK_STALE_MS,
-		retries: request.retries ?? DEFAULT_LOCK_RETRIES,
+		retries: request.retries ?? DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
 		realpath: false,
 		lockfilePath,
 	};

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import type { BoardColumn, CardSelection } from "@/types";
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
@@ -182,6 +183,7 @@ describe("ColumnContextPanel", () => {
 			);
 		});
 
+		expect(container.querySelector('button[aria-label="Create task"]')).toBeNull();
 		expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
 		expect(scrollIntoViewMock).toHaveBeenLastCalledWith({
 			block: "center",
@@ -206,9 +208,13 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
-	it("renders the create-task button at the top of the scroll list, above every stage section", async () => {
+	it.each([false, true])("创建按钮固定在滚动区外、置顶板上方（有置顶任务：%s）", async (hasPinnedTask) => {
 		const columns: BoardColumn[] = [
-			{ id: "backlog", title: "Backlog", cards: [createCard("task-1", "Backlog task")] },
+			{
+				id: "backlog",
+				title: "Backlog",
+				cards: [{ ...createCard("task-1", "Backlog task"), pinnedToTaskPinboardAt: hasPinnedTask ? 1 : undefined }],
+			},
 			{ id: "in_progress", title: "In Progress", cards: [] },
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
@@ -229,10 +235,27 @@ describe("ColumnContextPanel", () => {
 
 		const createButton = container.querySelector<HTMLButtonElement>('button[aria-label="Create task"]');
 		expect(createButton).toBeInstanceOf(HTMLButtonElement);
-		// 直接挂在 scrollport 上（不再嵌在 backlog 的 stage section / Droppable 里）。
+		// 固定区在 stage scrollport 外，不会被阶段列表滚走或被 rail 覆盖。
 		const scrollport = container.querySelector(".kb-detail-task-list-scroll");
-		expect(createButton?.parentElement).toBe(scrollport);
-		// 文档顺序上位于所有任务卡之前 = 列表最顶端。
+		expect(scrollport?.contains(createButton)).toBe(false);
+		const stageList = container.querySelector('[data-testid="focus-view-current-project-stage-list"]');
+		expect(stageList?.firstElementChild?.contains(createButton)).toBe(true);
+		const pinboard = container.querySelector('[data-task-pinboard-container="focus-view-section"]');
+		if (hasPinnedTask) {
+			expect(pinboard).not.toBeNull();
+			expect(createButton && pinboard && createButton.compareDocumentPosition(pinboard)).toBe(
+				Node.DOCUMENT_POSITION_FOLLOWING,
+			);
+			const pinboardToggle = pinboard?.querySelector<HTMLButtonElement>("button");
+			await act(async () => pinboardToggle?.click());
+			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("false");
+			expect(stageList?.firstElementChild?.contains(createButton)).toBe(true);
+			await act(async () => pinboardToggle?.click());
+			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("true");
+		} else {
+			expect(pinboard).toBeNull();
+		}
+		// 文档顺序上位于所有阶段本体卡之前。
 		const firstCard = container.querySelector("[data-task-id]");
 		expect(firstCard).not.toBeNull();
 		if (createButton && firstCard) {
@@ -395,8 +418,8 @@ describe("ColumnContextPanel", () => {
 		expect(pinnedSection.compareDocumentPosition(scrollport) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
-	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / 依赖锚点
-	// 都会随机接到分身上（dependency-overlay 的锚点表是「后出现者覆盖先出现者」）。
+	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / Post-Deploy Verification 高亮
+	// 都会随机接到分身上。
 	it("keeps data-task-id unique after a card gets pinned to the task pinboard", async () => {
 		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
 		const columns: BoardColumn[] = [
@@ -868,5 +891,86 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		// 目标 index 3 → 基值 R = 150；焦点 stage（index 2）在目标之上，试算 210 − 420 + 150 = −60 ≤ 0
 		// → 预留 16 + 80。scrollTop = 1000 + 420 − (150 + 16 + 80) = 1174。
 		expect(scrollRoot.scrollTop).toBe(1174);
+	});
+});
+
+// Focus View 左栏的列表范围切换（docs/context-cross-project-recently-active-task-switcher.md）：有宿主时才出现；
+// 切到 All projects 时 stage 列表只隐藏不卸载（钉住 rail / 焦点卡几何 hook 挂在它的 scrollport 上）。
+describe("ColumnContextPanel left column task list scope", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+
+	beforeEach(() => {
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		window.localStorage.clear();
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+	});
+
+	afterEach(() => {
+		act(() => root.unmount());
+		container.remove();
+	});
+
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards: [createCard("task-1", "In progress task")] },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+
+	function renderPanel(withHost: boolean, isBoardScopeAllProjectsSelected = false): void {
+		const panel = (
+			<ColumnContextPanel
+				selection={createSelection(columns, "task-1")}
+				onCardSelect={() => {}}
+				taskSessions={{}}
+				onTaskDragEnd={() => {}}
+			/>
+		);
+		act(() =>
+			root.render(
+				withHost ? (
+					<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
+						value={{
+							projects: [],
+							notificationLogByWorkspaceId: {},
+							currentProjectId: "project-a",
+							isBoardScopeAllProjectsSelected,
+							focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
+							onOpenTaskInProject: vi.fn(),
+							onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
+							onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
+							onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
+						}}
+					>
+						{panel}
+					</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+				) : (
+					panel
+				),
+			),
+		);
+	}
+
+	it("没有宿主时只有 stage 列表；左栏不再有自己的范围切换（范围收进顶栏项目切换器）", () => {
+		renderPanel(false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
+		renderPanel(true, false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
+	});
+
+	it("Board Scope（顶栏选了 All projects）：显示切换面板，stage 列表隐藏但仍挂载", () => {
+		renderPanel(true, true);
+		expect(
+			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
+		).not.toBeNull();
+		const stageList = container.querySelector<HTMLElement>('[data-testid="focus-view-current-project-stage-list"]');
+		expect(stageList?.className).toContain("hidden");
+		expect(stageList?.querySelector('[data-task-id="task-1"]')).not.toBeNull();
 	});
 });

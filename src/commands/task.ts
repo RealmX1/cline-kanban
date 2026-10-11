@@ -2,18 +2,21 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
+import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
-	RuntimeBoardDependency,
-	RuntimeClineReasoningEffort,
+	RuntimeKanbanCliTaskBoardMutationKind,
+	RuntimeKanbanCliTaskBoardMutationRequest,
+	RuntimeKanbanCliTaskBoardMutationResponse,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
+	RuntimeTaskCardActionMoveIntoDoneResponse,
 	RuntimeTaskClineSettings,
-	RuntimeTaskSessionStartRequest,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceGitStatus,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
@@ -23,7 +26,6 @@ import {
 	runtimeClineReasoningEffortSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
-	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
 import {
@@ -32,21 +34,21 @@ import {
 	resolveCliTrpcTimeoutMs,
 	safeStringify,
 } from "../core/cli-process-guards";
+import {
+	collectKanbanCliInvocationEnvironmentActorClaims,
+	encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
+	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
+} from "../core/kanban-cli-invocation-environment-actor-claims";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
+import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
 import {
-	addTaskDependency,
-	addTaskToColumn,
-	deleteTasksFromBoard,
-	getTaskColumnId,
-	moveTaskToColumn,
-	type RuntimeAddTaskDependencyResult,
-	removeTaskDependency,
-	resolveTaskDescriptionLastUpdatedAt,
-	trashTaskAndGetReadyLinkedTaskIds,
-	updateTask,
-} from "../core/task-board-mutations";
+	buildTaskAgentSessionInitialization,
+	buildTaskClineSettingsForCreate,
+	cloneTaskClineSettings,
+	type ParsedTaskClineReasoningEffort,
+} from "../core/task-card-field-patch-resolution";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -62,21 +64,23 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import {
 	detectGitRepositoryInfo,
 	getTaskWorktreesHomePath,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
-	mutateWorkspaceState,
 	resolveWorkspacePath,
 } from "../state/workspace-state";
+import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
-import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
+import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+
+const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
+	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "validation", "trash"] as const;
 type ListTaskColumn = (typeof LIST_TASK_COLUMNS)[number];
@@ -91,11 +95,6 @@ type ResolvedTaskCommandTarget =
 			kind: "column";
 			column: ListTaskColumn;
 	  };
-
-interface RuntimeWorkspaceMutationResult<T> {
-	board: RuntimeWorkspaceStateResponse["board"];
-	value: T;
-}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -213,52 +212,6 @@ function parseOptionalStringOrDefault(value: string | undefined): string | null 
 	return value;
 }
 
-type ParsedTaskClineReasoningEffort = RuntimeClineReasoningEffort | "default" | null | undefined;
-
-export function buildTaskAgentSessionInitialization(input: {
-	agentId: RuntimeAgentId | null | undefined;
-	sourceSessionId: string | null | undefined;
-	sourceSessionReuseMode: RuntimeTaskAgentSessionInitializationReuseMode | undefined;
-	existingTaskAgentId?: RuntimeAgentId;
-	existing?: RuntimeTaskAgentSessionInitialization;
-}): RuntimeTaskAgentSessionInitialization | null | undefined {
-	if (input.sourceSessionId === undefined && input.sourceSessionReuseMode === undefined) {
-		if (
-			input.agentId !== undefined &&
-			input.existing !== undefined &&
-			input.agentId !== input.existing.sourceAgentId
-		) {
-			return null;
-		}
-		return undefined;
-	}
-	if (input.sourceSessionId === null) {
-		return null;
-	}
-	if (
-		input.sourceSessionId === undefined &&
-		input.agentId !== undefined &&
-		input.existing !== undefined &&
-		input.agentId !== input.existing.sourceAgentId
-	) {
-		throw new Error(
-			"Changing the session reuse mode while switching agents also requires --agent-session-initialization-id.",
-		);
-	}
-	const sourceSessionId = input.sourceSessionId ?? input.existing?.sourceSessionId;
-	const sourceAgentId = input.agentId ?? input.existingTaskAgentId ?? input.existing?.sourceAgentId;
-	if (!sourceSessionId || (sourceAgentId !== "claude" && sourceAgentId !== "codex" && sourceAgentId !== "cursor")) {
-		throw new Error("Agent session initialization requires --agent-id claude, codex, or cursor and a session UUID.");
-	}
-	return runtimeTaskAgentSessionInitializationSchema.parse({
-		sourceAgentId,
-		sourceSessionId,
-		sourceSessionReuseMode:
-			input.sourceSessionReuseMode ?? input.existing?.sourceSessionReuseMode ?? "resume_existing_session",
-		sourceSessionWorkingDirectoryPath: input.existing?.sourceSessionWorkingDirectoryPath,
-	});
-}
-
 function parseTaskClineReasoningEffort(value: string | undefined): ParsedTaskClineReasoningEffort {
 	if (value === undefined) {
 		return undefined;
@@ -276,19 +229,6 @@ function parseTaskClineReasoningEffort(value: string | undefined): ParsedTaskCli
 	throw new Error("Invalid Cline reasoning effort. Expected one of: default, low, medium, high, xhigh, inherit.");
 }
 
-function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTaskClineSettings | undefined {
-	if (settings === undefined) {
-		return undefined;
-	}
-	const providerId = settings.providerId?.trim();
-	const modelId = settings.modelId?.trim();
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-	};
-}
-
 function formatTaskClineSettings(settings?: RuntimeTaskClineSettings): JsonRecord {
 	if (settings === undefined) {
 		return {};
@@ -296,80 +236,6 @@ function formatTaskClineSettings(settings?: RuntimeTaskClineSettings): JsonRecor
 	return {
 		clineSettings: cloneTaskClineSettings(settings) ?? {},
 	};
-}
-
-function buildTaskClineSettingsForCreate(input: {
-	providerId?: string;
-	modelId?: string;
-	reasoningEffort?: ParsedTaskClineReasoningEffort;
-}): RuntimeTaskClineSettings | undefined {
-	const providerId = input.providerId?.trim();
-	const modelId = input.modelId?.trim();
-	const reasoningEffort = input.reasoningEffort === null ? undefined : input.reasoningEffort;
-	if (!providerId && !modelId && reasoningEffort === undefined) {
-		return undefined;
-	}
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(reasoningEffort && reasoningEffort !== "default" ? { reasoningEffort } : {}),
-	};
-}
-
-function buildTaskClineSettingsForUpdate(
-	currentSettings: RuntimeTaskClineSettings | undefined,
-	input: {
-		providerId?: string | null;
-		modelId?: string | null;
-		reasoningEffort?: ParsedTaskClineReasoningEffort;
-	},
-): RuntimeTaskClineSettings | null | undefined {
-	if (input.providerId === undefined && input.modelId === undefined && input.reasoningEffort === undefined) {
-		return undefined;
-	}
-	const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
-	let preserveEmptyOverride = currentSettings !== undefined && Object.keys(currentSettings).length === 0;
-
-	if (input.providerId !== undefined) {
-		const providerId = input.providerId?.trim();
-		if (providerId) {
-			nextSettings.providerId = providerId;
-		} else {
-			delete nextSettings.providerId;
-		}
-	}
-
-	if (input.modelId !== undefined) {
-		const modelId = input.modelId?.trim();
-		if (modelId) {
-			nextSettings.modelId = modelId;
-		} else {
-			delete nextSettings.modelId;
-		}
-	}
-
-	if (input.reasoningEffort !== undefined) {
-		if (input.reasoningEffort === "default") {
-			delete nextSettings.reasoningEffort;
-			preserveEmptyOverride = true;
-		} else if (input.reasoningEffort === null) {
-			delete nextSettings.reasoningEffort;
-			preserveEmptyOverride = false;
-		} else {
-			nextSettings.reasoningEffort = input.reasoningEffort;
-		}
-	}
-
-	if (
-		nextSettings.providerId === undefined &&
-		nextSettings.modelId === undefined &&
-		nextSettings.reasoningEffort === undefined &&
-		!preserveEmptyOverride
-	) {
-		return null;
-	}
-
-	return nextSettings;
 }
 
 function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string): ResolvedTaskCommandTarget {
@@ -399,12 +265,25 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 		links: [
 			httpBatchLink({
 				url: buildKanbanRuntimeUrl("/api/trpc"),
-				headers: () => (workspaceId ? { "x-kanban-workspace-id": workspaceId } : {}),
-				fetch: async (url, options) => {
-					const runtimeFetch = await getRuntimeFetch();
-					const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
-					return runtimeFetch(url, { ...options, signal });
-				},
+				headers: () => ({
+					...(workspaceId ? { "x-kanban-workspace-id": workspaceId } : {}),
+					// dd2db 1a：每个 CLI 请求都带调用环境行动者声明，由 runtime 解析出是哪个工作单元发起的。
+					[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME]:
+						encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+							collectKanbanCliInvocationEnvironmentActorClaims({
+								environment: process.env,
+								invokingKanbanCliCodeVersion: KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS,
+								invokingProcessWorkingDirectory: process.cwd(),
+							}),
+						),
+				}),
+				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
+				fetch: (url, options) =>
+					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+						const runtimeFetch = await getRuntimeFetch();
+						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
+						return runtimeFetch(url, { ...options, signal });
+					}),
 			}),
 		],
 	});
@@ -442,30 +321,33 @@ async function ensureRuntimeWorkspace(workspaceRepoPath: string): Promise<string
 	return added.project.id;
 }
 
-async function notifyRuntimeWorkspaceStateUpdated(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-): Promise<void> {
-	await runtimeClient.workspace.notifyStateUpdated.mutate().catch(() => null);
-}
+type RuntimeKanbanCliTaskBoardMutationResponseOfKind<
+	TKanbanCliTaskBoardMutationKind extends RuntimeKanbanCliTaskBoardMutationKind,
+> = Extract<
+	RuntimeKanbanCliTaskBoardMutationResponse,
+	{ kanbanCliTaskBoardMutationKind: TKanbanCliTaskBoardMutationKind }
+>;
 
-async function updateRuntimeWorkspaceState<T>(
+// dd2db 1a.2b：create 只经 runtime procedure 落盘，由 runtime 按本进程随请求发出的行动者声明头解析行动者、写进
+// 关系账本；广播也由 runtime 在写成后自己做。update / start / done / delete 走 taskCardAction.*（连同停会话、删
+// worktree、清草稿与 checkpoint ref 的整条收尾链都在 runtime 里执行，CLI 只做参数解析与输出格式化）。
+// runtime 不可达时 tRPC 调用直接抛错、命令以 exit 1 失败（fail closed）——这里刻意没有「回退到直接写盘」的分支。
+async function applyKanbanCliTaskBoardMutationThroughRuntime<
+	TKanbanCliTaskBoardMutationKind extends RuntimeKanbanCliTaskBoardMutationKind,
+>(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	workspaceRepoPath: string,
-	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceMutationResult<T>,
-): Promise<T> {
-	const mutationResponse = await mutateWorkspaceState(workspaceRepoPath, (state) => {
-		const mutation = mutate(state);
-		return {
-			board: mutation.board,
-			value: mutation.value,
-		};
-	});
-
-	if (mutationResponse.saved) {
-		await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
+	request: Extract<
+		RuntimeKanbanCliTaskBoardMutationRequest,
+		{ kanbanCliTaskBoardMutationKind: TKanbanCliTaskBoardMutationKind }
+	>,
+): Promise<RuntimeKanbanCliTaskBoardMutationResponseOfKind<TKanbanCliTaskBoardMutationKind>> {
+	const response = await runtimeClient.workspace.applyKanbanCliTaskBoardMutation.mutate(request);
+	if (response.kanbanCliTaskBoardMutationKind !== request.kanbanCliTaskBoardMutationKind) {
+		throw new Error(
+			`Kanban runtime answered a "${request.kanbanCliTaskBoardMutationKind}" board mutation with a "${response.kanbanCliTaskBoardMutationKind}" response.`,
+		);
 	}
-
-	return mutationResponse.value;
+	return response as RuntimeKanbanCliTaskBoardMutationResponseOfKind<TKanbanCliTaskBoardMutationKind>;
 }
 
 function findTaskRecord(
@@ -490,7 +372,16 @@ function formatTaskRecord(
 	columnId: RuntimeBoardColumnId,
 	workspaceGitStatus: RuntimeTaskWorkspaceGitStatus | null = null,
 ): JsonRecord {
-	const session = state.sessions[task.id] ?? null;
+	return formatTaskRecordWithSessionSummary(task, columnId, state.sessions[task.id] ?? null, workspaceGitStatus);
+}
+
+// 写动词迁到 runtime procedure 之后，CLI 手里没有整份 state，只有 runtime 回传的卡片、列与盘上会话摘要。
+function formatTaskRecordWithSessionSummary(
+	task: RuntimeBoardCard,
+	columnId: RuntimeBoardColumnId,
+	session: RuntimeTaskSessionSummary | null,
+	workspaceGitStatus: RuntimeTaskWorkspaceGitStatus | null = null,
+): JsonRecord {
 	const sessionFacets = session ? resolveSessionFacets(session) : null;
 	return {
 		id: task.id,
@@ -531,36 +422,6 @@ function formatTaskRecord(
 					}
 				: null,
 	};
-}
-
-function formatDependencyRecord(
-	state: RuntimeWorkspaceStateResponse,
-	dependency: RuntimeBoardDependency,
-): Record<string, unknown> {
-	return {
-		id: dependency.id,
-		backlogTaskId: dependency.fromTaskId,
-		backlogTaskColumn: getTaskColumnId(state.board, dependency.fromTaskId),
-		linkedTaskId: dependency.toTaskId,
-		linkedTaskColumn: getTaskColumnId(state.board, dependency.toTaskId),
-		createdAt: dependency.createdAt,
-	};
-}
-
-function getLinkFailureMessage(reason: RuntimeAddTaskDependencyResult["reason"]): string {
-	if (reason === "same_task") {
-		return "A task cannot be linked to itself.";
-	}
-	if (reason === "duplicate") {
-		return "These tasks are already linked.";
-	}
-	if (reason === "trash_task") {
-		return "Links cannot include done tasks.";
-	}
-	if (reason === "non_backlog") {
-		return "Links require at least one backlog task.";
-	}
-	return "One or both tasks could not be found.";
 }
 
 function findTasksInColumn(
@@ -609,7 +470,6 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 		workspacePath: workspace.repoPath,
 		column: input.column ?? null,
 		tasks,
-		dependencies: state.board.dependencies.map((dependency) => formatDependencyRecord(state, dependency)),
 		count: tasks.length,
 	};
 }
@@ -617,16 +477,107 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 // 「task get」：按 task ID 取回单条任务的只读快照。存在的意义是补上「别的 agent 拿到一个 task ID
 // （或一条 worktree 路径）之后该怎么找回这个任务」这一段——task list 要求调用方自己在整块 JSON 里筛，
 // 而任务标题既不唯一也会随 prompt 编辑而变，ID 才是唯一可靠的引用键。
+// dd2db 1b：当前（或推断的）project 里没有这张卡时，经 runtime 的全局 task 身份登记簿跨 project 解析。
+// 显式传了 --project-path 就不替调用方换 project，只在报错里指出它实际在哪。
 async function getTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
-	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
-		autoCreateIfMissing: false,
-	});
+	const explicitProjectPath = input.projectPath?.trim() || undefined;
+	let workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>> | null = null;
+	let workspaceResolutionFailureMessage: string | null = null;
+	try {
+		workspace = await resolveRuntimeWorkspace(explicitProjectPath, input.cwd, { autoCreateIfMissing: false });
+	} catch (error) {
+		if (explicitProjectPath) {
+			throw error;
+		}
+		workspaceResolutionFailureMessage = toErrorMessage(error);
+	}
+	if (workspace) {
+		const taskInWorkspace = await getTaskFromRuntimeWorkspace(workspace, input.taskId);
+		if (taskInWorkspace) {
+			return taskInWorkspace;
+		}
+	}
+	const notFoundMessage = workspace
+		? `Task "${input.taskId}" was not found in workspace ${workspace.repoPath}`
+		: `Task "${input.taskId}" could not be looked up in the current directory (${workspaceResolutionFailureMessage})`;
+	const kanbanBoardCardIdentityCandidates = await createRuntimeTrpcClient(null)
+		.workUnit.resolveKanbanBoardCardIdentityByBareTaskId.query({ bareTaskId: input.taskId })
+		.then((response) => response.kanbanBoardCardIdentityCandidates)
+		.catch(() => null);
+	if (!kanbanBoardCardIdentityCandidates || kanbanBoardCardIdentityCandidates.length === 0) {
+		throw new Error(
+			kanbanBoardCardIdentityCandidates === null
+				? `${notFoundMessage}, and the cross-project lookup through the Kanban runtime is unavailable.`
+				: `${notFoundMessage}, and no other project knows this task id.`,
+		);
+	}
+	const describeCandidateLocations = () =>
+		kanbanBoardCardIdentityCandidates
+			.map(
+				(candidate) =>
+					`${candidate.workspaceRepositoryPath ?? candidate.kanbanBoardCard.workspaceId}${candidate.permanentlyRemovedFromBoardAt !== null ? " (permanently removed)" : ""}`,
+			)
+			.join(", ");
+	if (explicitProjectPath) {
+		throw new Error(
+			`${notFoundMessage}; it is known in: ${describeCandidateLocations()}. Omit --project-path to resolve it across projects.`,
+		);
+	}
+	const liveCandidates = kanbanBoardCardIdentityCandidates.filter(
+		(candidate) => candidate.permanentlyRemovedFromBoardAt === null,
+	);
+	if (liveCandidates.length === 0) {
+		// 墓碑：卡已永久删除，id 仍能解析出它是什么、在哪、何时删的。
+		return {
+			ok: true,
+			taskPermanentlyRemovedFromBoard: true,
+			permanentlyRemovedTaskIdentityTombstones: kanbanBoardCardIdentityCandidates,
+		};
+	}
+	const [onlyLiveCandidate, ...otherLiveCandidates] = liveCandidates;
+	if (!onlyLiveCandidate || otherLiveCandidates.length > 0) {
+		throw new Error(
+			`Task id "${input.taskId}" matches more than one Kanban task card (${describeCandidateLocations()}); pass --project-path to choose one.`,
+		);
+	}
+	// 以下只有唯一一个活卡候选：定位或读取不到它时如实报「在哪、为何读不到」，绝不误报「匹配多张卡」。
+	const onlyLiveCandidateRepositoryPath = onlyLiveCandidate.workspaceRepositoryPath;
+	if (!onlyLiveCandidateRepositoryPath) {
+		throw new Error(
+			`${notFoundMessage}; the global task identity registry places it in workspace ${onlyLiveCandidate.kanbanBoardCard.workspaceId}, which is not a project the Kanban runtime currently knows (no repository path is recorded for it), so it cannot be read across projects. Add that project to Kanban and pass --project-path <that project's path> to read it.`,
+		);
+	}
+	const describeCrossProjectReadFailure = (failureReason: string) =>
+		`${notFoundMessage}; the cross-project lookup through the global task identity registry places it in ${onlyLiveCandidateRepositoryPath}, but reading it there failed: ${failureReason}`;
+	let taskInOwningWorkspace: JsonRecord | null;
+	try {
+		const owningWorkspace = await resolveRuntimeWorkspace(onlyLiveCandidateRepositoryPath, input.cwd, {
+			autoCreateIfMissing: false,
+		});
+		taskInOwningWorkspace = await getTaskFromRuntimeWorkspace(owningWorkspace, input.taskId);
+	} catch (error) {
+		throw new Error(describeCrossProjectReadFailure(toErrorMessage(error)));
+	}
+	if (!taskInOwningWorkspace) {
+		throw new Error(
+			describeCrossProjectReadFailure(
+				"that project's board has no task with this id (the card may have been moved away, or the registry may lag behind the board).",
+			),
+		);
+	}
+	return { ...taskInOwningWorkspace, resolvedAcrossProjectsThroughGlobalTaskIdentityRegistry: true };
+}
+
+async function getTaskFromRuntimeWorkspace(
+	workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>>,
+	taskId: string,
+): Promise<JsonRecord | null> {
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
 	const state = await runtimeClient.workspace.getState.query();
 
-	const found = findTaskRecord(state, input.taskId);
+	const found = findTaskRecord(state, taskId);
 	if (!found) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspace.repoPath}.`);
+		return null;
 	}
 
 	// worktree 路径与 HEAD 状态由运行时给出而非本地拼接：调用方通常正是为了「进到那个目录去」才来查的，
@@ -639,50 +590,28 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 		})
 		.catch(() => null);
 
+	// C5（dd2db 1b 起）：只输出记录型邻域；门段落在阶段 3 加入。关系读不到不让整条命令失败，如实给出原因。
+	const workUnitRelationNeighborhood = await runtimeClient.workUnit.getRelationNeighborhoodSummary
+		.query({
+			workUnit: {
+				workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+				bareTaskId: found.task.id,
+				workspaceId: workspace.workspaceId,
+			},
+		})
+		.then((response) => ({
+			recordedRelationCount: response.recordedRelations.length,
+			renderedNeighborhoodSummaryText: response.renderedNeighborhoodSummaryText,
+		}))
+		.catch((error: unknown) => ({ neighborhoodUnavailableReason: toErrorMessage(error) }));
+
 	return {
 		ok: true,
 		workspacePath: workspace.repoPath,
 		task: formatTaskRecord(state, found.task, found.columnId),
 		taskWorkspace: taskWorkspaceInfo,
-		dependencies: state.board.dependencies
-			.filter((dependency) => dependency.fromTaskId === found.task.id || dependency.toTaskId === found.task.id)
-			.map((dependency) => formatDependencyRecord(state, dependency)),
+		workUnitRelationNeighborhood,
 	};
-}
-
-async function stopTaskRuntimeSession(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	taskId: string,
-): Promise<void> {
-	await runtimeClient.runtime.stopTaskSession
-		.mutate({
-			taskId,
-		})
-		.catch(() => null);
-}
-
-async function deleteTaskWorkspace(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	taskId: string,
-	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion = false,
-): Promise<{ removed: boolean; error?: string }> {
-	try {
-		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({
-			taskId,
-			...(removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion
-				? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
-				: {}),
-		});
-		return {
-			removed: deleted.removed,
-			error: deleted.ok ? undefined : deleted.error,
-		};
-	} catch (error) {
-		return {
-			removed: false,
-			error: toErrorMessage(error),
-		};
-	}
 }
 
 interface TaskCreateCommandInput {
@@ -831,36 +760,30 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 	if (!resolvedBaseRef) {
 		throw new Error("Could not determine task base branch for this workspace.");
 	}
-	const created = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (state) => {
-		const result = addTaskToColumn(
-			state.board,
-			"backlog",
-			{
-				title: input.title,
-				prompt: input.prompt,
-				startInPlanMode: effectiveSettings.resolvedSettings.startInPlanMode.value,
-				ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
-				// --agent-id 省略时这张卡实际会跑工作区默认 agent；固化判据要看后者，否则
-				// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
-				workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
-				taskAgentPermissionMode: effectiveSettings.resolvedSettings.requestedTaskAgentPermissionMode.value,
-				autoReviewEnabled: input.autoReviewEnabled,
-				autoReviewMode: input.autoReviewMode,
-				agentId: input.agentId,
-				clineSettings: input.clineSettings,
-				taskAgentSessionInitialization: input.taskAgentSessionInitialization,
-				baseRef: resolvedBaseRef,
-				parentSessionId: input.parentSessionId,
-				worktreeMode: input.worktreeMode,
-				prepFilePath: input.prepFilePath,
-			},
-			() => globalThis.crypto.randomUUID(),
-		);
-		return {
-			board: result.board,
-			value: result.task,
-		};
+	// effective settings 已在本进程解析完（指纹校验也已通过），runtime 只负责分配 task id 并落盘。
+	const createMutation = await applyKanbanCliTaskBoardMutationThroughRuntime(runtimeClient, {
+		kanbanCliTaskBoardMutationKind: "create_backlog_task_card",
+		backlogTaskCardFieldValuesResolvedByKanbanCli: {
+			title: input.title,
+			prompt: input.prompt,
+			startInPlanMode: effectiveSettings.resolvedSettings.startInPlanMode.value,
+			ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
+			// --agent-id 省略时这张卡实际会跑工作区默认 agent；固化判据要看后者，否则
+			// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
+			workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
+			taskAgentPermissionMode: effectiveSettings.resolvedSettings.requestedTaskAgentPermissionMode.value,
+			autoReviewEnabled: input.autoReviewEnabled,
+			autoReviewMode: input.autoReviewMode,
+			agentId: input.agentId,
+			clineSettings: input.clineSettings,
+			taskAgentSessionInitialization: input.taskAgentSessionInitialization,
+			baseRef: resolvedBaseRef,
+			parentSessionId: input.parentSessionId,
+			worktreeMode: input.worktreeMode,
+			prepFilePath: input.prepFilePath,
+		},
 	});
+	const created = createMutation.createdBacklogTaskCard;
 
 	return {
 		ok: true,
@@ -940,123 +863,42 @@ async function updateTaskCommand(input: {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const updated = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
-		const taskRecord = findTaskRecord(runtimeState, input.taskId);
-		if (!taskRecord) {
-			throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-		}
-		const nextTaskClineSettings = buildTaskClineSettingsForUpdate(taskRecord.task.clineSettings, {
-			providerId: input.clineProviderId,
-			modelId: input.clineModelId,
-			reasoningEffort: input.clineReasoningEffort,
-		});
-		const builtTaskAgentSessionInitialization = buildTaskAgentSessionInitialization({
-			agentId: input.agentId,
-			sourceSessionId: input.taskAgentSessionInitializationId,
-			sourceSessionReuseMode: input.taskAgentSessionInitializationMode,
-			existingTaskAgentId: taskRecord.task.agentId,
-			existing: taskRecord.task.taskAgentSessionInitialization,
-		});
-		const nextTaskAgentSessionInitialization =
-			builtTaskAgentSessionInitialization === null ? null : builtTaskAgentSessionInitialization;
-
-		const updatedTask = updateTask(runtimeState.board, input.taskId, {
-			title: input.title ?? taskRecord.task.title,
-			prompt: input.prompt ?? taskRecord.task.prompt,
-			baseRef: input.baseRef ?? taskRecord.task.baseRef,
-			startInPlanMode: input.startInPlanMode ?? taskRecord.task.startInPlanMode,
-			taskAgentPermissionMode: input.taskAgentPermissionMode ?? taskRecord.task.taskAgentPermissionMode,
-			autoReviewEnabled: input.autoReviewEnabled ?? taskRecord.task.autoReviewEnabled === true,
-			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
-			agentId: input.agentId,
-			clineSettings: nextTaskClineSettings,
-			taskAgentSessionInitialization: nextTaskAgentSessionInitialization,
-			parentSessionId: input.parentSessionId,
-			worktreeMode: input.worktreeMode,
-			prepFilePath: input.prepFilePath,
-		});
-		if (!updatedTask.updated || !updatedTask.task) {
-			throw new Error(`Task "${input.taskId}" could not be updated.`);
-		}
-
-		const nextState: RuntimeWorkspaceStateResponse = {
-			...runtimeState,
-			board: updatedTask.board,
-		};
-
-		return {
-			board: updatedTask.board,
-			value: formatTaskRecord(nextState, updatedTask.task, taskRecord.columnId),
-		};
+	// 只传原始输入：与卡片现值的合并在 runtime 的 board 锁内对最新卡片进行，CLI 这边不做读-改-写，
+	// 否则两次读写之间别人的更新会被这次整卡回写抹掉。
+	const updated = await runtimeClient.taskCardAction.updateTaskCardFieldValues.mutate({
+		taskId: input.taskId,
+		taskCardFieldUpdate: {
+			taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
+			kanbanCliTaskCardFieldUpdateRawInput: {
+				title: input.title,
+				prompt: input.prompt,
+				baseRef: input.baseRef,
+				startInPlanMode: input.startInPlanMode,
+				taskAgentPermissionMode: input.taskAgentPermissionMode,
+				autoReviewEnabled: input.autoReviewEnabled,
+				autoReviewMode: input.autoReviewMode,
+				agentId: input.agentId,
+				clineProviderId: input.clineProviderId,
+				clineModelId: input.clineModelId,
+				clineReasoningEffort: input.clineReasoningEffort,
+				taskAgentSessionInitializationId: input.taskAgentSessionInitializationId,
+				taskAgentSessionInitializationMode: input.taskAgentSessionInitializationMode,
+				parentSessionId: input.parentSessionId,
+				worktreeMode: input.worktreeMode,
+				prepFilePath: input.prepFilePath,
+			},
+		},
 	});
+	const updatedTaskCardSnapshot = updated.taskCardSnapshotAfterAction;
 
 	return {
 		ok: true,
-		task: updated,
+		task: formatTaskRecordWithSessionSummary(
+			updatedTaskCardSnapshot.taskCard,
+			updatedTaskCardSnapshot.boardColumnIdContainingTaskCard,
+			updatedTaskCardSnapshot.taskSessionSummaryPersistedInWorkspaceSessionsFile,
+		),
 		workspacePath: workspaceRepoPath,
-	};
-}
-
-async function linkTasks(input: {
-	cwd: string;
-	taskId: string;
-	linkedTaskId: string;
-	projectPath?: string;
-}): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
-	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const dependency = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
-		const linked = addTaskDependency(runtimeState.board, input.taskId, input.linkedTaskId);
-		if (!linked.added || !linked.dependency) {
-			throw new Error(getLinkFailureMessage(linked.reason));
-		}
-
-		const nextState: RuntimeWorkspaceStateResponse = {
-			...runtimeState,
-			board: linked.board,
-		};
-		return {
-			board: linked.board,
-			value: formatDependencyRecord(nextState, linked.dependency),
-		};
-	});
-	return {
-		ok: true,
-		workspacePath: workspaceRepoPath,
-		dependency,
-	};
-}
-
-async function unlinkTasks(input: { cwd: string; dependencyId: string; projectPath?: string }): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
-	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const removedDependency = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
-		const dependency =
-			runtimeState.board.dependencies.find((candidate) => candidate.id === input.dependencyId) ?? null;
-		if (!dependency) {
-			throw new Error(`Dependency "${input.dependencyId}" was not found in workspace ${workspaceRepoPath}.`);
-		}
-
-		const unlinked = removeTaskDependency(runtimeState.board, input.dependencyId);
-		if (!unlinked.removed) {
-			throw new Error(`Dependency "${input.dependencyId}" could not be removed.`);
-		}
-
-		const nextState: RuntimeWorkspaceStateResponse = {
-			...runtimeState,
-			board: unlinked.board,
-		};
-		return {
-			board: unlinked.board,
-			value: formatDependencyRecord(nextState, dependency),
-		};
-	});
-	return {
-		ok: true,
-		workspacePath: workspaceRepoPath,
-		removedDependency,
 	};
 }
 
@@ -1064,99 +906,42 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const runtimeState = await runtimeClient.workspace.getState.query();
-	const fromColumnId = getTaskColumnId(runtimeState.board, input.taskId);
-	if (!fromColumnId) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-	}
-
-	if (fromColumnId !== "backlog" && fromColumnId !== "in_progress") {
+	// runtime 一次做完：只收 backlog / in_progress 的卡 → 先移列到 in_progress → ensure worktree → 起会话
+	// （会话已在 agent 回合就不重复起）。卡不存在 / 所在列不允许时 runtime 抛错，原文案与迁移前 CLI 本地报错一致。
+	const started = await runtimeClient.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress.mutate({
+		taskId: input.taskId,
+	});
+	// 执行期失败时卡已留在 in_progress（backlog 单向）；命令照旧以失败退出，带回 runtime 给的原因。
+	if (
+		started.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
+		started.agentSessionStartOutcome === "agent_session_start_failed"
+	) {
 		throw new Error(
-			`Task "${input.taskId}" is in "${fromColumnId}" and can only be started from backlog or in_progress.`,
+			started.agentSessionStartFailureMessage ??
+				(started.agentSessionStartOutcome === "task_worktree_ensure_failed"
+					? "Could not ensure task worktree."
+					: "Could not start task session."),
 		);
 	}
+	const startedTaskCard = started.taskCardSnapshotAfterAction.taskCard;
+	const startedTaskRecord = {
+		id: startedTaskCard.id,
+		prompt: startedTaskCard.prompt,
+		column: "in_progress",
+		workspacePath: workspaceRepoPath,
+	};
 
-	const currentRecord = findTaskRecord(runtimeState, input.taskId);
-	const task = currentRecord?.task;
-	if (!task) {
-		throw new Error(`Task "${input.taskId}" could not be resolved.`);
-	}
-
-	const existingSession = runtimeState.sessions[task.id] ?? null;
-	// 旧 `state==="running"` → facet 真相源 turnOwner==="agent"（running 是 agent 回合唯一来源，严格等价）。
-	const shouldStartSession = !existingSession || resolveSessionFacets(existingSession).turnOwner !== "agent";
-
-	if (shouldStartSession) {
-		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
-			taskId: task.id,
-			baseRef: task.baseRef,
-			worktreeMode: task.worktreeMode,
-		});
-		if (!ensured.ok) {
-			throw new Error(ensured.error ?? "Could not ensure task worktree.");
-		}
-
-		const started = await runtimeClient.runtime.startTaskSession.mutate(buildCliTaskSessionStartRequest(task));
-		if (!started.ok || !started.summary) {
-			throw new Error(started.error ?? "Could not start task session.");
-		}
-	}
-
-	const moved = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (latestState) => {
-		const movement = moveTaskToColumn(latestState.board, input.taskId, "in_progress");
-		if (!movement.task) {
-			throw new Error(`Task "${input.taskId}" could not be resolved.`);
-		}
-		if (!movement.moved) {
-			return {
-				board: latestState.board,
-				value: movement,
-			};
-		}
-		return {
-			board: movement.board,
-			value: movement,
-		};
-	});
-
-	if (!moved.moved) {
+	if (!started.taskCardWasMovedIntoInProgressColumnByThisAction) {
 		return {
 			ok: true,
 			message: `Task "${input.taskId}" is already in progress.`,
-			task: {
-				id: task.id,
-				prompt: task.prompt,
-				column: "in_progress",
-				workspacePath: workspaceRepoPath,
-			},
+			task: startedTaskRecord,
 		};
 	}
 
 	return {
 		ok: true,
-		task: {
-			id: task.id,
-			prompt: task.prompt,
-			column: "in_progress",
-			workspacePath: workspaceRepoPath,
-		},
-	};
-}
-
-export function buildCliTaskSessionStartRequest(task: RuntimeBoardCard): RuntimeTaskSessionStartRequest {
-	return {
-		taskId: task.id,
-		prompt: task.prompt,
-		taskTitle: task.title,
-		startInPlanMode: task.startInPlanMode,
-		taskAgentPermissionMode: task.taskAgentPermissionMode,
-		baseRef: task.baseRef,
-		agentId: task.agentId,
-		clineSettings: task.clineSettings,
-		taskAgentSessionInitialization: task.taskAgentSessionInitialization,
-		parentSessionId: task.parentSessionId,
-		worktreeMode: task.worktreeMode,
-		prepFilePath: task.prepFilePath,
+		task: startedTaskRecord,
 	};
 }
 
@@ -1232,117 +1017,45 @@ async function isTaskParkedCommand(input: { cwd: string; taskId: string; project
 	};
 }
 
-export interface TrashTaskExecutionResult {
+interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
 	previousColumnId: ListTaskColumn;
-	readyTaskIds: string[];
-	autoStartedTasks: JsonRecord[];
 	worktreeDeleted: boolean;
 	worktreeDeleteError?: string;
 	alreadyInTrash: boolean;
 }
 
-interface TrashTaskMutationValue {
-	task: JsonRecord;
-	previousColumnId: ListTaskColumn;
-	readyTaskIds: string[];
-	alreadyInTrash: boolean;
+function toTrashTaskExecutionResult(
+	taskId: string,
+	movedIntoDone: RuntimeTaskCardActionMoveIntoDoneResponse,
+): TrashTaskExecutionResult {
+	const movedTaskCardSnapshot = movedIntoDone.taskCardSnapshotAfterAction;
+	return {
+		task: formatTaskRecordWithSessionSummary(
+			movedTaskCardSnapshot.taskCard,
+			"trash",
+			movedTaskCardSnapshot.taskSessionSummaryPersistedInWorkspaceSessionsFile,
+		),
+		taskId,
+		previousColumnId: movedIntoDone.boardColumnIdOfTaskCardBeforeAction,
+		worktreeDeleted: movedIntoDone.taskWorktreeDeletionResult?.taskWorktreeWasRemoved ?? false,
+		worktreeDeleteError: movedIntoDone.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? undefined,
+		alreadyInTrash: movedIntoDone.taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan,
+	};
 }
 
-function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
-	return columnId === "in_progress" || columnId === "review" || columnId === "validation";
-}
-
-// deployment CLI（verification-complete / -confirm 移列）复用其完整副作用链：
-// notifyStateUpdated（server reload）→ 按列门控 stopTaskSession → 自动启动就绪 linked 任务 → deleteWorktree。
-export async function trashTaskById(input: {
-	cwd: string;
+// 移入 Done 的整条副作用链（移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）都在 runtime 的
+// taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree 里执行；CLI 只把响应摊成旧 JSON 字段。
+async function trashTaskById(input: {
 	taskId: string;
-	projectPath?: string;
-	workspaceRepoPath: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
 }): Promise<TrashTaskExecutionResult> {
-	const mutation = await mutateWorkspaceState<TrashTaskMutationValue>(input.workspaceRepoPath, (latestState) => {
-		const latestRecord = findTaskRecord(latestState, input.taskId);
-		if (!latestRecord) {
-			throw new Error(`Task "${input.taskId}" was not found in workspace ${input.workspaceRepoPath}.`);
-		}
-		if (latestRecord.columnId === "trash") {
-			return {
-				board: latestState.board,
-				value: {
-					task: formatTaskRecord(latestState, latestRecord.task, latestRecord.columnId),
-					previousColumnId: latestRecord.columnId,
-					readyTaskIds: [] as string[],
-					alreadyInTrash: true,
-				},
-				save: false,
-			};
-		}
-
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(latestState.board, input.taskId);
-		if (!trashed.moved || !trashed.task) {
-			throw new Error(`Task "${input.taskId}" could not be moved to done.`);
-		}
-
-		const nextState: RuntimeWorkspaceStateResponse = {
-			...latestState,
-			board: trashed.board,
-		};
-		return {
-			board: trashed.board,
-			value: {
-				task: formatTaskRecord(nextState, trashed.task, "trash"),
-				previousColumnId: latestRecord.columnId,
-				readyTaskIds: trashed.readyTaskIds,
-				alreadyInTrash: false,
-			},
-		};
-	});
-
-	if (mutation.saved) {
-		await notifyRuntimeWorkspaceStateUpdated(input.runtimeClient);
-	}
-
-	if (mutation.value.alreadyInTrash) {
-		return {
-			task: mutation.value.task,
+	const movedIntoDone =
+		await input.runtimeClient.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
 			taskId: input.taskId,
-			previousColumnId: mutation.value.previousColumnId,
-			readyTaskIds: [],
-			autoStartedTasks: [],
-			worktreeDeleted: false,
-			alreadyInTrash: true,
-		};
-	}
-
-	if (columnCanHaveLiveTaskSession(mutation.value.previousColumnId)) {
-		await stopTaskRuntimeSession(input.runtimeClient, input.taskId);
-	}
-
-	const autoStartedTasks: JsonRecord[] = [];
-	for (const readyTaskId of mutation.value.readyTaskIds) {
-		const started = await startTask({
-			cwd: input.cwd,
-			taskId: readyTaskId,
-			projectPath: input.projectPath,
 		});
-		autoStartedTasks.push(started);
-	}
-
-	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId);
-
-	return {
-		task: mutation.value.task,
-		taskId: input.taskId,
-		previousColumnId: mutation.value.previousColumnId,
-		readyTaskIds: mutation.value.readyTaskIds,
-		autoStartedTasks,
-		worktreeDeleted: deletedWorkspace.removed,
-		worktreeDeleteError: deletedWorkspace.error,
-		alreadyInTrash: false,
-	};
+	return toTrashTaskExecutionResult(input.taskId, movedIntoDone);
 }
 
 async function trashTask(input: {
@@ -1357,29 +1070,19 @@ async function trashTask(input: {
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 
 	if (target.kind === "task") {
-		const trashed = await trashTaskById({
-			cwd: input.cwd,
-			taskId: target.taskId,
-			projectPath: input.projectPath,
-			workspaceRepoPath,
-			runtimeClient,
-		});
+		const trashed = await trashTaskById({ taskId: target.taskId, runtimeClient });
 		if (trashed.alreadyInTrash) {
 			return {
 				ok: true,
 				message: `Task "${target.taskId}" is already done.`,
 				task: trashed.task,
 				workspacePath: workspaceRepoPath,
-				readyTaskIds: [],
-				autoStartedTasks: [],
 			};
 		}
 		return {
 			ok: true,
 			task: trashed.task,
 			workspacePath: workspaceRepoPath,
-			readyTaskIds: trashed.readyTaskIds,
-			autoStartedTasks: trashed.autoStartedTasks,
 			worktreeDeleted: trashed.worktreeDeleted,
 			worktreeDeleteError: trashed.worktreeDeleteError,
 		};
@@ -1394,8 +1097,6 @@ async function trashTask(input: {
 			workspacePath: workspaceRepoPath,
 			trashedTasks: [],
 			alreadyTrashedTasks: [],
-			readyTaskIds: [],
-			autoStartedTasks: [],
 			worktreeCleanup: [],
 			count: 0,
 		};
@@ -1403,15 +1104,7 @@ async function trashTask(input: {
 
 	const results: TrashTaskExecutionResult[] = [];
 	for (const { task } of targetTasks) {
-		results.push(
-			await trashTaskById({
-				cwd: input.cwd,
-				taskId: task.id,
-				projectPath: input.projectPath,
-				workspaceRepoPath,
-				runtimeClient,
-			}),
-		);
+		results.push(await trashTaskById({ taskId: task.id, runtimeClient }));
 	}
 
 	const trashedTasks = results.filter((result) => !result.alreadyInTrash);
@@ -1423,8 +1116,6 @@ async function trashTask(input: {
 		workspacePath: workspaceRepoPath,
 		trashedTasks: trashedTasks.map((result) => result.task),
 		alreadyTrashedTasks: alreadyTrashedTasks.map((result) => result.task),
-		readyTaskIds: [...new Set(trashedTasks.flatMap((result) => result.readyTaskIds))],
-		autoStartedTasks: trashedTasks.flatMap((result) => result.autoStartedTasks),
 		worktreeCleanup: trashedTasks.map((result) => ({
 			taskId: result.taskId,
 			removed: result.worktreeDeleted,
@@ -1444,67 +1135,23 @@ async function deleteTaskCommand(input: {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
-		const latestTargetRecords =
+	// 整条收尾链（board 删卡 → 清编辑草稿 → 清排队 prompt → 停会话 → 删 worktree → 最后批删 turn checkpoint ref）
+	// 都在 runtime 的 taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup 里按这个顺序执行。
+	const deleted = await runtimeClient.taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup.mutate({
+		permanentlyDeletedTaskCardSelection:
 			target.kind === "task"
-				? (() => {
-						const record = findTaskRecord(latestState, target.taskId);
-						if (!record) {
-							throw new Error(`Task "${target.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-						}
-						return [record];
-					})()
-				: findTasksInColumn(latestState, target.column);
-
-		if (latestTargetRecords.length === 0) {
-			return {
-				board: latestState.board,
-				value: {
-					deletedTaskIds: [] as string[],
-					taskIdsRequiringStop: [] as string[],
-					deletedTasks: [] as JsonRecord[],
-				},
-				save: false,
-			};
-		}
-
-		const deleted = deleteTasksFromBoard(
-			latestState.board,
-			latestTargetRecords.map(({ task }) => task.id),
-		);
-		if (!deleted.deleted) {
-			return {
-				board: latestState.board,
-				value: {
-					deletedTaskIds: [] as string[],
-					taskIdsRequiringStop: [] as string[],
-					deletedTasks: [] as JsonRecord[],
-				},
-				save: false,
-			};
-		}
-
-		const deletedTasks = latestTargetRecords.map(({ task, columnId }) =>
-			formatTaskRecord(latestState, task, columnId),
-		);
-		const taskIdsRequiringStop = latestTargetRecords
-			.filter(({ columnId }) => columnCanHaveLiveTaskSession(columnId))
-			.map(({ task }) => task.id);
-		return {
-			board: deleted.board,
-			value: {
-				deletedTaskIds: deleted.deletedTaskIds,
-				taskIdsRequiringStop,
-				deletedTasks,
-			},
-		};
+				? {
+						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+						selectedTaskIds: [target.taskId],
+					}
+				: {
+						permanentlyDeletedTaskCardSelectionKind: "every_task_card_in_board_column",
+						selectedBoardColumnId: target.column,
+					},
 	});
+	const permanentlyDeletedTaskCards = deleted.permanentlyDeletedTaskCards;
 
-	if (mutation.saved) {
-		await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
-	}
-
-	if (mutation.value.deletedTaskIds.length === 0) {
+	if (permanentlyDeletedTaskCards.length === 0) {
 		return {
 			ok: true,
 			workspacePath: workspaceRepoPath,
@@ -1514,44 +1161,28 @@ async function deleteTaskCommand(input: {
 		};
 	}
 
-	// 任务本体没了之后，它的编辑草稿与落败副本再也没有可以认领的地方——界面上连打开它的入口都不存在了。
-	// 浏览器侧的删除 handler 会自己清一次，但 CLI 这条路径完全不经过它。
-	await discardTaskEditDraftsForDeletedTasks(workspaceId, mutation.value.deletedTaskIds);
-
-	await Promise.all(
-		mutation.value.taskIdsRequiringStop.map(async (taskId) => await stopTaskRuntimeSession(runtimeClient, taskId)),
-	);
-
-	const workspaceCleanupResults = await Promise.all(
-		mutation.value.deletedTaskIds.map(async (taskId) => ({
-			taskId,
-			...(await deleteTaskWorkspace(runtimeClient, taskId, true)),
-		})),
-	);
-
-	// 批删全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时按前缀批删）。
-	// 顺序铁律：必须排在会话停止与 worktree 清理**之后**。hooks-api 的 to_review checkpoint 捕获是
-	// runtime 侧不 await 的后台任务（hooks-api.ts F1），若先批删，枚举完成后在途捕获仍可能
-	// update-ref，给已删除任务留下再无清理方的孤儿 ref。会话停止切断新 hook 来源（任务已从看板
-	// 移除，transition 失败也不会再派生新捕获），批删放到最后给在途捕获最大收敛窗口。
-	// 残余窗口：CLI 无法 await runtime 侧已派生的在途捕获，理论上仍可能有批删后才落定的孤儿 ref——
-	// 与草稿清理同一套失败语义：这是删除已成之后的收尾，失败只吞不抛，残留几个无人认领的 ref，
-	// 不该让已经删成的任务被报成失败。
-	for (const taskId of mutation.value.deletedTaskIds) {
-		try {
-			await deleteAllTaskTurnCheckpointRefs({ cwd: workspaceRepoPath, taskId });
-		} catch {
-			// 收尾清理，best-effort。
-		}
-	}
-
 	return {
 		ok: true,
 		workspacePath: workspaceRepoPath,
 		column: target.kind === "column" ? target.column : null,
-		deletedTasks: mutation.value.deletedTasks,
-		count: mutation.value.deletedTaskIds.length,
-		worktreeCleanup: workspaceCleanupResults,
+		deletedTasks: permanentlyDeletedTaskCards.map(
+			({
+				deletedTaskCard,
+				boardColumnIdOfDeletedTaskCardBeforeDeletion,
+				taskSessionSummaryPersistedInWorkspaceSessionsFileBeforeDeletion,
+			}) =>
+				formatTaskRecordWithSessionSummary(
+					deletedTaskCard,
+					boardColumnIdOfDeletedTaskCardBeforeDeletion,
+					taskSessionSummaryPersistedInWorkspaceSessionsFileBeforeDeletion,
+				),
+		),
+		count: permanentlyDeletedTaskCards.length,
+		worktreeCleanup: permanentlyDeletedTaskCards.map(({ deletedTaskCard, taskWorktreeDeletionResult }) => ({
+			taskId: deletedTaskCard.id,
+			removed: taskWorktreeDeletionResult.taskWorktreeWasRemoved,
+			error: taskWorktreeDeletionResult.taskWorktreeDeletionErrorMessage ?? undefined,
+		})),
 	};
 }
 
@@ -1570,6 +1201,10 @@ interface TaskMessageCommandResult extends JsonRecord {
 	turn_id?: string;
 	checkpoint_id?: string;
 	status?: string;
+	// ↓ 仅 --deliver-when-agent-idle 的记录才有。pending 且 gate_passed_at 为 null ⇒ 还卡在 agent 空闲门；
+	// 非 null ⇒ 已交给终端投递、卡在终端门。契约：terminal-delivery-interface-contract.md § agent 空闲门控的排队投递。
+	agent_idle_wait_deadline_at?: string;
+	agent_idle_gate_passed_at?: string | null;
 }
 
 function hashPrompt(prompt: string): string {
@@ -1591,7 +1226,37 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 		...(record.turn_id ? { turn_id: record.turn_id } : {}),
 		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
 		...(record.status ? { status: record.status } : {}),
+		...(record.agent_idle_wait_deadline_at
+			? {
+					agent_idle_wait_deadline_at: record.agent_idle_wait_deadline_at,
+					agent_idle_gate_passed_at: record.agent_idle_gate_passed_at ?? null,
+				}
+			: {}),
 	};
+}
+
+// --deliver-when-agent-idle 与 --max-wait-for-agent-idle-ms 必须成对出现。等多久是调用方的策略，不给默认值：
+// 一个看不见的默认上限，等于替调用方决定「晚问多久就不该再问了」。
+export function resolveTaskMessageAgentIdleGateOptions(input: {
+	deliverWhenAgentIdle: boolean;
+	maxWaitForAgentIdleMs: number | undefined;
+	maxWaitForAgentIdleUpperBoundMs: number;
+}): { maxWaitForAgentIdleMs: number } | null {
+	if (!input.deliverWhenAgentIdle) {
+		if (input.maxWaitForAgentIdleMs !== undefined) {
+			throw new Error("--max-wait-for-agent-idle-ms requires --deliver-when-agent-idle.");
+		}
+		return null;
+	}
+	if (input.maxWaitForAgentIdleMs === undefined) {
+		throw new Error("--deliver-when-agent-idle requires --max-wait-for-agent-idle-ms.");
+	}
+	if (input.maxWaitForAgentIdleMs > input.maxWaitForAgentIdleUpperBoundMs) {
+		throw new Error(
+			`--max-wait-for-agent-idle-ms must not exceed ${input.maxWaitForAgentIdleUpperBoundMs} (24 hours).`,
+		);
+	}
+	return { maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs };
 }
 
 function resolvePromptInput(input: { prompt?: string; promptFile?: string }): Promise<string> {
@@ -1620,7 +1285,14 @@ async function sendTaskMessageCommand(input: {
 	attemptId?: string;
 	waitForTerminalStatus?: boolean;
 	waitTimeoutMs?: number;
+	deliverWhenAgentIdle?: boolean;
+	maxWaitForAgentIdleMs?: number;
 }): Promise<TaskMessageCommandResult> {
+	const agentIdleGate = resolveTaskMessageAgentIdleGateOptions({
+		deliverWhenAgentIdle: input.deliverWhenAgentIdle ?? false,
+		maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
+		maxWaitForAgentIdleUpperBoundMs: MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS,
+	});
 	const taskId = input.taskId.trim();
 	if (!taskId) {
 		throw new Error("task message requires --task-id.");
@@ -1653,6 +1325,33 @@ async function sendTaskMessageCommand(input: {
 	}
 
 	const ledgerPath = getTaskMessageInjectionLedgerPath(workspace.statePath);
+
+	// agent 空闲门控的排队投递：账本记录由 runtime 在同一次调用里建并入队（理由见
+	// src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts 文件头）。CLI 只负责把回执读出来。
+	// runtime 够不到 / 版本还没有这个入口时直接报错（ok:false，退出码 1），**不留账本记录**——与立即投递不同，
+	// 那边的记录是 CLI 自己先建的，所以得由 CLI 落失败。
+	if (agentIdleGate !== null) {
+		const enqueueResponse = await runtimeClient.runtime.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mutate({
+			taskId,
+			text: prompt,
+			source,
+			idempotencyKey,
+			promptSha256,
+			...(attemptId ? { attemptId } : {}),
+			maxWaitForAgentIdleMs: agentIdleGate.maxWaitForAgentIdleMs,
+		});
+		if (!enqueueResponse.ok) {
+			throw new Error(enqueueResponse.error ?? "enqueueAgentIdleGatedProgrammaticTaskChatMessage failed.");
+		}
+		return await resolveTaskMessageResult({
+			ledgerPath,
+			taskId,
+			idempotencyKey,
+			fallbackRecord: null,
+			waitForTerminalStatus: input.waitForTerminalStatus ?? false,
+			waitTimeoutMs: input.waitTimeoutMs,
+		});
+	}
 
 	// 第一段（锁内）：幂等判定 + 落一条 pending。
 	// 与旧实现的差别：上一条仍 pending 时**不再报错**。pending 现在是合法的、会自行收敛的状态，
@@ -2057,6 +1756,40 @@ export function registerTaskCommand(program: Command): void {
 			);
 		});
 
+	for (const commandName of ["set-current-work-phase-goal", "clear-current-work-phase-goal"] as const) {
+		const command = task.command(commandName).description("按调用环境身份更新当前对话的阶段目标。");
+		if (commandName === "set-current-work-phase-goal")
+			command.requiredOption("--goal <text>", "阶段目标（最多 160 字）。");
+		command.action(async (options: { goal?: string }) => {
+			await runTaskCommand(async () => {
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim())
+					throw new Error("当前调用环境缺少 Task 身份；不会从 cwd 推测。");
+				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				return await createRuntimeTrpcClient(workspaceId).runtime.setCurrentWorkPhaseGoal.mutate({
+					goal: commandName === "clear-current-work-phase-goal" ? null : (options.goal ?? ""),
+				});
+			});
+		});
+	}
+
+	task
+		.command("rename-current-task")
+		.description("按调用环境身份给自己的 Task 改名，并记录原因。")
+		.requiredOption("--title <text>", "新名称（最多 80 字）。")
+		.requiredOption("--reason <text>", "改名原因（最多 500 字）。")
+		.action(async (options: { title: string; reason: string }) => {
+			await runTaskCommand(async () => {
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim()) {
+					throw new Error("当前调用环境缺少 KANBAN_TASK_ID 或 KANBAN_PROJECT_PATH；不会从 cwd 推测。 ");
+				}
+				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				const renamed = await createRuntimeTrpcClient(workspaceId).taskCardAction.renameCurrentTask.mutate(options);
+				return { ok: true, task: renamed.taskCardSnapshotAfterAction.taskCard };
+			});
+		});
+
 	task
 		.command("create")
 		.description("Create a task in backlog.")
@@ -2323,6 +2056,14 @@ export function registerTaskCommand(program: Command): void {
 			"--wait-timeout-ms <ms>",
 			"Timeout for --wait-for-terminal-status. Defaults to 30000. Clamped to the CLI hard timeout (KANBAN_CLI_HARD_TIMEOUT_MS, default 35000) minus a small margin, so the command always prints its JSON receipt instead of being killed with exit code 124. Raise KANBAN_CLI_HARD_TIMEOUT_MS to actually wait longer.",
 		)
+		.option(
+			"--deliver-when-agent-idle",
+			"Queue the message in Kanban's durable prompt queue and hand it to the terminal only once the agent is idle (not generating, not parked awaiting background work, not waiting on a question/plan/permission). Requires --max-wait-for-agent-idle-ms. The receipt stays accepted_pending_submit_confirmation while queued.",
+		)
+		.option(
+			"--max-wait-for-agent-idle-ms <ms>",
+			"With --deliver-when-agent-idle: give up after this many milliseconds (at most 86400000) without the agent becoming idle, settling the receipt as delivery_failed{agent_never_became_idle_before_queued_delivery_deadline}.",
+		)
 		.action(
 			async (options: {
 				projectPath: string;
@@ -2334,6 +2075,8 @@ export function registerTaskCommand(program: Command): void {
 				attemptId?: string;
 				waitForTerminalStatus?: boolean;
 				waitTimeoutMs?: string;
+				deliverWhenAgentIdle?: boolean;
+				maxWaitForAgentIdleMs?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -2349,6 +2092,15 @@ export function registerTaskCommand(program: Command): void {
 							waitForTerminalStatus: options.waitForTerminalStatus ?? false,
 							...(options.waitTimeoutMs
 								? { waitTimeoutMs: parsePositiveIntegerOption(options.waitTimeoutMs, "--wait-timeout-ms") }
+								: {}),
+							deliverWhenAgentIdle: options.deliverWhenAgentIdle ?? false,
+							...(options.maxWaitForAgentIdleMs
+								? {
+										maxWaitForAgentIdleMs: parsePositiveIntegerOption(
+											options.maxWaitForAgentIdleMs,
+											"--max-wait-for-agent-idle-ms",
+										),
+									}
 								: {}),
 						}),
 				);
@@ -2387,56 +2139,6 @@ export function registerTaskCommand(program: Command): void {
 						projectPath: options.projectPath,
 						taskId: options.taskId,
 						idempotencyKey: options.idempotencyKey,
-					}),
-			);
-		});
-
-	task
-		.command("link")
-		.description("Link two tasks so one task waits on another.")
-		.requiredOption("--task-id <id>", "One of the two task IDs to link.")
-		.requiredOption("--linked-task-id <id>", "The other task ID to link.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.addHelpText(
-			"after",
-			[
-				"",
-				"Dependency direction:",
-				"  If both linked tasks are in backlog, Kanban preserves the order you pass:",
-				"  --task-id waits on --linked-task-id, and on the board the arrow points into",
-				"  --linked-task-id.",
-				"  Once only one linked task remains in backlog, Kanban reorients the saved link",
-				"  so the backlog task is the waiting dependent task and the other task is the",
-				"  prerequisite.",
-				"  When the prerequisite finishes review and moves to done, the waiting backlog",
-				"  task becomes ready to start.",
-				"",
-			].join("\n"),
-		)
-		.action(async (options: { taskId: string; linkedTaskId: string; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await linkTasks({
-						cwd: process.cwd(),
-						taskId: options.taskId,
-						linkedTaskId: options.linkedTaskId,
-						projectPath: options.projectPath,
-					}),
-			);
-		});
-
-	task
-		.command("unlink")
-		.description("Remove an existing dependency link.")
-		.requiredOption("--dependency-id <id>", "Dependency ID.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { dependencyId: string; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await unlinkTasks({
-						cwd: process.cwd(),
-						dependencyId: options.dependencyId,
-						projectPath: options.projectPath,
 					}),
 			);
 		});

@@ -10,6 +10,7 @@ import {
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
 import { handleClineMcpOauthCallback } from "../cline-sdk/cline-mcp-runtime-service";
+import { createClineProviderService } from "../cline-sdk/cline-provider-service";
 import {
 	type ClineTaskSessionService,
 	createInMemoryClineTaskSessionService,
@@ -18,11 +19,18 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
+	RuntimeHookIngestRequest,
+	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
+import {
+	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
+	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
+} from "../core/kanban-cli-invocation-environment-actor-claims";
+import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -31,13 +39,25 @@ import {
 	getKanbanRuntimeTls,
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
+import { resolveSessionFacets } from "../core/session-activity";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
+import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
+import { createTaskAgentConversationModelTokenUsageJournalMonitor } from "../diagnostics/task-agent-conversation-model-token-usage-journal-monitor";
+import { createTaskAttributedProcessTreeResourceSampler } from "../diagnostics/task-attributed-process-tree-resource-sampler";
+import { createTaskWorktreeDiskUsageMeasurementMonitor } from "../diagnostics/task-worktree-disk-usage-measurement-monitor";
 import { translateExplorationThreadGraphMaintenanceOutcome } from "../exploration-thread-graph/exploration-thread-graph-maintenance-outcome-translation";
 import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
+import {
+	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
+	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+	readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+} from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -50,7 +70,18 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
-import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
+import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
+import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import {
+	readLiveRuntimeProcessInstanceIds,
+	startRuntimeProcessInstanceHeartbeat,
+} from "../state/runtime-process-instance-heartbeat-registry";
+import {
+	getTaskWorktreesHomePath,
+	listWorkspaceIndexEntries,
+	loadWorkspaceBoardById,
+	loadWorkspaceContextById,
+} from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -60,6 +91,15 @@ import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
+import { createTaskCardActionApi } from "../trpc/task-card-action-api";
+import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
+import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
+import { createWorkUnitRelationAssertionWriteApi } from "../trpc/work-unit-relation-assertion-write-api";
+import { createWorkUnitRelationPresentationPreferenceApi } from "../trpc/work-unit-relation-presentation-preference-api";
+import {
+	createWorkUnitRelationReadApi,
+	readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+} from "../trpc/work-unit-relation-read-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
@@ -67,9 +107,18 @@ import {
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
+import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
-import { scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart } from "./pending-task-message-injection-startup-sweep";
+import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
+import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
+import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
+import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
+import {
+	enumerateTaskResourceUsageAttributionRoots,
+	type TaskResourceUsageAttributionSessionSource,
+} from "./task-resource-usage-attribution-root-enumeration";
+import { createLiveTaskResourceUsageSnapshotPublisher } from "./task-resource-usage-live-snapshot-publication";
 import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
 
@@ -97,6 +146,13 @@ export interface CreateRuntimeServerDependencies {
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	// agent session PTY host 模式才有：runtime 缺席期间存进 host 的 hook 事件，由这里的 hooks ingest 按序应用。
+	agentSessionPtyHostHookSpool?: {
+		bindSpooledHookIngestRequestApplier: (
+			spooledHookIngestRequestApplier: (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>,
+		) => void;
+		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
+	};
 }
 
 export interface RuntimeServer {
@@ -143,8 +199,22 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动清扫：上一次 runtime 生命周期里没落定的程序化投递，其收敛完全依赖已经消失的内存态，
 	// 不清扫就会永远停在 pending。只清扫**超期**的那些——账本是全机共享的，同机并存的另一个实例
 	// 此刻可能正有在途投递，全扫会把它们判成不可纠正的假失败（见清扫模块头注）。
-	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
-	scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart();
+	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。启动之后仍按超期判据持续清扫：
+	// runtime 活着期间也会冒出没人收敛的 pending（见清扫模块头注）。
+	const stalePendingTaskMessageInjectionSweepsForRuntimeLifetime =
+		startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime();
+
+	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
+	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
+	// 刚接手的东西当成上一次生命周期的残骸。
+	//
+	// await 它（不像下面的清扫那样放飞）：它很便宜（一次 mkdir + 一次 writeFile），而「先写下自己
+	// 再开始服务」正是这套判据的前提。
+	const runtimeProcessInstanceHeartbeat = await startRuntimeProcessInstanceHeartbeat();
+
+	// 工作单元间关系账本：注册后本进程每一次 board 写入先过账本（dd2db 1a）。账本打不开时 board 只读。
+	const activatedInterWorkUnitRelationLedgerLiveCapture =
+		await activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
@@ -218,7 +288,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedAcpTaskSessionService = async (scope: RuntimeTrpcWorkspaceScope): Promise<AcpTaskSessionService> => {
 		let service = acpTaskSessionServiceByWorkspaceId.get(scope.workspaceId);
 		if (!service) {
-			service = createAcpTaskSessionService();
+			service = createAcpTaskSessionService({
+				workspaceId: scope.workspaceId,
+				workspaceRepositoryPath: scope.workspacePath,
+			});
 			acpTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			acpWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
 			deps.runtimeStateHub.trackAcpTaskSessionService(scope.workspaceId, scope.workspacePath, service);
@@ -244,6 +317,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		if (!service) {
 			service = createInMemoryClineTaskSessionService({
 				watcherRegistry: clineWatcherRegistry,
+				kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+					workspaceId: scope.workspaceId,
+					workspaceRepositoryPath: scope.workspacePath,
+				},
 			});
 			clineTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			clineWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
@@ -315,6 +392,158 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			}
 		},
 	});
+
+	// 排队 prompt 的出队引擎（runtime 级单例）。放在这里的理由与上面的回收调度器相同：三种 transport 的
+	// 服务持有者都在本作用域，findRuntimeSessionSummary 是现成的三流合并查询面。
+	//
+	// 发送走的是与人类聊天、RVF followup **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
+	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
+	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
+	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
+		getTaskSessionSummary: findRuntimeSessionSummary,
+		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
+			deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(workspaceId)
+				?.hasPendingProgrammaticTaskChatInputDelivery(taskId) ?? false,
+		resolveWorkspaceScope: (workspaceId) => {
+			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+			return workspacePath === null ? null : { workspaceId, workspacePath };
+		},
+		sendThroughTaskChatTransports: async (scope, request, onProgrammaticTerminalDeliverySettled) =>
+			await sendTaskChatMessageAcrossSessionTransports(
+				{
+					getScopedTerminalManager,
+					getScopedClineTaskSessionService,
+					getScopedAcpTaskSessionService,
+					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+					resolveClineTaskSessionLaunchConfig: async () =>
+						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
+					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+					onProgrammaticTerminalDeliverySettled,
+				},
+				scope,
+				request,
+			),
+		cancelProgrammaticTerminalDelivery: async (scope, taskId, idempotencyKey) =>
+			(await getScopedTerminalManager(scope)).cancelTaskChatInputDelivery(taskId, idempotencyKey),
+		readPromptLibraryEntryTextSha256ByEntryId: async (workspaceId) => {
+			const library = await readWorkspacePromptLibrarySnapshot(workspaceId);
+			const shaByEntryId = new Map<string, string>();
+			for (const entry of [
+				...library.globalScopedPrompts,
+				...library.repoScopedPrompts,
+				...Object.values(library.taskScopedPromptsByTaskId).flat(),
+			]) {
+				shaByEntryId.set(entry.id, computeQueuedTaskPromptDeliveryTextSha256(entry.text));
+			}
+			return shaByEntryId;
+		},
+		onProjectedQueueChanged: deps.runtimeStateHub.broadcastQueuedTaskPromptDeliveriesUpdated,
+		warn: deps.warn,
+		// 托管门 + 持续盖章屏障：只发本实例托管的条目；托管者判死的条目先盖章等人确认（见 dispatcher 头注）。
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+			runtimeProcessStartedAtEpochMs: runtimeProcessInstanceHeartbeat.startedAtEpochMs,
+			readLiveRuntimeProcessInstanceIds: async () => await readLiveRuntimeProcessInstanceIds(),
+		},
+	});
+	const unregisterQueuedTaskPromptDeliveryDispatchObserver =
+		deps.runtimeStateHub.registerQueuedTaskPromptDeliveryDispatchObserver(queuedTaskPromptDeliveryDispatcher);
+	// 排队 prompt 的启动清扫：收敛被上一次生命周期撂在半路的在途投递，并给跨过这次重启的条目盖章
+	// （门控 0 据此等人看见再发）。必须在心跳写下之后——盖章按「托管实例此刻不在心跳里」判，同刻启动的
+	// 另一个实例得先看得见我。不 await：纠偏动作，不是服务可用性的前置条件。
+	void scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart({
+		runtimeProcessStartedAtEpochMs: runtimeProcessInstanceHeartbeat.startedAtEpochMs,
+		sweepingRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		onWorkspaceQueueRewritten: (workspaceId, snapshot) => {
+			void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+		},
+	});
+
+	const publishLiveTaskResourceUsageSnapshots = createLiveTaskResourceUsageSnapshotPublisher(
+		(workspaceId, snapshots) => {
+			deps.runtimeStateHub.broadcastTaskResourceUsageSnapshotsUpdated(workspaceId, snapshots);
+		},
+	);
+	// 按 task 归因的资源占用采集的会话源。按 transport 分别列出、不做 taskId 合并：
+	// listProjectRuntimeSessionSummaries 的「后写覆盖先写」会吞掉 PTY 会话的 pid。
+	const listTerminalTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		deps.workspaceRegistry.listManagedWorkspaces().map(({ workspaceId, workspacePath, terminalManager }) => ({
+			workspaceId,
+			workspacePath,
+			listSummaries: () => terminalManager.listSummaries(),
+		}));
+	const listClineTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		Array.from(clineTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
+			workspaceId,
+			workspacePath: clineWorkspacePathByWorkspaceId.get(workspaceId) ?? null,
+			listSummaries: () => service.listSummaries(),
+		}));
+	const listAcpTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		Array.from(acpTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
+			workspaceId,
+			workspacePath: acpWorkspacePathByWorkspaceId.get(workspaceId) ?? null,
+			listSummaries: () => service.listSummaries(),
+		}));
+	const enumerateCurrentTaskResourceUsageAttributionRoots = () =>
+		enumerateTaskResourceUsageAttributionRoots({
+			listTerminalSessionSources: listTerminalTaskResourceUsageAttributionSessionSources,
+			listClineSessionSources: listClineTaskResourceUsageAttributionSessionSources,
+			listAcpSessionSources: listAcpTaskResourceUsageAttributionSessionSources,
+		});
+	// harness 根进程、MCP、agent 命令、残留孤儿、用户 shell / dev server 的内存与 CPU，按 task 归因后写 journal。
+	const taskAttributedProcessTreeResourceSampler = createTaskAttributedProcessTreeResourceSampler({
+		enumerateAttributionRoots: enumerateCurrentTaskResourceUsageAttributionRoots,
+		// 卡片上的实时内存 / CPU 药丸：独立推流消息，不进 session summary。
+		onLiveTaskResourceUsageSnapshotsUpdated: (snapshots) => {
+			// 附上 token 用量与 worktree 磁盘体积（各自的监视器低频刷新），详情面板一并展示。
+			publishLiveTaskResourceUsageSnapshots(
+				snapshots.map((snapshot) =>
+					snapshot.attributedTaskCardId === null
+						? snapshot
+						: {
+								...snapshot,
+								modelTokenUsageAcrossTaskSessions:
+									taskAgentConversationModelTokenUsageJournalMonitor.summarizeLatestModelTokenUsageForTaskCard(
+										snapshot.workspaceId,
+										snapshot.attributedTaskCardId,
+									),
+								latestWorktreeDiskUsageBytes:
+									taskWorktreeDiskUsageMeasurementMonitor.getLatestWorktreeDiskUsageBytesForTaskCard(
+										snapshot.workspaceId,
+										snapshot.attributedTaskCardId,
+									),
+							},
+				),
+			);
+		},
+	});
+	// Claude Code / Codex 的模型 token 用量：每 5 分钟增量读 transcript / rollout，写累计快照进 journal。
+	const taskAgentConversationModelTokenUsageJournalMonitor = createTaskAgentConversationModelTokenUsageJournalMonitor({
+		listSessionSummariesWithWorkspace: () =>
+			listTerminalTaskResourceUsageAttributionSessionSources().flatMap(({ workspaceId, listSummaries }) =>
+				listSummaries().map((summary) => ({ workspaceId, summary })),
+			),
+	});
+	// task worktree 的实体磁盘体积：每个活跃 worktree 最多 24 小时量一次。
+	const taskWorktreeDiskUsageMeasurementMonitor = createTaskWorktreeDiskUsageMeasurementMonitor({
+		listTaskWorkingDirectoryAttributions: () =>
+			enumerateCurrentTaskResourceUsageAttributionRoots().taskWorkingDirectoryAttributions,
+		isKanbanManagedTaskWorktreePath: (workingDirectoryPath) =>
+			workingDirectoryPath.startsWith(`${getTaskWorktreesHomePath()}/`),
+	});
+	const countLiveInProcessClineSdkSessions = (): number => {
+		let liveSessionCount = 0;
+		for (const { listSummaries } of listClineTaskResourceUsageAttributionSessionSources()) {
+			for (const summary of listSummaries()) {
+				const { liveness } = resolveSessionFacets(summary);
+				if (liveness === "starting" || liveness === "live" || liveness === "retrying") {
+					liveSessionCount += 1;
+				}
+			}
+		}
+		return liveSessionCount;
+	};
 
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
@@ -439,39 +668,95 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 	};
 
+	// taskCardAction.* 的按卡串行器：必须是 runtime 级单例——api 对象按请求新建，串行器若也按请求新建就串不住任何东西。
+	const taskCardActionPerTaskCommandSerializer = createTaskCardActionPerTaskCommandSerializer();
+	// 跨项目切换面板「其他项目」行的 git 元数据缓存：同理必须是 runtime 级单例，多个标签页的轮询才能在这里去重。
+	const crossProjectTaskWorktreeGitMetadataCache = createCrossProjectTaskWorktreeGitMetadataCache({
+		listRegisteredWorkspacePathsById: async () =>
+			new Map((await listWorkspaceIndexEntries()).map((entry) => [entry.workspaceId, entry.repoPath])),
+		loadWorkspaceBoardById,
+	});
+
+	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
+		// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
+		// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
+		notifyExplorationThreadGraphAgentTurnStopped: explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+	};
+	// spool 重放走同一套 hooks ingest，只是不再「先排空 spool」（它自己就是排空）。
+	const hooksApiForHookEventsSpooledInAgentSessionPtyHost = createHooksApi({
+		...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+		ingestsHookEventsReplayedFromAgentSessionPtyHostSpool: true,
+	});
+	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
+		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
+	);
+
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
+		// 与路由上暴露的是同一个实例，不复制逻辑。
+		const runtimeApi = createRuntimeApi({
+			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+			getScopedTerminalManager,
+			getScopedClineTaskSessionService,
+			getScopedAcpTaskSessionService,
+			resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+			runCommand: deps.runCommand,
+			broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
+			broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+			broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
+			prepareForStateReset,
+			getUpdateStatus: deps.getUpdateStatus,
+			runUpdateNow: deps.runUpdateNow,
+			queuedTaskPromptDeliveryDispatcher,
+		});
+		const workspaceApi = createWorkspaceApi({
+			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+			getScopedClineTaskSessionService,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
+			buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
+			listProjectRuntimeSessionSummaries,
+			onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+				void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+			},
+		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			workspaceScope: scope.workspaceScope,
-			runtimeApi: createRuntimeApi({
-				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-				getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-				setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-				getScopedTerminalManager,
-				getScopedClineTaskSessionService,
-				getScopedAcpTaskSessionService,
-				resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-				runCommand: deps.runCommand,
-				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
-				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
-				prepareForStateReset,
-				getUpdateStatus: deps.getUpdateStatus,
-				runUpdateNow: deps.runUpdateNow,
-			}),
-			workspaceApi: createWorkspaceApi({
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				getScopedClineTaskSessionService,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			kanbanRequestOriginActorEvidence: {
+				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+					req.headers[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME],
+				),
+				webUiPageLoadRequestOriginNonceVerificationStatus:
+					verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue(
+						req.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME],
+					),
+			},
+			runtimeApi,
+			workspaceApi,
+			taskCardActionApi: createTaskCardActionApi({
+				runtimeApi,
+				workspaceApi,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
-				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
-				listProjectRuntimeSessionSummaries,
+				findTaskSessionSummaryLiveInRuntimeProcessMemory: findRuntimeSessionSummary,
+				taskCardActionPerTaskCommandSerializer,
+				// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
+				onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
+					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+				},
 			}),
 			projectsApi: createProjectsApi({
 				getActiveWorkspacePath: deps.workspaceRegistry.getActiveWorkspacePath,
@@ -506,18 +791,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
+				listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon:
+					deps.workspaceRegistry.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
+				readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
+					crossProjectTaskWorktreeGitMetadataCache.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries,
 				pickDirectoryPathFromSystemDialog: deps.pickDirectoryPathFromSystemDialog,
 				serverCwd: process.cwd(),
 			}),
 			hooksApi: createHooksApi({
-				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
-				// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
-				// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
-				notifyExplorationThreadGraphAgentTurnStopped:
-					explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+				...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+				drainPendingHookSpoolEntriesBeforeDirectHookIngest:
+					deps.agentSessionPtyHostHookSpool?.drainPendingHookSpoolEntriesBeforeDirectHookIngest,
 			}),
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
@@ -570,6 +854,26 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const manager = await getScopedTerminalManager(scope);
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
 				},
+			}),
+			workUnitRelationReadApi: createWorkUnitRelationReadApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+				readLatestNotificationSummaryTextOfTaskCard:
+					readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+			}),
+			workUnitRelationPresentationPreferenceApi: createWorkUnitRelationPresentationPreferenceApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				appendCommittedEventsIntoLedgerAndWaitForCommit:
+					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+			}),
+			workUnitRelationAssertionWriteApi: createWorkUnitRelationAssertionWriteApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				runInterWorkUnitRelationLedgerClientOperation:
+					runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 			}),
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,
@@ -787,7 +1091,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		// ── End passcode gate ─────────────────────────────────────────────────
 		(request as IncomingMessage & { __kanbanUpgradeHandled?: boolean }).__kanbanUpgradeHandled = true;
 		const requestedWorkspaceId = requestUrl.searchParams.get("workspaceId")?.trim() || null;
-		deps.runtimeStateHub.handleUpgrade(request, socket, head, { requestedWorkspaceId });
+		deps.runtimeStateHub.handleUpgrade(request, socket, head, {
+			requestedWorkspaceId,
+			initialWorkspaceMetadataProbeScope: parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl(requestUrl),
+		});
 	});
 	// [tui-freeze] 诊断:终端回显链路与所有任务的输入处理共享这个 Node 事件循环,
 	// 循环被同步重活占据时键盘输入会整体延迟——在 bridge 生命周期内持续采样延迟直方图。
@@ -795,6 +1102,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// fd 泄漏曾一路无声地越过 Darwin OPEN_MAX(10240)，才以「所有 git 调用 EBADF」的形式在一个毫不相干
 	// 的子系统里间接显形；这条探针让 fd 水位在爆炸前就可见，对任何一类 fd 泄漏回归都同样有效。
 	const stopProcessFileDescriptorWatermarkMonitor = startProcessFileDescriptorWatermarkMonitor();
+	// Kanban 进程自身的内存 / CPU 基线：固定服务器成本的对照，也是进程内 Cline SDK 会话唯一可见的资源面。
+	const stopKanbanRuntimeProcessSelfResourceSampleMonitor = startKanbanRuntimeProcessSelfResourceSampleMonitor({
+		countLiveInProcessClineSdkSessions,
+		countLiveSessionsWithOsProcess: () => enumerateCurrentTaskResourceUsageAttributionRoots().roots.length,
+	});
 	const terminalWebSocketBridge = createTerminalWebSocketBridge({
 		server,
 		resolveTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
@@ -836,12 +1148,26 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
+	queuedTaskPromptDeliveryDispatcher.start();
+	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
+	taskAttributedProcessTreeResourceSampler.start();
+	taskAgentConversationModelTokenUsageJournalMonitor.start();
+	taskWorktreeDiskUsageMeasurementMonitor.start();
 
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();
+			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
+			queuedTaskPromptDeliveryDispatcher.stop();
+			unregisterQueuedTaskPromptDeliveryDispatchObserver();
+			// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
+			taskAttributedProcessTreeResourceSampler.stop();
+			taskAgentConversationModelTokenUsageJournalMonitor.stop();
+			taskWorktreeDiskUsageMeasurementMonitor.stop();
+			stopKanbanRuntimeProcessSelfResourceSampleMonitor();
 			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
 			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
 			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {
@@ -857,10 +1183,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			clineTaskSessionServiceByWorkspaceId.clear();
 			clineWorkspacePathByWorkspaceId.clear();
 			await clineWatcherRegistry.close();
+			// 优雅退出主动销号，于是下一个实例不必等满宽限期才敢判本实例已死——重启后的排队 prompt
+			// 提醒因此立刻生效，而不是迟到一个宽限期。非优雅退出没有这一步，靠宽限期兜底。
+			await runtimeProcessInstanceHeartbeat.stop();
 			await deps.runtimeStateHub.close();
 			stopEventLoopDelayMonitor();
 			stopProcessFileDescriptorWatermarkMonitor();
 			await terminalWebSocketBridge.close();
+			await activatedInterWorkUnitRelationLedgerLiveCapture.deactivate();
 			await new Promise<void>((resolveClose, rejectClose) => {
 				server.close((error) => {
 					if (error) {

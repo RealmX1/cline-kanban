@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 /**
  * 置顶任务时（以及事后编辑时）填「我为什么盯着它」的小对话框。
@@ -63,6 +64,10 @@ export function TaskPinboardPinReasonDialog({
 	};
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+		// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			return;
+		}
 		// 原因是可换行的自由文本，所以裸 Enter 留给换行，用 cmd/ctrl+Enter 提交（与仓库内其他多行输入一致）。
 		if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 			event.preventDefault();

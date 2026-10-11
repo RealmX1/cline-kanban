@@ -427,3 +427,56 @@ describe("reasoning stream phase", () => {
 		expect(finishedMessage?.meta?.streamType).toBe("reasoning");
 	});
 });
+
+describe("ACP structured plan 阶段目标", () => {
+	it("用户投递与 plan 同一毫秒时，新的结构化目标仍是当前阶段", () => {
+		const { context } = createContext();
+		const deliveredAt = Date.now();
+		updateAcpSummary(context.entry, {
+			...deriveAcpFacetPatch("running", null, { pid: 4242, agentId: "omp" }),
+			agentCurrentWorkPhaseGoalInvalidatedAt: deliveredAt,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "omp",
+				nativeSessionId: SESSION_ID,
+				transcriptPath: null,
+				observedAt: deliveredAt,
+			},
+		});
+		applyAcpSessionUpdate(
+			context,
+			notify({
+				sessionUpdate: "plan",
+				entries: [{ content: "当前阶段", status: "in_progress", priority: "medium" }],
+			}),
+		);
+		expect(context.entry.summary.agentNativeCurrentWorkPhaseGoal?.updatedAt).toBeGreaterThan(deliveredAt);
+	});
+
+	it("只投影唯一进行中条目，重播与 Stop 后迟到事件不恢复当前目标", () => {
+		const { context } = createContext();
+		updateAcpSummary(context.entry, {
+			...deriveAcpFacetPatch("running", null, { pid: 4242, agentId: "omp" }),
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "omp",
+				nativeSessionId: SESSION_ID,
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const plan = notify({
+			sessionUpdate: "plan",
+			entries: [{ content: "验证 API 的最终结果", status: "in_progress", priority: "high" }],
+		});
+		applyAcpSessionUpdate(context, plan);
+		expect(context.entry.summary.agentNativeCurrentWorkPhaseGoal?.goalText).toBe("验证 API 的最终结果");
+		updateAcpSummary(context.entry, {
+			agentNativeCurrentWorkPhaseGoal: null,
+			...deriveAcpFacetPatch("awaiting_review", "hook", { pid: 4242, agentId: "omp" }),
+		});
+		applyAcpSessionUpdate(context, plan);
+		expect(context.entry.summary.agentNativeCurrentWorkPhaseGoal).toBeNull();
+		context.isReplayingPersistedConversationHistory = true;
+		applyAcpSessionUpdate(context, plan);
+		expect(context.entry.summary.agentNativeCurrentWorkPhaseGoal).toBeNull();
+	});
+});

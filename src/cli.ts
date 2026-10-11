@@ -8,10 +8,12 @@ import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
 import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
 import { registerDeploymentCommand } from "./commands/deployment";
+import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
+import { registerWorkUnitCommand } from "./commands/work-unit";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
 import type { RuntimeCommandRunResponse } from "./core/api-contract";
 import {
@@ -377,7 +379,7 @@ async function runScopedCommand(command: string, cwd: string): Promise<RuntimeCo
 	});
 }
 
-async function startServer(): Promise<{
+async function startServer(startServerOptions: { runtimePortWasAutoSelected: boolean }): Promise<{
 	url: string;
 	close: () => Promise<void>;
 	shutdown: () => Promise<void>;
@@ -402,6 +404,7 @@ async function startServer(): Promise<{
 		{ shutdownRuntimeServer },
 		{ createWorkspaceRegistry },
 		{ clearPendingUpdateNotification, getPendingUpdateNotification },
+		{ startAgentSessionPtyHostRuntimeFacadeWhenEnabled },
 	] = await Promise.all([
 		import("./projects/project-path.js"),
 		import("./server/directory-picker.js"),
@@ -411,9 +414,28 @@ async function startServer(): Promise<{
 		import("./server/shutdown-coordinator.js"),
 		import("./server/workspace-registry.js"),
 		import("./update/update.js"),
+		import("./agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-startup.js"),
 	]);
+	// 必须先于 workspace registry：registry 建 TerminalSessionManager 时就要拿到 hosted spawner。
+	const agentSessionPtyHostRuntimeFacade = await startAgentSessionPtyHostRuntimeFacadeWhenEnabled({
+		runtimePortWasAutoSelected: startServerOptions.runtimePortWasAutoSelected,
+		warn: (message) => {
+			console.warn(`[kanban] ${message}`);
+		},
+	});
 	let runtimeStateHub: RuntimeStateHub | undefined;
 	const workspaceRegistry = await createWorkspaceRegistry({
+		createHostedTerminalPtyProcessSpawnerForWorkspace: agentSessionPtyHostRuntimeFacade
+			? (workspaceId, workspaceRepositoryPath) =>
+					agentSessionPtyHostRuntimeFacade.createHostedTerminalPtyProcessSpawnerForWorkspace(
+						workspaceId,
+						workspaceRepositoryPath,
+					)
+			: undefined,
+		takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace: agentSessionPtyHostRuntimeFacade
+			? (workspaceId) =>
+					agentSessionPtyHostRuntimeFacade.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace(workspaceId)
+			: undefined,
 		cwd: process.cwd(),
 		loadGlobalRuntimeConfig,
 		loadRuntimeConfig,
@@ -421,11 +443,36 @@ async function startServer(): Promise<{
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
 		},
+		listConversationTaskSessionSummariesForWorkspace: (workspaceId) =>
+			runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? [],
 	});
 	runtimeStateHub = createRuntimeStateHub({
 		workspaceRegistry,
 	});
 	const runtimeHub = runtimeStateHub;
+	// 热重启接管必须在 listen（createRuntimeServer 内部）之前完成：浏览器若先连上，会看到「无活进程」的卡片并
+	// 触发前端自动续跑，起出第二个 agent。逐个加载有会话等待接管的 workspace，加载即接管。
+	if (agentSessionPtyHostRuntimeFacade) {
+		for (const candidatesOfWorkspace of agentSessionPtyHostRuntimeFacade.listHostedTerminalPtySessionAdoptionCandidatesByWorkspace()) {
+			if (
+				candidatesOfWorkspace.adoptionCandidates.length === 0 ||
+				candidatesOfWorkspace.workspaceRepositoryPath === null
+			) {
+				continue;
+			}
+			try {
+				await workspaceRegistry.ensureTerminalManagerForWorkspace(
+					candidatesOfWorkspace.workspaceId,
+					candidatesOfWorkspace.workspaceRepositoryPath,
+				);
+			} catch (error) {
+				console.warn(
+					`[kanban] could not load workspace ${candidatesOfWorkspace.workspaceId} to adopt its running agent sessions: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		agentSessionPtyHostRuntimeFacade.warnAboutHostedSessionsNotAdoptedDuringStartup();
+	}
 	for (const { workspaceId, terminalManager } of workspaceRegistry.listManagedWorkspaces()) {
 		runtimeHub.trackTerminalManager(workspaceId, terminalManager);
 	}
@@ -446,6 +493,17 @@ async function startServer(): Promise<{
 	const runtimeServer = await createRuntimeServer({
 		workspaceRegistry,
 		runtimeStateHub: runtimeHub,
+		agentSessionPtyHostHookSpool: agentSessionPtyHostRuntimeFacade
+			? {
+					bindSpooledHookIngestRequestApplier: (spooledHookIngestRequestApplier) =>
+						agentSessionPtyHostRuntimeFacade.bindSpooledHookIngestRequestApplier(spooledHookIngestRequestApplier),
+					drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId, taskId) =>
+						agentSessionPtyHostRuntimeFacade.drainPendingHookSpoolEntriesBeforeDirectHookIngest(
+							workspaceId,
+							taskId,
+						),
+				}
+			: undefined,
 		warn: (message) => {
 			console.warn(`[kanban] ${message}`);
 		},
@@ -511,6 +569,8 @@ async function startServer(): Promise<{
 			},
 			closeRuntimeServer: close,
 		});
+		// 关停里对 hosted 会话发出的 stop 等消息必须写进内核再断开，否则会留在用户态缓冲里随进程一起丢掉。
+		await agentSessionPtyHostRuntimeFacade?.closeControllerConnectionsAfterFlushingPendingFrames();
 	};
 
 	return {
@@ -521,13 +581,14 @@ async function startServer(): Promise<{
 }
 
 async function startServerWithAutoPortRetry(options: CliOptions): Promise<Awaited<ReturnType<typeof startServer>>> {
-	if (options.port?.mode !== "auto") {
-		return await startServer();
+	const runtimePortWasAutoSelected = options.port?.mode === "auto";
+	if (!runtimePortWasAutoSelected) {
+		return await startServer({ runtimePortWasAutoSelected });
 	}
 
 	while (true) {
 		try {
-			return await startServer();
+			return await startServer({ runtimePortWasAutoSelected });
 		} catch (error) {
 			if (!isAddressInUseError(error)) {
 				throw error;
@@ -700,10 +761,12 @@ function createProgram(invocationArgs: string[]): Command {
 	);
 
 	registerTaskCommand(program);
+	registerWorkUnitCommand(program);
 	registerHooksCommand(program);
 	registerExploratoryCommand(program);
 	registerDeploymentCommand(program);
 	registerVerificationCommand(program);
+	registerDiagnosticsCommand(program);
 
 	program
 		.command("mcp")

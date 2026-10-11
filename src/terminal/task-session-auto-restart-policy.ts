@@ -71,6 +71,7 @@ export function doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRe
 		case "stale_session_client_auto_resume":
 		case "home_agent_panel_auto_start":
 		case "durable_record_rebuilt_resume":
+		case "harness_background_session_reclaim_watch_auto_resume":
 			return false;
 	}
 }
@@ -182,13 +183,36 @@ export function deriveTaskSessionAutoRestartDecision(
 	};
 }
 
-export function describeTaskSessionAutoRestartCircuitBreak(reason: TaskSessionAutoRestartCircuitBreakReason): string {
+// 熔断文案。旧版一律以「请手动刷新终端」收尾，可刷新走的是同一份启动参数：若退出原因是确定性的（例如 Cursor 续跑
+// 撞上 "No previous chats found."），刷新只会再撞一次，用户被引进死循环。现在把上一代退出前最后一行输出带上，
+// 并如实说明刷新做的是什么，让人能自己判断该不该刷新。
+export function describeTaskSessionAutoRestartCircuitBreak(
+	reason: TaskSessionAutoRestartCircuitBreakReason,
+	lastNonEmptyTerminalOutputLineBeforeExit: string | null = null,
+): string {
+	const lastOutputSentence = lastNonEmptyTerminalOutputLineBeforeExit
+		? `最后一次退出前的输出：「${lastNonEmptyTerminalOutputLineBeforeExit}」。`
+		: "";
+	const refreshSentence =
+		"刷新终端会用同样的启动参数再试一次；若退出原因是确定性的（参数错误、要续的会话不存在之类），刷新同样会失败，需先排除成因。";
 	switch (reason) {
 		case "consecutive_fast_exit_auto_restarts_exhausted":
-			return `会话连续 ${MAX_CONSECUTIVE_FAILED_FAST_EXIT_AUTO_RESTARTS_BEFORE_CIRCUIT_BREAK} 次启动后都在 ${Math.round(MINIMUM_PTY_LIFETIME_TO_COUNT_AS_HEALTHY_TASK_SESSION_START_MS / 1000)} 秒内退出，已停止自动重启。请手动刷新终端。`;
+			return `会话连续 ${MAX_CONSECUTIVE_FAILED_FAST_EXIT_AUTO_RESTARTS_BEFORE_CIRCUIT_BREAK} 次启动后都在 ${Math.round(MINIMUM_PTY_LIFETIME_TO_COUNT_AS_HEALTHY_TASK_SESSION_START_MS / 1000)} 秒内退出，已停止自动重启。${lastOutputSentence}${refreshSentence}`;
 		case "per_task_rolling_hour_auto_restart_cap_reached":
-			return `该任务一小时内已自动重启 ${MAX_AUTO_RESTARTS_PER_TASK_PER_ROLLING_HOUR} 次，已停止自动重启。请手动刷新终端。`;
+			return `该任务一小时内已自动重启 ${MAX_AUTO_RESTARTS_PER_TASK_PER_ROLLING_HOUR} 次，已停止自动重启。${lastOutputSentence}${refreshSentence}`;
 		case "all_tasks_rolling_hour_fast_exit_auto_restart_cap_reached":
-			return `本进程一小时内的秒退自动重启已达 ${MAX_FAST_EXIT_AUTO_RESTARTS_ACROSS_ALL_TASKS_PER_ROLLING_HOUR} 次，已停止自动重启。请手动刷新终端。`;
+			return `本进程一小时内的秒退自动重启已达 ${MAX_FAST_EXIT_AUTO_RESTARTS_ACROSS_ALL_TASKS_PER_ROLLING_HOUR} 次，已停止自动重启。${lastOutputSentence}${refreshSentence}`;
 	}
+}
+
+// 从终端屏幕快照里取上一代退出前最后一行有内容的输出（跳过 kanban 自己写进镜像的 `[kanban]` 行），截到 200 字。
+export function selectLastNonEmptyAgentTerminalOutputLine(screenLines: readonly string[]): string | null {
+	for (let index = screenLines.length - 1; index >= 0; index -= 1) {
+		const line = screenLines[index]?.trim() ?? "";
+		if (line.length === 0 || line.startsWith("[kanban]")) {
+			continue;
+		}
+		return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+	}
+	return null;
 }

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -185,6 +186,98 @@ describe("cursorAdapter", () => {
 			}),
 		).rejects.toThrow("Cursor");
 	});
+
+	// task 203f3：Cursor 的身份由 kanban 在启动前分配，argv 必须把这个 id 用对。
+	const KANBAN_ASSIGNED_CURSOR_CHAT_ID = "a57d8fb0-3047-45d0-9695-b73f429974a5";
+	const RECORDED_CURSOR_CHAT_ID = "4debf190-1111-4222-8333-944444444444";
+
+	it("starts a fresh Cursor session on the kanban-assigned chat id and still submits the prompt and plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-fresh-start-assigned-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			startInPlanMode: true,
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(launch.args[resumeIndex + 1]).toBe(KANBAN_ASSIGNED_CURSOR_CHAT_ID);
+		expect(launch.args).toContain("--plan");
+		expect(launch.args.at(-1)).toContain("Implement the feature");
+		expect(launch.args).not.toContain("--continue");
+		// 全新开局不是续跑：不能武装实质输出抑制。
+		expect(launch.resumesPriorAgentConversation).toBe(false);
+	});
+
+	it("resumes a restarted Cursor session by its recorded chat id without re-sending the prompt or replaying plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-restart-by-recorded-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			// 用户自己写进 agent 命令的 `--continue` 会静默压过 `--resume <id>`（实测），必须剥掉。
+			args: ["--continue", "--resume", "11111111-2222-4333-8444-555555555555"],
+			cwd: "/tmp/repo",
+			prompt: "",
+			startInPlanMode: true,
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "cursor",
+				sourceSessionId: RECORDED_CURSOR_CHAT_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args.filter((argument) => argument === "--resume")).toHaveLength(1);
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.args).not.toContain("11111111-2222-4333-8444-555555555555");
+		// `--plan` 在续跑时会把 chat 的 mode 覆写回 plan。
+		expect(launch.args).not.toContain("--plan");
+		expect(launch.args.at(-1)).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("keeps --continue only for a legacy Cursor resume that has no recorded chat id", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-legacy-resume-latest",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "",
+			resumeFromTrash: true,
+			// 即便会话上还挂着一个分配好的 id，续跑也不该拿它开新对话。
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("--resume");
+	});
+
+	it("passes --trust only for kanban task worktrees so the Workspace Trust dialog cannot swallow the first prompt", async () => {
+		const homeDirectoryPath = setupTempHome();
+		const taskWorktreeLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-worktree-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, ".cline", "worktrees", "8ef28", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(taskWorktreeLaunch.args).toContain("--trust");
+
+		const userRepositoryLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-inplace-no-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, "Documents", "GitHub", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(userRepositoryLaunch.args).not.toContain("--trust");
+	});
 });
 
 describe("prepareAgentLaunch hook strategies", () => {
@@ -218,6 +311,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:permission_request:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:pre_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_tool_use:0:0"');
+		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_compact:0:0"');
 		expect(hookTrustState[0]).toContain('trusted_hash="sha256:');
 		expect(launchCommand).toContain("timeout=8");
 		expect(launchCommand).not.toContain("codex-wrapper");
@@ -787,7 +881,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes Claude settings with explicit permission hook", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "claude",
 			binary: "claude",
@@ -797,7 +891,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const settingsPath = join(homedir(), ".cline", "kanban", "hooks", "claude", "settings.json");
+		const settingsPath = launch.args[launch.args.indexOf("--settings") + 1] ?? "";
+		expect(settingsPath).toMatch(/[/\\]\.cline[/\\]kanban[/\\]hooks[/\\]claude[/\\]settings-[0-9a-f]{12}\.json$/);
 		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
 			hooks?: Record<string, unknown>;
 		};
@@ -805,6 +900,56 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(settings.hooks?.PreToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUseFailure).toBeDefined();
+		// 压缩完成推进 Cache warm 起点：不带 matcher（manual / auto 都收）。
+		expect(JSON.stringify(settings.hooks?.PostCompact)).toContain(
+			"main_agent_conversation_context_compaction_completed",
+		);
+	});
+
+	it("never rewrites a hook settings file a running agent may have loaded: new content goes to a new file", async () => {
+		setupTempHome();
+		const launchWithDefaultPermissions = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		const settingsPathOfDefaultPermissions =
+			launchWithDefaultPermissions.args[launchWithDefaultPermissions.args.indexOf("--settings") + 1] ?? "";
+		const settingsContentLoadedByFirstAgent = readFileSync(settingsPathOfDefaultPermissions, "utf8");
+
+		const launchStartingInPlanMode = await prepareAgentLaunch({
+			taskId: "task-2",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			startInPlanMode: true,
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		const settingsPathOfPlanModeStart =
+			launchStartingInPlanMode.args[launchStartingInPlanMode.args.indexOf("--settings") + 1] ?? "";
+
+		expect(settingsPathOfPlanModeStart).not.toBe(settingsPathOfDefaultPermissions);
+		expect(readFileSync(settingsPathOfDefaultPermissions, "utf8")).toBe(settingsContentLoadedByFirstAgent);
+		expect(JSON.parse(readFileSync(settingsPathOfPlanModeStart, "utf8")).autonomyMode).toBe("spec");
+
+		const relaunchWithDefaultPermissions = await prepareAgentLaunch({
+			taskId: "task-3",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		expect(relaunchWithDefaultPermissions.args[relaunchWithDefaultPermissions.args.indexOf("--settings") + 1]).toBe(
+			settingsPathOfDefaultPermissions,
+		);
 	});
 
 	it("forks Claude with a read-only tool set for a By the way session", async () => {
@@ -849,7 +994,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes Gemini settings with AfterTool mapped to to_in_progress", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "gemini",
 			binary: "gemini",
@@ -859,7 +1004,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const settingsPath = join(homedir(), ".cline", "kanban", "hooks", "gemini", "settings.json");
+		const settingsPath = launch.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH ?? "";
+		expect(settingsPath.startsWith(join(homedir(), ".cline", "kanban", "hooks", "gemini", "settings-"))).toBe(true);
 		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
 			hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
 		};
@@ -872,7 +1018,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes OpenCode plugin with root-session filtering and permission hooks", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "opencode",
 			binary: "opencode",
@@ -882,7 +1028,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const pluginPath = join(homedir(), ".cline", "kanban", "hooks", "opencode", "kanban.js");
+		const config = JSON.parse(readFileSync(launch.env.OPENCODE_CONFIG ?? "", "utf8")) as { plugin: string[] };
+		const pluginPath = fileURLToPath(config.plugin[0] ?? "");
+		expect(pluginPath.startsWith(join(homedir(), ".cline", "kanban", "hooks", "opencode", "kanban-"))).toBe(true);
 		const plugin = readFileSync(pluginPath, "utf8");
 		expect(plugin).toContain("parentID");
 		expect(plugin).toContain('"permission.ask"');
@@ -1332,6 +1480,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			"hooks.PermissionRequest",
 			"hooks.PreToolUse",
 			"hooks.PostToolUse",
+			"hooks.PostCompact",
 		]) {
 			const configIndex = launch.args.findIndex((arg) => arg.startsWith(`${key}=`));
 			expect(configIndex).toBeGreaterThan(-1);
@@ -2114,7 +2263,12 @@ describe("Kimi 延迟首发文本", () => {
 			prompt: "第一行\n第二行",
 			resumeFromTrash,
 		});
-		expect(launch.deferredStartupPromptText).toBe(resumeFromTrash ? undefined : "第一行\n第二行");
+		if (resumeFromTrash) {
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+		} else {
+			expect(launch.deferredStartupPromptText).toContain("rename-current-task");
+			expect(launch.deferredStartupPromptText?.endsWith("第一行\n第二行")).toBe(true);
+		}
 	});
 });
 

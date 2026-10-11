@@ -18,16 +18,38 @@
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
+      "@runtime-inter-work-unit-recorded-relation-projection-contract": [
+        "../src/core/inter-work-unit-recorded-relation-projection-contract.ts"
+      ],
+      "@runtime-inter-work-unit-asserted-relation-kind-registry-contract": [
+        "../src/core/inter-work-unit-asserted-relation-kind-registry-contract.ts"
+      ],
+      "@runtime-inter-work-unit-relation-assertion-lifecycle-event-contract": [
+        "../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract.ts"
+      ],
+      "@runtime-work-unit-relation-read-api-contract": ["../src/core/work-unit-relation-read-api-contract.ts"],
+      "@runtime-work-unit-relation-assertion-write-api-contract": [
+        "../src/core/work-unit-relation-assertion-write-api-contract.ts"
+      ],
+      "@runtime-kanban-web-ui-page-load-request-origin-nonce": [
+        "../src/core/kanban-web-ui-page-load-request-origin-nonce.ts"
+      ],
       "@runtime-last-conversation-progress-observation": ["../src/core/last-conversation-progress-observation.ts"],
       "@runtime-notification-intelligence-purpose-binding-problems": [
         "../src/core/notification-intelligence-purpose-binding-problems.ts"
       ],
+      "@runtime-cross-project-recently-active-task-switcher-section-assignment": [
+        "../src/core/cross-project-recently-active-task-switcher-section-assignment.ts"
+      ],
       "@runtime-session-activity": ["../src/core/session-activity.ts"],
+      "@runtime-state-stream-workspace-metadata-probe-scope-declaration": ["../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts"],
       "@runtime-trpc": ["../src/trpc/app-router.ts"],
       "@runtime-shortcuts": ["../src/config/shortcut-utils.ts"],
       "@runtime-task-agent-permission-mode": ["../src/core/task-agent-permission-mode.ts"],
+      "@runtime-task-card-action-board-column-transitions": ["../src/core/task-card-action-board-column-transitions.ts"],
       "@runtime-task-create-base-ref-resolution": ["../src/core/task-create-base-ref-resolution.ts"],
       "@runtime-task-id": ["../src/core/task-id.ts"],
+      "@runtime-task-pinboard-pinning": ["../src/core/task-pinboard-pinning.ts"],
       "@runtime-task-title": ["../src/core/task-title.ts"],
       "@runtime-task-worktree-path": ["../src/workspace/task-worktree-path.ts"],
       "@runtime-task-state": ["../src/core/task-board-mutations.ts"]

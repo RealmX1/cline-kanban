@@ -13,10 +13,17 @@ vi.mock("proper-lockfile", () => ({
 	lock: lockfileMocks.lock,
 }));
 
-import { LockedFileSystem } from "../../src/fs/locked-file-system";
+import {
+	DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
+	DEFAULT_LOCK_STALE_MS,
+	LOCK_ACQUISITION_WAIT_BUDGET_MARGIN_BEYOND_STALE_THRESHOLD_MS,
+	LockedFileSystem,
+	sumLockAcquisitionRetryWaitBudgetMs,
+} from "../../src/fs/locked-file-system";
 
 type LockOptionsShape = {
 	onCompromised?: (error: Error) => void;
+	retries?: unknown;
 };
 
 describe("LockedFileSystem", () => {
@@ -122,6 +129,32 @@ describe("LockedFileSystem", () => {
 			// 且绝不能被误记为良性（区别于 compromise 善后）。
 			const loggedAsBenign = stderrLines.some((line) => line.includes("release-failed-benign"));
 			expect(loggedAsBenign).toBe(false);
+		} finally {
+			tempDir.cleanup();
+		}
+	});
+
+	it("waits at least the stale threshold plus margin before giving up on a held lock", () => {
+		// 不变式：活着但慢的持有者不能比「已经死掉的持有者被判 stale」更早让等待方失败。
+		// 旧预算 200×25ms≈5s < 30s stale，高负载下新任务的 ensureWorktree 因此抛 ELOCKED。
+		expect(
+			sumLockAcquisitionRetryWaitBudgetMs(DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD),
+		).toBeGreaterThanOrEqual(DEFAULT_LOCK_STALE_MS + LOCK_ACQUISITION_WAIT_BUDGET_MARGIN_BEYOND_STALE_THRESHOLD_MS);
+		// 公式自检：旧配置算出来正是那个过短的 5s。
+		expect(sumLockAcquisitionRetryWaitBudgetMs({ retries: 200, factor: 1, minTimeout: 25, maxTimeout: 50 })).toBe(
+			5_000,
+		);
+	});
+
+	it("passes the stale-covering retry schedule to proper-lockfile when the caller does not override it", async () => {
+		const tempDir = createTempDir("kanban-locked-fs-");
+		try {
+			const lockedFileSystem = new LockedFileSystem();
+
+			await lockedFileSystem.withLock({ path: join(tempDir.path, "state.json"), type: "file" }, async () => {});
+
+			const options = lockfileMocks.lock.mock.calls[0]?.[1] as LockOptionsShape;
+			expect(options.retries).toEqual(DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD);
 		} finally {
 			tempDir.cleanup();
 		}

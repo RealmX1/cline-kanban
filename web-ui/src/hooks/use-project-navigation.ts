@@ -63,6 +63,9 @@ export interface UseProjectNavigationResult {
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
 	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
 	latestExplorationThreadGraphUpdate: ReturnType<typeof useRuntimeStateStream>["latestExplorationThreadGraphUpdate"];
+	queuedTaskPromptDeliveryProjectionsByTaskId: ReturnType<
+		typeof useRuntimeStateStream
+	>["queuedTaskPromptDeliveryProjectionsByTaskId"];
 	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
 	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
@@ -114,6 +117,7 @@ export function useProjectNavigation({
 		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -147,13 +151,21 @@ export function useProjectNavigation({
 
 	const handleSelectProject = useCallback(
 		(projectId: string) => {
-			if (!projectId || projectId === currentProjectId) {
+			if (!projectId) {
+				return;
+			}
+			if (projectId === currentProjectId) {
+				// 切换在途时选回当前项目 = 撤销这次切换。只 return 的话 requestedProjectId 仍指向在途目标，
+				// 导航最后照样落到目标项目（跨项目打开的 Cancel、在途期间点回原项目的任务都踩过）。
+				if (requestedProjectId !== null && requestedProjectId !== currentProjectId) {
+					setRequestedProjectId(projectId);
+				}
 				return;
 			}
 			onProjectSwitchStart();
 			setRequestedProjectId(projectId);
 		},
-		[currentProjectId, onProjectSwitchStart],
+		[currentProjectId, onProjectSwitchStart, requestedProjectId],
 	);
 
 	const handleAddProjectSuccess = useCallback(
@@ -345,6 +357,7 @@ export function useProjectNavigation({
 		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,

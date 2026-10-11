@@ -61,7 +61,9 @@ function toTaskWorkspaceInfo(metadata: RuntimeTaskWorkspaceMetadata): RuntimeTas
 	};
 }
 
-function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): ReviewTaskWorkspaceSnapshot {
+// 跨项目切换面板「其他项目」行的 store（cross-project-task-worktree-git-metadata-store.ts）也用这两个函数：
+// 同一份运行时结构、同一套展示规则，不各写一遍。
+export function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): ReviewTaskWorkspaceSnapshot {
 	return {
 		taskId: metadata.taskId,
 		path: metadata.path,
@@ -136,7 +138,7 @@ function areTaskWorkspaceInfosEqual(
 	);
 }
 
-function areTaskWorkspaceSnapshotsEqual(
+export function areTaskWorkspaceSnapshotsEqual(
 	a: ReviewTaskWorkspaceSnapshot | null,
 	b: ReviewTaskWorkspaceSnapshot | null,
 ): boolean {

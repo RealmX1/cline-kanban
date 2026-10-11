@@ -13,6 +13,7 @@ import { renderFuzzyHighlightedText } from "@/components/shared/render-fuzzy-hig
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeClineReasoningEffort } from "@/runtime/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 const MATCHED_TEXT_STYLE = {
 	color: "var(--color-text-primary)",
@@ -196,6 +197,10 @@ export function ClineChatModelSelector({
 
 	const handleSearchInputKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLInputElement>) => {
+			// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
+				return;
+			}
 			if (filteredModelOptions.length === 0) {
 				if (event.key === "Escape") {
 					event.preventDefault();

@@ -1,5 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import type * as ReactHotkeysHookModule from "react-hotkeys-hook";
 import { useHotkeys } from "react-hotkeys-hook";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -67,6 +68,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={handleToggleGitHistory}
 					handleCloseGitHistory={() => {}}
 					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -113,6 +115,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}
 					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -152,6 +155,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
 					onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -191,6 +195,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
 					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -230,6 +235,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
 					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -269,6 +275,7 @@ describe("useAppHotkeys", () => {
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
 					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={null}
 				/>,
 			);
 		});
@@ -284,5 +291,154 @@ describe("useAppHotkeys", () => {
 		});
 
 		expect(handleToggleTaskSpotlightSearch).not.toHaveBeenCalled();
+	});
+
+	it("toggles between Board Scope and the focused task's project on Mod+E, but not behind an open dialog", async () => {
+		const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					isDetailTerminalOpen={false}
+					isHomeTerminalOpen={false}
+					isHomeGitHistoryOpen={false}
+					canUseCreateTaskShortcut
+					canUseTaskSpotlightSearch
+					handleToggleDetailTerminal={() => {}}
+					handleToggleHomeTerminal={() => {}}
+					handleToggleExpandDetailTerminal={() => {}}
+					handleToggleExpandHomeTerminal={() => {}}
+					handleOpenCreateTask={() => {}}
+					handleToggleTaskSpotlightSearch={() => {}}
+					handleOpenSettings={() => {}}
+					handleToggleGitHistory={() => {}}
+					handleCloseGitHistory={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
+					handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={
+						handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
+					}
+				/>,
+			);
+		});
+
+		const scopeToggleCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "mod+e");
+		if (!scopeToggleCall || typeof scopeToggleCall[1] !== "function") {
+			throw new Error("Expected the scope toggle shortcut to be registered.");
+		}
+		const scopeToggleHandler = scopeToggleCall[1] as (event: KeyboardEvent) => void;
+		const dialog = document.createElement("div");
+		dialog.setAttribute("role", "dialog");
+		const inputInsideDialog = document.createElement("input");
+		dialog.appendChild(inputInsideDialog);
+		document.body.appendChild(dialog);
+
+		act(() => {
+			const eventInsideDialog = new KeyboardEvent("keydown", { cancelable: true });
+			Object.defineProperty(eventInsideDialog, "target", { value: inputInsideDialog });
+			scopeToggleHandler(eventInsideDialog);
+		});
+		expect(handleToggleBetweenBoardScopeAndFocusedTaskProjectScope).not.toHaveBeenCalled();
+
+		act(() => {
+			scopeToggleHandler(new KeyboardEvent("keydown", { cancelable: true }));
+		});
+		expect(handleToggleBetweenBoardScopeAndFocusedTaskProjectScope).toHaveBeenCalledTimes(1);
+		dialog.remove();
+	});
+
+	// 走真实的 react-hotkeys-hook：库在调回调之前就按 preventDefault / enabled 处理事件，
+	// 只调回调的桩测不出「回调早退了但 ⌘E 仍被吞」。
+	describe("Mod+E dispatched through the real react-hotkeys-hook", () => {
+		beforeEach(async () => {
+			const actualReactHotkeysHookModule =
+				await vi.importActual<typeof ReactHotkeysHookModule>("react-hotkeys-hook");
+			mockUseHotkeys.mockImplementation(actualReactHotkeysHookModule.useHotkeys);
+		});
+
+		async function renderAppHotkeysWithBoardOrFocusedTaskProjectScopeToggleHandler(
+			handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: (() => void) | null,
+		): Promise<void> {
+			await act(async () => {
+				root.render(
+					<HookHarness
+						selectedCard={null}
+						isDetailTerminalOpen={false}
+						isHomeTerminalOpen={false}
+						isHomeGitHistoryOpen={false}
+						canUseCreateTaskShortcut
+						canUseTaskSpotlightSearch
+						handleToggleDetailTerminal={() => {}}
+						handleToggleHomeTerminal={() => {}}
+						handleToggleExpandDetailTerminal={() => {}}
+						handleToggleExpandHomeTerminal={() => {}}
+						handleOpenCreateTask={() => {}}
+						handleToggleTaskSpotlightSearch={() => {}}
+						handleOpenSettings={() => {}}
+						handleToggleGitHistory={() => {}}
+						handleCloseGitHistory={() => {}}
+						onRequestStartAllReadyBacklogTasks={() => {}}
+						handleToggleBetweenBoardScopeAndFocusedTaskProjectScope={
+							handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
+						}
+					/>,
+				);
+			});
+		}
+
+		function dispatchCancelableModifierEKeydownFrom(
+			target: EventTarget,
+			modifierKey: "metaKey" | "ctrlKey",
+		): KeyboardEvent {
+			const modifierEKeydownEvent = new KeyboardEvent("keydown", {
+				key: "e",
+				code: "KeyE",
+				[modifierKey]: true,
+				bubbles: true,
+				cancelable: true,
+			});
+			act(() => {
+				target.dispatchEvent(modifierEKeydownEvent);
+			});
+			return modifierEKeydownEvent;
+		}
+
+		it("leaves Mod+E to the browser when there is no scope to toggle", async () => {
+			await renderAppHotkeysWithBoardOrFocusedTaskProjectScopeToggleHandler(null);
+
+			expect(dispatchCancelableModifierEKeydownFrom(document.body, "metaKey").defaultPrevented).toBe(false);
+			expect(dispatchCancelableModifierEKeydownFrom(document.body, "ctrlKey").defaultPrevented).toBe(false);
+		});
+
+		it("leaves Mod+E to the browser inside an open dialog and does not toggle behind it", async () => {
+			const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = vi.fn();
+			await renderAppHotkeysWithBoardOrFocusedTaskProjectScopeToggleHandler(
+				handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
+			);
+			const dialog = document.createElement("div");
+			dialog.setAttribute("role", "dialog");
+			const inputInsideDialog = document.createElement("input");
+			dialog.appendChild(inputInsideDialog);
+			document.body.appendChild(dialog);
+
+			try {
+				expect(dispatchCancelableModifierEKeydownFrom(inputInsideDialog, "metaKey").defaultPrevented).toBe(false);
+				expect(handleToggleBetweenBoardScopeAndFocusedTaskProjectScope).not.toHaveBeenCalled();
+			} finally {
+				dialog.remove();
+			}
+		});
+
+		it("prevents the browser default and toggles the scope on Mod+E outside dialogs", async () => {
+			const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = vi.fn();
+			await renderAppHotkeysWithBoardOrFocusedTaskProjectScopeToggleHandler(
+				handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
+			);
+
+			expect(dispatchCancelableModifierEKeydownFrom(document.body, "metaKey").defaultPrevented).toBe(true);
+			expect(handleToggleBetweenBoardScopeAndFocusedTaskProjectScope).toHaveBeenCalledTimes(1);
+			expect(dispatchCancelableModifierEKeydownFrom(document.body, "ctrlKey").defaultPrevented).toBe(true);
+			expect(handleToggleBetweenBoardScopeAndFocusedTaskProjectScope).toHaveBeenCalledTimes(2);
+		});
 	});
 });

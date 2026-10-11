@@ -148,6 +148,22 @@ describe("per-task session start exclusivity", () => {
 		expect(restoreSnapshot?.snapshot).toContain("codex adapter could not prepare");
 	});
 
+	it("pushes the failure explanation to a viewer that was already attached when the start failed", async () => {
+		// 镜像只服务之后才挂上来的 viewer。新任务的面板在卡片进 In Progress 那一刻就挂上了，若失败原因
+		// 只进镜像，这个 viewer 看到的是一块空终端，面板只能把它解释成「会话随上一个运行时没了」。
+		prepareAgentLaunchMock.mockRejectedValueOnce(new Error("codex adapter could not prepare"));
+		const manager = new TerminalSessionManager();
+		const attachedViewerOnOutput = vi.fn();
+		const attachedViewerOnState = vi.fn();
+		manager.attach("task-1", { onState: attachedViewerOnState, onOutput: attachedViewerOnOutput, onExit: vi.fn() });
+
+		await expect(manager.startTaskSession(startTaskSessionRequestFor("task-1"))).rejects.toThrow();
+
+		const outputDeliveredToAttachedViewer = attachedViewerOnOutput.mock.calls.map((call) => String(call[0])).join("");
+		expect(outputDeliveredToAttachedViewer).toContain("codex adapter could not prepare");
+		expect(attachedViewerOnState).toHaveBeenLastCalledWith(expect.objectContaining({ liveness: "failed" }));
+	});
+
 	it("runs refresh's stop and start under one gate without deadlocking on itself", async () => {
 		// refreshTaskTerminal 现在整体持有闸门（forceStop 与 start 不再可能被别的请求插进中间）。
 		// 这条用例锁的是这个改动**自身**最大的回归风险：内部若误调公开的 startTaskSession，

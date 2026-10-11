@@ -145,6 +145,62 @@ describe("deriveCardSessionActivity", () => {
 		});
 	});
 
+	describe("agent native conversation persistence (Cursor chat never established)", () => {
+		function makeObservation(
+			persistenceStatus: NonNullable<
+				RuntimeTaskSessionSummary["agentNativeConversationPersistenceObservation"]
+			>["persistenceStatus"],
+			suspectedBlockingCause: "agent_workspace_trust_prompt_awaiting_answer" | null = null,
+		): RuntimeTaskSessionSummary["agentNativeConversationPersistenceObservation"] {
+			return {
+				persistenceStatus,
+				nativeSessionId: null,
+				workingDirectoryPath: "/tmp/worktree",
+				suspectedBlockingCause,
+				observedAt: 1,
+			};
+		}
+
+		it("warns on the card the moment a live session's first prompt has not reached the chat store, naming the trust dialog", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					agentId: "cursor",
+					agentNativeConversationPersistenceObservation: makeObservation(
+						"first_prompt_not_persisted_within_startup_window",
+						"agent_workspace_trust_prompt_awaiting_answer",
+					),
+					latestHookActivity: makeHookActivity({ activityText: "Agent active" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.warning, text: "对话未建立：终端在等你信任工作区" });
+		});
+
+		it("replaces the misleading circuit-break story with 'never established' once the session is gone", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					agentId: "cursor",
+					reviewReason: "exit",
+					agentNativeConversationPersistenceObservation: makeObservation(
+						"conversation_never_established_in_agent_native_store",
+					),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.warning, text: "对话从未建立，无法续跑" });
+		});
+
+		it("stays out of the way once the conversation is established", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					agentId: "cursor",
+					agentNativeConversationPersistenceObservation: makeObservation(
+						"conversation_established_in_agent_native_store",
+					),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+		});
+	});
+
 	describe("awaiting-review final message", () => {
 		it("shows the final message verbatim regardless of hook event name (review turn → success)", () => {
 			const result = deriveCardSessionActivity(

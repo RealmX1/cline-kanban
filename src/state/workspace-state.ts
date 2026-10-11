@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -20,10 +20,19 @@ import {
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
-import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
+import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
+import {
+	logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite,
+	removeTaskSessionSummariesOwnedByOtherWorkspaces,
+	type TaskSessionSummariesOwnedByOtherWorkspacesRemoval,
+} from "./task-session-summaries-owned-by-other-workspaces-removal";
+import {
+	getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
+	type TaskMutationIntentWithResolvedActor,
+} from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 
@@ -160,7 +169,6 @@ function createEmptyBoard(): RuntimeBoardData {
 			title: column.title,
 			cards: [],
 		})),
-		dependencies: [],
 	};
 }
 
@@ -416,10 +424,9 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
 	const boardPath = getWorkspaceBoardPath(workspaceId);
 	const rawBoard = await readJsonFile(boardPath);
-	return updateTaskDependencies(
-		reconcileBoardColumns(
-			parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
-		),
+	// 旧盘里已退役的 `dependencies` 键由 runtimeBoardDataSchema（非 strict）在解析时静默剥离。
+	return reconcileBoardColumns(
+		parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
 	);
 }
 
@@ -732,7 +739,7 @@ export async function loadWorkspaceContext(
 		};
 	}
 
-	return await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
+	const ensuredWorkspaceId = await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
 		let index = await readWorkspaceIndex();
 		const existingEntry = findWorkspaceEntry(index, repoPath);
 		const ensured = existingEntry
@@ -742,14 +749,19 @@ export async function loadWorkspaceContext(
 		if (ensured.changed) {
 			await writeWorkspaceIndex(index);
 		}
-
-		return {
-			repoPath,
-			workspaceId: ensured.entry.workspaceId,
-			statePath: getWorkspaceDirectoryPath(ensured.entry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
-		};
+		return ensured.entry.workspaceId;
 	});
+
+	// git 探测刻意放在全局 index 锁**之外**：它是四次同步 spawnSync git，与 index 无关；放在锁里会把
+	// 高负载下被放大的 git 耗时（且期间 event loop 被同步阻塞）整段算进持锁时间，所有项目的
+	// ensureWorktree / startTaskSession / saveState 都在这把锁上排队，等太久就抛 ELOCKED。
+	// 抛错时机不变：index 条目照旧先写入，再因非 git 目录抛出。
+	return {
+		repoPath,
+		workspaceId: ensuredWorkspaceId,
+		statePath: getWorkspaceDirectoryPath(ensuredWorkspaceId),
+		git: detectGitRepositoryInfo(repoPath),
+	};
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {
@@ -802,6 +814,18 @@ export async function loadPersistedWorkspaceStateById(workspaceId: string): Prom
 	};
 }
 
+// 只读 sessions.json（不碰 board / meta）。给跨项目视图读未加载项目的会话用；调用方按下面的文件路径 stat
+// 做 mtime 缓存——这个文件单个可达数 MB，不能每次广播都重新解析。
+export function getPersistedWorkspaceSessionsFilePathById(workspaceId: string): string {
+	return getWorkspaceSessionsPath(workspaceId);
+}
+
+export async function loadPersistedWorkspaceSessionsById(
+	workspaceId: string,
+): Promise<Record<string, RuntimeTaskSessionSummary>> {
+	return await readWorkspaceSessions(workspaceId);
+}
+
 export async function savePersistedWorkspaceSessionsById(
 	workspaceId: string,
 	sessions: Record<string, RuntimeTaskSessionSummary>,
@@ -833,12 +857,18 @@ export async function savePersistedWorkspaceSessionsById(
 	});
 }
 
+// 只有第一种结果推进了 meta.revision（调用方据此决定是否广播整份 workspace 快照）。
+export type AgentNativeConversationSessionIdentityPersistenceOutcome =
+	| "persisted_new_identity_and_invalidated_stale_snapshot_revision"
+	| "persisted_reconfirmed_identity_observation_time_without_revision_change"
+	| "already_persisted_without_write";
+
 // 身份是重启寻址所需的会话事实，不能等待浏览器保存 board 或正常关机才落盘。
 export async function persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
 	workspaceId: string,
 	taskId: string,
 	readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
-): Promise<boolean> {
+): Promise<AgentNativeConversationSessionIdentityPersistenceOutcome> {
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
 		const sessions = await readWorkspaceSessions(workspaceId);
 		const currentMeta = await readWorkspaceMeta(workspaceId);
@@ -860,7 +890,17 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 				(isSameAgentNativeConversationSessionIdentity(savedIdentity, identity) &&
 					savedIdentity.observedAt === identity.observedAt))
 		) {
-			return false;
+			return "already_persisted_without_write";
+		}
+		const nextSessions = { ...sessions, [taskId]: parsedSummary };
+		// 同一身份的再次确认（每个带 session id 的 hook 都会来一次）只推进 observedAt 水位：不动 revision。
+		// 推 revision 会让所有客户端整板重水合、让在途的整板保存冲突，曾把浏览器里尚未落盘的新卡整张抹掉（cf427）。
+		// 迟到的陈旧快照仍拿不回旧水位：saveWorkspaceState 在同一把目录锁内按 observedAt 保留较新的盘上身份。
+		if (savedIdentity && isSameAgentNativeConversationSessionIdentity(savedIdentity, identity)) {
+			await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, {
+				lock: null,
+			});
+			return "persisted_reconfirmed_identity_observation_time_without_revision_change";
 		}
 		// 先使旧快照的 revision 失效，再替换 sessions。后一步失败允许 revision 空增，重试仍会补存身份。
 		await lockedFileSystem.writeJsonFileAtomic(
@@ -868,12 +908,28 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 			{ revision: currentMeta.revision + 1, updatedAt: Date.now() } satisfies WorkspaceStateMeta,
 			{ lock: null },
 		);
-		await lockedFileSystem.writeJsonFileAtomic(
-			getWorkspaceSessionsPath(workspaceId),
-			{ ...sessions, [taskId]: parsedSummary },
-			{ lock: null },
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, { lock: null });
+		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
+			{
+				workspaceId,
+				kanbanTaskConversationSessionId: taskId,
+				sessionSummary: parsedSummary,
+				previouslyPersistedAgentNativeConversationSessionIdentity: savedIdentity ?? null,
+			},
 		);
-		return true;
+		return "persisted_new_identity_and_invalidated_stale_snapshot_revision";
+	});
+}
+
+function removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+	context: RuntimeWorkspaceContext,
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+): TaskSessionSummariesOwnedByOtherWorkspacesRemoval {
+	return removeTaskSessionSummariesOwnedByOtherWorkspaces({
+		workspaceId: context.workspaceId,
+		workspaceRepositoryPath: context.repoPath,
+		taskWorktreesHomePath: getTaskWorktreesHomePath(),
+		sessions,
 	});
 }
 
@@ -883,19 +939,23 @@ export async function loadWorkspaceState(
 ): Promise<RuntimeWorkspaceStateResponse> {
 	const context = await loadWorkspaceContext(cwd, options);
 	const board = await readWorkspaceBoard(context.workspaceId);
-	const sessions = await readWorkspaceSessions(context.workspaceId);
+	// 别的项目串写进来的会话不交给调用方（重启水合、整板快照、浏览器）；盘上的在下一次写入时自愈。
+	const sessions = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+		context,
+		await readWorkspaceSessions(context.workspaceId),
+	).sessionsWithoutSummariesOwnedByOtherWorkspaces;
 	const meta = await readWorkspaceMeta(context.workspaceId);
 	return toWorkspaceStateResponse(context, board, sessions, meta.revision);
 }
 
 export async function saveWorkspaceState(
 	cwd: string,
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor,
 	payload: RuntimeWorkspaceStateSaveRequest,
 ): Promise<RuntimeWorkspaceStateResponse> {
 	const parsedPayload = parseWorkspaceStateSavePayload(payload);
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
-		const metaPath = getWorkspaceMetaPath(context.workspaceId);
 		const currentMeta = await readWorkspaceMeta(context.workspaceId);
 		const expectedRevision = parsedPayload.expectedRevision;
 		if (
@@ -908,12 +968,28 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+			context,
+			persistedBoard,
+			persistedSessions,
+			currentMeta.revision,
+		);
+		// 客户端（含没刷新的旧 bundle）发来的整份 sessions 里可能夹着别的项目的会话：只收本项目的（cf427）。
+		const incomingSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			parsedPayload.sessions,
+		);
+		logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite({
+			workspaceId: context.workspaceId,
+			removedTaskSessionIdsOwnedByOtherWorkspaces:
+				incomingSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+		});
 		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				parsedPayload.board,
 				persistedSessions,
-				parsedPayload.sessions,
+				incomingSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
 		const board = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
@@ -927,14 +1003,14 @@ export async function saveWorkspaceState(
 			updatedAt: Date.now(),
 		};
 
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), board, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), sessions, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(metaPath, nextMeta, {
-			lock: null,
+		await writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents({
+			context,
+			previousBoard: persistedBoard,
+			previousSessions: persistedSessions,
+			nextBoard: board,
+			nextSessions: sessions,
+			nextMeta,
+			taskMutationIntentWithResolvedActor,
 		});
 
 		return toWorkspaceStateResponse(context, board, sessions, nextRevision);
@@ -956,6 +1032,7 @@ export interface RuntimeWorkspaceAtomicMutationResponse<T> {
 
 export async function mutateWorkspaceState<T>(
 	cwd: string,
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor,
 	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceAtomicMutationResult<T>,
 ): Promise<RuntimeWorkspaceAtomicMutationResponse<T>> {
 	const context = await loadWorkspaceContext(cwd);
@@ -963,7 +1040,24 @@ export async function mutateWorkspaceState<T>(
 		const currentBoard = await readWorkspaceBoard(context.workspaceId);
 		const currentSessions = await readWorkspaceSessions(context.workspaceId);
 		const currentMeta = await readWorkspaceMeta(context.workspaceId);
-		const currentState = toWorkspaceStateResponse(context, currentBoard, currentSessions, currentMeta.revision);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+			context,
+			currentBoard,
+			currentSessions,
+			currentMeta.revision,
+		);
+		// 盘上串写进来的别的项目的会话不交给变更函数，也不随这次写入写回（cf427）。
+		const currentSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			currentSessions,
+		);
+		const currentSessionsOwnedByThisWorkspace = currentSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces;
+		const currentState = toWorkspaceStateResponse(
+			context,
+			currentBoard,
+			currentSessionsOwnedByThisWorkspace,
+			currentMeta.revision,
+		);
 
 		const mutation = mutate(currentState);
 		if (mutation.save === false) {
@@ -974,12 +1068,23 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
+		const mutatedSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			mutation.sessions ?? currentSessionsOwnedByThisWorkspace,
+		);
+		logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite({
+			workspaceId: context.workspaceId,
+			removedTaskSessionIdsOwnedByOtherWorkspaces: [
+				...currentSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+				...mutatedSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+			],
+		});
 		const nextSessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			currentSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				mutation.board,
 				currentSessions,
-				mutation.sessions ?? currentSessions,
+				mutatedSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
 		const nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
@@ -993,14 +1098,14 @@ export async function mutateWorkspaceState<T>(
 			updatedAt: Date.now(),
 		};
 
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), nextBoard, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), nextSessions, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceMetaPath(context.workspaceId), nextMeta, {
-			lock: null,
+		await writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents({
+			context,
+			previousBoard: currentBoard,
+			previousSessions: currentSessions,
+			nextBoard,
+			nextSessions,
+			nextMeta,
+			taskMutationIntentWithResolvedActor,
 		});
 
 		return {
@@ -1009,4 +1114,90 @@ export async function mutateWorkspaceState<T>(
 			saved: true,
 		};
 	});
+}
+
+async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<string | null> {
+	try {
+		return await readFile(getWorkspaceBoardPath(workspaceId), "utf8");
+	} catch (error) {
+		if (isNodeErrorWithCode(error, "ENOENT")) {
+			return null;
+		}
+		throw error;
+	}
+}
+
+// Y-EVENT-2 第 1、2 步。账本不可用时抛出 InterWorkUnitRelationLedgerUnavailableError，本次写入随之失败——
+// 该实例的 board 只读，宁可拒写也不产生没有事件的 board 变更。
+async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+	context: RuntimeWorkspaceContext,
+	persistedBoard: RuntimeBoardData,
+	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
+	persistedBoardRevision: number,
+): Promise<void> {
+	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
+	if (!capture) {
+		return;
+	}
+	const persistedBoardFileRawText = await readWorkspaceBoardFileRawText(context.workspaceId);
+	await capture.reconcileLedgerWithPersistedBoardWithinBoardLock({
+		workspaceId: context.workspaceId,
+		workspaceRepositoryPath: context.repoPath,
+		persistedBoard,
+		persistedSessions,
+		persistedBoardFileSha256:
+			persistedBoardFileRawText === null
+				? null
+				: createHash("sha256").update(persistedBoardFileRawText, "utf8").digest("hex"),
+		persistedBoardFileRawText,
+		persistedBoardRevision,
+	});
+}
+
+// Y-EVENT-2 第 4–6 步：事件先记为 pending，再写三个 JSON，最后提交。board 序列化只做一次，
+// 期望哈希与落盘字节逐字一致；悬挂批次在下一次漏斗通过时按盘上 board 哈希结算。
+async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents(input: {
+	context: RuntimeWorkspaceContext;
+	previousBoard: RuntimeBoardData;
+	previousSessions: Record<string, RuntimeTaskSessionSummary>;
+	nextBoard: RuntimeBoardData;
+	nextSessions: Record<string, RuntimeTaskSessionSummary>;
+	nextMeta: WorkspaceStateMeta;
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor;
+}): Promise<void> {
+	const { context } = input;
+	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
+	const serializedNextBoard = JSON.stringify(input.nextBoard, null, 2);
+	const nextBoardFileSha256 = createHash("sha256").update(serializedNextBoard, "utf8").digest("hex");
+	const pendingBatch = capture
+		? await capture.recordPendingTaskMutationEventsBeforeBoardFileWrite({
+				workspaceId: context.workspaceId,
+				workspaceRepositoryPath: context.repoPath,
+				previousBoard: input.previousBoard,
+				nextBoard: input.nextBoard,
+				previousSessions: input.previousSessions,
+				nextSessions: input.nextSessions,
+				nextBoardFileSha256,
+				nextBoardRevision: input.nextMeta.revision,
+				taskMutationIntentWithResolvedActor: input.taskMutationIntentWithResolvedActor,
+			})
+		: null;
+
+	await lockedFileSystem.writeTextFileAtomic(getWorkspaceBoardPath(context.workspaceId), serializedNextBoard, {
+		lock: null,
+	});
+	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), input.nextSessions, {
+		lock: null,
+	});
+	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceMetaPath(context.workspaceId), input.nextMeta, {
+		lock: null,
+	});
+
+	if (capture && pendingBatch) {
+		await capture.commitPendingTaskMutationEventsAfterBoardFileWrite({
+			pendingBatchId: pendingBatch.pendingBatchId,
+			boardFileSha256: nextBoardFileSha256,
+			boardRevision: input.nextMeta.revision,
+		});
+	}
 }

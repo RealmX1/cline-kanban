@@ -91,18 +91,6 @@ vi.mock("@/components/board-column-collapsed-vertical-strip", () => ({
 	),
 }));
 
-vi.mock("@/components/dependencies/dependency-overlay", () => ({
-	DependencyOverlay: (): null => null,
-}));
-
-vi.mock("@/components/dependencies/use-dependency-linking", () => ({
-	useDependencyLinking: () => ({
-		draft: null,
-		onDependencyPointerDown: vi.fn(),
-		onDependencyPointerEnter: vi.fn(),
-	}),
-}));
-
 function createRect(left: number, top: number, width: number, height: number): DOMRect {
 	return {
 		x: left,
@@ -237,7 +225,6 @@ describe("KanbanBoard", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		let requestMove: RequestProgrammaticCardMove | null = null;
@@ -249,7 +236,6 @@ describe("KanbanBoard", () => {
 					taskSessions={{}}
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
-					dependencies={[]}
 					onDragEnd={() => {}}
 					onRequestProgrammaticCardMoveReady={(nextRequestMove) => {
 						requestMove = nextRequestMove;
@@ -288,7 +274,6 @@ describe("KanbanBoard", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		await act(async () => {
@@ -299,7 +284,6 @@ describe("KanbanBoard", () => {
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
 					onSaveTaskTitle={onSaveTaskTitle}
-					dependencies={[]}
 					onDragEnd={() => {}}
 				/>,
 			);
@@ -322,7 +306,6 @@ describe("KanbanBoard", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		await act(async () => {
@@ -333,7 +316,6 @@ describe("KanbanBoard", () => {
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
 					onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
-					dependencies={[]}
 					onDragEnd={() => {}}
 				/>,
 			);
@@ -353,7 +335,6 @@ describe("KanbanBoard", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 
@@ -368,7 +349,6 @@ describe("KanbanBoard", () => {
 					taskSessions={{}}
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
-					dependencies={[]}
 					onDragEnd={() => {}}
 					onRequestProgrammaticCardMoveReady={onRequestProgrammaticCardMoveReady}
 				/>,

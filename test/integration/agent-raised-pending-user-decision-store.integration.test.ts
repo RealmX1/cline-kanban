@@ -21,6 +21,7 @@ import {
 	recordAgentRaisedPendingUserDecisionAnswer,
 	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
+	saveAgentRaisedPendingUserDecisionAnswerDraft,
 	updateAgentRaisedPendingUserDecisionAnswerDeliveryState,
 } from "../../src/state/agent-raised-pending-user-decision-store";
 import { getWorkspaceDirectoryPath } from "../../src/state/workspace-state";
@@ -55,6 +56,150 @@ function questionInput(
 }
 
 describe.sequential("agent-raised-pending-user-decision-store integration", () => {
+	it("未提交草稿原样落盘并可重读，保存不记录答案也不改变待答状态", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("draft-project");
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+			const orderedQuestionAnswers = [
+				{ decisionQuestionId: "question-0", selectedOptionIds: ["orm"], freeformText: "  Notes\n保留空白  " },
+			];
+			await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, {
+				taskId: "task-a",
+				decisionId: "claude-tool-use-1",
+				orderedQuestionAnswers,
+			});
+			const [restored] = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(restored?.pendingAnswerDraft?.orderedQuestionAnswers).toEqual(orderedQuestionAnswers);
+			expect(restored?.status).toBe("pending");
+			expect(restored?.answer).toBeNull();
+			expect(restored?.answerDeliveryState).toBe("not_answered");
+			await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, {
+				taskId: "task-a",
+				decisionId: "claude-tool-use-1",
+				orderedQuestionAnswers: [{ decisionQuestionId: "question-0", selectedOptionIds: [], freeformText: "" }],
+			});
+			expect(
+				(await readAgentRaisedPendingUserDecisions(workspaceId))[0]?.pendingAnswerDraft?.orderedQuestionAnswers[0]
+					?.freeformText,
+			).toBe("");
+		});
+	});
+
+	it("草稿编辑版本持久化，迟到旧请求与同版本重试不能回滚已确认内容", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("draft-edit-version-project");
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+			const latestDraftRequest = {
+				taskId: "task-a",
+				decisionId: "claude-tool-use-1",
+				answerDraftEditVersion: 2,
+				orderedQuestionAnswers: [
+					{ decisionQuestionId: "question-0", selectedOptionIds: ["orm"], freeformText: "最新已确认草稿" },
+				],
+			};
+			await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, latestDraftRequest);
+			for (const answerDraftEditVersion of [1, 2]) {
+				const response = await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, {
+					...latestDraftRequest,
+					answerDraftEditVersion,
+					orderedQuestionAnswers: [
+						{ decisionQuestionId: "question-0", selectedOptionIds: [], freeformText: "迟到的旧草稿" },
+					],
+				});
+				expect(response?.pendingAnswerDraft?.answerDraftEditVersion).toBe(2);
+				expect(response?.pendingAnswerDraft?.orderedQuestionAnswers).toEqual(
+					latestDraftRequest.orderedQuestionAnswers,
+				);
+			}
+			const [restored] = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(restored?.pendingAnswerDraft?.answerDraftEditVersion).toBe(2);
+			expect(restored?.pendingAnswerDraft?.orderedQuestionAnswers).toEqual(
+				latestDraftRequest.orderedQuestionAnswers,
+			);
+		});
+	});
+
+	it("草稿校验任务归属、问题、选项、单选数量及自由回答权限", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("draft-validation-project");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { allowsFreeformAnswer: false }),
+			);
+			for (const invalidAnswer of [
+				{ decisionQuestionId: "missing", selectedOptionIds: [], freeformText: null },
+				{ decisionQuestionId: "question-0", selectedOptionIds: ["missing"], freeformText: null },
+				{ decisionQuestionId: "question-0", selectedOptionIds: ["orm", "raw-sql"], freeformText: null },
+				{ decisionQuestionId: "question-0", selectedOptionIds: [], freeformText: "禁止的自由回答" },
+			]) {
+				await expect(
+					saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, {
+						taskId: "task-a",
+						decisionId: "claude-tool-use-1",
+						orderedQuestionAnswers: [invalidAnswer],
+					}),
+				).rejects.toThrow();
+			}
+			await expect(
+				saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, {
+					taskId: "other-task",
+					decisionId: "claude-tool-use-1",
+					orderedQuestionAnswers: [],
+				}),
+			).rejects.toThrow();
+			expect((await readAgentRaisedPendingUserDecisions(workspaceId))[0]?.pendingAnswerDraft ?? null).toBeNull();
+		});
+	});
+
+	it("了结问题会清掉草稿，迟到的草稿保存不能复活它", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("draft-closed-project");
+			for (const resolution of ["answer", "dismiss", "supersede", "terminal"] as const) {
+				const decisionId = `task-a:${resolution}`;
+				await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId, { decisionId }));
+				const draftRequest = {
+					taskId: "task-a",
+					decisionId,
+					orderedQuestionAnswers: [
+						{ decisionQuestionId: "question-0", selectedOptionIds: ["orm"], freeformText: "草稿" },
+					],
+				};
+				await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, draftRequest);
+				if (resolution === "answer") {
+					await recordAgentRaisedPendingUserDecisionAnswer(workspaceId, decisionId, {
+						selectedOptionIds: ["orm"],
+						freeformText: null,
+						answeredAt: ASKED_AT + 1,
+					});
+				} else if (resolution === "dismiss") {
+					await dismissAgentRaisedPendingUserDecision(workspaceId, decisionId, ASKED_AT + 1);
+				} else if (resolution === "supersede") {
+					await recordAgentRaisedPendingUserDecision(
+						workspaceId,
+						questionInput(workspaceId, { decisionId: `${decisionId}-new`, questionMarkdown: "新问题" }),
+					);
+				} else {
+					await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+						taskId: "task-a",
+						resolvedAt: ASKED_AT + 1,
+						resolution: {
+							decisionSourceId: resolution,
+							resolutionKind: "answered_in_agent_terminal",
+							answersForQuestions: [
+								{ questionText: "数据访问层用哪种方案？", answerText: "用 ORM", notesText: null },
+							],
+						},
+					});
+				}
+				expect(await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceId, draftRequest)).toBeNull();
+				expect(
+					(await readAgentRaisedPendingUserDecisions(workspaceId)).find(
+						(record) => record.decisionId === decisionId,
+					)?.pendingAnswerDraft,
+				).toBeNull();
+			}
+		});
+	});
 	it("提问即落库：正文、结构化选项、来源信号、幂等键", async () => {
 		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
 			const { workspaceId } = await registerIsolatedWorkspace("project-a");
