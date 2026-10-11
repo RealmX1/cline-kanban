@@ -19,7 +19,9 @@ import type {
 	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
 import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import type { NewTaskCardRuntimePersistenceOutcome } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
+import { startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
 import {
 	discardAllPendingWebUiBoardMutationInitiatorRecords,
 	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
@@ -29,7 +31,10 @@ import {
 	resetPendingTaskCardCommandBoardOverlayStore,
 	usePendingTaskCardCommandBoardOverlayEntries,
 } from "@/stores/pending-task-card-command-board-overlay-store";
-import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
+import {
+	clearAllTaskCardActionCommandsInFlight,
+	tryBeginTaskCardActionCommandInFlight,
+} from "@/stores/task-card-action-commands-in-flight-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
 /**
@@ -193,9 +198,14 @@ vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-c
 // cf427：建卡同时向 runtime 发起「启动 agent 前先落盘」。这里只记录调用，落盘与等待语义在该模块自己的测试里。
 const beginPersistingNewBacklogTaskCardsMock = vi.hoisted(() => vi.fn());
 const waitForNewTaskCardPersistedByRuntimeMock = vi.hoisted(() => vi.fn(async () => ({ ok: true as const })));
+const waitForAlreadyRequestedNewTaskCardRuntimePersistenceMock = vi.hoisted(() =>
+	vi.fn(async (): Promise<NewTaskCardRuntimePersistenceOutcome> => ({ ok: true })),
+);
 vi.mock("@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start", () => ({
 	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: beginPersistingNewBacklogTaskCardsMock,
 	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart: waitForNewTaskCardPersistedByRuntimeMock,
+	waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying:
+		waitForAlreadyRequestedNewTaskCardRuntimePersistenceMock,
 }));
 
 // 行内改名、编辑器保存走 taskCardAction.updateTaskCardFieldValues：回一份「服务端已按 patch 写下」的动作后快照
@@ -556,6 +566,7 @@ describe("useTaskEditor", () => {
 		localStorage.clear();
 		resetTaskEditDraftStoreForTests();
 		beginPersistingNewBacklogTaskCardsMock.mockClear();
+		waitForAlreadyRequestedNewTaskCardRuntimePersistenceMock.mockReset();
 		fakeWorkspaceTaskEditDraftServer.snapshot = null;
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
 		fakeTaskNameSuggestionEndpoint.respond = null;
@@ -564,6 +575,7 @@ describe("useTaskEditor", () => {
 		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds = [];
 		discardAllPendingWebUiBoardMutationInitiatorRecords();
 		updateTaskCardFieldValuesInWorkspaceMock.mockClear();
+		startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock.mockClear();
 		resetPendingTaskCardCommandBoardOverlayStore();
 		clearAllTaskCardActionCommandsInFlight();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -814,6 +826,156 @@ describe("useTaskEditor", () => {
 				},
 			}),
 		);
+	});
+
+	it.each(["同项目单卡", "跨项目单卡", "清空名称保存后启动"])(
+		"%s：启动锁在途时仍发送一次 AI 条件回填",
+		async (entry) => {
+			const captured = await renderCreateHarness();
+			const workspaceId = entry === "跨项目单卡" ? "project-b" : "project-1";
+			if (entry === "跨项目单卡") {
+				await act(async () => requireSnapshot(captured.current).handleOpenCreateTaskInBoardScope(workspaceId));
+			}
+			await act(async () => requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求"));
+			let taskId = "";
+			await act(async () => {
+				taskId =
+					requireSnapshot(captured.current).handleCreateTask(
+						entry === "清空名称保存后启动" ? { taskNameOverride: "用户名称" } : undefined,
+					) ?? "";
+			});
+			expect(taskId).not.toBe("");
+			if (entry === "清空名称保存后启动") {
+				const task = requireSnapshot(captured.current).board.columns[0]?.cards[0];
+				if (!task) throw new Error("未找到待编辑的卡片");
+				await act(async () => requireSnapshot(captured.current).handleOpenEditTask(task));
+				await act(async () => requireSnapshot(captured.current).setEditTaskName(""));
+				await act(async () => requireSnapshot(captured.current).handleSaveEditedTask());
+				updateTaskCardFieldValuesInWorkspaceMock.mockClear();
+			}
+			const finishStart = tryBeginTaskCardActionCommandInFlight(
+				workspaceId,
+				taskId,
+				"start_task_card_agent_session_moving_it_into_in_progress",
+			);
+			expect(finishStart).not.toBeNull();
+			try {
+				await act(async () =>
+					fakeTaskNameSuggestionEndpoint.respond?.({
+						status: "suggested",
+						suggestedTaskNames: ["[FIX]建议名称"],
+					}),
+				);
+				expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledExactlyOnceWith(
+					workspaceId,
+					expect.objectContaining({
+						taskId,
+						expectedTaskTitleAndPromptForAiNameBackfill: { title: "完整初始需求", prompt: "完整初始需求" },
+					}),
+				);
+				expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+			} finally {
+				finishStart?.();
+			}
+		},
+	);
+
+	it("AI 回填请求未完成时，正常启动仍发出且完成", async () => {
+		const captured = await renderCreateHarness();
+		await act(async () => requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求"));
+		let taskId = "";
+		await act(async () => {
+			taskId = requireSnapshot(captured.current).handleCreateTask() ?? "";
+		});
+		let releaseBackfill!: (response: Awaited<ReturnType<typeof updateTaskCardFieldValuesInWorkspaceMock>>) => void;
+		const pendingBackfill = new Promise<Awaited<ReturnType<typeof updateTaskCardFieldValuesInWorkspaceMock>>>(
+			(resolve) => {
+				releaseBackfill = resolve;
+			},
+		);
+		updateTaskCardFieldValuesInWorkspaceMock.mockReturnValueOnce(pendingBackfill);
+		await act(async () =>
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["[FIX]建议名称"],
+			}),
+		);
+		try {
+			await act(async () => {
+				const started = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
+					workspaceId: "project-1",
+					taskId,
+				});
+				expect(started.taskCardActionCommandExecutionOutcome).toBe("command_completed_by_runtime");
+			});
+			expect(startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock).toHaveBeenCalledOnce();
+		} finally {
+			await act(async () =>
+				releaseBackfill({
+					taskCardSnapshotAfterAction: {
+						taskCard: { ...createTask(taskId, "完整初始需求", 1), title: "[FIX]建议名称" },
+						boardColumnIdContainingTaskCard: "backlog",
+						taskSessionSummaryLiveInRuntimeProcessMemory: null,
+						taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+					},
+				}),
+			);
+		}
+	});
+
+	it("AI 先返回时只等待已请求的落盘，建卡不等待且落盘后只回填一次", async () => {
+		let releasePersistence!: (outcome: NewTaskCardRuntimePersistenceOutcome) => void;
+		waitForAlreadyRequestedNewTaskCardRuntimePersistenceMock.mockReturnValueOnce(
+			new Promise((resolve) => {
+				releasePersistence = resolve;
+			}),
+		);
+		const captured = await renderCreateHarness();
+		await act(async () => requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求"));
+		await act(async () => {
+			expect(requireSnapshot(captured.current).handleCreateTask()).not.toBeNull();
+		});
+		expect(requireSnapshot(captured.current).board.columns[0]?.cards[0]?.title).toBe("完整初始需求");
+		await act(async () =>
+			fakeTaskNameSuggestionEndpoint.respond?.({ status: "suggested", suggestedTaskNames: ["[FIX]建议名称"] }),
+		);
+		expect(updateTaskCardFieldValuesInWorkspaceMock).not.toHaveBeenCalled();
+		await act(async () => releasePersistence({ ok: true }));
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledOnce();
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+	});
+
+	it("落盘失败时结束 AI 回填，不补建卡片或重试模型", async () => {
+		waitForAlreadyRequestedNewTaskCardRuntimePersistenceMock.mockResolvedValueOnce({
+			ok: false,
+			message: "落盘失败",
+		});
+		const captured = await renderCreateHarness();
+		await act(async () => requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求"));
+		await act(async () => {
+			expect(requireSnapshot(captured.current).handleCreateTask()).not.toBeNull();
+		});
+		await act(async () =>
+			fakeTaskNameSuggestionEndpoint.respond?.({ status: "suggested", suggestedTaskNames: ["[FIX]建议名称"] }),
+		);
+		expect(updateTaskCardFieldValuesInWorkspaceMock).not.toHaveBeenCalled();
+		expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenCalledOnce();
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+	});
+
+	it("回填请求失败时保留临时名称，不重复模型请求或更新", async () => {
+		const captured = await renderCreateHarness();
+		await act(async () => requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求"));
+		await act(async () => {
+			requireSnapshot(captured.current).handleCreateTask();
+		});
+		updateTaskCardFieldValuesInWorkspaceMock.mockRejectedValueOnce(new Error("更新失败"));
+		await act(async () =>
+			fakeTaskNameSuggestionEndpoint.respond?.({ status: "suggested", suggestedTaskNames: ["[FIX]建议名称"] }),
+		);
+		expect(requireSnapshot(captured.current).board.columns[0]?.cards[0]?.title).toBe("完整初始需求");
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledOnce();
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
 	});
 
 	it("leaves the derived title alone when the naming endpoint is unavailable", async () => {

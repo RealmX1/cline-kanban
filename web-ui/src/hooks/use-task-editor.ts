@@ -24,6 +24,7 @@ import {
 	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled,
 	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
 } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
+import { updateTaskCardFieldValuesInWorkspace } from "@/runtime/task-card-action-query";
 import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
@@ -51,6 +52,7 @@ import {
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import {
 	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart,
+	waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying,
 	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart,
 } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import {
@@ -267,14 +269,21 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 	priorTitle: string,
 ): Promise<void> {
 	try {
-		const suggestion = await suggestTaskNamesFromTaskDescription(prompt);
+		// 在第一个 await 前捕获落盘请求；成功后登记会移除，但这次回填仍须等待该请求。
+		const [suggestion, persistenceOutcome] = await Promise.all([
+			suggestTaskNamesFromTaskDescription(prompt),
+			waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({ workspaceId, taskId }),
+		]);
+		if (!persistenceOutcome.ok) return;
 		const title = suggestion.status === "suggested" ? suggestion.suggestedTaskNames[0] : undefined;
 		if (!title) return;
-		await updateTaskCardFieldValuesThroughRuntime({
-			workspaceId,
+		// 后台回填由服务端 CAS 保护，不占交互命令锁，否则会丢回填或反向拒绝正常启动。
+		await updateTaskCardFieldValuesInWorkspace(workspaceId, {
 			taskId,
-			taskCardFieldValuePatch: { title },
-			boardMutationInitiator: null,
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+				taskCardFieldValuePatch: { title },
+			},
 			expectedTaskTitleAndPromptForAiNameBackfill: { title: priorTitle, prompt },
 		});
 	} catch {
@@ -1297,7 +1306,8 @@ export function useTaskEditor({
 	 * 三条刻意的选择：
 	 *   - fire-and-forget：起名要往外发一次网络请求，让建卡等它回来会把「点一下就出卡」变成「转两秒」；
 	 *   - 失败全静默：标题保持正则推导值，用户什么都不会丢，弹提示只会打断建卡节奏；
-	 *   - 回填前比对标题：卡片仍是当初那个推导标题才写。用户手改过、或 agent 已经改过名的卡不该被顶掉。
+	 *   - 服务端同时比对标题与描述：用户手改过、或 agent 已经改过名的卡不该被顶掉。
+	 * shortcut: 起名与回填随浏览器页面存活；需要刷新或关闭页面后继续时再移交 runtime。
 	 */
 	const backfillSuggestedTaskTitleForCreatedTask = useCallback(
 		(taskId: string, prompt: string, priorTitle: string) => {

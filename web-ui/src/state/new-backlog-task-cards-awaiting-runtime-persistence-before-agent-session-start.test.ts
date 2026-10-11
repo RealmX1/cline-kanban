@@ -5,6 +5,7 @@ import {
 	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart,
 	resetNewBacklogTaskCardsAwaitingRuntimePersistenceForTests,
 	subscribeToWorkspaceStateAfterNewBacklogTaskCardsPersistedByRuntime,
+	waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying,
 	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart,
 } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import type { BoardCard } from "@/types";
@@ -121,6 +122,59 @@ describe("new backlog task cards awaiting runtime persistence before agent sessi
 			workspaceId: "project-a",
 			newBacklogTaskCardsCreatedFromWebUi: [currentCard],
 		});
+	});
+
+	it("后台等待捕获已有请求，按项目隔离，成功退出登记后仍得到该次确认", async () => {
+		const deferred = createDeferred<RuntimeWorkspaceStateResponse>();
+		persistNewBacklogTaskCardsMock.mockReturnValueOnce(deferred.promise);
+		beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+			workspaceId: "project-a",
+			newBacklogTaskCardsCreatedFromWebUi: [createCard("new01")],
+			boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+		});
+		const capturedRequest = waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+			workspaceId: "project-a",
+			taskId: "new01",
+		});
+		expect(
+			await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+				workspaceId: "project-b",
+				taskId: "new01",
+			}),
+		).toEqual({ ok: true });
+		let completed = false;
+		void capturedRequest.then(() => {
+			completed = true;
+		});
+		await Promise.resolve();
+		expect(completed).toBe(false);
+		deferred.resolve(persistedWorkspaceState);
+		expect(await capturedRequest).toEqual({ ok: true });
+		expect(
+			await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+				workspaceId: "project-a",
+				taskId: "new01",
+			}),
+		).toEqual({ ok: true });
+		expect(persistNewBacklogTaskCardsMock).toHaveBeenCalledOnce();
+	});
+
+	it("后台等待保留落盘失败结果，不借启动重试路径补建卡片", async () => {
+		persistNewBacklogTaskCardsMock.mockRejectedValueOnce(new Error("落盘失败"));
+		beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+			workspaceId: "project-a",
+			newBacklogTaskCardsCreatedFromWebUi: [createCard("new01")],
+			boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+		});
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			expect(
+				await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+					workspaceId: "project-a",
+					taskId: "new01",
+				}),
+			).toEqual({ ok: false, message: "落盘失败" });
+		}
+		expect(persistNewBacklogTaskCardsMock).toHaveBeenCalledOnce();
 	});
 
 	it("重试仍失败：不放行，并带回失败原因（调用方据此不启动 agent）", async () => {
