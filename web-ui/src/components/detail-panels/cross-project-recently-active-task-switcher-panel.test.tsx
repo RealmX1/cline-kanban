@@ -1330,6 +1330,41 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-a", "warm");
 	});
 
+	it("App 常驻的 Esc 热键早于行展开在 document 上注册、对每次 Esc 都 preventDefault：没有弹窗时 Esc 仍收起 hover 展开的行", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		// 模拟 use-app-hotkeys 的 useHotkeys("escape", …, { preventDefault: true })：react-hotkeys-hook 在应用启动时就于
+		// document 上以 bubble 阶段注册（早于行展开时才注册的收起监听，同节点同阶段按注册顺序先跑），且在回调之前无条件
+		// preventDefault。
+		const preventDefaultOfEveryEscapeKeydownLikeAppEscapeHotkey = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				event.preventDefault();
+			}
+		};
+		document.addEventListener("keydown", preventDefaultOfEveryEscapeKeydownLikeAppEscapeHotkey);
+		try {
+			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+			const queryRecentRow = () =>
+				section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+			await hoverRowUntilExpandedInPlace(queryRecentRow());
+			expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
+
+			const escapeKeydownWithoutAnyDialogOpen = new KeyboardEvent("keydown", {
+				key: "Escape",
+				bubbles: true,
+				cancelable: true,
+			});
+			await act(async () => {
+				document.body.dispatchEvent(escapeKeydownWithoutAnyDialogOpen);
+			});
+			// 前提：这次 Esc 确实已被「App 热键」preventDefault。
+			expect(escapeKeydownWithoutAnyDialogOpen.defaultPrevented).toBe(true);
+			expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		} finally {
+			document.removeEventListener("keydown", preventDefaultOfEveryEscapeKeydownLikeAppEscapeHotkey);
+		}
+	});
+
 	it("当前项目的行 hover：原地展开的卡直接用宿主给的本页 board 与动作，不读服务端", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		const onMoveToValidationTask = vi.fn();
@@ -1376,6 +1411,96 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
 		);
 		expect(onMoveToValidationTask).toHaveBeenCalledWith("warm");
+	});
+
+	it("hover 展开卡上弹出的原始 prompt 弹窗（portal 挂在 body 下、不在面板 DOM 里）：在弹窗里按下或按 Esc 不收起这一行，Copy 能复制；真正在面板外按下照旧收起", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const previousClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+		try {
+			const host = makeHost();
+			act(() =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={host}
+						currentProjectTaskCards={{
+							currentProjectDisplayedBoard: {
+								columns: [
+									{
+										id: "review",
+										title: "Review",
+										cards: [
+											{
+												id: "warm",
+												title: "Warm task from the in-browser board",
+												prompt: "Original prompt of the warm task",
+												startInPlanMode: false,
+												baseRef: "main",
+												createdAt: NOW_MS - DAY_MS,
+												updatedAt: NOW_MS - DAY_MS,
+											},
+										],
+									},
+								],
+							},
+							currentProjectTaskSessions: {},
+							currentProjectTaskCardActionHandlers: {},
+							currentProjectWorkspacePath: "/repos/project-a",
+						}}
+					/>,
+				),
+			);
+			const queryWarmRow = () =>
+				section("prompt-cache-warm").querySelector<HTMLElement>(
+					'[data-cross-project-task-switcher-task-id="warm"]',
+				);
+			const queryOriginalPromptDialog = () => document.body.querySelector<HTMLElement>('[role="dialog"]');
+			await hoverRowUntilExpandedInPlace(queryWarmRow());
+			expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
+
+			await act(async () =>
+				queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="View original prompt"]')?.click(),
+			);
+			const originalPromptDialog = queryOriginalPromptDialog();
+			expect(originalPromptDialog?.textContent).toContain("Original prompt of the warm task");
+			expect(container.contains(originalPromptDialog)).toBe(false);
+
+			// 先按下再 click，与真实浏览器同序：按下若把这一行收起，卡体连同弹窗卸载，click 就落空。
+			const copyButton = [...(originalPromptDialog?.querySelectorAll("button") ?? [])].find(
+				(button) => button.textContent?.trim() === "Copy prompt",
+			);
+			await act(async () => {
+				copyButton?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+			});
+			expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
+			expect(queryOriginalPromptDialog()).not.toBeNull();
+			await act(async () => copyButton?.click());
+			expect(writeText).toHaveBeenCalledExactlyOnceWith("Original prompt of the warm task");
+
+			// Esc 只关最上层的弹窗：弹窗关掉，hover 展开的这一行不跟着收起。与真实焦点一致，Esc 派发到弹窗内获得焦点的
+			// 元素上（Radix 把焦点困在 role=dialog 的 Content 里）。
+			const elementFocusedInsideOriginalPromptDialog = document.activeElement;
+			expect(queryOriginalPromptDialog()?.contains(elementFocusedInsideOriginalPromptDialog)).toBe(true);
+			await act(async () => {
+				elementFocusedInsideOriginalPromptDialog?.dispatchEvent(
+					new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+				);
+			});
+			expect(queryOriginalPromptDialog()).toBeNull();
+			expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
+
+			await act(async () => {
+				document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+			});
+			expect(rowInPlaceExpansionState(queryWarmRow())).toBe("compact_row");
+		} finally {
+			if (previousClipboardDescriptor) {
+				Object.defineProperty(navigator, "clipboard", previousClipboardDescriptor);
+			} else {
+				Reflect.deleteProperty(navigator, "clipboard");
+			}
+		}
 	});
 
 	it("对非当前项目的卡取消置顶走 runtime；当前项目的卡走浏览器既有链路", async () => {
