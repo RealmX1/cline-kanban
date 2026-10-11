@@ -185,7 +185,13 @@ export type TaskCardBodyRenderRole =
 	// All projects 切换面板里原地展开的一行（hover 展开 / 固定展开，可以是任何项目的卡）。同置顶板分身：不可拖、
 	// 不持有 DOM 身份，动作按钮与本体一致；不显示置顶板专属的 stage 标签与原因行。单击与点那一行的精简行
 	// 同一结果（面板的主动作是切换任务）：不延迟、不接双击改标题（铅笔照旧可改），Done 也能点开。
-	| "expanded_card_copy_in_cross_project_task_switcher_row";
+	| "expanded_card_copy_in_cross_project_task_switcher_row"
+	// Post-Deploy Verification 面板里一个任务条目的上半部分（下半部分的核对清单由条目 wrapper 自己渲染）。
+	// 不可拖；`data-task-id` 与 verification 锚点留在 wrapper 上（wrapper 挂 `verification-panel-task:<taskId>`），
+	// 卡体副本一律不输出。其余交互与置顶板分身一致、即与本体一致：单击进详情（会跳转的列延迟单击留出双击窗口）、
+	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡不可点开。
+	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
+	| "task_card_copy_in_post_deploy_verification_panel_entry";
 
 /**
  * 仅 All projects 切换面板的行副本（`expanded_card_copy_in_cross_project_task_switcher_row`）：精简行上有、卡体本身没有的
@@ -237,7 +243,7 @@ export const CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER
 /**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
  *
- * 三种渲染角色见 `TaskCardBodyRenderRole`；本组件对角色差异的处理全部收敛在下方那组派生布尔里，
+ * 各渲染角色见 `TaskCardBodyRenderRole`；本组件对角色差异的处理全部收敛在下方那组派生布尔里，
  * 各处 JSX 只读布尔、不再重复判角色。
  */
 export const TaskCardBody = memo(function TaskCardBody({
@@ -335,6 +341,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
 	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
 	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
+	// 置顶板分身专属的 stage 标签 / 原因行只认这一个角色；PDV 面板条目副本（task_card_copy_in_post_deploy_verification_panel_entry）
+	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击、Done 卡不可点开。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
@@ -1105,7 +1113,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 				...(drag?.draggableStyle ?? {}),
 				// 紧凑密度的行之间靠 hover 底色区分，不需要标准卡片那么大的间距。
 				marginBottom: emitsCanonicalDomIdentity ? (isCompactRowInFocusViewLeftColumn ? 2 : 6) : 0,
-				// 本体可拖 → grab；置顶板分身 / 跨项目展开行单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
+				// 本体可拖 → grab；置顶板分身 / 跨项目展开行 / PDV 面板条目单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
 				cursor: emitsCanonicalDomIdentity ? "grab" : isPassiveMirrorUnderStickyStageHeader ? "default" : "pointer",
 			}}
 			onMouseEnter={() => setIsHovered(true)}

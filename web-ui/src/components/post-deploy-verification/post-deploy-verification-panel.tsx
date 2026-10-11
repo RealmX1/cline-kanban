@@ -1,51 +1,63 @@
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, ClipboardCheck, Minus, Pin, PinOff } from "lucide-react";
-import type { ReactElement } from "react";
+import { type ReactElement, useMemo } from "react";
 import { createPortal } from "react-dom";
 
-import { PostDeployVerificationDeploymentGroup } from "@/components/post-deploy-verification/post-deploy-verification-deployment-group";
+import {
+	countPostDeployVerificationTasksAwaitingVerification,
+	isPostDeployVerificationTaskClosed,
+	isPostDeployVerificationTaskIncludedAsReadOnlyBecauseAlreadyInDoneColumn,
+	readCarriedForwardIntoDeploymentIdOrNull,
+} from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
+import {
+	PostDeployVerificationActiveDeploymentGroupZoneSections,
+	type PostDeployVerificationDeploymentGroupTaskEntryActions,
+	PostDeployVerificationHistoryDeploymentGroupTaskEntries,
+} from "@/components/post-deploy-verification/post-deploy-verification-deployment-group";
 import {
 	formatDeployShaRange,
 	formatDeployTimestamp,
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
+import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
-export interface PostDeployVerificationPanelProps {
+export interface PostDeployVerificationPanelProps extends PostDeployVerificationDeploymentGroupTaskEntryActions {
 	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
 	historyGroups: RuntimePostDeployVerificationDeploymentGroup[];
 	hasLoadedOnce: boolean;
 	loadError: string | null;
 	board: BoardData;
+	realTaskCardRenderingInputs: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
 	stayInFront: boolean;
 	collapsed: boolean;
-	// 确认对话框打开时临时降 z：modal Overlay(z-50) 需盖住面板（plan 确认框方案，z-[80] 不可行）。
+	// 对话框打开时临时降 z：modal Overlay(z-50) 需盖住面板（plan 确认框方案，z-[80] 不可行）。
 	loweredForDialog: boolean;
-	completingTaskId: string | null;
+	isBatchClosureWithReasonsInFlight: boolean;
 	onToggleStayInFront: () => void;
 	onToggleCollapsed: () => void;
-	onToggleChecklistItem: (deploymentId: string, taskId: string, itemId: string, checked: boolean) => void;
-	onAddCustomChecklistItem: (deploymentId: string, taskId: string, label: string) => void;
-	onRemoveCustomChecklistItem: (deploymentId: string, taskId: string, itemId: string) => void;
-	onRunVerificationItem: (deploymentId: string, taskId: string, itemId: string) => void;
-	onRequestComplete: (deploymentId: string, taskId: string) => void;
-	onSelectTask: (taskId: string) => void;
-	onNavigateToBoard: () => void;
+	onRequestBatchClosureWithReasonsOfZoneTasks: (deploymentId: string, taskIds: string[]) => void;
 }
 
-function countPending(group: RuntimePostDeployVerificationDeploymentGroup | null): number {
-	if (!group) {
-		return 0;
-	}
-	return group.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null).length;
-}
-
-function summarizeGroupProgress(tasks: RuntimePostDeployVerificationTask[]): { done: number; total: number } {
-	const total = tasks.filter((task) => task.droppedReason === null).length;
-	const done = tasks.filter((task) => task.droppedReason === null && task.verifiedAt !== null).length;
-	return { done, total };
+// 历史组标题的进度：已结案（通过或带原因）/ 需核对（不含已移除与只读展示项）；已延续到新组的单独计数。
+function summarizeHistoryGroupProgress(tasks: RuntimePostDeployVerificationTask[]): {
+	closedTaskCount: number;
+	taskCountRequiringVerification: number;
+	carriedForwardTaskCount: number;
+} {
+	const tasksRequiringVerification = tasks.filter(
+		(task) =>
+			task.droppedReason === null && !isPostDeployVerificationTaskIncludedAsReadOnlyBecauseAlreadyInDoneColumn(task),
+	);
+	return {
+		closedTaskCount: tasksRequiringVerification.filter(isPostDeployVerificationTaskClosed).length,
+		taskCountRequiringVerification: tasksRequiringVerification.length,
+		carriedForwardTaskCount: tasksRequiringVerification.filter(
+			(task) => readCarriedForwardIntoDeploymentIdOrNull(task) !== null,
+		).length,
+	};
 }
 
 export function PostDeployVerificationPanel(props: PostDeployVerificationPanelProps): ReactElement | null {
@@ -55,12 +67,15 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		hasLoadedOnce,
 		loadError,
 		board,
+		realTaskCardRenderingInputs,
 		stayInFront,
 		collapsed,
 		loweredForDialog,
-		completingTaskId,
+		isBatchClosureWithReasonsInFlight,
 		onToggleStayInFront,
 		onToggleCollapsed,
+		onRequestBatchClosureWithReasonsOfZoneTasks,
+		completingTaskId,
 		onToggleChecklistItem,
 		onAddCustomChecklistItem,
 		onRemoveCustomChecklistItem,
@@ -69,6 +84,26 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		onSelectTask,
 		onNavigateToBoard,
 	} = props;
+	const taskEntryActions: PostDeployVerificationDeploymentGroupTaskEntryActions = {
+		completingTaskId,
+		onToggleChecklistItem,
+		onAddCustomChecklistItem,
+		onRemoveCustomChecklistItem,
+		onRunVerificationItem,
+		onRequestComplete,
+		onSelectTask,
+		onNavigateToBoard,
+	};
+	// 第二区徽标「首次上线于 <短 SHA>」要把 firstDeployedInDeploymentId 解析成部署组。
+	const retainedDeploymentGroupsByDeploymentId = useMemo(
+		() =>
+			new Map(
+				[...(activeGroup ? [activeGroup] : []), ...historyGroups].map(
+					(group) => [group.deploymentId, group] as const,
+				),
+			),
+		[activeGroup, historyGroups],
+	);
 
 	// 门控：数据未到达前不闪现；本 workspace 无任何 deployment 组时不挂载（即工作区维度门控，见 plan）。
 	if (typeof document === "undefined" || !hasLoadedOnce || (!activeGroup && historyGroups.length === 0)) {
@@ -77,7 +112,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 
 	// stayInFront=ON 且无对话框：z-70（高于 dialog z-50）。OFF 或对话框打开：降至 z-30 可被遮挡。
 	const zIndexClassName = stayInFront && !loweredForDialog ? "z-[70]" : "z-30";
-	const pendingCount = countPending(activeGroup);
+	const pendingCount = activeGroup ? countPostDeployVerificationTasksAwaitingVerification(activeGroup.tasks) : 0;
 
 	if (collapsed) {
 		return null;
@@ -85,10 +120,11 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 
 	// ponytail: 面板位置/尺寸固定在右下角；plan 面板行为表提过的「拖拽/尺寸偏好存 localStorage」按 spike 范围延后，
 	// 需要时再引入 drag/resize，勿为此提前加依赖。
+	// 宽 420px：条目上半部分是真实任务卡体（紧凑密度），360px 时标题与药丸行挤得太窄。
 	return createPortal(
 		<div
 			className={cn(
-				"kb-viewport-bottom-verification-floating-panel fixed right-4 flex max-h-[70vh] w-[360px] max-w-[calc(100vw-2rem)] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl",
+				"kb-viewport-bottom-verification-floating-panel fixed right-4 flex max-h-[70vh] w-[420px] max-w-[calc(100vw-2rem)] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl",
 				zIndexClassName,
 			)}
 		>
@@ -139,7 +175,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 					</p>
 				) : null}
 
-				{/* 当前 Deployment 组 */}
+				{/* 当前 Deployment 组：按部署归属分三区 */}
 				{activeGroup ? (
 					<section>
 						<div className="mb-2">
@@ -156,28 +192,24 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 							</div>
 							<p className="m-0 mt-0.5 text-[11px] text-text-secondary">当前部署 · 待核对 {pendingCount}</p>
 						</div>
-						<PostDeployVerificationDeploymentGroup
+						<PostDeployVerificationActiveDeploymentGroupZoneSections
 							group={activeGroup}
 							board={board}
-							interactive
-							completingTaskId={completingTaskId}
-							onToggleChecklistItem={onToggleChecklistItem}
-							onAddCustomChecklistItem={onAddCustomChecklistItem}
-							onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
-							onRunVerificationItem={onRunVerificationItem}
-							onRequestComplete={onRequestComplete}
-							onSelectTask={onSelectTask}
-							onNavigateToBoard={onNavigateToBoard}
+							realTaskCardRenderingInputs={realTaskCardRenderingInputs}
+							retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
+							taskEntryActions={taskEntryActions}
+							onRequestBatchClosureWithReasonsOfZoneTasks={onRequestBatchClosureWithReasonsOfZoneTasks}
+							isBatchClosureWithReasonsInFlight={isBatchClosureWithReasonsInFlight}
 						/>
 					</section>
 				) : null}
 
-				{/* 历史 Deployment 组（倒序 accordion，只读快照） */}
+				{/* 历史 Deployment 组（倒序 accordion，只读快照；收起时不挂载内容） */}
 				{historyGroups.length > 0 ? (
 					<section className="space-y-1.5 border-t border-border pt-2">
 						<h3 className="m-0 text-[11px] font-semibold uppercase tracking-wide text-text-tertiary">历史部署</h3>
 						{historyGroups.map((group) => {
-							const progress = summarizeGroupProgress(group.tasks);
+							const progress = summarizeHistoryGroupProgress(group.tasks);
 							return (
 								<RadixCollapsible.Root
 									key={group.deploymentId}
@@ -196,8 +228,11 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 													)}
 												</span>
 												<span className="block text-[11px] text-text-tertiary">
-													{formatDeployTimestamp(group.deployedAtIso)} · {progress.done}/{progress.total}{" "}
-													已核对
+													{formatDeployTimestamp(group.deployedAtIso)} · {progress.closedTaskCount}/
+													{progress.taskCountRequiringVerification} 已结案
+													{progress.carriedForwardTaskCount > 0
+														? ` · ${progress.carriedForwardTaskCount} 个已延续`
+														: null}
 												</span>
 											</span>
 											<ChevronDown
@@ -207,18 +242,12 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 										</button>
 									</RadixCollapsible.Trigger>
 									<RadixCollapsible.Content className="border-t border-border px-2 py-2">
-										<PostDeployVerificationDeploymentGroup
+										<PostDeployVerificationHistoryDeploymentGroupTaskEntries
 											group={group}
 											board={board}
-											interactive={false}
-											completingTaskId={completingTaskId}
-											onToggleChecklistItem={onToggleChecklistItem}
-											onAddCustomChecklistItem={onAddCustomChecklistItem}
-											onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
-											onRunVerificationItem={onRunVerificationItem}
-											onRequestComplete={onRequestComplete}
-											onSelectTask={onSelectTask}
-											onNavigateToBoard={onNavigateToBoard}
+											realTaskCardRenderingInputs={realTaskCardRenderingInputs}
+											retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
+											taskEntryActions={taskEntryActions}
 										/>
 									</RadixCollapsible.Content>
 								</RadixCollapsible.Root>

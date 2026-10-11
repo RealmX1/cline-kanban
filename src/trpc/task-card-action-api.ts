@@ -5,6 +5,7 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
+	RuntimeTaskCardActionMoveIntoDoneRequest,
 	RuntimeTaskCardActionMoveIntoDoneResponse,
 	RuntimeTaskCardActionPermanentlyDeleteResponse,
 	RuntimeTaskCardActionRestoreFromDoneResponse,
@@ -17,6 +18,7 @@ import type {
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import type { WebUiBoardMutationInitiator } from "../core/kanban-web-ui-page-load-request-origin-nonce";
+import { POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX } from "../core/post-deploy-verification-done-entry-closure-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
 	deleteTasksFromBoard,
@@ -35,6 +37,11 @@ import {
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { buildTaskSessionStartRequestFromBoardCard } from "../core/task-session-start-request-from-board-card";
 import { buildTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
+import type {
+	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
+} from "../deployment/post-deploy-verification-done-entry-gate";
 import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
@@ -84,6 +91,15 @@ export interface CreateTaskCardActionApiDependencies {
 	) => void;
 	// 测试注入用；缺省为读 workspace 索引与 board.json 的生产实现。
 	kanbanActorResolutionLookups?: KanbanActorResolutionLookups;
+	// 移入 Done 的 Post-Deploy Verification 门禁（src/deployment/post-deploy-verification-done-entry-gate.ts）。runtime 注入；
+	// 缺省 = 不设门禁（单元测试默认不读 runtime home 下的 PDV 状态）。
+	postDeployVerificationDoneEntryGate?: TaskCardActionPostDeployVerificationDoneEntryGate;
+}
+
+export interface TaskCardActionPostDeployVerificationDoneEntryGate {
+	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone: typeof authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone;
+	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone: typeof finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone;
+	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed: typeof revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed;
 }
 
 interface TaskCardFoundWithBoardColumn {
@@ -391,6 +407,116 @@ export function createTaskCardActionApi(
 			taskSessionSummaryPersistedInWorkspaceSessionsFile,
 		);
 	};
+
+	// 移入 Done 的门禁授权：返回是否写下了在途授权（之后移列失败要撤销、成功要结案）；拒绝时抛 PRECONDITION_FAILED。
+	// 卡已在 Done、或不受门禁（不在该 workspace 活跃部署组里等核对）时直接放行、不写盘。
+	const authorizePostDeployVerificationDoneEntryOrThrowPreconditionFailed = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		input: RuntimeTaskCardActionMoveIntoDoneRequest,
+	): Promise<boolean> => {
+		const gate = deps.postDeployVerificationDoneEntryGate;
+		if (!gate) {
+			return false;
+		}
+		const persistedBoard = (await loadPersistedWorkspaceStateById(workspaceScope.workspaceId)).board;
+		const boardColumnIdBeforeMove = findTaskCardWithBoardColumn(persistedBoard, input.taskId)?.boardColumnId;
+		if (boardColumnIdBeforeMove === undefined) {
+			// 卡不在看板：交给移列本身报 NOT_FOUND。
+			return false;
+		}
+		const authorization = await gate.authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone({
+			workspaceId: workspaceScope.workspaceId,
+			taskId: input.taskId,
+			boardColumnIdOfTaskCardBeforeMove: boardColumnIdBeforeMove,
+			postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure,
+			postDeployVerificationCompletionPath:
+				"kanban_runtime_task_card_action_move_into_done_through_post_deploy_verification_done_entry_gate",
+			nowIso: new Date().toISOString(),
+		});
+		if (
+			authorization.postDeployVerificationDoneEntryGateDecision ===
+			"move_into_done_rejected_because_unchecked_items_lack_closure_reasons"
+		) {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message: `${POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX} Task "${input.taskId}" has unchecked Post-Deploy Verification items; give a closure reason for each before moving it to Done: ${authorization.uncheckedChecklistItemsMissingClosureReason
+					.map((item) => `${item.checklistItemId} (${item.checklistItemLabel})`)
+					.join("; ")}`,
+			});
+		}
+		return (
+			authorization.postDeployVerificationDoneEntryGateDecision ===
+			"move_into_done_authorized_with_closure_authorization_in_flight"
+		);
+	};
+
+	const revokePostDeployVerificationDoneEntryAuthorization = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		taskId: string,
+	): Promise<void> => {
+		await deps.postDeployVerificationDoneEntryGate
+			?.revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed({
+				workspaceId: workspaceScope.workspaceId,
+				taskId,
+				nowIso: new Date().toISOString(),
+			})
+			.catch(() => undefined);
+	};
+
+	const moveTaskCardIntoTrashColumnWithinBoardLock = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		input: RuntimeTaskCardActionMoveIntoDoneRequest,
+		kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+	) =>
+		await mutateWorkspaceState<{
+			foundAfterMovement: TaskCardFoundWithBoardColumn;
+			boardColumnIdOfTaskCardBeforeAction: RuntimeBoardColumnId;
+			taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
+		}>(
+			workspaceScope.workspacePath,
+			await resolveIntent(
+				"move_task_card_into_done",
+				kanbanRequestOriginActorEvidence,
+				input.boardMutationInitiator,
+				[input.taskId],
+			),
+			(state) => {
+				const found = findTaskCardWithBoardColumnOrThrowNotFound(
+					state.board,
+					input.taskId,
+					workspaceScope.workspacePath,
+				);
+				const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+				if (found.boardColumnId === "trash") {
+					return {
+						board: state.board,
+						value: {
+							foundAfterMovement: found,
+							boardColumnIdOfTaskCardBeforeAction: found.boardColumnId,
+							taskSessionSummaryPersistedInWorkspaceSessionsFile,
+						},
+						save: false,
+					};
+				}
+				const trashed = moveTaskToColumn(state.board, input.taskId, "trash", undefined, {
+					insertAtIndex: input.insertAtIndexWithinDoneBoardColumn,
+				});
+				if (!trashed.moved || !trashed.task) {
+					throw new TRPCError({
+						code: "INTERNAL_SERVER_ERROR",
+						message: `Task "${input.taskId}" could not be moved to done.`,
+					});
+				}
+				return {
+					board: trashed.board,
+					value: {
+						foundAfterMovement: { taskCard: trashed.task, boardColumnId: "trash" as const },
+						boardColumnIdOfTaskCardBeforeAction: found.boardColumnId,
+						taskSessionSummaryPersistedInWorkspaceSessionsFile,
+					},
+				};
+			},
+		);
 
 	return {
 		readTaskCardWithBoardColumn: async (workspaceScope, input) => {
@@ -728,55 +854,23 @@ export function createTaskCardActionApi(
 				workspaceScope,
 				[input.taskId],
 				async (): Promise<RuntimeTaskCardActionMoveIntoDoneResponse> => {
-					const movement = await mutateWorkspaceState<{
-						foundAfterMovement: TaskCardFoundWithBoardColumn;
-						boardColumnIdOfTaskCardBeforeAction: RuntimeBoardColumnId;
-						taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
-					}>(
-						workspaceScope.workspacePath,
-						await resolveIntent(
-							"move_task_card_into_done",
+					// Post-Deploy Verification 门禁（所有进 Done 的入口共用这一处判据）：受门禁的卡要么全勾，要么请求带齐每个
+					// 未勾项的原因，否则 PRECONDITION_FAILED（message 带机读前缀，客户端据此打开原因对话框）。放行时写在途授权。
+					const postDeployVerificationDoneEntryAuthorizedInFlight =
+						await authorizePostDeployVerificationDoneEntryOrThrowPreconditionFailed(workspaceScope, input);
+					let movement: Awaited<ReturnType<typeof moveTaskCardIntoTrashColumnWithinBoardLock>>;
+					try {
+						movement = await moveTaskCardIntoTrashColumnWithinBoardLock(
+							workspaceScope,
+							input,
 							kanbanRequestOriginActorEvidence,
-							input.boardMutationInitiator,
-							[input.taskId],
-						),
-						(state) => {
-							const found = findTaskCardWithBoardColumnOrThrowNotFound(
-								state.board,
-								input.taskId,
-								workspaceScope.workspacePath,
-							);
-							const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
-							if (found.boardColumnId === "trash") {
-								return {
-									board: state.board,
-									value: {
-										foundAfterMovement: found,
-										boardColumnIdOfTaskCardBeforeAction: found.boardColumnId,
-										taskSessionSummaryPersistedInWorkspaceSessionsFile,
-									},
-									save: false,
-								};
-							}
-							const trashed = moveTaskToColumn(state.board, input.taskId, "trash", undefined, {
-								insertAtIndex: input.insertAtIndexWithinDoneBoardColumn,
-							});
-							if (!trashed.moved || !trashed.task) {
-								throw new TRPCError({
-									code: "INTERNAL_SERVER_ERROR",
-									message: `Task "${input.taskId}" could not be moved to done.`,
-								});
-							}
-							return {
-								board: trashed.board,
-								value: {
-									foundAfterMovement: { taskCard: trashed.task, boardColumnId: "trash" },
-									boardColumnIdOfTaskCardBeforeAction: found.boardColumnId,
-									taskSessionSummaryPersistedInWorkspaceSessionsFile,
-								},
-							};
-						},
-					);
+						);
+					} catch (error) {
+						if (postDeployVerificationDoneEntryAuthorizedInFlight) {
+							await revokePostDeployVerificationDoneEntryAuthorization(workspaceScope, input.taskId);
+						}
+						throw error;
+					}
 					broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, movement.saved);
 					const { foundAfterMovement, boardColumnIdOfTaskCardBeforeAction } = movement.value;
 					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
@@ -784,6 +878,9 @@ export function createTaskCardActionApi(
 					// 本来就在 Done：不再停会话、不删 worktree。会话中断自动流转进 Done 的卡刻意保留了 worktree 供恢复，
 					// 对它重复「移入 Done」不该把这份保留删掉。
 					if (!movement.saved) {
+						if (postDeployVerificationDoneEntryAuthorizedInFlight) {
+							await revokePostDeployVerificationDoneEntryAuthorization(workspaceScope, input.taskId);
+						}
 						return {
 							boardColumnIdOfTaskCardBeforeAction,
 							taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: true,
@@ -794,8 +891,20 @@ export function createTaskCardActionApi(
 								foundAfterMovement,
 								taskSessionSummaryPersistedInWorkspaceSessionsFile,
 							),
+							postDeployVerificationClosureOutcome: null,
 						};
 					}
+					// 结案写盘失败不回滚移列：在途授权还在，runtime 对账会按它补完。
+					const postDeployVerificationClosureOutcome =
+						postDeployVerificationDoneEntryAuthorizedInFlight && deps.postDeployVerificationDoneEntryGate
+							? await deps.postDeployVerificationDoneEntryGate
+									.finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone({
+										workspaceId: workspaceScope.workspaceId,
+										taskId: input.taskId,
+										nowIso: new Date().toISOString(),
+									})
+									.catch(() => null)
+							: null;
 					const { taskAgentSessionStopWasRequested } =
 						await stopTaskAgentSessionAndTaskCardDetailUserShellTerminal(
 							workspaceScope,
@@ -817,6 +926,7 @@ export function createTaskCardActionApi(
 							foundAfterMovement,
 							taskSessionSummaryPersistedInWorkspaceSessionsFile,
 						),
+						postDeployVerificationClosureOutcome,
 					};
 				},
 			),

@@ -158,7 +158,7 @@ _Avoid_：裸词 inject、queue、inbox
 _Avoid_：dependency、blocker、link、wait-for 关系（门不是一条可以直接断言的关系）
 
 **门条件（Work Unit Gate Condition）**：
-共 9 种叶子条件：1 被等卡片 main 会话把回合交还给用户审阅；2 被等方宣告了自己的 milestone；3 被等任务的提交落地到本地 base；4 落地且要求的部署后验证通过；5 被等卡片的义务以指定的满足类结局结案；6 被等卡片被移入 Done 列（只表示有人宣告做完，不是完成证据）；7 到达某个绝对时刻；8 外部就绪探针报告就绪；9 只能由用户在 Web UI 宣告满足的外部条件文本（用来表达「暂停」）。完成证据类叶子一经观测就锁存；只有条件 5 可以因义务重开而解锁。
+共 9 种叶子条件：1 被等卡片 main 会话把回合交还给用户审阅；2 被等方宣告了自己的 milestone；3 被等任务的提交落地到本地 base；4 落地且要求的部署后验证通过（只认 `post_deploy_verification_passed_observed`，且事件里的部署归属区不能是「尚未随部署上线」；未全勾、带原因结案的 `post_deploy_verification_closed_into_done_with_unchecked_items_reasoned_observed` 不算）；5 被等卡片的义务以指定的满足类结局结案；6 被等卡片被移入 Done 列（只表示有人宣告做完，不是完成证据）；7 到达某个绝对时刻；8 外部就绪探针报告就绪；9 只能由用户在 Web UI 宣告满足的外部条件文本（用来表达「暂停」）。完成证据类叶子一经观测就锁存；只有条件 5 可以因义务重开而解锁。
 _Avoid_：trigger、precondition、「进 review 列」（review 列在第一次提问时就会进入，不是条件）
 
 **满足证据等级（Gate Condition Leaf Satisfaction Evidence Grade）**：

@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
+import { countPostDeployVerificationTasksAwaitingVerification } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
@@ -295,9 +296,12 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 				.sort((left, right) => Date.parse(right.deployedAtIso) - Date.parse(left.deployedAtIso)),
 		[deploymentGroups, activeDeploymentId],
 	);
+	// 待核对 = 未结案（全勾通过或带原因结案都算结案）、未移除、不是「记录部署时已在 Done」的只读展示项。
 	const pendingVerificationTaskCount =
 		hasLoadedOnce && deploymentGroups.length > 0
-			? (activeGroup?.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null).length ?? 0)
+			? activeGroup
+				? countPostDeployVerificationTasksAwaitingVerification(activeGroup.tasks)
+				: 0
 			: null;
 
 	const toggleChecklistItem = useCallback(

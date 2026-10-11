@@ -53,6 +53,14 @@ export default defineConfig({
 				__dirname,
 				"../src/core/notification-intelligence-purpose-binding-problems.ts",
 			),
+			"@runtime-post-deploy-verification-done-entry-closure-contract": resolve(
+				__dirname,
+				"../src/core/post-deploy-verification-done-entry-closure-contract.ts",
+			),
+			"@runtime-post-deploy-verification-task-closed-and-awaiting-verification-predicates": resolve(
+				__dirname,
+				"../src/core/post-deploy-verification-task-closed-and-awaiting-verification-predicates.ts",
+			),
 			"@runtime-cross-project-recently-active-task-switcher-section-assignment": resolve(
 				__dirname,
 				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
