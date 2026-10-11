@@ -197,6 +197,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
+	// 已进全局广播集合、首帧 snapshot 尚未发出的连接：projects_updated 广播跳过它们（不变式见连接握手处）。
+	const runtimeStateClientsStillAwaitingInitialSnapshotMessage = new Set<WebSocket>();
+	// 上面集合里被某次 projects_updated 广播跳过的连接：首帧发出后要补发一次最新 projects。
+	const runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot = new Set<WebSocket>();
 	const runtimeStateWorkspaceIdByClient = new Map<WebSocket, string>();
 	// 每个连接在 git 元数据监视器里的订阅（调用 connectWorkspace 之前就登记，好让首轮刷新失败或等待期间断开时都能断开它；
 	// 与 runtimeStateWorkspaceIdByClient 一起在首帧之后登记，握手期间不直接改监视器），
@@ -255,15 +259,25 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	// flushTaskSessionSummaries 每 150ms 触发的重发（前端每收一条 projects_updated 都要重 dispatch
 	// 一轮）；agent 活跃输出期间 inProgressTaskDetails 的 lastOutputAt 随每个非空 PTY chunk 刷新，
 	// payload 每次都不同、广播照常发送——那是合法新数据而非浪费。失效是天然的、无需按 workspace 记账：项目增删 /
-	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接客户端登记进广播集合时会把指纹
-	// 置回 null（见连接握手处），保证注册后下一次广播必定发送——snapshot 全量替换可能把该客户端
-	// 回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
+	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接的首帧 snapshot 发出后会把指纹
+	// 置回 null（见 releaseRuntimeStateClientFromAwaitingInitialSnapshot），保证此后下一次广播必定发送——snapshot
+	// 全量替换可能把该客户端回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
+	// 首帧前被跳过的连接不持有本次内容，但它在首帧后由补发 + 指纹复位兜住，故不破坏上面的「在场客户端都已持有」。
 	let lastBroadcastProjectsPayloadFingerprint: string | null = null;
+	// 代际判定：广播是 async（先 await 构建、再比对 / 发送 / 打标），flush、tRPC mutation、首帧后补发会并发触发，
+	// 先开始的构建可能后完成。它反映的是更早的状态：若照常发送，会把旧 projects 推给全部在场客户端（含刚补发过
+	// 最新内容的新连接），并把上面的指纹倒退成旧内容，安静系统里没有下一次广播来纠正。故每次广播入口取一个单调
+	// 递增的开始序号，构建完成时若已有开始得更晚的广播完成过，本次结果直接丢弃。「完成」在去重比较之前记账：
+	// 被去重跳过的较新广播同样说明客户端已持有较新内容。构建失败不记账，不会把后续正常完成的广播误判为旧代际。
+	let projectsBroadcastStartSequenceNumber = 0;
+	let highestStartSequenceNumberOfCompletedProjectsBroadcast = 0;
 
 	const broadcastRuntimeProjectsUpdated = async (preferredCurrentProjectId: string | null): Promise<void> => {
 		if (runtimeStateClients.size === 0) {
 			return;
 		}
+		projectsBroadcastStartSequenceNumber += 1;
+		const startSequenceNumberOfThisProjectsBroadcast = projectsBroadcastStartSequenceNumber;
 		try {
 			const payload =
 				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
@@ -274,15 +288,38 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				currentProjectId: payload.currentProjectId,
 				projects: payload.projects,
 			} satisfies RuntimeStateStreamProjectsMessage);
+			if (startSequenceNumberOfThisProjectsBroadcast < highestStartSequenceNumberOfCompletedProjectsBroadcast) {
+				return;
+			}
+			highestStartSequenceNumberOfCompletedProjectsBroadcast = startSequenceNumberOfThisProjectsBroadcast;
 			if (serializedPayload === lastBroadcastProjectsPayloadFingerprint) {
 				return;
 			}
 			for (const client of runtimeStateClients) {
+				if (runtimeStateClientsStillAwaitingInitialSnapshotMessage.has(client)) {
+					runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.add(client);
+					continue;
+				}
 				sendSerializedRuntimeStateMessage(client, serializedPayload);
 			}
 			lastBroadcastProjectsPayloadFingerprint = serializedPayload;
 		} catch {
 			// Ignore transient project summary failures; next update will resync.
+		}
+	};
+
+	// 首帧 snapshot 已发出（或握手失败、不会再发）：此后该连接照常接收 projects_updated。
+	const releaseRuntimeStateClientFromAwaitingInitialSnapshot = (
+		client: WebSocket,
+		preferredCurrentProjectId: string | null,
+	) => {
+		if (!runtimeStateClientsStillAwaitingInitialSnapshotMessage.delete(client)) {
+			return;
+		}
+		lastBroadcastProjectsPayloadFingerprint = null;
+		// 握手期间被跳过过：snapshot 里的 projects 构建得比那次广播早，安静系统里不会很快再有广播来纠正，立即补一次最新的。
+		if (runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.delete(client)) {
+			void broadcastRuntimeProjectsUpdated(preferredCurrentProjectId);
 		}
 	};
 
@@ -472,6 +509,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		runtimeStateWorkspaceIdByClient.delete(client);
 		runtimeStateClients.delete(client);
+		runtimeStateClientsStillAwaitingInitialSnapshotMessage.delete(client);
+		runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.delete(client);
 	};
 
 	const disposeWorkspace = (workspaceId: string) => {
@@ -784,9 +823,12 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			// 首帧不等 git：先用缓存或空元数据发送 snapshot，再注册广播，最后登记监视器并启动探测。
 			// 新连接尚未进入 workspace 广播名单时，既有连接的后台探测不会抢在它的 snapshot 前送增量。
 			runtimeStateClients.add(client);
-			// 去重指纹此刻对该客户端不成立（后续 snapshot 全量替换可能把它回滚到旧数据）：置回 null，
-			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
-			lastBroadcastProjectsPayloadFingerprint = null;
+			// 不变式：snapshot 永远是该连接收到的第一条带 currentProjectId 的状态。组 snapshot 要几百毫秒（负载高时上秒），
+			// 期间别的项目有 agent 在跑就会每 150ms 广播一次 projects_updated；它若先到，浏览器会把 currentProjectId 换成
+			// 本连接的项目、board 却还是上一个项目的，切项目途中点任务就会在旧 board 里找卡、误报任务不在看板。
+			// 故首帧前 projects_updated 跳过本连接，首帧发出后补发（releaseRuntimeStateClientFromAwaitingInitialSnapshot）。
+			// 其余全局广播（通知 / MCP auth / Cline 会话上下文）不改 currentProjectId，照常即时送达。
+			runtimeStateClientsStillAwaitingInitialSnapshotMessage.add(client);
 			let monitorWorkspaceId: string | null = null;
 
 			try {
@@ -834,6 +876,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					clineSessionContextVersion,
 					notificationLog,
 				} satisfies RuntimeStateStreamSnapshotMessage);
+				releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
 
 				if (client.readyState !== WebSocket.OPEN) {
 					cleanupRuntimeStateClient(client);
@@ -919,6 +962,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				}
 			} catch (error) {
 				disconnectWorkspaceMetadataSubscriptionOfClient(client);
+				// 首帧没发成也不再发：恢复 projects_updated 投递，与改动前「组首帧失败仍收广播」一致。
+				releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
 				const message = error instanceof Error ? error.message : String(error);
 				sendRuntimeStateMessage(client, {
 					type: "error",

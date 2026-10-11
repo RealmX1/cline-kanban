@@ -29,6 +29,7 @@ function makeBoard(cardsByColumn: Partial<Record<BoardColumnId, string[]>>): Boa
 interface HarnessProps {
 	board: BoardData;
 	currentProjectId: string | null;
+	projectIdOwningHydratedBoard: string | null;
 	selectedTaskId: string | null;
 	isDetailViewOpen: boolean;
 	isCurrentProjectBoardSettled: boolean;
@@ -82,11 +83,14 @@ afterEach(() => {
 });
 
 function render(props: Partial<HarnessProps> = {}): void {
+	const currentProjectId = props.currentProjectId !== undefined ? props.currentProjectId : "project-a";
 	act(() =>
 		root.render(
 			createElement(Harness, {
 				board: makeBoard({ review: ["a-review"], backlog: ["a-backlog"] }),
-				currentProjectId: "project-a",
+				currentProjectId,
+				// 未显式给出时视为 board 已属于当前项目；握手窗口（board 仍属上一个项目）的用例显式给出。
+				projectIdOwningHydratedBoard: currentProjectId,
 				selectedTaskId: "a-review",
 				isDetailViewOpen: true,
 				isCurrentProjectBoardSettled: true,
@@ -250,6 +254,44 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		expect(openBacklogTaskEditor).toHaveBeenCalledTimes(1);
 		expect(openBacklogTaskEditor).toHaveBeenCalledWith(expect.objectContaining({ id: "shared-task-id" }));
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+	});
+
+	// 握手窗口：旧服务端会让 projects_updated 抢在 snapshot 前到达（或 snapshot 到达那一帧 setBoard 还没发生），
+	// currentProjectId 已是目标项目、board 仍属上一个项目。此时在过渡外壳里再点目标项目的另一个任务，不能被当成
+	// 「同项目」去旧 board 里找卡——那会误报「That task is no longer on its project's board.」并把第一次的在途一起丢掉。
+	it("currentProjectId 已是目标项目、board 仍属上一个项目时再点目标项目的另一个任务：改挂在途、不误报，落定后打开它", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "b-first"));
+		render({
+			currentProjectId: "project-b",
+			projectIdOwningHydratedBoard: "project-a",
+			isDetailViewOpen: false,
+			selectedTaskId: null,
+			isCurrentProjectBoardSettled: false,
+		});
+
+		act(() => latest?.handleOpenTaskInProject("project-b", "b-second"));
+		expect(showAppToastMock).not.toHaveBeenCalled();
+		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(latest?.pendingCrossProjectTaskOpen).toEqual({
+			repoId: "project-b",
+			taskId: "b-second",
+			originatedFromFocusView: true,
+			originFocusedTaskInProject: { repoId: "project-a", taskId: "a-review" },
+		});
+
+		render({
+			currentProjectId: "project-b",
+			projectIdOwningHydratedBoard: "project-b",
+			board: makeBoard({ review: ["b-first", "b-second"] }),
+			isDetailViewOpen: false,
+			selectedTaskId: null,
+		});
+		expect(setSelectedTaskId).toHaveBeenCalledTimes(1);
+		expect(setSelectedTaskId).toHaveBeenCalledWith("b-second");
+		expect(showAppToastMock).not.toHaveBeenCalled();
 		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
 	});
 
