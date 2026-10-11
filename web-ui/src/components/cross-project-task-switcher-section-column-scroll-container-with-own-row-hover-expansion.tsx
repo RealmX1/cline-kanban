@@ -63,6 +63,8 @@ export function CrossProjectTaskSwitcherSectionColumnScrollContainerWithOwnRowHo
 				rowHoverExpansionOfSectionColumnScrollContainer.panelPointerHandlers.onPointerEnter,
 			onSectionColumnPointerLeave:
 				rowHoverExpansionOfSectionColumnScrollContainer.panelPointerHandlers.onPointerLeave,
+			onSectionColumnPointerDownCapture:
+				rowHoverExpansionOfSectionColumnScrollContainer.panelPointerHandlers.onPointerDownCapture,
 		},
 	};
 	switch (section) {

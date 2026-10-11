@@ -60,7 +60,8 @@ export interface CrossProjectTaskSwitcherRowExpandedInPlaceByHover {
  * 原地展开要避开的跳动（都在这里处理）：
  * - **交接，不在离开时收起**：指针离开展开的那一行时不收起；等下一行停够意图时长，旧行收起与新行展开在同一次提交里
  *   完成。若离开即收起，往下挪向下一行时，上一行一收、整列在指针移动途中上移几十像素，指针脚下换成了更下面的行。
- *   指针离开整个面板（延时）、Esc、在面板外按下指针，才收起。
+ *   指针离开整个面板（延时）、Esc（键盘焦点在弹窗里时归弹窗，按事件目标判断）、在面板外按下指针（按 React 子树
+ *   判断，卡上弹出的 portal 弹窗算面板内），才收起。
  * - **列表顶边固定（经典手风琴，用户 2026-10-08 选定）**：收起的行在新行上方时，新行随之上移那一行多出的高度，
  *   指针一般落在新行的下半部；上一张卡比这张高时指针会落到再下一行（新行显示在指针上方，手再动才去展开那一行）。
  *   不再补 scrollTop、不垫顶部空白：那样指针下的行不动，代价是指针上方的整列往下拖、滚到顶时顶部露出空白，
@@ -91,6 +92,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	panelPointerHandlers: {
 		onPointerEnter: () => void;
 		onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => void;
+		onPointerDownCapture: (event: ReactPointerEvent<HTMLElement>) => void;
 	};
 	cancelPendingHoverIntent: () => void;
 	collapseRowExpandedInPlaceByHover: () => void;
@@ -120,6 +122,9 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	// 按任务记（Pinned 与下方区同一个任务一起收起）。
 	const entryKeyWithHoverExpansionSuppressedUntilPointerLeavesRowRef = useRef<string | null>(null);
 	const lastObservedPointerClientPositionRef = useRef<{ clientX: number; clientY: number } | null>(null);
+	// 最近一次沿面板 React 子树传播的 pointerdown 原生事件（含卡上弹出、DOM 挂在 body 下的 portal 弹窗）。
+	// 「面板外按下」按事件对象身份对照它，不留滞后的布尔标记。
+	const lastPointerDownNativeEventDispatchedThroughPanelReactTreeRef = useRef<Event | null>(null);
 	// 交接时指针停在的那一行（新展开的行，或停在固定展开的行上时的那一行）与它提交前的顶边；提交后检查交接是否把它的
 	// 顶边带出了可视区。
 	const rowWhoseTopEdgeMustStayVisibleAfterHandOffRef = useRef<{
@@ -363,6 +368,9 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 				setRowExpandedInPlaceByHover(null);
 			}, CROSS_PROJECT_TASK_SWITCHER_PANEL_POINTER_EXIT_COLLAPSE_DELAY_MS);
 		},
+		onPointerDownCapture: (event: ReactPointerEvent<HTMLElement>) => {
+			lastPointerDownNativeEventDispatchedThroughPanelReactTreeRef.current = event.nativeEvent;
+		},
 	};
 
 	const isHoverExpansionCollapseOnEscapeOrPointerDownOutsidePanelArmed = rowExpandedInPlaceByHover !== null;
@@ -370,23 +378,35 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		if (!isHoverExpansionCollapseOnEscapeOrPointerDownOutsidePanelArmed) {
 			return;
 		}
-		const collapseOnEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
+		// 键盘焦点在弹窗里（如卡上弹出的原始 prompt 弹窗：Radix 把焦点困在 role=dialog 的 Content 内）时这次 Esc 归弹窗，
+		// 只关弹窗、不收起这一行。按事件目标判断，不读 defaultPrevented：App 常驻的 Esc 热键（react-hotkeys-hook，
+		// preventDefault: true）启动时就挂在 document 上、先于这里对每次 Esc 都 preventDefault，读它就永远收不起。
+		// 弹窗即便已被 Radix 的 capture 监听关掉、从 DOM 摘下，target 的祖先链仍在摘下的子树里，closest 照样命中。
+		const collapseOnEscapeOutsideDialog = (event: KeyboardEvent) => {
+			const isEscapeKeydownInsideDialog =
+				event.target instanceof Element && event.target.closest("[role='dialog']") !== null;
+			if (event.key === "Escape" && !isEscapeKeydownInsideDialog) {
 				collapseRowExpandedInPlaceByHover();
 			}
 		};
-		// 触屏没有「指针离开面板」：在面板以外按下就收起。
+		// 触屏没有「指针离开面板」：在面板以外按下就收起。「面板以外」按 React 子树判断：卡上弹出的 portal 弹窗
+		// DOM 挂在 body 下、不在面板 DOM 里，只看 DOM 包含关系会把在弹窗里的每次按下都当成面板外，收起这一行、
+		// 连卡体带弹窗一起卸载（原始 prompt 弹窗一点就关、Copy 的 click 落空）。
+		// 必须挂 bubble 阶段：面板的 onPointerDownCapture 由 React 挂在 root / portal 容器上的监听派发，晚于 document 的 capture。
 		const collapseOnPointerDownOutsidePanel = (event: PointerEvent) => {
-			if (panelScrollContainerRef.current?.contains(event.target as Node)) {
+			if (
+				event === lastPointerDownNativeEventDispatchedThroughPanelReactTreeRef.current ||
+				panelScrollContainerRef.current?.contains(event.target as Node)
+			) {
 				return;
 			}
 			collapseRowExpandedInPlaceByHover();
 		};
-		document.addEventListener("keydown", collapseOnEscape);
-		document.addEventListener("pointerdown", collapseOnPointerDownOutsidePanel, true);
+		document.addEventListener("keydown", collapseOnEscapeOutsideDialog);
+		document.addEventListener("pointerdown", collapseOnPointerDownOutsidePanel);
 		return () => {
-			document.removeEventListener("keydown", collapseOnEscape);
-			document.removeEventListener("pointerdown", collapseOnPointerDownOutsidePanel, true);
+			document.removeEventListener("keydown", collapseOnEscapeOutsideDialog);
+			document.removeEventListener("pointerdown", collapseOnPointerDownOutsidePanel);
 		};
 	}, [
 		collapseRowExpandedInPlaceByHover,

@@ -343,4 +343,80 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		renderBoard(makeHostWithPinnedEntryPresence(true));
 		expect(sectionColumnScrollContainer("pinned").scrollTop).toBe(90);
 	});
+
+	it("列里 hover 展开卡上弹出的原始 prompt 弹窗（portal 挂在 body 下、不在列 DOM 里）：在弹窗里按下不收起这一行；真正在列外按下照旧收起", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			act(() =>
+				root.render(
+					<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+						host={makeHost()}
+						currentProjectTaskCards={{
+							currentProjectDisplayedBoard: {
+								columns: [
+									{
+										id: "review",
+										title: "Review",
+										cards: [
+											{
+												id: "warm",
+												title: "Warm task from the in-browser board",
+												prompt: "Original prompt of the warm task",
+												startInPlanMode: false,
+												baseRef: "main",
+												createdAt: NOW_MS - 60 * 60_000,
+												updatedAt: NOW_MS - 60 * 60_000,
+											},
+										],
+									},
+								],
+							},
+							currentProjectTaskSessions: {},
+							currentProjectTaskCardActionHandlers: {},
+							currentProjectWorkspacePath: "/repos/project-a",
+						}}
+						defaultAgentId={null}
+					/>,
+				),
+			);
+			const queryWarmRow = () =>
+				sectionColumnScrollContainer("prompt-cache-warm").querySelector<HTMLElement>(
+					'[data-cross-project-task-switcher-task-id="warm"]',
+				);
+			const warmRowInPlaceExpansionState = () => queryWarmRow()?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
+			// hook 只认坐标真的变了的 pointermove；再等过 hover 意图的延时。
+			await act(async () =>
+				(queryWarmRow()?.querySelector("button") ?? queryWarmRow())?.dispatchEvent(
+					new MouseEvent("pointermove", { bubbles: true, clientX: 40, clientY: 137 }),
+				),
+			);
+			await act(async () => {
+				vi.advanceTimersByTime(400);
+			});
+			expect(warmRowInPlaceExpansionState()).toBe("expanded_in_place_by_hover");
+
+			await act(async () =>
+				queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="View original prompt"]')?.click(),
+			);
+			const originalPromptDialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+			expect(originalPromptDialog?.textContent).toContain("Original prompt of the warm task");
+			expect(container.contains(originalPromptDialog)).toBe(false);
+
+			const copyButton = [...(originalPromptDialog?.querySelectorAll("button") ?? [])].find(
+				(button) => button.textContent?.trim() === "Copy prompt",
+			);
+			await act(async () => {
+				copyButton?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+			});
+			expect(warmRowInPlaceExpansionState()).toBe("expanded_in_place_by_hover");
+			expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+
+			await act(async () => {
+				document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+			});
+			expect(warmRowInPlaceExpansionState()).toBe("compact_row");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

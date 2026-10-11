@@ -52,6 +52,8 @@ export interface CrossProjectTaskSwitcherSectionColumnScrollContainerBinding {
 	onSectionColumnScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
 	onSectionColumnPointerEnter: () => void;
 	onSectionColumnPointerLeave: (event: ReactPointerEvent<HTMLDivElement>) => void;
+	// 记下沿这一列 React 子树传播的 pointerdown：卡上弹出的 portal 弹窗（DOM 在 body 下）里的按下不算「列外按下」。
+	onSectionColumnPointerDownCapture: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }
 
 export interface CrossProjectTaskSwitcherSectionBlockProps {
@@ -95,6 +97,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 					onScroll={sectionColumnScrollContainerBinding?.onSectionColumnScroll}
 					onPointerEnter={sectionColumnScrollContainerBinding?.onSectionColumnPointerEnter}
 					onPointerLeave={sectionColumnScrollContainerBinding?.onSectionColumnPointerLeave}
+					onPointerDownCapture={sectionColumnScrollContainerBinding?.onSectionColumnPointerDownCapture}
 					// overflow-anchor: none —— 与 Focus View 左栏面板同理：hover 交接时列表顶边固定，浏览器自带的 scroll
 					// anchoring 会在列滚动过时自己补 scrollTop。这个容器的顶边也是 hook 判断「交接是否把新行顶边带出可视区」的基准。
 					className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-1 pb-1.5 [overflow-anchor:none]"

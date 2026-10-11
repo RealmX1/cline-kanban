@@ -22,6 +22,9 @@ export interface PendingCrossProjectTaskOpen {
  *
  * 同项目直接选中；跨项目先切 workspace（原地切，WS 重连），待目标 board 落定后再 setSelectedTaskId——
  * 绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。
+ * 「同项目」以 board 归属为准（repoId 既是 currentProjectId、也是 projectIdOwningHydratedBoard），不只看 currentProjectId：
+ * 切项目握手期间 currentProjectId 会先变成目标项目而 board 仍属上一个项目，这时在过渡外壳里再点目标项目的任务若被当成
+ * 同项目，会在旧 board 里找卡、误报找不到并丢掉第一次的在途；归属不符就照跨项目处理，挂在途等目标 board 落定。
  * backlog 卡与看板上单击 backlog 卡同语义：打开编辑对话框，不进详情（task-card-business-props.ts）。
  *
  * 在途态的一切收尾决策（选中详情 / 打开 backlog 编辑器 / 判定找不到并提示）都只在 isCurrentProjectBoardSettled
@@ -34,6 +37,7 @@ export interface PendingCrossProjectTaskOpen {
 export function useCrossProjectTaskOpenInProject({
 	board,
 	currentProjectId,
+	projectIdOwningHydratedBoard,
 	selectedTaskId,
 	isDetailViewOpen,
 	isCurrentProjectBoardSettled,
@@ -43,6 +47,8 @@ export function useCrossProjectTaskOpenInProject({
 }: {
 	board: BoardData;
 	currentProjectId: string | null;
+	// board 此刻装的是哪个项目的数据（use-workspace-sync，与 setBoard 同批更新）。
+	projectIdOwningHydratedBoard: string | null;
 	selectedTaskId: string | null;
 	isDetailViewOpen: boolean;
 	// 当前项目的 board 已是该项目的完整快照（不在切项目 / 等快照 / 等元数据中）。
@@ -75,7 +81,7 @@ export function useCrossProjectTaskOpenInProject({
 			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
 			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Post-Deploy Verification 面板点 task
 			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
-			if (repoId === currentProjectId) {
+			if (repoId === currentProjectId && projectIdOwningHydratedBoard === repoId) {
 				setPendingCrossProjectTaskOpen(null);
 				// 在途期间点回当前项目的任务：先撤销在途切换（handleSelectProject 选回当前项目即撤销；
 				// 不在途时是 no-op），否则导航仍会落到在途目标项目、刚选中的详情随即被切项目关掉。
@@ -93,6 +99,8 @@ export function useCrossProjectTaskOpenInProject({
 				setSelectedTaskId(taskId);
 				return;
 			}
+			// 跨项目，或目标已是 currentProjectId 但 board 还没换成它的（握手窗口）：后者 handleSelectProject 是 no-op，
+			// 在途态改指向这次点的任务（保留最早的 origin），由下方落定 effect 在目标 board 就绪后打开。
 			setPendingCrossProjectTaskOpen((previous) => ({
 				repoId,
 				taskId,
@@ -111,7 +119,7 @@ export function useCrossProjectTaskOpenInProject({
 			});
 			handleSelectProject(repoId);
 		},
-		[currentProjectId, handleSelectProject, setSelectedTaskId],
+		[currentProjectId, handleSelectProject, projectIdOwningHydratedBoard, setSelectedTaskId],
 	);
 
 	useEffect(() => {

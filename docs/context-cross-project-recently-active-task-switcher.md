@@ -56,7 +56,7 @@ _Avoid_: hot tasks, urgent
 - 三态同一几何：精简行、hover 展开、固定展开的标题首行左上角一像素不动（实测 0px），多出来的内容只向下长。框没有内边距与边框（描边是不占布局的 ring），卡体首行用精简行同一个前导点（替换 In progress 的 Spinner；「在跑 / 失败」由会话活动行表达）与同一套度量（`…-task-row-first-line.tsx`）。精简行上的项目名、未读点、Cache warm 药丸并进卡体已有的位置（`TaskCardBodyCrossProjectTaskSwitcherRowElements`），不在卡上方另叠一条。
 - hover 一行约 350ms（`EXPERIMENT_NODE`）后这一行在列表里原地换成与 This project 同一个紧凑 `TaskCardBody`，把下面的行往下推。同一时刻只有一行因 hover 展开（按行，不按任务）。hover 意图期间完整卡片已隐藏挂载在行里，借此预取其他项目的卡；展开时就是这个实例，不重读。触屏改用长按约 500ms，抬手那一下的点击被吞掉。
 - 往下挪到下一行：
-  - **交接**：指针离开展开的行不收起，下一行停够意图时长时两行在同一次提交里换过来；指针离开整个面板约 300ms（`EXPERIMENT_NODE`）、Esc、在面板外按下，才收起。离开即收起会让列表在指针移动途中上移几十像素，指针脚下换成更下面的行。
+  - **交接**：指针离开展开的行不收起，下一行停够意图时长时两行在同一次提交里换过来；指针离开整个面板约 300ms（`EXPERIMENT_NODE`）、Esc、在面板外按下，才收起。「面板外」按面板的 React 子树判断：卡上弹出的 portal 弹窗（如原始 prompt 弹窗）DOM 挂在 body 下，但在里面按下不算面板外，否则一按就收起这一行、连卡带弹窗卸载；键盘焦点在弹窗里（Esc 的事件目标在 `role=dialog` 内）时 Esc 只关弹窗、不收起；不读 `defaultPrevented`，因为 App 常驻的 Esc 热键（react-hotkeys-hook，`preventDefault: true`）对每次 Esc 都先 preventDefault，读它就永远收不起（2026-10-12 评审发现）。离开即收起会让列表在指针移动途中上移几十像素，指针脚下换成更下面的行。
   - **列表顶边固定（经典手风琴）**：收起的行在上方时，新行跟着上移那一行多出的高度，指针一般落在新行下半部；上一张卡比这张高时指针会落到再下一行（新行显示在指针上方，手再动才去展开那一行）。不补 `scrollTop`、不垫顶部空白；面板容器 `overflow-anchor: none`，免得浏览器的 scroll anchoring 在面板滚动过时自己补。唯一例外：交接把新行顶边（连同伸出顶边的动作组）带出了面板可视区上沿，就回滚到刚好露出，最多回滚它被带上去的距离。面板已滚到底、内容变矮时，浏览器会把 `scrollTop` 夹到新的最大值，列表随之下移一点，没有处理。
   - 2026-10-08 用户否掉了此前的「锚定指针下的行」（新行停在指针下，上移的距离先用 `scrollTop` 补，不够就垫面板顶部空白）：指针上方的整列被往下拖，面板在顶部时露出空白，且每往下交接一次空白就累加一次。三种取舍只能选一：上方往下拖（否掉）、新卡上跳（选定）、扫过的行留着展开直到离开面板（未选：列表会越扫越长）。
   - **只认真实移动**：意图只由坐标真的变了的 pointermove 发起，布局 / 滚动造成的同坐标指针事件不算，不会连锁展开；滚轮滚完停下也不会自己展开。
@@ -84,7 +84,7 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 - 两处共用同一份「区数据 + 一行怎么画、点了做什么」（`use-cross-project-task-switcher-section-row-rendering-shared-across-scroll-containers.tsx`）与同一组区块组件（`cross-project-recently-active-task-switcher-section-blocks.tsx`，参数 `sectionBlockPresentation` 区分两种呈现）。
 - 列序 Pinned（没有置顶时隐藏）| Cache warm · your turn | Recent | Running，注意力优先（`EXPERIMENT_NODE`）；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
 - 与左栏的呈现差异：Pinned 全量显示、不折叠（不读左栏的折叠 / 只露 5 条偏好）；Running 始终列出行（不读左栏的收起偏好）；Pinned 行点击不做「跳到下方区那一行」（点行就进了 Focus View，首页随即卸载）。Cache warm 与 Recent 两处相同。
-- 每列一个滚动容器（列 header 固定在滚动区外、滚动容器就是分区内容容器），各持一个 hover 原地展开 hook 实例：手风琴语义与左栏相同，「指针离开面板」「在面板外按下」都以这一列为面板，指针从 A 列移到 B 列时 A 列展开的行约 300ms 后收起。各列滚动位置记在 continuity store 的 `boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection`：Focus View 打开时首页被卸载，Back 回来落回原位。
+- 每列一个滚动容器（列 header 固定在滚动区外、滚动容器就是分区内容容器），各持一个 hover 原地展开 hook 实例：手风琴语义与左栏相同，「指针离开面板」「在面板外按下」都以这一列为面板（「列外」同样按这一列的 React 子树判断，列里卡上弹出的 portal 弹窗算列内），指针从 A 列移到 B 列时 A 列展开的行约 300ms 后收起。各列滚动位置记在 continuity store 的 `boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection`：Focus View 打开时首页被卸载，Back 回来落回原位。
 - 当前项目的行展开成完整卡片时与主看板同数据、同动作（`use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page.ts`，与 ColumnContextPanel 同构）；board 还不是当前项目的数据时改读服务端。
 - 页头「All projects」与「N projects · X live · Y awaiting you」（与顶栏切换器 Live / 等你处理两列同源），右侧「Create task (c)」。移动端放不下多列，回落竖排面板。
 
