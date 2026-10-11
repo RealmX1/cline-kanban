@@ -33,7 +33,7 @@ import {
 } from "@/state/task-card-action-command-execution";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
-// 每个卡片动作在浏览器侧的唯一入口，主看板、Focus View（This project）、跨项目切换面板（All projects）共用。
+// 每个用户交互卡片动作在浏览器侧的唯一入口，主看板、Focus View（This project）、跨项目切换面板（All projects）共用。
 // 差别只在调用方给不给 `currentProjectBoardForOptimisticOverlay`：
 //   - 当前项目：给。动作在渲染层立刻生效（overlay），不改会被整板保存的 board；
 //   - 其他项目：不给。board 不在浏览器内存里，只显示在途 spinner，结果随广播回来。
@@ -67,7 +67,7 @@ function expectedBoardEffectsForSingleTaskCard(
 	return expectedBoardEffect ? new Map([[taskId, expectedBoardEffect]]) : undefined;
 }
 
-// --- 改字段：行内改名、取消自动动作、编辑器保存、AI 起名回填 ---
+// --- 改字段：行内改名、取消自动动作、编辑器保存 ---
 // patch 三态语义见 runtimeTaskCardFieldValuePatchSchema：键缺省 = 保留服务端最新现值，null = 清除，值 = 改成它。
 // 合并在服务端 board 锁内对最新卡片进行，所以「只改标题」不会抹掉别人刚改的 prompt。
 // overlay 的乐观值由调用方给的 board 变换算出（与改动前浏览器 setBoard 用的是同一个纯函数）。
@@ -75,11 +75,9 @@ export async function updateTaskCardFieldValuesThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
 	taskCardFieldValuePatch: RuntimeTaskCardFieldValuePatch;
-	expectedTaskTitleAndPromptForAiNameBackfill?: { title: string; prompt: string };
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	optimisticBoardTransformation?: (board: BoardData) => { board: BoardData; updated: boolean };
-	// null = 不属于任何已定义的发起方（AI 起名回填这类浏览器端异步自动化）：不带标注，runtime 如实记缺标注。
-	boardMutationInitiator?: WebUiBoardMutationInitiator | null;
+	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionUpdateFieldValuesResponse>> {
 	const optimisticTaskCardFieldPatch =
 		input.currentProjectBoardForOptimisticOverlay && input.optimisticBoardTransformation
@@ -106,14 +104,11 @@ export async function updateTaskCardFieldValuesThroughRuntime(input: {
 		sendCommand: () =>
 			updateTaskCardFieldValuesInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
-				expectedTaskTitleAndPromptForAiNameBackfill: input.expectedTaskTitleAndPromptForAiNameBackfill,
 				taskCardFieldUpdate: {
 					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 					taskCardFieldValuePatch: input.taskCardFieldValuePatch,
 				},
-				...(input.boardMutationInitiator === null
-					? {}
-					: { boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture" }),
+				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
 	});

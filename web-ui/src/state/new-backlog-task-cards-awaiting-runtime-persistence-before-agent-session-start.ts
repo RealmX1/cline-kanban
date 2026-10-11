@@ -72,6 +72,18 @@ export function beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSes
 	}
 }
 
+// 后台回填只等已发出的落盘请求，不能借启动入口的重试路径重新创建已删除的卡。
+export function waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying(input: {
+	workspaceId: string;
+	taskId: string;
+}): Promise<NewTaskCardRuntimePersistenceOutcome> {
+	return (
+		newTaskCardRuntimePersistenceRequestByWorkspaceAndTaskKey.get(
+			buildWorkspaceAndTaskKey(input.workspaceId, input.taskId),
+		) ?? Promise.resolve({ ok: true })
+	);
+}
+
 // 启动 agent 前调用。不是本页面新建的卡（或早已确认落盘）立即放行；在途的等它；上次失败的以当前卡片重试一次。
 export async function waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart(input: {
 	workspaceId: string;
