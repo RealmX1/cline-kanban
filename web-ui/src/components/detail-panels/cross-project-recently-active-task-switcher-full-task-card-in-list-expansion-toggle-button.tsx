@@ -19,9 +19,9 @@ const IN_LIST_EXPANSION_TOGGLE_LABEL_BY_EXPANSION_STATE: Record<
 };
 
 /**
- * 命中区扩到 24×24（WCAG 2.2 目标尺寸下限），按钮自身盒子（20×20）与图标坐标不动：伪元素向上扩 4px（正好到卡片上沿，
- * 动作组是 top-1）、向右扩 4px（落在动作组 px-0.5 + right-1 共 6px 的空白里），左沿与按钮左沿齐平——左侧隔 2px（gap-0.5）
- * 就是相邻动作按钮，不能盖住它；也不向下扩，不抢卡体 / 精简行下方内容的点击。
+ * 命中区扩到 24×24（WCAG 2.2 目标尺寸下限），按钮自身盒子（20×20）与图标坐标不动：伪元素向上扩 4px（动作组叠在首行上方，
+ * 上面是上一行右下角的几像素）、向右扩 4px（落在动作组 px-0.5 + right-1 共 6px 的空白里），左沿与按钮左沿齐平——左侧隔 2px
+ *（gap-0.5）就是相邻动作按钮，不能盖住它；也不向下扩，不抢首行标题的点击。
  * 伪元素命中的就是按钮本身（click / :hover 都落在 button 上）；pointer-events 随动作组继承，动作组隐形时伪元素也接不到点击。
  * 三态开关同一坐标靠按钮盒子不变（真实浏览器测试按开关的 getBoundingClientRect 断言），所以只能用伪元素，不能加 padding / margin。
  */
@@ -30,7 +30,7 @@ const IN_LIST_EXPANSION_TOGGLE_HIT_AREA_EXTENDED_UP_AND_RIGHT_BEYOND_BUTTON_BOX_
 
 /**
  * 「固定展开 / 收起」开关。精简行 hover、hover 原地展开、固定展开的卡片三处都画在卡片右上角同一坐标
- *（各自 hover 动作组的最右一格：right-1 + px-0.5 = 距右 6px，top-1 = 距上 4px，20×20），
+ *（各自 hover 动作组的最右一格：right-1 + px-0.5 = 距右 6px，叠在首行上方、顶边在行顶边之上 12px，20×20），
  * 点完以后下一个状态的开关正好还在光标下。
  *
  * 不叫 Open：这个面板里「打开」是打开任务（点行就是）。也不叫 Pin：Pin 是 Pinboard 的专名。

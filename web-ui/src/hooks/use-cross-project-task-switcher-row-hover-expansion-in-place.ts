@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
+import { CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX } from "@/components/task-card-body";
 
 // EXPERIMENT_NODE: 指针在一行上停多久才原地展开（350ms）；太短扫过列表时会一路展开、整列跟着动，太长又像没反应
 const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_INTENT_EXPANSION_DELAY_MS = 350;
@@ -56,19 +57,21 @@ export interface CrossProjectTaskSwitcherRowExpandedInPlaceByHover {
  * All projects 面板的行：指针停够 hover 意图的时长（触屏长按）后，这一行在列表里**原地**展开成完整卡片，把下面的行
  * 往下推（不做浮层：浮层会盖住下一行，往下挪鼠标切到下一个任务不直观）。同一时刻只有一行因 hover 展开。
  *
- * 原地展开要避开的三种跳动（都在这里处理）：
+ * 原地展开要避开的跳动（都在这里处理）：
  * - **交接，不在离开时收起**：指针离开展开的那一行时不收起；等下一行停够意图时长，旧行收起与新行展开在同一次提交里
- *   完成。若离开即收起，往下挪向下一行时，上一行一收、整列上移几十像素，指针脚下换成了更下面的行（跳过想看的那个）。
+ *   完成。若离开即收起，往下挪向下一行时，上一行一收、整列在指针移动途中上移几十像素，指针脚下换成了更下面的行。
  *   指针离开整个面板（延时）、Esc、在面板外按下指针，才收起。
- * - **锚定指针下的行**：交接时若收起的行在新行上方，新行会随之上移；提交后把面板 scrollTop 补回同样的距离，新展开的行
- *   停在指针下不动。面板已滚到顶、scrollTop 不够补时，差额垫成面板顶部的空白（`panelTopSpacerKeepingHoverAnchorRowInPlacePx`），
- *   效果与滚动补偿相同——指针上方的内容下移、指针下的行不动；整组 hover 展开收起时（指针离开面板等）空白一并撤掉。
- *   实测：不垫的话面板在顶部时新行上移 47px，指针落到新行下沿之外，再一动就去展开再下一行（跳过想看的那个）。
- *   面板容器关掉浏览器自带的 scroll anchoring（overflow-anchor: none），免得两套补偿叠加。
+ * - **列表顶边固定（经典手风琴，用户 2026-10-08 选定）**：收起的行在新行上方时，新行随之上移那一行多出的高度，
+ *   指针一般落在新行的下半部；上一张卡比这张高时指针会落到再下一行（新行显示在指针上方，手再动才去展开那一行）。
+ *   不再补 scrollTop、不垫顶部空白：那样指针下的行不动，代价是指针上方的整列往下拖、滚到顶时顶部露出空白，
+ *   且每往下交接一次空白就累加一次（用户否掉）。面板容器关掉浏览器自带的 scroll anchoring（overflow-anchor: none），
+ *   否则面板滚动过时浏览器会自己补 scrollTop，又变回「整列往下拖」。唯一的例外是新行的顶边被这次收起带出了可视区
+ *   （面板滚过、上一张卡的上半截已在可视区之外）：回滚到刚好露出新行的顶边（最多回滚它被带上去的距离），
+ *   不然这张卡的标题看不见。
  * - **只认真实移动**：意图只由坐标真的变了的 pointermove 发起。布局变化 / 滚动把别的行换到静止的光标下时，浏览器
- *   可能补发同坐标的指针事件——不理它们，否则一次展开引起的位移会接着触发下一行展开，连锁下去。
+ *   可能补发同坐标的指针事件——不理它们，否则一次交接引起的位移会接着触发下一行展开，连锁下去。
  *
- * 展开是顶边不动、只向下长，指针始终留在展开的那一行里，所以不会出现「展开→挤走指针→收起→回到指针下→再展开」的循环。
+ * 展开是顶边不动、只向下长，展开的那一行不会把自己挤离指针，所以不会出现「展开→挤走指针→收起→回到指针下→再展开」的循环。
  *
  * 另两处主动不展开：在行上按下指针就取消待发的意图（按下与抬起之间行变成卡片，click 会落到公共祖先上丢失）；
  * 用户刚把固定展开的卡收起（`suppressHoverExpansionUntilPointerLeavesRow`），指针离开这一行之前不再 hover 展开。
@@ -93,8 +96,6 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	collapseRowExpandedInPlaceByHover: () => void;
 	suppressHoverExpansionUntilPointerLeavesRow: (entryKey: string) => void;
 	forgetHoverExpansionOfRowNowKeptExpandedInList: () => void;
-	// 面板顶部额外垫的空白（px）；面板把它加进顶部内边距。
-	panelTopSpacerKeepingHoverAnchorRowInPlacePx: number;
 } {
 	const [rowExpandedInPlaceByHover, setRowExpandedInPlaceByHoverState] =
 		useState<CrossProjectTaskSwitcherRowExpandedInPlaceByHover | null>(null);
@@ -119,12 +120,12 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	// 按任务记（Pinned 与下方区同一个任务一起收起）。
 	const entryKeyWithHoverExpansionSuppressedUntilPointerLeavesRowRef = useRef<string | null>(null);
 	const lastObservedPointerClientPositionRef = useRef<{ clientX: number; clientY: number } | null>(null);
-	// 交接前量下的「指针下那一行」的上沿；提交后对比、补 scrollTop。
-	const pendingScrollCompensationRef = useRef<{ anchorRowElement: HTMLElement; anchorRowTopBeforePx: number } | null>(
-		null,
-	);
-	// EXPERIMENT_NODE: 面板滚到顶、scrollTop 不够补时用顶部空白锚住指针下的行；另一选择是接受新行上移（指针可能落到下一行）
-	const [panelTopSpacerKeepingHoverAnchorRowInPlacePx, setPanelTopSpacerKeepingHoverAnchorRowInPlacePx] = useState(0);
+	// 交接时指针停在的那一行（新展开的行，或停在固定展开的行上时的那一行）与它提交前的顶边；提交后检查交接是否把它的
+	// 顶边带出了可视区。
+	const rowWhoseTopEdgeMustStayVisibleAfterHandOffRef = useRef<{
+		anchorRowElement: HTMLElement;
+		anchorRowTopBeforeHandOffPx: number;
+	} | null>(null);
 
 	const cancelPendingHoverIntent = useCallback(() => {
 		if (hoverIntentTimeoutIdRef.current !== null) {
@@ -157,7 +158,6 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		if (rowExpandedInPlaceByHoverRef.current !== null) {
 			setRowExpandedInPlaceByHover(null);
 		}
-		setPanelTopSpacerKeepingHoverAnchorRowInPlacePx(0);
 	}, [
 		cancelPendingHoverIntent,
 		clearPanelPointerExitCollapseTimeout,
@@ -166,7 +166,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	]);
 
 	// 把 hover 展开交给 `rowIdentity`（null = 只收起当前那一行，用于停在固定展开的行上）。
-	// 提交前量一次 anchorRowElement 的上沿，提交后若它被上方的收起带着移动了，就补 scrollTop。
+	// `anchorRowElement` 是指针停在的那一行，提交后它的顶边若被这次交接带出可视区就回滚到刚好露出。
 	const handOffHoverExpansion = useCallback(
 		(rowIdentity: CrossProjectTaskSwitcherRowIdentity | null, anchorRowElement: HTMLElement) => {
 			const currentRowExpandedInPlaceByHover = rowExpandedInPlaceByHoverRef.current;
@@ -176,9 +176,9 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			) {
 				return;
 			}
-			pendingScrollCompensationRef.current = {
+			rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current = {
 				anchorRowElement,
-				anchorRowTopBeforePx: anchorRowElement.getBoundingClientRect().top,
+				anchorRowTopBeforeHandOffPx: anchorRowElement.getBoundingClientRect().top,
 			};
 			setRowExpandedInPlaceByHover(rowIdentity ? { rowIdentity, isPointerOverRow: true } : null);
 		},
@@ -186,31 +186,26 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	);
 
 	useLayoutEffect(() => {
-		const pendingScrollCompensation = pendingScrollCompensationRef.current;
-		pendingScrollCompensationRef.current = null;
+		const rowWhoseTopEdgeMustStayVisible = rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current;
+		rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current = null;
 		const panelScrollContainer = panelScrollContainerRef.current;
-		if (
-			!pendingScrollCompensation ||
-			!panelScrollContainer ||
-			!pendingScrollCompensation.anchorRowElement.isConnected
-		) {
+		if (!rowWhoseTopEdgeMustStayVisible?.anchorRowElement.isConnected || !panelScrollContainer) {
 			return;
 		}
-		const anchorRowDriftPx =
-			pendingScrollCompensation.anchorRowElement.getBoundingClientRect().top -
-			pendingScrollCompensation.anchorRowTopBeforePx;
-		if (Math.abs(anchorRowDriftPx) < 0.5) {
-			return;
+		// 顶边固定：一般什么都不用做。只有这次交接把这一行往上带、顶边（连同叠在首行上方、伸出顶边的 hover 动作组）
+		// 因此落到面板可视区上沿之外，才往回滚，且最多回滚它被带上去的距离——交接前就因用户自己滚动而露不全的部分不管，
+		// 那是用户的滚动位置，回滚就成了在静止的光标下拖动列表。在 layout effect 里改，浏览器绘制前就到位。
+		const anchorRowTopAfterHandOffPx = rowWhoseTopEdgeMustStayVisible.anchorRowElement.getBoundingClientRect().top;
+		const anchorRowCarriedUpwardByHandOffPx =
+			rowWhoseTopEdgeMustStayVisible.anchorRowTopBeforeHandOffPx - anchorRowTopAfterHandOffPx;
+		const rowTopEdgeHiddenAbovePanelViewportPx =
+			panelScrollContainer.getBoundingClientRect().top +
+			CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX -
+			anchorRowTopAfterHandOffPx;
+		const scrollBackPx = Math.min(anchorRowCarriedUpwardByHandOffPx, rowTopEdgeHiddenAbovePanelViewportPx);
+		if (scrollBackPx > 0) {
+			panelScrollContainer.scrollTop = Math.max(0, panelScrollContainer.scrollTop - scrollBackPx);
 		}
-		// 上移（drift < 0）→ scrollTop 减同样多，内容整体下移回原位。scrollTop 不够减的差额垫成顶部空白：在 layout
-		// effect 里 setState，React 会在浏览器绘制前同步重渲，中间没有一帧是错位的。
-		const compensatedScrollTopPx = panelScrollContainer.scrollTop + anchorRowDriftPx;
-		if (compensatedScrollTopPx >= 0) {
-			panelScrollContainer.scrollTop = compensatedScrollTopPx;
-			return;
-		}
-		panelScrollContainer.scrollTop = 0;
-		setPanelTopSpacerKeepingHoverAnchorRowInPlacePx((previousSpacerPx) => previousSpacerPx - compensatedScrollTopPx);
 	}, [panelScrollContainerRef, rowExpandedInPlaceByHover]);
 
 	const suppressHoverExpansionUntilPointerLeavesRow = useCallback(
@@ -366,15 +361,11 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			panelPointerExitCollapseTimeoutIdRef.current = window.setTimeout(() => {
 				panelPointerExitCollapseTimeoutIdRef.current = null;
 				setRowExpandedInPlaceByHover(null);
-				setPanelTopSpacerKeepingHoverAnchorRowInPlacePx(0);
 			}, CROSS_PROJECT_TASK_SWITCHER_PANEL_POINTER_EXIT_COLLAPSE_DELAY_MS);
 		},
 	};
 
-	// 顶部空白也要挂着这两条收起路径：把 hover 展开的行固定展开（forgetHoverExpansionOfRowNowKeptExpandedInList）后
-	// 已没有 hover 展开的行，空白却留着；若只在有 hover 行时监听，触屏（没有指针离开面板）/ 键盘用户就再也清不掉它。
-	const isHoverExpansionCollapseOnEscapeOrPointerDownOutsidePanelArmed =
-		rowExpandedInPlaceByHover !== null || panelTopSpacerKeepingHoverAnchorRowInPlacePx > 0;
+	const isHoverExpansionCollapseOnEscapeOrPointerDownOutsidePanelArmed = rowExpandedInPlaceByHover !== null;
 	useEffect(() => {
 		if (!isHoverExpansionCollapseOnEscapeOrPointerDownOutsidePanelArmed) {
 			return;
@@ -414,8 +405,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		[clearPanelPointerExitCollapseTimeout, clearTouchLongPress],
 	);
 
-	// 用户把正在 hover 展开的那一行固定展开：形态不变，只清掉 hover 记录（免得之后收起时又落回 hover 展开）；
-	// 指针还在面板里，顶部空白不撤（撤了指针下的行会移动）；之后由指针离开面板、Esc、在面板外按下指针撤掉。
+	// 用户把正在 hover 展开的那一行固定展开：形态不变，只清掉 hover 记录（免得之后收起时又落回 hover 展开）。
 	const forgetHoverExpansionOfRowNowKeptExpandedInList = useCallback(() => {
 		cancelPendingHoverIntent();
 		if (rowExpandedInPlaceByHoverRef.current !== null) {
@@ -432,6 +422,5 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		collapseRowExpandedInPlaceByHover,
 		suppressHoverExpansionUntilPointerLeavesRow,
 		forgetHoverExpansionOfRowNowKeptExpandedInList,
-		panelTopSpacerKeepingHoverAnchorRowInPlacePx,
 	};
 }

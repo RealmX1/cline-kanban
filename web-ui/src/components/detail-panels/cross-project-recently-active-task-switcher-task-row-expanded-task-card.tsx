@@ -14,9 +14,14 @@ import {
 	CrossProjectTaskSwitcherRowLeadingActivityIndicator,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
-import { TaskCardBody, type TaskCardBodyCrossProjectTaskSwitcherRowElements } from "@/components/task-card-body";
+import {
+	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
+	TaskCardBody,
+	type TaskCardBodyCrossProjectTaskSwitcherRowElements,
+} from "@/components/task-card-body";
 import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-visual-density-context";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 import type { TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
@@ -136,7 +141,12 @@ function ExpandedTaskCardUnavailableFallback({
 				/>
 			</div>
 			<div className="mt-1 flex items-center gap-1.5 pl-[19px] text-xs text-text-tertiary">{children}</div>
-			<div className="absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm">
+			<div
+				className={cn(
+					"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm",
+					CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
+				)}
+			>
 				<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
 					expansionState={rowContext.inListExpansionState}
 					onToggleInListExpansion={rowContext.onToggleInListExpansion}

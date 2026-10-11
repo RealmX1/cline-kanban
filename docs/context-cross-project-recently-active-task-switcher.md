@@ -45,29 +45,31 @@ TTL 表在 `src/core/coding-agent-prompt-cache-retention-measured-ttl-lower-boun
 _Avoid_: hot tasks, urgent
 
 **Row（面板行）**：
-紧凑行：第 1 行前导点（Running 脉动点 / 未读交接点）/ agent 图标 / 标题，第 2 行项目名 / stage 标签（仅置顶区），右侧依次是倒计时药丸（仅 Cache warm 区）、三颗时长药丸（创建、停止生成、对话推进，与卡片同源）、置顶标记（置顶且不在 Pinned 区），置顶区另有第 3 行置顶理由。第 1 行右端留给 hover 动作组（Edit pin reason / Pin / 展开开关，叠在右上角），所以倒计时药丸与置顶标记放第 2 行，与完整卡片元信息行右侧同一组、同一顺序。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
+紧凑行：第 1 行前导点（Running 脉动点 / 未读交接点）/ agent 图标 / 标题，第 2 行项目名 / stage 标签（仅置顶区），右侧依次是倒计时药丸（仅 Cache warm 区）、三颗时长药丸（创建、停止生成、对话推进，与卡片同源）、置顶标记（置顶且不在 Pinned 区），置顶区另有第 3 行置顶理由。hover 动作组（Edit pin reason / Pin / 展开开关）叠在第 1 行**上方**（见下方「hover 动作组位置」），倒计时药丸与置顶标记放第 2 行，与完整卡片元信息行右侧同一组、同一顺序。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
 元信息行还显示 worktree 的 git 元数据（2026-10-05 用户要求，与 This project 卡片目录行同一套显隐规则）：相对 base 分支的 ahead / behind 与已集成提交数，以及未提交改动「(N files +A -D)」。Backlog 不显示；没有可说的提交关系、且未提交改动全为 0 时整组隐藏。取数唯一入口 `useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry`：
 - 当前项目的精简行与完整卡（hover 展开 / 固定展开）：优先读 `workspace_metadata_updated` 推流 store；Board Scope 下推流只探焦点任务与 auto-review 的 Review 列任务，其余任务在推流里没有数据，回落到下面的轮询 store。完整卡由展开宿主显式传入项目 ID，普通看板卡继续只订阅推流。
 - 全部非 Backlog 的行（含当前项目）：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
 - 不并入 `projects_updated`：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
 
 **Hover Expansion In Place / Keep Expanded In List（hover 原地展开与固定展开）**：
-2026-10-05 起取代原来的 chevron 展开；2026-10-07 把 hover 浮层改成原地展开（task 6527d，用户：浮层会盖住下一个任务，往下挪鼠标切到下一个任务不直观；浮层顶条把标题往下挤、左侧留白变大，Keep open 难点）。实现：`use-cross-project-task-switcher-row-hover-expansion-in-place.ts`。
+2026-10-05 起取代原来的 chevron 展开；2026-10-07 把 hover 浮层改成原地展开（task 6527d，用户：浮层会盖住下一个任务，往下挪鼠标切到下一个任务不直观；浮层顶条把标题往下挤、左侧留白变大，Keep open 难点）；2026-10-08 部署后撤掉交接补偿、改为列表顶边固定，动作组挪到首行上方（同一 task，见下）。实现：`use-cross-project-task-switcher-row-hover-expansion-in-place.ts`。
 - 三态同一几何：精简行、hover 展开、固定展开的标题首行左上角一像素不动（实测 0px），多出来的内容只向下长。框没有内边距与边框（描边是不占布局的 ring），卡体首行用精简行同一个前导点（替换 In progress 的 Spinner；「在跑 / 失败」由会话活动行表达）与同一套度量（`…-task-row-first-line.tsx`）。精简行上的项目名、未读点、Cache warm 药丸并进卡体已有的位置（`TaskCardBodyCrossProjectTaskSwitcherRowElements`），不在卡上方另叠一条。
 - hover 一行约 350ms（`EXPERIMENT_NODE`）后这一行在列表里原地换成与 This project 同一个紧凑 `TaskCardBody`，把下面的行往下推。同一时刻只有一行因 hover 展开（按行，不按任务）。hover 意图期间完整卡片已隐藏挂载在行里，借此预取其他项目的卡；展开时就是这个实例，不重读。触屏改用长按约 500ms，抬手那一下的点击被吞掉。
-- 往下挪不跳行（实测）：
-  - **交接**：指针离开展开的行不收起，下一行停够意图时长时两行在同一次提交里换过来；指针离开整个面板约 300ms（`EXPERIMENT_NODE`）、Esc、在面板外按下，才收起。离开即收起会让列表在指针下上移几十像素，指针脚下换成更下面的行。
-  - **锚定指针下的行**：收起的行在上方时，新行被带着上移的距离先用 `scrollTop` 补回，不够时差额垫成面板顶部空白（`EXPERIMENT_NODE`），整组收起时撤掉。面板容器 `overflow-anchor: none`，免得浏览器的 scroll anchoring 再补一次。实测不垫时面板在顶部，新行上移 47px，指针落到新行下沿之外。
+- 往下挪到下一行：
+  - **交接**：指针离开展开的行不收起，下一行停够意图时长时两行在同一次提交里换过来；指针离开整个面板约 300ms（`EXPERIMENT_NODE`）、Esc、在面板外按下，才收起。离开即收起会让列表在指针移动途中上移几十像素，指针脚下换成更下面的行。
+  - **列表顶边固定（经典手风琴）**：收起的行在上方时，新行跟着上移那一行多出的高度，指针一般落在新行下半部；上一张卡比这张高时指针会落到再下一行（新行显示在指针上方，手再动才去展开那一行）。不补 `scrollTop`、不垫顶部空白；面板容器 `overflow-anchor: none`，免得浏览器的 scroll anchoring 在面板滚动过时自己补。唯一例外：交接把新行顶边（连同伸出顶边的动作组）带出了面板可视区上沿，就回滚到刚好露出，最多回滚它被带上去的距离。面板已滚到底、内容变矮时，浏览器会把 `scrollTop` 夹到新的最大值，列表随之下移一点，没有处理。
+  - 2026-10-08 用户否掉了此前的「锚定指针下的行」（新行停在指针下，上移的距离先用 `scrollTop` 补，不够就垫面板顶部空白）：指针上方的整列被往下拖，面板在顶部时露出空白，且每往下交接一次空白就累加一次。三种取舍只能选一：上方往下拖（否掉）、新卡上跳（选定）、扫过的行留着展开直到离开面板（未选：列表会越扫越长）。
   - **只认真实移动**：意图只由坐标真的变了的 pointermove 发起，布局 / 滚动造成的同坐标指针事件不算，不会连锁展开；滚轮滚完停下也不会自己展开。
-  - 展开顶边不动、只向下长，指针留在展开的行里，不会出现「展开→挤走指针→收起→再展开」的循环。
-- 展开开关：⌄ / ⌃ 图标，三态都在卡片右上角同一坐标（hover 动作组最右一格：距右 6px、距上 4px，20×20），点完以后下一个状态的开关正好在光标下。精简行上的开关常驻 DOM（只切透明度），键盘 Tab 得到。tooltip「Keep expanded in list」/「Collapse to compact row」。不叫 Open（面板里「打开」是打开任务），也不叫 Pin（Pinboard 的专名）。点精简行上的开关不等 hover 意图，直接固定展开；收起后指针离开这一行之前不再 hover 展开。
+  - 展开顶边不动、只向下长，展开的行不会把自己挤离指针，不会出现「展开→挤走指针→收起→再展开」的循环。
+- **hover 动作组位置**：精简行、卡体（铅笔、置顶、原始 prompt、移列、删除……）、卡体兜底三处都叠在首行**上方**（`-top-3`，伸出行顶边 12px，底边落在首行字形之上），与标准密度卡片把动作组伸出上边框同一个思路。2026-10-08 用户反馈：一般紧凑密度的 `top-1` 压在首行右端、盖住后半截标题；也不要让首行在被盖住的地方提前折行（会抖、标题可用宽度变窄）。代价：行间只有 2px，动作组上半截伸进上一行的右下角，hover 时盖住那里几像素。分区第一行上方是分区 header（Pinned / Running 的折叠按钮铺满宽度，Recent 右侧是排序下拉框），伸进去会盖住它们的右下沿、指针从首行往上移时截走点击，所以紧挨 header 的第一行有 16px 上外边距（行根节点 `first:mt-4` = 动作组伸出量 12px + 动作组最右一格展开开关命中区伪元素 `after:-top-1` 再向上扩的 4px），开关命中区顶边正好落在 header 底边上。只让出 12px 时动作组盒子顶边虽落在 header 底边，开关命中区仍高出 4px，伸进 Pinned / Running 折叠按钮（h-9 header 里居中的 h-8，底边距 header 底边 2px）底沿约 2px、截走点击（2026-10-11 评审发现）；改伸出量或命中区向上扩展量中任何一项都要同步这里，真实浏览器集成测试阶段 6 先置顶一个任务让 Pinned 分区有行，hover 各分区首行后用 `elementFromPoint` 在 header 底沿与各控件底边内侧取点守着。三态共用行根节点，仍同一坐标，非首行不变（开关命中区仍是 24×24）。首行前是 Recent「Unread + opened」的小标题或空态提示时不生效（不紧挨 header，也不多出空白）。共享常量 `CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME` 与 `CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME`（`task-card-body.tsx`）；Focus View 左栏的一般紧凑密度仍是 `top-1`。
+- 展开开关：⌄ / ⌃ 图标，三态都在同一坐标（hover 动作组最右一格：距右 6px、叠在首行上方，20×20），点完以后下一个状态的开关正好在光标下。精简行上的开关常驻 DOM（只切透明度），键盘 Tab 得到。tooltip「Keep expanded in list」/「Collapse to compact row」。不叫 Open（面板里「打开」是打开任务），也不叫 Pin（Pinboard 的专名）。点精简行上的开关不等 hover 意图，直接固定展开；收起后指针离开这一行之前不再 hover 展开。
 - 固定状态按任务记（Pinned 与下方区同一个任务一起换），存在 `cross-project-task-switcher-panel-view-continuity-store`（字段 `crossProjectTaskSwitcherEntryKeysKeptExpandedInListAsFullTaskCardByUser`）：过渡外壳重挂载时保留，按标签页隔离，刷新即清，不进 localStorage。
 - 点卡片任何非按钮位置 = 点精简行：同一个行激活函数（backlog 原地编辑框 / 打开任务 / Pinned 行跳到下方区那一行）。卡体渲染角色 `expanded_card_copy_in_cross_project_task_switcher_row` 下单击不延迟、不接双击改标题（铅笔照旧可改）、Done 卡也能点开；在行上按下指针就取消待发的意图（否则按下与抬起之间行变成卡片，click 丢失）。点完不收起 hover 展开（收起会让列表在指针下移动）。
 - 卡体在 hover 展开的第一帧就以 hover 态呈现（动作组、底色）：展开发生在静止的光标下，卡体收不到 mouseenter，否则精简行上刚看到的开关会闪没。
 - 卡体渲染角色不可拖、不持有 `data-task-id`。门控同 This project（`buildTaskCardBusinessProps`）。面板自己提供紧凑密度（过渡外壳里也一样）。
 - 卡快照还没到 / 读失败时，展开的卡先画与精简行同一个首行，提示放在下面，标题不整行消失。
 - 键盘：按开关切换形态时旧形态连同它的开关整块卸载，提交后焦点交给**触发那一行**新形态下同一坐标的开关（含卡快照到达、兜底换成卡体那一次），不落到 body。只接力 `:focus-visible` 的焦点：鼠标点开关照旧不留焦点，否则 focus-within 会让动作组在指针离开后常显（`use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff.ts`）。展开后「打开任务」的键盘入口是卡体标题（兜底态是首行）：可聚焦，Enter / Space 走同一个行激活函数；只在该渲染角色下生效，标题里没有可交互元素（不形成嵌套），几何不变。
-- 验证：真实浏览器隔离检查（`test/integration/cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts` 阶段 6）量三态几何、交接后新行位移与是否连锁。
+- 验证：真实浏览器隔离检查（`test/integration/cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts` 阶段 6）量三态几何、动作组是否压首行、分区首行动作组是否伸进本分区 header、交接后上方的行与 scrollTop 是否不动、新行位移与是否连锁。
 - 当前项目：直接用 Focus View 左栏手里的数据与动作（带 overlay 的 board、推流 session、同一套 handler），与 This project 那张卡逐字一致。
 - 其他项目：按需只读 `taskCardAction.readTaskCardWithBoardColumn`，条目变了去抖重读（重读期间保留上一份）。卡体经 `taskCardOwnedByOtherProjectWorkspaceId` 不读只按 taskId 分键的当前项目 store（git 元数据改读上面的跨项目轮询 store；资源占用与排队 prompt 只对当前项目推流，不显示）。动作调同一组 `taskCardAction.*` 命令、同样的删除 / 跳过 Validation 确认框，不带 overlay、不切项目，期间显示在途 spinner（`use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx`）。
 
