@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1717,6 +1717,124 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 		expect(kimiPlanBypass.args).toContain("--plan");
 		expect(kimiPlanBypass.args).toContain("--yolo");
+	});
+
+	// 续跑不重放「plan 起步」，但会话死前若仍停在**没批准**的 plan 里，必须按转录恢复：否则卡片的
+	// `--dangerously-skip-permissions` 会让它直接跳出 plan 开工（09-14 ～ 10-12 实测 18 次，4 次没出计划就改了代码）。
+	describe("resuming a Claude conversation keeps an unapproved plan mode", () => {
+		const RESUMED_CLAUDE_SESSION_ID = "cccccccc-3333-4333-8333-333333333333";
+
+		function writeResumedClaudeTranscript(
+			homeDirectoryPath: string,
+			workspacePath: string,
+			records: unknown[],
+		): void {
+			const projectDirectoryPath = join(
+				homeDirectoryPath,
+				".claude",
+				"projects",
+				realpathSync(workspacePath).replace(/[^a-zA-Z0-9]/gu, "-"),
+			);
+			mkdirSync(projectDirectoryPath, { recursive: true });
+			writeFileSync(
+				join(projectDirectoryPath, `${RESUMED_CLAUDE_SESSION_ID}.jsonl`),
+				`${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+				"utf8",
+			);
+		}
+
+		async function prepareResumedClaudeLaunch(workspacePath: string, startInPlanMode: boolean) {
+			return await prepareAgentLaunch({
+				taskId: "task-claude-resume-plan-mode",
+				agentId: "claude",
+				binary: "claude",
+				args: [],
+				startInPlanMode,
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				cwd: workspacePath,
+				prompt: "",
+				resumeFromTrash: true,
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "claude",
+					sourceSessionId: RESUMED_CLAUDE_SESSION_ID,
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			});
+		}
+
+		it("会话死前仍在未批准的 plan 里 → 续跑回到 plan，并保留日后切 bypass 的预授权", async () => {
+			const homeDirectoryPath = setupTempHome();
+			const workspacePath = join(homeDirectoryPath, "worktree");
+			mkdirSync(workspacePath, { recursive: true });
+			writeResumedClaudeTranscript(homeDirectoryPath, workspacePath, [
+				{ type: "permission-mode", permissionMode: "plan" },
+				{ type: "user", permissionMode: "plan", message: { role: "user", content: "先调研" } },
+			]);
+
+			const launch = await prepareResumedClaudeLaunch(workspacePath, true);
+
+			expect(launch.args[launch.args.indexOf("--permission-mode") + 1]).toBe("plan");
+			expect(launch.args.filter((argument) => argument === "--permission-mode")).toHaveLength(1);
+			expect(launch.args).toContain("--allow-dangerously-skip-permissions");
+			expect(launch.args).not.toContain("--dangerously-skip-permissions");
+			expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(RESUMED_CLAUDE_SESSION_ID);
+		});
+
+		it("会话是在 TUI 里手动进入 plan 的（卡片没选 plan 起步）→ 续跑同样回到 plan", async () => {
+			const homeDirectoryPath = setupTempHome();
+			const workspacePath = join(homeDirectoryPath, "worktree");
+			mkdirSync(workspacePath, { recursive: true });
+			writeResumedClaudeTranscript(homeDirectoryPath, workspacePath, [
+				{ type: "permission-mode", permissionMode: "bypassPermissions" },
+				{ type: "permission-mode", permissionMode: "plan" },
+			]);
+
+			const launch = await prepareResumedClaudeLaunch(workspacePath, false);
+
+			expect(launch.args[launch.args.indexOf("--permission-mode") + 1]).toBe("plan");
+			expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		});
+
+		it("计划已获批、会话已离开 plan → 续跑维持卡片放权档，不把它拽回 plan", async () => {
+			const homeDirectoryPath = setupTempHome();
+			const workspacePath = join(homeDirectoryPath, "worktree");
+			mkdirSync(workspacePath, { recursive: true });
+			writeResumedClaudeTranscript(homeDirectoryPath, workspacePath, [
+				{ type: "permission-mode", permissionMode: "plan" },
+				{
+					type: "assistant",
+					message: {
+						role: "assistant",
+						content: [{ type: "tool_use", id: "toolu_exit", name: "ExitPlanMode", input: {} }],
+					},
+				},
+				{
+					type: "user",
+					message: {
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_exit", content: "User has approved your plan." },
+						],
+					},
+				},
+			]);
+
+			const launch = await prepareResumedClaudeLaunch(workspacePath, true);
+
+			expect(launch.args).toContain("--dangerously-skip-permissions");
+			expect(launch.args).not.toContain("--permission-mode");
+		});
+
+		it("读不到转录（问不出结论）→ 与改动前逐字一致：续跑不带 plan、照常带卡片放权旗标", async () => {
+			const homeDirectoryPath = setupTempHome();
+			const workspacePath = join(homeDirectoryPath, "worktree");
+			mkdirSync(workspacePath, { recursive: true });
+
+			const launch = await prepareResumedClaudeLaunch(workspacePath, true);
+
+			expect(launch.args).toContain("--dangerously-skip-permissions");
+			expect(launch.args).not.toContain("--permission-mode");
+		});
 	});
 });
 

@@ -8,6 +8,7 @@ import {
 	ensurePersistentTerminal,
 	type TerminalSearchResultState,
 } from "@/terminal/persistent-terminal-manager";
+import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import { registerTerminalController } from "@/terminal/terminal-controller-registry";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 
@@ -42,6 +43,8 @@ export interface UsePersistentTerminalSessionResult {
 	isRefreshing: boolean;
 	/** 「重新同步画面」进行中 —— 与 isRefreshing（重启 agent 会话）是两件独立的事，各自转各自的 spinner。 */
 	isResyncingTerminalView: boolean;
+	/** 打开任务时的陈旧会话自动续跑进行到哪一步；null = 没有在进行。 */
+	automaticStaleSessionResumePhase: StaleAgentTerminalSessionAutomaticResumePhase | null;
 	isSearchOpen: boolean;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
@@ -105,6 +108,8 @@ export function usePersistentTerminalSession({
 	const [isStopping, setIsStopping] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isResyncingTerminalView, setIsResyncingTerminalView] = useState(false);
+	const [automaticStaleSessionResumePhase, setAutomaticStaleSessionResumePhase] =
+		useState<StaleAgentTerminalSessionAutomaticResumePhase | null>(null);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
 	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
@@ -137,6 +142,7 @@ export function usePersistentTerminalSession({
 			previousSessionRef.current = null;
 			setLastError(null);
 			setIsStopping(false);
+			setAutomaticStaleSessionResumePhase(null);
 			resetTerminalSearchState();
 			return;
 		}
@@ -152,6 +158,7 @@ export function usePersistentTerminalSession({
 			recentlyUnmountedTerminalRef.current = null;
 			previousSessionRef.current = null;
 			setLastError("No project selected.");
+			setAutomaticStaleSessionResumePhase(null);
 			resetTerminalSearchState();
 			return;
 		}
@@ -213,6 +220,7 @@ export function usePersistentTerminalSession({
 			},
 			onSearchResults: setSearchResults,
 			onScrolledAwayFromLatestChange: setIsScrolledAwayFromLatest,
+			onAutomaticStaleSessionResumePhaseChange: setAutomaticStaleSessionResumePhase,
 		});
 		// 换任务/重挂载时用新终端的当前位置重置，避免沿用上一个终端的滚动态。
 		setIsScrolledAwayFromLatest(terminal.isScrolledAwayFromLatest());
@@ -400,6 +408,7 @@ export function usePersistentTerminalSession({
 		isStopping,
 		isRefreshing,
 		isResyncingTerminalView,
+		automaticStaleSessionResumePhase,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,

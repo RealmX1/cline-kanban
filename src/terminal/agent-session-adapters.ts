@@ -3,6 +3,7 @@ import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
@@ -1293,9 +1294,22 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.resumeFromTrash ||
 				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
+		// 续跑不重放「plan 起步」（那是开局意图，会话可能早已批准计划、退出了 plan），但也不能因此丢掉一个
+		// **还没批准**的 plan：会话死前若仍停在 plan 里，按转录如实恢复，否则卡片的放权旗标会让它直接跳出 plan
+		// 开工（见 persisted-agent-transcript-plan-mode-still-open-probe.ts 的取证）。探针问不出结论时维持原规则。
+		const resumedConversationPlanModeState =
+			continuesWithoutNewPrompt && !input.readOnlyQuestionSession
+				? await probeClaudeConversationPlanModeStateBeforeResume({
+						agentId: input.agentId,
+						workspacePath: input.cwd,
+						agentNativeConversationSessionId: observedNativeSessionResumeAddressing?.sourceSessionId ?? null,
+					}).catch(() => null)
+				: null;
 		applyClaudePermissionAndPlanModeArgs(args, {
 			...input,
-			startInPlanMode: input.startInPlanMode && !continuesWithoutNewPrompt,
+			startInPlanMode:
+				(input.startInPlanMode && !continuesWithoutNewPrompt) ||
+				resumedConversationPlanModeState === "plan_mode_still_open",
 		});
 		// 四条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
 		const resumesPriorAgentConversation = Boolean(

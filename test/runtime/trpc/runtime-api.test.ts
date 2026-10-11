@@ -1994,6 +1994,46 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	// 前端自动续跑不再以「停在用户回合」为由让位，打开一张 Done 卡不能因此把 agent 复活；人点的重启照常放行。
+	it.each([
+		{ declaredOrigin: "stale_session_client_auto_resume" as const, expectsRestart: false },
+		{ declaredOrigin: undefined, expectsRestart: true },
+	])(
+		"Done 卡：自动续跑被拒、人点的重启照常（声明来源=$declaredOrigin）",
+		async ({ declaredOrigin, expectsRestart }) => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [{ id: "trash", cards: [{ id: "task-1", agentId: "claude" }] }],
+			});
+			const terminalManager = {
+				getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+				refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.refreshTaskTerminal(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					cols: 120,
+					rows: 40,
+					...(declaredOrigin ? { taskSessionStartOriginDeclaredByClient: declaredOrigin } : {}),
+				},
+			);
+
+			expect(response.ok).toBe(expectsRestart);
+			expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledTimes(expectsRestart ? 1 : 0);
+		},
+	);
+
 	// 「停止后台会话并在这里续跑」：终端面板确认接管后，字段必须一路传到 terminalManager——漏在这一环就是
 	// 按钮能点、确认框能弹，服务端却照旧拒绝（runbook「runtime-api 传参最易漏」同一类）。
 	it("forwards the user-confirmed takeover of a Claude background session to the terminal manager", async () => {
