@@ -8,6 +8,7 @@ import {
 	type TaskBoardSearchMode,
 	type TaskBoardSearchProjectContext,
 	type TaskBoardSearchResult,
+	type TaskSearchMatchedTextFieldScope,
 } from "@/search/task-board-search";
 import type { TaskSearchResultSortOrder } from "@/search/task-search-result-ordering";
 import { type UseTaskBoardSearchResult, useTaskBoardSearch } from "@/search/use-task-board-search";
@@ -88,6 +89,7 @@ type UseTaskBoardSearchHarnessProps = {
 	documents: readonly TaskBoardSearchDocument[];
 	query: string;
 	mode: TaskBoardSearchMode;
+	matchedTextFieldScope?: TaskSearchMatchedTextFieldScope;
 	sortOrder?: TaskSearchResultSortOrder;
 	resolveAgentConversationProgressAtEpochMs?: (document: TaskBoardSearchDocument) => number | null;
 	isBrowsingAllTasksWithoutQueryEnabled?: boolean;
@@ -133,6 +135,7 @@ describe("useTaskBoardSearch", () => {
 
 		function HookHarness(props: UseTaskBoardSearchHarnessProps): null {
 			hookResult = useTaskBoardSearch({
+				matchedTextFieldScope: "title_and_prompt",
 				sortOrder: "relevance",
 				resolveAgentConversationProgressAtEpochMs: NO_AGENT_CONVERSATION_PROGRESS,
 				isBrowsingAllTasksWithoutQueryEnabled: false,
@@ -333,7 +336,7 @@ describe("useTaskBoardSearch", () => {
 		});
 		const findResults = vi.fn(async () => []);
 		await act(async () => finish?.({ findResults }));
-		expect(findResults).toHaveBeenCalledExactlyOnceWith("beta", "semantic");
+		expect(findResults).toHaveBeenCalledExactlyOnceWith("beta", "semantic", "title_and_prompt");
 	});
 
 	it("reuses the semantic index for query changes and does not show stale semantic results", async () => {
@@ -403,5 +406,98 @@ describe("useTaskBoardSearch", () => {
 			await Promise.resolve();
 		});
 		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(2);
+	});
+	it("orders direct relevance results by most recent agent activity, with position order only breaking ties", async () => {
+		// 两条都只在 prompt 里命中 "re"：位置序是 beta（"Refine" @0）先于 alpha（"Prepare" @1）。
+		const documents = createDocuments();
+		const progressByTaskId: Record<string, number> = { "task-alpha": 500 };
+		const resolveAgentConversationProgressAtEpochMs = (document: TaskBoardSearchDocument) =>
+			progressByTaskId[document.taskId] ?? null;
+
+		const { getState, rerender } = await renderHook({ documents, query: "re", mode: "direct" });
+		// 都没有推进时刻、上次修改又相同 → 只剩位置序决胜。
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-beta", "task-alpha"]);
+
+		await rerender({ documents, query: "re", mode: "direct", resolveAgentConversationProgressAtEpochMs });
+		// 命中即一视同仁：有推进时刻的 alpha 排到前面，哪怕它的命中位置更靠后。
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-alpha", "task-beta"]);
+	});
+
+	it("orders direct relevance rows without agent activity by last modified", async () => {
+		const board = createBoard();
+		const alphaCard = board.columns[0]?.cards[0];
+		if (!alphaCard) {
+			throw new Error("missing alpha card");
+		}
+		alphaCard.updatedAt = 50;
+		const documents = buildTaskBoardSearchDocuments(board, PROJECT_CONTEXT);
+
+		const { getState } = await renderHook({ documents, query: "re", mode: "direct" });
+
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-alpha", "task-beta"]);
+	});
+
+	it("keeps fuzzy relevance on match score instead of agent activity", async () => {
+		// 「按最近活跃」只属于 direct：fuzzy / semantic / hybrid 的 relevance 仍是匹配分数。
+		const documents = createDocuments();
+		const { getState: getWithoutActivity } = await renderHook({ documents, query: "alpha", mode: "fuzzy" });
+		const orderWithoutActivity = getWithoutActivity().orderedResults.map((result) => result.document.taskId);
+
+		const { getState } = await renderHook({
+			documents,
+			query: "alpha",
+			mode: "fuzzy",
+			resolveAgentConversationProgressAtEpochMs: (document) => (document.taskId === "task-beta" ? 900 : null),
+		});
+
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(orderWithoutActivity);
+	});
+
+	it("narrows direct matching to the selected text field scope", async () => {
+		// alpha 的 "API" 只在 prompt 里。
+		const documents = createDocuments();
+		const { getState, rerender } = await renderHook({
+			documents,
+			query: "api",
+			mode: "direct",
+			matchedTextFieldScope: "title_only",
+		});
+		expect(getState().orderedResults).toEqual([]);
+
+		await rerender({ documents, query: "api", mode: "direct", matchedTextFieldScope: "prompt_only" });
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-alpha"]);
+	});
+
+	it("re-queries the same semantic index when the text field scope changes, without rebuilding it", async () => {
+		vi.useFakeTimers();
+		const documents = createDocuments();
+		const alphaDocument = findDocument(documents, "task-alpha");
+		const semanticIndex = {
+			findResults: vi.fn(async () => [createSemanticResult(alphaDocument)]),
+		};
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockResolvedValue(semanticIndex);
+
+		const { getState, rerender } = await renderHook({ documents, query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+		expect(getState().semanticSearchStatus).toBe("ready");
+
+		await rerender({ documents, query: "alpha", mode: "semantic", matchedTextFieldScope: "title_only" });
+		// 换范围后旧范围的语义结果不能冒充新范围的结果。
+		expect(getState().semanticSearchStatus).toBe("loading");
+		expect(getState().orderedResults).toEqual([]);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+
+		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(1);
+		expect(semanticIndex.findResults.mock.calls).toEqual([
+			["alpha", "semantic", "title_and_prompt"],
+			["alpha", "semantic", "title_only"],
+		]);
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-alpha"]);
 	});
 });

@@ -1,14 +1,17 @@
 import {
 	EMPTY_MATCH_CHARACTER_POSITIONS,
+	isTaskSearchTextFieldIncludedInMatchedTextFieldScope,
 	orderMatchSources,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMatchSource,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
+	type TaskSearchMatchableTextField,
+	type TaskSearchMatchedTextFieldScope,
 } from "@/search/task-board-search";
 
 /** 进得了向量索引的命中来源：taskId 是 5 位随机串，嵌入毫无语义，在类型层面就排除掉。 */
-type TaskBoardSemanticSearchField = Exclude<TaskBoardSearchMatchSource, "taskId">;
+type TaskBoardSemanticSearchField = TaskSearchMatchableTextField;
 
 import { create, embeddingsType, insert, pluginEmbeddings, search } from "@/search/task-board-semantic-vendor";
 
@@ -23,6 +26,11 @@ export interface TaskBoardSemanticSearchIndex {
 	findResults: (
 		query: string,
 		mode: Extract<TaskBoardSearchMode, "hybrid" | "semantic">,
+		/**
+		 * 字段范围在**查询时**后过滤：记录本就按 title / prompt 分条入库、limit 等于记录总数，丢掉范围外字段的
+		 * 命中不会挤掉任何范围内命中，因此换范围无需重建索引（重建 = 重新嵌入全部记录，是最贵的那一步）。
+		 */
+		matchedTextFieldScope: TaskSearchMatchedTextFieldScope,
 	) => Promise<TaskBoardSearchResult[]>;
 }
 
@@ -101,7 +109,7 @@ export async function createTaskBoardSemanticSearchIndex(
 	}
 	const limit = Math.max(records.length, 1);
 	return {
-		findResults: async (query, mode) => {
+		findResults: async (query, mode, matchedTextFieldScope) => {
 			const results =
 				mode === "semantic"
 					? await search(database, {
@@ -125,7 +133,10 @@ export async function createTaskBoardSemanticSearchIndex(
 			const groupedResults = new Map<number, { score: number; sources: Set<TaskBoardSearchMatchSource> }>();
 			for (const hit of results.hits) {
 				const searchField = normalizeSearchFieldSource(hit.document.searchField);
-				if (!searchField) {
+				if (
+					!searchField ||
+					!isTaskSearchTextFieldIncludedInMatchedTextFieldScope(searchField, matchedTextFieldScope)
+				) {
 					continue;
 				}
 				const documentIndex = typeof hit.document.documentIndex === "number" ? hit.document.documentIndex : null;

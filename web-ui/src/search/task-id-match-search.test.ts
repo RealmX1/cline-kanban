@@ -27,6 +27,7 @@ function createDocument(overrides: {
 		taskLastModifiedAtEpochMs: 0,
 		taskAgentOverrideAgentId: null,
 		mostRecentlyLaunchedAgentSessionAgentId: null,
+		crossProjectAgentConversationProgressAtEpochMs: null,
 	});
 }
 

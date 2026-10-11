@@ -81,6 +81,7 @@ function buildTaskSearchDocumentForTest(input: {
 		taskLastModifiedAtEpochMs: 2_000,
 		taskAgentOverrideAgentId: null,
 		mostRecentlyLaunchedAgentSessionAgentId: null,
+		crossProjectAgentConversationProgressAtEpochMs: null,
 	});
 }
 

@@ -23,7 +23,7 @@ self.onmessage = (event: MessageEvent<TaskBoardSemanticSearchWorkerRequest>) => 
 				response = { requestId: request.requestId, ok: true, results: [] };
 			} else {
 				if (!index) throw new Error("语义搜索索引尚未初始化");
-				const results = await index.findResults(request.query, request.mode);
+				const results = await index.findResults(request.query, request.mode, request.matchedTextFieldScope);
 				response = {
 					requestId: request.requestId,
 					ok: true,

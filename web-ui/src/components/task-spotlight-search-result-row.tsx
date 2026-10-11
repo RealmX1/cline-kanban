@@ -9,7 +9,7 @@ import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { resolveSpotlightStageLabel } from "@/hooks/use-task-spotlight-search-controller";
 import type { RuntimeAgentId } from "@/runtime/types";
-import type { TaskBoardSearchResult } from "@/search/task-board-search";
+import type { TaskBoardSearchMode, TaskBoardSearchResult } from "@/search/task-board-search";
 import { buildPromptMatchSnippet } from "@/search/task-search-prompt-match-snippet";
 import type { TaskSearchResultSortOrder } from "@/search/task-search-result-ordering";
 import type { BoardColumnId } from "@/types";
@@ -34,21 +34,32 @@ const PROMPT_SNIPPET_WINDOW_RADIUS = 48;
 const MISSING_PRIMARY_TEXT_PLACEHOLDER = "Untitled task";
 
 /**
- * 时间药丸展示的是哪一个时刻。跟随**当前生效的排序档**：既然用户是按某个时间排的序，行里就该显示那个时间，
- * 否则「为什么这条排在前面」在行上根本看不出来。
+ * 时间药丸展示的是哪一个时刻。跟随**这一行实际被排序所用的那个时间**：既然用户是按某个时间排的序，
+ * 行里就该显示那个时间，否则「为什么这条排在前面」在行上根本看不出来。因此要逐行解析——
+ * direct 的 relevance 档分两段（有推进时刻的按它排、没有的按上次修改排），同一屏里两种药丸并存。
  */
 export type TaskSpotlightSearchResultRowTimePillKind = "created" | "last_modified" | "agent_conversation_progress";
 
-export function resolveTaskSpotlightSearchResultRowTimePillKind(
-	effectiveSortOrder: TaskSearchResultSortOrder,
-): TaskSpotlightSearchResultRowTimePillKind {
+export function resolveTaskSpotlightSearchResultRowTimePillKind({
+	effectiveSortOrder,
+	mode,
+	agentConversationProgressAtEpochMs,
+}: {
+	effectiveSortOrder: TaskSearchResultSortOrder;
+	mode: TaskBoardSearchMode;
+	agentConversationProgressAtEpochMs: number | null;
+}): TaskSpotlightSearchResultRowTimePillKind {
 	if (effectiveSortOrder === "task_created_at_desc") {
 		return "created";
 	}
 	if (effectiveSortOrder === "agent_conversation_progress_desc") {
 		return "agent_conversation_progress";
 	}
-	// relevance 档没有自己的时间语义，落到「上次修改」——它是三者中唯一对每一行都有值的。
+	// direct 的 relevance 档按「最近活跃」排：有推进时刻的行显示它，没有的落到段 2 所用的「上次修改」。
+	if (effectiveSortOrder === "relevance" && mode === "direct" && agentConversationProgressAtEpochMs !== null) {
+		return "agent_conversation_progress";
+	}
+	// 其余模式的 relevance 档没有自己的时间语义，落到「上次修改」——它是三者中唯一对每一行都有值的。
 	return "last_modified";
 }
 
@@ -90,7 +101,7 @@ export function TaskSpotlightSearchResultRow({
 	/** 会话活性预览（色点 + 文案）；跨项目行与无会话行为 null。 */
 	sessionActivity: CardSessionActivity | null;
 	timePillKind: TaskSpotlightSearchResultRowTimePillKind;
-	/** 「对话上次推进」时刻；仅当前项目可得，其余为 null（时间药丸此时不显示）。 */
+	/** 「对话上次推进」时刻；当前项目取会话推流、其它项目取跨项目索引快照，从没推进过为 null（药丸此时不显示）。 */
 	agentConversationProgressAtEpochMs: number | null;
 	/** 由弹层统一传入：每行各自 `Date.now()` 会让同屏各行读数不一致，且每次重渲都变。 */
 	nowEpochMs: number;
