@@ -485,6 +485,7 @@ export default function App(): ReactElement {
 	} = useCrossProjectTaskOpenInProject({
 		board,
 		currentProjectId,
+		projectIdOwningHydratedBoard,
 		selectedTaskId,
 		isDetailViewOpen: selectedCard !== null,
 		isCurrentProjectBoardSettled,

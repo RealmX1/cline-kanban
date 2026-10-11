@@ -99,7 +99,11 @@ import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
-import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
+import {
+	applyMostRecentlyLaunchedAgentSessionAgentIdToTask,
+	getTaskColumnId,
+	updateTask,
+} from "../core/task-board-mutations";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -1275,6 +1279,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							workspaceTaskId === body.taskId
 								? "Card not found in the workspace board."
 								: "The board card hosting this conversation session no longer exists.",
+					};
+				}
+				// 打开一张 Done 卡不该把它的 agent 复活：前端的陈旧会话自动续跑已不再以「停在用户回合」为由让位
+				// （回收后的会话恒在用户回合），这里是独立于客户端版本的那道防线。人点的重启照常放行。
+				if (
+					body.taskSessionStartOriginDeclaredByClient === "stale_session_client_auto_resume" &&
+					getTaskColumnId(board, workspaceTaskId) === "trash"
+				) {
+					return {
+						ok: false,
+						summary: null,
+						error: "Automatic resume is skipped for tasks in Done; use Restart to resume this session.",
 					};
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);

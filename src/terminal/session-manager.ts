@@ -5822,14 +5822,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 		//
 		// 内部调私有的启动体而不是公开的 startTaskSession：后者会再抢一次同一把闸门，当场自死锁。
 		// forceStopTaskSession 自己不抢闸门，可以安全地在闸门内调用。
-		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
-			this.refreshTaskTerminalHoldingPerTaskStartExclusivity(
+		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, async () => {
+			// 前端的陈旧会话自动续跑**永远不杀活会话**：它的立论是「这条会话已经不在了」，而这个结论是客户端用
+			// 自己手里的 summary 下的——多标签页同时打开同一张卡（第二个请求排在第一个之后进闸）、或客户端
+			// summary 已经陈旧时，进闸这一刻会话可能早就活着。此时照常「停掉再起」就是把刚接回来的会话杀掉重来。
+			// 判定放在闸门内，与先进闸的那次续跑严格串行，看到的一定是它装载完成后的状态。人点的重启不受影响。
+			const entryAtExclusivityAcquisition = this.entries.get(request.taskId);
+			if (taskSessionStartOrigin === "stale_session_client_auto_resume" && entryAtExclusivityAcquisition?.active) {
+				return cloneSummary(entryAtExclusivityAcquisition.summary);
+			}
+			return await this.refreshTaskTerminalHoldingPerTaskStartExclusivity(
 				request,
 				taskSessionStartOrigin,
 				arrival,
 				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
-			),
-		);
+			);
+		});
 	}
 
 	// 迁入既有对话：复制进本会话的执行工作目录（源对话不动，见 agent-session-materialization.ts）、钉成身份并

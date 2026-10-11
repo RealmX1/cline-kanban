@@ -55,6 +55,8 @@ import {
 } from "@/stores/task-agent-session-start-request-in-flight-store";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
+import { wasCurrentRuntimeSessionIncarnationEndedByKanbanInactivityReclamation } from "@/terminal/stale-agent-terminal-session-automatic-resume-eligibility";
+import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform } from "@/utils/platform";
@@ -67,6 +69,7 @@ interface AgentTerminalSessionControls {
 	isStopping: boolean;
 	isRefreshing: boolean;
 	isResyncingTerminalView: boolean;
+	automaticStaleSessionResumePhase: StaleAgentTerminalSessionAutomaticResumePhase | null;
 	isSearchOpen: boolean;
 	isScrolledAwayFromLatest: boolean;
 	lastError: string | null;
@@ -194,6 +197,7 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 // 在启动窗口里点它会和真正的启动抢同一把 per-task 闸门，把一次慢启动变成真失败。所以先分清来历，
 // 再决定说什么、给什么动作。判定顺序即优先级：
 //   1. 本标签页的启动请求还在路上 → 正在启动，不给任何会干扰启动的动作；
+//   1b. 打开任务时的陈旧会话自动续跑正在进行 → 说明正在续跑，同样不给会和它抢 per-task 闸门的动作；
 //   2. 会话以 spawn/准备失败告终（liveness=failed）→ 启动失败（原因由服务端写进终端，到了就会盖掉本空态）；
 //   3. 被回收（reclamation outcome）→ 说明回收原因；
 //   4. summary 仍是占位、且宿主有正面证据「这张卡从没启动过」（任务 worktree 不存在）→ 尚未启动，
@@ -203,6 +207,7 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 //   6. 其余 → 确有启动史、会话随运行时没了（原解释）。
 type EmptyTerminalSessionCause =
 	| { kind: "agent_session_start_request_in_flight"; phase: TaskAgentSessionStartRequestInFlightPhase }
+	| { kind: "agent_session_automatic_resume_in_flight" }
 	| { kind: "agent_session_failed_to_start" }
 	| {
 			kind: "agent_session_reclaimed";
@@ -218,13 +223,18 @@ export function classifyEmptyTerminalSessionCause({
 	summary,
 	startRequestInFlightPhase,
 	taskAgentSessionLaunchHistoryEvidence,
+	automaticStaleSessionResumePhase = null,
 }: {
 	summary: RuntimeTaskSessionSummary | null;
 	startRequestInFlightPhase: TaskAgentSessionStartRequestInFlightPhase | null;
 	taskAgentSessionLaunchHistoryEvidence: TaskAgentSessionLaunchHistoryEvidence | undefined;
+	automaticStaleSessionResumePhase?: StaleAgentTerminalSessionAutomaticResumePhase | null;
 }): EmptyTerminalSessionCause {
 	if (startRequestInFlightPhase !== null) {
 		return { kind: "agent_session_start_request_in_flight", phase: startRequestInFlightPhase };
+	}
+	if (automaticStaleSessionResumePhase !== null) {
+		return { kind: "agent_session_automatic_resume_in_flight" };
 	}
 	if (summary && resolveSessionFacets(summary).liveness === "failed") {
 		return { kind: "agent_session_failed_to_start" };
@@ -255,6 +265,13 @@ function describeEmptyTerminalSessionCause(cause: EmptyTerminalSessionCause): {
 						? "Preparing the task worktree…"
 						: "Launching the agent session…",
 				detail: "This can take a while when the machine is under heavy load. The agent's output will appear here.",
+			};
+		case "agent_session_automatic_resume_in_flight":
+			return {
+				headline: "Resuming the previous conversation…",
+				detail:
+					"This task's agent session had stopped — reclaimed after sitting idle, or ended with the previous runtime. " +
+					"Kanban is resuming its conversation from disk in the same worktree.",
 			};
 		case "agent_session_failed_to_start":
 			return {
@@ -291,6 +308,16 @@ function describeEmptyTerminalSessionCause(cause: EmptyTerminalSessionCause): {
 	}
 }
 
+// 进程已退、屏幕上还留着旧输出时的那条横幅。被 Kanban 空闲回收结束的会话不是「到此为止」：打开任务就会
+// 自动续跑（见 stale-agent-terminal-session-automatic-resume-eligibility.ts），措辞要说清这一点。
+// 判据直接复用资格模块的同一个函数：回收失败 / 演练记录不触发自动续跑，横幅也就不能承诺。
+function describeTerminalStreamClosedBanner(summary: RuntimeTaskSessionSummary | null): string {
+	if (summary && wasCurrentRuntimeSessionIncarnationEndedByKanbanInactivityReclamation(summary)) {
+		return "This session was reclaimed after sitting idle. It resumes when you open the task; Restart resumes it now.";
+	}
+	return "Terminal stream closed — the agent process has exited. The output above is final.";
+}
+
 function AgentTerminalEmptySessionRecoveryNotice({
 	cause,
 	canRefresh,
@@ -306,7 +333,8 @@ function AgentTerminalEmptySessionRecoveryNotice({
 }): ReactElement {
 	const { headline, detail } = describeEmptyTerminalSessionCause(cause);
 	const icon =
-		cause.kind === "agent_session_start_request_in_flight" ? (
+		cause.kind === "agent_session_start_request_in_flight" ||
+		cause.kind === "agent_session_automatic_resume_in_flight" ? (
 			<Spinner size={18} />
 		) : cause.kind === "agent_session_failed_to_start" ? (
 			<AlertTriangle size={18} className="text-status-red" />
@@ -314,7 +342,7 @@ function AgentTerminalEmptySessionRecoveryNotice({
 			<Unplug size={18} className="text-text-secondary" />
 		);
 	// 「启动」= 走正常启动、把卡片上的原 prompt 发给一段新对话；「续跑」= 对磁盘上的旧对话 --continue、空 prompt。
-	// 启动请求在路上时两者都不给（都会和这次启动抢 per-task 闸门）；从没启动过只给启动（没有旧对话可续）；
+	// 启动请求或自动续跑在路上时两者都不给（都会和它抢 per-task 闸门）；从没启动过只给启动（没有旧对话可续）；
 	// 说不清时两者都给；其余只给续跑。
 	const offersStartWithTaskPrompt =
 		(cause.kind === "agent_session_never_launched" ||
@@ -322,6 +350,7 @@ function AgentTerminalEmptySessionRecoveryNotice({
 		onStartTaskAgentSessionWithTaskPrompt !== undefined;
 	const offersResumeOfPreviousConversation =
 		cause.kind !== "agent_session_start_request_in_flight" &&
+		cause.kind !== "agent_session_automatic_resume_in_flight" &&
 		cause.kind !== "agent_session_never_launched" &&
 		canRefresh;
 	return (
@@ -774,6 +803,7 @@ function AgentTerminalPanelLayout({
 		isStopping,
 		isRefreshing,
 		isResyncingTerminalView,
+		automaticStaleSessionResumePhase,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -812,10 +842,14 @@ function AgentTerminalPanelLayout({
 	// 本标签页对这张卡的启动请求还在路上（建 worktree / 启动 RPC）。此时「重启 agent 会话」会和这次启动抢
 	// 同一把 per-task 闸门：refresh 先进闸就把原 prompt 折叠掉永不送达，启动先进闸就被 refresh 当场杀掉。
 	const startRequestInFlightPhase = useTaskAgentSessionStartRequestInFlightPhase(workspaceId, taskId);
+	// 同理，打开任务时的陈旧会话自动续跑在路上（等停留时长 / 请求在途）时也不给重启：日志里有过续跑 6 秒后
+	// 用户点重启、把刚起的进程杀掉重来的实例——那几秒里屏幕上没有任何迹象表明续跑已经在路上。
+	const isAutomaticStaleSessionResumeInProgress = automaticStaleSessionResumePhase !== null;
 	const canRefresh =
 		showRefreshButton &&
 		!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) &&
-		startRequestInFlightPhase === null;
+		startRequestInFlightPhase === null &&
+		!isAutomaticStaleSessionResumeInProgress;
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
@@ -831,8 +865,9 @@ function AgentTerminalPanelLayout({
 				summary,
 				startRequestInFlightPhase,
 				taskAgentSessionLaunchHistoryEvidence,
+				automaticStaleSessionResumePhase,
 			}),
-		[summary, startRequestInFlightPhase, taskAgentSessionLaunchHistoryEvidence],
+		[summary, startRequestInFlightPhase, taskAgentSessionLaunchHistoryEvidence, automaticStaleSessionResumePhase],
 	);
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
@@ -1043,10 +1078,15 @@ function AgentTerminalPanelLayout({
 				onNext={findNextInTerminal}
 				onPrevious={findPreviousInTerminal}
 			/>
-			{isStreamClosed ? (
+			{isAutomaticStaleSessionResumeInProgress ? (
+				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
+					<Spinner size={12} />
+					<span>Resuming the previous conversation…</span>
+				</div>
+			) : isStreamClosed ? (
 				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
 					<Unplug size={12} className="shrink-0" />
-					<span>Terminal stream closed — the agent process has exited. The output above is final.</span>
+					<span>{describeTerminalStreamClosedBanner(summary)}</span>
 				</div>
 			) : null}
 			{canRefresh ? (
