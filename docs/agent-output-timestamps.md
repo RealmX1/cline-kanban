@@ -21,7 +21,7 @@
 | 此刻在不在吐东西 | `lastSubstantiveOutputAt` | **应**（刮 TUI 的新鲜度，秒级） | TUI 实质分类器 / SDK / ACP 事件 |
 | 本轮何时停止生成（药丸 Stopped） | `agentResponseGenerationStopped` | **应**（新活体新一轮） | `mergeSummaryWithFacets` 在 turnOwner 交回 user 的**边沿**上落，与 2h 回收共用锚点 |
 | 对话上次推进（药丸 Progress） | `lastConversationProgressObservation` | **不应**（跨 incarnation 的历史事实） | 持久转录 > hook 事件 / 结构化会话事件 > TUI 分类器兜底 |
-| 本轮何时开始生成（跨项目面板 Running 区 / Board Overview Active 组的排序键，不是卡片药丸） | `agentResponseGenerationTurnStarted` | **应**（续跑会重新进入 agent 回合） | `mergeSummaryWithFacets` 在 turnOwner 由非 agent 翻入 agent 的**边沿**上落（与 Stopped 对偶、与回合序号 +1 同一分支）；离开 agent 回合后保留原值 |
+| 本轮何时开始生成（跨项目切换面板 Running 区的排序键，不是卡片药丸） | `agentResponseGenerationTurnStarted` | **应**（续跑会重新进入 agent 回合） | `mergeSummaryWithFacets` 在 turnOwner 由非 agent 翻入 agent 的**边沿**上落（与 Stopped 对偶、与回合序号 +1 同一分支）；离开 agent 回合后保留原值 |
 | 主对话最后一次向模型发请求（跨项目面板 Cache warm 倒计时起点，不是卡片药丸） | `lastMainAgentConversationModelRequestDispatchObservation` | **不应**（恢复会话不发请求） | 「harness 紧接着就发请求」的 hook 的 ingest 时刻：未被拦截的 UserPromptSubmit、主对话的 PostToolUse(Failure)；Gemini 为 BeforeAgent / AfterTool |
 
 第四行是 2026-10-03 加的：prompt cache 的 TTL 由每次请求刷新，起点必须是请求发出时刻。曾用

@@ -1657,9 +1657,9 @@ export const runtimeProjectAvailabilitySchema = z.discriminatedUnion("status", [
 ]);
 export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabilitySchema>;
 
-// Cross-Repository Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）用：in_progress 列单个 task
-// 的精简明细投影。前端据 turnOwner + lastOutputAt 把它二分为 Active / Stale
-// （见 session-activity.ts 的 RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS）。
+// in_progress 列单个 task 的精简明细投影。现只供顶栏项目切换器的 live 计数（project-switcher-session-activity-counts 的
+// deriveLiveAgentTaskCount）；跨项目切换面板的条目是它的超集（下方 runtimeCrossProjectTaskSwitcherEntrySchema）。
+// 原消费者 Stage-First Overview 已退役（docs/context-board-scope-all-projects-and-single-project-scope.md）。
 export const runtimeInProgressTaskDetailSchema = z.object({
 	taskId: z.string(),
 	title: z.string(),
@@ -1730,12 +1730,12 @@ export const runtimeProjectSummarySchema = z.object({
 	taskCounts: runtimeProjectTaskCountsSchema,
 	// 旧 runtime payload 未携带 availability；缺省仅用于网络兼容。新服务端始终显式检查并发送结果。
 	availability: runtimeProjectAvailabilitySchema.default({ status: "available" }),
-	// board 列归属的原始计数（未套主看板的 live-session overlay）。Stage-First Overview 用它做
-	// Review/Validation/Done 的 stage 计数，与 overlay 后的 taskCounts 并存不冲突（见 ADR-0001）。
+	// board 列归属的原始计数（未套主看板的 live-session overlay）。原供已退役的 Stage-First Overview 做 stage 计数
+	// （ADR-0001，已 Superseded），现已没有前端消费者；为兼容旧 bundle 暂留，后续可删。
 	// optional：projects.add 快路径可省略，下一次 projects_updated/snapshot 广播补齐。
 	rawColumnTaskCounts: runtimeProjectTaskCountsSchema.optional(),
-	// 该 project in_progress 列全部 task 的明细，供 Stage-First Overview 展开 In-Progress 阶段
-	// （前端据活跃度二分 Active/Stale）。default([])：旧广播/快照无此字段时安全回退。
+	// 该 project in_progress 列全部 task 的明细，供顶栏项目切换器数 live agent（deriveLiveAgentTaskCount）。
+	// default([])：旧广播/快照无此字段时安全回退。
 	inProgressTaskDetails: z.array(runtimeInProgressTaskDetailSchema).default([]),
 	// 跨项目切换面板的条目（取景见 runtimeCrossProjectTaskSwitcherEntrySchema）。default([])：旧广播无此字段时安全回退。
 	crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema).default([]),

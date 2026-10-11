@@ -18,7 +18,7 @@ export interface PendingCrossProjectTaskOpen {
 }
 
 /**
- * 「在某个项目里打开某个任务」——Board Overview、Spotlight、跨项目切换面板共用的唯一入口。
+ * 「在某个项目里打开某个任务」——All projects 首页、Spotlight、跨项目切换面板共用的唯一入口。
  *
  * 同项目直接选中；跨项目先切 workspace（原地切，WS 重连），待目标 board 落定后再 setSelectedTaskId——
  * 绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。

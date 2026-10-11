@@ -8,11 +8,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
+import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
 import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
-import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository-stage-first-overview";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -55,6 +55,7 @@ import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-tas
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
+import { useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage } from "@/hooks/use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
@@ -131,7 +132,7 @@ export default function App(): ReactElement {
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	// Exploratory findings 浏览器开关（蓝图 §G.2）：isGitHistoryOpen 同款形态——
-	// 开启时置换 home 主视图，非 overlay；与 git history / board overview 互斥。
+	// 开启时置换 home 主视图，非 overlay；与 git history / All projects 首页互斥。
 	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
@@ -443,9 +444,9 @@ export default function App(): ReactElement {
 		pushedUpdate: latestExplorationThreadGraphUpdate,
 	});
 
-	// 范围（顶栏项目切换器首行 All projects = Board Scope，见 docs/context-stage-first-overview.md）：看板页据此在
-	// Stage-First Overview（跨-repo 概览）与当前项目看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表
-	// 之间切换。下面还有跨-workspace 打开某 task 的待定跳转。
+	// 范围（顶栏项目切换器首行 All projects = Board Scope，见 docs/context-board-scope-all-projects-and-single-project-scope.md）：
+	// 看板页据此在 All projects 首页（跨项目切换面板的分区横排成列）与当前项目看板之间切换，Focus View 左栏据此在
+	// 跨项目切换面板与 stage 列表之间切换。下面还有跨-workspace 打开某 task 的待定跳转。
 	const { selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope } =
 		useSelectedBoardOrSingleProjectScope();
 	const isBoardScopeAllProjectsSelected = selectedBoardOrSingleProjectScope === "board_scope_all_projects";
@@ -454,14 +455,7 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 	}, [setSelectedBoardOrSingleProjectScope]);
-	const handleToggleBoardOverview = useCallback(() => {
-		if (isBoardScopeAllProjectsSelected) {
-			setSelectedBoardOrSingleProjectScope("single_project_scope");
-			return;
-		}
-		selectBoardScopeAllProjects();
-	}, [isBoardScopeAllProjectsSelected, selectBoardScopeAllProjects, setSelectedBoardOrSingleProjectScope]);
-	// 用户明确选了某个项目（顶栏切换器、数字槽热键、首页侧栏、概览里点 stage）：范围收窄到它。
+	// 用户明确选了某个项目（顶栏切换器、数字槽热键、首页侧栏）：范围收窄到它。
 	// 跨项目打开任务（面板、Spotlight、通知）不走这里——Board Scope 下点别的项目的任务，范围不变。
 	const handleSelectProjectNarrowingToSingleProjectScope = useCallback(
 		(projectId: string) => {
@@ -522,12 +516,6 @@ export default function App(): ReactElement {
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
 		onOpenTaskInProject: handleOpenTaskInProject,
 	});
-	const handleOpenOverviewStage = useCallback(
-		(repoId: string) => {
-			handleSelectProjectNarrowingToSingleProjectScope(repoId);
-		},
-		[handleSelectProjectNarrowingToSingleProjectScope],
-	);
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
 	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
@@ -773,7 +761,7 @@ export default function App(): ReactElement {
 		resetTaskEditorState();
 	}, [isProjectSwitching, resetTaskEditorState]);
 
-	// Board Scope 建卡入口（热键 c、跨项目面板的 Create task、Board Overview 的 New task）：默认目标取上下文项目——
+	// Board Scope 建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：默认目标取上下文项目——
 	// 跨项目打开在途时是目标项目，否则是当前项目（Focus View 的焦点任务总在当前项目里）。
 	// EXPERIMENT_NODE: Board Scope 建卡默认目标项目取上下文项目，还是跨次记忆的上次所用项目
 	const handleOpenCreateTaskInCurrentScope = useCallback(() => {
@@ -1182,7 +1170,7 @@ export default function App(): ReactElement {
 		workspaceMetadataProbeFocusedTaskId,
 		workspaceMetadataProbeFocusedTaskWorkspaceId,
 	]);
-	// ⌘E：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	// ⌘E 与顶栏 All projects 按钮：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
 	const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = useCallback(() => {
 		if (!isBoardScopeAllProjectsSelected) {
 			selectBoardScopeAllProjects();
@@ -1382,6 +1370,28 @@ export default function App(): ReactElement {
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
 	});
+	// All projects 首页分区列看板里，当前项目的行展开成完整卡片时与主看板同数据、同动作。
+	const currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage =
+		useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage({
+			isDisplayedBoardHydratedForCurrentProject:
+				projectRuntimeWorkspaceId !== null && projectIdOwningHydratedBoard === projectRuntimeWorkspaceId,
+			currentProjectDisplayedBoard: displayedBoard,
+			currentProjectTaskSessions: sessions,
+			currentProjectWorkspacePath: workspacePath ?? null,
+			resolveTaskWorkspaceAbsoluteDirectoryPath,
+			onStartTask: handleStartTaskFromBoard,
+			onMoveToTrashTask: handleMoveReviewCardToTrash,
+			onMoveToValidationTask: handleMoveCardToValidation,
+			onMoveToReviewTask: handleMoveCardToReview,
+			onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+			onDeleteTask: handleOpenDeleteTask,
+			onSaveTitle: handleSaveTaskTitle,
+			onEditTask: handleOpenEditTask,
+			onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
+			onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+			onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
+			moveToTrashLoadingById,
+		});
 	// Focus View 的外观（顶栏详情模式、隐藏首页布局与左侧项目栏、看板不挂载）在跨项目打开在途期间保持不变——
 	// 否则一次跨项目打开会画出「旧详情 → 首页 / 看板 → 外壳 → 新详情」四个全屏状态。
 	const isFocusViewChromeShown = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
@@ -1511,12 +1521,12 @@ export default function App(): ReactElement {
 							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
 							projectSwitcher={topBarProjectSwitcherState}
 							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
-							onToggleBoardOverview={
+							onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
 								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-									? handleToggleBoardOverview
+									? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
 									: undefined
 							}
-							isBoardOverviewOpen={isBoardScopeAllProjectsSelected}
+							isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
 							onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
 							workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
 							isWorkspacePathLoading={shouldShowProjectLoadingState}
@@ -1677,11 +1687,12 @@ export default function App(): ReactElement {
 										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
 										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
 											{isFocusViewChromeShown ? null : isBoardScopeAllProjectsSelected ? (
-												<CrossRepositoryStageFirstOverview
-													projects={projects}
-													onOpenTask={handleOpenTaskInProject}
-													onOpenStage={handleOpenOverviewStage}
-													onRequestCreateTask={handleOpenCreateTaskInCurrentScope}
+												<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+													host={crossProjectRecentlyActiveTaskSwitcherHost}
+													currentProjectTaskCards={
+														currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage
+													}
+													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 												/>
 											) : isGitHistoryOpen ? (
 												<GitHistoryView

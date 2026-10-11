@@ -28,6 +28,12 @@ export function topBarProjectSwitcherBoardOrSingleProjectScopeTriggerAnchorKey()
 	return "top-bar-project-switcher-board-or-single-project-scope-trigger";
 }
 
+// 顶栏的 All projects ⇄ 单项目切换按钮（Layers，与 ⌘E 同一处理器）。只在看板页（非 Focus View）渲染，全局单例、不带 id。
+// All projects 首页（跨项目切换面板分区横排的列看板）的部署后引导验证从这里起步。
+export function topBarBoardScopeAllProjectsToggleButtonAnchorKey(): string {
+	return "top-bar-board-scope-all-projects-toggle-button";
+}
+
 // 跨项目「最近活跃任务」切换面板里 Running / 缓存倒计时 / 剩余区的一行（Pinned 区的行不带它：Pinned 点击后
 // 要跳到的正是下方区里的这一行）。taskId 跨项目会撞号，必须带 workspaceId。
 export function crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId: string, taskId: string): string {

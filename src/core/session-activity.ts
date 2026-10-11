@@ -38,8 +38,8 @@ import { mergeLastMainAgentConversationModelRequestDispatchObservation } from ".
 export const VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS = 5_000;
 export const AGENT_OUTPUT_QUIET_THRESHOLD_MS = 2_000;
 
-// 「近期活跃」窗口（毫秒）：Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md）据此把 In-Progress
-// 阶段的 task 二分为 Active（agent 回合且距最近 PTY 输出 lastOutputAt 在本窗口内）/ Stale（其余）。
+// 「近期活跃」窗口（毫秒）：跨项目切换面板的 Running 区（docs/context-cross-project-recently-active-task-switcher.md）
+// 据此判定 agent 回合里的任务是否还在跑（距最近 PTY 输出 lastOutputAt 在本窗口内）。
 // 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，
 // 宽窗口下 spinner 噪声无影响，故读 lastOutputAt（而非实质戳）即可。复用 isAgentOutputWithinActiveWindow。
 export const RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS = 5 * 60_000;
