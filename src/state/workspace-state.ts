@@ -33,6 +33,10 @@ import {
 	getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 	type TaskMutationIntentWithResolvedActor,
 } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import {
+	logWorkspaceStatePostDeployVerificationDoneEntryGuardRevertedCards,
+	revertCardsNewlyEnteringDoneWithoutPostDeployVerificationClosure,
+} from "./workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 
@@ -992,11 +996,27 @@ export async function saveWorkspaceState(
 				incomingSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
-		const board = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
-			persistedBoard,
-			parsedPayload.board,
-			sessions,
-		);
+		const boardWithoutStartedTasksReenteringBacklog =
+			reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+				persistedBoard,
+				parsedPayload.board,
+				sessions,
+			);
+		// Post-Deploy Verification 门禁兜底：整板保存不能把受门禁、未结案的卡带进 Done（正常入口走 taskCardAction 的门禁）。
+		const postDeployVerificationDoneEntryGuarded =
+			await revertCardsNewlyEnteringDoneWithoutPostDeployVerificationClosure({
+				workspaceId: context.workspaceId,
+				persistedBoard,
+				incomingBoard: boardWithoutStartedTasksReenteringBacklog,
+				nowIso: new Date().toISOString(),
+			});
+		if (postDeployVerificationDoneEntryGuarded.revertedTaskIds.length > 0) {
+			logWorkspaceStatePostDeployVerificationDoneEntryGuardRevertedCards({
+				workspaceId: context.workspaceId,
+				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
+			});
+		}
+		const board = postDeployVerificationDoneEntryGuarded.board;
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,

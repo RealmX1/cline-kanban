@@ -2,6 +2,10 @@ import { type ReactElement, useCallback, useState } from "react";
 
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
+import {
+	describePostDeployVerificationDoneEntryGateRejectionForHumans,
+	isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate,
+} from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
@@ -69,6 +73,20 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 	const moveTaskCardInOtherProjectIntoDone = useCallback((workspaceId: string, taskId: string) => {
 		void moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({ workspaceId, taskId }).then(
 			(result) => {
+				// 其他项目的 PDV 读模型不在这个页面里，没法在这里列出未勾项问原因：受门禁时给一句可读提示，
+				// 让用户切到那个项目里带原因移入 Done（当前项目的卡走 use-board-interactions，会直接打开原因对话框）。
+				if (
+					result.taskCardActionCommandExecutionOutcome === "command_failed" &&
+					isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(result.commandFailureMessage)
+				) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: `${describePostDeployVerificationDoneEntryGateRejectionForHumans(result.commandFailureMessage)}——请在该项目里带原因移入 Done。`,
+						timeout: 8000,
+					});
+					return;
+				}
 				reportTaskCardActionCommandFailure("move the task to Done", result);
 				if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
 					return;

@@ -40,6 +40,12 @@ import {
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
+import {
+	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+	listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
+	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
+} from "../deployment/post-deploy-verification-done-entry-gate";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
@@ -76,6 +82,7 @@ import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
+import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } from "../state/workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
 import {
 	getTaskWorktreesHomePath,
 	listWorkspaceIndexEntries,
@@ -670,6 +677,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	// taskCardAction.* 的按卡串行器：必须是 runtime 级单例——api 对象按请求新建，串行器若也按请求新建就串不住任何东西。
 	const taskCardActionPerTaskCommandSerializer = createTaskCardActionPerTaskCommandSerializer();
+	// 整板保存的 Post-Deploy Verification 门禁兜底（浏览器 / 旧 bundle 的 saveState 不能把受门禁、未结案的卡带进 Done）。
+	registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard(
+		listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
+	);
 	// 跨项目切换面板「其他项目」行的 git 元数据缓存：同理必须是 runtime 级单例，多个标签页的轮询才能在这里去重。
 	const crossProjectTaskWorktreeGitMetadataCache = createCrossProjectTaskWorktreeGitMetadataCache({
 		listRegisteredWorkspacePathsById: async () =>
@@ -756,6 +767,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
 				onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
 					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+				},
+				// 所有进 Done 的入口共用的 Post-Deploy Verification 门禁（未勾项必须带原因）。
+				postDeployVerificationDoneEntryGate: {
+					authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+					finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+					revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 				},
 			}),
 			projectsApi: createProjectsApi({

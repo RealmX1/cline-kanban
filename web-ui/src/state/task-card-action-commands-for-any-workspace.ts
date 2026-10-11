@@ -14,6 +14,7 @@ import {
 import type {
 	RuntimeAgentTerminalGeometryForTaskSessionSpawn,
 	RuntimePermanentlyDeletedTaskCardSelection,
+	RuntimePostDeployVerificationDoneEntryClosureRequest,
 	RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse,
 	RuntimeTaskCardActionMoveIntoDoneResponse,
 	RuntimeTaskCardActionMoveIntoReviewResponse,
@@ -232,6 +233,8 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 	insertAtIndexWithinDoneBoardColumn?: number;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	boardMutationInitiator?: WebUiBoardMutationInitiator;
+	// 卡片受 Post-Deploy Verification 门禁时的结案原因 / 确认项；缺省 = 不受门禁或尚未问过原因（受门禁时服务端拒绝）。
+	postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionMoveIntoDoneResponse>> {
 	return await executeTaskCardActionCommand({
 		workspaceId: input.workspaceId,
@@ -252,6 +255,9 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 				// 落点必须发给服务端：只进 overlay 的话，广播回灌后卡片会跳回列顶。
 				...(input.insertAtIndexWithinDoneBoardColumn !== undefined
 					? { insertAtIndexWithinDoneBoardColumn: input.insertAtIndexWithinDoneBoardColumn }
+					: {}),
+				...(input.postDeployVerificationDoneEntryClosure
+					? { postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure }
 					: {}),
 			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],

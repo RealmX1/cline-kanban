@@ -11,6 +11,7 @@ import type {
 	RuntimeKanbanCliTaskBoardMutationKind,
 	RuntimeKanbanCliTaskBoardMutationRequest,
 	RuntimeKanbanCliTaskBoardMutationResponse,
+	RuntimePostDeployVerificationDoneEntryClosureRequest,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
@@ -22,6 +23,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
+	POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX,
 	runtimeAgentIdSchema,
 	runtimeClineReasoningEffortSchema,
 	runtimeTaskAgentPermissionModeSchema,
@@ -95,6 +97,12 @@ type ResolvedTaskCommandTarget =
 			kind: "column";
 			column: ListTaskColumn;
 	  };
+
+import {
+	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+	type PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+	parsePostDeployVerificationDoneEntryClosureFromCliOptions,
+} from "./post-deploy-verification-unchecked-item-closure-reason-cli-options";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1045,17 +1053,56 @@ function toTrashTaskExecutionResult(
 	};
 }
 
-// 移入 Done 的整条副作用链（移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）都在 runtime 的
+// 移入 Done 的整条副作用链（Post-Deploy Verification 门禁 → 移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）都在 runtime 的
 // taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree 里执行；CLI 只把响应摊成旧 JSON 字段。
+// 受门禁的任务有未勾核对项而没给原因时 runtime 拒绝（PRECONDITION_FAILED + 机读前缀），这里转成可读的拒绝而不是整条命令失败。
+type TrashTaskByIdOutcome =
+	| { trashTaskByIdOutcomeKind: "moved_into_done_or_already_done"; trashed: TrashTaskExecutionResult }
+	| {
+			trashTaskByIdOutcomeKind: "rejected_by_post_deploy_verification_done_entry_gate";
+			taskId: string;
+			postDeployVerificationDoneEntryGateRejectionMessage: string;
+	  };
+
 async function trashTaskById(input: {
 	taskId: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
-}): Promise<TrashTaskExecutionResult> {
-	const movedIntoDone =
-		await input.runtimeClient.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
+	postDeployVerificationDoneEntryClosure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
+}): Promise<TrashTaskByIdOutcome> {
+	try {
+		const movedIntoDone =
+			await input.runtimeClient.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
+				taskId: input.taskId,
+				...(input.postDeployVerificationDoneEntryClosure
+					? { postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure }
+					: {}),
+			});
+		return {
+			trashTaskByIdOutcomeKind: "moved_into_done_or_already_done",
+			trashed: toTrashTaskExecutionResult(input.taskId, movedIntoDone),
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (
+			!message.includes(
+				POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX,
+			)
+		) {
+			throw error;
+		}
+		return {
+			trashTaskByIdOutcomeKind: "rejected_by_post_deploy_verification_done_entry_gate",
 			taskId: input.taskId,
-		});
-	return toTrashTaskExecutionResult(input.taskId, movedIntoDone);
+			postDeployVerificationDoneEntryGateRejectionMessage: `${message
+				.slice(
+					message.indexOf(
+						POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX,
+					) +
+						POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX.length,
+				)
+				.trim()} Re-run with --closure-reason-for-all-unchecked-items <code> [--closure-reason-text <text>] or --closure-reasons-file <path>.`,
+		};
+	}
 }
 
 async function trashTask(input: {
@@ -1063,6 +1110,7 @@ async function trashTask(input: {
 	taskId?: string;
 	column?: ListTaskColumn;
 	projectPath?: string;
+	postDeployVerificationDoneEntryClosure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
 }): Promise<JsonRecord> {
 	const target = resolveTaskCommandTarget(input, "task done");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
@@ -1070,7 +1118,20 @@ async function trashTask(input: {
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 
 	if (target.kind === "task") {
-		const trashed = await trashTaskById({ taskId: target.taskId, runtimeClient });
+		const outcome = await trashTaskById({
+			taskId: target.taskId,
+			runtimeClient,
+			postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure,
+		});
+		if (outcome.trashTaskByIdOutcomeKind === "rejected_by_post_deploy_verification_done_entry_gate") {
+			return {
+				ok: false,
+				error: outcome.postDeployVerificationDoneEntryGateRejectionMessage,
+				rejectedByPostDeployVerificationDoneEntryGate: true,
+				workspacePath: workspaceRepoPath,
+			};
+		}
+		const trashed = outcome.trashed;
 		if (trashed.alreadyInTrash) {
 			return {
 				ok: true,
@@ -1098,20 +1159,34 @@ async function trashTask(input: {
 			trashedTasks: [],
 			alreadyTrashedTasks: [],
 			worktreeCleanup: [],
+			rejectedByPostDeployVerificationDoneEntryGate: [],
 			count: 0,
 		};
 	}
 
 	const results: TrashTaskExecutionResult[] = [];
+	const rejectedByPostDeployVerificationDoneEntryGate: Array<{ taskId: string; error: string }> = [];
 	for (const { task } of targetTasks) {
-		results.push(await trashTaskById({ taskId: task.id, runtimeClient }));
+		const outcome = await trashTaskById({
+			taskId: task.id,
+			runtimeClient,
+			postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure,
+		});
+		if (outcome.trashTaskByIdOutcomeKind === "rejected_by_post_deploy_verification_done_entry_gate") {
+			rejectedByPostDeployVerificationDoneEntryGate.push({
+				taskId: outcome.taskId,
+				error: outcome.postDeployVerificationDoneEntryGateRejectionMessage,
+			});
+			continue;
+		}
+		results.push(outcome.trashed);
 	}
 
 	const trashedTasks = results.filter((result) => !result.alreadyInTrash);
 	const alreadyTrashedTasks = results.filter((result) => result.alreadyInTrash);
 
 	return {
-		ok: true,
+		ok: rejectedByPostDeployVerificationDoneEntryGate.length === 0,
 		column: target.column,
 		workspacePath: workspaceRepoPath,
 		trashedTasks: trashedTasks.map((result) => result.task),
@@ -1121,6 +1196,7 @@ async function trashTask(input: {
 			removed: result.worktreeDeleted,
 			error: result.worktreeDeleteError,
 		})),
+		rejectedByPostDeployVerificationDoneEntryGate,
 		count: trashedTasks.length,
 	};
 }
@@ -1993,18 +2069,28 @@ export function registerTaskCommand(program: Command): void {
 			},
 		);
 
-	task
-		.command("trash")
-		.alias("done")
-		.description("Move a task or an entire column to done and clean up task workspaces.")
-		.option("--task-id <id>", "Task ID.")
-		.option(
-			"--column <column>",
-			"Column to move to done: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { taskId?: string; column?: ListTaskColumn; projectPath?: string }) => {
+	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions(
+		task
+			.command("trash")
+			.alias("done")
+			.description(
+				"Move a task or an entire column to done and clean up task workspaces. Tasks awaiting Post-Deploy Verification with unchecked items need a closure reason for each.",
+			)
+			.option("--task-id <id>", "Task ID.")
+			.option(
+				"--column <column>",
+				"Column to move to done: backlog | in_progress | review | done. trash is also accepted.",
+				parseListColumn,
+			)
+			.option("--project-path <path>", "Workspace path. Defaults to current directory workspace."),
+	).action(
+		async (
+			options: {
+				taskId?: string;
+				column?: ListTaskColumn;
+				projectPath?: string;
+			} & PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+		) => {
 			await runTaskCommand(
 				async () =>
 					await trashTask({
@@ -2012,9 +2098,12 @@ export function registerTaskCommand(program: Command): void {
 						taskId: options.taskId,
 						column: options.column,
 						projectPath: options.projectPath,
+						postDeployVerificationDoneEntryClosure:
+							await parsePostDeployVerificationDoneEntryClosureFromCliOptions(options, process.cwd()),
 					}),
 			);
-		});
+		},
+	);
 
 	task
 		.command("delete")

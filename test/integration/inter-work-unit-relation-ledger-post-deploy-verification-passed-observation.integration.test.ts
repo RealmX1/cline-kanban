@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimePostDeployVerificationState } from "../../src/core/api-contract";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	getPostDeployVerificationStatePath,
 	markTaskVerified,
@@ -69,6 +70,7 @@ describe("inter-work-unit relation ledger post-deploy verification passed observ
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},
@@ -121,7 +123,7 @@ describe("inter-work-unit relation ledger post-deploy verification passed observ
 					postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
 					inclusionReason: "commit_correlation",
 					matchedCommits: ["matched-commit"],
-					forcedCompletionWithoutAllVerificationsPassed: true,
+					confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
 					confirmedAcknowledgements: ["skip_validation"],
 					rawTaskCommitLandingSnapshotAtVerification: {
 						lastKnownTaskHeadCommit: null,
@@ -178,10 +180,11 @@ describe("inter-work-unit relation ledger post-deploy verification passed observ
 					boardMovedToDoneAt: null,
 					pendingConfirmation: null,
 					droppedReason: null,
+					...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 				},
 				completionEvidence: {
 					postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
-					forcedCompletionWithoutAllVerificationsPassed: false,
+					confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: false,
 					confirmedAcknowledgements: [],
 				},
 			});

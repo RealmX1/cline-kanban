@@ -271,6 +271,8 @@ export const FACT_OBSERVED_BY_KANBAN_RUNTIME_KINDS = [
 	"main_session_turn_handed_back_to_user_observed",
 	"task_commits_integrated_into_local_base_observed",
 	"post_deploy_verification_passed_observed",
+	// 未全勾、每个未勾项带原因移入 Done（2026-10-11）。不是「通过」，完成条件 4 不认它。
+	"post_deploy_verification_closed_into_done_with_unchecked_items_reasoned_observed",
 	"user_terminal_input_submission_observed_for_session",
 	"legacy_board_dependency_observed_at_retirement",
 	"runtime_instance_live_capture_capabilities_activated",

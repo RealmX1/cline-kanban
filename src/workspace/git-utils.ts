@@ -105,7 +105,7 @@ export async function getGitStdout(args: string[], cwd: string, options: RunGitO
 }
 
 // `runGit` 走 execFile，无法向 git 的 stdin 灌数据；`git patch-id` 只从 stdin 读 patch，故需一个 spawn 版本。
-// 保持不导出：目前唯一用途是 computeStablePatchId 的两步管道。
+// 保持不导出：只服务本文件单提交的 patch-id 两步管道（按区间批量的走下方 runGitLogPatchesPipedIntoGitStablePatchId）。
 async function runGitReadingStdin(
 	cwd: string,
 	args: string[],
@@ -154,6 +154,114 @@ export async function computeStablePatchId(cwd: string, sha: string): Promise<st
 	// 输出形如 `<patch-id> <commit-id>`，取首列。
 	const firstToken = patchId.stdout.trim().split(/\s+/)[0];
 	return firstToken !== undefined && firstToken !== "" ? firstToken : null;
+}
+
+// `git log -p` 的整段输出随区间线性增长（约两个月、130 个提交的部署区间实测 15MB），读进内存会撞上 runGit 的
+// maxBuffer、让整次调用失败。这里不经内存中转：`git log` 的 stdout 直接 pipe 进 `git patch-id --stable` 的 stdin，
+// 只收集 patch-id 那份很小的输出（每个提交一行 `<patch-id> <commit-id>`）。
+// 任一进程 spawn 失败或非零退出都算失败；一方失败时杀掉另一方，免得 pipe 堵住后永远等不到 close。
+async function runGitLogPatchesPipedIntoGitStablePatchId(
+	cwd: string,
+	gitLogArgs: string[],
+): Promise<{ ok: boolean; patchIdStdout: string; stderr: string }> {
+	return await new Promise((resolve) => {
+		const env = createGitProcessEnv();
+		const gitLogProducer = spawn("git", ["-c", "core.quotepath=false", ...gitLogArgs], { cwd, env });
+		const gitStablePatchIdConsumer = spawn("git", ["-c", "core.quotepath=false", "patch-id", "--stable"], {
+			cwd,
+			env,
+		});
+		let patchIdStdout = "";
+		let gitLogStderr = "";
+		let gitStablePatchIdStderr = "";
+		let gitLogExitCode: number | null | undefined;
+		let gitStablePatchIdExitCode: number | null | undefined;
+		let resolved = false;
+		const finish = (ok: boolean, processSpawnFailureMessage?: string) => {
+			if (resolved) {
+				return;
+			}
+			resolved = true;
+			resolve({
+				ok,
+				patchIdStdout,
+				stderr: [processSpawnFailureMessage, gitLogStderr.trim(), gitStablePatchIdStderr.trim()]
+					.filter(Boolean)
+					.join("\n"),
+			});
+		};
+		const finishOnceBothProcessesClosed = () => {
+			if (gitLogExitCode === undefined || gitStablePatchIdExitCode === undefined) {
+				return;
+			}
+			finish(gitLogExitCode === 0 && gitStablePatchIdExitCode === 0);
+		};
+		gitLogProducer.on("error", (error) => {
+			gitStablePatchIdConsumer.kill();
+			finish(false, error instanceof Error ? error.message : String(error));
+		});
+		gitStablePatchIdConsumer.on("error", (error) => {
+			gitLogProducer.kill();
+			finish(false, error instanceof Error ? error.message : String(error));
+		});
+		gitLogProducer.stderr.on("data", (chunk) => {
+			gitLogStderr += chunk.toString();
+		});
+		gitStablePatchIdConsumer.stderr.on("data", (chunk) => {
+			gitStablePatchIdStderr += chunk.toString();
+		});
+		gitStablePatchIdConsumer.stdout.on("data", (chunk) => {
+			patchIdStdout += chunk.toString();
+		});
+		// patch-id 提前退出时 `git log` 往 pipe 里写会 EPIPE——吞掉，交给两个 close 事件裁决成败。
+		gitStablePatchIdConsumer.stdin.on("error", () => {});
+		gitLogProducer.stdout.pipe(gitStablePatchIdConsumer.stdin);
+		gitLogProducer.on("close", (code) => {
+			gitLogExitCode = code;
+			finishOnceBothProcessesClosed();
+		});
+		gitStablePatchIdConsumer.on("close", (code) => {
+			gitStablePatchIdExitCode = code;
+			// patch-id 异常退出后不再有人读 pipe，`git log` 会堵在写上，必须杀掉它才等得到 close。
+			if (code !== 0 && gitLogExitCode === undefined) {
+				gitLogProducer.kill();
+			}
+			finishOnceBothProcessesClosed();
+		});
+	});
+}
+
+/**
+ * 一次算出某个提交区间里全部非 merge 提交的 stable patch-id（commitSha → patchId）。与逐个
+ * `computeStablePatchId` 结果相同（同一份默认 diff 输出喂 `git patch-id --stable`），但整段区间只起两个 git 进程——
+ * 部署归属要对每次部署的 delta 求 patch-id，逐个算会随提交数线性起进程。`git log -p` 的输出流式 pipe 给 patch-id、
+ * 不进内存，区间再长也不受 runGit 的 maxBuffer 限制。
+ * 无 diff 的提交（空提交）没有输出行，不在返回的 Map 里。git 失败返回 null。
+ */
+export async function computeStablePatchIdsOfNonMergeCommitsInRevisionRange(
+	cwd: string,
+	revisionRange: string,
+): Promise<Map<string, string> | null> {
+	const patchIds = await runGitLogPatchesPipedIntoGitStablePatchId(cwd, [
+		"log",
+		"-p",
+		"--no-merges",
+		"--no-color",
+		"--no-ext-diff",
+		"--format=commit %H",
+		revisionRange,
+	]);
+	if (!patchIds.ok) {
+		return null;
+	}
+	const patchIdByCommitSha = new Map<string, string>();
+	for (const line of patchIds.patchIdStdout.split("\n")) {
+		const [patchId, commitSha] = line.trim().split(/\s+/);
+		if (patchId && commitSha) {
+			patchIdByCommitSha.set(commitSha, patchId);
+		}
+	}
+	return patchIdByCommitSha;
 }
 
 export interface GitHeadInfo {

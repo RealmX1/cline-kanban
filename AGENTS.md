@@ -54,6 +54,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片两颗时长药丸读两个不同字段，绝不可再合并**：`agentResponseGenerationStopped`（本轮何时停止生成，边沿触发）与 `lastConversationProgressObservation`（对话上次推进，跨 incarnation 的历史事实，单调 reducer）。会话重开时前者刷新、后者不刷；两者都不读 `lastSubstantiveOutputAt`，无值就隐藏，绝不回退。26% 误显示取证与全文：`docs/agent-output-timestamps.md`。
 - **`lastSubstantiveOutputAt` 是「默认不推进、显式才推进」**：终端侧唯一防线是 `suppressSubstantiveOutputUntilContinues`（武装判据只读启动侧 `resumesPriorAgentConversation || resumeFromTrash || resumePriorAgentConversationWithoutResendingPrompt`，绝不用「此前是否产出过」反推；解除只认三处「用户真·继续」）；Cline/ACP 漏斗要推进必须显式 `withAgentSubstantiveOutputTimestamp`。全文同上。
+- **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
@@ -98,6 +99,7 @@ web-ui：
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |
+| `docs/post-deploy-verification.md` / `docs/post-deploy-verification-natural-usage-observation-pipeline-design.md` | PDV 现行机制（三区归属、门禁、原因码、待观察记录）与「自然使用中多模态判定」pipeline 设计稿 |
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` / `docs/agent-harness-cursor.md` | Kimi、oh-my-pi(ACP) 与 Cursor 接入坑（Cursor：chat store 布局、trust、启动前分配 id、续跑预检） |
