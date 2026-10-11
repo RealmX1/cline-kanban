@@ -43,6 +43,7 @@ const documents = ["deploy application", "cake dessert"].map((title, index) =>
 		taskLastModifiedAtEpochMs: 1,
 		taskAgentOverrideAgentId: null,
 		mostRecentlyLaunchedAgentSessionAgentId: null,
+		crossProjectAgentConversationProgressAtEpochMs: null,
 		title,
 		prompt: index === 0 ? "release service" : "bake dessert",
 	}),
@@ -50,13 +51,39 @@ const documents = ["deploy application", "cake dessert"].map((title, index) =>
 
 it("真实插件等待文档和查询嵌入，semantic 与 hybrid 均能返回正确的跨项目文档", async () => {
 	const index = await createTaskBoardSemanticSearchIndex(documents);
-	const semantic = await index.findResults("deploy", "semantic");
+	const semantic = await index.findResults("deploy", "semantic", "title_and_prompt");
 	expect(semantic).toHaveLength(1);
 	expect(semantic[0]?.document).toBe(documents[0]);
 	expect(semantic[0]?.matchSources).toEqual(["title", "prompt"]);
-	const hybrid = await index.findResults("cake dessert", "hybrid");
+	const hybrid = await index.findResults("cake dessert", "hybrid", "title_and_prompt");
 	expect(hybrid[0]?.document).toBe(documents[1]);
 	expect(hybrid[0]?.matchSources).toEqual(["title", "prompt"]);
+});
+
+it("字段范围在查询时丢弃范围外字段的命中：同一个索引换范围即可，不必重建", async () => {
+	const titleOnlyMatchingDocument = buildTaskBoardSearchDocument({
+		projectId: "project-scope",
+		projectName: "Project scope",
+		taskId: "scope-id",
+		columnId: "review",
+		taskCreatedAtEpochMs: 1,
+		taskLastModifiedAtEpochMs: 1,
+		taskAgentOverrideAgentId: null,
+		mostRecentlyLaunchedAgentSessionAgentId: null,
+		crossProjectAgentConversationProgressAtEpochMs: null,
+		title: "deploy pipeline",
+		prompt: "bake bread",
+	});
+	const index = await createTaskBoardSemanticSearchIndex([titleOnlyMatchingDocument]);
+	const embeddingCallCountAfterIndexing = embeddingModel.embed.mock.calls.length;
+
+	const titleOnly = await index.findResults("deploy", "semantic", "title_only");
+	expect(titleOnly.map((result) => result.matchSources)).toEqual([["title"]]);
+	// 唯一命中的字段被范围排除 → 整篇文档不入选，而不是带着空 matchSources 混进来。
+	expect(await index.findResults("deploy", "semantic", "prompt_only")).toEqual([]);
+	expect(await index.findResults("deploy", "hybrid", "prompt_only")).toEqual([]);
+	// 三次查询只多嵌入了三次查询串本身，文档记录没有重新嵌入。
+	expect(embeddingModel.embed.mock.calls.length - embeddingCallCountAfterIndexing).toBe(3);
 });
 
 it("初始化逐条等待全部文档嵌入完成后才允许查询", async () => {
@@ -84,7 +111,7 @@ it("初始化逐条等待全部文档嵌入完成后才允许查询", async () =
 	}
 	const index = await initialization;
 	let queryCompleted = false;
-	const query = index.findResults("deploy", "semantic").then((results) => {
+	const query = index.findResults("deploy", "semantic", "title_and_prompt").then((results) => {
 		queryCompleted = true;
 		return results;
 	});

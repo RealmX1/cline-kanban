@@ -121,6 +121,54 @@ describe("task board search", () => {
 		expect(crossFieldResult?.matchSources).toEqual(["title", "prompt"]);
 	});
 
+	it("matches only inside the title when the scope is title only, with positions local to the title", () => {
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+		const titleOnlyResults = findFuzzyTaskBoardSearchResults(documents, "billing", "title_only");
+		const titleResult = titleOnlyResults.find((result) => result.document.taskId === "task-title");
+
+		expect(titleResult?.matchSources).toEqual(["title"]);
+		expect(titleResult?.promptMatchCharacterPositions.size).toBe(0);
+		const titleLength = titleResult?.document.title.length ?? 0;
+		expect([...(titleResult?.titleMatchCharacterPositions ?? [])].every((position) => position < titleLength)).toBe(
+			true,
+		);
+		expect(
+			findFuzzyTaskBoardSearchResults(documents, "database migration", "title_only").some(
+				(result) => result.document.taskId === "task-prompt",
+			),
+		).toBe(false);
+	});
+
+	it("matches only inside the prompt when the scope is prompt only, with positions local to the prompt", () => {
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+		const promptResult = findFuzzyTaskBoardSearchResults(documents, "database migration", "prompt_only").find(
+			(result) => result.document.taskId === "task-prompt",
+		);
+
+		expect(promptResult?.matchSources).toEqual(["prompt"]);
+		expect(promptResult?.titleMatchCharacterPositions.size).toBe(0);
+		// 单字段主体下 positions 就是 prompt 内的局部下标：首个命中字符必须真的是 prompt 里的 "d"。
+		const earliestPromptPosition = Math.min(...(promptResult?.promptMatchCharacterPositions ?? []));
+		expect(promptResult?.document.prompt[earliestPromptPosition]?.toLowerCase()).toBe("d");
+		expect(
+			findFuzzyTaskBoardSearchResults(documents, "billing", "prompt_only").some(
+				(result) => result.document.taskId === "task-title",
+			),
+		).toBe(false);
+	});
+
+	it("does not let a narrowed scope keep a subsequence that only exists across the title/prompt boundary", () => {
+		// "api logs" 在合并主体上横跨 title 与 prompt 才凑得齐；只看标题时它根本不成立，
+		// 所以收窄范围必须换匹配主体，不能在合并主体上匹配后再按字段筛位置。
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+
+		expect(
+			findFuzzyTaskBoardSearchResults(documents, "api logs", "title_only").some(
+				(result) => result.document.taskId === "task-cross-field",
+			),
+		).toBe(false);
+	});
+
 	it("merges fuzzy and semantic results by document reference, unioning sources and positions", () => {
 		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
 		const targetDocument = documents[0];

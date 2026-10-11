@@ -16,7 +16,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { TaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
-import type { TaskBoardSearchMode } from "@/search/task-board-search";
+import type { TaskBoardSearchMode, TaskSearchMatchedTextFieldScope } from "@/search/task-board-search";
 import { TASK_SEARCH_RESULT_SORT_ORDER_OPTIONS } from "@/search/task-search-result-ordering";
 import type { TaskBoardSemanticSearchStatus } from "@/search/use-task-board-search";
 import { TaskFilterControls } from "@/task-filtering/task-filter-controls";
@@ -26,6 +26,21 @@ const SEARCH_MODE_OPTIONS: ReadonlyArray<{ mode: TaskBoardSearchMode; label: str
 	{ mode: "fuzzy", label: "Fuzzy" },
 	{ mode: "semantic", label: "Semantic" },
 	{ mode: "hybrid", label: "Hybrid" },
+];
+
+// 文本在哪些字段里匹配。四种模式都吃这个范围；粘贴完整 task id 的直达置顶不受它约束。
+const MATCHED_TEXT_FIELD_SCOPE_OPTIONS: ReadonlyArray<{
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope;
+	label: string;
+	description: string;
+}> = [
+	{
+		matchedTextFieldScope: "title_and_prompt",
+		label: "Title + Prompt",
+		description: "Match text in both the task title and its prompt",
+	},
+	{ matchedTextFieldScope: "title_only", label: "Title", description: "Only match text in the task title" },
+	{ matchedTextFieldScope: "prompt_only", label: "Prompt", description: "Only match text in the task prompt" },
 ];
 
 const SESSION_ACTIVITY_DIMENSION_HINT = "Only known for the current project — tasks from other projects are excluded";
@@ -76,6 +91,8 @@ export function TaskSpotlightSearchDialog({
 		setQuery,
 		mode,
 		setMode,
+		matchedTextFieldScope,
+		setMatchedTextFieldScope,
 		sortOrder,
 		setSortOrder,
 		effectiveSortOrder,
@@ -104,7 +121,6 @@ export function TaskSpotlightSearchDialog({
 	} = controller;
 
 	const showSemanticSpinner = semanticSearchStatus === "loading" && (mode === "hybrid" || mode === "semantic");
-	const timePillKind = resolveTaskSpotlightSearchResultRowTimePillKind(effectiveSortOrder);
 
 	useEffect(() => {
 		if (!isOpen || activeIndex < 0) {
@@ -314,6 +330,36 @@ export function TaskSpotlightSearchDialog({
 							))}
 						</div>
 
+						<div
+							className={cn(
+								"inline-flex shrink-0 items-center rounded-md border border-border bg-surface-1 p-0.5",
+								!isMobile && "h-6",
+							)}
+							role="group"
+							aria-label="Match in"
+						>
+							{MATCHED_TEXT_FIELD_SCOPE_OPTIONS.map((option) => (
+								<button
+									key={option.matchedTextFieldScope}
+									type="button"
+									aria-pressed={option.matchedTextFieldScope === matchedTextFieldScope}
+									title={option.description}
+									onClick={() => {
+										setMatchedTextFieldScope(option.matchedTextFieldScope);
+										focusInput();
+									}}
+									className={cn(
+										"shrink-0 rounded-sm px-2 text-[11px] font-medium text-text-secondary hover:text-text-primary",
+										isMobile ? MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME : "h-5",
+										option.matchedTextFieldScope === matchedTextFieldScope &&
+											"bg-surface-4 text-text-primary",
+									)}
+								>
+									{option.label}
+								</button>
+							))}
+						</div>
+
 						<TaskSpotlightSearchResultRowFieldVisibilityMenu
 							fieldVisibility={fieldVisibility}
 							onToggleFieldVisibility={toggleFieldVisibility}
@@ -340,6 +386,11 @@ export function TaskSpotlightSearchDialog({
 								computeItemKey={(_, result) => `${result.document.projectId}:${result.document.taskId}`}
 								itemContent={(index, result) => {
 									const rowDisplayContext = resolveResultRowDisplayContext(result.document);
+									const timePillKind = resolveTaskSpotlightSearchResultRowTimePillKind({
+										effectiveSortOrder,
+										mode,
+										agentConversationProgressAtEpochMs: rowDisplayContext.agentConversationProgressAtEpochMs,
+									});
 									return (
 										<div className="px-1.5 first:pt-1.5">
 											<TaskSpotlightSearchResultRow

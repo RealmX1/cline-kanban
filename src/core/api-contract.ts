@@ -1581,9 +1581,12 @@ export const runtimeProjectsResponseSchema = z.object({
 export type RuntimeProjectsResponse = z.infer<typeof runtimeProjectsResponseSchema>;
 
 // 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。携带「匹配所需字段」
-// （taskId + title + prompt + columnId）与「结果行排序/展示所需的卡片级持久事实」（createdAt / updatedAt /
-// 两个 agent 归属字段）。刻意**仍然**不含 session 活跃度与工作区 git 元数据：那些只对当前项目可得
-// （由 runtime-state-hub 推流），塞进这个按需拉取的快照只会得到一份立刻过期的假值。
+// （taskId + title + prompt + columnId）、「结果行排序/展示所需的卡片级持久事实」（createdAt / updatedAt /
+// 两个 agent 归属字段），以及唯一一个来自会话摘要的量：对话上次推进时刻。
+// 后者能进快照，是因为它是**历史事实**而非此刻的电平：稳态只前进（`mergeLastConversationProgressObservation`
+// 只在持久转录回纠低置信猜测时往回走），快照拉取后最多是「略旧」。刻意**仍然**不含 liveness / 会话状态 /
+// 本轮生成状态与工作区 git 元数据：那些是此刻的电平，只对当前项目可得（由 runtime-state-hub 推流），
+// 塞进这个按需拉取的快照只会得到一份立刻过期的假值。
 // 本端点是按需拉取（弹层开 + All projects 打开）而非高频广播，因此这几个定长字段的体积可以接受。
 export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
 	taskId: z.string(),
@@ -1600,6 +1603,11 @@ export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
 	// runtime 观测值：本卡最近一次**真正启动成功**的会话用的是哪个 agent。跨项目行拿不到 live session，
 	// 它是「这个任务实际在用哪个 agent」唯一可得的事实。
 	mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.nullable(),
+	// 会话摘要 `lastConversationProgressObservation.observedAtMs`（epoch ms）：这个任务的对话上次真正往前走的时刻。
+	// 已加载项目以内存摘要为准（内存无该任务摘要或只是未启动空壳时回落盘上值），其余项目取盘上 sessions.json；
+	// 从没推进过 / 摘要已被清掉为 null。
+	// 与 `updatedAt` 是两个量，消费方只能分段使用、绝不可混排（见 web-ui task-search-result-ordering）。
+	agentConversationProgressObservedAt: z.number().nullable(),
 });
 export type RuntimeAllProjectsTaskSearchIndexTaskEntry = z.infer<
 	typeof runtimeAllProjectsTaskSearchIndexTaskEntrySchema

@@ -70,8 +70,13 @@ it("按请求 id 路由并保留跨项目 document 原引用，取消后拒绝�
 	expect(worker().url.pathname).toContain("task-board-semantic-search-worker.ts");
 	worker().respond({ requestId: 0, ok: true, results: [] });
 	const index = await initializing;
-	const first = index.findResults("deploy", "semantic");
-	const second = index.findResults("rollout", "hybrid");
+	const first = index.findResults("deploy", "semantic", "title_and_prompt");
+	const second = index.findResults("rollout", "hybrid", "prompt_only");
+	// 字段范围随查询请求透传给 Worker（索引在 Worker 里，换范围只换查询、不重发 initialize）。
+	expect(worker().requests.slice(1)).toEqual([
+		{ requestId: 1, type: "search", query: "deploy", mode: "semantic", matchedTextFieldScope: "title_and_prompt" },
+		{ requestId: 2, type: "search", query: "rollout", mode: "hybrid", matchedTextFieldScope: "prompt_only" },
+	]);
 	const match = {
 		score: 0.9,
 		matchSources: ["title" as const],
@@ -82,12 +87,12 @@ it("按请求 id 路由并保留跨项目 document 原引用，取消后拒绝�
 	worker().respond({ requestId: 1, ok: true, results: [{ ...match, documentIndex: 0 }] });
 	expect((await first)[0]?.document).toBe(documents[0]);
 	expect((await second)[0]?.document).toBe(documents[1]);
-	const pending = index.findResults("another", "semantic");
+	const pending = index.findResults("another", "semantic", "title_and_prompt");
 	const rejected = expect(pending).rejects.toThrow("取消");
 	controller.abort();
 	await rejected;
 	expect(worker().terminate).toHaveBeenCalledOnce();
-	await expect(index.findResults("again", "semantic")).rejects.toThrow("取消");
+	await expect(index.findResults("again", "semantic", "title_and_prompt")).rejects.toThrow("取消");
 });
 
 it.each(["error", "messageerror", "timeout", "response"] as const)(
@@ -112,6 +117,8 @@ it("取消模型初始化和空文档不遗留 Worker", async () => {
 	await rejected;
 	expect(worker().terminate).toHaveBeenCalledOnce();
 	await expect(createTaskBoardSemanticSearchIndex(documents, controller.signal)).rejects.toThrow("取消");
-	expect(await (await createTaskBoardSemanticSearchIndex([])).findResults("x", "semantic")).toEqual([]);
+	expect(
+		await (await createTaskBoardSemanticSearchIndex([])).findResults("x", "semantic", "title_and_prompt"),
+	).toEqual([]);
 	expect(ControlledWorker.instances).toHaveLength(1);
 });
