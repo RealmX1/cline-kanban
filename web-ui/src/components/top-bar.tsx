@@ -11,7 +11,7 @@ import {
 	Command,
 	GitBranch,
 	GitCompareArrows,
-	LayoutGrid,
+	Layers,
 	Lightbulb,
 	Menu,
 	Play,
@@ -22,6 +22,7 @@ import {
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
+import { topBarBoardScopeAllProjectsToggleButtonAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import {
 	getRuntimeShortcutIconComponent,
@@ -30,6 +31,7 @@ import {
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
 import { TaskSpotlightSearchTriggerButton } from "@/components/task-spotlight-search-trigger-button";
+import { formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel } from "@/components/top-bar-project-switcher/board-or-focused-task-project-scope-toggle-hotkey-descriptor";
 import {
 	TopBarProjectSwitcher,
 	type TopBarProjectSwitcherState,
@@ -315,8 +317,8 @@ export function TopBar({
 	isFindingsOpen,
 	onToggleTaskChangesSidebar,
 	isTaskChangesSidebarOpen,
-	onToggleBoardOverview,
-	isBoardOverviewOpen,
+	onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope,
+	isBoardScopeAllProjectsSelected,
 	onOpenSettings,
 	showDebugButton,
 	onOpenDebugDialog,
@@ -371,8 +373,9 @@ export function TopBar({
 	isFindingsOpen?: boolean;
 	onToggleTaskChangesSidebar?: () => void;
 	isTaskChangesSidebarOpen?: boolean;
-	onToggleBoardOverview?: () => void;
-	isBoardOverviewOpen?: boolean;
+	// 与 ⌘E 同一个处理器：All projects ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope?: () => void;
+	isBoardScopeAllProjectsSelected?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;
 	showDebugButton?: boolean;
 	onOpenDebugDialog?: () => void;
@@ -805,23 +808,35 @@ export function TopBar({
 						/>
 					) : null}
 
-					{/* Board Overview: 跨-repo 的 Stage-First 概览切换（仅主看板视图，非任务详情） */}
-					{onToggleBoardOverview ? (
-						<Button
-							variant="ghost"
-							size="sm"
-							icon={<LayoutGrid size={16} />}
-							onClick={onToggleBoardOverview}
-							aria-label={isBoardOverviewOpen ? "Close board overview" : "Open board overview"}
-							className={cn(
-								"ml-0.5",
-								isBoardOverviewOpen && "ring-1 ring-accent",
-								isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
-							)}
-						/>
+					{/* All projects（Board Scope）⇄ 单项目的切换（仅主看板视图，非任务详情）；图标与项目切换器首行一致。 */}
+					{onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope ? (
+						<Tooltip
+							side="bottom"
+							content={`${
+								isBoardScopeAllProjectsSelected ? "Show only the current project" : "Show all projects"
+							} (${formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel()})`}
+						>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<Layers size={16} />}
+								onClick={onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope}
+								aria-label={
+									isBoardScopeAllProjectsSelected ? "Show only the current project" : "Show all projects"
+								}
+								aria-pressed={isBoardScopeAllProjectsSelected}
+								data-testid="toggle-board-scope-all-projects-button"
+								data-verification-anchor={topBarBoardScopeAllProjectsToggleButtonAnchorKey()}
+								className={cn(
+									"ml-0.5",
+									isBoardScopeAllProjectsSelected && "ring-1 ring-accent",
+									isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
+								)}
+							/>
+						</Tooltip>
 					) : null}
 
-					{/* Findings 浏览器（蓝图 §G.2）：home 主视图置换开关，与 git history / 概览互斥。 */}
+					{/* Findings 浏览器（蓝图 §G.2）：home 主视图置换开关，与 git history / All projects 首页互斥。 */}
 					{onToggleFindings ? (
 						<Tooltip side="bottom" content="Browse exploratory findings">
 							<Button

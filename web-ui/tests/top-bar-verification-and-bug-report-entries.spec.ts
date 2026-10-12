@@ -24,7 +24,7 @@ function Fixture() {
  return h(TooltipProvider, null,
   h(TopBar, { openTargetOptions: [], selectedOpenTargetId:'vscode', onSelectOpenTarget() {}, onOpenWorkspace() {}, canOpenWorkspace:false, isOpeningWorkspace:false,
    onToggleSidebar() {}, onBack() {}, workspacePath:'/fixture/cline-kanban', onOpenTaskSpotlightSearch() {}, onToggleTerminal() {},
-   onToggleTaskChangesSidebar() {}, onToggleFindings() {}, onToggleBoardOverview() {},
+   onToggleTaskChangesSidebar() {}, onToggleFindings() {}, onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope() {},
    postDeployVerificationPendingCount:verification.pendingVerificationTaskCount, onOpenPostDeployVerification:()=>verification.setCollapsed(false),
    bugReportTriggerButton:h(BugReportTriggerButton, { projects:[], currentProjectId:null, activeView:'task:fixture' }),
    notificationCenter:h(Button, { 'aria-label':'Notifications', className:'min-w-[44px] min-h-[44px]', icon:h('span', null, 'N') }) }),

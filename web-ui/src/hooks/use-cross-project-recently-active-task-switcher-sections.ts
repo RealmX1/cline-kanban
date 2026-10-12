@@ -23,7 +23,7 @@ import {
 import { useBooleanLocalStorageValue, useInterval, useRawLocalStorageValue } from "@/utils/react-use";
 
 // 区归属随时间漂移（Running 的 5 分钟窗、缓存倒计时到期），广播不会为此专门推送，故本地 tick 重算。
-// 30 秒与 Board Overview / 卡片头部的 tick 同口径；倒计时显示到分钟，30 秒足够。
+// 30 秒与卡片头部的 tick 同口径；倒计时显示到分钟，30 秒足够。
 // 「显示更早」开启期间同一 tick 也重新拉取快照：广播取景范围外的旧任务状态变化（移入 Done / 删除）只能靠它收敛。
 const CROSS_PROJECT_TASK_SWITCHER_SECTION_REASSIGNMENT_TICK_MS = 30_000;
 

@@ -7,8 +7,8 @@ import {
 } from "@/storage/local-storage-store";
 
 /**
- * 顶栏项目切换器选中的范围（docs/context-stage-first-overview.md 的 Board Scope / Project Scope）：
- *   board_scope_all_projects —— 切换器首行「All projects」。看板页显示 Board Overview，Focus View 左栏显示跨项目
+ * 顶栏项目切换器选中的范围（docs/context-board-scope-all-projects-and-single-project-scope.md 的 Board Scope / Project Scope）：
+ *   board_scope_all_projects —— 切换器首行「All projects」。看板页显示 All projects 首页（分区列看板），Focus View 左栏显示跨项目
  *                               「最近活跃任务」切换面板；从面板里跨项目打开任务时范围不变，变的只是当前项目
  *                               （焦点任务所属的项目）。
  *   single_project_scope     —— 切换器里选了某个项目。看板页显示该项目看板，Focus View 左栏显示它的 stage 列表。
