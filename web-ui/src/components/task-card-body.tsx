@@ -21,6 +21,7 @@ import {
 	AlertTriangle,
 	Archive,
 	Check,
+	CircleDotDashed,
 	ClipboardCheck,
 	Clock,
 	Copy,
@@ -65,6 +66,7 @@ import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
 	WorktreeUncommittedChangeSummaryIndicator,
 } from "@/components/ui/worktree-uncommitted-change-summary-indicator";
+import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } from "@/hooks/use-session-activity-dot-breathing-opacity-on-shared-fine-clock";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
@@ -461,6 +463,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
 			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
 			: false;
+	// computing 时会话活动点按 1Hz 呼吸（不用 animate-pulse，理由见该 hook）；activityNowMs 在 computing 时本就订阅着细时钟。
+	const sessionActivityDotBreathingOpacity =
+		!isTrashCard && isAgentComputing
+			? resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp(activityNowMs)
+			: undefined;
 	const displayTitle = useMemo(
 		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
 		[card.prompt, card.title],
@@ -549,7 +556,15 @@ export const TaskCardBody = memo(function TaskCardBody({
 			if (sessionFacets?.turnOwner === "user" && sessionFacets.liveness === "failed") {
 				return <AlertCircle size={12} className="text-status-red" />;
 			}
-			return <Spinner size={12} />;
+			// 静态图标而非旋转的 Spinner：In Progress 列的每张卡都有这个标记，无限旋转会让看板页可见期间一直逐帧合成。
+			// agent 此刻是否在产出由下方会话活动行的呼吸点表达。
+			return (
+				<CircleDotDashed
+					size={12}
+					className="text-text-secondary"
+					data-task-card-in-progress-column-status-marker="static"
+				/>
+			);
 		}
 		return null;
 	};
@@ -1459,10 +1474,10 @@ export const TaskCardBody = memo(function TaskCardBody({
 						}}
 					>
 						<span
-							className={cn(
-								"inline-block shrink-0 rounded-full",
-								!isTrashCard && isAgentComputing && "animate-pulse",
-							)}
+							className="inline-block shrink-0 rounded-full"
+							data-session-activity-dot-breathing-on-shared-fine-clock={
+								sessionActivityDotBreathingOpacity !== undefined ? "true" : undefined
+							}
 							title={
 								!isTrashCard && isExitedAwaiting
 									? "Agent process exited — still awaiting your review"
@@ -1482,6 +1497,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								border:
 									!isTrashCard && isExitedAwaiting ? `1.5px solid ${sessionActivity.dotColor}` : undefined,
 								marginTop: 4,
+								opacity: sessionActivityDotBreathingOpacity,
 							}}
 						/>
 						<div className="min-w-0 flex-1">
