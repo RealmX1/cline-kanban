@@ -43,7 +43,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [card("task-done", "Done task", "shared archive")] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -56,7 +55,6 @@ function createOtherProjectBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -83,6 +81,14 @@ function runningSessionSummary(taskId: string, activityText: string): RuntimeTas
 			notificationType: null,
 			source: "cline-sdk",
 		},
+	} as unknown as RuntimeTaskSessionSummary;
+}
+
+/** 一条带「对话上次推进」时刻的会话摘要。 */
+function sessionSummaryWithAgentConversationProgress(taskId: string, observedAtMs: number): RuntimeTaskSessionSummary {
+	return {
+		...runningSessionSummary(taskId, "Agent: working"),
+		lastConversationProgressObservation: { observedAtMs, evidenceKind: "agent_lifecycle_hook_event" },
 	} as unknown as RuntimeTaskSessionSummary;
 }
 
@@ -267,7 +273,6 @@ describe("useTaskSpotlightSearchController", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 
@@ -280,7 +285,6 @@ describe("useTaskSpotlightSearchController", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 
@@ -515,6 +519,115 @@ describe("useTaskSpotlightSearchController", () => {
 			}),
 		);
 		expect(get().results.map((result) => result.document.taskId)).toEqual(["task-alpha"]);
+	});
+
+	it("ranks other-project rows by their projected agent activity and shows it on the row", () => {
+		// 跨项目行的推进时刻来自索引快照（文档字段），当前项目的来自会话推流——两路比较的是同一个量，
+		// 跨项目行不再在 Agent activity 档与 direct 的 relevance 档里一律垫底。
+		const [remoteDocument] = buildTaskBoardSearchDocuments(createOtherProjectBoard(), {
+			projectId: "proj-b",
+			projectName: "Project B",
+		});
+		if (!remoteDocument) {
+			throw new Error("missing remote document");
+		}
+		crossProjectIndexMock.documents = [{ ...remoteDocument, crossProjectAgentConversationProgressAtEpochMs: 900 }];
+		const { get } = renderController(
+			baseProps({
+				taskSessionSummariesByTaskId: {
+					"task-alpha": sessionSummaryWithAgentConversationProgress("task-alpha", 100),
+				},
+			}),
+		);
+		act(() => get().open());
+		act(() => get().setIncludeOtherProjects(true));
+		act(() => get().setQuery("shared"));
+
+		expect(
+			get()
+				.results.slice(0, 2)
+				.map((result) => result.document.taskId),
+		).toEqual(["task-remote", "task-alpha"]);
+		const remoteResult = get().results[0];
+		expect(
+			remoteResult && get().resolveResultRowDisplayContext(remoteResult.document).agentConversationProgressAtEpochMs,
+		).toBe(900);
+
+		act(() => get().setSortOrder("agent_conversation_progress_desc"));
+		expect(
+			get()
+				.results.slice(0, 2)
+				.map((result) => result.document.taskId),
+		).toEqual(["task-remote", "task-alpha"]);
+	});
+
+	it("keeps the selected task selected when live agent activity reorders the same results", () => {
+		// direct 的 relevance 档按推进时刻排：某个 agent 一推进，它那行就挪位。成员没变、用户也没改任何排序输入时，
+		// 选中行必须跟着同一个任务走——钉回第 0 行会让回车打开别的任务。
+		const { get, rerender } = renderController(
+			baseProps({
+				taskSessionSummariesByTaskId: {
+					"task-alpha": sessionSummaryWithAgentConversationProgress("task-alpha", 300),
+					"task-beta": sessionSummaryWithAgentConversationProgress("task-beta", 200),
+					"task-review": sessionSummaryWithAgentConversationProgress("task-review", 100),
+				},
+			}),
+		);
+		act(() => get().open());
+		act(() => get().setQuery("shared"));
+		expect(
+			get()
+				.results.slice(0, 3)
+				.map((result) => result.document.taskId),
+		).toEqual(["task-alpha", "task-beta", "task-review"]);
+
+		act(() => get().moveActive(1));
+		expect(get().results[get().activeIndex]?.document.taskId).toBe("task-beta");
+
+		// task-review 推进到最前：beta 被挤到第 2 行。钉回第 0 行会选中 review，这里必须仍是 beta。
+		rerender(
+			baseProps({
+				taskSessionSummariesByTaskId: {
+					"task-alpha": sessionSummaryWithAgentConversationProgress("task-alpha", 300),
+					"task-beta": sessionSummaryWithAgentConversationProgress("task-beta", 200),
+					"task-review": sessionSummaryWithAgentConversationProgress("task-review", 400),
+				},
+			}),
+		);
+		expect(
+			get()
+				.results.slice(0, 3)
+				.map((result) => result.document.taskId),
+		).toEqual(["task-review", "task-alpha", "task-beta"]);
+		expect(get().activeIndex).toBe(2);
+		expect(get().results[get().activeIndex]?.document.taskId).toBe("task-beta");
+
+		// 反向护栏：用户自己改了查询串时，仍回到第 0 行（最佳命中）。
+		act(() => get().moveActive(1));
+		act(() => get().setQuery("shared a"));
+		expect(get().activeIndex).toBe(0);
+	});
+
+	it("narrows matching to the selected text field scope", () => {
+		const { get } = renderController(baseProps());
+		act(() => get().open());
+		expect(get().matchedTextFieldScope).toBe("title_and_prompt");
+		act(() => get().setQuery("shared"));
+		expect(
+			get()
+				.results.map((result) => result.document.taskId)
+				.sort(),
+		).toEqual(["task-alpha", "task-beta", "task-done", "task-review"].sort());
+
+		act(() => get().setMatchedTextFieldScope("title_only"));
+		expect(get().results.map((result) => result.document.taskId)).toEqual(["task-beta"]);
+
+		act(() => get().setMatchedTextFieldScope("prompt_only"));
+		expect(
+			get()
+				.results.map((result) => result.document.taskId)
+				.sort(),
+		).toEqual(["task-alpha", "task-done", "task-review"].sort());
 	});
 
 	it("closes automatically when the current project changes", () => {

@@ -46,13 +46,21 @@ export interface RevealCanonicalTaskCardController {
 
 export function useRevealCanonicalTaskCard({
 	prepareRevealTarget,
+	resolveRevealTargetAnchorKey = boardTaskCardAnchorKey,
 }: {
 	/** 在发起请求的同一帧同步执行，用于「先展开目标所在的折叠分段」这类前置准备。 */
 	prepareRevealTarget?: (taskId: string) => void;
+	/**
+	 * 请求键 → 目标元素的 `data-verification-anchor`。缺省是看板 / Focus View 的本体卡；跨项目切换面板
+	 * 传入自己的行锚点（请求键是 (workspaceId, taskId) 复合键，taskId 跨项目会撞号）。
+	 */
+	resolveRevealTargetAnchorKey?: (taskId: string) => string;
 } = {}): RevealCanonicalTaskCardController {
 	const [pendingRevealRequest, setPendingRevealRequest] = useState<CanonicalTaskCardRevealRequest | null>(null);
 	const prepareRevealTargetRef = useRef(prepareRevealTarget);
 	prepareRevealTargetRef.current = prepareRevealTarget;
+	const resolveRevealTargetAnchorKeyRef = useRef(resolveRevealTargetAnchorKey);
+	resolveRevealTargetAnchorKeyRef.current = resolveRevealTargetAnchorKey;
 
 	const requestRevealCanonicalTaskCard = useCallback((taskId: string) => {
 		prepareRevealTargetRef.current?.(taskId);
@@ -76,7 +84,7 @@ export function useRevealCanonicalTaskCard({
 			if (isCancelled) {
 				return;
 			}
-			if (spotlightAnchor(boardTaskCardAnchorKey(taskIdToReveal))) {
+			if (spotlightAnchor(resolveRevealTargetAnchorKeyRef.current(taskIdToReveal))) {
 				setPendingRevealRequest(null);
 				return;
 			}

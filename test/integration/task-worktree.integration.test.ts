@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { loadWorkspaceContext } from "../../src/state/workspace-state";
+import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import type * as GitUtilsModule from "../../src/workspace/git-utils";
 import { probeAndRefreshTaskCommitIntegrationProvenance } from "../../src/workspace/task-commit-integration-provenance";
 import {
@@ -374,6 +374,78 @@ describe.sequential("task-worktree integration", () => {
 				taskCommitIntegrationTrackingStatus: "complete",
 				observationSource: "persisted_final_snapshot",
 			});
+		});
+	});
+
+	it("persists the non-merge task commits reachable from the last known HEAD at every probe (dd2db 1a landing data preservation)", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("task-commit-reachable-set-repository");
+			const repoPath = repository.repositoryPath;
+			writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
+			repository.runGit(["add", "README.md"]);
+			repository.runGit(["commit", "-m", "initial"]);
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-reachable-set",
+				baseRef: "main",
+			});
+			if (!ensured.ok || !ensured.path) {
+				throw new Error("Task worktree was not created");
+			}
+			const worktreePath = ensured.path;
+			writeFileSync(join(worktreePath, "task-change.txt"), "task change\n", "utf8");
+			repository.runGit(["add", "task-change.txt"], { workingDirectoryPath: worktreePath });
+			repository.runGit(["commit", "-m", "task change"], { workingDirectoryPath: worktreePath });
+			const taskCommitSha = repository
+				.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: worktreePath })
+				.stdout.trim();
+			repository.runGit(["checkout", "-b", "side-branch-for-merge", "HEAD~1"], {
+				workingDirectoryPath: worktreePath,
+			});
+			writeFileSync(join(worktreePath, "side-change.txt"), "side change\n", "utf8");
+			repository.runGit(["add", "side-change.txt"], { workingDirectoryPath: worktreePath });
+			repository.runGit(["commit", "-m", "side change"], { workingDirectoryPath: worktreePath });
+			const sideCommitSha = repository
+				.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: worktreePath })
+				.stdout.trim();
+			repository.runGit(["checkout", "--detach", taskCommitSha], { workingDirectoryPath: worktreePath });
+			repository.runGit(["merge", "--no-ff", "-m", "merge side branch", "side-branch-for-merge"], {
+				workingDirectoryPath: worktreePath,
+			});
+			const workspaceContext = await loadWorkspaceContext(repoPath);
+
+			await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-reachable-set",
+				repoPath,
+				worktreePath,
+				baseRef: "main",
+				worktreeExists: true,
+			});
+
+			const persisted = JSON.parse(
+				readFileSync(
+					join(getWorkspaceDirectoryPath(workspaceContext.workspaceId), "task-commit-integration-provenance.json"),
+					"utf8",
+				),
+			) as {
+				tasks: Record<
+					string,
+					{
+						lastWorkspaceGitSnapshot: {
+							taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead?: {
+								commitSha: string;
+								stablePatchId: string | null;
+							}[];
+						};
+					}
+				>;
+			};
+			const reachable =
+				persisted.tasks["task-reachable-set"]?.lastWorkspaceGitSnapshot
+					.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead ?? [];
+			expect(reachable.map((commit) => commit.commitSha).sort()).toEqual([sideCommitSha, taskCommitSha].sort());
+			expect(reachable.every((commit) => typeof commit.stablePatchId === "string")).toBe(true);
 		});
 	});
 

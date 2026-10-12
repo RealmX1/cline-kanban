@@ -2,12 +2,13 @@ import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getTerminalThemeColors, useTheme } from "@/hooks/use-theme";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "@/runtime/types";
 import {
 	disposePersistentTerminal,
 	ensurePersistentTerminal,
 	type TerminalSearchResultState,
 } from "@/terminal/persistent-terminal-manager";
+import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import { registerTerminalController } from "@/terminal/terminal-controller-registry";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 
@@ -42,6 +43,8 @@ export interface UsePersistentTerminalSessionResult {
 	isRefreshing: boolean;
 	/** 「重新同步画面」进行中 —— 与 isRefreshing（重启 agent 会话）是两件独立的事，各自转各自的 spinner。 */
 	isResyncingTerminalView: boolean;
+	/** 打开任务时的陈旧会话自动续跑进行到哪一步；null = 没有在进行。 */
+	automaticStaleSessionResumePhase: StaleAgentTerminalSessionAutomaticResumePhase | null;
 	isSearchOpen: boolean;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
@@ -52,6 +55,13 @@ export interface UsePersistentTerminalSessionResult {
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
 	refreshTerminal: () => Promise<void>;
+	// 「从既有对话迁入」：把选定的那段对话迁进本会话再按 id 续跑（服务端语义见 api-contract 的
+	// adoptExistingAgentConversationAsTaskSessionIdentity）。与 refreshTerminal 共用 isRefreshing / lastError。
+	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
+	// 「停止后台会话并在这里续跑」：对话被 Claude 后台会话占着、又不能安全收回时，用户确认后无条件接管
+	// （服务端语义见 api-contract 的 forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser）。
+	// 与 refreshTerminal 共用 isRefreshing / lastError。
+	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	scrollTerminalToLatest: () => void;
 	stopTerminal: () => Promise<void>;
@@ -98,6 +108,8 @@ export function usePersistentTerminalSession({
 	const [isStopping, setIsStopping] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isResyncingTerminalView, setIsResyncingTerminalView] = useState(false);
+	const [automaticStaleSessionResumePhase, setAutomaticStaleSessionResumePhase] =
+		useState<StaleAgentTerminalSessionAutomaticResumePhase | null>(null);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
 	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
@@ -130,6 +142,7 @@ export function usePersistentTerminalSession({
 			previousSessionRef.current = null;
 			setLastError(null);
 			setIsStopping(false);
+			setAutomaticStaleSessionResumePhase(null);
 			resetTerminalSearchState();
 			return;
 		}
@@ -145,6 +158,7 @@ export function usePersistentTerminalSession({
 			recentlyUnmountedTerminalRef.current = null;
 			previousSessionRef.current = null;
 			setLastError("No project selected.");
+			setAutomaticStaleSessionResumePhase(null);
 			resetTerminalSearchState();
 			return;
 		}
@@ -181,7 +195,7 @@ export function usePersistentTerminalSession({
 			// (including the "[kanban] Refreshing terminal session..." banner) survives
 			// the PTY swap. Normal restarts (e.g., trash-resume drag) still reset.
 			if (!terminal.consumeRestartResetSuppression()) {
-				terminal.reset();
+				terminal.resetForSessionRestartAndRequestServerMirrorSnapshot();
 			}
 		}
 		previousSessionRef.current = {
@@ -206,6 +220,7 @@ export function usePersistentTerminalSession({
 			},
 			onSearchResults: setSearchResults,
 			onScrolledAwayFromLatestChange: setIsScrolledAwayFromLatest,
+			onAutomaticStaleSessionResumePhaseChange: setAutomaticStaleSessionResumePhase,
 		});
 		// 换任务/重挂载时用新终端的当前位置重置，避免沿用上一个终端的滚动态。
 		setIsScrolledAwayFromLatest(terminal.isScrolledAwayFromLatest());
@@ -298,24 +313,50 @@ export function usePersistentTerminalSession({
 		}
 	}, []);
 
-	const refreshTerminal = useCallback(async () => {
-		const terminal = terminalRef.current;
-		if (!terminal) {
-			return;
-		}
-		setIsRefreshing(true);
-		try {
-			const result = await terminal.refresh();
-			if (!result.ok && result.error) {
-				setLastError(result.error);
+	const refreshTerminalAdoptingOptionalExistingAgentConversation = useCallback(
+		async (
+			adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean,
+		) => {
+			const terminal = terminalRef.current;
+			if (!terminal) {
+				return;
 			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			setLastError(message);
-		} finally {
-			setIsRefreshing(false);
-		}
-	}, []);
+			setIsRefreshing(true);
+			try {
+				const result = await terminal.refresh(
+					undefined,
+					adoptExistingAgentConversationAsTaskSessionIdentity,
+					forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+				);
+				if (!result.ok && result.error) {
+					setLastError(result.error);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setLastError(message);
+			} finally {
+				setIsRefreshing(false);
+			}
+		},
+		[],
+	);
+
+	const refreshTerminal = useCallback(
+		async () => await refreshTerminalAdoptingOptionalExistingAgentConversation(),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
+
+	const adoptExistingAgentConversationAndResume = useCallback(
+		async (initialization: RuntimeTaskAgentSessionInitialization) =>
+			await refreshTerminalAdoptingOptionalExistingAgentConversation(initialization),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
+
+	const forceStopHarnessBackgroundSessionAndResumeHere = useCallback(
+		async () => await refreshTerminalAdoptingOptionalExistingAgentConversation(undefined, true),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
 
 	// 与 refreshTerminal 并列的另一件事：只重画屏幕，不动 agent 进程。走同一套 lastError 出口，
 	// 但状态位分开——两者可以各自独立地转 spinner。
@@ -367,6 +408,7 @@ export function usePersistentTerminalSession({
 		isStopping,
 		isRefreshing,
 		isResyncingTerminalView,
+		automaticStaleSessionResumePhase,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -377,6 +419,8 @@ export function usePersistentTerminalSession({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		adoptExistingAgentConversationAndResume,
+		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,

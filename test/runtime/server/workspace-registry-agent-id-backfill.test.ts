@@ -43,7 +43,6 @@ function makeBoard(cardsByColumn: Partial<Record<RuntimeBoardColumnId, RuntimeBo
 	const allColumns: RuntimeBoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
 	return {
 		columns: allColumns.map((id) => ({ id, title: id, cards: cardsByColumn[id] ?? [] })),
-		dependencies: [],
 	};
 }
 

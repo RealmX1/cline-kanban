@@ -8,6 +8,31 @@ export type TaskBoardSearchMode = "direct" | "hybrid" | "fuzzy" | "semantic";
 // 单字符容错分档，见 task-id-match-search.ts），不参与 direct 的分词、不进 fuzzy 的合并主体、不进语义索引。
 export type TaskBoardSearchMatchSource = "taskId" | "title" | "prompt";
 
+/** 可做文本匹配的字段（taskId 不是文本命中来源，见上）。 */
+export type TaskSearchMatchableTextField = Exclude<TaskBoardSearchMatchSource, "taskId">;
+
+/**
+ * 文本匹配的字段范围：默认 title 与 prompt 都参与，用户可收窄到只匹配其一。四种模式通用——
+ * direct 只在允许的字段里找子串、fuzzy 换 fzf 的匹配主体、semantic / hybrid 丢弃范围外字段的向量命中。
+ * task id 全等置顶不受它约束（taskId 是独立于文本的命中来源）。
+ */
+export type TaskSearchMatchedTextFieldScope = "title_and_prompt" | "title_only" | "prompt_only";
+
+export const DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE: TaskSearchMatchedTextFieldScope = "title_and_prompt";
+
+export function isTaskSearchTextFieldIncludedInMatchedTextFieldScope(
+	textField: TaskSearchMatchableTextField,
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope,
+): boolean {
+	if (matchedTextFieldScope === "title_only") {
+		return textField === "title";
+	}
+	if (matchedTextFieldScope === "prompt_only") {
+		return textField === "prompt";
+	}
+	return true;
+}
+
 /** 全体 producer 共用的空命中位置集：语义清晰且免重复分配。 */
 export const EMPTY_MATCH_CHARACTER_POSITIONS: ReadonlySet<number> = new Set<number>();
 
@@ -36,6 +61,10 @@ export interface TaskBoardSearchDocument {
 	// runtime 观测值：本卡最近一次真正启动成功的会话用的是哪个 agent。跨项目行没有 live session，
 	// 它是「这个任务实际在用哪个 agent」唯一可得的事实。
 	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId | null;
+	// 跨项目行的「对话上次推进」时刻（跨项目索引按需拉取时由 runtime 从会话摘要投影而来）。
+	// **当前项目的文档恒为 null**：当前项目读实时会话推流叠加层（controller），不读这份快照——
+	// 推进时刻每 tick 都可能前进，放进 documents 会让语义索引反复重建。
+	crossProjectAgentConversationProgressAtEpochMs: number | null;
 	// direct 子串匹配每键都要 lowercase 两个字段，预计算免每次搜索重复归一。
 	titleLowerCase: string;
 	promptLowerCase: string;
@@ -119,6 +148,7 @@ export function buildTaskBoardSearchDocument(params: {
 	taskLastModifiedAtEpochMs: number;
 	taskAgentOverrideAgentId: RuntimeAgentId | null;
 	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId | null;
+	crossProjectAgentConversationProgressAtEpochMs: number | null;
 }): TaskBoardSearchDocument {
 	const title = params.title.trim();
 	const prompt = params.prompt.trim();
@@ -138,6 +168,7 @@ export function buildTaskBoardSearchDocument(params: {
 		taskLastModifiedAtEpochMs: params.taskLastModifiedAtEpochMs,
 		taskAgentOverrideAgentId: params.taskAgentOverrideAgentId,
 		mostRecentlyLaunchedAgentSessionAgentId: params.mostRecentlyLaunchedAgentSessionAgentId,
+		crossProjectAgentConversationProgressAtEpochMs: params.crossProjectAgentConversationProgressAtEpochMs,
 		titleLowerCase: title.toLocaleLowerCase(),
 		promptLowerCase: prompt.toLocaleLowerCase(),
 		taskSearchSubjectText,
@@ -167,6 +198,8 @@ export function buildTaskBoardSearchDocuments(
 					taskLastModifiedAtEpochMs: card.updatedAt,
 					taskAgentOverrideAgentId: card.agentId ?? null,
 					mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId ?? null,
+					// 当前项目 board 卡：推进时刻走实时会话叠加层，见字段注释。
+					crossProjectAgentConversationProgressAtEpochMs: null,
 				}),
 			);
 		}
@@ -174,24 +207,60 @@ export function buildTaskBoardSearchDocuments(
 	return documents;
 }
 
+/**
+ * 按字段范围选 fzf 的匹配主体。收窄范围时**换主体**而不是「在合并主体上匹配再按字段后过滤」：
+ * 子序列匹配会跨过 title / prompt 的边界，后过滤要么误收（一半字符落在被排除的字段里）、要么误删。
+ */
+function selectFuzzyMatchSubjectText(
+	document: TaskBoardSearchDocument,
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope,
+): string {
+	if (matchedTextFieldScope === "title_only") {
+		return document.title;
+	}
+	if (matchedTextFieldScope === "prompt_only") {
+		return document.prompt;
+	}
+	return document.taskSearchSubjectText;
+}
+
 export function findFuzzyTaskBoardSearchResults(
 	documents: readonly TaskBoardSearchDocument[],
 	query: string,
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope = DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
 ): TaskBoardSearchResult[] {
 	const normalizedQuery = normalizeSearchQuery(query);
 	if (!normalizedQuery) {
 		return [];
 	}
 	const finder = new Fzf(documents, {
-		selector: (document) => document.taskSearchSubjectText,
+		selector: (document) => selectFuzzyMatchSubjectText(document, matchedTextFieldScope),
 	});
-	return finder.find(normalizedQuery).map((match) => buildFuzzyTaskBoardSearchResult(match));
+	return finder.find(normalizedQuery).map((match) => buildFuzzyTaskBoardSearchResult(match, matchedTextFieldScope));
 }
 
-function buildFuzzyTaskBoardSearchResult(match: FzfResultItem<TaskBoardSearchDocument>): TaskBoardSearchResult {
+function buildFuzzyTaskBoardSearchResult(
+	match: FzfResultItem<TaskBoardSearchDocument>,
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope,
+): TaskBoardSearchResult {
 	const document = match.item;
 	const titleMatchCharacterPositions = new Set<number>();
 	const promptMatchCharacterPositions = new Set<number>();
+	// 单字段主体：positions 本就是该字段内的局部下标，原样归给它。
+	if (matchedTextFieldScope !== "title_and_prompt") {
+		const matchedFieldPositions =
+			matchedTextFieldScope === "title_only" ? titleMatchCharacterPositions : promptMatchCharacterPositions;
+		for (const position of match.positions) {
+			matchedFieldPositions.add(position);
+		}
+		return {
+			document,
+			score: match.score,
+			matchSources: deriveMatchSourcesFromPositions(titleMatchCharacterPositions, promptMatchCharacterPositions),
+			titleMatchCharacterPositions,
+			promptMatchCharacterPositions,
+		};
+	}
 	// fzf 的 positions 是合并主体上的字符下标；减去各字段在主体中的起始偏移，还原为字段内局部下标。
 	for (const position of match.positions) {
 		if (position >= document.titleSubjectStartIndex && position < document.titleSubjectEndIndex) {

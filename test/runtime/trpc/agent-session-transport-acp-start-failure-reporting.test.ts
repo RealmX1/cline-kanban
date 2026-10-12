@@ -57,6 +57,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const ACP_SPAWN_FAILURE_MESSAGE = "spawn omp ENOENT";
 
@@ -169,14 +170,15 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	// 承重回归：ACP 起不来时切换必须回 ok:false，并如实说明旧会话已经停了。
@@ -214,6 +216,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -325,6 +328,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
@@ -382,6 +386,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(response.error).toBeUndefined();
 		expect(response.ok).toBe(true);

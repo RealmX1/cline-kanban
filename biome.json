@@ -39,7 +39,12 @@
 	"plugins": ["grit/no-process-env-destructure.grit", "grit/no-home-agent-prefix-literal.grit"],
 	"overrides": [
 		{
-			"includes": ["src/**/*.ts", "src/**/*.tsx", "!src/cli.ts"],
+			"includes": [
+				"src/**/*.ts",
+				"src/**/*.tsx",
+				"!src/cli.ts",
+				"!src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"
+			],
 			"plugins": ["grit/no-console.grit", "grit/no-process-exit.grit"]
 		},
 		{
@@ -54,6 +59,40 @@
 									{
 										"group": ["@clinebot/core", "@clinebot/core/**"],
 										"message": "Import Cline SDK packages only through src/cline-sdk/sdk-provider-boundary.ts or src/cline-sdk/sdk-runtime-boundary.ts."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/commands/**/*.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["@clinebot/core", "@clinebot/core/**"],
+										"message": "Import Cline SDK packages only through src/cline-sdk/sdk-provider-boundary.ts or src/cline-sdk/sdk-runtime-boundary.ts."
+									},
+									{
+										"group": ["**/inter-work-unit-relation-ledger/**"],
+										"message": "dd2db: the inter-work-unit relation ledger is opened and written only by the Kanban runtime. CLI commands must go through a runtime tRPC procedure."
+									},
+									{
+										"group": ["**/state/workspace-state"],
+										"importNamePattern": "(mutateWorkspaceState|saveWorkspaceState|savePersistedWorkspaceSessionsById|persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId)",
+										"message": "dd2db: CLI commands must not write board/sessions files directly; every board write goes through a runtime procedure so the relation ledger records it with the resolved actor."
+									},
+									{
+										"group": ["**/deployment/post-deploy-verification-state"],
+										"importNamePattern": "(markTaskVerified|consumePendingConfirmationAndMarkVerified|reconcileGroup|reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups)",
+										"message": "dd2db: Post-Deploy Verification completion (verifiedAt) is written only by the runtime; call deployment.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone."
 									}
 								]
 							}
@@ -92,6 +131,10 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["web-ui/src/**/*.ts", "web-ui/src/**/*.tsx"],
+			"plugins": ["grit/relation-user-decision-calls-only-from-explicit-user-gesture-handlers.grit"]
 		},
 		{
 			"includes": [

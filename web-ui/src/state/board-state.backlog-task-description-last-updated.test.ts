@@ -25,7 +25,6 @@ function normalizeBacklog(rawBacklogCards: unknown[]): BoardData {
 			{ id: "validation", cards: [] },
 			{ id: "trash", cards: [] },
 		],
-		dependencies: [],
 	});
 	if (!normalized) {
 		throw new Error("expected normalized board");

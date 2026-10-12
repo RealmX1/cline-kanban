@@ -32,13 +32,14 @@
 
 ## 决策记录与事故复盘
 
-- [`adr/0001-stage-first-overview-uses-raw-column-membership.md`](./adr/0001-stage-first-overview-uses-raw-column-membership.md)——stage-first overview 按 raw 列归属判定 stage 成员。
+- [`adr/0001-stage-first-overview-uses-raw-column-membership.md`](./adr/0001-stage-first-overview-uses-raw-column-membership.md)——（已 Superseded）已退役的 Board Scope 旧首页按 raw 列归属判定 stage 成员。
 - [`adr/0002-plan-mode-permission-mode-orthogonal.md`](./adr/0002-plan-mode-permission-mode-orthogonal.md)——plan 起步与权限档位是两条正交轴。
 - [`post-mortems/event-loop-stall-lock-crash.md`](./post-mortems/event-loop-stall-lock-crash.md)——事件循环停摆被文件锁 compromise 处理放大，导致整个多项目服务器进程退出。
 
 ## 功能术语表
 
-- [`context-stage-first-overview.md`](./context-stage-first-overview.md)——跨仓库 stage-first overview 的领域语言（从仓库根 `CONTEXT.md` 迁入）。
+- [`context-board-scope-all-projects-and-single-project-scope.md`](./context-board-scope-all-projects-and-single-project-scope.md)——Board Scope（All projects）与单项目范围、All projects 首页分区列看板、建卡目标项目的领域语言。
+- [`context-inter-work-unit-relation-modeling-overhaul.md`](./context-inter-work-unit-relation-modeling-overhaul.md)——dd2db 工作单元间关系建模重构的领域语言：工作单元、行动者、关系账本事件、记录型与断言型关系等（从仓库根 `CONTEXT.md` 迁入）。
 
 说明：`docs/architecture.md`、`DEVELOPMENT.md`、`web-ui/README.md` 等上游继承的人类向文档仍为英文（属既定策略）；新增 agent 向文档以中文为主。
 

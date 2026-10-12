@@ -3,29 +3,48 @@ import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
 	RuntimeBoardData,
+	RuntimeCrossProjectTaskSwitcherEntry,
 	RuntimeInProgressTaskDetail,
 	RuntimeProjectAvailability,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
 	RuntimeProjectUnavailableReason,
+	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
+import { CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
+import { recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import {
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAgentSessionReclamationDeadlineRecords,
 } from "../state/agent-session-reclamation-deadline-store";
+import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
 	loadWorkspaceState,
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
+import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
+import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
+import type {
+	HostedTerminalPtyProcessSpawner,
+	HostedTerminalPtySessionAdoptionCandidate,
+} from "../terminal/terminal-pty-process-handle";
 import { runGit } from "../workspace/git-utils";
-import { collectInProgressTaskDetailsFromBoard } from "./in-progress-task-detail-projection";
+import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "./cross-project-task-switcher-entry-projection";
+import {
+	collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts,
+	extractTaskSessionFactsByTaskIdForCrossProjectTaskViews,
+	extractTaskSessionFactsForCrossProjectTaskViews,
+	type TaskSessionFactsForCrossProjectTaskViews,
+} from "./in-progress-task-detail-projection";
+import { createPersistedTaskSessionFactsCacheForUnloadedProjects } from "./persisted-task-session-facts-cache-for-unloaded-projects";
 import { applyLiveSessionStateToProjectTaskCounts } from "./project-task-counts-live-session-overlay";
 import { inspectRuntimeProjectAvailability } from "./runtime-project-availability";
 
@@ -41,6 +60,21 @@ export interface CreateWorkspaceRegistryDependencies {
 	hasGitRepository: (path: string) => boolean;
 	inspectRuntimeProjectAvailability?: typeof inspectRuntimeProjectAvailability;
 	onTerminalManagerReady?: (workspaceId: string, manager: TerminalSessionManager) => void;
+	// Cline SDK / ACP 会话不在 TerminalSessionManager 里，由 runtime-state-hub 订阅持有。跨项目视图
+	// （in_progress 明细、跨项目切换面板）要覆盖全部三种 transport，故后绑定一个读口（hub 晚于 registry 创建）。
+	listConversationTaskSessionSummariesForWorkspace?: (workspaceId: string) => RuntimeTaskSessionSummary[];
+	// agent session PTY host 模式启用时提供：每个 workspace 的 TerminalSessionManager 经它把 PTY 交给 host 进程持有。
+	createHostedTerminalPtyProcessSpawnerForWorkspace?: (
+		workspaceId: string,
+		workspaceRepositoryPath: string,
+	) => HostedTerminalPtyProcessSpawner;
+	// 热重启接管：该 workspace 在 PTY host 里仍有的会话（取走即消费）。在 terminal manager 首次加载时、
+	// hydrate 之后立刻接管，保证接管先于任何浏览器连接（runtime 在接管全部完成后才 listen）。
+	takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace?: (
+		workspaceId: string,
+	) => HostedTerminalPtySessionAdoptionCandidate[];
+	// 测试注入用；缺省 Date.now。
+	now?: () => number;
 }
 
 export interface DisposeWorkspaceRegistryOptions {
@@ -156,6 +190,30 @@ async function backfillSessionAgentIdsBeforeHydrate(
 	backfillMissingSessionAgentIdsFromDurableSources({ board, agentSessionReclamationDeadlineRecords }, sessions);
 }
 
+// 存量 Cursor 会话的身份回填 / 「从未建立对话」校正（规则与政策例外见被调模块的文件头）。看板读不出来就整体跳过：
+// 「只动看板上确有其卡的会话」是这道回填不碰幽灵副本的唯一凭据，没有它宁可不做。
+async function backfillCursorAgentChatIdentityBeforeHydrate(
+	workspaceId: string,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): Promise<void> {
+	let board: RuntimeBoardData;
+	try {
+		board = await loadWorkspaceBoardById(workspaceId);
+	} catch {
+		return;
+	}
+	// 回填是锦上添花，绝不能连累 hydrate：调用方的 catch 会把任何异常当成「workspace 状态不存在」，整批会话都不水合。
+	try {
+		await backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate({
+			sessions,
+			taskIdsOnWorkspaceBoard: new Set(board.columns.flatMap((column) => column.cards.map((card) => card.id))),
+			currentTimeEpochMs: Date.now(),
+		});
+	} catch {
+		// 回填失败 ⇒ 会话维持原样，下次续跑时的预检仍会按同一套规则判定。
+	}
+}
+
 export type ResolvedWorkspaceStreamTarget =
 	| { status: "available"; projectId: string; workspacePath: string }
 	| {
@@ -201,6 +259,12 @@ export interface WorkspaceRegistry {
 		projects: RuntimeProjectSummary[];
 	}>;
 	resolveWorkspaceForStream: (requestedWorkspaceId: string | null) => Promise<ResolvedWorkspaceStreamTarget>;
+	// 跨项目切换面板「显示更早」：按给定时间窗现算全部项目的条目，不进广播。
+	listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon: (
+		activityHorizonMs: number,
+	) => Promise<
+		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
+	>;
 	listManagedWorkspaces: () => Array<{
 		workspaceId: string;
 		workspacePath: string | null;
@@ -247,11 +311,13 @@ function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
 	taskCounts: RuntimeProjectTaskCounts;
-	// board 列归属的原始计数（未套 live-session overlay），供 Stage-First Overview 用。快路径可省略，
-	// 下一次 projects_updated/snapshot 广播补齐（见 ADR-0001）。
+	// board 列归属的原始计数（未套 live-session overlay）。原供已退役的 Stage-First Overview，现无前端消费者，
+	// 为兼容旧 bundle 暂留（ADR-0001，已 Superseded）。快路径可省略，下一次 projects_updated/snapshot 广播补齐。
 	rawColumnTaskCounts?: RuntimeProjectTaskCounts;
-	// in_progress 列 task 明细，供 Stage-First Overview 展开 In-Progress 阶段。快路径省略时默认空数组。
+	// in_progress 列 task 明细，供顶栏项目切换器数 live agent。快路径省略时默认空数组。
 	inProgressTaskDetails?: RuntimeInProgressTaskDetail[];
+	// 跨项目切换面板条目。快路径省略时默认空数组，下一次广播补齐。
+	crossProjectTaskSwitcherEntries?: RuntimeCrossProjectTaskSwitcherEntry[];
 	availability?: RuntimeProjectAvailability;
 	// Optional so the `projects.add` fast path can omit it — origin is populated for real
 	// on the next projects_updated/snapshot broadcast via buildProjectsPayload.
@@ -266,6 +332,7 @@ function toProjectSummary(project: {
 		availability: project.availability ?? { status: "available" },
 		...(project.rawColumnTaskCounts ? { rawColumnTaskCounts: project.rawColumnTaskCounts } : {}),
 		inProgressTaskDetails: project.inProgressTaskDetails ?? [],
+		crossProjectTaskSwitcherEntries: project.crossProjectTaskSwitcherEntries ?? [],
 		gitRemoteOriginUrl: project.gitRemoteOriginUrl ?? null,
 	};
 }
@@ -299,6 +366,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		{ repoPath: string; availability: RuntimeProjectAvailability }
 	>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
+	const persistedTaskSessionFactsCacheForUnloadedProjects = createPersistedTaskSessionFactsCacheForUnloadedProjects();
+	const now = deps.now ?? Date.now;
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
 
 	const rememberWorkspace = (workspaceId: string, repoPath: string): void => {
@@ -333,13 +402,44 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			return loaded;
 		}
 		const loading = (async () => {
-			const manager = new TerminalSessionManager();
+			const manager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: deps.createHostedTerminalPtyProcessSpawnerForWorkspace?.(
+					workspaceId,
+					repoPath,
+				),
+				onUserTerminalInputSubmissionObservedForSession: (kanbanTaskConversationSessionId) =>
+					recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking({
+						workspaceId,
+						kanbanTaskConversationSessionId,
+					}),
+				persistAgentNativeConversationSessionIdentityImmediately: async (
+					kanbanTaskConversationSessionId,
+					readCurrentSessionSummary,
+				) => {
+					await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+						workspaceId,
+						kanbanTaskConversationSessionId,
+						readCurrentSessionSummary,
+					);
+				},
+				claudeCodeBackgroundSessionDaemonClient: createClaudeCodeBackgroundSessionDaemonCliClient(),
+			});
+			const hostedTerminalPtySessionAdoptionCandidates =
+				deps.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace?.(workspaceId) ?? [];
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath, { autoCreateIfMissing: false });
 				await backfillSessionAgentIdsBeforeHydrate(workspaceId, existingWorkspace.sessions);
-				manager.hydrateFromRecord(existingWorkspace.sessions);
+				// 排在 agentId 回填之后：它只处理 agentId 已是 cursor 的会话，agentId 被修好的存量会话也该被覆盖到。
+				await backfillCursorAgentChatIdentityBeforeHydrate(workspaceId, existingWorkspace.sessions);
+				manager.hydrateFromRecord(
+					existingWorkspace.sessions,
+					new Set(hostedTerminalPtySessionAdoptionCandidates.map((candidate) => candidate.taskId)),
+				);
 			} catch {
 				// Workspace state will be created on demand.
+			}
+			if (hostedTerminalPtySessionAdoptionCandidates.length > 0) {
+				await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart(hostedTerminalPtySessionAdoptionCandidates);
 			}
 			terminalManagersByWorkspaceId.set(workspaceId, manager);
 			return manager;
@@ -381,6 +481,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		projectTaskCountsByWorkspaceId.delete(workspaceId);
 		runtimeProjectAvailabilityByWorkspaceId.delete(workspaceId);
+		persistedTaskSessionFactsCacheForUnloadedProjects.forgetWorkspace(workspaceId);
 		const workspacePath = workspacePathsById.get(workspaceId) ?? null;
 		workspacePathsById.delete(workspaceId);
 		return {
@@ -389,44 +490,121 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		};
 	};
 
-	// 一次性汇总单个 project 的三样数据（共用一次 board 加载 + listSummaries，零重复 I/O）：
+	// 单个 project 的 board + 全部三种 transport 的会话事实 + 「我最后打开」。in_progress 明细、跨项目切换面板
+	// 条目、「显示更早」查询共用这一份读取，不各自拼一遍会话来源。
+	//   - 已加载项目：TerminalSessionManager（已 hydrate 盘上记录）+ Cline SDK / ACP 会话叠加（后写覆盖先写，
+	//     与 runtime-server 的 listProjectRuntimeSessionSummaries 同序）。
+	//   - 未加载项目：sessions.json 的 mtime 缓存（见 persisted-task-session-facts-cache-for-unloaded-projects.ts）+
+	//     同样的会话叠加。
+	const loadProjectBoardAndTaskSessionFacts = async (
+		workspaceId: string,
+	): Promise<{
+		board: RuntimeBoardData;
+		terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null;
+		sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
+		lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
+	}> => {
+		const board = await loadWorkspaceBoardById(workspaceId);
+		const terminalManager = getTerminalManagerForWorkspace(workspaceId);
+		let terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null = null;
+		let sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
+		if (terminalManager) {
+			terminalManagerSessionsByTaskId = {};
+			for (const summary of terminalManager.listSummaries()) {
+				terminalManagerSessionsByTaskId[summary.taskId] = summary;
+			}
+			sessionFactsByTaskId = extractTaskSessionFactsByTaskIdForCrossProjectTaskViews(
+				Object.values(terminalManagerSessionsByTaskId),
+			);
+		} else {
+			sessionFactsByTaskId = new Map(
+				await persistedTaskSessionFactsCacheForUnloadedProjects.loadTaskSessionFactsByTaskId(workspaceId),
+			);
+		}
+		for (const summary of deps.listConversationTaskSessionSummariesForWorkspace?.(workspaceId) ?? []) {
+			sessionFactsByTaskId.set(summary.taskId, extractTaskSessionFactsForCrossProjectTaskViews(summary));
+		}
+		const lastOpenedByUserAtByTaskId = await readTaskLastOpenedByUserAtByTaskId(workspaceId).catch(
+			() => new Map<string, number>(),
+		);
+		return { board, terminalManagerSessionsByTaskId, sessionFactsByTaskId, lastOpenedByUserAtByTaskId };
+	};
+
+	// 一次性汇总单个 project 的四样数据（共用一次 loadProjectBoardAndTaskSessionFacts，零重复 I/O）：
 	//   - taskCounts：套 live-session overlay 的计数（主看板/项目列表用）。
-	//   - rawColumnTaskCounts：board 列归属的原始计数（Stage-First Overview 的 stage 计数用，见 ADR-0001）。
-	//   - inProgressTaskDetails：in_progress 列 task 明细（Stage-First Overview 展开 In-Progress 用）。
+	//   - rawColumnTaskCounts：board 列归属的原始计数（已无前端消费者，为兼容旧 bundle 暂留，见 ADR-0001 的 Superseded 说明）。
+	//   - inProgressTaskDetails：in_progress 列 task 明细（顶栏项目切换器的 live 计数用）。
+	//   - crossProjectTaskSwitcherEntries：跨项目切换面板条目（同一个 per-card 构造函数，取景不同）。
 	const summarizeProject = async (
 		workspaceId: string,
 	): Promise<{
 		taskCounts: RuntimeProjectTaskCounts;
 		rawColumnTaskCounts: RuntimeProjectTaskCounts;
 		inProgressTaskDetails: RuntimeInProgressTaskDetail[];
+		crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[];
 	}> => {
 		try {
-			const board = await loadWorkspaceBoardById(workspaceId);
+			const { board, terminalManagerSessionsByTaskId, sessionFactsByTaskId, lastOpenedByUserAtByTaskId } =
+				await loadProjectBoardAndTaskSessionFacts(workspaceId);
 			const persistedCounts = countTasksByColumn(board);
-			const terminalManager = getTerminalManagerForWorkspace(workspaceId);
-			if (!terminalManager) {
-				projectTaskCountsByWorkspaceId.set(workspaceId, persistedCounts);
-				return {
-					taskCounts: persistedCounts,
-					rawColumnTaskCounts: persistedCounts,
-					inProgressTaskDetails: collectInProgressTaskDetailsFromBoard(board, {}),
-				};
-			}
-			const liveSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] = {};
-			for (const summary of terminalManager.listSummaries()) {
-				liveSessionsByTaskId[summary.taskId] = summary;
-			}
-			const nextCounts = applyLiveSessionStateToProjectTaskCounts(persistedCounts, board, liveSessionsByTaskId);
-			projectTaskCountsByWorkspaceId.set(workspaceId, nextCounts);
+			// 计数 overlay 仍只看 terminal manager 的 summary（未加载项目退化为原始列计数），与改动前一致。
+			const taskCounts = terminalManagerSessionsByTaskId
+				? applyLiveSessionStateToProjectTaskCounts(persistedCounts, board, terminalManagerSessionsByTaskId)
+				: persistedCounts;
+			projectTaskCountsByWorkspaceId.set(workspaceId, taskCounts);
 			return {
-				taskCounts: nextCounts,
+				taskCounts,
 				rawColumnTaskCounts: persistedCounts,
-				inProgressTaskDetails: collectInProgressTaskDetailsFromBoard(board, liveSessionsByTaskId),
+				inProgressTaskDetails: collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts(
+					board,
+					sessionFactsByTaskId,
+				),
+				crossProjectTaskSwitcherEntries: collectCrossProjectTaskSwitcherEntriesFromBoard({
+					board,
+					sessionFactsByTaskId,
+					lastOpenedByUserAtByTaskId,
+					nowMs: now(),
+					activityHorizonMs: CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
+				}),
 			};
 		} catch {
 			const cached = projectTaskCountsByWorkspaceId.get(workspaceId) ?? createEmptyProjectTaskCounts();
-			return { taskCounts: cached, rawColumnTaskCounts: cached, inProgressTaskDetails: [] };
+			return {
+				taskCounts: cached,
+				rawColumnTaskCounts: cached,
+				inProgressTaskDetails: [],
+				crossProjectTaskSwitcherEntries: [],
+			};
 		}
+	};
+
+	const listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon = async (
+		activityHorizonMs: number,
+	): Promise<
+		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
+	> => {
+		const projects = await listWorkspaceIndexEntries();
+		const nowMs = now();
+		return await Promise.all(
+			projects.map(async (project) => {
+				try {
+					const { board, sessionFactsByTaskId, lastOpenedByUserAtByTaskId } =
+						await loadProjectBoardAndTaskSessionFacts(project.workspaceId);
+					return {
+						workspaceId: project.workspaceId,
+						crossProjectTaskSwitcherEntries: collectCrossProjectTaskSwitcherEntriesFromBoard({
+							board,
+							sessionFactsByTaskId,
+							lastOpenedByUserAtByTaskId,
+							nowMs,
+							activityHorizonMs,
+						}),
+					};
+				} catch {
+					return { workspaceId: project.workspaceId, crossProjectTaskSwitcherEntries: [] };
+				}
+			}),
+		);
 	};
 
 	// 接口保留的薄封装（projects.add 快路径经此只取 overlay 计数；repoPath 参数留作签名兼容）。
@@ -516,9 +694,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		const projectSummaries = await Promise.all(
 			projects.map(async (project) => {
 				const availability = await getRuntimeProjectAvailabilityUsingCache(project.workspaceId, project.repoPath);
-				const { taskCounts, rawColumnTaskCounts, inProgressTaskDetails } = await summarizeProject(
-					project.workspaceId,
-				);
+				const { taskCounts, rawColumnTaskCounts, inProgressTaskDetails, crossProjectTaskSwitcherEntries } =
+					await summarizeProject(project.workspaceId);
 				const gitRemoteOriginUrl =
 					availability.status === "available"
 						? await resolveGitRemoteOriginUrl(project.workspaceId, project.repoPath)
@@ -529,6 +706,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 					taskCounts,
 					rawColumnTaskCounts,
 					inProgressTaskDetails,
+					crossProjectTaskSwitcherEntries,
 					availability,
 					gitRemoteOriginUrl,
 				});
@@ -626,6 +804,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		buildProjectsPayload,
 		buildProjectsPayloadUsingCachedRuntimeProjectAvailability,
 		resolveWorkspaceForStream,
+		listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
 		listManagedWorkspaces: () => {
 			return Array.from(terminalManagersByWorkspaceId.entries()).map(([workspaceId, terminalManager]) => ({
 				workspaceId,

@@ -2,6 +2,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createPostDeployVerificationTaskReadModelTestFixture } from "@/components/post-deploy-verification/post-deploy-verification-task-read-model-test-fixtures";
 import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 
@@ -107,17 +108,10 @@ function makeGuidedManualChecklistItem(checked: boolean): RuntimePostDeployVerif
 }
 
 function makeTask(checked: boolean): RuntimePostDeployVerificationTask {
-	return {
+	return createPostDeployVerificationTaskReadModelTestFixture({
 		taskId: TASK_ID,
-		columnIdAtMatch: "review",
-		matchedCommits: [],
-		inclusionReason: "commit_correlation",
 		checklist: [makeGuidedManualChecklistItem(checked)],
-		verifiedAt: null,
-		boardMovedToDoneAt: null,
-		pendingConfirmation: null,
-		droppedReason: null,
-	};
+	});
 }
 
 function makeGroup(checked: boolean): RuntimePostDeployVerificationDeploymentGroup {
@@ -147,6 +141,7 @@ function makeVerificationStateResponseForDeployment(
 }
 
 interface HookSnapshot {
+	pendingVerificationTaskCount: number | null;
 	refresh: ReturnType<typeof usePostDeployVerification>["refresh"];
 	toggleChecklistItem: ReturnType<typeof usePostDeployVerification>["toggleChecklistItem"];
 	activeGroup: ReturnType<typeof usePostDeployVerification>["activeGroup"];
@@ -162,11 +157,18 @@ function HookHarness({
 	const verification = usePostDeployVerification(workspaceId);
 	useEffect(() => {
 		onSnapshot({
+			pendingVerificationTaskCount: verification.pendingVerificationTaskCount,
 			refresh: verification.refresh,
 			toggleChecklistItem: verification.toggleChecklistItem,
 			activeGroup: verification.activeGroup,
 		});
-	}, [onSnapshot, verification.refresh, verification.toggleChecklistItem, verification.activeGroup]);
+	}, [
+		onSnapshot,
+		verification.refresh,
+		verification.toggleChecklistItem,
+		verification.activeGroup,
+		verification.pendingVerificationTaskCount,
+	]);
 	return null;
 }
 
@@ -339,5 +341,51 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 			await flushMicrotasks();
 		});
 		expect(getSnapshot()?.activeGroup?.deploymentId).toBe(WORKSPACE_B_DEPLOYMENT_ID);
+	});
+	it.each([
+		{ name: "无部署记录", response: { deploymentGroups: [], activeDeploymentId: null }, expected: null },
+		{
+			name: "仅历史记录",
+			response: {
+				deploymentGroups: [{ ...makeGroup(false), foldedAtIso: "2026-07-19T00:00:00.000Z" }],
+				activeDeploymentId: null,
+			},
+			expected: 0,
+		},
+		{ name: "当前待核对任务", response: makeVerificationStateResponse(false), expected: 1 },
+		{
+			name: "已核对及已移除任务不计数",
+			response: {
+				deploymentGroups: [
+					{
+						...makeGroup(false),
+						tasks: [
+							{ ...makeTask(false), verifiedAt: "2026-07-19T00:00:00.000Z" },
+							{ ...makeTask(false), taskId: "removed-task", droppedReason: "task_deleted" as const },
+						],
+					},
+				],
+				activeDeploymentId: DEPLOYMENT_ID,
+			},
+			expected: 0,
+		},
+	])("顶栏唯一入口的数量与可见性：$name", async ({ response, expected }) => {
+		let observedPendingTaskCount: number | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					workspaceId="workspace-a"
+					onSnapshot={(snapshot) => {
+						observedPendingTaskCount = snapshot.pendingVerificationTaskCount;
+					}}
+				/>,
+			);
+		});
+		expect(observedPendingTaskCount).toBeNull();
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 0).resolve(response);
+			await flushMicrotasks();
+		});
+		expect(observedPendingTaskCount).toBe(expected);
 	});
 });

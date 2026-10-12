@@ -5,6 +5,7 @@
  */
 import { createServer, connect } from "node:net";
 import { access } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -73,7 +74,17 @@ function waitForPort(port, timeout = 15000) {
 
 const runtimePort = await findPort(3484);
 const webUiPort = await findPort(4173, new Set([runtimePort]));
-const runtimeCliArgs = ["--port", String(runtimePort), "--no-open", ...process.argv.slice(2)];
+// 工作单元间关系账本只追加，dev 代码写进真实账本后不可逆（dd2db §R3 Y-PHASE-10）。dev:full 默认把账本存储根
+// 指向隔离目录；只有显式带 --share-real-inter-work-unit-relation-ledger 才写真实账本。看板状态保持现有的共享行为。
+const SHARE_REAL_INTER_WORK_UNIT_RELATION_LEDGER_FLAG = "--share-real-inter-work-unit-relation-ledger";
+const shouldShareRealInterWorkUnitRelationLedger = process.argv.includes(SHARE_REAL_INTER_WORK_UNIT_RELATION_LEDGER_FLAG);
+const passthroughRuntimeCliArgs = process.argv.slice(2).filter((arg) => arg !== SHARE_REAL_INTER_WORK_UNIT_RELATION_LEDGER_FLAG);
+const runtimeCliArgs = ["--port", String(runtimePort), "--no-open", ...passthroughRuntimeCliArgs];
+const isolatedDevFullInterWorkUnitRelationLedgerStorageRoot = join(
+	homedir(),
+	".cline",
+	"kanban-dev-full-isolated-inter-work-unit-relation-ledger",
+);
 
 console.log(`\n  Runtime port: ${runtimePort}`);
 console.log(`  Web UI:       http://127.0.0.1:${webUiPort}\n`);
@@ -83,7 +94,15 @@ const env = {
 	...process.env,
 	KANBAN_RUNTIME_PORT: String(runtimePort),
 	KANBAN_WEB_UI_PORT: String(webUiPort),
+	...(shouldShareRealInterWorkUnitRelationLedger
+		? {}
+		: { KANBAN_INTER_WORK_UNIT_RELATION_LEDGER_STORAGE_ROOT: isolatedDevFullInterWorkUnitRelationLedgerStorageRoot }),
 };
+console.log(
+	shouldShareRealInterWorkUnitRelationLedger
+		? "  Relation ledger: SHARED with the real ledger (explicit flag)\n"
+		: `  Relation ledger: isolated at ${isolatedDevFullInterWorkUnitRelationLedgerStorageRoot}\n`,
+);
 
 const tsxBin = isWindows ? "node_modules/.bin/tsx.cmd" : "node_modules/.bin/tsx";
 const runtime = spawn(tsxBin, ["watch", "src/cli.ts", ...runtimeCliArgs], {

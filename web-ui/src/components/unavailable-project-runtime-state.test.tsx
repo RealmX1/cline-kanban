@@ -18,6 +18,7 @@ const UNAVAILABLE_PROJECT: RuntimeProjectSummary = {
 	},
 	availability: { status: "unavailable", reason: "git_work_tree_unavailable" },
 	inProgressTaskDetails: [],
+	crossProjectTaskSwitcherEntries: [],
 };
 
 describe("UnavailableProjectRuntimeState", () => {

@@ -7,6 +7,8 @@ import {
 	DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR,
 	getDiagnosticEventJournalActiveFilePath,
 	getDiagnosticEventJournalDirectoryPath,
+	listExistingDiagnosticEventJournalShardFilePathsOldestFirst,
+	resolveDiagnosticEventJournalRetainedRotatedFileCount,
 	serializeDiagnosticEventJournalLine,
 	waitForPendingDiagnosticEventJournalWrites,
 } from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
@@ -135,5 +137,52 @@ describe("rotating JSONL diagnostic event journal", () => {
 		const activeLines = readFileSync(activeFilePath, "utf8").trimEnd().split("\n");
 		expect(activeLines).toHaveLength(1);
 		expect((JSON.parse(activeLines[0]) as { errorCode: string }).errorCode).toBe("EBADF");
+	});
+
+	it("keeps the default four rotated generations for ordinary trip-wire channels", () => {
+		expect(resolveDiagnosticEventJournalRetainedRotatedFileCount("git-command-failure")).toBe(4);
+	});
+
+	it("retains roughly three weeks of generations for the task resource usage channels that analysis reads back", () => {
+		// 资源占用通道是给事后按 task / 时间窗回看的，默认 5 × 8 MiB 只够两三天。
+		expect(resolveDiagnosticEventJournalRetainedRotatedFileCount("task-attributed-process-lifetime-episode")).toBe(
+			12,
+		);
+		expect(
+			resolveDiagnosticEventJournalRetainedRotatedFileCount(
+				"task-attributed-process-tree-periodic-resource-snapshot",
+			),
+		).toBe(12);
+	});
+
+	it("rotates a long-retention channel past the default depth instead of dropping its fifth generation", async () => {
+		const journalDirectoryPath = getDiagnosticEventJournalDirectoryPath();
+		const channel = "task-attributed-process-lifetime-episode";
+		for (let rotationIndex = 1; rotationIndex <= 4; rotationIndex++) {
+			writeFileSync(
+				join(journalDirectoryPath, `${channel}.${rotationIndex}.jsonl`),
+				`generation-${rotationIndex}\n`,
+			);
+		}
+		writeFileSync(getDiagnosticEventJournalActiveFilePath(channel), `${"x".repeat(9 * 1024 * 1024)}\n`, "utf8");
+
+		appendDiagnosticEventToRotatingJsonlJournal(channel, { pid: 42 });
+		await waitForPendingDiagnosticEventJournalWrites();
+
+		expect(readFileSync(join(journalDirectoryPath, `${channel}.5.jsonl`), "utf8")).toBe("generation-4\n");
+	});
+
+	it("lists every shard of a channel oldest first so a reader sees the same window the rotation keeps", () => {
+		const journalDirectoryPath = getDiagnosticEventJournalDirectoryPath();
+		const channel = "task-attributed-process-lifetime-episode";
+		writeFileSync(join(journalDirectoryPath, `${channel}.2.jsonl`), "");
+		writeFileSync(join(journalDirectoryPath, `${channel}.1.jsonl`), "");
+		writeFileSync(getDiagnosticEventJournalActiveFilePath(channel), "");
+
+		expect(listExistingDiagnosticEventJournalShardFilePathsOldestFirst(channel)).toEqual([
+			join(journalDirectoryPath, `${channel}.2.jsonl`),
+			join(journalDirectoryPath, `${channel}.1.jsonl`),
+			getDiagnosticEventJournalActiveFilePath(channel),
+		]);
 	});
 });

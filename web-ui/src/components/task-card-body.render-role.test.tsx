@@ -15,6 +15,7 @@ const workspaceSnapshotMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: workspaceSnapshotMock,
+	useTaskWorkspaceInfoValue: () => null,
 }));
 
 function createCard(overrides: Partial<BoardCard> = {}): BoardCard {
@@ -100,6 +101,40 @@ describe("TaskCardBody 的渲染角色", () => {
 		const pinboardCopy = cardShell(renderCardBody({ renderRole: "pinned_card_copy_in_task_pinboard" }));
 		expect(pinboardCopy?.getAttribute("data-task-id")).toBeNull();
 		expect(pinboardCopy?.getAttribute("data-verification-anchor")).toBeNull();
+
+		// PDV 面板条目：DOM 身份留在条目 wrapper 上（verification-panel-task:<taskId>），卡体副本不输出。
+		const postDeployVerificationPanelEntryCopy = cardShell(
+			renderCardBody({ renderRole: "task_card_copy_in_post_deploy_verification_panel_entry" }),
+		);
+		expect(postDeployVerificationPanelEntryCopy?.getAttribute("data-task-id")).toBeNull();
+		expect(postDeployVerificationPanelEntryCopy?.getAttribute("data-verification-anchor")).toBeNull();
+	});
+
+	it("PDV 面板条目副本与置顶板分身同一侧：可单击进详情（pointer）、双击改标题，不显示置顶板专属的 stage 标签", () => {
+		const onSaveTitle = vi.fn();
+		act(() =>
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="review"
+					renderRole="task_card_copy_in_post_deploy_verification_panel_entry"
+					stageDisplayNameForTaskPinboardCopy="Review"
+					onClick={vi.fn()}
+					onSaveTitle={onSaveTitle}
+				/>,
+			),
+		);
+		const postDeployVerificationPanelEntryCopy = cardShell(container);
+		expect(postDeployVerificationPanelEntryCopy?.dataset.taskCardRenderRole).toBe(
+			"task_card_copy_in_post_deploy_verification_panel_entry",
+		);
+		expect(postDeployVerificationPanelEntryCopy?.style.cursor).toBe("pointer");
+		expect(postDeployVerificationPanelEntryCopy?.onclick).not.toBeNull();
+		expect(container.querySelector("[data-task-pinboard-stage-label]")).toBeNull();
+		act(() => {
+			postDeployVerificationPanelEntryCopy?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+		});
+		expect(container.querySelector("textarea")).not.toBeNull();
 	});
 
 	it("每份卡体都标出自己的渲染角色，供 CSS 与断言区分同名的多份 DOM", () => {

@@ -16,6 +16,7 @@ const PROJECT: RuntimeProjectSummary = {
 	taskCounts: { backlog: 1, in_progress: 1, review: 0, validation: 0, trash: 0 },
 	availability: { status: "available" },
 	inProgressTaskDetails: [],
+	crossProjectTaskSwitcherEntries: [],
 };
 
 const PREVIEW: RuntimeProjectPermanentDeletionPreview = {

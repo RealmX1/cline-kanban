@@ -422,6 +422,43 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Investigate startup"]);
 	});
 
+	it("injects the card's work-unit identity into the bash tool environment when the service knows its workspace", async () => {
+		const runtime = createFakeClineSessionRuntime();
+		const runtimeSetup = createFakeRuntimeSetup();
+		const service = createInMemoryClineTaskSessionService({
+			createSessionRuntime: (options) => runtime.createRuntime(options),
+			createRuntimeSetup: vi.fn(async (_workspacePath: string) => runtimeSetup.setup),
+			kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+				workspaceId: "workspace-1",
+				workspaceRepositoryPath: "/tmp/repo",
+			},
+		});
+		services.push(service);
+
+		await service.startTaskSession({ taskId: "c0001", cwd: "/tmp/worktree", prompt: "Investigate startup" });
+		await waitForTaskSessionId(runtime, "c0001");
+
+		expect(
+			runtime.startTaskSessionMock.mock.calls[0]?.[0].bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
+		).toMatchObject({
+			KANBAN_TASK_ID: "c0001",
+			KANBAN_TASK_CONVERSATION_SESSION_ID: "c0001",
+			KANBAN_HOOK_WORKSPACE_ID: "workspace-1",
+			KANBAN_PROJECT_PATH: "/tmp/repo",
+		});
+	});
+
+	it("leaves the bash tool environment untouched when the service has no workspace identity", async () => {
+		const { service, runtime } = createTrackedService();
+
+		await service.startTaskSession({ taskId: "c0002", cwd: "/tmp/worktree", prompt: "Investigate startup" });
+		await waitForTaskSessionId(runtime, "c0002");
+
+		expect(
+			runtime.startTaskSessionMock.mock.calls[0]?.[0].bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
+		).toBeUndefined();
+	});
+
 	it("getTaskSessionMessagesProjectionSignature：未知任务 → null；live 会话 → 三元与末条一致", async () => {
 		const { service } = createTrackedService();
 		expect(service.getTaskSessionMessagesProjectionSignature("task-unknown")).toBeNull();
@@ -1880,15 +1917,25 @@ describe("InMemoryClineTaskSessionService", () => {
 			expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
 		});
 
-		const response = await Promise.race([
-			service.sendTaskSessionInput("task-1", "Continue"),
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
-		]);
-
-		expect(response).not.toBeNull();
+		// 顺序断言而非 50ms 计时：SDK 的整轮 send（sendDeferred）在整个等待期间都不 resolve，
+		// 所以只要 sendTaskSessionInput 能 resolve，就证明它没有等整轮完成——与宿主负载无关。
+		let sendTaskSessionInputResolved = false;
+		const sendTaskSessionInputResponse = service.sendTaskSessionInput("task-1", "Continue").then((response) => {
+			sendTaskSessionInputResolved = true;
+			return response;
+		});
 		await vi.waitFor(() => {
 			expect(runtime.sendTaskSessionInputMock).toHaveBeenCalledTimes(1);
 		});
+		// 若 send 被整轮完成阻塞，这里会在 10s 后以断言失败收场，而不是拖到用例超时。
+		await vi.waitFor(
+			() => {
+				expect(sendTaskSessionInputResolved).toBe(true);
+			},
+			{ timeout: 10_000 },
+		);
+
+		expect(await sendTaskSessionInputResponse).not.toBeNull();
 		sendDeferred.resolve({ text: "done" });
 	});
 

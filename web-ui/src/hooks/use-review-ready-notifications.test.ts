@@ -123,6 +123,7 @@ describe("OS 通知正文保留来源身份", () => {
 				useReviewReadyNotifications({
 					activeWorkspaceId: "workspace-a",
 					workspacePath: "/projects/my-repo",
+					projects: [],
 					board: {
 						columns: [
 							{
@@ -141,7 +142,6 @@ describe("OS 通知正文保留来源身份", () => {
 								],
 							},
 						],
-						dependencies: [],
 					},
 					isDocumentVisible: false,
 					latestTaskReadyForReview: {

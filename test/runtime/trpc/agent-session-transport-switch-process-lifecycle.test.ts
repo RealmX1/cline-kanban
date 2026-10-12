@@ -53,6 +53,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
@@ -151,14 +152,15 @@ describe("createRuntimeApi switchAgentSessionTransport process lifecycle", () =>
 					],
 				},
 			],
-			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	// 承重回归：TUI→ACP 必须等旧 PTY 真的退出之后才建立 ACP 会话。
@@ -208,6 +210,7 @@ describe("createRuntimeApi switchAgentSessionTransport process lifecycle", () =>
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.error).toBeUndefined();
@@ -253,6 +256,7 @@ describe("createRuntimeApi switchAgentSessionTransport process lifecycle", () =>
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.error).toBeUndefined();

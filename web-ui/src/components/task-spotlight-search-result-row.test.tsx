@@ -2,7 +2,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { TaskSpotlightSearchResultRow } from "@/components/task-spotlight-search-result-row";
+import {
+	resolveTaskSpotlightSearchResultRowTimePillKind,
+	TaskSpotlightSearchResultRow,
+} from "@/components/task-spotlight-search-result-row";
 import { DEFAULT_TASK_SPOTLIGHT_SEARCH_RESULT_ROW_FIELD_VISIBILITY } from "@/components/task-spotlight-search-result-row-field-visibility";
 import type { RuntimeAgentId } from "@/runtime/types";
 import { buildTaskBoardSearchDocument, type TaskBoardSearchResult } from "@/search/task-board-search";
@@ -31,6 +34,7 @@ function createResult(overrides: {
 			taskLastModifiedAtEpochMs: overrides.taskLastModifiedAtEpochMs ?? 0,
 			taskAgentOverrideAgentId: overrides.taskAgentOverrideAgentId ?? null,
 			mostRecentlyLaunchedAgentSessionAgentId: overrides.mostRecentlyLaunchedAgentSessionAgentId ?? null,
+			crossProjectAgentConversationProgressAtEpochMs: null,
 		}),
 		score: 0,
 		matchSources: overrides.matchSources ?? ["title"],
@@ -187,5 +191,54 @@ describe("TaskSpotlightSearchResultRow", () => {
 		renderRow(createResult({ matchSources: ["taskId"], title: "", prompt: "" }));
 
 		expect(container.textContent).toContain("Untitled task");
+	});
+});
+
+describe("resolveTaskSpotlightSearchResultRowTimePillKind", () => {
+	it("shows on each direct relevance row the very time that row was ordered by", () => {
+		// direct 的 relevance 档分两段：有推进时刻的按它排、没有的按上次修改排——药丸逐行跟着走。
+		expect(
+			resolveTaskSpotlightSearchResultRowTimePillKind({
+				effectiveSortOrder: "relevance",
+				mode: "direct",
+				agentConversationProgressAtEpochMs: 1_000,
+			}),
+		).toBe("agent_conversation_progress");
+		expect(
+			resolveTaskSpotlightSearchResultRowTimePillKind({
+				effectiveSortOrder: "relevance",
+				mode: "direct",
+				agentConversationProgressAtEpochMs: null,
+			}),
+		).toBe("last_modified");
+	});
+
+	it("keeps last modified for relevance in the score-ranked modes", () => {
+		for (const mode of ["fuzzy", "semantic", "hybrid"] as const) {
+			expect(
+				resolveTaskSpotlightSearchResultRowTimePillKind({
+					effectiveSortOrder: "relevance",
+					mode,
+					agentConversationProgressAtEpochMs: 1_000,
+				}),
+			).toBe("last_modified");
+		}
+	});
+
+	it("follows an explicitly chosen time order regardless of mode", () => {
+		expect(
+			resolveTaskSpotlightSearchResultRowTimePillKind({
+				effectiveSortOrder: "task_created_at_desc",
+				mode: "direct",
+				agentConversationProgressAtEpochMs: 1_000,
+			}),
+		).toBe("created");
+		expect(
+			resolveTaskSpotlightSearchResultRowTimePillKind({
+				effectiveSortOrder: "agent_conversation_progress_desc",
+				mode: "fuzzy",
+				agentConversationProgressAtEpochMs: null,
+			}),
+		).toBe("agent_conversation_progress");
 	});
 });

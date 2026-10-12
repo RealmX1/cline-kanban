@@ -12,21 +12,18 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { BoardColumn } from "@/components/board-column";
 import { BoardColumnCollapsedVerticalStrip } from "@/components/board-column-collapsed-vertical-strip";
-import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
-import { useDependencyLinking } from "@/components/dependencies/use-dependency-linking";
 import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
 import { useKanbanBoardColumnCollapseAndWidthPreferences } from "@/hooks/use-kanban-board-column-collapse-and-width-preferences";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import { ResizeHandle } from "@/resize/resize-handle";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
-import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import {
 	KANBAN_BOARD_COLUMN_MAX_CUSTOM_WIDTH_PX,
 	KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX,
 } from "@/state/kanban-board-column-collapse-and-width-preferences";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
-import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
+import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
 const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
 
@@ -69,12 +66,10 @@ export const KanbanBoard = memo(function KanbanBoard({
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
 	moveToReviewLoadingById,
-	dependencies,
-	onCreateDependency,
-	onDeleteDependency,
 	onDragEnd,
 	onRequestProgrammaticCardMoveReady,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	defaultClineModelId,
 	defaultAgentId,
 }: {
@@ -99,12 +94,10 @@ export const KanbanBoard = memo(function KanbanBoard({
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
 	moveToReviewLoadingById?: Record<string, boolean>;
-	dependencies: BoardDependency[];
-	onCreateDependency?: (fromTaskId: string, toTaskId: string) => void;
-	onDeleteDependency?: (dependencyId: string) => void;
 	onDragEnd: (result: DropResult) => void;
 	onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void;
 	workspacePath?: string | null;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCard) => Promise<string | null>;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
@@ -117,10 +110,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const [programmaticCardMoveInFlight, setProgrammaticCardMoveInFlight] =
 		useState<ProgrammaticCardMoveInFlight | null>(null);
-	const canLinkTasks = useCallback(
-		(fromTaskId: string, toTaskId: string) => canCreateTaskDependency(data, fromTaskId, toTaskId),
-		[data],
-	);
 	const activateCard = useCallback((card: BoardCard) => onCardSelect(card.id), [onCardSelect]);
 	const activateCardUnlessDragged = useCallback(
 		(card: BoardCard) => {
@@ -128,10 +117,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 		},
 		[onCardSelect],
 	);
-	const dependencyLinking = useDependencyLinking({
-		canLinkTasks,
-		onCreateDependency,
-	});
 	// 每次 board 变化都要重扫全盘卡片，memo 掉避免拖拽期间逐帧重排（拖拽会高频重渲 KanbanBoard）。
 	const pinnedTasks = useMemo(() => collectTasksPinnedToTaskPinboard(data), [data]);
 	const columnCollapseAndWidthPreferences = useKanbanBoardColumnCollapseAndWidthPreferences({
@@ -417,23 +402,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 		[clearProgrammaticCardMoveInFlight, onDragEnd],
 	);
 
-	// Dependency links should reroute as soon as motion starts, not only after drop.
-	// Treat the active card as already belonging to its destination/effective column
-	// so the edge transition can animate alongside the move.
-	const activeTaskEffectiveColumnId =
-		programmaticCardMoveInFlight?.toColumnId ??
-		(activeDragTaskId !== null && activeDragSourceColumnId === "backlog" ? "in_progress" : null);
-
-	// Boards without dependency edges are the common case, and a mounted overlay
-	// still installs a subtree MutationObserver plus a ResizeObserver over the
-	// whole board. Motion keeps it mounted so a link removed mid-drag can still
-	// play its transient fade-out.
-	const shouldMountDependencyOverlay =
-		dependencies.length > 0 ||
-		dependencyLinking.draft !== null ||
-		activeDragTaskId !== null ||
-		programmaticCardMoveInFlight !== null;
-
 	return (
 		<DragDropContext
 			onBeforeCapture={handleBeforeCapture}
@@ -442,7 +410,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 			sensors={PROGRAMMATIC_SENSORS}
 		>
 			{/* 置顶板横条在 DragDropContext 之内、`.kb-board` 之外：见 TaskPinboardStripOnKanbanBoard 的注释，
-			    进了 `.kb-board` 会被移动端的「直接子 section 即一列」规则拉宽，也会落进依赖连线的查询范围。 */}
+			    进了 `.kb-board` 会被移动端的「直接子 section 即一列」规则拉宽，也会落进 getPrimaryBoardTaskElement 的查询范围。 */}
 			<div className="flex min-h-0 flex-1 flex-col">
 				<TaskPinboardStripOnKanbanBoard
 					pinnedTasks={pinnedTasks}
@@ -459,6 +427,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 						onEditTask,
 						onRequestPinToTaskPinboard,
 						onUnpinFromTaskPinboard,
+						resolveTaskWorkspaceAbsoluteDirectoryPath,
 						moveToTrashLoadingById,
 						moveToValidationLoadingById,
 						moveToReviewLoadingById,
@@ -472,7 +441,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 				/>
 				<section
 					ref={boardRef}
-					className="kb-board kb-dependency-surface"
+					className="kb-board"
 					data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
 				>
 					{data.columns.map((column) =>
@@ -523,12 +492,8 @@ export const KanbanBoard = memo(function KanbanBoard({
 									activeDragTaskId={activeDragTaskId}
 									activeDragSourceColumnId={activeDragSourceColumnId}
 									programmaticCardMoveInFlight={programmaticCardMoveInFlight}
-									onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
-									onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
-									dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
-									dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
-									isDependencyLinking={dependencyLinking.draft !== null}
 									workspacePath={workspacePath}
+									resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 									defaultClineModelId={defaultClineModelId}
 									defaultAgentId={defaultAgentId}
 									onCardClick={activateCardUnlessDragged}
@@ -563,17 +528,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 								/>
 							</Fragment>
 						),
-					)}
-					{shouldMountDependencyOverlay && (
-						<DependencyOverlay
-							containerRef={boardRef}
-							dependencies={dependencies}
-							draft={dependencyLinking.draft}
-							activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
-							activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
-							isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
-							onDeleteDependency={onDeleteDependency}
-						/>
 					)}
 				</section>
 			</div>

@@ -78,6 +78,10 @@ function createClineRuntimeConfigResponse(): RuntimeConfigResponse {
 		openPrPromptTemplate: "",
 		commitPromptTemplateDefault: "",
 		openPrPromptTemplateDefault: "",
+		runtimeHostRemoteEditorAccessIdentity: {
+			operatingSystemAccountUsername: "kanban-test-user",
+			operatingSystemHostname: "kanban-test-host",
+		},
 	};
 }
 
@@ -889,6 +893,45 @@ describe("ClineAgentChatPanel", () => {
 			button.textContent?.includes("Plan"),
 		);
 		expect(restoredPlanButton?.getAttribute("aria-selected")).toBe("true");
+	});
+
+	it.each(["", "已有草稿  \n"])("ACP 草稿逐字保留填入提示词的边界换行：%j", async (initialDraft) => {
+		const panelRef = createRef<ClineAgentChatPanelHandle>();
+		const onSendMessage = vi.fn();
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					ref={panelRef}
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("idle", null, { agentId: "omp", sessionTransport: "acp_stdio_subprocess" })}
+					onLoadMessages={async () => []}
+					onSendMessage={onSendMessage}
+				/>,
+			);
+		});
+		const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+		if (!textarea) {
+			throw new Error("Expected composer textarea");
+		}
+		await act(async () => {
+			const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+			if (!valueSetter) {
+				throw new Error("Expected textarea value setter");
+			}
+			valueSetter.call(textarea, initialDraft);
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () => {
+			panelRef.current?.appendToDraft("\n提示词\n", { preserveInsertedTextBoundaryWhitespace: true });
+		});
+		expect(textarea.value).toBe(`${initialDraft}\n提示词\n`);
+		await act(async () => {
+			panelRef.current?.appendToDraft("\n提示词\n", { preserveInsertedTextBoundaryWhitespace: true });
+		});
+		expect(textarea.value).toBe(`${initialDraft}\n提示词\n\n提示词\n`);
+		expect(onSendMessage).not.toHaveBeenCalled();
 	});
 
 	it("appends review comments into the composer draft through the panel handle", async () => {

@@ -1,6 +1,10 @@
 export const isMacPlatform =
 	typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
 
+// 只认 Windows 自己的标记（platform 是 "Win32"，UA 含 "Windows"）；别用 /win/i，它会匹配 "Darwin"。
+export const isWindowsPlatform =
+	typeof navigator !== "undefined" && /^Win|Windows/.test(navigator.platform || navigator.userAgent);
+
 // Safari（macOS/iOS/iPadOS 的 WebKit）在 Cmd +/- 整页缩放时不会改变 window.devicePixelRatio，
 // 导致 xterm 的 WebGL canvas 不会按新 DPR 重新光栅化、文字发虚。我们让 Safari 走 xterm 的
 // DOM 渲染器（任意缩放都清晰）。负向先行断言排除 Chrome/Edge/Brave/Arc/Opera 及 iOS 上的

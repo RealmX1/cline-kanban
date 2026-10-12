@@ -151,6 +151,28 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 			text: attempts > 0 ? `重连中…（已续跑 ${attempts} 次）` : "重连中…",
 		};
 	}
+	// 「对话没有落进 agent 自己的会话存储」（目前只有 Cursor 产出）：卡片上必须当场看得见——旧版要等续跑连撞
+	// 5 次熔断才露馅，而熔断文案又把人引向注定无效的刷新。排在 hook 活动文案之前：卡在信任对话框时，最近一条
+	// hook 文案说的是别的事。
+	const nativeConversationPersistenceObservation = summary.agentNativeConversationPersistenceObservation;
+	if (
+		nativeConversationPersistenceObservation?.persistenceStatus ===
+		"conversation_never_established_in_agent_native_store"
+	) {
+		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "对话从未建立，无法续跑" };
+	}
+	if (
+		nativeConversationPersistenceObservation?.persistenceStatus === "first_prompt_not_persisted_within_startup_window"
+	) {
+		return {
+			dotColor: SESSION_ACTIVITY_COLOR.warning,
+			text:
+				nativeConversationPersistenceObservation.suspectedBlockingCause ===
+				"agent_workspace_trust_prompt_awaiting_answer"
+					? "对话未建立：终端在等你信任工作区"
+					: "对话未建立：首个 prompt 还没提交",
+		};
+	}
 	const hookActivity = summary.latestHookActivity;
 	const activityText = hookActivity?.activityText?.trim();
 	const toolName = hookActivity?.toolName?.trim() ?? null;

@@ -6,6 +6,7 @@ import {
 	FileText,
 	GitBranch,
 	Globe,
+	ListPlus,
 	Plus,
 	Trash2,
 } from "lucide-react";
@@ -17,6 +18,34 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { type PromptScope, type StoredPrompt, usePromptLibrary } from "@/hooks/use-prompt-library";
 
 const COLLAPSED_PROMPT_TEXTAREA_VISIBLE_LINE_COUNT = 4;
+
+// 「排队」与「填进输入框」是两种不同意图，并存而不是替换：前者是「agent 打完这一轮再发」，后者是「现在就
+// 由我来发」。tooltip 要把「会自动发出、随时可取消」说清楚，否则用户不敢点。
+const QUEUE_PROMPT_FOR_AFTER_CURRENT_TURN_TOOLTIP =
+	"Queue for after the current turn — sent automatically when the agent finishes; cancel anytime in the Queue tab";
+
+function QueuePromptForAfterCurrentTurnButton({
+	prompt,
+	onQueue,
+	ariaLabel,
+}: {
+	prompt: StoredPrompt;
+	onQueue: (prompt: StoredPrompt) => void;
+	ariaLabel: string;
+}): React.ReactElement {
+	return (
+		<Tooltip content={QUEUE_PROMPT_FOR_AFTER_CURRENT_TURN_TOOLTIP}>
+			<Button
+				variant="ghost"
+				size="xs"
+				icon={<ListPlus size={14} />}
+				aria-label={ariaLabel}
+				disabled={prompt.text.trim().length === 0}
+				onClick={() => onQueue(prompt)}
+			/>
+		</Tooltip>
+	);
+}
 
 const PROMPT_SCOPE_META: Record<
 	PromptScope,
@@ -202,6 +231,7 @@ function PromptRow({
 	onChangeText,
 	onToggleScope,
 	onFill,
+	onQueue,
 	onRemove,
 	shouldAutoFocus,
 	onAutoFocusHandled,
@@ -210,6 +240,7 @@ function PromptRow({
 	onChangeText: (id: string, text: string) => void;
 	onToggleScope: (id: string, scope: PromptScope) => void;
 	onFill: (text: string) => void;
+	onQueue?: (prompt: StoredPrompt) => void;
 	onRemove: (id: string) => void;
 	shouldAutoFocus: boolean;
 	onAutoFocusHandled: () => void;
@@ -300,6 +331,13 @@ function PromptRow({
 						onClick={() => onFill(prompt.text)}
 					/>
 				</Tooltip>
+				{onQueue ? (
+					<QueuePromptForAfterCurrentTurnButton
+						prompt={prompt}
+						onQueue={onQueue}
+						ariaLabel="Queue prompt for after the current turn"
+					/>
+				) : null}
 				<Tooltip content="Delete">
 					<Button
 						variant="ghost"
@@ -331,6 +369,7 @@ function OrphanedPromptsSection({
 	onClaim,
 	onRemove,
 	onFill,
+	onQueue,
 }: {
 	orphanedPrompts: StoredPrompt[];
 	isExpanded: boolean;
@@ -338,6 +377,7 @@ function OrphanedPromptsSection({
 	onClaim: (id: string) => void;
 	onRemove: (id: string) => void;
 	onFill: (text: string) => void;
+	onQueue?: (prompt: StoredPrompt) => void;
 }): React.ReactElement {
 	return (
 		<div className="mt-2 rounded-md border border-border bg-surface-2">
@@ -379,6 +419,13 @@ function OrphanedPromptsSection({
 										onClick={() => onFill(prompt.text)}
 									/>
 								</Tooltip>
+								{onQueue ? (
+									<QueuePromptForAfterCurrentTurnButton
+										prompt={prompt}
+										onQueue={onQueue}
+										ariaLabel="Queue orphaned prompt for after the current turn"
+									/>
+								) : null}
 								<Tooltip content="Delete">
 									<Button
 										variant="ghost"
@@ -402,12 +449,15 @@ export function PromptLibraryPanel({
 	taskId,
 	projectId,
 	onFillInput,
+	onQueuePromptForAfterCurrentTurn,
 	headerContent,
 	taskIdsOnBoard = null,
 }: {
 	taskId: string;
 	projectId: string;
 	onFillInput: (text: string) => void;
+	/** 把这条 prompt 排进该任务的队列，等 agent 这一轮结束后自动发出。缺省时不显示排队按钮。 */
+	onQueuePromptForAfterCurrentTurn?: (prompt: StoredPrompt) => void;
 	headerContent?: ReactNode;
 	/** 看板上此刻存在的任务 id。null = 还不知道（首屏未加载），此时一条都不标成孤儿。 */
 	taskIdsOnBoard?: ReadonlySet<string> | null;
@@ -418,6 +468,9 @@ export function PromptLibraryPanel({
 	const [pendingFocusPromptId, setPendingFocusPromptId] = useState<string | null>(null);
 	const handleAddPrompt = (): void => {
 		setPendingFocusPromptId(addPrompt());
+	};
+	const handleFillPromptWithSurroundingNewlines = (text: string): void => {
+		onFillInput(`\n${text}\n`);
 	};
 
 	return (
@@ -442,7 +495,8 @@ export function PromptLibraryPanel({
 							prompt={prompt}
 							onChangeText={updatePromptText}
 							onToggleScope={setPromptScope}
-							onFill={onFillInput}
+							onFill={handleFillPromptWithSurroundingNewlines}
+							onQueue={onQueuePromptForAfterCurrentTurn}
 							onRemove={removePrompt}
 							shouldAutoFocus={pendingFocusPromptId === prompt.id}
 							onAutoFocusHandled={() => setPendingFocusPromptId(null)}
@@ -456,7 +510,8 @@ export function PromptLibraryPanel({
 						onToggleExpanded={() => setIsOrphanedSectionExpanded((current) => !current)}
 						onClaim={claimOrphanedPrompt}
 						onRemove={removePrompt}
-						onFill={onFillInput}
+						onFill={handleFillPromptWithSurroundingNewlines}
+						onQueue={onQueuePromptForAfterCurrentTurn}
 					/>
 				) : null}
 			</div>

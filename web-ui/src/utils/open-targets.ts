@@ -318,3 +318,84 @@ export function buildOpenCommand(targetId: OpenTargetId, path: string, platform:
 	}
 	return buildOpenAppCommand(path, "Zed");
 }
+
+// ── 从其他设备访问时：Remote-SSH 深链 ─────────────────────────────────────────
+// 浏览器不在 runtime 主机上时，在 runtime 主机上启动编辑器毫无意义（窗口开在别人看不到的屏幕上）。
+// 改为在浏览器所在的设备上打开编辑器的 `<scheme>://vscode-remote/ssh-remote+<destination><path>` 深链，
+// 由编辑器经 SSH 连回 runtime 主机。只有 VS Code 系编辑器认这种 URL。
+
+const REMOTE_SSH_EDITOR_URL_SCHEME_BY_OPEN_TARGET_ID: Partial<Record<OpenTargetId, string>> = {
+	vscode: "vscode",
+	"vscode-insiders": "vscode-insiders",
+	cursor: "cursor",
+	windsurf: "windsurf",
+};
+
+const REMOTE_SSH_OPEN_TARGET_IDS: readonly OpenTargetId[] = ["vscode", "cursor", "windsurf", "vscode-insiders"];
+
+function toRemoteSshOpenTargetOption(targetId: OpenTargetId): OpenTargetOption {
+	const option = openTargetById.get(targetId) ?? DEFAULT_OPEN_TARGET;
+	return { ...option, label: `${option.label} (Remote-SSH)` };
+}
+
+export function getRemoteSshOpenTargetOptions(): readonly OpenTargetOption[] {
+	return REMOTE_SSH_OPEN_TARGET_IDS.map(toRemoteSshOpenTargetOption);
+}
+
+// 偏好里存的可能是 Finder、终端之类不支持 Remote-SSH 的目标（偏好跨 origin 共享，本机访问时选的）。
+// 这时按 VS Code 处理，但只在读取时回落，不写回偏好，免得改掉本机访问时的选择。
+export function getRemoteSshOpenTargetOption(targetId: OpenTargetId): OpenTargetOption {
+	return toRemoteSshOpenTargetOption(
+		REMOTE_SSH_OPEN_TARGET_IDS.includes(targetId) ? targetId : DEFAULT_OPEN_TARGET.id,
+	);
+}
+
+// Remote-SSH 深链要连的 SSH 目标，结构化保存，由 `buildRemoteSshAuthorityForEditorDeepLink` 统一编码。
+export interface RemoteSshDestinationForEditorDeepLink {
+	// 登录用的账号；未知时为 null，交给当前设备的 SSH 配置 / 默认账号决定。
+	sshLoginUsername: string | null;
+	// DNS 名、IPv4，或**不带方括号**的 IPv6 字面量（如 `fd7a:115c:a1e0::1`）——`ssh` 命令行与扩展都要这个原值。
+	sshHostnameWithoutIpv6Brackets: string;
+}
+
+function encodeTextAsLowercaseHexOfUtf8Bytes(text: string): string {
+	return Array.from(new TextEncoder().encode(text), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * 深链里 `ssh-remote+` 之后的 authority。
+ *
+ * Remote-SSH 扩展先把 authority 当十六进制编码的 JSON 解析，失败再退回可读形式，按
+ * `^(?:([^@]+)@)?([^:]+)(?::(\d+))?$` 拆用户 / 主机 / 端口——主机里的冒号会被当成端口分隔符，IPv6 字面量
+ * 必然报 `Invalid authority format`。所以：
+ * - DNS 名 / IPv4：保持可读的 `<user>@<host>` / `<host>`。
+ * - IPv6 字面量（主机含冒号）：`JSON.stringify({ hostName, user? })` 的 UTF-8 小写十六进制。字段名与编码
+ *   取自扩展自己的实现：Cursor Remote-SSH 1.1.16 的 `parseAuthorityNew` / `toEncodedString`，以及 VS Code
+ *   Dev Containers 扩展为 Microsoft Remote-SSH 拼 `ssh-remote+` authority 的同一套 `{hostName, user, port}`。
+ */
+export function buildRemoteSshAuthorityForEditorDeepLink(destination: RemoteSshDestinationForEditorDeepLink): string {
+	const hostname = destination.sshHostnameWithoutIpv6Brackets;
+	const username = destination.sshLoginUsername;
+	if (!hostname.includes(":")) {
+		return username ? `${username}@${hostname}` : hostname;
+	}
+	const sshAuthorityJson = JSON.stringify(username ? { hostName: hostname, user: username } : { hostName: hostname });
+	return encodeTextAsLowercaseHexOfUtf8Bytes(sshAuthorityJson);
+}
+
+export function buildRemoteSshEditorDeepLinkUrl(input: {
+	openTargetId: OpenTargetId;
+	remoteSshDestination: RemoteSshDestinationForEditorDeepLink;
+	absolutePath: string;
+	// 给了行号就按文件打开（VS Code 以路径末尾的 `:<line>` 区分文件与文件夹），不给就按文件夹打开。
+	lineNumber?: number;
+}): string {
+	const scheme =
+		REMOTE_SSH_EDITOR_URL_SCHEME_BY_OPEN_TARGET_ID[input.openTargetId] ??
+		REMOTE_SSH_EDITOR_URL_SCHEME_BY_OPEN_TARGET_ID.vscode;
+	const remoteSshAuthority = buildRemoteSshAuthorityForEditorDeepLink(input.remoteSshDestination);
+	const normalizedPath = input.absolutePath.startsWith("/") ? input.absolutePath : `/${input.absolutePath}`;
+	const encodedPath = normalizedPath.split("/").map(encodeURIComponent).join("/");
+	const lineSuffix = input.lineNumber === undefined ? "" : `:${input.lineNumber}`;
+	return `${scheme}://vscode-remote/ssh-remote+${remoteSshAuthority}${encodedPath}${lineSuffix}`;
+}

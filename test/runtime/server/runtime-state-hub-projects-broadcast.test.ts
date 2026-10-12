@@ -25,6 +25,9 @@ import { createTempDir } from "../../utilities/temp-dir";
 const WORKSPACE_ID = "workspace-1";
 // flush 批次窗口 150ms + 处理裕量；负面断言（不应再收到消息）必须等过这个窗口。
 const FLUSH_OVERSHOOT_MS = 400;
+// 「终会到达」的单档等待（WS 连接、正向广播消息）：原先 2s 在高负载（两个 worker 共享宿主）下不够；
+// 断言判的是「最终收到了什么」，放宽不损失判别力。FLUSH_OVERSHOOT_MS 是反向观察窗口，不在此列。
+const RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS = 10_000;
 
 function makeProject(id: string, inProgressCount = 0): RuntimeProjectSummary {
 	const taskCounts = { backlog: 0, in_progress: inProgressCount, review: 0, validation: 0, trash: 0 };
@@ -37,6 +40,7 @@ function makeProject(id: string, inProgressCount = 0): RuntimeProjectSummary {
 		rawColumnTaskCounts: taskCounts,
 		// 静态 payload（无活体 lastOutputAt）才能保证两次构建字节级相同、去重命中；活体输出期间广播照常。
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 		gitRemoteOriginUrl: null,
 	};
 }
@@ -62,22 +66,34 @@ function makeSummary(taskId: string): RuntimeTaskSessionSummary {
 interface QueuedRuntimeSocket {
 	socket: WebSocket;
 	queue: RuntimeStateStreamMessage[];
+	// queue 会被 waitForRuntimeMessage 按谓词摘走，看不出先后；顺序断言读这份只追加的记录。
+	receivedMessageTypesInArrivalOrder: RuntimeStateStreamMessage["type"][];
 	events: EventEmitter;
 }
 
 async function openQueuedRuntimeSocket(url: string): Promise<QueuedRuntimeSocket> {
 	const socket = new WebSocket(url);
-	const queued: QueuedRuntimeSocket = { socket, queue: [], events: new EventEmitter() };
+	const queued: QueuedRuntimeSocket = {
+		socket,
+		queue: [],
+		receivedMessageTypesInArrivalOrder: [],
+		events: new EventEmitter(),
+	};
 	socket.on("message", (rawData) => {
 		try {
-			queued.queue.push(JSON.parse(String(rawData)) as RuntimeStateStreamMessage);
+			const message = JSON.parse(String(rawData)) as RuntimeStateStreamMessage;
+			queued.queue.push(message);
+			queued.receivedMessageTypesInArrivalOrder.push(message.type);
 			queued.events.emit("message");
 		} catch {
 			// Ignore malformed messages in tests.
 		}
 	});
 	await new Promise<void>((resolve, reject) => {
-		const timeoutId = setTimeout(() => reject(new Error(`Timed out connecting websocket: ${url}`)), 2_000);
+		const timeoutId = setTimeout(
+			() => reject(new Error(`Timed out connecting websocket: ${url}`)),
+			RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+		);
 		socket.once("open", () => {
 			clearTimeout(timeoutId);
 			resolve();
@@ -93,7 +109,7 @@ async function openQueuedRuntimeSocket(url: string): Promise<QueuedRuntimeSocket
 async function waitForRuntimeMessage<T extends RuntimeStateStreamMessage = RuntimeStateStreamMessage>(
 	queued: QueuedRuntimeSocket,
 	predicate: (message: RuntimeStateStreamMessage) => message is T,
-	timeoutMs = 2_000,
+	timeoutMs = RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 ): Promise<T> {
 	return await new Promise((resolve, reject) => {
 		const tryResolve = () => {
@@ -122,21 +138,40 @@ function isProjectsUpdatedMessage(
 	return message.type === "projects_updated";
 }
 
+interface HeldProjectsPayloadBuild {
+	// 被扣住的那次构建已进入（握手已把连接放进全局广播集合、正在等 snapshot 所需的 projects）。
+	heldProjectsPayloadBuildStarted: Promise<void>;
+	releaseHeldProjectsPayloadBuild: () => void;
+}
+
 interface HubTestHarness {
 	hub: RuntimeStateHub;
 	streamUrl: string;
 	projects: RuntimeProjectSummary[];
 	buildProjectsPayload: ReturnType<typeof vi.fn>;
+	// 扣住下一次 projects payload 构建直到放行；被扣住的那次返回进入时的 projects 副本（模拟慢 snapshot 带的旧数据）。
+	holdNextProjectsPayloadBuildUntilReleased: () => HeldProjectsPayloadBuild;
 	emitTerminalSummary: (summary: RuntimeTaskSessionSummary) => void;
 	cleanup: () => Promise<void>;
 }
 
 async function setupHubHarness(): Promise<HubTestHarness> {
 	const projects: RuntimeProjectSummary[] = [makeProject("project-a")];
-	const buildProjectsPayload = vi.fn(async (preferredCurrentProjectId: string | null) => ({
-		currentProjectId: preferredCurrentProjectId,
-		projects,
-	}));
+	let nextProjectsPayloadBuildHold: {
+		markHeldProjectsPayloadBuildStarted: () => void;
+		heldProjectsPayloadBuildReleased: Promise<void>;
+	} | null = null;
+	const buildProjectsPayload = vi.fn(async (preferredCurrentProjectId: string | null) => {
+		const projectsPayloadBuildHold = nextProjectsPayloadBuildHold;
+		if (!projectsPayloadBuildHold) {
+			return { currentProjectId: preferredCurrentProjectId, projects };
+		}
+		nextProjectsPayloadBuildHold = null;
+		const projectsAtHeldBuildStart = [...projects];
+		projectsPayloadBuildHold.markHeldProjectsPayloadBuildStarted();
+		await projectsPayloadBuildHold.heldProjectsPayloadBuildReleased;
+		return { currentProjectId: preferredCurrentProjectId, projects: projectsAtHeldBuildStart };
+	});
 	const workspaceRegistry: CreateRuntimeStateHubDependencies["workspaceRegistry"] = {
 		resolveWorkspaceForStream: async () => ({
 			status: "no_registered_project",
@@ -164,7 +199,10 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 
 	const httpServer: Server = createServer();
 	httpServer.on("upgrade", (request, socket, head) => {
-		hub.handleUpgrade(request, socket, head, { requestedWorkspaceId: null });
+		hub.handleUpgrade(request, socket, head, {
+			requestedWorkspaceId: null,
+			initialWorkspaceMetadataProbeScope: null,
+		});
 	});
 	httpServer.listen(0, "127.0.0.1");
 	await once(httpServer, "listening");
@@ -175,6 +213,18 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 		streamUrl: `ws://127.0.0.1:${port}/api/runtime/ws`,
 		projects,
 		buildProjectsPayload,
+		holdNextProjectsPayloadBuildUntilReleased: () => {
+			let markHeldProjectsPayloadBuildStarted = () => {};
+			const heldProjectsPayloadBuildStarted = new Promise<void>((resolve) => {
+				markHeldProjectsPayloadBuildStarted = resolve;
+			});
+			let releaseHeldProjectsPayloadBuild = () => {};
+			const heldProjectsPayloadBuildReleased = new Promise<void>((resolve) => {
+				releaseHeldProjectsPayloadBuild = resolve;
+			});
+			nextProjectsPayloadBuildHold = { markHeldProjectsPayloadBuildStarted, heldProjectsPayloadBuildReleased };
+			return { heldProjectsPayloadBuildStarted, releaseHeldProjectsPayloadBuild };
+		},
 		emitTerminalSummary: (summary) => {
 			if (!terminalSummaryListener) {
 				throw new Error("terminal summary listener was not registered");
@@ -190,7 +240,22 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 	};
 }
 
-describe("runtime-state-hub projects_updated 广播去重", () => {
+// beforeEach 依次等 WS 握手与首帧 snapshot 两段「终会到达」等待，外加 5s 建临时 HOME 与起 HTTP server 的余量；
+// 默认 hookTimeout 10s 只够一段，第二段到点前 hook 就会超时，内层带诊断的失败被截断。
+const BEFORE_EACH_HOOK_TIMEOUT_MS_COVERING_SOCKET_OPEN_AND_FIRST_SNAPSHOT_WAITS =
+	2 * RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + 5_000;
+
+// 用例超时挂在 describe 上，取组内串行等待最多的用例「新客户端注册后同内容广播仍发送」：4 段「终会到达」等待（既有
+// 客户端等广播 + 新客户端开 socket + 等首帧 snapshot + 等广播）× 单段上限 + 一个 FLUSH_OVERSHOOT_MS 反向观察窗 + 5s 关 socket 余量。
+const TEST_TIMEOUT_MS_COVERING_FOUR_SERIAL_WAITS =
+	4 * RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + FLUSH_OVERSHOOT_MS + 5_000;
+
+// 「握手期间广播」用例单独挂超时：5 段「终会到达」等待（新客户端开 socket + 扣住的构建进入 + 既有客户端等广播 +
+// 新客户端等首帧 + 等补发）+ 两个 FLUSH_OVERSHOOT_MS 观察窗 + 5s 关 socket 余量。
+const TEST_TIMEOUT_MS_COVERING_FIVE_SERIAL_WAITS_AND_TWO_OBSERVATION_WINDOWS =
+	5 * RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + 2 * FLUSH_OVERSHOOT_MS + 5_000;
+
+describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIMEOUT_MS_COVERING_FOUR_SERIAL_WAITS }, () => {
 	// 连接握手会聚合通知 feed（读 ~/.cline/kanban/workspaces/**）；把 HOME 指到临时目录保持 hermetic。
 	let tempHome: { path: string; cleanup: () => void };
 	let previousHome: string | undefined;
@@ -209,7 +274,7 @@ describe("runtime-state-hub projects_updated 广播去重", () => {
 		client = await openQueuedRuntimeSocket(harness.streamUrl);
 		// 首帧 snapshot 到达即说明客户端已登记进全局广播集合；后续只盯 projects_updated 增量。
 		await waitForRuntimeMessage(client, (message) => message.type === "snapshot");
-	});
+	}, BEFORE_EACH_HOOK_TIMEOUT_MS_COVERING_SOCKET_OPEN_AND_FIRST_SNAPSHOT_WAITS);
 
 	afterEach(async () => {
 		if (client.socket.readyState !== WebSocket.CLOSED && client.socket.readyState !== WebSocket.CLOSING) {
@@ -271,12 +336,12 @@ describe("runtime-state-hub projects_updated 广播去重", () => {
 		expect(second.projects[0]?.taskCounts.in_progress).toBe(3);
 	});
 
-	it("新客户端注册后同内容广播仍发送（注册时指纹复位）", async () => {
+	it("新客户端收到首帧后同内容广播仍发送（首帧发出后指纹复位）", async () => {
 		// 既有客户端先收过一轮广播，把去重指纹推进到当前内容。
 		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 		await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
 
-		// 新客户端注册会把指纹置回 null：此后第一次广播即使内容相同也必须发送，
+		// 新客户端首帧 snapshot 发出后指纹置回 null：此后第一次广播即使内容相同也必须发送，
 		// 自愈 snapshot 全量替换可能带回的旧数据。
 		const lateClient = await openQueuedRuntimeSocket(harness.streamUrl);
 		try {
@@ -297,4 +362,90 @@ describe("runtime-state-hub projects_updated 广播去重", () => {
 			}
 		}
 	});
+
+	// 广播是 async（先 await 构建再比对 / 发送 / 打标），flush、tRPC mutation、首帧后补发会并发触发。先开始、后完成的
+	// 旧代际广播若照常发送，会把旧 projects 推给全部在场客户端并把去重指纹倒退成旧内容，安静系统里不会再有广播纠正。
+	it("先开始、后完成的旧代际广播被丢弃：不发旧内容、不倒退去重指纹", async () => {
+		const heldStaleGenerationProjectsPayloadBuild = harness.holdNextProjectsPayloadBuildUntilReleased();
+		const staleGenerationBroadcastCompletion = harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+		try {
+			await heldStaleGenerationProjectsPayloadBuild.heldProjectsPayloadBuildStarted;
+
+			harness.projects.push(makeProject("project-b", 2));
+			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+			const newerGenerationBroadcast = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
+			expect(newerGenerationBroadcast.projects).toHaveLength(2);
+
+			heldStaleGenerationProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
+			await staleGenerationBroadcastCompletion;
+			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+
+			// 指纹仍是较新内容：再来一次与较新内容相同的广播照常被去重跳过。
+			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+		} finally {
+			heldStaleGenerationProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
+			await staleGenerationBroadcastCompletion;
+		}
+	});
+
+	// 切项目即重连：握手期间别的项目有 agent 在跑，flush 每 150ms 广播一次 projects_updated。若它抢在 snapshot 前
+	// 到达，浏览器会先把 currentProjectId 换成目标项目、board 却仍是上一个项目的——此时再点目标项目的任务会在旧
+	// board 里找卡，误报「That task is no longer on its project's board.」。
+	it(
+		"握手期间的 projects_updated 不抢在首帧 snapshot 之前，首帧后补发最新内容",
+		{ timeout: TEST_TIMEOUT_MS_COVERING_FIVE_SERIAL_WAITS_AND_TWO_OBSERVATION_WINDOWS },
+		async () => {
+			const heldHandshakeProjectsPayloadBuild = harness.holdNextProjectsPayloadBuildUntilReleased();
+			const lateClient = await openQueuedRuntimeSocket(harness.streamUrl);
+			try {
+				await heldHandshakeProjectsPayloadBuild.heldProjectsPayloadBuildStarted;
+
+				harness.projects.push(makeProject("project-b", 2));
+				await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+				const broadcastToExistingClientDuringHandshake = await waitForRuntimeMessage(
+					client,
+					isProjectsUpdatedMessage,
+				);
+				expect(broadcastToExistingClientDuringHandshake.projects).toHaveLength(2);
+
+				heldHandshakeProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
+				const snapshot = await waitForRuntimeMessage(
+					lateClient,
+					(message): message is Extract<RuntimeStateStreamMessage, { type: "snapshot" }> =>
+						message.type === "snapshot",
+				);
+				// 首帧带的是握手开始时构建的旧 projects。
+				expect(snapshot.projects).toHaveLength(1);
+				const catchUpAfterSnapshot = await waitForRuntimeMessage(lateClient, isProjectsUpdatedMessage);
+				expect(catchUpAfterSnapshot.projects).toHaveLength(2);
+				expect(lateClient.receivedMessageTypesInArrivalOrder[0]).toBe("snapshot");
+				expect(lateClient.receivedMessageTypesInArrivalOrder.indexOf("projects_updated")).toBeGreaterThan(
+					lateClient.receivedMessageTypesInArrivalOrder.indexOf("snapshot"),
+				);
+
+				// 稳态去重不受影响：同内容连发两次，第二次对两个客户端都跳过。补发用的是握手时的 preferredCurrentProjectId
+				// （本 harness 为 null），与下面的 WORKSPACE_ID 内容不同，故先发一次把指纹推进到同内容。
+				await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+				await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+				client.queue.length = 0;
+				lateClient.queue.length = 0;
+				await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+				await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+				expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+				expect(lateClient.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+			} finally {
+				heldHandshakeProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
+				if (
+					lateClient.socket.readyState !== WebSocket.CLOSED &&
+					lateClient.socket.readyState !== WebSocket.CLOSING
+				) {
+					lateClient.socket.close();
+					await once(lateClient.socket, "close");
+				}
+			}
+		},
+	);
 });

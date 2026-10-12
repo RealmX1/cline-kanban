@@ -224,7 +224,13 @@ describe("TerminalSessionManager", () => {
 		const delayed = manager.applyAgentNativeConversationSessionIdentity("task-1", { ...identity, observedAt: 30 });
 		expect(delayed).toEqual(confirmed);
 		expect(confirmed?.agentNativeConversationSessionIdentity).toEqual(confirmedIdentity);
-		expect(confirmed).toEqual({ ...originalSummary, agentNativeConversationSessionIdentity: confirmedIdentity });
+		expect(confirmed).toEqual({
+			...originalSummary,
+			agentNativeConversationSessionIdentity: confirmedIdentity,
+			agentCurrentWorkPhaseGoal: null,
+			agentNativeCurrentWorkPhaseGoal: null,
+			agentCurrentWorkPhaseGoalInvalidatedAt: undefined,
+		});
 		expect(summaryListener).toHaveBeenCalledTimes(3);
 
 		// 更早的同身份确认与相同时间的重试都不能回退水位或重复广播。

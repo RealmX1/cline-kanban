@@ -238,6 +238,14 @@ Its shape mirrors the Cline integration: `acp-protocol-boundary.ts` is the only 
 
 This is important because Kanban is not designed around browser polling. The runtime is long-lived and streams state outward.
 
+`projects_updated` 是全局消息（覆盖全部已注册项目，切项目不清空）。跨项目视图都从它的 per-project 投影读：`inProgressTaskDetails`（顶栏项目切换器的 live 计数）与跨项目切换面板（Focus View 左栏与 All projects 首页）的 `crossProjectTaskSwitcherEntries` 由同一个 per-card 构造函数产出，会话事实覆盖三种 transport（Terminal manager + hub 订阅的 Cline SDK / ACP），未加载项目读 sessions.json 的文件戳缓存（`server/persisted-task-session-facts-cache-for-unloaded-projects.ts`）。就绪通知 `task_ready_for_review` 同样投给全部客户端。术语与边界见 `docs/context-cross-project-recently-active-task-switcher.md`。
+
+两个**有意的轮询例外**：
+- workspace diff 是定时轮询。
+- 跨项目切换面板里各行（含当前项目里不在推流探测范围内的行）的 git 元数据（ahead/behind、未提交改动）由面板按需轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`，服务端按 (workspaceId, taskId) 缓存（`server/cross-project-task-worktree-git-metadata-cache.ts`）。`workspace_metadata_updated` 只为有浏览器连着的项目推流；而未提交改动几秒一变，并入 `projects_updated` 会让整份广播变频繁。单任务探针与 git spawn 并发上限由 `workspace/task-worktree-git-metadata-probe.ts` 统一提供，推流 monitor 与按需缓存共用。
+
+`workspace_metadata_updated` 的**探测范围由每个连接声明**（2026-10-05）：单项目范围要整个项目，All projects（Board Scope）只要焦点任务（服务端并上 auto-review 的 Review 列任务），同一项目多个连接取并集。初值在 WS URL 参数里，之后经状态流**唯一一种浏览器 → 服务端消息** `declare_workspace_metadata_probe_scope` 更新（schema `runtimeStateStreamClientMessageSchema`）。这样跨项目打开不必等目标项目每张卡的 git 跑完才收到快照。细节与代价见 `docs/context-cross-project-recently-active-task-switcher.md` 的 Workspace Metadata Probe Scope。
+
 ## Frontend Architecture
 
 The frontend is also easier to navigate if you think in responsibilities instead of folders.
@@ -257,9 +265,26 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 - the main board: `kanban-board.tsx` → `board-column.tsx`
 - the Focus View left sidebar: `card-detail-view.tsx` → `detail-panels/column-context-panel.tsx`
 
-宿主链按列筛选下传的 handler（例如 `onMoveToValidationTask={column.id === "review" ? ... : undefined}`），共用卡片业务 props 的路径还经过 `task-card-business-props.ts` 的 `buildTaskCardBusinessProps` 门控。卡片按钮可能满足自身 `columnId` 渲染条件，却因宿主未传入 handler 而点击无效；此类问题已多次发生。新增或修改卡片动作时，应同步 `task-card-body.tsx` 中的渲染条件、业务 props 门控及两条宿主链的 handler 传递；`board-card.tsx` 仅负责拖拽适配。
+宿主链按列筛选下传的 handler（例如 `onMoveToValidationTask={column.id === "review" ? ... : undefined}`），共用卡片业务 props 的路径还经过 `task-card-business-props.ts` 的 `buildTaskCardBusinessProps` 门控。卡片按钮可能满足自身 `columnId` 渲染条件，却因宿主未传入 handler 而点击无效；此类问题已多次发生。新增或修改卡片动作时，应同步 `task-card-body.tsx` 中的渲染条件、业务 props 门控及两条宿主链的 handler 传递；`board-card.tsx` 仅负责拖拽适配。卡体的其余副本——两个置顶板分身、Focus View rail 钉住的焦点卡克隆（`stage-header-rails.tsx`，曾手抄门控漏掉「移到 Review / 取消自动动作」）、All projects 面板的展开行——一律经 `buildTaskCardBusinessProps` 拿同一个 handler 集合，不要再手抄 stage 门控。All projects 面板的当前项目展开行有两处组装 handler 集合的地方，新增卡片动作时两处都要传：Focus View 左栏是 `column-context-panel.tsx`；All projects 首页分区列看板是 App 里的 `use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page.ts`，与前者同构，也是 KanbanBoard 用的同一组 handler。
 
-The move-to-done "skip validation?" confirmation is centralized in `web-ui/src/hooks/use-board-interactions.ts` (`requestMoveToTrash` → `pendingMoveToDone` → `confirmMoveToDone`/`cancelMoveToDone`) with a single `SkipValidationConfirmDialog` rendered in `App.tsx`. Both the by-id handler used by board and sidebar cards and the selected-card handler used by the agent TUI bottom button funnel through it — do not reintroduce a per-view dialog.
+**per-card 动作的唯一实现在服务端 `taskCardAction.*`**（`src/trpc/task-card-action-api.ts`，契约与错误语义在 `src/core/api-contract.ts` 的 taskCardAction 一节）：启动（`startTaskCardAgentSessionMovingItIntoInProgress`）、移到 review（`moveTaskCardIntoReviewByHandingTurnToUser`）、进出 validation / in_progress 列内重排（`moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects`）、移入 Done（`moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree`）、从 Done 恢复（`restoreTaskCardFromDoneIntoReviewResumingAgentSession`）、永久删除（`permanentlyDeleteTaskCardsWithFullResourceCleanup`）、改字段（`updateTaskCardFieldValues`）、置顶（`setTaskPinboardPinStateOfTaskCard`），外加只读的 `readTaskCardWithBoardColumn`。主看板、Focus View、跨项目切换面板（All projects）与 kanban CLI 都只调它们，不在浏览器里「改内存 board → 整板 saveState」、也不在 CLI 进程里编排停会话 / 删 worktree。新增卡片动作时直接加在 `taskCardAction.*`，不要再往浏览器 setBoard 路径上加。仍留在浏览器整板保存路径上的只有：建卡（cf427 的「乐观插入 + 先落盘」，见下）、列自动流转（facet 驱动、中断会话进 Done、auto-review）与 in_progress 列内重排。要点：
+
+- 全部 workspace-scoped：作用于 `x-kanban-workspace-id` 指向的**任意**已注册项目，跨项目执行动作不切换浏览器当前项目。
+- 形状统一：board 锁内对最新 board 做纯变更（`mutateWorkspaceState`，写成后广播 `workspace_state_updated` + `projects_updated`）→ 锁外复用 `runtimeApi` / `workspaceApi` 的起停会话与 ensure / 删 worktree。会话 / worktree 的执行期失败回传在响应的 outcome 字段里，不抛错。
+- 同一张卡的生命周期命令经 `task-card-action-per-task-command-serializer.ts` 在进程内串行（防双击、防 done 与 start 交错）；改字段与置顶不排队。
+- 哪种移列走哪个 procedure 由 `src/core/task-card-action-board-column-transitions.ts` 判定（语义源自 `drag-rules.ts`）；启动请求由 `src/core/task-session-start-request-from-board-card.ts` 从卡片构造；字段合并规则在 `src/core/task-card-field-patch-resolution.ts`。
+- 账本记账：带 CLI 声明头的请求沿用 `kanban_cli_task_*` 旧意图名、记成 CLI 行动者；页面请求用 `web_ui_task_card_action_*`，并把输入里浏览器声明的 `boardMutationInitiator` 合成为该卡的发起方标注（见 `task-card-action-task-mutation-intent-resolution.ts`）。浏览器侧的接线细节见下文 / web-ui 各 hook。
+- 置顶动作统一直调 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；部署版浏览器已迁移，旧 workspace 转发入口及其专用契约已移除。
+
+**浏览器侧接线（2026-10-05）**：
+- 唯一入口 `web-ui/src/state/task-card-action-commands-for-any-workspace.ts`（每个动作一个 `*ThroughRuntime`），编排在 `task-card-action-command-execution.ts`：同一张卡在三处只有一个在途命令（`stores/task-card-action-commands-in-flight-store.ts`，键带 workspace）→ 当前项目写 overlay → 发命令 → 按服务端的动作后快照核对期望（不符立即撤、字段 patch 换成服务端实际写下的值）→ 等广播回灌把 overlay 换成真相（5 秒兜底）；失败立即撤 overlay。
+- **overlay 是硬约束**：浏览器执行命令时绝不改那份会被整板保存的 `board`，只写不持久化的 overlay（`stores/pending-task-card-command-board-overlay-store.ts` + 纯函数 `state/pending-task-card-command-board-overlay.ts`），App 渲染 `displayedBoard = apply(board, overlay)`。若浏览器先把乐观结果写进 board 并抢先保存，服务端命令会看到「卡已经在 Done」而跳过停会话 / 删 worktree。拖放落点因此按 taskId 解出（`resolveTaskCardDropFromDragResultByTaskId`），不信任 `displayedBoard` 的下标。
+- 其他项目（All projects 面板的行动作、展开行、原地编辑 backlog 卡、Board Scope 往别的项目建卡）调同一组命令，只是不带 overlay（那个项目的 board 不在浏览器里，结果随 `projects_updated` 回来），见 `hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx`。
+- 编辑器保存只发「表单值 ≠ 铺表单时的卡片」的字段（`hooks/task-editor-changed-task-card-field-value-patch.ts`），编辑期间别人改的、用户没动的字段不会被旧值顶掉；Save & Start 等保存命令结算后才启动。
+- 建卡（含 Board Scope 往其他项目建卡）不走 taskCardAction：卡片由浏览器用 core 同一个纯函数算出、id 取 runtime 预分配池，经 `workspace.persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart` 落盘（cf427）；目标是其他项目时本页 board 不动。
+- 浏览器 vs 服务端的回灌对账由 `use-workspace-sync` 的三方合并（cf427）负责：本地防抖保存与服务端命令的写入交错时，保存撞 CONFLICT → 取回 → 按基线 / 本地 / 远端三方合并后重放，命令写下的列与字段以远端为准。
+
+The move-to-done "skip validation?" confirmation is centralized in `web-ui/src/hooks/use-board-interactions.ts` (`requestMoveToTrash` → `pendingMoveToDone` → `confirmMoveToDone`/`cancelMoveToDone`) with a single `SkipValidationConfirmDialog` rendered in `App.tsx`. Both the by-id handler used by board and sidebar cards and the selected-card handler used by the agent TUI bottom button funnel through it — do not reintroduce a per-view dialog. 例外只有 All projects 面板里**其他项目**的卡：那些卡不在当前项目的 board 里，由 `use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx` 挂自己的一份同款确认框（判据相同：从 Review / In Progress 直接进 Done 才确认）。
 
 ## Native Cline Architecture
 

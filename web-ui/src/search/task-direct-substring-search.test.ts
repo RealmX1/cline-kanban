@@ -59,7 +59,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -134,6 +133,41 @@ describe("findDirectSubstringTaskBoardSearchResults", () => {
 	});
 });
 
+describe("findDirectSubstringTaskBoardSearchResults with a matched text field scope", () => {
+	it("only matches inside the title when the scope is title only, and never highlights the prompt", () => {
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+		const results = findDirectSubstringTaskBoardSearchResults(documents, "api", "title_only");
+
+		// task-prompt-only 的 "api" 只出现在 prompt 里 → 被范围排除。
+		expect(results.map((result) => result.document.taskId)).toEqual(["task-cross", "task-billing"]);
+		for (const result of results) {
+			expect(result.matchSources).toEqual(["title"]);
+			expect(result.promptMatchCharacterPositions.size).toBe(0);
+		}
+	});
+
+	it("only matches inside the prompt when the scope is prompt only, and never highlights the title", () => {
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+		const results = findDirectSubstringTaskBoardSearchResults(documents, "api", "prompt_only");
+
+		expect(results.map((result) => result.document.taskId)).toEqual(["task-prompt-only"]);
+		expect(results[0]?.matchSources).toEqual(["prompt"]);
+		expect(results[0]?.titleMatchCharacterPositions.size).toBe(0);
+	});
+
+	it("requires every token to hit inside the allowed fields", () => {
+		// "billing" 在 title、"handlers" 只在 prompt：两者都算时命中，只算标题时 "handlers" 落空 → 不入选。
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+
+		expect(
+			findDirectSubstringTaskBoardSearchResults(documents, "billing handlers", "title_and_prompt").map(
+				(result) => result.document.taskId,
+			),
+		).toEqual(["task-billing"]);
+		expect(findDirectSubstringTaskBoardSearchResults(documents, "billing handlers", "title_only")).toEqual([]);
+	});
+});
+
 describe("direct substring search stays free of task id matching", () => {
 	function createDocumentsWithIdShapedTaskIds() {
 		const board: BoardData = {
@@ -167,7 +201,6 @@ describe("direct substring search stays free of task id matching", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 		return buildTaskBoardSearchDocuments(board, PROJECT_CONTEXT);
 	}

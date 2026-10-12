@@ -8,6 +8,7 @@ import {
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
+	type TaskSearchMatchedTextFieldScope,
 } from "@/search/task-board-search";
 import {
 	createTaskBoardSemanticSearchIndex,
@@ -18,6 +19,7 @@ import { hoistTaskIdMatchedResultsToTopByMatchTier } from "@/search/task-id-matc
 import {
 	resolveEffectiveTaskSearchResultSortOrder,
 	sortTaskSearchResults,
+	sortTaskSearchResultsByAgentConversationProgressThenLastModified,
 	type TaskSearchResultSortOrder,
 } from "@/search/task-search-result-ordering";
 import { useDebouncedEffect } from "@/utils/react-use";
@@ -43,6 +45,7 @@ interface TaskBoardSemanticSearchIndexCacheEntry {
 interface TaskBoardSemanticSearchResultSnapshot {
 	documents: readonly TaskBoardSearchDocument[];
 	mode: Extract<TaskBoardSearchMode, "hybrid" | "semantic">;
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope;
 	query: string;
 	results: TaskBoardSearchResult[];
 }
@@ -75,6 +78,7 @@ export function useTaskBoardSearch({
 	documents,
 	query,
 	mode,
+	matchedTextFieldScope,
 	sortOrder,
 	resolveAgentConversationProgressAtEpochMs,
 	isBrowsingAllTasksWithoutQueryEnabled,
@@ -82,10 +86,12 @@ export function useTaskBoardSearch({
 	documents: readonly TaskBoardSearchDocument[];
 	query: string;
 	mode: TaskBoardSearchMode;
+	/** 文本匹配的字段范围。换范围只重查、不重建语义索引（索引缓存只以 documents 为键）。 */
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope;
 	sortOrder: TaskSearchResultSortOrder;
 	/**
-	 * 取「这个任务的对话上次真正往前走」的时刻，仅 agent 活跃档用。只对当前项目可得（会话推流），
-	 * 跨项目文档一律返回 null。调用方必须给一个**引用稳定**的实现（否则每 tick 重排一次）。
+	 * 取「这个任务的对话上次真正往前走」的时刻：agent 活跃档与 direct 的 relevance 档用。当前项目读会话推流，
+	 * 跨项目读索引快照；从没推进过的返回 null。调用方必须给一个**引用稳定**的实现（否则每 tick 重排一次）。
 	 */
 	resolveAgentConversationProgressAtEpochMs: (document: TaskBoardSearchDocument) => number | null;
 	/** 空查询时是否浏览全量任务。由调用方按「弹层开着」门控，关着时不做这份无用的全量包装。 */
@@ -102,15 +108,15 @@ export function useTaskBoardSearch({
 		if (!isSearchActive || mode !== "direct") {
 			return [] satisfies TaskBoardSearchResult[];
 		}
-		return findDirectSubstringTaskBoardSearchResults(documents, normalizedQuery);
-	}, [documents, isSearchActive, mode, normalizedQuery]);
+		return findDirectSubstringTaskBoardSearchResults(documents, normalizedQuery, matchedTextFieldScope);
+	}, [documents, isSearchActive, matchedTextFieldScope, mode, normalizedQuery]);
 
 	const fuzzyResults = useMemo(() => {
 		if (!isSearchActive || mode === "direct" || mode === "semantic") {
 			return [] satisfies TaskBoardSearchResult[];
 		}
-		return findFuzzyTaskBoardSearchResults(documents, normalizedQuery);
-	}, [documents, isSearchActive, mode, normalizedQuery]);
+		return findFuzzyTaskBoardSearchResults(documents, normalizedQuery, matchedTextFieldScope);
+	}, [documents, isSearchActive, matchedTextFieldScope, mode, normalizedQuery]);
 
 	const [semanticResultSnapshot, setSemanticResultSnapshot] = useState<TaskBoardSemanticSearchResultSnapshot | null>(
 		null,
@@ -122,14 +128,15 @@ export function useTaskBoardSearch({
 	const semanticResults =
 		semanticResultSnapshot?.documents === documents &&
 		semanticResultSnapshot.query === normalizedQuery &&
-		semanticResultSnapshot.mode === mode
+		semanticResultSnapshot.mode === mode &&
+		semanticResultSnapshot.matchedTextFieldScope === matchedTextFieldScope
 			? semanticResultSnapshot.results
 			: null;
 
 	useEffect(() => {
 		semanticSearchRequestIdRef.current += 1;
 		setSemanticSearchStatus(shouldRunSemanticSearch ? "loading" : "idle");
-	}, [documents, mode, normalizedQuery, shouldRunSemanticSearch]);
+	}, [documents, matchedTextFieldScope, mode, normalizedQuery, shouldRunSemanticSearch]);
 
 	// 换项目/文档、离开语义模式或关闭搜索时释放 Worker，包括尚未完成的模型下载。
 	useEffect(
@@ -161,7 +168,9 @@ export function useTaskBoardSearch({
 			}
 			void semanticSearchIndexCacheRef.current.indexPromise
 				.then((index) =>
-					semanticSearchRequestIdRef.current === requestId ? index.findResults(normalizedQuery, mode) : [],
+					semanticSearchRequestIdRef.current === requestId
+						? index.findResults(normalizedQuery, mode, matchedTextFieldScope)
+						: [],
 				)
 				.then((results) => {
 					if (semanticSearchRequestIdRef.current !== requestId) {
@@ -170,6 +179,7 @@ export function useTaskBoardSearch({
 					setSemanticResultSnapshot({
 						documents,
 						mode,
+						matchedTextFieldScope,
 						query: normalizedQuery,
 						results,
 					});
@@ -186,7 +196,7 @@ export function useTaskBoardSearch({
 				});
 		},
 		220,
-		[documents, mode, normalizedQuery, shouldRunSemanticSearch],
+		[documents, matchedTextFieldScope, mode, normalizedQuery, shouldRunSemanticSearch],
 	);
 
 	const browseAllTasksResults = useMemo(() => {
@@ -208,8 +218,15 @@ export function useTaskBoardSearch({
 		}
 		function resolveBaseOrderedResultsForCurrentMode(): TaskBoardSearchResult[] {
 			if (mode === "direct") {
-				// direct 已按 D2 位置规则排好序，不再按 score 重排。
-				return directResults;
+				// direct 的子串命中只决定入不入选、不分高低（score 恒 0）：relevance 档按「最近活跃」排，
+				// 匹配器给出的位置序只在同一时刻之间决胜。非 relevance 档随后由排序层整体重排，这里不必白算一遍。
+				if (effectiveSortOrder !== "relevance") {
+					return directResults;
+				}
+				return sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+					results: directResults,
+					resolveAgentConversationProgressAtEpochMs,
+				});
 			}
 			if (mode === "fuzzy") {
 				// fzf.find 已按分数降序返回。
@@ -218,7 +235,9 @@ export function useTaskBoardSearch({
 			if (mode === "semantic") {
 				const results =
 					semanticResults ??
-					(semanticSearchStatus === "error" ? findFuzzyTaskBoardSearchResults(documents, normalizedQuery) : []);
+					(semanticSearchStatus === "error"
+						? findFuzzyTaskBoardSearchResults(documents, normalizedQuery, matchedTextFieldScope)
+						: []);
 				return sortResultsByScoreDescending(results);
 			}
 			if (semanticSearchStatus === "error") {
@@ -250,6 +269,7 @@ export function useTaskBoardSearch({
 		effectiveSortOrder,
 		fuzzyResults,
 		isSearchActive,
+		matchedTextFieldScope,
 		mode,
 		normalizedQuery,
 		resolveAgentConversationProgressAtEpochMs,

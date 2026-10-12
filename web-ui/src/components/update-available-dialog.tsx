@@ -7,6 +7,7 @@ import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/
 import { Spinner } from "@/components/ui/spinner";
 import { runRuntimeUpdateNow } from "@/runtime/runtime-config-query";
 import type { RuntimeRunUpdateResponse } from "@/runtime/types";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 interface UpdateAvailableDialogProps {
 	open: boolean;
@@ -38,7 +39,7 @@ export function UpdateAvailableDialog({
 
 	const handleCopy = async (): Promise<void> => {
 		try {
-			await navigator.clipboard.writeText(installCommand);
+			await writeTextToSystemClipboardWithInsecureContextFallback(installCommand);
 			setCopied(true);
 			setTimeout(() => {
 				setCopied(false);

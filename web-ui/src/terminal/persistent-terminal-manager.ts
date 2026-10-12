@@ -1,5 +1,3 @@
-import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
-import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -11,12 +9,20 @@ import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-th
 import { estimateTaskSessionGeometry, SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskSessionSummary,
 	RuntimeTerminalWsClientMessage,
 	RuntimeTerminalWsResizeMessage,
 	RuntimeTerminalWsServerMessage,
 } from "@/runtime/types";
+import { OSC_52_CLIPBOARD_PROVIDER_TOLERATING_INSECURE_BROWSER_CONTEXT } from "@/terminal/osc-52-clipboard-provider-tolerating-insecure-browser-context";
 import { sliceRestoreSnapshotForIncrementalWrite } from "@/terminal/restore-snapshot-slicing";
+import {
+	forgetStaleSessionAutoResumeCooldownsForWorkspace,
+	type StaleAgentTerminalSessionAutomaticResumePhase,
+	StaleAgentTerminalSessionAutomaticResumeScheduler,
+} from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
+import { resolveTerminalClipboardKeyboardShortcutAction } from "@/terminal/terminal-clipboard-keyboard-shortcut-resolution";
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import {
 	isStashTerminalInputBoxToPromptLibraryShortcut,
@@ -34,7 +40,8 @@ import {
 	type TerminalScrollbackTranscriptLogicalLine,
 } from "@/terminal/terminal-scrollback-transcript-extraction";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
-import { isMacPlatform, isSafari } from "@/utils/platform";
+import { isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
+import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
@@ -52,43 +59,6 @@ const RESYNC_TERMINAL_VIEW_RESTORE_SNAPSHOT_DEADLINE_MS = 1_500;
 // 升级重连之后再等一次的截止时间。给得比上面宽，是因为这一程要重新握手两条 WebSocket 并在服务端
 // 重建一份 viewerState，本来就比「往已连着的 control socket 上发一条 request_restore」慢一个数量级。
 const RESYNC_TERMINAL_VIEW_ESCALATED_RECONNECT_RESTORE_SNAPSHOT_DEADLINE_MS = 4_000;
-// 陈旧会话自动续跑的**跨实例**冷却。
-//
-// 类里那个 autoResumeAttempted 是 per-终端实例的一次性闩，它拦不住真正的重复触发：切一张卡、
-// 被 MAX_PARKED_TERMINALS 的 LRU 驱逐后重挂、关掉面板再打开，每一次都是一份新实例、都重新放一次电。
-// 于是「服务端起不来」这种持续故障会被前端反复叫醒，一次故障变成一串创建请求。
-//
-// 用冷却而不是永久闩：服务器如果真的第二次重启，这条会话仍然应该允许再续一次——永久闩会把
-// 「自动接回会话」这个功能在一次失败之后彻底关掉。
-//
-// 作用域诚实说明：模块级 = **同一个标签页内**跨实例。多标签页各有各的 JS realm，这里拦不住；
-// 那一层归服务端的 per-task 启动互斥管（见 session-manager 的
-// runTaskSessionStartExclusivelyPerTask），前端 ref 无论怎么写都覆盖不到。
-const MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS = 60_000;
-const staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask = new Map<string, number>();
-
-function hasStaleSessionAutoResumeCooledDownForTask(workspaceAndTaskKey: string): boolean {
-	const lastAttemptedAtEpochMs = staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.get(workspaceAndTaskKey);
-	return (
-		lastAttemptedAtEpochMs === undefined ||
-		Date.now() - lastAttemptedAtEpochMs >= MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS
-	);
-}
-
-function recordStaleSessionAutoResumeAttemptForTask(workspaceAndTaskKey: string): void {
-	const attemptedAtEpochMs = Date.now();
-	// 顺手丢掉已经过期的键，免得这张表随会话数单调增长——它记的是「最近一分钟内续跑过谁」，
-	// 不是一份历史账。
-	for (const [key, recordedAtEpochMs] of staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask) {
-		if (
-			attemptedAtEpochMs - recordedAtEpochMs >=
-			MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS
-		) {
-			staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.delete(key);
-		}
-	}
-	staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.set(workspaceAndTaskKey, attemptedAtEpochMs);
-}
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
@@ -130,6 +100,8 @@ interface PersistentTerminalSubscriber {
 	 * 把它落回 false；只在值真的变化时通知。
 	 */
 	onTerminalContentPresenceChange?: (hasRenderedAnyTerminalContent: boolean) => void;
+	/** 陈旧会话自动续跑进行到哪一步（null = 没有在进行）；面板据此在续跑途中禁用「重启」并给出说明。 */
+	onAutomaticStaleSessionResumePhaseChange?: (phase: StaleAgentTerminalSessionAutomaticResumePhase | null) => void;
 }
 
 interface MountPersistentTerminalOptions {
@@ -144,6 +116,7 @@ interface MountPersistentTerminalOptions {
 }
 
 interface EnsurePersistentTerminalInput extends PersistentTerminalAppearance {
+	deferAutomaticSessionResumeUntilVisibleMount?: boolean;
 	taskId: string;
 	workspaceId: string;
 }
@@ -201,14 +174,6 @@ function getTerminalSocketChunkByteLength(data: string | ArrayBuffer | Blob): nu
 		return data.byteLength;
 	}
 	return 0;
-}
-
-function isCopyShortcut(event: KeyboardEvent): boolean {
-	return (
-		event.type === "keydown" &&
-		((isMacPlatform && event.metaKey && !event.shiftKey && event.key.toLowerCase() === "c") ||
-			(!isMacPlatform && event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c"))
-	);
 }
 
 function isFindShortcut(event: KeyboardEvent): boolean {
@@ -326,6 +291,7 @@ class PersistentTerminal {
 	private resizeObserver: ResizeObserver | null = null;
 	private resizeTimer: ReturnType<typeof setTimeout> | null = null;
 	private visibleContainer: HTMLDivElement | null = null;
+	private isMountedContainerVisible = false;
 	// 当前这次挂载所处的视图是否自己注册了 alt+↑/↓ 切卡热键（见同名 mount option）。随 mount 写入、
 	// 随 unmount 归零——泊车终端没有任何可见容器，自然也就不在任何接管者内部。
 	private isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false;
@@ -334,9 +300,10 @@ class PersistentTerminal {
 	private connectionReady = false;
 	private restoreCompleted = false;
 	private hasRenderedAnyTerminalContent = false;
-	// 一次性防抖：运行时重启后首次聚焦该任务、检测到「空终端 + 无活会话」时自动续跑一次。manager 实例
-	// 跨 mount/unmount parked 存活，故一生只放一次电；dispose 重建（关面板/刷页）才允许再试。
-	private autoResumeAttempted = false;
+	// 「用户打开 / 回到这个任务时把已经不在的 PTY agent 会话接回来」：资格、停留门槛、按活体计的闩与跨实例
+	// 冷却都在调度器里（见 stale-agent-terminal-session-automatic-resume-scheduler.ts），本类只在各个
+	// 「打开 / 回到」信号上叫它评估一次。
+	private readonly staleAgentTerminalSessionAutomaticResumeScheduler: StaleAgentTerminalSessionAutomaticResumeScheduler;
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
 	// 写队列的代次。discardStalledTerminalWriteQueue 换得掉 terminalWriteQueue 这个「队尾指针」，却取消不了
@@ -368,10 +335,10 @@ class PersistentTerminal {
 	// 后重放。5s 兜底超时防控制消息丢失导致白屏。
 	private awaitingRestoreSnapshot = false;
 	private awaitingRestoreSnapshotTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-	// 「重新同步画面」期间抑制 maybeAutoResumeStaleSession 的一次性闩（与上面 suppressNextRestartReset 同构）。
+	// 「重新同步画面」期间抑制陈旧会话自动续跑的一次性闩（与上面 suppressNextRestartReset 同构）。
 	//
 	// 非它不可的理由：resync 升级重连后，服务端在 control socket 连上时**无条件**重推一份快照，客户端照常
-	// 走 applyRestore → 落到 maybeAutoResumeStaleSession 的调用点。若此时服务端 mirror 恰好是空的、而客户端
+	// 走 applyRestore → 落到自动续跑的评估点。若此时服务端 mirror 恰好是空的、而客户端
 	// 手里那份 latestSummary 又是控制通道僵死前的陈旧值（pid 为 null），自动续跑的全部判据就都命中了——
 	// 用户点的是「只把画面解冻，别动 agent」，结果反而打出一次 refreshTaskTerminal 把活着的 agent 杀了。
 	// 这正是本功能存在的意义的反面，所以 resync 路径上必须显式压掉这条自动路径。
@@ -382,19 +349,39 @@ class PersistentTerminal {
 	// 为什么按到达序号而不是只数「应用了几次」：resync 发起时可能已经有一份更早的快照在途（写队列慢、还没
 	// 落屏），它恰好在 resync 的等待窗口里落屏时，会把「只数次数」的等待顺手满足——resync 于是提前收尾、
 	// finally 清掉抑制闩，而本次真正请求到的那份快照随后才落地、不再被抑制。若它恰是空快照且 latestSummary
-	// 是控制通道僵死前的陈旧值（pid 为 null），maybeAutoResumeStaleSession 的判据就全中，「只解冻画面」当场
+	// 是控制通道僵死前的陈旧值（pid 为 null），自动续跑的判据就全中，「只解冻画面」当场
 	// 变成一次杀掉活 agent 的 refreshTaskTerminal。按序号比较即把「早于本次请求到达的快照」整类排除在外。
 	private restoreSnapshotArrivalSequence = 0;
 	private latestAppliedRestoreSnapshotArrivalSequence = 0;
 	private readonly restoreSnapshotApplicationWaiters = new Set<() => void>();
 	private scrolledAwayFromLatest = false;
+	// 最近一份落屏的 restore 是否「快照为空、且不是画面重同步引起的」——自动续跑「服务端 mirror 已丢」证据的
+	// 前两条（第三条「之后没渲染过内容」见 readLatestRestoreSnapshotTrustedAsEvidenceOfServerTerminalMirrorLoss）。
+	//
+	// resync 引起的那份快照落屏时把它压成 false：resync 是在 viewer 通路坏掉时发起的，拿到的空快照不可信，
+	// 而它也盖掉了先前那份快照留在屏幕上的结论（预热泊车期间的空 restore 之后又 resync，可见挂载时不续跑）。
+	// 但 resync 只作废这条证据、**不封锁评估本身**：回收分支依赖的是服务端回收记录，与快照无关；若在 resync
+	// 之后把整条评估挡到下一份 restore 为止，活会话 resync 后被回收、泊车再挂回（socket 没断、没有新 restore）
+	// 时就永远续不上了。resync 进行中自己触发的评估由 suppressNextStaleSessionAutoResumeTriggeredByViewResync 挡。
+	private latestAppliedRestoreWasEmptyAndNotTriggeredByViewResync = false;
 
 	constructor(
 		private readonly taskId: string,
 		private readonly workspaceId: string,
 		appearance: PersistentTerminalAppearance,
+		private shouldDeferAutomaticSessionResumeUntilVisibleMount = false,
 	) {
 		this.appearance = appearance;
+		this.staleAgentTerminalSessionAutomaticResumeScheduler = new StaleAgentTerminalSessionAutomaticResumeScheduler({
+			workspaceId,
+			taskId,
+			isAllowedToEvaluateAutomaticResumeNow: () => this.isAllowedToEvaluateStaleSessionAutomaticResumeNow(),
+			readLatestSummary: () => this.latestSummary,
+			readLatestRestoreSnapshotTrustedAsEvidenceOfServerTerminalMirrorLoss: () =>
+				this.readLatestRestoreSnapshotTrustedAsEvidenceOfServerTerminalMirrorLoss(),
+			requestAutomaticResume: async () => await this.refresh("stale_session_client_auto_resume"),
+			onPhaseChange: (phase) => this.notifyAutomaticStaleSessionResumePhase(phase),
+		});
 		this.parkingRoot = getParkingRoot();
 		this.hostElement = document.createElement("div");
 		Object.assign(this.hostElement.style, {
@@ -415,7 +402,9 @@ class PersistentTerminal {
 			rows: initialGeometry.rows,
 		});
 		this.terminal.loadAddon(this.fitAddon);
-		this.terminal.loadAddon(new ClipboardAddon());
+		this.terminal.loadAddon(
+			new ClipboardAddon(undefined, OSC_52_CLIPBOARD_PROVIDER_TOLERATING_INSECURE_BROWSER_CONTEXT),
+		);
 		this.terminal.loadAddon(this.searchAddon);
 		this.terminal.loadAddon(new WebLinksAddon());
 		this.terminal.loadAddon(this.unicode11Addon);
@@ -450,10 +439,24 @@ class PersistentTerminal {
 				}
 				return false;
 			}
-			if (isCopyShortcut(event) && this.terminal.hasSelection()) {
-				void navigator.clipboard.writeText(this.terminal.getSelection()).catch(() => {
-					// Ignore clipboard failures.
-				});
+			const clipboardShortcutAction = resolveTerminalClipboardKeyboardShortcutAction(event, {
+				isMacPlatform,
+				isWindowsPlatform,
+				terminalHasSelection: this.terminal.hasSelection(),
+				browserIsOnDifferentMachineThanAgentRuntimeHost: !isBrowserOnTheSameMachineAsAgentRuntimeHost(),
+			});
+			if (clipboardShortcutAction.kind === "copy-terminal-selection-to-system-clipboard") {
+				// preventDefault 挡掉浏览器对这组按键的默认动作（Chrome 的 Ctrl+Shift+C 是「检查元素」）。
+				event.preventDefault();
+				this.copyTerminalSelectionToSystemClipboard();
+				if (clipboardShortcutAction.clearSelectionAfterCopy) {
+					this.terminal.clearSelection();
+				}
+				return false;
+			}
+			if (clipboardShortcutAction.kind === "release-to-browser-native-paste-of-this-device-clipboard") {
+				// 返回 false 且不 preventDefault：xterm 不把它转成 `^V`，浏览器照常触发 paste 事件，
+				// 由 xterm 自己的 paste 监听读出 clipboardData 发给 agent。http 下也可用，不需要 Clipboard API。
 				return false;
 			}
 			if (isFindShortcut(event)) {
@@ -500,6 +503,9 @@ class PersistentTerminal {
 		if (typeof document !== "undefined") {
 			document.addEventListener("visibilitychange", this.handleVisibilityChange);
 		}
+		// 焦点点进终端也算「回到这个任务」：覆盖标签页一直可见、人离开数小时后回来直接点进终端的情形——
+		// 那时既没有新的挂载，也没有可见性变化。
+		this.hostElement.addEventListener("focusin", this.handleTerminalFocusIn);
 
 		this.ensureConnected();
 	}
@@ -507,6 +513,39 @@ class PersistentTerminal {
 	private readonly handleVisibilityChange = (): void => {
 		this.setDocumentVisible(document.visibilityState === "visible");
 	};
+
+	private readonly handleTerminalFocusIn = (): void => {
+		this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
+	};
+
+	// 只有用户此刻真的看着这个终端时才评估自动续跑：可见挂载、标签页可见、已有一份落屏的 restore
+	// （快照空不空是资格判据之一），且没有被预热延迟或进行中的「重新同步画面」抑制。
+	private isAllowedToEvaluateStaleSessionAutomaticResumeNow(): boolean {
+		return (
+			this.visibleContainer !== null &&
+			this.isMountedContainerVisible &&
+			this.documentVisible &&
+			this.restoreCompleted &&
+			!this.shouldDeferAutomaticSessionResumeUntilVisibleMount &&
+			!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync
+		);
+	}
+
+	// 「服务端 mirror 已随旧 runtime 丢失」这条证据必须反映 mirror 的**当前**状态，而不是某一刻的历史结论：
+	// 空 restore 之后只要渲染过任何内容——续跑后服务端写进新 mirror 的「Refreshing terminal session」banner、
+	// agent 输出——就说明 mirror 已经有东西了，证据随即作废。否则续跑出来的新活体之后在用户眼前自然退出，
+	// 过了冷却再回来，仍会被这份陈旧的空快照当成「mirror 已丢」再拉起一次（refresh 不会再要一份快照来纠正它）。
+	// hasRenderedAnyTerminalContent 正是「自最近一次空 restore 以来」的那一位：空快照落屏把它落回 false，
+	// 任何输出或非空快照把它置 true。
+	private readLatestRestoreSnapshotTrustedAsEvidenceOfServerTerminalMirrorLoss(): boolean {
+		return this.latestAppliedRestoreWasEmptyAndNotTriggeredByViewResync && !this.hasRenderedAnyTerminalContent;
+	}
+
+	private notifyAutomaticStaleSessionResumePhase(phase: StaleAgentTerminalSessionAutomaticResumePhase | null): void {
+		for (const subscriber of this.subscribers) {
+			subscriber.onAutomaticStaleSessionResumePhaseChange?.(phase);
+		}
+	}
 
 	private setDocumentVisible(visible: boolean): void {
 		if (this.documentVisible === visible) {
@@ -520,6 +559,12 @@ class PersistentTerminal {
 			// (见 awaitingRestoreSnapshot 字段注释的竞态说明)。
 			this.beginAwaitingRestoreSnapshotGate();
 			this.requestSnapshotResync();
+		}
+		// 标签页切回来 = 用户回到这个任务；切走时还在等停留时长的那一次作废。
+		if (visible) {
+			this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
+		} else {
+			this.staleAgentTerminalSessionAutomaticResumeScheduler.cancelPendingVisibleDwell();
 		}
 	}
 
@@ -689,45 +734,22 @@ class PersistentTerminal {
 		}
 	}
 
-	// 运行时（node 服务器）重启会杀掉终端 agent 的非-detached PTY 子进程，并丢失只存在内存里的
-	// scrollback mirror；新服务器 hydrate 出的会话 active=null、summary 降级为 idle（agentId 由服务端
-	// hydrate 从 board card 回填）。此时聚焦该任务 → 终端一片空白且无活会话。按约定「聚焦 + 空终端 +
-	// 未连到活 agent 会话」应自动续跑：经 refresh() 走 refreshTaskTerminal 的 resumeFromTrash 路径
-	// （--continue）在原 worktree 接回 agent 自己落盘的会话。空 restore 快照是「服务器死过一次、mirror
-	// 已丢」的权威信号——活会话 / 自然退出但服务器存活时 mirror 仍有内容、快照非空，故不会误触发。
-	private maybeAutoResumeStaleSession(hadSnapshot: boolean): void {
-		if (this.autoResumeAttempted || hadSnapshot) {
+	private copyTerminalSelectionToSystemClipboard(): void {
+		const selectedText = this.terminal.getSelection();
+		if (navigator.clipboard?.writeText) {
+			void navigator.clipboard.writeText(selectedText).catch(() => {
+				// Ignore clipboard failures.
+			});
 			return;
 		}
-		const summary = this.latestSummary;
-		// agentId===null → 无 agent 会话可续（全新 backlog / shell）；会话面板型 agent（Cline SDK /
-		// ACP）压根不走 PTY；pid!==null → 已有活 PTY，无需续跑。
-		if (
-			!summary ||
-			summary.agentId === null ||
-			isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) ||
-			summary.pid !== null
-		) {
-			return;
+		// 非安全上下文（经局域网 / tailnet 的 http 访问）没有 Clipboard API：在这次按键手势里同步触发原生 copy。
+		// 焦点就在 xterm 的 textarea 上，copy 事件冒泡到 xterm 自己的 copy 监听，由它把选区写进 clipboardData。
+		// 刻意不借隐藏 textarea：焦点移出终端会向开了焦点上报的 agent 发 `\e[O` / `\e[I`。
+		try {
+			document.execCommand("copy");
+		} catch {
+			// Ignore clipboard failures.
 		}
-		// 让位守卫（铁律：consumer 一律经 resolveSessionFacets 读 facet 做决策，不臆测 pid/state）：会话若停在
-		// 「用户回合」（awaiting review / 提问 / 待授权，turnOwner==="user"）则绝不自动续跑——那会用 --continue
-		// 抢跑 agent、把等待用户处理的 Review 会话强行推进。仅 agent 回合 / 无归属（真 idle）才续。
-		const facets = resolveSessionFacets(summary);
-		if (facets.turnOwner === "user" && facets.userTurnKind !== "question" && facets.userTurnKind !== "permission") {
-			return;
-		}
-		// 跨实例冷却：per-实例的 autoResumeAttempted 拦不住「换一份实例就重新放一次电」，
-		// 而持续性故障（服务端起不来）恰恰会不断制造新实例。见模块顶部该冷却表的注释。
-		const staleSessionAutoResumeCooldownKey = `${this.workspaceId}:${this.taskId}`;
-		if (!hasStaleSessionAutoResumeCooledDownForTask(staleSessionAutoResumeCooldownKey)) {
-			return;
-		}
-		this.autoResumeAttempted = true;
-		recordStaleSessionAutoResumeAttemptForTask(staleSessionAutoResumeCooldownKey);
-		void this.refresh("stale_session_client_auto_resume").catch(() => {
-			// 续跑失败不打断终端；Refresh 按钮仍可手动重试。
-		});
 	}
 
 	private notifySearchOpenRequested(): void {
@@ -796,7 +818,11 @@ class PersistentTerminal {
 	}
 
 	private sendIoData(data: string | Uint8Array): boolean {
-		if (!this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
+		if (
+			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
+			!this.ioSocket ||
+			this.ioSocket.readyState !== WebSocket.OPEN
+		) {
 			return false;
 		}
 		this.ioSocket.send(data);
@@ -917,7 +943,8 @@ class PersistentTerminal {
 	}
 
 	private requestResize(): void {
-		if (!this.visibleContainer) {
+		// 隐藏挂载仍有容器；尺寸观察、socket 打开与 restore 回调都不得因此调整活 PTY。
+		if (!this.visibleContainer || !this.isMountedContainerVisible) {
 			return;
 		}
 		const proposedDimensions = this.fitAddon.proposeDimensions();
@@ -1107,12 +1134,13 @@ class PersistentTerminal {
 							this.notifyConnectionReady();
 						}
 						// 「重新同步画面」引发的 restore 绝不允许升级成一次杀 agent 的 refreshTaskTerminal，
-						// 见 suppressNextStaleSessionAutoResumeTriggeredByViewResync 的字段注释。判定放在
+						// 见 suppressNextStaleSessionAutoResumeTriggeredByViewResync 的字段注释；它的快照也不作为
+						// 「mirror 已丢」的证据，见 latestAppliedRestoreWasEmptyAndNotTriggeredByViewResync。判定放在
 						// notifyRestoreSnapshotApplied 之前：那个通知会唤醒 resync 的等待者，而等待者返回后
 						// resync 的 finally 就把闩清了。
-						if (!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync) {
-							this.maybeAutoResumeStaleSession(Boolean(payload.snapshot));
-						}
+						this.latestAppliedRestoreWasEmptyAndNotTriggeredByViewResync =
+							!payload.snapshot && !this.suppressNextStaleSessionAutoResumeTriggeredByViewResync;
+						this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
 						this.notifyRestoreSnapshotApplied(arrivedRestoreSnapshotArrivalSequence);
 					})
 					.catch(() => {
@@ -1184,6 +1212,10 @@ class PersistentTerminal {
 		};
 	}
 
+	deferAutomaticSessionResumeUntilVisibleMount(): void {
+		if (this.isParked()) this.shouldDeferAutomaticSessionResumeUntilVisibleMount = true;
+	}
+
 	setAppearance(appearance: PersistentTerminalAppearance): void {
 		this.updateAppearance(appearance);
 	}
@@ -1198,6 +1230,9 @@ class PersistentTerminal {
 		if (this.connectionReady) {
 			subscriber.onConnectionReady?.(this.taskId);
 		}
+		subscriber.onAutomaticStaleSessionResumePhaseChange?.(
+			this.staleAgentTerminalSessionAutomaticResumeScheduler.getPhase(),
+		);
 		return () => {
 			this.subscribers.delete(subscriber);
 		};
@@ -1213,6 +1248,7 @@ class PersistentTerminal {
 		}
 		this.ensureConnected();
 		this.updateAppearance(appearance);
+		this.isMountedContainerVisible = options.isVisible !== false;
 		this.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView =
 			options.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView === true;
 		const shouldKeepScrolledToBottom = this.shouldKeepScrolledToBottom();
@@ -1246,6 +1282,12 @@ class PersistentTerminal {
 				// 所以这里补上与 `requestResize()` 里 `if (!this.visibleContainer) return;` 同源的那道
 				// 门：只有本终端此刻仍挂在发起这次 mount 的那个容器上，autoFocus 才算数。
 				const isStillMountedOnMountRequestContainer = this.visibleContainer === container;
+				// 每一次可见挂载都是「用户打开了这个任务」，包括从泊车区重新挂回来：那时 socket 没断、
+				// 不会有新的 restore，以前的「只在 restore 落屏时判」在这里永远轮不到。
+				if (isStillMountedOnMountRequestContainer) {
+					this.shouldDeferAutomaticSessionResumeUntilVisibleMount = false;
+					this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
+				}
 				if (
 					options.autoFocus &&
 					isStillMountedOnMountRequestContainer &&
@@ -1273,6 +1315,9 @@ class PersistentTerminal {
 			return;
 		}
 		this.visibleContainer = null;
+		this.isMountedContainerVisible = false;
+		// 用户已经离开这个任务：还在等停留时长的自动续跑作废（快速翻卡时沿途的卡都走这里）。
+		this.staleAgentTerminalSessionAutomaticResumeScheduler.cancelPendingVisibleDwell();
 		// 泊车终端不在任何视图内部，接管者身份随之作废：否则一个曾在详情视图里挂过的终端被泊车后
 		// 仍然放行 alt+↑/↓，而此刻详情视图早已卸载、热键无人注册，按键又落回被静默吞掉的老路。
 		this.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false;
@@ -1292,7 +1337,11 @@ class PersistentTerminal {
 	}
 
 	input(text: string): boolean {
-		if (!this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
+		if (
+			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
+			!this.ioSocket ||
+			this.ioSocket.readyState !== WebSocket.OPEN
+		) {
 			return false;
 		}
 		this.terminal.input(text);
@@ -1300,7 +1349,11 @@ class PersistentTerminal {
 	}
 
 	paste(text: string): boolean {
-		if (!this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
+		if (
+			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
+			!this.ioSocket ||
+			this.ioSocket.readyState !== WebSocket.OPEN
+		) {
 			return false;
 		}
 		this.terminal.paste(text);
@@ -1376,6 +1429,15 @@ class PersistentTerminal {
 				}
 				this.terminal.reset();
 			});
+	}
+
+	// 会话重启（sessionStartedAt 变了）时的清屏，清完立刻向服务端 mirror 要一份快照。只清不补会永久白屏：
+	// sessionStartedAt 也会因为摘要错配而变（跨项目切换时同号任务的旧摘要残留），这时 PTY 根本没换，
+	// agent 停在那里不会再有新输出。真重启时 mirror 本就是新会话的画面，补一份也无害。顺序有保证：
+	// applyRestore 先等写队列（含这次 reset）再清屏写快照。
+	resetForSessionRestartAndRequestServerMirrorSnapshot(): void {
+		this.reset();
+		this.requestSnapshotResync();
 	}
 
 	waitForLikelyPrompt(timeoutMs: number): Promise<boolean> {
@@ -1454,7 +1516,7 @@ class PersistentTerminal {
 	//
 	// 不变式：这条路径上不存在任何能到达 refreshTaskTerminal 的分支——全程只有 WebSocket 上的
 	// request_restore，不进 tRPC、不产生 TaskSessionStartOrigin、不参与自动重启熔断记账、不改
-	// sessionStartedAt。唯一一处需要显式堵的漏是 maybeAutoResumeStaleSession（它挂在每次 restore 应用上），
+	// sessionStartedAt。唯一一处需要显式堵的漏是陈旧会话自动续跑（它在每次 restore 应用上评估），
 	// 由 suppressNextStaleSessionAutoResumeTriggeredByViewResync 这道闩压住。
 	async resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession(): Promise<void> {
 		if (this.disposed) {
@@ -1503,11 +1565,17 @@ class PersistentTerminal {
 	}
 
 	// taskSessionStartOriginDeclaredByClient 纯归因、不改行为：默认不传即由服务端记成 refresh_task_terminal
-	// （人点的刷新），只有 maybeAutoResumeStaleSession 这条自动路径显式声明自己。不这样声明的话，服务端
+	// （人点的刷新），只有陈旧会话自动续跑这条自动路径显式声明自己。不这样声明的话，服务端
 	// 收到的两种请求逐字相同，而 refresh 实测占 pty 创建量的 68%——「这 68% 里有多少是程序自己点的」
 	// 正是排查会话反复重建时的第一个问题。
+	//
+	// adoptExistingAgentConversationAsTaskSessionIdentity：「从既有对话迁入」——服务端先把这段对话复制进本会话的
+	// 工作目录并钉成身份，再按 id 续跑（见 api-contract 的同名字段）。只由人在终端面板上选定后传入。
 	async refresh(
 		taskSessionStartOriginDeclaredByClient?: "stale_session_client_auto_resume",
+		adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
+		// 「停止后台会话并在这里续跑」：只有人在终端面板上确认后才传 true（服务端语义见 api-contract 同名字段）。
+		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean,
 	): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
 		this.suppressNextRestartReset = true;
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
@@ -1517,6 +1585,12 @@ class PersistentTerminal {
 				cols: this.terminal.cols,
 				rows: this.terminal.rows,
 				taskSessionStartOriginDeclaredByClient,
+				...(adoptExistingAgentConversationAsTaskSessionIdentity
+					? { adoptExistingAgentConversationAsTaskSessionIdentity }
+					: {}),
+				...(forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser
+					? { forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true }
+					: {}),
 			});
 			if (!result.ok) {
 				this.suppressNextRestartReset = false;
@@ -1539,6 +1613,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.disposed = true;
+		this.staleAgentTerminalSessionAutomaticResumeScheduler.dispose();
 		if (typeof document !== "undefined") {
 			document.removeEventListener("visibilitychange", this.handleVisibilityChange);
 		}
@@ -1587,6 +1662,7 @@ export function ensurePersistentTerminal(input: EnsurePersistentTerminalInput): 
 	const key = buildKey(input.workspaceId, input.taskId);
 	const existing = terminals.get(key);
 	if (existing) {
+		if (input.deferAutomaticSessionResumeUntilVisibleMount) existing.deferAutomaticSessionResumeUntilVisibleMount();
 		existing.setAppearance({
 			cursorColor: input.cursorColor,
 			terminalBackgroundColor: input.terminalBackgroundColor,
@@ -1598,11 +1674,16 @@ export function ensurePersistentTerminal(input: EnsurePersistentTerminalInput): 
 		reclaimParkedTerminalsBeyondLimit();
 		return existing;
 	}
-	const terminal = new PersistentTerminal(input.taskId, input.workspaceId, {
-		cursorColor: input.cursorColor,
-		terminalBackgroundColor: input.terminalBackgroundColor,
-		themeColors: input.themeColors,
-	});
+	const terminal = new PersistentTerminal(
+		input.taskId,
+		input.workspaceId,
+		{
+			cursorColor: input.cursorColor,
+			terminalBackgroundColor: input.terminalBackgroundColor,
+			themeColors: input.themeColors,
+		},
+		input.deferAutomaticSessionResumeUntilVisibleMount,
+	);
 	terminals.set(key, terminal);
 	// 刚创建的终端尚未 mount（isParked()===true）但处于 parkedKeys 末尾（最新），不会被本次 sweep 回收。
 	reclaimParkedTerminalsBeyondLimit();
@@ -1626,10 +1707,10 @@ export function disposeAllPersistentTerminalsForWorkspace(workspaceId: string): 
 		}
 		terminal.dispose();
 		terminals.delete(key);
-		// 这个 workspace 的终端被整体拆掉了，它的续跑冷却也一并作废：冷却拦的是「实例churn 导致
-		// 重复放电」，而整体拆除是一条粗粒度的、由外部显式触发的边界，不属于那种 churn。
-		// 注意与 disposePersistentTerminal 的区别——**那**条恰恰是切卡片时的实例 churn 本身，
-		// 在那里清冷却等于把这道守卫整个废掉。
-		staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.delete(key);
 	}
+	// 这个 workspace 的终端被整体拆掉了，它的续跑冷却也一并作废：冷却拦的是「实例 churn 导致
+	// 重复放电」，而整体拆除是一条粗粒度的、由外部显式触发的边界，不属于那种 churn。
+	// 注意与 disposePersistentTerminal 的区别——**那**条恰恰是切卡片时的实例 churn 本身，
+	// 在那里清冷却等于把这道守卫整个废掉。
+	forgetStaleSessionAutoResumeCooldownsForWorkspace(workspaceId);
 }

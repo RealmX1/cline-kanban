@@ -174,6 +174,20 @@ vi.mock(
 	},
 );
 
+// 排队投递的两条记账入口只做间谍：断言 runtime-api 只在「本次新建了投递意图」时调它们（记账本身另有集成测试）。
+const queuedTaskMessageDeliveryRecordingMocks = vi.hoisted(() => ({
+	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking: vi.fn(),
+	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking: vi.fn(),
+}));
+
+vi.mock(
+	"../../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording.js",
+	async (importOriginal) => ({
+		...(await importOriginal<typeof TaskMessageDeliveryRequestEventRecordingModule>()),
+		...queuedTaskMessageDeliveryRecordingMocks,
+	}),
+);
+
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
@@ -185,16 +199,20 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
+import { buildQueuedProgrammaticInjectionQueueEntryId } from "../../../src/core/queued-programmatic-injection-ledger-receipt-mirroring";
+import type * as TaskMessageDeliveryRequestEventRecordingModule from "../../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
 } from "../../../src/state/prompt-library-store";
+import { MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK } from "../../../src/state/queued-task-prompt-delivery-store";
 import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createTestRuntimeApi(
 	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "getScopedAcpTaskSessionService"> &
@@ -392,7 +410,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				},
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		});
 
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
@@ -766,6 +783,213 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 		expect(terminalManager.applyTurnCheckpoint).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+	});
+
+	// cf427：浏览器乐观建卡后立刻启动，卡片却可能永远落不了盘，agent 就成了没有卡片的孤儿会话。
+	describe("宿主卡未落盘时拒绝启动卡片会话", () => {
+		function createRuntimeApiWithTerminalManagerSpy() {
+			const terminalManager = {
+				getSummary: vi.fn(() => null),
+				listSummaries: vi.fn(() => []),
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			return { api, terminalManager };
+		}
+
+		it("主会话的卡不在盘上 board 里：不建 worktree、不 spawn，返回机器可读的拒绝原因", async () => {
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-created-only-in-browser-memory", baseRef: "main", prompt: "Install the skill" },
+			);
+			expect(response).toMatchObject({
+				ok: false,
+				summary: null,
+				taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+			});
+			expect(response.error).toContain("task-created-only-in-browser-memory");
+			expect(taskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("By the way 侧问会话按宿主卡（workspaceTaskId）判定", async () => {
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-conversation-session-side",
+					workspaceTaskId: "task-created-only-in-browser-memory",
+					baseRef: "main",
+					prompt: "Why?",
+					agentId: "codex",
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "task-created-only-in-browser-memory",
+						taskConversationSessionRole: "by_the_way",
+						taskConversationSessionContextSource: "started_from_scratch",
+						parentTaskConversationSessionId: "task-created-only-in-browser-memory",
+						mainSessionOriginTurnNumber: null,
+						mainSessionOriginUserMessagePreview: null,
+						latestUserMessagePreview: "Why?",
+					},
+				},
+			);
+			expect(response.taskSessionStartRejectionReason).toBe("task_card_not_yet_persisted_on_workspace_board");
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("宿主卡已在盘上（含 trash 列里的卡从 trash 恢复）时照常启动", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+			);
+			expect(response.ok).toBe(true);
+			expect(response.taskSessionStartRejectionReason).toBeUndefined();
+			expect(terminalManager.startTaskSession).toHaveBeenCalledOnce();
+		});
+
+		// 启动开始时卡还在、spawn 期间被别的客户端删掉：删卡方那时还看不到会话，只能由启动方自己停掉。
+		describe("启动开始时宿主卡在盘上、会话启动期间卡被删", () => {
+			function simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient(): void {
+				workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [] },
+						{ id: "review", title: "Review", cards: [] },
+						{ id: "trash", title: "Done", cards: [] },
+					],
+				});
+			}
+
+			it("终端会话：停掉刚启动的会话、不回写卡片、不打 checkpoint，返回同一拒绝原因", async () => {
+				taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+				workspaceStateMocks.mutateWorkspaceState.mockClear();
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => {
+						simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+						return createSummary();
+					}),
+					stopTaskSession: vi.fn(() => createSummary({ state: "interrupted" })),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+				);
+
+				expect(response).toMatchObject({
+					ok: false,
+					summary: null,
+					taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+				});
+				expect(response.error).toContain("task-1");
+				expect(terminalManager.startTaskSession).toHaveBeenCalledOnce();
+				expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith("task-1");
+				expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+			});
+
+			it("Cline 会话：经 Cline 会话服务停掉刚启动的会话，返回同一拒绝原因", async () => {
+				taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+				agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
+				setSelectedProviderSettings({
+					provider: "anthropic",
+					model: "claude-sonnet-4-6",
+					apiKey: "anthropic-api-key",
+				});
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => createSummary()),
+					stopTaskSession: vi.fn(() => null),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const clineTaskSessionService = createClineTaskSessionServiceMock();
+				clineTaskSessionService.startTaskSession.mockImplementation(async () => {
+					simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+					return createSummary({ agentId: "cline", pid: null });
+				});
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => {
+						const runtimeConfigState = createRuntimeConfigState();
+						runtimeConfigState.selectedAgentId = "cline";
+						return runtimeConfigState;
+					}),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+				);
+
+				expect(response).toMatchObject({
+					ok: false,
+					summary: null,
+					taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+				});
+				expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledExactlyOnceWith("task-1");
+				expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+			});
+
+			it("侧边栏 home agent 会话不属于任何卡片：盘上 board 怎么变都照常启动、不被停", async () => {
+				const homeTaskId = "__home_agent__:workspace-1:codex";
+				simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => createSummary({ taskId: homeTaskId })),
+					stopTaskSession: vi.fn(() => null),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: homeTaskId, baseRef: "main", prompt: "" },
+				);
+
+				expect(response.ok).toBe(true);
+				expect(response.taskSessionStartRejectionReason).toBeUndefined();
+				expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+			});
+		});
 	});
 
 	it("rejects By the way runtime sessions for unsupported agents", async () => {
@@ -1695,7 +1919,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
 			agentId: config.selectedAgentId,
@@ -1771,6 +1994,82 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	// 前端自动续跑不再以「停在用户回合」为由让位，打开一张 Done 卡不能因此把 agent 复活；人点的重启照常放行。
+	it.each([
+		{ declaredOrigin: "stale_session_client_auto_resume" as const, expectsRestart: false },
+		{ declaredOrigin: undefined, expectsRestart: true },
+	])(
+		"Done 卡：自动续跑被拒、人点的重启照常（声明来源=$declaredOrigin）",
+		async ({ declaredOrigin, expectsRestart }) => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [{ id: "trash", cards: [{ id: "task-1", agentId: "claude" }] }],
+			});
+			const terminalManager = {
+				getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+				refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.refreshTaskTerminal(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					cols: 120,
+					rows: 40,
+					...(declaredOrigin ? { taskSessionStartOriginDeclaredByClient: declaredOrigin } : {}),
+				},
+			);
+
+			expect(response.ok).toBe(expectsRestart);
+			expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledTimes(expectsRestart ? 1 : 0);
+		},
+	);
+
+	// 「停止后台会话并在这里续跑」：终端面板确认接管后，字段必须一路传到 terminalManager——漏在这一环就是
+	// 按钮能点、确认框能弹，服务端却照旧拒绝（runbook「runtime-api 传参最易漏」同一类）。
+	it("forwards the user-confirmed takeover of a Claude background session to the terminal manager", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				cols: 120,
+				rows: 40,
+				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true,
+			},
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.anything(), "refresh_task_terminal", {
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true,
+		});
+	});
+
 	it("keeps recording an undeclared refresh as a human refresh so older clients read the same", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
@@ -1826,7 +2125,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
 			agentId: config.selectedAgentId,
@@ -1886,7 +2184,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
@@ -1978,6 +2275,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -2066,7 +2364,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", title: "In Progress", cards: [] }],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() =>
@@ -2118,7 +2415,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
@@ -2171,12 +2467,12 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		} as unknown as RuntimeBoardData;
 		let savedBoard: RuntimeBoardData | null = null;
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -2491,6 +2787,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const sendResponse = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-1", text: "hello" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(sendResponse.ok).toBe(true);
 		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
@@ -2545,6 +2842,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "  /clear  " },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response).toEqual({
@@ -2587,6 +2885,7 @@ describe("createRuntimeApi startTaskSession", () => {
 					},
 				],
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2728,6 +3027,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-1", text: "continue" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2785,6 +3085,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: " rvf-run-1 ",
 				promptSha256: " abc123 ",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2830,6 +3131,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2921,6 +3223,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-acp-1",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2971,6 +3274,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-acp-2",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -3011,6 +3315,7 @@ describe("createRuntimeApi startTaskSession", () => {
 					},
 				],
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response).toEqual({
@@ -3059,6 +3364,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -3115,6 +3421,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "continue home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -3164,6 +3471,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -4346,7 +4654,6 @@ describe("createRuntimeApi resumed claude session model", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		} as RuntimeBoardData;
 	}
 
@@ -4364,6 +4671,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -4651,14 +4959,15 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	function createAcpServiceMockWithLiveSession() {
@@ -4697,6 +5006,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(response.ok).toBe(false);
 		expect(response.error).toContain("only one session transport");
@@ -4733,6 +5043,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(acpTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-omp");
@@ -4777,6 +5088,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -4963,13 +5275,17 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			runCommand: vi.fn(),
 		});
 
-		await api.sendTaskChatMessage(scope, {
-			taskId: "task-1",
-			text: "继续 RVF",
-			source: "review-validate-fix",
-			idempotencyKey: "rvf-contention-1",
-			promptSha256: "abc123",
-		});
+		await api.sendTaskChatMessage(
+			scope,
+			{
+				taskId: "task-1",
+				text: "继续 RVF",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-contention-1",
+				promptSha256: "abc123",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 
 		const deliveryOptions = terminalManager.submitTaskChatInputWhenReady.mock.calls[0]?.[2];
 		if (!deliveryOptions?.preemptivelyStashHumanInputBox) {
@@ -5124,13 +5440,17 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
-		await api.sendTaskChatMessage(scope, {
-			taskId: "task-1",
-			text: "继续 RVF",
-			source: "review-validate-fix",
-			idempotencyKey: `rvf-preemption-${scope.workspaceId}`,
-			promptSha256: "abc123",
-		});
+		await api.sendTaskChatMessage(
+			scope,
+			{
+				taskId: "task-1",
+				text: "继续 RVF",
+				source: "review-validate-fix",
+				idempotencyKey: `rvf-preemption-${scope.workspaceId}`,
+				promptSha256: "abc123",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		const preemptivelyStashHumanInputBox =
 			terminalManagerWithDelivery.submitTaskChatInputWhenReady.mock.calls[0]?.[2]?.preemptivelyStashHumanInputBox;
 		if (!preemptivelyStashHumanInputBox) {
@@ -5353,5 +5673,240 @@ describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTas
 				taskId: "task-1",
 			}),
 		).toEqual([]);
+	});
+});
+
+// 排队 prompt 的两条 procedure。出队引擎本身有独立的行为网（queued-task-prompt-delivery-dispatcher.test.ts），
+// 这里只钉 procedure 层自己的语义：空正文拒绝、队列满时**说出来**、在途取消的回执原样带回、改动后通知引擎。
+describe("createRuntimeApi task prompt delivery queue", () => {
+	const createdWorkspaceDirectoryPaths: string[] = [];
+
+	function createQueueWorkspaceScope(): { workspaceId: string; workspacePath: string } {
+		const workspaceId = `queued-prompt-${process.pid}-${Math.random().toString(16).slice(2)}`;
+		const workspaceDirectoryPath = `/tmp/kanban-workspaces/${workspaceId}`;
+		mkdirSync(workspaceDirectoryPath, { recursive: true });
+		createdWorkspaceDirectoryPaths.push(workspaceDirectoryPath);
+		return { workspaceId, workspacePath: "/tmp/repo" };
+	}
+
+	function createQueueApi(
+		scope: { workspaceId: string },
+		dispatcher: CreateRuntimeApiDependencies["queuedTaskPromptDeliveryDispatcher"],
+	) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			queuedTaskPromptDeliveryDispatcher: dispatcher,
+		});
+	}
+
+	function createDispatcherDouble() {
+		return {
+			notifyQueueMutated: vi.fn(async () => {}),
+			cancelInFlightQueuedPromptDelivery: vi.fn(async () => null),
+			buildProjectedEntriesByTaskId: vi.fn(async () => ({})),
+		};
+	}
+
+	afterEach(() => {
+		for (const path of createdWorkspaceDirectoryPaths.splice(0)) {
+			rmSync(path, { recursive: true, force: true });
+		}
+	});
+
+	it("入队后读得回，且改动之后通知出队引擎（触发源 b：agent 已经闲着时立刻出队）", async () => {
+		const scope = createQueueWorkspaceScope();
+		const dispatcher = createDispatcherDouble();
+		const api = createQueueApi(scope, dispatcher);
+		const mutated = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q1",
+					text: "跑测试",
+				},
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(mutated.ok).toBe(true);
+		expect(dispatcher.notifyQueueMutated).toHaveBeenCalledWith(scope.workspaceId, "task-1", mutated.queue);
+		const read = await api.getTaskPromptDeliveryQueue(scope as never, {});
+		expect(read.queue?.entriesByTaskId["task-1"]?.map((entry) => entry.text)).toEqual(["跑测试"]);
+		expect(read.projectedEntriesByTaskId).toEqual({});
+	});
+
+	it("空正文拒绝入队", async () => {
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const mutated = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q1",
+					text: "   ",
+				},
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(mutated.ok).toBe(false);
+	});
+
+	// 队列满与幂等重发在快照上长得一样；不单独说出来，用户会以为自己排上了。
+	it("队列满时 ok:false 并明说是满了", async () => {
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		for (let index = 0; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
+			await api.mutateTaskPromptDeliveryQueue(
+				scope as never,
+				{
+					mutation: {
+						kind: "enqueue_prompt_for_delivery_after_current_turn",
+						taskId: "task-1",
+						queueEntryId: `q${index}`,
+						text: `第 ${index} 条`,
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+		}
+		const overflow = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "overflow",
+					text: "再排一条",
+				},
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(overflow).toMatchObject({ ok: false, enqueueRefusedBecauseQueueCapacityIsExhausted: true });
+		// 幂等重发不算被拒。
+		const replay = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q0",
+					text: "第 0 条",
+				},
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(replay.ok).toBe(true);
+		expect(replay.enqueueRefusedBecauseQueueCapacityIsExhausted).toBeUndefined();
+	});
+
+	// dd2db T2：人排条目也是一次「请求向会话投递消息」，按请求证据记 message 事件；只有本次真的新建了条目才算新意图。
+	it("人排入队只在本次新建条目时记投递请求：同 id 重发与满额被拒都不记", async () => {
+		const recordUserQueued =
+			queuedTaskMessageDeliveryRecordingMocks.recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking;
+		recordUserQueued.mockClear();
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const enqueue = (queueEntryId: string, text: string) =>
+			api.mutateTaskPromptDeliveryQueue(
+				scope as never,
+				{
+					mutation: {
+						kind: "enqueue_prompt_for_delivery_after_current_turn",
+						taskId: "task-1",
+						queueEntryId,
+						text,
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+
+		await enqueue("q0", "第 0 条");
+		expect(recordUserQueued).toHaveBeenCalledTimes(1);
+		expect(recordUserQueued).toHaveBeenCalledWith({
+			workspaceId: scope.workspaceId,
+			newlyCreatedQueueEntry: expect.objectContaining({ queueEntryId: "q0", taskId: "task-1", text: "第 0 条" }),
+			retriedFromSettledFailedQueueEntryId: null,
+			kanbanRequestOriginActorEvidence:
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		});
+		await enqueue("q0", "第 0 条");
+		expect(recordUserQueued).toHaveBeenCalledTimes(1);
+
+		for (let index = 1; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
+			await enqueue(`q${index}`, `第 ${index} 条`);
+		}
+		expect(recordUserQueued).toHaveBeenCalledTimes(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK);
+		const overflow = await enqueue("overflow", "再排一条");
+		expect(overflow.enqueueRefusedBecauseQueueCapacityIsExhausted).toBe(true);
+		expect(recordUserQueued).toHaveBeenCalledTimes(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK);
+	});
+
+	it("CLI 空闲门控入队只在新建注入账本记录时记投递请求，同 key 重发不记", async () => {
+		const recordAgentIdleGated =
+			queuedTaskMessageDeliveryRecordingMocks.recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking;
+		recordAgentIdleGated.mockClear();
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const request = {
+			taskId: " task-1 ",
+			text: "RVF 决策点边界标记",
+			source: "rvf",
+			idempotencyKey: " rvf-boundary-1 ",
+			promptSha256: "sha-1",
+			maxWaitForAgentIdleMs: 600_000,
+		};
+
+		const first = await api.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+			scope as never,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(first).toEqual({ ok: true, injectionLedgerRecordDisposition: "created" });
+		expect(recordAgentIdleGated).toHaveBeenCalledTimes(1);
+		expect(recordAgentIdleGated).toHaveBeenCalledWith({
+			workspaceId: scope.workspaceId,
+			taskId: "task-1",
+			messageBodyText: "RVF 决策点边界标记",
+			taskMessageDeliveryIdempotencyKey: "rvf-boundary-1",
+			declaredMessageSourceLabel: "rvf",
+			queuedPromptDeliveryQueueEntryId: buildQueuedProgrammaticInjectionQueueEntryId("rvf-boundary-1"),
+			maxWaitForAgentIdleMs: 600_000,
+			kanbanRequestOriginActorEvidence:
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		});
+
+		const replay = await api.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+			scope as never,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(replay).toEqual({ ok: true, injectionLedgerRecordDisposition: "already_existed" });
+		expect(recordAgentIdleGated).toHaveBeenCalledTimes(1);
+	});
+
+	// already_delivered 必须让用户看见（「来不及了，已经发出去」）。
+	it("取消时把在途投递的取消回执原样带回", async () => {
+		const scope = createQueueWorkspaceScope();
+		const dispatcher = createDispatcherDouble();
+		dispatcher.cancelInFlightQueuedPromptDelivery.mockResolvedValue("already_delivered" as never);
+		const api = createQueueApi(scope, dispatcher);
+		const cancelled = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: { kind: "cancel_queued_prompt_delivery", taskId: "task-1", queueEntryId: "q1" },
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(dispatcher.cancelInFlightQueuedPromptDelivery).toHaveBeenCalledWith(scope.workspaceId, "task-1", "q1");
+		expect(cancelled.inFlightDeliveryCancelResult).toBe("already_delivered");
 	});
 });

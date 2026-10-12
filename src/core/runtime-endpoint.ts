@@ -91,6 +91,51 @@ export function isKanbanRuntimeHttps(): boolean {
 	return runtimeHttps;
 }
 
+export interface KanbanAdditionalTrustedBrowserOrigin {
+	// 浏览器在 Origin 头里发来的值，例如 `https://my-machine.example-tailnet.ts.net:3485`。
+	browserOrigin: string;
+	// 同一地址在 Host 头里的写法。默认端口（https 443 / http 80）时浏览器不带端口，`URL.host` 的规则与之一致。
+	hostHeaderValue: string;
+}
+
+/**
+ * 经反向代理（典型是 `tailscale serve`）访问时，浏览器看到的 origin 与 runtime 自己监听的 origin 不同，
+ * 同源校验会把它拒掉。这里登记的 origin 及其 Host 一并放行。
+ *
+ * 刻意只存在模块内、不写 `process.env`：runtime 派生的 agent 子进程（以及它们跑的测试）不该继承这份信任。
+ * 也刻意不影响 `isKanbanRemoteHost()`：runtime 仍只绑在本机回环地址上，passcode 门禁等远程模式行为不触发。
+ */
+let additionalTrustedBrowserOrigins: readonly KanbanAdditionalTrustedBrowserOrigin[] = [];
+
+export function parseKanbanAdditionalTrustedBrowserOrigin(rawOrigin: string): KanbanAdditionalTrustedBrowserOrigin {
+	const invalid = (reason: string) =>
+		new Error(
+			`Invalid --additional-trusted-browser-origin value "${rawOrigin}": ${reason}. ` +
+				"Expected a bare origin such as https://my-machine.tailnet-name.ts.net:3485.",
+		);
+	let url: URL;
+	try {
+		url = new URL(rawOrigin.trim());
+	} catch {
+		throw invalid("not a URL");
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw invalid("only http and https are supported");
+	}
+	if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+		throw invalid("an origin must not include credentials, a path, a query or a fragment");
+	}
+	return { browserOrigin: url.origin, hostHeaderValue: url.host.toLowerCase() };
+}
+
+export function setKanbanAdditionalTrustedBrowserOrigins(rawOrigins: readonly string[]): void {
+	additionalTrustedBrowserOrigins = rawOrigins.map(parseKanbanAdditionalTrustedBrowserOrigin);
+}
+
+export function getKanbanAdditionalTrustedBrowserOrigins(): readonly KanbanAdditionalTrustedBrowserOrigin[] {
+	return additionalTrustedBrowserOrigins;
+}
+
 const LOCALHOST_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /**

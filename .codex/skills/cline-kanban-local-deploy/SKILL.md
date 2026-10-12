@@ -77,9 +77,9 @@ Present this as the default because source edits are not live until the build/li
      - 正向新增:`git log --oneline --no-decorate <OLD>..<NEW>` —— 列为「本次新投入使用的 N 个源 commit」。
      - 反向兜底:`git log --oneline --no-decorate <NEW>..<OLD>` —— 若非空说明发生回滚/分叉,标为「⚠️ M 个 commit 被回退」并如实给出方向,别只报单向。
    - 诚实覆盖三类边界:① OLD 为「无基线」→ 报「无基线(首次/不可知),仅列出本次 NEW 所在的源 commit」;② 正向与反向区间皆空 → 报「与上次部署为同一 commit,无新增」;③ 区间命令失败(OLD 已不在本 repo,git 报 `unknown revision`)→ 退化为直接给出 OLD/NEW 两个 SHA、不做区间。
-   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选,缺省按 source checkout 路径匹配已注册 workspace)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(新 uuid)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Post-Deploy Verification 组、关联本次 delta 命中的任务提交。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、关联任务数),并入本步汇报。
+   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选,缺省按 source checkout 路径匹配已注册 workspace)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(新 uuid)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Post-Deploy Verification 组:按任务提交来历匹配本次 delta,把任务归入三区(本次上线 / 早先部署已上线待核对 / 未上线或无从归属),上一组未结案任务连同勾选进度延续进新组(机制见 `docs/post-deploy-verification.md`)。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、`tasksShippedInThisDeploymentCount` 与 `tasksShippedInThisDeployment` 明细、积压与未归属计数),并入本步汇报——**重点报「本次部署上线」的那几个任务**,积压只报计数。`tasksShippedInThisDeployment` 明细与 `tasksShippedInThisDeploymentCount` 同口径,只含本次上线、待核对的任务;提交也随本次上线、但建组时已在 Done 的任务是只读展示,不在明细里,只计入 `tasksAlreadyInDoneShownReadOnlyCount`。
    - 措辞锚在 runtime 语义:「现在运行的 build 反映了这些源 commit」,不要写成「源码集成了这些 commit」(那是 upstream-update skill 的语义)。
-   - `record` 之后,跑 `kanban deployment verification-state --active-only`(可加 `--project-path`)汇报本次部署组挂载的 Post-Deploy Verification 定义:逐条列出 automated / guided 的条数与每条的 item id + label。若某任务实现阶段应注册验证却在此 0 挂载,标为「⚠️ 未挂载异常」提示用户(可能 RVF 阶段漏调 authoring skill)。
+   - Post-Deploy Verification 只汇报 `record` 返回 JSON 里已有的字段:计数字段(`totalVerificationTaskCount`、`tasksShippedInThisDeploymentCount`、`tasksDeployedOnlyInEarlierDeploymentsAwaitingVerificationCount`、`tasksNotYetDeployedOrUnattributableCount`、`tasksCarriedForwardWithVerificationProgressCount`、`tasksAlreadyInDoneShownReadOnlyCount`、`authoredVerificationItemCount`)合成一行;`tasksShippedInThisDeployment` 里的任务逐个列出(只列 taskId 与匹配到的 commit,不展开验证项),条数应等于 `tasksShippedInThisDeploymentCount`。**不要**再跑 `kanban deployment verification-state`,也不要逐条列出积压任务或任何验证项——积压任务会随每次部署延续进新组,逐条列出动辄上百条。用户明确要求看明细时,才按需跑 `kanban deployment verification-state --active-only --project-path <repo>`,或请用户到 Web UI 的验证面板查看。
 
 7. If something looks wiped, stop and recover from artifacts.
    - Do not move cards, trash tasks, run cleanup, or reset worktrees again.
@@ -95,8 +95,7 @@ Report:
 - Whether any source files or version files were intentionally changed; normally this skill should not change version files.
 - Where runtime backups were saved.
 - Which service/process is now running and how it was launched.
-- 现在运行的 build 对应的源 commit(NEW),以及 `kanban deployment record` 的记录结果:部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)、本次 `deploymentId`、以及本次 Post-Deploy Verification 组关联的任务数。
-- 本次部署组挂载的 Post-Deploy Verification 定义汇报(来自 `deployment verification-state --active-only`):automated / guided 条数、逐条 item id + label,以及任何「应注册却未挂载」的异常提示。
+- 现在运行的 build 对应的源 commit(NEW),以及 `kanban deployment record` 的记录结果:部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)、本次 `deploymentId`、本次部署上线的任务(逐个列出),以及本次 Post-Deploy Verification 组的一行计数摘要(验证任务总数 / 本次上线 / 早先已上线待核对 / 未上线或无从归属 / 延续 / 已在 Done 只读展示 / authored 验证项数,均取自 `record` 输出,积压不逐条列出)。
 - Validation commands and results.
 - Any residual risk, especially tasks that lost live processes and need manual resume.
 

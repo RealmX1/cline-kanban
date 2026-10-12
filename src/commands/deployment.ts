@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
-import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
 import type {
 	RuntimeBoardColumnId,
 	RuntimePostDeployVerificationAcknowledgement,
 	RuntimePostDeployVerificationDeploymentGroup,
+	RuntimePostDeployVerificationDoneEntryClosureRequest,
 	RuntimePostDeployVerificationPendingConfirmation,
 	RuntimePostDeployVerificationState,
 	RuntimePostDeployVerificationTask,
@@ -17,26 +17,41 @@ import { runtimePostDeployVerificationAcknowledgementSchema } from "../core/api-
 import { parsePostDeployVerificationState } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { getTaskColumnId } from "../core/task-board-mutations";
-import { materializeAuthoredVerificationItemsForTask } from "../deployment/authored-verification-definitions";
-import { readDeployMarker } from "../deployment/deploy-marker";
+import {
+	isChecklistOfPostDeployVerificationTaskFullyChecked,
+	resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask,
+} from "../deployment/post-deploy-verification-closure-application";
+import { listPostDeployVerificationDeferredNaturalUsageObservationRecords } from "../deployment/post-deploy-verification-deferred-natural-usage-observation-records";
+import {
+	isPostDeployVerificationTaskAwaitingVerification,
+	isPostDeployVerificationTaskClosed,
+} from "../deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	computeRequiredAcknowledgementsForColumn,
-	createDeploymentGroup,
-	createPostDeployVerificationTaskWithSeededChecklist,
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
-	markTaskVerified,
 	migrateLegacyPostDeployVerificationStateFileIfNeeded,
 	setPendingConfirmation,
 	updateTaskChecklist,
 } from "../deployment/post-deploy-verification-state";
-import type { DeploymentCorrelationTaskInput } from "../deployment/task-deploy-correlation";
-import { correlateTasksWithDeployDelta } from "../deployment/task-deploy-correlation";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceBoardById, loadWorkspaceContext, loadWorkspaceContextById } from "../state/workspace-state";
-import { runGit } from "../workspace/git-utils";
-import { createRuntimeTrpcClient, printJson, trashTaskById } from "./task";
+import { recordDeploymentWithTaskDeploymentAttribution } from "./deployment-record-with-task-deployment-attribution";
+import {
+	acknowledgementSetsEqual,
+	buildKanbanCliCompletionAuthorizedBeforeMoveIntoDone,
+	decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded,
+	formatKanbanCliPostDeployVerificationCompletionRetryCommand,
+	type KanbanCliPostDeployVerificationCompletionEntryPoint,
+	type KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded,
+} from "./post-deploy-verification-moved-to-done-but-verified-at-unrecorded-cli-retry";
+import {
+	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+	type PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+	parsePostDeployVerificationDoneEntryClosureFromCliOptions,
+} from "./post-deploy-verification-unchecked-item-closure-reason-cli-options";
+import { createRuntimeTrpcClient, printJson } from "./task";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -44,8 +59,6 @@ type JsonRecord = Record<string, unknown>;
 const CONFIRMATION_TOKEN_TTL_MS = 15 * 60 * 1000;
 // agent response 预览统一截断上限（plan Grilling #5）。
 const AGENT_RESPONSE_PREVIEW_MAX_CHARS = 800;
-
-const KANBAN_PACKAGE_VERSION = typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
 
 function toErrorMessage(error: unknown): string {
 	if (error instanceof Error && error.message.trim().length > 0) {
@@ -113,25 +126,21 @@ function findTaskInGroup(
 	return group.tasks.find((task) => task.taskId === taskId) ?? null;
 }
 
-function checklistFullyChecked(task: RuntimePostDeployVerificationTask): boolean {
-	return task.checklist.length > 0 && task.checklist.every((item) => item.checked);
-}
-
-function acknowledgementSetsEqual(
-	left: RuntimePostDeployVerificationAcknowledgement[],
-	right: RuntimePostDeployVerificationAcknowledgement[],
-): boolean {
-	const leftSet = new Set(left);
-	const rightSet = new Set(right);
-	if (leftSet.size !== rightSet.size) {
-		return false;
+// 完成核对的放行条件：全勾，或随命令给出的原因覆盖全部未勾项（真正的裁决在 runtime 门禁；这里提前给出可读的拒绝）。
+function describeUncheckedChecklistItemsLackingClosureReason(
+	task: RuntimePostDeployVerificationTask,
+	closure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined,
+): string | null {
+	if (isChecklistOfPostDeployVerificationTaskFullyChecked(task)) {
+		return null;
 	}
-	for (const value of leftSet) {
-		if (!rightSet.has(value)) {
-			return false;
-		}
+	const resolution = resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask(task, closure);
+	if (resolution.uncheckedChecklistItemClosureReasonsCoverAllUncheckedItems) {
+		return null;
 	}
-	return true;
+	return `Checklist is not fully checked. Give a closure reason for each unchecked item (--closure-reason-for-all-unchecked-items <code> [--closure-reason-text <text>] or --closure-reasons-file <path>): ${resolution.uncheckedChecklistItemsMissingClosureReason
+		.map((item) => `${item.id} (${item.label})`)
+		.join("; ")}`;
 }
 
 function acknowledgementMismatchMessage(required: RuntimePostDeployVerificationAcknowledgement[]): string {
@@ -210,7 +219,7 @@ interface LiveWorkspaceRuntime {
 }
 
 // 凡触发移列的路径都须 live runtime（plan server 依赖边界）：server 不在则明确报错、不静默降级
-// （trashTaskById 内部对 tRPC 副作用是 catch-and-ignore，故必须在移列前显式探活）。
+// （移入 Done 的停会话 / 删 worktree 收尾对失败是吞掉不抛的，故必须在移列前显式探活）。
 async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWorkspaceRuntime> {
 	const context = await loadWorkspaceContextById(workspaceId);
 	if (!context) {
@@ -227,34 +236,190 @@ async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWor
 	}
 }
 
-async function moveTaskToDoneAndMarkVerified(input: {
+function confirmedAcknowledgementsOfEntryPoint(
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint,
+): RuntimePostDeployVerificationAcknowledgement[] {
+	// validation 列直接完成（verification-complete）不需要任何确认项。
+	return entryPoint.kind === "verification_complete_without_confirmation_token"
+		? []
+		: entryPoint.presentedAcknowledgements;
+}
+
+// 结案由 runtime 写：「PDV 通过」与「带原因结案」事件只能由 runtime 记进关系账本（dd2db Y-EVENT-14），CLI 进程直接写状态文件会漏记。
+// 2026-10-11 起移入 Done 时 taskCardAction 门禁已在 runtime 结案，这一步通常是幂等命中；只在门禁结案没写成时真正结案。
+async function markTaskVerifiedThroughRuntimeAfterItWasMovedToDone(input: {
 	deploymentId: string;
 	taskId: string;
+	live: LiveWorkspaceRuntime;
+	confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: boolean;
+	confirmedAcknowledgements: RuntimePostDeployVerificationAcknowledgement[];
+	uncheckedChecklistItemClosureReasons: NonNullable<
+		RuntimePostDeployVerificationDoneEntryClosureRequest["uncheckedChecklistItemClosureReasons"]
+	>;
+}): Promise<{ ok: boolean; task: RuntimePostDeployVerificationTask | null; error?: string }> {
+	return await input.live.client.deployment.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone
+		.mutate({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			// 过渡期两个字段同值双写：旧 runtime（刚构建完、还没重启）把历史字段定为必填，缺了会拒收补记请求。
+			forcedCompletionWithoutAllVerificationsPassed:
+				input.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+			confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag:
+				input.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+			confirmedAcknowledgements: input.confirmedAcknowledgements,
+			uncheckedChecklistItemClosureReasons: input.uncheckedChecklistItemClosureReasons,
+		})
+		.catch((error: unknown) => ({ ok: false, task: null, error: toErrorMessage(error) }));
+}
+
+function describeVerifiedAtUnrecordedAfterMoveToDone(input: {
+	markError: string | undefined;
+	movedToDoneByThisCommand: boolean;
+	inFlightCompletionRecordExpiresAtIso: string;
+	kanbanCliCommandToRetry: string;
+}): JsonRecord {
+	return {
+		ok: false,
+		moved: input.movedToDoneByThisCommand,
+		verifiedAt: null,
+		error: `${input.markError ?? "Failed to mark task verified after moving it to done."} The task is already in done but its verification was not recorded; re-run the same command before ${input.inFlightCompletionRecordExpiresAtIso} to record it.`,
+		retryCommand: input.kanbanCliCommandToRetry,
+		retryBeforeIso: input.inFlightCompletionRecordExpiresAtIso,
+	};
+}
+
+async function moveTaskToDoneAndMarkVerified(input: {
+	deploymentId: string;
+	task: RuntimePostDeployVerificationTask;
 	currentColumnId: RuntimeBoardColumnId;
 	live: LiveWorkspaceRuntime;
 	nowIso: string;
-	forced: boolean;
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint;
+	closure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
 }): Promise<JsonRecord> {
-	const trashed = await trashTaskById({
-		cwd: process.cwd(),
-		taskId: input.taskId,
-		projectPath: input.live.repoPath,
-		workspaceRepoPath: input.live.repoPath,
-		runtimeClient: input.live.client,
+	const taskId = input.task.taskId;
+	const forced = input.entryPoint.kind === "verification_confirm_with_force_break_glass";
+	const confirmedAcknowledgements = confirmedAcknowledgementsOfEntryPoint(input.entryPoint);
+	const resolution = resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask(
+		input.task,
+		input.closure,
+	);
+	const uncheckedChecklistItemClosureReasons = resolution.uncheckedChecklistItemClosureReasonsCoverAllUncheckedItems
+		? resolution.resolvedReasons
+		: [];
+	// 移列前先落「在途完成记录」（pendingConfirmation 形状；token 路径沿用用户手里那枚 token、只刷新过期）：
+	// 移列成功而 runtime 结案失败时，它让 reconcile 不把任务误标 moved_out_manually，
+	// 并作为原样重跑本命令时「只补记结案」的授权证据（判定见 decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded）；
+	// 没人重跑时，runtime 下次为该项目加载 PDV 状态（如 Web UI 面板轮询）时凭它自行补写，不受 15 分钟过期限制，
+	// 所属部署组已被新部署折叠也一样；CLI 的 verification-state 只读文件，不触发补写。
+	const inFlightCompletionRecord: RuntimePostDeployVerificationPendingConfirmation = {
+		token:
+			input.entryPoint.kind === "verification_confirm_with_confirmation_token"
+				? input.entryPoint.presentedConfirmationToken
+				: randomUUID(),
+		expiresAtIso: new Date(Date.parse(input.nowIso) + CONFIRMATION_TOKEN_TTL_MS).toISOString(),
+		requiredAcknowledgements: confirmedAcknowledgements,
+		columnIdAtIssuance: input.currentColumnId,
+		// 走到这里时授权已核对完毕；runtime 据此在结案失败、又没人重跑命令时自行补写，门禁也据此认出这次移列来自 CLI 完成动词。
+		kanbanCliCompletionAuthorizedBeforeMoveIntoDone: buildKanbanCliCompletionAuthorizedBeforeMoveIntoDone({
+			authorizedAtIso: input.nowIso,
+			confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: forced,
+			uncheckedChecklistItemClosureReasons,
+		}),
+	};
+	const recorded = await setPendingConfirmation(input.deploymentId, taskId, inFlightCompletionRecord, input.nowIso);
+	if (!recorded.ok) {
+		return { ok: false, error: recorded.error ?? "Failed to record the in-flight completion before moving to done." };
+	}
+	// 移入 Done 的整条副作用链（门禁结案 → 移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）由 runtime 的
+	// taskCardAction 执行，与浏览器 PDV 面板走的是同一个实现。原因随请求带上，门禁据此结案。
+	const movedIntoDone =
+		await input.live.client.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
+			taskId,
+			postDeployVerificationDoneEntryClosure: {
+				uncheckedChecklistItemClosureReasons,
+				confirmedAcknowledgements,
+			},
+		});
+	const taskWorktreeDeletionResult = movedIntoDone.taskWorktreeDeletionResult;
+	// 移列成功后确认结案（门禁已结案则幂等命中；顺带清 pendingConfirmation token）。
+	const marked = await markTaskVerifiedThroughRuntimeAfterItWasMovedToDone({
+		deploymentId: input.deploymentId,
+		taskId,
+		live: input.live,
+		confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: forced,
+		confirmedAcknowledgements,
+		uncheckedChecklistItemClosureReasons,
 	});
-	// 移列成功后才标记 verified（markTaskVerified 顺带清 pendingConfirmation token）。
-	const marked = await markTaskVerified(input.deploymentId, input.taskId, input.nowIso);
 	if (!marked.ok) {
-		return { ok: false, error: marked.error ?? "Failed to mark task verified after moving it to done." };
+		return describeVerifiedAtUnrecordedAfterMoveToDone({
+			markError: marked.error,
+			movedToDoneByThisCommand: true,
+			inFlightCompletionRecordExpiresAtIso: inFlightCompletionRecord.expiresAtIso,
+			kanbanCliCommandToRetry: formatKanbanCliPostDeployVerificationCompletionRetryCommand({
+				deploymentId: input.deploymentId,
+				taskId,
+				entryPoint: input.entryPoint,
+			}),
+		});
 	}
 	return {
 		ok: true,
 		moved: true,
-		forced: input.forced,
+		forced,
 		previousColumn: input.currentColumnId,
-		verifiedAt: marked.task?.verifiedAt ?? input.nowIso,
-		worktreeDeleted: trashed.worktreeDeleted,
-		...(trashed.worktreeDeleteError ? { worktreeDeleteError: trashed.worktreeDeleteError } : {}),
+		postDeployVerificationClosureOutcome:
+			marked.task?.postDeployVerificationClosure?.postDeployVerificationClosureOutcome ??
+			movedIntoDone.postDeployVerificationClosureOutcome ??
+			null,
+		verifiedAt: marked.task?.verifiedAt ?? null,
+		worktreeDeleted: taskWorktreeDeletionResult?.taskWorktreeWasRemoved ?? false,
+		...(taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage
+			? { worktreeDeleteError: taskWorktreeDeletionResult.taskWorktreeDeletionErrorMessage }
+			: {}),
+		task: marked.task,
+	};
+}
+
+// 「移入 Done 成功、verifiedAt 未记」滞留态的重试：任务已在 trash，只经 runtime 补记 verifiedAt，不再移列。
+async function recordVerifiedAtForTaskAlreadyMovedToDone(input: {
+	deploymentId: string;
+	taskId: string;
+	live: LiveWorkspaceRuntime;
+	nowIso: string;
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint;
+	retryDecision: Extract<KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded, { retryAllowed: true }>;
+}): Promise<JsonRecord> {
+	const marked = await markTaskVerifiedThroughRuntimeAfterItWasMovedToDone({
+		deploymentId: input.deploymentId,
+		taskId: input.taskId,
+		live: input.live,
+		confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag:
+			input.retryDecision.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+		confirmedAcknowledgements: input.retryDecision.confirmedAcknowledgements,
+		uncheckedChecklistItemClosureReasons: input.retryDecision.uncheckedChecklistItemClosureReasons,
+	});
+	if (!marked.ok) {
+		return describeVerifiedAtUnrecordedAfterMoveToDone({
+			markError: marked.error,
+			movedToDoneByThisCommand: false,
+			inFlightCompletionRecordExpiresAtIso: input.retryDecision.inFlightCompletionRecordExpiresAtIso,
+			kanbanCliCommandToRetry: formatKanbanCliPostDeployVerificationCompletionRetryCommand({
+				deploymentId: input.deploymentId,
+				taskId: input.taskId,
+				entryPoint: input.entryPoint,
+			}),
+		});
+	}
+	return {
+		ok: true,
+		moved: false,
+		recordedVerificationForTaskAlreadyMovedToDone: true,
+		forced: input.retryDecision.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+		previousColumn: input.retryDecision.sourceColumnIdBeforeMoveToDone,
+		postDeployVerificationClosureOutcome:
+			marked.task?.postDeployVerificationClosure?.postDeployVerificationClosureOutcome ?? null,
+		verifiedAt: marked.task?.verifiedAt ?? null,
 		task: marked.task,
 	};
 }
@@ -298,145 +463,7 @@ async function proposeVerificationConfirmation(input: {
 	};
 }
 
-// ---- record ----
-
-async function recordDeployment(input: {
-	cwd: string;
-	sourceCheckoutPath?: string;
-	newCommit?: string;
-	projectPath?: string;
-}): Promise<JsonRecord> {
-	const sourceCheckoutPath = input.sourceCheckoutPath
-		? resolveProjectInputPath(input.sourceCheckoutPath, input.cwd)
-		: input.cwd;
-	// 关联任务的 workspace：显式 --project-path 优先，否则按 sourceCheckoutPath 定位（0 匹配即未注册 → 报错提示 --project-path）。
-	const workspaceResolutionPath = input.projectPath
-		? resolveProjectInputPath(input.projectPath, input.cwd)
-		: sourceCheckoutPath;
-	let workspace: Awaited<ReturnType<typeof loadWorkspaceContext>>;
-	try {
-		workspace = await loadWorkspaceContext(workspaceResolutionPath, { autoCreateIfMissing: false });
-	} catch (error) {
-		throw new Error(
-			`Could not resolve a Kanban workspace for ${workspaceResolutionPath}: ${toErrorMessage(error)}. Pass --project-path to select a registered project.`,
-		);
-	}
-
-	const revParse = await runGit(sourceCheckoutPath, ["rev-parse", input.newCommit ?? "HEAD"]);
-	if (!revParse.ok || revParse.stdout.trim().length === 0) {
-		throw new Error(
-			`Could not resolve deploy commit "${input.newCommit ?? "HEAD"}" in ${sourceCheckoutPath}: ${revParse.error ?? revParse.stderr}`,
-		);
-	}
-	const newSha = revParse.stdout.trim();
-
-	const previousMarker = await readDeployMarker();
-	const oldSha = previousMarker?.deployedSourceCommit ?? null;
-
-	const board = await loadWorkspaceBoardById(workspace.workspaceId);
-	const correlationTasks: DeploymentCorrelationTaskInput[] = [];
-	for (const column of board.columns) {
-		if (column.id !== "in_progress" && column.id !== "review") {
-			continue;
-		}
-		for (const card of column.cards) {
-			correlationTasks.push({
-				taskId: card.id,
-				columnId: column.id,
-				cwd: workspace.repoPath,
-				baseRef: card.baseRef,
-				worktreeMode: card.worktreeMode,
-			});
-		}
-	}
-	const validationCards = board.columns.find((column) => column.id === "validation")?.cards ?? [];
-
-	const candidates = await correlateTasksWithDeployDelta({
-		sourceCheckoutPath,
-		oldSha,
-		newSha,
-		tasks: correlationTasks,
-	});
-
-	const groupTasks: RuntimePostDeployVerificationTask[] = [];
-	for (const candidate of candidates) {
-		groupTasks.push(
-			createPostDeployVerificationTaskWithSeededChecklist({
-				taskId: candidate.taskId,
-				columnIdAtMatch: candidate.columnId,
-				matchedCommits: candidate.matchedCommits,
-				inclusionReason: "commit_correlation",
-			}),
-		);
-	}
-	for (const card of validationCards) {
-		groupTasks.push(
-			createPostDeployVerificationTaskWithSeededChecklist({
-				taskId: card.id,
-				columnIdAtMatch: "validation",
-				matchedCommits: [],
-				inclusionReason: "validation_column",
-			}),
-		);
-	}
-
-	const deploymentId = randomUUID();
-	const nowIso = new Date().toISOString();
-
-	// 合并 agent 注册的 authored 验证定义（plan Stage 2）：对每个组内任务，按 (workspaceId, taskId) materialize
-	// 并按 item id 去重追加（authored id 前缀独立，实际不会与 commit:/custom 冲突）。跨多次部署：每个新组 seed 一份新副本。
-	let authoredItemCount = 0;
-	for (const task of groupTasks) {
-		const authoredItems = await materializeAuthoredVerificationItemsForTask(
-			workspace.workspaceId,
-			task.taskId,
-			nowIso,
-		);
-		for (const item of authoredItems) {
-			if (!task.checklist.some((existing) => existing.id === item.id)) {
-				task.checklist.push(item);
-				authoredItemCount += 1;
-			}
-		}
-	}
-
-	const { group, marker } = await createDeploymentGroup(
-		{
-			deploymentId,
-			workspaceId: workspace.workspaceId,
-			deployedSourceCommit: newSha,
-			previousDeployedSourceCommit: oldSha,
-			sourceCheckoutPath,
-			packageVersion: KANBAN_PACKAGE_VERSION,
-			tasks: groupTasks,
-		},
-		nowIso,
-	);
-
-	return {
-		ok: true,
-		deploymentId: group.deploymentId,
-		workspaceId: group.workspaceId,
-		workspacePath: workspace.repoPath,
-		sourceCheckoutPath,
-		deployedSourceCommit: group.deployedSourceCommit,
-		previousDeployedSourceCommit: group.previousDeployedSourceCommit,
-		deployedAtIso: group.deployedAtIso,
-		packageVersion: marker.packageVersion,
-		correlatedTaskCount: candidates.length,
-		validationTaskCount: validationCards.length,
-		totalVerificationTaskCount: groupTasks.length,
-		authoredVerificationItemCount: authoredItemCount,
-		noCorrelatedTasks: candidates.length === 0,
-		tasks: groupTasks.map((task) => ({
-			taskId: task.taskId,
-			inclusionReason: task.inclusionReason,
-			columnIdAtMatch: task.columnIdAtMatch,
-			matchedCommits: task.matchedCommits,
-			checklistItemCount: task.checklist.length,
-		})),
-	};
-}
+// ---- record ----（实现见 deployment-record-with-task-deployment-attribution.ts）
 
 // ---- verification-summary ----
 
@@ -447,33 +474,47 @@ async function verificationSummary(input: { cwd: string; projectPath?: string })
 	);
 	const nowIso = new Date().toISOString();
 	const activeGroup = await getActiveGroup(workspace.workspaceId, nowIso);
-	if (!activeGroup) {
-		return {
-			ok: true,
-			workspaceId: workspace.workspaceId,
-			activeDeploymentId: null,
-			pendingCount: 0,
-			doneCount: 0,
-			droppedCount: 0,
-			noCorrelatedTasks: true,
-		};
-	}
-	const liveTasks = activeGroup.tasks.filter((task) => task.droppedReason === null);
-	const pendingCount = liveTasks.filter((task) => task.verifiedAt === null).length;
-	const doneCount = liveTasks.filter((task) => task.verifiedAt !== null).length;
-	const droppedCount = activeGroup.tasks.length - liveTasks.length;
-	const noCorrelatedTasks = !activeGroup.tasks.some((task) => task.inclusionReason === "commit_correlation");
+	// 没有活跃组时按空任务列表计数：输出形状与有组时完全一致（部署字段为 null、计数为 0），不另起一套字段名。
+	const activeGroupTasks = activeGroup?.tasks ?? [];
+	const tasksAwaitingVerification = activeGroupTasks.filter(isPostDeployVerificationTaskAwaitingVerification);
+	const countAwaitingInZone = (zone: string): number =>
+		tasksAwaitingVerification.filter(
+			(task) =>
+				(task.taskDeploymentAttribution?.taskDeploymentAttributionZone ??
+					"task_commits_not_yet_deployed_or_task_unattributable") === zone,
+		).length;
+	const closedTasks = activeGroupTasks.filter(isPostDeployVerificationTaskClosed);
+	const droppedCount = activeGroupTasks.filter((task) => task.droppedReason !== null).length;
+	// 与 `kanban deployment record` 的 tasksShippedInThisDeploymentCount 同口径：建组时已在 Done 的只读条目不算
+	// （面板同样把它们单列为「本次部署还包含（已在 Done）」）。
+	const tasksShippedInThisDeploymentCount = activeGroupTasks.filter(
+		(task) =>
+			!task.includedAsReadOnlyBecauseTaskAlreadyInDoneColumnWhenDeploymentRecorded &&
+			task.taskDeploymentAttribution?.taskDeploymentAttributionZone ===
+				"task_commits_included_in_this_deployment_delta",
+	).length;
 	return {
 		ok: true,
 		workspaceId: workspace.workspaceId,
-		activeDeploymentId: activeGroup.deploymentId,
-		deployedSourceCommit: activeGroup.deployedSourceCommit,
-		previousDeployedSourceCommit: activeGroup.previousDeployedSourceCommit,
-		deployedAtIso: activeGroup.deployedAtIso,
-		pendingCount,
-		doneCount,
+		activeDeploymentId: activeGroup?.deploymentId ?? null,
+		deployedSourceCommit: activeGroup?.deployedSourceCommit ?? null,
+		previousDeployedSourceCommit: activeGroup?.previousDeployedSourceCommit ?? null,
+		deployedAtIso: activeGroup?.deployedAtIso ?? null,
+		pendingCount: tasksAwaitingVerification.length,
+		pendingTasksShippedInThisDeploymentCount: countAwaitingInZone("task_commits_included_in_this_deployment_delta"),
+		pendingTasksDeployedOnlyInEarlierDeploymentsCount: countAwaitingInZone(
+			"task_commits_deployed_only_in_earlier_deployments_awaiting_verification",
+		),
+		pendingTasksNotYetDeployedOrUnattributableCount: countAwaitingInZone(
+			"task_commits_not_yet_deployed_or_task_unattributable",
+		),
+		// 结案（全勾通过 + 带原因结案）计数；passed 单列，带原因的不算「通过」。
+		doneCount: closedTasks.length,
+		passedCount: closedTasks.filter((task) => task.verifiedAt !== null).length,
+		closedWithUncheckedItemsReasonedCount: closedTasks.filter((task) => task.verifiedAt === null).length,
 		droppedCount,
-		noCorrelatedTasks,
+		tasksShippedInThisDeploymentCount,
+		noTasksShippedInThisDeployment: tasksShippedInThisDeploymentCount === 0,
 	};
 }
 
@@ -597,7 +638,11 @@ async function verificationRun(input: { deploymentId: string; taskId: string; it
 
 // ---- verification-complete ----
 
-async function verificationComplete(input: { deploymentId: string; taskId: string }): Promise<JsonRecord> {
+async function verificationComplete(input: {
+	deploymentId: string;
+	taskId: string;
+	closure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
+}): Promise<JsonRecord> {
 	const nowIso = new Date().toISOString();
 	const state = await readPostDeployVerificationStateReadOnly();
 	const group = findGroupInState(state, input.deploymentId);
@@ -619,8 +664,8 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 			error: `Task was dropped from verification (${task.droppedReason}).`,
 		};
 	}
-	if (!checklistFullyChecked(task)) {
-		return { ok: false, needsConfirmation: false, error: "Checklist is not fully checked yet." };
+	if (isPostDeployVerificationTaskClosed(task)) {
+		return { ok: true, needsConfirmation: false, alreadyClosed: true, task };
 	}
 
 	// 离线定当前列，使 review/in_progress 的 propose 路径无需 server。
@@ -630,7 +675,42 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 		return { ok: false, needsConfirmation: false, error: "Task is no longer on the board (deleted or moved out)." };
 	}
 	if (offlineColumnId === "trash") {
-		return { ok: false, needsConfirmation: false, error: "Task is already in done." };
+		// 「移入 Done 成功、runtime 补记 verifiedAt 失败」后原样重跑 verification-complete：在途记录授权时只补记 verifiedAt。
+		// 这条路径先于命令行原因校验：原因取自在途记录（由重试判定校验覆盖），重跑命令本就不带 --closure-reason-*。
+		const entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint = {
+			kind: "verification_complete_without_confirmation_token",
+		};
+		const retryDecision = decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded({ task, entryPoint, nowIso });
+		if (!retryDecision.retryAllowed) {
+			return {
+				ok: false,
+				needsConfirmation: false,
+				error: retryDecision.error,
+				...(retryDecision.requiredAcknowledgements
+					? { requiredAcknowledgements: retryDecision.requiredAcknowledgements }
+					: {}),
+			};
+		}
+		const live = await requireLiveWorkspaceRuntime(group.workspaceId);
+		if (getTaskColumnId(live.board, input.taskId) !== "trash") {
+			return {
+				ok: false,
+				needsConfirmation: false,
+				error: "Task left done while its verification was being recorded; re-run verification-complete.",
+			};
+		}
+		return await recordVerifiedAtForTaskAlreadyMovedToDone({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			live,
+			nowIso,
+			entryPoint,
+			retryDecision,
+		});
+	}
+	const uncheckedItemsLackingClosureReason = describeUncheckedChecklistItemsLackingClosureReason(task, input.closure);
+	if (uncheckedItemsLackingClosureReason !== null) {
+		return { ok: false, needsConfirmation: false, error: uncheckedItemsLackingClosureReason };
 	}
 	// 列门控与 Web 对齐（issue C）：仅 validation/review/in_progress 是合法完成来源；backlog 等非法列直接拒绝，
 	// 否则后续 propose → verification-confirm/--force 可把手动移回 backlog、尚未 reconcile-dropped 的任务直接推入 Done。
@@ -649,11 +729,12 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 		if (liveColumnId === "validation") {
 			return await moveTaskToDoneAndMarkVerified({
 				deploymentId: input.deploymentId,
-				taskId: input.taskId,
+				task,
 				currentColumnId: liveColumnId,
 				live,
 				nowIso,
-				forced: false,
+				entryPoint: { kind: "verification_complete_without_confirmation_token" },
+				closure: input.closure,
 			});
 		}
 		// 竞态：live 已流转出 validation → 回落 propose（按 live 列重算）。
@@ -688,6 +769,7 @@ async function verificationConfirm(input: {
 	token?: string;
 	acks: RuntimePostDeployVerificationAcknowledgement[];
 	force: boolean;
+	closure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
 }): Promise<JsonRecord> {
 	const nowIso = new Date().toISOString();
 	if (input.force && input.token !== undefined) {
@@ -712,8 +794,8 @@ async function verificationConfirm(input: {
 	if (task.droppedReason !== null) {
 		return { ok: false, error: `Task was dropped from verification (${task.droppedReason}); cannot confirm.` };
 	}
-	if (!checklistFullyChecked(task)) {
-		return { ok: false, error: "Checklist is not fully checked; cannot confirm." };
+	if (isPostDeployVerificationTaskClosed(task)) {
+		return { ok: true, alreadyClosed: true, task };
 	}
 
 	// confirm 会移列 → 需 live runtime；同时用 live 板确定当前列（全量重校验，不信任发放时快照）。
@@ -723,7 +805,43 @@ async function verificationConfirm(input: {
 		return { ok: false, error: "Task is no longer on the board (deleted); cannot confirm." };
 	}
 	if (currentColumnId === "trash") {
-		return { ok: false, error: "Task is already in done." };
+		// 「移入 Done 成功、runtime 补记 verifiedAt 失败」后原样重跑本命令：在途记录 + 同 token / --force 与同 --ack 授权时只补记 verifiedAt。
+		// 这条路径先于命令行原因校验：原因取自在途记录（由重试判定校验覆盖），重跑命令本就不带 --closure-reason-*。
+		const entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint = input.force
+			? { kind: "verification_confirm_with_force_break_glass", presentedAcknowledgements: input.acks }
+			: {
+					kind: "verification_confirm_with_confirmation_token",
+					presentedConfirmationToken: input.token ?? "",
+					presentedAcknowledgements: input.acks,
+				};
+		const retryDecision = decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded({ task, entryPoint, nowIso });
+		if (!retryDecision.retryAllowed) {
+			return {
+				ok: false,
+				error: retryDecision.error,
+				...(retryDecision.requiredAcknowledgements
+					? { requiredAcknowledgements: retryDecision.requiredAcknowledgements }
+					: {}),
+			};
+		}
+		if (input.force && !(await isForceCompleteEnabled(live.repoPath))) {
+			return {
+				ok: false,
+				error: "--force requires postDeployVerificationForceCompleteEnabled to be enabled in the runtime config.",
+			};
+		}
+		return await recordVerifiedAtForTaskAlreadyMovedToDone({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			live,
+			nowIso,
+			entryPoint,
+			retryDecision,
+		});
+	}
+	const uncheckedItemsLackingClosureReason = describeUncheckedChecklistItemsLackingClosureReason(task, input.closure);
+	if (uncheckedItemsLackingClosureReason !== null) {
+		return { ok: false, error: uncheckedItemsLackingClosureReason };
 	}
 	// 列门控与 Web 对齐（issue C）：--force break-glass 与 token 两条路径都在此之后，故统一在此拒绝非法列（backlog 等），
 	// 避免把手动移回 backlog、尚未 reconcile-dropped 的任务经 --force 或重发 token 直接推入 Done。
@@ -751,11 +869,12 @@ async function verificationConfirm(input: {
 		}
 		return await moveTaskToDoneAndMarkVerified({
 			deploymentId: input.deploymentId,
-			taskId: input.taskId,
+			task,
 			currentColumnId,
 			live,
 			nowIso,
-			forced: true,
+			entryPoint: { kind: "verification_confirm_with_force_break_glass", presentedAcknowledgements: input.acks },
+			closure: input.closure,
 		});
 	}
 
@@ -794,11 +913,16 @@ async function verificationConfirm(input: {
 
 	return await moveTaskToDoneAndMarkVerified({
 		deploymentId: input.deploymentId,
-		taskId: input.taskId,
+		task,
 		currentColumnId,
 		live,
 		nowIso,
-		forced: false,
+		entryPoint: {
+			kind: "verification_confirm_with_confirmation_token",
+			presentedConfirmationToken: pending.token,
+			presentedAcknowledgements: input.acks,
+		},
+		closure: input.closure,
 	});
 }
 
@@ -822,11 +946,12 @@ export function registerDeploymentCommand(program: Command): void {
 		.action(async (options: { sourceCheckoutPath?: string; newCommit?: string; projectPath?: string }) => {
 			await runDeploymentCommand(
 				async () =>
-					await recordDeployment({
+					await recordDeploymentWithTaskDeploymentAttribution({
 						cwd: process.cwd(),
 						sourceCheckoutPath: options.sourceCheckoutPath,
 						newCommit: options.newCommit,
 						projectPath: options.projectPath,
+						readPostDeployVerificationStateReadOnly,
 					}),
 			);
 		});
@@ -909,40 +1034,95 @@ export function registerDeploymentCommand(program: Command): void {
 			);
 		});
 
-	deployment
-		.command("verification-complete")
-		.description("Propose moving a fully-checked verification task to done (validation column completes directly).")
-		.requiredOption("--deployment-id <id>", "Deployment group id.")
-		.requiredOption("--task-id <id>", "Task id within the deployment group.")
-		.action(async (options: { deploymentId: string; taskId: string }) => {
+	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions(
+		deployment
+			.command("verification-complete")
+			.description(
+				"Propose moving a verification task to done (validation column completes directly). Unchecked items need a closure reason each.",
+			)
+			.requiredOption("--deployment-id <id>", "Deployment group id.")
+			.requiredOption("--task-id <id>", "Task id within the deployment group."),
+	).action(
+		async (
+			options: {
+				deploymentId: string;
+				taskId: string;
+			} & PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+		) => {
 			await runDeploymentCommand(
-				async () => await verificationComplete({ deploymentId: options.deploymentId, taskId: options.taskId }),
+				async () =>
+					await verificationComplete({
+						deploymentId: options.deploymentId,
+						taskId: options.taskId,
+						closure: await parsePostDeployVerificationDoneEntryClosureFromCliOptions(options, process.cwd()),
+					}),
 			);
-		});
+		},
+	);
+
+	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions(
+		deployment
+			.command("verification-confirm")
+			.description("Confirm moving a verification task to done using a confirmation token (or --force break-glass).")
+			.requiredOption("--deployment-id <id>", "Deployment group id.")
+			.requiredOption("--task-id <id>", "Task id within the deployment group.")
+			.option("--token <token>", "Confirmation token from verification-complete. Mutually exclusive with --force.")
+			.option(
+				"--ack <list>",
+				"Comma-separated acknowledgements (skip_validation,in_progress_active) required by the current column.",
+			)
+			.option(
+				"--force",
+				"Break-glass: skip the token handshake (never the checklist). Requires postDeployVerificationForceCompleteEnabled.",
+			),
+	).action(
+		async (
+			options: {
+				deploymentId: string;
+				taskId: string;
+				token?: string;
+				ack?: string;
+				force?: boolean;
+			} & PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+		) => {
+			await runDeploymentCommand(
+				async () =>
+					await verificationConfirm({
+						deploymentId: options.deploymentId,
+						taskId: options.taskId,
+						token: options.token,
+						acks: parseAcknowledgementList(options.ack),
+						force: options.force === true,
+						closure: await parsePostDeployVerificationDoneEntryClosureFromCliOptions(options, process.cwd()),
+					}),
+			);
+		},
+	);
 
 	deployment
-		.command("verification-confirm")
-		.description("Confirm moving a verification task to done using a confirmation token (or --force break-glass).")
-		.requiredOption("--deployment-id <id>", "Deployment group id.")
-		.requiredOption("--task-id <id>", "Task id within the deployment group.")
-		.option("--token <token>", "Confirmation token from verification-complete. Mutually exclusive with --force.")
-		.option(
-			"--ack <list>",
-			"Comma-separated acknowledgements (skip_validation,in_progress_active) required by the current column.",
+		.command("deferred-observations")
+		.description(
+			"List Post-Deploy Verification items closed as 'deferred to natural-usage observation' (read-only; input for the future natural-usage observation pipeline).",
 		)
-		.option("--force", "Break-glass: skip the token handshake. Requires postDeployVerificationForceCompleteEnabled.")
-		.action(
-			async (options: { deploymentId: string; taskId: string; token?: string; ack?: string; force?: boolean }) => {
-				await runDeploymentCommand(
-					async () =>
-						await verificationConfirm({
-							deploymentId: options.deploymentId,
-							taskId: options.taskId,
-							token: options.token,
-							acks: parseAcknowledgementList(options.ack),
-							force: options.force === true,
-						}),
-				);
-			},
-		);
+		.option("--project-path <path>", "Filter to a single workspace. Defaults to all workspaces.")
+		.action(async (options: { projectPath?: string }) => {
+			await runDeploymentCommand(async () => {
+				const workspaceId =
+					options.projectPath !== undefined
+						? (
+								await loadWorkspaceContext(resolveProjectInputPath(options.projectPath, process.cwd()), {
+									autoCreateIfMissing: false,
+								})
+							).workspaceId
+						: undefined;
+				return {
+					ok: true,
+					deferredNaturalUsageObservationRecords:
+						await listPostDeployVerificationDeferredNaturalUsageObservationRecords(
+							{ ...(workspaceId !== undefined ? { workspaceId } : {}) },
+							new Date().toISOString(),
+						),
+				};
+			});
+		});
 }

@@ -19,6 +19,7 @@
 //   本模块 = 「这条**会话自己**上一世的对话在哪」，每次重启现算。
 // 播种一旦被当作重启寻址用，从垃圾桶拖回来的任务会去续播种源的对话而不是它自己的。
 
+import { canAgentResumeByRecordedNativeConversationSessionId } from "./agent-catalog";
 import {
 	type RuntimeAgentNativeConversationSessionIdentity,
 	type RuntimeObservedAgentNativeConversationSessionResumeAddressing,
@@ -93,7 +94,7 @@ export function resolveAgentConversationSessionResumeAddressing(
 		// 原生 ID 由 harness 报告；不把 Kimi 的 session_<UUID> 强制解析成 UUID。
 		if (
 			identity.sourceAgentId === input.launchAgentId &&
-			["claude", "codex", "cursor", "kimi", "omp"].includes(input.launchAgentId)
+			canAgentResumeByRecordedNativeConversationSessionId(input.launchAgentId)
 		) {
 			const parsed = runtimeObservedAgentNativeConversationSessionResumeAddressingSchema.safeParse({
 				sourceAgentId: identity.sourceAgentId,

@@ -2,24 +2,36 @@ import { useCallback, useMemo, useState } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+import type { RuntimeHostRemoteEditorAccessIdentity } from "@/runtime/types";
 import { useWorkspaceOpenTargetPreferredApplicationIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import { openRuntimeHostPathInEditorOnThisDeviceThroughRemoteSsh } from "@/utils/open-runtime-host-path-in-editor-on-this-device-through-remote-ssh";
 import {
 	buildOpenCommand,
 	getOpenTargetOption,
 	getOpenTargetOptions,
+	getRemoteSshOpenTargetOption,
+	getRemoteSshOpenTargetOptions,
 	normalizeOpenTargetId,
 	type OpenTargetId,
 	type OpenTargetOption,
 	resolveOpenTargetPlatform,
 } from "@/utils/open-targets";
+import { resolveProjectFilesystemAccessRouteForBrowser } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
 interface UseOpenWorkspaceParams {
 	currentProjectId: string | null;
 	workspacePath?: string;
+	// 从其他设备访问时拼 Remote-SSH 深链要用；runtime 配置还没加载完时为 null，此时远程的 Open 不可用。
+	runtimeHostRemoteEditorAccessIdentity: RuntimeHostRemoteEditorAccessIdentity | null;
 }
+
+export const REMOTE_SSH_OPEN_TARGET_OPTIONS_FOOTNOTE =
+	"Opens on this device over SSH. Needs the editor's Remote-SSH extension and SSH access to the Kanban host.";
 
 interface UseOpenWorkspaceResult {
 	openTargetOptions: readonly OpenTargetOption[];
+	// 显示在下拉列表底部的说明；只在从其他设备访问（走 Remote-SSH 深链）时有。
+	openTargetOptionsFootnote: string | null;
 	selectedOpenTargetId: OpenTargetId;
 	onSelectOpenTarget: (targetId: OpenTargetId) => void;
 	onOpenWorkspace: () => void;
@@ -36,9 +48,19 @@ function getFirstOutputLine(output: string): string | null {
 	);
 }
 
-export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWorkspaceParams): UseOpenWorkspaceResult {
+export function useOpenWorkspace({
+	currentProjectId,
+	workspacePath,
+	runtimeHostRemoteEditorAccessIdentity,
+}: UseOpenWorkspaceParams): UseOpenWorkspaceResult {
+	const opensThroughRemoteSshDeepLink =
+		resolveProjectFilesystemAccessRouteForBrowser() === "remote-ssh-editor-deep-link";
 	const openTargetPlatform = resolveOpenTargetPlatform();
-	const openTargetOptions = useMemo(() => getOpenTargetOptions(openTargetPlatform), [openTargetPlatform]);
+	const openTargetOptions = useMemo(
+		() =>
+			opensThroughRemoteSshDeepLink ? getRemoteSshOpenTargetOptions() : getOpenTargetOptions(openTargetPlatform),
+		[opensThroughRemoteSshDeepLink, openTargetPlatform],
+	);
 	const fallbackTargetId = openTargetOptions[0]?.id ?? "vscode";
 	const [storedOpenTargetApplicationId, setStoredOpenTargetApplicationId] =
 		useWorkspaceOpenTargetPreferredApplicationIdPreference(fallbackTargetId);
@@ -48,10 +70,15 @@ export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWor
 	const setPreferredOpenTargetId = setStoredOpenTargetApplicationId;
 	const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
 	const selectedOpenTarget = useMemo(
-		() => getOpenTargetOption(preferredOpenTargetId, openTargetPlatform),
-		[openTargetPlatform, preferredOpenTargetId],
+		() =>
+			opensThroughRemoteSshDeepLink
+				? getRemoteSshOpenTargetOption(preferredOpenTargetId)
+				: getOpenTargetOption(preferredOpenTargetId, openTargetPlatform),
+		[opensThroughRemoteSshDeepLink, openTargetPlatform, preferredOpenTargetId],
 	);
-	const canOpenWorkspace = Boolean(currentProjectId && workspacePath);
+	const canOpenWorkspace = Boolean(
+		currentProjectId && workspacePath && (!opensThroughRemoteSshDeepLink || runtimeHostRemoteEditorAccessIdentity),
+	);
 
 	const onSelectOpenTarget = useCallback(
 		(targetId: OpenTargetId) => {
@@ -83,6 +110,18 @@ export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWor
 			return;
 		}
 
+		if (opensThroughRemoteSshDeepLink) {
+			if (!runtimeHostRemoteEditorAccessIdentity) {
+				return;
+			}
+			openRuntimeHostPathInEditorOnThisDeviceThroughRemoteSsh({
+				preferredOpenTargetId: selectedOpenTarget.id,
+				runtimeHostRemoteEditorAccessIdentity,
+				absolutePath: workspacePath,
+			});
+			return;
+		}
+
 		void (async () => {
 			setIsOpeningWorkspace(true);
 			try {
@@ -104,7 +143,9 @@ export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWor
 	}, [
 		currentProjectId,
 		isOpeningWorkspace,
+		opensThroughRemoteSshDeepLink,
 		openTargetPlatform,
+		runtimeHostRemoteEditorAccessIdentity,
 		selectedOpenTarget.id,
 		showOpenFailureToast,
 		workspacePath,
@@ -112,6 +153,7 @@ export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWor
 
 	return {
 		openTargetOptions,
+		openTargetOptionsFootnote: opensThroughRemoteSshDeepLink ? REMOTE_SSH_OPEN_TARGET_OPTIONS_FOOTNOTE : null,
 		selectedOpenTargetId: selectedOpenTarget.id,
 		onSelectOpenTarget,
 		onOpenWorkspace,

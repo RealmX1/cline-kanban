@@ -2,14 +2,11 @@
 // It owns how the board and detail view start, stop, resize, and route task
 // sessions across native Cline and PTY-backed agents.
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
 import { type ClineChatActionResult, useClineChatRuntimeActions } from "@/hooks/use-cline-chat-runtime-actions";
-import { loadDetailTerminalPanelWidth } from "@/resize/detail-terminal-panel-width";
-import { MIN_DETAIL_DIFF_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
-import { clampPanelWidthToWindow, estimateTaskAgentTerminalGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
@@ -22,10 +19,11 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "@/runtime/types";
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
+import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
-import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard } from "@/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 interface UseTaskSessionsInput {
 	currentProjectId: string | null;
@@ -36,6 +34,10 @@ interface EnsureTaskWorkspaceResult {
 	ok: boolean;
 	message?: string;
 	response?: Extract<RuntimeWorktreeEnsureResponse, { ok: true }>;
+}
+
+interface SendTaskSessionInputOptions extends SendTerminalInputOptions {
+	requireTerminalPasteSuccess?: boolean;
 }
 
 interface SendTaskSessionInputResult {
@@ -98,7 +100,7 @@ export interface UseTaskSessionsResult {
 	sendTaskSessionInput: (
 		taskId: string,
 		text: string,
-		options?: SendTerminalInputOptions,
+		options?: SendTaskSessionInputOptions,
 	) => Promise<SendTaskSessionInputResult>;
 	sendTaskChatMessage: (
 		taskId: string,
@@ -116,7 +118,6 @@ export interface UseTaskSessionsResult {
 	cleanupTaskWorkspace: (
 		taskId: string,
 		worktreeMode?: RuntimeTaskWorktreeMode,
-		removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion?: boolean,
 	) => Promise<RuntimeWorktreeDeleteResponse | null>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 }
@@ -158,6 +159,19 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			});
 		},
 		[setSessions],
+	);
+	// 请求发出后切了项目：响应里的 summary 属于上一个项目，不能并进当前项目的 sessions——
+	// 否则它会随下一次整板保存写进当前项目的 sessions.json（cf427 的跨项目串写）。
+	const latestCurrentProjectIdRef = useRef(currentProjectId);
+	latestCurrentProjectIdRef.current = currentProjectId;
+	const upsertSessionUnlessProjectSwitchedSinceRequest = useCallback(
+		(requestProjectId: string, summary: RuntimeTaskSessionSummary) => {
+			if (latestCurrentProjectIdRef.current !== requestProjectId) {
+				return;
+			}
+			upsertSession(summary);
+		},
+		[upsertSession],
 	);
 	const {
 		sendTaskChatMessage,
@@ -206,32 +220,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			try {
 				const kickoffPrompt = options?.resumeFromTrash ? "" : task.prompt.trim();
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				// When the task terminal has never been mounted, fall back to the
-				// persisted, user-resizable detail terminal panel width so the PTY
-				// spawns at the width the agent TUI will actually be viewed at — not
-				// a fixed 60-column default. A TUI hard-wraps its history at startup
-				// width, so spawning at the wrong width can't be repaired by a later
-				// resize. Once mounted, the measured per-task geometry takes priority.
-				//
-				// The persisted width is clamped to [320, 1400] but not to the
-				// CURRENT window: a width persisted in a wide window can exceed what
-				// a narrower window can display (the detail view renders the agent
-				// panel at min(persisted, container − MIN_DETAIL_DIFF_PANEL_WIDTH_PX)).
-				// Upper-bound it by the window before deriving columns so a
-				// background-started task in a narrow window doesn't spawn at a column
-				// count its visible width can never show. `window.innerWidth` is a
-				// loose stand-in for the (still unmounted) detail container width;
-				// clampPanelWidthToWindow falls back to the persisted width when the
-				// window width is unavailable, so this never narrows below current
-				// behavior.
-				const windowDisplayableTerminalPanelWidth = clampPanelWidthToWindow(
-					loadDetailTerminalPanelWidth(),
-					MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-					window.innerWidth,
-				);
-				const geometry =
-					getTerminalGeometry(task.id) ??
-					estimateTaskAgentTerminalGeometry(windowDisplayableTerminalPanelWidth, window.innerHeight);
+				// 估算口径（实测几何优先、否则按持久化面板宽度并以窗口宽度为上界）见该函数注释；经 taskCardAction
+				// 起会话的路径共用同一份。
+				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(task.id);
 				const payload = await trpcClient.runtime.startTaskSession.mutate({
 					taskId: task.id,
 					prompt: kickoffPrompt,
@@ -270,7 +261,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 						message,
 					};
 				}
-				upsertSession(payload.summary);
+				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				if (options?.resumeFromTrash) {
 					trackTaskResumedFromTrash();
 				}
@@ -286,7 +277,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return { ok: false, message };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const stopTaskSession = useCallback(
@@ -313,18 +304,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			if (!initialUserQuestion) {
 				return { ok: false, message: "Enter a question for the new session." };
 			}
-			const taskConversationSessionId = `task-conversation-session-${crypto.randomUUID()}`;
+			const taskConversationSessionId = `task-conversation-session-${createRandomUuidV4WithInsecureContextFallback()}`;
 			try {
-				const geometry =
-					getTerminalGeometry(taskConversationSessionId) ??
-					estimateTaskAgentTerminalGeometry(
-						clampPanelWidthToWindow(
-							loadDetailTerminalPanelWidth(),
-							MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-							window.innerWidth,
-						),
-						window.innerHeight,
-					);
+				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(taskConversationSessionId);
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
 				const payload = await trpcClient.runtime.startTaskSession.mutate({
 					taskId: taskConversationSessionId,
@@ -355,13 +337,13 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				if (!payload.ok || !payload.summary) {
 					return { ok: false, message: payload.error ?? "Could not create the By the way session." };
 				}
-				upsertSession(payload.summary);
+				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				return { ok: true, taskConversationSessionId };
 			} catch (error) {
 				return { ok: false, message: error instanceof Error ? error.message : String(error) };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const transitionTaskToReview = useCallback(
@@ -374,14 +356,14 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.runtime.transitionTaskToReview.mutate({ taskId });
 				if (payload.ok && payload.summary) {
 					// 即时 upsert：不等 WS 广播，直接喂新 summary（turnOwner=user）给 Rule A → 立刻落位 Review。
-					upsertSession(payload.summary);
+					upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				}
 				return payload.ok;
 			} catch {
 				return false;
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const continueConnectionRetrySessions = useCallback(
@@ -419,14 +401,24 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const sendTaskSessionInput = useCallback(
-		async (taskId: string, text: string, options?: SendTerminalInputOptions): Promise<SendTaskSessionInputResult> => {
+		async (
+			taskId: string,
+			text: string,
+			options?: SendTaskSessionInputOptions,
+		): Promise<SendTaskSessionInputResult> => {
 			const appendNewline = options?.appendNewline ?? true;
 			const controller = options?.preferTerminal === false ? null : getTerminalController(taskId);
+			if (options?.mode === "paste") {
+				if (!appendNewline && controller?.paste(text)) {
+					return { ok: true };
+				}
+				// 仅填入时，正文换行不能回落为可能提交的原始 PTY 输入。程序化发送仍保留原有回退。
+				if (options.requireTerminalPasteSuccess) {
+					return { ok: false, message: "Could not paste into the task input. Open its terminal and try again." };
+				}
+			}
 			if (controller) {
-				const sent =
-					options?.mode === "paste"
-						? !appendNewline && controller.paste(text)
-						: controller.input(appendNewline ? `${text}\n` : text);
+				const sent = controller.input(appendNewline ? `${text}\n` : text);
 				if (sent) {
 					return { ok: true };
 				}
@@ -446,7 +438,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					return { ok: false, message: errorMessage };
 				}
 				if (payload.summary) {
-					upsertSession(payload.summary);
+					upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				}
 				return { ok: true };
 			} catch (error) {
@@ -454,15 +446,11 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return { ok: false, message };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const cleanupTaskWorkspace = useCallback(
-		async (
-			taskId: string,
-			worktreeMode?: RuntimeTaskWorktreeMode,
-			removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion = false,
-		): Promise<RuntimeWorktreeDeleteResponse | null> => {
+		async (taskId: string, worktreeMode?: RuntimeTaskWorktreeMode): Promise<RuntimeWorktreeDeleteResponse | null> => {
 			if (!currentProjectId) {
 				return null;
 			}
@@ -471,9 +459,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.workspace.deleteWorktree.mutate({
 					taskId,
 					...(worktreeMode ? { worktreeMode } : {}),
-					...(removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion
-						? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
-						: {}),
 				});
 				if (!payload.ok) {
 					const message = payload.error ?? "Could not clean up task workspace.";

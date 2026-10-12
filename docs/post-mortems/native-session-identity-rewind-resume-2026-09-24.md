@@ -24,6 +24,8 @@ Codex 0.156.1 的实测根因是启动配置被分到两个层次：根命令的
 
 Cursor 的既有按 ID 路径保留；本轮没有追加 Cursor 原生 CLI 实测。以上版本结论不能外推到任意未来版本。
 
+> **附注（2026-10-02，task 203f3）**：上面「Cursor 的既有按 ID 路径保留」不成立——kanban 从未有任何采集 Cursor chat id 的路径，「按记录的 id 重启寻址」那条分支对 Cursor 从未命中过（建卡播种的 `--resume <种子>` 是另一条路径），Cursor 的重启实际全走 `--continue`。修复改为由 kanban 在 spawn 前分配 id（`--resume <新 UUID> <prompt>` 开局），身份带 `identityEstablishmentMethod = kanban_assigned_before_agent_launch`。下文「身份来自 harness hook、托管扩展或 ACP 协议，不从路径或 cwd 最新文件猜测」「没有加入……猜测式历史迁移」两条由此各有一处经用户授权的窄修订：Cursor 身份可由 kanban 分配；存量 Cursor 会话在桶内**恰好一段**已建立对话且无竞争者时钉住（与 `--continue` 的选择等价）。细节与实测证据见 `docs/agent-harness-cursor.md`。
+
 ## 实现边界
 
 - 本任务自己的恢复身份与「建卡时从另一历史会话初始化」分开建模，避免把 Kimi/OMP 身份强塞进既有 UUID 播种 schema。身份来自 harness hook、托管扩展或 ACP 协议，不从路径或 cwd 最新文件猜测。

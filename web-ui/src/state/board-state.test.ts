@@ -1,22 +1,38 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createInitialBoardData } from "@/data/board-data";
+import type { RuntimeBoardCard } from "@/runtime/types";
 import {
-	addTaskDependency,
 	addTaskToColumn,
+	addTaskToColumnWithResult,
 	applyDragResult,
 	applyTaskDetailClineSettingsChange,
 	applyTaskDetailClineSettingsSelection,
-	clearColumnTasks,
+	BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION,
 	disableTaskAutoReview,
 	getTaskColumnId,
 	moveTaskToColumn,
 	normalizeBoardData,
-	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 	updateTaskTitle,
 } from "@/state/board-state";
 import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+
+// 生产路径的建卡 id 只来自 runtime 预分配（dd2db Y-EVENT-12）；测试里用确定性的递增 5 位 id 代替那次分配。
+let nextRuntimeAllocatedTaskIdStandInSequenceForTests = 0;
+function addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(
+	board: Parameters<typeof addTaskToColumn>[0],
+	columnId: Parameters<typeof addTaskToColumn>[1],
+	draft: Parameters<typeof addTaskToColumn>[2],
+): ReturnType<typeof addTaskToColumn> {
+	nextRuntimeAllocatedTaskIdStandInSequenceForTests += 1;
+	return addTaskToColumn(
+		board,
+		columnId,
+		draft,
+		String(nextRuntimeAllocatedTaskIdStandInSequenceForTests).padStart(5, "0"),
+	);
+}
 
 function createBacklogBoard(taskPrompts: string[]): {
 	board: ReturnType<typeof createInitialBoardData>;
@@ -24,7 +40,7 @@ function createBacklogBoard(taskPrompts: string[]): {
 } {
 	let board = createInitialBoardData();
 	for (const taskPrompt of taskPrompts) {
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: taskPrompt,
 			baseRef: "main",
 		});
@@ -52,7 +68,7 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-describe("board dependency state", () => {
+describe("board state", () => {
 	it("applies worktree and agent session initialization changes when updating a task", () => {
 		const fixture = createBacklogBoard(["Task A"]);
 		const taskId = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
@@ -93,7 +109,7 @@ describe("board dependency state", () => {
 			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
 			sourceSessionReuseMode: "resume_existing_session" as const,
 		};
-		let board = addTaskToColumn(createInitialBoardData(), "review", {
+		let board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(createInitialBoardData(), "review", {
 			title: "Initial title",
 			prompt: "Task A",
 			autoReviewEnabled: true,
@@ -123,7 +139,7 @@ describe("board dependency state", () => {
 			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
 			sourceSessionReuseMode: "resume_existing_session" as const,
 		};
-		const board = addTaskToColumn(createInitialBoardData(), "backlog", {
+		const board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(createInitialBoardData(), "backlog", {
 			prompt: "Task A",
 			baseRef: "main",
 			worktreeMode: "inplace",
@@ -165,7 +181,7 @@ describe("board dependency state", () => {
 	it("creates tasks when randomUUID is unavailable", () => {
 		vi.stubGlobal("crypto", { randomUUID: undefined });
 
-		const board = addTaskToColumn(createInitialBoardData(), "backlog", {
+		const board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(createInitialBoardData(), "backlog", {
 			prompt: "Task A",
 			baseRef: "main",
 		});
@@ -175,172 +191,29 @@ describe("board dependency state", () => {
 		expect(backlogCards[0]?.id).toHaveLength(5);
 	});
 
-	it("uses random entropy when randomUUID is unavailable", () => {
-		vi.stubGlobal("crypto", { randomUUID: undefined });
-		vi.spyOn(Math, "random").mockReturnValue(0.123456789);
+	// dd2db Y-EVENT-12：新卡 id 只能由 runtime 分配。浏览器端不再有任何本地随机造 id 的退路。
+	it("creates the card with exactly the runtime-allocated task id and never generates one locally", () => {
+		const randomUuidSpy = vi.fn(() => "ffffffff-ffff-4fff-8fff-ffffffffffff");
+		vi.stubGlobal("crypto", { randomUUID: randomUuidSpy });
+		const mathRandomSpy = vi.spyOn(Math, "random");
 
-		const board = addTaskToColumn(createInitialBoardData(), "backlog", {
-			prompt: "Task A",
-			baseRef: "main",
-		});
+		const board = addTaskToColumn(
+			createInitialBoardData(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main" },
+			"k7q2m",
+		);
 		const backlogCards = board.columns.find((column) => column.id === "backlog")?.cards ?? [];
 
-		expect(backlogCards[0]?.id).toBe("4fzzz");
+		expect(backlogCards.map((card) => card.id)).toEqual(["k7q2m"]);
+		expect(randomUuidSpy).not.toHaveBeenCalled();
+		expect(mathRandomSpy).not.toHaveBeenCalled();
 	});
 
-	it("prevents duplicate links in either direction", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
-
-		const first = addTaskDependency(movedA.board, taskA, taskB);
-		expect(first.added).toBe(true);
-
-		const duplicate = addTaskDependency(first.board, taskA, taskB);
-		expect(duplicate.added).toBe(false);
-		expect(duplicate.reason).toBe("duplicate");
-
-		const reverseDuplicate = addTaskDependency(first.board, taskB, taskA);
-		expect(reverseDuplicate.added).toBe(false);
-		expect(reverseDuplicate.reason).toBe("duplicate");
-
-		const sameTask = addTaskDependency(first.board, taskC, taskC);
-		expect(sameTask.added).toBe(false);
-		expect(sameTask.reason).toBe("same_task");
-	});
-
-	it("preserves backlog-to-backlog link order and reorients it when one task starts", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-
-		const bothBacklog = addTaskDependency(fixture.board, taskA, taskB);
-		expect(bothBacklog.added).toBe(true);
-		expect(bothBacklog.dependency).toMatchObject({
-			fromTaskId: taskA,
-			toTaskId: taskB,
-		});
-
-		const movedA = moveTaskToColumn(bothBacklog.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
-		expect(movedA.board.dependencies).toEqual([
-			expect.objectContaining({
-				fromTaskId: taskB,
-				toTaskId: taskA,
-			}),
-		]);
-	});
-
-	it("allows backlog-to-backlog links in either direction", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-
-		const firstDirection = addTaskDependency(fixture.board, taskA, taskB);
-		expect(firstDirection.added).toBe(true);
-		const reverseDirection = addTaskDependency(firstDirection.board, taskB, taskA);
-		expect(reverseDirection.added).toBe(true);
-		expect(reverseDirection.board.dependencies).toEqual([
-			expect.objectContaining({ fromTaskId: taskA, toTaskId: taskB }),
-			expect.objectContaining({ fromTaskId: taskB, toTaskId: taskA }),
-		]);
-	});
-
-	it("only unlocks backlog cards when a review card is trashed", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "review");
-		expect(movedA.moved).toBe(true);
-		const movedB = moveTaskToColumn(movedA.board, taskB, "review");
-		expect(movedB.moved).toBe(true);
-
-		const dependencyA = addTaskDependency(movedB.board, taskC, taskA);
-		expect(dependencyA.added).toBe(true);
-		const dependencyB = addTaskDependency(dependencyA.board, taskC, taskB);
-		expect(dependencyB.added).toBe(true);
-
-		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskA);
-		expect(moveATrash.moved).toBe(true);
-		expect(moveATrash.board.dependencies).toHaveLength(1);
-		expect(moveATrash.readyTaskIds).toEqual([taskC]);
-
-		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskB);
-		expect(moveBTrash.moved).toBe(true);
-		expect(moveBTrash.readyTaskIds).toEqual([taskC]);
-	});
-
-	it("does not unlock backlog cards when an in-progress card is trashed", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
-
-		const linked = addTaskDependency(movedA.board, taskA, taskB);
-		expect(linked.added).toBe(true);
-
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, taskA);
-		expect(trashed.readyTaskIds).toEqual([]);
-		expect(trashed.board.dependencies).toEqual([]);
-	});
-
-	it("removes dependency links once both linked cards are in trash", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
-
-		const linked = addTaskDependency(movedA.board, taskA, taskB);
-		expect(linked.added).toBe(true);
-		expect(linked.board.dependencies).toHaveLength(1);
-
-		const movedATrash = moveTaskToColumn(linked.board, taskA, "trash");
-		expect(movedATrash.board.dependencies).toHaveLength(0);
-
-		const movedBTrash = moveTaskToColumn(movedATrash.board, taskB, "trash");
-		expect(movedBTrash.board.dependencies).toHaveLength(0);
-	});
-
-	it("removes links once neither endpoint remains in backlog", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
-
-		const linked = addTaskDependency(movedA.board, taskA, taskB);
-		expect(linked.added).toBe(true);
-		expect(linked.board.dependencies).toHaveLength(1);
-
-		const movedB = moveTaskToColumn(linked.board, taskB, "in_progress");
-		expect(movedB.board.dependencies).toHaveLength(0);
-	});
-
-	it("drops links automatically when an unlocked backlog card starts", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		const movedB = moveTaskToColumn(movedA.board, taskB, "review");
-		const firstLink = addTaskDependency(movedB.board, taskC, taskA);
-		const secondLink = addTaskDependency(firstLink.board, taskC, taskB);
-
-		const trashA = trashTaskAndGetReadyLinkedTaskIds(secondLink.board, taskA);
-		expect(trashA.readyTaskIds).toEqual([]);
-
-		const trashB = trashTaskAndGetReadyLinkedTaskIds(trashA.board, taskB);
-		expect(trashB.readyTaskIds).toEqual([taskC]);
-
-		const autoStarted = moveTaskToColumn(trashB.board, taskC, "in_progress");
-		expect(autoStarted.moved).toBe(true);
-		expect(autoStarted.board.dependencies).toEqual([]);
+	it("refuses to create a card without a runtime-allocated task id instead of falling back to a local one", () => {
+		expect(() =>
+			addTaskToColumnWithResult(createInitialBoardData(), "backlog", { prompt: "Task A", baseRef: "main" }, "  "),
+		).toThrow(/runtime-allocated task id/);
 	});
 
 	it("keeps manual in-progress to review drags disabled", () => {
@@ -624,57 +497,25 @@ describe("board dependency state", () => {
 		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskC, taskB, taskA]);
 	});
 
-	it("removes dependencies when trash is cleared", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "review");
-		expect(movedA.moved).toBe(true);
-
-		const linked = addTaskDependency(movedA.board, taskA, taskB);
-		expect(linked.added).toBe(true);
-		expect(linked.board.dependencies.length).toBe(1);
-
-		const moved = moveTaskToColumn(linked.board, taskA, "trash");
-		expect(moved.moved).toBe(true);
-		const cleared = clearColumnTasks(moved.board, "trash");
-		expect(cleared.clearedTaskIds).toContain(taskA);
-		expect(cleared.board.dependencies).toEqual([]);
-	});
-
-	it("normalizes boards and keeps valid unique links", () => {
+	it("drops the retired dependencies key when normalizing a legacy board", () => {
 		const rawBoard = {
 			columns: [
 				{
 					id: "backlog",
-					cards: [
-						{ id: "b", prompt: "Task B", startInPlanMode: false, baseRef: "main" },
-						{ id: "c", prompt: "Task C", startInPlanMode: false, baseRef: "main" },
-					],
+					cards: [{ id: "b", prompt: "Task B", startInPlanMode: false, baseRef: "main" }],
 				},
-				{
-					id: "in_progress",
-					cards: [{ id: "a", prompt: "Task A", startInPlanMode: false, baseRef: "main" }],
-				},
+				{ id: "in_progress", cards: [] },
 				{ id: "review", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [
-				{ id: "dep-1", fromTaskId: "a", toTaskId: "b" },
-				{ id: "dep-2", fromTaskId: "b", toTaskId: "a" },
-				{ id: "dep-3", fromTaskId: "c", toTaskId: "a" },
-				{ id: "dep-4", fromTaskId: "a", toTaskId: "b" },
-				{ id: "dep-5", fromTaskId: "b", toTaskId: "c" },
-				{ id: "dep-6", fromTaskId: "a", toTaskId: "missing" },
-			],
+			dependencies: [{ id: "dep-1", fromTaskId: "b", toTaskId: "a" }],
 		};
 
 		const normalized = normalizeBoardData(rawBoard);
 		expect(normalized).not.toBeNull();
-		expect(normalized?.dependencies.map((dependency) => `${dependency.fromTaskId}->${dependency.toTaskId}`)).toEqual([
-			"b->a",
-			"c->a",
-			"b->c",
+		expect(normalized).not.toHaveProperty("dependencies");
+		expect(normalized?.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id)).toEqual([
+			"b",
 		]);
 	});
 
@@ -698,7 +539,6 @@ describe("board dependency state", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalizedTask = normalizeBoardData(rawBoard)?.columns[0]?.cards[0];
@@ -745,7 +585,6 @@ describe("board dependency state", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
@@ -800,7 +639,6 @@ describe("board dependency state", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
@@ -827,7 +665,6 @@ describe("board dependency state", () => {
 				},
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalized = normalizeBoardData(rawBoard);
@@ -868,7 +705,6 @@ describe("board dependency state", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalized = normalizeBoardData(rawBoard);
@@ -913,7 +749,6 @@ describe("board dependency state", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalized = normalizeBoardData(rawBoard);
@@ -945,7 +780,6 @@ describe("board dependency state", () => {
 				{ id: "review", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalized = normalizeBoardData(rawBoard);
@@ -967,7 +801,7 @@ describe("board dependency state", () => {
 
 	it("disables auto-review settings for a task", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "review", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "review", {
 			prompt: "Task A",
 			autoReviewEnabled: true,
 			autoReviewMode: "commit",
@@ -989,7 +823,7 @@ describe("board dependency state", () => {
 
 	it("updates only the task title", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			title: "Initial",
 			prompt: "Task A prompt",
 			baseRef: "main",
@@ -1009,7 +843,7 @@ describe("board dependency state", () => {
 
 	it("preserves task-level cline overrides when updating the title", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with cline overrides",
 			agentId: "cline",
 			clineSettings: {
@@ -1039,7 +873,7 @@ describe("board dependency state", () => {
 
 	it("preserves model fields when disabling auto-review", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "review", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "review", {
 			prompt: "Task with model",
 			autoReviewEnabled: true,
 			autoReviewMode: "commit",
@@ -1078,7 +912,7 @@ describe("board dependency state", () => {
 
 	it("does not create task model overrides for tasks inheriting global agent settings", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with inherited settings",
 			baseRef: "main",
 		});
@@ -1103,7 +937,7 @@ describe("board dependency state", () => {
 
 	it("updates task model overrides when the task already has explicit task-level settings", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with explicit override",
 			agentId: "cline",
 			clineSettings: {
@@ -1139,7 +973,7 @@ describe("board dependency state", () => {
 
 	it("updates reasoning-only task overrides without forcing provider or model overrides", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with reasoning-only override",
 			clineSettings: {
 				reasoningEffort: "low",
@@ -1167,7 +1001,7 @@ describe("board dependency state", () => {
 
 	it("does not treat non-cline agent overrides as explicit cline settings", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with codex override",
 			agentId: "codex",
 			baseRef: "main",
@@ -1193,7 +1027,7 @@ describe("board dependency state", () => {
 
 	it("materializes a concrete cline override when saving task-level chat settings", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task with explicit empty override",
 			clineSettings: {},
 			baseRef: "main",
@@ -1228,7 +1062,7 @@ describe("board dependency state", () => {
 
 	it("keeps tasks pinned to cline when the global selected agent is different", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task pinned to cline",
 			agentId: "cline",
 			clineSettings: {
@@ -1270,12 +1104,12 @@ describe("board dependency state", () => {
 describe("task conversation mode（蓝图 §A.1）", () => {
 	it("create：按 draft 落卡片字段，缺省不落字段", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Exploratory task",
 			baseRef: "main",
 			taskConversationMode: "exploratory",
 		});
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Plain task",
 			baseRef: "main",
 		});
@@ -1318,7 +1152,6 @@ describe("task conversation mode（蓝图 §A.1）", () => {
 				{ id: "validation", cards: [] },
 				{ id: "trash", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
@@ -1331,7 +1164,7 @@ describe("task conversation mode（蓝图 §A.1）", () => {
 
 	it("updateTask 三态：不提保留 / null 清除回缺省 / 具体值覆盖", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "backlog", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "backlog", {
 			prompt: "Task A",
 			baseRef: "main",
 			taskConversationMode: "exploratory",
@@ -1364,7 +1197,7 @@ describe("task conversation mode（蓝图 §A.1）", () => {
 
 	it("updateTaskTitle / disableTaskAutoReview 等部分重建路径保留模式声明", () => {
 		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "review", {
+		board = addTaskToColumnWithRuntimeAllocatedTaskIdStandIn(board, "review", {
 			title: "Initial title",
 			prompt: "Task A",
 			autoReviewEnabled: true,
@@ -1382,5 +1215,55 @@ describe("task conversation mode（蓝图 §A.1）", () => {
 		expect(board.columns.find((column) => column.id === "review")?.cards[0]?.taskConversationMode).toBe(
 			"exploratory",
 		);
+	});
+});
+
+describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整板 saveState 回盘）", () => {
+	// 服务端卡片 schema 的每个字段都填上非缺省值。新增字段时 typecheck 会先在
+	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
+	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
+		id: "f1e2d",
+		title: "Every field populated",
+		prompt: "Carry every field through normalization",
+		startInPlanMode: true,
+		taskAgentPermissionMode: "auto_approve_file_edits_only",
+		autoReviewEnabled: true,
+		autoReviewMode: "pr",
+		images: [{ id: "image-1", data: "aGVsbG8=", mimeType: "image/png", name: "screenshot.png" }],
+		taskCommentEntries: [{ taskCommentEntryId: "comment-1", commentText: "note", createdAt: 10, updatedAt: 11 }],
+		pinnedToTaskPinboardAt: 1_700_000_000_000,
+		taskPinboardPinReason: "watch this",
+		agentId: "claude",
+		ompAgentSessionTransport: "acp_stdio_subprocess",
+		taskConversationMode: "exploratory",
+		mostRecentlyLaunchedAgentSessionAgentId: "claude",
+		clineSettings: { providerId: "anthropic", modelId: "claude-sonnet", reasoningEffort: "high" },
+		terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opus" },
+		taskAgentSessionInitialization: {
+			sourceAgentId: "codex",
+			sourceSessionId: "019a0000-0000-7000-8000-000000000000",
+			sourceSessionReuseMode: "fork_existing_session",
+		},
+		baseRef: "main",
+		parentSessionId: "019a0000-0000-7000-8000-000000000000",
+		worktreeMode: "inplace",
+		prepFilePath: "/abs/prep.json",
+		createdAt: 1_600_000_000_000,
+		updatedAt: 1_650_000_000_000,
+		taskDescriptionLastUpdatedAt: 1_640_000_000_000,
+	};
+
+	it("服务端卡片的每个字段都原样带过归一化", () => {
+		const normalizedCard = normalizeBoardData({
+			columns: [{ id: "backlog", title: "Backlog", cards: [fullyPopulatedRuntimeBoardCard] }],
+		})?.columns.find((column) => column.id === "backlog")?.cards[0];
+		for (const fieldName of Object.keys(BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION) as Array<
+			keyof RuntimeBoardCard
+		>) {
+			expect({ fieldName, value: normalizedCard?.[fieldName as keyof typeof normalizedCard] }).toEqual({
+				fieldName,
+				value: fullyPopulatedRuntimeBoardCard[fieldName],
+			});
+		}
 	});
 });

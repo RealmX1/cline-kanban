@@ -24,6 +24,7 @@ function createProject(id: string): RuntimeProjectSummary {
 		taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
 		availability: { status: "available" },
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 	};
 }
 
@@ -100,6 +101,7 @@ describe("useProjectNumericSlotGroupHotkeys", () => {
 		const props: Parameters<typeof useProjectNumericSlotGroupHotkeys>[0] = {
 			projects: [createProject("alpha"), createProject("bravo")],
 			currentProjectId: "alpha",
+			isBoardScopeAllProjectsSelected: false,
 			numericSlotGroupAssignments: {},
 			onSelectProject: () => {},
 			onAssignProjectToNumericSlotGroupNumber: () => {},
@@ -142,6 +144,18 @@ describe("useProjectNumericSlotGroupHotkeys", () => {
 		invokeRegisteredCallback("mod+shift+9");
 		invokeRegisteredCallback("mod+shift+1");
 		expect(onSelectProject).not.toHaveBeenCalled();
+	});
+
+	it("in Board Scope, jumping to the project already open narrows the scope to it instead of doing nothing", async () => {
+		const onSelectProject = vi.fn();
+		await renderHarness({
+			isBoardScopeAllProjectsSelected: true,
+			numericSlotGroupAssignments: { "1": "alpha" },
+			onSelectProject,
+		});
+
+		invokeRegisteredCallback("mod+shift+1");
+		expect(onSelectProject).toHaveBeenCalledWith("alpha");
 	});
 
 	it("binds the current project to the pressed slot", async () => {

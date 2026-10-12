@@ -1,4 +1,7 @@
+import { isAgent } from "std-env";
 import { defineConfig } from "vitest/config";
+
+import LoadSensitiveSoftDeadlineExceededEndOfRunSummaryReporter from "./test/vitest-reporter-load-sensitive-soft-deadline-exceeded-end-of-run-summary";
 
 process.env.NODE_ENV = "production";
 
@@ -30,6 +33,13 @@ export default defineConfig({
 		// 诊断事件 journal 是排障时要读的真实数据，测试必须写到临时目录而非用户的 ~/.cline。
 		setupFiles: ["./test/vitest-setup-diagnostic-event-journal-isolation.ts"],
 		testTimeout: 15_000,
+		// 只有 reporters 为空时 vitest 才会自动选 agent/default 并追加 github-actions，所以显式写全；
+		// 末尾的自定义 reporter 汇总负载敏感软档告警（见 test/README.md）。命令行 `--reporter` 会整体替换这里。
+		reporters: [
+			isAgent ? "agent" : "default",
+			...(process.env.GITHUB_ACTIONS === "true" ? ["github-actions"] : []),
+			new LoadSensitiveSoftDeadlineExceededEndOfRunSummaryReporter(),
+		],
 		projects: [
 			{
 				extends: true,

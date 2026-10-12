@@ -15,7 +15,7 @@ import {
 //   - to_in_progress（review→running，本函数的兜底分支）：旧 `state==="awaiting_review"`
 //     ⟺ `isAwaitingUserReviewTurn(facets)`（涵盖 user+live 与 user+exited 折叠，对 live↔exited
 //     不敏感、不偷渡 distinction ②；全表等价见 session-facets.test.ts）。
-//   - activity：永不转换（纯活动元数据 ingestion）。
+//   - activity / 身份观测 / 压缩完成：永不转换（纯元数据 ingestion）。
 //
 // `reviewReason`(attention/hook/error) 读**故意保留不动**——`deriveUserTurnKind` 是非 1:1 映射
 // （attention→needs_input，而 needs_input 亦覆盖 reviewReason===null），把它换成 `userTurnKind`
@@ -25,7 +25,11 @@ export function canTransitionTaskForHookEvent(
 	event: RuntimeHookEvent,
 	explicitUserTurnKind: RuntimeTaskSessionUserTurnKind | null = null,
 ): boolean {
-	if (event === "activity" || event === "agent_conversation_session_identity_observed") {
+	if (
+		event === "activity" ||
+		event === "agent_conversation_session_identity_observed" ||
+		event === "main_agent_conversation_context_compaction_completed"
+	) {
 		return false;
 	}
 	if (event === "to_review") {

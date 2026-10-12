@@ -1,12 +1,11 @@
-import { describe, expect, it } from "vitest";
-
 import {
-	collectTasksPinnedToTaskPinboard,
 	isPinnedToTaskPinboard,
 	pinTaskToTaskPinboard,
 	setTaskPinboardPinReason,
 	unpinTaskFromTaskPinboard,
-} from "@/state/task-pinboard-pinning";
+} from "@runtime-task-pinboard-pinning";
+import { describe, expect, it } from "vitest";
+import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import type { BoardCard, BoardData } from "@/types";
 
 function createCard(id: string, overrides: Partial<BoardCard> = {}): BoardCard {
@@ -31,7 +30,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [createCard("done-task")] },
 		],
-		dependencies: [],
 	};
 }
 

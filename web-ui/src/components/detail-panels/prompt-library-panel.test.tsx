@@ -120,6 +120,64 @@ describe("PromptLibraryPanel", () => {
 		}
 	});
 
+	it.each(["单行提示词", "第一行\n第二行", "\n保留原有换行\n"])(
+		"填入普通条目时前后各新增换行并保留原文：%j",
+		async (promptText) => {
+			promptsHeldByFakeServerByTaskId["task-1"] = [
+				{ id: "prompt-1", text: promptText, scope: "task", createdAt: 100, updatedAt: 100 },
+			];
+			const onFillInput = vi.fn();
+			const onQueue = vi.fn();
+			await act(async () => {
+				renderPanel(
+					root,
+					<PromptLibraryPanel
+						taskId="task-1"
+						projectId="project-1"
+						onFillInput={onFillInput}
+						onQueuePromptForAfterCurrentTurn={onQueue}
+					/>,
+				);
+			});
+			await act(async () => {
+				getButton(container, "Fill prompt into input").click();
+				getButton(container, "Fill prompt into input").click();
+			});
+			expect(onFillInput.mock.calls).toEqual([[`\n${promptText}\n`], [`\n${promptText}\n`]]);
+			expect(promptsHeldByFakeServerByTaskId["task-1"]?.[0]?.text).toBe(promptText);
+			expect(onQueue).not.toHaveBeenCalled();
+			await act(async () => {
+				getButton(container, "Queue prompt for after the current turn").click();
+			});
+			expect(onQueue.mock.calls[0]?.[0].text).toBe(promptText);
+		},
+	);
+
+	it("填入孤儿条目时同样前后各新增换行", async () => {
+		promptsHeldByFakeServerByTaskId["task-deleted"] = [
+			{ id: "p-orphan", text: "孤儿提示词", scope: "task", createdAt: 100, updatedAt: 100 },
+		];
+		const onFillInput = vi.fn();
+		await act(async () => {
+			renderPanel(
+				root,
+				<PromptLibraryPanel
+					taskId="task-1"
+					projectId="project-1"
+					onFillInput={onFillInput}
+					taskIdsOnBoard={new Set(["task-1"])}
+				/>,
+			);
+		});
+		await act(async () => {
+			getButton(container, "1 prompt from deleted tasks").click();
+		});
+		await act(async () => {
+			getButton(container, "Fill orphaned prompt into input").click();
+		});
+		expect(onFillInput).toHaveBeenCalledWith("\n孤儿提示词\n");
+	});
+
 	it("focuses a newly added prompt entry", async () => {
 		await act(async () => {
 			renderPanel(root, <PromptLibraryPanel taskId="task-1" projectId="project-1" onFillInput={() => {}} />);
@@ -300,5 +358,43 @@ describe("PromptLibraryPanel", () => {
 		});
 
 		expect(container.textContent).not.toContain("from deleted tasks");
+	});
+	// 「排队」与「填进输入框」是两种意图，并存而不是替换；调用方不给排队能力时（例：home 侧栏）不显示按钮。
+	it("给了排队回调才显示排队按钮，点击把那条 prompt 原样交出去", async () => {
+		promptsHeldByFakeServerByTaskId["task-1"] = [
+			{ id: "prompt-q", text: "跑一遍测试再提交", scope: "task", createdAt: 1, updatedAt: 1 },
+		];
+		const onQueue = vi.fn();
+		await act(async () => {
+			renderPanel(
+				root,
+				<PromptLibraryPanel
+					taskId="task-1"
+					projectId="project-1"
+					onFillInput={() => {}}
+					onQueuePromptForAfterCurrentTurn={onQueue}
+				/>,
+			);
+		});
+		await act(async () => {
+			getButton(container, "Queue prompt for after the current turn").click();
+		});
+		expect(onQueue).toHaveBeenCalledWith(expect.objectContaining({ id: "prompt-q", text: "跑一遍测试再提交" }));
+		// 与 Fill 并存。
+		expect(getButton(container, "Fill prompt into input")).toBeInstanceOf(HTMLButtonElement);
+	});
+
+	it("不给排队回调时没有排队按钮", async () => {
+		promptsHeldByFakeServerByTaskId["task-1"] = [
+			{ id: "prompt-q", text: "跑一遍测试再提交", scope: "task", createdAt: 1, updatedAt: 1 },
+		];
+		await act(async () => {
+			renderPanel(root, <PromptLibraryPanel taskId="task-1" projectId="project-1" onFillInput={() => {}} />);
+		});
+		expect(
+			Array.from(container.querySelectorAll("button")).some(
+				(button) => button.getAttribute("aria-label") === "Queue prompt for after the current turn",
+			),
+		).toBe(false);
 	});
 });

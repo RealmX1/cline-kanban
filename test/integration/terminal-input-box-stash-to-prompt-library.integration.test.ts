@@ -43,6 +43,25 @@ vi.mock("../../src/terminal/agent-session-adapters.js", async (importOriginal) =
 
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../../src/state/prompt-library-store";
 import { TerminalSessionManager } from "../../src/terminal/session-manager";
+import {
+	type LoadSensitiveDeadlineAnnotatingTestContext,
+	type LoadSensitiveWallClockTwoTierDeadline,
+	waitForConditionWithinLoadSensitiveTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+
+// 真 PTY 上合成 TUI 的输出到达 listener：原先单档 8s，负载下 PTY 启动与镜像重画会超过它。
+const SYNTHETIC_TUI_OUTPUT_ARRIVAL_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "合成 TUI 输出到达 listener",
+	softDeadlineMsExpectedOnUncontendedHost: 8_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 15_000,
+};
+
+// 清框后重新打的字反映到读框结果：原先单档 5s。
+const INPUT_BOX_READ_REFLECTS_RETYPED_TEXT_AFTER_CLEAR_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "清框后读框只读到重新打的字",
+	softDeadlineMsExpectedOnUncontendedHost: 5_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 15_000,
+};
 
 const TASK_ID = "task-terminal-input-box-stash";
 const WORKSPACE_ID = "workspace-terminal-input-box-stash";
@@ -187,18 +206,22 @@ describe("终端输入框 Ctrl+S 暂存进 Prompt Library（integration，真 PT
 		rmSync(runtimeHomeMocks.runtimeHomePath, { recursive: true, force: true });
 	});
 
-	async function waitForOutputContaining(expectedText: string, timeoutMs = 8_000): Promise<void> {
-		const startedAtMs = Date.now();
-		while (Date.now() - startedAtMs < timeoutMs) {
-			if (receivedOutputText.includes(expectedText)) {
-				return;
-			}
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-		throw new Error(`未在 ${timeoutMs}ms 内等到输出包含 ${JSON.stringify(expectedText)}`);
+	async function waitForOutputContaining(
+		testContext: LoadSensitiveDeadlineAnnotatingTestContext,
+		expectedText: string,
+	): Promise<void> {
+		await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+			testContext,
+			{
+				...SYNTHETIC_TUI_OUTPUT_ARRIVAL_TWO_TIER_DEADLINE,
+				waitedForDescription: `${SYNTHETIC_TUI_OUTPUT_ARRIVAL_TWO_TIER_DEADLINE.waitedForDescription}：${JSON.stringify(expectedText)}`,
+			},
+			() => receivedOutputText.includes(expectedText),
+		);
 	}
 
-	it("粘贴被折叠成占位符后按 Ctrl+S：库里存到的是回填后的完整正文，框随即被清空", async () => {
+	// 用例超时 75s 覆盖：三次等输出 + 一次清框后读框，各自硬档 15s，外加会话启动与写库。
+	it("粘贴被折叠成占位符后按 Ctrl+S：库里存到的是回填后的完整正文，框随即被清空", async (testContext) => {
 		const scriptPath = join(workDir, "synthetic-claude-tui.cjs");
 		writeFileSync(scriptPath, SYNTHETIC_CLAUDE_TUI_SCRIPT_SOURCE, "utf8");
 		manager.attach(TASK_ID, {
@@ -217,7 +240,7 @@ describe("终端输入框 Ctrl+S 暂存进 Prompt Library（integration，真 PT
 			rows: 24,
 		});
 		// 输入框先画出来（合成 TUI 启动即 redraw 一次）。
-		await waitForOutputContaining("\u276f");
+		await waitForOutputContaining(testContext, "\u276f");
 
 		const pastedPayload = ["第一行", "第二行", "第三行", "第四行"].join(CARRIAGE_RETURN);
 		manager.writeInput(
@@ -225,7 +248,7 @@ describe("终端输入框 Ctrl+S 暂存进 Prompt Library（integration，真 PT
 			Buffer.from(`请看 ${BRACKETED_PASTE_START_MARKER}${pastedPayload}${BRACKETED_PASTE_END_MARKER} 结尾`, "utf8"),
 		);
 		// TUI 把它折叠掉了：此刻屏幕上一个字的原文都没有，原文只存在于运行时的粘贴账本里。
-		await waitForOutputContaining("[Pasted text #1 +3 lines]");
+		await waitForOutputContaining(testContext, "[Pasted text #1 +3 lines]");
 
 		const capture = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash(TASK_ID);
 
@@ -254,13 +277,17 @@ describe("终端输入框 Ctrl+S 暂存进 Prompt Library（integration，真 PT
 		// 读不到框（定位失败）同样会给出空字符串，那会让一个坏掉的读框冒充成功。
 		// 改为清框后重新打一段字：读出来恰好只有这段新字，才同时证明「旧内容没了」与「读框仍然有效」。
 		manager.writeInput(TASK_ID, Buffer.from("清空之后重新打的字", "utf8"));
-		await waitForOutputContaining("清空之后重新打的字");
-		const startedWaitingForClearedBoxAtMs = Date.now();
+		await waitForOutputContaining(testContext, "清空之后重新打的字");
 		let captureAfterClear = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash(TASK_ID);
-		while (captureAfterClear?.text !== "清空之后重新打的字" && Date.now() - startedWaitingForClearedBoxAtMs < 5_000) {
-			await new Promise((resolve) => setTimeout(resolve, 25));
-			captureAfterClear = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash(TASK_ID);
-		}
+		await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+			testContext,
+			INPUT_BOX_READ_REFLECTS_RETYPED_TEXT_AFTER_CLEAR_TWO_TIER_DEADLINE,
+			async () => {
+				captureAfterClear = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash(TASK_ID);
+				return captureAfterClear?.text === "清空之后重新打的字";
+			},
+			{ describeLastObservedStateForFailureMessage: () => JSON.stringify(captureAfterClear) },
+		);
 		expect(captureAfterClear?.text).toBe("清空之后重新打的字");
 
 		// 磁盘上的那份才是真相源：重新读一遍，确认存的是回填后的正文而不是占位符。
@@ -274,5 +301,5 @@ describe("终端输入框 Ctrl+S 暂存进 Prompt Library（integration，真 PT
 		]);
 
 		manager.stopTaskSession(TASK_ID);
-	}, 30_000);
+	}, 75_000);
 });

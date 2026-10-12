@@ -10,6 +10,7 @@ import {
 } from "@/components/shared/render-fuzzy-highlighted-text";
 import { Button, type ButtonVariant } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 export interface SearchSelectOption {
 	value: string;
@@ -214,6 +215,10 @@ export function SearchSelectDropdown({
 	}, [isOpen]);
 
 	const handleSearchInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			return;
+		}
 		if (filteredItems.length === 0) {
 			if (event.key === "Escape") {
 				event.preventDefault();

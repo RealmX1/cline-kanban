@@ -4,6 +4,7 @@ import { type ReactElement, useCallback, useEffect, useRef, useState } from "rea
 import { cn } from "@/components/ui/cn";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeDirectoryListEntry, RuntimeDirectoryListResponse } from "@/runtime/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { useDebouncedEffect } from "@/utils/react-use";
 import { toUiRelative } from "@/utils/server-path";
 
@@ -157,11 +158,18 @@ export function DirectoryAutocomplete({
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent<HTMLInputElement>) => {
+			const keyPressEmittedDuringImeComposition = isKeyboardEventEmittedDuringImeComposition(e);
 			if (e.key === "Escape") {
 				// Always intercept Escape so it doesn't propagate to the
 				// Radix Dialog and close the modal.
 				e.preventDefault();
 				e.stopPropagation();
+				// 组字期间的 Escape 归输入法（取消候选），但「让开」只能让开本处理器自己的动作，
+				// 不能连拦冒泡一起放弃：一旦这一下冒到宿主 Radix Dialog 就会触发 onDismiss，
+				// 用户只想撤掉候选词，整张 Add Project 表单却被关掉并清空。
+				if (keyPressEmittedDuringImeComposition) {
+					return;
+				}
 				if (isOpen) {
 					setIsOpen(false);
 					setHighlightedIndex(-1);
@@ -169,6 +177,11 @@ export function DirectoryAutocomplete({
 					// Blur the input when Escape is pressed with dropdown closed
 					inputRefToUse.current?.blur();
 				}
+				return;
+			}
+
+			// 其余按键在组字期间完全属于输入法本身（上屏字符原文、翻候选页），处理器整体让开。
+			if (keyPressEmittedDuringImeComposition) {
 				return;
 			}
 

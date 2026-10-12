@@ -35,6 +35,7 @@ vi.mock("@/stores/workspace-metadata-store", () => ({
 		cardRenderObservation(taskId);
 		return undefined;
 	},
+	useTaskWorkspaceInfoValue: () => null,
 }));
 vi.mock("@hello-pangea/dnd", () => ({
 	DragDropContext: ({ children }: { children: ReactNode }) => children,
@@ -62,7 +63,6 @@ const firstCard = card("first");
 const secondCard = card("second");
 const board: BoardData = {
 	columns: [{ id: "review", title: "Review", cards: [firstCard, secondCard] }],
-	dependencies: [],
 };
 const stableHandlers = {
 	onCardSelect: vi.fn(),
@@ -105,13 +105,7 @@ for (const host of ["board", "focus"] as const) {
 				root.render(
 					<TooltipProvider>
 						{host === "board" ? (
-							<KanbanBoard
-								data={board}
-								dependencies={board.dependencies}
-								taskSessions={taskSessions}
-								{...stableHandlers}
-								{...overrides}
-							/>
+							<KanbanBoard data={board} taskSessions={taskSessions} {...stableHandlers} {...overrides} />
 						) : (
 							<ColumnContextPanel
 								selection={{ card: firstCard, column: board.columns[0]!, allColumns: board.columns }}
