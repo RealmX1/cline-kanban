@@ -14,7 +14,7 @@ export type TaskSearchMatchableTextField = Exclude<TaskBoardSearchMatchSource, "
 /**
  * 文本匹配的字段范围：默认 title 与 prompt 都参与，用户可收窄到只匹配其一。四种模式通用——
  * direct 只在允许的字段里找子串、fuzzy 换 fzf 的匹配主体、semantic / hybrid 丢弃范围外字段的向量命中。
- * task id 全等置顶不受它约束（taskId 是独立于文本的命中来源）。
+ * task id 置顶（全等 / 前缀 / 子串 / 单字符容错）不受它约束（taskId 是独立于文本的命中来源）。
  */
 export type TaskSearchMatchedTextFieldScope = "title_and_prompt" | "title_only" | "prompt_only";
 

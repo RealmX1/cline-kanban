@@ -161,7 +161,7 @@ export interface TaskSpotlightSearchController {
 	isBrowsingAllTasksWithoutQuery: boolean;
 	semanticSearchStatus: TaskBoardSemanticSearchStatus;
 	results: TaskBoardSearchResult[];
-	/** task id 全等命中、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
+	/** task id 命中（全等 / 片段 / 容错）、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
 	taskIdMatchedResultCountHiddenByFilters: number;
 	/** 因「会话状态维度已启用、但跨项目行判不了」而被排除的条数（空态同样要说明）。 */
 	resultCountExcludedBecauseSessionActivityIsNotObservable: number;
