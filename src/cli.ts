@@ -38,7 +38,9 @@ import {
 	getKanbanRuntimePort,
 	getRuntimeFetch,
 	isKanbanRemoteHost,
+	parseKanbanAdditionalTrustedBrowserOrigin,
 	parseRuntimePort,
+	setKanbanAdditionalTrustedBrowserOrigins,
 	setKanbanRuntimeHost,
 	setKanbanRuntimePort,
 	setKanbanRuntimeTls,
@@ -64,6 +66,7 @@ interface CliOptions {
 	cert: string | null;
 	key: string | null;
 	noPasscode: boolean;
+	additionalTrustedBrowserOrigins: string[];
 }
 
 const KANBAN_VERSION = typeof packageJson.version === "string" ? packageJson.version : "0.1.0";
@@ -92,6 +95,7 @@ interface RootCommandOptions {
 	cert?: string;
 	key?: string;
 	noPasscode?: boolean;
+	additionalTrustedBrowserOrigin?: string[];
 }
 
 type ShutdownIndicatorResult = "done" | "interrupted" | "failed";
@@ -110,7 +114,14 @@ interface ShutdownIndicator {
  */
 function shouldAutoOpenBrowserTabForInvocation(argv: string[]): boolean {
 	const launchFlags = new Set(["--open", "--no-open", "--skip-shutdown-cleanup", "--https", "--no-passcode"]);
-	const launchOptionsWithValues = new Set(["--host", "--port", "--agent", "--cert", "--key"]);
+	const launchOptionsWithValues = new Set([
+		"--host",
+		"--port",
+		"--agent",
+		"--cert",
+		"--key",
+		"--additional-trusted-browser-origin",
+	]);
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -606,6 +617,10 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		setKanbanRuntimeHost(options.host);
 		console.log(`Binding to host ${options.host}.`);
 	}
+	if (options.additionalTrustedBrowserOrigins.length > 0) {
+		setKanbanAdditionalTrustedBrowserOrigins(options.additionalTrustedBrowserOrigins);
+		console.log(`Also trusting browser origins: ${options.additionalTrustedBrowserOrigins.join(", ")}.`);
+	}
 
 	const [{ openInBrowser }, { autoUpdateOnStartup, runPendingAutoUpdateOnShutdown }] = await Promise.all([
 		import("./server/browser.js"),
@@ -749,6 +764,15 @@ function createProgram(invocationArgs: string[]): Command {
 			"--no-passcode",
 			"Disable auto-generated passcode for remote access (for advanced users behind a reverse proxy).",
 		)
+		.option(
+			"--additional-trusted-browser-origin <origin>",
+			"Also accept browser requests from this origin, e.g. https://my-machine.tailnet-name.ts.net:3485 " +
+				"when a reverse proxy such as `tailscale serve` forwards to this runtime. Repeatable.",
+			(value: string, previous: string[] = []) => {
+				parseKanbanAdditionalTrustedBrowserOrigin(value);
+				return [...previous, value];
+			},
+		)
 		.showHelpAfterError()
 		.addHelpText("after", `\nRuntime URL: ${getKanbanRuntimeOrigin()}`);
 
@@ -796,6 +820,7 @@ function createProgram(invocationArgs: string[]): Command {
 				cert: options.cert ?? null,
 				key: options.key ?? null,
 				noPasscode: options.noPasscode === true,
+				additionalTrustedBrowserOrigins: options.additionalTrustedBrowserOrigin ?? [],
 			},
 			shouldAutoOpenBrowser,
 		);

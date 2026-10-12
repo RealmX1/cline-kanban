@@ -23,6 +23,7 @@ import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agen
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard } from "@/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 interface UseTaskSessionsInput {
 	currentProjectId: string | null;
@@ -303,7 +304,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			if (!initialUserQuestion) {
 				return { ok: false, message: "Enter a question for the new session." };
 			}
-			const taskConversationSessionId = `task-conversation-session-${crypto.randomUUID()}`;
+			const taskConversationSessionId = `task-conversation-session-${createRandomUuidV4WithInsecureContextFallback()}`;
 			try {
 				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(taskConversationSessionId);
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);

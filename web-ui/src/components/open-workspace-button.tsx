@@ -27,6 +27,7 @@ function OpenTargetIcon({ option }: { option: OpenTargetOption }): React.ReactEl
 
 export function OpenWorkspaceButton({
 	options,
+	optionsFootnote = null,
 	selectedOptionId,
 	disabled,
 	loading,
@@ -34,6 +35,8 @@ export function OpenWorkspaceButton({
 	onSelectOption,
 }: {
 	options: readonly OpenTargetOption[];
+	// 显示在下拉列表底部的一句说明（例如从其他设备访问时，Open 走的是 Remote-SSH）。
+	optionsFootnote?: string | null;
 	selectedOptionId: OpenTargetId;
 	disabled: boolean;
 	loading: boolean;
@@ -101,6 +104,11 @@ export function OpenWorkspaceButton({
 									</button>
 								);
 							})}
+							{optionsFootnote ? (
+								<p className="mt-1 max-w-[240px] border-t border-border px-2.5 pt-1.5 pb-1 text-[11px] leading-snug text-text-tertiary">
+									{optionsFootnote}
+								</p>
+							) : null}
 						</div>
 					</RadixPopover.Content>
 				</RadixPopover.Portal>

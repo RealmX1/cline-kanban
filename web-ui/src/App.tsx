@@ -1397,6 +1397,7 @@ export default function App(): ReactElement {
 
 	const {
 		openTargetOptions,
+		openTargetOptionsFootnote,
 		selectedOpenTargetId,
 		onSelectOpenTarget,
 		onOpenWorkspace,
@@ -1405,6 +1406,7 @@ export default function App(): ReactElement {
 	} = useOpenWorkspace({
 		currentProjectId: projectRuntimeWorkspaceId,
 		workspacePath: activeWorkspacePath,
+		runtimeHostRemoteEditorAccessIdentity: runtimeProjectConfig?.runtimeHostRemoteEditorAccessIdentity ?? null,
 	});
 	const selectedTaskChatMessages = selectTaskChatMessagesForTask(selectedCard?.card.id, taskChatMessagesByTaskId);
 
@@ -1659,6 +1661,7 @@ export default function App(): ReactElement {
 							onRunShortcut={handleRunShortcut}
 							onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
 							openTargetOptions={openTargetOptions}
+							openTargetOptionsFootnote={openTargetOptionsFootnote}
 							selectedOpenTargetId={selectedOpenTargetId}
 							onSelectOpenTarget={onSelectOpenTarget}
 							onOpenWorkspace={onOpenWorkspace}

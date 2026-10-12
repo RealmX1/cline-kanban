@@ -30,6 +30,13 @@ Bind to a specific local port or pick the first available port starting at 3484.
 .B --no-open
 Do not open the browser automatically.
 .TP
+.B --additional-trusted-browser-origin <origin>
+Also accept browser requests (HTTP and WebSocket) whose Origin and Host match this origin, for example
+https://my-machine.example-tailnet.ts.net:3485 when
+.B tailscale serve
+forwards HTTPS to this runtime. Repeatable. The runtime keeps binding to its own host, so remote-mode
+passcode authentication is not enabled by this option. See docs/remote-access-via-tailscale-serve.md.
+.TP
 .B --help, -h
 Show help text and exit.
 .TP

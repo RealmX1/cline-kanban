@@ -58,13 +58,18 @@ import type {
 	RuntimeProjectShortcut,
 } from "@/runtime/types";
 import { useRuntimeConfig } from "@/runtime/use-runtime-config";
+import { useWorkspaceOpenTargetPreferredApplicationIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import {
 	type BrowserNotificationPermission,
 	getBrowserNotificationPermission,
 	requestBrowserNotificationPermission,
 } from "@/utils/notification-permission";
+import { openRuntimeHostPathInEditorOnThisDeviceThroughRemoteSsh } from "@/utils/open-runtime-host-path-in-editor-on-this-device-through-remote-ssh";
+import { normalizeOpenTargetId } from "@/utils/open-targets";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { useUnmount, useWindowEvent } from "@/utils/react-use";
+import { resolveProjectFilesystemAccessRouteForBrowser } from "@/utils/resolve-project-filesystem-access-route-for-browser";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 interface RuntimeSettingsAgentRowModel {
 	id: RuntimeAgentId;
@@ -751,7 +756,7 @@ export function RuntimeSettingsDialog({
 	const handleCopyVariableToken = (token: string) => {
 		void (async () => {
 			try {
-				await navigator.clipboard.writeText(token);
+				await writeTextToSystemClipboardWithInsecureContextFallback(token);
 				setCopiedVariableToken(token);
 				if (copiedVariableResetTimerRef.current !== null) {
 					window.clearTimeout(copiedVariableResetTimerRef.current);
@@ -861,15 +866,30 @@ export function RuntimeSettingsDialog({
 		})();
 	};
 
+	const [storedOpenTargetApplicationId] = useWorkspaceOpenTargetPreferredApplicationIdPreference("vscode");
+	const runtimeHostRemoteEditorAccessIdentity = config?.runtimeHostRemoteEditorAccessIdentity ?? null;
 	const handleOpenFilePath = useCallback(
 		(filePath: string) => {
 			setSaveError(null);
+			if (resolveProjectFilesystemAccessRouteForBrowser() === "remote-ssh-editor-deep-link") {
+				// 从其他设备访问：在 runtime 主机上打开文件会开在别人看不到的屏幕上，改为在这台设备的编辑器里经 SSH 打开。
+				if (!runtimeHostRemoteEditorAccessIdentity) {
+					return;
+				}
+				openRuntimeHostPathInEditorOnThisDeviceThroughRemoteSsh({
+					preferredOpenTargetId: normalizeOpenTargetId(storedOpenTargetApplicationId) ?? "vscode",
+					runtimeHostRemoteEditorAccessIdentity,
+					absolutePath: filePath,
+					lineNumber: 1,
+				});
+				return;
+			}
 			void openFileOnHost(workspaceId, filePath).catch((error) => {
 				const message = error instanceof Error ? error.message : String(error);
 				setSaveError(`Could not open file on host: ${message}`);
 			});
 		},
-		[workspaceId],
+		[runtimeHostRemoteEditorAccessIdentity, storedOpenTargetApplicationId, workspaceId],
 	);
 
 	const handleClineSetupSaved = useCallback(() => {

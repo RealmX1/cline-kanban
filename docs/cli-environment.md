@@ -13,6 +13,8 @@ This page documents environment variables that affect **CLI subprocess behavior*
 
 Subcommands such as `kanban task list` and `kanban hooks ingest` reach the runtime through these settings. If nothing is listening, the CLI should fail fast and exit (see timeout variables below).
 
+To reach the runtime from other devices, keep it bound to `127.0.0.1` and put `tailscale serve` in front of it with `--additional-trusted-browser-origin`. There is deliberately no environment variable for that trust list, so agent subprocesses never inherit it. Recipe: [`remote-access-via-tailscale-serve.md`](./remote-access-via-tailscale-serve.md).
+
 ## CLI subprocess timeouts
 
 These guards apply to **short-lived subcommands** (`kanban task …`, `kanban hooks ingest`, etc.). They do **not** apply to a long-running `kanban` server launch (`kanban`, `kanban --port 3484`, …).
