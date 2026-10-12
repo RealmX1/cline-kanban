@@ -25,6 +25,9 @@ import { createTempDir } from "../../utilities/temp-dir";
 const WORKSPACE_ID = "workspace-1";
 // flush 批次窗口 150ms + 处理裕量；负面断言（不应再收到消息）必须等过这个窗口。
 const FLUSH_OVERSHOOT_MS = 400;
+// summary flush 触发的 projects 广播还要再等合并窗口（1 秒，PROJECTS_BROADCAST_COALESCING_WINDOW_AFTER_TASK_SESSION_SUMMARY_FLUSH_MS）
+// 结束才构建；这一路的负面断言要等过 flush 批次窗口 + 合并窗口。
+const FLUSH_AND_PROJECTS_BROADCAST_COALESCING_OVERSHOOT_MS = 150 + 1_000 + FLUSH_OVERSHOOT_MS;
 // 「终会到达」的单档等待（WS 连接、正向广播消息）：原先 2s 在高负载（两个 worker 共享宿主）下不够；
 // 断言判的是「最终收到了什么」，放宽不损失判别力。FLUSH_OVERSHOOT_MS 是反向观察窗口，不在此列。
 const RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS = 10_000;
@@ -322,11 +325,13 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 	it("flushTaskSessionSummaries 触发的 projects 广播同样按内容去重", async () => {
 		harness.emitTerminalSummary(makeSummary("task-1"));
 		const first = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
-		expect(first.currentProjectId).toBe(WORKSPACE_ID);
+		// flush 这一路不带自己的 workspaceId（harness 原样回显 preferredCurrentProjectId）：currentProjectId 不随轮到
+		// flush 的工作区来回切，去重才可能命中。
+		expect(first.currentProjectId).toBeNull();
 
-		// 内容未变：又一次 150ms flush 不再重发。
+		// 内容未变：又一次 flush 不再重发。
 		harness.emitTerminalSummary(makeSummary("task-1"));
-		await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+		await new Promise((resolve) => setTimeout(resolve, FLUSH_AND_PROJECTS_BROADCAST_COALESCING_OVERSHOOT_MS));
 		expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
 
 		// 内容变化：下一次 flush 确实重发。
@@ -334,6 +339,34 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		harness.emitTerminalSummary(makeSummary("task-1"));
 		const second = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
 		expect(second.projects[0]?.taskCounts.in_progress).toBe(3);
+	});
+
+	it("合并窗口内的多次 flush 合并构建、广播 projects，最终送达最新状态", async () => {
+		const projectsPayloadBuildCountBeforeFlushes = harness.buildProjectsPayload.mock.calls.length;
+		// 4 个相隔 200ms 的 flush 批次（标称跨度 600ms，落在 1 秒合并窗口内），每批内容都在变：不合并的话要构建并广播 4 次。
+		const flushCount = 4;
+		for (let flushIndex = 1; flushIndex <= flushCount; flushIndex += 1) {
+			harness.projects[0] = makeProject("project-a", flushIndex);
+			harness.emitTerminalSummary(makeSummary(`task-${flushIndex}`));
+			await new Promise((resolve) => setTimeout(resolve, 200));
+		}
+		await waitForRuntimeMessage(
+			client,
+			(message): message is Extract<RuntimeStateStreamMessage, { type: "projects_updated" }> =>
+				isProjectsUpdatedMessage(message) && message.projects[0]?.taskCounts.in_progress === flushCount,
+		);
+		await new Promise((resolve) => setTimeout(resolve, FLUSH_AND_PROJECTS_BROADCAST_COALESCING_OVERSHOOT_MS));
+		const projectsPayloadBuildsTriggeredByFlushes = harness.buildProjectsPayload.mock.calls.slice(
+			projectsPayloadBuildCountBeforeFlushes,
+		);
+		// 标称只构建 1 次；宿主很忙、sleep 被拉长到跨过一个窗口边界时是 2 次。都远少于 4 次，且都不带 workspaceId。
+		expect(projectsPayloadBuildsTriggeredByFlushes.length).toBeGreaterThanOrEqual(1);
+		expect(projectsPayloadBuildsTriggeredByFlushes.length).toBeLessThanOrEqual(2);
+		expect(
+			projectsPayloadBuildsTriggeredByFlushes.every(
+				([preferredCurrentProjectId]) => preferredCurrentProjectId === null,
+			),
+		).toBe(true);
 	});
 
 	it("新客户端收到首帧后同内容广播仍发送（首帧发出后指纹复位）", async () => {

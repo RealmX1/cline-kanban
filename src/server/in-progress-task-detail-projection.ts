@@ -37,6 +37,26 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	isParkedAwaitingDispatchedBackgroundWork: boolean;
 }
 
+/**
+ * 跨项目视图里 lastOutputAt 的取整粒度。这些视图只拿它判断「是否在 5 分钟活跃窗口内」
+ * （RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS），15 秒的误差无关紧要；而原值随每个非空 PTY chunk 刷新（含 spinner 重绘），
+ * 让整份约 115 KB 的 projects_updated 几乎每次构建都不同、按内容去重失效。按墙钟整桶向下取整后，同一桶内的输出
+ * 不再改变 payload。只取整这一个字段：lastSubstantiveOutputAt 与 lastConversationProgressObservation 是真实进展，
+ * 原样保留。
+ */
+// EXPERIMENT_NODE: 跨项目视图 lastOutputAt 的取整粒度（15 秒）
+export const LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS = 15_000;
+
+function roundLastOutputAtDownForCrossProjectTaskViews(lastOutputAt: number | null): number | null {
+	if (lastOutputAt === null) {
+		return null;
+	}
+	return (
+		Math.floor(lastOutputAt / LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS) *
+		LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS
+	);
+}
+
 // facet 经真相源 resolveSessionFacets 解析，绝不读 summary.state。
 export function extractTaskSessionFactsForCrossProjectTaskViews(
 	summary: RuntimeTaskSessionSummary,
@@ -44,7 +64,7 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 	const facets = resolveSessionFacets(summary);
 	return {
 		agentId: summary.agentId,
-		lastOutputAt: summary.lastOutputAt,
+		lastOutputAt: roundLastOutputAtDownForCrossProjectTaskViews(summary.lastOutputAt),
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
 		agentResponseGenerationStopped: summary.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: summary.lastConversationProgressObservation ?? null,

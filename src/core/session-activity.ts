@@ -684,6 +684,14 @@ export function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(
 // 放行 = 在用户从没继续过对话的情况下，把几小时前排的一句话发进一个刚恢复的会话。那一侧的代价是「不提醒
 // 就发」，而等下去的代价只是「队列一直等到用户继续」（面板如实写着原因）。所以排队门控读声明态，
 // 不读带兜底过期的那一个。两态的枚举仍只在这里定义一次。
+//
+// 「等到用户继续」成立的前提：**解除侧也只看声明态**。解除只走 session-manager 的
+// disarmRestorationContinuationGuard 一个漏斗，它绝不能读带兜底的谓词——那样首个真人提交一旦晚于启动
+// 30 分钟就清不掉声明态，队列永远等不到（2026-10-11 a768a，d0304b47 与 f1d61259 两次修复叠出的接缝）。
+//
+// EXPERIMENT_NODE: 门控 5 是否叠加「本次 spawn 之后已有真人提交」的独立证据作纵深防御。现成候选
+// lastMainAgentConversationModelRequestDispatchObservation 不合格：它的 user_prompt_submit 证据包含 harness
+// task-notification（兜底过期后放行的正是孤儿通知），且只存最后一次观测、会被 PostToolUse 覆盖。
 export function isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(
 	summary: RuntimeTaskSessionSummary,
 ): boolean {
