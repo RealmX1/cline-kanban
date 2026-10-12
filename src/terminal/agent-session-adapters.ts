@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
@@ -27,6 +29,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
+import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from "../prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import {
@@ -36,6 +39,7 @@ import {
 	normalizeCodexConfigOverridesBeforeSubcommand,
 } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
+import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
 import { writeOmpNativeConversationSessionIdentityExtension } from "./omp-native-conversation-session-identity-extension";
@@ -76,6 +80,9 @@ export interface AgentAdapterLaunchInput {
 	// prepareAgentLaunch 解析好的 exploratory 注入段（非 exploratory / 物化失败 ⇒ null），
 	// 由 resolveAgentAppendSystemPrompt 与 prependTaskSessionGuidanceToPrompt 两处组合点并入（§A.2）。
 	exploratoryModeAppendSystemPrompt?: string | null;
+	// prepareAgentLaunch 解析好的工作单元间关系邻域注入段（dd2db 1b；没有默认可见的关系 / 读不到 ⇒ null），
+	// 与 exploratory 注入段走同样两处组合点。
+	interWorkUnitRelationNeighborhoodAppendSystemPrompt?: string | null;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
@@ -91,6 +98,10 @@ export interface AgentAdapterLaunchInput {
 	// 会被前端同时发出（web-ui/src/hooks/use-task-sessions.ts 的 trash 恢复），今天靠 resumeFromTrash
 	// 压过播种才是对的，故本字段必须独立于播种轴另起一档。
 	observedAgentNativeConversationSessionResumeAddressing?: RuntimeObservedAgentNativeConversationSessionResumeAddressing;
+	// kanban 在 spawn 前为**全新开局**分配并已落盘的原生会话 id（目前只有 Cursor，见 agent-catalog 的
+	// nativeConversationSessionIdentityCaptureMethod）。与上面的重启寻址同为「按 id」，但语义相反：这里是
+	// 以新 id 开一段新对话、照常投 prompt，绝不能被当成续跑（不武装实质输出抑制、不省略 prompt）。
+	kanbanAssignedAgentNativeConversationSessionIdForFreshStart?: string;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
@@ -121,6 +132,13 @@ export interface PreparedAgentLaunch {
 	resumesPriorAgentConversation?: boolean;
 	detectOutputTransition?: AgentOutputTransitionDetector;
 	shouldInspectOutputForTransition?: AgentOutputTransitionInspectionPredicate;
+	// 只给把工作单元间关系邻域注入段写在 argv 之外（agent 配置文件）的 adapter 用（目前只有 kiro）：如实声明本次启动
+	// 带上了这段文本。写进 argv / deferredStartupPromptText 的不用设，prepareAgentLaunch 在合流点直接查验。
+	carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv?: boolean;
+	// 本次启动确实带上了关系邻域注入段、且段里列出了断言型关系时才有（由 prepareAgentLaunch 在合流点填写，adapter 不设）。
+	// session-manager 在 PTY spawn 成功、新会话装载之后调用一次，提交注入回执；准备或 spawn 失败绝不调用。
+	// 后台记账、按幂等键去重、绝不抛错，不影响启动。
+	commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded?: () => void;
 }
 
 interface HookContext {
@@ -1093,6 +1111,26 @@ async function ensureTextFile(filePath: string, content: string, executable = fa
 	});
 }
 
+// agent 启动时读到的 hook 配置文件，在 agent 存活期间不能被改写：热重启之后会话不再随部署重开，原地改写会让
+// 存活会话中途读到新 build 的配置（Claude 会察觉 settings 被外部修改）；droid 的 settings 还随任务权限档而异，
+// 共用一个路径会被并发启动的任务互相覆盖。所以按内容寻址：内容不同就是另一个文件，已有文件永不改写。
+// EXPERIMENT_NODE: 旧内容的文件目前不回收——每种内容一份、体积很小，只在 hook 配置变化的部署或不同权限档时新增。
+async function ensureContentAddressedTextFile(input: {
+	directoryPath: string;
+	fileNameStem: string;
+	fileNameExtension: string;
+	content: string;
+}): Promise<string> {
+	const contentSha256Prefix = createHash("sha256").update(input.content).digest("hex").slice(0, 12);
+	const filePath = join(input.directoryPath, `${input.fileNameStem}-${contentSha256Prefix}${input.fileNameExtension}`);
+	const existingContent = await readFile(filePath, "utf8").catch(() => null);
+	if (existingContent !== input.content) {
+		// 只有文件不存在（或被截断 / 损坏）时才写；内容相同的文件名就是它的内容。
+		await ensureTextFile(filePath, input.content);
+	}
+	return filePath;
+}
+
 function withPrompt(args: string[], prompt: string, mode: "append" | "flag", flag?: string): PreparedAgentLaunch {
 	const trimmed = prompt.trim();
 	if (!trimmed) {
@@ -1131,6 +1169,7 @@ function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string 
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
 		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
 		input.exploratoryModeAppendSystemPrompt,
+		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
 }
 
@@ -1139,6 +1178,7 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 	const taskSessionPrompt = combineAppendSystemPrompts(
 		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
 		input.exploratoryModeAppendSystemPrompt,
+		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
 	if (!prompt || !taskSessionPrompt) {
 		return input.prompt;
@@ -1254,9 +1294,22 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.resumeFromTrash ||
 				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
+		// 续跑不重放「plan 起步」（那是开局意图，会话可能早已批准计划、退出了 plan），但也不能因此丢掉一个
+		// **还没批准**的 plan：会话死前若仍停在 plan 里，按转录如实恢复，否则卡片的放权旗标会让它直接跳出 plan
+		// 开工（见 persisted-agent-transcript-plan-mode-still-open-probe.ts 的取证）。探针问不出结论时维持原规则。
+		const resumedConversationPlanModeState =
+			continuesWithoutNewPrompt && !input.readOnlyQuestionSession
+				? await probeClaudeConversationPlanModeStateBeforeResume({
+						agentId: input.agentId,
+						workspacePath: input.cwd,
+						agentNativeConversationSessionId: observedNativeSessionResumeAddressing?.sourceSessionId ?? null,
+					}).catch(() => null)
+				: null;
 		applyClaudePermissionAndPlanModeArgs(args, {
 			...input,
-			startInPlanMode: input.startInPlanMode && !continuesWithoutNewPrompt,
+			startInPlanMode:
+				(input.startInPlanMode && !continuesWithoutNewPrompt) ||
+				resumedConversationPlanModeState === "plan_mode_still_open",
 		});
 		// 四条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
 		const resumesPriorAgentConversation = Boolean(
@@ -1316,7 +1369,6 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const settingsPath = join(getHookAgentDirectory("claude"), "settings.json");
 			const hooksSettings = {
 				hooks: {
 					SessionStart: [
@@ -1334,6 +1386,20 @@ const claudeAdapter: AgentSessionAdapter = {
 					Stop: [{ hooks: [{ type: "command", command: buildHookCommand("to_review", { source: "claude" }) }] }],
 					SubagentStop: [
 						{ hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }] },
+					],
+					// 压缩完成：manual / auto 都收（不带 matcher），trigger 由 `kanban hooks` 从 stdin 派生。
+					// 刻意不用 SessionStart(source=compact)——它被映射为身份事件，且语义是「会话（重新）开始」。
+					PostCompact: [
+						{
+							hooks: [
+								{
+									type: "command",
+									command: buildHookCommand("main_agent_conversation_context_compaction_completed", {
+										source: "claude",
+									}),
+								},
+							],
+						},
 					],
 					PreToolUse: [
 						{
@@ -1387,7 +1453,12 @@ const claudeAdapter: AgentSessionAdapter = {
 					],
 				},
 			};
-			await ensureTextFile(settingsPath, JSON.stringify(hooksSettings, null, 2));
+			const settingsPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("claude"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(hooksSettings, null, 2),
+			});
 			args.push("--settings", settingsPath);
 			Object.assign(
 				env,
@@ -1416,8 +1487,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				...env,
 			},
 			resumesPriorAgentConversation,
-			detectOutputTransition: claudePromptDetector,
-			shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("claude"),
 		};
 	},
 };
@@ -1617,11 +1687,33 @@ const codexAdapter: AgentSessionAdapter = {
 			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
-			detectOutputTransition: codexPromptDetector,
-			shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("codex"),
 		};
 	},
 };
+
+// cursor-agent 的 chat 选择参数：`--continue`（cwd 桶最近一段）与 `--resume [chatId]`（chatId 可省）。kanban 一旦按 id
+// 寻址就必须先把用户 args 里的这些剥掉——实测 `--continue` 与 `--resume <id>` 同时出现时 `--continue` 胜，
+// 按 id 续跑会被静默改成「最近一段」。`--resume` 后面只吞 UUID 形状的值，免得把 positional prompt 当成 chatId 吃掉。
+const CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function removeCursorAgentChatSelectionArguments(args: readonly string[]): string[] {
+	const remaining: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--continue" || argument.startsWith("--resume=")) {
+			continue;
+		}
+		if (argument === "--resume") {
+			if (CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN.test(args[index + 1] ?? "")) {
+				index += 1;
+			}
+			continue;
+		}
+		remaining.push(argument);
+	}
+	return remaining;
+}
 
 const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
@@ -1630,7 +1722,7 @@ const cursorAdapter: AgentSessionAdapter = {
 		// cursor 是唯一**无条件**传 `--model` 的 adapter（claude / codex 只在有显式 override 时才传），
 		// 所以这个默认值必须跟得上上游改名：从实际模型目录解析（带 TTL 缓存，热路径零开销），
 		// 探测失败才回落写死的常量。上一版直接用常量，结果每次会话都在传一个上游早已删除的 model id。
-		const args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
+		let args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
 		const env: Record<string, string | undefined> = {};
 
 		if (!hasCliOption(args, "--workspace")) {
@@ -1648,33 +1740,52 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--force");
 		}
 
+		// 未信任的 cwd 上，交互模式会先弹 Workspace Trust 对话框，prompt 要等应答后才提交（`--force` 跳不过，
+		// 只有 `--trust` 能）。kanban 从不应答它，于是 8ef28 / aa23d 这类任务的首轮从未落盘，之后每次续跑都撞
+		// `No previous chats found.`。范围与 Claude 自动信任一致：只替 kanban 自己的 task worktree 做主。
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && !hasCliOption(args, "--trust")) {
+			args.push("--trust");
+		}
+
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
-		const resumesPriorAgentConversation = Boolean(
-			observedNativeSessionResumeAddressing || input.resumeFromTrash || taskAgentSessionInitialization,
+		// 与 claude 同一口径：续跑既有对话时不再投 prompt、不重放 plan 起步（`--plan` 会把续上的 chat 的 mode 覆写回 plan）。
+		const continuesWithoutNewPrompt = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
-		// 优先级同 claude / codex：**重启寻址（按 id）→ resumeFromTrash（`--continue`）→ 建卡播种**。
-		// cursor 不支持 fork（契约层已 superRefine 拦下），故按-id 只有 resume 一种落法。
-		if (observedNativeSessionResumeAddressing) {
-			if (!hasCliOption(args, "--resume")) {
-				args.push("--resume", observedNativeSessionResumeAddressing.sourceSessionId);
-			}
-		} else if (input.resumeFromTrash) {
+		const resumesPriorAgentConversation = Boolean(continuesWithoutNewPrompt || taskAgentSessionInitialization);
+		// chat 选择优先级：**重启寻址（按记录的 id）→ 无 id 的续跑（`--continue`）→ 建卡播种 → kanban 刚分配的新 id**。
+		// cursor 不支持 fork（契约层已 superRefine 拦下），所以按 id 只有 `--resume` 一种落法；新 id 开局也用
+		// `--resume <新 id> <prompt>`：实测 cursor 会以该 id 建 chat 并自动提交 prompt。
+		const chatIdSelectedForLaunch =
+			observedNativeSessionResumeAddressing?.sourceSessionId ??
+			(continuesWithoutNewPrompt
+				? null
+				: (taskAgentSessionInitialization?.sourceSessionId ??
+					input.kanbanAssignedAgentNativeConversationSessionIdForFreshStart ??
+					null));
+		if (chatIdSelectedForLaunch !== null) {
+			args = [...removeCursorAgentChatSelectionArguments(args), "--resume", chatIdSelectedForLaunch];
+		} else if (continuesWithoutNewPrompt) {
+			// 只剩「没有记录 id、桶里有 ≥2 段已建立对话」这一条会走到这里——续跑前的预检已经排除了桶为空的情形。
 			if (!hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
 				args.push("--continue");
 			}
-		} else if (taskAgentSessionInitialization) {
-			if (!hasCliOption(args, "--resume")) {
-				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
-			}
 		}
 
-		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {
+		if (
+			input.startInPlanMode &&
+			!continuesWithoutNewPrompt &&
+			!hasCliOption(args, "--plan") &&
+			!hasCliOption(args, "--mode")
+		) {
 			args.push("--plan");
 		}
 
 		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
-		if (!input.resumeFromTrash && trimmed) {
+		if (!continuesWithoutNewPrompt && trimmed) {
 			args.push(trimmed);
 		}
 
@@ -1710,7 +1821,6 @@ const geminiAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const configPath = join(getHookAgentDirectory("gemini"), "settings.json");
 			const geminiHookCommand = buildHooksCommand(["gemini-hook"]);
 
 			const config = {
@@ -1742,7 +1852,12 @@ const geminiAdapter: AgentSessionAdapter = {
 					],
 				},
 			};
-			await ensureTextFile(configPath, JSON.stringify(config, null, 2));
+			const configPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("gemini"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(config, null, 2),
+			});
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -2015,20 +2130,27 @@ const opencodeAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const pluginPath = join(getHookAgentDirectory("opencode"), "kanban.js");
-			const configPath = join(getHookAgentDirectory("opencode"), "opencode.json");
-
 			const pluginContent = buildOpenCodePluginContent(
 				buildHookCommand("to_review", { source: "opencode" }),
 				buildHookCommand("to_in_progress", { source: "opencode" }),
 				buildHookCommand("activity", { source: "opencode" }),
 			);
-			await ensureTextFile(pluginPath, pluginContent);
+			const pluginPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("opencode"),
+				fileNameStem: "kanban",
+				fileNameExtension: ".js",
+				content: pluginContent,
+			});
 			const pluginFileUrl = pathToFileURL(pluginPath).href;
 			const config = {
 				plugin: [pluginFileUrl],
 			};
-			await ensureTextFile(configPath, JSON.stringify(config));
+			const configPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("opencode"),
+				fileNameStem: "opencode",
+				fileNameExtension: ".json",
+				content: JSON.stringify(config),
+			});
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -2078,7 +2200,6 @@ const droidAdapter: AgentSessionAdapter = {
 		// settings.json 必写：autonomyMode 要如实反映当前放权档（"normal" 同样是一个有意义的档位，
 		// 不写就会退回 droid 自己的默认，权限档形同虚设）。
 		{
-			const settingsPath = join(getHookAgentDirectory("droid"), "settings.json");
 			const settings: Record<string, unknown> = {
 				// droid 的 autonomyMode 是**单轴**（spec / normal / auto-high），无法同时表达
 				// 「plan 起步」与「放权档位」。这是已知的 harness 限制，由
@@ -2129,7 +2250,12 @@ const droidAdapter: AgentSessionAdapter = {
 				);
 			}
 
-			await ensureTextFile(settingsPath, JSON.stringify(settings, null, 2));
+			const settingsPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("droid"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(settings, null, 2),
+			});
 			if (!hasCliOption(args, "--settings")) {
 				args.push("--settings", settingsPath);
 			}
@@ -2174,6 +2300,7 @@ const kiroAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
+		let carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv = false;
 		if (hooks || appendedSystemPrompt) {
 			const configPath = getKiroAgentConfigPath();
 			const config: Record<string, unknown> = {
@@ -2248,6 +2375,10 @@ const kiroAdapter: AgentSessionAdapter = {
 			await ensureTextFile(configPath, JSON.stringify(config, null, 2));
 			if (!hasCliOption(args, "--agent")) {
 				args.push("--agent", KIRO_KANBAN_AGENT_NAME);
+				// 只有选中的是 Kanban 托管 agent，配置文件里的 prompt 才生效；用户自带 --agent 时如实不算带上。
+				carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv = Boolean(
+					appendedSystemPrompt && input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
+				);
 			}
 		}
 
@@ -2269,6 +2400,7 @@ const kiroAdapter: AgentSessionAdapter = {
 				...withPromptLaunch.env,
 				...env,
 			},
+			carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv,
 		};
 	},
 };
@@ -2415,7 +2547,7 @@ const kimiAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const trimmed = input.prompt.trim();
+		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
 		const deferredStartupPromptText = !resumesPriorAgentConversation && trimmed ? trimmed : undefined;
 
 		return {
@@ -2423,8 +2555,7 @@ const kimiAdapter: AgentSessionAdapter = {
 			env,
 			deferredStartupPromptText,
 			resumesPriorAgentConversation,
-			detectOutputTransition: kimiPromptDetector,
-			shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("kimi"),
 		};
 	},
 };
@@ -2508,13 +2639,44 @@ const ompAdapter: AgentSessionAdapter = {
 			args,
 			env,
 			resumesPriorAgentConversation,
-			// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
-			// 「只能靠 scanForStalls 兜底」结构化得多；身份扩展不参与这个状态判定。
-			// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
-			detectOutputTransition: detectOmpTerminalTitleStateTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("omp"),
 		};
 	},
 };
+
+// 按 agent 绑定的「从 PTY 输出推断状态迁移」检测器。与启动参数无关，只由 agentId 决定，因此集中在一张表：
+// 新 spawn（各 adapter 的 PreparedAgentLaunch）与热重启后接管仍在跑的会话（不经 prepareAgentLaunch）
+// 都从这里取，保证两条路径挂的是同一套检测器。不在表里的 agent 没有输出检测，只靠 hook 与 scanForStalls。
+const AGENT_OUTPUT_TRANSITION_DETECTION_BY_AGENT_ID: Readonly<
+	Partial<
+		Record<RuntimeAgentId, Pick<PreparedAgentLaunch, "detectOutputTransition" | "shouldInspectOutputForTransition">>
+	>
+> = {
+	claude: {
+		detectOutputTransition: claudePromptDetector,
+		shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
+	},
+	codex: {
+		detectOutputTransition: codexPromptDetector,
+		shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
+	},
+	kimi: {
+		detectOutputTransition: kimiPromptDetector,
+		shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
+	},
+	// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
+	// 「只能靠 scanForStalls 兜底」结构化得多；身份扩展不参与这个状态判定。
+	// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+	omp: {
+		detectOutputTransition: detectOmpTerminalTitleStateTransition,
+	},
+};
+
+export function resolveAgentOutputTransitionDetectionForAgentId(
+	agentId: RuntimeAgentId,
+): Pick<PreparedAgentLaunch, "detectOutputTransition" | "shouldInspectOutputForTransition"> {
+	return AGENT_OUTPUT_TRANSITION_DETECTION_BY_AGENT_ID[agentId] ?? {};
+}
 
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
@@ -2529,6 +2691,30 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	omp: ompAdapter,
 };
 
+// 合流点查验：adapter 产出的启动参数里是否真的带上了关系邻域注入段。不在 adapter 里逐个上报，是因为「推没推进 argv」
+// 散落在各 adapter 的分支里（续跑不重投 prompt、prompt 为空时不拼接、用户已带 --system-prompt 时不追加……），
+// 查最终 argv 才是如实的。combineAppendSystemPrompts 会 trim 每一段；codex 以 JSON 字符串字面量放进
+// `-c developer_instructions=…`，所以同时认原文与 JSON 转义后的形式。
+function doesPreparedAgentLaunchCarryInterWorkUnitRelationNeighborhoodAppendSystemPrompt(
+	preparedAgentLaunch: PreparedAgentLaunch,
+	interWorkUnitRelationNeighborhoodAppendSystemPrompt: string,
+): boolean {
+	if (preparedAgentLaunch.carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv === true) {
+		return true;
+	}
+	const trimmedAppendSystemPromptText = interWorkUnitRelationNeighborhoodAppendSystemPrompt.trim();
+	const jsonStringLiteralEscapedAppendSystemPromptText = JSON.stringify(trimmedAppendSystemPromptText).slice(1, -1);
+	const launchTextsThatReachTheAgent = [
+		...preparedAgentLaunch.args,
+		preparedAgentLaunch.deferredStartupPromptText ?? "",
+	];
+	return launchTextsThatReachTheAgent.some(
+		(launchText) =>
+			launchText.includes(trimmedAppendSystemPromptText) ||
+			launchText.includes(jsonStringLiteralEscapedAppendSystemPromptText),
+	);
+}
+
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {
 	const preparedPrompt = await prepareTaskPromptWithImages({
 		prompt: input.prompt,
@@ -2536,12 +2722,36 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 	});
 	// Exploratory Mode 注入（§A.2）：仅 exploratory 启动物化指令文件；非 exploratory / 物化失败恒为 null。
 	const exploratoryModeAppendSystemPrompt = await resolveExploratoryModeAppendSystemPrompt(input.taskConversationMode);
+	// dd2db 1b：会话启动时注入工作单元间关系邻域摘要；读不到或超时即不注入，绝不阻断启动。
+	// 解析只给文本与「待提交的注入回执」，此刻绝不记账（见下方合流点与 session-manager 的提交点）。
+	const interWorkUnitRelationNeighborhoodSessionStartInjection =
+		await resolveInterWorkUnitRelationNeighborhoodSessionStartInjection({
+			workspaceId: input.workspaceId,
+			taskId: input.taskId,
+		});
+	const interWorkUnitRelationNeighborhoodAppendSystemPrompt =
+		interWorkUnitRelationNeighborhoodSessionStartInjection?.interWorkUnitRelationNeighborhoodAppendSystemPromptText ??
+		null;
 	if (input.agentId !== "codex") {
 		warnUnsupportedParentSessionId(input.agentId, input.parentSessionId);
 	}
-	return await ADAPTERS[input.agentId].prepare({
+	const preparedAgentLaunch = await ADAPTERS[input.agentId].prepare({
 		...input,
 		prompt: preparedPrompt,
 		exploratoryModeAppendSystemPrompt,
+		interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	});
+	const commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded =
+		interWorkUnitRelationNeighborhoodSessionStartInjection?.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded;
+	if (
+		!interWorkUnitRelationNeighborhoodAppendSystemPrompt ||
+		!commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded ||
+		!doesPreparedAgentLaunchCarryInterWorkUnitRelationNeighborhoodAppendSystemPrompt(
+			preparedAgentLaunch,
+			interWorkUnitRelationNeighborhoodAppendSystemPrompt,
+		)
+	) {
+		return preparedAgentLaunch;
+	}
+	return { ...preparedAgentLaunch, commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded };
 }

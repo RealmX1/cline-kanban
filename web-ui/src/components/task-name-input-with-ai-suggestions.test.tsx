@@ -45,13 +45,20 @@ function suggested(...suggestedTaskNames: string[]): RuntimeTaskNameSuggestionRe
 }
 
 /** 名字是受控值，所以测试里得有个持有它的宿主，否则点候选看不出任何变化。 */
-function TaskNameInputHarness({ taskDescription }: { taskDescription: string }): React.ReactElement {
+function TaskNameInputHarness({
+	taskDescription,
+	preserveNameUntilSuggestionIsPicked = false,
+}: {
+	taskDescription: string;
+	preserveNameUntilSuggestionIsPicked?: boolean;
+}): React.ReactElement {
 	const [taskName, setTaskName] = useState("");
 	return (
 		<TaskNameInputWithAiSuggestions
 			taskName={taskName}
 			onTaskNameChange={setTaskName}
 			taskDescription={taskDescription}
+			preserveNameUntilSuggestionIsPicked={preserveNameUntilSuggestionIsPicked}
 		/>
 	);
 }
@@ -143,6 +150,23 @@ describe("TaskNameInputWithAiSuggestions", () => {
 		}
 	});
 
+	it("编辑已有 Task 时即使名称清空也先展示候选，必须点击才应用", async () => {
+		fakeTaskNameSuggestionEndpoint.responsesToReturn.push(suggested("[FIX]新的稳定任务名"));
+		await act(async () => {
+			root.render(<TaskNameInputHarness taskDescription="完整需求" preserveNameUntilSuggestionIsPicked />);
+		});
+		await act(async () => {
+			clickSuggestButton();
+		});
+		expect(taskNameInput().value).toBe("");
+		expect(suggestionChipLabels()).toContain("[FIX]新的稳定任务名");
+		await act(async () => {
+			Array.from(container.querySelectorAll("button"))
+				.find((button) => button.textContent === "[FIX]新的稳定任务名")
+				?.click();
+		});
+		expect(taskNameInput().value).toBe("[FIX]新的稳定任务名");
+	});
 	it("shows the title that would be derived from the description as the placeholder", async () => {
 		await act(async () => {
 			root.render(<TaskNameInputHarness taskDescription={"<trajectory>\nFix the SSO redirect\n</trajectory>"} />);

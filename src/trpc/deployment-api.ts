@@ -2,7 +2,8 @@
 // 纯委托：读写 verification state 交给 src/deployment/post-deploy-verification-state.ts，
 // 看板当前列 / agent 回复预览由 runtime-server 经 DI 注入。
 // 硬约束（plan 1d）：confirmVerificationComplete **只更新 verification state，绝不移列** —— Web 侧移列由
-// completePostDeployVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
+// completePostDeployVerificationMoveToDone 负责、CLI 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree；
+// 本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
@@ -11,8 +12,8 @@ import type {
 	RuntimeConfirmVerificationCompleteResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
+	RuntimeListDeferredNaturalUsageObservationRecordsResponse,
 	RuntimePostDeployVerificationState,
-	RuntimePostDeployVerificationTask,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -21,7 +22,14 @@ import type {
 	RuntimeUpdateVerificationChecklistResponse,
 } from "../core/api-contract";
 import { parsePostDeployVerificationState } from "../core/api-validation";
+import {
+	backfillDeferredNaturalUsageObservationRecordsMissingForClosedPostDeployVerificationTasks,
+	isChecklistOfPostDeployVerificationTaskFullyChecked,
+} from "../deployment/post-deploy-verification-closure-application";
+import { listPostDeployVerificationDeferredNaturalUsageObservationRecords } from "../deployment/post-deploy-verification-deferred-natural-usage-observation-records";
+import { isPostDeployVerificationTaskClosed } from "../deployment/post-deploy-verification-deployment-group-task-assembly";
 import type {
+	ComputeTaskDeploymentAttributionsForDeploymentGroup,
 	ConsumePendingConfirmationFailureReason,
 	ReconcileGroupBoardTask,
 } from "../deployment/post-deploy-verification-state";
@@ -29,14 +37,17 @@ import {
 	applyVerificationRunResult,
 	computeRequiredAcknowledgementsForColumn,
 	consumePendingConfirmationAndMarkVerified,
+	findPostDeployVerificationTaskFollowingCarriedForwardChain,
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
 	markTaskVerified,
 	reconcileGroup,
+	reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups,
 	setPendingConfirmation,
 	setVerificationRunState,
 	updateTaskChecklist,
 } from "../deployment/post-deploy-verification-state";
+import { computeTaskDeploymentAttributionsAgainstDeployment } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
 import { runVerificationScript, toRunSnapshot } from "../deployment/verification-script-runner";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -79,9 +90,20 @@ async function readPostDeployVerificationStateSnapshot(): Promise<RuntimePostDep
 	}
 }
 
-// checklist 非空且全部勾选才算可完成核对（seed 保证至少一项，空数组防御性判为未完成）。
-function isChecklistFullyChecked(task: RuntimePostDeployVerificationTask): boolean {
-	return task.checklist.length > 0 && task.checklist.every((item) => item.checked);
+// 对账补算部署归属：用该 workspace 的仓库（部署的 source checkout 与 workspace 仓库共享对象库）起 git。
+function buildTaskDeploymentAttributionComputerForWorkspace(
+	scope: RuntimeTrpcWorkspaceScope,
+	nowIso: string,
+): ComputeTaskDeploymentAttributionsForDeploymentGroup {
+	return async ({ targetDeploymentGroup, retainedEarlierDeploymentGroupsInAscendingOrder, taskIds }) =>
+		await computeTaskDeploymentAttributionsAgainstDeployment({
+			workspaceId: scope.workspaceId,
+			repositoryPath: scope.workspacePath,
+			targetDeployment: targetDeploymentGroup,
+			retainedEarlierDeploymentsInAscendingOrder: retainedEarlierDeploymentGroupsInAscendingOrder,
+			taskIds,
+			nowIso,
+		});
 }
 
 function truncateAgentResponsePreview(text: string): string {
@@ -116,19 +138,35 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			const nowIso = new Date().toISOString();
 			// active 组选取顺带触发 state 模块的损坏隔离 + 过期 token GC（读时经 mutate 骨架）。
 			const activeGroup = await getActiveGroup(scope.workspaceId, nowIso);
+			const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 			if (activeGroup) {
 				// 每次轮询对当前组做双向 reconcile：新进 validation 任务动态加入 + 悬挂任务标 droppedReason（plan 数据流）。
-				const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 				await reconcileGroup({
 					deploymentId: activeGroup.deploymentId,
 					workspaceId: scope.workspaceId,
 					currentBoardTasks: boardTasks,
 					nowIso,
+					computeTaskDeploymentAttributionsForDeploymentGroup: buildTaskDeploymentAttributionComputerForWorkspace(
+						scope,
+						nowIso,
+					),
 				});
 			}
+			// CLI 已授权、已移入 Done、却没来得及写 verifiedAt 的在途完成记录：跨该 workspace 全部组（含已被新部署折叠的组）补写，
+			// 不论有无活跃组——所属组被折叠后 reconcileGroup 不再触达它（RVF-002）。
+			await reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups({
+				workspaceId: scope.workspaceId,
+				currentBoardTasks: boardTasks,
+				nowIso,
+			});
 			// getActiveGroup 已确保盘上为合法 JSON，可安全直读全量并按当前 workspaceId 过滤。
 			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const workspaceGroups = snapshot.deploymentGroups.filter((group) => group.workspaceId === scope.workspaceId);
+			// 带原因结案时锁外写待观察记录失败的，按结案快照补写（结案已引用记录 id，结案路径不会再重试）。不抛错。
+			await backfillDeferredNaturalUsageObservationRecordsMissingForClosedPostDeployVerificationTasks(
+				workspaceGroups,
+				nowIso,
+			);
 			const activeDeploymentId = activeGroup?.deploymentId ?? null;
 			const deploymentGroups = input.activeOnly
 				? workspaceGroups.filter((group) => group.deploymentId === activeDeploymentId)
@@ -207,16 +245,22 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { needsConfirmation: false, error: `部署组未找到：deploymentId=${input.deploymentId}` };
 			}
-			const task = group.tasks.find((entry) => entry.taskId === input.taskId);
+			// 面板手里的 deploymentId 可能是新部署建组之前的旧组：按延续链读任务的最新副本（token 也会写到那里，RVF-002）。
+			const task = findPostDeployVerificationTaskFollowingCarriedForwardChain(
+				snapshot,
+				input.deploymentId,
+				input.taskId,
+			)?.task;
 			if (!task) {
 				return { needsConfirmation: false, error: taskNotFoundMessage(input.deploymentId, input.taskId) };
 			}
 			if (task.droppedReason !== null) {
 				return { needsConfirmation: false, error: `任务已从本次部署核对中移除（${task.droppedReason}）` };
 			}
-			if (!isChecklistFullyChecked(task)) {
-				return { needsConfirmation: false, error: "checklist 未全部勾选，无法完成核对" };
+			if (isPostDeployVerificationTaskClosed(task)) {
+				return { needsConfirmation: false, error: "任务已结案，无需再次完成核对" };
 			}
+			// 2026-10-11 起不再要求全勾：未勾项的原因随移入 Done 的请求提交，由 taskCardAction 的门禁裁决（全部入口同一判据）。
 
 			// 按「当前列」重算需确认项（非 columnIdAtMatch 快照）：match 后移列时以此刻实际所在列为准（plan 1d）。
 			const requiredAcknowledgements = computeRequiredAcknowledgementsForColumn(currentColumn);
@@ -263,7 +307,12 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
 			}
-			const task = group.tasks.find((entry) => entry.taskId === input.taskId);
+			// 发 token 之后可能建了新组：按延续链读任务的最新副本——门禁结案、搬过去的 token 都在那份上（RVF-002）。
+			const task = findPostDeployVerificationTaskFollowingCarriedForwardChain(
+				snapshot,
+				input.deploymentId,
+				input.taskId,
+			)?.task;
 			if (!task) {
 				return { ok: false, task: null, error: taskNotFoundMessage(input.deploymentId, input.taskId) };
 			}
@@ -275,13 +324,14 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 					error: `确认要求任务已移入 Done（trash），当前列：${currentColumn ?? "未在看板"}`,
 				};
 			}
-			// 幂等恢复（issue B）：任务已在 trash 且此前已 verified —— confirm 成功但响应丢失 / 用户重复提交 → 直接返回成功，
+			// 幂等恢复（issue B）：任务已在 trash 且此前已结案 —— confirm 成功但响应丢失 / 用户重复提交 → 直接返回成功，
 			// 不再要求 token（避免「移列成功、标记成功但客户端未收到响应」时 requestVerificationComplete 对 trash 列拒发新 token 造成死角）。
-			if (task.verifiedAt !== null) {
+			// 2026-10-11 起移入 Done 时 taskCardAction 门禁已在服务端结案（通过或带原因），之后的 confirm 都走这里。
+			if (isPostDeployVerificationTaskClosed(task)) {
 				return { ok: true, task };
 			}
-			if (!isChecklistFullyChecked(task)) {
-				return { ok: false, task, error: "checklist 未全部勾选" };
+			if (!isChecklistOfPostDeployVerificationTaskFullyChecked(task)) {
+				return { ok: false, task, error: "checklist 未全部勾选（带原因结案请随移入 Done 的请求提交原因）" };
 			}
 			const pending = task.pendingConfirmation;
 			if (!pending) {
@@ -306,7 +356,7 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 				nowIso,
 				{
 					postDeployVerificationCompletionPath: "web_ui_post_deploy_verification_panel_atomic_confirmation",
-					forcedCompletionWithoutAllVerificationsPassed: false,
+					confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: false,
 					confirmedAcknowledgements: [...pending.requiredAcknowledgements],
 				},
 			);
@@ -323,12 +373,30 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
 			}
-			const marked = await markTaskVerified(input.deploymentId, input.taskId, new Date().toISOString(), {
-				postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
-				forcedCompletionWithoutAllVerificationsPassed: input.forcedCompletionWithoutAllVerificationsPassed,
-				confirmedAcknowledgements: [...input.confirmedAcknowledgements],
-			});
+			const marked = await markTaskVerified(
+				input.deploymentId,
+				input.taskId,
+				new Date().toISOString(),
+				{
+					postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+					confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag:
+						input.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag ??
+						input.forcedCompletionWithoutAllVerificationsPassed ??
+						false,
+					confirmedAcknowledgements: [...input.confirmedAcknowledgements],
+				},
+				input.uncheckedChecklistItemClosureReasons ?? [],
+			);
 			return { ok: marked.ok, task: marked.task, ...(marked.error ? { error: marked.error } : {}) };
 		},
+
+		listDeferredNaturalUsageObservationRecords: async (
+			scope: RuntimeTrpcWorkspaceScope,
+		): Promise<RuntimeListDeferredNaturalUsageObservationRecordsResponse> => ({
+			deferredNaturalUsageObservationRecords: await listPostDeployVerificationDeferredNaturalUsageObservationRecords(
+				{ workspaceId: scope.workspaceId },
+				new Date().toISOString(),
+			),
+		}),
 	};
 }

@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createInitialBoardData } from "@/data/board-data";
+import type { RuntimeBoardCard } from "@/runtime/types";
 import {
 	addTaskToColumn,
 	addTaskToColumnWithResult,
 	applyDragResult,
 	applyTaskDetailClineSettingsChange,
 	applyTaskDetailClineSettingsSelection,
+	BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION,
 	disableTaskAutoReview,
 	getTaskColumnId,
 	moveTaskToColumn,
@@ -1213,5 +1215,55 @@ describe("task conversation mode（蓝图 §A.1）", () => {
 		expect(board.columns.find((column) => column.id === "review")?.cards[0]?.taskConversationMode).toBe(
 			"exploratory",
 		);
+	});
+});
+
+describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整板 saveState 回盘）", () => {
+	// 服务端卡片 schema 的每个字段都填上非缺省值。新增字段时 typecheck 会先在
+	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
+	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
+		id: "f1e2d",
+		title: "Every field populated",
+		prompt: "Carry every field through normalization",
+		startInPlanMode: true,
+		taskAgentPermissionMode: "auto_approve_file_edits_only",
+		autoReviewEnabled: true,
+		autoReviewMode: "pr",
+		images: [{ id: "image-1", data: "aGVsbG8=", mimeType: "image/png", name: "screenshot.png" }],
+		taskCommentEntries: [{ taskCommentEntryId: "comment-1", commentText: "note", createdAt: 10, updatedAt: 11 }],
+		pinnedToTaskPinboardAt: 1_700_000_000_000,
+		taskPinboardPinReason: "watch this",
+		agentId: "claude",
+		ompAgentSessionTransport: "acp_stdio_subprocess",
+		taskConversationMode: "exploratory",
+		mostRecentlyLaunchedAgentSessionAgentId: "claude",
+		clineSettings: { providerId: "anthropic", modelId: "claude-sonnet", reasoningEffort: "high" },
+		terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opus" },
+		taskAgentSessionInitialization: {
+			sourceAgentId: "codex",
+			sourceSessionId: "019a0000-0000-7000-8000-000000000000",
+			sourceSessionReuseMode: "fork_existing_session",
+		},
+		baseRef: "main",
+		parentSessionId: "019a0000-0000-7000-8000-000000000000",
+		worktreeMode: "inplace",
+		prepFilePath: "/abs/prep.json",
+		createdAt: 1_600_000_000_000,
+		updatedAt: 1_650_000_000_000,
+		taskDescriptionLastUpdatedAt: 1_640_000_000_000,
+	};
+
+	it("服务端卡片的每个字段都原样带过归一化", () => {
+		const normalizedCard = normalizeBoardData({
+			columns: [{ id: "backlog", title: "Backlog", cards: [fullyPopulatedRuntimeBoardCard] }],
+		})?.columns.find((column) => column.id === "backlog")?.cards[0];
+		for (const fieldName of Object.keys(BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION) as Array<
+			keyof RuntimeBoardCard
+		>) {
+			expect({ fieldName, value: normalizedCard?.[fieldName as keyof typeof normalizedCard] }).toEqual({
+				fieldName,
+				value: fullyPopulatedRuntimeBoardCard[fieldName],
+			});
+		}
 	});
 });

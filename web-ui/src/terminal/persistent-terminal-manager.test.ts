@@ -6,6 +6,10 @@ import {
 	disposePersistentTerminal,
 	ensurePersistentTerminal,
 } from "@/terminal/persistent-terminal-manager";
+import {
+	STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS,
+	type StaleAgentTerminalSessionAutomaticResumePhase,
+} from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import type * as PlatformModule from "@/utils/platform";
 
 const fitAddonProposeDimensionsMock = vi.hoisted(() => vi.fn<() => { cols: number; rows: number } | undefined>());
@@ -193,6 +197,12 @@ vi.mock("@xterm/xterm", () => ({
 }));
 
 class MockResizeObserver implements ResizeObserver {
+	static readonly instances: MockResizeObserver[] = [];
+
+	constructor(readonly callback: ResizeObserverCallback) {
+		MockResizeObserver.instances.push(this);
+	}
+
 	readonly root: Element | Document | null = null;
 	readonly rootMargin = "";
 	readonly thresholds = [0];
@@ -305,6 +315,7 @@ describe("persistent-terminal-manager", () => {
 		platformOverrides.isSafari = false;
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
+		MockResizeObserver.instances.length = 0;
 		screenPixelSize.width = 480;
 		screenPixelSize.height = 320;
 		Object.defineProperty(globalThis, "ResizeObserver", {
@@ -372,6 +383,39 @@ describe("persistent-terminal-manager", () => {
 				rows: 30,
 				type: "resize",
 			},
+		]);
+	});
+
+	it.each([false, true])("隐藏挂载的异步尺寸回调不调整 PTY，可见后正常调整（预热=%s）", async (prewarmed) => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-hidden-resize",
+			workspaceId: "workspace-1",
+			deferAutomaticSessionResumeUntilVisibleMount: prewarmed,
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: false });
+		const observer = MockResizeObserver.instances.at(-1);
+		if (!observer) throw new Error("隐藏挂载未注册 ResizeObserver");
+		// 浏览器首次尺寸通知在 observe 返回后异步到达，再经 manager 的防抖计时器执行。
+		await Promise.resolve().then(() => observer.callback([], observer));
+		vi.advanceTimersByTime(50);
+
+		expect(fitAddonProposeDimensionsMock).not.toHaveBeenCalled();
+		expect(getResizeMessages()).toEqual([]);
+		terminal.mount(container, appearance, { isVisible: true });
+		vi.advanceTimersByTime(20);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([[80, 30]]);
+
+		const visibleObserver = MockResizeObserver.instances.at(-1);
+		if (!visibleObserver) throw new Error("可见挂载未注册 ResizeObserver");
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 100, rows: 31 });
+		await Promise.resolve().then(() => visibleObserver.callback([], visibleObserver));
+		vi.advanceTimersByTime(50);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
+			[80, 30],
+			[100, 31],
 		]);
 	});
 
@@ -754,7 +798,7 @@ describe("persistent-terminal-manager", () => {
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
-		// 回归护栏（本次改动的核心不变式）：maybeAutoResumeStaleSession 挂在**每一次** restore 应用上，
+		// 回归护栏（本次改动的核心不变式）：陈旧会话自动续跑在**每一次** restore 应用上评估，
 		// 而升级重连必然要重走一遍 restore。判据全中时它会打出一次 refreshTaskTerminal——用户点的是
 		// 「只解冻画面」，结果把还活着的 agent 杀了。抑制闩存在的全部理由就是这一条。
 		it("升级重连后拿到空快照，也绝不能顺势变成一次重启", async () => {
@@ -777,9 +821,10 @@ describe("persistent-terminal-manager", () => {
 
 			expect(refreshSpy).not.toHaveBeenCalled();
 
-			// 闩只压这一程：流程终结后，真正意义上的「空快照 = 服务端 mirror 已随运行时丢失」仍然照常续跑。
+			// 闩只压这一程：流程终结后，真正意义上的「空快照 = 服务端 mirror 已随运行时丢失」仍然照常续跑
+			// （要先等完可见停留门槛）。
 			dispatchRestoreToNewest("");
-			await vi.advanceTimersByTimeAsync(10);
+			await vi.advanceTimersByTimeAsync(STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS + 10);
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
 		});
 
@@ -869,11 +914,24 @@ describe("persistent-terminal-manager", () => {
 		});
 	});
 
-	describe("auto-resume on focusing a runtime-restarted stale session", () => {
+	describe("auto-resume when the user opens or returns to a task whose agent session is gone", () => {
+		beforeEach(() => {
+			// 只假计时器与 Date（冷却按 Date.now 计）；rAF 保持外层装好的同步实现，否则挂载后的评估永远不跑。
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+		});
+
 		function findControlSocket() {
-			const socket = webSocketInstances.find((entry) => entry.url.includes("/api/terminal/control"));
+			const socket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/control")).at(-1);
 			if (!socket) {
 				throw new Error("control socket not found");
+			}
+			return socket;
+		}
+
+		function findIoSocket() {
+			const socket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/io")).at(-1);
+			if (!socket) {
+				throw new Error("terminal io socket not found");
 			}
 			return socket;
 		}
@@ -886,15 +944,14 @@ describe("persistent-terminal-manager", () => {
 			dispatchSocketMessage(findControlSocket(), JSON.stringify({ type: "restore", snapshot, cols: 80, rows: 30 }));
 		}
 
-		function mountedTerminal() {
+		function mountedTerminal(container: HTMLDivElement = createContainer()) {
 			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
-			terminal.mount(createContainer(), appearance, { isVisible: true });
+			terminal.mount(container, appearance, { isVisible: true });
 			return terminal;
 		}
 
-		// 自动续跑决策发生在 applyRestore().then() 回调里：restore_complete 控制消息在 maybeAutoResumeStaleSession
-		// 之前的同一同步块内经 sendControlMessage 发出。故等到 restore_complete 出现即代表续跑决策已跑完，可确定性断言
-		// refresh 是否被调用——取代「2 个 microtask」浅时序（那会在决策点之前就断言、无论有无 gate 都通过，形成假绿）。
+		// 评估发生在 applyRestore().then() 回调里：restore_complete 控制消息在评估之前的同一同步块内发出。
+		// 故等到 restore_complete 出现即代表本次评估已跑完，可确定性断言——取代「2 个 microtask」浅时序。
 		async function waitForRestoreCompleted(expectedCount = 1): Promise<void> {
 			await vi.waitFor(() => {
 				const completions = parseControlMessages(findControlSocket()).filter(
@@ -904,79 +961,391 @@ describe("persistent-terminal-manager", () => {
 			});
 		}
 
-		// 死会话（服务器重启后 hydrate 出的 idle、agentId 已由服务端从 board card 回填、pid=null）+ 空 restore
-		// 快照 → 聚焦即自动一次性续跑；再次空 restore（切走再切回）不重复触发。
-		it("auto-refreshes once for an empty snapshot terminal-agent session, then debounces", async () => {
-			const terminal = mountedTerminal();
-			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
-			dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "idle", liveness: "none" });
-			dispatchRestore("");
+		async function waitThroughVisibleDwell(): Promise<void> {
+			await vi.advanceTimersByTimeAsync(STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS);
+		}
 
-			await vi.waitFor(() => {
-				expect(refreshSpy).toHaveBeenCalledTimes(1);
-			});
-
-			dispatchRestore("");
-			await waitForRestoreCompleted(2);
-			expect(refreshSpy).toHaveBeenCalledTimes(1);
-		});
-
-		it("does not auto-refresh again from a freshly created terminal instance for the same task", async () => {
-			// 类里那个一次性闩是 per-实例的，而实例 churn 恰恰是常态：切一张卡（disposePersistentTerminal）、
-			// 被 MAX_PARKED_TERMINALS 的 LRU 驱逐后重挂、关掉面板再打开，每次都是一份新实例。
-			// 没有跨实例冷却的话，「服务端起不来」这种持续故障会被前端反复叫醒，一次故障变成一串创建请求。
-			//
-			// 注意 socket 要取**最新**那条：上一份实例已被销毁，它那条 control socket 还留在录制数组里，
-			// 打过去等于什么都没测。
-			function findNewestControlSocket() {
-				const socket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/control")).at(-1);
-				if (!socket) {
-					throw new Error("control socket not found");
-				}
-				return socket;
-			}
-			function dispatchStateToNewest(summary: Record<string, unknown>): void {
-				dispatchSocketMessage(findNewestControlSocket(), JSON.stringify({ type: "state", summary }));
-			}
-			function dispatchRestoreToNewest(snapshot: string): void {
-				dispatchSocketMessage(
-					findNewestControlSocket(),
-					JSON.stringify({ type: "restore", snapshot, cols: 80, rows: 30 }),
-				);
-			}
-			const staleAgentSessionState = {
+		function buildReclaimedSummary(runtimeSessionIncarnationId: string): Record<string, unknown> {
+			return {
 				taskId: "task-a",
 				agentId: "claude",
 				pid: null,
-				state: "idle",
-				liveness: "none",
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "error",
+				reviewReason: "error",
+				exitCode: 129,
+				runtimeSessionIncarnationId,
+				agentSessionRuntimeReclamationOutcome: {
+					runtimeSessionIncarnationId,
+					sessionTransport: "pty_terminal",
+					reclamationTrigger: "response_generation_grace_period_expired",
+					attemptedAt: 1,
+					completedAt: 2,
+					rootProcessExitConfirmed: true,
+					descendantProcessesExitConfirmed: true,
+					survivingDescendantPids: [],
+					usedForcefulEscalation: true,
+					releasedResources: ["pty", "terminal_state_mirror"],
+					failureReason: null,
+					nextRetryAt: null,
+				},
 			};
+		}
 
+		// 在用户眼前自然退出（/exit、崩溃）：活体已结束，但没有 Kanban 回收记录。
+		function buildExitedInFrontOfUserWithoutKanbanReclamationSummary(
+			runtimeSessionIncarnationId: string,
+		): Record<string, unknown> {
+			return {
+				taskId: "task-a",
+				agentId: "claude",
+				pid: null,
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "error",
+				reviewReason: "exit",
+				exitCode: 0,
+				runtimeSessionIncarnationId,
+			};
+		}
+
+		function buildLiveSummary(runtimeSessionIncarnationId: string): Record<string, unknown> {
+			return {
+				taskId: "task-a",
+				agentId: "claude",
+				pid: 4321,
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "review",
+				reviewReason: "hook",
+				runtimeSessionIncarnationId,
+			};
+		}
+
+		const runtimeRestartedStaleAgentSessionState = {
+			taskId: "task-a",
+			agentId: "claude",
+			pid: null,
+			state: "idle",
+			liveness: "none",
+		};
+
+		it.each([false, true])(
+			"隐藏预热（复用停放=%s）不续跑、不输入、不 resize，可见挂载并停留后才续跑",
+			async (reuseParked) => {
+				if (reuseParked) ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+				const terminal = ensurePersistentTerminal({
+					...appearance,
+					taskId: "task-a",
+					workspaceId: "workspace-1",
+					deferAutomaticSessionResumeUntilVisibleMount: true,
+				});
+				const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+				dispatchState(runtimeRestartedStaleAgentSessionState);
+				dispatchRestore("");
+				await waitForRestoreCompleted();
+				await waitThroughVisibleDwell();
+				expect(refreshSpy).not.toHaveBeenCalled();
+				expect(terminal.input("隐藏输入")).toBe(false);
+				expect(terminal.paste("隐藏粘贴")).toBe(false);
+				expect(parseControlMessages(findControlSocket()).some((message) => message.type === "resize")).toBe(false);
+				const container = createContainer();
+				terminal.mount(container, appearance, { isVisible: false });
+				await waitThroughVisibleDwell();
+				expect(refreshSpy).not.toHaveBeenCalled();
+				terminal.mount(container, appearance, { isVisible: true });
+				expect(refreshSpy).not.toHaveBeenCalled();
+				expect(terminal.input("可见输入")).toBe(true);
+				await waitThroughVisibleDwell();
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+				terminal.mount(container, appearance, { isVisible: true });
+				await waitThroughVisibleDwell();
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+			},
+		);
+
+		it.each([false, true])("预热期间的画面重同步不能变成续跑（恢复前挂载=%s）", async (mountBeforeRestore) => {
+			const terminal = ensurePersistentTerminal({
+				...appearance,
+				taskId: "task-a",
+				workspaceId: "workspace-1",
+				deferAutomaticSessionResumeUntilVisibleMount: true,
+			});
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			const container = createContainer();
+			if (mountBeforeRestore) {
+				terminal.mount(container, appearance, { isVisible: true });
+			}
+			dispatchRestore("");
+			await resync;
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("runtime 重启丢了 mirror（空快照）→ 停留后续跑一次，再次空 restore 不重复触发", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			expect(refreshSpy).not.toHaveBeenCalled();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+			expect(refreshSpy).toHaveBeenCalledWith("stale_session_client_auto_resume");
+
+			dispatchRestore("");
+			await waitForRestoreCompleted(2);
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("同一 runtime 内被空闲回收、mirror 还在（快照非空）→ 打开即续跑", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildReclaimedSummary("incarnation-1"));
+			dispatchRestore("old agent output");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("终端停在泊车区期间会话被回收，重新挂回来（没有新 restore）也会续跑", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildLiveSummary("incarnation-1"));
+			dispatchRestore("live agent screen");
+			await waitForRestoreCompleted();
+			terminal.unmount(container);
+			dispatchState(buildReclaimedSummary("incarnation-1"));
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("只是 summary 变成「已回收」（用户没回来）不续跑；焦点点进终端才算回来", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildLiveSummary("incarnation-1"));
+			dispatchRestore("live agent screen");
+			await waitForRestoreCompleted();
+			dispatchState(buildReclaimedSummary("incarnation-1"));
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+
+			container.firstElementChild?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("标签页在后台时不续跑，切回可见才续跑", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			setDocumentHidden(true);
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+
+			setDocumentHidden(false);
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("停留期间离开（快速翻卡 unmount）→ 这一次作废，不续跑", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await vi.advanceTimersByTimeAsync(STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS / 2);
+			terminal.unmount(container);
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("同一死活体只试一次；续跑出来的新活体之后又被回收，回来时可以再续（冷却过后）", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildReclaimedSummary("incarnation-1"));
+			dispatchRestore("old agent output");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+			// 同一死活体：再挂一次也不重试。
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+			// 续跑成功换了活体，之后又被回收；越过 60s 跨实例冷却后回到任务，应当再续一次。
+			dispatchState(buildLiveSummary("incarnation-2"));
+			dispatchState(buildReclaimedSummary("incarnation-2"));
+			await vi.advanceTimersByTimeAsync(61_000);
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(2);
+		});
+
+		// 回归护栏：「空快照 ⇒ 服务端 mirror 已丢」这条证据必须反映 mirror 的**当前**状态。续跑之后服务端往新
+		// mirror 里写了 banner（随后还有 agent 输出），那份空快照就不再成立；否则新活体之后在用户眼前自然退出，
+		// 过了冷却再回来仍会被当成「mirror 已丢」再拉起一次，绕过「自然退出保持手动」。
+		it("空快照续跑后有了新输出，新活体在用户眼前自然退出 → 冷却过后回来也不再凭那份旧空快照续跑", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+			// 续跑成功：服务端把 banner 写进新 mirror 并经 io 通道推过来（refresh 不会再要一份快照）。
+			const terminalContentPresenceChanges: boolean[] = [];
+			terminal.subscribe({
+				onTerminalContentPresenceChange: (hasRenderedAnyTerminalContent) =>
+					terminalContentPresenceChanges.push(hasRenderedAnyTerminalContent),
+			});
+			dispatchSocketMessage(findIoSocket(), "\r\n[kanban] Refreshing terminal session...\r\n");
+			await vi.waitFor(() => {
+				expect(terminalContentPresenceChanges.at(-1)).toBe(true);
+			});
+			dispatchState(buildLiveSummary("incarnation-2"));
+			dispatchState(buildExitedInFrontOfUserWithoutKanbanReclamationSummary("incarnation-2"));
+
+			await vi.advanceTimersByTimeAsync(61_000);
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		// 回归护栏：「重新同步画面」的抑制只管它自己引发的那几份 restore——它拿到的快照不作为「mirror 已丢」的
+		// 证据，但不能把整条评估永久封住。活会话 resync 完成后被空闲回收，终端泊车再挂回（socket 没断、不会有
+		// 新 restore）时，回收分支照样要续跑：面板横幅承诺的正是「打开任务就接回来」。
+		it("画面重同步完成后会话被空闲回收，泊车再挂回（没有新 restore）仍会续跑", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildLiveSummary("incarnation-1"));
+			dispatchRestore("live agent screen");
+			await waitForRestoreCompleted();
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestore("live agent screen redrawn by resync");
+			await resync;
+
+			terminal.unmount(container);
+			dispatchState(buildReclaimedSummary("incarnation-1"));
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+
+			terminal.mount(container, appearance, { isVisible: true });
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		// 与上一条互为对照：不再封锁评估之后，resync 拿到的空快照也不能被当成「mirror 已丢」——控制通道僵死期间
+		// 的 summary 可能是陈旧值（pid 已空），这时把它当证据就是把「只解冻画面」变成一次杀 agent 的重启。
+		it("画面重同步拿到的空快照不算「mirror 已丢」的证据：resync 结束后焦点点进终端也不续跑", async () => {
+			const container = createContainer();
+			const terminal = mountedTerminal(container);
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState(buildLiveSummary("incarnation-1"));
+			dispatchRestore("live agent screen");
+			await waitForRestoreCompleted();
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestore("");
+			await resync;
+
+			container.firstElementChild?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("把进行阶段报给订阅者：等停留 → 请求在途 → 结束", async () => {
+			const terminal = mountedTerminal();
+			let resolveRefresh: (value: { ok: boolean; mode: "resume" }) => void = () => {};
+			vi.spyOn(terminal, "refresh").mockImplementation(
+				async () =>
+					await new Promise<{ ok: boolean; mode: "resume" }>((resolve) => {
+						resolveRefresh = resolve;
+					}),
+			);
+			const phases: Array<StaleAgentTerminalSessionAutomaticResumePhase | null> = [];
+			terminal.subscribe({ onAutomaticStaleSessionResumePhaseChange: (phase) => phases.push(phase) });
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			expect(phases).toEqual([null, "waiting_for_visible_dwell"]);
+			await waitThroughVisibleDwell();
+			expect(phases).toEqual([null, "waiting_for_visible_dwell", "resume_request_in_flight"]);
+			resolveRefresh({ ok: true, mode: "resume" });
+			await vi.waitFor(() => {
+				expect(phases.at(-1)).toBeNull();
+			});
+		});
+
+		it("does not auto-refresh again from a freshly created terminal instance for the same task", async () => {
+			// 按活体闩是 per-实例的，而实例 churn 恰恰是常态：切一张卡（disposePersistentTerminal）、
+			// 被 MAX_PARKED_TERMINALS 的 LRU 驱逐后重挂、关掉面板再打开，每次都是一份新实例。
+			// 没有跨实例冷却的话，「服务端起不来」这种持续故障会被前端反复叫醒，一次故障变成一串创建请求。
 			const firstTerminal = mountedTerminal();
 			const firstRefreshSpy = vi.spyOn(firstTerminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
-			dispatchStateToNewest(staleAgentSessionState);
-			dispatchRestoreToNewest("");
-			await vi.waitFor(() => {
-				expect(firstRefreshSpy).toHaveBeenCalledTimes(1);
-			});
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(firstRefreshSpy).toHaveBeenCalledTimes(1);
 
 			disposePersistentTerminal("workspace-1", "task-a");
 			const secondTerminal = mountedTerminal();
 			expect(secondTerminal).not.toBe(firstTerminal);
 			const secondRefreshSpy = vi.spyOn(secondTerminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
-			dispatchStateToNewest(staleAgentSessionState);
-			dispatchRestoreToNewest("");
-			await vi.waitFor(() => {
-				const completions = parseControlMessages(findNewestControlSocket()).filter(
-					(message) => message.type === "restore_complete",
-				);
-				expect(completions.length).toBeGreaterThanOrEqual(1);
-			});
-
+			dispatchState(runtimeRestartedStaleAgentSessionState);
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
 			expect(secondRefreshSpy).not.toHaveBeenCalled();
 		});
 
-		it("does not auto-refresh when the restore snapshot is non-empty (live/exited session, mirror intact)", async () => {
+		it("does not auto-refresh a session the server has already found to have never established its conversation", async () => {
+			// 8ef28 / aa23d：续跑注定被服务端预检拒绝，自动重试只会反复撞同一道拒绝；出路在终端面板上由人选。
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({
+				...runtimeRestartedStaleAgentSessionState,
+				agentId: "cursor",
+				agentNativeConversationPersistenceObservation: {
+					persistenceStatus: "conversation_never_established_in_agent_native_store",
+					nativeSessionId: null,
+					workingDirectoryPath: "/tmp/worktree",
+					suspectedBlockingCause: null,
+					observedAt: 1,
+				},
+			});
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("快照非空、进程在用户眼前自然退出（没有回收记录）→ 不自动续跑", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
 			dispatchState({
@@ -988,58 +1357,58 @@ describe("persistent-terminal-manager", () => {
 			});
 			dispatchRestore("restored screen");
 			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
-		it("does not auto-refresh an empty-snapshot session that is awaiting a user turn (review)", async () => {
+		it("空快照的 review 会话也续跑：续跑不带 prompt、落在用户回合，不可能抢跑", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
-			// 重启后 hydrate 出的会话即便空快照，只要仍是用户回合（awaiting_review → turnOwner==="user"）就绝不自动续跑，
-			// 否则会抢跑正等待用户核对的 agent。resolveSessionFacets 从 legacy state 派生 turnOwner。
 			dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "awaiting_review" });
 			dispatchRestore("");
 			await waitForRestoreCompleted();
-			expect(refreshSpy).not.toHaveBeenCalled();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("restores an empty-snapshot question session without treating restoration as an agent turn", async () => {
+		it("启动即失败（liveness=failed）→ 不自动续跑，交给人", async () => {
 			const terminal = mountedTerminal();
-			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
 			dispatchState({
 				taskId: "task-a",
 				agentId: "claude",
 				pid: null,
-				state: "awaiting_review",
+				state: "failed",
 				turnOwner: "user",
-				liveness: "exited",
-				userTurnKind: "question",
+				liveness: "failed",
+				userTurnKind: "error",
 			});
 			dispatchRestore("");
-
-			await vi.waitFor(() => {
-				expect(refreshSpy).toHaveBeenCalledTimes(1);
-			});
+			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
+			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
 		// 这条负例在「hydrate 多源回填 agentId」之后依然成立，且是刻意保留的：自动续跑是**静默**动作，
-		// agentId 完全问不出来时不该靠猜去拉起一个 agent。真实的中断场景已由回填补上 agentId，走上面的正例；
-		// 三个源全灭时用户仍有出路——面板会渲染可解释空态 + 「重启终端会话」按钮（那是显式动作，
-		// 服务端可以安全地退回项目默认档）。
+		// agentId 完全问不出来时不该靠猜去拉起一个 agent。三个源全灭时用户仍有出路——面板会渲染可解释空态 +
+		// 「重启终端会话」按钮（那是显式动作，服务端可以安全地退回项目默认档）。
 		it("does not auto-refresh when agentId is null (fresh/never-started or shell session)", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
-			dispatchState({ taskId: "task-a", agentId: null, pid: null, state: "idle", liveness: "none" });
+			dispatchState({ ...runtimeRestartedStaleAgentSessionState, agentId: null });
 			dispatchRestore("");
 			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
 		it("does not auto-refresh the in-process Cline SDK agent", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
-			dispatchState({ taskId: "task-a", agentId: "cline", pid: null, state: "idle", liveness: "none" });
+			dispatchState({ ...runtimeRestartedStaleAgentSessionState, agentId: "cline" });
 			dispatchRestore("");
 			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
@@ -1049,6 +1418,7 @@ describe("persistent-terminal-manager", () => {
 			dispatchState({ taskId: "task-a", agentId: "claude", pid: 4321, state: "running", liveness: "live" });
 			dispatchRestore("");
 			await waitForRestoreCompleted();
+			await waitThroughVisibleDwell();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 	});

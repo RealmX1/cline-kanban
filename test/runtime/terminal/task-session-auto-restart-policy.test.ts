@@ -3,12 +3,14 @@ import {
 	AUTO_RESTART_BACKOFF_MAX_MS,
 	AUTO_RESTART_ROLLING_HOUR_WINDOW_MS,
 	deriveTaskSessionAutoRestartDecision,
+	describeTaskSessionAutoRestartCircuitBreak,
 	doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRestartCircuitBreak,
 	MAX_AUTO_RESTARTS_PER_TASK_PER_ROLLING_HOUR,
 	MAX_CONSECUTIVE_FAILED_FAST_EXIT_AUTO_RESTARTS_BEFORE_CIRCUIT_BREAK,
 	MAX_FAST_EXIT_AUTO_RESTARTS_ACROSS_ALL_TASKS_PER_ROLLING_HOUR,
 	MINIMUM_PTY_LIFETIME_TO_COUNT_AS_HEALTHY_TASK_SESSION_START_MS,
 	pruneAutoRestartTimestampsToRollingHour,
+	selectLastNonEmptyAgentTerminalOutputLine,
 } from "../../../src/terminal/task-session-auto-restart-policy";
 
 const FAST_EXIT_LIFETIME_MS = 800;
@@ -185,5 +187,34 @@ describe("task session auto-restart policy", () => {
 				"durable_record_rebuilt_resume",
 			),
 		).toBe(false);
+	});
+});
+
+describe("task session auto-restart circuit break message", () => {
+	it("quotes the agent's last output line and says honestly what a refresh does instead of only telling the user to refresh", () => {
+		// 8ef28 / aa23d 的现场：每一代 cursor-agent --continue 都输出这一行就 exit 1。旧文案只说「请手动刷新终端」，
+		// 而刷新走的是同一条 --continue。
+		const message = describeTaskSessionAutoRestartCircuitBreak(
+			"consecutive_fast_exit_auto_restarts_exhausted",
+			selectLastNonEmptyAgentTerminalOutputLine([
+				"",
+				"No previous chats found.",
+				"   ",
+				"[kanban] Refreshing terminal session...",
+			]),
+		);
+		expect(message).toContain("已停止自动重启");
+		expect(message).toContain("「No previous chats found.」");
+		expect(message).toContain("刷新同样会失败");
+		expect(message).not.toContain("请手动刷新终端");
+	});
+
+	it("truncates an overlong last line and omits the quote when the screen has nothing to show", () => {
+		const longLine = "x".repeat(500);
+		expect(selectLastNonEmptyAgentTerminalOutputLine([longLine])).toBe(`${"x".repeat(200)}…`);
+		expect(selectLastNonEmptyAgentTerminalOutputLine(["", "  "])).toBeNull();
+		expect(
+			describeTaskSessionAutoRestartCircuitBreak("per_task_rolling_hour_auto_restart_cap_reached"),
+		).not.toContain("最后一次退出前的输出");
 	});
 });

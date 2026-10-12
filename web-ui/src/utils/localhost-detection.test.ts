@@ -30,6 +30,18 @@ describe("isLocalhostAccess", () => {
 		expect(isLocalhostAccess()).toBe(true);
 	});
 
+	// 浏览器访问 http://[::1]:3484 时 window.location.hostname 实际给出的是带方括号的形式。
+	it("returns true for '[::1]' (IPv6 loopback as browsers report it)", () => {
+		setHostname(new URL("http://[::1]:3484").hostname);
+		expect(window.location.hostname).toBe("[::1]");
+		expect(isLocalhostAccess()).toBe(true);
+	});
+
+	it("returns false for a bracketed non-loopback IPv6 address", () => {
+		setHostname("[fd7a:115c:a1e0::1]");
+		expect(isLocalhostAccess()).toBe(false);
+	});
+
 	it("returns false for a remote hostname", () => {
 		setHostname("my-server.example.com");
 		expect(isLocalhostAccess()).toBe(false);

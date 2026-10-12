@@ -28,10 +28,11 @@ const BRACKETED_PASTE_END_MARKER = "\u001b[201~";
 const PASTED_NEWLINE = "\u000d";
 const STASH_KEY_SEQUENCE = "\u0013";
 
-// 与 session-manager 里的 TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_QUIET_MS / _MAX_WAIT_MS 对齐（那两个
-// 常量是模块私有）。用例只依赖「回显补齐时刻 < 沉降窗 < 总预算」这层关系，写成具名常量以免读成魔数。
+// 与 session-manager 里的 TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_QUIET_MS / _MAX_WAIT_MS / _POLL_MS 对齐（这些
+// 常量是模块私有）。用例只依赖「回显补齐时刻 < 沉降窗 < 总预算」这层关系与轮询间隔，写成具名常量以免读成魔数。
 const MIRROR_SETTLE_QUIET_WINDOW_MS = 150;
 const MIRROR_SETTLE_MAX_WAIT_BUDGET_MS = 750;
+const MIRROR_SETTLE_POLL_INTERVAL_MS = 50;
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -163,17 +164,25 @@ describe("captureTaskTerminalInputBoxContentForPromptLibraryStash", () => {
 		expect(capture?.text).toBe("");
 	});
 
-	it("两路都说空 → input_box_empty，且 lastUserInputAt 为 null 不会把沉降窗空等满预算", async () => {
+	it("两路都说空 → input_box_empty，且 lastUserInputAt 为 null 时沉降窗立即放行、一次都不轮询等待", async () => {
 		const manager = new TerminalSessionManager();
 		injectClaudeEntryWithScreen(manager, buildInputBoxScreen(""));
-		const captureStartedAtMs = Date.now();
+		// 结构断言而非墙钟断言：原先断言「总耗时 < 等待预算 750ms」，高负载下即便立即放行，整次读框也可能超过它。
+		// 沉降窗每轮不静默就 setTimeout 一个轮询间隔再看，所以「一次都没按轮询间隔睡过」就等于「立即放行」。
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		try {
+			const capture = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash("task-1");
 
-		const capture = await manager.captureTaskTerminalInputBoxContentForPromptLibraryStash("task-1");
-
-		expect(capture?.status).toBe("input_box_empty");
-		// 本会话还没有人手敲过（lastUserInputAt 为 null）⇒ 不存在「在路上的回显」，沉降窗必须立即放行。
-		// 若把 null 当成「未静默」，空框上按一次 Ctrl+S 就要白等满整个等待预算。
-		expect(Date.now() - captureStartedAtMs).toBeLessThan(MIRROR_SETTLE_MAX_WAIT_BUDGET_MS);
+			expect(capture?.status).toBe("input_box_empty");
+			// 本会话还没有人手敲过（lastUserInputAt 为 null）⇒ 不存在「在路上的回显」，沉降窗必须立即放行。
+			// 若把 null 当成「未静默」，空框上按一次 Ctrl+S 就要白等满整个等待预算。
+			const mirrorSettlePollSleeps = setTimeoutSpy.mock.calls.filter(
+				([, delayMs]) => delayMs === MIRROR_SETTLE_POLL_INTERVAL_MS,
+			);
+			expect(mirrorSettlePollSleeps).toHaveLength(0);
+		} finally {
+			setTimeoutSpy.mockRestore();
+		}
 	});
 
 	it("人类刚敲完、回显还没画进镜像（lastOutputAt 为 null）→ 先等沉降窗，读到的是补齐后的完整正文", async () => {

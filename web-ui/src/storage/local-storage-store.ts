@@ -2,6 +2,7 @@ export enum LocalStorageKey {
 	TaskAutoReviewEnabled = "kanban.task-auto-review-enabled",
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
 	TaskEditDrafts = "kanban.task-edit-drafts.v1",
+	AgentRaisedPendingUserDecisionAnswerDrafts = "kanban.agent-raised-pending-user-decision-answer-drafts.v1",
 	TaskCreateTerminalAgentModelSelections = "kanban.task-create-terminal-agent-model-selections.v1",
 	// projectId → 该项目上次成功建卡所用的 base ref。真相源在服务端 config.json，这里只是本地镜像
 	// （服务端写失败时不丢用户这次的选择）。
@@ -36,6 +37,8 @@ export enum LocalStorageKey {
 	// 故同样不进 LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS——「重置布局」不该把用户选的排序与字段抹掉。
 	TaskSpotlightSearchResultSortOrder = "kanban.task-spotlight-search-result-sort-order.v1",
 	TaskSpotlightSearchResultRowFieldVisibility = "kanban.task-spotlight-search-result-row-field-visibility.v1",
+	// ⌘K Spotlight：最近用过的检索串（最新在前）。同样不属于布局自定义——「重置布局」不该抹掉检索历史。
+	TaskSpotlightSearchQueryHistory = "kanban.task-spotlight-search-query-history.v1",
 	// 曾经叫 `kb-sidebar-width`——本枚举里**唯一**没有 `kanban.` 前缀的键，按前缀扫描/导出/清理的逻辑
 	// 都会漏掉它。改名后由 legacy-local-storage-key-rename-migration.ts 在启动时把旧键搬过来。
 	ProjectNavigationPanelWidth = "kanban.project-navigation-panel-width",
@@ -61,6 +64,19 @@ export enum LocalStorageKey {
 	// state/kanban-board-column-collapse-and-width-preferences.ts。
 	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
 	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
+	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-stage-first-overview.md）vs 单个项目。
+	// 看板页据此在 Board Overview 与看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
+	// localStorage 里这份只是新开标签页的默认值；每个标签页的实际范围存在 sessionStorage 同名键里
+	// （见 use-selected-board-or-single-project-scope）。便利项，丢了回落到单项目。
+	SelectedBoardOrSingleProjectScope = "kanban.selected-board-or-single-project-scope.v1",
+	// 已并入 SelectedBoardOrSingleProjectScope 的旧键（Focus View 左栏的 This project | All projects 两段切换）。
+	// 只为一次性迁移保留，见 use-selected-board-or-single-project-scope。
+	LegacyFocusViewLeftColumnTaskListScopeMigratedIntoSelectedBoardOrSingleProjectScope = "kanban.focus-view-left-column-task-list-scope.v1",
+	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）、Pinned 区的折叠态（默认展开，
+	// 与 This project 置顶分段各自一个键）与剩余区的排序模式。
+	CrossProjectTaskSwitcherRunningSectionExpanded = "kanban.cross-project-task-switcher-running-section-expanded.v1",
+	CrossProjectTaskSwitcherPinnedSectionCollapsed = "kanban.cross-project-task-switcher-pinned-section-collapsed.v1",
+	CrossProjectTaskSwitcherRemainingSectionOrderingMode = "kanban.cross-project-task-switcher-remaining-section-ordering-mode.v1",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
@@ -86,7 +102,11 @@ function getLocalStorage(): Storage | null {
 	if (typeof window === "undefined") {
 		return null;
 	}
-	return window.localStorage;
+	try {
+		return window.localStorage;
+	} catch {
+		return null;
+	}
 }
 
 export function readLocalStorageItem(key: LocalStorageKey): string | null {
@@ -101,15 +121,16 @@ export function readLocalStorageItem(key: LocalStorageKey): string | null {
 	}
 }
 
-export function writeLocalStorageItem(key: LocalStorageKey, value: string): void {
+export function writeLocalStorageItem(key: LocalStorageKey, value: string): boolean {
 	const storage = getLocalStorage();
 	if (!storage) {
-		return;
+		return false;
 	}
 	try {
 		storage.setItem(key, value);
+		return true;
 	} catch {
-		// Ignore storage write failures.
+		return false;
 	}
 }
 

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 const COPIED_CONFIRMATION_VISIBLE_MS = 1500;
 
@@ -37,13 +38,13 @@ export function TruncatedIdentifierChipWithCopyOnClick({
 		};
 	}, []);
 
-	// 刻意直接用 navigator.clipboard 而不是 react-use 的 useCopyToClipboard：后者底层退回
-	// `document.execCommand("copy")`，成败只经一个下一帧才可读的 state 汇报，于是**失败时对勾照样会亮**——
-	// 用户以为拿到了值，粘出来的却是上一次剪贴板里的东西。这里的 await 让「打勾」与「报错」互斥。
+	// 刻意不用 react-use 的 useCopyToClipboard：它的成败只经一个下一帧才可读的 state 汇报，于是**失败时对勾
+	// 照样会亮**——用户以为拿到了值，粘出来的却是上一次剪贴板里的东西。这里的 await 让「打勾」与「报错」互斥；
+	// helper 在非安全上下文（经局域网 / tailnet 的 http 访问）里退回原生复制，并且同样会在失败时 reject。
 	// 形态与 task-original-prompt-dialog.tsx 的复制按钮一致。
 	const handleCopy = async (): Promise<void> => {
 		try {
-			await navigator.clipboard.writeText(identifierValue);
+			await writeTextToSystemClipboardWithInsecureContextFallback(identifierValue);
 		} catch {
 			showAppToast(
 				{

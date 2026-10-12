@@ -1,3 +1,7 @@
+import { mergeWorkPhaseGoalConversationOwnership } from "./agent-current-work-phase-goal";
+
+export { resolveAgentCurrentWorkPhaseGoalForDisplay } from "./agent-current-work-phase-goal";
+
 // 会话「执行活性」派生的单一真相源（纯函数、零运行时依赖，可被 Node 后端 / 浏览器前端 /
 // 部署探针共享 import；唯一的类型 import 在编译期被擦除，故打进浏览器 bundle 不会带入任何
 // Node 依赖）。
@@ -22,6 +26,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
 import { mergeLastConversationProgressObservation } from "./last-conversation-progress-observation.js";
+import { mergeLastMainAgentConversationModelRequestDispatchObservation } from "./last-main-agent-conversation-model-request-dispatch-observation.js";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -225,6 +230,25 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 	};
 }
 
+// 写入时刻（updatedAt）之外，本次写所对应的领域事件真实发生的时刻。只有经 agent session PTY host spool
+// 晚送达的 hook 会让两者分开（runtime 缺席期间 agent 停下了，几小时后 runtime 回来才收到 Stop）；
+// 缺省时两者相同。只影响「本轮何时开始 / 停止生成」两个边沿章，updatedAt 仍是写入墙钟。
+export interface SummaryWriteDomainEventTiming {
+	domainEventObservedAtEpochMs?: number;
+}
+
+// 晚于写入时刻的值按写入时刻截断：跑到未来的时钟不可信，边沿章也不该比记下它的那次写更晚。
+function resolveDomainEventObservedAtEpochMs(
+	summaryUpdatedAt: number,
+	domainEventTiming: SummaryWriteDomainEventTiming | undefined,
+): number {
+	const domainEventObservedAtEpochMs = domainEventTiming?.domainEventObservedAtEpochMs;
+	if (domainEventObservedAtEpochMs === undefined || !Number.isFinite(domainEventObservedAtEpochMs)) {
+		return summaryUpdatedAt;
+	}
+	return Math.min(domainEventObservedAtEpochMs, summaryUpdatedAt);
+}
+
 // ── 写侧主真相源派发器（Stage 4 全写侧反转）────────────────────────────────────
 // 单一 per-patch 派发器：按 patch 形状决定 facet 与 legacy state 谁是权威，产出「三 facet 与 state
 // 自洽」的 summary。两个 updateSummary 漏斗（cline-session-state.ts / session-manager.ts）统一经此写。
@@ -246,8 +270,9 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 export function mergeSummaryWithFacets(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
+	domainEventTiming?: SummaryWriteDomainEventTiming,
 ): RuntimeTaskSessionSummary {
-	const merged = { ...prev, ...patch };
+	const merged = mergeWorkPhaseGoalConversationOwnership(prev, { ...prev, ...patch });
 	const patchHasFacet =
 		patch.turnOwner !== undefined || patch.liveness !== undefined || patch.userTurnKind !== undefined;
 	const patchHasState = patch.state !== undefined;
@@ -279,19 +304,37 @@ export function mergeSummaryWithFacets(
 		return refreshed;
 	})();
 
+	const domainEventObservedAtEpochMs = resolveDomainEventObservedAtEpochMs(
+		mergedWithFacets.updatedAt,
+		domainEventTiming,
+	);
 	const withTurnSequence = didEnterAgentTurn(prev, patch, mergedWithFacets)
-		? {
-				...mergedWithFacets,
-				agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
-			}
+		? stampAgentResponseGenerationTurnStarted(
+				patch,
+				{
+					...mergedWithFacets,
+					agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
+				},
+				domainEventObservedAtEpochMs,
+			)
 		: // 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
+			// 回合开始事件同理：不在边沿上就不碰它（离开 agent 回合后保留原值，缺失就继续缺失）。
 			// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
 			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
 			mergedWithFacets;
 
-	const withProgressObservation = resolveLastConversationProgressObservation(prev, patch, withTurnSequence);
+	const withProgressObservation = resolveLastMainAgentConversationModelRequestDispatchObservation(
+		prev,
+		patch,
+		resolveLastConversationProgressObservation(prev, patch, withTurnSequence),
+	);
 
-	const stopped = resolveAgentResponseGenerationStopped(prev, patch, withProgressObservation);
+	const stopped = resolveAgentResponseGenerationStopped(
+		prev,
+		patch,
+		withProgressObservation,
+		domainEventObservedAtEpochMs,
+	);
 	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
 	// 「没有可显示的停止时刻」，但若在此把 undefined 视作不等于 null，每一次 agent 回合期间的
 	// metadata-only 写都会给 summary 凭空补一个 `agentResponseGenerationStopped: null`——历史盘上
@@ -337,6 +380,29 @@ function resolveLastConversationProgressObservation(
 	return { ...mergedWithFacets, lastConversationProgressObservation: merged };
 }
 
+// 「主对话最后一次向模型发出请求」观测的合并落点，与上面那个观测同理放在共用漏斗里，让单调性成为结构性
+// 保证。「哪些事件该写」由写点判定（main-agent-conversation-model-request-dispatch-hook-event-classification.ts），
+// 这里只负责不倒退、不跑到未来。
+function resolveLastMainAgentConversationModelRequestDispatchObservation(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	merged: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	const incoming = patch.lastMainAgentConversationModelRequestDispatchObservation;
+	if (incoming == null) {
+		return merged;
+	}
+	const reduced = mergeLastMainAgentConversationModelRequestDispatchObservation(
+		prev.lastMainAgentConversationModelRequestDispatchObservation,
+		incoming,
+		{ nowMs: merged.updatedAt },
+	);
+	if (reduced === merged.lastMainAgentConversationModelRequestDispatchObservation) {
+		return merged;
+	}
+	return { ...merged, lastMainAgentConversationModelRequestDispatchObservation: reduced };
+}
+
 // 「本轮何时停止生成」离散事件的唯一写点（与回合序号同处这条三 transport 共用漏斗，故三侧自动一致）。
 //
 // 判据只看 turnOwner，不看 liveness / reviewReason：
@@ -368,6 +434,7 @@ function resolveAgentResponseGenerationStopped(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
 	mergedWithFacets: RuntimeTaskSessionSummary,
+	domainEventObservedAtEpochMs: number,
 ): RuntimeAgentResponseGenerationStopped | null {
 	if (patch.agentResponseGenerationStopped !== undefined) {
 		// 显式覆写优先：磁盘水合、回收流程、测试构造按原值采信（已在 merged 里），不在此重新推算。
@@ -385,9 +452,10 @@ function resolveAgentResponseGenerationStopped(
 		return prev.agentResponseGenerationStopped ?? null;
 	}
 	return {
-		// 锚点取本次写入时刻——那正是这次状态转移发生的瞬间。刻意不取 lastOutputAt /
-		// lastSubstantiveOutputAt：前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
-		stoppedAt: mergedWithFacets.updatedAt,
+		// 锚点取这次状态转移发生的瞬间：通常就是本次写入时刻；spool 晚送达的 Stop hook 取它的捕获时刻
+		// （见 resolveDomainEventObservedAtEpochMs）。刻意不取 lastOutputAt / lastSubstantiveOutputAt：
+		// 前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
+		stoppedAt: domainEventObservedAtEpochMs,
 		signalConfidence: deriveAgentResponseGenerationStopSignalConfidence(mergedWithFacets),
 		turnSequence: mergedWithFacets.agentResponseGenerationTurnSequence ?? 0,
 	};
@@ -423,6 +491,29 @@ function didEnterUserTurnEndingAgentResponseGeneration(
 		return true;
 	}
 	return prev.runtimeSessionIncarnationId !== mergedWithFacets.runtimeSessionIncarnationId;
+}
+
+// 「本轮何时开始生成」边沿事件的唯一写点：与回合序号 +1 同一分支，故三条 transport 自动一致，且只在
+// 「非 agent → agent」那一次写上盖章——agent 回合内的 lastOutputAt bump / hook activity / connectionRetry
+// 等元数据写都不经过这里，跨项目切换面板 Running 区的顺序因此不随 spinner 抖动。
+// EXPERIMENT_NODE: 模态决策（permission/question/plan_review）往返后是否保留原 startedAt（当前：重新盖章，排到 Running 末尾）
+function stampAgentResponseGenerationTurnStarted(
+	patch: Partial<RuntimeTaskSessionSummary>,
+	withTurnSequence: RuntimeTaskSessionSummary,
+	domainEventObservedAtEpochMs: number,
+): RuntimeTaskSessionSummary {
+	if (patch.agentResponseGenerationTurnStarted !== undefined) {
+		// 显式覆写优先：磁盘水合、测试构造按原值采信（已在 merged 里），不在此重新盖章。
+		return withTurnSequence;
+	}
+	return {
+		...withTurnSequence,
+		agentResponseGenerationTurnStarted: {
+			// 与停止事件同口径：取翻入 agent 回合的瞬间（通常即本次写入时刻，spool 晚送达时取捕获时刻）。
+			startedAt: domainEventObservedAtEpochMs,
+			turnSequence: withTurnSequence.agentResponseGenerationTurnSequence ?? 0,
+		},
+	};
 }
 
 // 回合序号推进：本函数是终端 / Cline SDK / ACP **三条 transport 共用**的唯一 summary 写漏斗，

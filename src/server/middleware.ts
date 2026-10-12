@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import {
+	getKanbanAdditionalTrustedBrowserOrigins,
 	getKanbanRuntimeHost,
 	getKanbanRuntimeOrigin,
 	getKanbanRuntimePort,
@@ -15,7 +16,7 @@ export type CorsDecision =
 export interface CorsGateInput {
 	method: string | undefined;
 	originHeader: string | undefined;
-	allowedOrigin: string;
+	allowedOrigins: ReadonlySet<string>;
 }
 
 const isDev = process.env.NODE_ENV === "development";
@@ -30,7 +31,7 @@ export function evaluateCors(input: CorsGateInput): CorsDecision {
 
 	const isDevServer = isDev && (origin === "http://localhost:4173" || origin === "http://127.0.0.1:4173");
 
-	if (origin !== input.allowedOrigin && !isDevServer) {
+	if (!input.allowedOrigins.has(origin) && !isDevServer) {
 		return { kind: "reject", origin };
 	}
 
@@ -60,6 +61,15 @@ export function evaluateHost(input: HostGateInput): HostDecision {
 	return { kind: "allow" };
 }
 
+// runtime 自己的 origin，加上经反向代理访问时登记的额外受信 origin（见 `--additional-trusted-browser-origin`）。
+export function getAllowedBrowserOrigins(): ReadonlySet<string> {
+	const allowed = new Set<string>([getKanbanRuntimeOrigin()]);
+	for (const trusted of getKanbanAdditionalTrustedBrowserOrigins()) {
+		allowed.add(trusted.browserOrigin);
+	}
+	return allowed;
+}
+
 export function getAllowedHostHeaders(): ReadonlySet<string> {
 	const port = getKanbanRuntimePort();
 	const boundHost = getKanbanRuntimeHost().toLowerCase();
@@ -67,6 +77,10 @@ export function getAllowedHostHeaders(): ReadonlySet<string> {
 	const addHostPort = (host: string) => {
 		allowed.add(`${host}:${port}`);
 	};
+	// 反向代理（如 `tailscale serve`）会原样转发浏览器的 Host 头，与绑定地址无关，两种模式都要放行。
+	for (const trusted of getKanbanAdditionalTrustedBrowserOrigins()) {
+		allowed.add(trusted.hostHeaderValue);
+	}
 
 	if (isKanbanRemoteHost()) {
 		addHostPort(boundHost);
@@ -120,7 +134,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): { 
 	const corsDecision = evaluateCors({
 		method: req.method,
 		originHeader: req.headers.origin,
-		allowedOrigin: getKanbanRuntimeOrigin(),
+		allowedOrigins: getAllowedBrowserOrigins(),
 	});
 
 	switch (corsDecision.kind) {
@@ -157,7 +171,7 @@ export function handleSocketUpgrade(request: IncomingMessage, socket: Duplex): {
 	const corsDecision = evaluateCors({
 		method: request.method,
 		originHeader: request.headers.origin,
-		allowedOrigin: getKanbanRuntimeOrigin(),
+		allowedOrigins: getAllowedBrowserOrigins(),
 	});
 	if (corsDecision.kind === "reject") {
 		return rejectSocket(socket);

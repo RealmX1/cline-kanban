@@ -1,4 +1,8 @@
-import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../core/api-contract";
+import type {
+	RuntimeAgentNativeConversationSessionIdentity,
+	RuntimeBoardData,
+	RuntimeTaskSessionSummary,
+} from "../core/api-contract";
 import type {
 	AgentConversationSessionIdentityKey,
 	InterWorkUnitRelationWorkUnitReference,
@@ -72,11 +76,13 @@ export interface WorkspaceBoardPersistenceFunnelTaskMutationEventCapture {
 	allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry(input: {
 		requestingWorkspaceId: string | null;
 	}): Promise<string>;
-	// 只写 sessions 的身份落盘路径（不经两阶段批次）：落盘之后追加一条族 2 观测，不阻塞调用方。
+	// 只写 sessions 的身份落盘路径（不经两阶段批次）：落盘之后，仅当原生身份真的变了才追加一条族 2 观测，不阻塞调用方。
+	// 同一身份的新确认也会落盘（推进时间水位），所以必须带上落盘前的身份由实现判定，不能落盘一次就记一条。
 	recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(input: {
 		workspaceId: string;
 		kanbanTaskConversationSessionId: string;
 		sessionSummary: RuntimeTaskSessionSummary;
+		previouslyPersistedAgentNativeConversationSessionIdentity: RuntimeAgentNativeConversationSessionIdentity | null;
 	}): void;
 }
 

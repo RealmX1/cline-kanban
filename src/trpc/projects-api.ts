@@ -3,10 +3,17 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import pLimit from "p-limit";
 import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
+	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
+	RuntimeCrossProjectTaskSwitcherEntry,
+	RuntimeCrossProjectTaskWorktreeGitMetadata,
 	RuntimeDirectoryListResponse,
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
+	RuntimeRecordTaskOpenedByUserRequest,
+	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import {
@@ -15,13 +22,17 @@ import {
 	parseProjectPermanentDeletionPreviewRequest,
 	parseProjectPermanentDeletionRequest,
 } from "../core/api-validation";
+import { CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
 import {
 	type AllProjectsTaskSearchIndexProjectInput,
+	overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId,
 	projectAllProjectsTaskSearchIndex,
 } from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
+import { recordTaskLastOpenedByUser } from "../state/task-last-opened-by-user-record-store";
+import { loadWorkspaceAgentConversationProgressObservedAtByTaskId } from "../state/workspace-agent-conversation-progress-observed-at-reader";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -61,6 +72,17 @@ export interface CreateProjectsApiDependencies {
 	}>;
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	serverCwd: string;
+	listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon: (
+		activityHorizonMs: number,
+	) => Promise<
+		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
+	>;
+	// runtime 级单例缓存（见 cross-project-task-worktree-git-metadata-cache.ts）；api 对象按请求新建，缓存不能跟着新建。
+	readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: (
+		request: RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+	) => Promise<RuntimeCrossProjectTaskWorktreeGitMetadata[]>;
+	// 测试注入用；缺省 Date.now。
+	now?: () => number;
 }
 
 /**
@@ -74,6 +96,9 @@ export interface CreateProjectsApiDependencies {
  * 参照 `src/workspace/git-concurrency.ts` / `src/server/workspace-metadata-monitor.ts` 的既有模式：把逐项目
  * board 加载钳进一个**跨所有请求共享的模块级 p-limit 单例**，使任意负载下的并发 board 读取恒为常数、不再随
  * 项目数增长。共享是关键——即便多个 tRPC 请求同时各自 fan-out，总并发也被钳成 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT。
+ *
+ * 每个槽位里 board.json 与 sessions.json（只抽对话推进时刻）并行读：一个项目占一个槽，项目级并发上限不变，
+ * 文件级并发最多翻倍到 2×LIMIT。
  */
 const WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT = 8;
 
@@ -334,22 +359,79 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 						// 停摆事件循环（参见 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT 的动机说明）。
 						workspaceBoardLoadConcurrencyLimiter(async () => {
 							const projectName = deriveProjectDisplayNameFromRepoPath(entry.repoPath);
-							try {
-								const board = await loadWorkspaceBoardById(entry.workspaceId);
-								return { projectId: entry.workspaceId, projectName, board };
-							} catch (error) {
-								// 单个项目读盘失败（盘损坏 / 迁移中等）不阻断整体索引：跳过该项目。
-								deps.warn(
-									`Failed to load board for cross-project task search index (workspace ${entry.workspaceId}): ${
-										error instanceof Error ? error.message : String(error)
-									}`,
-								);
-								return { projectId: entry.workspaceId, projectName, board: null };
-							}
+							const [boardLoadOutcome, persistedAgentConversationProgressObservedAtByTaskId] = await Promise.all(
+								[
+									loadWorkspaceBoardById(entry.workspaceId).then(
+										(board) => ({ board }),
+										(error: unknown) => {
+											// 单个项目读盘失败（盘损坏 / 迁移中等）不阻断整体索引：跳过该项目。
+											deps.warn(
+												`Failed to load board for cross-project task search index (workspace ${entry.workspaceId}): ${
+													error instanceof Error ? error.message : String(error)
+												}`,
+											);
+											return { board: null };
+										},
+									),
+									loadWorkspaceAgentConversationProgressObservedAtByTaskId(entry.workspaceId).catch(
+										(error: unknown) => {
+											// 推进时刻只影响排序与药丸：读不了就当这个项目没有推进记录，board 照常进索引。
+											deps.warn(
+												`Failed to read agent conversation progress for cross-project task search index (workspace ${entry.workspaceId}): ${
+													error instanceof Error ? error.message : String(error)
+												}`,
+											);
+											return new Map<string, number>();
+										},
+									),
+								],
+							);
+							return {
+								projectId: entry.workspaceId,
+								projectName,
+								board: boardLoadOutcome.board,
+								agentConversationProgressObservedAtByTaskId:
+									overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId({
+										persistedAgentConversationProgressObservedAtByTaskId,
+										// 未加载的项目这里是空数组；已加载的项目以内存摘要为准（盘上可能滞后，也可能已被回纠）。
+										liveRuntimeSessionSummaries: deps.listProjectRuntimeSessionSummaries(entry.workspaceId),
+									}),
+							};
 						}),
 				),
 			);
 			return projectAllProjectsTaskSearchIndex(projectInputs);
+		},
+		recordTaskOpenedByUser: async (
+			input: RuntimeRecordTaskOpenedByUserRequest,
+		): Promise<RuntimeRecordTaskOpenedByUserResponse> => {
+			// 只认已注册项目：账本按 workspace 目录落盘，未知 id 不该凭空造出一个目录。
+			const isRegisteredWorkspace = (await listWorkspaceIndexEntries()).some(
+				(entry) => entry.workspaceId === input.workspaceId,
+			);
+			if (!isRegisteredWorkspace) {
+				return { recorded: false };
+			}
+			const recorded = await recordTaskLastOpenedByUser(input.workspaceId, input.taskId, (deps.now ?? Date.now)());
+			if (recorded) {
+				// 「我最后打开」进 projects_updated 的跨项目切换面板条目；其他标签页 / origin 据此重排。
+				void deps.broadcastRuntimeProjectsUpdated(null);
+			}
+			return { recorded };
+		},
+		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon:
+			async (): Promise<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse> => {
+				const activityHorizonMs = CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HORIZON_MS;
+				return {
+					activityHorizonMs,
+					projects:
+						await deps.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon(activityHorizonMs),
+				};
+			},
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: async (
+			input: RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+		): Promise<RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse> => {
+			return { tasks: await deps.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(input) };
 		},
 	};
 }

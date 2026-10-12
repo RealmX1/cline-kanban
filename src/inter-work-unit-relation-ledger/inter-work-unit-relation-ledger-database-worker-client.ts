@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 
+import type { AssertedInterWorkUnitRelationEffectivenessState } from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
+import type { UserRejectionSuppressionTombstone } from "../core/inter-work-unit-relation-assertion-lifecycle-event-contract";
 import {
 	type CommittedInterWorkUnitRelationLedgerEvent,
 	committedInterWorkUnitRelationLedgerEventSchema,
@@ -63,11 +65,56 @@ export interface PendingBoardFileWriteTaskMutationEventBatchResolution {
 	pendingBatchResolution: "commit" | "abandon";
 }
 
+// dd2db 阶段 2 断言型关系的写侧守卫（worker 里的当前态表与墓碑表，都是可从族 4 事件重建的缓存）。
+export interface InterWorkUnitAssertedRelationCurrentStateRow {
+	relationId: string;
+	relationAssertionNaturalKey: string;
+	relationKind: string;
+	assertionEffectivenessState: AssertedInterWorkUnitRelationEffectivenessState;
+	assertedRelationStateVersion: number;
+}
+
+export interface InterWorkUnitRelationAssertionWriteGuardState {
+	effectiveAssertedRelationOfNaturalKey: { relationId: string; assertedRelationStateVersion: number } | null;
+	assertedRelationStateOfRelationId: InterWorkUnitAssertedRelationCurrentStateRow | null;
+	userRejectionSuppressionTombstonesOfNaturalKey: UserRejectionSuppressionTombstone[];
+}
+
+export interface InterWorkUnitRelationAssertionWriteCompareAndSetExpectations {
+	relationAssertionNaturalKey: string;
+	expectedEffectiveRelationIdOfNaturalKey: string | null;
+	expectedUserRejectionSuppressionTombstoneCountOfNaturalKey: number;
+}
+
+export type InterWorkUnitAssertedRelationCurrentStateWrite =
+	| {
+			assertedRelationStateWriteKind: "insert_newly_effective_asserted_relation";
+			relationId: string;
+			relationKind: string;
+	  }
+	| {
+			assertedRelationStateWriteKind:
+				| "bump_version_of_effective_asserted_relation"
+				| "mark_effective_asserted_relation_revoked";
+			relationId: string;
+			expectedAssertedRelationStateVersion: number;
+	  };
+
+// better-sqlite3 是原生模块，只能被编译它的那个 Node ABI 加载。`dev:full` / `dogfood` 按 PATH 取 node，
+// 与安装 node_modules 时的 Node 不同就会打不开账本、board 只读——原始报错只说 NODE_MODULE_VERSION 不符，
+// 这里补上怎么办。task worktree 的 node_modules 软链到主 checkout，`npm rebuild` 会改掉正在服务的 runtime 用的那份。
+function appendNativeModuleNodeAbiMismatchGuidanceToLedgerUnavailableReason(ledgerUnavailableReason: string): string {
+	if (!ledgerUnavailableReason.includes("NODE_MODULE_VERSION")) {
+		return ledgerUnavailableReason;
+	}
+	return `${ledgerUnavailableReason} — this runtime runs on Node ${process.version}, but better-sqlite3 in node_modules was built for another Node version. Start Kanban with the Node version that installed node_modules (for example \`nvm use <that version>\`). Do not run \`npm rebuild\` from a task worktree: its node_modules is shared with the main checkout and with any Kanban runtime already serving from it.`;
+}
+
 // 账本 worker 打不开（例如 better-sqlite3 ABI 不符）时抛出；持久化漏斗据此让该实例的 board 只读（Y-EVENT-1）。
 export class InterWorkUnitRelationLedgerUnavailableError extends Error {
 	constructor(readonly ledgerUnavailableReason: string) {
 		super(
-			`Inter-work-unit relation ledger is unavailable, so this Kanban runtime keeps the board read-only: ${ledgerUnavailableReason}`,
+			`Inter-work-unit relation ledger is unavailable, so this Kanban runtime keeps the board read-only: ${appendNativeModuleNodeAbiMismatchGuidanceToLedgerUnavailableReason(ledgerUnavailableReason)}`,
 		);
 		this.name = "InterWorkUnitRelationLedgerUnavailableError";
 	}
@@ -165,6 +212,16 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		await this.request("appendCommittedEvents", input);
 	}
 
+	// 幂等键已记过的草稿原子跳过（同一事实只记一条）；返回实际追加与跳过的幂等键。
+	async appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded(input: {
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ appendedIdempotencyKeys: string[]; skippedIdempotencyKeysAlreadyRecorded: string[] }> {
+		return (await this.request("appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded", input)) as {
+			appendedIdempotencyKeys: string[];
+			skippedIdempotencyKeysAlreadyRecorded: string[];
+		};
+	}
+
 	// 返回 null 表示候选全部已被占用（调用方换一批候选重试）。
 	async allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry(input: {
 		candidateTaskIds: string[];
@@ -184,6 +241,43 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 			newlyReservedTaskIdCount: number;
 		};
 		return result.newlyReservedTaskIdCount;
+	}
+
+	async readInterWorkUnitRelationAssertionWriteGuardState(input: {
+		relationAssertionNaturalKey: string | null;
+		relationId: string | null;
+	}): Promise<InterWorkUnitRelationAssertionWriteGuardState> {
+		return (await this.request(
+			"readInterWorkUnitRelationAssertionWriteGuardState",
+			input,
+		)) as InterWorkUnitRelationAssertionWriteGuardState;
+	}
+
+	// CAS 失败（守卫状态在读与写之间变了）返回 null，调用方重读重判；成功返回已提交事件的 id 与全局序号。
+	async commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet(input: {
+		compareAndSetExpectations: InterWorkUnitRelationAssertionWriteCompareAndSetExpectations;
+		assertedRelationStateWrite: InterWorkUnitAssertedRelationCurrentStateWrite;
+		userRejectionSuppressionTombstoneInsert: UserRejectionSuppressionTombstone | null;
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ eventId: string; globalCommittedEventSequence: number }[] | null> {
+		const result = (await this.request(
+			"commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet",
+			input,
+		)) as
+			| { compareAndSetSucceeded: false }
+			| {
+					compareAndSetSucceeded: true;
+					committedEvents: { eventId: string; globalCommittedEventSequence: number }[];
+			  };
+		return result.compareAndSetSucceeded ? result.committedEvents : null;
+	}
+
+	// 一致性测试用：可从族 4 事件重建的当前态缓存（「全量重建 = 增量维护」）。
+	async listInterWorkUnitAssertedRelationCurrentStateRows(): Promise<InterWorkUnitAssertedRelationCurrentStateRow[]> {
+		return (await this.request(
+			"listInterWorkUnitAssertedRelationCurrentStateRows",
+			{},
+		)) as InterWorkUnitAssertedRelationCurrentStateRow[];
 	}
 
 	async listCommittedEvents(input: {

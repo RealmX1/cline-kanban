@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type { RuntimeHookIngestResponse, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import * as agentSessionRetentionLogger from "../../../src/diagnostics/agent-session-retention-logger";
 import {
 	DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR,
 	getDiagnosticEventJournalActiveFilePath,
@@ -16,6 +17,13 @@ import { createTempDir } from "../../utilities/temp-dir";
 // 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
 // 用桩 manager 复述一遍就只是在测桩本身。真实 manager 会 spawn PTY 并做 agent 启动准备，故把这两条
 // 外部边界桩掉。本文件其余用例仍用「按需实现方法的类型级 manager 桩」，完全不受这两个 mock 影响。
+const readNativePhaseGoalMock = vi.hoisted(() =>
+	vi.fn(async () => null as { goalText: string; updatedAt: number } | null),
+);
+vi.mock("../../../src/terminal/claude-native-task-list-current-work-phase-goal-projection.js", () => ({
+	readClaudeNativeTaskListCurrentWorkPhaseGoal: readNativePhaseGoalMock,
+}));
+
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
@@ -75,6 +83,233 @@ const LIVE_INCARNATION_BACKGROUND_WORK_COMPLETION_NOTIFICATION = [
 ].join("\n");
 
 describe("createHooksApi", () => {
+	it("Claude 清单慢读取不阻塞 hook 响应与 activity，幂等重投只投影一次", async () => {
+		const current = createSummary({
+			runtimeSessionIncarnationId: "incarnation-1",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "native-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const applyCurrentWorkPhaseGoal = vi.fn();
+		const applyHookActivity = vi.fn();
+		const recordAgentLifecycleHookConversationProgress = vi.fn();
+		const appliedDeliveryKeys = new Set<string>();
+		const manager = {
+			getSummary: () => current,
+			applyCurrentWorkPhaseGoal,
+			applyHookActivity,
+			recordAgentLifecycleHookConversationProgress,
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			hasAppliedHookEventDeliveryIdempotencyKey: (_taskId: string, key: string) => appliedDeliveryKeys.has(key),
+			rememberAppliedHookEventDeliveryIdempotencyKey: (_taskId: string, key: string) => appliedDeliveryKeys.add(key),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/tmp/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		let finishRead: (projection: { goalText: string; updatedAt: number }) => void = () => {
+			throw new Error("读取尚未开始");
+		};
+		readNativePhaseGoalMock.mockReset();
+		readNativePhaseGoalMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishRead = resolve;
+				}),
+		);
+		const hook = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity" as const,
+			hookEventDeliveryIdempotencyKey: "native-projection-delivery-1",
+			claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+		};
+		let response: RuntimeHookIngestResponse | undefined;
+		const ingestion = api.ingest(hook).then((result) => {
+			response = result;
+		});
+		try {
+			await vi.waitFor(() => expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+			await vi.waitFor(() => expect(response).toEqual({ ok: true }), { timeout: 10_000 });
+			expect(applyHookActivity).toHaveBeenCalledWith("task-1", hook.metadata);
+			expect(recordAgentLifecycleHookConversationProgress).toHaveBeenCalledTimes(1);
+			expect(applyCurrentWorkPhaseGoal).not.toHaveBeenCalled();
+			expect(await api.ingest(hook)).toEqual({ ok: true });
+			expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1);
+			expect(applyHookActivity).toHaveBeenCalledTimes(1);
+		} finally {
+			finishRead({ goalText: "当前阶段目标", updatedAt: Date.now() });
+			await ingestion;
+		}
+		await vi.waitFor(() => expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+	});
+
+	it.each([
+		"user_prompt_delivered",
+		"new_incarnation",
+		"newer_projection",
+		"new_native_identity",
+		"user_turn",
+	] as const)("Claude 清单读取过程中发生 %s 时，旧异步结果不得覆盖当前会话", async (interruption) => {
+		let current = createSummary({
+			runtimeSessionIncarnationId: "incarnation-1",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "native-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const applyCurrentWorkPhaseGoal = vi.fn();
+		const applyHookActivity = vi.fn();
+		let firstReadReleased = false;
+		let finishProjectionCheck: () => void = () => {};
+		const projectionCheckCompleted = new Promise<void>((resolve) => {
+			finishProjectionCheck = resolve;
+		});
+		const manager = {
+			getSummary: () => {
+				if (firstReadReleased) finishProjectionCheck();
+				return current;
+			},
+			applyCurrentWorkPhaseGoal,
+			applyHookActivity,
+			transitionToRunning: vi.fn(),
+			transitionToReview: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/tmp/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		let finishRead: (projection: { goalText: string; updatedAt: number }) => void = () => {
+			throw new Error("读取尚未开始");
+		};
+		readNativePhaseGoalMock.mockReset();
+		readNativePhaseGoalMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishRead = resolve;
+				}),
+		);
+		const hook = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity" as const,
+			claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+		};
+		const inFlight = api.ingest(hook);
+		await vi.waitFor(() => expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1));
+		if (interruption === "user_prompt_delivered")
+			current = { ...current, agentCurrentWorkPhaseGoalInvalidatedAt: Date.now() };
+		else if (interruption === "new_incarnation")
+			current = { ...current, runtimeSessionIncarnationId: "incarnation-2" };
+		else if (interruption === "new_native_identity")
+			current = {
+				...current,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "native-2",
+					transcriptPath: null,
+					observedAt: 2,
+				},
+			};
+		else if (interruption === "user_turn")
+			current = { ...current, turnOwner: "user", liveness: "live", userTurnKind: "review" };
+		else {
+			readNativePhaseGoalMock.mockResolvedValueOnce(null);
+			expect(await api.ingest(hook)).toEqual({ ok: true });
+		}
+		firstReadReleased = true;
+		finishRead({ goalText: "已经过期的阶段目标", updatedAt: Date.now() });
+		await projectionCheckCompleted;
+		expect(await inFlight).toEqual({ ok: true });
+		expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(interruption === "newer_projection" ? 1 : 0);
+		expect(applyHookActivity).toHaveBeenCalledTimes(interruption === "newer_projection" ? 2 : 1);
+	});
+
+	it.each(["read_failure", "apply_failure"] as const)(
+		"Claude 后台投影 %s 被捕获，不影响 hook 响应与 activity",
+		async (failure) => {
+			const current = createSummary({
+				runtimeSessionIncarnationId: "incarnation-1",
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "native-1",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+			});
+			const applyCurrentWorkPhaseGoal = vi.fn(() => {
+				throw new Error("模拟投影写入失败");
+			});
+			const applyHookActivity = vi.fn();
+			const manager = {
+				getSummary: () => current,
+				applyCurrentWorkPhaseGoal,
+				applyHookActivity,
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const api = createHooksApi({
+				getWorkspacePathById: () => "/tmp/repo",
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+			let releaseRead: () => void = () => {
+				throw new Error("读取尚未开始");
+			};
+			readNativePhaseGoalMock.mockReset();
+			readNativePhaseGoalMock.mockImplementationOnce(
+				() =>
+					new Promise((resolve, reject) => {
+						releaseRead = () =>
+							failure === "read_failure"
+								? reject(new Error("模拟清单读取失败"))
+								: resolve({ goalText: "当前阶段目标", updatedAt: Date.now() });
+					}),
+			);
+			let finishFailureHandling: () => void = () => {};
+			const failureHandled = new Promise<void>((resolve) => {
+				finishFailureHandling = resolve;
+			});
+			const warning = vi
+				.spyOn(agentSessionRetentionLogger, "logAgentSessionRetentionWarning")
+				.mockImplementation(finishFailureHandling);
+			try {
+				expect(
+					await api.ingest({
+						taskId: "task-1",
+						workspaceId: "workspace-1",
+						event: "activity",
+						claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+						metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+					}),
+				).toEqual({ ok: true });
+				expect(applyHookActivity).toHaveBeenCalledTimes(1);
+				releaseRead();
+				await failureHandled;
+				expect(warning).toHaveBeenCalledWith(
+					expect.stringContaining("claude-native-task-list-current-work-phase-goal-projection-failed"),
+				);
+				expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(failure === "apply_failure" ? 1 : 0);
+			} finally {
+				warning.mockRestore();
+			}
+		},
+	);
+
 	it("恢复旧 Claude 会话时阻止并持久暂存 harness 自动 task-notification", async () => {
 		const manager = {
 			getSummary: vi.fn(() =>
@@ -89,6 +324,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
 		const api = createHooksApi({
@@ -137,6 +373,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -176,6 +413,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
 		const api = createHooksApi({
@@ -216,6 +454,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -255,6 +494,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -304,6 +544,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -336,6 +577,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
 		const api = createHooksApi({
@@ -363,6 +605,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -403,6 +646,7 @@ describe("createHooksApi", () => {
 				transitionToRunning: vi.fn(),
 				applyHookActivity: vi.fn(),
 				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
 				applyTurnCheckpoint: vi.fn(),
 			} as unknown as TerminalSessionManager;
 			const api = createHooksApi({
@@ -493,6 +737,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -543,6 +788,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -589,6 +835,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -637,6 +884,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -687,6 +935,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -734,6 +983,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -774,6 +1024,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -813,6 +1064,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
@@ -877,6 +1129,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
@@ -944,6 +1197,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -975,6 +1229,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1005,6 +1260,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ agentId: "gemini", state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1033,6 +1289,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1052,6 +1309,10 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"user_prompt_submit_hook_event_accepted",
+		);
 	});
 
 	it("to_in_progress + PostToolUse：userInitiatedResume=false（自动续跑中途活动，不解除 guard）", async () => {
@@ -1061,6 +1322,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1080,6 +1342,130 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: false });
+		// 球在用户手上（attention ⇒ needs_input）时到来的工具事件来自后台子代理，不刷新主对话的缓存起点。
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+	});
+
+	it("Cache warm 起点：agent 回合里的主对话 PostToolUse 记一次发请求，子代理内的不记", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+			hookEventFiredInsideSubagentContext: true,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"post_tool_use_hook_event",
+		);
+	});
+
+	// 压缩完成（PostCompact）只推进 Cache warm 起点：不推进对话推进、不刷新活动行、不转移回合、不产生通知。
+	it("Cache warm 起点：用户回合里的手动压缩记一次替换类观测（带 harness 报的上下文大小），其余一概不碰", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "awaiting_review", reviewReason: "hook" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "kimi", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "manual_compact_command",
+			mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: 42_000,
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request",
+			42_000,
+		);
+		expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+		expect(manager.applyHookActivity).not.toHaveBeenCalled();
+		expect(manager.transitionToReview).not.toHaveBeenCalled();
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
+		expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
+	});
+
+	it("Cache warm 起点：agent 回合里的自动压缩记续写类（不带上下文大小）；子代理内的压缩不记", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "claude", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction",
+			hookEventFiredInsideSubagentContext: true,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "claude", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction",
+			mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: 42_000,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"automatic_context_compaction_completed_continuation_model_request_follows_immediately",
+			undefined,
+		);
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	});
 
 	it("captures a turn checkpoint when transitioning to review", async () => {
@@ -1106,6 +1492,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1153,6 +1540,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -1197,6 +1585,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1256,6 +1645,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -1299,6 +1689,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			disarmRestorationContinuationGuard: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
@@ -1347,6 +1738,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			disarmRestorationContinuationGuard: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -1512,8 +1904,11 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			applyHookActivity: vi.fn(),
 			applyAgentNativeConversationSessionIdentity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
-		const persistIdentity = vi.fn(async () => true);
+		const persistIdentity = vi.fn(
+			async () => "persisted_new_identity_and_invalidated_stale_snapshot_revision" as const,
+		);
 		const api = createHooksApi({
 			persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -1550,12 +1945,55 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 });
 
 describe("原生身份落盘与 hook 确认", () => {
+	// cf427：Codex/Claude 每个带 session id 的 hook 都会再确认一次同一身份；若每次都广播整份快照，
+	// 所有客户端都会整板重水合，抹掉浏览器里尚未落盘的新卡。
+	it.each([
+		["persisted_new_identity_and_invalidated_stale_snapshot_revision" as const, 1],
+		["persisted_reconfirmed_identity_observation_time_without_revision_change" as const, 0],
+		["already_persisted_without_write" as const, 0],
+	])(
+		"身份落盘结果为 %s 时广播整份 workspace 快照 %i 次",
+		async (identityPersistenceOutcome, expectedBroadcastCount) => {
+			const manager = {
+				getSummary: vi.fn(() => createSummary({ state: "running" })),
+				applyAgentNativeConversationSessionIdentity: vi.fn(),
+				applyHookActivity: vi.fn(),
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
+			const api = createHooksApi({
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(
+					async () => identityPersistenceOutcome,
+				),
+				getWorkspacePathById: () => "/tmp/repo",
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated,
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+			expect(
+				await api.ingest({
+					taskId: "task-1",
+					workspaceId: "workspace-1",
+					event: "agent_conversation_session_identity_observed",
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "claude",
+						nativeSessionId: "session-1",
+						transcriptPath: null,
+						observedAt: 2,
+					},
+				}),
+			).toEqual({ ok: true });
+			expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledTimes(expectedBroadcastCount);
+		},
+	);
+
 	it.each([false, true])("保存失败可重试，恢复拦截=%s 时仍保留 block", async (restorationBlocked) => {
 		const manager = {
 			getSummary: vi.fn(() => createSummary()),
 			applyAgentNativeConversationSessionIdentity: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			isRestorationHarnessGeneratedTaskNotificationInterceptionActive: vi.fn(() => restorationBlocked),
 		} as unknown as TerminalSessionManager;
 		let releasePersistence: () => void = () => {};
@@ -1568,7 +2006,7 @@ describe("原生身份落盘与 hook 确认", () => {
 				await pendingPersistence;
 				throw new Error("disk unavailable");
 			})
-			.mockResolvedValueOnce(true);
+			.mockResolvedValueOnce("persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 		const broadcast = vi.fn();
 		const api = createHooksApi({
 			getWorkspacePathById: () => "/tmp/repo",
@@ -1632,7 +2070,7 @@ it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", a
 		applyAgentNativeConversationSessionIdentity: vi.fn(),
 		transitionToReview: vi.fn(),
 	} as unknown as TerminalSessionManager;
-	const persistIdentity = vi.fn(async () => true);
+	const persistIdentity = vi.fn(async () => "persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 	const api = createHooksApi({
 		getWorkspacePathById: () => "/tmp/repo",
 		ensureTerminalManagerForWorkspace: async () => manager,
@@ -1687,13 +2125,16 @@ it.each([
 				transitionToRunning: vi.fn(),
 				applyHookActivity: vi.fn(),
 				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
 				applyTurnCheckpoint: vi.fn(),
 			} as unknown as TerminalSessionManager;
-			const persistIdentity = vi.fn().mockResolvedValueOnce(true);
+			const persistIdentity = vi
+				.fn()
+				.mockResolvedValueOnce("persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 			if (retryIdentityPersistenceFails) {
 				persistIdentity.mockRejectedValueOnce(new Error("identity storage unavailable"));
 			} else {
-				persistIdentity.mockResolvedValueOnce(false);
+				persistIdentity.mockResolvedValueOnce("already_persisted_without_write" as const);
 			}
 			const api = createHooksApi({
 				getWorkspacePathById: () => "/tmp/repo",
@@ -1788,11 +2229,14 @@ it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知
 		applyHookActivity: vi.fn(),
 		transitionToRunning: vi.fn(),
 		recordAgentLifecycleHookConversationProgress: vi.fn(),
+		recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		markRestoredAgentConversationContinued: vi.fn(),
 	} as unknown as TerminalSessionManager;
 	const notify = vi.fn();
 	const api = createHooksApi({
-		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(async () => false),
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(
+			async () => "already_persisted_without_write" as const,
+		),
 		getWorkspacePathById: () => "/tmp/repo",
 		ensureTerminalManagerForWorkspace: async () => manager,
 		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -1815,6 +2259,9 @@ it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知
 	expect(manager.applyHookActivity).not.toHaveBeenCalled();
 	expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+	// ca0af 回归（2026-10-04）：续跑 / 终端重启只带来 SessionStart，绝不能推进 Cache warm 起点——否则
+	// 「只是打开过」的任务会被当成刚发过请求，进 Cache warm 区。
+	expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
 	expect(notify).not.toHaveBeenCalled();
 });
 

@@ -13,6 +13,11 @@ export function isWorkspaceHomeUserShellTerminalSessionTaskId(sessionTaskId: str
 	return sessionTaskId === WORKSPACE_HOME_USER_SHELL_TERMINAL_SESSION_TASK_ID;
 }
 
+// 卡片移入 Done / 永久删除时，服务端（taskCardAction.*）按它停掉那张卡的详情 shell 终端。
+export function buildTaskCardDetailUserShellTerminalSessionTaskId(taskCardId: string): string {
+	return `${TASK_CARD_DETAIL_USER_SHELL_TERMINAL_SESSION_TASK_ID_PREFIX}${taskCardId}`;
+}
+
 // 不是卡片详情终端时返回 null。
 export function parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId(sessionTaskId: string): string | null {
 	if (!sessionTaskId.startsWith(TASK_CARD_DETAIL_USER_SHELL_TERMINAL_SESSION_TASK_ID_PREFIX)) {

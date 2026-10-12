@@ -53,6 +53,8 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskSessionStartRequest,
+	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -94,9 +96,14 @@ import {
 } from "../core/api-validation";
 import { formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt } from "../core/harness-generated-restoration-prompt";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
-import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
+import {
+	applyMostRecentlyLaunchedAgentSessionAgentIdToTask,
+	getTaskColumnId,
+	updateTask,
+} from "../core/task-board-mutations";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -104,10 +111,15 @@ import {
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
-import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
+import {
+	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking,
+	recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking,
+	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking,
+} from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
 import type { QueuedTaskPromptDeliveryDispatcher } from "../server/queued-task-prompt-delivery-dispatcher";
+import { resolveSessionCategoryAndAttributedTaskCardId } from "../server/task-resource-usage-attribution-root-enumeration";
 import {
 	dismissAgentRaisedPendingUserDecision,
 	isOpenAgentRaisedPendingUserDecision,
@@ -115,6 +127,7 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
 	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
+	saveAgentRaisedPendingUserDecisionAnswerDraft,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
@@ -123,7 +136,7 @@ import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from
 import {
 	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
 	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
-	mutateWorkspaceQueuedTaskPromptDeliveries,
+	mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
 import {
@@ -277,6 +290,27 @@ function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): Runtim
 		}
 	}
 	return null;
+}
+
+// cf427 启动门：卡片会话（主会话 / By the way 侧问）的宿主卡必须已在**盘上** board 里才放行，返回缺席的那张卡的 id。
+// 浏览器建卡是乐观的，卡片曾只活在浏览器内存里就照常启动了 agent；之后一次整板重水合抹掉卡片，会话就成了
+// 搜不到、进不了 Focus 的孤儿。这道门对所有客户端成立，包括没刷新的旧 bundle 与其他设备。
+// 不属于任何卡片的会话（home 侧边栏 agent、shell 终端）不受影响。
+async function findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(
+	workspaceId: string,
+	startRequest: Pick<RuntimeTaskSessionStartRequest, "taskId" | "workspaceTaskId" | "taskConversationSessionMetadata">,
+): Promise<string | null> {
+	const { attributedTaskCardId } = resolveSessionCategoryAndAttributedTaskCardId({
+		taskId: startRequest.taskId,
+		taskConversationSessionMetadata: startRequest.taskConversationSessionMetadata,
+	});
+	if (attributedTaskCardId === null) {
+		return null;
+	}
+	// 与下方 cwd 解析同一口径：显式的 workspaceTaskId 就是宿主卡。
+	const hostTaskCardId = startRequest.workspaceTaskId ?? attributedTaskCardId;
+	const persistedBoard = await loadWorkspaceBoardById(workspaceId);
+	return findWorkspaceBoardCard(persistedBoard, hostTaskCardId) ? null : hostTaskCardId;
 }
 
 // 恢复既有对话（终端 agent 的「Restart terminal session」与从 trash 拖回，两者都走 `--continue`）时，
@@ -659,7 +693,51 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			deps.bumpClineSessionContextVersion?.();
 			return response;
 		},
-		// 起名不需要任何运行时状态（无工作区、无会话），所以这里就是一层薄转发：协调者不沉淀逻辑。
+		// 阶段目标只允许写调用者所属的当前对话，主卡与旁支对话分别保存。
+		setCurrentWorkPhaseGoal: async (workspaceScope, input, evidence) => {
+			const intent = await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+				taskMutationIntentKind: "kanban_cli_task_set_current_work_phase_goal",
+				kanbanRequestOriginActorEvidence: evidence,
+			});
+			const actor = intent.resolvedKanbanActor;
+			if (
+				actor.kanbanActorKind !== "kanban_board_card_work_unit" ||
+				actor.actingKanbanBoardCardWorkUnit.workspaceId !== workspaceScope.workspaceId
+			) {
+				throw new TRPCError({ code: "FORBIDDEN", message: "当前调用环境没有可解析的 Task 身份。" });
+			}
+			const taskId = actor.actingKanbanBoardCardWorkUnit.taskId;
+			const conversationId = intent.actorKanbanTaskConversationSessionId ?? taskId;
+			const acp = await deps.getScopedAcpTaskSessionService(workspaceScope);
+			const terminal = await deps.getScopedTerminalManager(workspaceScope);
+			const acpSummary = acp.getSummary(conversationId);
+			const summary = acpSummary ?? terminal.getSummary(conversationId);
+			const nativeId = summary?.agentNativeConversationSessionIdentity?.nativeSessionId;
+			if (
+				!summary ||
+				resolveSessionCategoryAndAttributedTaskCardId(summary).attributedTaskCardId !== taskId ||
+				(intent.actorNativeConversationSessionIdentity &&
+					intent.actorNativeConversationSessionIdentity.nativeConversationSessionId !== nativeId)
+			) {
+				throw new TRPCError({ code: "FORBIDDEN", message: "当前对话身份缺失或不属于当前 Task。" });
+			}
+			const goal =
+				input.goal === null
+					? null
+					: {
+							goalText: input.goal,
+							source: "agent_explicit_declaration" as const,
+							updatedAt: Math.max(Date.now(), (summary.agentCurrentWorkPhaseGoalInvalidatedAt ?? 0) + 1),
+							owningNativeConversationSessionId: nativeId ?? null,
+							owningKanbanTaskConversationSessionId: conversationId,
+							owningRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+						};
+			const updated = acpSummary
+				? acp.applyCurrentWorkPhaseGoal(conversationId, goal)
+				: terminal.applyCurrentWorkPhaseGoal(conversationId, goal);
+			return { ok: true, summary: updated };
+		},
+
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input) => {
 			return await suggestTaskNamesFromTaskDescription(input);
 		},
@@ -703,6 +781,50 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseTaskSessionStartRequest(input);
 				diagnosticTaskId = body.taskId;
 				requestedAgentIdForDiagnostics = body.agentId ?? null;
+				startFailurePhase = "verify_host_task_card_persisted_on_workspace_board";
+				const hostTaskCardIdNotYetPersistedOnWorkspaceBoard =
+					await findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(workspaceScope.workspaceId, body);
+				if (hostTaskCardIdNotYetPersistedOnWorkspaceBoard !== null) {
+					const message = `Task card "${hostTaskCardIdNotYetPersistedOnWorkspaceBoard}" is not saved on the workspace board yet, so its agent session was not started. Wait for the card to be saved, then start it again.`;
+					recordStartDiagnostic("failed", startFailurePhase, message);
+					return {
+						ok: false,
+						summary: null,
+						error: message,
+						taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+					};
+				}
+				// cf427 启动门的第二道核对（会话启动之后）。上面那次读盘到真正 spawn 之间隔着配置加载、worktree 准备
+				// （可能数秒）与 transport 启动；这段时间里别的客户端删卡时还看不到会话（它的 stopTaskSession 落空），
+				// 会照常删掉卡片，而之后把 agentId 回写卡片的 mutate 对缺卡静默 no-op——会话又成了搜不到、进不了
+				// Focus 的孤儿。所以会话登记进各自的会话管理器之后再读一次盘：此后的删卡方必能经 stopTaskSession
+				// 看到并停掉它；若此刻宿主卡已不在盘上，就由本请求按 transport 停掉刚启动的会话，以同一拒绝原因回 ok:false。
+				// 不属于任何卡片的会话（home 侧边栏 agent、shell 终端）在 find… 里直接放行，不受影响。
+				const stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart = async (
+					stopJustStartedTaskSessionThroughItsTransport: () => Promise<unknown>,
+				): Promise<RuntimeTaskSessionStartResponse | null> => {
+					startFailurePhase = "reverify_host_task_card_persisted_on_workspace_board_after_session_start";
+					let hostTaskCardIdRemovedFromWorkspaceBoardDuringStart: string | null;
+					try {
+						hostTaskCardIdRemovedFromWorkspaceBoardDuringStart =
+							await findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(workspaceScope.workspaceId, body);
+					} catch {
+						// 读盘失败 = 无法确定卡片已被删：保留已启动的会话照常返回，绝不因核对本身失败误停合法会话。
+						return null;
+					}
+					if (hostTaskCardIdRemovedFromWorkspaceBoardDuringStart === null) {
+						return null;
+					}
+					await stopJustStartedTaskSessionThroughItsTransport();
+					const message = `Task card "${hostTaskCardIdRemovedFromWorkspaceBoardDuringStart}" was removed from the workspace board while its agent session was starting, so the session was stopped.`;
+					recordStartDiagnostic("failed", startFailurePhase, message);
+					return {
+						ok: false,
+						summary: null,
+						error: message,
+						taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+					};
+				};
 				if (body.resumeFromTrash) {
 					deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
 				}
@@ -863,6 +985,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						return { ok: false, summary: acpSummary, error: acpStartFailureMessage };
 					}
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					const acpStartRejectedBecauseHostTaskCardRemovedDuringStart =
+						await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(
+							async () => await acpTaskSessionService.stopTaskSession(body.taskId),
+						);
+					if (acpStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+						return acpStartRejectedBecauseHostTaskCardRemovedDuringStart;
+					}
 					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 						workspaceScope,
 						taskId: body.taskId,
@@ -962,6 +1091,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 					latestStartedSummaryForDiagnostics = summary;
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					const clineStartRejectedBecauseHostTaskCardRemovedDuringStart =
+						await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(
+							async () => await clineTaskSessionService.stopTaskSession(body.taskId),
+						);
+					if (clineStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+						return clineStartRejectedBecauseHostTaskCardRemovedDuringStart;
+					}
 					// 记 summary 的 agentId 而不是 effectiveAgentId：`shouldProbePersistedClineSession` 那条
 					// 分支会在 effectiveAgentId 仍是别的 agent 时把 useClinePath 翻成 true，此时真正跑起来的
 					// 是 Cline，卡片上必须记下这个事实。
@@ -1064,6 +1200,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				);
 				latestStartedSummaryForDiagnostics = summary;
 				recordStartDiagnostic("runtime_started", startFailurePhase);
+				const terminalStartRejectedBecauseHostTaskCardRemovedDuringStart =
+					await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(async () =>
+						terminalManager.stopTaskSession(body.taskId),
+					);
+				if (terminalStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+					return terminalStartRejectedBecauseHostTaskCardRemovedDuringStart;
+				}
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 					workspaceScope,
 					taskId: body.taskId,
@@ -1136,6 +1279,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							workspaceTaskId === body.taskId
 								? "Card not found in the workspace board."
 								: "The board card hosting this conversation session no longer exists.",
+					};
+				}
+				// 打开一张 Done 卡不该把它的 agent 复活：前端的陈旧会话自动续跑已不再以「停在用户回合」为由让位
+				// （回收后的会话恒在用户回合），这里是独立于客户端版本的那道防线。人点的重启照常放行。
+				if (
+					body.taskSessionStartOriginDeclaredByClient === "stale_session_client_auto_resume" &&
+					getTaskColumnId(board, workspaceTaskId) === "trash"
+				) {
+					return {
+						ok: false,
+						summary: null,
+						error: "Automatic resume is skipped for tasks in Done; use Restart to resume this session.",
 					};
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
@@ -1227,43 +1382,68 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
-				const summary = await terminalManager.refreshTaskTerminal(
-					{
-						taskId: body.taskId,
-						// 补回这两个字段（此前重建请求把它们丢了）：
-						//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
-						//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
-						//   readOnlyQuestionSession），丢了就等于重启一次侧问会话它就能写文件了。
-						// 且这份重建请求会覆盖 entry.restartRequest，残缺一次就会被此后的崩溃自动重启永久继承。
-						workspaceTaskId,
-						...(currentSummary?.taskConversationSessionMetadata
-							? { taskConversationSessionMetadata: currentSummary.taskConversationSessionMetadata }
-							: {}),
-						agentId: resolved.agentId,
-						binary: resolved.binary,
-						args: resolved.args,
-						taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-							card.taskAgentPermissionMode,
-							scopedRuntimeConfig.agentAutonomousModeEnabled,
-						),
-						autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
-						cwd: taskCwd,
-						prompt: "",
-						images: undefined,
-						startInPlanMode: undefined,
-						resumeFromTrash: true,
-						cols: body.cols,
-						rows: body.rows,
-						workspaceId: workspaceScope.workspaceId,
-						projectPath: workspaceScope.workspacePath,
-						parentSessionId: undefined,
-						taskAgentSessionInitialization: undefined,
-						terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
-					},
-					// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
-					// 靠它显式声明 stale_session_client_auto_resume 才分得开。
-					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal",
-				);
+				const refreshTaskTerminalRequest = {
+					taskId: body.taskId,
+					// 补回这两个字段（此前重建请求把它们丢了）：
+					//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
+					//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
+					//   readOnlyQuestionSession），丢了就等于重启一次侧问会话它就能写文件了。
+					// 且这份重建请求会覆盖 entry.restartRequest，残缺一次就会被此后的崩溃自动重启永久继承。
+					workspaceTaskId,
+					...(currentSummary?.taskConversationSessionMetadata
+						? { taskConversationSessionMetadata: currentSummary.taskConversationSessionMetadata }
+						: {}),
+					agentId: resolved.agentId,
+					binary: resolved.binary,
+					args: resolved.args,
+					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+						card.taskAgentPermissionMode,
+						scopedRuntimeConfig.agentAutonomousModeEnabled,
+					),
+					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+					cwd: taskCwd,
+					prompt: "",
+					images: undefined,
+					startInPlanMode: undefined,
+					resumeFromTrash: true,
+					cols: body.cols,
+					rows: body.rows,
+					workspaceId: workspaceScope.workspaceId,
+					projectPath: workspaceScope.workspacePath,
+					parentSessionId: undefined,
+					taskAgentSessionInitialization: undefined,
+					terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
+				};
+				// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
+				// 靠它显式声明 stale_session_client_auto_resume 才分得开。
+				const refreshTaskSessionStartOrigin =
+					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal";
+				// 「从既有对话迁入」（只有人在终端面板上选定后才会带）：先迁入、钉身份，再按 id 续跑。
+				// 「从既有对话迁入」与「停止后台会话并在这里续跑」都只有人在终端面板上选定 / 确认后才会带：前者先迁入、
+				// 钉身份再按 id 续跑；后者在对话被 Claude 后台会话占着又不能安全收回时，不再看是否安全，停掉后续跑。
+				// 两者都没带时保持两参调用，与旧行为逐字一致。
+				const refreshOptions = {
+					...(body.adoptExistingAgentConversationAsTaskSessionIdentity
+						? {
+								adoptExistingAgentConversationAsTaskSessionIdentity:
+									body.adoptExistingAgentConversationAsTaskSessionIdentity,
+							}
+						: {}),
+					...(body.forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser
+						? { forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true }
+						: {}),
+				};
+				const summary =
+					Object.keys(refreshOptions).length > 0
+						? await terminalManager.refreshTaskTerminal(
+								refreshTaskTerminalRequest,
+								refreshTaskSessionStartOrigin,
+								refreshOptions,
+							)
+						: await terminalManager.refreshTaskTerminal(
+								refreshTaskTerminalRequest,
+								refreshTaskSessionStartOrigin,
+							);
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
 				//
@@ -1424,6 +1604,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						answerDeliveryState: decision.answerDeliveryState,
 						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
 						originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
+						pendingAnswerDraft: decision.status === "pending" ? (decision.pendingAnswerDraft ?? null) : null,
 						recordedAnswerQuestionAnswers:
 							decision.answer === null
 								? null
@@ -1436,6 +1617,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									]),
 					})),
 			};
+		},
+		saveAgentRaisedPendingUserDecisionAnswerDraft: async (workspaceScope, input) => {
+			try {
+				const saved = await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceScope.workspaceId, input);
+				return {
+					ok: saved !== null,
+					pendingAnswerDraft: saved?.pendingAnswerDraft ?? null,
+					decisionIsNoLongerPending: saved === null,
+					...(saved === null ? { error: "问题已了结，无法保存草稿" } : {}),
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					pendingAnswerDraft: null,
+					decisionIsNoLongerPending: false,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
 		},
 		answerAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
 			try {
@@ -1697,13 +1896,22 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
+		// park 三件套按这条会话当下的 transport 分派：ACP（omp）会话由 ACP 服务持有 summary（dd2db 2x），其余走终端。
+		// 同一个 sidecar、同一个谓词，下游（UI、通知、回收、排队投递）不区分 transport。
 		parkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskParkAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const result = terminalManager.parkTaskSessionAwaitingDispatchedBackgroundWork(body.taskId, {
-					label: body.label,
-				});
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const parkOptions = { label: body.label };
+				const result = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.parkTaskSessionAwaitingDispatchedBackgroundWork(body.taskId, parkOptions)
+					: (await deps.getScopedTerminalManager(workspaceScope)).parkTaskSessionAwaitingDispatchedBackgroundWork(
+							body.taskId,
+							parkOptions,
+						);
 				if (!result.ok) {
 					return { ok: false, summary: null, error: result.error };
 				}
@@ -1716,8 +1924,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		unparkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = terminalManager.unparkTaskSession(body.taskId);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const summary = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.unparkTaskSession(body.taskId)
+					: (await deps.getScopedTerminalManager(workspaceScope)).unparkTaskSession(body.taskId);
 				return { ok: Boolean(summary), summary };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1727,8 +1940,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		isTaskParkedAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const state = terminalManager.getAwaitingDispatchedBackgroundWork(body.taskId);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const state = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.getAwaitingDispatchedBackgroundWork(body.taskId)
+					: (await deps.getScopedTerminalManager(workspaceScope)).getAwaitingDispatchedBackgroundWork(body.taskId);
 				return { ok: true, parked: state.parked, label: state.label, sinceMs: state.sinceMs };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -2232,7 +2450,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		mutateTaskPromptDeliveryQueue: async (workspaceScope, input) => {
+		mutateTaskPromptDeliveryQueue: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			const { mutation } = input;
 			const workspaceId = workspaceScope.workspaceId;
 			try {
@@ -2258,7 +2476,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								mutation.queueEntryId,
 							)) ?? null)
 						: null;
-				const queue = await mutateWorkspaceQueuedTaskPromptDeliveries(workspaceId, mutation);
+				const { snapshot: queue, newlyCreatedQueueEntries } =
+					await mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries(workspaceId, mutation);
 				const taskEntries = queue.entriesByTaskId[mutation.taskId] ?? [];
 				// 入队 / 重排被拒与幂等重发在快照上长得一样（都是原样返回），只能事后按「那条在不在」+「满没满」分辨。
 				const expectedNewQueueEntryId =
@@ -2271,6 +2490,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					expectedNewQueueEntryId !== null &&
 					!taskEntries.some((entry) => entry.queueEntryId === expectedNewQueueEntryId) &&
 					isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(queue, mutation.taskId);
+				// dd2db T2：人排条目也是一次投递请求。只有锁内真的新建了条目才是新意图（同 id 重发、满额被拒都不算）。
+				for (const newlyCreatedQueueEntry of newlyCreatedQueueEntries) {
+					recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking({
+						workspaceId,
+						newlyCreatedQueueEntry,
+						retriedFromSettledFailedQueueEntryId:
+							mutation.kind === "retry_settled_failed_queued_prompt_delivery" ? mutation.queueEntryId : null,
+						kanbanRequestOriginActorEvidence,
+					});
+				}
 				await deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated(workspaceId, mutation.taskId, queue);
 				return {
 					ok: !enqueueRefusedBecauseQueueCapacityIsExhausted,
@@ -2298,13 +2527,32 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (workspaceScope, input) => {
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) => {
 			try {
-				return await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				const enqueueResponse = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
 					workspaceScope.workspaceId,
 					input,
 				);
+				if (enqueueResponse.ok && enqueueResponse.injectionLedgerRecordDisposition === "created") {
+					recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking({
+						workspaceId: workspaceScope.workspaceId,
+						taskId: input.taskId.trim(),
+						messageBodyText: input.text,
+						taskMessageDeliveryIdempotencyKey: input.idempotencyKey.trim(),
+						declaredMessageSourceLabel: input.source.trim(),
+						queuedPromptDeliveryQueueEntryId: buildQueuedProgrammaticInjectionQueueEntryId(
+							input.idempotencyKey.trim(),
+						),
+						maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
+						kanbanRequestOriginActorEvidence,
+					});
+				}
+				return enqueueResponse;
 			} catch (error) {
 				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}

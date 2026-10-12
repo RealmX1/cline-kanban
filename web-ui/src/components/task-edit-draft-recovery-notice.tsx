@@ -55,7 +55,12 @@ function formatDraftTimestamp(timestamp: number): string {
 
 function areFormValuesEqual(left: TaskEditDraftComparableValues, right: TaskEditDraftComparableValues): boolean {
 	return (
-		left.prompt === right.prompt && areTaskImagesEqual(left.images, right.images) && areSettingsEqual(left, right)
+		(left.taskTitleOverride === undefined ||
+			right.taskTitleOverride === undefined ||
+			left.taskTitleOverride === right.taskTitleOverride) &&
+		left.prompt === right.prompt &&
+		areTaskImagesEqual(left.images, right.images) &&
+		areSettingsEqual(left, right)
 	);
 }
 

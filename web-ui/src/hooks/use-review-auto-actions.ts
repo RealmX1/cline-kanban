@@ -204,6 +204,9 @@ export function useReviewAutoActions({
 									boardMutationInitiator:
 										resolveWebUiBoardMutationInitiatorForAutoReviewCompletionMoveToDone(latestMode),
 								})
+								.catch(() => {
+									// 移入 Done 失败已由执行方提示；这里只负责收尾在途登记。
+								})
 								.finally(() => {
 									delete awaitingCleanActionByTaskIdRef.current[reviewTask.id];
 									moveToTrashInFlightTaskIdsRef.current.delete(reviewTask.id);

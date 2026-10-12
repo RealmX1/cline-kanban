@@ -1,3 +1,4 @@
+import { hostname, userInfo } from "node:os";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 
@@ -183,5 +184,23 @@ describe("buildRuntimeConfigResponse", () => {
 			oauthExpiresAt: null,
 		});
 		expect(response.debugModeEnabled).toBe(true);
+	});
+
+	it("broadcasts the runtime host's account and hostname for Remote-SSH deep links from other devices", () => {
+		const response = buildRuntimeConfigResponse(createRuntimeConfigState(), {
+			providerId: null,
+			modelId: null,
+			baseUrl: null,
+			apiKeyConfigured: false,
+			oauthProvider: null,
+			oauthAccessTokenConfigured: false,
+			oauthRefreshTokenConfigured: false,
+			oauthAccountId: null,
+			oauthExpiresAt: null,
+		});
+		expect(response.runtimeHostRemoteEditorAccessIdentity).toEqual({
+			operatingSystemAccountUsername: userInfo().username,
+			operatingSystemHostname: hostname(),
+		});
 	});
 });

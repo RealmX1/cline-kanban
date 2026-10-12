@@ -18,6 +18,7 @@ import {
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { showAppToast } from "@/components/app-toaster";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
@@ -32,6 +33,7 @@ import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/q
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
 import {
@@ -77,13 +79,14 @@ import type {
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
-import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
+import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
+import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
 // We still poll the open detail diff because line content can change without changing
 // the overall file or line counts that drive the shared workspace metadata stream.
@@ -662,6 +665,7 @@ export function CardDetailView({
 	selection,
 	currentProjectId,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	taskIdsOnBoard,
 	selectedAgentId = null,
 	runtimeConfig = null,
@@ -682,6 +686,7 @@ export function CardDetailView({
 	onMoveReviewCardToValidation,
 	onMoveCardToReview,
 	onRestoreTaskFromTrash,
+	onStartFreshTaskSessionWithOriginalPrompt,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
 	onRequestPinToTaskPinboard,
@@ -731,6 +736,7 @@ export function CardDetailView({
 	selection: CardSelection;
 	currentProjectId: string | null;
 	workspacePath?: string | null;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCard) => Promise<string | null>;
 	/** 看板上此刻存在的任务 id。Prompt Library 靠它认出「归属任务已被删掉」的孤儿条目。 */
 	taskIdsOnBoard?: ReadonlySet<string> | null;
 	selectedAgentId?: RuntimeAgentId | null;
@@ -753,6 +759,8 @@ export function CardDetailView({
 	// 手动把 In Progress 卡翻入 Review（仅终端 agent；by-id，路由到 column-context-panel 的 in_progress section）。
 	onMoveCardToReview?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
+	// 「对话从未建立」时以卡片原 prompt 全新开局（终端面板的恢复提示条调用；面板负责先让人确认 prompt）。
+	onStartFreshTaskSessionWithOriginalPrompt?: (taskId: string) => Promise<void>;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
@@ -902,6 +910,11 @@ export function CardDetailView({
 		startRightPromptResize,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
+	const mainTaskWorkspaceInfo = useTaskWorkspaceInfoValue(selection.card.id, selection.card.baseRef);
+	const mainTaskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
+		mostRecentlyLaunchedAgentSessionAgentId: selection.card.mostRecentlyLaunchedAgentSessionAgentId,
+		taskWorktreeExists: mainTaskWorkspaceInfo?.exists,
+	});
 	const activeTaskConversationSessionSummary =
 		selectedTaskConversationSessionId === selection.card.id
 			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
@@ -1153,9 +1166,7 @@ export function CardDetailView({
 		setIsDiffExpanded((previous) => !previous);
 	}, [bottomTerminalOpen, isDiffExpanded, onBottomTerminalClose]);
 
-	// Fill text into whichever agent input is active: Cline SDK composer draft (in-process) or the
-	// terminal agent's PTY (paste, no newline). Shared by the diff "add comment" action and the
-	// prompt library "fill into input" button.
+	// 填入当前会话草稿或终端输入框；终端使用粘贴，不追加提交用的回车。
 	const injectTextIntoActiveInput = useCallback(
 		(formatted: string) => {
 			if (showClineAgentChatPanel) {
@@ -1166,6 +1177,17 @@ export function CardDetailView({
 			onAddReviewComments?.(selection.card.id, formatted);
 		},
 		[onAddReviewComments, selection.card.id, showClineAgentChatPanel],
+	);
+	const handleFillPromptIntoActiveInput = useCallback(
+		(text: string) => {
+			if (showClineAgentChatPanel) {
+				clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+				setIsDiffExpanded(false);
+				return;
+			}
+			injectTextIntoActiveInput(text);
+		},
+		[injectTextIntoActiveInput, showClineAgentChatPanel],
 	);
 
 	const handleSendDiffComments = useCallback(
@@ -1253,7 +1275,7 @@ export function CardDetailView({
 			<PromptLibraryPanel
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
-				onFillInput={injectTextIntoActiveInput}
+				onFillInput={handleFillPromptIntoActiveInput}
 				onQueuePromptForAfterCurrentTurn={currentProjectId ? handleQueuePromptForAfterCurrentTurn : undefined}
 				headerContent={detailUtilityTabs}
 				taskIdsOnBoard={taskIdsOnBoard ?? null}
@@ -1322,6 +1344,11 @@ export function CardDetailView({
 				findings={exploratoryFindings}
 			/>
 		) : null;
+	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
+	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
+	const workUnitRelationNeighborhoodPanel = (
+		<WorkUnitRelationNeighborhoodPanel workspaceId={currentProjectId} kanbanBoardCardTaskId={selection.card.id} />
+	);
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
@@ -1394,6 +1421,16 @@ export function CardDetailView({
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
 			summary={activeTaskConversationSessionSummary}
 			onSummary={onSessionSummary}
+			// 启动史证据只对主会话成立（卡片字段与任务 worktree 描述的都是主会话）；侧问会话不传，沿用旧解释。
+			taskAgentSessionLaunchHistoryEvidence={
+				isMainTaskConversationSessionSelected ? mainTaskAgentSessionLaunchHistoryEvidence : undefined
+			}
+			// 只有 In Progress 的卡能被 onStartTask 就地启动（handleStartTask 对其它非 backlog 列是 no-op）。
+			onStartTaskAgentSessionWithTaskPrompt={
+				isMainTaskConversationSessionSelected && selection.column.id === "in_progress" && onStartTask
+					? () => onStartTask(selection.card.id)
+					: undefined
+			}
 			onCommit={
 				isMainTaskConversationSessionSelected && onAgentCommitTask
 					? () => onAgentCommitTask(selection.card.id)
@@ -1430,6 +1467,13 @@ export function CardDetailView({
 			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
 			cursorColor={terminalThemeColors.textPrimary}
 			taskColumnId={selection.column.id}
+			// 「用原 prompt 全新开局」只给主会话：侧问会话的 prompt 不在卡片上。
+			originalTaskPromptForFreshStart={isMainTaskConversationSessionSelected ? selection.card.prompt : null}
+			onStartFreshAgentSessionWithOriginalTaskPrompt={
+				isMainTaskConversationSessionSelected && onStartFreshTaskSessionWithOriginalPrompt
+					? () => onStartFreshTaskSessionWithOriginalPrompt(selection.card.id)
+					: undefined
+			}
 		/>
 	);
 	// 提问它的那个会话活体仍在跑、且仍停在提问回合 ⇒ 终端里此刻显示的就是这道题的交互式选择器。
@@ -1452,13 +1496,20 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
-					key={pendingUserDecision.decision.decisionId}
+					key={JSON.stringify([
+						currentProjectId,
+						selectedTaskConversationSessionId,
+						pendingUserDecision.decision.decisionId,
+					])}
+					workspaceId={currentProjectId}
 					decision={pendingUserDecision.decision}
 					isSubmitting={pendingUserDecision.isSubmitting}
 					onAnswer={pendingUserDecision.answer}
 					onDismiss={pendingUserDecision.dismiss}
+					onDecisionNoLongerPending={() => void pendingUserDecision.refresh()}
 					agentResponseGenerationTurnSequence={
 						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
 					}
@@ -1518,6 +1569,7 @@ export function CardDetailView({
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
 							{explorationThreadGraphPanel}
 							{sessionFindingsSection}
+							{workUnitRelationNeighborhoodPanel}
 						</div>
 						{/* Prompts / comments utility panel */}
 						<div
@@ -1664,6 +1716,7 @@ export function CardDetailView({
 						<ColumnContextPanel
 							selection={selection}
 							workspacePath={workspacePath}
+							resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 							onCardSelect={onCardSelect}
 							taskSessions={taskSessions}
 							onTaskDragEnd={onTaskDragEnd}
@@ -1681,6 +1734,7 @@ export function CardDetailView({
 							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
+							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
@@ -1805,9 +1859,10 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
-										{/* 探索线（B.2）+ 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{/* 探索线（B.2）+ 本会话 findings + Relations：同位下方的独立可折叠 section（蓝图 §G.2） */}
 										{explorationThreadGraphPanel}
 										{sessionFindingsSection}
+										{workUnitRelationNeighborhoodPanel}
 										<ResizeHandle
 											orientation="horizontal"
 											ariaLabel="Resize task conversation sessions and utility panels"

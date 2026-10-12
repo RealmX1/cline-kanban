@@ -469,6 +469,9 @@ export function PromptLibraryPanel({
 	const handleAddPrompt = (): void => {
 		setPendingFocusPromptId(addPrompt());
 	};
+	const handleFillPromptWithSurroundingNewlines = (text: string): void => {
+		onFillInput(`\n${text}\n`);
+	};
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -492,7 +495,7 @@ export function PromptLibraryPanel({
 							prompt={prompt}
 							onChangeText={updatePromptText}
 							onToggleScope={setPromptScope}
-							onFill={onFillInput}
+							onFill={handleFillPromptWithSurroundingNewlines}
 							onQueue={onQueuePromptForAfterCurrentTurn}
 							onRemove={removePrompt}
 							shouldAutoFocus={pendingFocusPromptId === prompt.id}
@@ -507,7 +510,7 @@ export function PromptLibraryPanel({
 						onToggleExpanded={() => setIsOrphanedSectionExpanded((current) => !current)}
 						onClaim={claimOrphanedPrompt}
 						onRemove={removePrompt}
-						onFill={onFillInput}
+						onFill={handleFillPromptWithSurroundingNewlines}
 						onQueue={onQueuePromptForAfterCurrentTurn}
 					/>
 				) : null}

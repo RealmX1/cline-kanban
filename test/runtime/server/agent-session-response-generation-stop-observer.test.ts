@@ -146,6 +146,43 @@ describe("deriveAgentSessionRetentionDeadlineTransition（边沿检测）", () =
 		expect(transition.input.sessionTransport).toBe("pty_terminal");
 	});
 
+	it("Stop hook 经 PTY host spool 晚送达：期限按本轮停止边沿章（捕获时刻）起算，而不是送达时的写入时刻", () => {
+		const stopCapturedWhileRuntimeWasAbsentAt = NOW - 2 * ONE_HOUR_MS;
+		const transition = deriveAgentSessionRetentionDeadlineTransition(
+			makeSummary(),
+			awaitingUserTurnSummary({
+				agentResponseGenerationStopped: {
+					stoppedAt: stopCapturedWhileRuntimeWasAbsentAt,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 1,
+				},
+			}),
+			options,
+		);
+		expect(transition.kind).toBe("start_retention_deadline");
+		if (transition.kind !== "start_retention_deadline") {
+			return;
+		}
+		expect(transition.input.retentionAnchorAt).toBe(stopCapturedWhileRuntimeWasAbsentAt);
+		expect(transition.input.reclamationEligibleAt).toBe(stopCapturedWhileRuntimeWasAbsentAt + GRACE_PERIOD_MS);
+	});
+
+	it("停止边沿章属于更早的回合 → 不采信，退回写入时刻", () => {
+		const transition = deriveAgentSessionRetentionDeadlineTransition(
+			makeSummary(),
+			awaitingUserTurnSummary({
+				agentResponseGenerationTurnSequence: 2,
+				agentResponseGenerationStopped: {
+					stoppedAt: NOW - ONE_HOUR_MS,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 1,
+				},
+			}),
+			options,
+		);
+		expect(transition.kind === "start_retention_deadline" && transition.input.retentionAnchorAt).toBe(NOW);
+	});
+
 	it("停在同一个活体的同一轮 → 不重复落库", () => {
 		const previous = awaitingUserTurnSummary();
 		const next = awaitingUserTurnSummary({ updatedAt: NOW + 5_000, lastOutputAt: NOW + 5_000 });

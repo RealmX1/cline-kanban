@@ -1,8 +1,12 @@
 import {
+	DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
 	deriveMatchSourcesFromPositions,
+	EMPTY_MATCH_CHARACTER_POSITIONS,
+	isTaskSearchTextFieldIncludedInMatchedTextFieldScope,
 	normalizeSearchQuery,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchResult,
+	type TaskSearchMatchedTextFieldScope,
 } from "@/search/task-board-search";
 
 /**
@@ -39,15 +43,18 @@ function findEarliestPosition(positions: ReadonlySet<number>): number {
 }
 
 /**
- * 朴素直接（子串）匹配：按空白切词，AND 语义——每词大小写不敏感地在 title 或 prompt 命中即算该词命中，
- * 全部词都命中才入选。记录每词在各字段的所有出现位置（全高亮）。
+ * 朴素直接（子串）匹配：按空白切词，AND 语义——每词大小写不敏感地在**字段范围允许的** title / prompt 里命中
+ * 即算该词命中，全部词都命中才入选。记录每词在各允许字段的所有出现位置（全高亮）；被范围排除的字段不收集位置。
  *
- * 排序：title 有命中 > 仅 prompt 命中；再按 title 最早命中位置、prompt 最早命中位置升序；
+ * 本函数产出的是**位置序**：title 有命中 > 仅 prompt 命中；再按 title 最早命中位置、prompt 最早命中位置升序；
  * 平局保持输入序（Array.prototype.sort 稳定，documents 构建时当前项目在前 → 当前项目自动优先）。
+ * 它不是 direct 模式最终的 relevance 序：use-task-board-search 会在其上按「最近活跃」稳定重排
+ * （sortTaskSearchResultsByAgentConversationProgressThenLastModified），位置序只在同一时刻之间决胜。
  */
 export function findDirectSubstringTaskBoardSearchResults(
 	documents: readonly TaskBoardSearchDocument[],
 	query: string,
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope = DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
 ): TaskBoardSearchResult[] {
 	const normalizedQuery = normalizeSearchQuery(query);
 	if (!normalizedQuery) {
@@ -60,14 +67,26 @@ export function findDirectSubstringTaskBoardSearchResults(
 	if (tokens.length === 0) {
 		return [];
 	}
+	const isTitleIncludedInMatchedTextFieldScope = isTaskSearchTextFieldIncludedInMatchedTextFieldScope(
+		"title",
+		matchedTextFieldScope,
+	);
+	const isPromptIncludedInMatchedTextFieldScope = isTaskSearchTextFieldIncludedInMatchedTextFieldScope(
+		"prompt",
+		matchedTextFieldScope,
+	);
 	const results: TaskBoardSearchResult[] = [];
 	for (const document of documents) {
 		const titleMatchCharacterPositions = new Set<number>();
 		const promptMatchCharacterPositions = new Set<number>();
 		let allTokensMatched = true;
 		for (const token of tokens) {
-			const titleTokenPositions = collectAllSubstringMatchPositions(document.titleLowerCase, token);
-			const promptTokenPositions = collectAllSubstringMatchPositions(document.promptLowerCase, token);
+			const titleTokenPositions = isTitleIncludedInMatchedTextFieldScope
+				? collectAllSubstringMatchPositions(document.titleLowerCase, token)
+				: EMPTY_MATCH_CHARACTER_POSITIONS;
+			const promptTokenPositions = isPromptIncludedInMatchedTextFieldScope
+				? collectAllSubstringMatchPositions(document.promptLowerCase, token)
+				: EMPTY_MATCH_CHARACTER_POSITIONS;
 			if (titleTokenPositions.size === 0 && promptTokenPositions.size === 0) {
 				allTokensMatched = false;
 				break;

@@ -5,7 +5,10 @@
 //   ① agent 已经闲着 ⇒ 入队当场交出，用的是**调用方的** key 与 source（交出之后的取消 / 回写与立即投递逐字相同）；
 //   ② 「parked 等后台工作」恒算忙（RVF 需求 2：无需 flag）——停止边沿到了也不交；
 //   ③ 交出之后的可重试失败一次定终身：不回队首、下一轮也不再发，账本拿到真实原因（与 RVF 的分工约定第 3 条）；
-//   ④ 截止时刻由定时器兑现：agent 一直不闲 ⇒ 到点账本落 agent_never_became_idle_before_queued_delivery_deadline；
+//   ④ 截止时刻兑现：agent 一直不闲 ⇒ 过了截止时刻账本落 agent_never_became_idle_before_queued_delivery_deadline。
+//      两道收敛各守一条用例：④a 专用截止定时器到点自行写盘收敛（假 setTimeout 与注入时钟同步推进，不调兜底
+//      sweep）；④b 兜底 sweep 越过截止时刻后同样收敛（注入时钟 + 手动 sweep）。两条都不依赖真实墙钟——
+//      真实 80ms 截止期在高负载下会在「入队后仍待定」的断言之前就到点；
 //   ⑤ 先来先发：排在人更早排的 prompt 后面，一轮一条。
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -100,6 +103,9 @@ const acceptedPendingPtyConfirmation: SendBehavior = () => ({
 
 function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 	let currentSummary: RuntimeTaskSessionSummary | null = null;
+	// 入队与出队共用一只可推进的时钟：截止时刻相关的断言不依赖真实时间流逝。
+	let injectedClockOffsetMs = 0;
+	const readInjectedClockNowEpochMs = () => Date.now() + injectedClockOffsetMs;
 	const sendBehavior = options.sendBehavior ?? deliveredImmediately;
 	const sends: { request: RuntimeTaskChatSendRequest; settlePtyDelivery: TaskChatInputDeliveryOutcomeObserver }[] = [];
 	const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
@@ -115,10 +121,20 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 		onProjectedQueueChanged: () => {},
 		createDispatchIdempotencyKey: () => "kanban-generated-key",
 		fallbackSweepIntervalMs: 60_000,
+		now: readInjectedClockNowEpochMs,
 	});
 	return {
 		dispatcher,
 		sends,
+		advanceInjectedClockBy(durationMs: number) {
+			injectedClockOffsetMs += durationMs;
+		},
+		// 仅供装了假 setTimeout 的用例：注入时钟与假定时器推进同一段时长，截止定时器到点回调里读到的 now()
+		// 才与「定时器已到点」一致（Date 保持真实，被推进的那一段由偏移量承担）。
+		async advanceInjectedClockAndFakeTimersTogetherBy(durationMs: number) {
+			injectedClockOffsetMs += durationMs;
+			await vi.advanceTimersByTimeAsync(durationMs);
+		},
 		observe(summary: RuntimeTaskSessionSummary) {
 			currentSummary = summary;
 			dispatcher.observeTaskSessionSummary(WORKSPACE_ID, summary);
@@ -126,7 +142,7 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 		// awaitDispatcherIdle=false：PTY 分支的出队尝试会一直等回执，先等它空闲就成了自己等自己。
 		async enqueueProgrammatic(maxWaitForAgentIdleMs = 10 * 60 * 1000, awaitDispatcherIdle = true) {
 			const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-				{ notifyQueueMutated: dispatcher.notifyQueueMutated },
+				{ notifyQueueMutated: dispatcher.notifyQueueMutated, now: readInjectedClockNowEpochMs },
 				WORKSPACE_ID,
 				{
 					taskId: TASK_ID,
@@ -179,8 +195,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	// 先 stop 再还原真实定时器：stop 要用（可能是假的）clearTimeout 清掉同一套定时器。
 	harnessToStop?.dispatcher.stop();
 	harnessToStop = null;
+	vi.useRealTimers();
 	await rm(testRuntimeHome.path, { recursive: true, force: true });
 });
 
@@ -255,12 +273,41 @@ describe("出队引擎 × 程序化排队投递", () => {
 		expect(subject.sends).toHaveLength(1);
 	});
 
-	it("④ agent 一直不闲 ⇒ 截止定时器到点落 agent_never_became_idle_before_queued_delivery_deadline", async () => {
+	it("④a agent 一直不闲 ⇒ 专用截止定时器到点自行落 agent_never_became_idle_before_queued_delivery_deadline（不靠兜底 sweep）", async () => {
+		// 只假 setTimeout / clearTimeout，截止定时器才能被确定性地推到点。shouldAdvanceTime：假时钟仍随真实时间
+		// 前进——proper-lockfile 的取锁重试与 mtime 刷新也走 setTimeout，同进程争用同一把文件锁时冻住它们，
+		// 写盘就永远等不到锁。Date 保持真实（锁的陈旧判据读 Date.now），被推进的那一段由注入时钟的偏移量承担。
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
 		const subject = harness();
 		subject.observe(generatingSummary(1));
-		await subject.enqueueProgrammatic(80);
+		const maxWaitForAgentIdleMs = 60_000;
+		await subject.enqueueProgrammatic(maxWaitForAgentIdleMs);
 		expect((await readLedgerRecord())?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		// 越过截止时刻（定时器在截止后还会多等一小段收敛余量，1s 足以覆盖）。只推进时钟、不调用 runFallbackSweep：
+		// 能写盘收敛的只有入队时武装的那只截止定时器的到点回调。
+		await subject.advanceInjectedClockAndFakeTimersTogetherBy(maxWaitForAgentIdleMs + 1_000);
+		await subject.dispatcher.whenIdle();
+		expect(await readStates()).toEqual(["expired"]);
+		expect(await readLedgerRecord()).toMatchObject({
+			terminal_delivery_status: "delivery_failed",
+			terminal_delivery_failure_reason: "agent_never_became_idle_before_queued_delivery_deadline",
+		});
+		// 过期之后 agent 再停下也不会发——不是「到点照粘」。
+		subject.observe(stoppedSummary(1));
+		await subject.dispatcher.whenIdle();
+		expect(subject.sends).toHaveLength(0);
+	});
+
+	it("④b 截止定时器之外的第二道：兜底 sweep 越过截止时刻后同样落 agent_never_became_idle_before_queued_delivery_deadline", async () => {
+		const subject = harness();
+		subject.observe(generatingSummary(1));
+		const maxWaitForAgentIdleMs = 60_000;
+		await subject.enqueueProgrammatic(maxWaitForAgentIdleMs);
+		expect((await readLedgerRecord())?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
+		// 截止定时器按真实时间武装（此处约 60s，不会在用例内触发）；推进注入时钟越过截止时刻后，
+		// 由兜底 sweep——截止定时器之外的第二道——写盘收敛。定时器自身的到点路径由 ④a 守。
+		subject.advanceInjectedClockBy(maxWaitForAgentIdleMs + 1);
+		await subject.dispatcher.runFallbackSweep();
 		await subject.dispatcher.whenIdle();
 		expect(await readStates()).toEqual(["expired"]);
 		expect(await readLedgerRecord()).toMatchObject({

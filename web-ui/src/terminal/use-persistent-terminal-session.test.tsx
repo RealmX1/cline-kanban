@@ -30,6 +30,7 @@ function createPersistentTerminalMock() {
 		mount: vi.fn(),
 		unmount: vi.fn(),
 		reset: vi.fn(),
+		resetForSessionRestartAndRequestServerMirrorSnapshot: vi.fn(),
 		input: vi.fn(() => true),
 		paste: vi.fn(() => true),
 		waitForLikelyPrompt: vi.fn(async () => true),
@@ -139,7 +140,7 @@ describe("usePersistentTerminalSession", () => {
 		}
 	});
 
-	it("resets the persistent terminal in place when a new session starts for the same task", async () => {
+	it("resets the persistent terminal in place and re-requests the server mirror snapshot when a new session starts for the same task", async () => {
 		const terminal = createPersistentTerminalMock();
 		ensurePersistentTerminalMock.mockReturnValue(terminal);
 
@@ -149,14 +150,15 @@ describe("usePersistentTerminalSession", () => {
 
 		expect(disposePersistentTerminalMock).not.toHaveBeenCalled();
 		expect(ensurePersistentTerminalMock).toHaveBeenCalledTimes(1);
-		expect(terminal.reset).not.toHaveBeenCalled();
+		expect(terminal.resetForSessionRestartAndRequestServerMirrorSnapshot).not.toHaveBeenCalled();
 
 		await act(async () => {
 			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={200} />);
 		});
 
 		expect(disposePersistentTerminalMock).not.toHaveBeenCalled();
-		expect(terminal.reset).toHaveBeenCalledTimes(1);
+		// 只清不补会在「摘要错配导致的假重启」后永久白屏，所以清屏必须连带向服务端 mirror 要快照。
+		expect(terminal.resetForSessionRestartAndRequestServerMirrorSnapshot).toHaveBeenCalledTimes(1);
 		expect(ensurePersistentTerminalMock).toHaveBeenCalledTimes(2);
 	});
 
@@ -183,7 +185,7 @@ describe("usePersistentTerminalSession", () => {
 		});
 
 		expect(terminal.clearSearch).toHaveBeenCalledTimes(1);
-		expect(terminal.reset).toHaveBeenCalledTimes(1);
+		expect(terminal.resetForSessionRestartAndRequestServerMirrorSnapshot).toHaveBeenCalledTimes(1);
 		expect(harness?.getAttribute("data-search-open")).toBe("false");
 		expect(harness?.getAttribute("data-search-result-count")).toBe("0");
 		expect(harness?.getAttribute("data-search-result-index")).toBe("-1");

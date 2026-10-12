@@ -6,6 +6,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
+	RuntimeBoardCard,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -250,40 +251,50 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 
 // `now` 由 normalizeBoardData 统一取一次再传进来：缺时间戳的卡片共享同一个回落值，Backlog 的稳定排序
 // 才会保持它们的原次序，而不是按「逐张归一化时 Date.now() 恰好跨过的毫秒」随机翻转。
+// normalizeCard 白名单铁律的编译期守卫。水合出来的 board 会被原样整板 saveState 回盘，而服务端是整块覆盖
+// board.json——白名单漏掉的字段会在下一次保存时被抹平。卡片动作改走服务端之后，服务端写进卡片的新字段只会越来越多，
+// 靠注释提醒已经兜不住：服务端 board 卡片 schema 每加一个字段，这里不登记就 typecheck 失败（satisfies 既查漏也查多）。
+// 登记后还要在下面真正带过它，并补进 board-state 测试里的「全字段往返」夹具。
+export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
+	id: true,
+	title: true,
+	prompt: true,
+	startInPlanMode: true,
+	taskAgentPermissionMode: true,
+	autoReviewEnabled: true,
+	autoReviewMode: true,
+	images: true,
+	taskCommentEntries: true,
+	pinnedToTaskPinboardAt: true,
+	taskPinboardPinReason: true,
+	agentId: true,
+	ompAgentSessionTransport: true,
+	taskConversationMode: true,
+	mostRecentlyLaunchedAgentSessionAgentId: true,
+	clineSettings: true,
+	terminalAgentModelOverrideSettings: true,
+	taskAgentSessionInitialization: true,
+	baseRef: true,
+	parentSessionId: true,
+	worktreeMode: true,
+	prepFilePath: true,
+	createdAt: true,
+	updatedAt: true,
+	taskDescriptionLastUpdatedAt: true,
+} as const satisfies Record<keyof RuntimeBoardCard, true>;
+
 function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
 	}
 
+	// 字段表由上面的守卫约束：键与服务端卡片 schema 一一对应，外加三个只读不写的旧字段（clineProviderId 等）。
 	const card = rawCard as {
-		id?: unknown;
-		title?: unknown;
-		prompt?: unknown;
-		startInPlanMode?: unknown;
-		taskAgentPermissionMode?: unknown;
-		autoReviewEnabled?: unknown;
-		autoReviewMode?: unknown;
-		images?: unknown;
-		taskCommentEntries?: unknown;
-		pinnedToTaskPinboardAt?: unknown;
-		taskPinboardPinReason?: unknown;
-		baseRef?: unknown;
-		agentId?: unknown;
-		ompAgentSessionTransport?: unknown;
-		taskConversationMode?: unknown;
-		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
-		clineSettings?: unknown;
-		terminalAgentModelOverrideSettings?: unknown;
-		taskAgentSessionInitialization?: unknown;
+		[fieldName in keyof typeof BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION]?: unknown;
+	} & {
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
-		parentSessionId?: unknown;
-		worktreeMode?: unknown;
-		prepFilePath?: unknown;
-		createdAt?: unknown;
-		updatedAt?: unknown;
-		taskDescriptionLastUpdatedAt?: unknown;
 	};
 	const prompt = typeof card.prompt === "string" ? card.prompt.trim() : "";
 	if (!prompt) {
@@ -599,6 +610,106 @@ export function applyDragResult(
 		},
 	};
 }
+// 拖放落点按 taskId 解出，不信任 `source.index`：看板显示的是叠了卡片动作 overlay 的 displayedBoard，命令在途时
+// 它的下标与内存里那份会被保存的 board 不一定一致，按下标从内存 board 里取卡可能取到另一张。判据与 applyDragResult
+// 一致（drag-rules 的跨列白名单、backlog 不重排、程序化移动的「插到列顶」）。
+export type TaskCardDropResolvedByTaskId =
+	| { taskCardDropKind: "no_effective_task_card_drop" }
+	| {
+			taskCardDropKind: "task_card_reordered_within_board_column";
+			taskId: string;
+			boardColumnId: BoardColumnId;
+			destinationIndex: number;
+	  }
+	| {
+			taskCardDropKind: "task_card_moved_between_board_columns";
+			taskId: string;
+			fromColumnId: BoardColumnId;
+			toColumnId: BoardColumnId;
+			destinationIndex: number;
+	  };
+
+export function resolveTaskCardDropFromDragResultByTaskId(
+	board: BoardData,
+	result: DropResult,
+	options?: { programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null },
+): TaskCardDropResolvedByTaskId {
+	const { source, destination, type } = result;
+	if (!destination || type === "COLUMN") {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	const selection = findCardSelection(board, result.draggableId);
+	const toColumnId = board.columns.find((column) => column.id === destination.droppableId)?.id;
+	if (!selection || !toColumnId) {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	const fromColumnId = selection.column.id;
+	if (fromColumnId === toColumnId) {
+		const isDroppedOntoOwnPosition =
+			source.droppableId === destination.droppableId && source.index === destination.index;
+		// Backlog 按 Description 最后更新时间排序，手动重排会被下一次排序立刻覆盖（同 applyDragResult）。
+		if (isDroppedOntoOwnPosition || fromColumnId === "backlog") {
+			return { taskCardDropKind: "no_effective_task_card_drop" };
+		}
+		return {
+			taskCardDropKind: "task_card_reordered_within_board_column",
+			taskId: result.draggableId,
+			boardColumnId: fromColumnId,
+			destinationIndex: destination.index,
+		};
+	}
+	if (
+		!isAllowedCrossColumnCardMove(fromColumnId, toColumnId, {
+			taskId: result.draggableId,
+			programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,
+		})
+	) {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	return {
+		taskCardDropKind: "task_card_moved_between_board_columns",
+		taskId: result.draggableId,
+		fromColumnId,
+		toColumnId,
+		destinationIndex: options?.programmaticCardMoveInFlight?.insertAtTop ? 0 : destination.index,
+	};
+}
+
+// 按 taskId 把卡放到目标列的指定下标（夹取到列长）。同列即重排（不推 updatedAt，同 applyDragResult 的列内分支），
+// 跨列推 updatedAt（同 applyDragResult 的跨列分支）。只给仍留在浏览器的移动用：列内重排、浏览器端列自动流转。
+export function placeTaskCardIntoBoardColumnAtIndexByTaskId(
+	board: BoardData,
+	taskId: string,
+	targetColumnId: BoardColumnId,
+	destinationIndex: number,
+): { board: BoardData; placed: boolean } {
+	const selection = findCardSelection(board, taskId);
+	const targetColumn = board.columns.find((column) => column.id === targetColumnId);
+	if (!selection || !targetColumn) {
+		return { board, placed: false };
+	}
+	const isReorderWithinColumn = selection.column.id === targetColumnId;
+	const cardToPlace = isReorderWithinColumn ? selection.card : updateTaskTimestamp(selection.card);
+	const columns = board.columns.map((column) => {
+		const cardsWithoutTaskCard = column.cards.filter((card) => card.id !== taskId);
+		if (column.id !== targetColumnId) {
+			return cardsWithoutTaskCard.length === column.cards.length
+				? column
+				: { ...column, cards: cardsWithoutTaskCard };
+		}
+		const insertAtIndex = Math.max(0, Math.min(destinationIndex, cardsWithoutTaskCard.length));
+		return {
+			...column,
+			cards: [
+				...cardsWithoutTaskCard.slice(0, insertAtIndex),
+				cardToPlace,
+				...cardsWithoutTaskCard.slice(insertAtIndex),
+			],
+		};
+	});
+	return { board: withUpdatedColumns(board, columns), placed: true };
+}
+
 export function moveTaskToColumn(
 	board: BoardData,
 	taskId: string,

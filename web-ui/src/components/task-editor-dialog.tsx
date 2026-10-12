@@ -32,6 +32,10 @@ import { TaskAgentPermissionModeControl } from "@/components/task-agent-permissi
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { TaskConversationModeControl } from "@/components/task-conversation-mode-control";
 import {
+	type TaskCreationTargetProjectField,
+	TaskCreationTargetProjectFieldControl,
+} from "@/components/task-creation-target-project-field";
+import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
 } from "@/components/task-edit-draft-recovery-notice";
@@ -55,6 +59,7 @@ import type {
 } from "@/runtime/types";
 import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
 
@@ -230,12 +235,15 @@ export function TaskEditorDialog({
 	defaultModelId,
 	defaultReasoningEffort,
 	taskEditorMode = "create",
+	editingTaskName = "",
+	onEditingTaskNameChange,
 	taskAgentSessionInitialization,
 	onTaskAgentSessionInitializationChange,
 	editingTaskId = null,
 	editTaskFormSeededFromSavedDraftAt = null,
 	onRevertEditTaskFormToSavedTaskContent,
 	onAdoptPromotedTaskEditDraft,
+	taskCreationTargetProjectField,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -298,6 +306,8 @@ export function TaskEditorDialog({
 	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
 	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 	taskEditorMode?: "create" | "edit";
+	editingTaskName?: string;
+	onEditingTaskNameChange?: (value: string) => void;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	onTaskAgentSessionInitializationChange?: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 	/** edit 模式下正在编辑的任务 id。草稿通知栏按它取这张卡片的落败副本。 */
@@ -306,6 +316,8 @@ export function TaskEditorDialog({
 	editTaskFormSeededFromSavedDraftAt?: number | null;
 	onRevertEditTaskFormToSavedTaskContent?: () => void;
 	onAdoptPromotedTaskEditDraft?: (promotedDraft: TaskEditDraft) => void;
+	/** 不传 = 隐藏（单项目范围）。见 TaskCreationTargetProjectField。 */
+	taskCreationTargetProjectField?: TaskCreationTargetProjectField;
 }): ReactElement {
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
 	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
@@ -359,7 +371,9 @@ export function TaskEditorDialog({
 
 	// 名字与候选名一样只在这一次建卡期间有意义，所以留在对话框本地，不上抛到 App 根节点；
 	// 提交时经 `taskNameOverride` 一次性交给处理方（与 promptDraft 同一套交接方式）。
-	const [taskName, setTaskName] = useState("");
+	const [newTaskName, setNewTaskName] = useState("");
+	const taskName = taskEditorMode === "edit" ? editingTaskName : newTaskName;
+	const setTaskName = taskEditorMode === "edit" ? (onEditingTaskNameChange ?? setNewTaskName) : setNewTaskName;
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
 	const [composerResetKey, setComposerResetKey] = useState(0);
@@ -433,7 +447,7 @@ export function TaskEditorDialog({
 	// Reset state when dialog closes
 	useEffect(() => {
 		if (!open) {
-			setTaskName("");
+			setNewTaskName("");
 			setMode("single");
 			setCreateMore(false);
 			setComposerResetKey(0);
@@ -511,7 +525,7 @@ export function TaskEditorDialog({
 		// 下一张卡是新的一张，上一张的名字与候选都不该跟过去。名字在这里清；候选轮次是
 		// TaskNameInputWithAiSuggestions 的本地 state，靠下面 setComposerResetKey 换 key 重挂来清
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
-		setTaskName("");
+		setNewTaskName("");
 		onImagesChange([]);
 		setMode("single");
 		setTaskPrompts([]);
@@ -589,6 +603,10 @@ export function TaskEditorDialog({
 
 	const handleInputKeyDown = useCallback(
 		(index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
+			// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
+				return;
+			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 				event.preventDefault();
 				if (event.shiftKey) {
@@ -638,6 +656,11 @@ export function TaskEditorDialog({
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
 			ignoreEventWhen: (event) => {
+				// 组字期间按键归输入法，这条 document 级热键必须整体让开。判据放在 ignoreEventWhen
+				// 而不是回调首行：react-hotkeys-hook 先查 ignoreEventWhen 再执行 preventDefault，
+				// 只有在这里短路才是真的不插手。输入框各自的局部守卫拦不住它——那些守卫早退时不再
+				// preventDefault，下面这条 defaultPrevented 判据反而会把事件放行过来。
+				if (isKeyboardEventEmittedDuringImeComposition(event)) return true;
 				if (!event.defaultPrevented) return false;
 				// Only skip when a textarea or input already handled the shortcut.
 				// Radix checkbox also calls preventDefault() on Enter, but that
@@ -662,6 +685,8 @@ export function TaskEditorDialog({
 			enabled: open && Boolean(onCreateStartAndOpen),
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
+			// 同上：组字期间整体让开，且必须在 preventDefault 之前短路。
+			ignoreEventWhen: (event) => isKeyboardEventEmittedDuringImeComposition(event),
 			preventDefault: true,
 		},
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
@@ -792,6 +817,7 @@ export function TaskEditorDialog({
 								{
 									// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
 									// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
+									taskTitleOverride: taskName,
 									prompt: promptDraft,
 									images,
 									startInPlanMode,
@@ -814,19 +840,14 @@ export function TaskEditorDialog({
 					) : null}
 					{mode === "single" ? (
 						<div>
-							{/* edit 模式本次不露出名字框：updateTask 里 title 是非三态字段，漏传即复位，
-							    那条链路的几个回填点要另外核一遍。见计划里的「明确不做」。 */}
-							{taskEditorMode === "create" ? (
-								// key 必须与下面 composer 那个**不同**：两个兄弟节点用同一个 key 会让 React 把它们
-								// 当成同一个 keyed 集合去对账，于是换 key 时该重挂的那个没重挂（上一张卡的候选名
-								// 会跟到下一张）。共用同一个计数器、各带各的前缀即可。
-								<TaskNameInputWithAiSuggestions
-									key={`task-name-input-${composerResetKey}`}
-									taskName={taskName}
-									onTaskNameChange={setTaskName}
-									taskDescription={promptDraft}
-								/>
-							) : null}
+							<TaskNameInputWithAiSuggestions
+								key={`task-name-input-${editingTaskId ?? composerResetKey}`}
+								taskName={taskName}
+								onTaskNameChange={setTaskName}
+								taskDescription={promptDraft}
+								preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
+							/>
+
 							<TaskPromptComposer
 								key={`task-prompt-composer-${composerResetKey}`}
 								value={promptDraft}
@@ -912,6 +933,11 @@ export function TaskEditorDialog({
 					)}
 
 					<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
+						{taskCreationTargetProjectField ? (
+							<TaskCreationTargetProjectFieldControl
+								taskCreationTargetProjectField={taskCreationTargetProjectField}
+							/>
+						) : null}
 						<label
 							htmlFor={startInPlanModeId}
 							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"

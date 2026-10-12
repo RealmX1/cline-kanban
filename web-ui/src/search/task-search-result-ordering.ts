@@ -3,11 +3,14 @@ import type { TaskBoardSearchDocument, TaskBoardSearchResult } from "@/search/ta
 /**
  * 结果排序档。四档的可比性刻意不同，档名与展示文案都按「这个数到底是什么」来定，不写成笼统的「最近」：
  *
- * - `relevance`                        —— 各搜索模式自己的排序（direct 位置规则 / fzf 分数 / 语义分数），跨模式不可比。
+ * - `relevance`                        —— 各搜索模式自己的排序，跨模式不可比：direct 是「最近活跃」
+ *                                         （见 sortTaskSearchResultsByAgentConversationProgressThenLastModified，
+ *                                         子串命中只决定入不入选、不分高低），fuzzy / semantic / hybrid 是匹配分数。
  * - `task_last_modified_at_desc`       —— 卡片的 `updatedAt`：建卡 / 跨列移动 / 用户编辑才 bump。**不是** agent 活跃时间。
  * - `task_created_at_desc`             —— 卡片的 `createdAt`。
- * - `agent_conversation_progress_desc` —— 「这个任务的对话上次真正往前走」的观测时刻，只对**当前项目**可得
- *                                         （由 runtime-state-hub 推流的 session summary 携带），跨项目行结构性无值。
+ * - `agent_conversation_progress_desc` —— 「这个任务的对话上次真正往前走」的观测时刻。当前项目取 runtime-state-hub
+ *                                         推流的 session summary；其它项目取跨项目索引从会话摘要投影的快照。
+ *                                         从没推进过（或会话摘要已被清掉）的任务无值。
  */
 export const TASK_SEARCH_RESULT_SORT_ORDERS = [
 	"relevance",
@@ -36,7 +39,8 @@ export const TASK_SEARCH_RESULT_SORT_ORDER_OPTIONS: readonly TaskSearchResultSor
 	{
 		sortOrder: "relevance",
 		label: "Relevance",
-		description: "Ranked by the active search mode; browsing with an empty query falls back to Last modified",
+		description:
+			"Direct: most recent agent activity first, then last modified; other modes: match score. Browsing with an empty query falls back to Last modified",
 	},
 	{
 		sortOrder: "task_last_modified_at_desc",
@@ -51,7 +55,7 @@ export const TASK_SEARCH_RESULT_SORT_ORDER_OPTIONS: readonly TaskSearchResultSor
 	{
 		sortOrder: "agent_conversation_progress_desc",
 		label: "Agent activity",
-		description: "When the task's conversation last advanced; only known for the current project",
+		description: "When the task's conversation last advanced; tasks with no recorded activity are listed last",
 	},
 ];
 
@@ -136,5 +140,49 @@ export function sortTaskSearchResults({
 			return -1;
 		}
 		return secondSortKey - firstSortKey;
+	});
+}
+
+/**
+ * direct 模式 relevance 档的排序：命中即一视同仁，按「最近活跃」排。
+ *
+ * - 段 1：有「对话上次推进」时刻的行，按该时刻降序；
+ * - 段 2：没有该值的行整体排在段 1 之后，按卡片「上次修改」降序。
+ *
+ * 两种时间**只分段、绝不混排**：`updatedAt` 是建卡 / 移列 / 编辑，拿它和对话推进时刻比大小，就是把「修改」
+ * 冒充成「活跃」（同 sortTaskSearchResults 约束 2 的立场；段 2 内部也不让无值行冒充很久以前活跃过）。
+ * 同一时刻的行按传入顺序决胜——direct 匹配器产出的位置序（标题命中优先 → 标题最早位置 → prompt 最早位置），
+ * 靠 Array#sort 的稳定性保证。
+ *
+ * 与 relevance 档不同，本函数总是返回新数组；身份稳定性由 controller 的结果集身份签名兜住，不依赖这里的引用。
+ */
+export function sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+	results,
+	resolveAgentConversationProgressAtEpochMs,
+}: {
+	results: readonly TaskBoardSearchResult[];
+	resolveAgentConversationProgressAtEpochMs: (document: TaskBoardSearchDocument) => number | null;
+}): TaskBoardSearchResult[] {
+	// 先一次性取出推进时刻：取值要查会话叠加层，放进比较器会被调用 O(n log n) 次。
+	const agentConversationProgressAtEpochMsByResult = new Map<TaskBoardSearchResult, number | null>();
+	for (const result of results) {
+		agentConversationProgressAtEpochMsByResult.set(
+			result,
+			resolveAgentConversationProgressAtEpochMs(result.document),
+		);
+	}
+	return [...results].sort((first, second) => {
+		const firstAgentConversationProgressAtEpochMs = agentConversationProgressAtEpochMsByResult.get(first) ?? null;
+		const secondAgentConversationProgressAtEpochMs = agentConversationProgressAtEpochMsByResult.get(second) ?? null;
+		if (firstAgentConversationProgressAtEpochMs !== null && secondAgentConversationProgressAtEpochMs !== null) {
+			return secondAgentConversationProgressAtEpochMs - firstAgentConversationProgressAtEpochMs;
+		}
+		if (firstAgentConversationProgressAtEpochMs !== null) {
+			return -1;
+		}
+		if (secondAgentConversationProgressAtEpochMs !== null) {
+			return 1;
+		}
+		return second.document.taskLastModifiedAtEpochMs - first.document.taskLastModifiedAtEpochMs;
 	});
 }

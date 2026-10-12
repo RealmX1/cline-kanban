@@ -1,4 +1,8 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
+import {
+	RUNTIME_WORKSPACE_METADATA_PROBE_SCOPE_URL_SEARCH_PARAM,
+	resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace,
+} from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
@@ -8,6 +12,7 @@ import type {
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	RuntimeStateStreamClientMessage,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
@@ -23,12 +28,17 @@ import type {
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceMetadata,
+	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
 import {
 	replaceTaskResourceUsageSnapshots,
 	resetTaskResourceUsageSnapshotStore,
 } from "@/stores/task-resource-usage-snapshot-store";
+import {
+	readWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+	subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+} from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 
 const STREAM_RECONNECT_BASE_DELAY_MS = 500;
 const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -76,7 +86,9 @@ export function mergeTaskSessionSummaries(
 // task_sessions_updated 的旁路出口：这条消息 150ms 一批、是最高频推流，不再进 reducer（不为它新建
 // workspaceState、不让 App 多渲染一次）。useWorkspaceSync 挂载时把「summaries → 一次 setSessions 合并」
 // 注册成 applier，stream hook 收到该批消息直接调用；App 持有这个 ref 并在两个 hook 之间接线。
-export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[]) => void;
+// workspaceId 是这批摘要所属的项目（流只转发当前连着的项目的批次）。接收方据此分辨「切项目之后新项目推来的
+// 摘要」与「上一个项目残留的同号任务摘要」——taskId 跨项目会撞号。
+export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[], workspaceId: string) => void;
 export interface StreamedTaskSessionSummariesApplierRef {
 	current: StreamedTaskSessionSummariesApplier | null;
 }
@@ -112,13 +124,29 @@ function pruneNotificationLogToWorkspaces(
 	return pruned;
 }
 
-function getRuntimeStreamUrl(workspaceId: string | null): string {
+function getRuntimeStreamUrl(
+	workspaceId: string | null,
+	workspaceMetadataProbeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
+): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const url = new URL(`${protocol}//${window.location.host}/api/runtime/ws`);
 	if (workspaceId) {
 		url.searchParams.set("workspaceId", workspaceId);
 	}
+	url.searchParams.set(
+		RUNTIME_WORKSPACE_METADATA_PROBE_SCOPE_URL_SEARCH_PARAM,
+		JSON.stringify(workspaceMetadataProbeScope),
+	);
 	return url.toString();
+}
+
+function resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+	workspaceId: string | null,
+): RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient {
+	return resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace(
+		readWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab(),
+		workspaceId ?? "",
+	);
 }
 
 export interface UseRuntimeStateStreamResult {
@@ -342,8 +370,10 @@ function runtimeStateStreamReducer(
 			workspaceMetadata: didProjectChange ? null : state.workspaceMetadata,
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
-			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
-			taskReadyForReviewEvents: didProjectChange ? [] : state.taskReadyForReviewEvents,
+			// 就绪通知是跨项目的（服务端投给所有客户端），切项目不清：单标签页切项目途中别的项目刚完成的任务
+			// 还要弹通知。事件本身 60 秒过期，消费侧按 candidateId 去重。
+			latestTaskReadyForReview: state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
 			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
 			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
@@ -511,6 +541,32 @@ export function useRuntimeStateStream(
 			activeWorkspaceId = nextWorkspaceId;
 		};
 
+		// 当前 socket 已经向服务端声明过的 git 元数据探测范围（连接 URL 里的，或之后经消息发过的）。
+		let workspaceMetadataProbeScopeJsonDeclaredOnSocket: string | null = null;
+		const declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged = () => {
+			if (!socket || socket.readyState !== WebSocket.OPEN) {
+				return;
+			}
+			const workspaceMetadataProbeScope = resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+				activeWorkspaceId ?? requestedWorkspaceForConnection,
+			);
+			const workspaceMetadataProbeScopeJson = JSON.stringify(workspaceMetadataProbeScope);
+			if (workspaceMetadataProbeScopeJson === workspaceMetadataProbeScopeJsonDeclaredOnSocket) {
+				return;
+			}
+			workspaceMetadataProbeScopeJsonDeclaredOnSocket = workspaceMetadataProbeScopeJson;
+			socket.send(
+				JSON.stringify({
+					type: "declare_workspace_metadata_probe_scope",
+					workspaceMetadataProbeScope,
+				} satisfies RuntimeStateStreamClientMessage),
+			);
+		};
+		const unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs =
+			subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab(
+				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged,
+			);
+
 		const cleanupSocket = () => {
 			if (socket) {
 				socket.onopen = null;
@@ -546,7 +602,11 @@ export function useRuntimeStateStream(
 			}
 			cleanupSocket();
 			try {
-				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection));
+				const workspaceMetadataProbeScope = resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+					requestedWorkspaceForConnection,
+				);
+				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection, workspaceMetadataProbeScope));
+				workspaceMetadataProbeScopeJsonDeclaredOnSocket = JSON.stringify(workspaceMetadataProbeScope);
 			} catch (error) {
 				dispatch({
 					type: "stream_disconnected",
@@ -566,6 +626,8 @@ export function useRuntimeStateStream(
 				shouldCheckServedBuildAssetsOnOpen = false;
 				reconnectAttempt = 0;
 				dispatch({ type: "stream_connected" });
+				// 建连到 open 之间焦点任务 / 范围变过：补发一次。
+				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged();
 			};
 			socket.onmessage = (event) => {
 				try {
@@ -637,13 +699,13 @@ export function useRuntimeStateStream(
 						}
 						// 旁路（见 StreamedTaskSessionSummariesApplier）：summaries 直送 useWorkspaceSync 注册的
 						// applier，一次 setSessions 并入；reducer 不再为该消息产新 state，App 每批只渲染一次。
-						onTaskSessionSummariesRef.current?.(payload.summaries);
+						onTaskSessionSummariesRef.current?.(payload.summaries, payload.workspaceId);
 						return;
 					}
 					if (payload.type === "task_ready_for_review") {
-						if (payload.workspaceId !== activeWorkspaceId) {
-							return;
-						}
+						// 不按当前 workspace 过滤：就绪通知跨项目投递（服务端投给所有客户端），单标签页管全部项目时
+						// 别的项目的完成通知只能由这个标签页来弹。消费侧（use-review-ready-notifications）只对当前项目
+						// 按前台可见让位，并以 claimDelivery 在标签页之间去重。
 						dispatch({
 							type: "task_ready_for_review",
 							payload,
@@ -748,6 +810,7 @@ export function useRuntimeStateStream(
 
 		return () => {
 			cancelled = true;
+			unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs();
 			if (reconnectTimer != null) {
 				window.clearTimeout(reconnectTimer);
 			}

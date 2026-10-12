@@ -41,6 +41,8 @@ database.exec(`
   ON inter_work_unit_relation_ledger_events(subject_workspace_id, subject_task_id, global_committed_event_sequence);
  CREATE INDEX IF NOT EXISTS ledger_events_by_pending_batch
   ON inter_work_unit_relation_ledger_events(pending_board_file_write_batch_id);
+ CREATE INDEX IF NOT EXISTS ledger_events_by_idempotency_key
+  ON inter_work_unit_relation_ledger_events(idempotency_key) WHERE idempotency_key IS NOT NULL;
  CREATE TABLE IF NOT EXISTS ledger_global_committed_event_sequence_counter (
   singleton_row_key INTEGER PRIMARY KEY CHECK (singleton_row_key = 1),
   last_assigned_global_committed_event_sequence INTEGER NOT NULL
@@ -80,6 +82,29 @@ database.exec(`
   first_registered_at INTEGER NOT NULL,
   last_updated_at INTEGER NOT NULL
  );
+ -- dd2db 阶段 2：断言型关系的当前态（写侧并发守卫）。真相是族 4 事件；这张表只是可从事件重建的缓存，
+ -- 让「同自然键至多一条生效」由部分唯一索引兜底、让合并 / 撤销按版本 CAS。读侧投影不读它（读时从事件推导）。
+ -- 阶段 2 起加表一律 CREATE TABLE IF NOT EXISTS、不升 user_version：旧 runtime 遇到更高的 user_version 会拒绝打开账本。
+ CREATE TABLE IF NOT EXISTS inter_work_unit_asserted_relation_current_state (
+  relation_id TEXT PRIMARY KEY,
+  relation_assertion_natural_key TEXT NOT NULL,
+  relation_kind TEXT NOT NULL,
+  assertion_effectiveness_state TEXT NOT NULL,
+  asserted_relation_state_version INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+ );
+ CREATE UNIQUE INDEX IF NOT EXISTS asserted_relation_single_effective_per_natural_key
+  ON inter_work_unit_asserted_relation_current_state(relation_assertion_natural_key)
+  WHERE assertion_effectiveness_state = 'applied_and_effective';
+ -- Y-CONF-9 拒绝后的抑制墓碑（所有提议方共用）。四字段同样写在撤销生效事件里，这里是可重建的缓存。
+ CREATE TABLE IF NOT EXISTS user_rejection_suppression_tombstones (
+  tombstone_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relation_assertion_natural_key TEXT NOT NULL,
+  user_rejection_suppression_tombstone_json TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL
+ );
+ CREATE INDEX IF NOT EXISTS user_rejection_suppression_tombstones_by_natural_key
+  ON user_rejection_suppression_tombstones(relation_assertion_natural_key);
  PRAGMA user_version = ${INTER_WORK_UNIT_RELATION_LEDGER_SCHEMA_VERSION};
 `);
 
@@ -370,6 +395,36 @@ const appendCommittedEvents = database.transaction(({ eventDrafts, retainedField
 	return { committedEvents: eventDrafts.map((eventDraft) => insertEventDraft(eventDraft, "committed", null)) };
 });
 
+const readEventWithIdempotencyKeyNotAbandonedStatement = database.prepare(
+	"SELECT 1 FROM inter_work_unit_relation_ledger_events WHERE idempotency_key = ? AND event_commit_status != 'abandoned' LIMIT 1",
+);
+
+// 「同一事实只记一条」的原子追加（dd2db 1c 起）：幂等键已记过（committed 或仍 pending）的草稿跳过，同批内重复的也只记第一条。
+// 查与插在同一个事务里，worker 单线程串行执行——并发上报的同一观测不会各记一条。没有幂等键的草稿照常追加。
+const appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded = database.transaction(
+	({ eventDrafts }) => {
+		const idempotencyKeysAppendedInThisBatch = new Set();
+		const appendedIdempotencyKeys = [];
+		const skippedIdempotencyKeysAlreadyRecorded = [];
+		for (const eventDraft of eventDrafts) {
+			const idempotencyKey = eventDraft.idempotencyKey ?? null;
+			if (idempotencyKey !== null) {
+				if (
+					idempotencyKeysAppendedInThisBatch.has(idempotencyKey) ||
+					readEventWithIdempotencyKeyNotAbandonedStatement.get(idempotencyKey)
+				) {
+					skippedIdempotencyKeysAlreadyRecorded.push(idempotencyKey);
+					continue;
+				}
+				idempotencyKeysAppendedInThisBatch.add(idempotencyKey);
+				appendedIdempotencyKeys.push(idempotencyKey);
+			}
+			insertEventDraft(eventDraft, "committed", null);
+		}
+		return { appendedIdempotencyKeys, skippedIdempotencyKeysAlreadyRecorded };
+	},
+);
+
 function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subjectWorkspaceId, subjectTaskId }) {
 	const conditions = ["event_commit_status = 'committed'", "global_committed_event_sequence > ?"];
 	const parameters = [afterGlobalCommittedEventSequence ?? 0];
@@ -437,6 +492,116 @@ const seedTaskIdReservationsFromExistingLocalTraces = database.transaction(({ se
 	return { newlyReservedTaskIdCount: newlyReservedTaskIdEntries.length };
 });
 
+const readEffectiveAssertedRelationOfNaturalKeyStatement = database.prepare(
+	"SELECT relation_id, asserted_relation_state_version FROM inter_work_unit_asserted_relation_current_state WHERE relation_assertion_natural_key = ? AND assertion_effectiveness_state = 'applied_and_effective'",
+);
+const readAssertedRelationStateStatement = database.prepare(
+	"SELECT relation_id, relation_assertion_natural_key, relation_kind, assertion_effectiveness_state, asserted_relation_state_version FROM inter_work_unit_asserted_relation_current_state WHERE relation_id = ?",
+);
+const readUserRejectionSuppressionTombstonesOfNaturalKeyStatement = database.prepare(
+	"SELECT user_rejection_suppression_tombstone_json FROM user_rejection_suppression_tombstones WHERE relation_assertion_natural_key = ? ORDER BY tombstone_row_id",
+);
+const insertAssertedRelationStateStatement = database.prepare(`INSERT INTO inter_work_unit_asserted_relation_current_state(
+ relation_id, relation_assertion_natural_key, relation_kind, assertion_effectiveness_state, asserted_relation_state_version, updated_at
+) VALUES (?, ?, ?, 'applied_and_effective', 1, ?)`);
+const updateAssertedRelationStateWithVersionCheckStatement =
+	database.prepare(`UPDATE inter_work_unit_asserted_relation_current_state
+ SET assertion_effectiveness_state = ?, asserted_relation_state_version = asserted_relation_state_version + 1, updated_at = ?
+ WHERE relation_id = ? AND assertion_effectiveness_state = 'applied_and_effective' AND asserted_relation_state_version = ?`);
+const insertUserRejectionSuppressionTombstoneStatement = database.prepare(
+	"INSERT INTO user_rejection_suppression_tombstones(relation_assertion_natural_key, user_rejection_suppression_tombstone_json, recorded_at) VALUES (?, ?, ?)",
+);
+const listAssertedRelationCurrentStateRowsStatement = database.prepare(
+	"SELECT relation_id, relation_assertion_natural_key, relation_kind, assertion_effectiveness_state, asserted_relation_state_version FROM inter_work_unit_asserted_relation_current_state ORDER BY relation_id",
+);
+
+function toAssertedRelationStateRow(row) {
+	return row
+		? {
+				relationId: row.relation_id,
+				relationAssertionNaturalKey: row.relation_assertion_natural_key,
+				relationKind: row.relation_kind,
+				assertionEffectivenessState: row.assertion_effectiveness_state,
+				assertedRelationStateVersion: row.asserted_relation_state_version,
+			}
+		: null;
+}
+
+function readUserRejectionSuppressionTombstonesOfNaturalKey(relationAssertionNaturalKey) {
+	return readUserRejectionSuppressionTombstonesOfNaturalKeyStatement
+		.all(relationAssertionNaturalKey)
+		.map((row) => JSON.parse(row.user_rejection_suppression_tombstone_json));
+}
+
+// 写侧守卫读：TS 侧据此决定「新建 / 合并 / 被墓碑抑制 / 撤销」，再带着读到的值走 CAS 提交。
+function readInterWorkUnitRelationAssertionWriteGuardState({ relationAssertionNaturalKey, relationId }) {
+	const effectiveRow = relationAssertionNaturalKey
+		? readEffectiveAssertedRelationOfNaturalKeyStatement.get(relationAssertionNaturalKey)
+		: undefined;
+	return {
+		effectiveAssertedRelationOfNaturalKey: effectiveRow
+			? { relationId: effectiveRow.relation_id, assertedRelationStateVersion: effectiveRow.asserted_relation_state_version }
+			: null,
+		assertedRelationStateOfRelationId: relationId
+			? toAssertedRelationStateRow(readAssertedRelationStateStatement.get(relationId))
+			: null,
+		userRejectionSuppressionTombstonesOfNaturalKey: relationAssertionNaturalKey
+			? readUserRejectionSuppressionTombstonesOfNaturalKey(relationAssertionNaturalKey)
+			: [],
+	};
+}
+
+// 断言型关系状态迁移的唯一写入口：读到的守卫状态没变（CAS）才在同一个事务里改当前态、插墓碑、追加族 4 事件；
+// 变了就整体不写，返回 compareAndSetSucceeded=false，由 TS 侧重读重判。多个 runtime 共用同一个库时也串行正确。
+const commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet = database.transaction(
+	({ compareAndSetExpectations, assertedRelationStateWrite, userRejectionSuppressionTombstoneInsert, eventDrafts }) => {
+		const now = Date.now();
+		const expectations = compareAndSetExpectations;
+		const currentEffectiveRow = readEffectiveAssertedRelationOfNaturalKeyStatement.get(
+			expectations.relationAssertionNaturalKey,
+		);
+		const currentEffectiveRelationId = currentEffectiveRow ? currentEffectiveRow.relation_id : null;
+		if (
+			currentEffectiveRelationId !== expectations.expectedEffectiveRelationIdOfNaturalKey ||
+			readUserRejectionSuppressionTombstonesOfNaturalKey(expectations.relationAssertionNaturalKey).length !==
+				expectations.expectedUserRejectionSuppressionTombstoneCountOfNaturalKey
+		) {
+			return { compareAndSetSucceeded: false };
+		}
+		if (assertedRelationStateWrite.assertedRelationStateWriteKind === "insert_newly_effective_asserted_relation") {
+			insertAssertedRelationStateStatement.run(
+				assertedRelationStateWrite.relationId,
+				expectations.relationAssertionNaturalKey,
+				assertedRelationStateWrite.relationKind,
+				now,
+			);
+		} else {
+			const nextEffectivenessState =
+				assertedRelationStateWrite.assertedRelationStateWriteKind === "mark_effective_asserted_relation_revoked"
+					? "revoked"
+					: "applied_and_effective";
+			const update = updateAssertedRelationStateWithVersionCheckStatement.run(
+				nextEffectivenessState,
+				now,
+				assertedRelationStateWrite.relationId,
+				assertedRelationStateWrite.expectedAssertedRelationStateVersion,
+			);
+			if (update.changes !== 1) {
+				return { compareAndSetSucceeded: false };
+			}
+		}
+		if (userRejectionSuppressionTombstoneInsert) {
+			insertUserRejectionSuppressionTombstoneStatement.run(
+				expectations.relationAssertionNaturalKey,
+				JSON.stringify(userRejectionSuppressionTombstoneInsert),
+				now,
+			);
+		}
+		const committedEvents = eventDrafts.map((eventDraft) => insertEventDraft(eventDraft, "committed", null));
+		return { compareAndSetSucceeded: true, committedEvents };
+	},
+);
+
 function readRetainedFieldContents({ fieldValueSha256s }) {
 	return fieldValueSha256s
 		.map((sha256) => readContentStatement.get(sha256))
@@ -450,9 +615,16 @@ const commands = {
 	recordPendingTaskMutationEventBatch: (input) => recordPendingTaskMutationEventBatch.immediate(input),
 	commitPendingTaskMutationEventBatch: (input) => commitPendingTaskMutationEventBatch.immediate(input),
 	appendCommittedEvents: (input) => appendCommittedEvents.immediate(input),
+	appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded: (input) =>
+		appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded.immediate(input),
 	allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry: (input) =>
 		allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry.immediate(input),
 	seedTaskIdReservationsFromExistingLocalTraces: (input) => seedTaskIdReservationsFromExistingLocalTraces.immediate(input),
+	readInterWorkUnitRelationAssertionWriteGuardState,
+	commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet: (input) =>
+		commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet.immediate(input),
+	listInterWorkUnitAssertedRelationCurrentStateRows: () =>
+		listAssertedRelationCurrentStateRowsStatement.all().map(toAssertedRelationStateRow),
 	listCommittedEvents,
 	readRetainedFieldContents,
 	close: () => {

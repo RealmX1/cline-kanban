@@ -57,12 +57,14 @@ export function TaskNameInputWithAiSuggestions({
 	onTaskNameChange,
 	taskDescription,
 	disabled = false,
+	preserveNameUntilSuggestionIsPicked = false,
 }: {
 	taskName: string;
 	onTaskNameChange: (taskName: string) => void;
 	/** 起名依据，同时也用来算出「留空的话会叫什么」那个 placeholder。 */
 	taskDescription: string;
 	disabled?: boolean;
+	preserveNameUntilSuggestionIsPicked?: boolean;
 }): ReactElement {
 	const taskNameInputId = useId();
 	const [suggestionRounds, setSuggestionRounds] = useState<TaskNameSuggestionRound[]>([]);
@@ -143,6 +145,7 @@ export function TaskNameInputWithAiSuggestions({
 				const isCurrentTaskNameSafeToReplace =
 					latestTaskNameRef.current.trim().length === 0 || taskNameOriginRef.current === "picked_from_suggestion";
 				if (
+					!preserveNameUntilSuggestionIsPicked &&
 					recommendedTaskName &&
 					isTaskDescriptionStillTheOneThisRoundWasNamedFrom &&
 					isCurrentTaskNameSafeToReplace
@@ -163,7 +166,13 @@ export function TaskNameInputWithAiSuggestions({
 				}
 			}
 		})();
-	}, [handlePickSuggestedTaskName, hasTaskDescription, isSuggestionRequestInFlight, taskDescription]);
+	}, [
+		handlePickSuggestedTaskName,
+		hasTaskDescription,
+		isSuggestionRequestInFlight,
+		taskDescription,
+		preserveNameUntilSuggestionIsPicked,
+	]);
 
 	return (
 		<div className="mb-2.5">

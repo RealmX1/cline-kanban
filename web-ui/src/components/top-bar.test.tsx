@@ -192,6 +192,7 @@ describe("TopBar script shortcut onboarding", () => {
 									},
 									availability: { status: "available" },
 									inProgressTaskDetails: [],
+									crossProjectTaskSwitcherEntries: [],
 								},
 							],
 							currentProjectId: "alpha",
@@ -204,6 +205,9 @@ describe("TopBar script shortcut onboarding", () => {
 							onAddProject: () => {},
 							onAssignProjectToNumericSlotGroupNumber: () => {},
 							onClearNumericSlotGroupNumber: () => {},
+							selectedBoardOrSingleProjectScope: "single_project_scope",
+							onSelectBoardScopeAllProjects: () => {},
+							boardScopeFocusViewFocusedTaskProjectId: null,
 						}}
 					/>
 				</TooltipProvider>,

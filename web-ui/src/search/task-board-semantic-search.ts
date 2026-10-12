@@ -69,8 +69,14 @@ export async function createTaskBoardSemanticSearchIndex(
 		});
 	await request({ requestId: nextRequestId++, type: "initialize", documents });
 	return {
-		findResults: async (query, mode) => {
-			const results = await request({ requestId: nextRequestId++, type: "search", query, mode });
+		findResults: async (query, mode, matchedTextFieldScope) => {
+			const results = await request({
+				requestId: nextRequestId++,
+				type: "search",
+				query,
+				mode,
+				matchedTextFieldScope,
+			});
 			return results.map(({ documentIndex, ...result }) => {
 				const document = documents[documentIndex];
 				if (!document) throw new Error("语义搜索返回了无效文档下标");

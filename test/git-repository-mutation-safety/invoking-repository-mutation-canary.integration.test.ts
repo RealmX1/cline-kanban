@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
+import {
+	type LoadSensitiveDeadlineAnnotatingTestContext,
+	type LoadSensitiveWallClockTwoTierDeadline,
+	waitForConditionWithinLoadSensitiveTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import { createIsolatedGitTestWorkspaceFixture } from "./isolated-git-test-workspace-fixture";
 import {
 	captureInvokingRepositoryEvidenceSnapshot,
@@ -23,42 +28,51 @@ function createCommittedCanaryRepository(repositoryDirectoryName: string) {
 	return { gitFixture, repository };
 }
 
-async function waitForStandardOutputText(childProcess: ChildProcess, expectedText: string): Promise<void> {
-	await new Promise<void>((resolveOutput, rejectOutput) => {
-		let standardOutput = "";
-		let standardError = "";
-		const timeout = setTimeout(() => {
-			rejectOutput(
-				new Error(
-					`Timed out waiting for child output ${expectedText}: stdout=${standardOutput} stderr=${standardError}`,
-				),
-			);
-		}, 5_000);
-		childProcess.stdout?.setEncoding("utf8");
-		childProcess.stdout?.on("data", (chunk: string) => {
-			standardOutput += chunk;
-			if (standardOutput.includes(expectedText)) {
-				clearTimeout(timeout);
-				resolveOutput();
-			}
-		});
-		childProcess.stderr?.setEncoding("utf8");
-		childProcess.stderr?.on("data", (chunk: string) => {
-			standardError += chunk;
-		});
-		childProcess.once("error", (error) => {
-			clearTimeout(timeout);
-			rejectOutput(error);
-		});
-		childProcess.once("exit", (exitCode, signal) => {
-			clearTimeout(timeout);
-			rejectOutput(
-				new Error(
-					`Child exited before output ${expectedText}: exit=${String(exitCode)} signal=${String(signal)} stdout=${standardOutput} stderr=${standardError}`,
-				),
-			);
-		});
+// canary runner 经 tsx 冷启动、再派生子测试进程：负载下 5s 不够，超过软档只告警。
+const CANARY_RUNNER_CHILD_TEST_READY_OUTPUT_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "canary runner 派生的子测试打印就绪标记（从 spawn 起算，含 tsx 冷启动）",
+	softDeadlineMsExpectedOnUncontendedHost: 5_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 30_000,
+};
+
+async function waitForStandardOutputText(
+	testContext: LoadSensitiveDeadlineAnnotatingTestContext,
+	childProcess: ChildProcess,
+	expectedText: string,
+): Promise<void> {
+	let standardOutput = "";
+	let standardError = "";
+	let childProcessFailureBeforeExpectedOutput: Error | null = null;
+	childProcess.stdout?.setEncoding("utf8");
+	childProcess.stdout?.on("data", (chunk: string) => {
+		standardOutput += chunk;
 	});
+	childProcess.stderr?.setEncoding("utf8");
+	childProcess.stderr?.on("data", (chunk: string) => {
+		standardError += chunk;
+	});
+	childProcess.once("error", (error) => {
+		childProcessFailureBeforeExpectedOutput ??= error;
+	});
+	childProcess.once("exit", (exitCode, signal) => {
+		childProcessFailureBeforeExpectedOutput ??= new Error(
+			`Child exited before output ${expectedText}: exit=${String(exitCode)} signal=${String(signal)} stdout=${standardOutput} stderr=${standardError}`,
+		);
+	});
+	await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+		testContext,
+		CANARY_RUNNER_CHILD_TEST_READY_OUTPUT_TWO_TIER_DEADLINE,
+		() => {
+			if (standardOutput.includes(expectedText)) {
+				return true;
+			}
+			if (childProcessFailureBeforeExpectedOutput) {
+				throw childProcessFailureBeforeExpectedOutput;
+			}
+			return false;
+		},
+		{ describeLastObservedStateForFailureMessage: () => `stdout=${standardOutput} stderr=${standardError}` },
+	);
 }
 
 describe.sequential("invoking repository mutation canary", () => {
@@ -236,7 +250,7 @@ describe.sequential("invoking repository mutation canary", () => {
 		}
 	});
 
-	it("SIGTERM 转发给子测试后仍执行 canary 复查", async () => {
+	it("SIGTERM 转发给子测试后仍执行 canary 复查", async (testContext) => {
 		const { gitFixture, repository } = createCommittedCanaryRepository("signal-forwarding-repository");
 		let canaryRunnerProcess: ChildProcess | null = null;
 		try {
@@ -268,7 +282,7 @@ describe.sequential("invoking repository mutation canary", () => {
 				},
 			);
 			canaryRunnerProcess = spawnedCanaryRunnerProcess;
-			await waitForStandardOutputText(spawnedCanaryRunnerProcess, "CHILD_READY");
+			await waitForStandardOutputText(testContext, spawnedCanaryRunnerProcess, "CHILD_READY");
 			spawnedCanaryRunnerProcess.kill("SIGTERM");
 			await new Promise<void>((resolveExit, rejectExit) => {
 				spawnedCanaryRunnerProcess.once("error", rejectExit);
@@ -283,5 +297,6 @@ describe.sequential("invoking repository mutation canary", () => {
 			}
 			gitFixture.cleanup();
 		}
-	});
+		// 用例超时覆盖：就绪标记硬档 30s + SIGTERM 转发后的 canary 复查。
+	}, 60_000);
 });

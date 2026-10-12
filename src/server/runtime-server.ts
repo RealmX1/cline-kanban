@@ -19,6 +19,8 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
+	RuntimeHookIngestRequest,
+	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskSessionSummary,
@@ -38,6 +40,12 @@ import {
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
+import {
+	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+	listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
+	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
+} from "../deployment/post-deploy-verification-done-entry-gate";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
@@ -49,7 +57,12 @@ import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-t
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
-import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import {
+	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
+	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+	readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+} from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
 	checkRateLimit,
@@ -69,7 +82,13 @@ import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
-import { getTaskWorktreesHomePath, loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
+import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } from "../state/workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
+import {
+	getTaskWorktreesHomePath,
+	listWorkspaceIndexEntries,
+	loadWorkspaceBoardById,
+	loadWorkspaceContextById,
+} from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -79,7 +98,15 @@ import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
+import { createTaskCardActionApi } from "../trpc/task-card-action-api";
+import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
+import { createWorkUnitRelationAssertionWriteApi } from "../trpc/work-unit-relation-assertion-write-api";
+import { createWorkUnitRelationPresentationPreferenceApi } from "../trpc/work-unit-relation-presentation-preference-api";
+import {
+	createWorkUnitRelationReadApi,
+	readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+} from "../trpc/work-unit-relation-read-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
@@ -87,10 +114,12 @@ import {
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
+import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
+import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
 import {
 	enumerateTaskResourceUsageAttributionRoots,
@@ -124,6 +153,13 @@ export interface CreateRuntimeServerDependencies {
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	// agent session PTY host 模式才有：runtime 缺席期间存进 host 的 hook 事件，由这里的 hooks ingest 按序应用。
+	agentSessionPtyHostHookSpool?: {
+		bindSpooledHookIngestRequestApplier: (
+			spooledHookIngestRequestApplier: (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>,
+		) => void;
+		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
+	};
 }
 
 export interface RuntimeServer {
@@ -639,9 +675,74 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 	};
 
+	// taskCardAction.* 的按卡串行器：必须是 runtime 级单例——api 对象按请求新建，串行器若也按请求新建就串不住任何东西。
+	const taskCardActionPerTaskCommandSerializer = createTaskCardActionPerTaskCommandSerializer();
+	// 整板保存的 Post-Deploy Verification 门禁兜底（浏览器 / 旧 bundle 的 saveState 不能把受门禁、未结案的卡带进 Done）。
+	registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard(
+		listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
+	);
+	// 跨项目切换面板「其他项目」行的 git 元数据缓存：同理必须是 runtime 级单例，多个标签页的轮询才能在这里去重。
+	const crossProjectTaskWorktreeGitMetadataCache = createCrossProjectTaskWorktreeGitMetadataCache({
+		listRegisteredWorkspacePathsById: async () =>
+			new Map((await listWorkspaceIndexEntries()).map((entry) => [entry.workspaceId, entry.repoPath])),
+		loadWorkspaceBoardById,
+	});
+
+	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
+		// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
+		// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
+		notifyExplorationThreadGraphAgentTurnStopped: explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+	};
+	// spool 重放走同一套 hooks ingest，只是不再「先排空 spool」（它自己就是排空）。
+	const hooksApiForHookEventsSpooledInAgentSessionPtyHost = createHooksApi({
+		...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+		ingestsHookEventsReplayedFromAgentSessionPtyHostSpool: true,
+	});
+	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
+		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
+	);
+
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
+		// 与路由上暴露的是同一个实例，不复制逻辑。
+		const runtimeApi = createRuntimeApi({
+			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+			getScopedTerminalManager,
+			getScopedClineTaskSessionService,
+			getScopedAcpTaskSessionService,
+			resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+			runCommand: deps.runCommand,
+			broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
+			broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+			broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
+			prepareForStateReset,
+			getUpdateStatus: deps.getUpdateStatus,
+			runUpdateNow: deps.runUpdateNow,
+			queuedTaskPromptDeliveryDispatcher,
+		});
+		const workspaceApi = createWorkspaceApi({
+			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+			getScopedClineTaskSessionService,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
+			buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
+			listProjectRuntimeSessionSummaries,
+			onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+				void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+			},
+		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			workspaceScope: scope.workspaceScope,
@@ -654,36 +755,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						req.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME],
 					),
 			},
-			runtimeApi: createRuntimeApi({
-				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-				getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-				setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-				getScopedTerminalManager,
-				getScopedClineTaskSessionService,
-				getScopedAcpTaskSessionService,
-				resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-				runCommand: deps.runCommand,
-				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
-				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
-				prepareForStateReset,
-				getUpdateStatus: deps.getUpdateStatus,
-				runUpdateNow: deps.runUpdateNow,
-				queuedTaskPromptDeliveryDispatcher,
-			}),
-			workspaceApi: createWorkspaceApi({
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				getScopedClineTaskSessionService,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			runtimeApi,
+			workspaceApi,
+			taskCardActionApi: createTaskCardActionApi({
+				runtimeApi,
+				workspaceApi,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
-				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
-				listProjectRuntimeSessionSummaries,
-				onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+				findTaskSessionSummaryLiveInRuntimeProcessMemory: findRuntimeSessionSummary,
+				taskCardActionPerTaskCommandSerializer,
+				// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
+				onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
 					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+				},
+				// 所有进 Done 的入口共用的 Post-Deploy Verification 门禁（未勾项必须带原因）。
+				postDeployVerificationDoneEntryGate: {
+					authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+					finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+					revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 				},
 			}),
 			projectsApi: createProjectsApi({
@@ -719,18 +808,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
+				listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon:
+					deps.workspaceRegistry.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
+				readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
+					crossProjectTaskWorktreeGitMetadataCache.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries,
 				pickDirectoryPathFromSystemDialog: deps.pickDirectoryPathFromSystemDialog,
 				serverCwd: process.cwd(),
 			}),
 			hooksApi: createHooksApi({
-				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
-				// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
-				// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
-				notifyExplorationThreadGraphAgentTurnStopped:
-					explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+				...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+				drainPendingHookSpoolEntriesBeforeDirectHookIngest:
+					deps.agentSessionPtyHostHookSpool?.drainPendingHookSpoolEntriesBeforeDirectHookIngest,
 			}),
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
@@ -783,6 +871,26 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const manager = await getScopedTerminalManager(scope);
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
 				},
+			}),
+			workUnitRelationReadApi: createWorkUnitRelationReadApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+				readLatestNotificationSummaryTextOfTaskCard:
+					readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+			}),
+			workUnitRelationPresentationPreferenceApi: createWorkUnitRelationPresentationPreferenceApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				appendCommittedEventsIntoLedgerAndWaitForCommit:
+					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+			}),
+			workUnitRelationAssertionWriteApi: createWorkUnitRelationAssertionWriteApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				runInterWorkUnitRelationLedgerClientOperation:
+					runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 			}),
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,
@@ -1000,7 +1108,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		// ── End passcode gate ─────────────────────────────────────────────────
 		(request as IncomingMessage & { __kanbanUpgradeHandled?: boolean }).__kanbanUpgradeHandled = true;
 		const requestedWorkspaceId = requestUrl.searchParams.get("workspaceId")?.trim() || null;
-		deps.runtimeStateHub.handleUpgrade(request, socket, head, { requestedWorkspaceId });
+		deps.runtimeStateHub.handleUpgrade(request, socket, head, {
+			requestedWorkspaceId,
+			initialWorkspaceMetadataProbeScope: parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl(requestUrl),
+		});
 	});
 	// [tui-freeze] 诊断:终端回显链路与所有任务的输入处理共享这个 Node 事件循环,
 	// 循环被同步重活占据时键盘输入会整体延迟——在 bridge 生命周期内持续采样延迟直方图。

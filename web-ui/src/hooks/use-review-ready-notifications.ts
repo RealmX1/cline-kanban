@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { buildProjectPathname } from "@/hooks/app-utils";
 import { notificationIntelligenceClient } from "@/runtime/notification-intelligence-query";
 import type {
+	RuntimeProjectSummary,
 	RuntimeStateStreamTaskReadyForReviewMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
@@ -35,6 +37,8 @@ interface UseReviewReadyNotificationsOptions {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	workspacePath: string | null;
+	// 就绪通知跨项目投递：别的项目的任务不在本地 board 上，正文第一行的项目名从这里取。
+	projects: readonly RuntimeProjectSummary[];
 }
 
 const TAB_VISIBILITY_HEARTBEAT_INTERVAL_MS = 5000;
@@ -100,12 +104,15 @@ async function showReadyForReviewNotification(input: {
 	if (!canShowBrowserNotifications()) {
 		return false;
 	}
-	const notificationTag = `task-ready-for-review-${input.taskId}`;
+	// taskId 只在一个看板内唯一、跨项目会撞号：tag 带上 workspaceId，免得别的项目的同号任务通知互相替换。
+	const notificationTag = `task-ready-for-review-${input.workspaceId}-${input.taskId}`;
 	const notificationIcon = "/assets/icon-notification.png";
 	const data = {
 		taskId: input.taskId,
 		workspaceId: input.workspaceId,
-		workspacePathname: typeof window === "undefined" ? "/" : window.location.pathname,
+		// 目标项目的路径，而不是弹出通知的这个标签页自己的路径：就绪通知跨项目投递（任一标签页都可能替别的项目弹），
+		// SW 据此聚焦已经开着目标项目的标签页，而不是把弹通知的标签页原地切走（cf427）。
+		workspacePathname: buildProjectPathname(input.workspaceId),
 	};
 	if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
 		try {
@@ -158,6 +165,7 @@ export function useReviewReadyNotifications({
 	readyForReviewNotificationsEnabled,
 	notificationSoundEnabled,
 	workspacePath,
+	projects,
 }: UseReviewReadyNotificationsOptions): void {
 	const notificationPresenceTabIdRef = useRef<string>(createTabPresenceId());
 	const notificationBadgeSyncSourceIdRef = useRef<string>(createNotificationBadgeSyncSourceId());
@@ -224,8 +232,9 @@ export function useReviewReadyNotifications({
 		activeWorkspaceId && isAppActive ? TAB_VISIBILITY_HEARTBEAT_INTERVAL_MS : null,
 	);
 
+	// 切项目只清标题角标；已处理事件键**不**清——就绪通知跨项目投递，切项目后的重放（服务端按全部项目重放
+	// 最近 60 秒）不该让同一条通知在本标签页再弹一次。
 	useEffect(() => {
-		handledReadyForReviewEventKeysRef.current.clear();
 		setPendingReviewReadyNotificationCount(0);
 	}, [activeWorkspaceId]);
 
@@ -234,9 +243,9 @@ export function useReviewReadyNotifications({
 			if (!latestTaskReadyForReview) {
 				return;
 			}
-			if (!activeWorkspaceId || latestTaskReadyForReview.workspaceId !== activeWorkspaceId) {
-				return;
-			}
+			// 不再按当前项目过滤：一个标签页可以经跨项目切换面板管全部项目（单标签页时别的项目的完成通知
+			// 只能由它来弹）。多标签页之间靠下方 claimDelivery 领取 + 「有可见标签页正开着该项目」让位去重。
+			const isEventForActiveWorkspace = latestTaskReadyForReview.workspaceId === activeWorkspaceId;
 			const eventKey =
 				latestTaskReadyForReview.candidateId ??
 				`${latestTaskReadyForReview.workspaceId}:${latestTaskReadyForReview.taskId}:${latestTaskReadyForReview.triggeredAt}`;
@@ -261,7 +270,7 @@ export function useReviewReadyNotifications({
 						clientId: notificationPresenceTabIdRef.current,
 						reason: !readyForReviewNotificationsEnabled
 							? "notifications_disabled"
-							: isVisibleNow && isWindowFocusedNow
+							: isEventForActiveWorkspace && isVisibleNow && isWindowFocusedNow
 								? "foreground_visible"
 								: hasVisiblePeerTabForWorkspace
 									? "visible_peer_tab"
@@ -270,20 +279,28 @@ export function useReviewReadyNotifications({
 										: "eligible",
 					})
 					.catch(() => undefined);
+			// 前台可见只压住**当前项目**的通知：人正看着别的项目时，这个项目的任务完成了照样要弹。
 			if (
 				!readyForReviewNotificationsEnabled ||
-				(isVisibleNow && isWindowFocusedNow) ||
+				(isEventForActiveWorkspace && isVisibleNow && isWindowFocusedNow) ||
 				hasVisiblePeerTabForWorkspace
 			) {
 				return;
 			}
-			const selection = findCardSelection(board, latestTaskReadyForReview.taskId);
-			const taskTitle = selection
-				? truncateTaskPromptLabel(selection.card.prompt) || `Task ${latestTaskReadyForReview.taskId}`
-				: `Task ${latestTaskReadyForReview.taskId}`;
-			const finalMessage = taskSessions[latestTaskReadyForReview.taskId]?.latestHookActivity?.finalMessage;
+			// 本地 board / session 只有当前项目的；别的项目用 ready 事件里的标题快照与项目名。
+			const selection = isEventForActiveWorkspace ? findCardSelection(board, latestTaskReadyForReview.taskId) : null;
+			const taskTitle =
+				(selection ? truncateTaskPromptLabel(selection.card.prompt) : null) ||
+				latestTaskReadyForReview.taskTitleSnapshot ||
+				`Task ${latestTaskReadyForReview.taskId}`;
+			const finalMessage = isEventForActiveWorkspace
+				? taskSessions[latestTaskReadyForReview.taskId]?.latestHookActivity?.finalMessage
+				: undefined;
+			const notificationWorkspaceTitle = isEventForActiveWorkspace
+				? workspaceTitle
+				: (projects.find((project) => project.id === latestTaskReadyForReview.workspaceId)?.name ?? null);
 			const notificationBody = resolveReviewReadyNotificationBody(
-				workspaceTitle,
+				notificationWorkspaceTitle,
 				taskTitle,
 				latestTaskReadyForReview.summaryText ?? finalMessage,
 			);
@@ -343,9 +360,12 @@ export function useReviewReadyNotifications({
 						recordSoundDisposition("sound_disabled", "runtime_speech_mode");
 						return;
 					}
+					// runtime 缺席期间存下、很久之后才送到的事件（热重启后排空 spool）：照常弹通知、照常提示音，但不朗读——
+					// runtime 停了很久之后一回来连播 N 条过时语音只是噪音。
 					if (
 						settings?.speechMode === "summary" &&
-						(latestTaskReadyForReview.userTurnKind ?? "review") === "review"
+						(latestTaskReadyForReview.userTurnKind ?? "review") === "review" &&
+						latestTaskReadyForReview.notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate !== true
 					) {
 						try {
 							await playNotificationSummarySpeech({
@@ -380,6 +400,7 @@ export function useReviewReadyNotifications({
 		taskReadyForReviewEvents,
 		readyForReviewNotificationsEnabled,
 		notificationSoundEnabled,
+		projects,
 		taskSessions,
 		workspaceTitle,
 	]);

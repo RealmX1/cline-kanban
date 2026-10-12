@@ -28,17 +28,34 @@ vi.mock("@/utils/notification-sound", () => ({
 	playReviewReadyNotificationSound: deliveryMocks.playNotificationSound,
 }));
 
-function NotificationHarness({ events }: { events: RuntimeStateStreamTaskReadyForReviewMessage[] }) {
+function NotificationHarness({
+	events,
+	isDocumentVisible = false,
+}: {
+	events: RuntimeStateStreamTaskReadyForReviewMessage[];
+	isDocumentVisible?: boolean;
+}) {
 	useReviewReadyNotifications({
 		activeWorkspaceId: "workspace-a",
 		board: { columns: [] },
-		isDocumentVisible: false,
+		isDocumentVisible,
 		latestTaskReadyForReview: null,
 		taskReadyForReviewEvents: events,
 		taskSessions: {},
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		workspacePath: "/projects/workspace-a",
+		projects: [
+			{
+				id: "workspace-b",
+				path: "/projects/workspace-b",
+				name: "workspace-b",
+				taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
+				availability: { status: "available" },
+				inProgressTaskDetails: [],
+				crossProjectTaskSwitcherEntries: [],
+			},
+		],
 	});
 	return null;
 }
@@ -119,6 +136,14 @@ describe("通知领取失败后的去重边界", () => {
 		expect(deliveryMocks.playSummarySpeech).not.toHaveBeenCalled();
 	});
 
+	it("runtime 缺席期间存下、很久之后才送到的事件：照常弹通知并响提示音，但不朗读", async () => {
+		await renderEvents([]);
+		await renderEvents([{ ...event, notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate: true }]);
+		expect(browserNotification).toHaveBeenCalledTimes(1);
+		expect(deliveryMocks.playSummarySpeech).not.toHaveBeenCalled();
+		expect(deliveryMocks.playNotificationSound).toHaveBeenCalledTimes(1);
+	});
+
 	it("领取后的语音与回退声音失败不释放去重，不重复已发起的付费操作", async () => {
 		await renderEvents([]);
 		deliveryMocks.playSummarySpeech.mockRejectedValueOnce(new Error("语音播放失败"));
@@ -130,5 +155,113 @@ describe("通知领取失败后的去重边界", () => {
 		expect(deliveryMocks.claimDelivery).toHaveBeenCalledTimes(1);
 		expect(browserNotification).toHaveBeenCalledTimes(1);
 		expect(deliveryMocks.playSummarySpeech).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("就绪通知跨项目投递（单标签页管全部项目）", () => {
+	let root: Root;
+	let container: HTMLDivElement;
+	const browserNotification = vi.fn(function BrowserNotification() {});
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+		vi.stubGlobal("Notification", browserNotification);
+		localStorage.clear();
+		deliveryMocks.claimDelivery.mockResolvedValue({ claimed: true });
+		deliveryMocks.recordClientFilter.mockResolvedValue({});
+		deliveryMocks.recordClientObservation.mockResolvedValue({});
+		deliveryMocks.getSettings.mockResolvedValue({ settings: { speechMode: "off" } });
+		container = document.createElement("div");
+		root = createRoot(container);
+	});
+
+	afterEach(() => {
+		act(() => root.unmount());
+		container.remove();
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
+	function readyEvent(workspaceId: string, taskId: string): RuntimeStateStreamTaskReadyForReviewMessage {
+		return {
+			type: "task_ready_for_review",
+			workspaceId,
+			taskId,
+			candidateId: `candidate-${workspaceId}-${taskId}`,
+			triggeredAt: Date.now(),
+			taskTitleSnapshot: `Title of ${taskId}`,
+		};
+	}
+
+	it("标签页正前台看着 A 项目时，B 项目的任务完成照样弹 OS 通知，正文带 B 的项目名与标题快照", async () => {
+		vi.spyOn(document, "hasFocus").mockReturnValue(true);
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+		await act(async () =>
+			root.render(
+				createElement(NotificationHarness, {
+					events: [readyEvent("workspace-b", "task-b")],
+					isDocumentVisible: true,
+				}),
+			),
+		);
+		expect(deliveryMocks.claimDelivery).toHaveBeenCalledTimes(1);
+		expect(browserNotification).toHaveBeenCalledTimes(1);
+		expect(browserNotification).toHaveBeenCalledWith(
+			"Ready for review",
+			expect.objectContaining({ body: "workspace-b\nTitle of task-b" }),
+		);
+	});
+
+	// cf427：通知可能由别的项目的标签页代为弹出。点击要回到目标项目的标签页，而不是弹通知的这个；
+	// taskId 只在一个看板内唯一，tag 不带 workspaceId 会让别的项目的同号任务通知互相替换。
+	it("service worker 承载的通知：tag 带 workspaceId，点击数据指向目标项目的路径而不是弹出它的标签页", async () => {
+		vi.spyOn(document, "hasFocus").mockReturnValue(false);
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+		const showNotification = vi.fn(async () => undefined);
+		const originalServiceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, "serviceWorker");
+		Object.defineProperty(navigator, "serviceWorker", {
+			configurable: true,
+			value: { ready: Promise.resolve({ showNotification }) },
+		});
+		try {
+			await act(async () =>
+				root.render(
+					createElement(NotificationHarness, {
+						events: [readyEvent("workspace-b", "task-b")],
+						isDocumentVisible: false,
+					}),
+				),
+			);
+			await vi.waitFor(() => expect(showNotification).toHaveBeenCalledTimes(1));
+			expect(showNotification).toHaveBeenCalledWith(
+				"Ready for review",
+				expect.objectContaining({
+					tag: "task-ready-for-review-workspace-b-task-b",
+					data: { taskId: "task-b", workspaceId: "workspace-b", workspacePathname: "/workspace-b" },
+				}),
+			);
+		} finally {
+			if (originalServiceWorkerDescriptor) {
+				Object.defineProperty(navigator, "serviceWorker", originalServiceWorkerDescriptor);
+			} else {
+				Reflect.deleteProperty(navigator, "serviceWorker");
+			}
+		}
+	});
+
+	it("标签页正前台看着 A 项目时，A 项目自己的任务完成仍按前台可见让位（不弹）", async () => {
+		vi.spyOn(document, "hasFocus").mockReturnValue(true);
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+		await act(async () =>
+			root.render(
+				createElement(NotificationHarness, {
+					events: [readyEvent("workspace-a", "task-a")],
+					isDocumentVisible: true,
+				}),
+			),
+		);
+		expect(deliveryMocks.claimDelivery).not.toHaveBeenCalled();
+		expect(browserNotification).not.toHaveBeenCalled();
 	});
 });

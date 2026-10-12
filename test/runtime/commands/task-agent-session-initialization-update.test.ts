@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCliTaskSessionStartRequest } from "../../../src/commands/task";
 import type { RuntimeTaskAgentSessionInitialization } from "../../../src/core/api-contract";
-import { buildTaskAgentSessionInitialization } from "../../../src/core/kanban-cli-task-card-field-input-resolution";
+import { buildTaskAgentSessionInitialization } from "../../../src/core/task-card-field-patch-resolution";
 
 const CLAUDE_SESSION_INITIALIZATION: RuntimeTaskAgentSessionInitialization = {
 	sourceAgentId: "claude",
@@ -134,22 +133,5 @@ describe("buildTaskAgentSessionInitialization for task update", () => {
 	});
 });
 
-describe("buildCliTaskSessionStartRequest", () => {
-	it("forwards the persisted agent session initialization into the runtime launch request", () => {
-		const request = buildCliTaskSessionStartRequest({
-			id: "task-1",
-			title: "Continue existing Claude session",
-			prompt: "Continue the implementation",
-			startInPlanMode: false,
-			autoReviewEnabled: false,
-			autoReviewMode: "commit",
-			baseRef: "main",
-			agentId: "claude",
-			taskAgentSessionInitialization: CLAUDE_SESSION_INITIALIZATION,
-			createdAt: 1,
-			updatedAt: 1,
-		});
-
-		expect(request.taskAgentSessionInitialization).toEqual(CLAUDE_SESSION_INITIALIZATION);
-	});
-});
+// 「把卡片上持久化的会话初始化带进启动请求」的断言迁到了
+// test/runtime/core/task-session-start-request-from-board-card.test.ts（CLI 与浏览器共用的构造函数）。

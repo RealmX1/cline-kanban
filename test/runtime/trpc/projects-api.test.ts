@@ -38,6 +38,7 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
 			availability: { status: "available" as const },
 			inProgressTaskDetails: [],
+			crossProjectTaskSwitcherEntries: [],
 		})),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
 		listProjectRuntimeSessionSummaries: vi.fn(() => []),
@@ -50,6 +51,8 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 		buildProjectsPayload: vi.fn(async () => ({ currentProjectId: null, projects: [] })),
 		pickDirectoryPathFromSystemDialog: vi.fn(() => null),
 		serverCwd,
+		listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon: vi.fn(async () => []),
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: vi.fn(async () => []),
 	};
 }
 

@@ -51,7 +51,9 @@ description: Author Post-Deploy Verification for a Cline Kanban task as it enter
 
 - 满足**全部**下列 → `automated_script`：可从外部程序化观察（CLI/HTTP/只读状态文件）、无需人眼/人手感知、幂等可重跑、副作用可回收。
 - 命中**任一** → `guided_manual`：需人眼/人手/外部条件（如真浏览器视觉、真实设备）、或脚本化成本过高。
-- **拿不准就选 guided_manual**（人工核对永远安全；自动脚本写错反而误导）。
+- **非 UI 断言优先写成 automated_script**：用户方向（2026-10-11）是非 UI 断言全自动监测、UI 断言由「自然使用中程序化捕捉 + 多模态 agent 判定」完成，人工观测只作兜底（设计见 `docs/post-deploy-verification-natural-usage-observation-pipeline-design.md`）。只有确实需要人眼/人手、或脚本化成本过高时才选 guided_manual。
+- guided_manual 的 `expectedObservation` / `failureSignature` 要写成**看一眼截图或 DOM 就能判定**的具体描述（哪个元素、在哪、什么状态），`anchor` 必须指向稳定的 `data-verification-anchor`——它们将来是多模态判定的输入，含糊的描述判不了。
+- 不要为凑数注册：用户可以对未勾项逐项带原因结案（如「手工复现成本过高」），注册了却没人愿意核对的项只会变成原因记录。
 
 ## Step 3 — 编写 automated_script 验证
 
@@ -93,6 +95,7 @@ description: Author Post-Deploy Verification for a Cline Kanban task as it enter
   - `manual`：保留资产，`manualSteps` 写清人工清理命令；面板展示这些步骤。
   - `retain`：刻意保留。
 - **repo instrumentation 强制 manual（Failure Gate）**：若验证需要往**已提交的 repo 代码**里插桩（临时日志 / 探针），该验证**必须** `cleanup.mode="manual"`（已提交代码无法靠删目录自动清理）。插桩块用 tag 注释 `// KANBAN-VERIFICATION-SCOPED:<verificationId>`（多行块用 `-BEGIN` / `-END` 配对），`manualSteps` 写 grep 移除命令（如 `grep -rn "KANBAN-VERIFICATION-SCOPED:<verificationId>" src`）。
+- **结案原因会覆盖 cleanup**：用户以「触发时机随机 / 罕见，转为在自然使用中观察」结案的项，无论 mode 都**保留资产、不注销定义**（生成持久的待观察记录，见 `docs/post-deploy-verification.md`）。所以 automated 脚本必须能在部署很久之后仍可重跑：不依赖部署当时的临时状态、不假设某张卡还在某一列。
 - 无论何种 mode，都在最终汇报里附**兜底人工清理文本**：`kanban verification cleanup --verification-id <id>`（删资产 + 注销）与 instrumentation 的 tag 扫描命令。
 
 ## Failure Gates（任一命中即停并说明）

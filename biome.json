@@ -39,7 +39,12 @@
 	"plugins": ["grit/no-process-env-destructure.grit", "grit/no-home-agent-prefix-literal.grit"],
 	"overrides": [
 		{
-			"includes": ["src/**/*.ts", "src/**/*.tsx", "!src/cli.ts"],
+			"includes": [
+				"src/**/*.ts",
+				"src/**/*.tsx",
+				"!src/cli.ts",
+				"!src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"
+			],
 			"plugins": ["grit/no-console.grit", "grit/no-process-exit.grit"]
 		},
 		{
@@ -86,7 +91,7 @@
 									},
 									{
 										"group": ["**/deployment/post-deploy-verification-state"],
-										"importNamePattern": "(markTaskVerified|consumePendingConfirmationAndMarkVerified)",
+										"importNamePattern": "(markTaskVerified|consumePendingConfirmationAndMarkVerified|reconcileGroup|reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups)",
 										"message": "dd2db: Post-Deploy Verification completion (verifiedAt) is written only by the runtime; call deployment.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone."
 									}
 								]
@@ -126,6 +131,10 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["web-ui/src/**/*.ts", "web-ui/src/**/*.tsx"],
+			"plugins": ["grit/relation-user-decision-calls-only-from-explicit-user-gesture-handlers.grit"]
 		},
 		{
 			"includes": [

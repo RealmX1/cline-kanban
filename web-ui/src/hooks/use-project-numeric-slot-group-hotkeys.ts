@@ -63,6 +63,8 @@ function isAltGraphCharacterInputKeyboardEvent(keyboardEvent: KeyboardEvent): bo
 interface UseProjectNumericSlotGroupHotkeysInput {
 	projects: readonly RuntimeProjectSummary[];
 	currentProjectId: string | null;
+	// Board Scope 下跳到当前项目不是 no-op：onSelectProject 会把范围收窄到它（与切换器里选当前项目一致）。
+	isBoardScopeAllProjectsSelected: boolean;
 	numericSlotGroupAssignments: ProjectNumericSlotGroupAssignments;
 	onSelectProject: (projectId: string) => void;
 	onAssignProjectToNumericSlotGroupNumber: (slotNumber: ProjectNumericSlotGroupNumber, projectId: string) => void;
@@ -80,6 +82,7 @@ interface UseProjectNumericSlotGroupHotkeysInput {
 export function useProjectNumericSlotGroupHotkeys({
 	projects,
 	currentProjectId,
+	isBoardScopeAllProjectsSelected,
 	numericSlotGroupAssignments,
 	onSelectProject,
 	onAssignProjectToNumericSlotGroupNumber,
@@ -93,7 +96,10 @@ export function useProjectNumericSlotGroupHotkeys({
 			}
 			const projectId = numericSlotGroupAssignments[String(slotNumber)];
 			// 空槽位静默 no-op：按到没绑过的数字不该弹提示打断手感。
-			if (!projectId || projectId === currentProjectId) {
+			if (!projectId) {
+				return;
+			}
+			if (projectId === currentProjectId && !isBoardScopeAllProjectsSelected) {
 				return;
 			}
 			onSelectProject(projectId);
@@ -103,7 +109,7 @@ export function useProjectNumericSlotGroupHotkeys({
 			enableOnContentEditable: true,
 			preventDefault: true,
 		},
-		[currentProjectId, numericSlotGroupAssignments, onSelectProject],
+		[currentProjectId, isBoardScopeAllProjectsSelected, numericSlotGroupAssignments, onSelectProject],
 	);
 
 	useHotkeys(

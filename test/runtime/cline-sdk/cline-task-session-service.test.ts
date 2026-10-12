@@ -1917,15 +1917,25 @@ describe("InMemoryClineTaskSessionService", () => {
 			expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
 		});
 
-		const response = await Promise.race([
-			service.sendTaskSessionInput("task-1", "Continue"),
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
-		]);
-
-		expect(response).not.toBeNull();
+		// 顺序断言而非 50ms 计时：SDK 的整轮 send（sendDeferred）在整个等待期间都不 resolve，
+		// 所以只要 sendTaskSessionInput 能 resolve，就证明它没有等整轮完成——与宿主负载无关。
+		let sendTaskSessionInputResolved = false;
+		const sendTaskSessionInputResponse = service.sendTaskSessionInput("task-1", "Continue").then((response) => {
+			sendTaskSessionInputResolved = true;
+			return response;
+		});
 		await vi.waitFor(() => {
 			expect(runtime.sendTaskSessionInputMock).toHaveBeenCalledTimes(1);
 		});
+		// 若 send 被整轮完成阻塞，这里会在 10s 后以断言失败收场，而不是拖到用例超时。
+		await vi.waitFor(
+			() => {
+				expect(sendTaskSessionInputResolved).toBe(true);
+			},
+			{ timeout: 10_000 },
+		);
+
+		expect(await sendTaskSessionInputResponse).not.toBeNull();
 		sendDeferred.resolve({ text: "done" });
 	});
 

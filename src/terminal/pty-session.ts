@@ -9,11 +9,10 @@ import {
 	recordPtySessionExitOutcome,
 	recordPtySessionSpawnOutcome,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
+import { terminatePtyProcessGroup } from "./pty-process-group-termination-signal-policy";
+import type { TerminalPtyProcessExitEvent, TerminalPtyProcessHandle } from "./terminal-pty-process-handle";
 
-export interface PtyExitEvent {
-	exitCode: number;
-	signal?: number;
-}
+export type PtyExitEvent = TerminalPtyProcessExitEvent;
 
 export interface SpawnPtySessionRequest {
 	binary: string;
@@ -57,28 +56,7 @@ function isIgnorablePtyResizeError(error: unknown): boolean {
 	return error.message.toLowerCase().includes("already exited");
 }
 
-function terminatePtyProcess(ptyProcess: pty.IPty, options: { force?: boolean } = {}): void {
-	const pid = ptyProcess.pid;
-	const groupSignal: NodeJS.Signals = options.force ? "SIGKILL" : "SIGTERM";
-	try {
-		if (options.force) {
-			ptyProcess.kill("SIGKILL");
-		} else {
-			ptyProcess.kill();
-		}
-	} catch {
-		// Process already exited or PTY already torn down; nothing to do.
-	}
-	if (process.platform !== "win32" && Number.isFinite(pid) && pid > 0) {
-		try {
-			process.kill(-pid, groupSignal);
-		} catch {
-			// Best effort: process group may already be gone or inaccessible.
-		}
-	}
-}
-
-export class PtySession {
+export class PtySession implements TerminalPtyProcessHandle {
 	private readonly ptyProcess: pty.IPty;
 	private interrupted = false;
 	private exited = false;
@@ -222,7 +200,7 @@ export class PtySession {
 		if (options?.interrupted) {
 			this.interrupted = true;
 		}
-		terminatePtyProcess(this.ptyProcess, { force: options?.force });
+		terminatePtyProcessGroup(this.ptyProcess, { force: options?.force });
 	}
 
 	hasExited(): boolean {

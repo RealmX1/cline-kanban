@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import {
@@ -12,6 +12,7 @@ import type { RuntimeAgentRaisedPendingUserDecision, RuntimeTaskHookActivity } f
 const listPendingUserDecisionsQueryMock = vi.hoisted(() => vi.fn());
 const answerPendingUserDecisionMutateMock = vi.hoisted(() => vi.fn());
 const dismissPendingUserDecisionMutateMock = vi.hoisted(() => vi.fn());
+const savePendingUserDecisionDraftMutateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
@@ -19,6 +20,7 @@ vi.mock("@/runtime/trpc-client", () => ({
 			listAgentRaisedPendingUserDecisions: { query: listPendingUserDecisionsQueryMock },
 			answerAgentRaisedPendingUserDecision: { mutate: answerPendingUserDecisionMutateMock },
 			dismissAgentRaisedPendingUserDecision: { mutate: dismissPendingUserDecisionMutateMock },
+			saveAgentRaisedPendingUserDecisionAnswerDraft: { mutate: savePendingUserDecisionDraftMutateMock },
 		},
 	}),
 }));
@@ -96,6 +98,7 @@ function renderPanel(props: {
 	act(() => {
 		root?.render(
 			<AgentRaisedPendingUserDecisionPanel
+				workspaceId="workspace-test"
 				decision={props.decision ?? decision}
 				isSubmitting={false}
 				onAnswer={props.onAnswer ?? vi.fn(async () => true)}
@@ -117,18 +120,42 @@ function findButtonByText(host: HTMLElement, text: string): HTMLButtonElement | 
 	return Array.from(host.querySelectorAll("button")).find((button) => button.textContent === text);
 }
 
-afterEach(() => {
-	act(() => root?.unmount());
+beforeEach(() => {
+	localStorage.clear();
+	savePendingUserDecisionDraftMutateMock.mockResolvedValue({
+		ok: true,
+		pendingAnswerDraft: null,
+		decisionIsNoLongerPending: false,
+	});
+});
+
+afterEach(async () => {
+	await act(async () => root?.unmount());
 	container?.remove();
 	root = null;
 	container = null;
 	listPendingUserDecisionsQueryMock.mockReset();
 	answerPendingUserDecisionMutateMock.mockReset();
 	dismissPendingUserDecisionMutateMock.mockReset();
+	savePendingUserDecisionDraftMutateMock.mockReset();
+	localStorage.clear();
 	latestPendingUserDecisionHookResult = null;
 });
 
 describe("AgentRaisedPendingUserDecisionPanel", () => {
+	it("提交或取消失败时保留当前选项与未提交草稿", async () => {
+		const host = renderPanel({
+			agentResponseGenerationTurnSequence: 3,
+			onAnswer: vi.fn(async () => false),
+			onDismiss: vi.fn(async () => false),
+		});
+		await act(async () => host.querySelector<HTMLInputElement>('input[value="option-b"]')?.click());
+		await act(async () => findButtonByText(host, "提交回答")?.click());
+		await act(async () => findButtonByText(host, "取消问题")?.click());
+		expect(host.querySelector<HTMLInputElement>('input[value="option-b"]')?.checked).toBe(true);
+		expect(host.textContent).toContain("恢复旧会话后怎么处理？");
+		expect(localStorage.getItem("kanban.agent-raised-pending-user-decision-answer-drafts.v1")).toContain("option-b");
+	});
 	it("完整渲染多问与所有选项", () => {
 		const host = renderPanel({ agentResponseGenerationTurnSequence: 3 });
 		expect(host.textContent).toContain("恢复旧会话后怎么处理？");

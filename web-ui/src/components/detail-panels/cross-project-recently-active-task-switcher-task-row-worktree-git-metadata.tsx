@@ -1,0 +1,81 @@
+import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import { GitBranch, Home } from "lucide-react";
+import type { ReactElement } from "react";
+import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
+import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
+import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
+import {
+	shouldDisplayWorktreeUncommittedChangeSummary,
+	WorktreeUncommittedChangeSummaryIndicator,
+} from "@/components/ui/worktree-uncommitted-change-summary-indicator";
+import { useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry } from "@/hooks/use-task-worktree-git-metadata-for-cross-project-task-switcher-entry";
+
+// 跨项目切换面板一行的 git 元数据：相对 base 分支的提交关系（ahead / behind / 已集成）与未提交改动（dirty）。
+// 显隐规则与 This project 卡片目录行一致：Backlog 没有 worktree 不显示；ahead/behind 一组只在有可说的时显示；
+// 未提交改动全为 0 时隐藏；两组都没有就整体不渲染，不留一个孤零零的图标。
+export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata({
+	entryInProject,
+	currentProjectId,
+}: {
+	entryInProject: CrossProjectTaskSwitcherEntryInProject;
+	currentProjectId: string | null;
+}): ReactElement | null {
+	const { workspaceId, entry } = entryInProject;
+	const snapshot = useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry(
+		workspaceId,
+		entry.taskId,
+		currentProjectId,
+	);
+	if (entry.columnId === "backlog" || !snapshot) {
+		return null;
+	}
+	const baseRef = entry.baseRef ?? "base branch";
+	const gitStatusAgainstBaseRefDescription = describeTaskWorkspaceGitStatusAgainstBaseRef({
+		baseRef,
+		commitsAheadOfBaseRef: snapshot.commitsAheadOfBaseRef,
+		commitsBehindBaseRef: snapshot.commitsBehindBaseRef,
+		taskCommitsIntegratedIntoBaseRef: snapshot.taskCommitsIntegratedIntoBaseRef ?? null,
+		taskCommitIntegrationTrackingStatus: snapshot.taskCommitIntegrationTrackingStatus,
+	});
+	const showsUncommittedChangeSummary =
+		snapshot.changedFiles != null && shouldDisplayWorktreeUncommittedChangeSummary(snapshot);
+	if (!gitStatusAgainstBaseRefDescription && !showsUncommittedChangeSummary) {
+		return null;
+	}
+	const isInplaceWorktree = entry.worktreeMode === "inplace";
+	return (
+		<span
+			className="inline-flex shrink-0 items-center gap-1 font-mono text-text-tertiary"
+			data-cross-project-task-switcher-row-worktree-git-metadata=""
+			title={[isInplaceWorktree ? "inplace" : "worktree", gitStatusAgainstBaseRefDescription]
+				.filter((part): part is string => Boolean(part))
+				.join(" · ")}
+		>
+			{isInplaceWorktree ? <Home size={10} className="shrink-0" /> : <GitBranch size={10} className="shrink-0" />}
+			{gitStatusAgainstBaseRefDescription ? (
+				<>
+					<AheadBehindIndicator
+						ahead={snapshot.commitsAheadOfBaseRef}
+						behind={snapshot.commitsBehindBaseRef}
+						tone="semantic"
+						iconSize={10}
+					/>
+					{snapshot.taskCommitIntegrationTrackingStatus !== undefined ? (
+						<TaskCommitsIntegratedIntoBaseRefIndicator
+							taskCommitsIntegratedIntoBaseRef={snapshot.taskCommitsIntegratedIntoBaseRef ?? null}
+						/>
+					) : null}
+				</>
+			) : null}
+			{showsUncommittedChangeSummary && snapshot.changedFiles != null ? (
+				<span>
+					<WorktreeUncommittedChangeSummaryIndicator
+						changedFiles={snapshot.changedFiles}
+						additions={snapshot.additions ?? 0}
+						deletions={snapshot.deletions ?? 0}
+					/>
+				</span>
+			) : null}
+		</span>
+	);
+}

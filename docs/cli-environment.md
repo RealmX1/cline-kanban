@@ -13,13 +13,15 @@ This page documents environment variables that affect **CLI subprocess behavior*
 
 Subcommands such as `kanban task list` and `kanban hooks ingest` reach the runtime through these settings. If nothing is listening, the CLI should fail fast and exit (see timeout variables below).
 
+To reach the runtime from other devices, keep it bound to `127.0.0.1` and put `tailscale serve` in front of it with `--additional-trusted-browser-origin`. There is deliberately no environment variable for that trust list, so agent subprocesses never inherit it. Recipe: [`remote-access-via-tailscale-serve.md`](./remote-access-via-tailscale-serve.md).
+
 ## CLI subprocess timeouts
 
 These guards apply to **short-lived subcommands** (`kanban task …`, `kanban hooks ingest`, etc.). They do **not** apply to a long-running `kanban` server launch (`kanban`, `kanban --port 3484`, …).
 
 | Variable | Default | Exit behavior | Description |
 |----------|---------|---------------|-------------|
-| `KANBAN_CLI_HARD_TIMEOUT_MS` | `35000` | `124` | Watchdog: the CLI process must exit within this many milliseconds after start, whether or not the command succeeded. Prevents orphaned `kanban task list` / `hooks ingest` children from running indefinitely. Cancelled as soon as the subcommand finishes so telemetry flush can run with the intended `process.exitCode`. |
+| `KANBAN_CLI_HARD_TIMEOUT_MS` | `35000` | `124` | Watchdog: the CLI process must exit within this many milliseconds after the watchdog is armed at the start of `run()` in `src/cli.ts` (after the static import graph has been evaluated, so module load time is not counted), whether or not the command succeeded. Prevents orphaned `kanban task list` / `hooks ingest` children from running indefinitely. Cancelled as soon as the subcommand finishes so telemetry flush can run with the intended `process.exitCode`. |
 | `KANBAN_CLI_TRPC_TIMEOUT_MS` | `28000` | `1` (command error JSON) | Per-request timeout for task-oriented tRPC calls from the CLI (for example `workspace.getState` in `kanban task list`). Must stay below `KANBAN_CLI_HARD_TIMEOUT_MS` with enough margin for subcommand shutdown (telemetry flush is capped at ~500ms). |
 | `KANBAN_HOOK_INGEST_TIMEOUT_MS` | `3500` | `1` (stderr + non-zero) | Single-attempt timeout for `kanban hooks ingest` delivery to the runtime. Retries are bounded separately inside the ingest command; see `src/commands/hooks.ts`. |
 

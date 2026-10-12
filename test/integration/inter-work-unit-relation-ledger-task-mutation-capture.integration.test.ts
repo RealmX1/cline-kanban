@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import type { CommittedInterWorkUnitRelationLedgerEvent } from "../../src/core/inter-work-unit-relation-ledger-event-contract";
@@ -15,7 +15,13 @@ import {
 	type TaskMutationIntentWithResolvedActor,
 	type WorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
-import { loadWorkspaceState, mutateWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import {
+	loadWorkspaceContext,
+	loadWorkspaceState,
+	mutateWorkspaceState,
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
+	saveWorkspaceState,
+} from "../../src/state/workspace-state";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
@@ -58,7 +64,11 @@ function createBoard(
 	};
 }
 
-function createSessionSummaryWithNativeIdentity(taskId: string, nativeSessionId: string): RuntimeTaskSessionSummary {
+function createSessionSummaryWithNativeIdentity(
+	taskId: string,
+	nativeSessionId: string,
+	observedAt = 1_000,
+): RuntimeTaskSessionSummary {
 	return {
 		taskId,
 		state: "idle",
@@ -76,7 +86,7 @@ function createSessionSummaryWithNativeIdentity(taskId: string, nativeSessionId:
 			sourceAgentId: "claude",
 			nativeSessionId,
 			transcriptPath: null,
-			observedAt: 1_000,
+			observedAt,
 		},
 	} as RuntimeTaskSessionSummary;
 }
@@ -372,6 +382,46 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 						nativeConversationSessionId: "native-after-clear",
 					},
 				},
+			]);
+		});
+	});
+
+	// 3484 线上实测：同一原生会话每次 hook 再确认都落盘推进时间水位，曾被逐次记成「新身份」（e2dfc 一卡 783 条）。
+	it("records a native identity observation only when the persisted identity actually changes", async () => {
+		await withIsolatedHomeAndLedger(async ({ workspacePath, ledgerClient, realCapture }) => {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard({ review: [createCard("t0001", "running")] }),
+				sessions: { t0001: createSessionSummaryWithNativeIdentity("t0001", "native-a", 1_000) },
+			});
+			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
+			const { workspaceId } = await loadWorkspaceContext(workspacePath);
+			for (const observedAt of [2_000, 3_000]) {
+				const persisted = await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					workspaceId,
+					"t0001",
+					() => createSessionSummaryWithNativeIdentity("t0001", "native-a", observedAt),
+				);
+				// 时间水位照常落盘（不推 revision，cf427），只是不再记账。
+				expect(persisted).toBe("persisted_reconfirmed_identity_observation_time_without_revision_change");
+			}
+			await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "t0001", () =>
+				createSessionSummaryWithNativeIdentity("t0001", "native-b", 4_000),
+			);
+
+			const listNativeIdentityObservations = async () =>
+				(await ledgerClient.listCommittedEvents({}))
+					.filter(
+						(event) =>
+							event.eventKind ===
+							"new_native_conversation_session_identity_observed_for_kanban_task_conversation_session",
+					)
+					.map((event) => event.eventPayload.conversationSessionIdentityKey);
+			// 记账不阻塞落盘；等最后一次（真的换了身份）落进账本，此前的同身份确认若被记账必然排在它前面。
+			await vi.waitFor(async () => {
+				expect((await listNativeIdentityObservations()).length).toBeGreaterThan(0);
+			});
+			expect(await listNativeIdentityObservations()).toEqual([
+				{ conversationSessionHostKanbanAgentId: "claude", nativeConversationSessionId: "native-b" },
 			]);
 		});
 	});

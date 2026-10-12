@@ -6,6 +6,7 @@ import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { buildShellCommandLine, quoteShellArg } from "../core/shell";
+import { renderTaskAgentNamingAndWorkPhaseGoalGuidance } from "../core/task-naming-conventions";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
 
 const DEFAULT_COMMAND_PREFIX = "kanban";
@@ -127,7 +128,7 @@ export function resolveAppendSystemPromptCommandPrefix(
 export function renderAppendSystemPrompt(commandPrefix: string, options: RenderAppendSystemPromptOptions = {}): string {
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const selectedAgentId = options.agentId ?? null;
-	return `# Kanban Sidebar
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Sidebar
 
 You are the Kanban sidebar agent for this workspace. Help the user interact with their Kanban board directly from this side panel. When the user asks to add tasks, create tasks, break work down, or start tasks, prefer using the Kanban CLI yourself instead of describing manual steps.
 
@@ -307,7 +308,7 @@ export function renderTaskSessionWorktreeGuardPrompt(
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
 	const quotedTaskId = quoteShellArg(trimmedTaskId);
-	return `# Kanban Task Workspace
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Task Workspace
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
 \`${cwd}\`
@@ -329,7 +330,11 @@ Always point \`--project-path\` at the main repository, never at a task worktree
 
 \`${kanbanCommand} task get --task-id ${quotedTaskId} --project-path "$(dirname "$(git rev-parse --git-common-dir)")"\`
 
-To look up a *different* task instead: Kanban lays task worktrees out as \`.cline/worktrees/<task_id>/<repo_folder>\`, so when you are handed a task worktree path under \`.cline/worktrees/\` (for example \`~/.cline/worktrees/ab12c/my-repo\`), the directory name immediately under \`worktrees/\` **is** that task's Kanban task ID — \`ab12c\` here, no lookup table, no truncation — and \`task get\` takes it the same way. That reading holds only for paths under \`.cline/worktrees/\`.`;
+To look up a *different* task instead: Kanban lays task worktrees out as \`.cline/worktrees/<task_id>/<repo_folder>\`, so when you are handed a task worktree path under \`.cline/worktrees/\` (for example \`~/.cline/worktrees/ab12c/my-repo\`), the directory name immediately under \`worktrees/\` **is** that task's Kanban task ID — \`ab12c\` here, no lookup table, no truncation — and \`task get\` takes it the same way. That reading holds only for paths under \`.cline/worktrees/\`.
+
+# Recording How This Task Relates To Other Tasks
+
+When this task studies or diagnoses another task, verifies its claims, reuses its outputs, takes its requirements from it, or is its counterpart in another repository, record that once with \`${kanbanCommand} work-unit assert-reference-relation\` (this task is always the subject; see \`--help\` for the counterpart flags). Read what is already recorded with \`${kanbanCommand} work-unit get-relation-neighborhood-summary\`.`;
 }
 
 export function resolveTaskSessionAppendSystemPrompt(

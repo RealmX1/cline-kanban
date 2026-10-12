@@ -25,9 +25,18 @@ import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
 import {
+	logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite,
+	removeTaskSessionSummariesOwnedByOtherWorkspaces,
+	type TaskSessionSummariesOwnedByOtherWorkspacesRemoval,
+} from "./task-session-summaries-owned-by-other-workspaces-removal";
+import {
 	getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 	type TaskMutationIntentWithResolvedActor,
 } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import {
+	logWorkspaceStatePostDeployVerificationDoneEntryGuardRevertedCards,
+	revertCardsNewlyEnteringDoneWithoutPostDeployVerificationClosure,
+} from "./workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 
@@ -734,7 +743,7 @@ export async function loadWorkspaceContext(
 		};
 	}
 
-	return await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
+	const ensuredWorkspaceId = await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
 		let index = await readWorkspaceIndex();
 		const existingEntry = findWorkspaceEntry(index, repoPath);
 		const ensured = existingEntry
@@ -744,14 +753,19 @@ export async function loadWorkspaceContext(
 		if (ensured.changed) {
 			await writeWorkspaceIndex(index);
 		}
-
-		return {
-			repoPath,
-			workspaceId: ensured.entry.workspaceId,
-			statePath: getWorkspaceDirectoryPath(ensured.entry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
-		};
+		return ensured.entry.workspaceId;
 	});
+
+	// git 探测刻意放在全局 index 锁**之外**：它是四次同步 spawnSync git，与 index 无关；放在锁里会把
+	// 高负载下被放大的 git 耗时（且期间 event loop 被同步阻塞）整段算进持锁时间，所有项目的
+	// ensureWorktree / startTaskSession / saveState 都在这把锁上排队，等太久就抛 ELOCKED。
+	// 抛错时机不变：index 条目照旧先写入，再因非 git 目录抛出。
+	return {
+		repoPath,
+		workspaceId: ensuredWorkspaceId,
+		statePath: getWorkspaceDirectoryPath(ensuredWorkspaceId),
+		git: detectGitRepositoryInfo(repoPath),
+	};
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {
@@ -804,6 +818,18 @@ export async function loadPersistedWorkspaceStateById(workspaceId: string): Prom
 	};
 }
 
+// 只读 sessions.json（不碰 board / meta）。给跨项目视图读未加载项目的会话用；调用方按下面的文件路径 stat
+// 做 mtime 缓存——这个文件单个可达数 MB，不能每次广播都重新解析。
+export function getPersistedWorkspaceSessionsFilePathById(workspaceId: string): string {
+	return getWorkspaceSessionsPath(workspaceId);
+}
+
+export async function loadPersistedWorkspaceSessionsById(
+	workspaceId: string,
+): Promise<Record<string, RuntimeTaskSessionSummary>> {
+	return await readWorkspaceSessions(workspaceId);
+}
+
 export async function savePersistedWorkspaceSessionsById(
 	workspaceId: string,
 	sessions: Record<string, RuntimeTaskSessionSummary>,
@@ -835,12 +861,18 @@ export async function savePersistedWorkspaceSessionsById(
 	});
 }
 
+// 只有第一种结果推进了 meta.revision（调用方据此决定是否广播整份 workspace 快照）。
+export type AgentNativeConversationSessionIdentityPersistenceOutcome =
+	| "persisted_new_identity_and_invalidated_stale_snapshot_revision"
+	| "persisted_reconfirmed_identity_observation_time_without_revision_change"
+	| "already_persisted_without_write";
+
 // 身份是重启寻址所需的会话事实，不能等待浏览器保存 board 或正常关机才落盘。
 export async function persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
 	workspaceId: string,
 	taskId: string,
 	readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
-): Promise<boolean> {
+): Promise<AgentNativeConversationSessionIdentityPersistenceOutcome> {
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
 		const sessions = await readWorkspaceSessions(workspaceId);
 		const currentMeta = await readWorkspaceMeta(workspaceId);
@@ -862,7 +894,17 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 				(isSameAgentNativeConversationSessionIdentity(savedIdentity, identity) &&
 					savedIdentity.observedAt === identity.observedAt))
 		) {
-			return false;
+			return "already_persisted_without_write";
+		}
+		const nextSessions = { ...sessions, [taskId]: parsedSummary };
+		// 同一身份的再次确认（每个带 session id 的 hook 都会来一次）只推进 observedAt 水位：不动 revision。
+		// 推 revision 会让所有客户端整板重水合、让在途的整板保存冲突，曾把浏览器里尚未落盘的新卡整张抹掉（cf427）。
+		// 迟到的陈旧快照仍拿不回旧水位：saveWorkspaceState 在同一把目录锁内按 observedAt 保留较新的盘上身份。
+		if (savedIdentity && isSameAgentNativeConversationSessionIdentity(savedIdentity, identity)) {
+			await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, {
+				lock: null,
+			});
+			return "persisted_reconfirmed_identity_observation_time_without_revision_change";
 		}
 		// 先使旧快照的 revision 失效，再替换 sessions。后一步失败允许 revision 空增，重试仍会补存身份。
 		await lockedFileSystem.writeJsonFileAtomic(
@@ -870,15 +912,28 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 			{ revision: currentMeta.revision + 1, updatedAt: Date.now() } satisfies WorkspaceStateMeta,
 			{ lock: null },
 		);
-		await lockedFileSystem.writeJsonFileAtomic(
-			getWorkspaceSessionsPath(workspaceId),
-			{ ...sessions, [taskId]: parsedSummary },
-			{ lock: null },
-		);
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, { lock: null });
 		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
-			{ workspaceId, kanbanTaskConversationSessionId: taskId, sessionSummary: parsedSummary },
+			{
+				workspaceId,
+				kanbanTaskConversationSessionId: taskId,
+				sessionSummary: parsedSummary,
+				previouslyPersistedAgentNativeConversationSessionIdentity: savedIdentity ?? null,
+			},
 		);
-		return true;
+		return "persisted_new_identity_and_invalidated_stale_snapshot_revision";
+	});
+}
+
+function removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+	context: RuntimeWorkspaceContext,
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+): TaskSessionSummariesOwnedByOtherWorkspacesRemoval {
+	return removeTaskSessionSummariesOwnedByOtherWorkspaces({
+		workspaceId: context.workspaceId,
+		workspaceRepositoryPath: context.repoPath,
+		taskWorktreesHomePath: getTaskWorktreesHomePath(),
+		sessions,
 	});
 }
 
@@ -888,7 +943,11 @@ export async function loadWorkspaceState(
 ): Promise<RuntimeWorkspaceStateResponse> {
 	const context = await loadWorkspaceContext(cwd, options);
 	const board = await readWorkspaceBoard(context.workspaceId);
-	const sessions = await readWorkspaceSessions(context.workspaceId);
+	// 别的项目串写进来的会话不交给调用方（重启水合、整板快照、浏览器）；盘上的在下一次写入时自愈。
+	const sessions = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+		context,
+		await readWorkspaceSessions(context.workspaceId),
+	).sessionsWithoutSummariesOwnedByOtherWorkspaces;
 	const meta = await readWorkspaceMeta(context.workspaceId);
 	return toWorkspaceStateResponse(context, board, sessions, meta.revision);
 }
@@ -919,19 +978,45 @@ export async function saveWorkspaceState(
 			persistedSessions,
 			currentMeta.revision,
 		);
+		// 客户端（含没刷新的旧 bundle）发来的整份 sessions 里可能夹着别的项目的会话：只收本项目的（cf427）。
+		const incomingSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			parsedPayload.sessions,
+		);
+		logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite({
+			workspaceId: context.workspaceId,
+			removedTaskSessionIdsOwnedByOtherWorkspaces:
+				incomingSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+		});
 		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				parsedPayload.board,
 				persistedSessions,
-				parsedPayload.sessions,
+				incomingSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
-		const board = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
-			persistedBoard,
-			parsedPayload.board,
-			sessions,
-		);
+		const boardWithoutStartedTasksReenteringBacklog =
+			reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+				persistedBoard,
+				parsedPayload.board,
+				sessions,
+			);
+		// Post-Deploy Verification 门禁兜底：整板保存不能把受门禁、未结案的卡带进 Done（正常入口走 taskCardAction 的门禁）。
+		const postDeployVerificationDoneEntryGuarded =
+			await revertCardsNewlyEnteringDoneWithoutPostDeployVerificationClosure({
+				workspaceId: context.workspaceId,
+				persistedBoard,
+				incomingBoard: boardWithoutStartedTasksReenteringBacklog,
+				nowIso: new Date().toISOString(),
+			});
+		if (postDeployVerificationDoneEntryGuarded.revertedTaskIds.length > 0) {
+			logWorkspaceStatePostDeployVerificationDoneEntryGuardRevertedCards({
+				workspaceId: context.workspaceId,
+				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
+			});
+		}
+		const board = postDeployVerificationDoneEntryGuarded.board;
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,
@@ -981,7 +1066,18 @@ export async function mutateWorkspaceState<T>(
 			currentSessions,
 			currentMeta.revision,
 		);
-		const currentState = toWorkspaceStateResponse(context, currentBoard, currentSessions, currentMeta.revision);
+		// 盘上串写进来的别的项目的会话不交给变更函数，也不随这次写入写回（cf427）。
+		const currentSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			currentSessions,
+		);
+		const currentSessionsOwnedByThisWorkspace = currentSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces;
+		const currentState = toWorkspaceStateResponse(
+			context,
+			currentBoard,
+			currentSessionsOwnedByThisWorkspace,
+			currentMeta.revision,
+		);
 
 		const mutation = mutate(currentState);
 		if (mutation.save === false) {
@@ -992,12 +1088,23 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
+		const mutatedSessionsRemoval = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
+			context,
+			mutation.sessions ?? currentSessionsOwnedByThisWorkspace,
+		);
+		logTaskSessionSummariesOwnedByOtherWorkspacesRemovedBeforeWrite({
+			workspaceId: context.workspaceId,
+			removedTaskSessionIdsOwnedByOtherWorkspaces: [
+				...currentSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+				...mutatedSessionsRemoval.removedTaskSessionIdsOwnedByOtherWorkspaces,
+			],
+		});
 		const nextSessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			currentSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				mutation.board,
 				currentSessions,
-				mutation.sessions ?? currentSessions,
+				mutatedSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
 		const nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(

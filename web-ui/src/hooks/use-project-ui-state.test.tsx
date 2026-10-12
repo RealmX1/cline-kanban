@@ -31,6 +31,7 @@ function HookHarness({ onResult }: { onResult: (result: ReturnType<typeof usePro
 				taskCounts: { backlog: 1, in_progress: 0, review: 1, validation: 0, trash: 0 },
 				availability: { status: "available" },
 				inProgressTaskDetails: [],
+				crossProjectTaskSwitcherEntries: [],
 			},
 			{
 				id: "project-b",
@@ -39,6 +40,7 @@ function HookHarness({ onResult }: { onResult: (result: ReturnType<typeof usePro
 				taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
 				availability: { status: "available" },
 				inProgressTaskDetails: [],
+				crossProjectTaskSwitcherEntries: [],
 			},
 		],
 		navigationCurrentProjectId: "project-b",

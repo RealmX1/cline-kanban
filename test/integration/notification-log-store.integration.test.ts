@@ -21,7 +21,18 @@ import {
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
 import { getWorkspacesRootPath, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import {
+	type LoadSensitiveWallClockTwoTierDeadline,
+	waitForConditionWithinLoadSensitiveTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
+
+const FIRE_AND_FORGET_NOTIFICATION_LOG_PERSISTENCE_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "无客户端时 broadcastTaskReadyForReview 的 fire-and-forget 通知落盘",
+	softDeadlineMsExpectedOnUncontendedHost: 500,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 10_000,
+};
+
 import { withIsolatedWorkspaceHome as withIsolatedNotificationLogWorkspaces } from "./isolated-workspace-home-fixture";
 
 function boardWith(cards: { columnId: "review" | "trash"; id: string; title: string }[]): RuntimeBoardData {
@@ -285,7 +296,7 @@ describe.sequential("notification-log-store integration", () => {
 		});
 	});
 
-	it("无客户端连接也落库（核心卖点：浏览器全关时段的后台事件也记录）", async () => {
+	it("无客户端连接也落库（核心卖点：浏览器全关时段的后台事件也记录）", async (testContext) => {
 		await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
 			const { workspaceId } = await registerIsolatedWorkspace("project-a");
 			const hub = createRuntimeStateHub({
@@ -305,12 +316,18 @@ describe.sequential("notification-log-store integration", () => {
 			try {
 				// 0 客户端连接：广播的一次性 OS 事件会被丢弃，但持久化必须发生。
 				hub.broadcastTaskReadyForReview(workspaceId, "task-x", "review");
-				// broadcastTaskReadyForReview 内是 fire-and-forget 落库，轮询等它落盘。
+				// broadcastTaskReadyForReview 内是 fire-and-forget 落库，两档轮询等它落盘：原先只轮询 50×10ms，
+				// 负载下落盘还没完成就判失败。
 				let entries = await readNotificationLog(workspaceId);
-				for (let attempt = 0; attempt < 50 && entries.length === 0; attempt += 1) {
-					await new Promise((resolve) => setTimeout(resolve, 10));
-					entries = await readNotificationLog(workspaceId);
-				}
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					FIRE_AND_FORGET_NOTIFICATION_LOG_PERSISTENCE_TWO_TIER_DEADLINE,
+					async () => {
+						entries = await readNotificationLog(workspaceId);
+						return entries.length > 0;
+					},
+					{ pollIntervalMs: 10 },
+				);
 				expect(entries).toHaveLength(1);
 				expect(entries[0]?.taskId).toBe("task-x");
 				expect(entries[0]?.userTurnKind).toBe("review");

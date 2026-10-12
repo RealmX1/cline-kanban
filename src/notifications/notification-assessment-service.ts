@@ -21,6 +21,22 @@ export interface NotificationAssessmentInput {
 	candidateId?: string;
 	summary?: RuntimeTaskSessionSummary;
 	finalMessage?: string;
+	// 触发这次通知的 agent 事件晚了多久才送到 runtime（runtime 缺席期间进了 agent session PTY host 的 spool）。
+	// 超过阈值的照常入档、照常视觉提示，但不朗读：runtime 停了很久之后一回来连播 N 条过时语音只是噪音。
+	agentEventDeliveredLateToRuntimeByMilliseconds?: number;
+}
+
+// EXPERIMENT_NODE: 晚到多久的 agent 事件不再朗读通知（与前端「60s 前的就绪事件不再提醒」同一量级）。
+export const LATE_DELIVERED_AGENT_EVENT_NOTIFICATION_SPEECH_SUPPRESSION_THRESHOLD_MS = 60_000;
+
+export function isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate(
+	evidence: Record<string, unknown> | undefined,
+): boolean {
+	const deliveredLateByMilliseconds = evidence?.agentEventDeliveredLateToRuntimeByMilliseconds;
+	return (
+		typeof deliveredLateByMilliseconds === "number" &&
+		deliveredLateByMilliseconds > LATE_DELIVERED_AGENT_EVENT_NOTIFICATION_SPEECH_SUPPRESSION_THRESHOLD_MS
+	);
 }
 const assessmentResultSchema = z.object({
 	decision: z.enum(["completed_turn_or_user_handoff", "awaiting_background_work", "insufficient_evidence"]),
@@ -304,6 +320,12 @@ export function createNotificationAssessmentService(input: {
 						summaryProgressIdentity: summary ? notificationSummaryProgressIdentity(summary) : null,
 						summary: redactNotificationEvidence(summary),
 						finalMessage: redactNotificationEvidence(notification.finalMessage),
+						...(notification.agentEventDeliveredLateToRuntimeByMilliseconds !== undefined
+							? {
+									agentEventDeliveredLateToRuntimeByMilliseconds:
+										notification.agentEventDeliveredLateToRuntimeByMilliseconds,
+								}
+							: {}),
 					},
 				},
 				"programmatic_notification_rules_passed",

@@ -1,4 +1,5 @@
 import type { TaskImage } from "@/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 const MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024;
 const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -33,7 +34,7 @@ export async function fileToTaskImage(file: File): Promise<TaskImage | null> {
 				return;
 			}
 			resolve({
-				id: crypto.randomUUID().replaceAll("-", "").slice(0, 12),
+				id: createRandomUuidV4WithInsecureContextFallback().replaceAll("-", "").slice(0, 12),
 				data: base64,
 				mimeType: file.type,
 				name: file.name || undefined,
