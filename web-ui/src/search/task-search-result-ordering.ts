@@ -97,7 +97,7 @@ function resolveSortKeyEpochMs(
 
 /**
  * 按选定档给结果排序。叠在各模式排序**之后**、task id 置顶层**之前**：
- * 粘贴一个完整 task id 回车直达的行为不受排序档影响。
+ * 粘贴一个 task id（或敲出它的前几位）回车直达的行为不受排序档影响。
  *
  * 三条约束：
  * 1. `relevance` 档**原样返回入参同一引用**（不是浅拷贝）。controller 的 `useEffect([results]) → setActiveIndex(0)`
