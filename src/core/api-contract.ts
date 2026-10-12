@@ -5454,6 +5454,27 @@ export type RuntimeGetPostDeployVerificationStateResponse = z.infer<
 	typeof runtimeGetPostDeployVerificationStateResponseSchema
 >;
 
+// deployment.listWorkspacesHavingPostDeployVerificationDeploymentGroups（query，**不带 workspace scope**）：
+// All projects 视图的 PDV 面板不跟随当前项目，要先知道哪些 workspace 有部署组，再挑一个绑定。纯读全局 state 文件。
+export const runtimeWorkspaceHavingPostDeployVerificationDeploymentGroupsSummarySchema = z.object({
+	workspaceId: z.string(),
+	// 该 workspace 全部部署组（含已折叠进历史的）里最新的 deployedAtIso：用来挑「最近部署过」的 workspace。
+	latestDeploymentGroupDeployedAtIso: z.string(),
+});
+export type RuntimeWorkspaceHavingPostDeployVerificationDeploymentGroupsSummary = z.infer<
+	typeof runtimeWorkspaceHavingPostDeployVerificationDeploymentGroupsSummarySchema
+>;
+
+export const runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema = z.object({
+	// 按 latestDeploymentGroupDeployedAtIso 新→旧排序；没有任何部署组时为空数组。
+	workspacesHavingPostDeployVerificationDeploymentGroups: z.array(
+		runtimeWorkspaceHavingPostDeployVerificationDeploymentGroupsSummarySchema,
+	),
+});
+export type RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse = z.infer<
+	typeof runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema
+>;
+
 // deployment.updateVerificationChecklist（mutation）：勾选 / 增删自定义项，operation 判别联合。
 export const runtimeUpdateVerificationChecklistRequestSchema = z.discriminatedUnion("operation", [
 	z.object({

@@ -103,3 +103,23 @@ kanban task done --task-id <id> --closure-reasons-file reasons.json   # [{checkl
 ```
 
 `--force` 从来只跳过 token 握手，不跳过勾选。历史字段 `forcedCompletionWithoutAllVerificationsPassed` 名不副实，读取以 `confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag` 为准，缺失时回退历史字段。旧 schema 把历史字段定为必填，所以 CLI 在途完成记录和补记请求在过渡期两个字段同值双写。只写新字段的记录一旦留在状态文件里，回滚到旧 binary 时整个文件会解析失败、被隔离。
+
+## 面板在 All projects 视图下
+
+顶栏按钮的待核对数与浮动面板共用 App 里唯一一份读模型（`usePostDeployVerification`），它绑定哪个 workspace 由范围决定（`web-ui/src/components/post-deploy-verification/post-deploy-verification-workspace-and-panel-task-card-board-source-for-board-or-single-project-scope.ts`）：
+
+- **单项目范围**：绑定当前项目。没有部署记录的项目不显示按钮，与过去一致。
+- **All projects**：面板不跟随当前项目，按钮与面板常驻。当前项目自己有部署组时仍绑定它，因为看板「移入 Done」的门禁预检只认当前项目的读模型；否则绑定最近部署过、已注册且可用的项目。候选列表来自无 scope 的只读 query `deployment.listWorkspacesHavingPostDeployVerificationDeploymentGroups`（纯读全局状态文件，不对账）。标题栏显示所绑定项目的名字。
+
+折叠状态与单项目视图共用同一个持久偏好（`kanban.post-deploy-verification-collapsed`），默认展开。
+
+面板条目的卡体与 controller 判列要读**所绑定项目**的 board，有两种来源：
+
+| 来源 | 何时 | 卡体与「完成核对」 |
+|---|---|---|
+| `current_project_board_hydrated_in_browser` | 单项目范围；或 All projects 下所绑定项目 = 当前项目 = 浏览器里已水合 board 的项目 | 与主看板同一份 board、同一组卡片动作；移列走 `useBoardInteractions`，带 overlay |
+| `runtime_board_snapshot_of_workspace_not_hydrated_in_browser` | 其余 All projects 情形，包括跨项目打开任务的过渡窗口（`currentProjectId` 已变、board 还是上一个项目的） | 向 runtime 读 `workspace.getState` 快照（30 秒轮询 + 该项目列计数变化去抖重读）；卡体只做展示，Done 按钮走条目自己的完成核对（历史组不可交互时改为在所属项目打开）；点卡，以及卡体按列画出的其余动作按钮（Start / Move to validation / Move to review / Restore），都在它所属的项目里打开该任务，不留点了没反应的按钮 |
+
+taskId 只在项目内唯一，所以「读浏览器里的 board」的判据必须同时比对 `projectIdOwningHydratedBoard`，只比 `currentProjectId` 会在过渡窗口里把另一个项目的同号卡当成条目。
+
+快照模式的移列（`web-ui/src/state/post-deploy-verification-panel-completion-move-into-done-for-workspace-board-not-hydrated-in-browser.ts`）先在服务端用 `taskCardAction.readTaskCardWithBoardColumn` 复检卡片所在列：快照最多旧 30 秒，而 token 按发放时的列算确认项，卡已漂移就不能用旧确认项推进 Done。复检通过后调用的仍是同一个 `taskCardAction.moveTaskCardIntoDone…` 门禁主路径。
