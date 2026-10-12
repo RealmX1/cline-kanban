@@ -31,8 +31,8 @@ const SEARCH_MODE_OPTIONS: ReadonlyArray<{ mode: TaskBoardSearchMode; label: str
 const SESSION_ACTIVITY_DIMENSION_HINT = "Only known for the current project — tasks from other projects are excluded";
 
 /**
- * 空结果时的说明文案。两种「其实有东西、只是被你自己的条件挡住了」必须点破原因——否则用户拷了个完整
- * task id 却看到 "No matching tasks"，会以为任务根本不存在（过滤刻意不为 ID 命中豁免）。
+ * 空结果时的说明文案。两种「其实有东西、只是被你自己的条件挡住了」必须点破原因——否则用户拷了个
+ * task id（或敲了它的片段）却看到 "No matching tasks"，会以为任务根本不存在（过滤刻意不为 ID 命中豁免）。
  */
 function resolveEmptyResultsMessage({
 	isBrowsingAllTasksWithoutQuery,

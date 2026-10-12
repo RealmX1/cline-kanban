@@ -4,8 +4,8 @@ import type { RuntimeAgentId } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
 export type TaskBoardSearchMode = "direct" | "hybrid" | "fuzzy" | "semantic";
-// taskId 是一条独立于文本的命中来源：仅当查询串整体就是一个完整 task id 时才产生（见 task-id-match-search.ts），
-// 不参与 direct 的分词、不进 fuzzy 的合并主体、不进语义索引。
+// taskId 是一条独立于文本的命中来源：仅当查询串整体是一个 task id 或其 3 位以上片段时才产生（全等 / 前缀 / 子串 /
+// 单字符容错分档，见 task-id-match-search.ts），不参与 direct 的分词、不进 fuzzy 的合并主体、不进语义索引。
 export type TaskBoardSearchMatchSource = "taskId" | "title" | "prompt";
 
 /** 全体 producer 共用的空命中位置集：语义清晰且免重复分配。 */
@@ -55,6 +55,9 @@ export interface TaskBoardSearchResult {
 	// 命中字符位置集：相对各自字段（title / prompt）的字符下标，供 renderFuzzyHighlightedText 高亮。
 	titleMatchCharacterPositions: ReadonlySet<number>;
 	promptMatchCharacterPositions: ReadonlySet<number>;
+	// taskId 内被 ID 检索对上的字符下标，供 ID 徽标高亮。只由 task-id-match-search.ts 写入，
+	// 其余 producer（direct / fuzzy / semantic / 浏览态）一律不带——故为可选。
+	taskIdMatchCharacterPositions?: ReadonlySet<number>;
 }
 
 export function normalizeSearchQuery(query: string): string {
@@ -75,7 +78,7 @@ function getTaskSearchSubjectText(title: string, prompt: string): string {
 
 export function orderMatchSources(sources: ReadonlySet<TaskBoardSearchMatchSource>): TaskBoardSearchMatchSource[] {
 	const orderedSources: TaskBoardSearchMatchSource[] = [];
-	// taskId 排最前：它是最强信号（全等命中即唯一确定一个任务）。
+	// taskId 排最前：它是最强信号（全等命中即唯一确定一个任务，片段命中也几乎不会偶然发生）。
 	// 这个分支不可省——mergeTaskBoardSearchResults 的合并分支会过本函数，漏了会把 "taskId" 静默丢弃。
 	if (sources.has("taskId")) {
 		orderedSources.push("taskId");

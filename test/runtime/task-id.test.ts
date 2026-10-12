@@ -4,6 +4,8 @@ import {
 	createShortTaskId,
 	createUniqueTaskId,
 	isCompleteShortTaskIdShapedText,
+	isPartialOrCompleteShortTaskIdShapedSearchQuery,
+	MINIMUM_PARTIAL_TASK_ID_SEARCH_QUERY_CHARACTER_LENGTH,
 	SHORT_TASK_ID_CHARACTER_LENGTH,
 } from "../../src/core/task-id";
 
@@ -48,5 +50,23 @@ describe("isCompleteShortTaskIdShapedText", () => {
 
 		vi.spyOn(Math, "random").mockReturnValue(0.123456789);
 		expect(isCompleteShortTaskIdShapedText(createUniqueTaskId(new Set(["moi4q"]), () => "moi4qabcdef"))).toBe(true);
+	});
+});
+
+describe("isPartialOrCompleteShortTaskIdShapedSearchQuery", () => {
+	it("accepts lowercase alphanumeric text from the minimum partial length up to the complete length", () => {
+		expect(MINIMUM_PARTIAL_TASK_ID_SEARCH_QUERY_CHARACTER_LENGTH).toBe(3);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94c")).toBe(true);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94c8")).toBe(true);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94c87")).toBe(true);
+	});
+
+	it("rejects text that is too short, too long, uppercase or outside the id character set", () => {
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("")).toBe(false);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94")).toBe(false);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94c870")).toBe(false);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("94C")).toBe(false);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("9-c")).toBe(false);
+		expect(isPartialOrCompleteShortTaskIdShapedSearchQuery("9 c8")).toBe(false);
 	});
 });

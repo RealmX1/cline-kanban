@@ -17,6 +17,7 @@ function createResult(overrides: {
 	mostRecentlyLaunchedAgentSessionAgentId?: RuntimeAgentId | null;
 	matchSources?: TaskBoardSearchResult["matchSources"];
 	titleMatchCharacterPositions?: ReadonlySet<number>;
+	taskIdMatchCharacterPositions?: ReadonlySet<number>;
 }): TaskBoardSearchResult {
 	return {
 		document: buildTaskBoardSearchDocument({
@@ -35,6 +36,7 @@ function createResult(overrides: {
 		matchSources: overrides.matchSources ?? ["title"],
 		titleMatchCharacterPositions: overrides.titleMatchCharacterPositions ?? new Set<number>(),
 		promptMatchCharacterPositions: new Set<number>(),
+		taskIdMatchCharacterPositions: overrides.taskIdMatchCharacterPositions,
 	};
 }
 
@@ -102,6 +104,18 @@ describe("TaskSpotlightSearchResultRow", () => {
 
 		// 靠 id 命中的那条通常在 title / prompt 上没有任何高亮，不上金色就看不出它凭什么被顶到最前。
 		expect(queryTaskIdBadge()?.style.color).toBe("var(--color-status-gold)");
+	});
+
+	it("bolds only the id characters a partial id query matched inside the gold badge", () => {
+		// 敲 "f21" 命中 "a3f21" 的后三位：整枚徽标描金边，只有对上的那一段加粗，看得出凭哪段命中。
+		renderRow(createResult({ matchSources: ["taskId"], taskIdMatchCharacterPositions: new Set([2, 3, 4]) }));
+
+		const taskIdBadge = queryTaskIdBadge();
+		expect(taskIdBadge?.style.borderColor).toBe("var(--color-status-gold)");
+		const boldedTaskIdFragments = [...(taskIdBadge?.querySelectorAll("span") ?? [])]
+			.filter((element) => element.style.fontWeight === "600")
+			.map((element) => element.textContent);
+		expect(boldedTaskIdFragments).toEqual(["f21"]);
 	});
 
 	it("still renders the task id badge on a plain text match, but muted", () => {
