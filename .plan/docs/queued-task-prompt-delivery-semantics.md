@@ -91,7 +91,7 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 | 2 | `session_parked_awaiting_dispatched_background_work` | 必须单列：`submitTaskChatInputWhenReady` 一进门就 unpark |
 | 3 | `agent_awaiting_modal_user_decision` | 集合在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`。**绝不含 `review`**——review 是目标态 |
 | 4 | `session_not_live` | 保持 queued 不判失败 |
-| 5 | `session_restoring_conversation` | 两态恢复守卫的**声明态**，**不看** 30 分钟兜底过期。`--continue` 恢复重放自己打出的 Stop hook 落在第二个状态上——只比第一个值 = 用户点开一张卡片就引爆队列。兜底过期是为「别永久吞掉 harness 唤醒通知」设的，对排队投递放行 = 用户没继续过对话、旧 prompt 半小时后自动发出 |
+| 5 | `session_restoring_conversation` | 两态恢复守卫的**声明态**，**不看** 30 分钟兜底过期。`--continue` 恢复重放自己打出的 Stop hook 落在第二个状态上——只比第一个值 = 用户点开一张卡片就引爆队列。兜底过期是为「别永久吞掉 harness 唤醒通知」设的，对排队投递放行 = 用户没继续过对话、旧 prompt 半小时后自动发出。「人一继续就放行」要成立，解除侧也必须只看声明态：解除只走 `disarmRestorationContinuationGuard` 一个漏斗（真人 UserPromptSubmit / BeforeAgent、一键放行、Codex / Cursor 提交边沿），harness `<task-notification>` 不解除。该漏斗一度读带兜底的谓词，首个真人提交晚于启动 30 分钟的会话声明态永久残留、条目挡到过期（2026-10-11 a768a，task f011d 修复） |
 | 6 | `another_programmatic_delivery_in_flight` | PTY 单飞槽被 RVF 占着。TOCTOU 残余由失败路由兜住 |
 | 7 | `awaiting_first_agent_turn_end_after_restart_reconfirmation` | 跨过重启、人已确认，但确认之后 agent 还没停下过一次（停止事件的 `stoppedAt` 不晚于确认时刻）。用户要的是「确认后在**下一次** stop hook 注入」；排最后，让更具体的原因先显示 |
 
@@ -183,6 +183,10 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 **交出时用调用方的 key 与 source**：于是交出之后的 `message-cancel`（PTY 代际失效）与账本回写（发送出口的
 `onDeliveryOutcome`）与立即投递逐字相同。还在等空闲时 `message-cancel` 打到 PTY 是无效的（单飞槽里没有它），
 所以 runtime 的 `cancelTaskChatDelivery` 先在队列里撤下它。
+
+**读回执只看 `terminal_delivery_status`**：账本记录上的 `status` 是遗留字段的镜像（`task-message-injection-ledger.ts`
+的 `LEGACY_STATUS_MIRROR`），只为旧读者不炸。其中 `delivered_queued_behind_active_agent_turn` 镜像成 `status: "queued"`，
+它是**终态**、意思是「已送达，写入时排在 agent 正在跑的回合之后」，**不是**「还在本队列里排队」。
 
 **有界收敛**：账本启动清扫的「超期」对门控记录从 `max(状态时间戳, agent_idle_wait_deadline_at)` 起算——
 否则并存的第二个 runtime 一启动，就把常驻实例上还在合法排队的记录写成不可纠正的假失败。上界因此是

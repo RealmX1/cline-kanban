@@ -50,6 +50,7 @@ import {
 	isAwaitingUserReviewTurn,
 	isParkedAwaitingDispatchedBackgroundWork,
 	isRestorationContinuationGuardArmed,
+	isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration,
 	isSessionInActiveTurn,
 	MODAL_USER_DECISION_TURN_KINDS,
 	mergeSummaryWithFacets,
@@ -5556,9 +5557,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.active && options?.userInitiatedResume === true) {
 			clearResumeSubstantiveGuard(entry.active);
 		}
-		if (options?.userInitiatedResume === true && isRestorationContinuationGuardArmed(summary, now())) {
-			summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
-		}
+		// 恢复守卫刻意**不在这里**解除，只走 disarmRestorationContinuationGuard 这一个漏斗：真人提交由 hooks-api
+		// 在转移闸之前调它。Claude 的 harness <task-notification> 也会带着 userInitiatedResume=true 走到这里——
+		// 30 分钟兜底过期后读侧拦截放行的上一活体孤儿通知就是这样进来的；在这里解除，等于让它替用户打开排队
+		// 投递的门控 5（「人没继续就等」，见 session-activity.ts 的声明态谓词）。
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -5611,12 +5613,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.active.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds = false;
 	}
 
+	// 恢复守卫的唯一解除漏斗（hooks-api 的真人 UserPromptSubmit / BeforeAgent、一键放行、Codex / Cursor 的提交
+	// 边沿都只调它）。判据必须是**声明态**、不看 30 分钟兜底：兜底只管读侧（别永久吞掉 harness 唤醒通知），
+	// 排队投递的门控 5 读的却是声明态。这里一度读带兜底的谓词，于是首个真人提交晚于恢复启动 30 分钟的会话
+	// 在这里直接返回、声明态永久残留，排队条目被门控 5 挡到过期（2026-10-11 a768a）。
 	disarmRestorationContinuationGuard(taskId: string): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
 		}
-		if (!isRestorationContinuationGuardArmed(entry.summary, now())) {
+		if (!isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
 		const summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
