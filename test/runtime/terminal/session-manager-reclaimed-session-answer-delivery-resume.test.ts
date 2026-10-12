@@ -186,7 +186,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(true);
 		manager.transitionToRunning("task-reclaimed", { userInitiatedResume: false });
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(true);
-		manager.transitionToRunning("task-reclaimed", { userInitiatedResume: true });
+		manager.disarmRestorationContinuationGuard("task-reclaimed");
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(false);
 	});
 
@@ -199,7 +199,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive("task-reclaimed-claude")).toBe(
 			true,
 		);
-		manager.transitionToRunning("task-reclaimed-claude", { userInitiatedResume: true });
+		manager.disarmRestorationContinuationGuard("task-reclaimed-claude");
 		// 真人提交解除广义守卫，不影响连接恢复；窄通知拦截则持续到首轮自然 Stop。
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed-claude")).toBe(false);
 		expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive("task-reclaimed-claude")).toBe(
