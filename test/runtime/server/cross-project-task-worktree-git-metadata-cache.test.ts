@@ -79,6 +79,7 @@ function probeResultFor(taskId: string, changedFiles = 1) {
 		cheapChangeToken: "cheap",
 		baseRefTipCommit: "tip",
 		lastFullRefreshAtMs: NOW_MS,
+		lastObservedTaskWorktreeGitChangeAtMs: null,
 	};
 }
 
@@ -112,7 +113,7 @@ afterEach(() => {
 });
 
 describe("createCrossProjectTaskWorktreeGitMetadataCache", () => {
-	it("探针目标（baseRef / worktreeMode）取自服务端 board；同一请求里每个项目只建一个 base tip 解析器", async () => {
+	it("探针目标（baseRef / worktreeMode / 所在列 / auto-review）取自服务端 board；同一请求里每个项目只建一个 base tip 解析器", async () => {
 		probeMocks.createBaseRefTipResolver.mockImplementation((workspacePath: string) => `resolver:${workspacePath}`);
 		probeMocks.loadTaskWorkspaceMetadata.mockImplementation(async (_workspaceId, _path, task) =>
 			probeResultFor(task.taskId),
@@ -136,9 +137,22 @@ describe("createCrossProjectTaskWorktreeGitMetadataCache", () => {
 		expect(probeMocks.loadTaskWorkspaceMetadata).toHaveBeenCalledWith(
 			"ws-a",
 			"/repos/a",
-			{ taskId: "inplace-a2", baseRef: "base-of-inplace-a2", worktreeMode: "inplace" },
+			{
+				taskId: "inplace-a2",
+				baseRef: "base-of-inplace-a2",
+				worktreeMode: "inplace",
+				taskCardBoardColumnId: "in_progress",
+				taskCardAutoReviewEnabled: false,
+			},
 			null,
 			"resolver:/repos/a",
+		);
+		expect(probeMocks.loadTaskWorkspaceMetadata).toHaveBeenCalledWith(
+			"ws-b",
+			"/repos/b",
+			{ taskId: "b1", baseRef: "base-of-b1", taskCardBoardColumnId: "review", taskCardAutoReviewEnabled: false },
+			null,
+			"resolver:/repos/b",
 		);
 	});
 

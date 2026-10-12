@@ -88,7 +88,7 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 		]);
 	});
 
-	it("running 会话 → turnOwner=agent / liveness=live，透传 lastOutputAt / lastSubstantiveOutputAt / agentId", () => {
+	it("running 会话 → turnOwner=agent / liveness=live，lastOutputAt 按 15 秒向下取整，透传 lastSubstantiveOutputAt / agentId", () => {
 		const result = collectInProgressTaskDetailsFromBoard(
 			makeBoard({ in_progress: ["a"] }),
 			sessionsOf(
@@ -97,7 +97,8 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 					state: "running",
 					pid: 1,
 					agentId: "claude",
-					lastOutputAt: 5_000,
+					// 落在 [0, 15 秒) 这一桶里：投影成 0，桶内的后续输出不再改变 projects_updated 的内容。
+					lastOutputAt: 14_999,
 					lastSubstantiveOutputAt: 4_000,
 					agentResponseGenerationTurnStarted: { startedAt: 3_000, turnSequence: 2 },
 				}),
@@ -109,7 +110,8 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				title: "a",
 				agentId: "claude",
 				createdAt: 0,
-				lastOutputAt: 5_000,
+				lastOutputAt: 0,
+				// 实质戳是真实进展，原样透传、不取整。
 				lastSubstantiveOutputAt: 4_000,
 				// agent 回合期间没有停止事件；本用例的 summary 也没带推进观测 ⇒ 两颗都是 null。
 				agentResponseGenerationStopped: null,

@@ -10,7 +10,7 @@ import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync
 import {
 	type CachedTaskWorkspaceMetadata,
 	createBaseRefTipResolver,
-	GIT_METADATA_FULL_REFRESH_INTERVAL_MS,
+	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS,
 	loadTaskWorkspaceMetadata,
 	type TaskWorktreeGitMetadataProbeTarget,
 	workspaceMetadataGitSpawnConcurrencyLimiter,
@@ -134,6 +134,8 @@ function collectTrackedTasks(board: RuntimeBoardData): TaskWorktreeGitMetadataPr
 				taskId: card.id,
 				baseRef: card.baseRef,
 				...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
+				taskCardBoardColumnId: column.id,
+				taskCardAutoReviewEnabled: card.autoReviewEnabled === true,
 			});
 		}
 	}
@@ -254,7 +256,8 @@ async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<Cache
 		if (
 			cached.cheapChangeToken !== null &&
 			cached.cheapChangeToken === cheapTokenBeforeProbe &&
-			now - cached.lastFullRefreshAtMs < GIT_METADATA_FULL_REFRESH_INTERVAL_MS
+			now - cached.lastFullRefreshAtMs <
+				GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS
 		) {
 			return cached;
 		}

@@ -1192,10 +1192,11 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const pinnedRunningRow = queryRow("pinned", "running-pinned");
 		expect(rowInPlaceExpansionState(pinnedRunningRow)).toBe("expanded_in_place_by_hover");
 		expect(pinnedRunningRow?.textContent).toContain("Card title running-pinned");
-		// 首行前导位换成精简行同一个前导点：Pinned 行没有前导点，也不画 In progress 的 Spinner。
+		// 首行前导位换成精简行同一个前导点：Pinned 行没有前导点，也不画 In progress 的状态标记。
 		expect(
 			pinnedRunningRow?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
 		).toBeNull();
+		expect(pinnedRunningRow?.querySelector("[data-task-card-in-progress-column-status-marker]")).toBeNull();
 		expect(pinnedRunningRow?.querySelector(".animate-spin")).toBeNull();
 		act(() => clickTaskCardBodyTitle(pinnedRunningRow));
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "running-pinned");
