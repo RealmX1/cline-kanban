@@ -383,7 +383,8 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 				sectionColumnScrollContainer("prompt-cache-warm").querySelector<HTMLElement>(
 					'[data-cross-project-task-switcher-task-id="warm"]',
 				);
-			const warmRowInPlaceExpansionState = () => queryWarmRow()?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
+			const warmRowInPlaceExpansionState = () =>
+				queryWarmRow()?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
 			// hook 只认坐标真的变了的 pointermove；再等过 hover 意图的延时。
 			await act(async () =>
 				(queryWarmRow()?.querySelector("button") ?? queryWarmRow())?.dispatchEvent(
