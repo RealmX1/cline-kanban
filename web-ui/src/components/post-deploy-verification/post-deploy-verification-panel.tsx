@@ -31,6 +31,8 @@ export interface PostDeployVerificationPanelProps extends PostDeployVerification
 	loadError: string | null;
 	board: BoardData;
 	realTaskCardRenderingInputs: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
+	// 非 null（All projects 视图）时在标题旁显示面板所绑定项目的名字：此时面板内容不跟随当前项目。
+	postDeployVerificationWorkspaceProjectNameShownInPanelHeader: string | null;
 	stayInFront: boolean;
 	collapsed: boolean;
 	// 对话框打开时临时降 z：modal Overlay(z-50) 需盖住面板（plan 确认框方案，z-[80] 不可行）。
@@ -68,6 +70,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		loadError,
 		board,
 		realTaskCardRenderingInputs,
+		postDeployVerificationWorkspaceProjectNameShownInPanelHeader,
 		stayInFront,
 		collapsed,
 		loweredForDialog,
@@ -133,6 +136,15 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 				<div className="flex min-w-0 items-center gap-2">
 					<ClipboardCheck size={16} className="shrink-0 text-accent" />
 					<span className="truncate text-sm font-semibold text-text-primary">Post-Deploy Verification</span>
+					{postDeployVerificationWorkspaceProjectNameShownInPanelHeader ? (
+						<span
+							data-testid="post-deploy-verification-panel-workspace-project-name"
+							title={postDeployVerificationWorkspaceProjectNameShownInPanelHeader}
+							className="min-w-0 max-w-[140px] shrink truncate rounded-sm bg-surface-3 px-1.5 py-0.5 text-[11px] text-text-secondary"
+						>
+							{postDeployVerificationWorkspaceProjectNameShownInPanelHeader}
+						</span>
+					) : null}
 					{pendingCount > 0 ? (
 						<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-status-orange px-1.5 text-[11px] font-semibold text-black">
 							{pendingCount}

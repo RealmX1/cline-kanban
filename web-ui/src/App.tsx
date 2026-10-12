@@ -23,14 +23,12 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
-import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
-import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
@@ -72,7 +70,8 @@ import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
-import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
+import { usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-controller-inputs-for-board-or-single-project-scope";
+import { usePostDeployVerificationForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-for-board-or-single-project-scope";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
@@ -1059,11 +1058,21 @@ export default function App(): ReactElement {
 		});
 	}, [hasNoProjects, setSelectedBoardOrSingleProjectScope]);
 
-	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例，同时供顶栏 badge 派生待核对数、
-	// 并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例（在下面这个 hook 里），同时供顶栏 badge
+	// 派生待核对数、并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	// 单项目范围绑定当前项目；All projects 下不跟随当前项目，绑定有部署组的项目（见 hook）。
 	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
-	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
+	const postDeployVerificationForBoardOrSingleProjectScope = usePostDeployVerificationForBoardOrSingleProjectScope({
+		selectedBoardOrSingleProjectScope,
+		currentProjectRuntimeWorkspaceId: projectRuntimeWorkspaceId,
+		projectIdOwningHydratedBoard,
+		projects,
+		currentProjectDisplayedBoard: displayedBoard,
+		currentProjectTaskSessions: sessions,
+		currentProjectWorkspacePath: workspacePath ?? null,
+	});
+	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1120,8 +1129,10 @@ export default function App(): ReactElement {
 		readyForReviewNotificationsEnabled,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
-		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck: postDeployVerification.activeGroup,
-		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection: postDeployVerification.refresh,
+		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck:
+			postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationActiveDeploymentGroupForCurrentProjectDoneEntryGatePrecheck,
+		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection:
+			postDeployVerificationForBoardOrSingleProjectScope.refreshPostDeployVerificationReadModelAfterCurrentProjectDoneEntryGateRejection,
 	});
 
 	const {
@@ -1149,59 +1160,42 @@ export default function App(): ReactElement {
 	const handleOpenPostDeployVerification = useCallback(() => {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
-	// PDV 面板条目上半部分是真实任务卡体：数据与动作和主看板同一份（displayedBoard、推流 session、同一组 handler，
-	// 参照 Focus View column-context-panel 的 TaskCardActionHandlerBundle），条目上的「移入 Done」因此同样过门禁。
-	const defaultAgentIdOfCurrentProject = runtimeProjectConfig?.selectedAgentId ?? null;
-	const defaultClineModelIdOfCurrentProject = runtimeProjectConfig?.clineProviderSettings?.modelId ?? null;
-	const realTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
-		useMemo((): RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries => {
-			const currentProjectTaskCardActionHandlers: TaskCardActionHandlerBundle = {
-				resolveTaskWorkspaceAbsoluteDirectoryPath,
-				onStartTask: handleStartTaskFromBoard,
-				onMoveToTrashTask: handleMoveReviewCardToTrash,
-				onMoveToValidationTask: handleMoveCardToValidation,
-				onMoveToReviewTask: handleMoveCardToReview,
-				onRestoreFromTrashTask: handleRestoreTaskFromTrash,
-				onDeleteTask: handleOpenDeleteTask,
-				onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
-				onSaveTitle: handleSaveTaskTitle,
-				onEditTask: handleOpenEditTaskKeepingDetailSelection,
-				onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
-				onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
-				moveToTrashLoadingById,
-				moveToReviewLoadingById,
-			};
-			return {
-				currentProjectDisplayedBoard: displayedBoard,
-				currentProjectTaskSessions: sessions,
-				currentProjectTaskCardActionHandlers,
-				currentProjectWorkspacePath: workspacePath ?? null,
-				onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
-				defaultAgentId: defaultAgentIdOfCurrentProject,
-				defaultClineModelId: defaultClineModelIdOfCurrentProject,
-			};
-		}, [
-			defaultAgentIdOfCurrentProject,
-			defaultClineModelIdOfCurrentProject,
-			displayedBoard,
-			handleCancelAutomaticTaskAction,
-			handleCardSelect,
-			handleMoveCardToReview,
-			handleMoveCardToValidation,
-			handleMoveReviewCardToTrash,
-			handleOpenDeleteTask,
-			handleOpenEditTaskKeepingDetailSelection,
-			handleRequestPinTaskToTaskPinboard,
-			handleRestoreTaskFromTrash,
-			handleSaveTaskTitle,
-			handleStartTaskFromBoard,
-			handleUnpinTaskFromTaskPinboard,
-			moveToReviewLoadingById,
-			moveToTrashLoadingById,
-			resolveTaskWorkspaceAbsoluteDirectoryPath,
-			sessions,
-			workspacePath,
-		]);
+	// PDV 面板条目上半部分是真实任务卡体：面板读浏览器里当前项目的 board 时，数据与动作和主看板同一份（条目上的
+	// 「移入 Done」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
+	const {
+		boardShownInPostDeployVerificationPanel,
+		completePostDeployVerificationMoveToDone: completePostDeployVerificationMoveToDoneForPanelBoardSource,
+		onSelectTaskInPostDeployVerificationPanel,
+		realTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
+		postDeployVerificationWorkspaceProjectNameShownInPanelHeader,
+	} = usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope({
+		selectedBoardOrSingleProjectScope,
+		postDeployVerificationForBoardOrSingleProjectScope,
+		projects,
+		currentProjectDisplayedBoard: displayedBoard,
+		currentProjectTaskSessions: sessions,
+		currentProjectWorkspacePath: workspacePath ?? null,
+		completeCurrentProjectPostDeployVerificationMoveToDone: completePostDeployVerificationMoveToDone,
+		setSelectedTaskId,
+		handleCardSelect,
+		handleOpenTaskInProject,
+		defaultAgentIdOfCurrentProject: runtimeProjectConfig?.selectedAgentId ?? null,
+		defaultClineModelIdOfCurrentProject: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
+		resolveTaskWorkspaceAbsoluteDirectoryPath,
+		onStartTask: handleStartTaskFromBoard,
+		onMoveToTrashTask: handleMoveReviewCardToTrash,
+		onMoveToValidationTask: handleMoveCardToValidation,
+		onMoveToReviewTask: handleMoveCardToReview,
+		onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+		onDeleteTask: handleOpenDeleteTask,
+		onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
+		onSaveTitle: handleSaveTaskTitle,
+		onEditTask: handleOpenEditTaskKeepingDetailSelection,
+		onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
+		onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+		moveToTrashLoadingById,
+		moveToReviewLoadingById,
+	});
 
 	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
 	const boardScopeFocusViewFocusedTaskProjectId =
@@ -2210,23 +2204,36 @@ export default function App(): ReactElement {
 						</AlertDialogFooter>
 					</AlertDialog>
 
-					<PostDeployVerificationController
-						verification={postDeployVerification}
-						board={displayedBoard}
-						completePostDeployVerificationMoveToDone={completePostDeployVerificationMoveToDone}
-						onSelectTask={setSelectedTaskId}
-						onNavigateToBoard={() => setSelectedTaskId(null)}
-						realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
-							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
-						}
-						isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
-							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
-							isMoveToDoneConfirmOpen ||
-							deleteTaskTarget !== null ||
-							taskPinboardPinReasonRequest !== null ||
-							editingTaskId !== null
-						}
-					/>
+					{/* 面板该读的 board 还没到（快照未读到）时不挂，免得条目全显示「已从看板删除」；换绑 workspace 时重挂，
+					    丢掉上一个 workspace 的在途完成流程。 */}
+					{boardShownInPostDeployVerificationPanel ? (
+						<PostDeployVerificationController
+							key={
+								postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ??
+								"no-post-deploy-verification-workspace"
+							}
+							verification={postDeployVerification}
+							board={boardShownInPostDeployVerificationPanel}
+							completePostDeployVerificationMoveToDone={
+								completePostDeployVerificationMoveToDoneForPanelBoardSource
+							}
+							onSelectTask={onSelectTaskInPostDeployVerificationPanel}
+							onNavigateToBoard={() => setSelectedTaskId(null)}
+							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
+								realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
+							}
+							isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
+								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
+								isMoveToDoneConfirmOpen ||
+								deleteTaskTarget !== null ||
+								taskPinboardPinReasonRequest !== null ||
+								editingTaskId !== null
+							}
+							postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
+								postDeployVerificationWorkspaceProjectNameShownInPanelHeader
+							}
+						/>
+					) : null}
 				</div>
 			</LayoutCustomizationsProvider>
 		</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>

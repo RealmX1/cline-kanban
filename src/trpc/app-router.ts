@@ -100,6 +100,7 @@ import type {
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse,
 	RuntimeListDeferredNaturalUsageObservationRecordsResponse,
+	RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse,
 	RuntimeNotificationClearRequest,
@@ -317,6 +318,7 @@ import {
 	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema,
 	runtimeListDeferredNaturalUsageObservationRecordsResponseSchema,
+	runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -947,6 +949,8 @@ export interface RuntimeTrpcContext {
 		listDeferredNaturalUsageObservationRecords: (
 			scope: RuntimeTrpcWorkspaceScope,
 		) => Promise<RuntimeListDeferredNaturalUsageObservationRecordsResponse>;
+		// 跨 workspace、只读：All projects 视图据此挑 PDV 面板绑定的 workspace（不带 scope）。
+		listWorkspacesHavingPostDeployVerificationDeploymentGroups: () => Promise<RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse>;
 	};
 	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
 	workUnitRelationReadApi: {
@@ -2010,6 +2014,12 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx }) => {
 				return await ctx.deploymentApi.listDeferredNaturalUsageObservationRecords(ctx.workspaceScope);
 			}),
+		listWorkspacesHavingPostDeployVerificationDeploymentGroups:
+			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+				.output(runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema)
+				.query(async ({ ctx }) => {
+					return await ctx.deploymentApi.listWorkspacesHavingPostDeployVerificationDeploymentGroups();
+				}),
 	}),
 	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。
 	workUnit: t.router({

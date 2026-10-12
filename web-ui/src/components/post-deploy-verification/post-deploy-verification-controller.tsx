@@ -40,6 +40,8 @@ export interface PostDeployVerificationControllerProps {
 	realTaskCardRenderingInputsForPostDeployVerificationPanelEntries?: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
 	// 看板级对话框（原因对话框、删除确认、置顶原因等，常由面板里卡体上的动作按钮打开）开着时，面板也要降 z 让它盖住。
 	isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel?: boolean;
+	// All projects 视图下面板不跟随当前项目：标题栏显示所绑定项目的名字。单项目视图不给。
+	postDeployVerificationWorkspaceProjectNameShownInPanelHeader?: string | null;
 }
 
 // 单任务完成流（面板条目的「完成核对并移入 Done」/「带原因移入 Done」）：token / 需确认项 / agent 回复 / 发起时的列。
@@ -68,6 +70,7 @@ export function PostDeployVerificationController({
 	onNavigateToBoard,
 	realTaskCardRenderingInputsForPostDeployVerificationPanelEntries = null,
 	isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel = false,
+	postDeployVerificationWorkspaceProjectNameShownInPanelHeader = null,
 }: PostDeployVerificationControllerProps): ReactElement {
 	const { refresh, requestComplete, confirmComplete } = verification;
 	// 批量结案逐个移列期间 board 会变：每一步都读最新 board 判列，而不是对话框打开那一刻的快照。
@@ -383,6 +386,9 @@ export function PostDeployVerificationController({
 				loadError={verification.loadError}
 				board={board}
 				realTaskCardRenderingInputs={realTaskCardRenderingInputsForPostDeployVerificationPanelEntries}
+				postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
+					postDeployVerificationWorkspaceProjectNameShownInPanelHeader
+				}
 				stayInFront={verification.stayInFront}
 				collapsed={verification.collapsed}
 				loweredForDialog={isClosureDialogOpen || isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel}

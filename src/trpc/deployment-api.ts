@@ -13,6 +13,7 @@ import type {
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeListDeferredNaturalUsageObservationRecordsResponse,
+	RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse,
 	RuntimePostDeployVerificationState,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
@@ -47,6 +48,7 @@ import {
 	setVerificationRunState,
 	updateTaskChecklist,
 } from "../deployment/post-deploy-verification-state";
+import { summarizeWorkspacesHavingPostDeployVerificationDeploymentGroupsFromStateSnapshot } from "../deployment/post-deploy-verification-workspaces-having-deployment-groups-summarization";
 import { computeTaskDeploymentAttributionsAgainstDeployment } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
 import { runVerificationScript, toRunSnapshot } from "../deployment/verification-script-runner";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
@@ -398,5 +400,15 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 				new Date().toISOString(),
 			),
 		}),
+
+		// All projects 视图挑 PDV 面板绑定哪个 workspace 用：纯读快照，不 reconcile、不加锁（写路径是原子写，
+		// 读到的总是某一版完整文件）；对账仍由面板绑定后那个 workspace 的 getPostDeployVerificationState 轮询负责。
+		listWorkspacesHavingPostDeployVerificationDeploymentGroups:
+			async (): Promise<RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse> => ({
+				workspacesHavingPostDeployVerificationDeploymentGroups:
+					summarizeWorkspacesHavingPostDeployVerificationDeploymentGroupsFromStateSnapshot(
+						await readPostDeployVerificationStateSnapshot(),
+					),
+			}),
 	};
 }
