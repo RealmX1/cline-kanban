@@ -3481,6 +3481,17 @@ export type RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLo
 	typeof runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema
 >;
 
+// runtime 所在主机的身份，供浏览器在其他设备上拼 Remote-SSH 深链（`ssh-remote+<user>@<host>`）查看这台主机上的文件。
+// 将来多机联邦时，每台机器的项目各带自己这一份。
+export const runtimeHostRemoteEditorAccessIdentitySchema = z.object({
+	// runtime 进程所属的操作系统账号，即 SSH 登录名。没有 passwd 记录的容器里 `os.userInfo()` 会抛错，此时为 null，
+	// 浏览器省掉 `<user>@`，交给 SSH 客户端的默认用户 / ssh_config。
+	operatingSystemAccountUsername: z.string().nullable(),
+	// 仅供展示与诊断；深链的主机名取浏览器能连上的那个名字（页面主机名），不用它。
+	operatingSystemHostname: z.string(),
+});
+export type RuntimeHostRemoteEditorAccessIdentity = z.infer<typeof runtimeHostRemoteEditorAccessIdentitySchema>;
+
 export const runtimeConfigResponseSchema = z.object({
 	selectedAgentId: runtimeAgentIdSchema,
 	selectedShortcutLabel: z.string().nullable(),
@@ -3508,6 +3519,7 @@ export const runtimeConfigResponseSchema = z.object({
 	commitPromptTemplateDefault: z.string(),
 	openPrPromptTemplateDefault: z.string(),
 	userInterfacePreferencesSharedAcrossBrowserOrigins: runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema,
+	runtimeHostRemoteEditorAccessIdentity: runtimeHostRemoteEditorAccessIdentitySchema,
 });
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 

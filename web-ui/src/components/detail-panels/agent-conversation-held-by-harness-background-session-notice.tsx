@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import type { RuntimeHarnessBackgroundSessionReclaimBlockedReason, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 const DESCRIPTION_OF_WHY_HARNESS_BACKGROUND_SESSION_WAS_NOT_RECLAIMED: Record<
 	RuntimeHarnessBackgroundSessionReclaimBlockedReason,
@@ -57,10 +58,10 @@ export function AgentConversationHeldByHarnessBackgroundSessionNotice({
 	const attachCommand = `claude attach ${observation.harnessBackgroundSessionShortId}`;
 	const copyAttachCommand = async () => {
 		try {
-			await navigator.clipboard.writeText(attachCommand);
+			await writeTextToSystemClipboardWithInsecureContextFallback(attachCommand);
 			setHasCopiedAttachCommand(true);
 		} catch {
-			// 剪贴板不可用（非安全上下文等）时命令本身就在文案里，人可以手动选中复制。
+			// 连降级的原生复制也失败时，命令本身就在文案里，人可以手动选中复制。
 		}
 	};
 	return (

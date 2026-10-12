@@ -1,3 +1,4 @@
+import { hostname, userInfo } from "node:os";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { getRuntimeLaunchSupportedAgentCatalog, RUNTIME_AGENT_CATALOG } from "../core/agent-catalog";
 import type {
@@ -5,6 +6,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeClineProviderSettings,
 	RuntimeConfigResponse,
+	RuntimeHostRemoteEditorAccessIdentity,
 } from "../core/api-contract";
 import { isBinaryAvailableOnPath } from "./command-discovery";
 
@@ -133,5 +135,16 @@ export function buildRuntimeConfigResponse(
 		openPrPromptTemplate: runtimeConfig.openPrPromptTemplate,
 		commitPromptTemplateDefault: runtimeConfig.commitPromptTemplateDefault,
 		openPrPromptTemplateDefault: runtimeConfig.openPrPromptTemplateDefault,
+		runtimeHostRemoteEditorAccessIdentity: readRuntimeHostRemoteEditorAccessIdentity(),
 	};
+}
+
+export function readRuntimeHostRemoteEditorAccessIdentity(): RuntimeHostRemoteEditorAccessIdentity {
+	let operatingSystemAccountUsername: string | null = null;
+	try {
+		operatingSystemAccountUsername = userInfo().username || null;
+	} catch {
+		// 没有 passwd 记录（某些容器）时 userInfo() 会抛错；浏览器会省掉深链里的 `<user>@`。
+	}
+	return { operatingSystemAccountUsername, operatingSystemHostname: hostname() };
 }

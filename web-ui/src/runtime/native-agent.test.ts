@@ -67,6 +67,10 @@ function createRuntimeConfigResponse(
 		openPrPromptTemplate: "",
 		commitPromptTemplateDefault: "",
 		openPrPromptTemplateDefault: "",
+		runtimeHostRemoteEditorAccessIdentity: {
+			operatingSystemAccountUsername: "kanban-test-user",
+			operatingSystemHostname: "kanban-test-host",
+		},
 	};
 	return {
 		...nextConfig,

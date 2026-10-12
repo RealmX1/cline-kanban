@@ -133,6 +133,10 @@ function createRuntimeConfig(selectedAgentId: RuntimeConfigResponse["selectedAge
 		openPrPromptTemplate: "pr",
 		commitPromptTemplateDefault: "commit",
 		openPrPromptTemplateDefault: "pr",
+		runtimeHostRemoteEditorAccessIdentity: {
+			operatingSystemAccountUsername: "kanban-test-user",
+			operatingSystemHostname: "kanban-test-host",
+		},
 	};
 }
 

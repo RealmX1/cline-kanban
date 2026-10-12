@@ -122,6 +122,10 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 		openPrPromptTemplate: "pr",
 		commitPromptTemplateDefault: "commit",
 		openPrPromptTemplateDefault: "pr",
+		runtimeHostRemoteEditorAccessIdentity: {
+			operatingSystemAccountUsername: "kanban-test-user",
+			operatingSystemHostname: "kanban-test-host",
+		},
 		...overrides,
 	};
 }

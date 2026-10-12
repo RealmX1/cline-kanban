@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import type { BoardCard as BoardCardModel } from "@/types";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 export function TaskOriginalPromptDialog({
 	open,
@@ -22,7 +23,7 @@ export function TaskOriginalPromptDialog({
 
 	const handleCopy = async (): Promise<void> => {
 		try {
-			await navigator.clipboard.writeText(card.prompt);
+			await writeTextToSystemClipboardWithInsecureContextFallback(card.prompt);
 			setCopied(true);
 			setTimeout(() => {
 				setCopied(false);

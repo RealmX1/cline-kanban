@@ -80,6 +80,7 @@ import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-eve
 import { formatPathForDisplay } from "@/utils/path-display";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 import { getAgentVisual } from "./agent-visual";
 import {
 	type CardSessionActivity,
@@ -745,26 +746,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 				// HTTP 无异步 Clipboard API：预取尚未完成时保留下一次点击的原生复制手势。
 				prefetchTaskWorkspaceDirectoryPathForCopy();
 				throw new Error("Directory path is still loading. Please try copying again.");
-			} else if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(directoryPath);
 			} else {
-				// 局域网 HTTP 没有 Clipboard API，保留原先可用的原生复制通道并检查其返回值。
-				const previouslyFocusedElement = document.activeElement;
-				const clipboardTextArea = document.createElement("textarea");
-				clipboardTextArea.value = directoryPath;
-				clipboardTextArea.className = "fixed left-0 top-0 opacity-0 pointer-events-none";
-				document.body.append(clipboardTextArea);
-				try {
-					clipboardTextArea.select();
-					if (!document.execCommand("copy")) {
-						throw new Error("The browser could not copy the directory path.");
-					}
-				} finally {
-					clipboardTextArea.remove();
-					if (previouslyFocusedElement instanceof HTMLElement) {
-						previouslyFocusedElement.focus({ preventScroll: true });
-					}
-				}
+				// 局域网 HTTP 没有 Clipboard API 时，helper 退回原生复制通道并检查其返回值。
+				await writeTextToSystemClipboardWithInsecureContextFallback(directoryPath);
 			}
 			setIsDirectoryPathCopied(true);
 			directoryCopyResetTimerRef.current = window.setTimeout(() => {

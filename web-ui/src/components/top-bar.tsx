@@ -327,6 +327,7 @@ export function TopBar({
 	onRunShortcut,
 	onCreateFirstShortcut,
 	openTargetOptions,
+	openTargetOptionsFootnote = null,
 	selectedOpenTargetId,
 	onSelectOpenTarget,
 	onOpenWorkspace,
@@ -382,6 +383,7 @@ export function TopBar({
 	onRunShortcut?: (shortcutLabel: string) => void;
 	onCreateFirstShortcut?: (shortcut: RuntimeProjectShortcut) => Promise<CreateShortcutResult>;
 	openTargetOptions: readonly OpenTargetOption[];
+	openTargetOptionsFootnote?: string | null;
 	selectedOpenTargetId: OpenTargetId;
 	onSelectOpenTarget: (targetId: OpenTargetId) => void;
 	onOpenWorkspace: () => void;
@@ -541,6 +543,7 @@ export function TopBar({
 								<div className="ml-2 shrink-0">
 									<OpenWorkspaceButton
 										options={openTargetOptions}
+										optionsFootnote={openTargetOptionsFootnote}
 										selectedOptionId={selectedOpenTargetId}
 										disabled={!canOpenWorkspace || isOpeningWorkspace}
 										loading={isOpeningWorkspace}

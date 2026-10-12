@@ -15,12 +15,14 @@ import type {
 	RuntimeTerminalWsResizeMessage,
 	RuntimeTerminalWsServerMessage,
 } from "@/runtime/types";
+import { OSC_52_CLIPBOARD_PROVIDER_TOLERATING_INSECURE_BROWSER_CONTEXT } from "@/terminal/osc-52-clipboard-provider-tolerating-insecure-browser-context";
 import { sliceRestoreSnapshotForIncrementalWrite } from "@/terminal/restore-snapshot-slicing";
 import {
 	forgetStaleSessionAutoResumeCooldownsForWorkspace,
 	type StaleAgentTerminalSessionAutomaticResumePhase,
 	StaleAgentTerminalSessionAutomaticResumeScheduler,
 } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
+import { resolveTerminalClipboardKeyboardShortcutAction } from "@/terminal/terminal-clipboard-keyboard-shortcut-resolution";
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import {
 	isStashTerminalInputBoxToPromptLibraryShortcut,
@@ -38,7 +40,8 @@ import {
 	type TerminalScrollbackTranscriptLogicalLine,
 } from "@/terminal/terminal-scrollback-transcript-extraction";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
-import { isMacPlatform, isSafari } from "@/utils/platform";
+import { isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
+import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
@@ -171,14 +174,6 @@ function getTerminalSocketChunkByteLength(data: string | ArrayBuffer | Blob): nu
 		return data.byteLength;
 	}
 	return 0;
-}
-
-function isCopyShortcut(event: KeyboardEvent): boolean {
-	return (
-		event.type === "keydown" &&
-		((isMacPlatform && event.metaKey && !event.shiftKey && event.key.toLowerCase() === "c") ||
-			(!isMacPlatform && event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c"))
-	);
 }
 
 function isFindShortcut(event: KeyboardEvent): boolean {
@@ -407,7 +402,9 @@ class PersistentTerminal {
 			rows: initialGeometry.rows,
 		});
 		this.terminal.loadAddon(this.fitAddon);
-		this.terminal.loadAddon(new ClipboardAddon());
+		this.terminal.loadAddon(
+			new ClipboardAddon(undefined, OSC_52_CLIPBOARD_PROVIDER_TOLERATING_INSECURE_BROWSER_CONTEXT),
+		);
 		this.terminal.loadAddon(this.searchAddon);
 		this.terminal.loadAddon(new WebLinksAddon());
 		this.terminal.loadAddon(this.unicode11Addon);
@@ -442,10 +439,24 @@ class PersistentTerminal {
 				}
 				return false;
 			}
-			if (isCopyShortcut(event) && this.terminal.hasSelection()) {
-				void navigator.clipboard.writeText(this.terminal.getSelection()).catch(() => {
-					// Ignore clipboard failures.
-				});
+			const clipboardShortcutAction = resolveTerminalClipboardKeyboardShortcutAction(event, {
+				isMacPlatform,
+				isWindowsPlatform,
+				terminalHasSelection: this.terminal.hasSelection(),
+				browserIsOnDifferentMachineThanAgentRuntimeHost: !isBrowserOnTheSameMachineAsAgentRuntimeHost(),
+			});
+			if (clipboardShortcutAction.kind === "copy-terminal-selection-to-system-clipboard") {
+				// preventDefault 挡掉浏览器对这组按键的默认动作（Chrome 的 Ctrl+Shift+C 是「检查元素」）。
+				event.preventDefault();
+				this.copyTerminalSelectionToSystemClipboard();
+				if (clipboardShortcutAction.clearSelectionAfterCopy) {
+					this.terminal.clearSelection();
+				}
+				return false;
+			}
+			if (clipboardShortcutAction.kind === "release-to-browser-native-paste-of-this-device-clipboard") {
+				// 返回 false 且不 preventDefault：xterm 不把它转成 `^V`，浏览器照常触发 paste 事件，
+				// 由 xterm 自己的 paste 监听读出 clipboardData 发给 agent。http 下也可用，不需要 Clipboard API。
 				return false;
 			}
 			if (isFindShortcut(event)) {
@@ -720,6 +731,24 @@ class PersistentTerminal {
 		this.connectionReady = true;
 		for (const subscriber of this.subscribers) {
 			subscriber.onConnectionReady?.(this.taskId);
+		}
+	}
+
+	private copyTerminalSelectionToSystemClipboard(): void {
+		const selectedText = this.terminal.getSelection();
+		if (navigator.clipboard?.writeText) {
+			void navigator.clipboard.writeText(selectedText).catch(() => {
+				// Ignore clipboard failures.
+			});
+			return;
+		}
+		// 非安全上下文（经局域网 / tailnet 的 http 访问）没有 Clipboard API：在这次按键手势里同步触发原生 copy。
+		// 焦点就在 xterm 的 textarea 上，copy 事件冒泡到 xterm 自己的 copy 监听，由它把选区写进 clipboardData。
+		// 刻意不借隐藏 textarea：焦点移出终端会向开了焦点上报的 agent 发 `\e[O` / `\e[I`。
+		try {
+			document.execCommand("copy");
+		} catch {
+			// Ignore clipboard failures.
 		}
 	}
 
