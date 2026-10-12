@@ -1664,15 +1664,17 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	taskId: z.string(),
 	title: z.string(),
 	agentId: runtimeAgentIdSchema.nullable(),
-	// 任务卡创建时刻（epoch ms）；概览行据此显示「自创建至今」时长药丸（同主看板卡片头部）。
+	// 任务卡创建时刻（epoch ms）；跨项目切换面板的行（经下方条目 schema 继承）据此显示「自创建至今」时长药丸
+	// （同主看板卡片头部）。
 	createdAt: z.number(),
-	// 距最近一次 PTY 输出（含 spinner 重绘）；null=从未产出/无会话。前端据此判「近期活跃」（Active/Stale 二分）。
+	// 距最近一次 PTY 输出（含 spinner 重绘）；null=从未产出/无会话。前端据此判 agent 回合里的任务是否还在跑
+	// （切换面板 Running 区与顶栏 live 计数）。
 	lastOutputAt: z.number().nullable(),
-	// 距最近一次「实质」产出（不含 spinner/footer/计时器等装饰性重绘）；null=无实质戳/无会话。概览行的
-	// 「agent 上次响应至今」药丸读它——与主看板卡片头部同源（task-card-body 的 lastAgentResponseAt），
-	// 避免终端 agent 仅 spinner 重绘时显示虚假「刚响应」。
+	// 距最近一次「实质」产出（不含 spinner/footer/计时器等装饰性重绘）；null=无实质戳/无会话。切换面板 Cache warm
+	// 倒计时在没有模型请求派发观测时以它为锚（section-assignment 的 last_substantive_agent_terminal_output）；
+	// 不读 lastOutputAt，免得终端 agent 仅 spinner 重绘就把锚点推到「刚响应」。时长药丸不读它（见下）。
 	lastSubstantiveOutputAt: z.number().nullable(),
-	// 概览行的两颗时长药丸（与主看板卡片头部同源、同语义）：
+	// 切换面板行的两颗时长药丸（与主看板卡片头部同源、同语义）：
 	//   Stopped   —— 本次 incarnation 何时进入非生成态；agent 回合 / park 期间为 null。
 	//   Progress  —— 这个任务的对话上次真正往前走到哪一刻（跨 incarnation 的历史事实）。
 	// 二者为什么必须分开、以及为什么都不能用 lastSubstantiveOutputAt 冒充，见
@@ -1680,8 +1682,8 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	// 加性 optional：旧 runtime payload 不带 ⇒ 该颗药丸隐藏，绝不回退读上面那个实质戳。
 	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
-	// 本轮 agent 回合的开始时刻（见 runtimeAgentResponseGenerationTurnStartedSchema）。概览 Active 组与
-	// 跨项目切换面板 Running 区都按它升序排，顺序只在回合边沿变化，不随 spinner 重绘抖动。加性 optional。
+	// 本轮 agent 回合的开始时刻（见 runtimeAgentResponseGenerationTurnStartedSchema）。跨项目切换面板 Running 区
+	// 按它升序排，顺序只在回合边沿变化，不随 spinner 重绘抖动。加性 optional。
 	agentResponseGenerationTurnStarted: runtimeAgentResponseGenerationTurnStartedSchema.nullable().optional(),
 	turnOwner: runtimeTaskSessionTurnOwnerSchema,
 	liveness: runtimeTaskSessionLivenessSchema,
