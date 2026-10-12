@@ -29,12 +29,14 @@ export type RuntimeAgentNativeConversationSessionIdentityCaptureMethod =
 	| "not_captured";
 
 // 恢复会话后的「续跑守卫」（restorationContinuationGuardState）靠什么信号解除。
-// 只有 codex / cursor 经核实没有可靠的提交 hook；其余 agent 维持历史行为（等 hook，或 30 分钟兜底自行失效）。
+// 只有 codex / cursor 经核实没有可靠的提交 hook；其余 agent 维持历史行为（等 hook）。
+// 30 分钟兜底只让读侧（harness 唤醒通知的拦截）自行失效，不清声明态；排队投递的门控 5 读声明态，
+// 所以收不到解除信号的会话，排队条目会一直挡到人真的提交为止。
 export type RuntimeAgentRestorationContinuationGuardDisarmSignal =
 	// agent 的 UserPromptSubmit 一类 hook 报告了真人提交（Claude 还要在那条同步 hook 里取出恢复期暂存的通知）。
 	| "agent_user_prompt_submit_hook"
-	// agent 没有可靠的 UserPromptSubmit hook：只能在终端 Enter / 程序化提交这一提交边沿解除，否则守卫要挂满
-	// 30 分钟兜底，期间排队投递一直被挡。
+	// agent 没有可靠的 UserPromptSubmit hook：只能在终端 Enter / 程序化提交这一提交边沿解除，否则声明态一直
+	// 不清，排队投递一直被门控 5 挡住。
 	| "terminal_submission_edge_without_reliable_user_prompt_submit_hook";
 
 // 这个 agent 的对话能否被 **harness 自己的后台会话守护进程**占住，以及续跑前怎样核对、收回。
