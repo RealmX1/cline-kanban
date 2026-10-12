@@ -280,6 +280,28 @@ describe("PtySession", () => {
 		expect(() => session.resize(100, 30)).toThrow("permission denied");
 	});
 
+	it("逐字转发二进制鼠标报告和跨消息拆分的 UTF-8 输入", () => {
+		const ptyProcess = createMockPtyProcess();
+		ptyMocks.spawn.mockReturnValue(ptyProcess);
+		const session = PtySession.spawn({
+			binary: "codex",
+			cwd: "/",
+			cols: 200,
+			rows: 40,
+		});
+		const chineseInput = Buffer.from("中文", "utf8");
+		const inputChunks = [
+			Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0xcb, 0x2d]),
+			chineseInput.subarray(0, 1),
+			chineseInput.subarray(1),
+		];
+
+		for (const chunk of inputChunks) session.write(chunk);
+		session.write("普通文字");
+
+		expect(ptyProcess.write.mock.calls).toEqual([...inputChunks.map((chunk) => [chunk]), ["普通文字"]]);
+	});
+
 	it("ignores EIO write errors", () => {
 		setPlatform("darwin");
 		const ptyProcess = createMockPtyProcess();

@@ -22,6 +22,104 @@ afterEach(() => {
 });
 
 describe("TerminalStateMirror", () => {
+	it.each([1006, 1016])("快照往返保留鼠标坐标编码 %i，并在启用跟踪前恢复编码", async (encodingMode) => {
+		const mirror = createMirror(200, 40);
+		mirror.applyOutput(Buffer.from(`\u001b[?1003h\u001b[?${encodingMode}h\u001b[?2004h画面`, "utf8"));
+		const snapshots = [await mirror.getSnapshot(), await mirror.getViewportSnapshot()];
+
+		for (const snapshot of snapshots) {
+			const responses: string[] = [];
+			const restoredMirror = new TerminalStateMirror(200, 40, { onInputResponse: (data) => responses.push(data) });
+			mirrors.push(restoredMirror);
+			restoredMirror.applyOutput(Buffer.from(snapshot.snapshot, "utf8"));
+			restoredMirror.applyOutput(Buffer.from(`\u001b[?${encodingMode}$p`, "utf8"));
+			await restoredMirror.getSnapshot();
+
+			expect(responses).toContain(`\u001b[?${encodingMode};1$y`);
+			expect(snapshot.snapshot.indexOf(`\u001b[?${encodingMode}h`)).toBeLessThan(
+				snapshot.snapshot.indexOf("\u001b[?1003h"),
+			);
+			expect(snapshot.snapshot).toContain("\u001b[?2004h");
+			expect(snapshot.snapshot).toContain("画面");
+		}
+	});
+
+	it("跟踪跨输出分片和同一指令内按顺序切换的坐标编码", async () => {
+		const mirror = createMirror();
+		for (const chunk of ["\u001b[?10", "06;1016;1003h", "\u001b[?1006h"]) {
+			mirror.applyOutput(Buffer.from(chunk, "utf8"));
+		}
+
+		const snapshot = await mirror.getSnapshot();
+		expect(snapshot.snapshot).toContain("\u001b[?1006h");
+		expect(snapshot.snapshot).not.toContain("\u001b[?1016h");
+	});
+
+	it.each([
+		["\u001b[?1006:1016h", 1006],
+		["\u001b[?1016:1006h", 1016],
+		["\u001b[?1006h\u001b[?1:1016h", 1006],
+		["\u001b[?1016h\u001b[?1:1006h", 1016],
+		["\u001b[?1006h\u001b[?1:1006l", 1006],
+		["\u001b[?1016h\u001b[?1:1016l", 1016],
+		["\u001b[?1006h\u001b[?1006:1016l", null],
+		["\u001b[?1016h\u001b[?1016:1006l", null],
+		["\u001b[?1006:1016;1016:1006;1003h", 1016],
+		["\u001b[?1016:1006;1006:1016;1003h", 1006],
+	])("快照往返只按主参数处理分片 CSI 的坐标编码：%j", async (output, expectedEncodingMode) => {
+		const originalResponses: string[] = [];
+		const mirror = new TerminalStateMirror(80, 24, { onInputResponse: (data) => originalResponses.push(data) });
+		mirrors.push(mirror);
+		for (const character of output) {
+			mirror.applyOutput(Buffer.from(character, "utf8"));
+		}
+		const snapshots = [await mirror.getSnapshot(), await mirror.getViewportSnapshot()];
+		const modeQueries = "\u001b[?1006$p\u001b[?1016$p";
+		mirror.applyOutput(Buffer.from(modeQueries, "utf8"));
+		await mirror.getSnapshot();
+		expect(originalResponses).toEqual(
+			[1006, 1016].map(
+				(encodingMode) => `\u001b[?${encodingMode};${encodingMode === expectedEncodingMode ? 1 : 2}$y`,
+			),
+		);
+
+		for (const snapshot of snapshots) {
+			const restoredResponses: string[] = [];
+			const restoredMirror = new TerminalStateMirror(80, 24, {
+				onInputResponse: (data) => restoredResponses.push(data),
+			});
+			mirrors.push(restoredMirror);
+			restoredMirror.applyOutput(Buffer.from(snapshot.snapshot + modeQueries, "utf8"));
+			await restoredMirror.getSnapshot();
+			expect(restoredResponses).toEqual(originalResponses);
+		}
+	});
+
+	it.each(["\u001b[?1006l", "\u001b[?1016l", "\u001bc"])(
+		"关闭编码或完整重置后不会从快照恢复旧编码：%j",
+		async (resetSequence) => {
+			const mirror = createMirror();
+			mirror.applyOutput(Buffer.from("\u001b[?1003h\u001b[?1006h", "utf8"));
+			const beforeReset = await mirror.getSnapshot();
+			mirror.applyOutput(Buffer.from(resetSequence, "utf8"));
+			const afterReset = await mirror.getSnapshot();
+
+			expect(beforeReset.snapshot).toContain("\u001b[?1006h");
+			expect(afterReset.snapshot).not.toContain("\u001b[?1006h");
+			expect(afterReset.snapshot).not.toContain("\u001b[?1016h");
+			expect(afterReset).not.toBe(beforeReset);
+		},
+	);
+
+	it("保留旧式鼠标协议，并让软重置保持当前坐标编码", async () => {
+		const mirror = createMirror();
+		mirror.applyOutput(Buffer.from("\u001b[?1000h", "utf8"));
+		const legacySnapshot = await mirror.getSnapshot();
+		expect(legacySnapshot.snapshot).not.toContain("\u001b[?1006h");
+		mirror.applyOutput(Buffer.from("\u001b[?1006h\u001b[!p", "utf8"));
+		expect((await mirror.getSnapshot()).snapshot).toContain("\u001b[?1006h");
+	});
+
 	it("serializes inline terminal content and dimensions", async () => {
 		const mirror = createMirror(100, 30);
 

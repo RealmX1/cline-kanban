@@ -98,3 +98,13 @@ Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux
 触发事故（2026-09-29，Codex 0.158.0）：Kanban 运行时跑在 tmux 里，Codex 子进程继承了 `TMUX`/`TMUX_PANE`。Codex 0.158 起会据此执行 `tmux display-message -p '#{mouse}'`（上游 `codex-rs/tui/src/tui/tmux.rs`），宿主 tmux 为 `mouse off` → `MouseCapture::DisabledByTmux` → 不开鼠标上报、改开 `?1007h` alternate scroll（`alternate_screen.rs::configure_input`）。xterm.js 在 alt buffer 且无鼠标上报时把滚轮翻译成 ↑/↓，于是滚轮不再滚 Codex 自己的全屏 transcript，而是翻输入框的历史 prompt。
 
 新增「宿主终端身份」类变量时同样加进该常量；已在运行的会话进程保留旧环境，需重启会话才生效。
+
+## 5. 输入字节与恢复后的鼠标坐标编码
+
+终端输入包含二进制协议，不能把每个 `Buffer` 独立按 UTF-8 解码。旧式鼠标报告 `ESC [ M CB Cx Cy` 的坐标是单字节；高位坐标经解码会变成三字节替换字符，TUI 消费完固定长度报告后把余字节当作普通输入。`PtySession.write` 与 PTY host 注册表因此直接向 node-pty 写原始 `Buffer`；普通字符串仍交由 node-pty 编码，跨消息拆开的 UTF-8 字节也保持原样。
+
+`@xterm/addon-serialize` 保存鼠标跟踪模式（如 `?1003h`），但不保存坐标编码（`?1006h` / `?1016h`）。`TerminalStateMirror` 经公共 parser API 观察这些模式的开启、关闭及 RIS 完整重置，将当前编码放在恢复快照开头；必须先恢复编码，再启用鼠标跟踪，避免浏览器分片恢复期间短暂发送旧式报告。软重置沿用 xterm 本身的编码语义，旧式协议不会被强制升级为 SGR。
+
+任务 `6377d` 的隔离原生 Codex 探针复现了损坏报告向 composer 插入 `-`，也发现合成的 DCS 状态应答能插入 `1$r0m`。后者仅证明另一种污染机制可能存在，尚未在真实静置现场捕获，不作为本次新增协议过滤的依据。短时静置未复现不能证明间歇性问题已解决；真实部署后的自然使用观察仍需保留。
+
+本次原生 `0.162.1` 探针还发现，隔离 `CODEX_HOME` 中的 `packages/app-server-daemon/releases/…/bin/codex` 后台进程可在主 TUI 退出后继续持有 SQLite 维护锁、重建已删目录。删除测试 HOME 前需按专属目录与可执行文件身份核对并回收这些后台进程；主 TUI 的退出事件不足以证明探针已完全清理。

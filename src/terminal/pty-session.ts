@@ -157,7 +157,8 @@ export class PtySession implements TerminalPtyProcessHandle {
 
 	write(data: string | Buffer): void {
 		try {
-			this.ptyProcess.write(typeof data === "string" ? data : data.toString("utf8"));
+			// 旧式鼠标报告含非 UTF-8 坐标字节，解码会把它们替换并变长，导致 TUI 将余字节当作输入。
+			this.ptyProcess.write(data);
 		} catch (error) {
 			if (isIgnorablePtyWriteError(error)) {
 				return;
