@@ -31,7 +31,7 @@ const SEARCH_MODE_OPTIONS: ReadonlyArray<{ mode: TaskBoardSearchMode; label: str
 	{ mode: "hybrid", label: "Hybrid" },
 ];
 
-// 文本在哪些字段里匹配。四种模式都吃这个范围；粘贴完整 task id 的直达置顶不受它约束。
+// 文本在哪些字段里匹配。四种模式都吃这个范围；task id（含 3 位以上片段）的直达置顶不受它约束。
 const MATCHED_TEXT_FIELD_SCOPE_OPTIONS: ReadonlyArray<{
 	matchedTextFieldScope: TaskSearchMatchedTextFieldScope;
 	label: string;
@@ -49,8 +49,8 @@ const MATCHED_TEXT_FIELD_SCOPE_OPTIONS: ReadonlyArray<{
 const SESSION_ACTIVITY_DIMENSION_HINT = "Only known for the current project — tasks from other projects are excluded";
 
 /**
- * 空结果时的说明文案。两种「其实有东西、只是被你自己的条件挡住了」必须点破原因——否则用户拷了个完整
- * task id 却看到 "No matching tasks"，会以为任务根本不存在（过滤刻意不为 ID 命中豁免）。
+ * 空结果时的说明文案。两种「其实有东西、只是被你自己的条件挡住了」必须点破原因——否则用户拷了个
+ * task id（或敲了它的片段）却看到 "No matching tasks"，会以为任务根本不存在（过滤刻意不为 ID 命中豁免）。
  */
 function resolveEmptyResultsMessage({
 	isBrowsingAllTasksWithoutQuery,

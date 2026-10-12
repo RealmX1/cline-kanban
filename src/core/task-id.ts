@@ -13,6 +13,26 @@ export function isCompleteShortTaskIdShapedText(text: string): boolean {
 	return COMPLETE_SHORT_TASK_ID_SHAPE_PATTERN.test(text);
 }
 
+/**
+ * 部分 task id 检索的最短查询长度。3 位 hex 子串对单篇文档的偶然命中率 ≈ 3/16³ ≈ 0.07%（500 任务期望 < 0.4 条误命中）；
+ * 2 位则 ≈ 1.6%/篇，几乎每次都会把无关任务顶到最前。
+ */
+// EXPERIMENT_NODE: 部分 task id 检索的最短查询长度取 3 还是 2（2 位召回更早、但误命中噪声高一个数量级）
+export const MINIMUM_PARTIAL_TASK_ID_SEARCH_QUERY_CHARACTER_LENGTH = 3;
+
+const PARTIAL_OR_COMPLETE_SHORT_TASK_ID_SEARCH_QUERY_SHAPE_PATTERN = new RegExp(
+	`^[0-9a-z]{${MINIMUM_PARTIAL_TASK_ID_SEARCH_QUERY_CHARACTER_LENGTH},${SHORT_TASK_ID_CHARACTER_LENGTH}}$`,
+	"u",
+);
+
+/**
+ * 判定一段搜索文本能否作为 task id 的**片段或整体**参与 ID 检索：长度介于最短部分查询长度与完整长度之间、
+ * 字符集同 task id。同样只认小写，大小写容忍由调用方负责。
+ */
+export function isPartialOrCompleteShortTaskIdShapedSearchQuery(text: string): boolean {
+	return PARTIAL_OR_COMPLETE_SHORT_TASK_ID_SEARCH_QUERY_SHAPE_PATTERN.test(text);
+}
+
 export function createShortTaskId(randomUuid: () => string): string {
 	return randomUuid().replaceAll("-", "").slice(0, SHORT_TASK_ID_CHARACTER_LENGTH);
 }

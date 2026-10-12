@@ -161,7 +161,7 @@ export interface TaskSpotlightSearchController {
 	isBrowsingAllTasksWithoutQuery: boolean;
 	semanticSearchStatus: TaskBoardSemanticSearchStatus;
 	results: TaskBoardSearchResult[];
-	/** task id 全等命中、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
+	/** task id 命中（全等 / 片段 / 容错）、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
 	taskIdMatchedResultCountHiddenByFilters: number;
 	/** 因「会话状态维度已启用、但跨项目行判不了」而被排除的条数（空态同样要说明）。 */
 	resultCountExcludedBecauseSessionActivityIsNotObservable: number;
@@ -529,7 +529,7 @@ export function useTaskSpotlightSearchController({
 	);
 	const results = filterApplication.filteredRows;
 
-	// ID 全等命中却被过滤条件挡掉时，空态必须说明原因 —— 否则用户拷了个完整 id 却看到
+	// ID 命中（全等 / 片段 / 容错）却被过滤条件挡掉时，空态必须说明原因 —— 否则用户拷了个 id 却看到
 	// "No matching tasks"，会以为任务不存在。过滤是用户显式设定的 scope，不为 ID 命中豁免，
 	// 只补一句诚实的解释。
 	const taskIdMatchedResultCountHiddenByFilters = useMemo(() => {

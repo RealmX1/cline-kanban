@@ -20,7 +20,8 @@ const HIGHLIGHTED_TEXT_STYLE: CSSProperties = {
 	fontWeight: 600,
 };
 
-// 与文本高亮同源的金色：task id 全等命中即整体高亮，不需要字符级位置集。
+// 与文本高亮同源的金色：凭 task id 命中的那条整枚徽标描金边，被 query 对上的那几位再按位加粗
+// （见 taskIdMatchCharacterPositions），部分 / 容错命中时一眼看出对上的是哪一段。
 const TASK_ID_BADGE_MATCHED_STYLE: CSSProperties = {
 	color: "var(--color-status-gold)",
 	borderColor: "var(--color-status-gold)",
@@ -187,7 +188,11 @@ export function TaskSpotlightSearchResultRow({
 								)}
 								style={isTaskIdMatched ? TASK_ID_BADGE_MATCHED_STYLE : undefined}
 							>
-								{document.taskId}
+								{renderFuzzyHighlightedText(
+									document.taskId,
+									result.taskIdMatchCharacterPositions,
+									HIGHLIGHTED_TEXT_STYLE,
+								)}
 							</span>
 						) : null}
 						{fieldVisibility.project_name_badge ? (
