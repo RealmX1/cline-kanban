@@ -7,8 +7,18 @@ import {
 	webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema,
 	webUiBoardMutationInitiatorSchema,
 } from "./kanban-web-ui-page-load-request-origin-nonce.js";
+import {
+	runtimePostDeployVerificationAcknowledgementSchema,
+	runtimePostDeployVerificationClosureOutcomeSchema,
+	runtimePostDeployVerificationDoneEntryClosureRequestSchema,
+	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
+} from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
+
+// Post-Deploy Verification「移入 Done 结案」的请求侧契约（确认项、原因码、结案请求、门禁拒绝前缀）住在独立文件里
+// （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
+export * from "./post-deploy-verification-done-entry-closure-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -1453,9 +1463,14 @@ export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	// 拖放进 Done 的落点；缺省 = 列顶（CLI / 程序化移入不传）。卡片本来就在 Done 时忽略。
 	insertAtIndexWithinDoneBoardColumn: z.number().int().nonnegative().optional(),
+	// 卡片受 Post-Deploy Verification 门禁（在活跃部署组里、未结案、有未勾项）时必须带上，覆盖全部未勾项的原因；
+	// 否则服务端以 PRECONDITION_FAILED 拒绝（message 前缀见 POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_...）。
+	postDeployVerificationDoneEntryClosure: runtimePostDeployVerificationDoneEntryClosureRequestSchema.optional(),
 });
 export type RuntimeTaskCardActionMoveIntoDoneRequest = z.infer<typeof runtimeTaskCardActionMoveIntoDoneRequestSchema>;
 export const runtimeTaskCardActionMoveIntoDoneResponseSchema = z.object({
+	// 本次移入 Done 时 Post-Deploy Verification 结案的结果；任务不受门禁时为 null。
+	postDeployVerificationClosureOutcome: runtimePostDeployVerificationClosureOutcomeSchema.nullable().optional(),
 	boardColumnIdOfTaskCardBeforeAction: runtimeBoardColumnIdSchema,
 	taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: z.boolean(),
 	// 卡片移入前所在列可能挂着活 agent 会话（in_progress / review / validation）时才发 stop；详情 shell 终端总是停。
@@ -5086,15 +5101,6 @@ export type RuntimePostDeployVerificationDroppedReason = z.infer<
 	typeof runtimePostDeployVerificationDroppedReasonSchema
 >;
 
-// 入 Done 前需显式确认的项（plan Grilling #6 / #8）：
-//   skip_validation     = review/in_progress 跳过 validation 列直接入 Done
-//   in_progress_active  = 任务仍处于 in_progress（session 可能仍在跑）
-// CLI 单次 `verification-confirm --ack a,b`；UI in_progress 拆成两次顺序对话框。
-export const runtimePostDeployVerificationAcknowledgementSchema = z.enum(["skip_validation", "in_progress_active"]);
-export type RuntimePostDeployVerificationAcknowledgement = z.infer<
-	typeof runtimePostDeployVerificationAcknowledgementSchema
->;
-
 // 验证项的两种 kind（plan Stage 1）：
 //   guided_manual    = 引导人工型：只能人眼/人手观察的断言，触发时把用户带到操作位置并分步指引（见 guidance）。
 //   automated_script = 自动脚本型：可程序化外部观察的断言，server 端 spawn 脚本执行，通过即自动勾选（见 script/run）。
@@ -5184,6 +5190,106 @@ export type RuntimePostDeployVerificationChecklistItem = z.infer<
 	typeof runtimePostDeployVerificationChecklistItemSchema
 >;
 
+// ---- 按部署归属（2026-10-11 用户需求：只突出「最新一次 deploy 专门对应」的任务）----
+// 归属依据是任务持久化的提交来历（src/workspace/task-commit-integration-provenance.ts，sha + stable patch-id，
+// worktree 删掉后仍在）与部署区间 previousDeployedSourceCommit..deployedSourceCommit 的一对一匹配。
+// 持久化约束：本节与下方结案一节只给任务条目**新增可选字段**、不给已有枚举加值——旧 binary（回滚时）解析新文件
+// 只会丢掉新字段，不会把整个文件判成损坏而隔离。
+//   task_commits_included_in_this_deployment_delta                       = 任务提交随本次部署上线（面板置顶展开）
+//   task_commits_deployed_only_in_earlier_deployments_awaiting_verification = 早先部署已上线、至今未结案（积压，折叠）
+//   task_commits_not_yet_deployed_or_task_unattributable                 = 提交还不在已部署 commit 里，或无从归属（折叠）
+export const runtimePostDeployVerificationTaskDeploymentAttributionZoneSchema = z.enum([
+	"task_commits_included_in_this_deployment_delta",
+	"task_commits_deployed_only_in_earlier_deployments_awaiting_verification",
+	"task_commits_not_yet_deployed_or_task_unattributable",
+]);
+export type RuntimePostDeployVerificationTaskDeploymentAttributionZone = z.infer<
+	typeof runtimePostDeployVerificationTaskDeploymentAttributionZoneSchema
+>;
+
+// 第三区里「无从归属」的原因；提交还没进已部署 commit 时为 task_commits_not_contained_in_deployed_source_commit。
+export const runtimePostDeployVerificationTaskDeploymentUnattributableReasonSchema = z.enum([
+	"no_task_commit_integration_provenance_entry",
+	"task_commit_integration_provenance_has_no_observed_task_commits",
+	"task_commits_not_contained_in_deployed_source_commit",
+	"git_inspection_failed",
+]);
+export type RuntimePostDeployVerificationTaskDeploymentUnattributableReason = z.infer<
+	typeof runtimePostDeployVerificationTaskDeploymentUnattributableReasonSchema
+>;
+
+export const runtimePostDeployVerificationMatchedDeployedCommitSchema = z.object({
+	taskCommitSha: z.string(),
+	// 部署区间里被消费掉的那个提交：exact 时与 taskCommitSha 相同，patch-id 等价时是 cherry-pick / rebase 后的新 SHA。
+	deployedCommitSha: z.string(),
+	taskCommitMatchKind: z.enum(["exact_commit_sha", "stable_patch_id_equivalent"]),
+});
+export type RuntimePostDeployVerificationMatchedDeployedCommit = z.infer<
+	typeof runtimePostDeployVerificationMatchedDeployedCommitSchema
+>;
+
+export const runtimePostDeployVerificationTaskDeploymentAttributionSchema = z.object({
+	taskDeploymentAttributionZone: runtimePostDeployVerificationTaskDeploymentAttributionZoneSchema,
+	matchedDeployedCommitsInThisDeploymentDelta: z.array(runtimePostDeployVerificationMatchedDeployedCommitSchema),
+	taskDeploymentUnattributableReason: runtimePostDeployVerificationTaskDeploymentUnattributableReasonSchema.nullable(),
+	attributionComputedAtIso: z.string(),
+});
+export type RuntimePostDeployVerificationTaskDeploymentAttribution = z.infer<
+	typeof runtimePostDeployVerificationTaskDeploymentAttributionSchema
+>;
+
+// ---- 未全勾也能结案进 Done，但每个未勾项必须带原因（2026-10-11 用户需求）----
+// 原因码、确认项、结案请求等请求侧 schema 见 post-deploy-verification-done-entry-closure-contract.ts（顶部 re-export）。
+
+// 结案走的是哪条入口（进关系账本的完成证据；也是 recording 模块的类型来源）。前三个值是历史值，逐字保留。
+export const runtimePostDeployVerificationCompletionPathSchema = z.enum([
+	"web_ui_post_deploy_verification_panel_atomic_confirmation",
+	"kanban_cli_post_deploy_verification_completion_verb",
+	"kanban_runtime_reconciliation_finalizing_kanban_cli_completion_authorized_but_left_in_flight",
+	// 任何入口（看板按钮 / 拖拽 / Focus View / PDV 面板 / CLI `kanban task done`）经 taskCardAction 移入 Done 时，
+	// 服务端门禁授权并在移列后结案。
+	"kanban_runtime_task_card_action_move_into_done_through_post_deploy_verification_done_entry_gate",
+	// 门禁已授权、卡已进 Done，结案写盘却没完成（进程在两步之间退出）：runtime 对账按在途授权补完。
+	"kanban_runtime_reconciliation_finalizing_done_entry_closure_authorized_but_left_in_flight",
+]);
+export type RuntimePostDeployVerificationCompletionPath = z.infer<
+	typeof runtimePostDeployVerificationCompletionPathSchema
+>;
+
+// 任务的结案记录。verifiedAt 只在 all_checklist_items_checked 时写——带原因结案绝不冒充「PDV 通过」。
+// completion path 存为字符串（而非枚举）：将来新增入口时，旧 binary 解析文件不会因未知枚举值把整个文件判成损坏。
+export const runtimePostDeployVerificationClosureSchema = z.object({
+	postDeployVerificationClosureOutcome: runtimePostDeployVerificationClosureOutcomeSchema,
+	closedAtIso: z.string(),
+	postDeployVerificationCompletionPath: z.string(),
+	uncheckedChecklistItemClosureReasons: z.array(
+		runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
+	),
+	confirmedAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
+	taskDeploymentAttributionZoneAtClosure: runtimePostDeployVerificationTaskDeploymentAttributionZoneSchema.nullable(),
+	deferredNaturalUsageObservationRecordIds: z.array(z.string()),
+});
+export type RuntimePostDeployVerificationClosure = z.infer<typeof runtimePostDeployVerificationClosureSchema>;
+
+// 门禁授权后、移列前写下的在途授权：移列成功而结案写盘失败时，runtime 对账据此补完（不再要求重新给原因）；
+// 移列没成功就过期清除。结案时按**当时的** checklist 重新核验结局，anticipated... 只是授权那一刻的预期。
+export const runtimePostDeployVerificationDoneEntryClosureAuthorizationInFlightSchema = z.object({
+	authorizedAtIso: z.string(),
+	expiresAtIso: z.string(),
+	anticipatedPostDeployVerificationClosureOutcome: runtimePostDeployVerificationClosureOutcomeSchema,
+	uncheckedChecklistItemClosureReasons: z.array(
+		runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
+	),
+	confirmedAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
+	// 移列由 CLI 完成动词发起时（授权那一刻任务带着 CLI 在途完成记录）为 kanban_cli_post_deploy_verification_completion_verb，
+	// 由服务端据记录推导、不信客户端自报；下一个字段同理取自该记录。缺省 = 没有用 `--force`。
+	postDeployVerificationCompletionPath: z.string(),
+	confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: z.boolean().optional(),
+});
+export type RuntimePostDeployVerificationDoneEntryClosureAuthorizationInFlight = z.infer<
+	typeof runtimePostDeployVerificationDoneEntryClosureAuthorizationInFlightSchema
+>;
+
 // CLI 两步确认跨进程，token 必须持久化于 task 条目而非内存（plan 1c / Grilling #8）。
 // columnIdAtIssuance 绑定发放时所在列——confirm 时任务列已变（如自动流转）则 token 失效重发。
 export const runtimePostDeployVerificationPendingConfirmationSchema = z.object({
@@ -5198,7 +5304,15 @@ export const runtimePostDeployVerificationPendingConfirmationSchema = z.object({
 	kanbanCliCompletionAuthorizedBeforeMoveIntoDone: z
 		.object({
 			authorizedAtIso: z.string(),
-			forcedCompletionWithoutAllVerificationsPassed: z.boolean(),
+			// 历史字段名与行为不符：`--force` 从来只跳过 token 握手、不跳过勾选。读取以下一个字段为准、缺失时回退本字段。
+			// 2026-10-11 之前的 schema 把本字段定为**必填**：过渡期新写入必须两个都写（同值），否则回滚到旧 binary 时
+			// 整个状态文件解析失败、被隔离成 .corrupt-*。
+			forcedCompletionWithoutAllVerificationsPassed: z.boolean().optional(),
+			confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: z.boolean().optional(),
+			// CLI 带原因结案（`--reason-for-all-unchecked` 等）时解析好的逐项原因；全勾结案为空。
+			uncheckedChecklistItemClosureReasons: z
+				.array(runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema)
+				.optional(),
 		})
 		.optional(),
 });
@@ -5213,10 +5327,29 @@ export const runtimePostDeployVerificationTaskSchema = z.object({
 	matchedCommits: z.array(z.string()),
 	inclusionReason: runtimePostDeployVerificationInclusionReasonSchema,
 	checklist: z.array(runtimePostDeployVerificationChecklistItemSchema),
+	// 只在全勾结案时写（「PDV 通过」）；带原因结案见 postDeployVerificationClosure。
 	verifiedAt: z.string().nullable(),
 	boardMovedToDoneAt: z.string().nullable(),
 	pendingConfirmation: runtimePostDeployVerificationPendingConfirmationSchema.nullable(),
 	droppedReason: runtimePostDeployVerificationDroppedReasonSchema.nullable(),
+	// ---- 以下均为 2026-10-11 起新增的可选字段（旧数据解析为默认值）----
+	// 本组部署的归属；null = 尚未计算（旧组 / record 时 git 不可用），由 runtime 对账补算。
+	taskDeploymentAttribution: runtimePostDeployVerificationTaskDeploymentAttributionSchema.nullable().default(null),
+	// 任务提交首次随哪次部署上线（跨部署延续）。null 且 ...PredatesRetained... 为 false = 还没上线或无从得知。
+	firstDeployedInDeploymentId: z.string().nullable().default(null),
+	firstDeployedAtIso: z.string().nullable().default(null),
+	// 提交已在已部署 commit 里，但保留的部署组都找不到它首次上线的那一次（早于保留记录）。
+	firstDeploymentPredatesRetainedDeploymentRecords: z.boolean().default(false),
+	// 任务未结案期间经历过的部署（含本组）；长度即「已历经部署数」，与历史组裁剪解耦。
+	deploymentIdsRecordedWhileTaskAwaitingVerification: z.array(z.string()).default([]),
+	// 本组被新部署折叠时，这个未结案任务连同勾选进度被延续到了哪一组（历史组据此显示「已延续」而非「未核对」）。
+	carriedForwardIntoDeploymentId: z.string().nullable().default(null),
+	// 记录部署时任务已经在 Done：只作「本次部署还包含」的只读展示，不受门禁、不计待核对。
+	includedAsReadOnlyBecauseTaskAlreadyInDoneColumnWhenDeploymentRecorded: z.boolean().default(false),
+	doneEntryClosureAuthorizationInFlight: runtimePostDeployVerificationDoneEntryClosureAuthorizationInFlightSchema
+		.nullable()
+		.default(null),
+	postDeployVerificationClosure: runtimePostDeployVerificationClosureSchema.nullable().default(null),
 });
 export type RuntimePostDeployVerificationTask = z.infer<typeof runtimePostDeployVerificationTaskSchema>;
 
@@ -5397,11 +5530,18 @@ export type RuntimeConfirmVerificationCompleteRequest = z.infer<typeof runtimeCo
 
 // CLI `kanban deployment` 完成动词在 CLI 进程里做完核对与移列后，由 runtime 写 verifiedAt（dd2db Y-EVENT-14：
 // PDV 完成走 runtime procedure，「PDV 通过」事件只能由 runtime 记账）。forced 与确认项随请求带上，原样进事件。
+// 移入 Done 已经过 runtime 门禁结案时，本 procedure 幂等返回已结案的 task（不再重复记账）。
 export const runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema = z.object({
 	deploymentId: z.string(),
 	taskId: z.string(),
-	forcedCompletionWithoutAllVerificationsPassed: z.boolean(),
+	// 历史字段（名不副实，见 kanbanCliCompletionAuthorizedBeforeMoveIntoDone）；旧 CLI 只发这个。旧 runtime 把它定为必填，
+	// 过渡期新 CLI 两个都发（同值），免得刚构建完、还没重启的旧 runtime 拒收补记请求。
+	forcedCompletionWithoutAllVerificationsPassed: z.boolean().optional(),
+	confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: z.boolean().optional(),
 	confirmedAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
+	uncheckedChecklistItemClosureReasons: z
+		.array(runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema)
+		.optional(),
 });
 export type RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest = z.infer<
 	typeof runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema
@@ -5427,6 +5567,62 @@ export const runtimeConfirmVerificationCompleteResponseSchema = z.object({
 });
 export type RuntimeConfirmVerificationCompleteResponse = z.infer<
 	typeof runtimeConfirmVerificationCompleteResponseSchema
+>;
+
+// ---- 待在自然使用中观察的记录（2026-10-11）----
+// 未勾项以「触发时机随机 / 罕见，转为在自然使用中观察」结案时生成，独立文件
+// ~/.cline/kanban/post-deploy-verification-deferred-natural-usage-observation-records.json，不随部署组裁剪。
+// 它是将来「在合适时机程序化捕捉情境 → 多模态 agent 判定 → 归档」pipeline 的输入；本期只生成与只读列出，
+// 状态只有 awaiting_natural_usage_observation，枚举留给 pipeline 扩展（设计见
+// docs/post-deploy-verification-natural-usage-observation-pipeline-design.md）。
+export const runtimePostDeployVerificationNaturalUsageObservationStatusSchema = z.enum([
+	"awaiting_natural_usage_observation",
+]);
+export type RuntimePostDeployVerificationNaturalUsageObservationStatus = z.infer<
+	typeof runtimePostDeployVerificationNaturalUsageObservationStatusSchema
+>;
+
+export const runtimePostDeployVerificationDeferredNaturalUsageObservationRecordSchema = z.object({
+	// (workspaceId, taskId, 结案时刻, checklistItemId) 的哈希：同一次结案重复写入幂等。
+	deferredNaturalUsageObservationRecordId: z.string(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	sourceDeploymentId: z.string(),
+	sourceDeployedSourceCommit: z.string(),
+	sourceChecklistItemId: z.string(),
+	// authored 项才有；commit / custom 项为 null。
+	sourceAuthoredVerificationId: z.string().nullable(),
+	assertionLabel: z.string(),
+	checklistItemKind: runtimePostDeployVerificationItemKindSchema,
+	guidanceSnapshot: runtimePostDeployVerificationGuidanceSchema.nullable(),
+	automatedScriptSnapshot: runtimePostDeployVerificationScriptSchema.nullable(),
+	// 结案时刻意保留不清理的资产目录（automated 脚本、fixture）；没有资产为 null。
+	retainedVerificationAssetsDirectory: z.string().nullable(),
+	deferralReasonText: z.string().nullable(),
+	deferredAtIso: z.string(),
+	naturalUsageObservationStatus: runtimePostDeployVerificationNaturalUsageObservationStatusSchema,
+});
+export type RuntimePostDeployVerificationDeferredNaturalUsageObservationRecord = z.infer<
+	typeof runtimePostDeployVerificationDeferredNaturalUsageObservationRecordSchema
+>;
+
+export const runtimePostDeployVerificationDeferredNaturalUsageObservationRecordsFileSchema = z.object({
+	deferredNaturalUsageObservationRecords: z.array(
+		runtimePostDeployVerificationDeferredNaturalUsageObservationRecordSchema,
+	),
+});
+export type RuntimePostDeployVerificationDeferredNaturalUsageObservationRecordsFile = z.infer<
+	typeof runtimePostDeployVerificationDeferredNaturalUsageObservationRecordsFileSchema
+>;
+
+// deployment.listDeferredNaturalUsageObservationRecords（query）：当前 workspace 的待观察记录。
+export const runtimeListDeferredNaturalUsageObservationRecordsResponseSchema = z.object({
+	deferredNaturalUsageObservationRecords: z.array(
+		runtimePostDeployVerificationDeferredNaturalUsageObservationRecordSchema,
+	),
+});
+export type RuntimeListDeferredNaturalUsageObservationRecordsResponse = z.infer<
+	typeof runtimeListDeferredNaturalUsageObservationRecordsResponseSchema
 >;
 
 // ══════════════════════════════════════════════════════════════════════════════

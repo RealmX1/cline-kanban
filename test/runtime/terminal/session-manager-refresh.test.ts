@@ -258,4 +258,60 @@ describe("TerminalSessionManager refreshTaskTerminal", () => {
 		expect(wedged?.stopCalls.length).toBeGreaterThanOrEqual(2);
 		expect(wedged?.stopCalls.some((call) => call.force)).toBe(true);
 	});
+
+	// 前端陈旧会话自动续跑的结论是客户端用自己手里的 summary 下的。多标签页同时打开同一张卡时，第二个请求进闸
+	// 那一刻会话已被第一个接回来——照常「停掉再起」就是把刚接回来的会话杀掉重来。
+	it("前端陈旧会话自动续跑遇到活会话时不停不起，直接返回当前 summary", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+		const manager = new TerminalSessionManager();
+		const request = {
+			taskId: "task-auto-resume-live",
+			agentId: "claude" as const,
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-auto-resume-live",
+			prompt: "",
+			resumeFromTrash: true,
+		};
+		await manager.startTaskSession(request);
+
+		const summary = await manager.refreshTaskTerminal(request, "stale_session_client_auto_resume");
+
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+		expect(spawnedSessions[0]?.stop).not.toHaveBeenCalled();
+		expect(summary.pid).toBe(111);
+	});
+
+	it("前端陈旧会话自动续跑在会话确实已不在时照常续跑", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+		const manager = new TerminalSessionManager();
+		const request = {
+			taskId: "task-auto-resume-dead",
+			agentId: "claude" as const,
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-auto-resume-dead",
+			prompt: "",
+			resumeFromTrash: true,
+		};
+		await manager.startTaskSession(request);
+		// 没有任何监听者 ⇒ 退出后不会自动重启，正是「回收后没人在看」的形态。
+		spawnedSessions[0]?.triggerExit(129);
+		expect(manager.getSummary("task-auto-resume-dead")?.pid).toBeNull();
+
+		const summary = await manager.refreshTaskTerminal(request, "stale_session_client_auto_resume");
+
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		expect(summary.pid).toBe(222);
+	});
 });

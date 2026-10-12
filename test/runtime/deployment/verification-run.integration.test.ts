@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { RuntimePostDeployVerificationState } from "../../../src/core/api-contract";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import { getPostDeployVerificationStatePath } from "../../../src/deployment/post-deploy-verification-state";
 import { ensureVerificationAssetsDir } from "../../../src/deployment/verification-assets";
 import { createDeploymentApi } from "../../../src/trpc/deployment-api";
@@ -89,6 +90,7 @@ describe.sequential("runPostDeployVerificationItem integration", () => {
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},

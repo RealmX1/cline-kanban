@@ -879,6 +879,18 @@ export async function readRawTaskCommitLandingSnapshotForRelationLedgerEvent(
 	};
 }
 
+// 部署归属（src/deployment/task-deployment-attribution-from-commit-integration-provenance.ts）的输入：每个 task 跨全部
+// 世累积观测到的自有提交（sha + stable patch-id，按 sha 去重）。只读已持久化的事实、不起 git；没有条目的 task 不在 Map 里。
+// 用跨世累积而不是最新一世的 S：部署回答「这个 task 的哪些改动随部署上线了」，旧世已落地的提交同样算数。
+export async function readObservedTaskCommitsAcrossIncarnationsByTaskId(
+	workspaceId: string,
+): Promise<Map<string, ObservedTaskCommit[]>> {
+	const file = await readProvenanceFile(workspaceId);
+	return new Map(
+		Object.values(file.tasks).map((entry) => [entry.taskId, deduplicateObservedTaskCommits(entry.incarnations)]),
+	);
+}
+
 // 激活补发扫描的范围（§R3 Y-PHASE-3「对 1a–1c 期间的快照补发」）：快照带自有提交集合字段的条目，即 1a 起被探测过的 task，
 // 含已删卡（provenance 不再随删卡、删 worktree 删除）。更早的条目没有 S，交给 2b 回填。
 export async function listTaskCommitIntegrationProvenanceEntriesProbedSinceLandingDataPreservation(

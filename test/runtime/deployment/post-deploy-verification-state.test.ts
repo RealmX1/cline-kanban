@@ -10,6 +10,7 @@ import type {
 	RuntimePostDeployVerificationState,
 	RuntimePostDeployVerificationTask,
 } from "../../../src/core/api-contract";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	applyVerificationRunResult,
 	computeRequiredAcknowledgementsForColumn,
@@ -128,6 +129,7 @@ describe.sequential("post-deploy-verification-state", () => {
 			boardMovedToDoneAt: overrides.boardMovedToDoneAt ?? null,
 			pendingConfirmation: overrides.pendingConfirmation ?? null,
 			droppedReason: overrides.droppedReason ?? null,
+			...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 		};
 	}
 
@@ -246,6 +248,7 @@ describe.sequential("post-deploy-verification-state", () => {
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},
@@ -673,6 +676,7 @@ describe.sequential("post-deploy-verification-state", () => {
 							],
 							// 竞态后遗症：reconcile 误标 + confirm 仍在途。
 							droppedReason: "moved_out_manually",
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 							pendingConfirmation: {
 								token: "tok",
 								expiresAtIso: FAR_FUTURE_ISO,
@@ -710,6 +714,7 @@ describe.sequential("post-deploy-verification-state", () => {
 							],
 							// 竞态后遗症：reconcile 误标，confirm 仍在途。
 							droppedReason: "moved_out_manually",
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 							pendingConfirmation: {
 								token: "tok-ok",
 								expiresAtIso: FAR_FUTURE_ISO,

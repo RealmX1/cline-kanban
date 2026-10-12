@@ -177,7 +177,13 @@ function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void
 	return { promise, resolve };
 }
 
-function createApiForTest() {
+function createApiForTest(
+	options: {
+		postDeployVerificationDoneEntryGate?: Parameters<
+			typeof createTaskCardActionApi
+		>[0]["postDeployVerificationDoneEntryGate"];
+	} = {},
+) {
 	const liveTaskSessionSummaryByTaskId = new Map<string, RuntimeTaskSessionSummary>();
 	const startTaskSessionRequests: RuntimeTaskSessionStartRequest[] = [];
 	const runtimeApi = {
@@ -244,6 +250,9 @@ function createApiForTest() {
 			liveTaskSessionSummaryByTaskId.get(taskId) ?? null,
 		taskCardActionPerTaskCommandSerializer: createTaskCardActionPerTaskCommandSerializer(),
 		onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards,
+		...(options.postDeployVerificationDoneEntryGate
+			? { postDeployVerificationDoneEntryGate: options.postDeployVerificationDoneEntryGate }
+			: {}),
 	});
 	return {
 		api,
@@ -1295,6 +1304,119 @@ describe("taskCardAction.readTaskCardWithBoardColumn", () => {
 			taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
 			lookedUpTaskId: "nope1",
 		});
+	});
+});
+
+describe("taskCardAction.moveTaskCardIntoDone… 的 Post-Deploy Verification 门禁", () => {
+	function createFakePostDeployVerificationDoneEntryGate(
+		decision: Awaited<
+			ReturnType<
+				NonNullable<
+					Parameters<typeof createTaskCardActionApi>[0]["postDeployVerificationDoneEntryGate"]
+				>["authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone"]
+			>
+		>,
+	) {
+		return {
+			authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone: vi.fn(async () => {
+				harness.callOrder.push("authorizePostDeployVerificationDoneEntry");
+				return decision;
+			}),
+			finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone: vi.fn(async () => {
+				harness.callOrder.push("finalizePostDeployVerificationClosure");
+				return "closed_into_done_with_unchecked_items_reasoned" as const;
+			}),
+			revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed: vi.fn(async () => {
+				harness.callOrder.push("revokePostDeployVerificationDoneEntryAuthorization");
+			}),
+		};
+	}
+
+	it("未勾项缺原因：PRECONDITION_FAILED（带机读前缀），卡不动、不停会话", async () => {
+		seedWorkspace(createBoard({ validation: [createCard("task-v")] }));
+		const gate = createFakePostDeployVerificationDoneEntryGate({
+			postDeployVerificationDoneEntryGateDecision:
+				"move_into_done_rejected_because_unchecked_items_lack_closure_reasons",
+			uncheckedChecklistItemsMissingClosureReason: [{ checklistItemId: "authored:x", checklistItemLabel: "断言 X" }],
+		});
+		const { api } = createApiForTest({ postDeployVerificationDoneEntryGate: gate });
+
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "task-v", boardMutationInitiator: "web_ui_user_gesture" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+			),
+		).rejects.toMatchObject({
+			code: "PRECONDITION_FAILED",
+			message: expect.stringMatching(
+				/^POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS:.*authored:x \(断言 X\)/,
+			),
+		});
+		expect(readColumnTaskIds("validation")).toEqual(["task-v"]);
+		expect(harness.callOrder).toEqual(["authorizePostDeployVerificationDoneEntry"]);
+		expect(gate.authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workspaceId: WORKSPACE_SCOPE.workspaceId,
+				taskId: "task-v",
+				boardColumnIdOfTaskCardBeforeMove: "validation",
+			}),
+		);
+	});
+
+	it("放行：移列后结案，再停会话、删 worktree；原因原样交给门禁，响应带结案结局", async () => {
+		seedWorkspace(createBoard({ validation: [createCard("task-v")] }));
+		const gate = createFakePostDeployVerificationDoneEntryGate({
+			postDeployVerificationDoneEntryGateDecision: "move_into_done_authorized_with_closure_authorization_in_flight",
+			anticipatedPostDeployVerificationClosureOutcome: "closed_into_done_with_unchecked_items_reasoned",
+		});
+		const { api } = createApiForTest({ postDeployVerificationDoneEntryGate: gate });
+		const closure = {
+			closureReasonAppliedToRemainingUncheckedChecklistItems: {
+				uncheckedChecklistItemClosureReasonCode: "manual_reproduction_cost_exceeds_verification_value" as const,
+			},
+		};
+
+		const response = await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			{
+				taskId: "task-v",
+				boardMutationInitiator: "web_ui_user_gesture",
+				postDeployVerificationDoneEntryClosure: closure,
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+
+		expect(harness.callOrder.slice(0, 3)).toEqual([
+			"authorizePostDeployVerificationDoneEntry",
+			"boardWrite:web_ui_task_card_action_move_into_done",
+			"finalizePostDeployVerificationClosure",
+		]);
+		expect(readColumnTaskIds("trash")).toEqual(["task-v"]);
+		expect(response.postDeployVerificationClosureOutcome).toBe("closed_into_done_with_unchecked_items_reasoned");
+		expect(gate.authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone).toHaveBeenCalledWith(
+			expect.objectContaining({ postDeployVerificationDoneEntryClosure: closure }),
+		);
+		expect(gate.revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed).not.toHaveBeenCalled();
+	});
+
+	it("不受门禁：照常移列，不结案、不撤销", async () => {
+		seedWorkspace(createBoard({ review: [createCard("task-r")] }));
+		const gate = createFakePostDeployVerificationDoneEntryGate({
+			postDeployVerificationDoneEntryGateDecision: "task_not_subject_to_post_deploy_verification_done_entry_gate",
+		});
+		const { api } = createApiForTest({ postDeployVerificationDoneEntryGate: gate });
+
+		const response = await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			{ taskId: "task-r" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+
+		expect(readColumnTaskIds("trash")).toEqual(["task-r"]);
+		expect(response.postDeployVerificationClosureOutcome).toBeNull();
+		expect(gate.finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone).not.toHaveBeenCalled();
+		expect(gate.revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed).not.toHaveBeenCalled();
 	});
 });
 

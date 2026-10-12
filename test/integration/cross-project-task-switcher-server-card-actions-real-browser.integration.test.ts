@@ -1682,6 +1682,121 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			});
 			recordCheck("compact pinboard 编辑按钮中心命中 Pencil，名称预填并保存，不会意外启动 Task");
 
+			// 真实浏览器仍持有启动响应时放行 AI，覆盖回填撞交互锁的窗口，不调用外部模型。
+			for (const entry of ["同项目单卡", "跨项目单卡", "清空名称保存后启动"]) {
+				const workspaceId = entry === "跨项目单卡" ? betaWorkspaceId : alphaWorkspaceId;
+				const suggestedTitle = `[FIX]${entry}后台回填已生效`;
+				const prompt = `${entry}起名竞争验证`;
+				let releaseSuggestion!: () => void;
+				let releaseStartResponse!: () => void;
+				const suggestionMayReturn = new Promise<void>((resolve) => {
+					releaseSuggestion = resolve;
+				});
+				const startResponseMayReturn = new Promise<void>((resolve) => {
+					releaseStartResponse = resolve;
+				});
+				let startResponseIsHeld = false;
+				let suggestionRequestCount = 0;
+				const suggestionRoute = "**/api/trpc/*runtime.suggestTaskNamesFromTaskDescription*";
+				const startRoute = "**/api/trpc/taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress*";
+				await page.route(suggestionRoute, async (route) => {
+					suggestionRequestCount += 1;
+					// 起名会与 saveConfig 合批；只替换起名响应，其余 procedure 仍由真实 runtime 执行。
+					const suggestionProcedureIndex = new URL(route.request().url()).pathname
+						.split("/")
+						.at(-1)
+						?.split(",")
+						.indexOf("runtime.suggestTaskNamesFromTaskDescription");
+					if (suggestionProcedureIndex === undefined || suggestionProcedureIndex < 0)
+						throw new Error("未找到合批请求中的起名 procedure");
+					const requestBody: Record<string, unknown> = route.request().postDataJSON();
+					requestBody[String(suggestionProcedureIndex)] = { taskDescription: "" };
+					const response = await route.fetch({ postData: JSON.stringify(requestBody) });
+					const batchResponse: unknown[] = await response.json();
+					batchResponse[suggestionProcedureIndex] = {
+						result: { data: { status: "suggested", suggestedTaskNames: [suggestedTitle] } },
+					};
+					await suggestionMayReturn;
+					await route.fulfill({ response, json: batchResponse });
+				});
+				await page.route(startRoute, async (route) => {
+					const response = await route.fetch();
+					startResponseIsHeld = true;
+					await startResponseMayReturn;
+					await route.fulfill({ response });
+				});
+				try {
+					await page.evaluate(
+						(boardScope) => {
+							sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", boardScope);
+							localStorage.setItem("kanban.selected-board-or-single-project-scope.v1", boardScope);
+						},
+						entry === "跨项目单卡" ? "board_scope_all_projects" : "single_project_scope",
+					);
+					await page.goto(`${webUiOrigin}/${alphaWorkspaceId}${entry === "跨项目单卡" ? `?task=${focusId}` : ""}`);
+					if (entry === "跨项目单卡") {
+						const runningSectionToggle = page
+							.getByTestId("cross-project-task-switcher-section-running")
+							.getByRole("button", { name: /^Running/ });
+						if ((await runningSectionToggle.getAttribute("aria-expanded")) === "false")
+							await runningSectionToggle.click();
+					}
+					if (entry === "清空名称保存后启动") {
+						await clickCardAction(namingBacklogId, "Edit task title");
+						const editDialog = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
+						await editDialog.getByLabel("Task name", { exact: true }).fill("");
+						await editDialog.getByRole("button", { name: "Save and start", exact: true }).click();
+					} else {
+						await page.getByRole("button", { name: "Create task", exact: true }).click();
+						const createDialog = page.getByRole("dialog").filter({ hasText: "New task" });
+						if (entry === "跨项目单卡") {
+							await createDialog
+								.locator('[data-testid="task-creation-target-project-field"]')
+								.getByRole("button")
+								.click();
+							await page
+								.getByRole("button", { name: /e2e-project-beta/ })
+								.last()
+								.click();
+						}
+						await createDialog.getByPlaceholder("Describe the task...").fill(prompt);
+						await createDialog.getByRole("button", { name: "Start task", exact: true }).click();
+					}
+					await observeUntil(async () => startResponseIsHeld, "AI 尚未返回时真实 agent 已启动");
+					const cards = (await runtimeClient(workspaceId).workspace.getState.query()).board.columns.flatMap(
+						(column) => column.cards,
+					);
+					const taskId =
+						entry === "清空名称保存后启动" ? namingBacklogId : cards.find((task) => task.prompt === prompt)?.id;
+					if (!taskId) throw new Error("未找到起名竞争验证卡片");
+					const beforeBackfill = await taskState(taskId, workspaceId);
+					expect(beforeBackfill.columnId).toBe("in_progress");
+					expect(beforeBackfill.summary?.pid).toBeTypeOf("number");
+					writeFileSync(
+						join(evidenceOutputDirectory, `task-ai-name-backfill-${entry}-requests.json`),
+						JSON.stringify({ suggestionRequestCount, recentRequests: pageRequests.slice(-30) }, null, 2),
+					);
+					expect(suggestionRequestCount).toBe(1);
+					releaseSuggestion();
+					await observeUntil(
+						async () => (await taskState(taskId, workspaceId)).card?.title === suggestedTitle,
+						"启动响应在途时 AI 回填落盘",
+					);
+					await page.getByText(suggestedTitle, { exact: true }).first().waitFor();
+					expect(suggestionRequestCount).toBe(1);
+					releaseStartResponse();
+					await observeUntil(async () => pendingTaskCardActionRequests.size === 0, "启动响应完成");
+					expect((await taskState(taskId, workspaceId)).card?.title).toBe(suggestedTitle);
+					await page.screenshot({ path: join(evidenceOutputDirectory, `task-ai-name-backfill-${entry}.png`) });
+					recordCheck(`${entry}：AI 与真实 PTY 启动独立，启动响应在途时回填落盘并广播`);
+				} finally {
+					releaseSuggestion();
+					releaseStartResponse();
+					await page.unroute(suggestionRoute);
+					await page.unroute(startRoute);
+				}
+			}
+
 			await runCli(
 				["task", "set-current-work-phase-goal", "--goal", "跨运行时重启保留的阶段目标"],
 				firstProject.repositoryPath,

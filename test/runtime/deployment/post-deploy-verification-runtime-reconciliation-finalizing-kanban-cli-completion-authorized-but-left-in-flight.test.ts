@@ -10,6 +10,7 @@ import type {
 	RuntimePostDeployVerificationState,
 	RuntimePostDeployVerificationTask,
 } from "../../../src/core/api-contract";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
@@ -33,7 +34,7 @@ const recordedPostDeployVerificationPassedObservations = vi.hoisted(
 			workspaceId: string;
 			deployedSourceCommit: string;
 			postDeployVerificationCompletionPath: string;
-			forcedCompletionWithoutAllVerificationsPassed: boolean;
+			confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: boolean;
 			confirmedAcknowledgements: string[];
 		}>,
 );
@@ -83,6 +84,7 @@ function buildTask(
 		boardMovedToDoneAt: null,
 		pendingConfirmation,
 		droppedReason: null,
+		...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 	};
 }
 
@@ -227,6 +229,10 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			boardMovedToDoneAt: NOW_ISO,
 			pendingConfirmation: null,
 			droppedReason: null,
+			postDeployVerificationClosure: expect.objectContaining({
+				postDeployVerificationClosureOutcome: "all_checklist_items_checked",
+				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
+			}),
 		});
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([
 			{
@@ -235,7 +241,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 				workspaceId: "ws-1",
 				deployedSourceCommit: FOLDED_GROUP_DEPLOYED_SOURCE_COMMIT,
 				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
-				forcedCompletionWithoutAllVerificationsPassed: true,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
 				confirmedAcknowledgements: ["skip_validation"],
 			},
 		]);
@@ -261,6 +267,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 		expect(readTaskInDeploymentGroup(deploymentId, "authorized-just-now")).toMatchObject({
 			verifiedAt: null,
 			droppedReason: null,
+			...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 		});
 		expect(readTaskInDeploymentGroup(deploymentId, "authorized-just-now")?.pendingConfirmation).not.toBeNull();
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([]);
@@ -287,6 +294,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			verifiedAt: null,
 			pendingConfirmation: null,
 			droppedReason: null,
+			...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 		});
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([]);
 	});
@@ -314,6 +322,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			verifiedAt: null,
 			pendingConfirmation: null,
 			droppedReason: "moved_out_manually",
+			...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 		});
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([]);
 	});
@@ -344,6 +353,10 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			boardMovedToDoneAt: NOW_ISO,
 			pendingConfirmation: null,
 			droppedReason: null,
+			postDeployVerificationClosure: expect.objectContaining({
+				postDeployVerificationClosureOutcome: "all_checklist_items_checked",
+				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
+			}),
 		});
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([
 			{
@@ -352,7 +365,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 				workspaceId: "ws-1",
 				deployedSourceCommit: FOLDED_GROUP_DEPLOYED_SOURCE_COMMIT,
 				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
-				forcedCompletionWithoutAllVerificationsPassed: true,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
 				confirmedAcknowledgements: ["skip_validation"],
 			},
 		]);
@@ -422,6 +435,10 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			verifiedAt: NOW_ISO,
 			pendingConfirmation: null,
 			droppedReason: null,
+			postDeployVerificationClosure: expect.objectContaining({
+				postDeployVerificationClosureOutcome: "all_checklist_items_checked",
+				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
+			}),
 		});
 		expect(recordedPostDeployVerificationPassedObservations.map((observation) => observation.deploymentId)).toEqual([
 			foldedDeploymentId,
@@ -453,6 +470,7 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			verifiedAt: null,
 			boardMovedToDoneAt: null,
 			droppedReason: null,
+			...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 			pendingConfirmation: { token: ordinaryConfirmationToken },
 		});
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([]);
@@ -486,6 +504,103 @@ describe.sequential("runtime finalization of authorized Kanban CLI completions l
 			undefined,
 		);
 		expect(recordedPostDeployVerificationPassedObservations).toEqual([]);
+	});
+
+	// 授权写下后 checklist 仍可被改：对账补完按当前 checklist 重新核验，证明不了任何结局的不冒充通过、也不再永远卡在待核对。
+	it("re-verifies authorizations left in flight against the current checklist and settles unprovable ones as moved out manually instead of leaving them stuck", async () => {
+		const foldedDeploymentId = randomUUID();
+		const activeDeploymentId = randomUUID();
+		const uncheckedGuidedManualItem = {
+			id: "unchecked-after-authorization",
+			label: "授权后被取消勾选的断言",
+			checked: false,
+			source: "authored" as const,
+			kind: "guided_manual" as const,
+			guidance: null,
+			script: null,
+			run: null,
+			cleanup: null,
+		};
+		const doneEntryAuthorizationAnticipatingPass = {
+			authorizedAtIso: AUTHORIZED_TWO_MINUTES_BEFORE_NOW_ISO,
+			expiresAtIso: NOT_YET_EXPIRED_ISO,
+			anticipatedPostDeployVerificationClosureOutcome: "all_checklist_items_checked" as const,
+			uncheckedChecklistItemClosureReasons: [],
+			confirmedAcknowledgements: [],
+			postDeployVerificationCompletionPath:
+				"kanban_runtime_task_card_action_move_into_done_through_post_deploy_verification_done_entry_gate",
+		};
+		writeStateWithDeploymentGroups([
+			buildFoldedDeploymentGroup(foldedDeploymentId, [
+				{
+					...buildTask(
+						"kanban-cli-record-whose-reasons-no-longer-cover",
+						buildKanbanCliInFlightCompletionRecord({
+							authorizedAtIso: AUTHORIZED_TWO_MINUTES_BEFORE_NOW_ISO,
+							expiresAtIso: ALREADY_EXPIRED_ISO,
+						}),
+					),
+					checklist: [uncheckedGuidedManualItem],
+				},
+				{
+					...buildTask("done-entry-authorization-whose-checklist-changed", null),
+					checklist: [uncheckedGuidedManualItem],
+					doneEntryClosureAuthorizationInFlight: doneEntryAuthorizationAnticipatingPass,
+				},
+			]),
+			buildActiveDeploymentGroup(activeDeploymentId, [
+				{
+					...buildTask("done-entry-authorization-from-kanban-cli-with-force", null),
+					doneEntryClosureAuthorizationInFlight: {
+						...doneEntryAuthorizationAnticipatingPass,
+						confirmedAcknowledgements: ["skip_validation"],
+						postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+						confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
+					},
+				},
+			]),
+		]);
+
+		await runRuntimePostDeployVerificationStatePollingReconciliation({
+			activeDeploymentId,
+			currentBoardTasks: [
+				{ taskId: "kanban-cli-record-whose-reasons-no-longer-cover", columnId: "trash" },
+				{ taskId: "done-entry-authorization-whose-checklist-changed", columnId: "trash" },
+				{ taskId: "done-entry-authorization-from-kanban-cli-with-force", columnId: "trash" },
+			],
+		});
+
+		for (const taskId of [
+			"kanban-cli-record-whose-reasons-no-longer-cover",
+			"done-entry-authorization-whose-checklist-changed",
+		]) {
+			expect(readTaskInDeploymentGroup(foldedDeploymentId, taskId)).toMatchObject({
+				verifiedAt: null,
+				postDeployVerificationClosure: null,
+				pendingConfirmation: null,
+				doneEntryClosureAuthorizationInFlight: null,
+				droppedReason: "moved_out_manually",
+			});
+		}
+		expect(
+			readTaskInDeploymentGroup(activeDeploymentId, "done-entry-authorization-from-kanban-cli-with-force"),
+		).toMatchObject({
+			verifiedAt: NOW_ISO,
+			postDeployVerificationClosure: expect.objectContaining({
+				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
+			}),
+		});
+		expect(recordedPostDeployVerificationPassedObservations).toEqual([
+			{
+				taskId: "done-entry-authorization-from-kanban-cli-with-force",
+				deploymentId: activeDeploymentId,
+				workspaceId: "ws-1",
+				deployedSourceCommit: ACTIVE_GROUP_DEPLOYED_SOURCE_COMMIT,
+				postDeployVerificationCompletionPath: RUNTIME_FINALIZATION_COMPLETION_PATH,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
+				confirmedAcknowledgements: ["skip_validation"],
+			},
+		]);
 	});
 
 	it("is driven by every getPostDeployVerificationState poll, including when the workspace has no active deployment group", async () => {

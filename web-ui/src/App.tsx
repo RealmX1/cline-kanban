@@ -23,11 +23,14 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
+import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
+import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
+import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
@@ -1056,6 +1059,12 @@ export default function App(): ReactElement {
 		});
 	}, [hasNoProjects, setSelectedBoardOrSingleProjectScope]);
 
+	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例，同时供顶栏 badge 派生待核对数、
+	// 并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
+	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
+
 	const {
 		handleProgrammaticCardMoveReady,
 		handleDragEnd,
@@ -1066,6 +1075,10 @@ export default function App(): ReactElement {
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
 		completePostDeployVerificationMoveToDone,
+		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
+		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
+		confirmPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone,
+		cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone,
 		isMoveToDoneConfirmOpen,
 		confirmMoveToDone,
 		cancelMoveToDone,
@@ -1107,6 +1120,8 @@ export default function App(): ReactElement {
 		readyForReviewNotificationsEnabled,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
+		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck: postDeployVerification.activeGroup,
+		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection: postDeployVerification.refresh,
 	});
 
 	const {
@@ -1128,16 +1143,65 @@ export default function App(): ReactElement {
 		setSelectedTaskId,
 	});
 
-	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例，同时供顶栏 badge 派生待核对数、
-	// 并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
-	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
-	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
 	const { setCollapsed: setPostDeployVerificationCollapsed } = postDeployVerification;
 	const postDeployVerificationPendingCount = postDeployVerification.pendingVerificationTaskCount;
 	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
 	const handleOpenPostDeployVerification = useCallback(() => {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
+	// PDV 面板条目上半部分是真实任务卡体：数据与动作和主看板同一份（displayedBoard、推流 session、同一组 handler，
+	// 参照 Focus View column-context-panel 的 TaskCardActionHandlerBundle），条目上的「移入 Done」因此同样过门禁。
+	const defaultAgentIdOfCurrentProject = runtimeProjectConfig?.selectedAgentId ?? null;
+	const defaultClineModelIdOfCurrentProject = runtimeProjectConfig?.clineProviderSettings?.modelId ?? null;
+	const realTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
+		useMemo((): RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries => {
+			const currentProjectTaskCardActionHandlers: TaskCardActionHandlerBundle = {
+				resolveTaskWorkspaceAbsoluteDirectoryPath,
+				onStartTask: handleStartTaskFromBoard,
+				onMoveToTrashTask: handleMoveReviewCardToTrash,
+				onMoveToValidationTask: handleMoveCardToValidation,
+				onMoveToReviewTask: handleMoveCardToReview,
+				onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+				onDeleteTask: handleOpenDeleteTask,
+				onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
+				onSaveTitle: handleSaveTaskTitle,
+				onEditTask: handleOpenEditTaskKeepingDetailSelection,
+				onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
+				onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+				moveToTrashLoadingById,
+				moveToReviewLoadingById,
+			};
+			return {
+				currentProjectDisplayedBoard: displayedBoard,
+				currentProjectTaskSessions: sessions,
+				currentProjectTaskCardActionHandlers,
+				currentProjectWorkspacePath: workspacePath ?? null,
+				onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
+				defaultAgentId: defaultAgentIdOfCurrentProject,
+				defaultClineModelId: defaultClineModelIdOfCurrentProject,
+			};
+		}, [
+			defaultAgentIdOfCurrentProject,
+			defaultClineModelIdOfCurrentProject,
+			displayedBoard,
+			handleCancelAutomaticTaskAction,
+			handleCardSelect,
+			handleMoveCardToReview,
+			handleMoveCardToValidation,
+			handleMoveReviewCardToTrash,
+			handleOpenDeleteTask,
+			handleOpenEditTaskKeepingDetailSelection,
+			handleRequestPinTaskToTaskPinboard,
+			handleRestoreTaskFromTrash,
+			handleSaveTaskTitle,
+			handleStartTaskFromBoard,
+			handleUnpinTaskFromTaskPinboard,
+			moveToReviewLoadingById,
+			moveToTrashLoadingById,
+			resolveTaskWorkspaceAbsoluteDirectoryPath,
+			sessions,
+			workspacePath,
+		]);
 
 	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
 	const boardScopeFocusViewFocusedTaskProjectId =
@@ -2093,6 +2157,19 @@ export default function App(): ReactElement {
 						onCancel={cancelMoveToDone}
 						onConfirm={confirmMoveToDone}
 					/>
+					{postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone ? (
+						<PostDeployVerificationUncheckedItemsClosureReasonDialog
+							key={`board-move-into-done:${postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}`}
+							dialogTitle="带原因移入 Done"
+							taskEntries={postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.taskEntries}
+							taskEntrySelectionMode="single_task_entry_always_included"
+							isSubmittingClosure={isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting}
+							onCancel={cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone}
+							onConfirmClosureRequestsBySelectedTaskId={
+								confirmPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone
+							}
+						/>
+					) : null}
 
 					<TaskSpotlightSearchDialog controller={taskSpotlightSearch} />
 
@@ -2136,6 +2213,16 @@ export default function App(): ReactElement {
 						completePostDeployVerificationMoveToDone={completePostDeployVerificationMoveToDone}
 						onSelectTask={setSelectedTaskId}
 						onNavigateToBoard={() => setSelectedTaskId(null)}
+						realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
+							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
+						}
+						isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
+							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
+							isMoveToDoneConfirmOpen ||
+							deleteTaskTarget !== null ||
+							taskPinboardPinReasonRequest !== null ||
+							editingTaskId !== null
+						}
 					/>
 				</div>
 			</LayoutCustomizationsProvider>

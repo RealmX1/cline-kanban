@@ -6,6 +6,7 @@ import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/component
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
+import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
 
 // 返回类型直接绑定生产类型（而不是就地写一个窄结构），这样 transcript 逻辑行的形状再变时
@@ -17,6 +18,7 @@ const {
 	mockTerminalInput,
 	mockReadScrollbackTranscript,
 	mockHasRenderedAnyTerminalContent,
+	mockAutomaticStaleSessionResumePhase,
 } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockResyncTerminalView: vi.fn(async () => {}),
@@ -24,6 +26,7 @@ const {
 	mockTerminalInput: vi.fn((_sequence: string) => true),
 	mockReadScrollbackTranscript: vi.fn((): TerminalScrollbackTranscriptLogicalLine[] => []),
 	mockHasRenderedAnyTerminalContent: vi.fn(() => true),
+	mockAutomaticStaleSessionResumePhase: vi.fn((): StaleAgentTerminalSessionAutomaticResumePhase | null => null),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
@@ -34,6 +37,7 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		isStopping: false,
 		isRefreshing: false,
 		isResyncingTerminalView: false,
+		automaticStaleSessionResumePhase: mockAutomaticStaleSessionResumePhase(),
 		isSearchOpen: false,
 		searchOpenRequestKey: 0,
 		searchResults: { resultCount: 0, resultIndex: -1 },
@@ -126,6 +130,7 @@ describe("AgentTerminalPanel", () => {
 		mockReadScrollbackTranscript.mockClear();
 		mockUseIsMobile.mockReturnValue(false);
 		mockHasRenderedAnyTerminalContent.mockReturnValue(true);
+		mockAutomaticStaleSessionResumePhase.mockReturnValue(null);
 	});
 
 	afterEach(() => {
@@ -470,6 +475,135 @@ describe("AgentTerminalPanel", () => {
 
 		expect(container.textContent).toContain("reclaimed after sitting idle past its retention window");
 		expect(container.textContent).not.toContain("This session is no longer running.");
+	});
+
+	// 打开任务时的陈旧会话自动续跑在路上：空态要说明正在续跑，且不给任何会和它抢 per-task 闸门的重启入口——
+	// 日志里有过续跑 6 秒后用户点重启、把刚起的进程杀掉重来的实例。
+	it.each(["waiting_for_visible_dwell", "resume_request_in_flight"] as const)(
+		"自动续跑进行中（%s）→ 空态说明正在续跑，重启按钮禁用、不给续跑按钮",
+		(phase) => {
+			mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+			mockAutomaticStaleSessionResumePhase.mockReturnValue(phase);
+			act(() => {
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={createBlankInterruptedSummary({ agentId: "claude" })}
+							showSessionToolbar={false}
+						/>
+					</TooltipProvider>,
+				);
+			});
+
+			expect(container.textContent).toContain("Resuming the previous conversation…");
+			expect(container.textContent).not.toContain("This session is no longer running.");
+			const restartButton = container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]');
+			expect(restartButton?.disabled).toBe(true);
+			expect(
+				[...container.querySelectorAll("button")].some((button) =>
+					button.textContent?.includes("Restart terminal session"),
+				),
+			).toBe(false);
+		},
+	);
+
+	it("自动续跑进行中、屏幕上还有旧输出 → 顶部横幅显示正在续跑，而不是「输出到此为止」", () => {
+		mockAutomaticStaleSessionResumePhase.mockReturnValue("resume_request_in_flight");
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("claude"), state: "awaiting_review", pid: null }}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("Resuming the previous conversation…");
+		expect(container.textContent).not.toContain("The output above is final.");
+	});
+
+	it("当前活体是被空闲回收结束的 → 横幅说明打开即自动续跑，而不是「输出到此为止」", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{
+							...createSummary("claude"),
+							state: "awaiting_review",
+							pid: null,
+							runtimeSessionIncarnationId: "incarnation-1",
+							agentSessionRuntimeReclamationOutcome: {
+								runtimeSessionIncarnationId: "incarnation-1",
+								sessionTransport: "pty_terminal",
+								reclamationTrigger: "response_generation_grace_period_expired",
+								attemptedAt: 1,
+								completedAt: 2,
+								rootProcessExitConfirmed: true,
+								descendantProcessesExitConfirmed: true,
+								survivingDescendantPids: [],
+								usedForcefulEscalation: true,
+								releasedResources: ["pty"],
+								failureReason: null,
+								nextRetryAt: null,
+							},
+						}}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("reclaimed after sitting idle. It resumes when you open the task");
+		expect(container.textContent).not.toContain("The output above is final.");
+	});
+
+	// 回收记录写了 failureReason（PTY 根进程已退、但 SIGKILL 后仍有后代存活）：资格判定不自动续跑，
+	// 横幅也不能承诺「打开即续跑」，回落为原文案。
+	it("当前活体的回收记录带 failureReason → 横幅不承诺自动续跑，回落为「输出到此为止」", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{
+							...createSummary("claude"),
+							state: "awaiting_review",
+							pid: null,
+							runtimeSessionIncarnationId: "incarnation-1",
+							agentSessionRuntimeReclamationOutcome: {
+								runtimeSessionIncarnationId: "incarnation-1",
+								sessionTransport: "pty_terminal",
+								reclamationTrigger: "response_generation_grace_period_expired",
+								attemptedAt: 1,
+								completedAt: 2,
+								rootProcessExitConfirmed: true,
+								descendantProcessesExitConfirmed: false,
+								survivingDescendantPids: [4242],
+								usedForcefulEscalation: true,
+								releasedResources: ["pty"],
+								failureReason: "SIGKILL 后仍有 1 个后代进程存活",
+								nextRetryAt: 3,
+							},
+						}}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain(
+			"Terminal stream closed — the agent process has exited. The output above is final.",
+		);
+		expect(container.textContent).not.toContain("It resumes when you open the task");
 	});
 
 	it("对话面板 agent（Cline）仍然禁用重启，且空态不给重启按钮", () => {

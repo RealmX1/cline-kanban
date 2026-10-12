@@ -12,10 +12,12 @@ import {
 	getAuthoredVerificationDefinitionsPath,
 	upsertAuthoredVerificationDefinition,
 } from "../../../src/deployment/authored-verification-definitions";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	getPostDeployVerificationStatePath,
 	reconcileGroup,
 } from "../../../src/deployment/post-deploy-verification-state";
+import { ensureVerificationAssetsDir } from "../../../src/deployment/verification-assets";
 import { createTempDir } from "../../utilities/temp-dir";
 
 // reconcileGroup 给「新进 validation 列的任务」动态加入组时，应把该任务已注册的 authored 定义 materialize 并合入其 checklist。
@@ -102,11 +104,14 @@ describe.sequential("reconcileGroup authored 合并", () => {
 		expect(authoredItem?.label).toBe("新进 validation 任务的 authored 验证");
 	});
 
-	it("组内已有的 validation 任务不触发 authored 存储访问（CI1(c) 回归：30s 轮询不产生 N+1 读）", async () => {
+	// 2026-10-11 起行为变更：晚于建组注册的 authored 定义也要合并进组内已有任务（以前只在任务加入组那一刻 materialize，
+	// 之后注册的定义永远进不了组）。N+1 约束保持：每轮对账只按 workspace 读一次定义文件（materializeAuthoredVerificationItemsForWorkspaceTasks），
+	// 不随组内任务数线性重读。有 authored 项后，未勾的通用兜底项「在已部署 build 上手工验证」去掉。
+	it("组内已有任务合并晚注册的 authored 定义，并去掉未勾的通用兜底项", async () => {
 		const deploymentId = randomUUID();
+		const verificationId = randomUUID();
 		const alreadyInGroupTaskId = "task-already-in-group";
 
-		// seed 一个「已含该 validation 任务」的组。
 		const state: RuntimePostDeployVerificationState = {
 			deploymentGroups: [
 				{
@@ -139,6 +144,7 @@ describe.sequential("reconcileGroup authored 合并", () => {
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},
@@ -147,12 +153,7 @@ describe.sequential("reconcileGroup authored 合并", () => {
 		const statePath = getPostDeployVerificationStatePath();
 		mkdirSync(dirname(statePath), { recursive: true });
 		writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
-
-		// 观察代理：故意写一份损坏的 authored 定义文件。若 reconcile 为组内已有任务读了 authored 存储，
-		// 损坏文件会被隔离改名（内容消失）；不读则原样保留。
-		const authoredPath = getAuthoredVerificationDefinitionsPath();
-		const corruptContent = "{ this is not valid json";
-		writeFileSync(authoredPath, corruptContent, "utf8");
+		await upsertAuthoredVerificationDefinition(buildDefinition(verificationId, alreadyInGroupTaskId), NOW_ISO);
 
 		const group = await reconcileGroup({
 			deploymentId,
@@ -160,9 +161,85 @@ describe.sequential("reconcileGroup authored 合并", () => {
 			currentBoardTasks: [{ taskId: alreadyInGroupTaskId, columnId: "validation" }],
 			nowIso: NOW_ISO,
 		});
-		expect(group?.tasks).toHaveLength(1);
 
-		// 组内已有任务不应触发 authored 存储的任何读写：损坏文件原样在场、未被隔离/重写。
-		expect(readFileSync(authoredPath, "utf8")).toBe(corruptContent);
+		const task = group?.tasks.find((candidate) => candidate.taskId === alreadyInGroupTaskId);
+		expect(task?.checklist.map((item) => item.id)).toEqual([`authored:${verificationId}`]);
+		expect(JSON.parse(readFileSync(getAuthoredVerificationDefinitionsPath(), "utf8")).definitions).toHaveLength(1);
+	});
+
+	// RVF-003：authoring skill 的 reconcile 模式按同一 verificationId 重注册，把已人工勾选的 guided 项改成 automated_script。
+	// 合并后不能是「从未运行却已勾选」的自动项（否则 every(checked) 会放行按 PDV 通过结案）。
+	it("同 id 重注册把已勾的 guided 项改成 automated_script：对账后清回未运行、未勾选", async () => {
+		const deploymentId = randomUUID();
+		const verificationId = randomUUID();
+		const taskId = "task-redefined-as-automated";
+
+		const state: RuntimePostDeployVerificationState = {
+			deploymentGroups: [
+				{
+					deploymentId,
+					workspaceId: "ws-1",
+					deployedSourceCommit: "a".repeat(40),
+					previousDeployedSourceCommit: null,
+					deployedAtIso: NOW_ISO,
+					foldedAtIso: null,
+					tasks: [
+						{
+							taskId,
+							columnIdAtMatch: "validation",
+							matchedCommits: [],
+							inclusionReason: "validation_column",
+							checklist: [
+								{
+									id: `authored:${verificationId}`,
+									label: "新进 validation 任务的 authored 验证",
+									checked: true,
+									source: "authored",
+									kind: "guided_manual",
+									guidance: null,
+									script: null,
+									run: null,
+									cleanup: { mode: "manual", assetsDir: null, manualSteps: [] },
+								},
+							],
+							verifiedAt: null,
+							boardMovedToDoneAt: null,
+							pendingConfirmation: null,
+							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
+						},
+					],
+				},
+			],
+		};
+		const statePath = getPostDeployVerificationStatePath();
+		mkdirSync(dirname(statePath), { recursive: true });
+		writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+		// automated_script 项 materialize 前要求资产目录在场。
+		await ensureVerificationAssetsDir(verificationId);
+		await upsertAuthoredVerificationDefinition(
+			{
+				...buildDefinition(verificationId, taskId),
+				kind: "automated_script",
+				script: { entrypoint: "verify.sh", interpreter: "bash", timeoutMs: 60000 },
+			},
+			NOW_ISO,
+		);
+
+		const group = await reconcileGroup({
+			deploymentId,
+			workspaceId: "ws-1",
+			currentBoardTasks: [{ taskId, columnId: "validation" }],
+			nowIso: NOW_ISO,
+		});
+
+		const task = group?.tasks.find((candidate) => candidate.taskId === taskId);
+		expect(task?.checklist).toHaveLength(1);
+		expect(task?.checklist[0]).toMatchObject({
+			id: `authored:${verificationId}`,
+			kind: "automated_script",
+			checked: false,
+			run: null,
+		});
 	});
 });

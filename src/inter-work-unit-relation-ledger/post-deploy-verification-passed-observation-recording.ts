@@ -1,23 +1,29 @@
-import type { RuntimePostDeployVerificationTask } from "../core/api-contract";
+import type {
+	RuntimePostDeployVerificationCompletionPath,
+	RuntimePostDeployVerificationTask,
+} from "../core/api-contract";
 import { readRawTaskCommitLandingSnapshotForRelationLedgerEvent } from "../workspace/task-commit-integration-provenance";
 import { logInterWorkUnitRelationLedgerDiagnosticWarning } from "./inter-work-unit-relation-ledger-diagnostics-logger";
 import { startBackgroundLedgerEventRecordingBoundToActiveKanbanRuntimeLiveCaptureWithoutBlocking } from "./kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 
-// 完成核对走的是哪条入口：Web 面板的原子确认，CLI `kanban deployment` 的完成动词，或 runtime 对账替 CLI 补写
-// （CLI 已授权并移入 Done，补记 verifiedAt 的调用却没成、也没人重跑命令；授权证据是 CLI 移列前写下的在途完成记录）。
-export type PostDeployVerificationCompletionPath =
-	| "web_ui_post_deploy_verification_panel_atomic_confirmation"
-	| "kanban_cli_post_deploy_verification_completion_verb"
-	| "kanban_runtime_reconciliation_finalizing_kanban_cli_completion_authorized_but_left_in_flight";
+// 完成核对走的是哪条入口：Web 面板的原子确认，CLI `kanban deployment` 的完成动词，runtime 对账替 CLI 补写
+// （CLI 已授权并移入 Done，补记 verifiedAt 的调用却没成、也没人重跑命令；授权证据是 CLI 移列前写下的在途完成记录），
+// 以及 2026-10-11 起任何入口经 taskCardAction 移入 Done 时服务端门禁授权后的结案（及其对账补完）。
+export type PostDeployVerificationCompletionPath = RuntimePostDeployVerificationCompletionPath;
 
 export interface PostDeployVerificationCompletionEvidence {
 	postDeployVerificationCompletionPath: PostDeployVerificationCompletionPath;
-	forcedCompletionWithoutAllVerificationsPassed: boolean;
+	// CLI `--force` 只跳过 token 握手、从不跳过勾选。2026-10-11 之前事件里同一含义的字段叫
+	// forcedCompletionWithoutAllVerificationsPassed（名不副实）；读历史事件时两个字段名都要认。
+	confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: boolean;
 	confirmedAcknowledgements: string[];
 }
 
-// 族 3「PDV 通过」（Y-EVENT-14）：只在 verifiedAt 真正从空变为有值时调用。事件携带纳入原因、匹配提交、
-// 是否强制、确认项，以及**原始**落地快照（最后已知 HEAD 与其可达的非 merge 自有提交）；不带「是否已落地」的判定——那是 1c 的事。
+// 族 3「PDV 通过」（Y-EVENT-14）：只在 verifiedAt 真正从空变为有值时调用（即全部核对项勾选后结案）。带原因、未全勾的结案
+// 记另一个事件（post_deploy_verification_closed_into_done_with_unchecked_items_reasoned_observed），绝不记成「通过」。
+// 事件携带纳入原因、匹配提交、结案时的部署归属区、是否跳过 token 握手、确认项，以及**原始**落地快照（最后已知 HEAD 与其可达的
+// 非 merge 自有提交）；不带「是否已落地」的判定——那是 1c 的事。归属区是第三区（提交还没随部署上线）时，这条「通过」
+// 不能当作「已在部署后验证」的证据（见 docs/context-inter-work-unit-relation-modeling-overhaul.md 完成条件 4）。
 // 偏离 Y-EVENT-2 的两阶段：PDV 状态是单独的全局 JSON，没有 board 字节哈希可供结算；这里在 JSON 写完之后追加，
 // 最坏情况是进程恰在两步之间崩溃而漏记一条，但绝不会出现「事件说通过了、状态里却没有」的幽灵事件。
 export function recordPostDeployVerificationPassedObservationWithoutBlocking(input: {
@@ -54,9 +60,12 @@ export function recordPostDeployVerificationPassedObservationWithoutBlocking(inp
 					inclusionReason: task.inclusionReason,
 					matchedCommits: task.matchedCommits,
 					columnIdAtMatch: task.columnIdAtMatch,
+					taskDeploymentAttributionZoneAtClosure:
+						task.taskDeploymentAttribution?.taskDeploymentAttributionZone ?? null,
+					firstDeployedInDeploymentId: task.firstDeployedInDeploymentId,
 					postDeployVerificationCompletionPath: input.completionEvidence.postDeployVerificationCompletionPath,
-					forcedCompletionWithoutAllVerificationsPassed:
-						input.completionEvidence.forcedCompletionWithoutAllVerificationsPassed,
+					confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag:
+						input.completionEvidence.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
 					confirmedAcknowledgements: input.completionEvidence.confirmedAcknowledgements,
 					rawTaskCommitLandingSnapshotAtVerification: rawTaskCommitLandingSnapshot,
 				},

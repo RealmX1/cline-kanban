@@ -12,6 +12,7 @@ import {
 	listAuthoredVerificationDefinitions,
 	upsertAuthoredVerificationDefinition,
 } from "../../../src/deployment/authored-verification-definitions";
+import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
 import {
 	getPostDeployVerificationStatePath,
 	markTaskVerified,
@@ -137,6 +138,7 @@ describe.sequential("verification 自动清理触发（markTaskVerified）", () 
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},
@@ -213,6 +215,7 @@ describe.sequential("verification 自动清理触发（markTaskVerified）", () 
 							boardMovedToDoneAt: null,
 							pendingConfirmation: null,
 							droppedReason: null,
+							...buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults(),
 						},
 					],
 				},

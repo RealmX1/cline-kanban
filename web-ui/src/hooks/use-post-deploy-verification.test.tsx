@@ -2,6 +2,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createPostDeployVerificationTaskReadModelTestFixture } from "@/components/post-deploy-verification/post-deploy-verification-task-read-model-test-fixtures";
 import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 
@@ -107,17 +108,10 @@ function makeGuidedManualChecklistItem(checked: boolean): RuntimePostDeployVerif
 }
 
 function makeTask(checked: boolean): RuntimePostDeployVerificationTask {
-	return {
+	return createPostDeployVerificationTaskReadModelTestFixture({
 		taskId: TASK_ID,
-		columnIdAtMatch: "review",
-		matchedCommits: [],
-		inclusionReason: "commit_correlation",
 		checklist: [makeGuidedManualChecklistItem(checked)],
-		verifiedAt: null,
-		boardMovedToDoneAt: null,
-		pendingConfirmation: null,
-		droppedReason: null,
-	};
+	});
 }
 
 function makeGroup(checked: boolean): RuntimePostDeployVerificationDeploymentGroup {

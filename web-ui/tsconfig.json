@@ -38,6 +38,12 @@
       "@runtime-notification-intelligence-purpose-binding-problems": [
         "../src/core/notification-intelligence-purpose-binding-problems.ts"
       ],
+      "@runtime-post-deploy-verification-done-entry-closure-contract": [
+        "../src/core/post-deploy-verification-done-entry-closure-contract.ts"
+      ],
+      "@runtime-post-deploy-verification-task-closed-and-awaiting-verification-predicates": [
+        "../src/core/post-deploy-verification-task-closed-and-awaiting-verification-predicates.ts"
+      ],
       "@runtime-cross-project-recently-active-task-switcher-section-assignment": [
         "../src/core/cross-project-recently-active-task-switcher-section-assignment.ts"
       ],
