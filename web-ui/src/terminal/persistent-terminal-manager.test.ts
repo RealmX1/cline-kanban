@@ -22,6 +22,10 @@ const terminalNormalBuffer = vi.hoisted(() => ({
 	getLine: (_lineIndex: number) => undefined,
 }));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
+const terminalInputEventHandlers = vi.hoisted(() => ({
+	data: [] as Array<(data: string) => void>,
+	binary: [] as Array<(data: string) => void>,
+}));
 const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
 // 用来复现「xterm 的 write 回调再也不触发」这一真实卡死形态：写队列是一条串行 promise 链，
 // 链上任何一次回调没来就永久悬停，applyRestore 第一句正是 await 这条链。
@@ -39,8 +43,10 @@ const webSocketInstances = vi.hoisted(
 			close: () => void;
 			messageListeners: Array<(event: MessageEvent) => void>;
 			onmessage: ((event: MessageEvent) => void) | null;
+			onopen: ((event: Event) => void) | null;
 			readyState: number;
 			sentMessages: string[];
+			send: MockWebSocket["send"];
 			url: string;
 		}>,
 );
@@ -111,6 +117,7 @@ vi.mock("@xterm/xterm", () => ({
 		rows: number;
 		unicode = { activeVersion: "" };
 		buffer = { active: terminalBuffer, normal: terminalNormalBuffer };
+		private readonly inputDataHandlers: Array<(data: string) => void> = [];
 
 		constructor(options: { cols?: number; rows?: number; theme?: unknown }) {
 			this.cols = options.cols ?? 80;
@@ -140,13 +147,20 @@ vi.mock("@xterm/xterm", () => ({
 			return false;
 		}
 
-		input(_text: string): void {}
+		input(text: string): void {
+			for (const handler of this.inputDataHandlers) handler(text);
+		}
 
 		loadAddon(_addon: unknown): void {}
 
-		onBinary(_handler: (data: string) => void): void {}
+		onBinary(handler: (data: string) => void): void {
+			terminalInputEventHandlers.binary.push(handler);
+		}
 
-		onData(_handler: (data: string) => void): void {}
+		onData(handler: (data: string) => void): void {
+			this.inputDataHandlers.push(handler);
+			terminalInputEventHandlers.data.push(handler);
+		}
 
 		onScroll(_handler: (viewportY: number) => void): void {}
 
@@ -169,7 +183,9 @@ vi.mock("@xterm/xterm", () => ({
 			hostElement.appendChild(screenElement);
 		}
 
-		paste(_text: string): void {}
+		paste(text: string): void {
+			this.input(text);
+		}
 
 		reset(): void {}
 
@@ -301,6 +317,23 @@ function parseControlMessages(socket: { sentMessages: string[] }): Array<{ type:
 	return socket.sentMessages.map((message) => JSON.parse(message) as { type: string; bytes?: number });
 }
 
+function findNewestTerminalSocket(role: "io" | "control") {
+	const socket = webSocketInstances.filter((candidate) => candidate.url.includes(`/api/terminal/${role}`)).at(-1);
+	if (!socket) throw new Error(`Expected terminal ${role} socket.`);
+	return socket;
+}
+
+async function completeTerminalRestoreHandshake(): Promise<void> {
+	const controlSocket = findNewestTerminalSocket("control");
+	dispatchSocketMessage(
+		controlSocket,
+		JSON.stringify({ type: "restore", snapshot: "保留的终端画面", cols: 80, rows: 24 }),
+	);
+	await vi.waitFor(() =>
+		expect(parseControlMessages(controlSocket).some((message) => message.type === "restore_complete")).toBe(true),
+	);
+}
+
 describe("persistent-terminal-manager", () => {
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
@@ -308,6 +341,8 @@ describe("persistent-terminal-manager", () => {
 		terminalBuffer.baseY = 0;
 		terminalBuffer.viewportY = 0;
 		terminalScrollToBottomMock.mockReset();
+		terminalInputEventHandlers.data.length = 0;
+		terminalInputEventHandlers.binary.length = 0;
 		terminalWriteSideEffect.current = null;
 		terminalWriteCallbackControl.suspended = false;
 		terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.length = 0;
@@ -531,6 +566,127 @@ describe("persistent-terminal-manager", () => {
 		const ioSockets = webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
 		expect(ioSockets).toHaveLength(2);
 		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
+	});
+
+	it.each(["none", "exited", "failed", "interrupted"] as const)(
+		"无进程且 facet 为 %s 时屏蔽终端输入，恢复后不补发旧输入",
+		(liveness) => {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+			const ioSocket = findNewestTerminalSocket("io");
+			const sendSpy = vi.spyOn(ioSocket, "send");
+			const userTurnKind = { none: null, exited: "review", failed: "error", interrupted: "interrupted" }[liveness];
+			dispatchSocketMessage(
+				findNewestTerminalSocket("control"),
+				JSON.stringify({
+					type: "state",
+					summary: {
+						taskId: "task-a",
+						agentId: "codex",
+						pid: null,
+						// 故意与 facet 不同，防止输入门控读回 legacy state。
+						state: "running",
+						turnOwner: liveness === "none" ? null : "user",
+						liveness,
+						userTurnKind,
+					},
+				}),
+			);
+			for (const report of ["\u001b[<35;14;5M", "\u001b[I", "\u001b[?1;2c", "键盘输入"]) {
+				for (const handler of terminalInputEventHandlers.data) handler(report);
+			}
+			for (const handler of terminalInputEventHandlers.binary) handler("\u001b[M !!");
+			expect(terminal.input("已退出时的输入")).toBe(false);
+			expect(terminal.paste("已退出时的粘贴")).toBe(false);
+			expect(sendSpy).not.toHaveBeenCalled();
+
+			dispatchSocketMessage(
+				findNewestTerminalSocket("control"),
+				JSON.stringify({
+					type: "state",
+					summary: { taskId: "task-a", pid: 4321, turnOwner: "user", liveness: "live", userTurnKind: "review" },
+				}),
+			);
+			expect(sendSpy).not.toHaveBeenCalled();
+			expect(terminal.input("恢复后的输入")).toBe(true);
+			expect(terminal.paste("恢复后的粘贴")).toBe(true);
+			expect(sendSpy.mock.calls).toEqual([["恢复后的输入"], ["恢复后的粘贴"]]);
+			for (const handler of terminalInputEventHandlers.binary) handler("\u001b[M !!");
+			expect(sendSpy).toHaveBeenLastCalledWith(new Uint8Array([27, 91, 77, 32, 33, 33]));
+		},
+	);
+
+	it("摘要未知时保持输入兼容", () => {
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		expect(terminal.input("摘要尚未到达")).toBe(true);
+		expect(findNewestTerminalSocket("io").sentMessages).toEqual(["摘要尚未到达"]);
+	});
+
+	it("短暂连接成功后仍按指数退避，稳定五秒后才恢复首档延迟", async () => {
+		vi.useFakeTimers();
+		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		const countIoSockets = () =>
+			webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io")).length;
+		for (const delayMs of [250, 500, 1_000, 2_000, 4_000, 5_000]) {
+			const previousSocketCount = countIoSockets();
+			findNewestTerminalSocket("io").close();
+			vi.advanceTimersByTime(delayMs - 1);
+			expect(countIoSockets()).toBe(previousSocketCount);
+			vi.advanceTimersByTime(1);
+			expect(countIoSockets()).toBe(previousSocketCount + 1);
+			findNewestTerminalSocket("io").onopen?.(new Event("open"));
+		}
+		vi.advanceTimersByTime(5_000);
+		const stableSocketCount = countIoSockets();
+		findNewestTerminalSocket("io").close();
+		vi.advanceTimersByTime(249);
+		expect(countIoSockets()).toBe(stableSocketCount);
+		vi.advanceTimersByTime(1);
+		expect(countIoSockets()).toBe(stableSocketCount + 1);
+	});
+
+	it("单通道打开不取消另一通道的重试，整组恢复前不清除错误或报告就绪", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const onLastError = vi.fn();
+		const onConnectionReady = vi.fn();
+		terminal.subscribe({ onLastError, onConnectionReady });
+		await completeTerminalRestoreHandshake();
+		onConnectionReady.mockClear();
+		findNewestTerminalSocket("io").close();
+		findNewestTerminalSocket("control").close();
+		vi.advanceTimersByTime(250);
+		const ioSocket = findNewestTerminalSocket("io");
+		findNewestTerminalSocket("control").close();
+		ioSocket.onopen?.(new Event("open"));
+		expect(onLastError.mock.lastCall?.[0]).toContain("Reconnecting");
+		expect(onConnectionReady).not.toHaveBeenCalled();
+		const previousSocketCount = webSocketInstances.length;
+		terminal.mount(createContainer(), appearance, { isVisible: true });
+		expect(webSocketInstances).toHaveLength(previousSocketCount);
+		vi.advanceTimersByTime(500);
+		expect(webSocketInstances).toHaveLength(previousSocketCount + 1);
+		findNewestTerminalSocket("control").onopen?.(new Event("open"));
+		expect(onConnectionReady).not.toHaveBeenCalled();
+		ioSocket.readyState = 0;
+		await completeTerminalRestoreHandshake();
+		expect(onConnectionReady).not.toHaveBeenCalled();
+		ioSocket.readyState = MockWebSocket.OPEN;
+		ioSocket.onopen?.(new Event("open"));
+		expect(onConnectionReady).toHaveBeenCalledTimes(1);
+		expect(onLastError).toHaveBeenLastCalledWith(null);
+	});
+
+	it.each([false, true])("dispose 取消重连与连接稳定计时器（重连在途=%s）", async (isReconnecting) => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		if (isReconnecting) findNewestTerminalSocket("io").close();
+		terminal.dispose();
+		const previousSocketCount = webSocketInstances.length;
+		vi.advanceTimersByTime(20_000);
+		expect(webSocketInstances).toHaveLength(previousSocketCount);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	// 运行时 redeploy（服务端重启）不会重建 PersistentTerminal：两条 socket 关闭只走 scheduleReconnect →
@@ -1059,7 +1215,8 @@ describe("persistent-terminal-manager", () => {
 				expect(refreshSpy).not.toHaveBeenCalled();
 				terminal.mount(container, appearance, { isVisible: true });
 				expect(refreshSpy).not.toHaveBeenCalled();
-				expect(terminal.input("可见输入")).toBe(true);
+				// 挂载只表示正在接回会话；无进程时不能谎报输入已送达。
+				expect(terminal.input("可见输入")).toBe(false);
 				await waitThroughVisibleDwell();
 				expect(refreshSpy).toHaveBeenCalledTimes(1);
 				terminal.mount(container, appearance, { isVisible: true });

@@ -4149,6 +4149,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 会话模式盖章：每次建会话都从启动请求快照一次；缺省不物化默认值。
 			...(request.taskConversationMode !== undefined ? { taskConversationMode: request.taskConversationMode } : {}),
 		});
+		// 已挂接终端靠任务监听者接收状态；先公布新活体，再排空输出，避免输入门控保留旧的无进程摘要。
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(entry.summary));
+		}
 		this.emitSummary(entry.summary);
 		// hosted 会话一装载就推一份接管记录，不等去抖：runtime 若在这之后立刻崩溃，新 runtime 仍有记录可用。
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(request.taskId);
@@ -4663,6 +4667,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
 		});
+		// shell 没有后续 agent hook，启动成功时必须主动解除已挂接终端的无进程输入门控。
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(entry.summary));
+		}
 		this.emitSummary(entry.summary);
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(request.taskId);
 		for (const chunk of preActiveShellOutputChunks.splice(0)) {

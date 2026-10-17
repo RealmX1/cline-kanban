@@ -66,6 +66,41 @@ describe("per-task session start exclusivity", () => {
 		});
 	});
 
+	it.each(["shell", "task"] as const)("%s 启动先向已有监听者推送完整状态，再排空装载前输出", async (sessionKind) => {
+		const manager = new TerminalSessionManager();
+		const deliveredEvents: string[] = [];
+		const onGlobalSummary = vi.fn();
+		manager.onSummary(onGlobalSummary);
+		const onState = vi.fn((summary: { pid: number | null }) => deliveredEvents.push(`state:${summary.pid}`));
+		manager.attach("task-start-state", {
+			onState,
+			onOutput: (chunk) => deliveredEvents.push(`output:${chunk.toString("utf8")}`),
+		});
+		deliveredEvents.length = 0;
+		ptySessionSpawnMock.mockImplementationOnce((request: MockSpawnRequest) => {
+			const session = createMockPtySession(100, request);
+			spawnedSessions.push(session);
+			request.onData?.(Buffer.from("装载前输出", "utf8"));
+			return session;
+		});
+
+		const summary =
+			sessionKind === "shell"
+				? await manager.startShellSession({
+						taskId: "task-start-state",
+						binary: "shell",
+						cwd: "/tmp/task-start-state",
+					})
+				: await manager.startTaskSession(startTaskSessionRequestFor("task-start-state"));
+
+		expect(onState).toHaveBeenLastCalledWith(onGlobalSummary.mock.calls[0]?.[0]);
+		expect(summary).toEqual(
+			expect.objectContaining({ pid: 100, liveness: "live", turnOwner: "agent", userTurnKind: null }),
+		);
+		expect(deliveredEvents).toEqual(["state:100", "output:装载前输出"]);
+		manager.dispose();
+	});
+
 	it("folds two concurrent starts for one task into a single pty instead of orphaning the first", async () => {
 		const manager = new TerminalSessionManager();
 		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });

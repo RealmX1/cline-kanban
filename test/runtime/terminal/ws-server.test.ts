@@ -74,7 +74,7 @@ class FakeTerminalManager implements TerminalSessionService {
 		}),
 	);
 	recoverStaleSession = vi.fn(() => createSummary());
-	writeInput = vi.fn(() => createSummary());
+	writeInput = vi.fn<TerminalSessionService["writeInput"]>(() => createSummary());
 	resize = vi.fn(() => true);
 	pauseOutput = vi.fn(() => true);
 	resumeOutput = vi.fn(() => true);
@@ -451,6 +451,45 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 				resolve();
 			});
 		});
+	});
+
+	it("无进程时丢弃鼠标报告但保留连接，恢复后同一连接可继续输入", async () => {
+		const ioSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=reclaimed-viewer`,
+		);
+		const controlSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=reclaimed-viewer`,
+		);
+		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+		terminalManager.writeInput.mockReturnValueOnce(null).mockReturnValueOnce(null);
+		const unexpectedClose = vi.fn();
+		ioSocket.socket.on("close", unexpectedClose);
+
+		ioSocket.socket.send("\u001b[<35;14;5M");
+		ioSocket.socket.send("\u001b[I");
+		await waitForAssertion(() => expect(terminalManager.writeInput).toHaveBeenCalledTimes(2));
+		ioSocket.socket.send("恢复后的输入");
+		await waitForAssertion(() =>
+			expect(terminalManager.writeInput).toHaveBeenLastCalledWith(TASK_ID, Buffer.from("恢复后的输入")),
+		);
+		expect(unexpectedClose).not.toHaveBeenCalled();
+		expect(ioSocket.socket.readyState).toBe(WebSocket.OPEN);
+		expect(controlSocket.socket.readyState).toBe(WebSocket.OPEN);
+		await closeSocket(ioSocket.socket);
+		await closeSocket(controlSocket.socket);
+	});
+
+	it("真实输入写入异常仍以 1011 关闭连接", async () => {
+		const ioSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=failed-input-viewer`,
+		);
+		terminalManager.writeInput.mockImplementationOnce(() => {
+			throw new Error("真实写入失败");
+		});
+		const closed = once(ioSocket.socket, "close");
+		ioSocket.socket.send("用户输入");
+		await expect(closed).resolves.toEqual([1011, Buffer.from("真实写入失败")]);
 	});
 
 	it("broadcasts one PTY session to multiple viewers", async () => {
