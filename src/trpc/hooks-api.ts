@@ -14,7 +14,11 @@ import {
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
-import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import {
+	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { recordHookIngestToolCallAndHookCliResourceUsageToJournal } from "../diagnostics/hook-ingest-tool-call-and-hook-cli-resource-usage-journal-recorder";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
@@ -763,17 +767,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
 			}
 
-			if (transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+			if (isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary))
 				await recordNotificationSignalDecision(
 					notificationCandidateId,
 					"by_the_way_notification_excluded",
 					{},
 					true,
 				);
-			if (
-				event === "to_review" &&
-				transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
-			) {
+			if (event === "to_review" && !isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary)) {
 				// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 				// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
 				deps.broadcastTaskReadyForReview(

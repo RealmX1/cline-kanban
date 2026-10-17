@@ -569,14 +569,24 @@ export const runtimeTaskTurnCheckpointSchema = z.object({
 });
 export type RuntimeTaskTurnCheckpoint = z.infer<typeof runtimeTaskTurnCheckpointSchema>;
 
+// 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
+export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
+	startInPlanMode: z.boolean().optional(),
+	sessionTransport: runtimeAgentSessionTransportSchema,
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
+	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+});
+
 export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	workspaceTaskId: z.string(),
-	taskConversationSessionRole: z.enum(["main", "by_the_way"]),
+	taskConversationSessionRole: z.enum(["main", "by_the_way", "task_collaborator"]),
 	taskConversationSessionContextSource: z.enum(["main", "started_from_scratch", "forked_from_main_current_turn"]),
 	parentTaskConversationSessionId: z.string().nullable(),
 	mainSessionOriginTurnNumber: z.number().int().nonnegative().nullable(),
 	mainSessionOriginUserMessagePreview: z.string().nullable(),
 	latestUserMessagePreview: z.string().nullable(),
+	taskConversationSessionLaunchSettings: runtimeTaskConversationSessionLaunchSettingsSchema.optional(),
 });
 export type RuntimeTaskConversationSessionMetadata = z.infer<typeof runtimeTaskConversationSessionMetadataSchema>;
 

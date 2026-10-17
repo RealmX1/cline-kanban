@@ -53,7 +53,7 @@ vi.mock("@/telemetry/events", () => ({
 interface HookSnapshot {
 	sendTaskSessionInput: ReturnType<typeof useTaskSessions>["sendTaskSessionInput"];
 	startTaskSession: ReturnType<typeof useTaskSessions>["startTaskSession"];
-	createByTheWayTaskConversationSession: ReturnType<typeof useTaskSessions>["createByTheWayTaskConversationSession"];
+	createTaskConversationSession: ReturnType<typeof useTaskSessions>["createTaskConversationSession"];
 }
 
 function createTask(): BoardCard {
@@ -80,14 +80,9 @@ function HookHarness({ onSnapshot }: { onSnapshot: (snapshot: HookSnapshot) => v
 		onSnapshot({
 			sendTaskSessionInput: sessions.sendTaskSessionInput,
 			startTaskSession: sessions.startTaskSession,
-			createByTheWayTaskConversationSession: sessions.createByTheWayTaskConversationSession,
+			createTaskConversationSession: sessions.createTaskConversationSession,
 		});
-	}, [
-		onSnapshot,
-		sessions.createByTheWayTaskConversationSession,
-		sessions.startTaskSession,
-		sessions.sendTaskSessionInput,
-	]);
+	}, [onSnapshot, sessions.createTaskConversationSession, sessions.startTaskSession, sessions.sendTaskSessionInput]);
 
 	return null;
 }
@@ -339,10 +334,10 @@ describe("useTaskSessions", () => {
 			throw new Error("Expected a hook snapshot.");
 		}
 
-		let result: Awaited<ReturnType<HookSnapshot["createByTheWayTaskConversationSession"]>> | null = null;
+		let result: Awaited<ReturnType<HookSnapshot["createTaskConversationSession"]>> | null = null;
 		await act(async () => {
 			result =
-				(await latestSnapshot?.createByTheWayTaskConversationSession({
+				(await latestSnapshot?.createTaskConversationSession({
 					task: createTask(),
 					agentId: "codex",
 					initialUserQuestion: "  Why does this type exist?  ",
@@ -365,6 +360,67 @@ describe("useTaskSessions", () => {
 					taskConversationSessionRole: "by_the_way",
 					taskConversationSessionContextSource: "forked_from_main_current_turn",
 					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 4,
+					mainSessionOriginUserMessagePreview: "Implement the feature",
+					latestUserMessagePreview: "Why does this type exist?",
+				},
+			}),
+		);
+	});
+
+	it("协作会话使用独立 agent 和全新上下文，不复制主会话模型", async () => {
+		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		let result: Awaited<ReturnType<HookSnapshot["createTaskConversationSession"]>> | null = null;
+		await act(async () => {
+			result =
+				(await latestSnapshot?.createTaskConversationSession({
+					task: {
+						...createTask(),
+						startInPlanMode: false,
+						taskAgentPermissionMode: "bypass_all_permission_prompts",
+						terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opus" },
+					},
+					sessionRole: "task_collaborator",
+					agentId: "codex",
+					initialUserQuestion: "  Why does this type exist?  ",
+					contextSource: "forked_from_main_current_turn",
+					mainSessionOriginTurnNumber: 4,
+					mainSessionOriginUserMessagePreview: "Implement the feature",
+				})) ?? null;
+		});
+
+		const taskConversationSessionId = "task-conversation-session-11111111-1111-4111-8111-111111111111";
+		expect(result).toEqual({ ok: true, taskConversationSessionId });
+		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: taskConversationSessionId,
+				workspaceTaskId: "task-1",
+				prompt: "Why does this type exist?",
+				agentId: "codex",
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				startInPlanMode: false,
+				terminalAgentModelOverrideSettings: undefined,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
 					mainSessionOriginTurnNumber: 4,
 					mainSessionOriginUserMessagePreview: "Implement the feature",
 					latestUserMessagePreview: "Why does this type exist?",
@@ -460,7 +516,7 @@ describe("useTaskSessions", () => {
 		}
 
 		await act(async () => {
-			await latestSnapshot?.createByTheWayTaskConversationSession({
+			await latestSnapshot?.createTaskConversationSession({
 				task: { ...createTask(), taskConversationMode: "exploratory" },
 				agentId: "codex",
 				initialUserQuestion: "Why does this type exist?",

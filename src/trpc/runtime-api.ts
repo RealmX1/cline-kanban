@@ -33,7 +33,9 @@ import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-se
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import {
+	getRuntimeAgentCatalogEntry,
 	getRuntimeAgentSessionTransport,
+	isRuntimeAgentLaunchSupported,
 	isRuntimeAgentSessionDrivenByAcpProtocol,
 	isRuntimeAgentSessionSummaryDrivenByAcpProtocol,
 	resolveRuntimeAgentSessionTransportFromSummary,
@@ -97,7 +99,12 @@ import {
 import { formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt } from "../core/harness-generated-restoration-prompt";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
-import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
+import {
+	isSessionInActiveTurn,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveByTheWayMainSessionForkSelection,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import {
 	applyMostRecentlyLaunchedAgentSessionAgentIdToTask,
@@ -277,9 +284,19 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 
 const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
 
-function isByTheWaySessionForWorkspaceTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
-	const metadata = summary.taskConversationSessionMetadata;
-	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
+async function persistTaskCollaborationSessionBeforeReturningLaunchResponse(
+	workspacePath: string,
+	summary: RuntimeTaskSessionSummary,
+): Promise<void> {
+	if (summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "task_collaborator") return;
+	await mutateWorkspaceState(
+		workspacePath,
+		buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+			"runtime_persist_task_collaboration_session",
+			"task_collaboration_session_creation",
+		),
+		(state) => ({ board: state.board, sessions: { ...state.sessions, [summary.taskId]: summary }, value: true }),
+	);
 }
 
 function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): RuntimeBoardCard | null {
@@ -540,6 +557,48 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) =>
 		buildRuntimeConfigResponse(runtimeConfig, clineProviderService.getProviderSettingsSummary());
 
+	// 宿主卡只提供执行目录参数；协作会话的身份、权限、模型与目标通道来自自己的 durable 快照。
+	// 同时供冷恢复答案和用户明确发送使用，避免两条入口分别拼出不同的恢复配置。
+	const buildTaskConversationSessionDurableResumeRequest = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		summary: RuntimeTaskSessionSummary,
+	): Promise<RuntimeTaskSessionStartRequest | null> => {
+		const metadata = summary.taskConversationSessionMetadata;
+		const settings = metadata?.taskConversationSessionLaunchSettings;
+		const workspaceTaskId = metadata?.workspaceTaskId ?? summary.taskId;
+		const card = findWorkspaceBoardCard(await loadWorkspaceBoardById(workspaceScope.workspaceId), workspaceTaskId);
+		if (!card) return null;
+		const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+		const observedAgentId =
+			summary.agentId ??
+			getRuntimeAgentCatalogEntry(summary.agentNativeConversationSessionIdentity?.sourceAgentId as RuntimeAgentId)
+				?.id;
+		if (metadata?.taskConversationSessionRole === "task_collaborator" && (!settings || !observedAgentId)) return null;
+		const agentId =
+			observedAgentId ??
+			card.mostRecentlyLaunchedAgentSessionAgentId ??
+			card.agentId ??
+			scopedRuntimeConfig.selectedAgentId;
+		return {
+			taskId: summary.taskId,
+			workspaceTaskId,
+			taskConversationSessionMetadata: metadata,
+			agentId,
+			prompt: "",
+			baseRef: card.baseRef,
+			worktreeMode: card.worktreeMode,
+			taskAgentPermissionMode: settings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
+			requestedAgentSessionTransport:
+				settings?.sessionTransport ?? resolveRuntimeAgentSessionTransportFromSummary(summary),
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+			terminalAgentModelOverrideSettings: settings
+				? settings.terminalAgentModelOverrideSettings
+				: card.terminalAgentModelOverrideSettings,
+			clineSettings: settings ? settings.clineSettings : card.clineSettings,
+			taskConversationMode: summary.taskConversationMode,
+		};
+	};
+
 	const resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery = async (
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskId: string,
@@ -551,6 +610,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				: false;
 		if (resumedFromInMemoryRestartRequest) {
 			return true;
+		}
+		const persistedSummary = terminalManager.getSummary(taskId);
+		if (persistedSummary?.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") {
+			const resumeRequest = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, persistedSummary);
+			if (!resumeRequest || resumeRequest.requestedAgentSessionTransport !== "pty_terminal") return false;
+			const response = await runtimeApi.startTaskSession(workspaceScope, resumeRequest);
+			return response.ok && response.summary?.pid != null;
 		}
 		// Kanban 完整重启后 entry.restartRequest 是纯内存态、必然丢失；从 durable board + runtime config
 		// 重建与 refreshTaskTerminal 相同的续跑请求，使“已保存答案”不会永久卡在 delivery_failed。
@@ -844,7 +910,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const shouldCaptureTurnCheckpoint =
 					!body.resumeFromTrash &&
 					!isHomeAgentSessionId(body.taskId) &&
-					body.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way";
+					!isTaskConversationSessionWithoutTaskLifecycleAuthority(body);
 
 				// Per-task config source-of-truth precedence:
 				//
@@ -867,7 +933,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const effectiveAgentId = previousTerminalAgentId ?? body.agentId ?? scopedRuntimeConfig.selectedAgentId;
 				effectiveAgentIdForDiagnostics = effectiveAgentId;
 				startFailurePhase = "validate_task_conversation_session_request";
-				const taskConversationSessionMetadata = body.taskConversationSessionMetadata;
+				let taskConversationSessionMetadata = body.taskConversationSessionMetadata;
+				let byTheWayMainSessionForkSourceNativeSessionId: string | undefined;
+				const isSideConversationSession = isTaskConversationSessionWithoutTaskLifecycleAuthority(body);
+				const isTaskCollaborator =
+					taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator";
 				const isByTheWaySession = taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way";
 				if (
 					taskConversationSessionMetadata &&
@@ -877,37 +947,49 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					throw new Error("Task conversation session role and context source are inconsistent.");
 				}
 				if (
-					isByTheWaySession &&
+					isSideConversationSession &&
 					(!body.workspaceTaskId ||
-						taskConversationSessionMetadata.workspaceTaskId !== workspaceTaskId ||
+						taskConversationSessionMetadata?.workspaceTaskId !== workspaceTaskId ||
 						body.taskId === workspaceTaskId)
 				) {
-					throw new Error("By the way sessions require a distinct taskId and a matching workspaceTaskId.");
+					throw new Error("侧会话需要独立的 taskId，并与宿主 workspaceTaskId 一致。");
+				}
+				if (
+					isTaskCollaborator &&
+					(!isRuntimeAgentLaunchSupported(effectiveAgentId) ||
+						taskConversationSessionMetadata?.taskConversationSessionContextSource !== "started_from_scratch" ||
+						taskConversationSessionMetadata?.parentTaskConversationSessionId !== null)
+				) {
+					throw new Error("协作会话必须使用可启动的 agent 和全新上下文。");
 				}
 				if (isByTheWaySession && !byTheWaySessionSupportedAgentIds.has(effectiveAgentId)) {
 					throw new Error(`Agent "${effectiveAgentId}" does not support By the way sessions.`);
 				}
 				if (
 					isByTheWaySession &&
-					taskConversationSessionMetadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
+					taskConversationSessionMetadata?.taskConversationSessionContextSource === "forked_from_main_current_turn"
 				) {
 					startFailurePhase = "inspect_existing_task_conversation_sessions";
 					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
+					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const existingTaskConversationSessionSummaries = [
 						...(typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : []),
 						...(typeof clineTaskSessionService.listSummaries === "function"
 							? clineTaskSessionService.listSummaries()
 							: []),
+						...acpTaskSessionService.listSummaries(),
 					];
-					if (
-						existingTaskConversationSessionSummaries.some((summary) =>
-							isByTheWaySessionForWorkspaceTask(summary, workspaceTaskId),
-						)
-					) {
-						throw new Error(
-							"Forking the current main session is unavailable after a By the way session already exists. Start from scratch instead.",
-						);
-					}
+					const forkSelection = resolveByTheWayMainSessionForkSelection({
+						workspaceTaskId,
+						launchAgentId: effectiveAgentId,
+						mainSessionSummary:
+							existingTaskConversationSessionSummaries.find((summary) => summary.taskId === workspaceTaskId) ??
+							terminalManager.getSummary(workspaceTaskId),
+						mainSessionWorkingDirectoryPath: taskCwd,
+						existingTaskConversationSessionSummaries,
+					});
+					if (forkSelection.forkRejectionReason) throw new Error(forkSelection.forkRejectionReason);
+					byTheWayMainSessionForkSourceNativeSessionId = forkSelection.mainSessionNativeConversationSessionId;
 				}
 				// 本次要走哪条通话通道。omp 有 TUI / ACP 两条，解析优先级是
 				// 「请求显式指定（切换 procedure）→ 卡片建卡时固化值 → 全局新任务默认 → catalog 默认」。
@@ -919,10 +1001,35 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					: null;
 				const resolvedAgentSessionTransport = resolveAgentSessionTransportForLaunch({
 					agentId: effectiveAgentId,
-					explicitlyRequestedSessionTransport: body.requestedAgentSessionTransport ?? null,
-					cardPinnedSessionTransport: cardPinnedOmpAgentSessionTransport,
+					explicitlyRequestedSessionTransport:
+						body.requestedAgentSessionTransport ??
+						taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.sessionTransport ??
+						null,
+					cardPinnedSessionTransport: isTaskCollaborator ? null : cardPinnedOmpAgentSessionTransport,
 					globalDefaultSessionTransportForNewTasks: scopedRuntimeConfig.ompAgentSessionTransportForNewTasks,
 				});
+				if (isTaskCollaborator && taskConversationSessionMetadata) {
+					taskConversationSessionMetadata = {
+						...taskConversationSessionMetadata,
+						taskConversationSessionLaunchSettings: {
+							taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+								body.taskAgentPermissionMode,
+								scopedRuntimeConfig.agentAutonomousModeEnabled,
+							),
+							// 保留创建快照；续跑不传起步参数，不等于清除原有记录。
+							startInPlanMode:
+								body.startInPlanMode ??
+								taskConversationSessionMetadata.taskConversationSessionLaunchSettings?.startInPlanMode,
+							sessionTransport: resolvedAgentSessionTransport.effectiveSessionTransport,
+							terminalAgentModelOverrideSettings:
+								body.terminalAgentModelOverrideSettings?.agentId === effectiveAgentId
+									? body.terminalAgentModelOverrideSettings
+									: undefined,
+							clineSettings: body.clineSettings,
+						},
+					};
+					body.taskConversationSessionMetadata = taskConversationSessionMetadata;
+				}
 				// ACP 会话（omp 切到 ACP 时）既不是 PTY 终端 agent 也不是 Cline SDK，走自己的服务。
 				if (resolvedAgentSessionTransport.effectiveSessionTransport === "acp_stdio_subprocess") {
 					startFailurePhase = "start_acp_runtime_session";
@@ -948,6 +1055,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						}));
 					const acpSummary = await acpTaskSessionService.startTaskSession({
 						taskId: body.taskId,
+						workspaceTaskId,
+						taskConversationSessionMetadata,
 						agentId: effectiveAgentId,
 						cwd: taskCwd,
 						prompt: body.prompt,
@@ -1123,6 +1232,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							// Best effort checkpointing only.
 						}
 					}
+					await persistTaskCollaborationSessionBeforeReturningLaunchResponse(
+						workspaceScope.workspacePath,
+						nextSummary,
+					);
 					latestStartedSummaryForDiagnostics = nextSummary;
 					recordStartDiagnostic("response_ready", "response_ready");
 
@@ -1193,6 +1306,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						projectPath: workspaceScope.workspacePath,
 						parentSessionId: body.parentSessionId,
 						taskAgentSessionInitialization: body.taskAgentSessionInitialization,
+						byTheWayMainSessionForkSourceNativeSessionId,
 						terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
 					},
 					// 客户端未声明即按「外部入口」记账，与本字段引入前的行为一致。
@@ -1229,6 +1343,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						// Best effort checkpointing only.
 					}
 				}
+				await persistTaskCollaborationSessionBeforeReturningLaunchResponse(
+					workspaceScope.workspacePath,
+					nextSummary,
+				);
 				latestStartedSummaryForDiagnostics = nextSummary;
 				recordStartDiagnostic("response_ready", "response_ready");
 				return {
@@ -1269,6 +1387,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 「解析工作目录」；任何**写回**一律以会话自身的 body.taskId 为键，否则侧问会话会把 agent 身份
 				// 与模型污染到主卡上。
 				const workspaceTaskId = currentSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? body.taskId;
+				const sideSessionLaunchSettings =
+					currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = findWorkspaceBoardCard(board, workspaceTaskId);
 				if (!card) {
@@ -1311,6 +1431,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 但尚未重启，既存会话的身份仍是上一次跑起来的那个），故只作为观测值缺席时的兜底。
 				const effectiveAgentId =
 					currentSummary?.agentId ??
+					getRuntimeAgentCatalogEntry(
+						currentSummary?.agentNativeConversationSessionIdentity?.sourceAgentId as RuntimeAgentId,
+					)?.id ??
 					card.mostRecentlyLaunchedAgentSessionAgentId ??
 					card.agentId ??
 					scopedRuntimeConfig.selectedAgentId;
@@ -1324,16 +1447,19 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   仍照读是为了不依赖这个隐含前提——那正是本次改动之前那批硬编码分叉的成因）；
 				//   硬中断后没有活体 summary ⇒ 按「下次启动该走哪条通道」解析（卡片固化 → 全局默认 →
 				//   catalog 默认），与 card-detail-view 无活会话时的面板分流同一套优先级。
-				const effectiveSessionTransport = currentSummary
-					? resolveRuntimeAgentSessionTransportFromSummary({
-							agentId: effectiveAgentId,
-							sessionTransport: currentSummary.sessionTransport,
-						})
-					: resolveAgentSessionTransportForLaunch({
-							agentId: effectiveAgentId,
-							cardPinnedSessionTransport: card.ompAgentSessionTransport,
-							globalDefaultSessionTransportForNewTasks: scopedRuntimeConfig.ompAgentSessionTransportForNewTasks,
-						}).effectiveSessionTransport;
+				const effectiveSessionTransport =
+					sideSessionLaunchSettings?.sessionTransport ??
+					(currentSummary
+						? resolveRuntimeAgentSessionTransportFromSummary({
+								agentId: effectiveAgentId,
+								sessionTransport: currentSummary.sessionTransport,
+							})
+						: resolveAgentSessionTransportForLaunch({
+								agentId: effectiveAgentId,
+								cardPinnedSessionTransport: card.ompAgentSessionTransport,
+								globalDefaultSessionTransportForNewTasks:
+									scopedRuntimeConfig.ompAgentSessionTransportForNewTasks,
+							}).effectiveSessionTransport);
 				if (effectiveSessionTransport !== "pty_terminal") {
 					return {
 						ok: false,
@@ -1379,7 +1505,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						taskCwd,
 						agentNativeConversationSessionIdentity: currentSummary?.agentNativeConversationSessionIdentity,
 						workspaceScope,
-						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
+						cardTerminalAgentModelOverrideSettings: sideSessionLaunchSettings
+							? sideSessionLaunchSettings.terminalAgentModelOverrideSettings
+							: card.terminalAgentModelOverrideSettings,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
 				const refreshTaskTerminalRequest = {
@@ -1397,7 +1525,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					binary: resolved.binary,
 					args: resolved.args,
 					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-						card.taskAgentPermissionMode,
+						sideSessionLaunchSettings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
 						scopedRuntimeConfig.agentAutonomousModeEnabled,
 					),
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
@@ -1474,10 +1602,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionStopRequest(input);
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-				const acpStoppedSummary = await acpTaskSessionService.stopTaskSession(body.taskId);
-				if (acpStoppedSummary) {
-					return { ok: true, summary: acpStoppedSummary };
-				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const relatedTaskConversationSessionIds = new Set<string>([body.taskId]);
@@ -1487,17 +1611,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						: [];
 				const terminalTaskSessionSummaries =
 					typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : [];
-				for (const summary of [...clineTaskSessionSummaries, ...terminalTaskSessionSummaries]) {
+				for (const summary of [
+					...clineTaskSessionSummaries,
+					...terminalTaskSessionSummaries,
+					...acpTaskSessionService.listSummaries(),
+				]) {
 					if (summary.taskConversationSessionMetadata?.workspaceTaskId === body.taskId) {
 						relatedTaskConversationSessionIds.add(summary.taskId);
 					}
 				}
 				let summary: RuntimeTaskSessionSummary | null = null;
 				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
-					const clineSummary = await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
-					const terminalSummary = clineSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					const acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
+					const clineSummary = acpSummary
+						? null
+						: await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
+					const terminalSummary =
+						clineSummary || acpSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
 					if (taskConversationSessionId === body.taskId) {
-						summary = clineSummary ?? terminalSummary ?? summary;
+						summary = acpSummary ?? clineSummary ?? terminalSummary ?? summary;
 					}
 				}
 				return {
@@ -1650,7 +1782,19 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						// 故这里必须真的把运行时拉回来——这正是计划 §7.4 第 2 步。
 						if (sessionTransport === "acp_stdio_subprocess") {
 							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-							return await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId);
+							if (await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId))
+								return true;
+							// 完整重启后 ACP 的内存启动请求也已丢失，summary 暂存在 terminalManager。
+							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+							const persistedSummary = acpService.getSummary(taskId) ?? terminalManager.getSummary(taskId);
+							if (!persistedSummary) return false;
+							const resumeRequest = await buildTaskConversationSessionDurableResumeRequest(
+								workspaceScope,
+								persistedSummary,
+							);
+							if (!resumeRequest || resumeRequest.requestedAgentSessionTransport !== sessionTransport)
+								return false;
+							return (await runtimeApi.startTaskSession(workspaceScope, resumeRequest)).ok;
 						}
 						if (sessionTransport === "in_process_cline_sdk") {
 							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
@@ -2244,6 +2388,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		sendTaskChatMessage: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			let taskChatSendResponse: RuntimeTaskChatSendResponse | null = null;
 			try {
+				if (input.source == null) {
+					const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+					const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+					const previousSummary =
+						acpService.getSummary(input.taskId) ?? terminalManager.getSummary?.(input.taskId);
+					const metadata = previousSummary?.taskConversationSessionMetadata;
+					const settings = metadata?.taskConversationSessionLaunchSettings;
+					if (metadata?.taskConversationSessionRole === "task_collaborator" && settings && previousSummary) {
+						const resumedFromMemory =
+							settings.sessionTransport === "acp_stdio_subprocess"
+								? await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(input.taskId)
+								: await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(
+										input.taskId,
+									);
+						if (!resumedFromMemory) {
+							const resumeRequest = await buildTaskConversationSessionDurableResumeRequest(
+								workspaceScope,
+								previousSummary,
+							);
+							if (!resumeRequest) return { ok: false, summary: null, error: "协作会话的宿主任务不存在。" };
+							const resumed = await runtimeApi.startTaskSession(workspaceScope, resumeRequest);
+							if (!resumed.ok) return { ok: false, summary: resumed.summary, error: resumed.error };
+						}
+					}
+				}
 				taskChatSendResponse = await sendTaskChatMessageAcrossSessionTransports(
 					{
 						getScopedTerminalManager: deps.getScopedTerminalManager,
@@ -2717,7 +2886,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const currentSummary =
 					acpTaskSessionService.getSummary(body.taskId) ?? terminalManager.getSummary(body.taskId) ?? null;
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-				const card = findWorkspaceBoardCard(board, body.taskId);
+				const workspaceTaskId = currentSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? body.taskId;
+				const isSideConversationSession = currentSummary
+					? isTaskConversationSessionWithoutTaskLifecycleAuthority(currentSummary)
+					: false;
+				const sideSessionLaunchSettings =
+					currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
+				const card = findWorkspaceBoardCard(board, workspaceTaskId);
 				const agentId = currentSummary?.agentId ?? card?.agentId ?? null;
 				if (!agentId) {
 					return {
@@ -2778,6 +2953,40 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					await terminalManager.forceStopTaskSession(body.taskId);
 				}
 				priorAgentSessionStopped = Boolean(acpStoppedSummary ?? terminalSummaryBeforeStop);
+				let targetSessionMetadata = currentSummary?.taskConversationSessionMetadata;
+				if (isSideConversationSession && sideSessionLaunchSettings && currentSummary && targetSessionMetadata) {
+					if (!terminalManager.getSummary(body.taskId)) {
+						terminalManager.hydrateFromRecord({ [body.taskId]: acpStoppedSummary ?? currentSummary });
+					}
+					if (acpStoppedSummary?.agentNativeConversationSessionIdentity) {
+						terminalManager.applyAgentNativeConversationSessionIdentity(
+							body.taskId,
+							acpStoppedSummary.agentNativeConversationSessionIdentity,
+						);
+					}
+					targetSessionMetadata =
+						terminalManager.applyTaskConversationSessionTargetTransport(
+							body.taskId,
+							body.targetSessionTransport,
+							targetSessionMetadata,
+						)?.taskConversationSessionMetadata ?? targetSessionMetadata;
+					// summary 广播是异步的；目标快照必须在尝试新通道前 durable 落盘。
+					const targetSummary = terminalManager.getSummary(body.taskId);
+					if (targetSummary) {
+						await mutateWorkspaceState(
+							workspaceScope.workspacePath,
+							buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+								"runtime_persist_conversation_session_target_transport",
+								"task_conversation_session_transport_switch",
+							),
+							(state) => ({
+								board: state.board,
+								sessions: { ...state.sessions, [body.taskId]: targetSummary },
+								value: true,
+							}),
+						);
+					}
+				}
 				// 切离 ACP 时必须把 ACP 账本条目彻底摘掉。stopTaskSession 只是把 summary 写成 interrupted、
 				// 刻意保留条目（UI 还要显示那个终态），但 getTaskChatMessages / sendTaskChatMessage 是按
 				// 「ACP 账本里有没有这条会话」分派的——留着条目，切回 TUI 的会话就会继续被 ACP 劫持这两个端点，
@@ -2817,33 +3026,35 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//    persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard 同一注意事项。
 				//    行动者按请求发起方证据解析（Web UI 目前无 nonce → direct_runtime_trpc_caller，1a.3 接 nonce）；
 				//    必须在 board 锁之外解析，lookups 会读 board.json。
-				const cardMutation = await mutateWorkspaceState(
-					workspaceScope.workspacePath,
-					await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
-						taskMutationIntentKind: "runtime_trpc_switch_agent_session_transport_persist_onto_card",
-						kanbanRequestOriginActorEvidence,
-					}),
-					(state) => {
-						const currentCard = findWorkspaceBoardCard(state.board, body.taskId);
-						if (!currentCard) {
-							return { board: state.board, value: false, save: false };
-						}
-						const updated = updateTask(state.board, body.taskId, {
-							title: currentCard.title,
-							prompt: currentCard.prompt,
-							baseRef: currentCard.baseRef,
-							startInPlanMode: currentCard.startInPlanMode,
-							taskAgentPermissionMode: currentCard.taskAgentPermissionMode,
-							autoReviewEnabled: currentCard.autoReviewEnabled === true,
-							autoReviewMode: currentCard.autoReviewMode ?? "commit",
-							ompAgentSessionTransport: body.targetSessionTransport,
-						});
-						if (!updated.updated) {
-							return { board: state.board, value: false, save: false };
-						}
-						return { board: updated.board, value: true };
-					},
-				);
+				const cardMutation = isSideConversationSession
+					? { value: false }
+					: await mutateWorkspaceState(
+							workspaceScope.workspacePath,
+							await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+								taskMutationIntentKind: "runtime_trpc_switch_agent_session_transport_persist_onto_card",
+								kanbanRequestOriginActorEvidence,
+							}),
+							(state) => {
+								const currentCard = findWorkspaceBoardCard(state.board, body.taskId);
+								if (!currentCard) {
+									return { board: state.board, value: false, save: false };
+								}
+								const updated = updateTask(state.board, body.taskId, {
+									title: currentCard.title,
+									prompt: currentCard.prompt,
+									baseRef: currentCard.baseRef,
+									startInPlanMode: currentCard.startInPlanMode,
+									taskAgentPermissionMode: currentCard.taskAgentPermissionMode,
+									autoReviewEnabled: currentCard.autoReviewEnabled === true,
+									autoReviewMode: currentCard.autoReviewMode ?? "commit",
+									ompAgentSessionTransport: body.targetSessionTransport,
+								});
+								if (!updated.updated) {
+									return { board: state.board, value: false, save: false };
+								}
+								return { board: updated.board, value: true };
+							},
+						);
 				if (cardMutation.value) {
 					void deps.broadcastRuntimeWorkspaceStateUpdated?.(
 						workspaceScope.workspaceId,
@@ -2861,11 +3072,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//    恒真，切换就会在旧会话已停的情况下谎报成功。
 				const startResponse = await runtimeApi.startTaskSession(workspaceScope, {
 					taskId: body.taskId,
+					workspaceTaskId,
+					taskConversationSessionMetadata: targetSessionMetadata,
 					prompt: card.prompt,
 					taskTitle: card.title,
 					baseRef: card.baseRef,
 					agentId,
-					taskAgentPermissionMode: card.taskAgentPermissionMode,
+					taskAgentPermissionMode:
+						sideSessionLaunchSettings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
+					terminalAgentModelOverrideSettings: sideSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 					worktreeMode: card.worktreeMode,
 					requestedAgentSessionTransport: body.targetSessionTransport,
 					resumePriorAgentConversationWithoutResendingPrompt: true,

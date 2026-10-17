@@ -805,6 +805,42 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
 	});
 
+	it.each(["claude", "codex"] as const)(
+		"首次 By the way 按主原生 ID fork %s，保持只读并清除最近会话选择",
+		async (agentId) => {
+			setupTempHome();
+			const mainNativeSessionId = "11111111-2222-4333-8444-555555555555";
+			const launch = await prepareAgentLaunch({
+				taskId: "first-by-the-way",
+				agentId,
+				binary: agentId,
+				args:
+					agentId === "claude"
+						? ["--continue", "--resume", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "--dangerously-skip-permissions"]
+						: ["fork", "--last", "--dangerously-bypass-approvals-and-sandbox"],
+				cwd: "/tmp/task-worktree",
+				prompt: "解释实现",
+				readOnlyQuestionSession: true,
+				forkLatestWorkingDirectorySession: true,
+				byTheWayMainSessionForkSourceNativeSessionId: mainNativeSessionId,
+			});
+			expect(launch.args).not.toContain("--last");
+			expect(launch.args).not.toContain("--continue");
+			expect(launch.args).not.toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+			if (agentId === "claude") {
+				expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(mainNativeSessionId);
+				expect(launch.args).toContain("--fork-session");
+				expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
+				expect(launch.args).not.toContain("--dangerously-skip-permissions");
+			} else {
+				expect(launch.args[launch.args.indexOf("fork") + 1]).toBe(mainNativeSessionId);
+				expect(launch.args).toContain("read-only");
+				expect(launch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+			}
+		},
+	);
+
 	it("forks the latest Codex session in read-only mode for a By the way session", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -2701,4 +2737,32 @@ describe("Codex 当前任务目录最近会话隔离", () => {
 			expect(launch.args[launch.args.indexOf("--cd") + 1]).toBe("/tmp/task-b");
 		},
 	);
+});
+
+describe("可写协作会话启动", () => {
+	it.each(["claude", "codex"] as const)("%s 保留写权限并声明两个 ID，不 fork 主会话", async (agentId) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-independent",
+			agentId,
+			args: [],
+			cwd: "/tmp/collaboration-worktree",
+			prompt: "仅处理本次协作",
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "owner-task",
+				taskConversationSessionRole: "task_collaborator",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+			},
+		});
+		expect(launch.args).not.toContain("read-only");
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args).not.toContain("--fork-session");
+		expect(JSON.stringify(launch)).toContain("owner-task");
+		expect(JSON.stringify(launch)).toContain("task-conversation-session-independent");
+	});
 });

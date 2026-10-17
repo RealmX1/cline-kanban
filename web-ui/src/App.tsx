@@ -308,7 +308,7 @@ export default function App(): ReactElement {
 	const {
 		upsertSession,
 		startTaskSession,
-		createByTheWayTaskConversationSession,
+		createTaskConversationSession,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
@@ -1884,30 +1884,12 @@ export default function App(): ReactElement {
 										explorationThreadGraph={explorationThreadGraphData}
 										runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 										isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
-										onCreateByTheWayTaskConversationSession={async (input) => {
-											const effectiveAgentId =
-												detailSession.agentId ??
-												selectedCardRenderedInFocusView.card.agentId ??
-												runtimeProjectConfig?.selectedAgentId;
-											if (
-												!effectiveAgentId ||
-												!(["cline", "claude", "codex"] as const).includes(
-													effectiveAgentId as "cline" | "claude" | "codex",
-												)
-											) {
-												return {
-													ok: false,
-													message: effectiveAgentId
-														? `${effectiveAgentId} By the way sessions are not available.`
-														: "No supported agent is selected.",
-												};
-											}
-											return await createByTheWayTaskConversationSession({
+										onCreateTaskConversationSession={async (input) =>
+											await createTaskConversationSession({
 												task: selectedCardRenderedInFocusView.card,
-												agentId: effectiveAgentId,
 												...input,
-											});
-										}}
+											})
+										}
 										onSessionSummary={upsertSession}
 										onCardSelect={handleCardSelect}
 										onTaskDragEnd={handleDetailTaskDragEnd}
