@@ -82,7 +82,7 @@ _Avoid_: hot tasks, urgent
 **Board Scope Home Page Section Columns（All projects 首页分区列呈现）**：
 Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列（`board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board.tsx`，2026-10-12 取代 Board Overview）。与单项目对称：单项目首页是阶段列看板、Focus View 左栏是阶段竖列表；All projects 首页是分区列看板、Focus View 左栏是同一组分区的竖列表。
 - 两处共用同一份「区数据 + 一行怎么画、点了做什么」（`use-cross-project-task-switcher-section-row-rendering-shared-across-scroll-containers.tsx`）与同一组区块组件（`cross-project-recently-active-task-switcher-section-blocks.tsx`，参数 `sectionBlockPresentation` 区分两种呈现）。
-- 列序 Pinned（没有置顶时隐藏）| Cache warm · your turn | Recent | Running，注意力优先（`EXPERIMENT_NODE`）；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
+- 列序 Pinned（没有置顶时隐藏）| Running | Cache warm · your turn | Recent，与 Focus View 左栏的 All projects 分区同序；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
 - 与左栏的呈现差异：Pinned 全量显示、不折叠（不读左栏的折叠 / 只露 5 条偏好）；Running 始终列出行（不读左栏的收起偏好）；Pinned 行点击不做「跳到下方区那一行」（点行就进了 Focus View，首页随即卸载）。Cache warm 与 Recent 两处相同。
 - 每列一个滚动容器（列 header 固定在滚动区外、滚动容器就是分区内容容器），各持一个 hover 原地展开 hook 实例：手风琴语义与左栏相同，「指针离开面板」「在面板外按下」都以这一列为面板（「列外」同样按这一列的 React 子树判断，列里卡上弹出的 portal 弹窗算列内），指针从 A 列移到 B 列时 A 列展开的行约 300ms 后收起。各列滚动位置记在 continuity store 的 `boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection`：Focus View 打开时首页被卸载，Back 回来落回原位。
 - 当前项目的行展开成完整卡片时与主看板同数据、同动作（`use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page.ts`，与 ColumnContextPanel 同构）；board 还不是当前项目的数据时改读服务端。
