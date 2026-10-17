@@ -55,7 +55,11 @@ import type {
 } from "../core/api-contract";
 import { runtimeStateStreamClientMessageSchema } from "../core/api-contract";
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
-import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
+import {
+	isNotifiableUserTurn,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
@@ -466,6 +470,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			const currentFacets = resolveSessionFacets(summary);
 			if (
 				previousSummary &&
+				!isTaskConversationSessionWithoutTaskLifecycleAuthority(summary) &&
 				!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
 				isNotifiableUserTurn(currentFacets)
 			) {

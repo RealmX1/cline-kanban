@@ -404,7 +404,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="codex"
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -492,7 +492,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="claude"
 					sessionSummary={mainSummary}
 					taskSessions={{ "task-1": mainSummary, [childTaskId]: childSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -605,7 +605,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="codex"
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -649,7 +649,7 @@ describe("CardDetailView", () => {
 					isTaskChangesSidebarOpen
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -1999,7 +1999,7 @@ describe("CardDetailView", () => {
 						selectedAgentId="cline"
 						sessionSummary={sessionSummary}
 						taskSessions={{ "task-1": sessionSummary }}
-						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onCreateTaskConversationSession={async () => ({ ok: true })}
 						onSessionSummary={() => {}}
 						onCardSelect={() => {}}
 						onTaskDragEnd={() => {}}

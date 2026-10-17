@@ -69,7 +69,7 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 		});
 	});
 
-	it("attributes a by-the-way side conversation to the card it hangs off, not to its own session id", () => {
+	it.each(["by_the_way", "task_collaborator"] as const)("%s 的资源用量归属宿主卡片", (role) => {
 		const { roots } = enumerateTaskResourceUsageAttributionRoots({
 			listTerminalSessionSources: () => [
 				source("repo", [
@@ -78,7 +78,7 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 						pid: 2000,
 						taskConversationSessionMetadata: {
 							workspaceTaskId: "ab12c",
-							taskConversationSessionRole: "by_the_way",
+							taskConversationSessionRole: role,
 							taskConversationSessionContextSource: "started_from_scratch",
 							parentTaskConversationSessionId: null,
 							mainSessionOriginTurnNumber: null,

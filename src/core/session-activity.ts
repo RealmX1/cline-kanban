@@ -38,6 +38,71 @@ import { mergeLastMainAgentConversationModelRequestDispatchObservation } from ".
 export const VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS = 5_000;
 export const AGENT_OUTPUT_QUIET_THRESHOLD_MS = 2_000;
 
+// 写权限与卡片生命周期权限正交：By the way 只读，协作会话可写，两者都不是主会话。
+export function isTaskConversationSessionWithoutTaskLifecycleAuthority(
+	summary: Pick<RuntimeTaskSessionSummary, "taskConversationSessionMetadata">,
+): boolean {
+	const metadata = summary.taskConversationSessionMetadata;
+	return metadata !== undefined && metadata.taskConversationSessionRole !== "main";
+}
+
+// 首次侧问 fork 与协作会话共用目录时，前后端必须采用同一份寻址判据。
+export function resolveByTheWayMainSessionForkSelection(input: {
+	workspaceTaskId: string;
+	launchAgentId: RuntimeAgentId;
+	mainSessionSummary: RuntimeTaskSessionSummary | null | undefined;
+	mainSessionWorkingDirectoryPath: string | null;
+	existingTaskConversationSessionSummaries: readonly RuntimeTaskSessionSummary[];
+}): { forkRejectionReason: string | null; mainSessionNativeConversationSessionId?: string } {
+	const sessions = input.existingTaskConversationSessionSummaries;
+	if (
+		sessions.some(
+			(summary) =>
+				summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId &&
+				summary.taskConversationSessionMetadata.taskConversationSessionRole === "by_the_way",
+		)
+	) {
+		return { forkRejectionReason: "已有 By the way 会话，后续侧问请从全新上下文开始。" };
+	}
+	// Cline 按宿主任务 id 加载消息，不使用 cwd-latest。
+	if (input.launchAgentId !== "claude" && input.launchAgentId !== "codex") {
+		return { forkRejectionReason: null };
+	}
+	const mainSummary = input.mainSessionSummary;
+	if (mainSummary?.agentId && mainSummary.agentId !== input.launchAgentId) {
+		return {
+			forkRejectionReason: "主会话的 agent 与当前 By the way agent 不同，无法 fork 主对话，请从全新上下文开始。",
+		};
+	}
+	const identity = mainSummary?.agentNativeConversationSessionIdentity;
+	if (identity?.sourceAgentId === input.launchAgentId) {
+		const nativeSessionId = identity.nativeSessionId.trim();
+		if (
+			!nativeSessionId ||
+			nativeSessionId.startsWith("-") ||
+			Array.from(nativeSessionId).some(
+				(character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+			)
+		) {
+			return { forkRejectionReason: "主会话记录的原生会话 ID 无效，无法安全 fork，请从全新上下文开始。" };
+		}
+		return { forkRejectionReason: null, mainSessionNativeConversationSessionId: nativeSessionId };
+	}
+	const hasCompetingSession = sessions.some(
+		(summary) =>
+			summary.taskId !== input.workspaceTaskId &&
+			summary.agentId === input.launchAgentId &&
+			(summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId ||
+				(input.mainSessionWorkingDirectoryPath !== null &&
+					summary.workspacePath === input.mainSessionWorkingDirectoryPath)),
+	);
+	return {
+		forkRejectionReason: hasCompetingSession
+			? `主会话尚未记录可用的 ${input.launchAgentId} 原生会话 ID，且同一工作目录存在其他 ${input.launchAgentId} 会话，无法安全 fork 主对话，请从全新上下文开始。`
+			: null,
+	};
+}
+
 // 「近期活跃」窗口（毫秒）：跨项目切换面板的 Running 区（docs/context-cross-project-recently-active-task-switcher.md）
 // 据此判定 agent 回合里的任务是否还在跑（距最近 PTY 输出 lastOutputAt 在本窗口内）。
 // 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，

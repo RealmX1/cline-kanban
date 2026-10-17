@@ -1,3 +1,5 @@
+import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import { resolveByTheWayMainSessionForkSelection, resolveSessionFacets } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
@@ -5,7 +7,7 @@ import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/trun
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
 
@@ -15,8 +17,17 @@ type TaskConversationSessionsPanelTab = "sessions" | "create_session";
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
 
 const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
+const supportedAgentCatalog = getRuntimeLaunchSupportedAgentCatalog();
 
-interface CreateByTheWaySessionRequest {
+function resolveDefaultCollaborationAgentId(mainAgentId: RuntimeAgentId): RuntimeAgentId {
+	return supportedAgentCatalog.some((entry) => entry.id === mainAgentId)
+		? mainAgentId
+		: (supportedAgentCatalog[0]?.id ?? "codex");
+}
+
+interface CreateTaskConversationSessionRequest {
+	agentId: RuntimeAgentId;
+	sessionRole: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
 	contextSource: NewTaskConversationSessionContextSource;
 }
@@ -53,9 +64,9 @@ function TaskConversationSessionIdentifierChips({
 	);
 }
 
-function isByTheWaySessionForTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
+function isSideConversationSessionForTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
 	const metadata = summary.taskConversationSessionMetadata;
-	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
+	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole !== "main";
 }
 
 function getMainSessionTurnNumber(summary: RuntimeTaskSessionSummary): number {
@@ -63,11 +74,12 @@ function getMainSessionTurnNumber(summary: RuntimeTaskSessionSummary): number {
 }
 
 function getSessionStatusLabel(summary: RuntimeTaskSessionSummary): string {
-	if (summary.turnOwner === "agent") {
-		return summary.liveness === "retrying" ? "Retrying" : "Answering";
+	const facets = resolveSessionFacets(summary);
+	if (facets.turnOwner === "agent") {
+		return facets.liveness === "retrying" ? "Retrying" : "Answering";
 	}
-	if (summary.turnOwner === "user") {
-		return summary.liveness === "failed" ? "Failed" : "Ready";
+	if (facets.turnOwner === "user") {
+		return facets.liveness === "failed" ? "Failed" : "Ready";
 	}
 	return "Idle";
 }
@@ -98,10 +110,11 @@ export function TaskConversationSessionsPanel({
 	mainSessionUserMessagePreview,
 	mainSessionOriginalPromptCard,
 	effectiveAgentId,
+	agents,
 	taskSessions,
 	selectedTaskConversationSessionId,
 	onSelectTaskConversationSession,
-	onCreateByTheWaySession,
+	onCreateTaskConversationSession,
 }: {
 	workspaceTaskId: string;
 	mainSessionSummary: RuntimeTaskSessionSummary;
@@ -111,10 +124,13 @@ export function TaskConversationSessionsPanel({
 	// 的两行预览，把「看全文」挂在它旁边是移动端唯一自然的落点。
 	mainSessionOriginalPromptCard: TaskOriginalPromptCard;
 	effectiveAgentId: RuntimeAgentId;
+	agents?: RuntimeAgentDefinition[];
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	selectedTaskConversationSessionId: string;
 	onSelectTaskConversationSession: (taskConversationSessionId: string) => void;
-	onCreateByTheWaySession: (request: CreateByTheWaySessionRequest) => Promise<{ ok: boolean; message?: string }>;
+	onCreateTaskConversationSession: (
+		request: CreateTaskConversationSessionRequest,
+	) => Promise<{ ok: boolean; message?: string }>;
 }): React.ReactElement {
 	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
 	const [activeTab, setActiveTab] = useState<TaskConversationSessionsPanelTab>("sessions");
@@ -122,21 +138,45 @@ export function TaskConversationSessionsPanel({
 	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(() =>
 		mainSessionSummary.startedAt === null ? "started_from_scratch" : "forked_from_main_current_turn",
 	);
+	const [sessionRole, setSessionRole] = useState<"by_the_way" | "task_collaborator">("task_collaborator");
+	const [collaborationAgentId, setCollaborationAgentId] = useState<RuntimeAgentId>(() =>
+		resolveDefaultCollaborationAgentId(effectiveAgentId),
+	);
+	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
 	const [isCreating, setIsCreating] = useState(false);
 	const [creationError, setCreationError] = useState<string | null>(null);
 	const isByTheWaySessionCreationSupported = byTheWaySessionSupportedAgentIds.has(effectiveAgentId);
+	const isSessionCreationSupported =
+		sessionRole === "by_the_way"
+			? isByTheWaySessionCreationSupported
+			: supportedAgentCatalog.some((entry) => entry.id === selectedAgentId) &&
+				agents?.find((agent) => agent.id === selectedAgentId)?.installed !== false;
+	useEffect(() => {
+		setCollaborationAgentId(resolveDefaultCollaborationAgentId(effectiveAgentId));
+		setSessionRole("task_collaborator");
+		setInitialUserQuestion("");
+		setCreationError(null);
+	}, [workspaceTaskId, effectiveAgentId]);
 	const [readSessionUpdatedAtById, setReadSessionUpdatedAtById] = useState<Record<string, number>>(
 		readTaskConversationSessionReadReceipts,
 	);
 	const mainSessionTurnNumber = getMainSessionTurnNumber(mainSessionSummary);
-	const byTheWaySessions = useMemo(
+	const sideConversationSessions = useMemo(
 		() =>
 			Object.values(taskSessions)
-				.filter((summary) => isByTheWaySessionForTask(summary, workspaceTaskId))
+				.filter((summary) => isSideConversationSessionForTask(summary, workspaceTaskId))
 				.sort((left, right) => right.updatedAt - left.updatedAt),
 		[taskSessions, workspaceTaskId],
 	);
-	const canForkCurrentMainSession = mainSessionSummary.startedAt !== null && byTheWaySessions.length === 0;
+	const mainSessionForkSelection = resolveByTheWayMainSessionForkSelection({
+		workspaceTaskId,
+		launchAgentId: effectiveAgentId,
+		mainSessionSummary,
+		mainSessionWorkingDirectoryPath: mainSessionSummary.workspacePath,
+		existingTaskConversationSessionSummaries: Object.values(taskSessions),
+	});
+	const canForkCurrentMainSession =
+		mainSessionSummary.startedAt !== null && mainSessionForkSelection.forkRejectionReason === null;
 
 	useEffect(() => {
 		if (!canForkCurrentMainSession && contextSource === "forked_from_main_current_turn") {
@@ -182,14 +222,17 @@ export function TaskConversationSessionsPanel({
 	};
 
 	const createSession = async () => {
-		if (!isByTheWaySessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
+		if (!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
 			return;
 		}
 		setCreationError(null);
 		setIsCreating(true);
-		const result = await onCreateByTheWaySession({
+		const result = await onCreateTaskConversationSession({
+			agentId: selectedAgentId,
+			sessionRole,
 			initialUserQuestion,
-			contextSource: canForkCurrentMainSession ? contextSource : "started_from_scratch",
+			contextSource:
+				sessionRole === "by_the_way" && canForkCurrentMainSession ? contextSource : "started_from_scratch",
 		});
 		setIsCreating(false);
 		if (!result.ok) {
@@ -229,7 +272,7 @@ export function TaskConversationSessionsPanel({
 								: "text-text-secondary hover:bg-surface-3",
 						)}
 						onClick={() => setActiveTab("create_session")}
-						disabled={!isByTheWaySessionCreationSupported}
+						disabled={isCreating}
 					>
 						Create session
 					</button>
@@ -241,7 +284,7 @@ export function TaskConversationSessionsPanel({
 						icon={<Plus size={14} />}
 						className="ml-auto h-6"
 						onClick={() => setActiveTab("create_session")}
-						disabled={!isByTheWaySessionCreationSupported}
+						disabled={isCreating}
 					>
 						Add New
 					</Button>
@@ -293,14 +336,14 @@ export function TaskConversationSessionsPanel({
 						card={mainSessionOriginalPromptCard}
 						onClose={() => setIsOriginalPromptDialogOpen(false)}
 					/>
-					{byTheWaySessions.map((summary) => {
+					{sideConversationSessions.map((summary) => {
 						const metadata = summary.taskConversationSessionMetadata;
 						if (!metadata) {
 							return null;
 						}
 						const turnsAgo = Math.max(0, mainSessionTurnNumber - (metadata.mainSessionOriginTurnNumber ?? 0));
 						const hasUnreadCompletion =
-							summary.turnOwner === "user" &&
+							resolveSessionFacets(summary).turnOwner === "user" &&
 							(readSessionUpdatedAtById[summary.taskId] ?? 0) < summary.updatedAt &&
 							selectedTaskConversationSessionId !== summary.taskId;
 						return (
@@ -320,7 +363,14 @@ export function TaskConversationSessionsPanel({
 								>
 									<div className="flex items-center gap-2">
 										<MessageCircleQuestion size={13} className="text-status-purple" />
-										<span className="text-xs font-medium text-text-primary">By the way</span>
+										<span className="text-xs font-medium text-text-primary">
+											{metadata.taskConversationSessionRole === "task_collaborator"
+												? "协作会话"
+												: "By the way"}
+										</span>
+										<span className="text-[11px] text-text-tertiary">
+											{getRuntimeAgentCatalogEntry(summary.agentId ?? "codex")?.label ?? summary.agentId}
+										</span>
 										{hasUnreadCompletion ? (
 											<span
 												role="img"
@@ -348,10 +398,10 @@ export function TaskConversationSessionsPanel({
 							</div>
 						);
 					})}
-					{byTheWaySessions.length === 0 ? (
+					{sideConversationSessions.length === 0 ? (
 						<div className="flex flex-col items-center gap-2 px-4 py-6 text-center text-xs text-text-tertiary">
 							<MessageCircleQuestion size={24} />
-							<span>Ask a side question without interrupting the main session.</span>
+							<span>创建协作会话处理工作，或用 By the way 询问侧问。</span>
 						</div>
 					) : null}
 				</div>
@@ -361,52 +411,109 @@ export function TaskConversationSessionsPanel({
 						className="mb-1 block text-xs font-medium text-text-secondary"
 						htmlFor="task-conversation-session-role"
 					>
-						Session role
+						会话类型
 					</label>
 					<select
 						id="task-conversation-session-role"
 						className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-						value="by_the_way"
-						onChange={() => undefined}
+						value={sessionRole}
+						disabled={isCreating}
+						onChange={(event) => {
+							setSessionRole(event.target.value as "by_the_way" | "task_collaborator");
+							setContextSource(
+								canForkCurrentMainSession ? "forked_from_main_current_turn" : "started_from_scratch",
+							);
+							setCreationError(null);
+						}}
 					>
-						<option value="by_the_way">By the way</option>
-					</select>
-					<label
-						className="mb-1 block text-xs font-medium text-text-secondary"
-						htmlFor="task-conversation-context-source"
-					>
-						Context
-					</label>
-					<select
-						id="task-conversation-context-source"
-						className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-						value={contextSource}
-						onChange={(event) => setContextSource(event.target.value as NewTaskConversationSessionContextSource)}
-					>
-						<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
-							Fork current main session
+						<option value="task_collaborator">协作会话</option>
+						<option value="by_the_way" disabled={!isByTheWaySessionCreationSupported}>
+							By the way
 						</option>
-						<option value="started_from_scratch">Start from scratch</option>
 					</select>
+					{sessionRole === "task_collaborator" ? (
+						<>
+							<label
+								className="mb-1 block text-xs font-medium text-text-secondary"
+								htmlFor="task-conversation-session-agent"
+							>
+								Agent
+							</label>
+							<select
+								id="task-conversation-session-agent"
+								value={collaborationAgentId}
+								disabled={isCreating}
+								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
+								onChange={(event) => setCollaborationAgentId(event.target.value as RuntimeAgentId)}
+							>
+								{supportedAgentCatalog.map((agent) => (
+									<option
+										key={agent.id}
+										value={agent.id}
+										disabled={agents?.find((candidate) => candidate.id === agent.id)?.installed === false}
+									>
+										{agent.label}
+										{agents?.find((candidate) => candidate.id === agent.id)?.installed === false
+											? "（未安装）"
+											: ""}
+									</option>
+								))}
+							</select>
+							<p className="mb-3 text-xs text-text-secondary">
+								全新上下文，共用当前工作目录。主会话负责卡片生命周期。
+							</p>
+						</>
+					) : (
+						<>
+							<label
+								className="mb-1 block text-xs font-medium text-text-secondary"
+								htmlFor="task-conversation-context-source"
+							>
+								Context
+							</label>
+							<select
+								id="task-conversation-context-source"
+								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
+								value={contextSource}
+								onChange={(event) =>
+									setContextSource(event.target.value as NewTaskConversationSessionContextSource)
+								}
+							>
+								<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
+									Fork current main session
+								</option>
+								<option value="started_from_scratch">Start from scratch</option>
+							</select>
+							{mainSessionForkSelection.forkRejectionReason ? (
+								<p className="mb-3 text-xs text-text-secondary">
+									{mainSessionForkSelection.forkRejectionReason}
+								</p>
+							) : null}
+						</>
+					)}
 					<label
 						className="mb-1 block text-xs font-medium text-text-secondary"
 						htmlFor="task-conversation-initial-question"
 					>
-						Question
+						{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
 					</label>
 					<textarea
 						id="task-conversation-initial-question"
 						className="min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary placeholder:text-text-secondary focus:border-border-focus focus:outline-none"
-						placeholder="Ask a side question…"
+						placeholder={
+							sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
+						}
 						value={initialUserQuestion}
 						onChange={(event) => setInitialUserQuestion(event.target.value)}
 					/>
 					<p className="mt-1 text-[11px] text-text-tertiary">
-						{!isByTheWaySessionCreationSupported
-							? `${effectiveAgentId} By the way sessions are not available.`
-							: effectiveAgentId === "cline"
-								? "Cline will answer in read-only Plan mode."
-								: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
+						{sessionRole === "task_collaborator"
+							? "可执行命令与修改文件，权限和 Plan 起步设置沿用当前卡片。"
+							: !isByTheWaySessionCreationSupported
+								? `${effectiveAgentId} By the way sessions are not available.`
+								: effectiveAgentId === "cline"
+									? "Cline will answer in read-only Plan mode."
+									: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
 					</p>
 					{creationError ? <p className="mt-2 text-xs text-status-red">{creationError}</p> : null}
 					<Button
@@ -414,7 +521,7 @@ export function TaskConversationSessionsPanel({
 						size="sm"
 						fill
 						className="mt-3"
-						disabled={!initialUserQuestion.trim() || isCreating}
+						disabled={!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating}
 						onClick={() => void createSession()}
 					>
 						{isCreating ? "Creating…" : "Create session"}

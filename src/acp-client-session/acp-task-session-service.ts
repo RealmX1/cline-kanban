@@ -13,11 +13,13 @@ import type {
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskConversationMode,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import {
+	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
@@ -65,6 +67,8 @@ import { AcpTaskSessionRegistry } from "./acp-task-session-registry";
 
 export interface StartAcpTaskSessionRequest {
 	taskId: string;
+	workspaceTaskId?: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
 	cwd: string;
 	prompt: string;
@@ -307,6 +311,9 @@ export class AcpTaskSessionService {
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
+				...(request.taskConversationSessionMetadata
+					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+					: {}),
 				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
 				startedAt,
 				runtimeSessionIncarnationId,
@@ -352,11 +359,11 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
-				// omp 每张卡一个进程：工作单元身份直接写进进程 env，工具 shell 里的 kanban CLI 才能声明「是哪张卡」。
-				// omp 的卡片只有一条 agent 会话，会话 id 就是 workspace task id。
+				// 工作单元身份写进每条会话的进程 env，工具 shell 中的 kanban CLI 才能声明宿主与行动者。
+				// 宿主任务与会话分别寻址：协作会话共用任务目录，但 hook 与原生身份归各自会话。
 				env: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
 					? buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
-							workspaceTaskId: request.taskId,
+							workspaceTaskId: request.workspaceTaskId ?? request.taskId,
 							kanbanTaskConversationSessionId: request.taskId,
 							workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
 							workspaceRepositoryPath:
@@ -410,7 +417,7 @@ export class AcpTaskSessionService {
 					request.taskId,
 					connection,
 					buildAcpPromptBlocks(
-						`${resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.prompt}`,
+						`${resolveTaskSessionAppendSystemPrompt(request.workspaceTaskId ?? request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator" ? renderTaskCollaborationSessionResponsibilityGuidance(request.workspaceTaskId ?? request.taskId, request.taskId) : ""}\n\n${request.prompt}`,
 						request.images,
 					),
 					request.prompt,

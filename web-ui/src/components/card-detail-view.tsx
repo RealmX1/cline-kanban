@@ -740,7 +740,7 @@ export function CardDetailView({
 	onTaskClineSettingsChanged,
 	onTaskCommentEntriesChange,
 	isTaskChangesSidebarOpen = false,
-	onCreateByTheWayTaskConversationSession,
+	onCreateTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratoryFindings,
 	explorationThreadGraph,
@@ -828,7 +828,9 @@ export function CardDetailView({
 	}) => void;
 	onTaskCommentEntriesChange?: (taskId: string, entries: TaskCommentEntry[]) => void;
 	isTaskChangesSidebarOpen?: boolean;
-	onCreateByTheWayTaskConversationSession?: (input: {
+	onCreateTaskConversationSession?: (input: {
+		agentId: RuntimeAgentId;
+		sessionRole?: "by_the_way" | "task_collaborator";
 		initialUserQuestion: string;
 		contextSource: "started_from_scratch" | "forked_from_main_current_turn";
 		mainSessionOriginTurnNumber: number;
@@ -1317,18 +1319,21 @@ export function CardDetailView({
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
 	const taskConversationSessionsPanel =
-		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateByTheWayTaskConversationSession ? (
+		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateTaskConversationSession ? (
 			<TaskConversationSessionsPanel
 				workspaceTaskId={selection.card.id}
 				mainSessionSummary={sessionSummary}
 				mainSessionUserMessagePreview={selection.card.prompt}
 				mainSessionOriginalPromptCard={selection.card}
-				effectiveAgentId={effectiveTaskConversationSessionAgentId}
+				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId}
+				agents={runtimeConfig?.agents}
 				taskSessions={taskSessions}
 				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
 				onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
-				onCreateByTheWaySession={async ({ initialUserQuestion, contextSource }) => {
-					const result = await onCreateByTheWayTaskConversationSession({
+				onCreateTaskConversationSession={async ({ agentId, sessionRole, initialUserQuestion, contextSource }) => {
+					const result = await onCreateTaskConversationSession({
+						agentId,
+						sessionRole,
 						initialUserQuestion,
 						contextSource,
 						mainSessionOriginTurnNumber: sessionSummary.latestTurnCheckpoint?.turn ?? 1,
@@ -1384,7 +1389,12 @@ export function CardDetailView({
 			// 会话面板由多种传输形态共用，面板内部据此决定是否显示 Cline 专属的 provider/模型控件。
 			agentId={effectiveTaskConversationSessionAgentId ?? undefined}
 			taskColumnId={selection.column.id}
-			defaultMode={isMainTaskConversationSessionSelected ? "act" : "plan"}
+			defaultMode={
+				activeTaskConversationSessionSummary?.taskConversationSessionMetadata?.taskConversationSessionRole ===
+				"by_the_way"
+					? "plan"
+					: "act"
+			}
 			showComposerModeToggle={false}
 			workspaceId={currentProjectId}
 			runtimeConfig={runtimeConfig}
