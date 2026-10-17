@@ -45,7 +45,7 @@ import {
 // 关系 = 事件日志 × 投影表版本的纯函数（d-vocab §2.2）：本模块按全局提交序号顺序消费已提交事件，
 // 不写账本、不落盘；runtime 在内存里持有状态并按游标增量追上（见 ...-catch-up-against-ledger-worker.ts）。
 // 投影规则改了就升版本号，持有方据此从头重放——账本只追加，所以重放的结果与「当初就按新规则投影」完全一致。
-export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 1;
+export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 2;
 
 const MOST_RECENT_PROJECTED_FROM_EVENT_IDS_RETAINED_PER_RECORDED_RELATION = 10;
 
@@ -639,7 +639,7 @@ function isConversationSessionIdentityEventObservedInMainKanbanTaskConversationS
 		"taskConversationSessionRole",
 	);
 	if (taskConversationSessionRole !== null) {
-		return taskConversationSessionRole !== "by_the_way";
+		return taskConversationSessionRole === "main";
 	}
 	const kanbanTaskConversationSessionId = readKanbanTaskConversationSessionIdOfConversationSessionIdentityEvent(event);
 	return kanbanTaskConversationSessionId === null || kanbanTaskConversationSessionId === owningKanbanTaskId;

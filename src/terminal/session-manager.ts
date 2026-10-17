@@ -7,6 +7,7 @@ import {
 	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
 	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
 	isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge,
+	resolveRuntimeAgentSessionTransportFromSummary,
 } from "../core/agent-catalog";
 import {
 	type AgentConversationSessionResumeAddressing,
@@ -21,6 +22,7 @@ import type {
 	RuntimeAgentNativeConversationPersistenceObservation,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
+	RuntimeAgentSessionTransport,
 	RuntimeLastConversationProgressObservation,
 	RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
 	RuntimeTaskAgentSessionInitialization,
@@ -602,6 +604,7 @@ export interface StartTaskSessionRequest {
 	projectPath?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
+	byTheWayMainSessionForkSourceNativeSessionId?: string;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -907,9 +910,11 @@ export function reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgent
 						},
 					}
 				: {}),
-			// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
-			// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
-			sessionTransport: "pty_terminal",
+			// 此处也重建 ACP 的持久化记录，不能把「由 terminalManager 暂存」等同于 PTY。
+			// 旧记录缺章时沿用 catalog 默认；已有通道与侧会话的启动快照必须保留。
+			sessionTransport:
+				summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.sessionTransport ??
+				resolveRuntimeAgentSessionTransportFromSummary(summary),
 		},
 		options.logsReconciliation,
 	);
@@ -3855,6 +3860,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				await this.establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(entry, request);
 			launch = await prepareAgentLaunch({
 				taskId: request.taskId,
+				taskConversationSessionMetadata: taskConversationSessionMetadataForLaunch,
 				agentId: request.agentId,
 				binary: request.binary,
 				args: request.args,
@@ -3871,6 +3877,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
+				byTheWayMainSessionForkSourceNativeSessionId: request.byTheWayMainSessionForkSourceNativeSessionId,
 				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
 				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
 				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
@@ -5424,6 +5431,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 否则会话再回到 running 会让陈旧值复活成 retrying。
 			this.endActiveOutputReactionEpisode(entry, taskId);
 		}
+		return cloneSummary(summary);
+	}
+
+	// 切换前先保存协作会话的目标通道。启动失败仍保留新意图，后续明确发送不得复活旧 ACP。
+	applyTaskConversationSessionTargetTransport(
+		taskId: string,
+		targetSessionTransport: RuntimeAgentSessionTransport,
+		metadata: RuntimeTaskConversationSessionMetadata,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		const launchSettings = metadata?.taskConversationSessionLaunchSettings;
+		if (!entry || !metadata || !launchSettings) return null;
+		const summary = updateSummary(entry, {
+			sessionTransport: targetSessionTransport,
+			taskConversationSessionMetadata: {
+				...metadata,
+				taskConversationSessionLaunchSettings: { ...launchSettings, sessionTransport: targetSessionTransport },
+			},
+		});
+		this.emitSummary(summary);
 		return cloneSummary(summary);
 	}
 

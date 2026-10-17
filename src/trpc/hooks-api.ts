@@ -14,7 +14,11 @@ import {
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
-import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import {
+	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { recordHookIngestToolCallAndHookCliResourceUsageToJournal } from "../diagnostics/hook-ingest-tool-call-and-hook-cli-resource-usage-journal-recorder";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
@@ -24,6 +28,7 @@ import {
 	captureNotificationSignal,
 	recordNotificationSignalDecision,
 } from "../notifications/notification-signal-capture";
+import type { PromptDraftUsageSubmission } from "../server/prompt-draft-usage-service";
 import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
@@ -43,6 +48,7 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
+	notifyPromptDraftUserPromptSubmitted?: (input: PromptDraftUsageSubmission) => void;
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId?: typeof persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
@@ -434,6 +440,17 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
 			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				if (body.hookEventFiredInsideSubagentContext !== true) {
+					deps.notifyPromptDraftUserPromptSubmitted?.({
+						workspaceId,
+						taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+						submittedAtEpochMs: hookEventObservedAtEpochMs ?? Date.now(),
+						submittedPromptText: body.submittedPromptText,
+						currentIdentity:
+							body.agentNativeConversationSessionIdentity ?? summary.agentNativeConversationSessionIdentity,
+						sourceAgentId: body.metadata?.source ?? summary.agentId ?? undefined,
+					});
+				}
 				manager.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt?.(
 					taskId,
 					hookEventObservedAtEpochMs ?? Date.now(),
@@ -754,17 +771,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
 			}
 
-			if (transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+			if (isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary))
 				await recordNotificationSignalDecision(
 					notificationCandidateId,
 					"by_the_way_notification_excluded",
 					{},
 					true,
 				);
-			if (
-				event === "to_review" &&
-				transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
-			) {
+			if (event === "to_review" && !isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary)) {
 				// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 				// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
 				deps.broadcastTaskReadyForReview(

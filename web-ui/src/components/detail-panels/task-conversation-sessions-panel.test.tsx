@@ -1,3 +1,4 @@
+import { getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -109,7 +110,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary, "side-1": sideSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={onSelectTaskConversationSession}
-					onCreateByTheWaySession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 				/>,
 			);
 		});
@@ -131,7 +132,7 @@ describe("TaskConversationSessionsPanel", () => {
 
 	it("creates a fork of the current main session from the Add New form", async () => {
 		const mainSessionSummary = createSessionSummary("task-1");
-		const onCreateByTheWaySession = vi.fn(async () => ({ ok: true }));
+		const onCreateTaskConversationSession = vi.fn(async () => ({ ok: true }));
 		await act(async () => {
 			root.render(
 				<TaskConversationSessionsPanel
@@ -143,7 +144,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={() => {}}
-					onCreateByTheWaySession={onCreateByTheWaySession}
+					onCreateTaskConversationSession={onCreateTaskConversationSession}
 				/>,
 			);
 		});
@@ -152,6 +153,13 @@ describe("TaskConversationSessionsPanel", () => {
 			Array.from(container.querySelectorAll("button"))
 				.find((button) => button.textContent?.includes("Add New"))
 				?.click();
+		});
+		await act(async () => {
+			const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+			if (roleSelect) {
+				roleSelect.value = "by_the_way";
+				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
+			}
 		});
 		const questionInput = container.querySelector("textarea");
 		expect(questionInput).toBeInstanceOf(HTMLTextAreaElement);
@@ -166,10 +174,115 @@ describe("TaskConversationSessionsPanel", () => {
 		);
 		await act(async () => createSessionButtons.at(-1)?.click());
 
-		expect(onCreateByTheWaySession).toHaveBeenCalledWith({
+		expect(onCreateTaskConversationSession).toHaveBeenCalledWith({
+			agentId: "codex",
+			sessionRole: "by_the_way",
 			initialUserQuestion: "Explain the relation",
 			contextSource: "forked_from_main_current_turn",
 		});
+	});
+
+	it("协作会话可选择创建任务的全部 agent，使用全新上下文，失败后保留输入", async () => {
+		const onCreateTaskConversationSession = vi.fn(async () => ({ ok: false, message: "隔离启动失败" }));
+		await act(async () =>
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId="task-1"
+					mainSessionSummary={createSessionSummary("task-1", { agentId: "claude" })}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId="claude"
+					taskSessions={{}}
+					selectedTaskConversationSessionId="task-1"
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={onCreateTaskConversationSession}
+				/>,
+			),
+		);
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("Add New"))
+				?.click(),
+		);
+		const agentSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-agent");
+		expect(Array.from(agentSelect?.options ?? []).map((option) => option.value)).toEqual(
+			getRuntimeLaunchSupportedAgentCatalog().map((agent) => agent.id),
+		);
+		expect(container.querySelector("#task-conversation-context-source")).toBeNull();
+		await act(async () => {
+			if (agentSelect) {
+				agentSelect.value = "codex";
+				agentSelect.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+			const input = container.querySelector("textarea");
+			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
+				input,
+				"实现协作部分",
+			);
+			input?.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.filter((button) => button.textContent === "Create session")
+				.at(-1)
+				?.click(),
+		);
+		expect(onCreateTaskConversationSession).toHaveBeenCalledWith({
+			agentId: "codex",
+			sessionRole: "task_collaborator",
+			initialUserQuestion: "实现协作部分",
+			contextSource: "started_from_scratch",
+		});
+		expect(container.textContent).toContain("隔离启动失败");
+		expect(container.querySelector("textarea")?.value).toBe("实现协作部分");
+	});
+
+	it("未安装的 agent 显示原因，且不能提交创建", async () => {
+		const onCreateTaskConversationSession = vi.fn(async () => ({ ok: true }));
+		await act(async () =>
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId="task-1"
+					mainSessionSummary={createSessionSummary("task-1")}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId="codex"
+					agents={[
+						{
+							id: "codex",
+							label: "OpenAI Codex",
+							binary: "codex",
+							command: "codex",
+							defaultArgs: [],
+							installed: false,
+							configured: false,
+						},
+					]}
+					taskSessions={{}}
+					selectedTaskConversationSessionId="task-1"
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={onCreateTaskConversationSession}
+				/>,
+			),
+		);
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("Add New"))
+				?.click(),
+		);
+		expect(container.querySelector<HTMLOptionElement>('option[value="codex"]')?.disabled).toBe(true);
+		expect(container.querySelector('option[value="codex"]')?.textContent).toContain("未安装");
+		await act(async () => {
+			const input = container.querySelector("textarea");
+			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(input, "协作工作");
+			input?.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		const submit = Array.from(container.querySelectorAll("button"))
+			.filter((button) => button.textContent === "Create session")
+			.at(-1);
+		expect(submit?.disabled).toBe(true);
+		await act(async () => submit?.click());
+		expect(onCreateTaskConversationSession).not.toHaveBeenCalled();
 	});
 
 	it("disables By the way session creation for unsupported agents", async () => {
@@ -185,7 +298,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={() => {}}
-					onCreateByTheWaySession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 				/>,
 			);
 		});
@@ -193,8 +306,79 @@ describe("TaskConversationSessionsPanel", () => {
 		expect(
 			Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Add New"))
 				?.disabled,
-		).toBe(true);
+		).toBe(false);
 	});
+
+	it.each(
+		(["claude", "codex"] as const).flatMap((mainAgentId) =>
+			[true, false].flatMap((hasMainNativeIdentity) =>
+				[true, false].map((hasSameAgentCollaborator) => ({
+					mainAgentId,
+					hasMainNativeIdentity,
+					hasSameAgentCollaborator,
+				})),
+			),
+		),
+	)(
+		"首次侧问 UI：$mainAgentId 主身份=$hasMainNativeIdentity，同 agent 协作=$hasSameAgentCollaborator",
+		async ({ mainAgentId, hasMainNativeIdentity, hasSameAgentCollaborator }) => {
+			const main = createSessionSummary("task-1", {
+				agentId: mainAgentId,
+				agentNativeConversationSessionIdentity: hasMainNativeIdentity
+					? {
+							sourceAgentId: mainAgentId,
+							nativeSessionId: "11111111-2222-4333-8444-555555555555",
+							transcriptPath: null,
+							observedAt: 1,
+						}
+					: undefined,
+			});
+			const collaborator = createSessionSummary("collaborator", {
+				agentId: hasSameAgentCollaborator ? mainAgentId : mainAgentId === "claude" ? "codex" : "claude",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "协作",
+				},
+			});
+			await act(async () =>
+				root.render(
+					<TaskConversationSessionsPanel
+						workspaceTaskId="task-1"
+						mainSessionSummary={main}
+						mainSessionUserMessagePreview="实现任务"
+						mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+						effectiveAgentId={mainAgentId}
+						taskSessions={{ "task-1": main, collaborator }}
+						selectedTaskConversationSessionId="task-1"
+						onSelectTaskConversationSession={() => {}}
+						onCreateTaskConversationSession={async () => ({ ok: true })}
+					/>,
+				),
+			);
+			await act(async () =>
+				Array.from(container.querySelectorAll("button"))
+					.find((button) => button.textContent?.includes("Add New"))
+					?.click(),
+			);
+			await act(async () => {
+				const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+				if (!roleSelect) throw new Error("缺少角色选项");
+				roleSelect.value = "by_the_way";
+				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+			const mustRefuseAmbiguousFork = !hasMainNativeIdentity && hasSameAgentCollaborator;
+			expect(
+				container.querySelector<HTMLOptionElement>('option[value="forked_from_main_current_turn"]')?.disabled,
+			).toBe(mustRefuseAmbiguousFork);
+			if (mustRefuseAmbiguousFork) expect(container.textContent).toContain("主会话尚未记录可用的");
+			expect(container.textContent).not.toContain("已有 By the way 会话");
+		},
+	);
 
 	it("forces later By the way sessions to start from scratch", async () => {
 		const mainSessionSummary = createSessionSummary("task-1");
@@ -209,7 +393,7 @@ describe("TaskConversationSessionsPanel", () => {
 				latestUserMessagePreview: "Earlier question",
 			},
 		});
-		const onCreateByTheWaySession = vi.fn(async () => ({ ok: true }));
+		const onCreateTaskConversationSession = vi.fn(async () => ({ ok: true }));
 		await act(async () => {
 			root.render(
 				<TaskConversationSessionsPanel
@@ -221,7 +405,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary, "side-existing": existingByTheWaySummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={() => {}}
-					onCreateByTheWaySession={onCreateByTheWaySession}
+					onCreateTaskConversationSession={onCreateTaskConversationSession}
 				/>,
 			);
 		});
@@ -230,6 +414,13 @@ describe("TaskConversationSessionsPanel", () => {
 			Array.from(container.querySelectorAll("button"))
 				.find((button) => button.textContent?.includes("Add New"))
 				?.click();
+		});
+		await act(async () => {
+			const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+			if (roleSelect) {
+				roleSelect.value = "by_the_way";
+				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
+			}
 		});
 		const forkOption = container.querySelector<HTMLOptionElement>('option[value="forked_from_main_current_turn"]');
 		expect(forkOption?.disabled).toBe(true);
@@ -248,7 +439,9 @@ describe("TaskConversationSessionsPanel", () => {
 				?.click();
 		});
 
-		expect(onCreateByTheWaySession).toHaveBeenCalledWith({
+		expect(onCreateTaskConversationSession).toHaveBeenCalledWith({
+			agentId: "codex",
+			sessionRole: "by_the_way",
 			initialUserQuestion: "Later question",
 			contextSource: "started_from_scratch",
 		});
@@ -295,7 +488,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary, "task-conversation-session-9": sideSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={() => {}}
-					onCreateByTheWaySession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 				/>,
 			);
 		});
@@ -332,7 +525,7 @@ describe("TaskConversationSessionsPanel", () => {
 					taskSessions={{ "task-1": mainSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
 					onSelectTaskConversationSession={() => {}}
-					onCreateByTheWaySession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 				/>,
 			);
 		});

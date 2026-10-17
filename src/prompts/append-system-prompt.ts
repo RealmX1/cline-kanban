@@ -337,6 +337,18 @@ To look up a *different* task instead: Kanban lays task worktrees out as \`.clin
 When this task studies or diagnoses another task, verifies its claims, reuses its outputs, takes its requirements from it, or is its counterpart in another repository, record that once with \`${kanbanCommand} work-unit assert-reference-relation\` (this task is always the subject; see \`--help\` for the counterpart flags). Read what is already recorded with \`${kanbanCommand} work-unit get-relation-neighborhood-summary\`.`;
 }
 
+export function renderTaskCollaborationSessionResponsibilityGuidance(
+	workspaceTaskId: string,
+	taskConversationSessionId: string,
+): string {
+	return `# 协作会话的责任边界
+
+当前会话是任务 ${workspaceTaskId} 的可写协作会话，会话 ID 为 ${taskConversationSessionId}。
+与主会话共用工作目录，文件修改立即相互可见。只执行本会话用户要求的工作。
+主会话负责卡片生命周期；不要自行修改卡片标题、阶段目标、看板列或宣告整个任务完成。
+RVF 的编辑归属以各会话为准，不要把共享目录的所有改动认作本会话产出。`;
+}
+
 export function resolveTaskSessionAppendSystemPrompt(
 	taskId: string,
 	cwd: string,

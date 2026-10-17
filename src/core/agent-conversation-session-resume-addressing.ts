@@ -33,7 +33,7 @@ export interface TaskConversationSessionSharingExecutionWorkingDirectory {
 	// 该会话**实际跑起来过**的 agent；从未启动过的会话为 null（它不可能在这个 cwd 里留下转录）。
 	agentId: string | null;
 	// 仅用于组装拒绝文案，让用户一眼认出竞争者是谁。
-	taskConversationSessionRole: "main" | "by_the_way" | null;
+	taskConversationSessionRole: "main" | "by_the_way" | "task_collaborator" | null;
 }
 
 export type AgentConversationSessionResumeAddressing =

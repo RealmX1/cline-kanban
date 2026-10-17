@@ -12,6 +12,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConversationMode,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -25,6 +26,7 @@ import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
 	combineAppendSystemPrompts,
+	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
@@ -42,7 +44,7 @@ import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
-import { writeOmpNativeConversationSessionIdentityExtension } from "./omp-native-conversation-session-identity-extension";
+import { writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension } from "./omp-native-conversation-session-identity-and-prompt-submission-extension";
 import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
 import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
@@ -57,6 +59,7 @@ import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-select
 
 export interface AgentAdapterLaunchInput {
 	taskId: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
 	binary?: string;
 	args: string[];
@@ -104,6 +107,8 @@ export interface AgentAdapterLaunchInput {
 	kanbanAssignedAgentNativeConversationSessionIdForFreshStart?: string;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
+	// 仅首次 By the way 开局使用；与历史播种、侧问自身的重启寻址分开。
+	byTheWayMainSessionForkSourceNativeSessionId?: string;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -470,7 +475,11 @@ function removeNativeSessionSelectionArguments(
 	return remaining;
 }
 
-function applyObservedCodexNativeSessionResumeArguments(args: string[], nativeSessionId: string): void {
+function applyRecordedCodexNativeSessionSelectionArguments(
+	args: string[],
+	nativeSessionId: string,
+	sessionSubcommand: "resume" | "fork",
+): void {
 	const remaining: string[] = [];
 	let hasSessionSubcommand = false;
 	for (let index = 0; index < args.length; index += 1) {
@@ -486,7 +495,7 @@ function applyObservedCodexNativeSessionResumeArguments(args: string[], nativeSe
 			remaining.push(argument);
 			if (index + 1 < args.length) remaining.push(args[++index]);
 		} else if (!hasSessionSubcommand && (argument === "resume" || argument === "fork")) {
-			remaining.push("resume", nativeSessionId);
+			remaining.push(sessionSubcommand, nativeSessionId);
 			hasSessionSubcommand = true;
 		} else if (argument.startsWith("-") && argument !== "-" && argument !== "--last" && argument !== "--all") {
 			assertNativeSessionResumeOptionHasUnambiguousValue(
@@ -506,7 +515,7 @@ function applyObservedCodexNativeSessionResumeArguments(args: string[], nativeSe
 		}
 		// 其余位置参数是旧 session ID 或开局 prompt，绑定恢复均不得重放。
 	}
-	if (!hasSessionSubcommand) remaining.push("resume", nativeSessionId);
+	if (!hasSessionSubcommand) remaining.push(sessionSubcommand, nativeSessionId);
 	args.splice(0, args.length, ...remaining);
 }
 
@@ -1167,7 +1176,16 @@ export const BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN = "\u000d";
 function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {
 	return combineAppendSystemPrompts(
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
-		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
+		resolveTaskSessionAppendSystemPrompt(
+			input.taskConversationSessionMetadata?.workspaceTaskId ?? input.taskId,
+			input.cwd,
+		),
+		input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator"
+			? renderTaskCollaborationSessionResponsibilityGuidance(
+					input.taskConversationSessionMetadata.workspaceTaskId,
+					input.taskId,
+				)
+			: null,
 		input.exploratoryModeAppendSystemPrompt,
 		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
@@ -1176,7 +1194,16 @@ function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string 
 function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): string {
 	const prompt = input.prompt.trim();
 	const taskSessionPrompt = combineAppendSystemPrompts(
-		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
+		resolveTaskSessionAppendSystemPrompt(
+			input.taskConversationSessionMetadata?.workspaceTaskId ?? input.taskId,
+			input.cwd,
+		),
+		input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator"
+			? renderTaskCollaborationSessionResponsibilityGuidance(
+					input.taskConversationSessionMetadata.workspaceTaskId,
+					input.taskId,
+				)
+			: null,
 		input.exploratoryModeAppendSystemPrompt,
 		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
@@ -1317,7 +1344,8 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.resumeFromTrash ||
 				input.resumePriorAgentConversationWithoutResendingPrompt ||
 				taskAgentSessionInitialization ||
-				input.forkLatestWorkingDirectorySession,
+				input.forkLatestWorkingDirectorySession ||
+				input.byTheWayMainSessionForkSourceNativeSessionId,
 		);
 		// 优先级：**重启寻址（按 id）→ resumeFromTrash（cwd-latest）→ 建卡播种 → fork cwd-latest**。
 		// 按-id 必须排在最前：`--continue` 挑的是「工作目录下最近一段对话」，而主会话与它的 By the way
@@ -1338,6 +1366,23 @@ const claudeAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(args, "--continue")) {
 				args.push("--continue");
 			}
+		} else if (input.byTheWayMainSessionForkSourceNativeSessionId) {
+			const forkArgs = removeNativeSessionSelectionArguments(args, "claude", [
+				"--resume",
+				"-r",
+				"--session-id",
+				"--from-pr",
+				"--teleport",
+				"--cloud",
+			]);
+			args.splice(
+				0,
+				args.length,
+				...forkArgs,
+				"--resume",
+				input.byTheWayMainSessionForkSourceNativeSessionId,
+				"--fork-session",
+			);
 		} else if (taskAgentSessionInitialization) {
 			if (!hasCliOption(args, "--resume")) {
 				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
@@ -1595,9 +1640,10 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
 				codexArgs.push("-C", input.cwd);
 			}
-			applyObservedCodexNativeSessionResumeArguments(
+			applyRecordedCodexNativeSessionSelectionArguments(
 				codexArgs,
 				observedNativeSessionResumeAddressing.sourceSessionId,
+				"resume",
 			);
 		} else if (continuesWithoutNewPrompt) {
 			if (!codexArgs.includes("resume")) {
@@ -1606,6 +1652,13 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
+		} else if (input.byTheWayMainSessionForkSourceNativeSessionId) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) codexArgs.push("-C", input.cwd);
+			applyRecordedCodexNativeSessionSelectionArguments(
+				codexArgs,
+				input.byTheWayMainSessionForkSourceNativeSessionId,
+				"fork",
+			);
 		} else if (taskAgentSessionInitialization) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
 				codexArgs.push("-C", input.cwd);
@@ -1632,7 +1685,10 @@ const codexAdapter: AgentSessionAdapter = {
 		const selectsLatestWorkingDirectorySession =
 			!observedNativeSessionResumeAddressing &&
 			(continuesWithoutNewPrompt ||
-				(!taskAgentSessionInitialization && !parentSessionId && input.forkLatestWorkingDirectorySession));
+				(!input.byTheWayMainSessionForkSourceNativeSessionId &&
+					!taskAgentSessionInitialization &&
+					!parentSessionId &&
+					input.forkLatestWorkingDirectorySession));
 		if (selectsLatestWorkingDirectorySession) {
 			await constrainCodexLatestSessionToTaskWorkingDirectory(codexArgs, input.cwd);
 		}
@@ -1666,7 +1722,8 @@ const codexAdapter: AgentSessionAdapter = {
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
 		const forksSession =
 			!continuesWithoutNewPrompt &&
-			(taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
+			(Boolean(input.byTheWayMainSessionForkSourceNativeSessionId) ||
+				taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
 				(!taskAgentSessionInitialization &&
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
 
@@ -2624,7 +2681,7 @@ const ompAdapter: AgentSessionAdapter = {
 		if (hooks) {
 			args.push(
 				"--extension",
-				await writeOmpNativeConversationSessionIdentityExtension(getHookAgentDirectory("omp")),
+				await writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension(getHookAgentDirectory("omp")),
 			);
 			Object.assign(env, createHookRuntimeEnv(hooks));
 		}

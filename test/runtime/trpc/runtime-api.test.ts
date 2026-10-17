@@ -2,9 +2,14 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	AcpClientConnectionRuntime,
+	type AcpTaskConnection,
+} from "../../../src/acp-client-session/acp-client-connection-runtime";
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
+import { getRuntimeLaunchSupportedAgentCatalog } from "../../../src/core/agent-catalog";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardData,
@@ -202,6 +207,11 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../../../src/core/queued-programmatic-injection-ledger-receipt-mirroring";
 import type * as TaskMessageDeliveryRequestEventRecordingModule from "../../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import {
+	readAgentRaisedPendingUserDecisions,
+	recordAgentRaisedPendingUserDecision,
+	recordAgentRaisedPendingUserDecisionAnswer,
+} from "../../../src/state/agent-raised-pending-user-decision-store";
+import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
 } from "../../../src/state/prompt-library-store";
@@ -210,6 +220,8 @@ import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
+import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import type { HostedTerminalPtyProcessSpawnRequest } from "../../../src/terminal/terminal-pty-process-handle";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
@@ -288,6 +300,28 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
 	};
+}
+
+function createCollaborationSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
+	return createSummary({
+		taskId: "collaborator-1",
+		agentId: "omp",
+		sessionTransport: "acp_stdio_subprocess",
+		taskConversationSessionMetadata: {
+			workspaceTaskId: "task-1",
+			taskConversationSessionRole: "task_collaborator",
+			taskConversationSessionContextSource: "started_from_scratch",
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: 1,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: "协作部分",
+			taskConversationSessionLaunchSettings: {
+				sessionTransport: "acp_stdio_subprocess",
+				taskAgentPermissionMode: "ask_for_every_tool_use",
+			},
+		},
+		...overrides,
+	});
 }
 
 function setSelectedProviderSettings(
@@ -731,6 +765,442 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
+	it.each(
+		getRuntimeLaunchSupportedAgentCatalog()
+			.filter((agent) => agent.id !== "cline")
+			.map((agent) => agent.id),
+	)("协作会话允许 %s 在宿主工作区独立启动，不创建主任务 checkpoint", async (agentId) => {
+		const metadata = {
+			workspaceTaskId: "task-1",
+			taskConversationSessionRole: "task_collaborator" as const,
+			taskConversationSessionContextSource: "started_from_scratch" as const,
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: 1,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: "独立实现",
+		};
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			startTaskSession: vi.fn(async (request) =>
+				createSummary({
+					taskId: "collaborator-1",
+					agentId,
+					taskConversationSessionMetadata: request.taskConversationSessionMetadata,
+				}),
+			),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId, binary: agentId, args: [] });
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "collaborator-1",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "独立实现",
+				agentId,
+				taskConversationSessionMetadata: metadata,
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			},
+		);
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agentId,
+				workspaceTaskId: "task-1",
+				taskConversationSessionMetadata: expect.objectContaining({
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionLaunchSettings: expect.objectContaining({
+						taskAgentPermissionMode: "bypass_all_permission_prompts",
+						sessionTransport: "pty_terminal",
+					}),
+				}),
+			}),
+			expect.any(String),
+		);
+		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+	});
+
+	describe("协作会话完整重启后的持久化恢复", () => {
+		function createColdRuntimeFixture(sessionTransport: "pty_terminal" | "acp_stdio_subprocess") {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
+			const metadata = createCollaborationSummary().taskConversationSessionMetadata;
+			if (!metadata?.taskConversationSessionLaunchSettings) throw new Error("协作会话夹具缺少启动快照");
+			const agentId = sessionTransport === "pty_terminal" ? "codex" : "omp";
+			const persisted = createCollaborationSummary({
+				agentId,
+				sessionTransport,
+				taskConversationSessionMetadata: {
+					...metadata,
+					taskConversationSessionLaunchSettings: {
+						...metadata.taskConversationSessionLaunchSettings,
+						sessionTransport,
+						startInPlanMode: true,
+						terminalAgentModelOverrideSettings:
+							sessionTransport === "pty_terminal"
+								? { agentId: "codex", modelId: "collaborator-model" }
+								: undefined,
+					},
+				},
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: agentId,
+					nativeSessionId: "11111111-2222-4333-8444-555555555555",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+			});
+			const spawnPty = vi.fn(async (request: HostedTerminalPtyProcessSpawnRequest) => {
+				let exited = false;
+				return {
+					pid: 4321,
+					write: vi.fn(),
+					resize: vi.fn(),
+					pause: vi.fn(),
+					resume: vi.fn(),
+					hasExited: () => exited,
+					wasInterrupted: () => true,
+					stop: () => {
+						exited = true;
+						request.onExit({ exitCode: 0 });
+					},
+				};
+			});
+			const terminalManager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: { spawnHostedTerminalPtyProcess: spawnPty },
+			});
+			// 生产路径：JSON 落盘边界后 hydrate，restartRequest 与 ACP latestStartRequest 均为空。
+			terminalManager.hydrateFromRecord(JSON.parse(JSON.stringify({ [persisted.taskId]: persisted })));
+			const acpService = createAcpTaskSessionService();
+			const workspaceScope = {
+				workspaceId: `collaboration-cold-${process.pid}-${Math.random().toString(16).slice(2)}`,
+				workspacePath: "/tmp/repo",
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => workspaceScope.workspaceId),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager),
+				getScopedAcpTaskSessionService: vi.fn(async () => acpService),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			return { persisted, terminalManager, acpService, workspaceScope, api, spawnPty };
+		}
+
+		it("生产 hydrate 保留 ACP 通道，真实 refresh 分流拒绝把它重开为 PTY", async () => {
+			const { persisted, terminalManager, api, workspaceScope } = createColdRuntimeFixture("acp_stdio_subprocess");
+			const startPty = vi.spyOn(terminalManager, "refreshTaskTerminal");
+			expect(terminalManager.getSummary(persisted.taskId)?.sessionTransport).toBe("acp_stdio_subprocess");
+			const response = await api.refreshTaskTerminal(workspaceScope, {
+				taskId: persisted.taskId,
+				cols: 120,
+				rows: 40,
+			});
+			expect(response.ok).toBe(false);
+			expect(startPty).not.toHaveBeenCalled();
+		});
+
+		it("切换 PTY 失败先保存新目标，完整重启后明确发送仍只恢复 PTY", async () => {
+			const { persisted, terminalManager, acpService, workspaceScope, api } =
+				createColdRuntimeFixture("acp_stdio_subprocess");
+			const persistedSessions: Record<string, RuntimeTaskSessionSummary> = {};
+			workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path, _intent, mutate) => {
+				const board = await workspaceStateMocks.loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const result = mutate({ board, sessions: persistedSessions });
+				if (result.sessions) Object.assign(persistedSessions, result.sessions);
+				return { saved: true, value: result.value };
+			});
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
+			const startAcp = vi.spyOn(acpService, "startTaskSession");
+			const response = await api.switchAgentSessionTransport(
+				workspaceScope,
+				{ taskId: persisted.taskId, targetSessionTransport: "pty_terminal" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+			expect(response).toMatchObject({ ok: false, priorAgentSessionStopped: true });
+			expect(terminalManager.getSummary(persisted.taskId)?.pid).toBeNull();
+			expect(persistedSessions[persisted.taskId]).toMatchObject({
+				sessionTransport: "pty_terminal",
+				taskConversationSessionMetadata: {
+					taskConversationSessionLaunchSettings: { sessionTransport: "pty_terminal" },
+				},
+			});
+			const board = await workspaceStateMocks.loadWorkspaceBoardById(workspaceScope.workspaceId);
+			expect(
+				board.columns
+					.flatMap((column: { cards: RuntimeBoardCard[] }) => column.cards)
+					.find((card: RuntimeBoardCard) => card.id === "task-1")?.ompAgentSessionTransport,
+			).toBeUndefined();
+			terminalManager.hydrateFromRecord(JSON.parse(JSON.stringify(persistedSessions)));
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId: "omp", binary: "omp", args: [] });
+			const startPty = vi.spyOn(terminalManager, "startTaskSession").mockImplementation(async (request) =>
+				createSummary({
+					...persisted,
+					sessionTransport: "pty_terminal",
+					taskConversationSessionMetadata: request.taskConversationSessionMetadata,
+				}),
+			);
+			vi.spyOn(terminalManager, "submitTaskChatInputWhenReady").mockReturnValue(
+				createSummary({ ...persisted, sessionTransport: "pty_terminal" }),
+			);
+			const sent = await api.sendTaskChatMessage(
+				workspaceScope,
+				{ taskId: persisted.taskId, text: "按新通道继续" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+			expect(sent.ok).toBe(true);
+			expect(startPty).toHaveBeenCalledWith(
+				expect.objectContaining({
+					workspaceTaskId: "task-1",
+					startInPlanMode: undefined,
+					taskConversationSessionMetadata: expect.objectContaining({
+						taskConversationSessionLaunchSettings: expect.objectContaining({ sessionTransport: "pty_terminal" }),
+					}),
+				}),
+				expect.any(String),
+			);
+			expect(startAcp).not.toHaveBeenCalled();
+		});
+
+		it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
+			"%s 冷恢复后把已保存答案投回自身原生对话",
+			async (sessionTransport) => {
+				const { persisted, terminalManager, acpService, workspaceScope, api, spawnPty } =
+					createColdRuntimeFixture(sessionTransport);
+				const nativeIdentity = persisted.agentNativeConversationSessionIdentity;
+				agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+					agentId: persisted.agentId,
+					binary: "agent",
+					args: [],
+				});
+				const startPty = vi.spyOn(terminalManager, "startTaskSession");
+				const submitPty = vi
+					.spyOn(terminalManager, "submitTaskChatInputWhenReady")
+					.mockImplementation((_taskId, _text, options) => {
+						options?.onDeliveryOutcome?.({ status: "delivered_and_submit_confirmed", reason: null });
+						return createSummary({ ...persisted, pid: 4321 });
+					});
+				let connected: AcpTaskConnection | null = null;
+				const promptAcp = vi.fn(async () => ({ stopReason: "end_turn" as const }));
+				const startAcp = vi
+					.spyOn(AcpClientConnectionRuntime.prototype, "startTaskConnection")
+					.mockImplementation(async (request) => {
+						connected = {
+							taskId: request.taskId,
+							agentId: "omp",
+							sessionId: nativeIdentity?.nativeSessionId ?? "missing-native-id",
+							pid: 4322,
+							initializeResponse: { protocolVersion: 1, agentCapabilities: {} },
+							prompt: promptAcp,
+							cancel: async () => {},
+							setSessionMode: async () => {},
+							close: () => {},
+						};
+						return connected;
+					});
+				const getAcpConnection = vi
+					.spyOn(AcpClientConnectionRuntime.prototype, "getConnection")
+					.mockImplementation(() => connected);
+				const decisionId = "collaborator-saved-answer";
+				try {
+					expect(
+						await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(
+							persisted.taskId,
+						),
+					).toBe(false);
+					expect(
+						await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(persisted.taskId),
+					).toBe(false);
+					await recordAgentRaisedPendingUserDecision(workspaceScope.workspaceId, {
+						workspaceId: workspaceScope.workspaceId,
+						decisionId,
+						taskId: persisted.taskId,
+						agentId: "omp",
+						sessionTransport,
+						decisionKind: "ordinary_user_question",
+						questionMarkdown: "按哪个方案继续？",
+						options: [],
+						allowsFreeformAnswer: true,
+						askedAt: 1,
+						graceDeadlineAt: null,
+						originRuntimeSessionIncarnationId: "previous-runtime",
+						originTurnSequence: 1,
+						sourceHarnessSignal: "omp:question",
+					});
+					await recordAgentRaisedPendingUserDecisionAnswer(workspaceScope.workspaceId, decisionId, {
+						selectedOptionIds: [],
+						freeformText: "采用方案甲",
+						answeredAt: 2,
+					});
+					const response = await api.answerAgentRaisedPendingUserDecision(workspaceScope, {
+						decisionId,
+						selectedOptionIds: [],
+						freeformText: null,
+					});
+					expect(response).toMatchObject({ ok: true, delivered: true });
+					expect(
+						(await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId))[0]?.answerDeliveryState,
+					).toBe("delivered");
+					if (sessionTransport === "acp_stdio_subprocess") {
+						expect(startAcp).toHaveBeenCalledWith(
+							expect.objectContaining({
+								cwd: "/tmp/worktree",
+								permissionMode: "ask_for_every_tool_use",
+								observedAgentNativeSessionId: nativeIdentity?.nativeSessionId,
+								startInPlanMode: false,
+							}),
+						);
+						expect(promptAcp).toHaveBeenCalledWith(
+							expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining("采用方案甲") })]),
+						);
+						expect(startPty).not.toHaveBeenCalled();
+					} else {
+						expect(startPty).toHaveBeenCalledWith(
+							expect.objectContaining({
+								workspaceTaskId: "task-1",
+								cwd: "/tmp/worktree",
+								taskAgentPermissionMode: "ask_for_every_tool_use",
+								startInPlanMode: undefined,
+								terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "collaborator-model" },
+							}),
+							expect.any(String),
+						);
+						expect(terminalManager.getSummary(persisted.taskId)?.agentNativeConversationSessionIdentity).toEqual(
+							nativeIdentity,
+						);
+						expect(submitPty).toHaveBeenCalledWith(
+							persisted.taskId,
+							expect.stringContaining("采用方案甲"),
+							expect.anything(),
+						);
+						expect(startAcp).not.toHaveBeenCalled();
+						expect(spawnPty).toHaveBeenCalledWith(
+							expect.objectContaining({
+								args: expect.arrayContaining(["resume", nativeIdentity?.nativeSessionId]),
+								cwd: "/tmp/worktree",
+							}),
+						);
+					}
+					expect(taskWorktreeMocks.resolveTaskCwd).toHaveBeenCalledWith(
+						expect.objectContaining({ cwd: "/tmp/repo", taskId: "task-1" }),
+					);
+				} finally {
+					terminalManager.markInterruptedAndStopAll();
+					startAcp.mockRestore();
+					getAcpConnection.mockRestore();
+					rmSync(`/tmp/kanban-workspaces/${workspaceScope.workspaceId}`, { recursive: true, force: true });
+				}
+			},
+		);
+	});
+
+	it("冷启动 ACP 协作会话按自身身份恢复后才投递用户消息，权限不回退到宿主", async () => {
+		const metadata = createCollaborationSummary().taskConversationSessionMetadata;
+		if (!metadata?.taskConversationSessionLaunchSettings) throw new Error("协作会话夹具缺少启动快照");
+		const persisted = createCollaborationSummary({
+			taskConversationSessionMetadata: {
+				...metadata,
+				taskConversationSessionLaunchSettings: {
+					...metadata.taskConversationSessionLaunchSettings,
+					startInPlanMode: true,
+				},
+			},
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "omp",
+				nativeSessionId: "native-collaborator",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		let active: RuntimeTaskSessionSummary | null = null;
+		const acpService = {
+			getSummary: vi.fn(() => active),
+			listSummaries: vi.fn(() => []),
+			resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery: vi.fn(async () => false),
+			startTaskSession: vi.fn(async (request) => {
+				active = createCollaborationSummary({
+					taskConversationSessionMetadata: request.taskConversationSessionMetadata,
+				});
+				return active;
+			}),
+			sendTaskSessionInput: vi.fn(async () => active),
+			listMessages: vi.fn(() => []),
+		};
+		const terminalManager = { getSummary: vi.fn(() => persisted), listSummaries: vi.fn(() => [persisted]) };
+		const clineService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: persisted.taskId, text: "继续协作" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(response.ok).toBe(true);
+		expect(acpService.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workspaceTaskId: "task-1",
+				taskId: persisted.taskId,
+				permissionMode: "ask_for_every_tool_use",
+				prompt: "",
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+				observedAgentNativeConversationSessionIdentity: persisted.agentNativeConversationSessionIdentity,
+				startInPlanMode: undefined,
+				taskConversationSessionMetadata: expect.objectContaining({
+					taskConversationSessionLaunchSettings: expect.objectContaining({ startInPlanMode: true }),
+				}),
+			}),
+		);
+		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(persisted.taskId, "继续协作", undefined);
+		expect(clineService.startTaskSession).not.toHaveBeenCalled();
+		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])("混合通道停止：仅停止协作会话或收拢整个任务，停止整任务=%s", async (stopWholeTask) => {
+		const side = createCollaborationSummary({ agentId: "codex", sessionTransport: "pty_terminal" });
+		const main = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
+		const acpService = {
+			listSummaries: () => [main],
+			stopTaskSession: vi.fn(async (id: string) => (id === main.taskId ? main : null)),
+		};
+		const terminalManager = { listSummaries: () => [side], stopTaskSession: vi.fn(() => side) };
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.stopTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: stopWholeTask ? main.taskId : side.taskId },
+		);
+		expect(response.ok).toBe(true);
+		expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith(side.taskId);
+		if (stopWholeTask) expect(acpService.stopTaskSession).toHaveBeenCalledWith(main.taskId);
+		else expect(acpService.stopTaskSession).not.toHaveBeenCalledWith(main.taskId);
+	});
+
 	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {
@@ -1086,9 +1556,101 @@ describe("createRuntimeApi startTaskSession", () => {
 			},
 		);
 
-		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Start from scratch") });
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("已有 By the way 会话") });
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
+
+	it.each(
+		(["claude", "codex"] as const).flatMap((mainAgentId) =>
+			[true, false].flatMap((hasMainNativeIdentity) =>
+				[true, false].map((hasSameAgentCollaborator) => ({
+					mainAgentId,
+					hasMainNativeIdentity,
+					hasSameAgentCollaborator,
+				})),
+			),
+		),
+	)(
+		"首次侧问 fork：$mainAgentId 主身份=$hasMainNativeIdentity，同 agent 协作=$hasSameAgentCollaborator",
+		async ({ mainAgentId, hasMainNativeIdentity, hasSameAgentCollaborator }) => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+				agentId: mainAgentId,
+				binary: mainAgentId,
+				args: [],
+			});
+			const mainNativeSessionId = "11111111-2222-4333-8444-555555555555";
+			const main = createSummary({
+				agentId: mainAgentId,
+				workspacePath: "/tmp/main-task-worktree",
+				agentNativeConversationSessionIdentity: hasMainNativeIdentity
+					? {
+							sourceAgentId: mainAgentId,
+							nativeSessionId: mainNativeSessionId,
+							transcriptPath: null,
+							observedAt: 1,
+						}
+					: undefined,
+			});
+			const collaborator = createCollaborationSummary({
+				agentId: hasSameAgentCollaborator ? mainAgentId : mainAgentId === "claude" ? "codex" : "claude",
+				workspacePath: main.workspacePath,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: mainAgentId,
+					nativeSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+					transcriptPath: null,
+					observedAt: 2,
+				},
+			});
+			const terminalManager = {
+				getSummary: vi.fn((taskId: string) => (taskId === main.taskId ? main : null)),
+				listSummaries: vi.fn(() => [main, collaborator]),
+				startTaskSession: vi.fn(async () => createSummary({ taskId: "first-by-the-way", agentId: mainAgentId })),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "first-by-the-way",
+					workspaceTaskId: "task-1",
+					baseRef: "main",
+					prompt: "解释实现",
+					agentId: mainAgentId,
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "task-1",
+						taskConversationSessionRole: "by_the_way",
+						taskConversationSessionContextSource: "forked_from_main_current_turn",
+						parentTaskConversationSessionId: "task-1",
+						mainSessionOriginTurnNumber: 1,
+						mainSessionOriginUserMessagePreview: null,
+						latestUserMessagePreview: "解释实现",
+					},
+				},
+			);
+			const mustRefuseAmbiguousFork = !hasMainNativeIdentity && hasSameAgentCollaborator;
+			expect(response.ok).toBe(!mustRefuseAmbiguousFork);
+			if (mustRefuseAmbiguousFork) {
+				expect(response.error).toContain("主会话尚未记录可用的");
+				expect(response.error).not.toContain("已有 By the way");
+				expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+			} else {
+				expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+					expect.objectContaining({
+						byTheWayMainSessionForkSourceNativeSessionId: hasMainNativeIdentity ? mainNativeSessionId : undefined,
+					}),
+					expect.any(String),
+				);
+			}
+		},
+	);
 
 	it("rejects a forged full-authority fork context", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
@@ -2224,14 +2786,26 @@ describe("createRuntimeApi startTaskSession", () => {
 		latestUserMessagePreview: null,
 	};
 
-	it("refreshes a By the way session through its host card and shared worktree", async () => {
+	it.each(["by_the_way", "task_collaborator"] as const)("按宿主目录刷新 %s 会话，保留自身启动配置", async (role) => {
+		const metadata = {
+			...BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+			taskConversationSessionRole: role,
+			...(role === "task_collaborator"
+				? {
+						taskConversationSessionLaunchSettings: {
+							taskAgentPermissionMode: "ask_for_every_tool_use" as const,
+							sessionTransport: "pty_terminal" as const,
+						},
+					}
+				: {}),
+		};
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		const terminalManager = {
 			getSummary: vi.fn(() =>
 				createSummary({
 					taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID,
 					agentId: "claude",
-					taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+					taskConversationSessionMetadata: metadata,
 				}),
 			),
 			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
@@ -2251,6 +2825,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			{ taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID, cols: 120, rows: 40 },
 		);
 
+		if (role === "task_collaborator")
+			expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+				expect.objectContaining({ taskAgentPermissionMode: "ask_for_every_tool_use" }),
+				expect.any(String),
+			);
 		expect(response.ok).toBe(true);
 		expect(response.error).toBeUndefined();
 		// 工作目录按**宿主任务**解析：用会话 id 解析会以 session id 另造一个空 worktree。
@@ -2262,7 +2841,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				workspaceTaskId: "task-1",
 				cwd: "/tmp/existing-worktree",
 				// 只读约束靠这份 metadata 传下去；丢了就等于重启一次侧问会话它就能写文件了。
-				taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+				taskConversationSessionMetadata: metadata,
 				resumeFromTrash: true,
 			}),
 			expect.any(String),
@@ -5056,6 +5635,63 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 			expect.objectContaining({ resumePriorAgentConversationWithoutResendingPrompt: true }),
 			expect.any(String),
 		);
+	});
+
+	it("协作会话切换通道只更新自身启动快照，不改宿主卡片的 agent 或通道", async () => {
+		const metadata = createCollaborationSummary().taskConversationSessionMetadata;
+		if (!metadata) throw new Error("协作会话夹具缺少 metadata");
+		const side = createCollaborationSummary({
+			taskConversationSessionMetadata: {
+				...metadata,
+				workspaceTaskId: "task-omp",
+			},
+		});
+		const acpService = createAcpServiceMockWithLiveSession();
+		acpService.getSummary.mockReturnValue(side);
+		acpService.stopTaskSession.mockResolvedValue(side);
+		const terminalManager = new TerminalSessionManager();
+		vi.spyOn(terminalManager, "startTaskSession").mockImplementation(async (request) =>
+			createCollaborationSummary({
+				sessionTransport: "pty_terminal",
+				taskConversationSessionMetadata: request.taskConversationSessionMetadata,
+			}),
+		);
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId: "omp", binary: "omp", args: [] });
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.switchAgentSessionTransport(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: side.taskId, targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workspaceTaskId: "task-omp",
+				taskAgentPermissionMode: "ask_for_every_tool_use",
+				taskConversationSessionMetadata: expect.objectContaining({
+					taskConversationSessionLaunchSettings: expect.objectContaining({ sessionTransport: "pty_terminal" }),
+				}),
+			}),
+			expect.any(String),
+		);
+		const board = await workspaceStateMocks.loadWorkspaceBoardById("workspace-1");
+		for (const call of workspaceStateMocks.mutateWorkspaceState.mock.calls) {
+			const mutate = call[2] as (state: {
+				board: RuntimeBoardData;
+				sessions: Record<string, RuntimeTaskSessionSummary>;
+			}) => { board: RuntimeBoardData };
+			expect(mutate({ board, sessions: {} }).board).toEqual(board);
+		}
 	});
 
 	// 失败口径：新通道起不来时**不回滚**。旧会话已经停了就如实说停了，卡片字段保持用户选的那条，

@@ -435,12 +435,13 @@ function WorkspaceChangesStaleDataWarning({
 	);
 }
 
-type MobileTab = "chat" | "sessions" | "prompts" | "queue" | "comments" | "diff" | "files";
+type MobileTab = "chat" | "sessions" | "prompts" | "commands" | "queue" | "comments" | "diff" | "files";
 
 const MOBILE_DEFAULT_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "sessions", label: "Sessions", icon: <List size={14} /> },
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "commands", label: "Commands", icon: <FileText size={14} /> },
 	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
@@ -450,16 +451,17 @@ const MOBILE_WORKSPACE_CHANGES_TABS: { id: MobileTab; label: string; icon: React
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
 ];
 
-type DetailUtilityTab = "prompts" | "queue" | "comments";
+type DetailUtilityTab = "prompts" | "commands" | "queue" | "comments";
 
 const DETAIL_UTILITY_TABS: { id: DetailUtilityTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "commands", label: "Commands", icon: <FileText size={14} /> },
 	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
 function isDetailUtilityTab(tab: MobileTab): tab is DetailUtilityTab {
-	return tab === "prompts" || tab === "queue" || tab === "comments";
+	return tab === "prompts" || tab === "commands" || tab === "queue" || tab === "comments";
 }
 
 // Queue 页签上的计数角标。页签条在 Prompts / Queue / Comments 三个 tab 下都渲染，所以不管停在哪个 tab，
@@ -555,7 +557,11 @@ function DetailUtilityTabList({
 	emitsQueueTabAnchor: boolean;
 }): React.ReactElement {
 	return (
-		<div role="tablist" aria-label="Task detail utility panel" className="flex min-w-0 items-center gap-0.5">
+		<div
+			role="tablist"
+			aria-label="Task detail utility panel"
+			className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
+		>
 			{DETAIL_UTILITY_TABS.map((tab) => (
 				<button
 					key={tab.id}
@@ -563,7 +569,7 @@ function DetailUtilityTabList({
 					role="tab"
 					aria-selected={activeTab === tab.id}
 					className={cn(
-						"inline-flex h-6 min-w-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium transition-colors",
+						"inline-flex h-6 min-w-0 shrink-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium transition-colors",
 						activeTab === tab.id
 							? "bg-surface-3 text-text-primary"
 							: "text-text-secondary hover:bg-surface-3 hover:text-text-primary",
@@ -727,7 +733,7 @@ export function CardDetailView({
 	onTaskClineSettingsChanged,
 	onTaskCommentEntriesChange,
 	isTaskChangesSidebarOpen = false,
-	onCreateByTheWayTaskConversationSession,
+	onCreateTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratoryFindings,
 	explorationThreadGraph,
@@ -814,7 +820,9 @@ export function CardDetailView({
 	}) => void;
 	onTaskCommentEntriesChange?: (taskId: string, entries: TaskCommentEntry[]) => void;
 	isTaskChangesSidebarOpen?: boolean;
-	onCreateByTheWayTaskConversationSession?: (input: {
+	onCreateTaskConversationSession?: (input: {
+		agentId: RuntimeAgentId;
+		sessionRole?: "by_the_way" | "task_collaborator";
 		initialUserQuestion: string;
 		contextSource: "started_from_scratch" | "forked_from_main_current_turn";
 		mainSessionOriginTurnNumber: number;
@@ -1271,8 +1279,9 @@ export function CardDetailView({
 		</>
 	);
 	const detailUtilityPanel =
-		detailUtilityTab === "prompts" ? (
+		detailUtilityTab === "prompts" || detailUtilityTab === "commands" ? (
 			<PromptLibraryPanel
+				entryKind={detailUtilityTab === "commands" ? "reusable_command" : "draft_prompt"}
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
 				onFillInput={handleFillPromptIntoActiveInput}
@@ -1295,18 +1304,21 @@ export function CardDetailView({
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
 	const taskConversationSessionsPanel =
-		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateByTheWayTaskConversationSession ? (
+		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateTaskConversationSession ? (
 			<TaskConversationSessionsPanel
 				workspaceTaskId={selection.card.id}
 				mainSessionSummary={sessionSummary}
 				mainSessionUserMessagePreview={selection.card.prompt}
 				mainSessionOriginalPromptCard={selection.card}
-				effectiveAgentId={effectiveTaskConversationSessionAgentId}
+				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId}
+				agents={runtimeConfig?.agents}
 				taskSessions={taskSessions}
 				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
 				onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
-				onCreateByTheWaySession={async ({ initialUserQuestion, contextSource }) => {
-					const result = await onCreateByTheWayTaskConversationSession({
+				onCreateTaskConversationSession={async ({ agentId, sessionRole, initialUserQuestion, contextSource }) => {
+					const result = await onCreateTaskConversationSession({
+						agentId,
+						sessionRole,
 						initialUserQuestion,
 						contextSource,
 						mainSessionOriginTurnNumber: sessionSummary.latestTurnCheckpoint?.turn ?? 1,
@@ -1362,7 +1374,12 @@ export function CardDetailView({
 			// 会话面板由多种传输形态共用，面板内部据此决定是否显示 Cline 专属的 provider/模型控件。
 			agentId={effectiveTaskConversationSessionAgentId ?? undefined}
 			taskColumnId={selection.column.id}
-			defaultMode={isMainTaskConversationSessionSelected ? "act" : "plan"}
+			defaultMode={
+				activeTaskConversationSessionSummary?.taskConversationSessionMetadata?.taskConversationSessionRole ===
+				"by_the_way"
+					? "plan"
+					: "act"
+			}
 			showComposerModeToggle={false}
 			workspaceId={currentProjectId}
 			runtimeConfig={runtimeConfig}

@@ -6,6 +6,7 @@ import {
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
+import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExploratoryFindingEntry,
@@ -632,7 +633,12 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "prompt_library_updated") {
+						notifyPromptLibraryInvalidated(payload.workspaceId);
+						return;
+					}
 					if (payload.type === "snapshot") {
+						notifyPromptLibraryInvalidated(payload.currentProjectId);
 						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
 						dispatch({ type: "snapshot", payload });
 						return;
