@@ -2647,7 +2647,14 @@ export type RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage = z.infer
 	typeof runtimeStateStreamTaskResourceUsageSnapshotsUpdatedMessageSchema
 >;
 
+export const runtimeStateStreamPromptLibraryUpdatedMessageSchema = z.object({
+	type: z.literal("prompt_library_updated"),
+	// null 表示全局条目变化，全部项目都需失效；正文始终按需读取。
+	workspaceId: z.string().nullable(),
+});
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	runtimeStateStreamPromptLibraryUpdatedMessageSchema,
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
 	runtimeStateStreamTaskSessionsMessageSchema,
@@ -4116,6 +4123,17 @@ export const terminalInputBoxStashFidelitySchema = z.object({
 });
 export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
 
+export const promptLibraryUserPromptMatchEvidenceSchema = z.object({
+	workspaceId: z.string(),
+	taskId: z.string(),
+	sourceAgentId: z.string(),
+	nativeSessionId: z.string().nullable(),
+	userPromptMessageId: z.string(),
+	userPromptSubmittedAtEpochMs: z.number().nullable(),
+	matchKind: z.enum(["normalized_exact", "exact_substring", "approximate_substring"]),
+});
+export type PromptLibraryUserPromptMatchEvidence = z.infer<typeof promptLibraryUserPromptMatchEvidenceSchema>;
+
 export const storedPromptLibraryEntrySchema = z.object({
 	id: z.string(),
 	text: z.string(),
@@ -4129,6 +4147,16 @@ export const storedPromptLibraryEntrySchema = z.object({
 	terminalInputBoxStashFidelity: terminalInputBoxStashFidelitySchema.optional(),
 	createdAt: z.number(),
 	updatedAt: z.number(),
+	entryKind: z.enum(["draft_prompt", "reusable_command"]).optional(),
+	// 旧条目回退 updatedAt；换范围与状态标记不应改变正文编辑排序。
+	textLastEditedAtEpochMs: z.number().optional(),
+	draftUsage: z
+		.object({
+			markedUsedAtEpochMs: z.number().nullable(),
+			ignoreUserPromptsSubmittedAtOrBeforeEpochMs: z.number().optional(),
+			matchEvidence: promptLibraryUserPromptMatchEvidenceSchema.optional(),
+		})
+		.optional(),
 });
 export type StoredPromptLibraryEntry = z.infer<typeof storedPromptLibraryEntrySchema>;
 
@@ -4157,6 +4185,23 @@ const TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE =
 // 写操作是**意图**而不是整份 PUT：多个标签页 + 运行时自己会并发写同一个库，整份 PUT 会让
 // 「另一个标签页刚加的条目」被静默抹掉。服务端在文件锁内读-改-写，于是并发写自然合并。
 export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("set_prompt_usage_status"),
+		promptId: z.string(),
+		isUsed: z.boolean(),
+	}),
+	z.object({
+		kind: z.literal("mark_prompt_used_from_user_prompt_match"),
+		promptId: z.string(),
+		expectedPromptTextSha256: z.string(),
+		expectedIgnoreUserPromptsSubmittedAtOrBeforeEpochMs: z.number().nullable(),
+		evidence: promptLibraryUserPromptMatchEvidenceSchema,
+	}),
+	z.object({
+		kind: z.literal("convert_prompt_to_reusable_command"),
+		promptId: z.string(),
+		scope: z.enum(["repo", "global"]),
+	}),
 	z
 		.object({
 			// 同一条意图兼管「新建」与「改正文」：id 不存在即新建，存在即只改正文（**不**动它所在的桶）。

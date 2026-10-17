@@ -106,6 +106,10 @@ const DENY_ALL_USER_DECISION_BROKER: AcpUserDecisionBroker = {
 };
 
 export class AcpTaskSessionService {
+	private userPromptSubmittedListener: ((taskId: string, text: string) => void) | null = null;
+	setUserPromptSubmittedListener(listener: (taskId: string, text: string) => void): void {
+		this.userPromptSubmittedListener = listener;
+	}
 	private readonly registry = new AcpTaskSessionRegistry();
 	private readonly connectionRuntime: AcpClientConnectionRuntime;
 	// 决策以聊天消息承载：presentDecision 落一条带 meta.userDecision 的消息，
@@ -409,6 +413,7 @@ export class AcpTaskSessionService {
 						`${resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.prompt}`,
 						request.images,
 					),
+					request.prompt,
 				);
 			}
 		} catch (error) {
@@ -444,7 +449,7 @@ export class AcpTaskSessionService {
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
-		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images));
+		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images), text);
 		return summary;
 	}
 
@@ -688,9 +693,11 @@ export class AcpTaskSessionService {
 		taskId: string,
 		connection: AcpTaskConnection,
 		promptBlocks: AcpContentBlock[],
+		originalSubmittedPromptText: string,
 	): Promise<void> {
 		try {
 			const promptTurn = connection.prompt(promptBlocks);
+			this.userPromptSubmittedListener?.(taskId, originalSubmittedPromptText);
 			const liveEntry = this.registry.getEntry(taskId);
 			if (liveEntry && this.connectionRuntime.getConnection(taskId) === connection) {
 				this.emitSummary(updateAcpSummary(liveEntry, { agentCurrentWorkPhaseGoalInvalidatedAt: now() }));

@@ -460,7 +460,7 @@ function parseHooksIngestArgs(
 		...(agentNativeConversationSessionIdentity ? { agentNativeConversationSessionIdentity } : {}),
 		...(agentToolCallExecutionOutcome ? { agentToolCallExecutionOutcome } : {}),
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
-		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
+		...(["userpromptsubmit", "beforeagent"].includes(metadata?.hookEventName?.trim().toLowerCase() ?? "") && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
 			: {}),
 		...(payload && readStringField(payload, "agent_id") ? { hookEventFiredInsideSubagentContext: true } : {}),
