@@ -1518,17 +1518,25 @@ export function CardDetailView({
 		pendingUserDecision.decision.originRuntimeSessionIncarnationId !== null &&
 		pendingUserDecision.decision.originRuntimeSessionIncarnationId ===
 			(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null) &&
-		pendingUserDecisionSessionFacets?.turnOwner === "user" &&
-		pendingUserDecisionSessionFacets.liveness === "live" &&
-		pendingUserDecisionSessionFacets.userTurnKind === "question";
+		pendingUserDecision.decision.nativeToolCallOutcome === undefined &&
+		(pendingUserDecision.decision.agentId === "codex" || pendingUserDecisionSessionFacets?.turnOwner === "user") &&
+		pendingUserDecisionSessionFacets?.liveness === "live" &&
+		(pendingUserDecision.decision.agentId === "codex" ||
+			pendingUserDecisionSessionFacets.userTurnKind === "question");
 	const isPendingQuestionRaisedByEarlierAgentSessionIncarnation =
 		pendingUserDecision.decision !== null &&
-		(pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
+		(pendingUserDecision.decision.nativeToolCallOutcome !== undefined ||
+			pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
 			pendingUserDecision.decision.originRuntimeSessionIncarnationId !==
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 			<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
+			{pendingUserDecision.transcriptRecoveryNotice ? (
+				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
+					{pendingUserDecision.transcriptRecoveryNotice}
+				</p>
+			) : null}
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
 					key={JSON.stringify([

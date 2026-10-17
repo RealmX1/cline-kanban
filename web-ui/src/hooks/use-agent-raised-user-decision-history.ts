@@ -18,9 +18,12 @@ export function useAgentRaisedUserDecisionHistory(input: {
 	const [historyResult, setHistoryResult] = useState<{
 		queryIdentity: string;
 		historyEntries: RuntimeAgentRaisedUserDecisionHistoryEntry[] | null;
+		transcriptRecoveryNotice?: string | null;
 	}>({ queryIdentity, historyEntries: null });
 	const [isLoading, setIsLoading] = useState(false);
 	const historyEntries = historyResult.queryIdentity === queryIdentity ? historyResult.historyEntries : null;
+	const transcriptRecoveryNotice =
+		historyResult.queryIdentity === queryIdentity ? (historyResult.transcriptRecoveryNotice ?? null) : null;
 
 	const refresh = useCallback(async () => {
 		const refreshRequestSequence = refreshRequestSequenceRef.current + 1;
@@ -38,7 +41,11 @@ export function useAgentRaisedUserDecisionHistory(input: {
 				latestQueryIdentityRef.current === queryIdentity &&
 				refreshRequestSequenceRef.current === refreshRequestSequence
 			) {
-				setHistoryResult({ queryIdentity, historyEntries: response.historyEntries });
+				setHistoryResult({
+					queryIdentity,
+					historyEntries: response.historyEntries,
+					transcriptRecoveryNotice: response.transcriptRecoveryNotice ?? null,
+				});
 			}
 		} catch (error) {
 			if (latestQueryIdentityRef.current === queryIdentity) {
@@ -60,5 +67,5 @@ export function useAgentRaisedUserDecisionHistory(input: {
 		}
 	}, [input.isHistoryVisible, input.pendingUserDecisionIdentityForRefresh, refresh]);
 
-	return { historyEntries, isLoading, refresh };
+	return { historyEntries, isLoading, refresh, transcriptRecoveryNotice };
 }

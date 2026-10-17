@@ -109,6 +109,8 @@ const agentRaisedPendingUserDecisionAnswerSchema = z.object({
 export type AgentRaisedPendingUserDecisionAnswer = z.infer<typeof agentRaisedPendingUserDecisionAnswerSchema>;
 
 const persistedAgentRaisedPendingUserDecisionSchema = z.object({
+	nativeConversationSessionId: z.string().optional(),
+	nativeToolCallOutcome: z.enum(["interrupted_without_answer", "failed_without_answer"]).optional(),
 	// 稳定去重键。由采集侧用 harness 提供的稳定标识构造（Claude 的 tool_use_id / ACP 的 decisionId /
 	// Cline 的 toolCallId），故同一次提问被重复观测到时不会落成两条。
 	decisionId: z.string(),
@@ -153,6 +155,7 @@ export type PersistedAgentRaisedPendingUserDecision = z.infer<typeof persistedAg
 const persistedAgentRaisedPendingUserDecisionFileSchema = z.array(persistedAgentRaisedPendingUserDecisionSchema);
 
 export interface RecordAgentRaisedPendingUserDecisionInput {
+	nativeConversationSessionId?: string;
 	decisionId: string;
 	taskId: string;
 	workspaceId: string;
@@ -263,11 +266,18 @@ function enqueueWrite<T>(workspaceId: string, operation: () => Promise<T>): Prom
 	return next;
 }
 
+// 未答 / 未送达记录不裁剪。Codex 面板作答与显式取消在原生转录中可能只留下 aborted，关闭事实也必须保留。
 function capDecisions(records: PersistedAgentRaisedPendingUserDecision[]): PersistedAgentRaisedPendingUserDecision[] {
 	if (records.length <= MAX_RECORDS_PER_WORKSPACE) {
 		return records;
 	}
-	return records.slice(records.length - MAX_RECORDS_PER_WORKSPACE);
+	return records.filter(
+		(record, index) =>
+			isOpenAgentRaisedPendingUserDecision(record) ||
+			(record.agentId === "codex" &&
+				(record.answer?.answerSource === "kanban_panel" || record.status === "dismissed")) ||
+			index >= records.length - MAX_RECORDS_PER_WORKSPACE,
+	);
 }
 
 export async function readAgentRaisedPendingUserDecisions(
@@ -310,6 +320,7 @@ export async function recordAgentRaisedPendingUserDecision(
 		// 正文完全相同、且旧的那条仍在等人答，就认定是同一次提问。
 		const sameQuestionStillAwaitingAnswer = records.find(
 			(record) =>
+				input.agentId !== "codex" &&
 				record.taskId === input.taskId &&
 				record.status === "pending" &&
 				record.decisionKind === input.decisionKind &&
@@ -319,6 +330,9 @@ export async function recordAgentRaisedPendingUserDecision(
 			return sameQuestionStillAwaitingAnswer;
 		}
 		const nextRecord: PersistedAgentRaisedPendingUserDecision = {
+			...(input.nativeConversationSessionId
+				? { nativeConversationSessionId: input.nativeConversationSessionId }
+				: {}),
 			decisionId: input.decisionId,
 			taskId: input.taskId,
 			workspaceId: input.workspaceId,
@@ -586,7 +600,11 @@ export function resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersessio
 		visitedDecisionIds.add(current.decisionId);
 		const successorDecisionId = current.supersededByDecisionId;
 		const successor = records.find((record) => record.decisionId === successorDecisionId);
-		if (successor === undefined || successor.questionMarkdown !== current.questionMarkdown) {
+		if (
+			current.agentId === "codex" ||
+			successor === undefined ||
+			successor.questionMarkdown !== current.questionMarkdown
+		) {
 			break;
 		}
 		current = successor;
@@ -638,9 +656,10 @@ function mapAgentTerminalAnswersOntoRecordedQuestions(
 	});
 }
 
-// 用户直接在 agent 终端里作答 / 拒答：了结对应的待答记录。只动 status=pending 的记录——
-// 若用户已在 Kanban 面板作答（answered），随后为投递而发的 Esc 会让 harness 报一次拒答，那一次
-// 必须被忽略，否则会把刚记下的面板答案冲掉。
+// 用户直接在 agent 终端里作答 / 拒答：了结 status=pending 的记录。
+// Codex 同一原生会话、精确调用的完整真实答案还能取代尚未确认送达的面板答案；已送达答案继续保护。
+// 面板投递时发出的 Esc 不含完整答案，必须忽略，否则会把刚记下的面板答案冲掉。
+// 完整 Codex 转录可显式按精确调用身份回填 superseded 的真实答案；不会沿后继链或按正文匹配。
 // 定位顺序：tool_use_id（沿重复记录链走到仍在等答的那条）→ 同 task 仍在等答、且逐问正文完全一致的最近一条。
 export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 	workspaceId: string,
@@ -648,6 +667,7 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 		taskId: string;
 		resolution: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 		resolvedAt: number;
+		allowSupersededCodexAnswerRecoveryFromTranscript?: boolean;
 	},
 ): Promise<PersistedAgentRaisedPendingUserDecision | null> {
 	return await enqueueWrite(workspaceId, async () => {
@@ -659,12 +679,41 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 			decisionIdFromToolUseId !== null
 				? resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(records, decisionIdFromToolUseId)
 				: undefined;
+		const canRecoverSupersededCodexAnswerFromTranscript =
+			input.allowSupersededCodexAnswerRecoveryFromTranscript === true &&
+			resolution.sourceAgentId === "codex" &&
+			resolution.resolutionKind === "answered_in_agent_terminal" &&
+			matchedByToolUseId?.agentId === "codex" &&
+			matchedByToolUseId.status === "superseded" &&
+			matchedByToolUseId.decisionId === decisionIdFromToolUseId;
+		const canReplaceUndeliveredCodexPanelAnswerWithNativeTerminalAnswer =
+			resolution.sourceAgentId === "codex" &&
+			resolution.resolutionKind === "answered_in_agent_terminal" &&
+			matchedByToolUseId?.agentId === "codex" &&
+			matchedByToolUseId.decisionId === decisionIdFromToolUseId &&
+			matchedByToolUseId.status === "answered" &&
+			matchedByToolUseId.answer !== null &&
+			matchedByToolUseId.answer.answerSource !== "agent_terminal" &&
+			(matchedByToolUseId.answerDeliveryState === "answer_recorded" ||
+				matchedByToolUseId.answerDeliveryState === "delivery_in_progress" ||
+				matchedByToolUseId.answerDeliveryState === "delivery_failed") &&
+			typeof resolution.nativeConversationSessionId === "string" &&
+			resolution.nativeConversationSessionId.length > 0 &&
+			resolution.nativeConversationSessionId === matchedByToolUseId.nativeConversationSessionId &&
+			matchesAgentTerminalResolutionByQuestionText(matchedByToolUseId, resolution) &&
+			resolution.answersForQuestions.every(
+				(answer) => typeof answer.answerText === "string" && answer.answerText.trim().length > 0,
+			);
 		const target =
-			matchedByToolUseId?.status === "pending"
+			matchedByToolUseId?.status === "pending" ||
+			canRecoverSupersededCodexAnswerFromTranscript ||
+			canReplaceUndeliveredCodexPanelAnswerWithNativeTerminalAnswer
 				? matchedByToolUseId
 				: records
 						.filter(
 							(record) =>
+								resolution.sourceAgentId !== "codex" &&
+								record.agentId !== "codex" &&
 								record.taskId === taskId &&
 								record.status === "pending" &&
 								record.decisionKind === "ordinary_user_question" &&
@@ -674,6 +723,41 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 		if (target === undefined) {
 			return null;
 		}
+		if (
+			resolution.nativeConversationSessionId &&
+			target.nativeConversationSessionId &&
+			resolution.nativeConversationSessionId !== target.nativeConversationSessionId
+		)
+			return null;
+		if (
+			resolution.resolutionKind === "interrupted_without_answer" ||
+			resolution.resolutionKind === "failed_without_answer"
+		) {
+			const hasNewPartialAnswer =
+				!target.pendingAnswerDraft && resolution.answersForQuestions.some((answer) => answer.answerText !== null);
+			if (target.nativeToolCallOutcome === resolution.resolutionKind && !hasNewPartialAnswer) return target;
+			const partialAnswers = mapAgentTerminalAnswersOntoRecordedQuestions(target, resolution);
+			const pending: PersistedAgentRaisedPendingUserDecision = {
+				...target,
+				nativeToolCallOutcome: resolution.resolutionKind,
+				updatedAt: Math.max(target.updatedAt, resolvedAt),
+				...(target.pendingAnswerDraft ||
+				!resolution.answersForQuestions.some((answer) => answer.answerText !== null)
+					? {}
+					: {
+							pendingAnswerDraft: {
+								orderedQuestionAnswers: partialAnswers,
+								savedAt: resolvedAt,
+								answerDraftEditVersion: resolvedAt,
+							},
+						}),
+			};
+			await writeDecisions(
+				workspaceId,
+				records.map((record) => (record.decisionId === target.decisionId ? pending : record)),
+			);
+			return pending;
+		}
 		const resolved: PersistedAgentRaisedPendingUserDecision =
 			resolution.resolutionKind === "answered_in_agent_terminal"
 				? (() => {
@@ -681,6 +765,7 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 						return {
 							...target,
 							status: "answered",
+							supersededByDecisionId: null,
 							pendingAnswerDraft: null,
 							answer: {
 								selectedOptionIds: orderedQuestionAnswers[0]?.selectedOptionIds ?? [],
@@ -708,5 +793,38 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 			records.map((record) => (record.decisionId === target.decisionId ? resolved : record)),
 		);
 		return resolved;
+	});
+}
+
+// 历史已存在后继已答记录时，重新补录旧调用也不能把旧问题复活。仅对同一原生对话、时间更早的调用生效。
+export async function supersedeEarlierCodexUserQuestionsFromTranscript(
+	workspaceId: string,
+	input: {
+		taskId: string;
+		nativeConversationSessionId: string;
+		latestDecisionId: string;
+		latestAskedAt: number;
+	},
+): Promise<void> {
+	await enqueueWrite(workspaceId, async () => {
+		const records = await readRawDecisions(workspaceId);
+		const next = records.map(
+			(record): PersistedAgentRaisedPendingUserDecision =>
+				record.taskId === input.taskId &&
+				record.agentId === "codex" &&
+				record.status === "pending" &&
+				record.nativeConversationSessionId === input.nativeConversationSessionId &&
+				record.decisionId !== input.latestDecisionId &&
+				record.askedAt <= input.latestAskedAt
+					? {
+							...record,
+							status: "superseded",
+							supersededByDecisionId: input.latestDecisionId,
+							pendingAnswerDraft: null,
+							updatedAt: input.latestAskedAt,
+						}
+					: record,
+		);
+		if (next.some((record, index) => record !== records[index])) await writeDecisions(workspaceId, next);
 	});
 }

@@ -1,3 +1,5 @@
+import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
+import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -17,10 +19,7 @@ import {
 } from "../agent-session-history/agent-raised-user-decision-history-builder";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import { encodeClaudeProjectDirectoryName } from "../agent-session-history/bounded-agent-transcript-reader";
-import {
-	salvageLatestUnansweredClaudeUserQuestionForTask,
-	salvageLatestUnansweredCodexUserQuestionForKnownSession,
-} from "../agent-session-history/pending-user-decision-transcript-salvage";
+import { salvageLatestUnansweredClaudeUserQuestionForTask } from "../agent-session-history/pending-user-decision-transcript-salvage";
 import {
 	probePersistedAgentTranscriptLastConversationModelIdentity,
 	probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
@@ -1650,6 +1649,37 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		listAgentRaisedPendingUserDecisions: async (workspaceScope, input) => {
 			let decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
 			const taskId = input.taskId?.trim();
+			let transcriptRecoveryNotice: string | null = null;
+			if (taskId) {
+				const manager = await deps.getScopedTerminalManager(workspaceScope);
+				const currentSummary = manager.getSummary(taskId);
+				const currentBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const currentCard = currentBoard.columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === taskId);
+				const initialization = currentCard?.taskAgentSessionInitialization;
+				const identity = currentSummary?.agentNativeConversationSessionIdentity;
+				const sessionId =
+					identity?.sourceAgentId === "codex"
+						? identity.nativeSessionId
+						: initialization?.sourceAgentId === "codex" &&
+								initialization.sourceSessionReuseMode === "resume_existing_session"
+							? initialization.sourceSessionId
+							: null;
+				if ((currentSummary?.agentId ?? currentCard?.agentId) === "codex" && sessionId) {
+					const recovered = await reconcileCodexUserQuestionTranscriptForTask({
+						workspaceId: workspaceScope.workspaceId,
+						taskId,
+						sessionId,
+						transcriptPath: identity?.sourceAgentId === "codex" ? identity.transcriptPath : null,
+						summary: currentSummary,
+					});
+					transcriptRecoveryNotice = recovered.transcriptRecoveryNotice;
+					decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+				} else if ((currentSummary?.agentId ?? currentCard?.agentId) === "codex" && currentSummary) {
+					transcriptRecoveryNotice = "暂时无法确认旧对话归属，旧问答记录尚未恢复。";
+				}
+			}
 			const alreadyHasOpenDecisionForTask =
 				taskId !== undefined &&
 				decisions.some((decision) => decision.taskId === taskId && isOpenAgentRaisedPendingUserDecision(decision));
@@ -1686,11 +1716,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										? { knownSessionId: knownSessionInitialization.sourceSessionId }
 										: {}),
 								})
-							: agentId === "codex" && knownSessionInitialization?.sourceAgentId === "codex"
-								? await salvageLatestUnansweredCodexUserQuestionForKnownSession({
-										sessionId: knownSessionInitialization.sourceSessionId,
-									})
-								: null;
+							: null;
 					if (salvaged) {
 						const summary = terminalManager.getSummary(taskId);
 						await recordAgentRaisedPendingUserDecision(workspaceScope.workspaceId, {
@@ -1717,6 +1743,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 			}
 			return {
+				transcriptRecoveryNotice,
 				decisions: decisions
 					.filter(
 						(decision) =>
@@ -1736,6 +1763,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						answerDeliveryState: decision.answerDeliveryState,
 						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
 						originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
+						nativeToolCallOutcome: decision.nativeToolCallOutcome,
 						pendingAnswerDraft: decision.status === "pending" ? (decision.pendingAnswerDraft ?? null) : null,
 						recordedAnswerQuestionAnswers:
 							decision.answer === null
@@ -1771,6 +1799,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		answerAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
 			try {
 				const body = parseAnswerAgentRaisedPendingUserDecisionRequest(input);
+				const answerManager = await deps.getScopedTerminalManager(workspaceScope);
+				const beforeAnswerRecords = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+				const beforeAnswerDecision = beforeAnswerRecords.find(
+					(decision) => decision.decisionId === body.decisionId,
+				);
+				if (beforeAnswerDecision?.agentId === "codex") {
+					const summary = answerManager.getSummary(beforeAnswerDecision.taskId);
+					const identity = summary?.agentNativeConversationSessionIdentity;
+					if (identity?.sourceAgentId === "codex") {
+						if (
+							beforeAnswerDecision.nativeConversationSessionId &&
+							beforeAnswerDecision.nativeConversationSessionId !== identity.nativeSessionId
+						)
+							throw new Error("当前任务已切换原生对话，不能把旧问题答案投递给另一个对话。");
+						await reconcileCodexUserQuestionTranscriptForTask({
+							workspaceId: workspaceScope.workspaceId,
+							taskId: beforeAnswerDecision.taskId,
+							sessionId: identity.nativeSessionId,
+							transcriptPath: identity.transcriptPath,
+							summary,
+						});
+						const refreshed = (await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId)).find(
+							(decision) => decision.decisionId === body.decisionId,
+						);
+						if (refreshed?.answer?.answerSource === "agent_terminal") return { ok: true, delivered: true };
+					}
+				}
+
 				return await createAgentRaisedPendingUserDecisionAnswerDelivery({
 					ensureTaskSessionReadyForDelivery: async ({ taskId, sessionTransport }) => {
 						// 三种 transport 的「让会话回到可投递状态」手法不同；返回 false 表示恢复不了、
@@ -1846,6 +1902,86 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							liveTerminalSummary?.runtimeSessionIncarnationId === originRuntimeSessionIncarnationId &&
 							liveTerminalFacets?.turnOwner === "user" &&
 							liveTerminalFacets.userTurnKind === "question";
+						const expectedNativeSessionId =
+							liveTerminalSummary?.agentNativeConversationSessionIdentity?.nativeSessionId;
+						const expectedRuntimeSessionIncarnationId = liveTerminalSummary?.runtimeSessionIncarnationId;
+						let terminalWriteValidationFailure: Error | null = null;
+						const validateCodexQuestionImmediatelyBeforeTerminalWrite =
+							liveTerminalSummary?.agentId === "codex"
+								? async () => {
+										try {
+											const currentTerminalSummary = terminalManager.getSummary(taskId);
+											const records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+											const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
+											const currentDecision = records.find(
+												(decision) => decision.decisionId === body.decisionId,
+											);
+											if (
+												identity?.sourceAgentId !== "codex" ||
+												identity.nativeSessionId !== expectedNativeSessionId ||
+												currentTerminalSummary?.runtimeSessionIncarnationId !==
+													expectedRuntimeSessionIncarnationId ||
+												(currentDecision?.nativeConversationSessionId &&
+													currentDecision.nativeConversationSessionId !== identity.nativeSessionId)
+											)
+												throw new Error("无法确认原问题所属的 Codex 对话，答案已保存但未投递。");
+											const recovered = await recoverCodexUserQuestionsFromKnownConversation({
+												sessionId: identity.nativeSessionId,
+												transcriptPath: identity.transcriptPath,
+											});
+											if (recovered.coverage !== "complete")
+												throw new Error("旧问答记录尚未完整读取，答案已保存；请稍后重试投递。");
+											const nativeQuestion = recovered.exchanges.find(
+												(exchange) =>
+													`${taskId}:${exchange.payload.decisionSourceId}` === body.decisionId ||
+													`${taskId}:${exchange.callId}` === body.decisionId,
+											);
+											if (!nativeQuestion) throw new Error("尚未核实原问题的完整记录，答案已保存但未投递。");
+											if (nativeQuestion?.resolution?.resolutionKind === "answered_in_agent_terminal")
+												throw new Error("此问题已在 Codex 终端作答，已保存的面板答案不会再次发送。");
+											if (recovered.exchanges.at(-1)?.callId !== nativeQuestion.callId)
+												throw new Error("此问题已被新提问取代，已保存的面板答案不会发送给新问题。");
+											// 转录读取跨 await，最终同步复查当前活体、对话与选择器，随后才允许 manager 写入。
+											const currentAfterTranscriptRead = terminalManager.getSummary(taskId);
+											if (
+												currentAfterTranscriptRead?.agentId !== "codex" ||
+												currentAfterTranscriptRead.agentNativeConversationSessionIdentity?.sourceAgentId !==
+													"codex" ||
+												currentAfterTranscriptRead?.runtimeSessionIncarnationId !==
+													expectedRuntimeSessionIncarnationId ||
+												currentAfterTranscriptRead?.agentNativeConversationSessionIdentity
+													?.nativeSessionId !== expectedNativeSessionId
+											)
+												throw new Error("核验期间 Codex 会话已更换，答案已保存但未投递。");
+											const currentTerminalFacets = resolveSessionFacets(currentAfterTranscriptRead);
+											const hasLiveQuestion = records.some(
+												(decision) =>
+													decision.taskId === taskId &&
+													decision.agentId === "codex" &&
+													decision.nativeToolCallOutcome === undefined &&
+													decision.originRuntimeSessionIncarnationId !== null &&
+													decision.originRuntimeSessionIncarnationId ===
+														currentTerminalSummary?.runtimeSessionIncarnationId &&
+													(decision.status === "pending" ||
+														(decision.answer?.answerSource === "kanban_panel" &&
+															decision.answerDeliveryState !== "delivered")),
+											);
+											if (
+												hasLiveQuestion ||
+												(currentTerminalFacets?.turnOwner === "user" &&
+													currentTerminalFacets.userTurnKind === "question")
+											)
+												throw new Error(
+													"Codex 正在等待终端选择题，请在终端作答；已保存的面板答案尚未投递。",
+												);
+										} catch (error) {
+											terminalWriteValidationFailure =
+												error instanceof Error ? error : new Error(String(error));
+											throw terminalWriteValidationFailure;
+										}
+									}
+								: undefined;
+						await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
 						if (agentIsStoppedOnThisQuestionSelectorInLiveTerminal) {
 							const selectorDismissalOutcome =
 								await terminalManager.dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(taskId);
@@ -1860,6 +1996,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							resolveConfirmedDelivery = resolve;
 						});
 						const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
+							validateBeforeTerminalWrite: validateCodexQuestionImmediatelyBeforeTerminalWrite,
 							onDeliveryOutcome: (outcome) => {
 								resolveConfirmedDelivery(outcome.status !== "delivery_failed");
 							},
@@ -1878,7 +2015,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								return stash.outcome;
 							},
 						});
-						return acceptedSummary ? await confirmedDelivery : false;
+						const delivered = acceptedSummary ? await confirmedDelivery : false;
+						if (terminalWriteValidationFailure) throw terminalWriteValidationFailure;
+						return delivered;
 					},
 				}).answerPendingUserDecision({
 					workspaceId: workspaceScope.workspaceId,
@@ -1892,16 +2031,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 		},
 		// 问答记录：已了结的 agent 提问与用户答案（含终端作答时写下的备注）。按需读取——只在用户展开
-		// 问答记录时调用，故允许流式扫描该 task 的 Claude 转录做回填。
+		// 问答记录时调用；Claude 流式回填，Codex 按已知原生身份读取有界的分页恢复链。
 		listAgentRaisedUserDecisionHistoryForTask: async (workspaceScope, input) => {
 			const taskId = input.taskId.trim();
-			const records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
-			const ledgerEntries = buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(records, taskId);
+			let records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+			let ledgerEntries = buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(records, taskId);
 			const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 			const summary = terminalManager.getSummary(taskId);
 			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 			const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
 			const agentId = summary?.agentId ?? card?.agentId ?? null;
+			let transcriptRecoveryNotice: string | null = null;
 			let transcriptEntries: Awaited<
 				ReturnType<typeof buildAgentRaisedUserDecisionHistoryEntriesFromClaudeTranscripts>
 			> = [];
@@ -1942,8 +2082,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					transcriptFilePaths,
 				});
 			}
+			if (agentId === "codex") {
+				const identity = summary?.agentNativeConversationSessionIdentity;
+				const initialization = card?.taskAgentSessionInitialization;
+				const sessionId =
+					identity?.sourceAgentId === "codex"
+						? identity.nativeSessionId
+						: initialization?.sourceAgentId === "codex" &&
+								initialization.sourceSessionReuseMode === "resume_existing_session"
+							? initialization.sourceSessionId
+							: null;
+				if (sessionId) {
+					const recovered = await reconcileCodexUserQuestionTranscriptForTask({
+						workspaceId: workspaceScope.workspaceId,
+						taskId,
+						sessionId,
+						transcriptPath: identity?.sourceAgentId === "codex" ? identity.transcriptPath : null,
+						summary,
+					});
+					transcriptEntries = recovered.historyEntries;
+					transcriptRecoveryNotice = recovered.transcriptRecoveryNotice;
+					records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+					ledgerEntries = buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(records, taskId);
+				}
+			}
+
 			const taskRecords = records.filter((record) => record.taskId === taskId);
 			return {
+				transcriptRecoveryNotice,
 				historyEntries: mergeAgentRaisedUserDecisionHistoryEntries({
 					ledgerEntries,
 					transcriptEntries,

@@ -441,6 +441,8 @@ interface TaskChatInputDeliveryAttemptPlan {
 	generation: number;
 	// 后台自动注入（RVF followup 等）遇 agent 模态待答时让位，见 Fix B 让位守卫。
 	deferWhileUserTurn: boolean;
+	// 调用方的领域核验；每次实际粘贴或提交前重读，不缓存入队时结论。
+	validateBeforeTerminalWrite: (() => Promise<void>) | null;
 	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
 	// 在受理时捕获而不是每次重探重读配置：一条投递最多活 ~196s，用同一份策略走完全程，
 	// 好过让它在半途因为用户改了设置而换一套语义。
@@ -1562,6 +1564,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		text: string,
 		options?: {
 			deferWhileUserTurn?: boolean;
+			validateBeforeTerminalWrite?: () => Promise<void>;
 			idempotencyKey?: string | null;
 			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
 			// 争用策略与抢占执行者，见 TaskChatInputDeliveryAttemptPlan。默认不抢占：
@@ -1585,6 +1588,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearTaskChatInputDeliveryTimer(active);
 		// 新投递取代任何上一条 paste 提交的待决确认链（其自身写入后会再起一条新的）。
 		clearSubmitConfirmTimer(active);
+		// 清定时器拦不住已进入异步核验的确认 tick，必须同步作废它捕获的代际。
+		active.submitConfirmGeneration++;
 		// 单飞槽被抢占：上一条投递从此再无人推进，必须当场给它一个诚实结论，
 		// 否则它的等待者（RVF）会永远停在 pending——这正是契约里 superseded_by_later_delivery 的用途。
 		settleActiveProgrammaticDelivery(active, "delivery_failed", "superseded_by_later_delivery");
@@ -1620,6 +1625,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
+			validateBeforeTerminalWrite: options?.validateBeforeTerminalWrite ?? null,
 			mayAutoStashAbsentHumanInputBox: options?.mayAutoStashAbsentHumanInputBox ?? false,
 			preemptivelyStashHumanInputBox: options?.preemptivelyStashHumanInputBox ?? null,
 			consecutivePreemptionDeclineCount: 0,
@@ -1795,6 +1801,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 			await this.holdOrPreemptContendedTerminalInputBox(plan, entryAfterContentionRead, currentActive, contention);
 			return;
 		}
+		if (
+			plan.validateBeforeTerminalWrite &&
+			!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+				taskId,
+				currentActive,
+				plan.validateBeforeTerminalWrite,
+				() => currentActive.taskChatInputDeliveryGeneration === generation,
+			))
+		)
+			return;
+		if (
+			this.entries.get(taskId)?.active !== currentActive ||
+			currentActive.taskChatInputDeliveryGeneration !== generation
+		)
+			return;
 		// 框是空的（或读框拿不到结论）：本条投递不再挂在争用上，清掉挂起可见性再写。
 		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		// 程序化投递的是一条**已提交的用户轮**（task-chat 手动发送 / RVF followup），语义上等价于用户在
@@ -1816,6 +1837,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 回执推进到「已写入、等确认」。queuedBehindActiveAgentTurn 必须在**此刻**捕获：确认 tick 在
 		// 2.5s 之后才跑，那时 turnOwner 早就被这次投递本身翻成 agent 了，届时再读一律是 agent，
 		// 就再也分不出「排在既有回合之后」与「agent 因这条消息才开始干活」。
+		if (
+			this.entries.get(taskId)?.active !== currentActive ||
+			currentActive.taskChatInputDeliveryGeneration !== generation
+		)
+			return;
 		const deliveryReceipt = currentActive.programmaticDeliveryReceipt;
 		if (deliveryReceipt) {
 			deliveryReceipt.phase = "awaiting_submit_confirmation";
@@ -1823,6 +1849,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		this.writePasteSubmissionWithConfirm(taskId, currentActive, text, {
 			retainsProgrammaticDeliveryReceipt: true,
+			validateBeforeTerminalWrite: plan.validateBeforeTerminalWrite,
 		});
 		logTuiFreezeWarning(
 			`[tui-freeze] task-chat-input-delivered taskId=${taskId} agentId=${currentEntry.summary.agentId} ` +
@@ -2095,6 +2122,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(updateSummary(entry, { terminalDeliveryContention: contention }));
 	}
 
+	private async validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+		taskId: string,
+		active: ActiveProcessState,
+		validateBeforeTerminalWrite: () => Promise<void>,
+		isCurrentGeneration: () => boolean,
+	): Promise<boolean> {
+		try {
+			await validateBeforeTerminalWrite();
+		} catch (error) {
+			// 核验期间可能已被另一条投递取代；只结算仍属于本次的回执与可见性。
+			if (this.entries.get(taskId)?.active !== active || !isCurrentGeneration()) return false;
+			settleActiveProgrammaticDelivery(
+				active,
+				"delivery_failed",
+				active.programmaticDeliveryReceipt?.phase === "awaiting_readiness"
+					? "cancelled_before_delivery"
+					: "submit_confirmation_budget_exhausted",
+			);
+			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
+			logTuiFreezeWarning(`[tui-freeze] terminal-write-validation-rejected taskId=${taskId} error=${String(error)}`);
+			return false;
+		}
+		// 领域核验可能读转录或账本，跨 await 后必须再次确认实际写入目标与代际。
+		return this.entries.get(taskId)?.active === active && isCurrentGeneration();
+	}
+
 	// 启动首发、RVF followup 与连接中断续跑的程序化 paste 注入的统一写入入口 + 写后确认闭环。先写 bracketed paste
 	// 框架、待 TUI 摄入后再单独写提交用的 CR（Codex 的 awaitingCodexPromptAfterEnter 跟着那次 CR 置位，
 	// 理由见 runSubmitCarriageReturnAfterPasteIngestionAttempt），然后起一个确认 tick：隔 SUBMIT_CONFIRM_DELAY_MS
@@ -2114,7 +2167,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		active: ActiveProcessState,
 		text: string,
-		options?: { retainsProgrammaticDeliveryReceipt?: boolean; waitsForStartupCompletion?: boolean },
+		options?: {
+			retainsProgrammaticDeliveryReceipt?: boolean;
+			waitsForStartupCompletion?: boolean;
+			validateBeforeTerminalWrite?: (() => Promise<void>) | null;
+		},
 	): void {
 		if (!options?.retainsProgrammaticDeliveryReceipt) {
 			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
@@ -2142,6 +2199,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const generation = ++active.submitConfirmGeneration;
 		this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, {
 			promptText: text,
+			validateBeforeTerminalWrite: options?.validateBeforeTerminalWrite ?? null,
 			confirmationBudgetMs: options?.waitsForStartupCompletion
 				? TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS
 				: SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS,
@@ -2158,29 +2216,31 @@ export class TerminalSessionManager implements TerminalSessionService {
 		generation: number,
 		ingestionWatch: {
 			promptText: string;
+			validateBeforeTerminalWrite: (() => Promise<void>) | null;
 			confirmationBudgetMs: number;
 			outputChunkArrivalSequenceNumberAtPasteWrite: number;
 			ingestionEvidenceDeadlineAt: number;
 		},
 	): void {
 		const timer = setTimeout(() => {
-			this.runSubmitCarriageReturnAfterPasteIngestionAttempt(taskId, generation, ingestionWatch);
+			void this.runSubmitCarriageReturnAfterPasteIngestionAttempt(taskId, generation, ingestionWatch);
 		}, PASTE_INGESTION_EVIDENCE_POLL_BEFORE_SUBMIT_MS);
 		timer.unref?.();
 		active.submitConfirmTimer = timer;
 	}
 
 	// 分离写第二步：摄入证据出现（或等到预算上限）后单独写提交用的 CR，随即起确认链。
-	private runSubmitCarriageReturnAfterPasteIngestionAttempt(
+	private async runSubmitCarriageReturnAfterPasteIngestionAttempt(
 		taskId: string,
 		generation: number,
 		ingestionWatch: {
 			promptText: string;
+			validateBeforeTerminalWrite: (() => Promise<void>) | null;
 			confirmationBudgetMs: number;
 			outputChunkArrivalSequenceNumberAtPasteWrite: number;
 			ingestionEvidenceDeadlineAt: number;
 		},
-	): void {
+	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -2198,6 +2258,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, ingestionWatch);
 			return;
 		}
+		if (
+			ingestionWatch.validateBeforeTerminalWrite &&
+			!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+				taskId,
+				active,
+				ingestionWatch.validateBeforeTerminalWrite,
+				() => active.submitConfirmGeneration === generation,
+			))
+		)
+			return;
+		if (this.entries.get(taskId)?.active !== active || active.submitConfirmGeneration !== generation) return;
 		if (active.programmaticDeliveryReceipt?.phase === "awaiting_submit_confirmation") {
 			active.programmaticDeliveryReceipt.firstSubmitCarriageReturnAtEpochMs ??= now();
 			active.programmaticDeliveryReceipt.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
@@ -2229,6 +2300,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			SUBMIT_CONFIRM_MAX_RESENDS,
 			now() + ingestionWatch.confirmationBudgetMs,
 			ingestionWatch.promptText,
+			ingestionWatch.validateBeforeTerminalWrite,
 		);
 	}
 
@@ -2240,20 +2312,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
 		promptText: string,
+		validateBeforeTerminalWrite: (() => Promise<void>) | null = null,
 	): void {
 		const timer = setTimeout(() => {
-			void this.runSubmitConfirmAttempt(taskId, generation, resendsLeft, convergenceDeadlineAt, promptText).catch(
-				(error: unknown) => {
-					logTuiFreezeError(`[tui-freeze] submit-confirmation-failed taskId=${taskId} error=${String(error)}`);
-					if (this.entries.get(taskId)?.active === active && active.submitConfirmGeneration === generation) {
-						settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
-							active,
-							"delivery_failed",
-							"submit_confirmation_budget_exhausted",
-						);
-					}
-				},
-			);
+			void this.runSubmitConfirmAttempt(
+				taskId,
+				generation,
+				resendsLeft,
+				convergenceDeadlineAt,
+				promptText,
+				validateBeforeTerminalWrite,
+			).catch((error: unknown) => {
+				logTuiFreezeError(`[tui-freeze] submit-confirmation-failed taskId=${taskId} error=${String(error)}`);
+				if (this.entries.get(taskId)?.active === active && active.submitConfirmGeneration === generation) {
+					settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+						active,
+						"delivery_failed",
+						"submit_confirmation_budget_exhausted",
+					);
+				}
+			});
 		}, SUBMIT_CONFIRM_DELAY_MS);
 		timer.unref?.();
 		active.submitConfirmTimer = timer;
@@ -2268,6 +2346,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
 		promptText: string,
+		validateBeforeTerminalWrite: (() => Promise<void>) | null = null,
 	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
@@ -2333,7 +2412,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 补发预算已耗尽时更是再等也无事可做——继续排 tick 只会让回执一直没有结论，故当场诚实收尾。
 		if (codexSubmissionBlockedByStartup || !this.canInjectIntoTerminalNow(active)) {
 			if (resendsLeft > 0) {
-				this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft, convergenceDeadlineAt, promptText);
+				this.scheduleSubmitConfirmTick(
+					taskId,
+					active,
+					generation,
+					resendsLeft,
+					convergenceDeadlineAt,
+					promptText,
+					validateBeforeTerminalWrite,
+				);
 				return;
 			}
 			logTuiFreezeError(
@@ -2365,11 +2452,30 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			return;
 		}
+		if (
+			validateBeforeTerminalWrite &&
+			!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+				taskId,
+				active,
+				validateBeforeTerminalWrite,
+				() => active.submitConfirmGeneration === generation,
+			))
+		)
+			return;
+		if (this.entries.get(taskId)?.active !== active || active.submitConfirmGeneration !== generation) return;
 		active.session.write("\r");
 		logTuiFreezeWarning(
 			`[tui-freeze] submit-resend-cr taskId=${taskId} agentId=${entry.summary.agentId} remaining=${resendsLeft - 1}`,
 		);
-		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1, convergenceDeadlineAt, promptText);
+		this.scheduleSubmitConfirmTick(
+			taskId,
+			active,
+			generation,
+			resendsLeft - 1,
+			convergenceDeadlineAt,
+			promptText,
+			validateBeforeTerminalWrite,
+		);
 	}
 
 	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的

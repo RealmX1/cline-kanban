@@ -43,6 +43,11 @@ import {
 	extractAgentRaisedUserQuestionPayload,
 	extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "./agent-raised-decision-payload-extraction";
+import {
+	extractCodexUserQuestionPayload,
+	extractCodexUserQuestionResolution,
+	resolveCodexUserQuestionHookEvent,
+} from "./codex-user-question-payload-extraction";
 import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
 import { extractAgentToolCallExecutionOutcomeFromHookPayload } from "./hook-events/agent-tool-call-execution-outcome-extraction";
 import {
@@ -443,7 +448,7 @@ function parseHooksIngestArgs(
 		toolName: metadata?.toolName,
 	});
 	return {
-		event,
+		event: resolveCodexUserQuestionHookEvent(event, metadata),
 		...(agentNativeConversationSessionIdentity?.sourceAgentId === "claude" &&
 		/^task(create|update|list|get)$/iu.test(metadata?.toolName ?? "") &&
 		metadata?.hookEventName?.toLowerCase() === "posttooluse"
@@ -508,6 +513,24 @@ export function buildAgentRaisedDecisionPayloads(
 	const toolName = metadata?.toolName ?? null;
 	const normalizedToolName = toolName?.trim().toLowerCase() ?? null;
 	const hookEventName = metadata?.hookEventName?.trim().toLowerCase() ?? null;
+	if (metadata?.source === "codex" && toolName === "request_user_input" && toolUseId) {
+		const question = extractCodexUserQuestionPayload({
+			callId: toolUseId,
+			toolInput: extractToolInput(payload),
+			...(typeof payload.session_id === "string" ? { nativeConversationSessionId: payload.session_id } : {}),
+		});
+		if (!question) return {};
+		if (hookEventName === "pretooluse") return { agentRaisedUserQuestion: question };
+		if (hookEventName === "posttooluse")
+			return {
+				agentRaisedUserQuestionResolvedInAgentTerminal: extractCodexUserQuestionResolution({
+					callId: toolUseId,
+					payload: question,
+					toolResponse: payload.tool_response,
+				}),
+			};
+		return {};
+	}
 	if (isClaudeUserQuestionToolName(normalizedToolName)) {
 		// 同一次 AskUserQuestion 会先后经过三个 hook，各自只承担一件事：
 		//   - PreToolUse：提问的那一刻，落 durable 记录（唯一的提问采集点）；
@@ -932,7 +955,7 @@ function notifyCodexSessionWatcherEvent(mapped: CodexMappedHookEvent): void {
 }
 
 async function enrichCodexReviewMetadata(args: HooksIngestArgs, cwd: string): Promise<HooksIngestArgs> {
-	if (args.event !== "to_review") {
+	if (args.event !== "to_review" || args.agentRaisedUserQuestion) {
 		return args;
 	}
 	const metadata = args.metadata ?? {};

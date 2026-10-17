@@ -119,7 +119,11 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 			options: question.options,
 			allowsFreeformAnswer: question.allowsFreeformAnswer,
 			orderedQuestions: question.orderedQuestions,
-			sourceHarnessSignal: `${body.metadata?.source ?? "unknown"}:AskUserQuestion`,
+			nativeConversationSessionId: question.nativeConversationSessionId,
+			sourceHarnessSignal:
+				body.metadata?.source === "codex"
+					? "codex:request_user_input"
+					: `${body.metadata?.source ?? "unknown"}:AskUserQuestion`,
 		});
 		return;
 	}

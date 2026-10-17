@@ -415,7 +415,59 @@ describe.sequential("agent-raised-pending-user-decision-store integration", () =
 		});
 	});
 
-	it("上限 200 丢最旧；文件损坏 fail-open；逃逸 workspaces 根被拒", async () => {
+	it("Codex 面板答案与显式取消的关闭事实不会被历史裁剪抹掉", async () => {
+		await withIsolatedWorkspaceHome(async (register) => {
+			const { workspaceId } = await register("codex-closed-facts");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { decisionId: "codex-panel", taskId: "answered-task", agentId: "codex" }),
+			);
+			await recordAgentRaisedPendingUserDecisionAnswer(workspaceId, "codex-panel", {
+				selectedOptionIds: ["raw-sql"],
+				freeformText: null,
+				answeredAt: ASKED_AT + 1,
+				answerSource: "kanban_panel",
+			});
+			await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(workspaceId, "codex-panel", {
+				answerDeliveryState: "delivery_in_progress",
+				updatedAt: ASKED_AT + 2,
+			});
+			await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(workspaceId, "codex-panel", {
+				answerDeliveryState: "delivered",
+				updatedAt: ASKED_AT + 3,
+			});
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { decisionId: "codex-dismissed", taskId: "dismissed-task", agentId: "codex" }),
+			);
+			const dismissed = await dismissAgentRaisedPendingUserDecision(workspaceId, "codex-dismissed", ASKED_AT + 4);
+			if (!dismissed) throw new Error("取消夹具无效");
+			const closureRecords = await readAgentRaisedPendingUserDecisions(workspaceId);
+			const ordinaryHistory = Array.from({ length: 205 }, (_, index) => ({
+				...dismissed,
+				decisionId: `ordinary-${index}`,
+				taskId: `ordinary-task-${index}`,
+				agentId: "claude",
+				sourceHarnessSignal: "claude:AskUserQuestion",
+			}));
+			await writeFile(
+				join(getWorkspaceDirectoryPath(workspaceId), "agent-raised-pending-user-decisions.json"),
+				JSON.stringify([...closureRecords, ...ordinaryHistory]),
+			);
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { decisionId: "newest", taskId: "newest-task" }),
+			);
+			const retained = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(retained.find((record) => record.decisionId === "codex-panel")?.answer?.selectedOptionIds).toEqual([
+				"raw-sql",
+			]);
+			expect(retained.find((record) => record.decisionId === "codex-dismissed")?.status).toBe("dismissed");
+			expect(retained.some((record) => record.decisionId === "ordinary-0")).toBe(false);
+		});
+	});
+
+	it("裁剪已了结历史时保留旧待答问题；文件损坏 fail-open；逃逸 workspaces 根被拒", async () => {
 		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
 			const { workspaceId } = await registerIsolatedWorkspace("project-a");
 			for (let index = 0; index < 205; index += 1) {
@@ -427,10 +479,13 @@ describe.sequential("agent-raised-pending-user-decision-store integration", () =
 						askedAt: ASKED_AT + index,
 					}),
 				);
+				if (index > 0)
+					await dismissAgentRaisedPendingUserDecision(workspaceId, `decision-${index}`, ASKED_AT + index);
 			}
 			const records = await readAgentRaisedPendingUserDecisions(workspaceId);
-			expect(records).toHaveLength(200);
-			expect(records.some((record) => record.decisionId === "decision-0")).toBe(false);
+			expect(records).toHaveLength(201);
+			expect(records.some((record) => record.decisionId === "decision-0")).toBe(true);
+			expect(records.some((record) => record.decisionId === "decision-1")).toBe(false);
 			expect(records.some((record) => record.decisionId === "decision-204")).toBe(true);
 
 			await writeFile(

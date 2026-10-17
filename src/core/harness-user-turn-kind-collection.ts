@@ -26,6 +26,7 @@ export function classifyHookUserTurnKind(
 	if (!metadata) {
 		return null;
 	}
+	if (metadata.source === "codex" && metadata.toolName === "request_user_input") return "question";
 	if (metadata.source?.trim().toLowerCase() !== "claude") {
 		return null;
 	}
