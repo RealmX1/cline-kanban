@@ -1,3 +1,4 @@
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -48,6 +49,8 @@ const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
 const TERMINAL_RECONNECT_INITIAL_DELAY_MS = 250;
 const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
+// EXPERIMENT_NODE: 连接连续健康 5 秒后清零重连退避，后续按真实弱网体验校准稳定窗口。
+const TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
 // 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
@@ -315,6 +318,7 @@ class PersistentTerminal {
 	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
 	private reconnectTimer: number | null = null;
 	private reconnectAttempt = 0;
+	private terminalTransportConnectionStabilityTimer: number | null = null;
 	private disposed = false;
 	// User-initiated refresh swaps the backing PTY but should NOT wipe the visible
 	// scrollback. The hook reads and clears this flag before deciding whether the
@@ -685,6 +689,7 @@ class PersistentTerminal {
 			// 关不掉就让它自己超时；重要的是本实例已经不再认它。
 		}
 		this.clearReconnectTimer();
+		this.clearTerminalTransportConnectionStabilityTimer();
 		this.reconnectAttempt = 0;
 		this.ensureConnected();
 	}
@@ -728,7 +733,22 @@ class PersistentTerminal {
 	}
 
 	private notifyConnectionReady(): void {
+		if (
+			this.connectionReady ||
+			this.ioSocket?.readyState !== WebSocket.OPEN ||
+			this.controlSocket?.readyState !== WebSocket.OPEN ||
+			!this.restoreCompleted
+		) {
+			return;
+		}
 		this.connectionReady = true;
+		this.clearReconnectTimer();
+		this.lastError = null;
+		this.notifyLastError();
+		this.terminalTransportConnectionStabilityTimer = window.setTimeout(() => {
+			this.terminalTransportConnectionStabilityTimer = null;
+			this.reconnectAttempt = 0;
+		}, TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS);
 		for (const subscriber of this.subscribers) {
 			subscriber.onConnectionReady?.(this.taskId);
 		}
@@ -802,11 +822,11 @@ class PersistentTerminal {
 		}, delay);
 	}
 
-	private markSocketOpen(): void {
-		this.reconnectAttempt = 0;
-		this.clearReconnectTimer();
-		this.lastError = null;
-		this.notifyLastError();
+	private clearTerminalTransportConnectionStabilityTimer(): void {
+		if (this.terminalTransportConnectionStabilityTimer !== null) {
+			window.clearTimeout(this.terminalTransportConnectionStabilityTimer);
+			this.terminalTransportConnectionStabilityTimer = null;
+		}
 	}
 
 	private sendControlMessage(message: RuntimeTerminalWsClientMessage): boolean {
@@ -817,12 +837,25 @@ class PersistentTerminal {
 		return true;
 	}
 
-	private sendIoData(data: string | Uint8Array): boolean {
+	private canSendTerminalInputToCurrentSession(): boolean {
 		if (
 			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
 			!this.ioSocket ||
 			this.ioSocket.readyState !== WebSocket.OPEN
 		) {
+			return false;
+		}
+		if (this.latestSummary?.pid === null) {
+			const { liveness } = resolveSessionFacets(this.latestSummary);
+			if (liveness === "none" || liveness === "exited" || liveness === "failed" || liveness === "interrupted") {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private sendIoData(data: string | Uint8Array): boolean {
+		if (!this.canSendTerminalInputToCurrentSession() || !this.ioSocket) {
 			return false;
 		}
 		this.ioSocket.send(data);
@@ -1053,7 +1086,6 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
-			this.markSocketOpen();
 			if (this.restoreCompleted && this.visibleContainer) {
 				this.requestResize();
 			}
@@ -1065,6 +1097,7 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal stream failed.";
 			this.notifyLastError();
 		};
@@ -1075,6 +1108,7 @@ class PersistentTerminal {
 			this.ioSocket = null;
 			this.outputTextDecoder = new TextDecoder();
 			this.connectionReady = false;
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal stream closed. Reconnecting...";
 			this.notifyLastError();
 			this.scheduleReconnect();
@@ -1092,7 +1126,7 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
-			this.markSocketOpen();
+			this.notifyConnectionReady();
 		};
 		controlSocket.onmessage = (event) => {
 			// 与 onopen / onerror / onclose 同源的守卫，必须在解析帧之前：升级重连
@@ -1115,6 +1149,8 @@ class PersistentTerminal {
 				// 恢复快照已到达:解除可见性恢复门控。此后到 restore_complete 之间服务端不再
 				// 转发实时输出(restoreComplete=false 缓冲),不存在门控漏窗。
 				this.endAwaitingRestoreSnapshotGate();
+				this.connectionReady = false;
+				this.clearTerminalTransportConnectionStabilityTimer();
 				this.restoreCompleted = false;
 				// 到达序号在此刻定死（而非等落屏时再取），resync 才能分辨「本次请求到的那一份」与「更早在途、
 				// 恰好此刻才落屏的那一份」。
@@ -1171,6 +1207,7 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal control connection failed.";
 			this.notifyLastError();
 		};
@@ -1180,6 +1217,7 @@ class PersistentTerminal {
 			}
 			this.controlSocket = null;
 			this.connectionReady = false;
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.restoreCompleted = false;
 			this.lastError = "Terminal control connection closed. Reconnecting...";
 			this.notifyLastError();
@@ -1188,7 +1226,7 @@ class PersistentTerminal {
 	}
 
 	private ensureConnected(): void {
-		if (this.disposed) {
+		if (this.disposed || this.reconnectTimer !== null) {
 			return;
 		}
 		if (!this.ioSocket) {
@@ -1337,11 +1375,7 @@ class PersistentTerminal {
 	}
 
 	input(text: string): boolean {
-		if (
-			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
-			!this.ioSocket ||
-			this.ioSocket.readyState !== WebSocket.OPEN
-		) {
+		if (!this.canSendTerminalInputToCurrentSession()) {
 			return false;
 		}
 		this.terminal.input(text);
@@ -1349,11 +1383,7 @@ class PersistentTerminal {
 	}
 
 	paste(text: string): boolean {
-		if (
-			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
-			!this.ioSocket ||
-			this.ioSocket.readyState !== WebSocket.OPEN
-		) {
+		if (!this.canSendTerminalInputToCurrentSession()) {
 			return false;
 		}
 		this.terminal.paste(text);
@@ -1618,6 +1648,7 @@ class PersistentTerminal {
 			document.removeEventListener("visibilitychange", this.handleVisibilityChange);
 		}
 		this.clearReconnectTimer();
+		this.clearTerminalTransportConnectionStabilityTimer();
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
 		// 在途的 resync 等待者不再可能被唤醒；丢掉引用，让它们各自到点以「没等到」收场。
 		this.restoreSnapshotApplicationWaiters.clear();
