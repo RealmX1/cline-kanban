@@ -35,7 +35,7 @@ const CHILD = card("ws-b", "c0001", 2_000);
 // 所属卡在 taskConversationSessionMetadata.workspaceTaskId。主会话的 kanban 会话 id 等于卡 id。
 interface KanbanTaskConversationSessionWithNativeIdentity {
 	kanbanTaskConversationSessionId?: string;
-	taskConversationSessionRole?: "main" | "by_the_way";
+	taskConversationSessionRole?: "main" | "by_the_way" | "task_collaborator";
 	agentId: string;
 	nativeId: string;
 	sidecarObservedAt: number;
@@ -934,64 +934,69 @@ describe("recorded inter-work-unit relation projection over live-capture-activat
 		expect(summarize(rebuiltState, adoptingCard)).toEqual(summarize(ledger.project(), adoptingCard));
 	});
 
-	it("attributes live and activation-seeded by-the-way session identities to the owning card and anchors later forks of them onto that card", () => {
-		const byTheWaySessionOwningCard = card("ws-a", "k0001", 1_500);
-		const forkingCard = card("ws-a", "f0009", 9_000);
-		const ledger = new SyntheticLedger();
-		ledger.liveCaptureActivationBatch("ws-a", [
-			{
-				card: byTheWaySessionOwningCard,
-				boardColumnId: "in_progress",
-				sessions: [
-					{ agentId: "claude", nativeId: "native-k-main", sidecarObservedAt: 40 },
-					{
-						kanbanTaskConversationSessionId: "btw-seeded-1",
-						taskConversationSessionRole: "by_the_way",
-						agentId: "claude",
-						nativeId: "native-btw-seeded",
-						sidecarObservedAt: 45,
-					},
-				],
-			},
-		]);
-		ledger.liveConversationSessionIdentityObserved(byTheWaySessionOwningCard, {
-			kanbanTaskConversationSessionId: "btw-live-2",
-			taskConversationSessionRole: "by_the_way",
-			agentId: "claude",
-			nativeId: "native-btw-live",
-			sidecarObservedAt: 60,
-		});
-		ledger.retainedFieldValueCanonicalJsonBySha256.set(
-			"init-fork-of-by-the-way-session",
-			JSON.stringify({
-				sourceAgentId: "claude",
-				sourceSessionId: "native-btw-live",
-				sourceSessionReuseMode: "fork_existing_session",
-			}),
-		);
-		ledger.cardCreated(forkingCard, undefined, {
-			fieldValueSha256ByFieldNameAtCreation: { taskAgentSessionInitialization: "init-fork-of-by-the-way-session" },
-		});
-		ledger.liveConversationSessionIdentityObserved(forkingCard, {
-			agentId: "claude",
-			nativeId: "native-f",
-			sidecarObservedAt: 70,
-		});
-		const state = ledger.project();
-		expect(
-			summarizeOwnershipPeriods(state, byTheWaySessionOwningCard).map((period) => [
-				period.nativeId,
-				period.observedInKanbanTaskConversationSessionIds,
-			]),
-		).toEqual([
-			["native-k-main", ["k0001"]],
-			["native-btw-seeded", ["btw-seeded-1"]],
-			["native-btw-live", ["btw-live-2"]],
-		]);
-		expect(summarizeRelationKindSubjectAnchor(state, forkingCard)).toEqual([
-			["provenance_forked_conversation_session_of", "f0009", "k0001"],
-		]);
-	});
+	it.each(["by_the_way", "task_collaborator"] as const)(
+		"%s 原生身份归属宿主卡片，后续 fork 关系不冒充主会话",
+		(role) => {
+			const byTheWaySessionOwningCard = card("ws-a", "k0001", 1_500);
+			const forkingCard = card("ws-a", "f0009", 9_000);
+			const ledger = new SyntheticLedger();
+			ledger.liveCaptureActivationBatch("ws-a", [
+				{
+					card: byTheWaySessionOwningCard,
+					boardColumnId: "in_progress",
+					sessions: [
+						{ agentId: "claude", nativeId: "native-k-main", sidecarObservedAt: 40 },
+						{
+							kanbanTaskConversationSessionId: "btw-seeded-1",
+							taskConversationSessionRole: role,
+							agentId: "claude",
+							nativeId: "native-btw-seeded",
+							sidecarObservedAt: 45,
+						},
+					],
+				},
+			]);
+			ledger.liveConversationSessionIdentityObserved(byTheWaySessionOwningCard, {
+				kanbanTaskConversationSessionId: "btw-live-2",
+				taskConversationSessionRole: role,
+				agentId: "claude",
+				nativeId: "native-btw-live",
+				sidecarObservedAt: 60,
+			});
+			ledger.retainedFieldValueCanonicalJsonBySha256.set(
+				"init-fork-of-by-the-way-session",
+				JSON.stringify({
+					sourceAgentId: "claude",
+					sourceSessionId: "native-btw-live",
+					sourceSessionReuseMode: "fork_existing_session",
+				}),
+			);
+			ledger.cardCreated(forkingCard, undefined, {
+				fieldValueSha256ByFieldNameAtCreation: {
+					taskAgentSessionInitialization: "init-fork-of-by-the-way-session",
+				},
+			});
+			ledger.liveConversationSessionIdentityObserved(forkingCard, {
+				agentId: "claude",
+				nativeId: "native-f",
+				sidecarObservedAt: 70,
+			});
+			const state = ledger.project();
+			expect(
+				summarizeOwnershipPeriods(state, byTheWaySessionOwningCard).map((period) => [
+					period.nativeId,
+					period.observedInKanbanTaskConversationSessionIds,
+				]),
+			).toEqual([
+				["native-k-main", ["k0001"]],
+				["native-btw-seeded", ["btw-seeded-1"]],
+				["native-btw-live", ["btw-live-2"]],
+			]);
+			expect(summarizeRelationKindSubjectAnchor(state, forkingCard)).toEqual([
+				["provenance_forked_conversation_session_of", "f0009", "k0001"],
+			]);
+		},
+	);
 
 	it("does not treat a by-the-way session start as the start of the card's main session awaited by its fork initialization", () => {
 		const awaitingCard = card("ws-a", "w0001", 1_600);

@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "../core/api-contract";
 import type { NotificationCandidate } from "../core/notification-lifecycle-contract";
-import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import {
+	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import {
 	readNotificationIntelligenceSettings,
 	resolveKanbanChatCredential,
@@ -310,7 +314,7 @@ export function createNotificationAssessmentService(input: {
 			if (
 				summary &&
 				((isParkedAwaitingDispatchedBackgroundWork(summary) && enriched.userTurnKind === "review") ||
-					summary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+					isTaskConversationSessionWithoutTaskLifecycleAuthority(summary))
 			) {
 				await archive.update(
 					candidateId,

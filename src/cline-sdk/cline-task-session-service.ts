@@ -24,6 +24,7 @@ import {
 } from "../core/session-activity";
 import {
 	combineAppendSystemPrompts,
+	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
@@ -508,7 +509,16 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					}));
 				const appendedSystemPrompt = combineAppendSystemPrompts(
 					resolveHomeAgentAppendSystemPrompt(request.taskId),
-					resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd),
+					resolveTaskSessionAppendSystemPrompt(
+						request.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId,
+						request.cwd,
+					),
+					request.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator"
+						? renderTaskCollaborationSessionResponsibilityGuidance(
+								request.taskConversationSessionMetadata.workspaceTaskId,
+								request.taskId,
+							)
+						: null,
 					// Exploratory Mode 注入（§A.2）：非 exploratory 启动恒为 null，零行为变化。
 					await resolveExploratoryModeAppendSystemPrompt(request.taskConversationMode),
 				);
