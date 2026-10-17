@@ -182,6 +182,8 @@ export type TaskCardBodyRenderRole =
 	// Focus View：焦点卡滚出视野时，跟着 sticky stage 卡头一起留在视野里的那份只读副本。
 	// 纯为「别让我正在看的任务跑出屏幕」而存在，因此关掉全部卡级指针交互，只留 hover 动作组。
 	| "focused_card_copy_under_sticky_stage_header"
+	// 手机详情顶部的当前任务副本：完整元数据、常驻触控动作，不拖拽、不持有本体 DOM 身份、不点击跳转。
+	| "focused_task_card_copy_in_mobile_detail_header"
 	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不持有 DOM 身份外，
 	// 交互与本体一致（单击进详情、双击改标题、全部动作按钮）。
 	| "pinned_card_copy_in_task_pinboard"
@@ -344,6 +346,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
 	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
 	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
+	const isMobileDetailHeaderCopy = renderRole === "focused_task_card_copy_in_mobile_detail_header";
 	// 置顶板分身专属的 stage 标签 / 原因行只认这一个角色；PDV 面板条目副本（task_card_copy_in_post_deploy_verification_panel_entry）
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击、Done 卡不可点开。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
@@ -373,7 +376,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 		(isNavigatingColumn || isTrashCard);
 	const delaysSingleClickActivationForDoubleClickTitleEdit = isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy;
 	const clickActivationTimerRef = useRef<number | null>(null);
-	const isDragging = drag?.isDragging ?? false;
+	const cardDragBindings = isMobileDetailHeaderCopy ? null : drag;
+	const isDragging = cardDragBindings?.isDragging ?? false;
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
@@ -1031,12 +1035,33 @@ export const TaskCardBody = memo(function TaskCardBody({
 		</div>
 	);
 
+	const directoryCopyButton = (
+		<Tooltip side="bottom" content={card.id} delayDuration={0}>
+			<Button
+				icon={isDirectoryPathCopied ? <Check size={12} className="text-status-green" /> : <Copy size={12} />}
+				variant="ghost"
+				size="xs"
+				aria-label="Copy directory path"
+				onPointerEnter={prefetchTaskWorkspaceDirectoryPathForCopy}
+				onFocus={prefetchTaskWorkspaceDirectoryPathForCopy}
+				onMouseDown={stopEvent}
+				onClick={(event) => {
+					stopEvent(event);
+					void handleCopyDirectoryPath();
+				}}
+			/>
+		</Tooltip>
+	);
+
 	const cardShell = (
 		<div
-			ref={drag?.innerRef}
-			{...(drag?.draggableProps ?? {})}
-			{...(drag?.dragHandleProps ?? {})}
-			className="kb-board-card-shell"
+			ref={cardDragBindings?.innerRef}
+			{...(cardDragBindings?.draggableProps ?? {})}
+			{...(cardDragBindings?.dragHandleProps ?? {})}
+			className={cn(
+				"kb-board-card-shell",
+				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
+			)}
 			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
 			data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（副本不输出，保唯一）。
@@ -1045,7 +1070,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 			data-column-id={columnId}
 			data-selected={selected}
 			onClick={
-				isPassiveMirrorUnderStickyStageHeader
+				isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
 					? undefined
 					: (event) => {
 							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，但 React 合成 click 仍沿
@@ -1084,7 +1109,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 						}
 			}
 			onDoubleClick={
-				isPassiveMirrorUnderStickyStageHeader
+				isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
 					? undefined
 					: (event) => {
 							if (!event.currentTarget.contains(event.target as Node)) {
@@ -1109,11 +1134,15 @@ export const TaskCardBody = memo(function TaskCardBody({
 						}
 			}
 			style={{
-				...(drag?.draggableStyle ?? {}),
+				...(cardDragBindings?.draggableStyle ?? {}),
 				// 紧凑密度的行之间靠 hover 底色区分，不需要标准卡片那么大的间距。
 				marginBottom: emitsCanonicalDomIdentity ? (isCompactRowInFocusViewLeftColumn ? 2 : 6) : 0,
 				// 本体可拖 → grab；置顶板分身 / 跨项目展开行 / PDV 面板条目单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
-				cursor: emitsCanonicalDomIdentity ? "grab" : isPassiveMirrorUnderStickyStageHeader ? "default" : "pointer",
+				cursor: emitsCanonicalDomIdentity
+					? "grab"
+					: isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
+						? "default"
+						: "pointer",
 			}}
 			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}
@@ -1132,7 +1161,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 							)
 						: cn(
 								"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
-								showDirectoryCopyButton && "pr-8",
+								showDirectoryCopyButton && !isMobileDetailHeaderCopy && "pr-8",
+								isMobileDetailHeaderCopy && "flex flex-col",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 								isDragging && "shadow-lg",
 								isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
@@ -1144,7 +1174,13 @@ export const TaskCardBody = memo(function TaskCardBody({
 				    置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
 				{isCompactRowInFocusViewLeftColumn ? null : (
-					<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+					<div
+						className={
+							isMobileDetailHeaderCopy
+								? "mb-1 flex flex-wrap items-center gap-1 leading-none"
+								: "absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
+						}
+					>
 						{agentBadge}
 						{taskAgentSettingsLabel ? (
 							<span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" />
@@ -1175,6 +1211,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							// 标题语义上仍是单串；改 textarea 只为长标题视觉 wraparound + 随内容自增高
 							// （原生 field-sizing:content，目标运行环境是现代 Chrome）。Enter 仍保存、Esc 仍取消。
 							<textarea
+								data-mobile-focus-view-idle-collapse-suspension=""
 								ref={titleInputRef}
 								value={draftTitle}
 								rows={1}
@@ -1239,7 +1276,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								</span>
 							</button>
 						) : null}
-						{showTitleEditButton && !isCompactRowInFocusViewLeftColumn ? (
+						{showTitleEditButton && !isCompactRowInFocusViewLeftColumn && !isMobileDetailHeaderCopy ? (
 							<TaskCardTitleRowHoverActions>
 								<Tooltip
 									side="bottom"
@@ -1268,19 +1305,23 @@ export const TaskCardBody = memo(function TaskCardBody({
 				</div>
 				<div
 					className={cn(
-						// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
-						"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
-						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧；All projects 切换面板的行例外，叠在首行上方。
-						isCrossProjectTaskSwitcherRowCopy
-							? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
-							: isCompactRowInFocusViewLeftColumn
-								? "top-1"
-								: "-top-[6px]",
-						"focus-within:opacity-100 focus-within:pointer-events-auto",
-						isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
+						isMobileDetailHeaderCopy
+							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
+							: cn(
+									// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
+									"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+									// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧；All projects 切换面板的行例外，叠在首行上方。
+									isCrossProjectTaskSwitcherRowCopy
+										? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
+										: isCompactRowInFocusViewLeftColumn
+											? "top-1"
+											: "-top-[6px]",
+									"focus-within:opacity-100 focus-within:pointer-events-auto",
+									isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
+								),
 					)}
 				>
-					{showTitleEditButton && isCompactRowInFocusViewLeftColumn ? (
+					{showTitleEditButton && (isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy) ? (
 						<Tooltip
 							side="bottom"
 							content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
@@ -1453,6 +1494,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
+					{isMobileDetailHeaderCopy && showDirectoryCopyButton ? (
+						<span data-task-directory-copy-actions="">{directoryCopyButton}</span>
+					) : null}
 				</div>
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
@@ -1564,7 +1608,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 						) : null}
 					</>
 				)}
-				{showDirectoryCopyButton ? (
+				{showDirectoryCopyButton && !isMobileDetailHeaderCopy ? (
 					<div
 						data-task-directory-copy-actions=""
 						className={cn(
@@ -1573,27 +1617,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
 						)}
 					>
-						<Tooltip side="bottom" content={card.id} delayDuration={0}>
-							<Button
-								icon={
-									isDirectoryPathCopied ? (
-										<Check size={12} className="text-status-green" />
-									) : (
-										<Copy size={12} />
-									)
-								}
-								variant="ghost"
-								size="xs"
-								aria-label="Copy directory path"
-								onPointerEnter={prefetchTaskWorkspaceDirectoryPathForCopy}
-								onFocus={prefetchTaskWorkspaceDirectoryPathForCopy}
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									void handleCopyDirectoryPath();
-								}}
-							/>
-						</Tooltip>
+						{directoryCopyButton}
 					</div>
 				) : null}
 			</div>
@@ -1603,7 +1627,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 拖拽中把卡壳 portal 到 document.body，避免被祖先 overflow 裁切（@hello-pangea/dnd 惯用法）。
 	// 关键：portal 只切换无状态的卡壳 DOM，TaskCardBody 组件本身始终挂载在原位，
 	// 故 isHovered/isEditingTitle/最近活动记忆等 hooks 状态在拖拽前后不被重置（与拆分前一致）。
-	if (drag?.isDragging && typeof document !== "undefined") {
+	if (cardDragBindings?.isDragging && typeof document !== "undefined") {
 		return createPortal(cardShell, document.body);
 	}
 	return cardShell;

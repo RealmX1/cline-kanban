@@ -105,6 +105,7 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
 	useTaskWorkspaceInfoValue: () => null,
+	useTaskWorkspaceSnapshotValue: () => undefined,
 }));
 
 vi.mock("@/hooks/use-conversation-session-turn-projection", () => ({
@@ -421,9 +422,11 @@ describe("CardDetailView", () => {
 		expect(container.textContent).toContain("Main session");
 		expect(container.querySelector('[data-testid="prompt-library-panel"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
+		expect(container.querySelector("[data-mobile-focused-task-card-header]")).toBeNull();
 	});
 
 	it("按当前选中的主/By-the-way 会话隔离待答 taskId、实时 hook signal 与 turn sequence", async () => {
+		mockUseIsMobile.mockReturnValue(true);
 		const mainHookActivity = {
 			activityText: "main activity",
 			toolName: "Read",
@@ -526,6 +529,61 @@ describe("CardDetailView", () => {
 				agentResponseGenerationTurnSequence: 9,
 			}),
 		);
+		const mainTaskCard = container.querySelector("[data-mobile-focused-task-card-header]");
+		expect(mainTaskCard?.textContent).toContain("main activity");
+		expect(mainTaskCard?.textContent).not.toContain("child question");
+	});
+
+	it("手机任务卡在移至 Review 请求中禁用按钮，完成后恢复", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const selection = createSelectionInColumn("in_progress");
+		const sessionSummary = createSessionSummary();
+		const onMoveCardToReview = vi.fn();
+		const renderWithMoveToReviewLoadingById = async (moveToReviewLoadingById: Record<string, boolean>) => {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId="workspace-1"
+						selectedAgentId="codex"
+						sessionSummary={sessionSummary}
+						taskSessions={{ "task-1": sessionSummary }}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveCardToReview={onMoveCardToReview}
+						moveToReviewLoadingById={moveToReviewLoadingById}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+
+		await renderWithMoveToReviewLoadingById({});
+		const moveToReviewButton = container.querySelector(
+			'[data-mobile-focused-task-card-header] button[aria-label="Move task to review"]',
+		);
+		expect(moveToReviewButton).toBeInstanceOf(HTMLButtonElement);
+		if (!(moveToReviewButton instanceof HTMLButtonElement)) {
+			throw new Error("手机任务卡应提供移至 Review 按钮");
+		}
+		expect(moveToReviewButton.disabled).toBe(false);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledExactlyOnceWith("task-1");
+
+		await renderWithMoveToReviewLoadingById({ "task-1": true });
+		expect(moveToReviewButton.disabled).toBe(true);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledTimes(1);
+
+		await renderWithMoveToReviewLoadingById({});
+		expect(moveToReviewButton.disabled).toBe(false);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledTimes(2);
 	});
 
 	it("keeps mobile Sessions and Prompts reachable without rendering disabled workspace changes", async () => {
@@ -562,6 +620,8 @@ describe("CardDetailView", () => {
 
 		expect(mockUseRuntimeWorkspaceChanges.mock.calls.at(-1)?.[0]).toBeNull();
 		expect(container.querySelector(".kb-skeleton")).toBeNull();
+		expect(container.querySelector("[data-mobile-focused-task-card-header]")?.textContent).toContain("Task task-1");
+		expect(container.querySelector('[data-verification-anchor="task-detail:task-1"]')).not.toBeNull();
 		expect(() => requireButtonWithExactText(container, "Diff")).toThrow();
 		expect(() => requireButtonWithExactText(container, "Files")).toThrow();
 

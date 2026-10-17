@@ -1925,6 +1925,7 @@ export default function App(): ReactElement {
 										onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
 										onMoveReviewCardToValidation={handleMoveCardToValidation}
 										onMoveCardToReview={handleMoveCardToReview}
+										moveToReviewLoadingById={moveToReviewLoadingById}
 										onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
 										onStartFreshTaskSessionWithOriginalPrompt={handleStartFreshTaskSessionWithOriginalPrompt}
 										onDeleteTask={handleOpenDeleteTask}
