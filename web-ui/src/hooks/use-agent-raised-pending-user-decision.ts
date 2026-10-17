@@ -22,10 +22,13 @@ export function useAgentRaisedPendingUserDecision(input: {
 	const [decisionResult, setDecisionResult] = useState<{
 		queryIdentity: string;
 		decision: RuntimeAgentRaisedPendingUserDecision | null;
+		transcriptRecoveryNotice?: string | null;
 	}>({ queryIdentity, decision: null });
 	const [isLoading, setIsLoading] = useState(false);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const decision = decisionResult.queryIdentity === queryIdentity ? decisionResult.decision : null;
+	const transcriptRecoveryNotice =
+		decisionResult.queryIdentity === queryIdentity ? (decisionResult.transcriptRecoveryNotice ?? null) : null;
 
 	const refresh = useCallback(async () => {
 		const refreshRequestSequence = refreshRequestSequenceRef.current + 1;
@@ -55,6 +58,7 @@ export function useAgentRaisedPendingUserDecision(input: {
 				setDecisionResult({
 					queryIdentity,
 					decision: pendingDecision,
+					transcriptRecoveryNotice: response.transcriptRecoveryNotice ?? null,
 				});
 			}
 		} catch (error) {
@@ -143,5 +147,5 @@ export function useAgentRaisedPendingUserDecision(input: {
 		}
 	}, [decision, input.workspaceId, queryIdentity, refresh]);
 
-	return { decision, isLoading, isSubmitting, answer, dismiss, refresh };
+	return { decision, isLoading, isSubmitting, answer, dismiss, refresh, transcriptRecoveryNotice };
 }

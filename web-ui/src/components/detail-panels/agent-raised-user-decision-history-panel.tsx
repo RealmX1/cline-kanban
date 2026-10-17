@@ -16,6 +16,8 @@ import { preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks } from "@/utils/pre
 // 存在意义见 src/agent-session-history/agent-raised-user-decision-history-builder.ts 文件头。
 
 const HISTORY_RESOLUTION_LABEL: Record<RuntimeAgentRaisedUserDecisionHistoryResolution, string> = {
+	interrupted_without_answer: "提问已中断，仍未作答",
+	failed_without_answer: "提问工具失败，仍未作答",
 	answered_in_kanban_panel: "在面板作答",
 	answered_in_agent_terminal: "在终端作答",
 	declined_in_agent_terminal: "在终端拒答",
@@ -25,6 +27,8 @@ const HISTORY_RESOLUTION_LABEL: Record<RuntimeAgentRaisedUserDecisionHistoryReso
 };
 
 const HISTORY_RESOLUTION_TONE_CLASS: Record<RuntimeAgentRaisedUserDecisionHistoryResolution, string> = {
+	interrupted_without_answer: "bg-surface-2 text-text-secondary",
+	failed_without_answer: "bg-surface-2 text-text-secondary",
 	answered_in_kanban_panel: "bg-status-green/10 text-status-green",
 	answered_in_agent_terminal: "bg-status-green/10 text-status-green",
 	declined_in_agent_terminal: "bg-surface-2 text-text-secondary",
@@ -35,6 +39,8 @@ const HISTORY_RESOLUTION_TONE_CLASS: Record<RuntimeAgentRaisedUserDecisionHistor
 
 // 卡头上了结时刻的前缀词：resolvedAt 对不同结局含义不同（作答 / 拒答 / 取消 / 被新问题取代的那一刻）。
 const HISTORY_RESOLVED_AT_PREFIX_LABEL: Record<RuntimeAgentRaisedUserDecisionHistoryResolution, string> = {
+	interrupted_without_answer: "中断于",
+	failed_without_answer: "失败于",
 	answered_in_kanban_panel: "作答于",
 	answered_in_agent_terminal: "作答于",
 	declined_in_agent_terminal: "拒答于",
@@ -189,7 +195,7 @@ export function AgentRaisedUserDecisionHistoryPanel({
 	pendingUserDecisionIdentityForRefresh: string | null;
 }): ReactElement {
 	const [isHistoryVisible, setIsHistoryVisible] = useState(false);
-	const { historyEntries, isLoading, refresh } = useAgentRaisedUserDecisionHistory({
+	const { historyEntries, isLoading, refresh, transcriptRecoveryNotice } = useAgentRaisedUserDecisionHistory({
 		workspaceId,
 		taskId,
 		isHistoryVisible,
@@ -197,6 +203,11 @@ export function AgentRaisedUserDecisionHistoryPanel({
 	});
 	return (
 		<section className="shrink-0 border-b border-border" aria-label="问答记录">
+			{transcriptRecoveryNotice ? (
+				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
+					{transcriptRecoveryNotice}
+				</p>
+			) : null}
 			<div className="flex items-center gap-2 px-3 py-1">
 				<History size={14} className="shrink-0 text-text-secondary" />
 				<button

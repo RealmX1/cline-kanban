@@ -40,6 +40,7 @@ let container: HTMLElement | null = null;
 function renderPanelWithSelectorSignals(signals: {
 	isAgentStoppedOnThisQuestionSelectorInLiveTerminal: boolean;
 	isQuestionRaisedByEarlierAgentSessionIncarnation: boolean;
+	agentId?: "claude" | "codex";
 }) {
 	container ??= document.body.appendChild(document.createElement("div"));
 	root ??= createRoot(container);
@@ -47,7 +48,7 @@ function renderPanelWithSelectorSignals(signals: {
 		root?.render(
 			<AgentRaisedPendingUserDecisionPanel
 				workspaceId="workspace-test"
-				decision={pendingDecisionRaisedInCurrentIncarnation}
+				decision={{ ...pendingDecisionRaisedInCurrentIncarnation, agentId: signals.agentId ?? "claude" }}
 				isSubmitting={false}
 				onAnswer={vi.fn(async () => true)}
 				onDismiss={vi.fn(async () => true)}
@@ -70,6 +71,31 @@ afterEach(() => {
 });
 
 describe("AgentRaisedPendingUserDecisionPanel：会话 summary 晚到时的默认展开态", () => {
+	it("Codex 活体选择器只允许终端作答，恢复后的同题可以在面板提交", () => {
+		const host = renderPanelWithSelectorSignals({
+			agentId: "codex",
+			isAgentStoppedOnThisQuestionSelectorInLiveTerminal: true,
+			isQuestionRaisedByEarlierAgentSessionIncarnation: false,
+		});
+		const expandButton = host.querySelector<HTMLButtonElement>('button[aria-label="展开问题"]');
+		act(() => expandButton?.click());
+		const submitButton = [...host.querySelectorAll("button")].find((button) =>
+			button.textContent?.includes("提交回答"),
+		);
+		expect(submitButton?.disabled).toBe(true);
+		expect(host.textContent).toContain("请在 Codex 终端中完成当前选择题");
+		expect(host.textContent).not.toContain("按 Esc");
+		renderPanelWithSelectorSignals({
+			agentId: "codex",
+			isAgentStoppedOnThisQuestionSelectorInLiveTerminal: false,
+			isQuestionRaisedByEarlierAgentSessionIncarnation: true,
+		});
+		const restoredSubmit = [...host.querySelectorAll("button")].find((button) =>
+			button.textContent?.includes("提交回答"),
+		);
+		expect(restoredSubmit?.disabled).toBe(false);
+	});
+
 	it("summary 到达后确认选择器就在当前活体终端上：收回到默认折叠并露出终端作答引导", () => {
 		const host = renderPanelWithSelectorSignals({
 			isAgentStoppedOnThisQuestionSelectorInLiveTerminal: false,

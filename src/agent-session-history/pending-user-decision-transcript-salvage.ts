@@ -1,8 +1,8 @@
-// 旧版本 Kanban 可能漏掉已经写进 agent 转录、却尚未得到回答的问题。这个模块只做按**已知任务路径 /
-// 已知 session id**的按需保守补录：不跑周期性全盘内容扫描；无法证明「无结果且之后无人类输入」就返回 null。
-import { readdir, stat } from "node:fs/promises";
+// 按已知任务路径 / 原生 session id 补录。Claude 沿用保守的后续人类输入门槛；Codex 由专用投影
+// 区分真实答案与中断 / 失败，环境注入和用户请求恢复都不能冒充作答或跳过。
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { extractAgentRaisedUserQuestionPayload } from "../commands/agent-raised-decision-payload-extraction";
 import type { RuntimeAgentRaisedUserQuestionPayload } from "../core/api-contract";
 import {
@@ -11,6 +11,10 @@ import {
 	readBoundedJsonLines,
 	readTranscriptRecord,
 } from "./bounded-agent-transcript-reader";
+import {
+	projectCodexUserQuestionTranscriptLines,
+	recoverCodexUserQuestionsFromKnownConversation,
+} from "./codex-user-question-transcript-recovery";
 
 const MAX_TRANSCRIPT_BYTES_FOR_PENDING_DECISION_SALVAGE = 4 * 1024 * 1024;
 
@@ -144,79 +148,16 @@ export function salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines(
 		: null;
 }
 
-function isLikelyHumanCodexRecord(record: Record<string, unknown>): boolean {
-	const payload = readTranscriptRecord(record.payload);
-	return (
-		(record.type === "event_msg" && payload?.type === "user_message") ||
-		(record.type === "response_item" && payload?.type === "message" && payload.role === "user")
-	);
-}
-
 export function salvageLatestUnansweredCodexUserQuestionFromTranscriptLines(
 	lines: readonly string[],
 ): SalvagedPendingUserDecisionFromTranscript | null {
-	let latestCandidate: {
-		callId: string;
-		toolInput: Record<string, unknown>;
-		askedAt: number;
-		resolved: boolean;
-		hasLaterHumanInput: boolean;
-	} | null = null;
-	for (const line of lines) {
-		const record = parseTranscriptJsonRecord(line);
-		if (!record) {
-			continue;
-		}
-		if (latestCandidate && isLikelyHumanCodexRecord(record)) {
-			latestCandidate.hasLaterHumanInput = true;
-		}
-		const payload = readTranscriptRecord(record.payload);
-		if (!payload || record.type !== "response_item") {
-			continue;
-		}
-		if (
-			payload.type === "function_call" &&
-			payload.name === "request_user_input" &&
-			typeof payload.call_id === "string" &&
-			typeof payload.arguments === "string"
-		) {
-			const askedAt = parseTimestamp(record.timestamp);
-			try {
-				const toolInput = readTranscriptRecord(JSON.parse(payload.arguments) as unknown);
-				if (askedAt !== null && toolInput) {
-					latestCandidate = {
-						callId: payload.call_id,
-						toolInput,
-						askedAt,
-						resolved: false,
-						hasLaterHumanInput: false,
-					};
-				}
-			} catch {
-				// 非法 arguments 不能补录。
-			}
-		} else if (
-			latestCandidate &&
-			payload.type === "function_call_output" &&
-			payload.call_id === latestCandidate.callId
-		) {
-			latestCandidate.resolved = true;
-		}
-	}
-	if (!latestCandidate || latestCandidate.resolved || latestCandidate.hasLaterHumanInput) {
-		return null;
-	}
-	const payload = extractAgentRaisedUserQuestionPayload({
-		toolUseId: latestCandidate.callId,
-		toolInput: latestCandidate.toolInput,
-	});
-	return payload
-		? {
-				payload,
-				askedAt: latestCandidate.askedAt,
-				sourceHarnessSignal: "codex:request_user_input:transcript_salvage",
-			}
-		: null;
+	const latest = projectCodexUserQuestionTranscriptLines(lines).at(-1);
+	if (!latest || latest.resolution?.resolutionKind === "answered_in_agent_terminal") return null;
+	return {
+		payload: latest.payload,
+		askedAt: latest.askedAt,
+		sourceHarnessSignal: "codex:request_user_input:transcript_salvage",
+	};
 }
 
 async function readCompleteTranscriptLines(filePath: string): Promise<string[] | null> {
@@ -257,61 +198,21 @@ export async function salvageLatestUnansweredClaudeUserQuestionForTask(input: {
 	return lines ? salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines(lines) : null;
 }
 
-async function resolveCodexTranscriptPathByKnownSessionId(
-	sessionId: string,
-	homeDirectoryPath: string | undefined,
-): Promise<string | null> {
-	const codexSessionsRoot = join(
-		homeDirectoryPath ?? process.env.CODEX_HOME?.trim() ?? join(homedir(), ".codex"),
-		"sessions",
-	);
-	let years: string[];
-	try {
-		years = await readdir(codexSessionsRoot);
-	} catch {
-		return null;
-	}
-	for (const year of years.sort().reverse()) {
-		let months: string[];
-		try {
-			months = await readdir(join(codexSessionsRoot, year));
-		} catch {
-			continue;
-		}
-		for (const month of months.sort().reverse()) {
-			let days: string[];
-			try {
-				days = await readdir(join(codexSessionsRoot, year, month));
-			} catch {
-				continue;
-			}
-			for (const day of days.sort().reverse()) {
-				let files: string[];
-				try {
-					files = await readdir(join(codexSessionsRoot, year, month, day));
-				} catch {
-					continue;
-				}
-				const exactFileName = files.find(
-					(fileName) => fileName.endsWith(`${sessionId}.jsonl`) || basename(fileName, ".jsonl") === sessionId,
-				);
-				if (exactFileName) {
-					return join(codexSessionsRoot, year, month, day, exactFileName);
-				}
-			}
-		}
-	}
-	return null;
-}
-
 export async function salvageLatestUnansweredCodexUserQuestionForKnownSession(input: {
 	sessionId: string;
 	homeDirectoryPath?: string;
 }): Promise<SalvagedPendingUserDecisionFromTranscript | null> {
-	const transcriptPath = await resolveCodexTranscriptPathByKnownSessionId(input.sessionId, input.homeDirectoryPath);
-	if (!transcriptPath) {
+	const recovered = await recoverCodexUserQuestionsFromKnownConversation(input);
+	const latest = recovered.exchanges.at(-1);
+	if (
+		recovered.coverage !== "complete" ||
+		!latest ||
+		latest.resolution?.resolutionKind === "answered_in_agent_terminal"
+	)
 		return null;
-	}
-	const lines = await readCompleteTranscriptLines(transcriptPath);
-	return lines ? salvageLatestUnansweredCodexUserQuestionFromTranscriptLines(lines) : null;
+	return {
+		payload: latest.payload,
+		askedAt: latest.askedAt,
+		sourceHarnessSignal: "codex:request_user_input:transcript_salvage",
+	};
 }

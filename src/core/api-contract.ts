@@ -4731,6 +4731,7 @@ export const runtimeAgentRaisedDecisionQuestionSchema = z.object({
 export type RuntimeAgentRaisedDecisionQuestion = z.infer<typeof runtimeAgentRaisedDecisionQuestionSchema>;
 
 export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
+	nativeConversationSessionId: z.string().optional(),
 	// harness 提供的稳定标识（Claude 的 tool_use_id），用于跨重发去重。
 	decisionSourceId: z.string(),
 	questionMarkdown: z.string(),
@@ -4749,7 +4750,7 @@ export const runtimeAgentRaisedToolPermissionPayloadSchema = z.object({
 });
 export type RuntimeAgentRaisedToolPermissionPayload = z.infer<typeof runtimeAgentRaisedToolPermissionPayloadSchema>;
 
-// 用户**直接在 agent 终端里**对 AskUserQuestion 作答（或拒答）后，PostToolUse / PostToolUseFailure
+// 用户**直接在 agent 终端里**对 Claude AskUserQuestion 或 Codex request_user_input 作答后，PostToolUse / PostToolUseFailure
 // 带回的结局。没有它，durable 账本就永远不知道这个问题已经在终端里了结，面板会一直挂着「尚未回答」；
 // 有了它，终端里的作答（含每问备注）也能进入 Kanban 的问答记录——那些备注在 TUI 里是看不清的。
 export const runtimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestionSchema = z.object({
@@ -4763,9 +4764,16 @@ export type RuntimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestion = z.inf
 >;
 
 export const runtimeAgentRaisedUserQuestionResolvedInAgentTerminalPayloadSchema = z.object({
-	// 与提问时 PreToolUse 同一个 tool_use_id；缺失时服务端按问题正文回落匹配。
+	sourceAgentId: z.literal("codex").optional(),
+	nativeConversationSessionId: z.string().optional(),
+	// 与 PreToolUse 同源：Claude 使用 tool_use_id；Codex 使用 nativeSessionId:call_id，且禁止正文回落匹配。
 	decisionSourceId: z.string().nullable(),
-	resolutionKind: z.enum(["answered_in_agent_terminal", "declined_in_agent_terminal"]),
+	resolutionKind: z.enum([
+		"answered_in_agent_terminal",
+		"declined_in_agent_terminal",
+		"interrupted_without_answer",
+		"failed_without_answer",
+	]),
 	answersForQuestions: z.array(runtimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestionSchema),
 });
 export type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload = z.infer<
@@ -4883,6 +4891,7 @@ export type RuntimeAgentRaisedPendingUserDecisionAnswerDraft = z.infer<
 >;
 
 export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
+	nativeToolCallOutcome: z.enum(["interrupted_without_answer", "failed_without_answer"]).optional(),
 	decisionId: z.string(),
 	taskId: z.string(),
 	agentId: runtimeAgentIdSchema.nullable(),
@@ -4925,6 +4934,8 @@ export type RuntimeAgentRaisedPendingUserDecision = z.infer<typeof runtimeAgentR
 // 存在意义：答案与备注在 TUI 里要么被折叠成 [Pasted text #N]、要么和选项混在一起看不清结构；
 // 这里把「问了什么、选了什么、补充了什么、在哪答的、有没有送达」结构化地摆出来。
 export const runtimeAgentRaisedUserDecisionHistoryResolutionSchema = z.enum([
+	"interrupted_without_answer",
+	"failed_without_answer",
 	"answered_in_kanban_panel",
 	"answered_in_agent_terminal",
 	"declined_in_agent_terminal",
@@ -4979,6 +4990,7 @@ export type RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest = z.infer<
 >;
 
 export const runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema = z.object({
+	transcriptRecoveryNotice: z.string().nullable().optional(),
 	// 按提问时间倒序（最近的在前）。
 	historyEntries: z.array(runtimeAgentRaisedUserDecisionHistoryEntrySchema),
 });
@@ -4987,6 +4999,7 @@ export type RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse = z.infer<
 >;
 
 export const runtimeListAgentRaisedPendingUserDecisionsResponseSchema = z.object({
+	transcriptRecoveryNotice: z.string().nullable().optional(),
 	decisions: z.array(runtimeAgentRaisedPendingUserDecisionSchema),
 });
 export type RuntimeListAgentRaisedPendingUserDecisionsResponse = z.infer<
