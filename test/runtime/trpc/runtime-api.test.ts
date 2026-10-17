@@ -7,6 +7,7 @@ import {
 	type AcpTaskConnection,
 } from "../../../src/acp-client-session/acp-client-connection-runtime";
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
+import { extractCodexUserQuestionPayload } from "../../../src/commands/codex-user-question-payload-extraction";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import { getRuntimeLaunchSupportedAgentCatalog } from "../../../src/core/agent-catalog";
@@ -347,7 +348,7 @@ function setSelectedProviderSettings(
 	);
 }
 
-function restoreEnvVar(name: "CLINE_API_KEY" | "OCA_API_KEY", value: string | undefined): void {
+function restoreEnvVar(name: "CLINE_API_KEY" | "OCA_API_KEY" | "CODEX_HOME", value: string | undefined): void {
 	if (value === undefined) {
 		delete process.env[name];
 		return;
@@ -1011,8 +1012,54 @@ describe("createRuntimeApi startTaskSession", () => {
 				const getAcpConnection = vi
 					.spyOn(AcpClientConnectionRuntime.prototype, "getConnection")
 					.mockImplementation(() => connected);
-				const decisionId = "collaborator-saved-answer";
+				const originalCodexHome = process.env.CODEX_HOME;
+				const isolatedCodexHome =
+					sessionTransport === "pty_terminal" ? mkdtempSync(join(tmpdir(), "collaborator-codex-question-")) : null;
+				const callId = "collaborator-saved-answer";
+				const codexToolInput = { questions: [{ id: "collaboration-plan", question: "按哪个方案继续？" }] };
+				const codexQuestion = isolatedCodexHome
+					? extractCodexUserQuestionPayload({
+							callId,
+							toolInput: codexToolInput,
+							nativeConversationSessionId: nativeIdentity?.nativeSessionId,
+						})
+					: null;
+				const decisionId = codexQuestion ? `${persisted.taskId}:${codexQuestion.decisionSourceId}` : callId;
 				try {
+					if (isolatedCodexHome) {
+						if (!codexQuestion) throw new Error("协作会话夹具缺少有效 Codex 问题");
+						process.env.CODEX_HOME = isolatedCodexHome;
+						const transcriptDirectory = join(isolatedCodexHome, "sessions", "2026", "10", "17");
+						mkdirSync(transcriptDirectory, { recursive: true });
+						// 冷恢复投递必须有同一原生对话、同一 call 的未答证据，不能借 OMP 问题绕过核验。
+						writeFileSync(
+							join(transcriptDirectory, `rollout-${nativeIdentity?.nativeSessionId}.jsonl`),
+							`${[
+								{
+									type: "session_meta",
+									timestamp: new Date(0).toISOString(),
+									payload: { id: nativeIdentity?.nativeSessionId },
+								},
+								{
+									type: "response_item",
+									timestamp: new Date(1).toISOString(),
+									payload: {
+										type: "function_call",
+										name: "request_user_input",
+										call_id: callId,
+										arguments: JSON.stringify(codexToolInput),
+									},
+								},
+								{
+									type: "response_item",
+									timestamp: new Date(2).toISOString(),
+									payload: { type: "function_call_output", call_id: callId, output: "aborted" },
+								},
+							]
+								.map((record) => JSON.stringify(record))
+								.join("\n")}\n`,
+						);
+					}
 					expect(
 						await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(
 							persisted.taskId,
@@ -1025,17 +1072,19 @@ describe("createRuntimeApi startTaskSession", () => {
 						workspaceId: workspaceScope.workspaceId,
 						decisionId,
 						taskId: persisted.taskId,
-						agentId: "omp",
+						agentId: sessionTransport === "pty_terminal" ? "codex" : "omp",
 						sessionTransport,
 						decisionKind: "ordinary_user_question",
-						questionMarkdown: "按哪个方案继续？",
-						options: [],
+						questionMarkdown: codexQuestion?.questionMarkdown ?? "按哪个方案继续？",
+						options: codexQuestion?.options ?? [],
+						orderedQuestions: codexQuestion?.orderedQuestions,
+						nativeConversationSessionId: codexQuestion?.nativeConversationSessionId,
 						allowsFreeformAnswer: true,
 						askedAt: 1,
 						graceDeadlineAt: null,
 						originRuntimeSessionIncarnationId: "previous-runtime",
 						originTurnSequence: 1,
-						sourceHarnessSignal: "omp:question",
+						sourceHarnessSignal: codexQuestion ? "codex:request_user_input" : "omp:question",
 					});
 					await recordAgentRaisedPendingUserDecisionAnswer(workspaceScope.workspaceId, decisionId, {
 						selectedOptionIds: [],
@@ -1095,6 +1144,8 @@ describe("createRuntimeApi startTaskSession", () => {
 						expect.objectContaining({ cwd: "/tmp/repo", taskId: "task-1" }),
 					);
 				} finally {
+					restoreEnvVar("CODEX_HOME", originalCodexHome);
+					if (isolatedCodexHome) rmSync(isolatedCodexHome, { recursive: true, force: true });
 					terminalManager.markInterruptedAndStopAll();
 					startAcp.mockRestore();
 					getAcpConnection.mockRestore();
