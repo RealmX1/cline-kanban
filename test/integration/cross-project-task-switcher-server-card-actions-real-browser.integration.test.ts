@@ -1198,12 +1198,12 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 					.evaluateAll((sectionColumns) =>
 						sectionColumns.map((sectionColumn) => sectionColumn.getAttribute("data-testid")),
 					),
-				"首页列序注意力优先",
+				"首页列序与 Focus View 一致",
 			).toEqual([
 				"cross-project-task-switcher-section-pinned",
+				"cross-project-task-switcher-section-running",
 				"cross-project-task-switcher-section-prompt-cache-warm",
 				"cross-project-task-switcher-section-remaining",
-				"cross-project-task-switcher-section-running",
 			]);
 			expect(
 				await page.getByTestId("toggle-board-scope-all-projects-button").getAttribute("aria-pressed"),
@@ -1213,7 +1213,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				path: join(evidenceOutputDirectory, "board-scope-all-projects-home-page-section-columns.png"),
 			});
 			recordCheck(
-				"阶段 7 All projects 首页分区列看板：列序 Pinned | Cache warm · your turn | Recent | Running；左栏固定展开的卡在首页同样固定展开",
+				"阶段 7 All projects 首页分区列看板：列序 Pinned | Running | Cache warm · your turn | Recent；左栏固定展开的卡在首页同样固定展开",
 			);
 			// 各列首行：动作组盒子与展开开关命中区的顶边不高于列 header 底边（不截 header 控件的点击），也不高于列滚动容器的上沿
 			// （不被 overflow 裁掉）。行必须是滚动容器的直接子节点，行根节点的 first:mt-4 才作用在首行上。

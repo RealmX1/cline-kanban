@@ -16,7 +16,7 @@ import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross
 import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
 
 // All projects 首页分区列看板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：与 Focus View
-// 左栏面板同一组分区横排成列、列序注意力优先、Pinned 全量 / Running 常开、点行走宿主、移动端回落竖排面板、
+// 左栏面板同一组分区横排成列且同序、Pinned 全量 / Running 常开、点行走宿主、移动端回落竖排面板、
 // 列滚动位置跨重挂载保留。行本身与 hover 原地展开的行为由面板测试覆盖（同一个渲染 hook）。
 
 const isMobileViewportForTest = vi.hoisted(() => ({ value: false }));
@@ -203,10 +203,10 @@ function rowTaskIds(scope: ParentNode): string[] {
 }
 
 describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard", () => {
-	it("同一组分区横排成列，列序注意力优先：Pinned | Cache warm · your turn | Recent | Running", () => {
+	it("同一组分区横排成列，与 Focus View 同序：Pinned | Running | Cache warm · your turn | Recent", () => {
 		renderBoard(makeHost());
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "prompt-cache-warm", "remaining", "running"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("pinned"))).toEqual(["recent"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("prompt-cache-warm"))).toEqual(["warm"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("running"))).toEqual(["running"]);
@@ -225,7 +225,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			}),
 		);
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["prompt-cache-warm", "remaining", "running"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["running", "prompt-cache-warm", "remaining"]);
 	});
 
 	it("Pinned 列全量显示、不折叠；Running 列不读左栏的收起偏好，始终列出行", () => {
@@ -294,6 +294,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		isMobileViewportForTest.value = true;
 		renderBoard(makeHost());
 
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
 		expect(
 			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
 		).not.toBeNull();

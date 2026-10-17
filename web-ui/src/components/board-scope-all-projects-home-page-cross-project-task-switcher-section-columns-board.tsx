@@ -13,13 +13,12 @@ import { useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScrollContain
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { RuntimeAgentId } from "@/runtime/types";
 
-// EXPERIMENT_NODE: 首页分区列顺序——注意力优先（Pinned | Cache warm · your turn | Recent | Running）；也可与左栏面板同序
-// （Pinned | Running | Cache warm | Recent），或把 Running 放到 Cache warm 之前。
+// 首页列顺序与 Focus View 左栏的 All projects 分区顺序一致。
 const BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER: readonly CrossProjectTaskSwitcherTaskRowSection[] = [
 	"pinned",
+	"running",
 	"prompt_cache_warm",
 	"remaining",
-	"running",
 ];
 
 interface BoardScopeAllProjectsHomePageProps {
