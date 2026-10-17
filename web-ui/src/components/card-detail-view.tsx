@@ -28,6 +28,7 @@ import { ColumnContextPanel } from "@/components/detail-panels/column-context-pa
 import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { MobileFocusedTaskCardHeader } from "@/components/detail-panels/mobile-focused-task-card-header";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
@@ -41,6 +42,7 @@ import {
 	taskDetailAnchorKey,
 	VERIFICATION_ANCHOR_ATTR,
 } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
@@ -49,6 +51,10 @@ import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import {
+	MobileFocusViewIdleCollapseControllerProvider,
+	useMobileFocusViewIdleCollapseController,
+} from "@/hooks/use-mobile-focus-view-idle-collapse-controller";
 import type { StoredPrompt } from "@/hooks/use-prompt-library";
 import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
 import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
@@ -701,6 +707,7 @@ export function CardDetailView({
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
 	moveToTrashLoadingById,
+	moveToReviewLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
 	onSendClineChatMessage,
@@ -776,6 +783,7 @@ export function CardDetailView({
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
+	moveToReviewLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
 	onSendClineChatMessage?: (
@@ -841,6 +849,13 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
+	const mobileFocusViewRootRef = useRef<HTMLDivElement>(null);
+	const mobileFocusedTaskIdentity = JSON.stringify([currentProjectId, selection.card.id]);
+	const mobileFocusViewIdleCollapseController = useMobileFocusViewIdleCollapseController({
+		enabled: isMobile && isDocumentVisible,
+		focusedTaskIdentity: mobileFocusedTaskIdentity,
+		focusViewRootRef: mobileFocusViewRootRef,
+	});
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const terminalThemeColors = useTerminalThemeColors();
@@ -1567,8 +1582,45 @@ export function CardDetailView({
 				setDetailUtilityTab(tab);
 			}
 		};
-		return (
-			<div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0">
+		const mobileDetailLayout = (
+			<div
+				ref={mobileFocusViewRootRef}
+				className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
+				data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
+			>
+				<MobileFocusedTaskCardHeader
+					key={mobileFocusedTaskIdentity}
+					stageDisplayName={selection.column.title}
+					idleCollapseController={mobileFocusViewIdleCollapseController}
+					cardBusinessProps={buildTaskCardBusinessProps({
+						card: selection.card,
+						columnId: selection.column.id,
+						sessionSummary: taskSessions[selection.card.id] ?? sessionSummary ?? undefined,
+						selected: true,
+						workspacePath,
+						defaultAgentId: selectedAgentId,
+						defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
+						handlers: {
+							onStartTask,
+							onEditTask,
+							onSaveTitle: onSaveTaskTitle,
+							onMoveToTrashTask: onMoveReviewCardToTrash,
+							onMoveToValidationTask: onMoveReviewCardToValidation,
+							onMoveToReviewTask: onMoveCardToReview,
+							onRestoreFromTrashTask: onRestoreTaskFromTrash,
+							onDeleteTask,
+							onCancelAutomaticTaskAction,
+							onRequestPinToTaskPinboard,
+							onUnpinFromTaskPinboard,
+							resolveTaskWorkspaceAbsoluteDirectoryPath,
+							moveToTrashLoadingById: moveToTrashLoadingById ?? {
+								[selection.card.id]: isMoveToTrashLoading ?? false,
+							},
+							moveToValidationLoadingById: { [selection.card.id]: isMoveToValidationLoading ?? false },
+							moveToReviewLoadingById,
+						},
+					})}
+				/>
 				<MobileDetailTabBar
 					activeTab={mobileTab}
 					onTabChange={handleMobileTabChange}
@@ -1725,6 +1777,11 @@ export function CardDetailView({
 					) : null}
 				</div>
 			</div>
+		);
+		return (
+			<MobileFocusViewIdleCollapseControllerProvider value={mobileFocusViewIdleCollapseController}>
+				{mobileDetailLayout}
+			</MobileFocusViewIdleCollapseControllerProvider>
 		);
 	}
 

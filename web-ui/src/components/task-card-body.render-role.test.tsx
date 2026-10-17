@@ -80,6 +80,7 @@ describe("TaskCardBody 的渲染角色", () => {
 	it.each<TaskCardBodyRenderRole>([
 		"canonical_card_in_its_stage_list",
 		"focused_card_copy_under_sticky_stage_header",
+		"focused_task_card_copy_in_mobile_detail_header",
 		"pinned_card_copy_in_task_pinboard",
 	])("Review 卡片有未提交变化时也不显示 Git 操作按钮：%s", (renderRole) => {
 		workspaceSnapshotMock.mockReturnValue({ path: "/isolated/task-1", changedFiles: 2, additions: 3, deletions: 1 });
@@ -98,6 +99,12 @@ describe("TaskCardBody 的渲染角色", () => {
 		expect(stickyCopy?.getAttribute("data-task-id")).toBeNull();
 		expect(stickyCopy?.getAttribute("data-verification-anchor")).toBeNull();
 
+		const mobileHeaderCopy = cardShell(
+			renderCardBody({ renderRole: "focused_task_card_copy_in_mobile_detail_header" }),
+		);
+		expect(mobileHeaderCopy?.getAttribute("data-task-id")).toBeNull();
+		expect(mobileHeaderCopy?.getAttribute("data-verification-anchor")).toBeNull();
+
 		const pinboardCopy = cardShell(renderCardBody({ renderRole: "pinned_card_copy_in_task_pinboard" }));
 		expect(pinboardCopy?.getAttribute("data-task-id")).toBeNull();
 		expect(pinboardCopy?.getAttribute("data-verification-anchor")).toBeNull();
@@ -108,6 +115,13 @@ describe("TaskCardBody 的渲染角色", () => {
 		);
 		expect(postDeployVerificationPanelEntryCopy?.getAttribute("data-task-id")).toBeNull();
 		expect(postDeployVerificationPanelEntryCopy?.getAttribute("data-verification-anchor")).toBeNull();
+	});
+
+	it("手机顶部卡片点击空白不会重新打开任务", () => {
+		const onClick = vi.fn();
+		const host = renderCardBody({ renderRole: "focused_task_card_copy_in_mobile_detail_header", onClick });
+		act(() => cardShell(host)?.click());
+		expect(onClick).not.toHaveBeenCalled();
 	});
 
 	it("PDV 面板条目副本与置顶板分身同一侧：可单击进详情（pointer）、双击改标题，不显示置顶板专属的 stage 标签", () => {
