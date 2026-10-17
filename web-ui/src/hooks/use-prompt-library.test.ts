@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PromptLibraryController, StoredPrompt } from "@/hooks/use-prompt-library";
+import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type { WorkspacePromptLibraryMutation, WorkspacePromptLibrarySnapshot } from "@/runtime/types";
 
 const fetchWorkspacePromptLibraryMock = vi.fn();
@@ -67,14 +68,14 @@ describe("usePromptLibrary", () => {
 	let previousActEnvironment: boolean | undefined;
 	let latestController: PromptLibraryController | null;
 
-	function HookHarness(): null {
-		latestController = usePromptLibrary(TASK_ID, PROJECT_ID);
+	function HookHarness({ projectId, taskId }: { projectId: string; taskId: string }): null {
+		latestController = usePromptLibrary(taskId, projectId);
 		return null;
 	}
 
-	async function renderHarness(): Promise<void> {
+	async function renderHarness(projectId = PROJECT_ID, taskId = TASK_ID): Promise<void> {
 		await act(async () => {
-			root?.render(createElement(HookHarness));
+			root?.render(createElement(HookHarness, { projectId, taskId }));
 		});
 	}
 
@@ -99,6 +100,226 @@ describe("usePromptLibrary", () => {
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		root = createRoot(container);
+	});
+
+	it.each(["成功", "失败"] as const)("切换项目后旧项目保存%s也不会把正文复制到当前项目", async (saveResult) => {
+		const otherProjectId = "workspace-beta";
+		const otherTaskId = "task-beta";
+		const projectSnapshot = {
+			...emptySnapshot(),
+			repoScopedPrompts: [createPrompt({ id: "project-alpha-prompt", scope: "repo", text: "项目 A 旧正文" })],
+		};
+		const otherProjectSnapshot = {
+			...emptySnapshot(),
+			repoScopedPrompts: [createPrompt({ id: "project-beta-prompt", scope: "repo", text: "项目 B 旧正文" })],
+		};
+		let finishOtherProjectFetch: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(projectSnapshot).mockReturnValueOnce(
+			new Promise<WorkspacePromptLibrarySnapshot>((resolve) => {
+				finishOtherProjectFetch = resolve;
+			}),
+		);
+		let finishOldProjectSave: (snapshot: WorkspacePromptLibrarySnapshot | null) => void = () => {};
+		const oldProjectSave = new Promise<WorkspacePromptLibrarySnapshot | null>((resolve) => {
+			finishOldProjectSave = resolve;
+		});
+		mutateWorkspacePromptLibraryMock.mockImplementation((requestedProjectId: string) =>
+			requestedProjectId === PROJECT_ID ? oldProjectSave : Promise.resolve(otherProjectSnapshot),
+		);
+		await renderHarness();
+		await act(async () => requireController().updatePromptText("project-alpha-prompt", "项目 A 尚在保存的正文"));
+		await act(async () => vi.advanceTimersByTime(600));
+		await renderHarness(otherProjectId, otherTaskId);
+		const promptsWhileOtherProjectLoads = requireController().prompts;
+		await act(async () => finishOtherProjectFetch(otherProjectSnapshot));
+		const savedProjectSnapshot = {
+			...projectSnapshot,
+			repoScopedPrompts: [
+				createPrompt({ id: "project-alpha-prompt", scope: "repo", text: "项目 A 尚在保存的正文" }),
+			],
+		};
+		await act(async () => finishOldProjectSave(saveResult === "成功" ? savedProjectSnapshot : null));
+		await act(async () => requireController().updatePromptText("project-beta-prompt", "项目 B 新正文"));
+		await act(async () => vi.advanceTimersByTime(600));
+		await act(async () => root?.unmount());
+		root = null;
+
+		expect.soft(promptsWhileOtherProjectLoads).toEqual([]);
+		const otherProjectWrites = mutateWorkspacePromptLibraryMock.mock.calls.filter(
+			([requestedProjectId]) => requestedProjectId === otherProjectId,
+		);
+		expect(otherProjectWrites.length).toBeGreaterThan(0);
+		expect(otherProjectWrites.every(([, mutation]) => mutation.promptId === "project-beta-prompt")).toBe(true);
+	});
+
+	it.each(["成功", "失败"] as const)("旧项目保存%s后切回时，正文按原项目保留或清理", async (saveResult) => {
+		const projectPromptId = "project-alpha-prompt";
+		const projectSnapshot = {
+			...emptySnapshot(),
+			repoScopedPrompts: [createPrompt({ id: projectPromptId, scope: "repo", text: "项目 A 旧正文" })],
+		};
+		fetchWorkspacePromptLibraryMock.mockResolvedValue(projectSnapshot);
+		let finishOldProjectSave: (snapshot: WorkspacePromptLibrarySnapshot | null) => void = () => {};
+		const oldProjectSave = new Promise<WorkspacePromptLibrarySnapshot | null>((resolve) => {
+			finishOldProjectSave = resolve;
+		});
+		mutateWorkspacePromptLibraryMock.mockReturnValue(oldProjectSave);
+		await renderHarness();
+		await act(async () => requireController().updatePromptText(projectPromptId, "项目 A 待保存正文"));
+		await act(async () => vi.advanceTimersByTime(600));
+		await renderHarness("workspace-beta", "task-beta");
+		const savedProjectSnapshot = {
+			...projectSnapshot,
+			repoScopedPrompts: [createPrompt({ id: projectPromptId, scope: "repo", text: "项目 A 待保存正文" })],
+		};
+		await act(async () => finishOldProjectSave(saveResult === "成功" ? savedProjectSnapshot : null));
+		if (saveResult === "成功") {
+			// 不让重读替成功响应做清理：即使切回后尚未读到快照，已保存正文也不能再次冲刷。
+			fetchWorkspacePromptLibraryMock.mockReturnValue(new Promise<never>(() => {}));
+		} else {
+			fetchWorkspacePromptLibraryMock.mockResolvedValue(projectSnapshot);
+		}
+		await renderHarness(PROJECT_ID, "another-task-alpha");
+		if (saveResult === "失败") {
+			expect(requireController().prompts.find((prompt) => prompt.id === projectPromptId)?.text).toBe(
+				"项目 A 待保存正文",
+			);
+		}
+		mutateWorkspacePromptLibraryMock.mockClear();
+		await act(async () => root?.unmount());
+		root = null;
+
+		if (saveResult === "成功") {
+			expect(mutateWorkspacePromptLibraryMock).not.toHaveBeenCalled();
+		} else {
+			expect(mutateWorkspacePromptLibraryMock).toHaveBeenCalledExactlyOnceWith(PROJECT_ID, {
+				kind: "upsert_prompt",
+				promptId: projectPromptId,
+				text: "项目 A 待保存正文",
+				scope: "task",
+				taskId: TASK_ID,
+			});
+		}
+	});
+
+	it("迁移的旧响应迟到时，不得覆盖已经显示的已使用状态", async () => {
+		localStorage.setItem(
+			"kanban.prompt-library.global.v1",
+			JSON.stringify([{ id: "g", text: "历史正文", scope: "global", createdAt: 1, updatedAt: 2 }]),
+		);
+		const migratedSnapshot = snapshotWithGlobalPrompt("历史正文");
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(migratedSnapshot);
+		let finishMigration: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+		mutateWorkspacePromptLibraryMock.mockReturnValueOnce(
+			new Promise<WorkspacePromptLibrarySnapshot>((resolve) => {
+				finishMigration = resolve;
+			}),
+		);
+		await renderHarness();
+		const usedSnapshot = snapshotWithGlobalPrompt("历史正文");
+		for (const prompt of usedSnapshot.globalScopedPrompts) prompt.draftUsage = { markedUsedAtEpochMs: 1000 };
+		fetchWorkspacePromptLibraryMock.mockResolvedValue(usedSnapshot);
+		await act(async () => notifyPromptLibraryInvalidated(PROJECT_ID));
+		expect(requireController().prompts[0]?.draftUsage?.markedUsedAtEpochMs).toBe(1000);
+		await act(async () => finishMigration(migratedSnapshot));
+		expect(requireController().prompts[0]?.draftUsage?.markedUsedAtEpochMs).toBe(1000);
+		expect(localStorage.getItem("kanban.prompt-library.uploaded-to-server-at.v1")).toContain(PROJECT_ID);
+	});
+
+	it.each(["正文", "使用状态"] as const)(
+		"较晚发出的失效查询最后返回旧库时，已保存的%s不能回退",
+		async (editedField) => {
+			const oldSnapshot = snapshotWithGlobalPrompt("旧正文");
+			fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(oldSnapshot);
+			await renderHarness();
+			let finishMutation: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+			mutateWorkspacePromptLibraryMock.mockReturnValueOnce(
+				new Promise<WorkspacePromptLibrarySnapshot>((resolve) => {
+					finishMutation = resolve;
+				}),
+			);
+			const savedSnapshot = snapshotWithGlobalPrompt(editedField === "正文" ? "已保存的新正文" : "旧正文");
+			if (editedField === "正文") {
+				await act(async () => requireController().updatePromptText("g", "已保存的新正文"));
+				await act(async () => vi.advanceTimersByTime(600));
+			} else {
+				for (const prompt of savedSnapshot.globalScopedPrompts) prompt.draftUsage = { markedUsedAtEpochMs: 1000 };
+				await act(async () => requireController().setPromptUsageStatus("g", true));
+			}
+			let finishOldRead: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+			fetchWorkspacePromptLibraryMock
+				.mockReturnValueOnce(
+					new Promise<WorkspacePromptLibrarySnapshot>((resolve) => {
+						finishOldRead = resolve;
+					}),
+				)
+				.mockResolvedValue(savedSnapshot);
+			await act(async () => notifyPromptLibraryInvalidated(PROJECT_ID));
+			await act(async () => finishMutation(savedSnapshot));
+			expect(requireController().prompts[0]?.text).toBe(savedSnapshot.globalScopedPrompts[0]?.text);
+			expect(requireController().prompts[0]?.draftUsage).toEqual(savedSnapshot.globalScopedPrompts[0]?.draftUsage);
+			await act(async () => finishOldRead(oldSnapshot));
+			expect(requireController().prompts[0]?.text).toBe(savedSnapshot.globalScopedPrompts[0]?.text);
+			expect(requireController().prompts[0]?.draftUsage).toEqual(savedSnapshot.globalScopedPrompts[0]?.draftUsage);
+		},
+	);
+
+	it("写入前读到旧库的查询先返回时，写入成功后补读真实已使用状态", async () => {
+		const oldSnapshot = snapshotWithGlobalPrompt("旧正文");
+		fetchWorkspacePromptLibraryMock.mockResolvedValue(oldSnapshot);
+		await renderHarness();
+		let finishMutation: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+		mutateWorkspacePromptLibraryMock.mockReturnValueOnce(
+			new Promise<WorkspacePromptLibrarySnapshot>((resolve) => {
+				finishMutation = resolve;
+			}),
+		);
+		await act(async () => requireController().setPromptUsageStatus("g", true));
+		await act(async () => notifyPromptLibraryInvalidated(PROJECT_ID));
+		const savedSnapshot = snapshotWithGlobalPrompt("旧正文");
+		for (const prompt of savedSnapshot.globalScopedPrompts) prompt.draftUsage = { markedUsedAtEpochMs: 1000 };
+		fetchWorkspacePromptLibraryMock.mockResolvedValue(savedSnapshot);
+		await act(async () => finishMutation(savedSnapshot));
+		expect(requireController().prompts[0]?.draftUsage?.markedUsedAtEpochMs).toBe(1000);
+	});
+
+	it("推流重读晚于保存响应时，读取失败也不会让刚编辑的正文回退", async () => {
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(snapshotWithGlobalPrompt("旧正文"));
+		await renderHarness();
+		let finishMutation: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+		mutateWorkspacePromptLibraryMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishMutation = resolve;
+				}),
+		);
+		await act(async () => requireController().updatePromptText("g", "已保存的新正文"));
+		await act(async () => vi.advanceTimersByTime(600));
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(null);
+		await act(async () => notifyPromptLibraryInvalidated(PROJECT_ID));
+		await act(async () => finishMutation(snapshotWithGlobalPrompt("已保存的新正文")));
+		expect(requireController().prompts[0]?.text).toBe("已保存的新正文");
+	});
+
+	it("已使用的推流快照先返回时，较早发出的编辑响应不能把状态改回未使用", async () => {
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(snapshotWithGlobalPrompt("旧正文"));
+		await renderHarness();
+		let finishMutation: (snapshot: WorkspacePromptLibrarySnapshot) => void = () => {};
+		mutateWorkspacePromptLibraryMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishMutation = resolve;
+				}),
+		);
+		await act(async () => requireController().updatePromptText("g", "已保存的新正文"));
+		await act(async () => vi.advanceTimersByTime(600));
+		const usedSnapshot = snapshotWithGlobalPrompt("已保存的新正文");
+		for (const prompt of usedSnapshot.globalScopedPrompts) prompt.draftUsage = { markedUsedAtEpochMs: 1000 };
+		// 写后确认读取失败时，也保留此前已经显示的较新使用状态。
+		fetchWorkspacePromptLibraryMock.mockResolvedValueOnce(usedSnapshot).mockResolvedValue(null);
+		await act(async () => notifyPromptLibraryInvalidated(PROJECT_ID));
+		await act(async () => finishMutation(snapshotWithGlobalPrompt("已保存的新正文")));
+		expect(requireController().prompts[0]?.draftUsage?.markedUsedAtEpochMs).toBe(1000);
 	});
 
 	afterEach(async () => {

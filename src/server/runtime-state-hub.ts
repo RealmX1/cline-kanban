@@ -59,6 +59,7 @@ import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-acti
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
+import { subscribeToPromptLibraryChanges } from "../state/prompt-library-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
@@ -204,6 +205,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
+	const unsubscribePromptLibraryChanges = subscribeToPromptLibraryChanges((workspaceId) => {
+		for (const client of runtimeStateClients) {
+			sendRuntimeStateMessage(client, { type: "prompt_library_updated", workspaceId });
+		}
+	});
 	// 已进全局广播集合、首帧 snapshot 尚未发出的连接：projects_updated 广播跳过它们（不变式见连接握手处）。
 	const runtimeStateClientsStillAwaitingInitialSnapshotMessage = new Set<WebSocket>();
 	// 上面集合里被某次 projects_updated 广播跳过的连接：首帧发出后要补发一次最新 projects。
@@ -1073,6 +1079,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastQueuedTaskPromptDeliveriesUpdated,
 		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
+			unsubscribePromptLibraryChanges();
 			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);

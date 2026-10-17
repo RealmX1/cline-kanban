@@ -1,5 +1,7 @@
 import {
 	AlertTriangle,
+	BookmarkPlus,
+	Check,
 	ChevronDown,
 	ChevronUp,
 	CornerDownLeft,
@@ -9,8 +11,9 @@ import {
 	ListPlus,
 	Plus,
 	Trash2,
+	Undo2,
 } from "lucide-react";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -156,7 +159,20 @@ function PromptMetadataPill({ prompt }: { prompt: StoredPrompt }): React.ReactEl
 			<PromptOriginBadge prompt={prompt} className="bg-surface-1" />
 			<span className="truncate">Created {formatPromptMetadataTimestamp(prompt.createdAt)}</span>
 			<span className="shrink-0 text-text-tertiary">·</span>
-			<span className="truncate">Edited {formatPromptMetadataTimestamp(prompt.updatedAt)}</span>
+			<span className="truncate">
+				Edited {formatPromptMetadataTimestamp(prompt.textLastEditedAtEpochMs ?? prompt.updatedAt)}
+			</span>
+			{prompt.draftUsage?.markedUsedAtEpochMs != null ? (
+				<Tooltip
+					content={
+						prompt.draftUsage.matchEvidence
+							? `已匹配任务 ${prompt.draftUsage.matchEvidence.taskId} 的用户提示（${prompt.draftUsage.matchEvidence.matchKind}）；会话 ${prompt.draftUsage.matchEvidence.nativeSessionId ?? "未提供"}`
+							: "已手动标记为使用"
+					}
+				>
+					<span className="pointer-events-auto shrink-0 text-status-green">已使用</span>
+				</Tooltip>
+			) : null}
 		</div>
 	);
 }
@@ -235,6 +251,8 @@ function PromptRow({
 	onRemove,
 	shouldAutoFocus,
 	onAutoFocusHandled,
+	onSetUsed,
+	onConvertToCommand,
 }: {
 	prompt: StoredPrompt;
 	onChangeText: (id: string, text: string) => void;
@@ -244,10 +262,13 @@ function PromptRow({
 	onRemove: (id: string) => void;
 	shouldAutoFocus: boolean;
 	onAutoFocusHandled: () => void;
+	onSetUsed: (id: string, isUsed: boolean) => void;
+	onConvertToCommand: (id: string, scope: "repo" | "global") => void;
 }): React.ReactElement {
 	const [hasCollapsibleContent, setHasCollapsibleContent] = useState(false);
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [isFocusedWithin, setIsFocusedWithin] = useState(false);
+	const [isCommandScopeChoiceOpen, setIsCommandScopeChoiceOpen] = useState(false);
 	const rowRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	useAutosizedPromptTextarea({
@@ -274,10 +295,13 @@ function PromptRow({
 	const isGlobal = prompt.scope === "global";
 	const canFill = prompt.text.trim().length > 0;
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
+	const isReusableCommand = prompt.entryKind === "reusable_command";
+	const isUsed = prompt.draftUsage?.markedUsedAtEpochMs != null;
 
 	return (
 		<div
 			ref={rowRef}
+			data-prompt-library-entry-id={prompt.id}
 			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
 			onFocus={() => setIsFocusedWithin(true)}
 			onBlur={(event) => {
@@ -318,7 +342,12 @@ function PromptRow({
 						icon={scopeMeta.icon}
 						aria-label="Change prompt scope"
 						className={cn(isGlobal && "text-accent hover:text-accent")}
-						onClick={() => onToggleScope(prompt.id, scopeMeta.nextScope)}
+						onClick={() =>
+							onToggleScope(
+								prompt.id,
+								isReusableCommand && prompt.scope === "global" ? "repo" : scopeMeta.nextScope,
+							)
+						}
 					/>
 				</Tooltip>
 				<Tooltip content="Fill into input">
@@ -338,6 +367,30 @@ function PromptRow({
 						ariaLabel="Queue prompt for after the current turn"
 					/>
 				) : null}
+				{!isReusableCommand ? (
+					<>
+						<Tooltip content={isUsed ? "恢复未使用；之后只检查新的提交" : "标记已使用"}>
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={isUsed ? <Undo2 size={14} /> : <Check size={14} />}
+								aria-label={isUsed ? "恢复未使用" : "标记已使用"}
+								onClick={() => onSetUsed(prompt.id, !isUsed)}
+							/>
+						</Tooltip>
+						<Tooltip content="转为长期保留的 Command">
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={<BookmarkPlus size={14} />}
+								aria-label="转为 Command"
+								aria-expanded={isCommandScopeChoiceOpen}
+								disabled={!canFill}
+								onClick={() => setIsCommandScopeChoiceOpen((current) => !current)}
+							/>
+						</Tooltip>
+					</>
+				) : null}
 				<Tooltip content="Delete">
 					<Button
 						variant="ghost"
@@ -349,6 +402,38 @@ function PromptRow({
 					/>
 				</Tooltip>
 			</div>
+			{isCommandScopeChoiceOpen && !isReusableCommand ? (
+				<div
+					role="group"
+					aria-label="选择 Command 范围"
+					className="flex flex-wrap items-center gap-1 border-t border-border px-1.5 py-1 text-xs"
+				>
+					<span className="text-text-secondary">保存到：</span>
+					<Button
+						variant="ghost"
+						size="xs"
+						onClick={() => {
+							onConvertToCommand(prompt.id, "repo");
+							setIsCommandScopeChoiceOpen(false);
+						}}
+					>
+						当前 Project
+					</Button>
+					<Button
+						variant="ghost"
+						size="xs"
+						onClick={() => {
+							onConvertToCommand(prompt.id, "global");
+							setIsCommandScopeChoiceOpen(false);
+						}}
+					>
+						全局
+					</Button>
+					<Button variant="ghost" size="xs" onClick={() => setIsCommandScopeChoiceOpen(false)}>
+						取消
+					</Button>
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -452,6 +537,7 @@ export function PromptLibraryPanel({
 	onQueuePromptForAfterCurrentTurn,
 	headerContent,
 	taskIdsOnBoard = null,
+	entryKind = "draft_prompt",
 }: {
 	taskId: string;
 	projectId: string;
@@ -461,9 +547,22 @@ export function PromptLibraryPanel({
 	headerContent?: ReactNode;
 	/** 看板上此刻存在的任务 id。null = 还不知道（首屏未加载），此时一条都不标成孤儿。 */
 	taskIdsOnBoard?: ReadonlySet<string> | null;
+	entryKind?: "draft_prompt" | "reusable_command";
 }): React.ReactElement {
-	const { prompts, orphanedPrompts, addPrompt, updatePromptText, removePrompt, setPromptScope, claimOrphanedPrompt } =
-		usePromptLibrary(taskId, projectId, taskIdsOnBoard);
+	const {
+		prompts: promptDrafts,
+		reusableCommands,
+		orphanedPrompts,
+		addPrompt,
+		updatePromptText,
+		removePrompt,
+		setPromptScope,
+		claimOrphanedPrompt,
+		setPromptUsageStatus,
+		convertPromptToReusableCommand,
+	} = usePromptLibrary(taskId, projectId, taskIdsOnBoard);
+	const showsCommands = entryKind === "reusable_command";
+	const prompts = showsCommands ? reusableCommands : promptDrafts;
 	const [isOrphanedSectionExpanded, setIsOrphanedSectionExpanded] = useState(false);
 	const [pendingFocusPromptId, setPendingFocusPromptId] = useState<string | null>(null);
 	const handleAddPrompt = (): void => {
@@ -477,33 +576,50 @@ export function PromptLibraryPanel({
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
 				{headerContent ?? (
-					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Prompts</span>
+					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">
+						{showsCommands ? "Commands" : "Prompts"}
+					</span>
 				)}
-				<Button variant="ghost" size="xs" icon={<Plus size={14} />} onClick={handleAddPrompt}>
-					Add
-				</Button>
+				{!showsCommands ? (
+					<Button variant="ghost" size="xs" icon={<Plus size={14} />} onClick={handleAddPrompt}>
+						Add
+					</Button>
+				) : null}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-3 pt-1 pb-3">
 				{prompts.length === 0 ? (
 					<p className="px-1 py-2 text-xs leading-5 text-text-tertiary">
-						No saved prompts yet. Add one to fill it into the agent input with a click.
+						{showsCommands
+							? "在 Prompts 中将草稿转为 Command，即可长期保留并重复使用。"
+							: "No saved prompts yet. Add one to fill it into the agent input with a click."}
 					</p>
 				) : (
-					prompts.map((prompt) => (
-						<PromptRow
-							key={prompt.id}
-							prompt={prompt}
-							onChangeText={updatePromptText}
-							onToggleScope={setPromptScope}
-							onFill={handleFillPromptWithSurroundingNewlines}
-							onQueue={onQueuePromptForAfterCurrentTurn}
-							onRemove={removePrompt}
-							shouldAutoFocus={pendingFocusPromptId === prompt.id}
-							onAutoFocusHandled={() => setPendingFocusPromptId(null)}
-						/>
+					prompts.map((prompt, index) => (
+						<Fragment key={prompt.id}>
+							{!showsCommands &&
+							prompt.draftUsage?.markedUsedAtEpochMs != null &&
+							(index === 0 || prompts[index - 1]?.draftUsage?.markedUsedAtEpochMs == null) ? (
+								<h3 className="mt-3 border-t border-border pt-3 text-xs font-medium text-text-secondary">
+									已使用
+								</h3>
+							) : null}
+							<PromptRow
+								key={prompt.id}
+								prompt={prompt}
+								onChangeText={updatePromptText}
+								onToggleScope={setPromptScope}
+								onFill={handleFillPromptWithSurroundingNewlines}
+								onQueue={onQueuePromptForAfterCurrentTurn}
+								onRemove={removePrompt}
+								shouldAutoFocus={pendingFocusPromptId === prompt.id}
+								onAutoFocusHandled={() => setPendingFocusPromptId(null)}
+								onSetUsed={setPromptUsageStatus}
+								onConvertToCommand={convertPromptToReusableCommand}
+							/>
+						</Fragment>
 					))
 				)}
-				{orphanedPrompts.length > 0 ? (
+				{!showsCommands && orphanedPrompts.length > 0 ? (
 					<OrphanedPromptsSection
 						orphanedPrompts={orphanedPrompts}
 						isExpanded={isOrphanedSectionExpanded}

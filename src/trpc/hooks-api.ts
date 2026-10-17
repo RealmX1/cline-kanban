@@ -24,6 +24,7 @@ import {
 	captureNotificationSignal,
 	recordNotificationSignalDecision,
 } from "../notifications/notification-signal-capture";
+import type { PromptDraftUsageSubmission } from "../server/prompt-draft-usage-service";
 import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
@@ -43,6 +44,7 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
+	notifyPromptDraftUserPromptSubmitted?: (input: PromptDraftUsageSubmission) => void;
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId?: typeof persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
@@ -430,6 +432,17 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
 			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				if (body.hookEventFiredInsideSubagentContext !== true) {
+					deps.notifyPromptDraftUserPromptSubmitted?.({
+						workspaceId,
+						taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+						submittedAtEpochMs: hookEventObservedAtEpochMs ?? Date.now(),
+						submittedPromptText: body.submittedPromptText,
+						currentIdentity:
+							body.agentNativeConversationSessionIdentity ?? summary.agentNativeConversationSessionIdentity,
+						sourceAgentId: body.metadata?.source ?? summary.agentId ?? undefined,
+					});
+				}
 				manager.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt?.(
 					taskId,
 					hookEventObservedAtEpochMs ?? Date.now(),

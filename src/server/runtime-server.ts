@@ -117,6 +117,7 @@ import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
+import { createPromptDraftUsageService } from "./prompt-draft-usage-service";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
@@ -255,6 +256,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
 
 	// exploration thread graph（B.2）。
 	//
@@ -298,6 +300,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			service = createAcpTaskSessionService({
 				workspaceId: scope.workspaceId,
 				workspaceRepositoryPath: scope.workspacePath,
+			});
+			service.setUserPromptSubmittedListener((taskId, text) => {
+				const summary = service?.getSummary(taskId);
+				promptDraftUsageService.notifyUserPromptSubmitted({
+					workspaceId: scope.workspaceId,
+					taskId: summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+					submittedAtEpochMs: Date.now(),
+					submittedPromptText: text,
+					sourceAgentId: summary?.agentId ?? "omp",
+					currentIdentity: summary?.agentNativeConversationSessionIdentity,
+				});
 			});
 			acpTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			acpWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
@@ -689,6 +702,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		notifyPromptDraftUserPromptSubmitted: promptDraftUsageService.notifyUserPromptSubmitted,
 		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
@@ -1170,11 +1184,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskAttributedProcessTreeResourceSampler.start();
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
+	promptDraftUsageService.startInitialHistoricalBackfill();
 
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			await promptDraftUsageService.close();
 			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();
 			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。

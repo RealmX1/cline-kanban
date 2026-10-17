@@ -42,7 +42,7 @@ import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
-import { writeOmpNativeConversationSessionIdentityExtension } from "./omp-native-conversation-session-identity-extension";
+import { writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension } from "./omp-native-conversation-session-identity-and-prompt-submission-extension";
 import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
 import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
@@ -2624,7 +2624,7 @@ const ompAdapter: AgentSessionAdapter = {
 		if (hooks) {
 			args.push(
 				"--extension",
-				await writeOmpNativeConversationSessionIdentityExtension(getHookAgentDirectory("omp")),
+				await writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension(getHookAgentDirectory("omp")),
 			);
 			Object.assign(env, createHookRuntimeEnv(hooks));
 		}

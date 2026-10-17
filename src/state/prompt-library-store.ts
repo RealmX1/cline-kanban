@@ -26,7 +26,7 @@
 // 但 prompt library 条目**不随任务删除而删**——它是用户资产，只把 scope:task 的条目标记为孤儿供回收，
 // 绝不「删任务顺手毁掉用户攒的模板」。
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -41,6 +41,15 @@ import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath, getWorkspaceDirectoryPath } from "./workspace-state";
 
 const PROMPT_LIBRARY_FILENAME = "prompt-library.json";
+
+const promptLibraryChangeListeners = new Set<(workspaceId: string | null) => void>();
+
+export function subscribeToPromptLibraryChanges(listener: (workspaceId: string | null) => void): () => void {
+	promptLibraryChangeListeners.add(listener);
+	return () => {
+		promptLibraryChangeListeners.delete(listener);
+	};
+}
 
 // 「scope:task 但调用方漏了 taskId」的条目落在这个键下。真实 taskId 不会长这样，于是没有任何任务的
 // 可见集合会把它捞出来——内容留着，可见性不外泄。详见 withEntryAppended 里的取舍说明。
@@ -194,6 +203,16 @@ async function readWorkspacePromptLibrarySnapshotWithFileReadability(
 // 只会让面板整个打不开。只有写路径需要分辨两者。
 export async function readWorkspacePromptLibrarySnapshot(workspaceId: string): Promise<WorkspacePromptLibrarySnapshot> {
 	return (await readWorkspacePromptLibrarySnapshotWithFileReadability(workspaceId)).snapshot;
+}
+
+export async function readWorkspacePromptLibrarySnapshotForUsageDetection(
+	workspaceId: string,
+): Promise<WorkspacePromptLibrarySnapshot> {
+	const result = await readWorkspacePromptLibrarySnapshotWithFileReadability(workspaceId);
+	if (result.globalFilePresentButUnreadable || result.workspaceFilePresentButUnreadable) {
+		throw new Error("prompt_library_unreadable");
+	}
+	return result.snapshot;
 }
 
 // 在三个桶里按 id 找条目，并连同「它此刻落在哪个桶」一起返回——换 scope 要先知道它现在在哪儿。
@@ -365,11 +384,57 @@ export function applyWorkspacePromptLibraryMutation(
 	if (mutation.kind === "remove_prompt") {
 		return withEntryRemoved(snapshot, mutation.promptId);
 	}
+	if (mutation.kind === "set_prompt_usage_status" || mutation.kind === "mark_prompt_used_from_user_prompt_match") {
+		const located = locateEntry(snapshot, mutation.promptId);
+		if (!located || located.entry.entryKind === "reusable_command") return snapshot;
+		if (mutation.kind === "mark_prompt_used_from_user_prompt_match") {
+			const cutoff = located.entry.draftUsage?.ignoreUserPromptsSubmittedAtOrBeforeEpochMs ?? null;
+			if (
+				located.entry.draftUsage?.markedUsedAtEpochMs != null ||
+				createHash("sha256").update(located.entry.text).digest("hex") !== mutation.expectedPromptTextSha256 ||
+				cutoff !== mutation.expectedIgnoreUserPromptsSubmittedAtOrBeforeEpochMs ||
+				(cutoff !== null &&
+					(mutation.evidence.userPromptSubmittedAtEpochMs === null ||
+						mutation.evidence.userPromptSubmittedAtEpochMs <= cutoff))
+			)
+				return snapshot;
+		}
+		return withEntryReplaced(
+			snapshot,
+			{
+				...located.entry,
+				draftUsage:
+					mutation.kind === "set_prompt_usage_status"
+						? mutation.isUsed
+							? { markedUsedAtEpochMs: nowEpochMs }
+							: { markedUsedAtEpochMs: null, ignoreUserPromptsSubmittedAtOrBeforeEpochMs: nowEpochMs }
+						: { ...located.entry.draftUsage, markedUsedAtEpochMs: nowEpochMs, matchEvidence: mutation.evidence },
+			},
+			located.taskId,
+		);
+	}
+	if (mutation.kind === "convert_prompt_to_reusable_command") {
+		const located = locateEntry(snapshot, mutation.promptId);
+		if (!located) return snapshot;
+		return withEntryReplaced(
+			snapshot,
+			{
+				...located.entry,
+				entryKind: "reusable_command",
+				scope: mutation.scope,
+				draftUsage: undefined,
+				textLastEditedAtEpochMs: located.entry.textLastEditedAtEpochMs ?? located.entry.updatedAt,
+				updatedAt: nowEpochMs,
+			},
+			null,
+		);
+	}
 	if (mutation.kind === "set_prompt_scope") {
 		const located = locateEntry(snapshot, mutation.promptId);
 		if (!located) {
 			return snapshot;
 		}
+		if (located.entry.entryKind === "reusable_command" && mutation.scope === "task") return snapshot;
 		// 条目落在哪个桶由 (scope, taskId) 一起决定；scope 不是 task 时没有任务维度，归一成 null 再比。
 		const requestedTaskIdForTaskScope = mutation.scope === "task" ? (mutation.taskId ?? null) : null;
 		// 只有「连桶都没换」才是无操作。只比 scope 会把「同为 task scope 但从 task-A 搬到 task-B」误判成
@@ -377,14 +442,26 @@ export function applyWorkspacePromptLibraryMutation(
 		if (located.scope === mutation.scope && located.taskId === requestedTaskIdForTaskScope) {
 			return snapshot;
 		}
-		const moved: StoredPromptLibraryEntry = { ...located.entry, scope: mutation.scope, updatedAt: nowEpochMs };
+		const moved: StoredPromptLibraryEntry = {
+			...located.entry,
+			scope: mutation.scope,
+			updatedAt: nowEpochMs,
+			textLastEditedAtEpochMs: located.entry.textLastEditedAtEpochMs ?? located.entry.updatedAt,
+		};
 		return withEntryAppended(withEntryRemoved(snapshot, mutation.promptId), moved, requestedTaskIdForTaskScope);
 	}
 	const located = locateEntry(snapshot, mutation.promptId);
 	if (located) {
 		// 已存在：只改正文，**不**动它当前所在的桶。换 scope 是另一条意图，混在改文里做会让
 		// 「两个标签页一个在改文、一个在换 scope」互相把对方的操作撤销掉。
-		const updated: StoredPromptLibraryEntry = { ...located.entry, text: mutation.text, updatedAt: nowEpochMs };
+		if (located.entry.text === mutation.text) return snapshot;
+		const updated: StoredPromptLibraryEntry = {
+			...located.entry,
+			text: mutation.text,
+			updatedAt: nowEpochMs,
+			...(located.entry.textLastEditedAtEpochMs === undefined ? {} : { textLastEditedAtEpochMs: nowEpochMs }),
+			...(located.entry.draftUsage === undefined ? {} : { draftUsage: undefined }),
+		};
 		return withEntryAppended(withEntryRemoved(snapshot, mutation.promptId), updated, located.taskId);
 	}
 	const created: StoredPromptLibraryEntry = {
@@ -496,7 +573,7 @@ export async function mutateWorkspacePromptLibrary(
 ): Promise<WorkspacePromptLibrarySnapshot> {
 	const globalPath = getGlobalPromptLibraryPath();
 	const workspacePath = getWorkspacePromptLibraryPath(workspaceId);
-	return await lockedFileSystem.withLocks(
+	const result = await lockedFileSystem.withLocks(
 		[
 			{ path: globalPath, type: "file" },
 			{ path: workspacePath, type: "file" },
@@ -549,7 +626,21 @@ export async function mutateWorkspacePromptLibrary(
 				await writeGlobalPromptLibraryFileIfItChanged();
 				await writeWorkspacePromptLibraryFileIfItChanged();
 			}
-			return next;
+			return {
+				next,
+				changed: next !== current,
+				globalChanged: next.globalScopedPrompts !== current.globalScopedPrompts,
+			};
 		},
 	);
+	if (result.changed) {
+		for (const listener of promptLibraryChangeListeners) {
+			try {
+				listener(result.globalChanged ? null : workspaceId);
+			} catch {
+				/* 推流失败不能否认已经完成的落盘。 */
+			}
+		}
+	}
+	return result.next;
 }
