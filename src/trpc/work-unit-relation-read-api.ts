@@ -18,6 +18,10 @@ import {
 	type KanbanBoardCardIdentityProjection,
 	listKanbanBoardCardIdentityProjectionsByBareTaskId,
 } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
+import {
+	getPermanentlyDeletedTaskPromptVersions,
+	listPermanentlyDeletedTaskCards,
+} from "../inter-work-unit-relation-ledger/permanently-deleted-task-history";
 import type { RecordedInterWorkUnitRelationProjectionState } from "../inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-from-ledger-events";
 import type { RecordedInterWorkUnitRelationProjectionReader } from "../inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
 import {
@@ -113,6 +117,14 @@ export function createWorkUnitRelationReadApi(
 	deps: CreateWorkUnitRelationReadApiDependencies,
 ): RuntimeTrpcContext["workUnitRelationReadApi"] {
 	return {
+		listPermanentlyDeletedTaskCards: (input) =>
+			readProjectionTranslatingLedgerUnavailability(deps, (reader) =>
+				listPermanentlyDeletedTaskCards(reader, input, deps.getWorkspacePathById),
+			),
+		getPermanentlyDeletedTaskPromptVersions: (input) =>
+			readProjectionTranslatingLedgerUnavailability(deps, (reader) =>
+				getPermanentlyDeletedTaskPromptVersions(reader, input),
+			),
 		readRelationModelingEditorDraft: readReferenceRelationModelingEditorDraft,
 		saveRelationModelingEditorDraft: saveReferenceRelationModelingEditorDraft,
 		getRelationModelingPreview: async (input) =>

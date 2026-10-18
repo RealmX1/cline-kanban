@@ -18,6 +18,7 @@ import {
 	Plus,
 	Settings,
 	Terminal,
+	Trash2,
 } from "lucide-react";
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
@@ -296,6 +297,7 @@ export function TopBar({
 	onToggleSidebar,
 	projectSwitcher,
 	onOpenTaskSpotlightSearch,
+	onOpenPermanentlyDeletedTaskHistory,
 	onBack,
 	workspacePath,
 	isWorkspacePathLoading = false,
@@ -352,6 +354,7 @@ export function TopBar({
 	// 打开任务 Spotlight 搜索。不传就不渲染入口（无项目态）。与项目切换器同理，刻意不受
 	// `hideProjectDependentActions` 影响——跨项目搜索在任务详情页里同样有效。
 	onOpenTaskSpotlightSearch?: () => void;
+	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onBack?: () => void;
 	workspacePath?: string;
 	isWorkspacePathLoading?: boolean;
@@ -860,6 +863,19 @@ export function TopBar({
 					{bugReportTriggerButton}
 					{notificationCenter}
 
+					{onOpenPermanentlyDeletedTaskHistory ? (
+						<Tooltip side="bottom" content="查看已删除 Task">
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<Trash2 size={16} />}
+								aria-label="查看已删除 Task"
+								onClick={onOpenPermanentlyDeletedTaskHistory}
+								data-verification-anchor="permanently-deleted-task-history-top-bar-entry"
+								className={cn("ml-0.5 shrink-0", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
+							/>
+						</Tooltip>
+					) : null}
 					{/* Settings: always visible */}
 					<Button
 						variant="ghost"
