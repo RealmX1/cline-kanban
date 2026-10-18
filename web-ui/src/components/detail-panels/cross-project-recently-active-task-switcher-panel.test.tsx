@@ -1,14 +1,14 @@
-import { act, type ReactNode } from "react";
+import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
-import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { CrossProjectRecentlyActiveTaskSwitcherPanel as ProductionCrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
 	collectUnreadHandoffEntryKeysFromNotificationLog,
+	useCrossProjectRecentlyActiveTaskSwitcherSections,
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { resetLastLoadedOtherProjectTaskCardSnapshotCache } from "@/hooks/use-task-card-snapshot-of-other-project-for-cross-project-task-switcher-row-expansion";
 import type {
@@ -22,6 +22,22 @@ import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-pr
 import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
 import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/workspace-metadata-store";
 import type { BoardColumnId } from "@/types";
+
+function CrossProjectRecentlyActiveTaskSwitcherPanel(
+	props: ComponentProps<typeof ProductionCrossProjectRecentlyActiveTaskSwitcherPanel>,
+) {
+	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		projects: props.host.projects,
+		notificationLogByWorkspaceId: props.host.notificationLogByWorkspaceId,
+		currentProjectId: props.host.currentProjectId,
+	});
+	return (
+		<ProductionCrossProjectRecentlyActiveTaskSwitcherPanel
+			{...props}
+			host={{ ...props.host, crossProjectTaskSwitcherSectionsModel: sectionsModel }}
+		/>
+	);
+}
 
 // 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：四个区、Running 默认收起、
 // Pinned 与下方区重复、点击走宿主的跨项目打开、对非当前项目的卡取消置顶走 runtime。

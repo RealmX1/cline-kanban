@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
+import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { PendingCrossProjectTaskOpen } from "@/hooks/use-cross-project-task-open-in-project";
 import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
 
@@ -8,6 +9,7 @@ import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runt
  * 并给出「跨项目跳转在途、要不要渲染 Focus View 过渡外壳」及外壳上显示的目标。
  */
 export function useCrossProjectRecentlyActiveTaskSwitcherHost({
+	crossProjectTaskSwitcherSectionsModel,
 	projects,
 	notificationLogByWorkspaceId,
 	currentProjectId,
@@ -21,6 +23,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	onUnpinCurrentProjectTaskFromTaskPinboard,
 	onEditCurrentProjectTaskPinboardPinReason,
 }: {
+	crossProjectTaskSwitcherSectionsModel: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
@@ -40,6 +43,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 } {
 	const crossProjectRecentlyActiveTaskSwitcherHost = useMemo<CrossProjectRecentlyActiveTaskSwitcherHostContextValue>(
 		() => ({
+			crossProjectTaskSwitcherSectionsModel,
 			projects,
 			notificationLogByWorkspaceId,
 			currentProjectId,
@@ -57,6 +61,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			onEditCurrentProjectTaskPinboardPinReason,
 		}),
 		[
+			crossProjectTaskSwitcherSectionsModel,
 			currentProjectId,
 			isBoardScopeAllProjectsSelected,
 			notificationLogByWorkspaceId,

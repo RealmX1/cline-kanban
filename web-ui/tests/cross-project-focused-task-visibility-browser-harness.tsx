@@ -5,6 +5,7 @@ import { TaskSpotlightSearchDialog } from "../src/components/task-spotlight-sear
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { createInitialBoardData } from "../src/data/board-data";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "../src/hooks/use-cross-project-recently-active-task-switcher-host";
+import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "../src/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "../src/hooks/use-cross-project-task-open-in-project";
 import { useTaskSpotlightSearchController } from "../src/hooks/use-task-spotlight-search-controller";
 import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeProjectSummary } from "../src/runtime/types";
@@ -73,7 +74,9 @@ function Harness() {
 		{ ...entry(runningTask, "in_progress"), turnOwner: "agent" as const, liveness: "live" as const, lastOutputAt: now },
 		...(outsideTaskNowInRecent ? [entry(outsideTask, "review")] : []),
 	]), project("project-b", [])], [outsideTaskNowInRecent]);
+	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({ projects, notificationLogByWorkspaceId: {}, currentProjectId });
 	const { crossProjectRecentlyActiveTaskSwitcherHost: host } = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		crossProjectTaskSwitcherSectionsModel: sectionsModel,
 		projects, notificationLogByWorkspaceId: {}, currentProjectId, isBoardScopeAllProjectsSelected: true,
 		selectedCardTaskId: selectedTaskId, pendingCrossProjectTaskOpen: taskOpening.pendingCrossProjectTaskOpen,
 		onOpenTaskInProject: taskOpening.handleOpenTaskInProject, onOpenBacklogTaskEditorInProject: () => {},

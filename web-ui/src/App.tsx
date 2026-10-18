@@ -54,7 +54,9 @@ import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallba
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
+import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
+import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
 import { useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage } from "@/hooks/use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page";
 import { useDebugTools } from "@/hooks/use-debug-tools";
@@ -1074,6 +1076,22 @@ export default function App(): ReactElement {
 		currentProjectWorkspacePath: workspacePath ?? null,
 	});
 	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
+	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		isTaskSwitcherSectionModelActive:
+			isBoardScopeAllProjectsSelected && !isRuntimeDisconnected && !isKanbanAccessBlocked,
+		projects,
+		notificationLogByWorkspaceId,
+		currentProjectId,
+	});
+	const captureCacheWarmTaskFocusNavigationAfterValidationMove = useCacheWarmTaskFocusNavigationAfterValidationMove({
+		isBoardScopeAllProjectsSelected,
+		currentProjectId,
+		selectedTaskId,
+		isCrossProjectTaskOpenPending: pendingCrossProjectTaskOpen !== null,
+		promptCacheWarmAwaitingUserEntries:
+			crossProjectTaskSwitcherSectionsModel.sections.promptCacheWarmAwaitingUserEntries,
+		onOpenTaskInProject: handleOpenTaskInProject,
+	});
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1117,6 +1135,7 @@ export default function App(): ReactElement {
 		moveToTrashLoadingById,
 		trashTaskCount,
 	} = useBoardInteractions({
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		board,
 		setBoard,
 		sessions,
@@ -1421,6 +1440,7 @@ export default function App(): ReactElement {
 		isFocusViewCrossProjectTaskOpenInTransit,
 		crossProjectTaskOpenInTransitTarget,
 	} = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		crossProjectTaskSwitcherSectionsModel,
 		projects,
 		notificationLogByWorkspaceId,
 		currentProjectId,

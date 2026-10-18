@@ -20,10 +20,7 @@ import {
 	TaskPinboardPinReasonDialog,
 	type TaskPinboardPinReasonDialogRequest,
 } from "@/components/task-pinboard-pin-reason-dialog";
-import {
-	type CrossProjectRecentlyActiveTaskSwitcherSectionsModel,
-	useCrossProjectRecentlyActiveTaskSwitcherSections,
-} from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import {
 	isSameCrossProjectTaskSwitcherRow,
 	type useCrossProjectTaskSwitcherRowHoverExpansionInPlace,
@@ -238,11 +235,8 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 	defaultAgentId: RuntimeAgentId | null;
 	sectionBlockPresentation: CrossProjectTaskSwitcherSectionBlockPresentation;
 }): CrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScrollContainers {
-	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
-		projects: host.projects,
-		notificationLogByWorkspaceId: host.notificationLogByWorkspaceId,
-		currentProjectId: host.currentProjectId,
-	});
+	const sectionsModel = host.crossProjectTaskSwitcherSectionsModel;
+	if (!sectionsModel) throw new Error("跨项目任务切换面板缺少共享分区模型");
 	const { sections, nowMs, unreadHandoffEntryKeys, setIsRunningSectionExpanded } = sectionsModel;
 	const {
 		togglePinnedToTaskPinboard,
