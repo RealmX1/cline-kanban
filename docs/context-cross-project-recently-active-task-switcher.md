@@ -82,6 +82,7 @@ _Avoid_: hot tasks, urgent
 **Board Scope Home Page Section Columns（All projects 首页分区列呈现）**：
 Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列（`board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board.tsx`，2026-10-12 取代 Board Overview）。与单项目对称：单项目首页是阶段列看板、Focus View 左栏是阶段竖列表；All projects 首页是分区列看板、Focus View 左栏是同一组分区的竖列表。
 - 两处共用同一份「区数据 + 一行怎么画、点了做什么」（`use-cross-project-task-switcher-section-row-rendering-shared-across-scroll-containers.tsx`）与同一组区块组件（`cross-project-recently-active-task-switcher-section-blocks.tsx`，参数 `sectionBlockPresentation` 区分两种呈现）。
+- 分区模型由 App 持有，经宿主的 `crossProjectTaskSwitcherSectionsModel` 供首页、Focus View 与动作导航共用；渲染 hook 不再单独创建分区模型。
 - 列序 Pinned（没有置顶时隐藏）| Running | Cache warm · your turn | Recent，与 Focus View 左栏的 All projects 分区同序；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
 - 与左栏的呈现差异：Pinned 全量显示、不折叠（不读左栏的折叠 / 只露 5 条偏好）；Running 始终列出行（不读左栏的收起偏好）；Pinned 行点击不做「跳到下方区那一行」（点行就进了 Focus View，首页随即卸载）。Cache warm 与 Recent 两处相同。
 - 每列一个滚动容器（列 header 固定在滚动区外、滚动容器就是分区内容容器），各持一个 hover 原地展开 hook 实例：手风琴语义与左栏相同，「指针离开面板」「在面板外按下」都以这一列为面板（「列外」同样按这一列的 React 子树判断，列里卡上弹出的 portal 弹窗算列内），指针从 A 列移到 B 列时 A 列展开的行约 300ms 后收起。各列滚动位置记在 continuity store 的 `boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection`：Focus View 打开时首页被卸载，Back 回来落回原位。
@@ -101,6 +102,7 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 - 主分组行优先于 Pinned 副本作为唯一定位源；Running 收起、仅在 Pinned 的任务被折叠或截断时仍保留这一行，用户的持久化收起偏好不变。分组内沿用精简行 / hover 展开的交互。
 - 复用 `useSelectedCardPinState` 的实时几何判定：完整可见时不显示副本，上下前沿触边即在对应边缘显示完整 Sticky 卡。源行只改 `visibility`、保留几何；副本不带 canonical `data-task-id` 或验证锚点。卡体或「返回当前任务所在位置」按钮只滚回定位源，卡片动作与 Portal 弹窗不触发导航。
 - 明确切换任务后定位新任务；同一任务跨过渡壳重挂载时恢复原滚动位置。临时区与组内定位源切换时重新绑定测量。没有聚焦任务的 All projects 首页不增加焦点区或 Sticky。
+- 当前聚焦的 Cache warm 任务从 Review 移入 Validation 时，按操作前的同组显示顺序选择下一项，末尾选上一项，单项保留当前焦点；跨项目沿用统一打开入口。普通卡片、Sticky 副本与 Review → Validation 拖拽共用此规则。仅服务端确认移入 Validation 后接续，失败、候选退出分组或用户已切走时不自动导航（`use-cache-warm-task-focus-navigation-after-validation-move.ts`）；其他场景仍按既有 Review 列导航。
 
 **Section Exclusivity（三区互斥）**：
 Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。区归属**只读 session facet 与时间戳，不读 board 列**（例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。

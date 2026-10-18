@@ -323,6 +323,7 @@ function HookHarness({
 	setSelectedTaskIdOverride,
 	sendTaskSessionInput = NOOP_SEND_TASK_INPUT,
 	initialSessions,
+	captureCacheWarmTaskFocusNavigationAfterValidationMove,
 	onSnapshot,
 	onSessionsControl,
 }: {
@@ -333,6 +334,7 @@ function HookHarness({
 	setSelectedTaskIdOverride?: Dispatch<SetStateAction<string | null>>;
 	sendTaskSessionInput?: UseTaskSessionsResult["sendTaskSessionInput"];
 	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
+	captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
 	onSessionsControl?: (control: {
 		setSessions: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>>;
@@ -359,6 +361,7 @@ function HookHarness({
 		readyForReviewNotificationsEnabled: false,
 		taskGitActionLoadingByTaskId: {},
 		runAutoReviewGitAction: NOOP_RUN_AUTO_REVIEW,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 	});
 
 	useEffect(() => {
@@ -454,7 +457,11 @@ describe("useBoardInteractions", () => {
 		}
 	});
 
-	async function renderMoveToValidationHarness(board: BoardData, initialSelectedTaskId: string | null) {
+	async function renderMoveToValidationHarness(
+		board: BoardData,
+		initialSelectedTaskId: string | null,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null,
+	) {
 		let currentBoard = board;
 		let selectedTaskId = initialSelectedTaskId;
 		let latestSnapshot: HookSnapshot | null = null;
@@ -475,6 +482,9 @@ describe("useBoardInteractions", () => {
 					setBoard={setBoard}
 					selectedTaskId={initialSelectedTaskId}
 					setSelectedTaskIdOverride={setSelectedTaskId}
+					captureCacheWarmTaskFocusNavigationAfterValidationMove={
+						captureCacheWarmTaskFocusNavigationAfterValidationMove
+					}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -1177,6 +1187,102 @@ describe("useBoardInteractions", () => {
 		});
 
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+	});
+
+	it("按 Cache warm 导航上下文接续，不选 Review 列中属于 Recent 的邻项", async () => {
+		const openNextCacheWarmTask = vi.fn();
+		const captureNavigation = vi.fn(() => openNextCacheWarmTask);
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["warm-current", "recent-first"]),
+			"warm-current",
+			captureNavigation,
+		);
+		await act(async () => harness.requireSnapshot().handleMoveCardToValidation("warm-current"));
+		expect(captureNavigation).toHaveBeenCalledWith("warm-current");
+		expect(openNextCacheWarmTask).toHaveBeenCalledOnce();
+		expect(harness.getSelectedTaskId()).toBe("warm-current");
+	});
+
+	it("Cache warm 移列失败时不切换焦点", async () => {
+		const openNextCacheWarmTask = vi.fn();
+		taskCardActionQueryMocks.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockRejectedValueOnce(
+			new Error("移列失败"),
+		);
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["warm-current", "recent-first"]),
+			"warm-current",
+			() => openNextCacheWarmTask,
+		);
+		await act(async () => harness.requireSnapshot().handleMoveCardToValidation("warm-current"));
+		expect(openNextCacheWarmTask).not.toHaveBeenCalled();
+		expect(harness.getSelectedTaskId()).toBe("warm-current");
+	});
+
+	it("Cache warm 等移列成功才接续，重复点击被在途闸拒绝时不提前导航", async () => {
+		const openNextCacheWarmTask = vi.fn();
+		let completeMove = () => {};
+		taskCardActionQueryMocks.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					completeMove = () =>
+						resolve({
+							taskCardSnapshotAfterAction: makeTaskCardSnapshotAfterAction("warm-current", "validation"),
+						});
+				}),
+		);
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["warm-current", "recent-first"]),
+			"warm-current",
+			() => openNextCacheWarmTask,
+		);
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("warm-current");
+			harness.requireSnapshot().handleMoveCardToValidation("warm-current");
+		});
+		expect(openNextCacheWarmTask).not.toHaveBeenCalled();
+		expect(harness.getSelectedTaskId()).toBe("warm-current");
+		expect(
+			taskCardActionQueryMocks.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace,
+		).toHaveBeenCalledOnce();
+		await act(async () => completeMove());
+		expect(openNextCacheWarmTask).toHaveBeenCalledOnce();
+	});
+
+	it("服务端未实际移入 Validation 时不执行 Cache warm 接续", async () => {
+		const openNextCacheWarmTask = vi.fn();
+		taskCardActionQueryMocks.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockResolvedValueOnce(
+			{ taskCardSnapshotAfterAction: makeTaskCardSnapshotAfterAction("warm-current", "review") },
+		);
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["warm-current", "recent-first"]),
+			"warm-current",
+			() => openNextCacheWarmTask,
+		);
+		await act(async () => harness.requireSnapshot().handleMoveCardToValidation("warm-current"));
+		expect(openNextCacheWarmTask).not.toHaveBeenCalled();
+		expect(harness.getSelectedTaskId()).toBe("warm-current");
+	});
+
+	it("Review 拖入 Validation 复用 Cache warm 接续，不选择 Recent 邻项", async () => {
+		const openNextCacheWarmTask = vi.fn();
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["warm-current", "recent-first"]),
+			"warm-current",
+			() => openNextCacheWarmTask,
+		);
+		await act(async () =>
+			harness.requireSnapshot().handleDragEnd({
+				draggableId: "warm-current",
+				source: { droppableId: "review", index: 0 },
+				destination: { droppableId: "validation", index: 0 },
+				reason: "DROP",
+				mode: "FLUID",
+				type: "DEFAULT",
+				combine: null,
+			}),
+		);
+		expect(openNextCacheWarmTask).toHaveBeenCalledOnce();
+		expect(harness.getSelectedTaskId()).toBe("warm-current");
 	});
 
 	it("moves focus to the following review task when the selected review task moves to validation", async () => {

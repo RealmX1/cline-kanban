@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
+import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { BoardColumn, CardSelection } from "@/types";
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
@@ -921,7 +921,18 @@ describe("ColumnContextPanel left column task list scope", () => {
 		{ id: "trash", title: "Done", cards: [] },
 	];
 
-	function renderPanel(withHost: boolean, isBoardScopeAllProjectsSelected = false): void {
+	function PanelWithSharedSectionsModel({
+		withHost,
+		isBoardScopeAllProjectsSelected,
+	}: {
+		withHost: boolean;
+		isBoardScopeAllProjectsSelected: boolean;
+	}) {
+		const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+			projects: [],
+			notificationLogByWorkspaceId: {},
+			currentProjectId: "project-a",
+		});
 		const panel = (
 			<ColumnContextPanel
 				selection={createSelection(columns, "task-1")}
@@ -930,27 +941,35 @@ describe("ColumnContextPanel left column task list scope", () => {
 				onTaskDragEnd={() => {}}
 			/>
 		);
+		return withHost ? (
+			<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
+				value={{
+					crossProjectTaskSwitcherSectionsModel: sectionsModel,
+					projects: [],
+					notificationLogByWorkspaceId: {},
+					currentProjectId: "project-a",
+					isBoardScopeAllProjectsSelected,
+					focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
+					onOpenTaskInProject: vi.fn(),
+					onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
+					onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
+					onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
+				}}
+			>
+				{panel}
+			</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+		) : (
+			panel
+		);
+	}
+
+	function renderPanel(withHost: boolean, isBoardScopeAllProjectsSelected = false): void {
 		act(() =>
 			root.render(
-				withHost ? (
-					<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
-						value={{
-							projects: [],
-							notificationLogByWorkspaceId: {},
-							currentProjectId: "project-a",
-							isBoardScopeAllProjectsSelected,
-							focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
-							onOpenTaskInProject: vi.fn(),
-							onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
-							onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
-							onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
-						}}
-					>
-						{panel}
-					</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
-				) : (
-					panel
-				),
+				<PanelWithSharedSectionsModel
+					withHost={withHost}
+					isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+				/>,
 			),
 		);
 	}

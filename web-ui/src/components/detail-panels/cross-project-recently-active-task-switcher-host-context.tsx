@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
 
 /**
@@ -9,6 +10,8 @@ import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runt
  * 渲染（见 FocusViewCrossProjectTaskOpenInTransitShell），两处宿主读同一份。
  */
 export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
+	// 只消费跨项目打开能力的宿主可省略；渲染切换面板时必须提供，与动作导航共享同一份模型。
+	crossProjectTaskSwitcherSectionsModel?: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;

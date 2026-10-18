@@ -1,10 +1,10 @@
-import { act, type ReactNode } from "react";
+import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
+import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard as ProductionBoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { resetLastLoadedOtherProjectTaskCardSnapshotCache } from "@/hooks/use-task-card-snapshot-of-other-project-for-cross-project-task-switcher-row-expansion";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntry,
@@ -14,6 +14,22 @@ import type {
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
+
+function BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard(
+	props: ComponentProps<typeof ProductionBoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard>,
+) {
+	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		projects: props.host.projects,
+		notificationLogByWorkspaceId: props.host.notificationLogByWorkspaceId,
+		currentProjectId: props.host.currentProjectId,
+	});
+	return (
+		<ProductionBoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+			{...props}
+			host={{ ...props.host, crossProjectTaskSwitcherSectionsModel: sectionsModel }}
+		/>
+	);
+}
 
 // All projects 首页分区列看板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：与 Focus View
 // 左栏面板同一组分区横排成列且同序、Pinned 全量 / Running 常开、点行走宿主、移动端回落竖排面板、

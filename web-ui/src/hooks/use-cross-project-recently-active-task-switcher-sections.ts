@@ -8,7 +8,7 @@ import {
 	type CrossProjectTaskSwitcherSections,
 	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon } from "@/runtime/cross-project-recently-active-task-switcher-query";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
@@ -112,10 +112,12 @@ export function collectCrossProjectTaskSwitcherEntriesInProjects(
 }
 
 export function useCrossProjectRecentlyActiveTaskSwitcherSections({
+	isTaskSwitcherSectionModelActive = true,
 	projects,
 	notificationLogByWorkspaceId,
 	currentProjectId,
 }: {
+	isTaskSwitcherSectionModelActive?: boolean;
 	projects: readonly RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
@@ -139,6 +141,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		useState<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null>(
 			() => readCrossProjectTaskSwitcherPanelViewContinuity().entriesWithinExtendedActivityHorizon,
 		);
+	const entriesWithinExtendedActivityHorizonRef = useRef(entriesWithinExtendedActivityHorizon);
+	entriesWithinExtendedActivityHorizonRef.current = entriesWithinExtendedActivityHorizon;
 	const setEntriesWithinExtendedActivityHorizon = useCallback(
 		(response: RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse) => {
 			writeCrossProjectTaskSwitcherPanelViewContinuity({ entriesWithinExtendedActivityHorizon: response });
@@ -156,6 +160,9 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	const latestExtendedActivityHorizonFetchSequenceNumberRef = useRef(0);
 	const fetchEntriesWithinExtendedActivityHorizon = useCallback(
 		(fetchTrigger: "requested_by_user_show_older" | "periodic_refresh_while_extended") => {
+			if (!isTaskSwitcherSectionModelActive) {
+				return;
+			}
 			latestExtendedActivityHorizonFetchSequenceNumberRef.current += 1;
 			const fetchSequenceNumber = latestExtendedActivityHorizonFetchSequenceNumberRef.current;
 			if (fetchTrigger === "requested_by_user_show_older") {
@@ -179,18 +186,43 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 					}
 				});
 		},
-		[currentProjectId, setEntriesWithinExtendedActivityHorizon],
+		[currentProjectId, isTaskSwitcherSectionModelActive, setEntriesWithinExtendedActivityHorizon],
 	);
 	const requestEntriesWithinExtendedActivityHorizon = useCallback(() => {
 		fetchEntriesWithinExtendedActivityHorizon("requested_by_user_show_older");
 	}, [fetchEntriesWithinExtendedActivityHorizon]);
 
-	useInterval(() => {
+	useEffect(() => {
+		if (!isTaskSwitcherSectionModelActive) {
+			return;
+		}
+		// 共享模型常驻 App：恢复活动时立即纠正时间，并刷新停用期间可能失效的旧任务快照。
 		setNowMs(Date.now());
-		if (entriesWithinExtendedActivityHorizon !== null) {
+		setExtendedActivityHorizonLoadState((loadState) =>
+			loadState === "loading"
+				? entriesWithinExtendedActivityHorizonRef.current === null
+					? "not_requested"
+					: "loaded"
+				: loadState,
+		);
+		if (entriesWithinExtendedActivityHorizonRef.current !== null) {
 			fetchEntriesWithinExtendedActivityHorizon("periodic_refresh_while_extended");
 		}
-	}, CROSS_PROJECT_TASK_SWITCHER_SECTION_REASSIGNMENT_TICK_MS);
+		return () => {
+			// 停用、切项目或卸载都作废在途请求，迟到结果不能改模型或连续性记忆。
+			latestExtendedActivityHorizonFetchSequenceNumberRef.current += 1;
+		};
+	}, [isTaskSwitcherSectionModelActive, fetchEntriesWithinExtendedActivityHorizon]);
+
+	useInterval(
+		() => {
+			setNowMs(Date.now());
+			if (entriesWithinExtendedActivityHorizon !== null) {
+				fetchEntriesWithinExtendedActivityHorizon("periodic_refresh_while_extended");
+			}
+		},
+		isTaskSwitcherSectionModelActive ? CROSS_PROJECT_TASK_SWITCHER_SECTION_REASSIGNMENT_TICK_MS : null,
+	);
 
 	const unreadHandoffEntryKeys = useMemo(
 		() => collectUnreadHandoffEntryKeysFromNotificationLog(notificationLogByWorkspaceId),

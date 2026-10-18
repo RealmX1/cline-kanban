@@ -111,6 +111,8 @@ interface UseBoardInteractionsInput {
 	readyForReviewNotificationsEnabled: boolean;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
+	// All projects Focus View 的分组导航：操作前捕获，成功后调用；null 才回退到普通 Review 列顺序。
+	captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null;
 	// Post-Deploy Verification「移入 Done」门禁的客户端预检数据：当前项目的活跃部署组（App 持有的唯一
 	// usePostDeployVerification 实例）。缺省 = 不预检，全靠服务端拒绝后的兜底。
 	postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck?: RuntimePostDeployVerificationDeploymentGroup | null;
@@ -195,6 +197,7 @@ export function useBoardInteractions({
 	readyForReviewNotificationsEnabled,
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
+	captureCacheWarmTaskFocusNavigationAfterValidationMove,
 	postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck = null,
 	refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
@@ -204,6 +207,7 @@ export function useBoardInteractions({
 		board,
 		sessions,
 		selectedTaskId,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
 		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 	});
@@ -211,6 +215,7 @@ export function useBoardInteractions({
 		board,
 		sessions,
 		selectedTaskId,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
 		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 	};
@@ -1055,11 +1060,21 @@ export function useBoardInteractions({
 						});
 					return;
 				}
-				case "board_column_transition_without_session_side_effects":
+				case "board_column_transition_without_session_side_effects": {
 					if (!currentProjectId) {
 						return;
 					}
-					if (drop.fromColumnId === "review" && drop.toColumnId === "validation") {
+					const completeCacheWarmFocusNavigation =
+						drop.fromColumnId === "review" && drop.toColumnId === "validation"
+							? latestBoardInteractionStateRef.current.captureCacheWarmTaskFocusNavigationAfterValidationMove?.(
+									drop.taskId,
+								)
+							: null;
+					if (
+						drop.fromColumnId === "review" &&
+						drop.toColumnId === "validation" &&
+						!completeCacheWarmFocusNavigation
+					) {
 						moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, drop.taskId);
 					}
 					void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
@@ -1072,11 +1087,18 @@ export function useBoardInteractions({
 							? { boardMutationInitiator: boardMutationInitiatorForCommand }
 							: {}),
 					}).then((commandResult) => {
+						if (
+							commandResult.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+							commandResult.response.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard === "validation"
+						) {
+							completeCacheWarmFocusNavigation?.();
+						}
 						if (commandResult.taskCardActionCommandExecutionOutcome === "command_failed") {
 							notifyError(`Could not move the task: ${commandResult.commandFailureMessage}`);
 						}
 					});
 					return;
+				}
 				default:
 					// 只对浏览器端自动流转放行的移动已在上面的自动流转分支处理。
 					resolvePendingProgrammaticStartMove(drop.taskId, false);
@@ -1407,17 +1429,27 @@ export function useBoardInteractions({
 			if (!currentProjectId || (fromColumnId !== "in_progress" && fromColumnId !== "review")) {
 				return;
 			}
+			const completeCacheWarmFocusNavigation =
+				fromColumnId === "review"
+					? latestBoardInteractionStateRef.current.captureCacheWarmTaskFocusNavigationAfterValidationMove?.(taskId)
+					: null;
 			void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
 				workspaceId: currentProjectId,
 				taskId,
 				targetBoardColumnId: "validation",
 				currentProjectBoardForOptimisticOverlay: board,
 			}).then((result) => {
+				if (
+					result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+					result.response.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard === "validation"
+				) {
+					completeCacheWarmFocusNavigation?.();
+				}
 				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
 					notifyError(`Could not move the task to Validation: ${result.commandFailureMessage}`);
 				}
 			});
-			if (fromColumnId === "review") {
+			if (fromColumnId === "review" && !completeCacheWarmFocusNavigation) {
 				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
 			}
 			// A session that is *actively producing output* in Validation gets auto-migrated back to
