@@ -31,6 +31,11 @@ export interface WorkspaceBoardCommittedTaskMutationCaptureSnapshot {
 	workspaceBoardSnapshot: WorkspaceBoardSnapshotForTaskMutationDiff;
 }
 
+export interface RetainedTaskCardFieldKeywordMatch {
+	fieldValueSha256: string;
+	matchedQueryTokenIndexes: number[];
+}
+
 export interface PendingBoardFileWriteTaskMutationEventBatch {
 	pendingBatchId: string;
 	expectedBoardFileSha256AfterWrite: string;
@@ -309,6 +314,16 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		return (await this.request("readRetainedFieldContents", {
 			fieldValueSha256s,
 		})) as TaskCardFieldValueRetainedContent[];
+	}
+
+	async findRetainedTaskCardFieldKeywordMatches(input: {
+		fieldValueSha256s: string[];
+		normalizedQueryTokens: string[];
+	}): Promise<RetainedTaskCardFieldKeywordMatch[]> {
+		return (await this.request(
+			"findRetainedTaskCardFieldKeywordMatches",
+			input,
+		)) as RetainedTaskCardFieldKeywordMatch[];
 	}
 
 	async close(): Promise<void> {

@@ -658,6 +658,29 @@ function readRetainedFieldContents({ fieldValueSha256s }) {
 		.map((row) => ({ fieldValueSha256: row.content_sha256, fieldValueCanonicalJson: row.content_canonical_json }));
 }
 
+// 全文匹配留在 worker：逐字段解析，不把未命中的长正文传回主线程或常驻正文缓存。
+// 沿用 JS 的 Unicode 大小写规则；SQLite lower/LIKE 的 ASCII 规则会改变既有搜索结果。
+function findRetainedTaskCardFieldKeywordMatches({ fieldValueSha256s, normalizedQueryTokens }) {
+	const matches = [];
+	for (const fieldValueSha256 of fieldValueSha256s) {
+		const row = readContentStatement.get(fieldValueSha256);
+		if (!row) continue;
+		let value;
+		try {
+			value = JSON.parse(row.content_canonical_json);
+		} catch {
+			continue;
+		}
+		if (typeof value !== "string") continue;
+		const normalizedText = value.toLocaleLowerCase();
+		const matchedQueryTokenIndexes = normalizedQueryTokens.flatMap((token, index) =>
+			normalizedText.includes(token) ? [index] : [],
+		);
+		if (matchedQueryTokenIndexes.length) matches.push({ fieldValueSha256, matchedQueryTokenIndexes });
+	}
+	return matches;
+}
+
 const commands = {
 	readWorkspaceTaskMutationCaptureState,
 	resolvePendingBatchesAndRecordDetectedEvents: (input) => resolvePendingBatchesAndRecordDetectedEvents.immediate(input),
@@ -678,6 +701,7 @@ const commands = {
 		listAssertedRelationCurrentStateRowsStatement.all().map(toAssertedRelationStateRow),
 	listCommittedEvents,
 	readRetainedFieldContents,
+	findRetainedTaskCardFieldKeywordMatches,
 	close: () => {
 		database.close();
 		return true;

@@ -21,6 +21,7 @@ import { FindingsView } from "@/components/findings/findings-view";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
+import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
@@ -455,6 +456,13 @@ export default function App(): ReactElement {
 	const { selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope } =
 		useSelectedBoardOrSingleProjectScope();
 	const isBoardScopeAllProjectsSelected = selectedBoardOrSingleProjectScope === "board_scope_all_projects";
+	const [permanentlyDeletedTaskHistoryScope, setPermanentlyDeletedTaskHistoryScope] = useState<{
+		workspaceId: string | null;
+	} | null>(null);
+	const openPermanentlyDeletedTaskHistory = useCallback(() => {
+		setPermanentlyDeletedTaskHistoryScope({ workspaceId: isBoardScopeAllProjectsSelected ? null : currentProjectId });
+	}, [isBoardScopeAllProjectsSelected, currentProjectId]);
+
 	const selectBoardScopeAllProjects = useCallback(() => {
 		setSelectedBoardOrSingleProjectScope("board_scope_all_projects");
 		setIsGitHistoryOpen(false);
@@ -1619,6 +1627,11 @@ export default function App(): ReactElement {
 							data-mobile-focus-view-collapsible-region=""
 						>
 							<TopBar
+								onOpenPermanentlyDeletedTaskHistory={
+									!isFocusViewChromeShown || mobileFocusViewControls.isEnabled
+										? openPermanentlyDeletedTaskHistory
+										: undefined
+								}
 								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
 								projectSwitcher={topBarProjectSwitcherState}
 								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
@@ -1915,6 +1928,7 @@ export default function App(): ReactElement {
 							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
+										onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
 										mobileFocusViewControls={mobileFocusViewControls}
 										onBackToBoard={handleBackFromFocusView}
 										selection={selectedCardRenderedInFocusView}
@@ -2204,6 +2218,14 @@ export default function App(): ReactElement {
 					) : null}
 
 					<TaskSpotlightSearchDialog controller={taskSpotlightSearch} />
+					{permanentlyDeletedTaskHistoryScope ? (
+						<PermanentlyDeletedTaskHistoryDialog
+							defaultWorkspaceId={permanentlyDeletedTaskHistoryScope.workspaceId}
+							currentProjectId={currentProjectId}
+							projects={projects}
+							onClose={() => setPermanentlyDeletedTaskHistoryScope(null)}
+						/>
+					) : null}
 
 					<StartAllReadyBacklogTasksConfirmDialog
 						tasks={pendingStartAllReadyBacklogTaskCards}

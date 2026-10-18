@@ -27,6 +27,9 @@ export interface KanbanBoardCardIdentityProjection {
 	creationActor: KanbanActor | null;
 	creationOnBehalfOfInitiatingWorkUnit: InterWorkUnitRelationWorkUnitReference | null;
 	currentFieldValueSha256ByFieldName: Record<string, string>;
+	// 与 current 分开保留来源，基线和字段变更绝不冒充创建/删除时快照。
+	fieldValueSha256ByFieldNameAtCreation?: Record<string, string>;
+	lastFieldValueSha256ByFieldNameBeforeRemoval?: Record<string, string>;
 	lastKnownBoardColumnId: string | null;
 	movedToTrashColumnAt: number | null;
 	permanentlyRemovedFromBoardAt: number | null;
@@ -197,6 +200,9 @@ export function applyCommittedLedgerEventToKanbanBoardCardIdentityProjection(
 			kanbanBoardCardFirstObservationRoute: "task_card_created_on_board_within_live_capture",
 			firstObservedAt: knownProjection?.firstObservedAt ?? event.occurredAt,
 			creationActor: event.actor as KanbanActor,
+			fieldValueSha256ByFieldNameAtCreation: readFieldValueSha256ByFieldName(
+				event.eventPayload.fieldValueSha256ByFieldNameAtCreation,
+			),
 			creationOnBehalfOfInitiatingWorkUnit: readInterWorkUnitRelationWorkUnitReferenceFromLedgerValue(
 				event.onBehalfOfInitiatingWorkUnit,
 			),
@@ -243,6 +249,7 @@ export function applyCommittedLedgerEventToKanbanBoardCardIdentityProjection(
 				projection.currentFieldValueSha256ByFieldName = lastFieldValueSha256ByFieldName;
 			}
 			const workspaceAndTaskIdKey = buildWorkspaceAndTaskIdKey(card.workspaceId, card.taskId);
+			projection.lastFieldValueSha256ByFieldNameBeforeRemoval = { ...lastFieldValueSha256ByFieldName };
 			if (
 				state.liveKanbanBoardCardWorkUnitKeyByWorkspaceAndTaskId.get(workspaceAndTaskIdKey) ===
 				buildInterWorkUnitRelationWorkUnitKey(card)

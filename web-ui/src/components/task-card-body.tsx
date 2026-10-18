@@ -71,7 +71,7 @@ import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } f
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
-import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { PermanentlyDeletedTaskCardEntry, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
@@ -200,7 +200,8 @@ export type TaskCardBodyRenderRole =
 	// 卡体副本一律不输出。其余交互与置顶板分身一致、即与本体一致：单击进详情（会跳转的列延迟单击留出双击窗口）、
 	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡不可点开。
 	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
-	| "task_card_copy_in_post_deploy_verification_panel_entry";
+	| "task_card_copy_in_post_deploy_verification_panel_entry"
+	| "permanently_deleted_task_history_card";
 
 /**
  * 仅 All projects 切换面板的行副本（`expanded_card_copy_in_cross_project_task_switcher_row`）：精简行上有、卡体本身没有的
@@ -255,39 +256,7 @@ export const CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER
  * 各渲染角色见 `TaskCardBodyRenderRole`；本组件对角色差异的处理全部收敛在下方那组派生布尔里，
  * 各处 JSX 只读布尔、不再重复判角色。
  */
-export const TaskCardBody = memo(function TaskCardBody({
-	card,
-	columnId,
-	sessionSummary,
-	selected = false,
-	onClick,
-	onStart,
-	onMoveToTrash,
-	onMoveToValidation,
-	onMoveToReview,
-	onRestoreFromTrash,
-	onDeleteTask,
-	onSaveTitle,
-	onOpenTaskEditor,
-	onCancelAutomaticAction,
-	onRequestPinToTaskPinboard,
-	onUnpinFromTaskPinboard,
-	isMoveToTrashLoading = false,
-	isMoveToValidationLoading = false,
-	isMoveToReviewLoading = false,
-	workspacePath,
-	resolveTaskWorkspaceAbsoluteDirectoryPath,
-	defaultClineModelId = null,
-	defaultAgentId = null,
-	drag = null,
-	renderRole = "canonical_card_in_its_stage_list",
-	stageDisplayNameForTaskPinboardCopy,
-	onNavigateToCanonicalCardInItsStage,
-	onEditTaskPinboardPinReason,
-	taskCardOwnedByOtherProjectWorkspaceId = null,
-	taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
-	crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
-}: TaskCardBusinessProps & {
+type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
 	renderRole?: TaskCardBodyRenderRole;
 	/**
@@ -306,7 +275,72 @@ export const TaskCardBody = memo(function TaskCardBody({
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	/** 仅 All projects 切换面板的行副本，见 TaskCardBodyCrossProjectTaskSwitcherRowElements。其他角色下忽略。 */
 	crossProjectTaskSwitcherRowElementsMergedIntoCardCopy?: TaskCardBodyCrossProjectTaskSwitcherRowElements | null;
-}): React.ReactElement {
+};
+type TaskCardBodyResolvedPresentationProps = Omit<TaskCardBodyLivePresentationProps, "columnId"> & {
+	columnId: BoardColumnId | null;
+};
+interface PermanentlyDeletedTaskCardBodyProps {
+	historicalTaskCard: PermanentlyDeletedTaskCardEntry;
+	historicalProjectName?: string;
+	onOpenHistoricalPrompt: () => void;
+}
+
+export const TaskCardBody = memo(function TaskCardBody(
+	input: TaskCardBodyLivePresentationProps | PermanentlyDeletedTaskCardBodyProps,
+): React.ReactElement {
+	const historicalContext = "historicalTaskCard" in input ? input : null;
+	const historicalSnapshot = historicalContext?.historicalTaskCard;
+	// 只供 JSX 使用的视图模型，不进入 board，也不传入任何任务变更命令。
+	const presentation: TaskCardBodyResolvedPresentationProps = historicalSnapshot
+		? {
+				card: {
+					id: historicalSnapshot.kanbanBoardCard.taskId,
+					title: historicalSnapshot.titleBeforePermanentRemoval ?? "标题未留存",
+					prompt: historicalSnapshot.promptPreview ?? "",
+					createdAt: historicalSnapshot.kanbanBoardCard.taskIncarnationCreatedAtEpochMs,
+					updatedAt: historicalSnapshot.permanentlyRemovedFromBoardAt,
+					startInPlanMode: false,
+					baseRef: "",
+				},
+				columnId: null,
+				renderRole: "permanently_deleted_task_history_card",
+				onClick: () => historicalContext?.onOpenHistoricalPrompt(),
+			}
+		: (input as TaskCardBodyLivePresentationProps);
+	const {
+		card,
+		columnId,
+		sessionSummary,
+		selected = false,
+		onClick,
+		onStart,
+		onMoveToTrash,
+		onMoveToValidation,
+		onMoveToReview,
+		onRestoreFromTrash,
+		onDeleteTask,
+		onSaveTitle,
+		onOpenTaskEditor,
+		onCancelAutomaticAction,
+		onRequestPinToTaskPinboard,
+		onUnpinFromTaskPinboard,
+		isMoveToTrashLoading = false,
+		isMoveToValidationLoading = false,
+		isMoveToReviewLoading = false,
+		workspacePath,
+		resolveTaskWorkspaceAbsoluteDirectoryPath,
+		defaultClineModelId = null,
+		defaultAgentId = null,
+		drag = null,
+		renderRole = "canonical_card_in_its_stage_list",
+		stageDisplayNameForTaskPinboardCopy,
+		onNavigateToCanonicalCardInItsStage,
+		onEditTaskPinboardPinReason,
+		taskCardOwnedByOtherProjectWorkspaceId = null,
+		taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
+		crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
+	} = presentation;
+
 	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
 	const [isHovered, setIsHovered] = useState(false);
 	// 卡片多数 Tooltip（右上角动作组、行内 Edit、头部药丸、git 状态）content 统一收成
@@ -326,7 +360,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const [draftTitle, setDraftTitle] = useState(card.title);
 	const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
-	const isTaskCardOwnedByOtherProject = taskCardOwnedByOtherProjectWorkspaceId !== null;
+	const isTaskCardOwnedByOtherProject = historicalSnapshot != null || taskCardOwnedByOtherProjectWorkspaceId !== null;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
@@ -367,9 +401,10 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
 	// 嵌套，也不改标题几何。其他角色不变。
 	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
-		isCrossProjectTaskSwitcherRowCopy && onClick != null;
+		(isCrossProjectTaskSwitcherRowCopy || historicalSnapshot != null) && onClick != null;
 	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
 	const isHoverPresentationShown =
+		historicalSnapshot != null ||
 		isHovered ||
 		openedQuickActionMenu !== null ||
 		crossProjectTaskSwitcherRowElements?.isPresentedAsHoveredFromFirstFrame === true;
@@ -915,7 +950,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
 							)}
 						>
-							<ColumnIndicator columnId={columnId} size={8} />
+							{columnId ? <ColumnIndicator columnId={columnId} size={8} /> : null}
 							<span className="truncate">{stageDisplayNameForTaskPinboardCopy}</span>
 						</button>
 					</Tooltip>
@@ -1075,7 +1110,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（副本不输出，保唯一）。
 			data-verification-anchor={emitsCanonicalDomIdentity ? boardTaskCardAnchorKey(card.id) : undefined}
 			data-task-card-render-role={renderRole}
-			data-column-id={columnId}
+			data-column-id={columnId ?? undefined}
 			data-selected={selected}
 			onClick={
 				isPassiveFocusedTaskCardCopy || isMobileDetailHeaderCopy
@@ -1163,6 +1198,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							cn(
 								"group/card relative rounded-md px-2 py-1.5",
 								showDirectoryCopyButton && "pr-8",
+								historicalSnapshot && "pr-14 sm:pr-10",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
 								isDragging && "bg-surface-3 shadow-lg",
 								isHoverPresentationShown && isCardInteractive && "bg-surface-3",
@@ -1368,27 +1404,44 @@ export const TaskCardBody = memo(function TaskCardBody({
 							/>
 						</Tooltip>
 					) : null}
-					<TaskCardPrimaryActionWithQuickOptions
-						open={openedQuickActionMenu === "prompt"}
-						onOpenChange={(open) =>
-							setOpenedQuickActionMenu((current) => (open ? "prompt" : current === "prompt" ? null : current))
-						}
-						icon={<FileText size={12} />}
-						primaryLabel="查看原始 Prompt"
-						primaryAccessibleLabel="View original prompt"
-						onPrimaryAction={() => setIsPromptViewerOpen(true)}
-						quickOption={{
-							label: "复制原始 Prompt",
-							icon: <Copy size={14} />,
-							onSelect: () => {
-								void writeTextToSystemClipboardWithInsecureContextFallback(card.prompt)
-									.then(() => {
-										showAppToast({ intent: "success", message: "已复制原始 Prompt", timeout: 2000 });
-									})
-									.catch(() => notifyError("无法复制原始 Prompt，请打开查看后手动复制。"));
-							},
-						}}
-					/>
+					{historicalContext ? (
+						<Tooltip side="bottom" content={revealHoverActionTooltip("查看完整 Prompt")}>
+							<Button
+								icon={<FileText size={12} />}
+								variant="ghost"
+								size="xs"
+								aria-label="查看完整 Prompt"
+								className="min-h-11 min-w-11 sm:min-h-7 sm:min-w-7"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									historicalContext.onOpenHistoricalPrompt();
+								}}
+							/>
+						</Tooltip>
+					) : (
+						<TaskCardPrimaryActionWithQuickOptions
+							open={openedQuickActionMenu === "prompt"}
+							onOpenChange={(open) =>
+								setOpenedQuickActionMenu((current) => (open ? "prompt" : current === "prompt" ? null : current))
+							}
+							icon={<FileText size={12} />}
+							primaryLabel="查看原始 Prompt"
+							primaryAccessibleLabel="View original prompt"
+							onPrimaryAction={() => setIsPromptViewerOpen(true)}
+							quickOption={{
+								label: "复制原始 Prompt",
+								icon: <Copy size={14} />,
+								onSelect: () => {
+									void writeTextToSystemClipboardWithInsecureContextFallback(card.prompt)
+										.then(() => {
+											showAppToast({ intent: "success", message: "已复制原始 Prompt", timeout: 2000 });
+										})
+										.catch(() => notifyError("无法复制原始 Prompt，请打开查看后手动复制。"));
+								},
+							}}
+						/>
+					)}
 					{/* 「In Progress 但从没真正起过会话」包括运行时 attach 时造的占位 summary：启动前段失败（如建 worktree
 					    时锁等待超时）后卡片上留下的正是它，不认它的话这张卡在看板上就没有任何重试入口。
 					    但占位形状也可能是硬中断后退化的老会话，所以占位时只在有**正面证据**（任务 worktree 不存在、
@@ -1527,6 +1580,40 @@ export const TaskCardBody = memo(function TaskCardBody({
 								{machineWaitingBadgeElement}
 							</div>
 						))}
+				{historicalSnapshot ? (
+					<div
+						className="mt-1 flex flex-col gap-1 text-xs text-text-secondary"
+						data-permanently-deleted-task-card=""
+					>
+						<div className="flex flex-wrap items-center gap-2">
+							<span
+								className="min-w-0 break-words"
+								title={historicalSnapshot.workspaceRepositoryPath ?? undefined}
+							>
+								{historicalContext?.historicalProjectName ?? historicalSnapshot.kanbanBoardCard.workspaceId}
+							</span>
+							<span className="font-mono">{card.id}</span>
+							<span>已永久删除</span>
+							<time
+								className="min-w-0 break-words"
+								dateTime={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toISOString()}
+								title={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toString()}
+							>
+								{new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toLocaleString()}
+							</time>
+						</div>
+						{historicalSnapshot.promptPreview !== null ? (
+							<p className="m-0 line-clamp-3 whitespace-pre-wrap break-words">
+								{historicalSnapshot.promptPreview || "删除前 Prompt 为空"}
+							</p>
+						) : (
+							<p className="m-0">删除前 Prompt 未留存或正文不可用，可查看其他版本。</p>
+						)}
+						{historicalSnapshot.matchedPromptVersions.includes("at_creation") ? (
+							<span>命中创建时 Prompt</span>
+						) : null}
+					</div>
+				) : null}
 				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
 				{sessionActivity ? (
 					<div
