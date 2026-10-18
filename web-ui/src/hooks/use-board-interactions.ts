@@ -27,6 +27,10 @@ import {
 } from "@/hooks/use-post-deploy-verification-done-entry-closure-dialog-for-board-moves-into-done";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
+import {
+	type TaskCommentBeforeMoveIntoDoneController,
+	useTaskCommentBeforeMoveIntoDone,
+} from "@/hooks/use-task-comment-before-move-into-done";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import type {
 	RuntimePostDeployVerificationDeploymentGroup,
@@ -64,6 +68,10 @@ import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
+import type {
+	TaskCardMoveIntoDoneRequestHandler,
+	TaskCommentToAppendWhenMovingIntoDone,
+} from "@/types/task-card-move-into-done-request";
 import {
 	getNextDetailTaskIdAfterTrashMove,
 	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
@@ -132,7 +140,9 @@ export interface UseBoardInteractionsResult {
 	handleDetailTaskDragEnd: (result: DropResult) => void;
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
-	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleMoveReviewCardToTrash: TaskCardMoveIntoDoneRequestHandler;
+	taskCommentBeforeMoveIntoDone: TaskCommentBeforeMoveIntoDoneController;
+	confirmTaskCommentBeforeMoveIntoDone: (commentText: string) => void;
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
@@ -245,9 +255,20 @@ export function useBoardInteractions({
 	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
 	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
 	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
-	const [pendingMoveToDone, setPendingMoveToDone] = useState<{ taskId: string; fromColumnId: BoardColumnId } | null>(
-		null,
-	);
+	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
+	const {
+		open: openTaskCommentBeforeMoveIntoDone,
+		complete: completeTaskCommentBeforeMoveIntoDone,
+		returnToEditing: returnToEditingTaskCommentBeforeMoveIntoDone,
+		suspendForConfirmation: suspendTaskCommentBeforeMoveIntoDone,
+		cancel: cancelTaskCommentBeforeMoveIntoDone,
+		prepareSubmission: prepareTaskCommentBeforeMoveIntoDone,
+	} = taskCommentBeforeMoveIntoDone;
+	const [pendingMoveToDone, setPendingMoveToDone] = useState<{
+		taskId: string;
+		fromColumnId: BoardColumnId;
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+	} | null>(null);
 	const [deleteTaskTarget, setDeleteTaskTarget] = useState<BoardCard | null>(null);
 	// 置顶原因对话框的在途请求（null = 未打开）。新 pin 与「编辑已有原因」共用同一个对话框，
 	// 靠 isEditingExistingPin 区分按钮文案与「确认时是否要写入置顶时间」。
@@ -761,10 +782,12 @@ export function useBoardInteractions({
 				boardMutationInitiator?: WebUiBoardMutationInitiator;
 				insertAtIndexWithinDoneBoardColumn?: number;
 				postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest;
+				taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 			},
 		): Promise<void> => {
 			const { board } = latestBoardInteractionStateRef.current;
 			if (!currentProjectId || !findCardSelection(board, taskId)) {
+				if (options?.taskCommentToAppendWhenMovingIntoDone) throw new Error("任务已不在当前项目中，未提交评论。");
 				return;
 			}
 			setSelectedTaskId((currentSelectedTaskId) =>
@@ -773,6 +796,9 @@ export function useBoardInteractions({
 			const result = await moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
 				workspaceId: currentProjectId,
 				taskId,
+				...(options?.taskCommentToAppendWhenMovingIntoDone
+					? { taskCommentToAppendWhenMovingIntoDone: options.taskCommentToAppendWhenMovingIntoDone }
+					: {}),
 				currentProjectBoardForOptimisticOverlay: board,
 				...(options?.insertAtIndexWithinDoneBoardColumn !== undefined
 					? { insertAtIndexWithinDoneBoardColumn: options.insertAtIndexWithinDoneBoardColumn }
@@ -795,7 +821,9 @@ export function useBoardInteractions({
 					})
 				) {
 					case "open_board_level_closure_reason_dialog_for_user_gesture":
+						if (options?.taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 						openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+							taskCommentToAppendWhenMovingIntoDone: options?.taskCommentToAppendWhenMovingIntoDone,
 							taskId,
 							insertAtIndexWithinDoneBoardColumn: options?.insertAtIndexWithinDoneBoardColumn,
 							runtimeRejectedMoveIntoDoneForMissingClosureReasons: true,
@@ -837,6 +865,7 @@ export function useBoardInteractions({
 			currentProjectId,
 			openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			setSelectedTaskId,
+			suspendTaskCommentBeforeMoveIntoDone,
 			showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard,
 		],
 	);
@@ -1198,11 +1227,38 @@ export function useBoardInteractions({
 	// Actually perform the move to Done. Pass the card's source column so the Review→Done slide
 	// animation only runs for Review cards and other columns fall back to a direct trash move.
 	const performMoveToTrash = useCallback(
-		(taskId: string, fromColumnId: BoardColumnId) => {
+		(
+			taskId: string,
+			fromColumnId: BoardColumnId,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
 				return;
 			}
 			setTaskMoveToTrashLoading(taskId, true);
+			if (taskCommentToAppendWhenMovingIntoDone) {
+				void requestMoveTaskToTrash(taskId, fromColumnId, {
+					boardMutationInitiator: "web_ui_user_gesture",
+					taskCommentToAppendWhenMovingIntoDone,
+				})
+					.then(() =>
+						completeTaskCommentBeforeMoveIntoDone(
+							taskId,
+							taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						),
+					)
+					.catch((error: unknown) => {
+						const message = error instanceof Error ? error.message : String(error);
+						if (!isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(message))
+							returnToEditingTaskCommentBeforeMoveIntoDone(
+								taskId,
+								message,
+								taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+							);
+					})
+					.finally(() => setTaskMoveToTrashLoading(taskId, false));
+				return;
+			}
 			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
 				boardMutationInitiator: "web_ui_user_gesture",
 			})
@@ -1213,7 +1269,13 @@ export function useBoardInteractions({
 					setTaskMoveToTrashLoading(taskId, false);
 				});
 		},
-		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
+		[
+			requestMoveTaskToTrashWithAnimation,
+			requestMoveTaskToTrash,
+			completeTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+			setTaskMoveToTrashLoading,
+		],
 	);
 
 	// Post-Deploy Verification 面板的移列入口。与 performMoveToTrash 等价——服务端的 Done 命令照常停会话、删 worktree，
@@ -1272,6 +1334,12 @@ export function useBoardInteractions({
 			const fromColumnId = getTaskColumnId(latestBoardInteractionStateRef.current.board, taskId);
 			if (!postDeployVerificationDoneEntryClosure || fromColumnId === null || fromColumnId === "trash") {
 				closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+				if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+					returnToEditingTaskCommentBeforeMoveIntoDone(
+						taskId,
+						"任务或完成条件已变化，未提交评论。",
+						dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+					);
 				return;
 			}
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
@@ -1282,9 +1350,15 @@ export function useBoardInteractions({
 			void requestMoveTaskToTrash(taskId, fromColumnId, {
 				boardMutationInitiator: "web_ui_user_gesture",
 				postDeployVerificationDoneEntryClosure,
+				taskCommentToAppendWhenMovingIntoDone: dialogRequest.taskCommentToAppendWhenMovingIntoDone,
 				...(insertAtIndexWithinDoneBoardColumn !== undefined ? { insertAtIndexWithinDoneBoardColumn } : {}),
 			})
 				.then(() => {
+					if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+						completeTaskCommentBeforeMoveIntoDone(
+							taskId,
+							dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						);
 					closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
 				})
 				.catch((error: unknown) => {
@@ -1313,6 +1387,12 @@ export function useBoardInteractions({
 						return;
 					}
 					closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+					if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskCommentBeforeMoveIntoDone(
+							taskId,
+							moveIntoDoneFailureMessage,
+							dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						);
 				})
 				.finally(() => {
 					setTaskMoveToTrashLoading(taskId, false);
@@ -1322,6 +1402,8 @@ export function useBoardInteractions({
 			closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 			markPostDeployVerificationDoneEntryClosureDialogTaskRejectedByRuntime,
+			completeTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
 			postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			requestMoveTaskToTrash,
 			setIsPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
@@ -1333,8 +1415,13 @@ export function useBoardInteractions({
 		if (isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting) {
 			return;
 		}
+		const commentRequest = postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone?.dialogRequest;
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+		if (commentRequest?.taskCommentToAppendWhenMovingIntoDone)
+			returnToEditingTaskCommentBeforeMoveIntoDone(commentRequest.taskId);
 	}, [
+		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
+		returnToEditingTaskCommentBeforeMoveIntoDone,
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 	]);
@@ -1344,8 +1431,14 @@ export function useBoardInteractions({
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
 	// 受 Post-Deploy Verification 门禁（有未勾项）的卡改开原因对话框：跳过 Validation 的确认是它的条件段落，不叠两层。
 	const requestMoveToTrash = useCallback(
-		(taskId: string, fromColumnId: BoardColumnId) => {
+		(
+			taskId: string,
+			fromColumnId: BoardColumnId,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
+				if (taskCommentToAppendWhenMovingIntoDone)
+					returnToEditingTaskCommentBeforeMoveIntoDone(taskId, "任务操作仍在进行中，请稍后重试。");
 				return;
 			}
 			if (
@@ -1355,7 +1448,9 @@ export function useBoardInteractions({
 					taskId,
 				)
 			) {
+				if (taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 				openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+					taskCommentToAppendWhenMovingIntoDone,
 					taskId,
 					insertAtIndexWithinDoneBoardColumn: undefined,
 					runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
@@ -1363,12 +1458,18 @@ export function useBoardInteractions({
 				return;
 			}
 			if (fromColumnId === "review" || fromColumnId === "in_progress") {
-				setPendingMoveToDone({ taskId, fromColumnId });
+				if (taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
+				setPendingMoveToDone({ taskId, fromColumnId, taskCommentToAppendWhenMovingIntoDone });
 				return;
 			}
-			performMoveToTrash(taskId, fromColumnId);
+			performMoveToTrash(taskId, fromColumnId, taskCommentToAppendWhenMovingIntoDone);
 		},
-		[openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone, performMoveToTrash],
+		[
+			openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
+			performMoveToTrash,
+			suspendTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+		],
 	);
 
 	const handleMoveToTrash = useCallback(() => {
@@ -1378,24 +1479,78 @@ export function useBoardInteractions({
 		requestMoveToTrash(selectedCard.card.id, selectedCard.column.id);
 	}, [requestMoveToTrash, selectedCard]);
 
-	const handleMoveReviewCardToTrash = useCallback(
-		(taskId: string) => {
+	const handleMoveReviewCardToTrash = useCallback<TaskCardMoveIntoDoneRequestHandler>(
+		(taskId, options) => {
 			const { board } = latestBoardInteractionStateRef.current;
+			const selection = findCardSelection(board, taskId);
+			if (options?.requestTaskCommentBeforeMovingIntoDone) {
+				if (currentProjectId && selection) openTaskCommentBeforeMoveIntoDone(currentProjectId, selection.card);
+				return;
+			}
 			requestMoveToTrash(taskId, getTaskColumnId(board, taskId) ?? "review");
 		},
-		[requestMoveToTrash],
+		[currentProjectId, openTaskCommentBeforeMoveIntoDone, requestMoveToTrash],
+	);
+
+	const confirmTaskCommentBeforeMoveIntoDone = useCallback(
+		(commentText: string) => {
+			const request = taskCommentBeforeMoveIntoDone.request;
+			if (!request) return;
+			const selection = findCardSelection(latestBoardInteractionStateRef.current.board, request.taskId);
+			if (request.workspaceId !== currentProjectId || !selection) {
+				returnToEditingTaskCommentBeforeMoveIntoDone(request.taskId, "任务已移动或当前项目已切换，未提交评论。");
+				return;
+			}
+			const comment = prepareTaskCommentBeforeMoveIntoDone(commentText);
+			if (!comment) return;
+			if (selection.column.id === "trash") {
+				// 响应可能在写盘后丢失；仅用广播中已保存的同 ID、同正文评论结算原草稿。
+				if (
+					selection.card.taskCommentEntries?.some(
+						(entry) =>
+							entry.taskCommentEntryId === comment.taskCommentEntryId &&
+							entry.commentText === comment.commentText,
+					)
+				)
+					completeTaskCommentBeforeMoveIntoDone(request.taskId, comment.taskCommentEntryId);
+				else
+					returnToEditingTaskCommentBeforeMoveIntoDone(
+						request.taskId,
+						"任务已移动或评论已变化，未提交评论。",
+						comment.taskCommentEntryId,
+					);
+				return;
+			}
+			requestMoveToTrash(request.taskId, selection.column.id, comment);
+		},
+		[
+			taskCommentBeforeMoveIntoDone.request,
+			currentProjectId,
+			completeTaskCommentBeforeMoveIntoDone,
+			prepareTaskCommentBeforeMoveIntoDone,
+			requestMoveToTrash,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+		],
 	);
 
 	const confirmMoveToDone = useCallback(() => {
 		if (pendingMoveToDone) {
-			performMoveToTrash(pendingMoveToDone.taskId, pendingMoveToDone.fromColumnId);
+			// 本次命令尚未执行时保留确认，草稿仍可取消或在其他操作结束后重试。
+			if (moveToTrashLoadingByIdRef.current[pendingMoveToDone.taskId]) return;
+			performMoveToTrash(
+				pendingMoveToDone.taskId,
+				pendingMoveToDone.fromColumnId,
+				pendingMoveToDone.taskCommentToAppendWhenMovingIntoDone,
+			);
 		}
 		setPendingMoveToDone(null);
 	}, [pendingMoveToDone, performMoveToTrash]);
 
 	const cancelMoveToDone = useCallback(() => {
+		if (pendingMoveToDone?.taskCommentToAppendWhenMovingIntoDone)
+			returnToEditingTaskCommentBeforeMoveIntoDone(pendingMoveToDone.taskId);
 		setPendingMoveToDone(null);
-	}, []);
+	}, [pendingMoveToDone, returnToEditingTaskCommentBeforeMoveIntoDone]);
 
 	// Pure board move into the manual-validation buffer. No session stop, no worktree teardown —
 	// the developer keeps the running agent/diff while validating. Goes through taskCardAction (the
@@ -1719,6 +1874,8 @@ export function useBoardInteractions({
 	]);
 
 	const resetBoardInteractionsState = useCallback(() => {
+		cancelTaskCommentBeforeMoveIntoDone();
+		setPendingMoveToDone(null);
 		previousSessionsRef.current = {};
 		previousAutoFlowBoardRef.current = null;
 		moveToTrashLoadingByIdRef.current = {};
@@ -1732,6 +1889,7 @@ export function useBoardInteractions({
 		setTaskPinboardPinReasonRequest(null);
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
 	}, [
+		cancelTaskCommentBeforeMoveIntoDone,
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		resetProgrammaticCardMoves,
 		resolvePendingProgrammaticStartMove,
@@ -1751,6 +1909,8 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		taskCommentBeforeMoveIntoDone,
+		confirmTaskCommentBeforeMoveIntoDone,
 		isMoveToDoneConfirmOpen: pendingMoveToDone !== null,
 		confirmMoveToDone,
 		cancelMoveToDone,

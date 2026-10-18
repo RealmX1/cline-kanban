@@ -13,11 +13,13 @@ import type {
 } from "@/runtime/types";
 import { completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHydratedInBrowser } from "@/state/post-deploy-verification-panel-completion-move-into-done-for-workspace-board-not-hydrated-in-browser";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 type CompletePostDeployVerificationMoveToDone = (
 	taskId: string,
 	fromColumnId: BoardColumnId,
 	postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest,
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
 ) => Promise<PostDeployVerificationMoveIntoDoneCompletionResult>;
 
 export interface PostDeployVerificationControllerInputsForBoardOrSingleProjectScope {
@@ -114,7 +116,12 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 
 	const completeRuntimeBoardSnapshotPostDeployVerificationMoveToDone =
 		useCallback<CompletePostDeployVerificationMoveToDone>(
-			async (taskId, fromColumnId, postDeployVerificationDoneEntryClosure) => {
+			async (
+				taskId,
+				fromColumnId,
+				postDeployVerificationDoneEntryClosure,
+				taskCommentToAppendWhenMovingIntoDone,
+			) => {
 				if (postDeployVerificationWorkspaceId === null) {
 					return { ok: false, moveIntoDoneFailureMessage: "没有可核对的项目" };
 				}
@@ -122,6 +129,7 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 					workspaceId: postDeployVerificationWorkspaceId,
 					taskId,
 					boardColumnIdObservedInBoardSnapshot: fromColumnId,
+					...(taskCommentToAppendWhenMovingIntoDone ? { taskCommentToAppendWhenMovingIntoDone } : {}),
 					...(postDeployVerificationDoneEntryClosure ? { postDeployVerificationDoneEntryClosure } : {}),
 				});
 				// 不论成败都重读：失败多半是列已变化，面板要显示新列。

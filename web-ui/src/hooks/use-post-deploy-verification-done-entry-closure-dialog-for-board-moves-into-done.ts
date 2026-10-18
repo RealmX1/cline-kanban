@@ -8,12 +8,14 @@ import {
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-closure-dialog-task-entries-from-read-model-and-board";
 import type { RuntimePostDeployVerificationDeploymentGroup } from "@/runtime/types";
 import type { BoardData } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 // 看板入口（卡片按钮 / 详情底栏 / 拖拽进 Done / 服务端拒绝兜底）的「带原因移入 Done」对话框状态。
 // 移列本身由 use-board-interactions 执行；这里只持有「哪张卡在等原因」与对话框条目（由读模型 + 看板现算），
 // 以及「浏览器端自动化撞上门禁只提示一次」的去重。PDV 面板自己的完成流另有一份对话框（在 controller 里）。
 
 export interface PostDeployVerificationDoneEntryClosureDialogRequestForBoardMoveIntoDone {
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	taskId: string;
 	// 拖拽进 Done 的落点；按钮入口缺省（列顶）。
 	insertAtIndexWithinDoneBoardColumn: number | undefined;

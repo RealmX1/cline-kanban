@@ -264,6 +264,261 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		return latestSnapshot;
 	}
 
+	it("评论确认后才发单次 Done 命令，空白输入无效，成功清空草稿", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
+		await act(async () =>
+			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, { requestTaskCommentBeforeMovingIntoDone: true }),
+		);
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request?.phase).toBe("editing");
+		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("   "));
+		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("  确认完成\n保留换行  "));
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledWith(
+			"project-1",
+			expect.objectContaining({
+				taskId: GATED_TASK_ID,
+				taskCommentToAppendWhenMovingIntoDone: {
+					taskCommentEntryId: expect.any(String),
+					commentText: "确认完成\n保留换行",
+				},
+			}),
+		);
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+	});
+
+	it("Review 评论经过原有跳过 Validation 确认，取消返回草稿，再确认成功", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"), activeGroup: null });
+		await act(async () =>
+			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, { requestTaskCommentBeforeMovingIntoDone: true }),
+		);
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("检查通过"));
+		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request?.phase).toBe("awaiting_confirmation");
+		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+		await act(async () => requireSnapshot().cancelMoveToDone());
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+			phase: "editing",
+			commentText: "检查通过",
+		});
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("检查通过"));
+		await act(async () => requireSnapshot().confirmMoveToDone());
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+	});
+
+	it.each(["取消评论确认", "在途结束后重试成功", "在途结束后重试失败"])(
+		"同卡普通 Done 在途时保留带评论的 Skip Validation 确认：%s",
+		async (followupAction) => {
+			let finishOrdinaryMoveIntoDone: (() => void) | undefined;
+			const ordinaryMoveIntoDoneCompletion = new Promise<void>((resolve) => {
+				finishOrdinaryMoveIntoDone = resolve;
+			});
+			const programmaticCardMoves = mockProgrammaticCardMoves({
+				requestMoveTaskToTrashWithAnimation: vi.fn(() => ordinaryMoveIntoDoneCompletion),
+			});
+			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"), activeGroup: null });
+			await act(async () =>
+				requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, {
+					requestTaskCommentBeforeMovingIntoDone: true,
+				}),
+			);
+			await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("并发操作期间保留的评论"));
+			const originalCommentId = requireSnapshot().taskCommentBeforeMoveIntoDone.request!.taskCommentEntryId;
+			// 模拟确认期间看板广播先移入 Validation，随后普通 Done 动作开始，评论确认仍等待用户决定。
+			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
+			await act(async () => requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID));
+			expect(programmaticCardMoves.requestMoveTaskToTrashWithAnimation).toHaveBeenCalledOnce();
+			expect(requireSnapshot().moveToTrashLoadingById[GATED_TASK_ID]).toBe(true);
+			await act(async () => requireSnapshot().confirmMoveToDone());
+			expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
+			expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+				phase: "awaiting_confirmation",
+				taskCommentEntryId: originalCommentId,
+				commentText: "并发操作期间保留的评论",
+			});
+			expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+			if (followupAction === "取消评论确认") {
+				await act(async () => requireSnapshot().cancelMoveToDone());
+				expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
+				expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+					phase: "editing",
+					taskCommentEntryId: originalCommentId,
+					commentText: "并发操作期间保留的评论",
+				});
+			}
+			await act(async () => finishOrdinaryMoveIntoDone!());
+			expect(requireSnapshot().moveToTrashLoadingById[GATED_TASK_ID]).toBeFalsy();
+			if (followupAction === "取消评论确认") {
+				expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+				return;
+			}
+			if (followupAction === "在途结束后重试失败")
+				moveTaskCardIntoDoneInWorkspaceMock.mockRejectedValueOnce(new Error("任务已完成，未提交本次评论"));
+			await act(async () => requireSnapshot().confirmMoveToDone());
+			expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
+			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledWith(
+				"project-1",
+				expect.objectContaining({
+					taskCommentToAppendWhenMovingIntoDone: {
+						taskCommentEntryId: originalCommentId,
+						commentText: "并发操作期间保留的评论",
+					},
+				}),
+			);
+			if (followupAction === "在途结束后重试失败")
+				expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+					phase: "editing",
+					taskCommentEntryId: originalCommentId,
+					commentText: "并发操作期间保留的评论",
+					errorMessage: "任务已完成，未提交本次评论",
+				});
+			else expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+		},
+	);
+
+	it("评论与 PDV 原因一并传递；取消原因确认时返回原评论", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({
+			board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"),
+			activeGroup: createActiveGroupWithTask(GATED_TASK_WITH_UNCHECKED_ITEM),
+		});
+		await act(async () =>
+			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, { requestTaskCommentBeforeMovingIntoDone: true }),
+		);
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("有原因完成"));
+		expect(
+			requireSnapshot().postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone?.dialogRequest
+				.taskCommentToAppendWhenMovingIntoDone?.commentText,
+		).toBe("有原因完成");
+		await act(async () => requireSnapshot().cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone());
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+			phase: "editing",
+			commentText: "有原因完成",
+		});
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("有原因完成"));
+		const closure = {
+			uncheckedChecklistItemClosureReasons: [
+				{
+					checklistItemId: "authored:guided",
+					uncheckedChecklistItemClosureReasonCode: "manual_reproduction_cost_exceeds_verification_value" as const,
+				},
+			],
+			confirmedAcknowledgements: ["skip_validation" as const],
+		};
+		await act(async () =>
+			requireSnapshot().confirmPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone({
+				[GATED_TASK_ID]: closure,
+			}),
+		);
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledWith(
+			"project-1",
+			expect.objectContaining({
+				postDeployVerificationDoneEntryClosure: closure,
+				taskCommentToAppendWhenMovingIntoDone: expect.objectContaining({ commentText: "有原因完成" }),
+			}),
+		);
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+	});
+
+	it("网络失败保留评论，重试沿用同一评论 ID", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
+		moveTaskCardIntoDoneInWorkspaceMock.mockRejectedValueOnce(new Error("网络失败"));
+		await act(async () =>
+			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, { requestTaskCommentBeforeMovingIntoDone: true }),
+		);
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("重试保留"));
+		const failedRequest = requireSnapshot().taskCommentBeforeMoveIntoDone.request;
+		expect(failedRequest).toMatchObject({
+			phase: "editing",
+			commentText: "重试保留",
+			errorMessage: expect.stringContaining("网络失败"),
+		});
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("重试保留"));
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenNthCalledWith(
+			2,
+			"project-1",
+			expect.objectContaining({
+				taskCommentToAppendWhenMovingIntoDone: expect.objectContaining({
+					taskCommentEntryId: failedRequest?.taskCommentEntryId,
+				}),
+			}),
+		);
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+	});
+
+	it("评论已保存但响应丢失时，Done 广播后的同文重试结算草稿且不重复执行命令", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
+		const persistedDoneBoard = createBoardWithTaskInColumn(GATED_TASK_ID, "trash");
+		const persistedTask = persistedDoneBoard.columns.find((column) => column.id === "trash")!.cards[0]!;
+		moveTaskCardIntoDoneInWorkspaceMock.mockImplementationOnce(async (_workspaceId, request) => {
+			persistedTask.taskCommentEntries = [
+				{ ...request.taskCommentToAppendWhenMovingIntoDone, createdAt: 2, updatedAt: 2 },
+			];
+			throw new Error("保存后的网络响应丢失");
+		});
+		await act(async () =>
+			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, { requestTaskCommentBeforeMovingIntoDone: true }),
+		);
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("已保存的完成评论"));
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+			phase: "editing",
+			commentText: "已保存的完成评论",
+			errorMessage: "保存后的网络响应丢失",
+		});
+		await renderHarness({ board: persistedDoneBoard, activeGroup: null });
+		await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("  已保存的完成评论  "));
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+		expect(persistedTask.taskCommentEntries).toHaveLength(1);
+	});
+
+	it.each(["缺少本次评论", "同文但不同 ID", "同 ID 但不同正文", "重试时改写正文"])(
+		"其他操作已移入 Done：%s 时保留草稿且不事后补加评论",
+		async (mismatch) => {
+			mockProgrammaticCardMoves();
+			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
+			moveTaskCardIntoDoneInWorkspaceMock.mockRejectedValueOnce(new Error("网络失败"));
+			await act(async () =>
+				requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, {
+					requestTaskCommentBeforeMovingIntoDone: true,
+				}),
+			);
+			await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("尚待确认的完成评论"));
+			const commentId = requireSnapshot().taskCommentBeforeMoveIntoDone.request!.taskCommentEntryId;
+			const doneBoard = createBoardWithTaskInColumn(GATED_TASK_ID, "trash");
+			const doneTask = doneBoard.columns.find((column) => column.id === "trash")!.cards[0]!;
+			doneTask.taskCommentEntries =
+				mismatch === "缺少本次评论"
+					? []
+					: [
+							{
+								taskCommentEntryId: mismatch === "同文但不同 ID" ? "另一条评论" : commentId,
+								commentText: mismatch === "同 ID 但不同正文" ? "另一段正文" : "尚待确认的完成评论",
+								createdAt: 2,
+								updatedAt: 2,
+							},
+						];
+			await renderHarness({ board: doneBoard, activeGroup: null });
+			await act(async () =>
+				requireSnapshot().confirmTaskCommentBeforeMoveIntoDone(
+					mismatch === "重试时改写正文" ? "改写后的完成评论" : "尚待确认的完成评论",
+				),
+			);
+			expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
+				phase: "editing",
+				errorMessage: expect.stringContaining("未提交评论"),
+			});
+			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+		},
+	);
+
 	it("卡片按钮移入 Done：有未勾项先开原因对话框（不弹跳过 Validation 的确认、不发命令），确认后带原因移列", async () => {
 		mockProgrammaticCardMoves();
 		await renderHarness({

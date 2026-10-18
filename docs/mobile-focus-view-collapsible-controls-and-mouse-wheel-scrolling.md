@@ -8,7 +8,7 @@
 
 `use-mobile-focus-view-collapsible-controls.ts` 管理上下工具状态并复用既有 `use-mobile-focus-view-idle-collapse-controller.ts`。App 中唯一有效的计时器覆盖全局顶栏和详情；独立挂载 CardDetailView 时才启用其本地控制器。Task Card 仍管理自己的展开状态，只消费同一收起通知。组件靠隐藏工具区域保留 agent、当前页签及草稿；虚拟按键栏本身可卸载。
 
-编辑可折叠区域中的输入、选择文字和打开弹窗会暂停收起。长按滚轮每一步记录真实用户活动；Agent 输出和程序化 `scroll` 不续期。手机根布局跟随 `visualViewport.height`，使软键盘出现后的常驻按钮仍位于可视区内。
+编辑可折叠区域中的输入、选择文字和打开弹窗会暂停收起。任务卡快捷菜单经 Portal 展开时也暂停：菜单带 `data-mobile-focus-view-idle-collapse-suspension`，控制器按其 `data-state="open"` 判断，避免菜单打开后卡体被闲置收起。长按滚轮每一步记录真实用户活动；Agent 输出和程序化 `scroll` 不续期。手机根布局跟随 `visualViewport.height`，使软键盘出现后的常驻按钮仍位于可视区内。
 
 PTY 面板的工具和阅读模式头部共用上方状态；ACP 对话面板的通道工具也跟随该状态，消息与 composer 不折叠。
 
