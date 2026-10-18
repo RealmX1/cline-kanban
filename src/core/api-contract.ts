@@ -1471,6 +1471,13 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 // 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	// 评论与移列在同一次保存里生效；稳定 ID 供网络重试去重，时间由服务端填写。
+	taskCommentToAppendWhenMovingIntoDone: z
+		.object({
+			taskCommentEntryId: z.string().min(1),
+			commentText: z.string().trim().min(1),
+		})
+		.optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	// 拖放进 Done 的落点；缺省 = 列顶（CLI / 程序化移入不传）。卡片本来就在 Done 时忽略。
 	insertAtIndexWithinDoneBoardColumn: z.number().int().nonnegative().optional(),

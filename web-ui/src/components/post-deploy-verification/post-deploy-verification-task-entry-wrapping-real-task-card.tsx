@@ -20,6 +20,7 @@ import type {
 import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
 import { findCardSelection } from "@/state/board-state";
 import type { BoardCard, BoardData } from "@/types";
+import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 
 // PDV 面板的一个任务条目：上半部分**直接渲染真实的任务卡体**（TaskCardBody，紧凑密度、角色
 // task_card_copy_in_post_deploy_verification_panel_entry），任务信息与动作和看板上那张卡逐字一致；
@@ -69,7 +70,7 @@ export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
 	onAddCustomChecklistItem: (label: string) => void;
 	onRemoveCustomChecklistItem: (itemId: string) => void;
 	onRunVerificationItem: (itemId: string) => void;
-	onRequestComplete: () => void;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
 	onSelectTask: () => void;
 	// 「定位并核对」中 anchor.view==="board" 时导航回看板。
 	onNavigateToBoard: () => void;
@@ -89,7 +90,7 @@ function buildTaskCardActionHandlersForRuntimeBoardSnapshotTaskCardCopy(input: {
 	workspaceIdOwningRuntimeBoardSnapshot: string;
 	interactive: boolean;
 	isCompleting: boolean;
-	onRequestComplete: () => void;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
 	onActivateTaskCardOpeningTaskInItsProject: (card: BoardCard) => void;
 }): TaskCardActionHandlerBundle {
 	const openTaskCardInItsProjectToUseColumnActionThere = (): void =>
@@ -104,7 +105,7 @@ function buildTaskCardActionHandlersForRuntimeBoardSnapshotTaskCardCopy(input: {
 				})
 			).path,
 		onMoveToTrashTask: input.interactive
-			? () => input.onRequestComplete()
+			? (_taskId, options) => input.onRequestComplete(options)
 			: openTaskCardInItsProjectToUseColumnActionThere,
 		moveToTrashLoadingById: { [input.card.id]: input.isCompleting },
 		onStartTask: openTaskCardInItsProjectToUseColumnActionThere,
@@ -129,7 +130,7 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 	realTaskCardRenderingInputs: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
 	interactive: boolean;
 	isCompleting: boolean;
-	onRequestComplete: () => void;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
 	onSelectTask: () => void;
 }): ReactElement {
 	const selection = findCardSelection(board, taskId);
@@ -269,7 +270,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				onAddCustomChecklistItem={onAddCustomChecklistItem}
 				onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
 				onRunVerificationItem={onRunVerificationItem}
-				onRequestComplete={onRequestComplete}
+				onRequestComplete={() => onRequestComplete()}
 				onLocateChecklistItem={locateChecklistItem}
 			/>
 		</div>

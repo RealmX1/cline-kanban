@@ -195,10 +195,30 @@ describe("taskCardAction commands through the runtime procedure", () => {
 				targetBoardColumnId: "validation",
 				boardMutationInitiator: "web_ui_user_gesture",
 			});
-			await webUiPageCaller.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree({
+			await expect(
+				webUiPageCaller.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree({
+					taskId: "web01",
+					taskCommentToAppendWhenMovingIntoDone: {
+						taskCommentEntryId: "empty-completion-comment",
+						commentText: "  ",
+					},
+				}),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+			const completionRequest = {
 				taskId: "web01",
-				boardMutationInitiator: "web_ui_client_automation_auto_review_commit_mode_completion",
-			});
+				boardMutationInitiator: "web_ui_client_automation_auto_review_commit_mode_completion" as const,
+				taskCommentToAppendWhenMovingIntoDone: {
+					taskCommentEntryId: "durable-completion-comment",
+					commentText: "  真实持久化\n确认完成  ",
+				},
+			};
+			await webUiPageCaller.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				completionRequest,
+			);
+			// 同一请求经过真实 schema 再次重试，不追加评论或再次清理。
+			await webUiPageCaller.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				completionRequest,
+			);
 			// 页面置顶经唯一 taskCardAction 入口，并保留用户手势行动者证据。
 			await webUiPageCaller.taskCardAction.setTaskPinboardPinStateOfTaskCard({
 				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
@@ -241,6 +261,16 @@ describe("taskCardAction commands through the runtime procedure", () => {
 
 			// 动作只落在 scope 指向的项目 B；浏览器当前打开的项目 A 原样未动。
 			const boardOfOtherProject = await loadWorkspaceBoardById(otherProjectScope.workspaceId);
+			expect(
+				boardOfOtherProject.columns.find((column) => column.id === "trash")?.cards[0].taskCommentEntries,
+			).toEqual([
+				{
+					taskCommentEntryId: "durable-completion-comment",
+					commentText: "真实持久化\n确认完成",
+					createdAt: expect.any(Number),
+					updatedAt: expect.any(Number),
+				},
+			]);
 			expect(
 				boardOfOtherProject.columns.flatMap((column) => column.cards.map((card) => `${column.id}:${card.id}`)),
 			).toEqual(["in_progress:cli01", "validation:rev01", "trash:web01"]);

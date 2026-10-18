@@ -7,6 +7,7 @@ import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-acti
 import type { RuntimePostDeployVerificationDoneEntryClosureRequest } from "@/runtime/types";
 import { moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
 import type { BoardColumnId } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 const POST_DEPLOY_VERIFICATION_PANEL_COMPLETION_BOARD_MUTATION_INITIATOR: WebUiBoardMutationInitiator =
 	"web_ui_user_gesture_post_deploy_verification_panel_completion";
@@ -29,6 +30,7 @@ export async function completePostDeployVerificationPanelMoveIntoDoneForWorkspac
 	taskId: string;
 	boardColumnIdObservedInBoardSnapshot: BoardColumnId;
 	postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest;
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 }): Promise<PostDeployVerificationMoveIntoDoneCompletionResult> {
 	let taskCardLookup: Awaited<ReturnType<typeof readTaskCardWithBoardColumnInWorkspace>>;
 	try {
@@ -47,6 +49,9 @@ export async function completePostDeployVerificationPanelMoveIntoDoneForWorkspac
 		workspaceId: input.workspaceId,
 		taskId: input.taskId,
 		boardMutationInitiator: POST_DEPLOY_VERIFICATION_PANEL_COMPLETION_BOARD_MUTATION_INITIATOR,
+		...(input.taskCommentToAppendWhenMovingIntoDone
+			? { taskCommentToAppendWhenMovingIntoDone: input.taskCommentToAppendWhenMovingIntoDone }
+			: {}),
 		...(input.postDeployVerificationDoneEntryClosure
 			? { postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure }
 			: {}),

@@ -29,6 +29,7 @@ import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
+import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
@@ -1109,6 +1110,8 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		taskCommentBeforeMoveIntoDone,
+		confirmTaskCommentBeforeMoveIntoDone,
 		completePostDeployVerificationMoveToDone,
 		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
@@ -2191,6 +2194,10 @@ export default function App(): ReactElement {
 
 					<UpdateNotificationController />
 
+					<TaskCommentBeforeMoveIntoDoneDialog
+						controller={taskCommentBeforeMoveIntoDone}
+						onSubmit={confirmTaskCommentBeforeMoveIntoDone}
+					/>
 					<SkipValidationConfirmDialog
 						open={isMoveToDoneConfirmOpen}
 						onCancel={cancelMoveToDone}
@@ -2273,6 +2280,7 @@ export default function App(): ReactElement {
 								realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
 							}
 							isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
+								taskCommentBeforeMoveIntoDone.request !== null ||
 								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
 								isMoveToDoneConfirmOpen ||
 								deleteTaskTarget !== null ||

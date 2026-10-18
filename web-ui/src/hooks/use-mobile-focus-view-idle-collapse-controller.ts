@@ -26,10 +26,10 @@ function isIdleCollapseSuspended(focusViewRoot: HTMLElement): boolean {
 	) {
 		return true;
 	}
-	// 弹窗可能通过 Portal 挂到 body；只检查未关闭的语义弹窗，不依赖它的 DOM 归属。
+	// 弹窗及任务卡快捷菜单可能通过 Portal 挂到 body；展开期间暂停，不依赖它的 DOM 归属。
 	if (
 		document.querySelector(
-			"[role='dialog']:not([hidden]):not([data-state='closed']), [role='alertdialog']:not([hidden]):not([data-state='closed']), dialog[open]",
+			"[role='dialog']:not([hidden]):not([data-state='closed']), [role='alertdialog']:not([hidden]):not([data-state='closed']), dialog[open], [data-mobile-focus-view-idle-collapse-suspension][data-state='open']",
 		)
 	) {
 		return true;

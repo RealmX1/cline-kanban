@@ -487,6 +487,20 @@ export function createTaskCardActionApi(
 					workspaceScope.workspacePath,
 				);
 				const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+				const completionComment = input.taskCommentToAppendWhenMovingIntoDone;
+				const existingCompletionComment = completionComment
+					? found.taskCard.taskCommentEntries?.find(
+							(entry) => entry.taskCommentEntryId === completionComment.taskCommentEntryId,
+						)
+					: undefined;
+				if (
+					completionComment &&
+					((existingCompletionComment &&
+						existingCompletionComment.commentText !== completionComment.commentText) ||
+						(found.boardColumnId === "trash" && !existingCompletionComment))
+				) {
+					throw new TRPCError({ code: "CONFLICT", message: "任务或评论已被其他操作更新，未提交本次评论。" });
+				}
 				if (found.boardColumnId === "trash") {
 					return {
 						board: state.board,
@@ -498,7 +512,21 @@ export function createTaskCardActionApi(
 						save: false,
 					};
 				}
-				const trashed = moveTaskToColumn(state.board, input.taskId, "trash", undefined, {
+				const timestamp = Date.now();
+				const boardWithCompletionComment =
+					completionComment && !existingCompletionComment
+						? updateTask(
+								state.board,
+								input.taskId,
+								buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch(found.taskCard, {
+									taskCommentEntries: [
+										...(found.taskCard.taskCommentEntries ?? []),
+										{ ...completionComment, createdAt: timestamp, updatedAt: timestamp },
+									],
+								}),
+							).board
+						: state.board;
+				const trashed = moveTaskToColumn(boardWithCompletionComment, input.taskId, "trash", undefined, {
 					insertAtIndex: input.insertAtIndexWithinDoneBoardColumn,
 				});
 				if (!trashed.moved || !trashed.task) {

@@ -88,6 +88,11 @@ describe("已删除 Task 弹窗", () => {
 		expect(document.body.textContent).toContain("已永久删除");
 		expect(
 			document.querySelector(
+				'[data-task-card-render-role="permanently_deleted_task_history_card"] [aria-haspopup="menu"]',
+			),
+		).toBeNull();
+		expect(
+			document.querySelector(
 				'[aria-label="Start task"], [aria-label="Restore task"], [aria-label="Edit task title"], [data-task-directory-copy-actions]',
 			),
 		).toBeNull();
