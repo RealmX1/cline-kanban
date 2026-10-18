@@ -10,6 +10,7 @@ import {
 	STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS,
 	type StaleAgentTerminalSessionAutomaticResumePhase,
 } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
+import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import type * as PlatformModule from "@/utils/platform";
 
 const fitAddonProposeDimensionsMock = vi.hoisted(() => vi.fn<() => { cols: number; rows: number } | undefined>());
@@ -278,6 +279,7 @@ const appearance = {
 
 function createContainer(): HTMLDivElement {
 	const container = document.createElement("div");
+	container.getBoundingClientRect = () => new DOMRect(0, 0, 480, 320);
 	document.body.appendChild(container);
 	return container;
 }
@@ -380,6 +382,32 @@ describe("persistent-terminal-manager", () => {
 		document.body.replaceChildren();
 	});
 
+	it("滚轮按实际行高校准旧字段并保留标准行单位，隐藏终端拒绝投递", () => {
+		vi.useFakeTimers();
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 80, rows: 20 });
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		vi.advanceTimersByTime(100);
+		const wheelEvents: WheelEvent[] = [];
+		container.addEventListener("wheel", (event) => wheelEvents.push(event));
+		expect(terminal.scrollByMouseWheelLines(-3)).toBe(true);
+		expect(wheelEvents).toHaveLength(1);
+		expect(wheelEvents[0]).toMatchObject({
+			deltaY: -3,
+			deltaMode: 1,
+			// 每行 16px，xterm 向外取整后为 48px，普通历史正好滚动三行。
+			wheelDeltaY: 114,
+			wheelDelta: 114,
+			clientX: 240,
+			clientY: 160,
+			bubbles: true,
+		});
+		terminal.mount(container, appearance, { isVisible: false });
+		expect(terminal.scrollByMouseWheelLines(3)).toBe(false);
+		expect(wheelEvents).toHaveLength(1);
+	});
+
 	it("reclaims the oldest parked terminal beyond the cap, keeping mounted and newer parked ones", () => {
 		// mounted 终端（mount 后 visibleContainer 非 null → 非 parked）：永不参与 LRU 回收。
 		const mounted = ensurePersistentTerminal({ ...appearance, taskId: "task-keep", workspaceId: "workspace-1" });
@@ -448,6 +476,39 @@ describe("persistent-terminal-manager", () => {
 		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 100, rows: 31 });
 		await Promise.resolve().then(() => visibleObserver.callback([], visibleObserver));
 		vi.advanceTimersByTime(50);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
+			[80, 30],
+			[100, 31],
+		]);
+	});
+
+	it("CSS 隐藏页签保留最后可见尺寸，恢复可见后按实际尺寸调整", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-css-hidden",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		vi.advanceTimersByTime(20);
+		const observer = MockResizeObserver.instances.at(-1);
+		if (!observer) throw new Error("终端未注册 ResizeObserver");
+		expect(getTerminalGeometry("task-css-hidden")).toEqual({ cols: 80, rows: 30 });
+		fitAddonProposeDimensionsMock.mockClear();
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 10, rows: 6 });
+		container.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+		await Promise.resolve().then(() => observer.callback([], observer));
+		vi.advanceTimersByTime(50);
+		expect(fitAddonProposeDimensionsMock).not.toHaveBeenCalled();
+		expect(getTerminalGeometry("task-css-hidden")).toEqual({ cols: 80, rows: 30 });
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([[80, 30]]);
+
+		container.getBoundingClientRect = () => new DOMRect(0, 0, 600, 400);
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 100, rows: 31 });
+		await Promise.resolve().then(() => observer.callback([], observer));
+		vi.advanceTimersByTime(50);
+		expect(getTerminalGeometry("task-css-hidden")).toEqual({ cols: 100, rows: 31 });
 		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
 			[80, 30],
 			[100, 31],

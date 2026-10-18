@@ -291,6 +291,7 @@ export function usePersistentTerminalSession({
 			readScrollbackTranscript: () => terminalRef.current?.readScrollbackTranscript() ?? [],
 			hasScrollbackTranscriptContent: () => terminalRef.current?.hasScrollbackTranscriptContent() ?? false,
 			scrollToLatest: () => terminalRef.current?.scrollToLatest(),
+			scrollByMouseWheelLines: (lineDelta) => terminalRef.current?.scrollByMouseWheelLines(lineDelta) ?? false,
 		});
 	}, [taskId]);
 

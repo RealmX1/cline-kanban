@@ -52,9 +52,11 @@ import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-s
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import {
-	MobileFocusViewIdleCollapseControllerProvider,
-	useMobileFocusViewIdleCollapseController,
-} from "@/hooks/use-mobile-focus-view-idle-collapse-controller";
+	type MobileFocusViewCollapsibleControls,
+	MobileFocusViewCollapsibleControlsProvider,
+	useMobileFocusViewCollapsibleControls,
+} from "@/hooks/use-mobile-focus-view-collapsible-controls";
+import { MobileFocusViewIdleCollapseControllerProvider } from "@/hooks/use-mobile-focus-view-idle-collapse-controller";
 import type { StoredPrompt } from "@/hooks/use-prompt-library";
 import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
 import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
@@ -674,6 +676,8 @@ function DiffToolbar({
 }
 
 export function CardDetailView({
+	mobileFocusViewControls,
+	onBackToBoard,
 	selection,
 	currentProjectId,
 	workspacePath,
@@ -746,6 +750,8 @@ export function CardDetailView({
 	explorationThreadGraph,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
+	mobileFocusViewControls?: MobileFocusViewCollapsibleControls;
+	onBackToBoard?: () => void;
 	selection: CardSelection;
 	currentProjectId: string | null;
 	workspacePath?: string | null;
@@ -849,13 +855,15 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
-	const mobileFocusViewRootRef = useRef<HTMLDivElement>(null);
 	const mobileFocusedTaskIdentity = JSON.stringify([currentProjectId, selection.card.id]);
-	const mobileFocusViewIdleCollapseController = useMobileFocusViewIdleCollapseController({
-		enabled: isMobile && isDocumentVisible,
+	const localMobileFocusViewControls = useMobileFocusViewCollapsibleControls({
+		enabled: mobileFocusViewControls === undefined && isMobile,
 		focusedTaskIdentity: mobileFocusedTaskIdentity,
-		focusViewRootRef: mobileFocusViewRootRef,
+		isDocumentVisible,
 	});
+	const mobileControls = mobileFocusViewControls ?? localMobileFocusViewControls;
+	const mobileFocusViewIdleCollapseController = mobileControls.idleCollapseController;
+	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const terminalThemeColors = useTerminalThemeColors();
@@ -1448,6 +1456,7 @@ export function CardDetailView({
 			taskId={selectedTaskConversationSessionId}
 			workspaceId={currentProjectId}
 			terminalEnabled={isTaskTerminalEnabled}
+			isMouseWheelScrollInteractionEnabled={!isMobile || mobileTab === "chat"}
 			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			// 切卡热键 alt+↑/↓ 由本视图注册，所以这个终端可以把它放行给 document。
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
@@ -1531,7 +1540,9 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-			<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
+			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
+				<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
+			</div>
 			{pendingUserDecision.transcriptRecoveryNotice ? (
 				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
 					{pendingUserDecision.transcriptRecoveryNotice}
@@ -1561,16 +1572,18 @@ export function CardDetailView({
 					}
 				/>
 			) : null}
-			<AgentRaisedUserDecisionHistoryPanel
-				workspaceId={currentProjectId}
-				taskId={selectedTaskConversationSessionId}
-				pendingUserDecisionIdentityForRefresh={
-					pendingUserDecision.decision
-						? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
-						: null
-				}
-			/>
-			<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
+			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
+				<AgentRaisedUserDecisionHistoryPanel
+					workspaceId={currentProjectId}
+					taskId={selectedTaskConversationSessionId}
+					pendingUserDecisionIdentityForRefresh={
+						pendingUserDecision.decision
+							? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+							: null
+					}
+				/>
+				<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
+			</div>
 			{agentSessionContent}
 		</div>
 	);
@@ -1589,6 +1602,8 @@ export function CardDetailView({
 				data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
 			>
 				<MobileFocusedTaskCardHeader
+					onBackToBoard={onBackToBoard}
+					navigationAndToolsControls={mobileControls}
 					key={mobileFocusedTaskIdentity}
 					stageDisplayName={selection.column.title}
 					idleCollapseController={mobileFocusViewIdleCollapseController}
@@ -1621,13 +1636,19 @@ export function CardDetailView({
 						},
 					})}
 				/>
-				<MobileDetailTabBar
-					activeTab={mobileTab}
-					onTabChange={handleMobileTabChange}
-					showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
-					queuedPromptTaskId={selectedTaskConversationSessionId}
-					queuedPromptCountIndicator={queuedPromptCountIndicator}
-				/>
+				<div
+					hidden={!mobileControls.upperNavigationAndToolsExpanded}
+					className="shrink-0"
+					data-mobile-focus-view-detail-tabs=""
+				>
+					<MobileDetailTabBar
+						activeTab={mobileTab}
+						onTabChange={handleMobileTabChange}
+						showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
+						queuedPromptTaskId={selectedTaskConversationSessionId}
+						queuedPromptCountIndicator={queuedPromptCountIndicator}
+					/>
+				</div>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
 						{/* Chat panel. 终端 agent 的阅读模式与虚拟按键条都由 AgentTerminalPanel 自己承载，
@@ -1780,7 +1801,9 @@ export function CardDetailView({
 		);
 		return (
 			<MobileFocusViewIdleCollapseControllerProvider value={mobileFocusViewIdleCollapseController}>
-				{mobileDetailLayout}
+				<MobileFocusViewCollapsibleControlsProvider value={mobileControls}>
+					{mobileDetailLayout}
+				</MobileFocusViewCollapsibleControlsProvider>
 			</MobileFocusViewIdleCollapseControllerProvider>
 		);
 	}

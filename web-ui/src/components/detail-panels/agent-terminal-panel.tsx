@@ -1,4 +1,5 @@
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { PanelBottomOpen } from "lucide-react";
 import { AgentConversationHeldByHarnessBackgroundSessionNotice } from "@/components/detail-panels/agent-conversation-held-by-harness-background-session-notice";
 import { AgentNativeConversationPersistenceRecoveryNotice } from "@/components/detail-panels/agent-native-conversation-persistence-recovery-notice";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
@@ -28,7 +29,8 @@ import {
 	X,
 } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
 import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-panels/terminal-scrollback-transcript-reader-panel";
 import { TerminalVirtualKeyInputBar } from "@/components/detail-panels/terminal-virtual-key-input-bar";
@@ -47,7 +49,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-is-mobile";
-
+import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "@/runtime/types";
 import {
 	type TaskAgentSessionStartRequestInFlightPhase,
@@ -57,6 +59,7 @@ import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
 import { wasCurrentRuntimeSessionIncarnationEndedByKanbanInactivityReclamation } from "@/terminal/stale-agent-terminal-session-automatic-resume-eligibility";
 import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
+import { getTerminalController } from "@/terminal/terminal-controller-registry";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform } from "@/utils/platform";
@@ -127,6 +130,8 @@ export interface AgentTerminalPanelProps {
 	terminalBackgroundColor?: string;
 	cursorColor?: string;
 	isVisible?: boolean;
+	// 手机页签只隐藏面板；滚轮交互单独禁用，避免触发终端卸载、尺寸清除与用户打开信号。
+	isMouseWheelScrollInteractionEnabled?: boolean;
 	onConnectionReady?: (taskId: string) => void;
 	agentCommand?: string | null;
 	onSendAgentCommand?: () => void;
@@ -786,7 +791,8 @@ function AgentTerminalPanelLayout({
 	panelBackgroundColor = "var(--color-surface-1)",
 	terminalBackgroundColor = "var(--color-surface-1)",
 	cursorColor: _cursorColor = "var(--color-text-primary)",
-	isVisible: _isVisible = true,
+	isVisible = true,
+	isMouseWheelScrollInteractionEnabled = true,
 	onConnectionReady: _onConnectionReady,
 	agentCommand,
 	onSendAgentCommand,
@@ -854,6 +860,28 @@ function AgentTerminalPanelLayout({
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
 	const showVirtualKeyInputBar = isMobile && !isSyntheticShellSession;
+	const mobileControls = useSharedMobileFocusViewCollapsibleControls();
+	const upperToolsExpanded = !mobileControls?.isEnabled || mobileControls.upperNavigationAndToolsExpanded;
+	const lowerKeysExpanded = !mobileControls?.isEnabled || mobileControls.lowerVirtualKeyBarExpanded;
+	const readerScrollContainerRef = useRef<HTMLElement | null>(null);
+	const areMouseWheelScrollControlsInteractive = isVisible && isMouseWheelScrollInteractionEnabled;
+	const scrollInteractionIdentity = JSON.stringify([
+		workspaceId,
+		taskId,
+		isTranscriptReaderOpen,
+		areMouseWheelScrollControlsInteractive,
+	]);
+	const scrollByMouseWheelLines = useCallback(
+		(lineDelta: number) => {
+			if (!areMouseWheelScrollControlsInteractive) return;
+			if (isTranscriptReaderOpen) {
+				readerScrollContainerRef.current?.scrollBy({ top: lineDelta * 20, behavior: "instant" });
+				return;
+			}
+			getTerminalController(taskId)?.scrollByMouseWheelLines?.(lineDelta);
+		},
+		[areMouseWheelScrollControlsInteractive, isTranscriptReaderOpen, taskId],
+	);
 	// 终端一片空白且没有任何回合在跑：给出解释与出路，而不是留一块纯白的 div 让用户猜是加载慢还是坏了。
 	// 来历不止一种（正在启动 / 启动失败 / 被回收 / 从没启动过 / 随运行时没了），见 classifyEmptyTerminalSessionCause。
 	// 合成 shell 排除在外：它本来就可能长时间没有输出，且没有「agent 会话」可重启。
@@ -891,40 +919,127 @@ function AgentTerminalPanelLayout({
 				background: panelBackgroundColor,
 			}}
 		>
-			{showSessionToolbar ? (
-				<>
+			<div
+				hidden={!upperToolsExpanded}
+				className="shrink-0"
+				data-mobile-focus-view-terminal-toolbar=""
+				data-mobile-focus-view-collapsible-region=""
+			>
+				{showSessionToolbar ? (
+					<>
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								gap: 8,
+								padding: "8px 12px",
+							}}
+						>
+							<div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+								<span
+									className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${statusTagColors[statusTagStyle]}`}
+								>
+									{statusLabel}
+								</span>
+								{stallElapsedMs !== null ? (
+									<span className="text-xs text-text-tertiary">
+										No output for {Math.round(stallElapsedMs / 1000)}s
+									</span>
+								) : null}
+							</div>
+							<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+								<TerminalTranscriptReaderToggleButton
+									isOpen={isTranscriptReaderOpen}
+									onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
+									iconSize={14}
+									variant="default"
+								/>
+								<Tooltip side="top" content="Find in terminal">
+									<Button
+										icon={<Search size={14} />}
+										variant="default"
+										size="sm"
+										onClick={openTerminalSearch}
+										aria-label="Find in terminal"
+									/>
+								</Tooltip>
+								<TerminalViewResyncAndAgentSessionRestartButtons
+									showAgentSessionRestartButton={showRefreshButton}
+									canRestartAgentSession={canRefresh}
+									isRestartingAgentSession={isRefreshing}
+									isResyncingTerminalView={isResyncingTerminalView}
+									isAgentSessionInActiveTurn={canStop}
+									onResyncTerminalView={resyncTerminalView}
+									onRestartAgentSession={refreshTerminal}
+									iconSize={14}
+									variant="default"
+								/>
+								<AgentSessionTransportSwitchButton
+									workspaceId={workspaceId}
+									taskId={taskId}
+									agentId={summary?.agentId ?? null}
+									currentSessionTransport="pty_terminal"
+									iconSize={14}
+									variant="default"
+								/>
+								<Button variant="default" size="sm" onClick={clearTerminal}>
+									Clear
+								</Button>
+								<Button
+									variant="default"
+									size="sm"
+									onClick={() => {
+										void stopTerminal();
+									}}
+									disabled={!canStop || isStopping}
+								>
+									Stop
+								</Button>
+							</div>
+						</div>
+						<div className="h-px bg-border" />
+					</>
+				) : showCompactHeader ? (
 					<div
 						style={{
 							display: "flex",
 							alignItems: "center",
 							justifyContent: "space-between",
 							gap: 8,
-							padding: "8px 12px",
+							padding: "6px 0 0 3px",
 						}}
 					>
-						<div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-							<span
-								className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${statusTagColors[statusTagStyle]}`}
-							>
-								{statusLabel}
+						<div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+							<span className="text-text-secondary" style={{ fontSize: 12 }}>
+								{minimalHeaderTitle}
 							</span>
+							{minimalHeaderSubtitle ? (
+								<span
+									className="truncate font-mono text-text-secondary"
+									style={{ fontSize: 10 }}
+									title={minimalHeaderSubtitle}
+								>
+									{minimalHeaderSubtitle}
+								</span>
+							) : null}
 							{stallElapsedMs !== null ? (
-								<span className="text-xs text-text-tertiary">
+								<span className="whitespace-nowrap text-text-tertiary" style={{ fontSize: 10 }}>
 									No output for {Math.round(stallElapsedMs / 1000)}s
 								</span>
 							) : null}
 						</div>
-						<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+						<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
 							<TerminalTranscriptReaderToggleButton
 								isOpen={isTranscriptReaderOpen}
 								onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
-								iconSize={14}
-								variant="default"
+								iconSize={12}
+								variant="ghost"
 							/>
 							<Tooltip side="top" content="Find in terminal">
 								<Button
-									icon={<Search size={14} />}
-									variant="default"
+									icon={<Search size={12} />}
+									variant="ghost"
 									size="sm"
 									onClick={openTerminalSearch}
 									aria-label="Find in terminal"
@@ -938,146 +1053,73 @@ function AgentTerminalPanelLayout({
 								isAgentSessionInActiveTurn={canStop}
 								onResyncTerminalView={resyncTerminalView}
 								onRestartAgentSession={refreshTerminal}
-								iconSize={14}
-								variant="default"
+								iconSize={12}
+								variant="ghost"
 							/>
-							<AgentSessionTransportSwitchButton
-								workspaceId={workspaceId}
-								taskId={taskId}
-								agentId={summary?.agentId ?? null}
-								currentSessionTransport="pty_terminal"
-								iconSize={14}
-								variant="default"
-							/>
-							<Button variant="default" size="sm" onClick={clearTerminal}>
-								Clear
-							</Button>
-							<Button
-								variant="default"
-								size="sm"
-								onClick={() => {
-									void stopTerminal();
-								}}
-								disabled={!canStop || isStopping}
-							>
-								Stop
-							</Button>
+							{agentLabel && onSendAgentCommand ? (
+								<Tooltip side="top" content={`Run ${agentLabel}`}>
+									<Button
+										icon={<MessageSquare size={12} />}
+										variant="ghost"
+										size="sm"
+										onClick={onSendAgentCommand}
+										aria-label={`Run ${agentLabel}`}
+									/>
+								</Tooltip>
+							) : null}
+							{onToggleExpand ? (
+								<Tooltip
+									side="top"
+									content={
+										<span
+											style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
+										>
+											<span>{isExpanded ? "Collapse" : "Expand"}</span>
+											<span
+												style={{
+													display: "inline-flex",
+													alignItems: "center",
+													gap: 2,
+													whiteSpace: "nowrap",
+												}}
+											>
+												<span>(</span>
+												{isMacPlatform ? <Command size={11} /> : <span style={{ fontSize: 11 }}>Ctrl</span>}
+												<span>+ M)</span>
+											</span>
+										</span>
+									}
+								>
+									<Button
+										icon={isExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+										variant="ghost"
+										size="sm"
+										onClick={onToggleExpand}
+										aria-label={isExpanded ? "Collapse terminal" : "Expand terminal"}
+									/>
+								</Tooltip>
+							) : null}
+							{onClose ? (
+								<Button
+									icon={<X size={14} />}
+									variant="ghost"
+									size="sm"
+									onClick={onClose}
+									aria-label="Close terminal"
+								/>
+							) : null}
 						</div>
 					</div>
-					<div className="h-px bg-border" />
-				</>
-			) : showCompactHeader ? (
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						gap: 8,
-						padding: "6px 0 0 3px",
-					}}
-				>
-					<div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-						<span className="text-text-secondary" style={{ fontSize: 12 }}>
-							{minimalHeaderTitle}
-						</span>
-						{minimalHeaderSubtitle ? (
-							<span
-								className="truncate font-mono text-text-secondary"
-								style={{ fontSize: 10 }}
-								title={minimalHeaderSubtitle}
-							>
-								{minimalHeaderSubtitle}
-							</span>
-						) : null}
-						{stallElapsedMs !== null ? (
-							<span className="whitespace-nowrap text-text-tertiary" style={{ fontSize: 10 }}>
-								No output for {Math.round(stallElapsedMs / 1000)}s
-							</span>
-						) : null}
-					</div>
-					<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
-						<TerminalTranscriptReaderToggleButton
-							isOpen={isTranscriptReaderOpen}
-							onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
-							iconSize={12}
-							variant="ghost"
-						/>
-						<Tooltip side="top" content="Find in terminal">
-							<Button
-								icon={<Search size={12} />}
-								variant="ghost"
-								size="sm"
-								onClick={openTerminalSearch}
-								aria-label="Find in terminal"
-							/>
-						</Tooltip>
-						<TerminalViewResyncAndAgentSessionRestartButtons
-							showAgentSessionRestartButton={showRefreshButton}
-							canRestartAgentSession={canRefresh}
-							isRestartingAgentSession={isRefreshing}
-							isResyncingTerminalView={isResyncingTerminalView}
-							isAgentSessionInActiveTurn={canStop}
-							onResyncTerminalView={resyncTerminalView}
-							onRestartAgentSession={refreshTerminal}
-							iconSize={12}
-							variant="ghost"
-						/>
-						{agentLabel && onSendAgentCommand ? (
-							<Tooltip side="top" content={`Run ${agentLabel}`}>
-								<Button
-									icon={<MessageSquare size={12} />}
-									variant="ghost"
-									size="sm"
-									onClick={onSendAgentCommand}
-									aria-label={`Run ${agentLabel}`}
-								/>
-							</Tooltip>
-						) : null}
-						{onToggleExpand ? (
-							<Tooltip
-								side="top"
-								content={
-									<span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-										<span>{isExpanded ? "Collapse" : "Expand"}</span>
-										<span
-											style={{ display: "inline-flex", alignItems: "center", gap: 2, whiteSpace: "nowrap" }}
-										>
-											<span>(</span>
-											{isMacPlatform ? <Command size={11} /> : <span style={{ fontSize: 11 }}>Ctrl</span>}
-											<span>+ M)</span>
-										</span>
-									</span>
-								}
-							>
-								<Button
-									icon={isExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
-									variant="ghost"
-									size="sm"
-									onClick={onToggleExpand}
-									aria-label={isExpanded ? "Collapse terminal" : "Expand terminal"}
-								/>
-							</Tooltip>
-						) : null}
-						{onClose ? (
-							<Button
-								icon={<X size={14} />}
-								variant="ghost"
-								size="sm"
-								onClick={onClose}
-								aria-label="Close terminal"
-							/>
-						) : null}
-					</div>
-				</div>
-			) : null}
-			<TerminalSearchBar
-				isOpen={isSearchOpen}
-				openRequestKey={searchOpenRequestKey}
-				results={searchResults}
-				onClose={closeTerminalSearch}
-				onNext={findNextInTerminal}
-				onPrevious={findPreviousInTerminal}
-			/>
+				) : null}
+				<TerminalSearchBar
+					isOpen={isSearchOpen}
+					openRequestKey={searchOpenRequestKey}
+					results={searchResults}
+					onClose={closeTerminalSearch}
+					onNext={findNextInTerminal}
+					onPrevious={findPreviousInTerminal}
+				/>
+			</div>
 			{isAutomaticStaleSessionResumeInProgress ? (
 				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
 					<Spinner size={12} />
@@ -1131,7 +1173,11 @@ function AgentTerminalPanelLayout({
 				)}
 				{isTranscriptReaderOpen ? (
 					<div className="absolute inset-0 z-10 flex">
-						<TerminalScrollbackTranscriptReaderPanel taskId={taskId} isVisible />
+						<TerminalScrollbackTranscriptReaderPanel
+							taskId={taskId}
+							isVisible
+							scrollContainerRef={readerScrollContainerRef}
+						/>
 					</div>
 				) : null}
 				{showEmptyTerminalRecoveryState ? (
@@ -1145,40 +1191,68 @@ function AgentTerminalPanelLayout({
 						/>
 					</div>
 				) : null}
+				{showVirtualKeyInputBar && !lowerKeysExpanded ? (
+					<div
+						className="absolute bottom-[max(0.5rem,env(safe-area-inset-bottom))] right-[max(0.5rem,env(safe-area-inset-right))] z-20 flex flex-col gap-1"
+						data-mobile-terminal-floating-scroll-controls=""
+					>
+						<TerminalMouseWheelScrollButtons
+							interactionIdentity={scrollInteractionIdentity}
+							onScrollByMouseWheelLines={scrollByMouseWheelLines}
+							isFloating
+						/>
+						<button
+							type="button"
+							aria-label="展开下方按键栏"
+							onClick={mobileControls?.expandLowerVirtualKeyBar}
+							className="mt-1 inline-flex h-11 w-11 items-center justify-center rounded-md border border-border-bright bg-surface-2 text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+						>
+							<PanelBottomOpen size={16} />
+						</button>
+					</div>
+				) : null}
 			</div>
-			{showVirtualKeyInputBar ? <TerminalVirtualKeyInputBar taskId={taskId} /> : null}
+			{showVirtualKeyInputBar && lowerKeysExpanded ? (
+				<TerminalVirtualKeyInputBar
+					taskId={taskId}
+					onScrollByMouseWheelLines={scrollByMouseWheelLines}
+					scrollInteractionIdentity={scrollInteractionIdentity}
+				/>
+			) : null}
 			{lastError ? (
 				<div className="flex gap-2 rounded-none border-t border-status-red/30 bg-status-red/10 p-3 text-[13px] text-status-red">
 					{lastError}
 				</div>
 			) : null}
-			{(showMoveToTrash && onMoveToTrash) || (showMoveToValidation && onMoveToValidation) ? (
-				<div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 12px" }}>
-					<AgentTerminalReviewActions
-						taskId={taskId}
-						taskColumnId={taskColumnId}
-						onCommit={onCommit}
-						onOpenPr={onOpenPr}
-						isCommitLoading={isCommitLoading}
-						isOpenPrLoading={isOpenPrLoading}
-					/>
-					{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-						<Button variant="default" fill onClick={onCancelAutomaticAction}>
-							{cancelAutomaticActionLabel}
-						</Button>
-					) : null}
-					{showMoveToValidation && onMoveToValidation ? (
-						<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
-							{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
-						</Button>
-					) : null}
-					{showMoveToTrash && onMoveToTrash ? (
-						<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-							{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
-						</Button>
-					) : null}
-				</div>
-			) : null}
+			<div hidden={!lowerKeysExpanded} className="shrink-0">
+				{(showMoveToTrash && onMoveToTrash) || (showMoveToValidation && onMoveToValidation) ? (
+					<div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 12px" }}>
+						<AgentTerminalReviewActions
+							taskId={taskId}
+							taskColumnId={taskColumnId}
+							onCommit={onCommit}
+							onOpenPr={onOpenPr}
+							isCommitLoading={isCommitLoading}
+							isOpenPrLoading={isOpenPrLoading}
+						/>
+						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+							<Button variant="default" fill onClick={onCancelAutomaticAction}>
+								{cancelAutomaticActionLabel}
+							</Button>
+						) : null}
+						{showMoveToValidation && onMoveToValidation ? (
+							<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
+								{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
+							</Button>
+						) : null}
+						{showMoveToTrash && onMoveToTrash ? (
+							<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
+								{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
+							</Button>
+						) : null}
+					</div>
+				) : null}
+			</div>
 		</div>
 	);
 }

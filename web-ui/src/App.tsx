@@ -66,6 +66,7 @@ import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-w
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
@@ -1468,6 +1469,11 @@ export default function App(): ReactElement {
 		!isFocusViewCrossProjectTaskOpenInTransit && projectIdOwningHydratedBoard === projectRuntimeWorkspaceId
 			? selectedCard
 			: null;
+	const mobileFocusViewControls = useMobileFocusViewCollapsibleControls({
+		enabled: selectedCardRenderedInFocusView !== null,
+		focusedTaskIdentity: JSON.stringify([currentProjectId, selectedCardRenderedInFocusView?.card.id ?? null]),
+		isDocumentVisible,
+	});
 	const latestSelectedTaskChatMessage = selectLatestTaskChatMessageForTask(
 		selectedCard?.card.id,
 		latestTaskChatMessage,
@@ -1549,7 +1555,11 @@ export default function App(): ReactElement {
 			<LayoutCustomizationsProvider
 				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
 			>
-				<div className="flex h-[100svh] min-w-0 overflow-hidden">
+				<div
+					ref={mobileFocusViewControls.focusViewRootRef}
+					style={{ height: mobileFocusViewControls.visibleViewportHeightPx }}
+					className="flex h-[100svh] min-w-0 overflow-hidden"
+				>
 					{!isFocusViewChromeShown ? (
 						<ProjectNavigationPanel
 							projects={displayedProjects}
@@ -1578,135 +1588,148 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-						<TopBar
-							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
-							projectSwitcher={topBarProjectSwitcherState}
-							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
-							onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
-								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-									? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
-									: undefined
+						<div
+							hidden={
+								mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded
 							}
-							isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
-							onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
-							workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
-							isWorkspacePathLoading={shouldShowProjectLoadingState}
-							workspaceHint={navbarWorkspaceHint}
-							runtimeHint={navbarRuntimeHint}
-							selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
-							selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
-							showHomeGitSummary={
-								!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
-							}
-							runningGitAction={
-								isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
-									? null
-									: runningGitAction
-							}
-							onGitFetch={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("fetch");
+							className="shrink-0"
+							data-mobile-focus-view-global-navigation=""
+							data-mobile-focus-view-collapsible-region=""
+						>
+							<TopBar
+								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
+								projectSwitcher={topBarProjectSwitcherState}
+								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
+								onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
+									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+										? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
+										: undefined
+								}
+								isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+								onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
+								workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
+								isWorkspacePathLoading={shouldShowProjectLoadingState}
+								workspaceHint={navbarWorkspaceHint}
+								runtimeHint={navbarRuntimeHint}
+								selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
+								selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
+								showHomeGitSummary={
+									!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
+								}
+								runningGitAction={
+									isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
+										? null
+										: runningGitAction
+								}
+								onGitFetch={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("fetch");
+											}
+								}
+								onGitPull={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("pull");
+											}
+								}
+								onGitPush={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("push");
+											}
+								}
+								onToggleTerminal={
+									hasNoProjects ||
+									isCurrentProjectRuntimeUnavailable ||
+									isFocusViewCrossProjectTaskOpenInTransit
+										? undefined
+										: selectedCard
+											? handleToggleDetailTerminal
+											: handleToggleHomeTerminal
+								}
+								isTerminalOpen={
+									isFocusViewCrossProjectTaskOpenInTransit
+										? false
+										: selectedCard
+											? isDetailTerminalOpen
+											: showHomeBottomTerminal
+								}
+								isTerminalLoading={
+									isFocusViewCrossProjectTaskOpenInTransit
+										? false
+										: selectedCard
+											? isDetailTerminalStarting
+											: isHomeTerminalStarting
+								}
+								onOpenSettings={handleOpenSettings}
+								showDebugButton={debugModeEnabled}
+								onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
+								shortcuts={shortcuts}
+								selectedShortcutLabel={selectedShortcutLabel}
+								onSelectShortcutLabel={handleSelectShortcutLabel}
+								runningShortcutLabel={runningShortcutLabel}
+								onRunShortcut={handleRunShortcut}
+								onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
+								openTargetOptions={openTargetOptions}
+								openTargetOptionsFootnote={openTargetOptionsFootnote}
+								selectedOpenTargetId={selectedOpenTargetId}
+								onSelectOpenTarget={onSelectOpenTarget}
+								onOpenWorkspace={onOpenWorkspace}
+								canOpenWorkspace={canOpenWorkspace}
+								isOpeningWorkspace={isOpeningWorkspace}
+								onToggleGitHistory={
+									hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
+								}
+								isGitHistoryOpen={isGitHistoryOpen}
+								onToggleFindings={
+									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+										? handleToggleFindings
+										: undefined
+								}
+								isFindingsOpen={isFindingsOpen}
+								onToggleTaskChangesSidebar={
+									selectedCardRenderedInFocusView
+										? () => setIsTaskChangesSidebarOpen((open) => !open)
+										: undefined
+								}
+								isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
+								hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
+								connectionRetrySessions={connectionRetrySessions}
+								onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
+								onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+								notificationCenter={
+									<NotificationCenter
+										panelGroups={notificationCenter.panelGroups}
+										onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
+										hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
+										archiveReadError={notificationCenter.archiveReadError}
+										allGroups={notificationCenter.allGroups}
+										allEntriesSortedByTriggeredAtDescending={
+											notificationCenter.allEntriesSortedByTriggeredAtDescending
 										}
-							}
-							onGitPull={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("pull");
-										}
-							}
-							onGitPush={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("push");
-										}
-							}
-							onToggleTerminal={
-								hasNoProjects || isCurrentProjectRuntimeUnavailable || isFocusViewCrossProjectTaskOpenInTransit
-									? undefined
-									: selectedCard
-										? handleToggleDetailTerminal
-										: handleToggleHomeTerminal
-							}
-							isTerminalOpen={
-								isFocusViewCrossProjectTaskOpenInTransit
-									? false
-									: selectedCard
-										? isDetailTerminalOpen
-										: showHomeBottomTerminal
-							}
-							isTerminalLoading={
-								isFocusViewCrossProjectTaskOpenInTransit
-									? false
-									: selectedCard
-										? isDetailTerminalStarting
-										: isHomeTerminalStarting
-							}
-							onOpenSettings={handleOpenSettings}
-							showDebugButton={debugModeEnabled}
-							onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
-							shortcuts={shortcuts}
-							selectedShortcutLabel={selectedShortcutLabel}
-							onSelectShortcutLabel={handleSelectShortcutLabel}
-							runningShortcutLabel={runningShortcutLabel}
-							onRunShortcut={handleRunShortcut}
-							onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
-							openTargetOptions={openTargetOptions}
-							openTargetOptionsFootnote={openTargetOptionsFootnote}
-							selectedOpenTargetId={selectedOpenTargetId}
-							onSelectOpenTarget={onSelectOpenTarget}
-							onOpenWorkspace={onOpenWorkspace}
-							canOpenWorkspace={canOpenWorkspace}
-							isOpeningWorkspace={isOpeningWorkspace}
-							onToggleGitHistory={
-								hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
-							}
-							isGitHistoryOpen={isGitHistoryOpen}
-							onToggleFindings={
-								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-									? handleToggleFindings
-									: undefined
-							}
-							isFindingsOpen={isFindingsOpen}
-							onToggleTaskChangesSidebar={
-								selectedCardRenderedInFocusView ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
-							}
-							isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
-							hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
-							connectionRetrySessions={connectionRetrySessions}
-							onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
-							onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
-							notificationCenter={
-								<NotificationCenter
-									panelGroups={notificationCenter.panelGroups}
-									onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
-									hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
-									archiveReadError={notificationCenter.archiveReadError}
-									allGroups={notificationCenter.allGroups}
-									allEntriesSortedByTriggeredAtDescending={
-										notificationCenter.allEntriesSortedByTriggeredAtDescending
-									}
-									unreadCount={notificationCenter.unreadCount}
-									onFocusTask={focusNotificationTask}
-									onMarkGroupVisited={handleMarkTaskNotificationsVisited}
-									onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
-									onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
-									onClearAll={notificationCenter.clearAll}
-								/>
-							}
-							postDeployVerificationPendingCount={postDeployVerificationPendingCount}
-							onOpenPostDeployVerification={handleOpenPostDeployVerification}
-							bugReportTriggerButton={
-								<BugReportTriggerButton
-									projects={projects}
-									currentProjectId={currentProjectId}
-									activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
-								/>
-							}
-						/>
+										unreadCount={notificationCenter.unreadCount}
+										onFocusTask={focusNotificationTask}
+										onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+										onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
+										onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
+										onClearAll={notificationCenter.clearAll}
+									/>
+								}
+								postDeployVerificationPendingCount={postDeployVerificationPendingCount}
+								onOpenPostDeployVerification={handleOpenPostDeployVerification}
+								bugReportTriggerButton={
+									<BugReportTriggerButton
+										projects={projects}
+										currentProjectId={currentProjectId}
+										activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+									/>
+								}
+							/>
+						</div>
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 							<div
 								className="kb-home-layout"
@@ -1870,6 +1893,8 @@ export default function App(): ReactElement {
 							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
+										mobileFocusViewControls={mobileFocusViewControls}
+										onBackToBoard={handleBackFromFocusView}
 										selection={selectedCardRenderedInFocusView}
 										currentProjectId={currentProjectId}
 										taskIdsOnBoard={taskIdsOnBoard}
