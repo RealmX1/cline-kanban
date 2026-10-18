@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import type { AssertedInterWorkUnitRelation } from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
+import {
+	type AssertedInterWorkUnitRelation,
+	assertedInterWorkUnitRelationSchema,
+} from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
 import {
 	type CommittedInterWorkUnitRelationLedgerEvent,
 	type InterWorkUnitRelationWorkUnitReference,
@@ -352,6 +355,24 @@ export function applyInterWorkUnitRelationAssertionLifecycleEvent(
 	event: CommittedInterWorkUnitRelationLedgerEvent,
 ): void {
 	switch (event.eventKind) {
+		case "reference_relation_modeling_changes_applied_by_web_ui_user": {
+			const parsed = z.array(assertedInterWorkUnitRelationSchema).safeParse(event.eventPayload.relationsAfterChange);
+			if (!parsed.success) return;
+			for (const relation of parsed.data) {
+				state.assertedRelationsByRelationId.set(relation.relationId, relation);
+				addAssertedRelationIdToWorkUnitIndex(
+					state,
+					relation.relationStatementSubjectWorkUnitRef,
+					relation.relationId,
+				);
+				addAssertedRelationIdToWorkUnitIndex(
+					state,
+					relation.relationStatementAnchorWorkUnitRef,
+					relation.relationId,
+				);
+			}
+			return;
+		}
 		case "relation_affecting_confirmable_change_created_and_routed":
 			applyRelationAffectingConfirmableChangeCreatedAndRoutedEvent(state, event);
 			return;

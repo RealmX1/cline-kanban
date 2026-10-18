@@ -14,6 +14,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-work-unit-relation-modeling-api-contract": resolve(
+				__dirname,
+				"../src/core/work-unit-relation-modeling-api-contract.ts",
+			),
 			// 模型只由插件间接依赖；统一身份以允许离线测试替换模型。
 			"@tensorflow-models/universal-sentence-encoder": require.resolve(
 				"@tensorflow-models/universal-sentence-encoder",

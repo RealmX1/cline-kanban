@@ -37,6 +37,8 @@ export type TaskCommentEntry = RuntimeTaskCommentEntry;
  * 处理方据此还会去异步取一个 AI 名字回填。
  */
 export interface TaskEditorSubmitOptions {
+	preserveFormUntilCreationConfirmed?: boolean;
+	onTaskCardAllocatedForRelationModeling?: (card: BoardCard) => void;
 	keepDialogOpen?: boolean;
 	promptOverride?: string;
 	taskNameOverride?: string;

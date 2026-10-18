@@ -2024,6 +2024,7 @@ export default function App(): ReactElement {
 						onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
 						images={editingTaskId ? editTaskImages : newTaskImages}
 						onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
+						onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
 						onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 						onCreateAndStart={
 							editingTaskId

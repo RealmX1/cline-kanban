@@ -9,6 +9,7 @@ import { afterEach, expect, it } from "vitest";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { runReferenceRelationModelingRealBrowserCheck } from "./reference-relation-modeling-real-browser-check";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	hasChildProcessExited,
@@ -16,7 +17,11 @@ import {
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
-const runRealBrowserCheck = process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
+const runRelationModelingBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_REFERENCE_RELATION_MODELING_BROWSER_CHECK === "1";
+const runRealBrowserCheck =
+	runRelationModelingBrowserCheck ||
+	process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
 const spawnedChildProcessRegistry = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => spawnedChildProcessRegistry.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
@@ -230,7 +235,7 @@ setInterval(() => {}, 1000);
 			writeFileSync(
 				viteConfigurationPath,
 				`import baseConfiguration from ${JSON.stringify(join(sourceCheckoutPath, "web-ui/vite.config.ts"))};
-export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
+export default { ...baseConfiguration, optimizeDeps: { include: ["react", "react-dom/client", "react/jsx-runtime", "@xyflow/react", "@dagrejs/dagre"] }, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
 			);
 			startOwnedProcess(
 				"isolated-vite",
@@ -256,7 +261,15 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			const page = await context.newPage();
 			page.setDefaultTimeout(10000);
 			const pageErrors: string[] = [];
-			page.on("pageerror", (error) => pageErrors.push(error.message));
+			writeFileSync(join(evidenceOutputDirectory, "page-errors.json"), "[]");
+			page.on("pageerror", (error) => {
+				pageErrors.push(error.stack ?? error.message);
+				writeFileSync(join(evidenceOutputDirectory, "page-errors.json"), JSON.stringify(pageErrors, null, 2));
+			});
+			page.on("console", (message) => {
+				if (message.type() === "error")
+					writeFileSync(join(evidenceOutputDirectory, "last-browser-console-error.txt"), message.text());
+			});
 			const pageRequests: string[] = [];
 			const pendingTaskCardActionRequests = new Set<Request>();
 			page.on("requestfinished", (request) => pendingTaskCardActionRequests.delete(request));
@@ -275,6 +288,54 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "Close", exact: true })
 				.click({ timeout: 10000 });
+			if (runRelationModelingBrowserCheck) {
+				await runReferenceRelationModelingRealBrowserCheck({
+					page,
+					workspaceId: alphaWorkspaceId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					focusId,
+					chainStartId: singleStartId,
+					chainMiddleId: allReadyId,
+					chainEndId: retryId,
+					observeUntil,
+					recordCheck,
+					seedRelation: (subjectTaskId, anchorTaskId) =>
+						runCli(
+							[
+								"work-unit",
+								"assert-reference-relation",
+								"--is-generally-related-with",
+								`${alphaWorkspaceId}/${anchorTaskId}`,
+								"--relation-assertion-rationale",
+								"隔离浏览器多跳图种子",
+								"--json",
+							],
+							firstProject.repositoryPath,
+							{
+								KANBAN_TASK_ID: subjectTaskId,
+								KANBAN_HOOK_WORKSPACE_ID: alphaWorkspaceId,
+								KANBAN_TASK_CONVERSATION_SESSION_ID: subjectTaskId,
+							},
+						),
+					readBoard: async () => (await runtimeClient(alphaWorkspaceId).workspace.getState.query()).board,
+					readNeighborhood: (taskId) =>
+						runtimeClient(alphaWorkspaceId).workUnit.getRelationNeighborhoodSummary.query({
+							workUnit: {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: alphaWorkspaceId,
+							},
+						}),
+				});
+				expect(pageErrors).toEqual([]);
+				writeFileSync(
+					join(evidenceOutputDirectory, "browser-check-results.json"),
+					JSON.stringify({ checks, pageErrors, runtimePort, webUiPort }, null, 2),
+				);
+				return;
+			}
+
 			const card = (taskId: string) => page.locator(`[data-task-id="${taskId}"]`).first();
 			const clickCardAction = async (taskId: string, action: string) => {
 				await card(taskId).hover();

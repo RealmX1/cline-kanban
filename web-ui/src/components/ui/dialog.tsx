@@ -18,10 +18,14 @@ export function Dialog({
 	onEscapeKeyDown,
 	onPointerDownOutside,
 	onInteractOutside,
+	onClickCapture,
+	onKeyDownCapture,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	children: ReactNode;
+	onClickCapture?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onClickCapture"];
+	onKeyDownCapture?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onKeyDownCapture"];
 	contentClassName?: string;
 	contentAriaDescribedBy?: string;
 	onEscapeKeyDown?: (event: KeyboardEvent) => void;
@@ -36,6 +40,8 @@ export function Dialog({
 					style={{ animation: "kb-overlay-show 150ms ease" }}
 				/>
 				<RadixDialog.Content
+					onClickCapture={onClickCapture}
+					onKeyDownCapture={onKeyDownCapture}
 					aria-describedby={contentAriaDescribedBy}
 					onEscapeKeyDown={onEscapeKeyDown}
 					onPointerDownOutside={onPointerDownOutside}

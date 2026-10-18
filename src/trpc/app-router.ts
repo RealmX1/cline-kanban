@@ -468,6 +468,21 @@ import {
 	revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema,
 } from "../core/work-unit-relation-assertion-write-api-contract";
 import {
+	type ApplyReferenceRelationModelingChangesRequest,
+	type ApplyReferenceRelationModelingChangesResponse,
+	applyReferenceRelationModelingChangesRequestSchema,
+	applyReferenceRelationModelingChangesResponseSchema,
+	type ReferenceRelationModelingEditorDraft,
+	type RelationModelingPreviewRequest,
+	type RelationModelingPreviewResponse,
+	referenceRelationModelingEditorDraftSchema,
+	referenceRelationModelingSuggestionsResponseSchema,
+	relationModelingEditorDraftReadRequestSchema,
+	relationModelingEditorDraftSaveRequestSchema,
+	relationModelingPreviewRequestSchema,
+	relationModelingPreviewResponseSchema,
+} from "../core/work-unit-relation-modeling-api-contract";
+import {
 	type GetRelationNeighborhoodSummaryRequest,
 	type GetRelationNeighborhoodSummaryResponse,
 	type GetWorkUnitContextRequest,
@@ -954,6 +969,19 @@ export interface RuntimeTrpcContext {
 	};
 	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
 	workUnitRelationReadApi: {
+		readRelationModelingEditorDraft: (input: {
+			workspaceId: string;
+			draftScopeId: string;
+		}) => Promise<ReferenceRelationModelingEditorDraft | null>;
+		saveRelationModelingEditorDraft: (input: {
+			workspaceId: string;
+			draftScopeId: string;
+			draft: ReferenceRelationModelingEditorDraft | null;
+		}) => Promise<{ saved: boolean }>;
+		getRelationModelingPreview: (input: RelationModelingPreviewRequest) => Promise<RelationModelingPreviewResponse>;
+		suggestReferenceRelationsForTaskModeling: (
+			input: RelationModelingPreviewRequest,
+		) => Promise<z.infer<typeof referenceRelationModelingSuggestionsResponseSchema>>;
 		resolveKanbanBoardCardIdentityByBareTaskId: (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
 		) => Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse>;
@@ -974,6 +1002,10 @@ export interface RuntimeTrpcContext {
 	};
 	// dd2db 2.1：断言型关系的写入面。agent 经 CLI（主语 = 请求方工作单元，走确认矩阵）；Web UI 用户带 nonce 直接断言 / 撤销。
 	workUnitRelationAssertionWriteApi: {
+		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: (
+			input: ApplyReferenceRelationModelingChangesRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<ApplyReferenceRelationModelingChangesResponse>;
 		assertReferenceRelationAsActingWorkUnit: (
 			input: AssertReferenceRelationAsActingWorkUnitRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
@@ -2057,6 +2089,32 @@ export const runtimeAppRouter = t.router({
 				);
 			}),
 		// dd2db 2.1 断言型关系写入（R3.4 `assert-reference-relation` / `revoke-effective-relation-assertion`）。
+		readRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingEditorDraftReadRequestSchema)
+			.output(referenceRelationModelingEditorDraftSchema.nullable())
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input)),
+		saveRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingEditorDraftSaveRequestSchema)
+			.output(z.object({ saved: z.boolean() }))
+			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft(input)),
+		getRelationModelingPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingPreviewRequestSchema)
+			.output(relationModelingPreviewResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getRelationModelingPreview(input)),
+		suggestReferenceRelationsForTaskModeling: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingPreviewRequestSchema)
+			.output(referenceRelationModelingSuggestionsResponseSchema)
+			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.suggestReferenceRelationsForTaskModeling(input)),
+		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(applyReferenceRelationModelingChangesRequestSchema)
+			.output(applyReferenceRelationModelingChangesResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.workUnitRelationAssertionWriteApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
+
 		assertReferenceRelationAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(assertReferenceRelationAsActingWorkUnitRequestSchema)
 			.output(interWorkUnitRelationAssertionWriteResponseSchema)

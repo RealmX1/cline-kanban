@@ -602,6 +602,55 @@ const commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet = dat
 	},
 );
 
+const readRelationModelingSubmissionEventStatement = database.prepare(
+	"SELECT event_json FROM inter_work_unit_relation_ledger_events WHERE idempotency_key = ? AND event_commit_status = 'committed' LIMIT 1",
+);
+function readReferenceRelationModelingSubmissionFingerprint({ idempotencyKey }) {
+	const row = readRelationModelingSubmissionEventStatement.get(idempotencyKey);
+	return row ? JSON.parse(row.event_json).eventPayload.modelingSubmissionFingerprint : null;
+}
+
+// 先检查整批版本，再统一撤销和插入；事务中任何错误都回滚，避免改类型时只撤销未重建。
+const commitReferenceRelationModelingChanges = database.transaction(
+	({ expectations, relationsAfterChange, eventDraft }) => {
+		const previousFingerprint = readReferenceRelationModelingSubmissionFingerprint({
+			idempotencyKey: eventDraft.idempotencyKey,
+		});
+		if (previousFingerprint !== null)
+			return previousFingerprint === eventDraft.eventPayload.modelingSubmissionFingerprint ? "already_applied" : "conflict";
+		const revokedIds = new Set(expectations.map((entry) => entry.relationId));
+		for (const expectation of expectations) {
+			const row = readAssertedRelationStateStatement.get(expectation.relationId);
+			if (
+				!row ||
+				row.assertion_effectiveness_state !== "applied_and_effective" ||
+				row.asserted_relation_state_version !== expectation.assertedRelationStateVersion
+			) return "conflict";
+		}
+		const effectiveRelationsAfterChange = relationsAfterChange.filter(
+			(entry) => entry.assertionEffectivenessState === "applied_and_effective",
+		);
+		for (const relation of effectiveRelationsAfterChange) {
+			const row = readEffectiveAssertedRelationOfNaturalKeyStatement.get(relation.relationAssertionNaturalKey);
+			if (row && !revokedIds.has(row.relation_id)) return "conflict";
+		}
+		for (const expectation of expectations)
+			updateAssertedRelationStateWithVersionCheckStatement.run(
+				"revoked", eventDraft.occurredAt, expectation.relationId, expectation.assertedRelationStateVersion,
+			);
+		for (const relation of effectiveRelationsAfterChange)
+			insertAssertedRelationStateStatement.run(
+				relation.relationId, relation.relationAssertionNaturalKey, relation.relationKind, eventDraft.occurredAt,
+			);
+		for (const tombstone of eventDraft.eventPayload.userRejectionSuppressionTombstones ?? [])
+			insertUserRejectionSuppressionTombstoneStatement.run(
+				tombstone.relationAssertionNaturalKey, JSON.stringify(tombstone), eventDraft.occurredAt,
+			);
+		insertEventDraft(eventDraft, "committed", null);
+		return "applied";
+	},
+);
+
 function readRetainedFieldContents({ fieldValueSha256s }) {
 	return fieldValueSha256s
 		.map((sha256) => readContentStatement.get(sha256))
@@ -621,6 +670,8 @@ const commands = {
 		allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry.immediate(input),
 	seedTaskIdReservationsFromExistingLocalTraces: (input) => seedTaskIdReservationsFromExistingLocalTraces.immediate(input),
 	readInterWorkUnitRelationAssertionWriteGuardState,
+	readReferenceRelationModelingSubmissionFingerprint,
+	commitReferenceRelationModelingChanges: (input) => commitReferenceRelationModelingChanges.immediate(input),
 	commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet: (input) =>
 		commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet.immediate(input),
 	listInterWorkUnitAssertedRelationCurrentStateRows: () =>

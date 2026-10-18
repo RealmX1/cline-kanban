@@ -1,11 +1,18 @@
+import type { ReferenceRelationModelingEditorDraft } from "@runtime-work-unit-relation-modeling-api-contract";
 import type { ComponentProps } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import * as relationModelingQueries from "@/runtime/work-unit-relation-modeling-query";
 
 type Props = ComponentProps<typeof TaskEditorDialog>;
+
+beforeEach(() => {
+	localStorage.clear();
+	sessionStorage.clear();
+});
 
 function makeProps(overrides: Partial<Props> = {}): Props {
 	return {
@@ -96,6 +103,7 @@ describe("TaskEditorDialog interactions", () => {
 			root.unmount();
 		});
 		container.remove();
+		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
 		if (previousActEnvironment === undefined) {
 			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -192,6 +200,133 @@ describe("TaskEditorDialog interactions", () => {
 			document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
 		});
 	}
+
+	function prepareDeferredRelationDraftRead() {
+		let resolveDraftRead!: (draft: ReferenceRelationModelingEditorDraft | null) => void;
+		const pendingDraftRead = new Promise<ReferenceRelationModelingEditorDraft | null>((resolve) => {
+			resolveDraftRead = resolve;
+		});
+		const readDraft = vi
+			.spyOn(relationModelingQueries, "readRelationModelingEditorDraft")
+			.mockReturnValue(pendingDraftRead);
+		vi.spyOn(relationModelingQueries, "persistRelationModelingEditorDraft").mockResolvedValue({ saved: true });
+		vi.spyOn(relationModelingQueries, "readRelationModelingPreview").mockResolvedValue({
+			rootWorkUnitKey: "pending-task-creation",
+			workUnits: [],
+			relations: [],
+			truncated: false,
+			projectedThroughGlobalCommittedEventSequence: 0,
+		});
+		const applyChanges = vi
+			.spyOn(relationModelingQueries, "applyReferenceRelationModelingChangesFromExplicitUserGesture")
+			.mockResolvedValue({ modelingSubmissionId: "restored-submission", alreadyApplied: false });
+		return { readDraft, resolveDraftRead, applyChanges };
+	}
+
+	function restoredCreationDraft(workspaceId: string): ReferenceRelationModelingEditorDraft {
+		return {
+			createdTaskId: `already-created-${workspaceId}`,
+			createdTaskCardSnapshot: null,
+			modelingSubmissionId: `restored-submission-${workspaceId}`,
+			creationPrompt: `恢复 ${workspaceId} 的创建需求`,
+			creationTitle: `恢复 ${workspaceId} 的任务名称`,
+			relationRevocations: [],
+			referenceRelationDrafts: [
+				{
+					draftId: `restored-relation-${workspaceId}`,
+					replacesRelationId: null,
+					expectedAssertedRelationStateVersion: null,
+					counterpartWorkUnit: {
+						workUnitType: "kanban_board_card",
+						workspaceId,
+						taskId: "counterpart",
+						taskIncarnationCreatedAtEpochMs: 1,
+					},
+					relationKind: "reference_is_generally_related_with",
+					currentTaskIsStatementSubject: true,
+					relationAssertionRationaleOneSentence: "恢复尚未提交的关系",
+					relationAssertionEvidencePointers: [],
+					assertedRelationKindSpecificAttributes: {},
+				},
+			],
+		};
+	}
+
+	it("草稿尚未水合时按钮和全部创建快捷键均等待，空草稿水合后照常创建", async () => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const props = makeProps({
+			prompt: "普通创建需求",
+			onCreate: vi.fn(() => "new-task"),
+			onCreateAndStart: vi.fn(() => "new-started-task"),
+			onCreateStartAndOpen: vi.fn(() => "new-opened-task"),
+		});
+		await render(props);
+		expect(findButtonByText("Create")?.disabled).toBe(true);
+		expect(findButtonByText("Start task")?.disabled).toBe(true);
+		expect(document.querySelector<HTMLButtonElement>('[aria-label="More start options"]')?.disabled).toBe(true);
+		await act(async () => {
+			findButtonByText("Create")?.click();
+			findButtonByText("Start task")?.click();
+		});
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true, shiftKey: true });
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true });
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(props.onCreateAndStart).not.toHaveBeenCalled();
+		expect(props.onCreateStartAndOpen).not.toHaveBeenCalled();
+		expect(applyChanges).not.toHaveBeenCalled();
+		await act(async () => resolveDraftRead(null));
+		expect(findButtonByText("Create")?.disabled).toBe(false);
+		await act(async () => findButtonByText("Create")?.click());
+		expect(props.onCreate).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ promptOverride: "普通创建需求" }),
+		);
+		expect(applyChanges).not.toHaveBeenCalled();
+	});
+
+	it("首次打开等待恢复关系及原卡身份，水合完成后复用原卡而不重复建卡", async () => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const props = makeProps({ prompt: "新输入的需求", onCreate: vi.fn(() => "incorrect-new-task") });
+		await render(props);
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
+		expect(props.onCreate).not.toHaveBeenCalled();
+		const recoveredDraft = restoredCreationDraft("project-1");
+		await act(async () => resolveDraftRead(recoveredDraft));
+		expect(document.querySelector("textarea")?.value).toBe(recoveredDraft.creationPrompt);
+		await act(async () => findButtonByText("Create")?.click());
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
+			"project-1",
+			expect.objectContaining({
+				workUnit: expect.objectContaining({ bareTaskId: recoveredDraft.createdTaskId }),
+				referenceRelationDrafts: recoveredDraft.referenceRelationDrafts,
+			}),
+		);
+		expect(props.onOpenChange).toHaveBeenCalledWith(false);
+	});
+
+	it("切换项目后等当前 scope 草稿水合，不把旧项目的关系或卡片身份用于新项目", async () => {
+		const { readDraft, resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		readDraft.mockResolvedValueOnce(restoredCreationDraft("project-1"));
+		const props = makeProps({ prompt: "创建需求", onCreate: vi.fn(() => "incorrect-new-task") });
+		await render(props);
+		await render({ ...props, workspaceId: "project-2" });
+		expect(findButtonByText("Create")?.disabled).toBe(true);
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(applyChanges).not.toHaveBeenCalled();
+		const recoveredDraft = restoredCreationDraft("project-2");
+		await act(async () => resolveDraftRead(recoveredDraft));
+		await act(async () => findButtonByText("Create")?.click());
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
+			"project-2",
+			expect.objectContaining({
+				workUnit: expect.objectContaining({ bareTaskId: recoveredDraft.createdTaskId, workspaceId: "project-2" }),
+				referenceRelationDrafts: recoveredDraft.referenceRelationDrafts,
+			}),
+		);
+	});
 
 	it("does not create the task on a Mod+Enter emitted while the IME is still composing", async () => {
 		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");

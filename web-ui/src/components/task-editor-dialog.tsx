@@ -2,7 +2,6 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
-
 import {
 	ArrowBigUp,
 	ArrowLeft,
@@ -19,9 +18,9 @@ import {
 import type { Dispatch, ReactElement, SetStateAction } from "react";
 import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
+import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import {
 	TaskAgentModelPicker,
@@ -46,6 +45,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -58,6 +58,14 @@ import type {
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import {
+	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
+	type TriggeringExplicitUserGestureEvent,
+} from "@/runtime/work-unit-relation-assertion-write-query";
+import { ensureRelationModelingCreatedTaskCardPersisted } from "@/runtime/work-unit-relation-modeling-query";
+import { waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
+import { startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
+import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -244,6 +252,7 @@ export function TaskEditorDialog({
 	onRevertEditTaskFormToSavedTaskContent,
 	onAdoptPromotedTaskEditDraft,
 	taskCreationTargetProjectField,
+	onOpenCreatedTaskWithRelations,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -251,6 +260,7 @@ export function TaskEditorDialog({
 	onPromptChange: (value: string) => void;
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
+	onOpenCreatedTaskWithRelations?: (workspaceId: string, taskId: string) => void;
 	onCreate: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateAndStart?: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateMultiple: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
@@ -534,7 +544,110 @@ export function TaskEditorDialog({
 		setComposerResetKey((current) => current + 1);
 	}, [onImagesChange, propagatePromptDraft]);
 
-	const handleCreateSingle = useCallback(() => {
+	const relationModeling = useReferenceRelationModelingEditor({
+		workspaceId,
+		taskId: null,
+		draftTaskTitle: taskName || "待创建任务",
+		active: open && taskEditorMode === "create" && mode === "single",
+	});
+	const isTaskCreationWaitingForRelationDraftHydration = taskEditorMode === "create" && !relationModeling.ready;
+	const [isRelationAwareCreationInFlight, setIsRelationAwareCreationInFlight] = useState(false);
+	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
+	const [relationAwareCreationError, setRelationAwareCreationError] = useState<string | null>(null);
+	const lastCreationGestureRef = useRef<{ event: TriggeringExplicitUserGestureEvent; observedAt: number } | null>(
+		null,
+	);
+	const relationRecoveryAppliedRef = useRef<string | null>(null);
+	useEffect(() => {
+		if (
+			relationModeling.ready &&
+			relationModeling.draft.creationPrompt &&
+			relationRecoveryAppliedRef.current !== workspaceId
+		) {
+			relationRecoveryAppliedRef.current = workspaceId;
+			setPromptDraft(relationModeling.draft.creationPrompt);
+			setTaskName(relationModeling.draft.creationTitle);
+		}
+	}, [
+		relationModeling.ready,
+		relationModeling.draft.creationPrompt,
+		relationModeling.draft.creationTitle,
+		workspaceId,
+	]);
+	const handleRelationAwareCreation = (action: "create" | "start" | "start_and_open"): boolean => {
+		// 当前 scope 水合前，旧草稿和空初值都不能决定建卡身份或关系提交路径。
+		if (isTaskCreationWaitingForRelationDraftHydration) return true;
+		if (taskEditorMode === "create" && hasUnstagedRelationForm) {
+			setRelationAwareCreationError("请先将当前关系加入草稿，或取消关系编辑，再创建任务。");
+			return true;
+		}
+		if (taskEditorMode !== "create" || (!relationModeling.hasChanges && !relationModeling.draft.createdTaskId))
+			return false;
+		if (isRelationAwareCreationInFlight || !workspaceId) return true;
+		const gesture = lastCreationGestureRef.current;
+		if (!gesture || performance.now() - gesture.observedAt > 1000) {
+			setRelationAwareCreationError("请点击创建按钮或使用快捷键提交关系。 ");
+			return true;
+		}
+		const characteristics = collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(
+			gesture.event,
+		);
+		setIsRelationAwareCreationInFlight(true);
+		setRelationAwareCreationError(null);
+		void (async () => {
+			try {
+				relationModeling.updateDraft({ creationPrompt: promptDraft, creationTitle: taskName });
+				await relationModeling.persistDraftNow();
+				const taskId =
+					relationModeling.draft.createdTaskId ??
+					onCreate({
+						keepDialogOpen: true,
+						preserveFormUntilCreationConfirmed: true,
+						promptOverride: promptDraft,
+						taskNameOverride: taskName,
+						onTaskCardAllocatedForRelationModeling: (card) =>
+							relationModeling.updateDraft({ createdTaskId: card.id, createdTaskCardSnapshot: card }),
+					});
+				if (!taskId) return;
+				relationModeling.updateDraft({ createdTaskId: taskId });
+				await relationModeling.persistDraftNow();
+				const persisted = await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+					workspaceId,
+					taskId,
+				});
+				if (!persisted.ok || relationModeling.draft.createdTaskId) {
+					const snapshot = relationModeling.readLatestDraft().createdTaskCardSnapshot;
+					if (snapshot) await ensureRelationModelingCreatedTaskCardPersisted(workspaceId, snapshot);
+					else if (!persisted.ok) throw new Error(`任务尚未确认保存：${persisted.message}`);
+				}
+				await relationModeling.applyToTask(taskId, characteristics);
+				if (action !== "create") {
+					const started = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
+						workspaceId,
+						taskId,
+						agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
+					});
+					if (started.taskCardActionCommandExecutionOutcome === "command_failed")
+						throw new Error(started.commandFailureMessage);
+					if (action === "start_and_open") onOpenCreatedTaskWithRelations?.(workspaceId, taskId);
+				}
+				relationModeling.discard();
+				if (createMore) {
+					resetForCreateMore();
+					propagatePromptDraft("");
+					onImagesChange([]);
+				} else onOpenChange(false);
+			} catch (failure) {
+				setRelationAwareCreationError(failure instanceof Error ? failure.message : String(failure));
+			} finally {
+				setIsRelationAwareCreationInFlight(false);
+			}
+		})();
+		return true;
+	};
+
+	const handleCreateSingle = () => {
+		if (handleRelationAwareCreation("create")) return;
 		const createdTaskId = onCreate({
 			keepDialogOpen: createMore,
 			promptOverride: promptDraft,
@@ -543,9 +656,10 @@ export function TaskEditorDialog({
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreate, promptDraft, resetForCreateMore, taskName]);
+	};
 
-	const handleCreateAndStartSingle = useCallback(() => {
+	const handleCreateAndStartSingle = () => {
+		if (handleRelationAwareCreation("start")) return;
 		const createdTaskId = onCreateAndStart?.({
 			keepDialogOpen: createMore,
 			promptOverride: promptDraft,
@@ -554,9 +668,10 @@ export function TaskEditorDialog({
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateAndStart, promptDraft, resetForCreateMore, taskName]);
+	};
 
-	const handleCreateStartAndOpenSingle = useCallback(() => {
+	const handleCreateStartAndOpenSingle = () => {
+		if (handleRelationAwareCreation("start_and_open")) return;
 		const createdTaskId = onCreateStartAndOpen?.({
 			keepDialogOpen: createMore,
 			promptOverride: promptDraft,
@@ -565,7 +680,7 @@ export function TaskEditorDialog({
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateStartAndOpen, promptDraft, resetForCreateMore, taskName]);
+	};
 
 	const handleRunSingleStartAction = useCallback(
 		(action: TaskCreateStartAction) => {
@@ -726,14 +841,21 @@ export function TaskEditorDialog({
 	}, [open]);
 
 	const handleCloseRequest = useCallback(() => {
+		if (isRelationAwareCreationInFlight) return;
 		const baseline = baselineFormSnapshotRef.current;
 		const hasEdits = baseline ? hasTaskCreateFormEdits(latestFormSnapshotRef.current, baseline) : false;
-		if (hasEdits) {
+		if (hasEdits || relationModeling.hasChanges || relationModeling.draft.createdTaskId || hasUnstagedRelationForm) {
 			setIsDiscardConfirmOpen(true);
 			return;
 		}
 		onOpenChange(false);
-	}, [onOpenChange]);
+	}, [
+		onOpenChange,
+		relationModeling.hasChanges,
+		relationModeling.draft.createdTaskId,
+		hasUnstagedRelationForm,
+		isRelationAwareCreationInFlight,
+	]);
 
 	// X 关闭按钮走 Radix Close → onOpenChange(false)；Esc / 点击外部各自 preventDefault
 	// 后也汇到这里。create 模式统一经 handleCloseRequest 守卫；edit 模式直通 base 语义。
@@ -754,8 +876,9 @@ export function TaskEditorDialog({
 
 	const handleConfirmDiscard = useCallback(() => {
 		setIsDiscardConfirmOpen(false);
+		relationModeling.discard();
 		onOpenChange(false);
-	}, [onOpenChange]);
+	}, [onOpenChange, relationModeling.discard]);
 
 	const handleCancelDiscard = useCallback(() => {
 		setIsDiscardConfirmOpen(false);
@@ -784,9 +907,15 @@ export function TaskEditorDialog({
 	return (
 		<>
 			<Dialog
+				onClickCapture={(event) => {
+					lastCreationGestureRef.current = { event: event.nativeEvent, observedAt: performance.now() };
+				}}
+				onKeyDownCapture={(event) => {
+					lastCreationGestureRef.current = { event: event.nativeEvent, observedAt: performance.now() };
+				}}
 				open={open}
 				onOpenChange={handleDialogOpenChange}
-				contentClassName="max-w-2xl"
+				contentClassName={relationModeling.hasChanges ? "max-w-5xl!" : "max-w-2xl"}
 				onEscapeKeyDown={
 					isCreateMode
 						? (event) => {
@@ -876,7 +1005,21 @@ export function TaskEditorDialog({
 									<button
 										type="button"
 										onClick={handleSplitIntoTasks}
-										className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0"
+										disabled={
+											isTaskCreationWaitingForRelationDraftHydration ||
+											relationModeling.hasChanges ||
+											Boolean(relationModeling.draft.createdTaskId) ||
+											hasUnstagedRelationForm ||
+											isRelationAwareCreationInFlight
+										}
+										title={
+											relationModeling.hasChanges ||
+											relationModeling.draft.createdTaskId ||
+											hasUnstagedRelationForm
+												? "请先完成或放弃关系草稿，再拆分为多个任务。"
+												: undefined
+										}
+										className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-default"
 									>
 										<List size={12} />
 										Split into {detectedItems.length} tasks
@@ -1107,7 +1250,26 @@ export function TaskEditorDialog({
 							</>
 						) : null}
 					</div>
+					{taskEditorMode === "create" && mode === "single" && workspaceId ? (
+						<div className="mt-4 border-t border-border">
+							<ReferenceRelationModelingEditor
+								key={workspaceId}
+								controller={relationModeling}
+								workspaceId={workspaceId}
+								taskId={null}
+								rootTitle={taskName || "待创建任务"}
+								onUnstagedFormChange={setHasUnstagedRelationForm}
+								creationInFlight={isRelationAwareCreationInFlight}
+							/>
+						</div>
+					) : null}
 				</DialogBody>
+
+				{relationAwareCreationError ? (
+					<p role="alert" className="px-4 py-2 text-xs text-status-orange">
+						{relationAwareCreationError}
+					</p>
+				) : null}
 				<DialogFooter>
 					{taskEditorMode === "create" ? (
 						<label
@@ -1129,7 +1291,16 @@ export function TaskEditorDialog({
 					)}
 					{mode === "single" ? (
 						<>
-							<Button size="sm" onClick={handleCreateSingle} disabled={!hasPromptDraftContent || !branchRef}>
+							<Button
+								size="sm"
+								onClick={handleCreateSingle}
+								disabled={
+									!hasPromptDraftContent ||
+									!branchRef ||
+									isTaskCreationWaitingForRelationDraftHydration ||
+									isRelationAwareCreationInFlight
+								}
+							>
 								<span className="inline-flex items-center">
 									{taskEditorMode === "edit" ? "Save changes" : "Create"}
 									<ButtonShortcut />
@@ -1142,7 +1313,12 @@ export function TaskEditorDialog({
 											variant="primary"
 											size="sm"
 											onClick={() => handleRunSingleStartAction(primaryStartAction)}
-											disabled={!hasPromptDraftContent || !branchRef}
+											disabled={
+												!hasPromptDraftContent ||
+												!branchRef ||
+												isTaskCreationWaitingForRelationDraftHydration ||
+												isRelationAwareCreationInFlight
+											}
 											className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
 										>
 											<span className="inline-flex items-center">
@@ -1155,7 +1331,12 @@ export function TaskEditorDialog({
 												<Button
 													variant="primary"
 													size="sm"
-													disabled={!hasPromptDraftContent || !branchRef}
+													disabled={
+														!hasPromptDraftContent ||
+														!branchRef ||
+														isTaskCreationWaitingForRelationDraftHydration ||
+														isRelationAwareCreationInFlight
+													}
 													className="rounded-l-none border-l border-white/20 px-1"
 													aria-label="More start options"
 												>
@@ -1223,6 +1404,7 @@ export function TaskEditorDialog({
 			</Dialog>
 			<DiscardTaskCreateConfirmDialog
 				open={isDiscardConfirmOpen}
+				alreadyCreatedTaskId={relationModeling.draft.createdTaskId}
 				onCancel={handleCancelDiscard}
 				onConfirm={handleConfirmDiscard}
 			/>

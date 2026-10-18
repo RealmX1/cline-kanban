@@ -1,5 +1,4 @@
 import { TRPCError } from "@trpc/server";
-
 import type { InterWorkUnitRelationWorkUnitReference } from "../core/inter-work-unit-relation-ledger-event-contract";
 import type {
 	GetRelationNeighborhoodSummaryRequest,
@@ -27,7 +26,12 @@ import {
 	buildWorkUnitDisplayEntries,
 } from "../inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import {
+	readReferenceRelationModelingEditorDraft,
+	saveReferenceRelationModelingEditorDraft,
+} from "../state/reference-relation-modeling-editor-drafts";
 import type { RuntimeTrpcContext } from "./app-router";
+import { buildRelationModelingPreview } from "./work-unit-relation-modeling-preview";
 
 // dd2db 1b 读侧（`workUnit.*` procedure 的 runtime 实现）：跨 project 解析裸 id、一度邻域、会话归属时段、
 // 上下文端口（1b 只有 L1 兜底的 global recap）。全部读同一份记录型关系投影，账本不可用时如实报 SERVICE_UNAVAILABLE。
@@ -109,6 +113,26 @@ export function createWorkUnitRelationReadApi(
 	deps: CreateWorkUnitRelationReadApiDependencies,
 ): RuntimeTrpcContext["workUnitRelationReadApi"] {
 	return {
+		readRelationModelingEditorDraft: readReferenceRelationModelingEditorDraft,
+		saveRelationModelingEditorDraft: saveReferenceRelationModelingEditorDraft,
+		getRelationModelingPreview: async (input) =>
+			await readProjectionTranslatingLedgerUnavailability(deps, (reader) =>
+				buildRelationModelingPreview(
+					reader,
+					input.workUnit
+						? resolveWorkUnitSelectorAgainstRecordedRelationProjection(reader.projectionState, input.workUnit)
+						: null,
+					input,
+					deps.getWorkspacePathById,
+				),
+			),
+		suggestReferenceRelationsForTaskModeling: async () => ({
+			availability: "unavailable" as const,
+			unavailableReason: "项目级关系建议服务尚未接入（a0401）。",
+			contextAsOf: null,
+			contextCompleteness: ["project_task_indexing_agent_not_implemented"],
+			candidates: [],
+		}),
 		resolveKanbanBoardCardIdentityByBareTaskId: async (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
 		): Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse> =>

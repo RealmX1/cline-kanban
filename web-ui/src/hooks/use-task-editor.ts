@@ -1448,6 +1448,7 @@ export function useTaskEditor({
 	// Create more（keepDialogOpen）保留用户选的目标项目。
 	const resetNewTaskFormAfterTaskCardsCreatedInOtherProject = useCallback(
 		(workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
+			if (options?.preserveFormUntilCreationConfirmed) return;
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
@@ -1508,6 +1509,7 @@ export function useTaskEditor({
 				if (!createdTaskCard) {
 					return null;
 				}
+				options?.onTaskCardAllocatedForRelationModeling?.(createdTaskCard);
 				if (!explicitTaskName) {
 					backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject(
 						taskCreationTargetOtherProjectWorkspaceId,
@@ -1562,6 +1564,7 @@ export function useTaskEditor({
 				},
 				runtimeAllocatedTaskId,
 			);
+			options?.onTaskCardAllocatedForRelationModeling?.(created.task);
 			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
 				boardBeforeMutation: board,
 				boardAfterMutation: created.board,
@@ -1586,6 +1589,7 @@ export function useTaskEditor({
 				...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 				prompt_character_count: prompt.length,
 			});
+			if (options?.preserveFormUntilCreationConfirmed) return created.task.id;
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);

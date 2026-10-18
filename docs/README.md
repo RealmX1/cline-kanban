@@ -20,6 +20,7 @@
 
 - [`session-facet-model.md`](./session-facet-model.md)——双轴会话状态 facet 模型（turnOwner / liveness / userTurnKind）及其三条铁律。
 - [`agent-output-timestamps.md`](./agent-output-timestamps.md)——卡片时长药丸的字段模型与 `lastSubstantiveOutputAt` 写路径。
+- [`task-reference-relation-modeling.md`](./task-reference-relation-modeling.md)——创建任务与既有 Relations Section 的共享人工建模、多跳图、原子保存、草稿恢复及索引 agent 接入边界。
 - [`terminal-io.md`](./terminal-io.md)——output-reaction 框架、持久终端 visibility 协议，以及 PTY/argv 特殊字符安全。
 - [`agent-harness-kimi.md`](./agent-harness-kimi.md)——Kimi Code 终端 harness 接入（延迟 prompt 注入、TOML hooks、预置 home）。
 - [`agent-harness-omp-acp.md`](./agent-harness-omp-acp.md)——oh-my-pi（omp）ACP 传输层及其协议坑。

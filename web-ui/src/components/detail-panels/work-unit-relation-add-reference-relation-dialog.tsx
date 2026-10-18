@@ -55,7 +55,7 @@ function AddReferenceRelationFormField({
 }
 
 // 每个专有属性的输入控件：单行 / 多行（一行一个）/ 下拉。
-function KindSpecificAttributeInput({
+export function KindSpecificAttributeInput({
 	attributeKey,
 	attributeInputElementId,
 	draft,

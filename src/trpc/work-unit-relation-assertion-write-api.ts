@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-
 import { TRPCError } from "@trpc/server";
-
 import type {
 	AssertedInterWorkUnitReferenceRelationKind,
 	AssertedInterWorkUnitRelation,
@@ -74,6 +72,7 @@ import {
 	type WorkspaceRepositoryPathLookupByWorkspaceId,
 } from "../inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
 import type { RuntimeTrpcContext } from "./app-router";
+import { applyReferenceRelationModelingChanges } from "./work-unit-relation-modeling-write-api";
 import { resolveWorkUnitSelectorAgainstRecordedRelationProjection } from "./work-unit-relation-read-api";
 
 // dd2db 2.1 断言型关系写入面（`workUnit.*` 的断言与撤销）。每次写入：读投影做规划 → 账本守卫读 → 带守卫值 CAS 提交族 4 事件
@@ -86,7 +85,13 @@ export type InterWorkUnitRelationLedgerClientCapabilitiesUsedByRelationAssertion
 	InterWorkUnitRelationLedgerDatabaseWorkerClient,
 	| "readInterWorkUnitRelationAssertionWriteGuardState"
 	| "commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet"
->;
+> &
+	Partial<
+		Pick<
+			InterWorkUnitRelationLedgerDatabaseWorkerClient,
+			"commitReferenceRelationModelingChanges" | "readReferenceRelationModelingSubmissionFingerprint"
+		>
+	>;
 
 export interface CreateWorkUnitRelationAssertionWriteApiDependencies {
 	readRecordedInterWorkUnitRelationProjection: <T>(
@@ -913,6 +918,10 @@ export function createWorkUnitRelationAssertionWriteApi(
 	}
 
 	return {
+		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: async (input, evidence) => {
+			assertWebUiUserDecisionRequestOrigin(evidence, input.webUiUserDecisionClientCharacteristics);
+			return translateLedgerUnavailability(() => applyReferenceRelationModelingChanges(deps, input));
+		},
 		assertReferenceRelationAsActingWorkUnit: async (
 			input: AssertReferenceRelationAsActingWorkUnitRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
