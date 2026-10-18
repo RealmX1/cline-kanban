@@ -1405,10 +1405,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{historicalContext ? (
-						<Tooltip
-							side="bottom"
-							content={revealHoverActionTooltip("查看完整 Prompt")}
-						>
+						<Tooltip side="bottom" content={revealHoverActionTooltip("查看完整 Prompt")}>
 							<Button
 								icon={<FileText size={12} />}
 								variant="ghost"
