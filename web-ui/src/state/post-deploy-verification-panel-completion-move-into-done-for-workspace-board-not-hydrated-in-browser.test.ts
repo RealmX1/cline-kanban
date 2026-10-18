@@ -104,17 +104,19 @@ describe("completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHyd
 		expect(moveTaskCardIntoDoneMock).not.toHaveBeenCalled();
 	});
 
-	it("成功：显式带 workspaceId、PDV 面板发起方标注与 closure，不带 overlay", async () => {
+	it("成功：显式带 workspaceId、PDV 面板发起方标注、closure 与评论，不带 overlay", async () => {
 		readTaskCardWithBoardColumnInWorkspaceMock.mockResolvedValue(taskCardFoundInColumn("validation"));
 		moveTaskCardIntoDoneMock.mockResolvedValue(moveCompletedByRuntime(null));
 		const postDeployVerificationDoneEntryClosure: RuntimePostDeployVerificationDoneEntryClosureRequest = {
 			confirmedAcknowledgements: ["skip_validation"],
 		};
+		const taskCommentToAppendWhenMovingIntoDone = { taskCommentEntryId: "comment-1", commentText: "实测完成" };
 		const result = await completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHydratedInBrowser({
 			workspaceId: "cline-kanban",
 			taskId: "task-1",
 			boardColumnIdObservedInBoardSnapshot: "validation",
 			postDeployVerificationDoneEntryClosure,
+			taskCommentToAppendWhenMovingIntoDone,
 		});
 		expect(result).toEqual({ ok: true });
 		expect(moveTaskCardIntoDoneMock).toHaveBeenCalledWith({
@@ -122,6 +124,7 @@ describe("completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHyd
 			taskId: "task-1",
 			boardMutationInitiator: "web_ui_user_gesture_post_deploy_verification_panel_completion",
 			postDeployVerificationDoneEntryClosure,
+			taskCommentToAppendWhenMovingIntoDone,
 		});
 		expect(notifyErrorMock).not.toHaveBeenCalled();
 		expect(showAppToastMock).not.toHaveBeenCalled();

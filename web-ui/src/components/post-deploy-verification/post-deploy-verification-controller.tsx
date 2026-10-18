@@ -11,14 +11,20 @@ import {
 import { PostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-panel";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
+import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
 import type { PostDeployVerificationMoveIntoDoneCompletionResult } from "@/hooks/use-board-interactions";
 import type { UsePostDeployVerificationResult } from "@/hooks/use-post-deploy-verification";
+import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
 import type {
 	RuntimePostDeployVerificationAcknowledgement,
 	RuntimePostDeployVerificationDoneEntryClosureRequest,
 } from "@/runtime/types";
-import { getTaskColumnId } from "@/state/board-state";
+import { findCardSelection, getTaskColumnId } from "@/state/board-state";
 import type { BoardColumnId, BoardData } from "@/types";
+import type {
+	TaskCardMoveIntoDoneRequestHandler,
+	TaskCommentToAppendWhenMovingIntoDone,
+} from "@/types/task-card-move-into-done-request";
 
 export interface PostDeployVerificationControllerProps {
 	// hook 单实例由 App.tsx 持有并下传：controller 与顶栏 badge 共用同一份轮询/状态，
@@ -31,6 +37,7 @@ export interface PostDeployVerificationControllerProps {
 		taskId: string,
 		fromColumnId: BoardColumnId,
 		postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest,
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
 	) => Promise<PostDeployVerificationMoveIntoDoneCompletionResult>;
 	// 点击任务卡片跳转 focus view。
 	onSelectTask: (taskId: string) => void;
@@ -46,6 +53,7 @@ export interface PostDeployVerificationControllerProps {
 
 // 单任务完成流（面板条目的「完成核对并移入 Done」/「带原因移入 Done」）：token / 需确认项 / agent 回复 / 发起时的列。
 interface PostDeployVerificationSingleTaskCompletionAwaitingClosureDialog {
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	deploymentId: string;
 	taskId: string;
 	// review | in_progress | validation（validation 且全勾时不弹窗、不落此态）。
@@ -73,6 +81,14 @@ export function PostDeployVerificationController({
 	postDeployVerificationWorkspaceProjectNameShownInPanelHeader = null,
 }: PostDeployVerificationControllerProps): ReactElement {
 	const { refresh, requestComplete, confirmComplete } = verification;
+	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
+	const {
+		open: openTaskComment,
+		returnToEditing: returnTaskCommentToEditing,
+		suspendForConfirmation: suspendTaskCommentForConfirmation,
+		complete: completeTaskComment,
+	} = taskCommentBeforeMoveIntoDone;
+	const deploymentIdForTaskCommentCompletionRef = useRef<string | null>(null);
 	// 批量结案逐个移列期间 board 会变：每一步都读最新 board 判列，而不是对话框打开那一刻的快照。
 	const latestBoardRef = useRef(board);
 	latestBoardRef.current = board;
@@ -109,6 +125,12 @@ export function PostDeployVerificationController({
 					intent: "warning",
 					message: liveColumnId === null ? "任务已不在看板，核对未完成" : "任务所在列已变化，请重新点击完成核对",
 				});
+				if (pending.taskCommentToAppendWhenMovingIntoDone)
+					returnTaskCommentToEditing(
+						pending.taskId,
+						"任务所在列已变化，请重新提交评论。",
+						pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+					);
 				closeCompletionFlow();
 				refresh();
 				return;
@@ -118,9 +140,16 @@ export function PostDeployVerificationController({
 				pending.taskId,
 				pending.fromColumnId,
 				postDeployVerificationDoneEntryClosure,
+				pending.taskCommentToAppendWhenMovingIntoDone,
 			);
 			if (!moved.ok) {
 				const moveIntoDoneFailureMessage = moved.moveIntoDoneFailureMessage ?? "";
+				if (pending.taskCommentToAppendWhenMovingIntoDone)
+					returnTaskCommentToEditing(
+						pending.taskId,
+						moveIntoDoneFailureMessage || "移入 Done 失败，评论尚未提交。",
+						pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+					);
 				showAppToast({
 					intent: "danger",
 					message: isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(
@@ -133,6 +162,8 @@ export function PostDeployVerificationController({
 				refresh();
 				return;
 			}
+			if (pending.taskCommentToAppendWhenMovingIntoDone)
+				completeTaskComment(pending.taskId, pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
 			const confirmed = await confirmComplete({
 				deploymentId: pending.deploymentId,
 				taskId: pending.taskId,
@@ -158,18 +189,35 @@ export function PostDeployVerificationController({
 			closeCompletionFlow();
 			refresh();
 		},
-		[completePostDeployVerificationMoveToDone, confirmComplete, closeCompletionFlow, refresh],
+		[
+			completePostDeployVerificationMoveToDone,
+			confirmComplete,
+			closeCompletionFlow,
+			refresh,
+			returnTaskCommentToEditing,
+			completeTaskComment,
+		],
 	);
 
-	const handleRequestComplete = useCallback(
-		async (deploymentId: string, taskId: string): Promise<void> => {
+	const requestSingleTaskCompletion = useCallback(
+		async (
+			deploymentId: string,
+			taskId: string,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		): Promise<void> => {
+			const returnCommentToEditingAfterFailure = (message: string) => {
+				if (taskCommentToAppendWhenMovingIntoDone)
+					returnTaskCommentToEditing(taskId, message, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
+			};
 			if (completingTaskId || batchClosureAwaitingClosureDialog) {
+				returnCommentToEditingAfterFailure("已有完成操作正在进行，请稍后重新提交。");
 				return;
 			}
 			// 按任务「当前列」分支（非 columnIdAtMatch 快照）：入 Done 时刻实际所在列决定要哪些确认。
 			const currentColumnId = getTaskColumnId(board, taskId);
 			if (currentColumnId === null) {
 				showAppToast({ intent: "danger", message: "任务已不在看板，无法完成核对" });
+				returnCommentToEditingAfterFailure("任务已不在看板，评论尚未提交。");
 				return;
 			}
 			// M4 恢复：先前「移列成功、confirm 失败」的滞留态——任务已在 Done（trash）但未 verified、盘上仍有有效 token。
@@ -204,10 +252,12 @@ export function PostDeployVerificationController({
 			setCompletingTaskId(taskId);
 			const response = await requestComplete({ deploymentId, taskId });
 			if (!response) {
+				returnCommentToEditingAfterFailure("无法申请完成核对，请重新提交。");
 				setCompletingTaskId(null);
 				return;
 			}
 			if (response.error) {
+				returnCommentToEditingAfterFailure(response.error);
 				showAppToast({ intent: "danger", message: response.error });
 				setCompletingTaskId(null);
 				refresh();
@@ -216,12 +266,14 @@ export function PostDeployVerificationController({
 			// 所有合法来源列后端都发放了一次性 token；validation 仅是 needsConfirmation=false（不弹确认），
 			// 但同样走「移列成功后再经 confirm 消费 token 标记完成」路径（issue A：移列先于标记，移列失败则不标记）。
 			if (!response.confirmationToken) {
+				returnCommentToEditingAfterFailure("未获得确认 token，评论尚未提交。");
 				showAppToast({ intent: "danger", message: "未获得确认 token，无法完成核对" });
 				setCompletingTaskId(null);
 				refresh();
 				return;
 			}
 			const pending: PostDeployVerificationSingleTaskCompletionAwaitingClosureDialog = {
+				...(taskCommentToAppendWhenMovingIntoDone ? { taskCommentToAppendWhenMovingIntoDone } : {}),
 				deploymentId,
 				taskId,
 				fromColumnId: currentColumnId,
@@ -237,6 +289,8 @@ export function PostDeployVerificationController({
 				await finalizeSingleTaskCompletion(pending, undefined);
 				return;
 			}
+			if (taskCommentToAppendWhenMovingIntoDone)
+				suspendTaskCommentForConfirmation(taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
 			setSingleTaskCompletionAwaitingClosureDialog(pending);
 		},
 		[
@@ -249,8 +303,78 @@ export function PostDeployVerificationController({
 			refresh,
 			verification.activeGroup,
 			verification.historyGroups,
+			returnTaskCommentToEditing,
+			suspendTaskCommentForConfirmation,
 		],
 	);
+
+	const handleRequestComplete = useCallback(
+		(deploymentId: string, taskId: string, options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => {
+			if (completingTaskId || batchClosureAwaitingClosureDialog || taskCommentBeforeMoveIntoDone.request) return;
+			if (options?.requestTaskCommentBeforeMovingIntoDone) {
+				const selection = findCardSelection(board, taskId);
+				if (
+					!selection ||
+					realTaskCardRenderingInputsForPostDeployVerificationPanelEntries?.realTaskCardRenderingInputsBoardSourceKind !==
+						"runtime_board_snapshot_of_workspace_not_hydrated_in_browser"
+				)
+					return;
+				deploymentIdForTaskCommentCompletionRef.current = deploymentId;
+				openTaskComment(
+					realTaskCardRenderingInputsForPostDeployVerificationPanelEntries.workspaceIdOwningRuntimeBoardSnapshot,
+					selection.card,
+				);
+				return;
+			}
+			void requestSingleTaskCompletion(deploymentId, taskId);
+		},
+		[
+			board,
+			completingTaskId,
+			batchClosureAwaitingClosureDialog,
+			taskCommentBeforeMoveIntoDone.request,
+			realTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
+			openTaskComment,
+			requestSingleTaskCompletion,
+		],
+	);
+
+	const submitTaskCommentBeforeCompletion = (commentText: string) => {
+		const request = taskCommentBeforeMoveIntoDone.request;
+		const deploymentId = deploymentIdForTaskCommentCompletionRef.current;
+		if (!request || !deploymentId) return;
+		if (
+			realTaskCardRenderingInputsForPostDeployVerificationPanelEntries?.realTaskCardRenderingInputsBoardSourceKind !==
+				"runtime_board_snapshot_of_workspace_not_hydrated_in_browser" ||
+			realTaskCardRenderingInputsForPostDeployVerificationPanelEntries.workspaceIdOwningRuntimeBoardSnapshot !==
+				request.workspaceId
+		) {
+			returnTaskCommentToEditing(request.taskId, "当前核对的项目已变化，请关闭评论弹窗后重新操作。");
+			return;
+		}
+		const taskCommentToAppendWhenMovingIntoDone = taskCommentBeforeMoveIntoDone.prepareSubmission(commentText);
+		if (!taskCommentToAppendWhenMovingIntoDone) return;
+		const currentTaskCardSelection = findCardSelection(latestBoardRef.current, request.taskId);
+		if (currentTaskCardSelection?.column.id === "trash") {
+			// 响应丢失后只结算已保存的同一评论；PDV 状态仍由原有完成恢复流程处理。
+			if (
+				currentTaskCardSelection.card.taskCommentEntries?.some(
+					(entry) =>
+						entry.taskCommentEntryId === taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId &&
+						entry.commentText === taskCommentToAppendWhenMovingIntoDone.commentText,
+				)
+			)
+				completeTaskComment(request.taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
+			else
+				returnTaskCommentToEditing(
+					request.taskId,
+					"任务已移入 Done，尚无法确认本次评论已保存，请核对任务评论后取消或重试。",
+					taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+				);
+			return;
+		}
+		void requestSingleTaskCompletion(deploymentId, request.taskId, taskCommentToAppendWhenMovingIntoDone);
+	};
 
 	const handleRequestBatchClosureWithReasonsOfZoneTasks = useCallback(
 		(deploymentId: string, candidateTaskIds: string[]) => {
@@ -371,8 +495,20 @@ export function PostDeployVerificationController({
 		if (isSubmittingClosure) {
 			return;
 		}
+		const pending = singleTaskCompletionAwaitingClosureDialog;
+		if (pending?.taskCommentToAppendWhenMovingIntoDone)
+			returnTaskCommentToEditing(
+				pending.taskId,
+				null,
+				pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+			);
 		closeCompletionFlow();
-	}, [closeCompletionFlow, isSubmittingClosure]);
+	}, [
+		closeCompletionFlow,
+		isSubmittingClosure,
+		singleTaskCompletionAwaitingClosureDialog,
+		returnTaskCommentToEditing,
+	]);
 
 	const isClosureDialogOpen =
 		singleTaskCompletionAwaitingClosureDialog !== null || batchClosureAwaitingClosureDialog !== null;
@@ -391,7 +527,11 @@ export function PostDeployVerificationController({
 				}
 				stayInFront={verification.stayInFront}
 				collapsed={verification.collapsed}
-				loweredForDialog={isClosureDialogOpen || isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel}
+				loweredForDialog={
+					isClosureDialogOpen ||
+					taskCommentBeforeMoveIntoDone.request !== null ||
+					isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel
+				}
 				completingTaskId={completingTaskId}
 				isBatchClosureWithReasonsInFlight={batchClosureAwaitingClosureDialog !== null}
 				onToggleStayInFront={() => verification.setStayInFront((current) => !current)}
@@ -404,6 +544,10 @@ export function PostDeployVerificationController({
 				onRequestBatchClosureWithReasonsOfZoneTasks={handleRequestBatchClosureWithReasonsOfZoneTasks}
 				onSelectTask={onSelectTask}
 				onNavigateToBoard={onNavigateToBoard}
+			/>
+			<TaskCommentBeforeMoveIntoDoneDialog
+				controller={taskCommentBeforeMoveIntoDone}
+				onSubmit={submitTaskCommentBeforeCompletion}
 			/>
 			{singleTaskCompletionAwaitingClosureDialog ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog

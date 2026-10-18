@@ -43,7 +43,7 @@ import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
-import { notifyError } from "@/components/app-toaster";
+import { notifyError, showAppToast } from "@/components/app-toaster";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
 import {
 	formatClineReasoningEffortLabel,
@@ -52,6 +52,7 @@ import {
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
+import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
@@ -77,6 +78,7 @@ import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stor
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
+import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { formatPathForDisplay } from "@/utils/path-display";
@@ -135,7 +137,7 @@ export interface TaskCardBusinessProps {
 	selected?: boolean;
 	onClick?: (card: BoardCardModel) => void;
 	onStart?: (taskId: string) => void;
-	onMoveToTrash?: (taskId: string) => void;
+	onMoveToTrash?: TaskCardMoveIntoDoneRequestHandler;
 	onMoveToValidation?: (taskId: string) => void;
 	// 手动把 In Progress 卡翻入 Review（仅终端 agent；卡死/空闲会话拖不进 Review 的兜底入口）。
 	onMoveToReview?: (taskId: string) => void;
@@ -343,6 +345,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,
 		taskWorktreeExists: taskWorkspaceInfo?.exists,
 	});
+	const [openedQuickActionMenu, setOpenedQuickActionMenu] = useState<"done" | "prompt" | null>(null);
 	const isTrashCard = columnId === "trash";
 	// 只有本体持有 DOM 身份（data-task-id / data-verification-anchor）与 DnD 绑定，见 TaskCardBodyRenderRole。
 	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
@@ -367,7 +370,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 		isCrossProjectTaskSwitcherRowCopy && onClick != null;
 	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
 	const isHoverPresentationShown =
-		isHovered || crossProjectTaskSwitcherRowElements?.isPresentedAsHoveredFromFirstFrame === true;
+		isHovered ||
+		openedQuickActionMenu !== null ||
+		crossProjectTaskSwitcherRowElements?.isPresentedAsHoveredFromFirstFrame === true;
 	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
 	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
 	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑；
@@ -1319,7 +1324,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 										: isCompactRowInFocusViewLeftColumn
 											? "top-1"
 											: "-top-[6px]",
-									"focus-within:opacity-100 focus-within:pointer-events-auto",
+									"focus-within:opacity-100 focus-within:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
 									isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
 								),
 					)}
@@ -1363,19 +1368,27 @@ export const TaskCardBody = memo(function TaskCardBody({
 							/>
 						</Tooltip>
 					) : null}
-					<Tooltip side="bottom" content={revealHoverActionTooltip("View original prompt")}>
-						<Button
-							icon={<FileText size={12} />}
-							variant="ghost"
-							size="xs"
-							aria-label="View original prompt"
-							onMouseDown={stopEvent}
-							onClick={(event) => {
-								stopEvent(event);
-								setIsPromptViewerOpen(true);
-							}}
-						/>
-					</Tooltip>
+					<TaskCardPrimaryActionWithQuickOptions
+						open={openedQuickActionMenu === "prompt"}
+						onOpenChange={(open) =>
+							setOpenedQuickActionMenu((current) => (open ? "prompt" : current === "prompt" ? null : current))
+						}
+						icon={<FileText size={12} />}
+						primaryLabel="查看原始 Prompt"
+						primaryAccessibleLabel="View original prompt"
+						onPrimaryAction={() => setIsPromptViewerOpen(true)}
+						quickOption={{
+							label: "复制原始 Prompt",
+							icon: <Copy size={14} />,
+							onSelect: () => {
+								void writeTextToSystemClipboardWithInsecureContextFallback(card.prompt)
+									.then(() => {
+										showAppToast({ intent: "success", message: "已复制原始 Prompt", timeout: 2000 });
+									})
+									.catch(() => notifyError("无法复制原始 Prompt，请打开查看后手动复制。"));
+							},
+						}}
+					/>
 					{/* 「In Progress 但从没真正起过会话」包括运行时 attach 时造的占位 summary：启动前段失败（如建 worktree
 					    时锁等待超时）后卡片上留下的正是它，不认它的话这张卡在看板上就没有任何重试入口。
 					    但占位形状也可能是硬中断后退化的老会话，所以占位时只在有**正面证据**（任务 worktree 不存在、
@@ -1440,20 +1453,22 @@ export const TaskCardBody = memo(function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{columnId === "review" || columnId === "validation" ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to done")}>
-							<Button
-								icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
-								variant="ghost"
-								size="xs"
-								disabled={isMoveToTrashLoading}
-								aria-label="Move task to done"
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									onMoveToTrash?.(card.id);
-								}}
-							/>
-						</Tooltip>
+						<TaskCardPrimaryActionWithQuickOptions
+							open={openedQuickActionMenu === "done"}
+							onOpenChange={(open) =>
+								setOpenedQuickActionMenu((current) => (open ? "done" : current === "done" ? null : current))
+							}
+							icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
+							primaryLabel="移入 Done"
+							primaryAccessibleLabel="Move task to done"
+							disabled={isMoveToTrashLoading || !onMoveToTrash}
+							onPrimaryAction={() => onMoveToTrash?.(card.id)}
+							quickOption={{
+								label: "添加评论并移入 Done…",
+								icon: <MessagesSquare size={14} />,
+								onSelect: () => onMoveToTrash?.(card.id, { requestTaskCommentBeforeMovingIntoDone: true }),
+							}}
+						/>
 					) : null}
 					{columnId === "trash" ? (
 						<Tooltip

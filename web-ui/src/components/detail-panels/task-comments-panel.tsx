@@ -9,19 +9,12 @@ import {
 	useRef,
 	useState,
 } from "react";
-
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { TaskCommentEntry } from "@/types";
+import { createTaskCommentEntryId } from "@/utils/create-task-comment-entry-id";
 
 const COLLAPSED_COMMENT_TEXTAREA_VISIBLE_LINE_COUNT = 4;
-
-function createTaskCommentEntryId(): string {
-	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-		return crypto.randomUUID();
-	}
-	return `task-comment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 function formatTaskCommentMetadataTimestamp(timestamp: number): string {
 	if (!Number.isFinite(timestamp)) {

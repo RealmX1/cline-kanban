@@ -83,6 +83,7 @@ for (const width of [375, 390, 768]) {
 		await card.getByRole("button", { name: "Move task to validation" }).tap();
 		await expect(page.getByLabel("动作结果")).toHaveText("validation:mobile-task-1");
 		await card.getByRole("button", { name: "View original prompt" }).tap();
+		await page.getByRole("menuitem", { name: "查看原始 Prompt", exact: true }).tap();
 		await expect(page.getByRole("dialog")).toContainText("手机上的原始任务需求");
 		await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).first().tap();
 		await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -114,6 +115,10 @@ test("真实组件共用 30 秒收起通知，编辑和 Portal 弹窗暂停", as
 	await expect(card.locator("textarea")).toBeVisible();
 	await card.locator("textarea").press("Escape");
 	await card.getByRole("button", { name: "View original prompt" }).tap();
+	await page.clock.runFor(60_000);
+	await expect(card).toBeVisible();
+	await expect(page.getByRole("menu")).toBeVisible();
+	await page.getByRole("menuitem", { name: "查看原始 Prompt", exact: true }).tap();
 	await page.clock.runFor(60_000);
 	await expect(page.getByRole("dialog")).toBeVisible();
 	await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).first().tap();

@@ -20,7 +20,9 @@ export function Dialog({
 	onInteractOutside,
 	onClickCapture,
 	onKeyDownCapture,
+	onOpenAutoFocus,
 }: {
+	onOpenAutoFocus?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onOpenAutoFocus"];
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	children: ReactNode;
@@ -40,6 +42,7 @@ export function Dialog({
 					style={{ animation: "kb-overlay-show 150ms ease" }}
 				/>
 				<RadixDialog.Content
+					onOpenAutoFocus={onOpenAutoFocus}
 					onClickCapture={onClickCapture}
 					onKeyDownCapture={onKeyDownCapture}
 					aria-describedby={contentAriaDescribedBy}

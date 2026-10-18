@@ -1,6 +1,7 @@
 import type { TaskCardBusinessProps } from "@/components/task-card-body";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { BoardCard, BoardColumnId } from "@/types";
+import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 
 /**
  * 「一张任务卡在某个 stage 里有哪些动作可用」的**唯一判定点**。
@@ -16,7 +17,7 @@ import type { BoardCard, BoardColumnId } from "@/types";
 /** 未按 stage 筛过的完整动作集合（含各动作的 in-flight 表）。 */
 export interface TaskCardActionHandlerBundle {
 	onStartTask?: (taskId: string) => void;
-	onMoveToTrashTask?: (taskId: string) => void;
+	onMoveToTrashTask?: TaskCardMoveIntoDoneRequestHandler;
 	onMoveToValidationTask?: (taskId: string) => void;
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
