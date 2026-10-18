@@ -14,6 +14,8 @@ import type { RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizo
  */
 export interface CrossProjectTaskSwitcherPanelViewContinuityRecord {
 	panelScrollTopPx: number;
+	// 同一任务跨过渡壳重挂载时只恢复滚动；真正切换任务时才重新定位。
+	focusedTaskEntryKeyLastRevealedInPanel: string | null;
 	showsAllPinnedEntries: boolean;
 	// 「显示更早」拉回的快照；null = 没展开（默认 7 天窗）。
 	entriesWithinExtendedActivityHorizon: RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null;
@@ -30,6 +32,7 @@ export interface CrossProjectTaskSwitcherPanelViewContinuityRecord {
 const INITIAL_CROSS_PROJECT_TASK_SWITCHER_PANEL_VIEW_CONTINUITY_RECORD: CrossProjectTaskSwitcherPanelViewContinuityRecord =
 	{
 		panelScrollTopPx: 0,
+		focusedTaskEntryKeyLastRevealedInPanel: null,
 		showsAllPinnedEntries: false,
 		entriesWithinExtendedActivityHorizon: null,
 		crossProjectTaskSwitcherEntryKeysKeptExpandedInListAsFullTaskCardByUser: [],

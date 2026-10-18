@@ -2,6 +2,7 @@ import type {
 	CrossProjectTaskSwitcherEntryInProject,
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Activity, ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin } from "lucide-react";
 import {
 	type MutableRefObject,
@@ -65,6 +66,8 @@ export interface CrossProjectTaskSwitcherSectionBlockProps {
 		section: CrossProjectTaskSwitcherTaskRowSection,
 	) => ReactElement;
 	sectionColumnScrollContainerBinding?: CrossProjectTaskSwitcherSectionColumnScrollContainerBinding;
+	/** 只在 Focus View 保留这一定位行，不改变分组数量或持久化展开偏好。 */
+	focusedTaskRowToKeepMounted?: { entryKey: string; section: CrossProjectTaskSwitcherTaskRowSection } | null;
 }
 
 // 两种呈现都是「h-9 header + 内容容器，行是内容容器的直接子节点」：行根节点自带的 first:mt-4
@@ -134,6 +137,7 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 	sectionsModel,
 	renderRowInHostingScrollContainer,
 	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
 	const { sections } = sectionsModel;
 	// 「展开全部置顶」跨重挂载保留（Focus View 左栏 ↔ 过渡外壳），见 cross-project-task-switcher-panel-view-continuity-store。
@@ -171,9 +175,16 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 			</CrossProjectTaskSwitcherSectionFrame>
 		);
 	}
-	const visiblePinnedEntries = showsAllPinnedEntries
-		? sections.pinnedEntries
-		: sections.pinnedEntries.slice(0, DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER);
+	const isFocusedPinnedEntry = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
+		focusedTaskRowToKeepMounted?.section === "pinned" &&
+		buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskRowToKeepMounted.entryKey;
+	const visiblePinnedEntries = sections.pinnedEntries.filter((entry, index) =>
+		isPinnedSectionCollapsed
+			? isFocusedPinnedEntry(entry)
+			: showsAllPinnedEntries ||
+				index < DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER ||
+				isFocusedPinnedEntry(entry),
+	);
 	const hiddenPinnedEntryCount = sections.pinnedEntries.length - visiblePinnedEntries.length;
 	return (
 		<CrossProjectTaskSwitcherSectionFrame
@@ -196,12 +207,12 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 				</button>
 			}
 		>
-			{isPinnedSectionCollapsed ? null : (
+			{visiblePinnedEntries.length === 0 ? null : (
 				<>
 					{visiblePinnedEntries.map((entryInProject) =>
 						renderRowInHostingScrollContainer(entryInProject, "pinned"),
 					)}
-					{hiddenPinnedEntryCount > 0 || showsAllPinnedEntries ? (
+					{!isPinnedSectionCollapsed && (hiddenPinnedEntryCount > 0 || showsAllPinnedEntries) ? (
 						<button
 							type="button"
 							onClick={() => setShowsAllPinnedEntries(!showsAllPinnedEntries)}
@@ -223,6 +234,7 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	sectionsModel,
 	renderRowInHostingScrollContainer,
 	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const { sections, isRunningSectionExpanded, setIsRunningSectionExpanded } = sectionsModel;
 	if (sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page") {
@@ -269,11 +281,15 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 				</button>
 			}
 		>
-			{isRunningSectionExpanded && sections.runningEntries.length > 0
-				? sections.runningEntries.map((entryInProject) =>
-						renderRowInHostingScrollContainer(entryInProject, "running"),
-					)
-				: null}
+			{sections.runningEntries
+				.filter(
+					({ workspaceId, entry }) =>
+						isRunningSectionExpanded ||
+						(focusedTaskRowToKeepMounted?.section === "running" &&
+							buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) ===
+								focusedTaskRowToKeepMounted.entryKey),
+				)
+				.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "running"))}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }

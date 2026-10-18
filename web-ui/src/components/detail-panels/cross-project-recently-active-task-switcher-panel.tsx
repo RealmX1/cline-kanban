@@ -1,5 +1,6 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { type ReactElement, useLayoutEffect, useRef } from "react";
+import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import { type ReactElement, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectTaskSwitcherPinnedSectionBlock,
@@ -10,14 +11,15 @@ import {
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-section-blocks";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
+import { CrossProjectTaskSwitcherFocusedTaskCard } from "@/components/detail-panels/cross-project-task-switcher-focused-task-card";
+import { crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/components/ui/cn";
+import { useCrossProjectTaskSwitcherFocusedTaskVisibility } from "@/hooks/use-cross-project-task-switcher-focused-task-visibility";
 import { useCrossProjectTaskSwitcherRowHoverExpansionInPlace } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScrollContainers } from "@/hooks/use-cross-project-task-switcher-section-row-rendering-shared-across-scroll-containers";
 import type { RuntimeAgentId } from "@/runtime/types";
-import {
-	readCrossProjectTaskSwitcherPanelViewContinuity,
-	writeCrossProjectTaskSwitcherPanelViewContinuity,
-} from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
+import { writeCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 
 /**
  * Focus View 左栏的 All projects 模式：跨项目「最近活跃任务」切换面板（docs/context-cross-project-recently-active-task-switcher.md）。
@@ -51,58 +53,116 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	const rowHoverExpansionOfPanelScrollContainer = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		panelScrollContainerRef,
 	});
-	// 跨重挂载保留（Focus View 左栏 ↔ 过渡外壳），见 cross-project-task-switcher-panel-view-continuity-store。
-	useLayoutEffect(() => {
-		if (panelScrollContainerRef.current) {
-			panelScrollContainerRef.current.scrollTop = readCrossProjectTaskSwitcherPanelViewContinuity().panelScrollTopPx;
-		}
-	}, []);
+	const focusedTaskVisibility = useCrossProjectTaskSwitcherFocusedTaskVisibility({
+		host,
+		currentProjectTaskCards,
+		sections: sectionsModel.sections,
+		scrollRootRef: panelScrollContainerRef,
+	});
+	const { focusedTaskEntryKey, focusedTaskSelection, focusedTaskSourceSection, focusedTaskPinState } =
+		focusedTaskVisibility;
+	const focusedTaskProjectName =
+		host.projects.find((project) => project.id === focusedTaskVisibility.focusedTaskInProject?.workspaceId)?.name ??
+		"";
+	const renderFocusedTaskCard = (onRevealFocusedTask?: () => void) => (
+		<CrossProjectTaskSwitcherFocusedTaskCard
+			selection={focusedTaskSelection}
+			projectName={focusedTaskProjectName}
+			currentProjectTaskCards={currentProjectTaskCards}
+			defaultAgentId={defaultAgentId}
+			onRevealFocusedTask={onRevealFocusedTask}
+		/>
+	);
 
 	const sectionBlockProps: CrossProjectTaskSwitcherSectionBlockProps = {
 		sectionBlockPresentation: "stacked_section_in_focus_view_left_column_panel",
 		sectionsModel,
+		focusedTaskRowToKeepMounted:
+			focusedTaskEntryKey && focusedTaskSourceSection
+				? { entryKey: focusedTaskEntryKey, section: focusedTaskSourceSection }
+				: null,
 		renderRowInHostingScrollContainer: (
 			entryInProject: CrossProjectTaskSwitcherEntryInProject,
 			section: CrossProjectTaskSwitcherTaskRowSection,
-		) => renderCrossProjectTaskSwitcherSectionRow(entryInProject, section, rowHoverExpansionOfPanelScrollContainer),
+		) =>
+			renderCrossProjectTaskSwitcherSectionRow(
+				entryInProject,
+				section,
+				rowHoverExpansionOfPanelScrollContainer,
+				section === focusedTaskSourceSection &&
+					buildCrossProjectTaskSwitcherEntryKey(entryInProject.workspaceId, entryInProject.entry.taskId) ===
+						focusedTaskEntryKey
+					? focusedTaskEntryKey
+					: undefined,
+			),
 	};
 
 	return (
 		<div
-			ref={panelScrollContainerRef}
-			onScroll={(event) =>
-				writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
-			}
+			// 源行、Sticky 与它们打开的 Portal 共用同一个 React 指针边界，副本内交互不能被当作离开面板。
 			onPointerEnter={rowHoverExpansionOfPanelScrollContainer.panelPointerHandlers.onPointerEnter}
 			onPointerLeave={rowHoverExpansionOfPanelScrollContainer.panelPointerHandlers.onPointerLeave}
 			onPointerDownCapture={rowHoverExpansionOfPanelScrollContainer.panelPointerHandlers.onPointerDownCapture}
-			// overflow-anchor: none —— hover 交接时列表顶边固定（见 use-cross-project-task-switcher-row-hover-expansion-in-place）；
-			// 浏览器自带的 scroll anchoring 会在面板滚动过时自己补 scrollTop，把指针上方的整列往下拖。
-			className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
-			data-testid="cross-project-recently-active-task-switcher-panel"
+			className="relative flex min-h-0 flex-1 flex-col overflow-clip"
+			data-cross-project-focused-task-visibility-panel=""
+			data-verification-anchor={crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey()}
 		>
-			{/* 与 This project 左栏同一个入口样式；Board Scope 下打开带目标项目字段的建卡框（默认上下文项目）。 */}
-			{host.onRequestCreateTaskInBoardScope ? (
-				<Button
-					icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-					aria-label="Create task"
-					fill
-					onClick={host.onRequestCreateTaskInBoardScope}
-					className="shrink-0"
-				>
-					<span className="inline-flex items-center gap-1.5">
-						<span>Create task</span>
-						<span aria-hidden className="text-text-secondary">
-							(c)
+			<div
+				ref={panelScrollContainerRef}
+				onScroll={(event) =>
+					writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
+				}
+				// overflow-anchor: none —— hover 交接时列表顶边固定（见 use-cross-project-task-switcher-row-hover-expansion-in-place）；
+				// 浏览器自带的 scroll anchoring 会在面板滚动过时自己补 scrollTop，把指针上方的整列往下拖。
+				className="isolate flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
+				data-testid="cross-project-recently-active-task-switcher-panel"
+				data-cross-project-focused-task-pin-state={focusedTaskPinState}
+			>
+				{/* 与 This project 左栏同一个入口样式；Board Scope 下打开带目标项目字段的建卡框（默认上下文项目）。 */}
+				{host.onRequestCreateTaskInBoardScope ? (
+					<Button
+						icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+						aria-label="Create task"
+						fill
+						onClick={host.onRequestCreateTaskInBoardScope}
+						className="shrink-0"
+					>
+						<span className="inline-flex items-center gap-1.5">
+							<span>Create task</span>
+							<span aria-hidden className="text-text-secondary">
+								(c)
+							</span>
 						</span>
-					</span>
-				</Button>
+					</Button>
+				) : null}
+				{focusedTaskEntryKey && focusedTaskSourceSection === null ? (
+					<div
+						className="shrink-0"
+						data-cross-project-focused-task-outside-sections=""
+						data-cross-project-focused-task-scroll-anchor={focusedTaskEntryKey}
+					>
+						{renderFocusedTaskCard()}
+					</div>
+				) : null}
+				<CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherRemainingRecentSectionBlock {...sectionBlockProps} />
+				{pinReasonDialogAndOtherProjectConfirmationDialogs}
+			</div>
+			{focusedTaskSelection && focusedTaskPinState !== "hidden" ? (
+				<div
+					className={cn(
+						"pointer-events-none absolute inset-x-0 z-10 max-h-full overflow-y-auto px-2",
+						focusedTaskPinState === "pinTop" ? "top-0" : "bottom-0",
+					)}
+					data-cross-project-focused-task-sticky-edge={focusedTaskPinState === "pinTop" ? "top" : "bottom"}
+				>
+					<div className="pointer-events-auto bg-surface-0 py-2">
+						{renderFocusedTaskCard(focusedTaskVisibility.revealFocusedTaskScrollAnchor)}
+					</div>
+				</div>
 			) : null}
-			<CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />
-			<CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />
-			<CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />
-			<CrossProjectTaskSwitcherRemainingRecentSectionBlock {...sectionBlockProps} />
-			{pinReasonDialogAndOtherProjectConfirmationDialogs}
 		</div>
 	);
 }

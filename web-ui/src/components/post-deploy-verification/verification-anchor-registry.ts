@@ -40,6 +40,11 @@ export function crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId: string,
 	return `cross-project-task-switcher-section-row:${workspaceId}:${taskId}`;
 }
 
+// All projects Focus View 的焦点任务展示与 Sticky 共用面板。副本不输出本体卡锚点。
+export function crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey(): string {
+	return "cross-project-task-switcher-focused-task-visibility-panel";
+}
+
 // 看板某一列容器。
 // 主看板的列容器（board-column.tsx）已挂本锚点；Focus View 的列面板（column-context-panel.tsx）仍未挂——
 // 创作指向 Focus View 列的引导验证时，须在同一变更内给那边补上，否则 spotlightAnchor 只能走降级路径。

@@ -80,6 +80,7 @@ describe("TaskCardBody 的渲染角色", () => {
 	it.each<TaskCardBodyRenderRole>([
 		"canonical_card_in_its_stage_list",
 		"focused_card_copy_under_sticky_stage_header",
+		"focused_task_card_copy_in_cross_project_task_switcher",
 		"focused_task_card_copy_in_mobile_detail_header",
 		"pinned_card_copy_in_task_pinboard",
 	])("Review 卡片有未提交变化时也不显示 Git 操作按钮：%s", (renderRole) => {
@@ -104,6 +105,11 @@ describe("TaskCardBody 的渲染角色", () => {
 		);
 		expect(mobileHeaderCopy?.getAttribute("data-task-id")).toBeNull();
 		expect(mobileHeaderCopy?.getAttribute("data-verification-anchor")).toBeNull();
+		const crossProjectFocusedCopy = cardShell(
+			renderCardBody({ renderRole: "focused_task_card_copy_in_cross_project_task_switcher" }),
+		);
+		expect(crossProjectFocusedCopy?.getAttribute("data-task-id")).toBeNull();
+		expect(crossProjectFocusedCopy?.getAttribute("data-verification-anchor")).toBeNull();
 
 		const pinboardCopy = cardShell(renderCardBody({ renderRole: "pinned_card_copy_in_task_pinboard" }));
 		expect(pinboardCopy?.getAttribute("data-task-id")).toBeNull();
@@ -122,6 +128,31 @@ describe("TaskCardBody 的渲染角色", () => {
 		const host = renderCardBody({ renderRole: "focused_task_card_copy_in_mobile_detail_header", onClick });
 		act(() => cardShell(host)?.click());
 		expect(onClick).not.toHaveBeenCalled();
+	});
+
+	it("跨项目焦点副本不触发卡级导航或双击编辑，卡片动作仍然可用", () => {
+		const onClick = vi.fn();
+		const onMoveToValidation = vi.fn();
+		act(() =>
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="review"
+					renderRole="focused_task_card_copy_in_cross_project_task_switcher"
+					onClick={onClick}
+					onSaveTitle={vi.fn()}
+					onMoveToValidation={onMoveToValidation}
+				/>,
+			),
+		);
+		act(() => {
+			cardShell(container)?.click();
+			cardShell(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+		});
+		expect(onClick).not.toHaveBeenCalled();
+		expect(container.querySelector("textarea")).toBeNull();
+		act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Move task to validation"]')?.click());
+		expect(onMoveToValidation).toHaveBeenCalledWith("task-1");
 	});
 
 	it("PDV 面板条目副本与置顶板分身同一侧：可单击进详情（pointer）、双击改标题，不显示置顶板专属的 stage 标签", () => {

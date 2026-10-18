@@ -380,6 +380,12 @@ body,
 	visibility: hidden;
 }
 
+/* All projects 的定位行不持有 canonical 卡片身份；Sticky 在 scrollport 外，隐藏源行仍保留测量几何。 */
+[data-cross-project-focused-task-pin-state]:not([data-cross-project-focused-task-pin-state="hidden"])
+	[data-cross-project-focused-task-scroll-anchor] {
+	visibility: hidden;
+}
+
 /*
  * Focus View 全 stage 卡头手风琴：顶沿 rail（已滚过卡头，顶→下堆叠）+ 底沿 rail（未到达卡头）。
  * 脱离文档流的 overlay，不挤动布局；条目用 flexbox 自然堆叠（不手算逐条偏移）。焦点 stage 的条目在

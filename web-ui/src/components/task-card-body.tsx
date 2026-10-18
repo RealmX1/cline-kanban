@@ -182,6 +182,8 @@ export type TaskCardBodyRenderRole =
 	// Focus View：焦点卡滚出视野时，跟着 sticky stage 卡头一起留在视野里的那份只读副本。
 	// 纯为「别让我正在看的任务跑出屏幕」而存在，因此关掉全部卡级指针交互，只留 hover 动作组。
 	| "focused_card_copy_under_sticky_stage_header"
+	// All projects 左栏的当前任务副本：分组外保底展示或上下沿 Sticky，无本体 DOM 身份与卡级导航。
+	| "focused_task_card_copy_in_cross_project_task_switcher"
 	// 手机详情顶部的当前任务副本：完整元数据、常驻触控动作，不拖拽、不持有本体 DOM 身份、不点击跳转。
 	| "focused_task_card_copy_in_mobile_detail_header"
 	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不持有 DOM 身份外，
@@ -345,7 +347,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 只有本体持有 DOM 身份（data-task-id / data-verification-anchor）与 DnD 绑定，见 TaskCardBodyRenderRole。
 	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
 	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
-	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
+	const isPassiveFocusedTaskCardCopy =
+		renderRole === "focused_card_copy_under_sticky_stage_header" ||
+		renderRole === "focused_task_card_copy_in_cross_project_task_switcher";
 	const isMobileDetailHeaderCopy = renderRole === "focused_task_card_copy_in_mobile_detail_header";
 	// 置顶板分身专属的 stage 标签 / 原因行只认这一个角色；PDV 面板条目副本（task_card_copy_in_post_deploy_verification_panel_entry）
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击、Done 卡不可点开。
@@ -355,8 +359,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
 		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
 		: null;
-	const isCardInteractive =
-		(!isTrashCard || isCrossProjectTaskSwitcherRowCopy) && !isPassiveMirrorUnderStickyStageHeader;
+	const isCardInteractive = (!isTrashCard || isCrossProjectTaskSwitcherRowCopy) && !isPassiveFocusedTaskCardCopy;
 	// 切换面板的行副本：「点卡体 = 打开任务」只挂在卡壳的 onClick 上，键盘够不到（精简行有主按钮，展开后没有）。
 	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
 	// 嵌套，也不改标题几何。其他角色不变。
@@ -370,7 +373,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑；
 	// 切换面板的行副本也不接（单击要立即生效，改标题走铅笔）。
 	const isInlineTitleEditEnabled =
-		!isPassiveMirrorUnderStickyStageHeader &&
+		!isPassiveFocusedTaskCardCopy &&
 		!isCrossProjectTaskSwitcherRowCopy &&
 		onSaveTitle != null &&
 		(isNavigatingColumn || isTrashCard);
@@ -596,7 +599,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 			: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
 	const showTitleEditButton =
-		(onSaveTitle != null || onOpenTaskEditor != null) && !isPassiveMirrorUnderStickyStageHeader && !isEditingTitle;
+		(onSaveTitle != null || onOpenTaskEditor != null) && !isPassiveFocusedTaskCardCopy && !isEditingTitle;
 	// 「已置顶」由 pinnedToTaskPinboardAt 的存在表达（见 state/task-pinboard-pinning.ts），没有冗余布尔。
 	const isPinnedToTaskPinboard = card.pinnedToTaskPinboardAt !== undefined;
 	// hover 动作组里那颗按钮：图标表示**动作**（要做什么），至于「这张卡已置顶」的常驻提示走左上角胶囊，
@@ -1070,7 +1073,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 			data-column-id={columnId}
 			data-selected={selected}
 			onClick={
-				isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
+				isPassiveFocusedTaskCardCopy || isMobileDetailHeaderCopy
 					? undefined
 					: (event) => {
 							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，但 React 合成 click 仍沿
@@ -1109,7 +1112,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 						}
 			}
 			onDoubleClick={
-				isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
+				isPassiveFocusedTaskCardCopy || isMobileDetailHeaderCopy
 					? undefined
 					: (event) => {
 							if (!event.currentTarget.contains(event.target as Node)) {
@@ -1140,7 +1143,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 				// 本体可拖 → grab；置顶板分身 / 跨项目展开行 / PDV 面板条目单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
 				cursor: emitsCanonicalDomIdentity
 					? "grab"
-					: isPassiveMirrorUnderStickyStageHeader || isMobileDetailHeaderCopy
+					: isPassiveFocusedTaskCardCopy || isMobileDetailHeaderCopy
 						? "default"
 						: "pointer",
 			}}

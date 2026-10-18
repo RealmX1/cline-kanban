@@ -55,6 +55,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	currentProjectId,
 	inPlaceExpansionState,
 	fullTaskCard,
+	focusedTaskScrollAnchorKey,
 	onKeepExpandedInListAsFullTaskCard,
 	rowHoverExpansionTriggerProps,
 	onOpen,
@@ -73,6 +74,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	inPlaceExpansionState: CrossProjectTaskSwitcherRowInPlaceExpansionState;
 	// 展开时显示；精简行在 hover 意图计时期间也给出，隐藏挂载，借此在展开前就读好其他项目的卡（展开时是同一个实例）。
 	fullTaskCard?: ReactNode;
+	focusedTaskScrollAnchorKey?: string;
 	onKeepExpandedInListAsFullTaskCard?: () => void;
 	rowHoverExpansionTriggerProps?: CrossProjectTaskSwitcherRowHoverExpansionTriggerProps;
 	onOpen: () => void;
@@ -85,6 +87,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 		"data-cross-project-task-switcher-section": section,
 		"data-cross-project-task-switcher-workspace-id": workspaceId,
 		"data-cross-project-task-switcher-task-id": entry.taskId,
+		"data-cross-project-focused-task-scroll-anchor": focusedTaskScrollAnchorKey,
 		"data-cross-project-task-switcher-row-in-place-expansion-state": inPlaceExpansionState,
 		// Pinned 行不挂锚点：Pinned 点击后要跳到的正是下方区里的这一行。
 		"data-verification-anchor":
