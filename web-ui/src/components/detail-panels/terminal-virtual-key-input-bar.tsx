@@ -1,7 +1,9 @@
 import { type ReactElement, useCallback, useRef } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
+import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalVirtualKeyCapButton } from "@/components/detail-panels/terminal-virtual-key-cap-button";
+import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import {
 	TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID,
 	TERMINAL_VIRTUAL_KEY_BAR_ACTION_KEY_IDS,
@@ -17,13 +19,14 @@ const KEY_CAP_HEIGHT_CLASS_NAME = "h-9";
 /** Enter 跨两行：两个 h-9（36px）加中间 2px 的间隙。 */
 const SUBMIT_KEY_CAP_HEIGHT_CLASS_NAME = "h-[74px]";
 
-// 横向宽度预算（改键帽尺寸前先算一遍）：动作栅格 2×58+2 ≈ 118，方向键簇 3×40+4 = 124，
-// Enter 48，两处 gap 8+4，容器左右内边距 16 —— 合计约 318px，最窄的在用机型（320pt）也不溢出。
-// 这条按键条一旦横向溢出，被挤出去的恰恰是最右侧的 Enter，而它是「导航到目标后确认」的终点。
+// 320px 预算：动作键 86、方向簇 100、Enter 36、滚轮 36，加间隙与内边距约 286px。
+// 480px 以上才恢复较宽键帽，确保最右侧滚轮和确认键始终可达。
 
 interface TerminalVirtualKeyInputBarProps {
 	taskId: string;
 	disabled?: boolean;
+	onScrollByMouseWheelLines?: (lineDelta: number) => void;
+	scrollInteractionIdentity?: string;
 }
 
 /**
@@ -42,9 +45,22 @@ interface TerminalVirtualKeyInputBarProps {
  * 终端同处移动端 Focus View 的 tab 树内（切 tab 只是 `display:none`，终端始终挂载），
  * 故 controller 必定在位；真的取不到时只可能是终端尚未连上，此时提示用户比静默无响应更好。
  */
-export function TerminalVirtualKeyInputBar({ taskId, disabled }: TerminalVirtualKeyInputBarProps): ReactElement {
+export function TerminalVirtualKeyInputBar({
+	taskId,
+	disabled,
+	onScrollByMouseWheelLines,
+	scrollInteractionIdentity = taskId,
+}: TerminalVirtualKeyInputBarProps): ReactElement {
 	const barElementRef = useRef<HTMLDivElement | null>(null);
 	usePublishTerminalVirtualKeyBarViewportBottomInset(barElementRef);
+	const controls = useSharedMobileFocusViewCollapsibleControls();
+	const scrollByMouseWheelLines = useCallback(
+		(lineDelta: number) => {
+			if (onScrollByMouseWheelLines) onScrollByMouseWheelLines(lineDelta);
+			else getTerminalController(taskId)?.scrollByMouseWheelLines?.(lineDelta);
+		},
+		[onScrollByMouseWheelLines, taskId],
+	);
 
 	const handlePressKey = useCallback(
 		(keyDefinition: TerminalControlKeyDefinition) => {
@@ -59,45 +75,62 @@ export function TerminalVirtualKeyInputBar({ taskId, disabled }: TerminalVirtual
 	return (
 		<div
 			ref={barElementRef}
-			className="flex shrink-0 items-start justify-between gap-2 border-t border-border bg-surface-1 px-2 py-1.5"
+			className="flex shrink-0 flex-col border-t border-border bg-surface-1 px-2 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]"
+			data-terminal-virtual-key-input-bar=""
 		>
-			<div className="grid grid-cols-2 gap-0.5">
-				{TERMINAL_VIRTUAL_KEY_BAR_ACTION_KEY_IDS.map((keyId) => (
+			<div className="flex items-start justify-between gap-1">
+				<div className="grid grid-cols-2 gap-0.5">
+					{TERMINAL_VIRTUAL_KEY_BAR_ACTION_KEY_IDS.map((keyId) => (
+						<TerminalVirtualKeyCapButton
+							key={keyId}
+							keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId]}
+							onPressKey={handlePressKey}
+							disabled={disabled}
+							className={`${KEY_CAP_HEIGHT_CLASS_NAME} min-w-[42px] min-[480px]:min-w-[58px] px-1 text-[11px]`}
+						/>
+					))}
+				</div>
+				<div className="flex items-start gap-1">
+					<div className="grid grid-cols-3 gap-0.5">
+						{TERMINAL_VIRTUAL_KEY_BAR_DIRECTIONAL_CLUSTER_ROWS.flatMap((clusterRow, clusterRowIndex) =>
+							clusterRow.map((keyId, columnIndex) =>
+								keyId === null ? (
+									// 倒 T 形的空位。渲染成空 div 而不是靠 col-start 定位，网格结构一眼可读。
+									<div key={`empty-${clusterRowIndex}-${columnIndex}`} aria-hidden="true" />
+								) : (
+									<TerminalVirtualKeyCapButton
+										key={keyId}
+										keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId]}
+										onPressKey={handlePressKey}
+										disabled={disabled}
+										className={`${KEY_CAP_HEIGHT_CLASS_NAME} w-8 min-[480px]:w-10 text-sm`}
+									/>
+								),
+							),
+						)}
+					</div>
 					<TerminalVirtualKeyCapButton
-						key={keyId}
-						keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId]}
+						keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[TERMINAL_VIRTUAL_KEY_BAR_SUBMIT_KEY_ID]}
 						onPressKey={handlePressKey}
 						disabled={disabled}
-						className={`${KEY_CAP_HEIGHT_CLASS_NAME} min-w-[58px] px-1.5 text-[11px]`}
+						className={`${SUBMIT_KEY_CAP_HEIGHT_CLASS_NAME} w-9 min-[480px]:w-12`}
 					/>
-				))}
-			</div>
-			<div className="flex items-start gap-1">
-				<div className="grid grid-cols-3 gap-0.5">
-					{TERMINAL_VIRTUAL_KEY_BAR_DIRECTIONAL_CLUSTER_ROWS.flatMap((clusterRow, clusterRowIndex) =>
-						clusterRow.map((keyId, columnIndex) =>
-							keyId === null ? (
-								// 倒 T 形的空位。渲染成空 div 而不是靠 col-start 定位，网格结构一眼可读。
-								<div key={`empty-${clusterRowIndex}-${columnIndex}`} aria-hidden="true" />
-							) : (
-								<TerminalVirtualKeyCapButton
-									key={keyId}
-									keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId]}
-									onPressKey={handlePressKey}
-									disabled={disabled}
-									className={`${KEY_CAP_HEIGHT_CLASS_NAME} w-10 text-sm`}
-								/>
-							),
-						),
-					)}
 				</div>
-				<TerminalVirtualKeyCapButton
-					keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[TERMINAL_VIRTUAL_KEY_BAR_SUBMIT_KEY_ID]}
-					onPressKey={handlePressKey}
-					disabled={disabled}
-					className={`${SUBMIT_KEY_CAP_HEIGHT_CLASS_NAME} w-12`}
+				<TerminalMouseWheelScrollButtons
+					interactionIdentity={scrollInteractionIdentity}
+					onScrollByMouseWheelLines={scrollByMouseWheelLines}
 				/>
 			</div>
+			{controls?.isEnabled ? (
+				<button
+					type="button"
+					onClick={controls.collapseLowerVirtualKeyBar}
+					className="min-h-9 self-end px-1 text-xs text-text-secondary"
+					aria-label="收起下方按键栏"
+				>
+					收起按键栏
+				</button>
+			) : null}
 		</div>
 	);
 }

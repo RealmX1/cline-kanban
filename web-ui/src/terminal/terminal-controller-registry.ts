@@ -7,6 +7,7 @@ export interface TerminalController {
 	readScrollbackTranscript?: () => TerminalScrollbackTranscriptLogicalLine[];
 	hasScrollbackTranscriptContent?: () => boolean;
 	scrollToLatest?: () => void;
+	scrollByMouseWheelLines?: (lineDelta: number) => boolean;
 }
 
 const controllersByTaskId = new Map<string, TerminalController>();

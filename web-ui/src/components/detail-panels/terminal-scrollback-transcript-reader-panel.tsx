@@ -1,5 +1,5 @@
 import { RotateCcw, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
@@ -8,11 +8,13 @@ import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobi
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { getTerminalController, readTerminalScrollbackTranscript } from "@/terminal/terminal-controller-registry";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 
 interface TerminalScrollbackTranscriptReaderPanelProps {
+	scrollContainerRef?: MutableRefObject<HTMLElement | null>;
 	taskId: string;
 	/** 阅读视图是否可见（作为终端面板内的叠加层展开时为 true）。由不可见转为可见时自动重取，避免读到过期快照。 */
 	isVisible?: boolean;
@@ -39,8 +41,11 @@ interface TerminalScrollbackTranscriptReaderPanelProps {
 export function TerminalScrollbackTranscriptReaderPanel({
 	taskId,
 	isVisible = true,
+	scrollContainerRef,
 }: TerminalScrollbackTranscriptReaderPanelProps) {
 	const isMobile = useIsMobile();
+	const controls = useSharedMobileFocusViewCollapsibleControls();
+	const upperToolsExpanded = !controls?.isEnabled || controls.upperNavigationAndToolsExpanded;
 	const terminalThemeColors = useTerminalThemeColors();
 	const virtuosoRef = useRef<VirtuosoHandle | null>(null);
 	const [logicalLines, setLogicalLines] = useState<TerminalScrollbackTranscriptLogicalLine[]>([]);
@@ -78,7 +83,12 @@ export function TerminalScrollbackTranscriptReaderPanel({
 			className="relative flex min-h-0 min-w-0 flex-1 flex-col"
 			style={{ background: terminalThemeColors.surfacePrimary }}
 		>
-			<div className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5">
+			<div
+				className={cn(
+					"shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5",
+					upperToolsExpanded ? "flex" : "hidden",
+				)}
+			>
 				<div className="relative flex min-w-0 flex-1 items-center">
 					<Search size={12} className="pointer-events-none absolute left-2 text-text-tertiary" />
 					<input
@@ -87,6 +97,7 @@ export function TerminalScrollbackTranscriptReaderPanel({
 						onChange={(event) => setFilterQuery(event.target.value)}
 						placeholder="Filter lines"
 						aria-label="Filter transcript lines"
+						data-mobile-focus-view-idle-collapse-suspension=""
 						className={cn(
 							"w-full rounded-md border border-border bg-surface-2 py-1 pl-7 pr-2 text-xs text-text-primary",
 							"placeholder:text-text-tertiary focus-visible:border-border-focus focus-visible:outline-none",
@@ -116,6 +127,9 @@ export function TerminalScrollbackTranscriptReaderPanel({
 			) : (
 				<Virtuoso
 					ref={virtuosoRef}
+					scrollerRef={(element) => {
+						if (scrollContainerRef) scrollContainerRef.current = element instanceof HTMLElement ? element : null;
+					}}
 					style={{ height: "100%" }}
 					className="kb-terminal-transcript-reader-scroll-area"
 					data={visibleLogicalLines}

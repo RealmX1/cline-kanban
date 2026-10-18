@@ -45,6 +45,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useClineChatPanelController } from "@/hooks/use-cline-chat-panel-controller";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
+import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useWindowedAgentChatMessageList } from "@/hooks/use-windowed-agent-chat-message-list";
 import type {
@@ -217,6 +218,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			showMoveToTrash,
 			showMoveToValidation,
 		});
+		const mobileControls = useSharedMobileFocusViewCollapsibleControls();
 		const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 		// 只渲染最近一屏消息；滚到顶再回填。回填期间存住回填前的 scrollHeight 用于补偿滚动位置。
 		const { visibleMessages, hiddenOlderMessageCount, revealOlderMessages } = useWindowedAgentChatMessageList({
@@ -566,7 +568,9 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 				{/* 会话级工具条。目前只承载「换通话通道」一个动作，故仅当该会话真能切换时才占一行高度
 				    （Cline SDK 会话上整行不渲染）。切过去看到的是 xterm 面板，所以那边也挂了同一个按钮。 */}
-				{summary && canAgentSessionTransportBeSwitched(agentId ?? null) ? (
+				{summary &&
+				canAgentSessionTransportBeSwitched(agentId ?? null) &&
+				(!mobileControls?.isEnabled || mobileControls.upperNavigationAndToolsExpanded) ? (
 					<div className="flex items-center justify-end gap-1 px-2 pt-2">
 						<AgentSessionTransportSwitchButton
 							workspaceId={workspaceId}

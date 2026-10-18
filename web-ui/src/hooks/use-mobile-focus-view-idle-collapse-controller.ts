@@ -20,7 +20,9 @@ function isIdleCollapseSuspended(focusViewRoot: HTMLElement): boolean {
 	if (
 		activeElement instanceof HTMLElement &&
 		focusViewRoot.contains(activeElement) &&
-		activeElement.closest("[data-mobile-focus-view-idle-collapse-suspension]")
+		(activeElement.closest("[data-mobile-focus-view-idle-collapse-suspension]") ||
+			(activeElement.matches("input, textarea, [contenteditable='true']") &&
+				activeElement.closest("[data-mobile-focus-view-collapsible-region]")))
 	) {
 		return true;
 	}
@@ -51,10 +53,24 @@ export function useMobileFocusViewIdleCollapseController({
 	const [idleCollapseRequestSequenceNumber, setIdleCollapseRequestSequenceNumber] = useState(0);
 	const recordUserInteractionRef = useRef<() => void>(() => {});
 	const recordUserInteraction = useCallback(() => recordUserInteractionRef.current(), []);
+	const activeIdleCollapseBindingRef = useRef<{
+		focusViewRoot: HTMLElement;
+		focusedTaskIdentity: string;
+		removeIdleCollapseListenersAndCountdown: () => void;
+	} | null>(null);
 
+	// 访问门禁可在任务身份不变时替换根节点；每次提交核对实际节点，普通重渲染不重启倒计时。
 	useEffect(() => {
-		const focusViewRoot = focusViewRootRef.current;
-		if (!enabled || !focusViewRoot) return;
+		const focusViewRoot = enabled ? focusViewRootRef.current : null;
+		const previousBinding = activeIdleCollapseBindingRef.current;
+		if (
+			previousBinding?.focusViewRoot === focusViewRoot &&
+			previousBinding?.focusedTaskIdentity === focusedTaskIdentity
+		)
+			return;
+		previousBinding?.removeIdleCollapseListenersAndCountdown();
+		activeIdleCollapseBindingRef.current = null;
+		if (!focusViewRoot) return;
 		let timeoutId: number | null = null;
 		let suspended = isIdleCollapseSuspended(focusViewRoot);
 		const clearCountdown = () => {
@@ -96,18 +112,29 @@ export function useMobileFocusViewIdleCollapseController({
 			attributeFilter: ["hidden", "data-state", "role", "open"],
 		});
 		restartCountdown();
-		return () => {
-			clearCountdown();
-			recordUserInteractionRef.current = () => {};
-			for (const eventName of interactionEventNames) {
-				focusViewRoot.removeEventListener(eventName, restartCountdown, true);
-			}
-			document.removeEventListener("selectionchange", refreshSuspension);
-			document.removeEventListener("focusin", refreshSuspension);
-			document.removeEventListener("focusout", refreshSuspension);
-			modalPresenceObserver.disconnect();
+		activeIdleCollapseBindingRef.current = {
+			focusViewRoot,
+			focusedTaskIdentity,
+			removeIdleCollapseListenersAndCountdown: () => {
+				clearCountdown();
+				recordUserInteractionRef.current = () => {};
+				for (const eventName of interactionEventNames) {
+					focusViewRoot.removeEventListener(eventName, restartCountdown, true);
+				}
+				document.removeEventListener("selectionchange", refreshSuspension);
+				document.removeEventListener("focusin", refreshSuspension);
+				document.removeEventListener("focusout", refreshSuspension);
+				modalPresenceObserver.disconnect();
+			},
 		};
-	}, [enabled, focusedTaskIdentity, focusViewRootRef]);
+	});
+	useEffect(
+		() => () => {
+			activeIdleCollapseBindingRef.current?.removeIdleCollapseListenersAndCountdown();
+			activeIdleCollapseBindingRef.current = null;
+		},
+		[],
+	);
 
 	return { idleCollapseRequestSequenceNumber, recordUserInteraction };
 }

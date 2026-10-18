@@ -4,14 +4,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useMobileFocusViewIdleCollapseController } from "@/hooks/use-mobile-focus-view-idle-collapse-controller";
 
 let controller: ReturnType<typeof useMobileFocusViewIdleCollapseController>;
-function Harness({ enabled = true, identity = "project/task-1" }: { enabled?: boolean; identity?: string }) {
+function Harness({
+	enabled = true,
+	identity = "project/task-1",
+	rootVisible = true,
+}: {
+	enabled?: boolean;
+	identity?: string;
+	rootVisible?: boolean;
+}) {
 	const focusViewRootRef = useRef<HTMLDivElement>(null);
 	controller = useMobileFocusViewIdleCollapseController({ enabled, focusedTaskIdentity: identity, focusViewRootRef });
+	if (!rootVisible) return null;
 	return (
 		<div ref={focusViewRootRef}>
 			<button type="button">操作</button>
 			<textarea data-mobile-focus-view-idle-collapse-suspension="" />
 			<input aria-label="Agent 输入" />
+			<div data-mobile-focus-view-collapsible-region="">
+				<input aria-label="工具输入" />
+			</div>
 			<p>可以选择的任务信息</p>
 		</div>
 	);
@@ -48,6 +60,32 @@ describe("手机 Focus View 共用闲置收起控制器", () => {
 		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
 		advance(60_000);
 		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
+	});
+
+	it("访问门禁卸载并恢复同一任务根节点时，清理旧监听并为新节点重新计时", () => {
+		const previousFocusViewRoot = host.firstElementChild!;
+		advance(20_000);
+		act(() => root.render(<Harness rootVisible={false} />));
+		expect(vi.getTimerCount()).toBe(0);
+		advance(60_000);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(0);
+
+		act(() => root.render(<Harness />));
+		expect(host.firstElementChild).not.toBe(previousFocusViewRoot);
+		expect(vi.getTimerCount()).toBe(1);
+		advance(20_000);
+		act(() => host.querySelector("button")!.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+		advance(20_000);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(0);
+		act(() => previousFocusViewRoot.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+		expect(vi.getTimerCount()).toBe(1);
+		advance(9_999);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(0);
+		advance(1);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
+		advance(60_000);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it.each(["pointerdown", "keydown", "input", "wheel", "touchmove"])(
@@ -99,6 +137,15 @@ describe("手机 Focus View 共用闲置收起控制器", () => {
 			selection?.removeAllRanges();
 			document.dispatchEvent(new Event("selectionchange"));
 		});
+		advance(30_000);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
+	});
+
+	it("可折叠工具区域内的编辑暂停，离开后重新计时", () => {
+		act(() => host.querySelector<HTMLInputElement>('[aria-label="工具输入"]')!.focus());
+		advance(60_000);
+		expect(controller.idleCollapseRequestSequenceNumber).toBe(0);
+		act(() => host.querySelector("button")!.focus());
 		advance(30_000);
 		expect(controller.idleCollapseRequestSequenceNumber).toBe(1);
 	});
