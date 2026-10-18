@@ -56,6 +56,7 @@ export interface CrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScrollCo
 		entryInProject: CrossProjectTaskSwitcherEntryInProject,
 		section: CrossProjectTaskSwitcherTaskRowSection,
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
+		focusedTaskScrollAnchorKey?: string,
 	) => ReactElement;
 	pinReasonDialogAndOtherProjectConfirmationDialogs: ReactNode;
 }
@@ -398,6 +399,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		entryInProject: CrossProjectTaskSwitcherEntryInProject,
 		section: CrossProjectTaskSwitcherTaskRowSection,
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
+		focusedTaskScrollAnchorKey?: string,
 	): ReactElement => {
 		const { rowExpandedInPlaceByHover, rowWithPendingHoverIntent, buildRowHoverExpansionTriggerProps } =
 			rowHoverExpansionOfHostingScrollContainer;
@@ -416,6 +418,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 				key={`${section}:${entryKey}`}
 				entryInProject={entryInProject}
 				section={section}
+				focusedTaskScrollAnchorKey={focusedTaskScrollAnchorKey}
 				isFocused={
 					host.focusedTaskInProject?.workspaceId === workspaceId &&
 					host.focusedTaskInProject.taskId === entry.taskId

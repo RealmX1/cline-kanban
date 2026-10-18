@@ -95,6 +95,13 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 - `most_recent_conversation_progress_only`：只按对话推进。
 默认 7 天窗；「Show older」按需查询 30 天窗（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不进广播）。快照只补广播取景范围**之外**的旧任务：落在取景范围内却不在广播里的快照条目已失效（取消置顶 / 移入 Done / 已删除），不补回；扩展期间随面板 30 秒 tick 重新拉取快照，范围外任务的变化在一个 tick 内收敛。
 
+**Focused Task Visibility（当前聚焦任务留存与 Sticky）**：
+- All projects Focus View 的当前任务不以四组取景为存在条件：Spotlight 可以打开未置顶 Done、时间窗外、或被 Recent 当前排序模式排除的任务。这时在创建按钮下方临时显示「当前聚焦任务」完整紧凑卡；任务进入正常分组后移除临时区，不改四组归属、计数或排序。
+- 当前任务以 `(workspaceId, taskId)` 定位，完整卡读已水合的当前项目 board、推流 session 与共享 `buildTaskCardBusinessProps`；跨项目在途只显示目标占位，不复用旧项目同号卡。手机详情顶部卡片继续使用独立的移动端角色。
+- 主分组行优先于 Pinned 副本作为唯一定位源；Running 收起、仅在 Pinned 的任务被折叠或截断时仍保留这一行，用户的持久化收起偏好不变。分组内沿用精简行 / hover 展开的交互。
+- 复用 `useSelectedCardPinState` 的实时几何判定：完整可见时不显示副本，上下前沿触边即在对应边缘显示完整 Sticky 卡。源行只改 `visibility`、保留几何；副本不带 canonical `data-task-id` 或验证锚点。卡体或「返回当前任务所在位置」按钮只滚回定位源，卡片动作与 Portal 弹窗不触发导航。
+- 明确切换任务后定位新任务；同一任务跨过渡壳重挂载时恢复原滚动位置。临时区与组内定位源切换时重新绑定测量。没有聚焦任务的 All projects 首页不增加焦点区或 Sticky。
+
 **Section Exclusivity（三区互斥）**：
 Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。区归属**只读 session facet 与时间戳，不读 board 列**（例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。
 
