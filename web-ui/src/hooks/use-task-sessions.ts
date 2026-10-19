@@ -336,11 +336,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					taskConversationSessionMetadata: {
 						workspaceTaskId: input.task.id,
 						taskConversationSessionRole: sessionRole,
-						taskConversationSessionContextSource: isTaskCollaborator
-							? "started_from_scratch"
-							: input.contextSource,
+						taskConversationSessionContextSource: input.contextSource,
 						parentTaskConversationSessionId:
-							!isTaskCollaborator && input.contextSource === "forked_from_main_current_turn"
+							input.contextSource === "forked_from_main_current_turn"
 								? resolveMainTaskConversationSessionId(input.task)
 								: null,
 						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,

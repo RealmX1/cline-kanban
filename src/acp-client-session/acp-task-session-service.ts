@@ -85,6 +85,8 @@ export interface StartAcpTaskSessionRequest {
 	// **同时不重放 startInPlanMode**：omp 的 loadSession 会返回该会话当前的 modes，
 	// 重新按 plan 起步会把用户在对话中途已经切走的模式按回去。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
 	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
@@ -274,12 +276,18 @@ export class AcpTaskSessionService {
 		const startedAt = now();
 		const runtimeSessionIncarnationId = randomUUID();
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
+		const isForkingMainContext =
+			!shouldResumeWithoutResendingPrompt &&
+			Boolean(request.taskConversationSessionMainContextForkSourceNativeSessionId);
 
 		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
 		// 免得进程冷启动那几秒里卡片看起来毫无反应。
 		// 续跑重开不走这条：没有新的用户输入可落，卡片也不该被推成 running（会话很可能正停在 Review）。
 		const promptText = shouldResumeWithoutResendingPrompt ? "" : request.prompt.trim();
-		if (promptText || (!shouldResumeWithoutResendingPrompt && (request.images?.length ?? 0) > 0)) {
+		if (
+			!isForkingMainContext &&
+			(promptText || (!shouldResumeWithoutResendingPrompt && (request.images?.length ?? 0) > 0))
+		) {
 			this.emitMessage(
 				request.taskId,
 				appendAcpMessage(
@@ -359,6 +367,12 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
+				taskConversationSessionMainContextForkSourceNativeSessionId: isForkingMainContext
+					? request.taskConversationSessionMainContextForkSourceNativeSessionId
+					: undefined,
+				revalidateTaskConversationSessionMainContextForkSource: isForkingMainContext
+					? request.revalidateTaskConversationSessionMainContextForkSource
+					: undefined,
 				// 工作单元身份写进每条会话的进程 env，工具 shell 中的 kanban CLI 才能声明宿主与行动者。
 				// 宿主任务与会话分别寻址：协作会话共用任务目录，但 hook 与原生身份归各自会话。
 				env: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
@@ -394,6 +408,19 @@ export class AcpTaskSessionService {
 					},
 				}),
 			);
+			if (isForkingMainContext) {
+				for (const message of finishAcpStreamedReasoningMessages(entry)) this.emitMessage(request.taskId, message);
+				clearAcpStreamingGrouping(entry);
+				if (promptText || (request.images?.length ?? 0) > 0) {
+					this.emitMessage(
+						request.taskId,
+						appendAcpMessage(
+							entry,
+							createAcpMessage(request.taskId, "user", request.prompt, { source: "acp" }, request.images),
+						),
+					);
+				}
+			}
 			if (shouldResumeWithoutResendingPrompt) {
 				// session/load 的历史在 startTaskConnection 返回前就已推完，所以这里是这条分支唯一的**回合边界**
 				// ——它不发 session/prompt，永远走不到 applyAcpPromptTurnCompletion 那个收尾点。不收尾会留下两笔

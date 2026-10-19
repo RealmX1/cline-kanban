@@ -1,5 +1,8 @@
 import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
-import { resolveByTheWayMainSessionForkSelection, resolveSessionFacets } from "@runtime-session-activity";
+import {
+	resolveSessionFacets,
+	resolveTaskConversationSessionMainContextForkSelection,
+} from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
@@ -140,8 +143,8 @@ export function TaskConversationSessionsPanel({
 	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
 	const [activeTab, setActiveTab] = useState<TaskConversationSessionsPanelTab>("sessions");
 	const [initialUserQuestion, setInitialUserQuestion] = useState("");
-	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(() =>
-		mainSessionSummary.startedAt === null ? "started_from_scratch" : "forked_from_main_current_turn",
+	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(
+		"forked_from_main_current_turn",
 	);
 	const [sessionRole, setSessionRole] = useState<"by_the_way" | "task_collaborator">("task_collaborator");
 	const [collaborationAgentId, setCollaborationAgentId] = useState<RuntimeAgentId>(() =>
@@ -159,6 +162,7 @@ export function TaskConversationSessionsPanel({
 	useEffect(() => {
 		setCollaborationAgentId(resolveDefaultCollaborationAgentId(effectiveAgentId));
 		setSessionRole("task_collaborator");
+		setContextSource("forked_from_main_current_turn");
 		setInitialUserQuestion("");
 		setCreationError(null);
 	}, [workspaceTaskId, effectiveAgentId]);
@@ -173,9 +177,10 @@ export function TaskConversationSessionsPanel({
 				.sort((left, right) => right.updatedAt - left.updatedAt),
 		[taskSessions, workspaceTaskId],
 	);
-	const mainSessionForkSelection = resolveByTheWayMainSessionForkSelection({
+	const mainSessionForkSelection = resolveTaskConversationSessionMainContextForkSelection({
 		workspaceTaskId,
-		launchAgentId: effectiveAgentId,
+		launchAgentId: selectedAgentId,
+		sessionRole,
 		mainSessionSummary,
 		mainSessionWorkingDirectoryPath: mainSessionSummary.workspacePath,
 		existingTaskConversationSessionSummaries: Object.values(taskSessions),
@@ -183,11 +188,8 @@ export function TaskConversationSessionsPanel({
 	const canForkCurrentMainSession =
 		mainSessionSummary.startedAt !== null && mainSessionForkSelection.forkRejectionReason === null;
 
-	useEffect(() => {
-		if (!canForkCurrentMainSession && contextSource === "forked_from_main_current_turn") {
-			setContextSource("started_from_scratch");
-		}
-	}, [canForkCurrentMainSession, contextSource]);
+	// 身份尚未就绪时只暂时显示全新上下文；身份到达后恢复默认，保留用户明确选择。
+	const resolvedContextSource = canForkCurrentMainSession ? contextSource : "started_from_scratch";
 
 	useEffect(() => {
 		const selectedSummary = taskSessions[selectedTaskConversationSessionId];
@@ -236,8 +238,7 @@ export function TaskConversationSessionsPanel({
 			agentId: selectedAgentId,
 			sessionRole,
 			initialUserQuestion,
-			contextSource:
-				sessionRole === "by_the_way" && canForkCurrentMainSession ? contextSource : "started_from_scratch",
+			contextSource: resolvedContextSource,
 		});
 		setIsCreating(false);
 		if (!result.ok) {
@@ -434,9 +435,7 @@ export function TaskConversationSessionsPanel({
 						disabled={isCreating}
 						onChange={(event) => {
 							setSessionRole(event.target.value as "by_the_way" | "task_collaborator");
-							setContextSource(
-								canForkCurrentMainSession ? "forked_from_main_current_turn" : "started_from_scratch",
-							);
+							setContextSource("forked_from_main_current_turn");
 							setCreationError(null);
 						}}
 					>
@@ -458,7 +457,10 @@ export function TaskConversationSessionsPanel({
 								value={collaborationAgentId}
 								disabled={isCreating}
 								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-								onChange={(event) => setCollaborationAgentId(event.target.value as RuntimeAgentId)}
+								onChange={(event) => {
+									setCollaborationAgentId(event.target.value as RuntimeAgentId);
+									setContextSource("forked_from_main_current_turn");
+								}}
 							>
 								{supportedAgentCatalog.map((agent) => (
 									<option
@@ -473,38 +475,33 @@ export function TaskConversationSessionsPanel({
 									</option>
 								))}
 							</select>
-							<p className="mb-3 text-xs text-text-secondary">
-								全新上下文，共用当前工作目录。主会话负责卡片生命周期。
-							</p>
+							<p className="mb-3 text-xs text-text-secondary">共用当前工作目录。主会话负责卡片生命周期。</p>
 						</>
-					) : (
-						<>
-							<label
-								className="mb-1 block text-xs font-medium text-text-secondary"
-								htmlFor="task-conversation-context-source"
-							>
-								Context
-							</label>
-							<select
-								id="task-conversation-context-source"
-								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-								value={contextSource}
-								onChange={(event) =>
-									setContextSource(event.target.value as NewTaskConversationSessionContextSource)
-								}
-							>
-								<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
-									Fork current main session
-								</option>
-								<option value="started_from_scratch">Start from scratch</option>
-							</select>
-							{mainSessionForkSelection.forkRejectionReason ? (
-								<p className="mb-3 text-xs text-text-secondary">
-									{mainSessionForkSelection.forkRejectionReason}
-								</p>
-							) : null}
-						</>
-					)}
+					) : null}
+					<>
+						<label
+							className="mb-1 block text-xs font-medium text-text-secondary"
+							htmlFor="task-conversation-context-source"
+						>
+							Context
+						</label>
+						<select
+							id="task-conversation-context-source"
+							className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
+							value={resolvedContextSource}
+							onChange={(event) =>
+								setContextSource(event.target.value as NewTaskConversationSessionContextSource)
+							}
+						>
+							<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
+								Fork current main session
+							</option>
+							<option value="started_from_scratch">Start from scratch</option>
+						</select>
+						{mainSessionForkSelection.forkRejectionReason ? (
+							<p className="mb-3 text-xs text-text-secondary">{mainSessionForkSelection.forkRejectionReason}</p>
+						) : null}
+					</>
 					<label
 						className="mb-1 block text-xs font-medium text-text-secondary"
 						htmlFor="task-conversation-initial-question"
