@@ -7,7 +7,7 @@ import type { RuntimeProjectSummary } from "@/runtime/types";
 
 /**
  * Board Scope 的 Focus View 里，顶栏「All projects」后面那段「› 焦点任务所属项目」。
- * 它和切换器触发按钮是两个按钮：点它直接收窄到这个项目（与 ⌘E 同一动作），不必打开切换器再找一遍。
+ * 它和切换器触发按钮是两个按钮：点它直接收窄到这个项目（与范围切换快捷键同一动作），不必打开切换器再找一遍。
  */
 export function BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton({
 	focusedTaskProjectName,

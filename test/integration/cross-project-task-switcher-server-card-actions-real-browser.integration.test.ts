@@ -1606,12 +1606,12 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				join(evidenceOutputDirectory, "cross-project-row-title-and-toggle-geometry.json"),
 				JSON.stringify(titleAndToggleGeometryEvidence, null, 2),
 			);
-			// 顶栏 All projects 按钮（Layers）与 ⌘E 是同一个处理器：tooltip 写明快捷键；收窄落到当前项目的阶段看板，再切回首页。
+			// 顶栏 All projects 按钮（Layers）与 ⌘⇧E / Ctrl+Shift+E 是同一个处理器：tooltip 写明快捷键；收窄到当前项目看板后切回首页。
 			const boardScopeToggleButton = page.getByTestId("toggle-board-scope-all-projects-button");
 			await boardScopeToggleButton.hover();
 			await page
 				.getByRole("tooltip")
-				.filter({ hasText: /^Show only the current project \((⌘E|Ctrl\+E)\)$/ })
+				.filter({ hasText: /^Show only the current project \((⌘⇧E|Ctrl\+Shift\+E)\)$/ })
 				.first()
 				.waitFor();
 			await boardScopeToggleButton.click();
@@ -1620,10 +1620,12 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			expect(await boardScopeToggleButton.getAttribute("aria-pressed")).toBe("false");
 			expect(page.url()).toContain(`/${alphaWorkspaceId}`);
 			await page.mouse.move(800, 600);
-			await page.keyboard.press("ControlOrMeta+e");
+			await page.keyboard.press("ControlOrMeta+Shift+e");
 			await boardScopeHomePage.waitFor();
 			expect(await boardScopeToggleButton.getAttribute("aria-pressed")).toBe("true");
-			recordCheck("顶栏 All projects 按钮 tooltip 写明 ⌘E，点它收窄到当前项目看板，⌘E 切回 All projects 首页");
+			recordCheck(
+				"顶栏 All projects 按钮 tooltip 写明 ⌘⇧E / Ctrl+Shift+E，点它收窄到当前项目看板，新快捷键切回 All projects 首页",
+			);
 			// 移动端放不下多列：首页回落竖排的切换面板。
 			await page.setViewportSize({ width: 700, height: 900 });
 			await page.locator('[data-testid="board-scope-all-projects-home-page-stacked-panel-on-mobile"]').waitFor();

@@ -20,7 +20,7 @@ import {
 export { workspaceMetadataGitSpawnConcurrencyLimiter };
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 3_000;
-// 最后一个订阅断开后，缓存再留这么久才删：切回这个项目（或 ⌘E 来回切范围）时，没变的 worktree 只需一条
+// 最后一个订阅断开后，缓存再留这么久才删：切回这个项目（或通过范围切换快捷键来回切范围）时，没变的 worktree 只需一条
 // git status 复核，不必五条命令重新探。期间不轮询。
 // EXPERIMENT_NODE: 最后一个订阅断开后元数据缓存保留多久（5 分钟）
 const WORKSPACE_METADATA_CACHE_RETENTION_AFTER_LAST_SUBSCRIBER_DISCONNECTED_MS = 5 * 60_000;

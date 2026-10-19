@@ -376,7 +376,7 @@ export function TopBar({
 	isFindingsOpen?: boolean;
 	onToggleTaskChangesSidebar?: () => void;
 	isTaskChangesSidebarOpen?: boolean;
-	// 与 ⌘E 同一个处理器：All projects ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	// 与 ⌘⇧E 同一个处理器：All projects ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
 	onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope?: () => void;
 	isBoardScopeAllProjectsSelected?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;

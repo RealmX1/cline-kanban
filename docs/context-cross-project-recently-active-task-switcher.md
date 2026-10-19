@@ -7,9 +7,9 @@
 ## Language
 
 **Selected Board Or Single Project Scope（范围）**：
-顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮后面接一个「› 项目名」按钮）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、点「› 项目名」、`⌘E` 或顶栏 Layers 按钮（与 `⌘E` 同一个处理器）。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
+顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮后面接一个「› 项目名」按钮）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、点「› 项目名」、`⌘⇧E` 或顶栏 Layers 按钮（与 `⌘⇧E` 同一个处理器）。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
 - **每个标签页各存一份**（2026-10-05）：实际范围存 sessionStorage（重载、Chrome 丢弃后恢复都保留），localStorage 同名键只是新开标签页的默认值。共用 localStorage 时，重载会让每个标签页继承「最后写入者」的范围，多标签页下表现为「没操作就跳了」。
-- **`⌘E`（非 mac 为 Ctrl+E）**：Board Scope ⇄ 焦点任务所属项目（看板页没有焦点任务时是当前项目）。选它的理由：左手单手可按、不与本应用及 Chrome / macOS 的常用键重合；mac 上终端不吃 ⌘ 组合。非 mac 的 Ctrl+E 会盖掉终端 readline 的「行尾」，与 mod+j / k / g 同样处理。对话框开着时不响应。备选 `mod+shift+e`（`EXPERIMENT_NODE`）。
+- **`⌘⇧E`（非 mac 为 Ctrl+Shift+E）**：Board Scope ⇄ 焦点任务所属项目（看板页没有焦点任务时是当前项目）。精确匹配平台修饰键，保留 Ctrl+E 的原生行尾移动。捕获阶段接管新组合，终端有焦点时也能切换且不向 agent 发送字符；长按只切换一次。对话框内或没有可切换项目时不响应、不吞键。
 - **探测范围**：范围决定状态流要哪些任务的 git 元数据，见下方 **Workspace Metadata Probe Scope**。
 _Avoid_: dashboard, global view, left column scope toggle
 
@@ -126,7 +126,7 @@ Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒�
 2026-10-05 用户观察：All projects 里打开其他项目的任务要等很久。成因：服务端发快照前要等目标项目**每张非 backlog 卡**（含 Done）的 git 元数据首轮刷新跑完（每卡 5 条 git、全局并发 4，cline-kanban 224 个 worktree 约 6.5 秒），且最后一个连接断开时缓存直接删掉，单标签页切回来必然全量冷探。修法（用户提议）：Board Scope 下屏幕上只有焦点任务要逐卡 git 状态，就只探它。
 - 每个状态流连接声明范围（`src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts` 组装，浏览器与服务端共用）：单项目范围 = 整个项目；Board Scope = 焦点任务（跨项目打开在途时是目标任务）。服务端自己并上 Review 列开了 auto-review 的卡（自动提交 / 自动 PR 要看它们有没有未提交改动）。不声明的旧客户端按整个项目。
 - 初值在 WS URL 参数 `workspaceMetadataProbeScope`（JSON）里，首轮探测就只探它；之后经浏览器 → 服务端消息 `declare_workspace_metadata_probe_scope` 更新（状态流里唯一一种上行消息），不阻塞、探完照常推 `workspace_metadata_updated`。跨项目打开在切项目**之前**同步登记目标任务（`workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store`），所以新连接的 URL 已带上它。握手期间到达的声明在注册进广播名单之后才补探，否则补探的推送到不了这个连接。
-- 同一项目多个连接取并集，任一要整个项目就探整个项目；快照只放范围内的任务。范围外仍跟踪的任务保留上次的结果，`⌘E` 收窄到单项目时补探整个项目，没变的 worktree 只需一条 `git status` 复核。
+- 同一项目多个连接取并集，任一要整个项目就探整个项目；快照只放范围内的任务。范围外仍跟踪的任务保留上次的结果，`⌘⇧E` 收窄到单项目时补探整个项目，没变的 worktree 只需一条 `git status` 复核。
 - 最后一个连接断开后缓存保留 5 分钟（`EXPERIMENT_NODE`）、期间不轮询，切回来不必全量冷探。
 - 代价：落地检测（`refreshTaskCommitIntegrationProvenance`）挂在同一个探针上，Board Scope 下没被探的卡要等它被看到（面板轮询或切到单项目）才更新，与其他项目现状一致。
 
