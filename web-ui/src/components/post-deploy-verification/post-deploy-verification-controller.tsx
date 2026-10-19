@@ -43,6 +43,11 @@ export interface PostDeployVerificationControllerProps {
 	onSelectTask: (taskId: string) => void;
 	// 引导定位 anchor.view==="board" 时导航回看板（App 提供 setSelectedTaskId(null)）。
 	onNavigateToBoard: () => void;
+	onCreateFollowUpTaskFromChecklistItems?: (
+		deploymentId: string,
+		taskId: string,
+		selectedChecklistItemIds: string[],
+	) => void;
 	// 条目上半部分渲染真实任务卡体所需的数据与看板动作；缺省（隔离的浏览器 fixture）时退回标题行。
 	realTaskCardRenderingInputsForPostDeployVerificationPanelEntries?: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
 	// 看板级对话框（原因对话框、删除确认、置顶原因等，常由面板里卡体上的动作按钮打开）开着时，面板也要降 z 让它盖住。
@@ -76,6 +81,7 @@ export function PostDeployVerificationController({
 	completePostDeployVerificationMoveToDone,
 	onSelectTask,
 	onNavigateToBoard,
+	onCreateFollowUpTaskFromChecklistItems,
 	realTaskCardRenderingInputsForPostDeployVerificationPanelEntries = null,
 	isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel = false,
 	postDeployVerificationWorkspaceProjectNameShownInPanelHeader = null,
@@ -544,6 +550,7 @@ export function PostDeployVerificationController({
 				onRequestBatchClosureWithReasonsOfZoneTasks={handleRequestBatchClosureWithReasonsOfZoneTasks}
 				onSelectTask={onSelectTask}
 				onNavigateToBoard={onNavigateToBoard}
+				onCreateFollowUpTaskFromChecklistItems={onCreateFollowUpTaskFromChecklistItems}
 			/>
 			<TaskCommentBeforeMoveIntoDoneDialog
 				controller={taskCommentBeforeMoveIntoDone}
