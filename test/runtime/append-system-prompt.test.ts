@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
 	combineAppendSystemPrompts,
 	renderAppendSystemPrompt,
@@ -231,5 +232,23 @@ describe("renderExploratoryModeAppendSystemPrompt", () => {
 			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md`",
 		);
 		expect(rendered).toContain("IN FULL");
+	});
+});
+
+describe("结构化任务起草指导的入口覆盖", () => {
+	it.each([
+		["侧栏 Agent", () => renderAppendSystemPrompt("kanban")],
+		["Task Agent", () => resolveTaskSessionAppendSystemPrompt("task-1", "/workspace/project")],
+	] as const)("%s 恰好注入一次共享指导", (_entrypoint, renderPrompt) => {
+		const prompt = renderPrompt();
+		const guidance = renderTaskInitialPromptAuthoringAndStartupSettingsGuidance();
+		expect(prompt).toContain(guidance);
+		expect(prompt?.split(guidance)).toHaveLength(2);
+	});
+
+	it("Task 接收端不继承侧栏不可写代码的角色限制", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/workspace/project");
+		expect(prompt).toContain('<task-prompt-authoring-and-startup-settings-guidance schema-version="1">');
+		expect(prompt).not.toContain("# CRITICAL: You are NOT a coding agent");
 	});
 });

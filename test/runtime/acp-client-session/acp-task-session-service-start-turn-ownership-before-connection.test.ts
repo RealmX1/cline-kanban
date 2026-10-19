@@ -24,6 +24,7 @@ import {
 	type StartAcpTaskSessionRequest,
 } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 
 const TASK_ID = "task-1";
 
@@ -67,6 +68,18 @@ function startServiceWithSummaryRecorder(
 }
 
 describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
+	it.each(["task-1", "__home_agent__:workspace-1:omp"])("%s 的 ACP 初始请求包含共享起草指导", async (taskId) => {
+		const { service } = startServiceWithSummaryRecorder();
+		const { settleAsEstablished } = createPendingTaskConnection();
+		const started = service.startTaskSession(buildStartRequest({ taskId }));
+		const connection = createIdentityTestConnection("guidance-test-native-id");
+		settleAsEstablished(connection);
+		await started;
+		expect(connection.prompt).toHaveBeenCalledExactlyOnceWith([
+			{ type: "text", text: expect.stringContaining(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()) },
+		]);
+	});
+
 	it("协作 ACP 会话在连接前后均保留宿主归属", async () => {
 		const { service, emittedSummaries } = startServiceWithSummaryRecorder({
 			workspaceId: "workspace-1",

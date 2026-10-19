@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
 	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
 	prepareAgentLaunch,
@@ -369,6 +370,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
 		expect(launch.args[appendPromptIndex + 1]).toContain("Kanban sidebar agent");
+		expect(
+			launch.args[appendPromptIndex + 1].split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
+		).toHaveLength(2);
 		expect(launch.args[appendPromptIndex + 1]).toContain(
 			"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
 		);
@@ -389,6 +393,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
 		expect(developerInstructions[0]).toContain("Kanban sidebar agent");
+		expect(
+			JSON.parse(developerInstructions[0]).split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
+		).toHaveLength(2);
 		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
@@ -421,6 +428,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
 		expect(developerInstructions[0]).toContain("Kanban-managed task session");
+		const decodedInstructions: string = JSON.parse(developerInstructions[0]);
+		expect(decodedInstructions.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
+		expect(decodedInstructions).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(developerInstructions[0]).toContain("`/tmp/worktrees/task-1/repo`");
 		expect(developerInstructions[0]).toContain("ask the user to confirm which workspace owns the work");
 	});
@@ -525,6 +535,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
 		const appendedPrompt = launch.args[appendPromptIndex + 1];
 		expect(appendedPrompt).toContain("Kanban-managed task session");
+		expect(appendedPrompt.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
+		expect(appendedPrompt).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(appendedPrompt).toContain("`/tmp/worktrees/task-1/repo`");
 		expect(appendedPrompt).toContain("ask the user to confirm which workspace owns the work");
 	});
