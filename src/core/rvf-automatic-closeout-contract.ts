@@ -26,6 +26,8 @@ export const rvfIndependentUserTurnBoundaryReceiptSchema = z.object({
 });
 export type RvfIndependentUserTurnBoundaryReceipt = z.infer<typeof rvfIndependentUserTurnBoundaryReceiptSchema>;
 export const rvfReviewStartBoundaryResponseSchema = z.object({ receipt: rvfIndependentUserTurnBoundaryReceiptSchema });
+export const rvfAutomaticCloseoutRunBindingActivationRequestSchema = rvfReviewStartBoundaryRequestSchema;
+export const rvfAutomaticCloseoutRunBindingActivationResponseSchema = rvfReviewStartBoundaryResponseSchema;
 export const rvfAutomaticCloseoutRecordSchema = z.object({
 	workspaceId: z.string(),
 	taskId: z.string(),
@@ -33,6 +35,7 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	receipt: rvfIndependentUserTurnBoundaryReceiptSchema,
 	preReviewTurnIds: z.array(z.string()).min(1),
 	status: z.enum([
+		"captured_review_start_boundary",
 		"awaiting_rvf_completion",
 		"restoring_pre_review_conversation",
 		"restored_pre_review_conversation",
