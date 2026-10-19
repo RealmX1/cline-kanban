@@ -455,6 +455,16 @@ import {
 	notificationArchiveListResponseSchema,
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
+import {
+	type ListPermanentlyDeletedTaskCardsRequest,
+	type ListPermanentlyDeletedTaskCardsResponse,
+	listPermanentlyDeletedTaskCardsRequestSchema,
+	listPermanentlyDeletedTaskCardsResponseSchema,
+	type PermanentlyDeletedTaskPromptVersionsRequest,
+	type PermanentlyDeletedTaskPromptVersionsResponse,
+	permanentlyDeletedTaskPromptVersionsRequestSchema,
+	permanentlyDeletedTaskPromptVersionsResponseSchema,
+} from "../core/permanently-deleted-task-history-contract";
 import type {
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
@@ -466,16 +476,6 @@ import {
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
 } from "../core/task-main-session-handover-contract";
-import {
-	type ListPermanentlyDeletedTaskCardsRequest,
-	type ListPermanentlyDeletedTaskCardsResponse,
-	listPermanentlyDeletedTaskCardsRequestSchema,
-	listPermanentlyDeletedTaskCardsResponseSchema,
-	type PermanentlyDeletedTaskPromptVersionsRequest,
-	type PermanentlyDeletedTaskPromptVersionsResponse,
-	permanentlyDeletedTaskPromptVersionsRequestSchema,
-	permanentlyDeletedTaskPromptVersionsResponseSchema,
-} from "../core/permanently-deleted-task-history-contract";
 import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
