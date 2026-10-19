@@ -1,8 +1,8 @@
 import { Activity, Clock, PencilLine } from "lucide-react";
 import type { CSSProperties } from "react";
-
 import { getAgentVisual } from "@/components/agent-visual";
 import type { CardSessionActivity } from "@/components/board-card-session-activity";
+import { ProjectIcon } from "@/components/project-visual-identity";
 import { renderFuzzyHighlightedText } from "@/components/shared/render-fuzzy-highlighted-text";
 import type { TaskSpotlightSearchResultRowFieldVisibility } from "@/components/task-spotlight-search-result-row-field-visibility";
 import { cn } from "@/components/ui/cn";
@@ -198,12 +198,13 @@ export function TaskSpotlightSearchResultRow({
 						{fieldVisibility.project_name_badge ? (
 							<span
 								className={cn(
-									"inline-flex h-4 max-w-[140px] items-center truncate rounded-sm border border-border bg-surface-2 px-1.5 text-[10px] font-medium",
+									"inline-flex h-4 max-w-[140px] items-center gap-1 rounded-sm border border-border bg-surface-2 px-1.5 text-[10px] font-medium",
 									// 跨项目行的项目名是「这条不在你当前项目里」的关键信号，比当前项目那条更该被看见。
 									isCrossProject ? "text-text-secondary" : "text-text-tertiary",
 								)}
 							>
-								{document.projectName}
+								<ProjectIcon workspaceId={document.projectId} projectName={document.projectName} size={14} />
+								<span className="truncate">{document.projectName}</span>
 							</span>
 						) : null}
 						{fieldVisibility.stage_label_badge ? (

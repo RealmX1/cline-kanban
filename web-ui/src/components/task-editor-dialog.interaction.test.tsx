@@ -119,6 +119,42 @@ describe("TaskEditorDialog interactions", () => {
 		});
 	}
 
+	it("Project 是单条与批量创建的首个表单字段，初始焦点仍在原输入框", async () => {
+		vi.spyOn(relationModelingQueries, "readRelationModelingEditorDraft").mockResolvedValue(null);
+		vi.spyOn(relationModelingQueries, "persistRelationModelingEditorDraft").mockResolvedValue({ saved: true });
+		await render(
+			makeProps({
+				prompt: "- 第一项任务\n- 第二项任务",
+				taskCreationTargetProjectField: {
+					taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
+					selectedTargetWorkspaceId: "project-1",
+					selectableProjects: [{ workspaceId: "project-1", projectName: "cline-kanban" }],
+					onSelectTargetWorkspaceId: vi.fn(),
+				},
+			}),
+		);
+		const projectField = document.querySelector('[data-testid="task-creation-target-project-field"]');
+		const taskInput = document.querySelector("textarea");
+		expect(projectField).not.toBeNull();
+		expect(taskInput).not.toBeNull();
+		expect(
+			Boolean((projectField?.compareDocumentPosition(taskInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING),
+		).toBe(true);
+		expect(projectField?.contains(document.activeElement)).toBe(false);
+		const splitButton = Array.from(document.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("Split into 2 tasks"),
+		);
+		expect(splitButton).toBeDefined();
+		await act(async () => {
+			splitButton?.click();
+		});
+		const batchInput = document.querySelector('input[placeholder="Describe the task..."]');
+		expect(batchInput).not.toBeNull();
+		expect(
+			(projectField?.compareDocumentPosition(batchInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+	});
+
 	it("closes immediately via the X button when the form has no edits", async () => {
 		const onOpenChange = vi.fn();
 		await render(makeProps({ onOpenChange, prompt: "" }));

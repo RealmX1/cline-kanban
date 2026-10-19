@@ -40,6 +40,8 @@ asarUnpack:
   - "cli/**"
   - "node_modules/node-pty/**"
   - "node_modules/better-sqlite3/**"
+  - "node_modules/sharp/**"
+  - "node_modules/@img/**"
   - "node_modules/bindings/**"
   - "node_modules/file-uri-to-path/**"
   - "node_modules/@napi-rs/keyring*/**"

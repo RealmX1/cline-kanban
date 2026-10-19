@@ -297,6 +297,7 @@ export function TopBarProjectSwitcher({
 					<ProjectSwitcherTriggerButton
 						isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
 						projectName={navigationCurrentProject?.name ?? null}
+						project={navigationCurrentProject}
 						liveAgentTaskCount={navigationCurrentProject ? deriveLiveAgentTaskCount(navigationCurrentProject) : 0}
 						isProjectUnavailable={navigationCurrentProject?.availability.status === "unavailable"}
 						isProjectSwitching={isProjectSwitching}
@@ -431,6 +432,7 @@ export function TopBarProjectSwitcher({
 			{boardScopeFocusViewFocusedTaskProject ? (
 				<BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton
 					focusedTaskProjectName={boardScopeFocusViewFocusedTaskProject.name}
+					project={boardScopeFocusViewFocusedTaskProject}
 					isMobile={isMobile}
 					onNarrowToFocusedTaskProject={() => onSelectProject(boardScopeFocusViewFocusedTaskProject.id)}
 				/>

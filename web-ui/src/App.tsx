@@ -24,6 +24,7 @@ import { NotificationCenter } from "@/components/notification-center";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
+import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
@@ -792,27 +793,31 @@ export default function App(): ReactElement {
 		projects,
 	]);
 
-	// 编辑对话框的「目标项目」字段：编辑其他项目的卡 → 只读标签；Board Scope 建卡 → 可选；单项目范围 → 不显示
-	//（对话框与改动前一致）。
+	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId) {
-			if (!editTaskWorkspaceId || editTaskWorkspaceId === projectRuntimeWorkspaceId) {
-				return undefined;
-			}
+		if (editingTaskId || !isBoardScopeAllProjectsSelected) {
+			const workspaceId = editingTaskId
+				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
+				: projectRuntimeWorkspaceId;
+			if (!workspaceId) return undefined;
+			const project = projects.find((entry) => entry.id === workspaceId);
 			return {
 				taskCreationTargetProjectFieldPresentation: "target_project_shown_read_only",
-				projectName: projects.find((project) => project.id === editTaskWorkspaceId)?.name ?? editTaskWorkspaceId,
+				workspaceId,
+				projectName: project?.name ?? workspaceId,
+				visualIdentity: project?.visualIdentity,
 			};
-		}
-		if (!isBoardScopeAllProjectsSelected) {
-			return undefined;
 		}
 		return {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
 			selectableProjects: projects
 				.filter((project) => project.availability.status === "available")
 				.sort((left, right) => left.name.localeCompare(right.name))
-				.map((project) => ({ workspaceId: project.id, projectName: project.name })),
+				.map((project) => ({
+					workspaceId: project.id,
+					projectName: project.name,
+					visualIdentity: project.visualIdentity,
+				})),
 			selectedTargetWorkspaceId: taskCreationTargetWorkspaceId,
 			onSelectTargetWorkspaceId: handleSelectTaskCreationTargetProject,
 		};
@@ -1572,7 +1577,7 @@ export default function App(): ReactElement {
 		return <KanbanAccessBlockedFallback />;
 	}
 
-	return (
+	const renderedApplicationView = (
 		<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectRecentlyActiveTaskSwitcherHost}>
 			<LayoutCustomizationsProvider
 				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
@@ -2274,4 +2279,5 @@ export default function App(): ReactElement {
 			</LayoutCustomizationsProvider>
 		</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
 	);
+	return <ProjectVisualIdentityProvider projects={projects}>{renderedApplicationView}</ProjectVisualIdentityProvider>;
 }

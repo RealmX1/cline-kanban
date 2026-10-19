@@ -456,6 +456,15 @@ import {
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
 import {
+	type ProjectVisualIdentity,
+	projectVisualIdentitySchema,
+	readProjectIconImageRequestSchema,
+	readProjectIconImageResponseSchema,
+	resetProjectVisualIdentityRequestSchema,
+	type SetProjectVisualIdentityRequest,
+	setProjectVisualIdentityRequestSchema,
+} from "../core/project-visual-identity";
+import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
 	assertReferenceRelationAsActingWorkUnitRequestSchema,
@@ -905,6 +914,12 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse>;
 	};
 	projectsApi: {
+		setProjectVisualIdentity: (input: SetProjectVisualIdentityRequest) => Promise<ProjectVisualIdentity>;
+		resetProjectVisualIdentityToDefault: (input: { workspaceId: string }) => Promise<ProjectVisualIdentity>;
+		readProjectIconImage: (input: {
+			workspaceId: string;
+			imageAssetId: string;
+		}) => Promise<{ mediaType: "image/png"; base64Content: string }>;
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
 		addProject: (
 			preferredWorkspaceId: string | null,
@@ -1927,6 +1942,18 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	projects: t.router({
+		setProjectVisualIdentity: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(setProjectVisualIdentityRequestSchema)
+			.output(projectVisualIdentitySchema)
+			.mutation(({ ctx, input }) => ctx.projectsApi.setProjectVisualIdentity(input)),
+		resetProjectVisualIdentityToDefault: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(resetProjectVisualIdentityRequestSchema)
+			.output(projectVisualIdentitySchema)
+			.mutation(({ ctx, input }) => ctx.projectsApi.resetProjectVisualIdentityToDefault(input)),
+		readProjectIconImage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(readProjectIconImageRequestSchema)
+			.output(readProjectIconImageResponseSchema)
+			.query(({ ctx, input }) => ctx.projectsApi.readProjectIconImage(input)),
 		list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeProjectsResponseSchema)
 			.query(async ({ ctx }) => {

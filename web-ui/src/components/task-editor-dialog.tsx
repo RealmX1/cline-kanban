@@ -326,7 +326,7 @@ export function TaskEditorDialog({
 	editTaskFormSeededFromSavedDraftAt?: number | null;
 	onRevertEditTaskFormToSavedTaskContent?: () => void;
 	onAdoptPromotedTaskEditDraft?: (promotedDraft: TaskEditDraft) => void;
-	/** 不传 = 隐藏（单项目范围）。见 TaskCreationTargetProjectField。 */
+	/** 由当前项目或目标任务提供归属；全项目创建可选，其他情况只读。 */
 	taskCreationTargetProjectField?: TaskCreationTargetProjectField;
 }): ReactElement {
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
@@ -935,6 +935,13 @@ export function TaskEditorDialog({
 			>
 				<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
 				<DialogBody>
+					{taskCreationTargetProjectField ? (
+						<div className="mb-4">
+							<TaskCreationTargetProjectFieldControl
+								taskCreationTargetProjectField={taskCreationTargetProjectField}
+							/>
+						</div>
+					) : null}
 					{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
 					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
 					{taskEditorMode === "edit" && editingTaskId !== null ? (
@@ -1076,11 +1083,6 @@ export function TaskEditorDialog({
 					)}
 
 					<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
-						{taskCreationTargetProjectField ? (
-							<TaskCreationTargetProjectFieldControl
-								taskCreationTargetProjectField={taskCreationTargetProjectField}
-							/>
-						) : null}
 						<label
 							htmlFor={startInPlanModeId}
 							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
