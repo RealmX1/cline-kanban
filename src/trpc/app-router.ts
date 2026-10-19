@@ -456,6 +456,16 @@ import {
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
 import {
+	type ListPermanentlyDeletedTaskCardsRequest,
+	type ListPermanentlyDeletedTaskCardsResponse,
+	listPermanentlyDeletedTaskCardsRequestSchema,
+	listPermanentlyDeletedTaskCardsResponseSchema,
+	type PermanentlyDeletedTaskPromptVersionsRequest,
+	type PermanentlyDeletedTaskPromptVersionsResponse,
+	permanentlyDeletedTaskPromptVersionsRequestSchema,
+	permanentlyDeletedTaskPromptVersionsResponseSchema,
+} from "../core/permanently-deleted-task-history-contract";
+import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
 	assertReferenceRelationAsActingWorkUnitRequestSchema,
@@ -969,6 +979,12 @@ export interface RuntimeTrpcContext {
 	};
 	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
 	workUnitRelationReadApi: {
+		listPermanentlyDeletedTaskCards: (
+			input: ListPermanentlyDeletedTaskCardsRequest,
+		) => Promise<ListPermanentlyDeletedTaskCardsResponse>;
+		getPermanentlyDeletedTaskPromptVersions: (
+			input: PermanentlyDeletedTaskPromptVersionsRequest,
+		) => Promise<PermanentlyDeletedTaskPromptVersionsResponse>;
 		readRelationModelingEditorDraft: (input: {
 			workspaceId: string;
 			draftScopeId: string;
@@ -2055,6 +2071,14 @@ export const runtimeAppRouter = t.router({
 	}),
 	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。
 	workUnit: t.router({
+		listPermanentlyDeletedTaskCards: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(listPermanentlyDeletedTaskCardsRequestSchema)
+			.output(listPermanentlyDeletedTaskCardsResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.listPermanentlyDeletedTaskCards(input)),
+		getPermanentlyDeletedTaskPromptVersions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(permanentlyDeletedTaskPromptVersionsRequestSchema)
+			.output(permanentlyDeletedTaskPromptVersionsResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getPermanentlyDeletedTaskPromptVersions(input)),
 		resolveKanbanBoardCardIdentityByBareTaskId: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema)
 			.output(resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema)
