@@ -368,7 +368,7 @@ describe("useTaskSessions", () => {
 		);
 	});
 
-	it("协作会话使用独立 agent 和全新上下文，不复制主会话模型", async () => {
+	it("协作 fork 透传父会话和上下文，由服务端按主身份解析模型", async () => {
 		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
 		let latestSnapshot: HookSnapshot | null = null;
 
@@ -419,8 +419,8 @@ describe("useTaskSessions", () => {
 				taskConversationSessionMetadata: {
 					workspaceTaskId: "task-1",
 					taskConversationSessionRole: "task_collaborator",
-					taskConversationSessionContextSource: "started_from_scratch",
-					parentTaskConversationSessionId: null,
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
 					mainSessionOriginTurnNumber: 4,
 					mainSessionOriginUserMessagePreview: "Implement the feature",
 					latestUserMessagePreview: "Why does this type exist?",

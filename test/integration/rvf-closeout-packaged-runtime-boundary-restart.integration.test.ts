@@ -4,26 +4,40 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rvfReviewStartBoundaryResponseSchema } from "../../src/core/api-contract";
 import { addTaskToColumn } from "../../src/core/task-board-mutations";
+import { computeRvfTextSha256 } from "../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext, mutateWorkspaceState } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import {
+	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	sigkillChildProcessAndWaitForExit,
+	waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
+const cliExitDeadline = {
+	waitedForDescription: "RVF 分界捕获或激活 CLI 退出",
+	softDeadlineMsExpectedOnUncontendedHost: 8_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 45_000,
+};
+const packagedRuntimeBoundaryRestartTimeout = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
+	runtimeColdStartCount: 3,
+	testBodyTimeoutBudgetMs: 60_000,
+	cliChildProcessSpawns: { cliChildProcessSpawnCount: 4, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
+});
 afterEach(async () => {
 	vi.unstubAllEnvs();
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
 });
-describe("RVF 开审分界的打包态宿主与进程重启", { timeout: 90_000 }, () => {
+describe("RVF 开审分界的打包态宿主与进程重启", { timeout: packagedRuntimeBoundaryRestartTimeout }, () => {
 	it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
-		"真实 Codex 捕获凭据经 tRPC 写盘；重启后幂等复用；不发模型请求",
-		async () => {
+		"真实 Codex 经 CLI/HTTP 捕获与绑定激活；两个持久阶段跨重启幂等；不发模型请求",
+		async (testContext) => {
 			const binary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex";
 			const fixture = createIsolatedGitTestWorkspaceFixture();
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "rvf-packaged-runtime" });
@@ -180,6 +194,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: 90_000 
 				const origin = new URL((await waitForRuntimeServerStartupBannerOrSigkillChild(process_)).runtimeUrl).origin;
 				return {
 					process_,
+					origin,
 					client: createTRPCProxyClient<RuntimeAppRouter>({
 						links: [
 							httpBatchLink({
@@ -190,28 +205,129 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: 90_000 
 					}),
 				};
 			};
+			const invokeTaskCommand = async (origin: string, command: string) => {
+				const child = children.register(
+					spawn(
+						process.execPath,
+						[
+							resolve("dist/cli.js"),
+							"task",
+							command,
+							"--project-path",
+							cwd,
+							"--task-id",
+							taskId,
+							"--decision-token",
+							token,
+						],
+						{
+							cwd,
+							stdio: ["ignore", "pipe", "pipe"],
+							env: fixture.createIsolatedChildProcessEnvironment({
+								PATH: `${dirname(binary)}:/usr/bin:/bin`,
+								CODEX_HOME: codexHome,
+								RVF_HOME: rvfHome,
+								KANBAN_RUNTIME_PORT: new URL(origin).port,
+								DO_NOT_TRACK: "1",
+							}),
+						},
+					),
+				);
+				let stdout = "";
+				let stderr = "";
+				child.stdout?.on("data", (chunk) => {
+					stdout += String(chunk);
+				});
+				child.stderr?.on("data", (chunk) => {
+					stderr += String(chunk);
+				});
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(testContext, child, cliExitDeadline, {
+					describeChildProcessOutputForFailureMessage: () => `${stdout}\n${stderr}`,
+				});
+				return { exitCode: child.exitCode, stdout, stderr };
+			};
 			const initial = await start();
-			const first = await initial.client.runtime.captureRvfReviewStartBoundary.mutate({
-				taskId,
-				decisionToken: token,
-			});
+			const firstCommand = await invokeTaskCommand(initial.origin, "capture-rvf-review-start-boundary");
+			expect(firstCommand.exitCode, firstCommand.stderr).toBe(0);
+			const first = rvfReviewStartBoundaryResponseSchema.parse(JSON.parse(firstCommand.stdout));
 			expect(first.receipt).toMatchObject({
 				session_id: nativeId,
 				native_turn_id: boundaryTurn,
 				kanban_task_id: taskId,
 			});
+			expect((await initial.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId })).records[0]?.status).toBe(
+				"captured_review_start_boundary",
+			);
 			expect(await sigkillChildProcessAndWaitForExit(initial.process_)).toBe(true);
 			const resumed = await start();
 			const status = await resumed.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId });
 			expect(status.records).toHaveLength(1);
 			expect(status.records[0]).toMatchObject({
-				status: "awaiting_rvf_completion",
+				status: "captured_review_start_boundary",
 				preReviewTurnIds: [implementationTurn],
 			});
+			await writeFile(
+				transcriptPath,
+				`${records.map((record) => JSON.stringify(record)).join("\n")}\n${JSON.stringify({ type: "event_msg", timestamp, payload: { type: "user_message", message: "bootstrap 已经开始" } })}\n`,
+			);
+			const retry = await invokeTaskCommand(resumed.origin, "capture-rvf-review-start-boundary");
+			expect(retry.exitCode, retry.stderr).toBe(0);
+			expect(JSON.parse(retry.stdout)).toEqual(first);
+			await expect(
+				resumed.client.runtime.activateRvfAutomaticCloseoutAfterRunBinding.mutate({ taskId, decisionToken: token }),
+			).rejects.toThrow();
+			expect((await resumed.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId })).records).toEqual(
+				status.records,
+			);
+			const run = join(rvfHome, "run-logs", "runs", "bound-native-run");
+			await mkdir(join(run, "inputs"), { recursive: true });
+			await writeFile(
+				join(run, "inputs", "automatic-closeout-review-start-receipt.json"),
+				JSON.stringify(first.receipt),
+			);
+			const canonicalReceipt = Object.fromEntries(
+				Object.entries(first.receipt).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+			);
+			await writeFile(
+				join(rvfHome, "review-start-independent-user-turn-boundary-receipts", `${token}.run-binding.json`),
+				JSON.stringify({
+					run_id: "bound-native-run",
+					run_dir: run,
+					receipt_sha256: computeRvfTextSha256(JSON.stringify(canonicalReceipt)),
+				}),
+			);
+			const activation = await invokeTaskCommand(
+				resumed.origin,
+				"activate-rvf-automatic-closeout-after-run-binding",
+			);
+			expect(activation.exitCode, activation.stderr).toBe(0);
+			expect(JSON.parse(activation.stdout)).toEqual(first);
+			const active = (await resumed.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId })).records[0];
+			expect(active).toMatchObject({
+				status: "awaiting_rvf_completion",
+				runId: "bound-native-run",
+				runDirectory: run,
+				receipt: first.receipt,
+				preReviewTurnIds: [implementationTurn],
+			});
+			expect(await sigkillChildProcessAndWaitForExit(resumed.process_)).toBe(true);
+			const activatedRestart = await start();
 			expect(
-				(await resumed.client.runtime.captureRvfReviewStartBoundary.mutate({ taskId, decisionToken: token }))
-					.receipt,
-			).toEqual(first.receipt);
+				(await activatedRestart.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId })).records[0],
+			).toMatchObject(active ?? {});
+			const repeated = await invokeTaskCommand(
+				activatedRestart.origin,
+				"activate-rvf-automatic-closeout-after-run-binding",
+			);
+			expect(repeated.exitCode, repeated.stderr).toBe(0);
+			expect(JSON.parse(repeated.stdout)).toEqual(first);
+			const afterRepeat = (await activatedRestart.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId }))
+				.records[0];
+			expect(afterRepeat).toMatchObject({
+				status: "awaiting_rvf_completion",
+				updatedAt: active?.updatedAt,
+				restoredNativeSessionId: null,
+			});
 		},
 	);
 });

@@ -208,7 +208,7 @@ describe("TaskConversationSessionsPanel", () => {
 		expect(Array.from(agentSelect?.options ?? []).map((option) => option.value)).toEqual(
 			getRuntimeLaunchSupportedAgentCatalog().map((agent) => agent.id),
 		);
-		expect(container.querySelector("#task-conversation-context-source")).toBeNull();
+		expect(container.querySelector("#task-conversation-context-source")).not.toBeNull();
 		await act(async () => {
 			if (agentSelect) {
 				agentSelect.value = "codex";
@@ -235,6 +235,133 @@ describe("TaskConversationSessionsPanel", () => {
 		});
 		expect(container.textContent).toContain("隔离启动失败");
 		expect(container.querySelector("textarea")?.value).toBe("实现协作部分");
+	});
+
+	it.each(["claude", "codex", "omp"] as const)("%s 协作会话默认复刻，已有侧问不影响；可选择全新", async (agentId) => {
+		const main = createSessionSummary("task-1", {
+			agentId,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: agentId,
+				nativeSessionId: "main-native-id",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const side = createSessionSummary("side", {
+			agentId,
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: "侧问",
+			},
+		});
+		const create = vi.fn(async () => ({ ok: false, message: "保留输入" }));
+		await act(async () =>
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId="task-1"
+					mainSessionSummary={main}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId={agentId}
+					taskSessions={{ "task-1": main, side }}
+					selectedTaskConversationSessionId="task-1"
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={create}
+				/>,
+			),
+		);
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("Add New"))
+				?.click(),
+		);
+		const select = container.querySelector<HTMLSelectElement>("#task-conversation-context-source");
+		expect(select?.value).toBe("forked_from_main_current_turn");
+		expect(select?.options[0]?.disabled).toBe(false);
+		await act(async () => {
+			const input = container.querySelector("textarea");
+			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
+				input,
+				"处理协作工作",
+			);
+			input?.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.filter((button) => button.textContent === "Create session")
+				.at(-1)
+				?.click(),
+		);
+		expect(create).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				sessionRole: "task_collaborator",
+				agentId,
+				contextSource: "forked_from_main_current_turn",
+			}),
+		);
+		await act(async () => {
+			if (select) {
+				select.value = "started_from_scratch";
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.filter((button) => button.textContent === "Create session")
+				.at(-1)
+				?.click(),
+		);
+		expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ contextSource: "started_from_scratch" }));
+	});
+
+	it("主身份稍后就绪时默认复刻，同时保留用户主动选择的全新上下文", async () => {
+		const renderPanel = (main: RuntimeTaskSessionSummary) =>
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId="task-1"
+					mainSessionSummary={main}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId="codex"
+					taskSessions={{ "task-1": main }}
+					selectedTaskConversationSessionId="task-1"
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
+				/>,
+			);
+		await act(async () => renderPanel(createSessionSummary("task-1", { startedAt: null })));
+		await act(async () =>
+			Array.from(container.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("Add New"))
+				?.click(),
+		);
+		expect(container.querySelector<HTMLSelectElement>("#task-conversation-context-source")?.value).toBe(
+			"started_from_scratch",
+		);
+		const ready = createSessionSummary("task-1", {
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "main-native-id",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		await act(async () => renderPanel(ready));
+		const select = container.querySelector<HTMLSelectElement>("#task-conversation-context-source");
+		expect(select?.value).toBe("forked_from_main_current_turn");
+		await act(async () => {
+			if (select) {
+				select.value = "started_from_scratch";
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+		await act(async () => renderPanel({ ...ready, updatedAt: ready.updatedAt + 1 }));
+		expect(select?.value).toBe("started_from_scratch");
 	});
 
 	it("未安装的 agent 显示原因，且不能提交创建", async () => {

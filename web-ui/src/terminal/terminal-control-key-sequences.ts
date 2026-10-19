@@ -20,8 +20,9 @@
  */
 export const TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE = "\u0003";
 
-/** 连续两次 ESC —— Claude Code 用它进入 rewind（回溯会话历史）界面。 */
-export const TERMINAL_REWIND_DOUBLE_ESCAPE_SEQUENCE = "\u001b\u001b";
+/** 单次 ESC。双 ESC 必须分两次投递，避免 TUI 将同批两个字节解析为一个事件。 */
+export const TERMINAL_ESCAPE_SEQUENCE = "\u001b";
+export const TERMINAL_DOUBLE_ESCAPE_INTER_PRESS_DELAY_MS = 100;
 
 export const TERMINAL_ARROW_UP_SEQUENCE = "\u001b[A";
 export const TERMINAL_ARROW_DOWN_SEQUENCE = "\u001b[B";
@@ -53,7 +54,9 @@ export interface TerminalControlKeyDefinition {
 	label: string;
 	/** 无障碍标签：说清这个键对 agent 做什么，触摸端没有 hover tooltip 可依赖。 */
 	accessibleDescription: string;
-	sequence: string;
+	/** 每一步是一次独立按键，不能拼接后一次投递。 */
+	inputSequences: readonly string[];
+	interSequenceDelayMs?: number;
 	/**
 	 * 误触代价是否明显高于其余键（当前只有 Ctrl+C：它会打断正在生成的回合）。
 	 * 用于让键帽换用告警配色，在密排的按键簇里拉开视觉距离。
@@ -74,7 +77,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "interrupt_and_clear_input_line",
 		label: "Ctrl+C",
 		accessibleDescription: "Interrupt the agent, or clear the current input line",
-		sequence: TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE,
+		inputSequences: [TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE],
 		isDestructive: true,
 		supportsAutoRepeatOnLongPress: false,
 	},
@@ -82,7 +85,8 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "rewind_double_escape",
 		label: "Esc Esc",
 		accessibleDescription: "Open the rewind history view (double escape)",
-		sequence: TERMINAL_REWIND_DOUBLE_ESCAPE_SEQUENCE,
+		inputSequences: [TERMINAL_ESCAPE_SEQUENCE, TERMINAL_ESCAPE_SEQUENCE],
+		interSequenceDelayMs: TERMINAL_DOUBLE_ESCAPE_INTER_PRESS_DELAY_MS,
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: false,
 	},
@@ -90,7 +94,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "arrow_up",
 		label: "↑",
 		accessibleDescription: "Arrow up",
-		sequence: TERMINAL_ARROW_UP_SEQUENCE,
+		inputSequences: [TERMINAL_ARROW_UP_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: true,
 	},
@@ -98,7 +102,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "arrow_down",
 		label: "↓",
 		accessibleDescription: "Arrow down",
-		sequence: TERMINAL_ARROW_DOWN_SEQUENCE,
+		inputSequences: [TERMINAL_ARROW_DOWN_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: true,
 	},
@@ -106,7 +110,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "arrow_left",
 		label: "←",
 		accessibleDescription: "Arrow left",
-		sequence: TERMINAL_ARROW_LEFT_SEQUENCE,
+		inputSequences: [TERMINAL_ARROW_LEFT_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: true,
 	},
@@ -114,7 +118,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "arrow_right",
 		label: "→",
 		accessibleDescription: "Arrow right",
-		sequence: TERMINAL_ARROW_RIGHT_SEQUENCE,
+		inputSequences: [TERMINAL_ARROW_RIGHT_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: true,
 	},
@@ -122,7 +126,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "submit",
 		label: "Enter",
 		accessibleDescription: "Submit the current selection or input",
-		sequence: TERMINAL_SUBMIT_CARRIAGE_RETURN_SEQUENCE,
+		inputSequences: [TERMINAL_SUBMIT_CARRIAGE_RETURN_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: false,
 	},
@@ -130,7 +134,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "tab",
 		label: "Tab",
 		accessibleDescription: "Tab",
-		sequence: TERMINAL_TAB_SEQUENCE,
+		inputSequences: [TERMINAL_TAB_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: false,
 	},
@@ -138,7 +142,7 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		id: "back_tab",
 		label: "⇧Tab",
 		accessibleDescription: "Shift tab (reverse cycle)",
-		sequence: TERMINAL_BACK_TAB_SEQUENCE,
+		inputSequences: [TERMINAL_BACK_TAB_SEQUENCE],
 		isDestructive: false,
 		supportsAutoRepeatOnLongPress: false,
 	},

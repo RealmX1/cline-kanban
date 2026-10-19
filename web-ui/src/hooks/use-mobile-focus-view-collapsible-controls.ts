@@ -54,8 +54,8 @@ export function useMobileFocusViewCollapsibleControls({
 	const [regionExpansionState, setRegionExpansionState] = useState({
 		focusedViewIdentity,
 		idleCollapseRequestSequenceNumber,
-		upperNavigationAndToolsExpanded: true,
-		lowerVirtualKeyBarExpanded: true,
+		upperNavigationAndToolsExpanded: !isEnabled,
+		lowerVirtualKeyBarExpanded: !isEnabled,
 	});
 	useEffect(() => {
 		setRegionExpansionState((previous) => {
@@ -63,8 +63,8 @@ export function useMobileFocusViewCollapsibleControls({
 				return {
 					focusedViewIdentity,
 					idleCollapseRequestSequenceNumber,
-					upperNavigationAndToolsExpanded: true,
-					lowerVirtualKeyBarExpanded: true,
+					upperNavigationAndToolsExpanded: !isEnabled,
+					lowerVirtualKeyBarExpanded: !isEnabled,
 				};
 			if (previous.idleCollapseRequestSequenceNumber !== idleCollapseRequestSequenceNumber)
 				return {
@@ -75,13 +75,15 @@ export function useMobileFocusViewCollapsibleControls({
 				};
 			return previous;
 		});
-	}, [focusedViewIdentity, idleCollapseRequestSequenceNumber]);
+	}, [focusedViewIdentity, idleCollapseRequestSequenceNumber, isEnabled]);
 	const upperNavigationAndToolsExpanded =
-		regionExpansionState.focusedViewIdentity !== focusedViewIdentity ||
-		regionExpansionState.upperNavigationAndToolsExpanded;
+		regionExpansionState.focusedViewIdentity !== focusedViewIdentity
+			? !isEnabled
+			: regionExpansionState.upperNavigationAndToolsExpanded;
 	const lowerVirtualKeyBarExpanded =
-		regionExpansionState.focusedViewIdentity !== focusedViewIdentity ||
-		regionExpansionState.lowerVirtualKeyBarExpanded;
+		regionExpansionState.focusedViewIdentity !== focusedViewIdentity
+			? !isEnabled
+			: regionExpansionState.lowerVirtualKeyBarExpanded;
 	const updateIndependentRegionExpansion = useCallback(
 		(
 			collapsibleRegionName: "upperNavigationAndToolsExpanded" | "lowerVirtualKeyBarExpanded",
@@ -95,13 +97,13 @@ export function useMobileFocusViewCollapsibleControls({
 						: {
 								focusedViewIdentity,
 								idleCollapseRequestSequenceNumber,
-								upperNavigationAndToolsExpanded: true,
-								lowerVirtualKeyBarExpanded: true,
+								upperNavigationAndToolsExpanded: !isEnabled,
+								lowerVirtualKeyBarExpanded: !isEnabled,
 							};
 				return { ...current, [collapsibleRegionName]: requestedExpanded ?? !current[collapsibleRegionName] };
 			});
 		},
-		[focusedViewIdentity, idleCollapseRequestSequenceNumber, idleCollapseController.recordUserInteraction],
+		[focusedViewIdentity, idleCollapseRequestSequenceNumber, idleCollapseController.recordUserInteraction, isEnabled],
 	);
 	const toggleUpperNavigationAndTools = useCallback(
 		() => updateIndependentRegionExpansion("upperNavigationAndToolsExpanded"),

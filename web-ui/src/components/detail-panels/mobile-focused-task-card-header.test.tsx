@@ -53,9 +53,7 @@ describe("手机顶部当前任务卡", () => {
 		delete actEnvironment.IS_REACT_ACT_ENVIRONMENT;
 	});
 
-	it("默认展示完整卡体，手动收起后保留标题、阶段与展开入口", () => {
-		expect(host.querySelector("[data-card-body]")).not.toBeNull();
-		act(() => host.querySelector<HTMLButtonElement>("[aria-label='收起任务卡']")!.click());
+	it("默认折叠并保留标题、阶段与展开入口，手动展开可查看卡体", () => {
 		expect(host.querySelector("[data-card-body]")).toBeNull();
 		expect(host.textContent).toContain("当前任务");
 		expect(host.textContent).toContain("Review");
@@ -65,6 +63,7 @@ describe("手机顶部当前任务卡", () => {
 	});
 
 	it("消费共用收起通知，卡片内容更新不会自动重新展开", () => {
+		act(() => host.querySelector<HTMLButtonElement>("[aria-label='展开任务卡']")!.click());
 		sequenceNumber = 1;
 		render();
 		expect(host.querySelector("[data-card-body]")).toBeNull();
@@ -74,6 +73,7 @@ describe("手机顶部当前任务卡", () => {
 	});
 
 	it("把真实业务 props 交给手机专用副本角色", () => {
+		act(() => host.querySelector<HTMLButtonElement>("[aria-label='展开任务卡']")!.click());
 		expect(renderTaskCard).toHaveBeenLastCalledWith(
 			expect.objectContaining({
 				card: expect.objectContaining({ id: "task-1" }),

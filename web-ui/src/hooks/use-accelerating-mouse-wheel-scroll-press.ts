@@ -101,7 +101,9 @@ export function useAcceleratingMouseWheelScrollPress({
 	const onClick = useCallback<MouseEventHandler<HTMLElement>>(
 		(event) => {
 			event.preventDefault();
-			if (didHandlePointerPress.current && event.detail > 0) {
+			// Chrome 的触屏 click 可以 detail=0，但仍带 pointerType；不能当作读屏激活再滚一次。
+			const nativePointerType = (event.nativeEvent as PointerEvent).pointerType;
+			if (didHandlePointerPress.current && (event.detail > 0 || Boolean(nativePointerType))) {
 				didHandlePointerPress.current = false;
 				return;
 			}

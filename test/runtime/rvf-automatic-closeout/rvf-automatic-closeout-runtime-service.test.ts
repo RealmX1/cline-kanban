@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -177,8 +177,31 @@ async function setup(mainConversationSessionId = "task") {
 		}),
 	);
 	const captured = await service.capture(scope, { taskId: "task", decisionToken: token });
-	async function complete() {
-		const run = join(fixture.fixtureRootDirectoryPath, "runs", "run");
+	const run = join(fixture.fixtureRootDirectoryPath, "runs", "run");
+	const bindingPath = join(
+		rvfHome,
+		"review-start-independent-user-turn-boundary-receipts",
+		`${token}.run-binding.json`,
+	);
+	const runReceiptPath = join(run, "inputs", "automatic-closeout-review-start-receipt.json");
+	async function bindRun() {
+		await mkdir(dirname(runReceiptPath), { recursive: true });
+		await writeFile(runReceiptPath, JSON.stringify(captured.receipt));
+		const canonical = Object.fromEntries(
+			Object.entries(captured.receipt).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+		);
+		await writeFile(
+			bindingPath,
+			JSON.stringify({
+				run_id: "run",
+				run_dir: run,
+				receipt_sha256: computeRvfTextSha256(JSON.stringify(canonical)),
+			}),
+		);
+	}
+	async function complete(activate = true) {
+		await bindRun();
+		if (activate) await service.activateAfterRunBinding(scope, { taskId: "task", decisionToken: token });
 		const artifacts = join(run, "artifacts");
 		await mkdir(artifacts, { recursive: true });
 		const handoffPath = join(artifacts, "handoff.md");
@@ -192,18 +215,6 @@ async function setup(mainConversationSessionId = "task") {
 				decision_kind: "handoff-advisory",
 				completed_at: "now",
 				errors: [],
-			}),
-		);
-		const receiptDirectory = join(rvfHome, "review-start-independent-user-turn-boundary-receipts");
-		const canonical = Object.fromEntries(
-			Object.entries(captured.receipt).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-		);
-		await writeFile(
-			join(receiptDirectory, `${token}.run-binding.json`),
-			JSON.stringify({
-				run_id: "run",
-				run_dir: run,
-				receipt_sha256: computeRvfTextSha256(JSON.stringify(canonical)),
 			}),
 		);
 		const notifications = join(rvfHome, "automatic-closeout-completion-notifications");
@@ -222,9 +233,243 @@ async function setup(mainConversationSessionId = "task") {
 			}),
 		);
 	}
-	return { service, dependencies, scope, token, complete, manager, runtimeApi, source, rvfHome };
+	return {
+		service,
+		dependencies,
+		scope,
+		token,
+		complete,
+		bindRun,
+		bindingPath,
+		runReceiptPath,
+		captured,
+		run,
+		manager,
+		runtimeApi,
+		source,
+		rvfHome,
+	};
 }
 describe("RVF 宿主自动收尾与持久投递链", () => {
+	it("捕获默认仅保存非活跃分界，重启和重试不重捕获或扫描完成事实", async () => {
+		const context = await setup();
+		const captured = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+		expect(captured?.status).toBe("captured_review_start_boundary");
+		const requestCount = mocked.request.mock.calls.length;
+		context.source.push({ id: "bootstrap-followup", status: "completed", items: [] });
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.capture(context.scope, { taskId: "task", decisionToken: context.token })).toEqual({
+			receipt: captured?.receipt,
+		});
+		await restarted.sweepPendingCloseoutsOnce();
+		expect((await restarted.status(context.scope, { taskId: "task" })).records).toEqual([captured]);
+		expect(mocked.request).toHaveBeenCalledTimes(requestCount);
+		expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		await expect(
+			restarted.validateCloseoutPromptDelivery(context.scope, {
+				taskId: "task",
+				source: "rvf_automatic_closeout",
+				idempotencyKey: captured?.promptDeliveryIdempotencyKey,
+			}),
+		).rejects.toThrow("尚未激活");
+	});
+	it("即使已存在成功通知，未显式激活的捕获在重启后也不恢复或投递", async () => {
+		const context = await setup();
+		await context.complete(false);
+		const captured = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+		mocked.request.mockClear();
+		await context.service.sweepPendingCloseoutsOnce();
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await restarted.sweepPendingCloseoutsOnce();
+		expect((await restarted.status(context.scope, { taskId: "task" })).records).toEqual([captured]);
+		expect(mocked.request).not.toHaveBeenCalled();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+	});
+	it("只有完整 run 双向绑定才能激活，重复激活与重启不改分界或阶段时间", async () => {
+		const context = await setup();
+		const input = { taskId: "task", decisionToken: context.token };
+		await expect(context.service.activateAfterRunBinding(context.scope, input)).rejects.toThrow();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe(
+			"captured_review_start_boundary",
+		);
+		await context.bindRun();
+		expect(await context.service.activateAfterRunBinding(context.scope, input)).toEqual(context.captured);
+		const active = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+		expect(active).toMatchObject({
+			status: "awaiting_rvf_completion",
+			runId: "run",
+			runDirectory: context.run,
+			preReviewTurnIds: ["implementation"],
+			receipt: context.captured.receipt,
+		});
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.activateAfterRunBinding(context.scope, input)).toEqual(context.captured);
+		expect((await restarted.status(context.scope, { taskId: "task" })).records).toEqual([active]);
+	});
+	it("两个服务同时激活同一绑定时幂等复用一条记录", async () => {
+		const context = await setup();
+		await context.bindRun();
+		const other = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		const input = { taskId: "task", decisionToken: context.token };
+		expect(
+			await Promise.all([
+				context.service.activateAfterRunBinding(context.scope, input),
+				other.activateAfterRunBinding(context.scope, input),
+			]),
+		).toEqual([context.captured, context.captured]);
+		expect((await context.service.status(context.scope, { taskId: "task" })).records).toHaveLength(1);
+	});
+	it.each([
+		"run_id",
+		"run_dir",
+		"receipt_sha256",
+		"receipt_token",
+		"receipt_checkpoint",
+		"extra_receipt_field",
+		"missing_receipt",
+	])("错误的 $0 绑定不能激活或启动任何恢复", async (corruption) => {
+		const context = await setup();
+		await context.bindRun();
+		const binding = JSON.parse(await readFile(context.bindingPath, "utf8"));
+		const receipt = { ...context.captured.receipt };
+		if (corruption === "run_id") binding.run_id = "another-run";
+		if (corruption === "run_dir") binding.run_dir = dirname(context.run);
+		if (corruption === "receipt_sha256") binding.receipt_sha256 = "wrong-digest";
+		if (corruption === "receipt_token") receipt.decision_token = "fedcba9876543210";
+		if (corruption === "receipt_checkpoint") receipt.checkpoint_tree = "another-tree";
+		await writeFile(context.bindingPath, JSON.stringify(binding));
+		await writeFile(
+			context.runReceiptPath,
+			JSON.stringify({ ...receipt, ...(corruption === "extra_receipt_field" ? { extra: true } : {}) }),
+		);
+		if (corruption === "missing_receipt") await rm(context.runReceiptPath);
+		await expect(
+			context.service.activateAfterRunBinding(context.scope, { taskId: "task", decisionToken: context.token }),
+		).rejects.toThrow();
+		await context.service.sweepPendingCloseoutsOnce();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe(
+			"captured_review_start_boundary",
+		);
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	});
+	it("run 内凭据通过软链接指向其他目录时拒绝激活", async () => {
+		const context = await setup();
+		await context.bindRun();
+		const outsideReceipt = join(context.rvfHome, "outside-receipt.json");
+		await writeFile(outsideReceipt, JSON.stringify(context.captured.receipt));
+		await rm(context.runReceiptPath);
+		await symlink(outsideReceipt, context.runReceiptPath);
+		await expect(
+			context.service.activateAfterRunBinding(context.scope, { taskId: "task", decisionToken: context.token }),
+		).rejects.toThrow("不属于该 run");
+	});
+	it.each(["主会话", "原生身份", "transcript", "worktree"])("激活前$0改变时保留非活跃捕获", async (changed) => {
+		const context = await setup();
+		await context.bindRun();
+		const summary = context.manager.getSummary();
+		const identity = summary.agentNativeConversationSessionIdentity;
+		if (!identity) throw new Error("测试缺少原生身份");
+		vi.spyOn(context.manager, "listSummaries").mockReturnValue([
+			{
+				...summary,
+				taskId: changed === "主会话" ? "replacement" : summary.taskId,
+				workspacePath: changed === "worktree" ? context.rvfHome : summary.workspacePath,
+				agentNativeConversationSessionIdentity: {
+					...identity,
+					nativeSessionId: changed === "原生身份" ? "replacement" : "native",
+					transcriptPath: changed === "transcript" ? "/replacement.jsonl" : "/native.jsonl",
+				},
+			},
+		]);
+		await expect(
+			context.service.activateAfterRunBinding(context.scope, { taskId: "task", decisionToken: context.token }),
+		).rejects.toThrow();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe(
+			"captured_review_start_boundary",
+		);
+	});
+	it("激活期间显式停止不会被旧回调覆盖，重启后也不能重新激活", async () => {
+		const context = await setup();
+		await context.bindRun();
+		const board = await mocked.board();
+		let releaseBoard!: () => void;
+		let markBoardStarted!: () => void;
+		const boardStarted = new Promise<void>((resolve) => {
+			markBoardStarted = resolve;
+		});
+		const boardReleased = new Promise<void>((resolve) => {
+			releaseBoard = resolve;
+		});
+		mocked.board.mockImplementationOnce(async () => {
+			markBoardStarted();
+			await boardReleased;
+			return board;
+		});
+		const input = { taskId: "task", decisionToken: context.token };
+		const activation = context.service.activateAfterRunBinding(context.scope, input);
+		const rejectedActivation = expect(activation).rejects.toThrow("停止");
+		await boardStarted;
+		await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+		releaseBoard();
+		await rejectedActivation;
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await expect(restarted.activateAfterRunBinding(context.scope, input)).rejects.toThrow("暂停");
+		expect((await restarted.status(context.scope, { taskId: "task" })).records[0]?.status).toBe("paused");
+		expect(await restarted.capture(context.scope, input)).toEqual(context.captured);
+	});
+	it("捕获期间按当前主会话停止，不会登记晚到的非活跃分界", async () => {
+		const context = await setup("codex-handover-target");
+		const nextToken = "fedcba9876543210";
+		context.source.push({
+			id: "next-boundary",
+			status: "completed",
+			items: [
+				{
+					id: "next-message",
+					type: "userMessage",
+					content: [{ type: "text", text: `RVF 发起决策点 · RVF_DECISION_TOKEN=${nextToken}` }],
+				},
+			],
+		});
+		await writeFile(
+			join(context.rvfHome, "agentic-initiation-decision-tokens", `${nextToken}.json`),
+			JSON.stringify({
+				token: nextToken,
+				session_id: "native",
+				worktree: context.scope.workspacePath,
+				candidate_fingerprint: "next",
+				state: "injected",
+				minted_at: new Date().toISOString(),
+				expires_at: new Date(Date.now() + 60_000).toISOString(),
+				candidate_summary: {},
+			}),
+		);
+		let releaseRead!: () => void;
+		let markReadStarted!: () => void;
+		const readStarted = new Promise<void>((resolve) => {
+			markReadStarted = resolve;
+		});
+		const readReleased = new Promise<void>((resolve) => {
+			releaseRead = resolve;
+		});
+		const request = mocked.request.getMockImplementation();
+		mocked.request.mockImplementationOnce(async (method, parameters) => {
+			markReadStarted();
+			await readReleased;
+			return request?.(method, parameters);
+		});
+		const capture = context.service.capture(context.scope, { taskId: "task", decisionToken: nextToken });
+		const rejectedCapture = expect(capture).rejects.toThrow("停止");
+		await readStarted;
+		await context.service.pauseForExplicitStop(context.scope.workspaceId, "codex-handover-target");
+		releaseRead();
+		await rejectedCapture;
+		const records = (await context.service.status(context.scope, { taskId: "task" })).records;
+		expect(records).toHaveLength(1);
+		expect(records[0]?.status).toBe("paused");
+	});
 	it("无人点击时自动恢复并入队，确认提交后终结投递阶段；重启复用同一记录与队列", async () => {
 		const context = await setup();
 		await context.complete();
@@ -431,41 +676,44 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe("paused");
 		expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
 	});
-	it("用户恢复工作后，新的独立开审回合可以登记新 run，旧 run 继续保持暂停", async () => {
-		const context = await setup();
-		await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
-		const nextToken = "fedcba9876543210";
-		context.source.push(
-			{ id: "resumed-implementation", status: "completed", items: [] },
-			{
-				id: "next-boundary",
-				status: "completed",
-				items: [
-					{
-						id: "next-message",
-						type: "userMessage",
-						content: [{ type: "text", text: `RVF 发起决策点 · RVF_DECISION_TOKEN=${nextToken}` }],
-					},
-				],
-			},
-		);
-		await writeFile(
-			join(context.rvfHome, "agentic-initiation-decision-tokens", `${nextToken}.json`),
-			JSON.stringify({
-				token: nextToken,
-				session_id: "native",
-				worktree: context.scope.workspacePath,
-				candidate_fingerprint: "next-candidate",
-				state: "injected",
-				minted_at: new Date().toISOString(),
-				expires_at: new Date(Date.now() + 60_000).toISOString(),
-				candidate_summary: {},
-			}),
-		);
-		await context.service.capture(context.scope, { taskId: "task", decisionToken: nextToken });
-		const records = (await context.service.status(context.scope, { taskId: "task" })).records;
-		expect(records.map((record) => record.status)).toEqual(["paused", "awaiting_rvf_completion"]);
-	});
+	it.each(["task", "codex-handover-target"])(
+		"用户恢复 $0 后，新分界可以登记，旧 run 继续暂停",
+		async (mainSessionId) => {
+			const context = await setup(mainSessionId);
+			await context.service.pauseForExplicitStop(context.scope.workspaceId, mainSessionId);
+			const nextToken = "fedcba9876543210";
+			context.source.push(
+				{ id: "resumed-implementation", status: "completed", items: [] },
+				{
+					id: "next-boundary",
+					status: "completed",
+					items: [
+						{
+							id: "next-message",
+							type: "userMessage",
+							content: [{ type: "text", text: `RVF 发起决策点 · RVF_DECISION_TOKEN=${nextToken}` }],
+						},
+					],
+				},
+			);
+			await writeFile(
+				join(context.rvfHome, "agentic-initiation-decision-tokens", `${nextToken}.json`),
+				JSON.stringify({
+					token: nextToken,
+					session_id: "native",
+					worktree: context.scope.workspacePath,
+					candidate_fingerprint: "next-candidate",
+					state: "injected",
+					minted_at: new Date().toISOString(),
+					expires_at: new Date(Date.now() + 60_000).toISOString(),
+					candidate_summary: {},
+				}),
+			);
+			await context.service.capture(context.scope, { taskId: "task", decisionToken: nextToken });
+			const records = (await context.service.status(context.scope, { taskId: "task" })).records;
+			expect(records.map((record) => record.status)).toEqual(["paused", "captured_review_start_boundary"]);
+		},
+	);
 
 	it("无通知不误用历史 handoff；错误摘要不会恢复", async () => {
 		const context = await setup();

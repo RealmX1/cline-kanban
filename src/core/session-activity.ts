@@ -53,7 +53,8 @@ export function isTaskConversationSessionWithoutTaskLifecycleAuthority(
 }
 
 // 首次侧问 fork 与协作会话共用目录时，前后端必须采用同一份寻址判据。
-export function resolveByTheWayMainSessionForkSelection(input: {
+export function resolveTaskConversationSessionMainContextForkSelection(input: {
+	sessionRole?: "by_the_way" | "task_collaborator";
 	workspaceTaskId: string;
 	launchAgentId: RuntimeAgentId;
 	mainSessionSummary: RuntimeTaskSessionSummary | null | undefined;
@@ -61,7 +62,17 @@ export function resolveByTheWayMainSessionForkSelection(input: {
 	existingTaskConversationSessionSummaries: readonly RuntimeTaskSessionSummary[];
 }): { forkRejectionReason: string | null; mainSessionNativeConversationSessionId?: string } {
 	const sessions = input.existingTaskConversationSessionSummaries;
+	const isTaskCollaborator = input.sessionRole === "task_collaborator";
+	if (isTaskCollaborator) {
+		if (!["claude", "codex", "omp"].includes(input.launchAgentId)) {
+			return { forkRejectionReason: "当前 Agent 不支持复刻主会话，请使用全新上下文。" };
+		}
+		if (input.mainSessionSummary?.startedAt == null) {
+			return { forkRejectionReason: "主会话尚未建立，请使用全新上下文。" };
+		}
+	}
 	if (
+		!isTaskCollaborator &&
 		sessions.some(
 			(summary) =>
 				summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId &&
@@ -71,13 +82,15 @@ export function resolveByTheWayMainSessionForkSelection(input: {
 		return { forkRejectionReason: "已有 By the way 会话，后续侧问请从全新上下文开始。" };
 	}
 	// Cline 按宿主任务 id 加载消息，不使用 cwd-latest。
-	if (input.launchAgentId !== "claude" && input.launchAgentId !== "codex") {
+	if (!isTaskCollaborator && input.launchAgentId !== "claude" && input.launchAgentId !== "codex") {
 		return { forkRejectionReason: null };
 	}
 	const mainSummary = input.mainSessionSummary;
 	if (mainSummary?.agentId && mainSummary.agentId !== input.launchAgentId) {
 		return {
-			forkRejectionReason: "主会话的 agent 与当前 By the way agent 不同，无法 fork 主对话，请从全新上下文开始。",
+			forkRejectionReason: isTaskCollaborator
+				? "所选 Agent 与主会话不同，无法复刻主会话，请使用全新上下文。"
+				: "主会话的 agent 与当前 By the way agent 不同，无法 fork 主对话，请从全新上下文开始。",
 		};
 	}
 	const identity = mainSummary?.agentNativeConversationSessionIdentity;
@@ -94,6 +107,9 @@ export function resolveByTheWayMainSessionForkSelection(input: {
 		}
 		return { forkRejectionReason: null, mainSessionNativeConversationSessionId: nativeSessionId };
 	}
+	if (isTaskCollaborator) {
+		return { forkRejectionReason: "主会话尚未记录可靠的原生会话 ID，无法安全复刻，请使用全新上下文。" };
+	}
 	const hasCompetingSession = sessions.some(
 		(summary) =>
 			summary.taskId !== input.workspaceTaskId &&
@@ -107,6 +123,13 @@ export function resolveByTheWayMainSessionForkSelection(input: {
 			? `主会话尚未记录可用的 ${input.launchAgentId} 原生会话 ID，且同一工作目录存在其他 ${input.launchAgentId} 会话，无法安全 fork 主对话，请从全新上下文开始。`
 			: null,
 	};
+}
+
+// 保留既有侧问入口及其次数规则；协作会话必须显式声明角色并满足更严格的身份要求。
+export function resolveByTheWayMainSessionForkSelection(
+	input: Omit<Parameters<typeof resolveTaskConversationSessionMainContextForkSelection>[0], "sessionRole">,
+): ReturnType<typeof resolveTaskConversationSessionMainContextForkSelection> {
+	return resolveTaskConversationSessionMainContextForkSelection({ ...input, sessionRole: "by_the_way" });
 }
 
 // 「近期活跃」窗口（毫秒）：跨项目切换面板的 Running 区（docs/context-cross-project-recently-active-task-switcher.md）

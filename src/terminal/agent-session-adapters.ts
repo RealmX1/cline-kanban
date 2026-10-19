@@ -45,6 +45,7 @@ import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
 import { writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension } from "./omp-native-conversation-session-identity-and-prompt-submission-extension";
+import { writeOmpTaskCollaboratorForkInitialPlanModeExtension } from "./omp-task-collaborator-fork-initial-plan-mode-extension";
 import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
 import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
@@ -107,8 +108,8 @@ export interface AgentAdapterLaunchInput {
 	kanbanAssignedAgentNativeConversationSessionIdForFreshStart?: string;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
-	// 仅首次 By the way 开局使用；与历史播种、侧问自身的重启寻址分开。
-	byTheWayMainSessionForkSourceNativeSessionId?: string;
+	// 仅首次侧会话 fork 使用；与历史播种及子会话自身的重启寻址分开。
+	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -1308,7 +1309,14 @@ const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
-		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
+		const isTaskCollaboratorFork = Boolean(
+			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator",
+		);
+		const modelBaseArgs = isTaskCollaboratorFork
+			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
+			: input.args;
+		const args = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const env: Record<string, string | undefined> = {
 			...resolveClaudeCodeTerminalRenderingModeEnv(),
 			FORCE_HYPERLINK: "1",
@@ -1345,7 +1353,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.resumePriorAgentConversationWithoutResendingPrompt ||
 				taskAgentSessionInitialization ||
 				input.forkLatestWorkingDirectorySession ||
-				input.byTheWayMainSessionForkSourceNativeSessionId,
+				input.taskConversationSessionMainContextForkSourceNativeSessionId,
 		);
 		// 优先级：**重启寻址（按 id）→ resumeFromTrash（cwd-latest）→ 建卡播种 → fork cwd-latest**。
 		// 按-id 必须排在最前：`--continue` 挑的是「工作目录下最近一段对话」，而主会话与它的 By the way
@@ -1366,7 +1374,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(args, "--continue")) {
 				args.push("--continue");
 			}
-		} else if (input.byTheWayMainSessionForkSourceNativeSessionId) {
+		} else if (input.taskConversationSessionMainContextForkSourceNativeSessionId) {
 			const forkArgs = removeNativeSessionSelectionArguments(args, "claude", [
 				"--resume",
 				"-r",
@@ -1380,7 +1388,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				args.length,
 				...forkArgs,
 				"--resume",
-				input.byTheWayMainSessionForkSourceNativeSessionId,
+				input.taskConversationSessionMainContextForkSourceNativeSessionId,
 				"--fork-session",
 			);
 		} else if (taskAgentSessionInitialization) {
@@ -1409,7 +1417,7 @@ const claudeAdapter: AgentSessionAdapter = {
 		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
 		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
 		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
-		if (!explicitModelId && !hasCliOption(args, "--model")) {
+		if (!explicitModelId && !hasCliOption(args, "--model") && !isTaskCollaboratorFork) {
 			args.push("--model", "default");
 		}
 		const hooks = resolveHookContext(input);
@@ -1591,7 +1599,14 @@ const codexAdapter: AgentSessionAdapter = {
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
-		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
+		const isTaskCollaboratorFork = Boolean(
+			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator",
+		);
+		const modelBaseArgs = isTaskCollaboratorFork
+			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
+			: input.args;
+		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		let deferredStartupPromptText: string | undefined;
@@ -1652,11 +1667,11 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
-		} else if (input.byTheWayMainSessionForkSourceNativeSessionId) {
+		} else if (input.taskConversationSessionMainContextForkSourceNativeSessionId) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) codexArgs.push("-C", input.cwd);
 			applyRecordedCodexNativeSessionSelectionArguments(
 				codexArgs,
-				input.byTheWayMainSessionForkSourceNativeSessionId,
+				input.taskConversationSessionMainContextForkSourceNativeSessionId,
 				"fork",
 			);
 		} else if (taskAgentSessionInitialization) {
@@ -1685,7 +1700,7 @@ const codexAdapter: AgentSessionAdapter = {
 		const selectsLatestWorkingDirectorySession =
 			!observedNativeSessionResumeAddressing &&
 			(continuesWithoutNewPrompt ||
-				(!input.byTheWayMainSessionForkSourceNativeSessionId &&
+				(!input.taskConversationSessionMainContextForkSourceNativeSessionId &&
 					!taskAgentSessionInitialization &&
 					!parentSessionId &&
 					input.forkLatestWorkingDirectorySession));
@@ -1722,7 +1737,7 @@ const codexAdapter: AgentSessionAdapter = {
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
 		const forksSession =
 			!continuesWithoutNewPrompt &&
-			(Boolean(input.byTheWayMainSessionForkSourceNativeSessionId) ||
+			(Boolean(input.taskConversationSessionMainContextForkSourceNativeSessionId) ||
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
 				(!taskAgentSessionInitialization &&
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
@@ -2664,7 +2679,8 @@ const ompAdapter: AgentSessionAdapter = {
 		// omp 的 terminal breadcrumb 认的是 TTY 设备路径（ttyid.ts），新 PTY 每次 id 都不同，于是
 		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」；仅在上游确认无同 harness 的
 		// 共目录竞争者且没有绑定时允许使用，它不锁定具体 sessionId。
-		const resumesPriorAgentConversation = shouldContinuePriorConversation;
+		const resumesPriorAgentConversation =
+			shouldContinuePriorConversation || Boolean(input.taskConversationSessionMainContextForkSourceNativeSessionId);
 		if (observedNativeSessionResumeAddressing) {
 			const resumeArgs = removeNativeSessionSelectionArguments(args, "omp", [
 				"--resume",
@@ -2673,6 +2689,28 @@ const ompAdapter: AgentSessionAdapter = {
 				"--fork",
 			]);
 			args.splice(0, args.length, ...resumeArgs, "--resume", observedNativeSessionResumeAddressing.sourceSessionId);
+		} else if (
+			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+			!shouldContinuePriorConversation
+		) {
+			const forkArgs = removeNativeSessionSelectionArguments(args, "omp", ["--resume", "-r", "--session", "--fork"]);
+			args.splice(
+				0,
+				args.length,
+				...removeCliOptionsWithValues(forkArgs, ["--model", "-m"]),
+				"--fork",
+				input.taskConversationSessionMainContextForkSourceNativeSessionId,
+			);
+			if (input.startInPlanMode) {
+				args.push(
+					"--extension",
+					await writeOmpTaskCollaboratorForkInitialPlanModeExtension({
+						directory: getHookAgentDirectory("omp"),
+						taskId: input.taskId,
+						sourceNativeSessionId: input.taskConversationSessionMainContextForkSourceNativeSessionId,
+					}),
+				);
+			}
 		} else if (shouldContinuePriorConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
 			args.push("--continue");
 		}

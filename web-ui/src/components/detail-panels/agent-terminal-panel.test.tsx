@@ -58,10 +58,13 @@ vi.mock("@/hooks/use-is-mobile", () => ({
 	useIsMobile: () => mockUseIsMobile(),
 }));
 
-vi.mock("@/terminal/terminal-controller-registry", () => ({
-	getTerminalController: () => ({ input: mockTerminalInput, paste: vi.fn(() => true) }),
-	readTerminalScrollbackTranscript: () => mockReadScrollbackTranscript(),
-}));
+vi.mock("@/terminal/terminal-controller-registry", () => {
+	const controller = { input: mockTerminalInput, paste: vi.fn(() => true) };
+	return {
+		getTerminalController: () => controller,
+		readTerminalScrollbackTranscript: () => mockReadScrollbackTranscript(),
+	};
+});
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => undefined,
@@ -134,6 +137,7 @@ describe("AgentTerminalPanel", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		act(() => {
 			root.unmount();
 		});
@@ -251,16 +255,18 @@ describe("AgentTerminalPanel", () => {
 				.querySelector<HTMLButtonElement>('[aria-label="Interrupt the agent, or clear the current input line"]')
 				?.click();
 		});
+		vi.useFakeTimers();
 		act(() => {
 			container
 				.querySelector<HTMLButtonElement>('[aria-label="Open the rewind history view (double escape)"]')
 				?.click();
 		});
+		act(() => vi.advanceTimersByTime(100));
 		act(() => {
 			container.querySelector<HTMLButtonElement>('[aria-label="Arrow up"]')?.click();
 		});
 
-		expect(mockTerminalInput.mock.calls.map((call) => call[0])).toEqual(["\u0003", "\u001b\u001b", "\u001b[A"]);
+		expect(mockTerminalInput.mock.calls.map((call) => call[0])).toEqual(["\u0003", "\u001b", "\u001b", "\u001b[A"]);
 	});
 
 	it("keeps the virtual key bar off synthetic shell terminals, which are not agent TUIs", () => {

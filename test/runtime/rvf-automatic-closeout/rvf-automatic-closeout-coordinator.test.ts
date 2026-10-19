@@ -86,6 +86,26 @@ function createDeferredCloseoutOperationSignal() {
 	return { promise, resolve };
 }
 describe("RVF 自动收尾持久编排", () => {
+	it("独立 coordinator 跳过尚未激活的分界，不检查完成、不认领或触发副作用", async () => {
+		const path = await setup();
+		await updateRvfAutomaticCloseoutRecords(path, (records) => ({
+			records: records.map((entry) => ({ ...entry, status: "captured_review_start_boundary" })),
+			value: null,
+		}));
+		const captured = await readRvfAutomaticCloseoutRecords(path);
+		const dependencies = {
+			storePath: path,
+			inspectCompletion: vi.fn(async () => null),
+			restore: vi.fn(),
+			enqueue: vi.fn(),
+		};
+		await createRvfAutomaticCloseoutCoordinator(dependencies).sweep();
+		await createRvfAutomaticCloseoutCoordinator(dependencies).sweep();
+		expect(await readRvfAutomaticCloseoutRecords(path)).toEqual(captured);
+		expect(dependencies.inspectCompletion).not.toHaveBeenCalled();
+		expect(dependencies.restore).not.toHaveBeenCalled();
+		expect(dependencies.enqueue).not.toHaveBeenCalled();
+	});
 	it("两个独立 coordinator 不能用旧快照重复恢复和投递", async () => {
 		const path = await setup();
 		const inspectionStarted = createDeferredCloseoutOperationSignal();
