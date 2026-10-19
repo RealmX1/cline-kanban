@@ -360,6 +360,8 @@ setInterval(() => {}, 1000);
 			await expect.poll(() => page.getByText("协作会话", { exact: true }).count(), { timeout: 15_000 }).toBe(1);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-desktop.png") });
 			await page.setViewportSize({ width: 390, height: 844 });
+			// 手机 Focus View 默认折叠导航，先通过真实入口展开，再检查协作会话。
+			await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).click();
 			await page.getByRole("button", { name: "Sessions", exact: true }).click();
 			await expect.poll(() => page.getByText("协作会话", { exact: true }).count()).toBe(1);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-mobile.png") });
