@@ -77,6 +77,16 @@ describe("滚轮按钮长按加速", () => {
 		act(() => host.querySelector("button")!.click());
 		expect(scrollStepTimes).toHaveLength(2);
 	});
+	it("触屏补发 detail=0 的 PointerEvent click 不重复滚动", () => {
+		dispatchPointer("pointerdown");
+		dispatchPointer("pointerup");
+		const click = new TestPointerEvent("click", { bubbles: true, detail: 0 });
+		Object.defineProperty(click, "pointerType", { value: "touch" });
+		act(() => host.querySelector("button")!.dispatchEvent(click));
+		expect(scrollStepTimes).toHaveLength(1);
+		act(() => host.querySelector("button")!.click());
+		expect(scrollStepTimes).toHaveLength(2);
+	});
 	it("页面隐藏立即清除连滚", () => {
 		dispatchPointer("pointerdown");
 		advance(600);

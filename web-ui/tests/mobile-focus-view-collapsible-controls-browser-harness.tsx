@@ -19,6 +19,7 @@ Terminal.prototype.open = function (parent: HTMLElement) {
 declare global {
 	interface Window {
 		mobileFocusViewTerminalBrowserTest: {
+			readScreenText: () => string;
 			readViewport: () => {
 				viewportY: number;
 				baseY: number;
@@ -31,6 +32,10 @@ declare global {
 	}
 }
 window.mobileFocusViewTerminalBrowserTest = {
+	readScreenText: () => {
+		const buffer = browserTestTerminals[0]!.buffer.active;
+		return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "").join("\n");
+	},
 	readViewport: () => {
 		const terminal = browserTestTerminals[0]!;
 		const screen = terminal.element!.querySelector(".xterm-screen")!;
