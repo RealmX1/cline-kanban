@@ -35,6 +35,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 			const current = records.find((entry) => entry.receipt.decision_token === token);
 			if (
 				!current ||
+				current.status === "captured_review_start_boundary" ||
 				current.status === "paused" ||
 				current.status === "closeout_prompt_submitted" ||
 				current.status === "completed"
@@ -122,7 +123,12 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 	}
 	async function run() {
 		for (const record of await readRvfAutomaticCloseoutRecords(deps.storePath)) {
-			if (["paused", "closeout_prompt_submitted", "completed"].includes(record.status)) continue;
+			if (
+				["captured_review_start_boundary", "paused", "closeout_prompt_submitted", "completed"].includes(
+					record.status,
+				)
+			)
+				continue;
 			try {
 				await withRvfAutomaticCloseoutRecordOperationLock(
 					deps.storePath,

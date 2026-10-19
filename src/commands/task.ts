@@ -2135,7 +2135,7 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("capture-rvf-review-start-boundary")
-		.description("捕获当前 Codex 主会话的独立 RVF 开审分界并登记默认自动收尾。")
+		.description("捕获并持久保存当前 Codex 主会话的独立 RVF 开审分界，等待真实 run 绑定后激活。")
 		.requiredOption("--project-path <path>", "main checkout 路径。")
 		.requiredOption("--task-id <id>", "任务 ID。")
 		.requiredOption("--decision-token <token>", "RVF 决策 token。")
@@ -2145,6 +2145,25 @@ export function registerTaskCommand(program: Command): void {
 			});
 			printJson(
 				await createRuntimeTrpcClient(workspace.workspaceId).runtime.captureRvfReviewStartBoundary.mutate({
+					taskId: options.taskId,
+					decisionToken: options.decisionToken,
+				}),
+			);
+		});
+	task
+		.command("activate-rvf-automatic-closeout-after-run-binding")
+		.description("核对已捕获分界与真实 RVF run 的双向绑定，激活默认自动收尾。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "RVF 决策 token。")
+		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			printJson(
+				await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.activateRvfAutomaticCloseoutAfterRunBinding.mutate({
 					taskId: options.taskId,
 					decisionToken: options.decisionToken,
 				}),
