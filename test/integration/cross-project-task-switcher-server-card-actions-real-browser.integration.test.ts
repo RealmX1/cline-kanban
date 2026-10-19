@@ -9,6 +9,7 @@ import { afterEach, expect, it } from "vitest";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { runPostDeployVerificationFollowUpTaskRealBrowserCheck } from "./post-deploy-verification-follow-up-task-real-browser-check";
 import { runReferenceRelationModelingRealBrowserCheck } from "./reference-relation-modeling-real-browser-check";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -19,8 +20,11 @@ import {
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
 const runRelationModelingBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_REFERENCE_RELATION_MODELING_BROWSER_CHECK === "1";
+const runPostDeployVerificationFollowUpBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
 	runRelationModelingBrowserCheck ||
+	runPostDeployVerificationFollowUpBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
 const spawnedChildProcessRegistry = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => spawnedChildProcessRegistry.sigkillEveryStillRunningChildProcessAndWaitForExit());
@@ -139,7 +143,7 @@ setInterval(() => {}, 1000);
 				stderr += String(chunk);
 			});
 			if (!(await waitForChildProcessExit(child, 45000))) throw new Error(`隔离 CLI 未退出：${stderr}`);
-			if (child.exitCode !== 0) throw new Error(`隔离 CLI 失败：${stderr}`);
+			if (child.exitCode !== 0) throw new Error(`隔离 CLI 失败：${stderr}\n${output}`);
 			return JSON.parse(output);
 		}
 		async function createTask(projectPath: string, title: string, extraArguments: string[] = []) {
@@ -235,7 +239,7 @@ setInterval(() => {}, 1000);
 			writeFileSync(
 				viteConfigurationPath,
 				`import baseConfiguration from ${JSON.stringify(join(sourceCheckoutPath, "web-ui/vite.config.ts"))};
-export default { ...baseConfiguration, optimizeDeps: { include: ["react", "react-dom/client", "react/jsx-runtime", "@xyflow/react", "@dagrejs/dagre"] }, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
+export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringify(join(sourceCheckoutPath, "web-ui/index.html"))}], include: ["react", "react-dom/client", "react/jsx-runtime", "@xyflow/react", "@dagrejs/dagre"] }, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
 			);
 			startOwnedProcess(
 				"isolated-vite",
@@ -288,6 +292,80 @@ export default { ...baseConfiguration, optimizeDeps: { include: ["react", "react
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "Close", exact: true })
 				.click({ timeout: 10000 });
+			if (runPostDeployVerificationFollowUpBrowserCheck) {
+				const client = runtimeClient(alphaWorkspaceId);
+				const sourceState = await client.workspace.getState.query();
+				const sourceColumn = sourceState.board.columns.find((column) =>
+					column.cards.some((card) => card.id === focusId),
+				);
+				const sourceCard = sourceColumn?.cards.find((card) => card.id === focusId);
+				if (!sourceColumn || !sourceCard) throw new Error("缺少 PDV 来源任务");
+				sourceColumn.cards = sourceColumn.cards.filter((card) => card.id !== focusId);
+				sourceState.board.columns.find((column) => column.id === "validation")?.cards.push(sourceCard);
+				await client.workspace.saveState.mutate({
+					board: sourceState.board,
+					sessions: sourceState.sessions,
+					expectedRevision: sourceState.revision,
+				});
+				await runCli(
+					[
+						"deployment",
+						"record",
+						"--project-path",
+						firstProject.repositoryPath,
+						"--source-checkout-path",
+						firstProject.repositoryPath,
+						"--new-commit",
+						firstProject.runGit(["rev-parse", "HEAD"]).stdout.trim(),
+					],
+					firstProject.repositoryPath,
+				);
+				const verification = await client.deployment.getPostDeployVerificationState.query({ activeOnly: true });
+				const deploymentId = verification.activeDeploymentId;
+				if (!deploymentId) throw new Error("未创建隔离部署记录");
+				for (const label of ["浏览器核对项甲", "浏览器核对项乙"]) {
+					await client.deployment.updateVerificationChecklist.mutate({
+						operation: "add_custom_checklist_item",
+						deploymentId,
+						taskId: focusId,
+						label,
+					});
+				}
+				await runPostDeployVerificationFollowUpTaskRealBrowserCheck({
+					page,
+					sourceWorkspaceId: alphaWorkspaceId,
+					otherWorkspaceId: betaWorkspaceId,
+					sourceTaskId: focusId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					observeUntil,
+					recordCheck,
+					readSourceBoard: async () => (await client.workspace.getState.query()).board,
+					readOtherBoard: async () => (await runtimeClient(betaWorkspaceId).workspace.getState.query()).board,
+					readSourceVerificationTask: async () => {
+						const state = await client.deployment.getPostDeployVerificationState.query({ activeOnly: true });
+						const task = state.deploymentGroups
+							.flatMap((group) => group.tasks)
+							.find((task) => task.taskId === focusId);
+						if (!task) throw new Error("来源核对任务缺失");
+						return task;
+					},
+					readNeighborhood: (taskId) =>
+						client.workUnit.getRelationNeighborhoodSummary.query({
+							workUnit: {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: alphaWorkspaceId,
+							},
+						}),
+				});
+				expect(pageErrors).toEqual([]);
+				writeFileSync(
+					join(evidenceOutputDirectory, "browser-check-results.json"),
+					JSON.stringify({ checks, pageErrors, runtimePort, webUiPort }, null, 2),
+				);
+				return;
+			}
 			if (runRelationModelingBrowserCheck) {
 				await runReferenceRelationModelingRealBrowserCheck({
 					page,

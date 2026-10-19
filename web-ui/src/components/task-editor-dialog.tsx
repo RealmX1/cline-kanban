@@ -22,6 +22,7 @@ import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
+import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import {
 	TaskAgentModelPicker,
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
@@ -253,6 +254,7 @@ export function TaskEditorDialog({
 	onAdoptPromotedTaskEditDraft,
 	taskCreationTargetProjectField,
 	onOpenCreatedTaskWithRelations,
+	postDeployVerificationFollowUpTaskCreationDraftSeed,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -328,6 +330,7 @@ export function TaskEditorDialog({
 	onAdoptPromotedTaskEditDraft?: (promotedDraft: TaskEditDraft) => void;
 	/** 不传 = 隐藏（单项目范围）。见 TaskCreationTargetProjectField。 */
 	taskCreationTargetProjectField?: TaskCreationTargetProjectField;
+	postDeployVerificationFollowUpTaskCreationDraftSeed?: PostDeployVerificationFollowUpTaskCreationDraftSeed | null;
 }): ReactElement {
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
 	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
@@ -550,7 +553,20 @@ export function TaskEditorDialog({
 		draftTaskTitle: taskName || "待创建任务",
 		active: open && taskEditorMode === "create" && mode === "single",
 	});
-	const isTaskCreationWaitingForRelationDraftHydration = taskEditorMode === "create" && !relationModeling.ready;
+	const [processedFollowUpSeedInitializationId, setProcessedFollowUpSeedInitializationId] = useState<string | null>(
+		null,
+	);
+	const [followUpSeedAwaitingDiscardConfirmation, setFollowUpSeedAwaitingDiscardConfirmation] =
+		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
+	useEffect(() => {
+		if (!open) setFollowUpSeedAwaitingDiscardConfirmation(null);
+	}, [open]);
+	const isTaskCreationWaitingForRelationDraftHydration =
+		taskEditorMode === "create" &&
+		(!relationModeling.ready ||
+			(!!postDeployVerificationFollowUpTaskCreationDraftSeed &&
+				processedFollowUpSeedInitializationId !==
+					postDeployVerificationFollowUpTaskCreationDraftSeed.initializationId));
 	const [isRelationAwareCreationInFlight, setIsRelationAwareCreationInFlight] = useState(false);
 	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
 	const [relationAwareCreationError, setRelationAwareCreationError] = useState<string | null>(null);
@@ -573,6 +589,62 @@ export function TaskEditorDialog({
 		relationModeling.draft.creationPrompt,
 		relationModeling.draft.creationTitle,
 		workspaceId,
+	]);
+	const updateRelationDraft = relationModeling.updateDraft;
+	const initializeFollowUpTaskCreationDraft = useCallback(
+		(seed: PostDeployVerificationFollowUpTaskCreationDraftSeed) => {
+			updateRelationDraft({
+				referenceRelationDrafts: seed.referenceRelationDrafts,
+				relationRevocations: [],
+				createdTaskId: null,
+				createdTaskCardSnapshot: null,
+				creationPrompt: seed.prompt,
+				creationTitle: seed.title,
+			});
+			relationRecoveryAppliedRef.current = seed.workspaceId;
+			setPromptDraft(seed.prompt);
+			propagatePromptDraft(seed.prompt);
+			setNewTaskName(seed.title);
+			setProcessedFollowUpSeedInitializationId(seed.initializationId);
+			setRelationAwareCreationError(null);
+		},
+		[updateRelationDraft, propagatePromptDraft],
+	);
+	useEffect(() => {
+		const seed = postDeployVerificationFollowUpTaskCreationDraftSeed;
+		if (
+			!open ||
+			taskEditorMode !== "create" ||
+			!seed ||
+			seed.workspaceId !== workspaceId ||
+			!relationModeling.ready ||
+			processedFollowUpSeedInitializationId === seed.initializationId
+		)
+			return;
+		// 恢复的草稿与本次来源不能静默合并；沿用现有放弃确认，并保留已创建任务的身份。
+		if (
+			relationModeling.hasChanges ||
+			relationModeling.draft.createdTaskId ||
+			relationModeling.draft.creationPrompt ||
+			promptDraft.trim()
+		) {
+			setFollowUpSeedAwaitingDiscardConfirmation(seed);
+			setIsDiscardConfirmOpen(true);
+			return;
+		}
+		initializeFollowUpTaskCreationDraft(seed);
+	}, [
+		open,
+		taskEditorMode,
+		postDeployVerificationFollowUpTaskCreationDraftSeed,
+		workspaceId,
+		relationModeling.ready,
+		relationModeling.hasChanges,
+		relationModeling.draft.createdTaskId,
+		relationModeling.draft.creationPrompt,
+		promptDraft,
+		processedFollowUpSeedInitializationId,
+		initializeFollowUpTaskCreationDraft,
 	]);
 	const handleRelationAwareCreation = (action: "create" | "start" | "start_and_open"): boolean => {
 		// 当前 scope 水合前，旧草稿和空初值都不能决定建卡身份或关系提交路径。
@@ -877,12 +949,33 @@ export function TaskEditorDialog({
 	const handleConfirmDiscard = useCallback(() => {
 		setIsDiscardConfirmOpen(false);
 		relationModeling.discard();
+		if (
+			followUpSeedAwaitingDiscardConfirmation &&
+			followUpSeedAwaitingDiscardConfirmation.workspaceId === workspaceId &&
+			followUpSeedAwaitingDiscardConfirmation.initializationId ===
+				postDeployVerificationFollowUpTaskCreationDraftSeed?.initializationId
+		) {
+			initializeFollowUpTaskCreationDraft(followUpSeedAwaitingDiscardConfirmation);
+			setFollowUpSeedAwaitingDiscardConfirmation(null);
+			return;
+		}
 		onOpenChange(false);
-	}, [onOpenChange, relationModeling.discard]);
+	}, [
+		onOpenChange,
+		relationModeling.discard,
+		followUpSeedAwaitingDiscardConfirmation,
+		workspaceId,
+		postDeployVerificationFollowUpTaskCreationDraftSeed,
+		initializeFollowUpTaskCreationDraft,
+	]);
 
 	const handleCancelDiscard = useCallback(() => {
+		if (followUpSeedAwaitingDiscardConfirmation) {
+			setProcessedFollowUpSeedInitializationId(followUpSeedAwaitingDiscardConfirmation.initializationId);
+			setFollowUpSeedAwaitingDiscardConfirmation(null);
+		}
 		setIsDiscardConfirmOpen(false);
-	}, []);
+	}, [followUpSeedAwaitingDiscardConfirmation]);
 
 	const dialogTitle =
 		taskEditorMode === "edit"

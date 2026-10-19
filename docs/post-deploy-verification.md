@@ -106,6 +106,16 @@ kanban task done --task-id <id> --closure-reasons-file reasons.json   # [{checkl
 
 ## 面板在 All projects 视图下
 
+### 从待核对项创建后续任务
+
+每张任务的“核对清单”标题旁保留两个紧凑入口：`＋` 按需展开自定义项输入，“新建后续任务”进入上下文选择。后者只在活跃组中、任务仍待核对且仍在看板上时开放，可选择该任务内的一项或多项未勾选断言；选择不会改变核对结果。
+
+“下一步”打开现有建卡窗口，预填来源项目、Task、部署、所选断言与指引及脚本结果，并暂存新任务指向原任务的 `reference_requirement_originates_from` 关系。目标项目固定为面板所绑定的项目，原 Task 的列、Session 与结案状态不会自动改变。未勾选本身不是验证失败，实际现象可在 Prompt 中补充。
+
+建卡沿用“先保存卡片、再保存关系、最后按需启动”链路。关系失败保留原卡身份和草稿，重试不重复建卡。草稿按项目隔离：刷新后从同一来源入口重开，选择保留恢复的草稿即可继续；不能用另一个项目的普通建卡入口恢复它。遇到已有草稿时必须先处理放弃确认，不静默合并或覆盖。
+
+### 面板的项目与卡片来源
+
 顶栏按钮的待核对数与浮动面板共用 App 里唯一一份读模型（`usePostDeployVerification`），它绑定哪个 workspace 由范围决定（`web-ui/src/components/post-deploy-verification/post-deploy-verification-workspace-and-panel-task-card-board-source-for-board-or-single-project-scope.ts`）：
 
 - **单项目范围**：绑定当前项目。没有部署记录的项目不显示按钮，与过去一致。

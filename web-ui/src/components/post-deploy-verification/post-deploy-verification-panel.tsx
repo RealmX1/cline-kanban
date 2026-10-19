@@ -86,6 +86,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		onRequestComplete,
 		onSelectTask,
 		onNavigateToBoard,
+		onCreateFollowUpTaskFromChecklistItems,
 	} = props;
 	const taskEntryActions: PostDeployVerificationDeploymentGroupTaskEntryActions = {
 		completingTaskId,
@@ -96,6 +97,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		onRequestComplete,
 		onSelectTask,
 		onNavigateToBoard,
+		onCreateFollowUpTaskFromChecklistItems,
 	};
 	// 第二区徽标「首次上线于 <短 SHA>」要把 firstDeployedInDeploymentId 解析成部署组。
 	const retainedDeploymentGroupsByDeploymentId = useMemo(
