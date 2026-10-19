@@ -529,6 +529,7 @@ describe("CardDetailView", () => {
 				agentResponseGenerationTurnSequence: 9,
 			}),
 		);
+		await act(async () => container.querySelector<HTMLButtonElement>("button[aria-label='展开任务卡']")!.click());
 		const mainTaskCard = container.querySelector("[data-mobile-focused-task-card-header]");
 		expect(mainTaskCard?.textContent).toContain("main activity");
 		expect(mainTaskCard?.textContent).not.toContain("child question");
@@ -564,6 +565,7 @@ describe("CardDetailView", () => {
 		};
 
 		await renderWithMoveToReviewLoadingById({});
+		await act(async () => container.querySelector<HTMLButtonElement>("button[aria-label='展开任务卡']")!.click());
 		const moveToReviewButton = container.querySelector(
 			'[data-mobile-focused-task-card-header] button[aria-label="Move task to review"]',
 		);

@@ -1,16 +1,28 @@
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 
 const mobile = vi.hoisted(() => ({ value: true }));
 vi.mock("@/hooks/use-is-mobile", () => ({ useIsMobile: () => mobile.value }));
+const committedExpansionStates: boolean[][] = [];
 let controls: ReturnType<typeof useMobileFocusViewCollapsibleControls>;
-function Harness({ identity = "workspace/task-1", visible = true }: { identity?: string; visible?: boolean }) {
+function Harness({
+	identity = "workspace/task-1",
+	visible = true,
+	enabled = true,
+}: {
+	identity?: string;
+	visible?: boolean;
+	enabled?: boolean;
+}) {
 	controls = useMobileFocusViewCollapsibleControls({
-		enabled: true,
+		enabled,
 		focusedTaskIdentity: identity,
 		isDocumentVisible: visible,
+	});
+	useLayoutEffect(() => {
+		committedExpansionStates.push([controls.upperNavigationAndToolsExpanded, controls.lowerVirtualKeyBarExpanded]);
 	});
 	return (
 		<div ref={controls.focusViewRootRef}>
@@ -27,6 +39,7 @@ describe("手机 Focus View 独立折叠", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		mobile.value = true;
+		committedExpansionStates.length = 0;
 		environment.IS_REACT_ACT_ENVIRONMENT = true;
 		host = document.createElement("div");
 		document.body.append(host);
@@ -39,10 +52,8 @@ describe("手机 Focus View 独立折叠", () => {
 		vi.useRealTimers();
 		delete environment.IS_REACT_ACT_ENVIRONMENT;
 	});
-	it("初始展开、统一闲置收起，手动展开上下区域互不影响", () => {
-		expect(controls.upperNavigationAndToolsExpanded).toBe(true);
-		expect(controls.lowerVirtualKeyBarExpanded).toBe(true);
-		advance(30_000);
+	it("首屏折叠且手动展开上下区域互不影响", () => {
+		expect(committedExpansionStates).toEqual([[false, false]]);
 		expect(controls.upperNavigationAndToolsExpanded).toBe(false);
 		expect(controls.lowerVirtualKeyBarExpanded).toBe(false);
 		act(() => controls.expandLowerVirtualKeyBar());
@@ -63,15 +74,17 @@ describe("手机 Focus View 独立折叠", () => {
 		advance(10_000);
 		expect(controls.lowerVirtualKeyBarExpanded).toBe(false);
 	});
-	it("换项目或任务恢复初始展开，不继承旧收起通知", () => {
-		advance(30_000);
+	it("换项目或任务从首帧折叠，不继承旧展开状态", () => {
+		act(() => controls.toggleUpperNavigationAndTools());
+		act(() => controls.expandLowerVirtualKeyBar());
+		committedExpansionStates.length = 0;
 		act(() => root.render(<Harness identity="other-workspace/task-1" />));
-		expect(controls.upperNavigationAndToolsExpanded).toBe(true);
-		expect(controls.lowerVirtualKeyBarExpanded).toBe(true);
+		expect(committedExpansionStates.every((states) => states.every((expanded) => !expanded))).toBe(true);
+		act(() => controls.expandLowerVirtualKeyBar());
 		advance(29_999);
-		expect(controls.upperNavigationAndToolsExpanded).toBe(true);
+		expect(controls.lowerVirtualKeyBarExpanded).toBe(true);
 		advance(1);
-		expect(controls.upperNavigationAndToolsExpanded).toBe(false);
+		expect(controls.lowerVirtualKeyBarExpanded).toBe(false);
 	});
 	it("页面隐藏期间不计时，回到页面不会自动展开", () => {
 		advance(30_000);
@@ -80,13 +93,22 @@ describe("手机 Focus View 独立折叠", () => {
 		act(() => root.render(<Harness />));
 		expect(controls.upperNavigationAndToolsExpanded).toBe(false);
 	});
-	it("切回桌面停用控制器，再进手机视图恢复展开", () => {
+	it("切回桌面停用控制器，再进手机视图从首帧折叠", () => {
 		advance(30_000);
 		mobile.value = false;
 		act(() => root.render(<Harness />));
 		expect(controls.isEnabled).toBe(false);
 		mobile.value = true;
 		act(() => root.render(<Harness />));
-		expect(controls.upperNavigationAndToolsExpanded).toBe(true);
+		expect(controls.upperNavigationAndToolsExpanded).toBe(false);
+		expect(controls.lowerVirtualKeyBarExpanded).toBe(false);
+	});
+	it("离开 Focus View 再进入同一任务也恢复折叠", () => {
+		act(() => controls.toggleUpperNavigationAndTools());
+		act(() => controls.expandLowerVirtualKeyBar());
+		act(() => root.render(<Harness enabled={false} />));
+		committedExpansionStates.length = 0;
+		act(() => root.render(<Harness />));
+		expect(committedExpansionStates.every((states) => states.every((expanded) => !expanded))).toBe(true);
 	});
 });
