@@ -51,6 +51,7 @@ import {
 	cloneTaskClineSettings,
 	type ParsedTaskClineReasoningEffort,
 } from "../core/task-card-field-patch-resolution";
+import { resolveMainTaskConversationSessionSummary } from "../core/task-main-conversation-session-binding";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -380,7 +381,12 @@ function formatTaskRecord(
 	columnId: RuntimeBoardColumnId,
 	workspaceGitStatus: RuntimeTaskWorkspaceGitStatus | null = null,
 ): JsonRecord {
-	return formatTaskRecordWithSessionSummary(task, columnId, state.sessions[task.id] ?? null, workspaceGitStatus);
+	return formatTaskRecordWithSessionSummary(
+		task,
+		columnId,
+		resolveMainTaskConversationSessionSummary(task, state.sessions),
+		workspaceGitStatus,
+	);
 }
 
 // 写动词迁到 runtime procedure 之后，CLI 手里没有整份 state，只有 runtime 回传的卡片、列与盘上会话摘要。

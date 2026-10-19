@@ -121,7 +121,7 @@ export function collectInjectionLedgerUpdatesForQueueSnapshotTransition(
 		if (receipt !== null && (beforeEntry === null || !isQueueEntryStateTerminal(beforeEntry.deliveryState))) {
 			updates.push({
 				kind: "record_terminal_delivery_outcome",
-				taskId: afterEntry.taskId,
+				taskId: link.injectionLedgerTaskId ?? afterEntry.taskId,
 				injectionLedgerIdempotencyKey: link.injectionLedgerIdempotencyKey,
 				receipt,
 			});
@@ -130,7 +130,7 @@ export function collectInjectionLedgerUpdatesForQueueSnapshotTransition(
 		if (afterEntry.deliveryState === "handed_to_transport" && beforeEntry?.deliveryState !== "handed_to_transport") {
 			updates.push({
 				kind: "record_agent_idle_gate_passed",
-				taskId: afterEntry.taskId,
+				taskId: link.injectionLedgerTaskId ?? afterEntry.taskId,
 				injectionLedgerIdempotencyKey: link.injectionLedgerIdempotencyKey,
 				passedAtEpochMs: afterEntry.lastAttemptedAt ?? nowEpochMs,
 			});
@@ -143,7 +143,7 @@ export function collectInjectionLedgerUpdatesForQueueSnapshotTransition(
 		}
 		updates.push({
 			kind: "record_terminal_delivery_outcome",
-			taskId: beforeEntry.taskId,
+			taskId: link.injectionLedgerTaskId ?? beforeEntry.taskId,
 			injectionLedgerIdempotencyKey: link.injectionLedgerIdempotencyKey,
 			receipt: INJECTION_LEDGER_RECEIPT_FOR_PROGRAMMATIC_INJECTION_DISCARDED_WITH_ITS_TASK,
 		});

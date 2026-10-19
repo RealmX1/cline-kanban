@@ -1,3 +1,4 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, ChevronUp, Pin } from "lucide-react";
 import { type ReactElement, useState } from "react";
 
@@ -101,7 +102,7 @@ export function TaskPinboardSectionInFocusView({
 								{...buildTaskCardBusinessProps({
 									card,
 									columnId,
-									sessionSummary: taskSessions[card.id],
+									sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 									selected: card.id === selectedCardId,
 									handlers,
 									onActivateCard,

@@ -14,12 +14,20 @@ import {
 	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
 } from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
+import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
 export * from "./permanently-deleted-task-history-contract.js";
 // Post-Deploy Verification「移入 Done 结案」的请求侧契约（确认项、原因码、结案请求、门禁拒绝前缀）住在独立文件里
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
 export * from "./post-deploy-verification-done-entry-closure-contract.js";
+export type {
+	TaskMainSessionHandoverMaterial,
+	TaskMainSessionHandoverPrepareResponse,
+	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRequest,
+} from "./task-main-session-handover-contract";
+export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -321,6 +329,9 @@ export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversation
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
+		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
+		mainTaskConversationSessionId: z.string().min(1).optional(),
+		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
 		title: z.string().optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
@@ -582,6 +593,9 @@ export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	workspaceTaskId: z.string(),
 	taskConversationSessionRole: z.enum(["main", "by_the_way", "task_collaborator"]),
+	// 当前角色按主会话绑定派生；创建角色与上下文来源不随交接改写。
+	taskConversationSessionRoleAtCreation: z.enum(["main", "by_the_way", "task_collaborator"]).optional(),
+	taskAutomationSuspendedForMainSessionHandover: z.boolean().optional(),
 	taskConversationSessionContextSource: z.enum(["main", "started_from_scratch", "forked_from_main_current_turn"]),
 	parentTaskConversationSessionId: z.string().nullable(),
 	mainSessionOriginTurnNumber: z.number().int().nonnegative().nullable(),
@@ -2331,6 +2345,7 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 	"session_not_live",
 	// PTY 恢复守卫武装中（`--continue` 恢复对话本身不等于开始新一轮）。
 	"session_restoring_conversation",
+	"task_main_session_handover_awaiting_user",
 	// PTY 单飞槽被另一条程序化投递（例：RVF followup）占着。
 	"another_programmatic_delivery_in_flight",
 	// 这条由**另一个此刻活着的** kanban runtime 实例托管（同机多实例共享 workspaces 根）。只有托管者会发它；
@@ -2414,6 +2429,8 @@ export const queuedTaskPromptDeliveryEntrySchema = z.object({
 			// 账本记录的 idempotency key（= 调用方传的 --idempotency-key）。交给终端投递时也用它，
 			// 于是交出之后的取消 / 回执与不带 flag 的 `kanban task message` 逐字相同。
 			injectionLedgerIdempotencyKey: z.string(),
+			// 调用方的宿主 Task ID；旧条目缺省时仍等于条目的真实 session ID。
+			injectionLedgerTaskId: z.string().optional(),
 			// 调用方的 --source。交给终端投递时原样带上。
 			injectionSource: z.string(),
 			// 条目落终态那一刻要镜像进账本的回执。只有出队引擎拿到真实终端回执时才写；其余落定路径
@@ -3599,6 +3616,8 @@ export type RuntimeTaskSessionStartOriginDeclaredByClient = z.infer<
 export const runtimeTaskSessionStartRequestSchema = z
 	.object({
 		taskId: z.string(),
+		// 省略时 taskId 按任务入口跟随当前主绑定；显式传入时按会话寻址。
+		// 前主会话的 taskId 等于宿主卡片 ID，仍用 workspaceTaskId 显式区分恢复目标。
 		workspaceTaskId: z.string().optional(),
 		taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 		prompt: z.string(),
@@ -4029,6 +4048,8 @@ export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMess
 
 export const runtimeTaskChatSendRequestSchema = z.object({
 	taskId: z.string(),
+	// 显式会话选择（含前主会话）；省略且 taskId 是卡片 ID 时投给当前主会话。
+	targetTaskConversationSessionId: z.string().optional(),
 	text: z.string(),
 	images: z.array(runtimeTaskImageSchema).optional(),
 	mode: runtimeTaskSessionModeSchema.optional(),

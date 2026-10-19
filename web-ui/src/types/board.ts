@@ -13,6 +13,7 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
+	TaskMainSessionHandoverRecord,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -71,6 +72,8 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 
 export interface BoardCard {
 	id: string;
+	mainTaskConversationSessionId?: string;
+	taskMainSessionHandover?: TaskMainSessionHandoverRecord;
 	title: string;
 	prompt: string;
 	startInPlanMode: boolean;

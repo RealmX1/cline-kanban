@@ -1500,6 +1500,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				if (isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 					return false;
 				}
+				if (entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover)
+					return false;
 				if (isRestorationContinuationGuardArmed(entry.summary, now())) {
 					return false;
 				}
@@ -5811,6 +5813,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	applyTaskConversationSessionMetadata(
+		taskId: string,
+		metadata: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) return null;
+		if (JSON.stringify(entry.summary.taskConversationSessionMetadata) === JSON.stringify(metadata))
+			return cloneSummary(entry.summary);
+		if (entry.restartRequest?.kind === "task") {
+			entry.restartRequest = {
+				...entry.restartRequest,
+				request: {
+					...entry.restartRequest.request,
+					taskConversationSessionMetadata: metadata,
+					workspaceTaskId: metadata?.workspaceTaskId,
+				},
+			};
+		}
+		updateSummary(entry, { taskConversationSessionMetadata: metadata });
+		if (metadata?.taskAutomationSuspendedForMainSessionHandover) {
+			this.cancelPendingAutoRestart(entry);
+			this.endActiveOutputReactionEpisode(entry, taskId);
+		}
+		const summary = entry.summary;
+		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -6388,6 +6419,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// （scheduleAutoRestart 的 pendingAutoRestart 早退就是现成的一条），配额就白白少一格——留下的是
 	// 一类「计了但没发生」的账，事后没人推得回来。
 	private isTaskSessionEligibleForAutoRestart(entry: SessionEntry): boolean {
+		if (entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) return false;
 		const wasSuppressed = entry.suppressAutoRestartOnExit;
 		entry.suppressAutoRestartOnExit = false;
 		if (wasSuppressed) {

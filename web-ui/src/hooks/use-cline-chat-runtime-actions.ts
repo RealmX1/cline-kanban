@@ -59,6 +59,7 @@ export function useClineChatRuntimeActions({
 			try {
 				const payload = await getRuntimeTrpcClient(currentProjectId).runtime.sendTaskChatMessage.mutate({
 					taskId,
+					targetTaskConversationSessionId: taskId,
 					text,
 					...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
 					...(options?.mode ? { mode: options.mode } : {}),
