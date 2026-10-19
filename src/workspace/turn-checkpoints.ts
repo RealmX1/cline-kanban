@@ -34,7 +34,12 @@ function buildCheckpointRef(taskId: string, turn: number): string {
 	return `refs/kanban/checkpoints/${encodeRefSegment(taskId)}/turn/${turn}`;
 }
 
-async function createWorkingTreeCheckpointCommit(repoRoot: string, turn: number, taskId: string): Promise<string> {
+async function createWorkingTreeCheckpointCommit(
+	repoRoot: string,
+	turn: number,
+	taskId: string,
+	boundMessage?: string,
+): Promise<string> {
 	const tempDir = await mkdtemp(join(tmpdir(), "kanban-checkpoint-"));
 	const tempIndexPath = join(tempDir, "index");
 
@@ -47,31 +52,54 @@ async function createWorkingTreeCheckpointCommit(repoRoot: string, turn: number,
 		GIT_COMMITTER_EMAIL: CHECKPOINT_AUTHOR_EMAIL,
 	};
 
+	const safeArguments = (arguments_: string[]) =>
+		boundMessage ? ["-c", "core.hooksPath=/dev/null", ...arguments_] : arguments_;
 	try {
-		const headCommit = await tryRunGit(repoRoot, ["rev-parse", "--verify", "HEAD"], {
+		const headCommit = await tryRunGit(repoRoot, safeArguments(["rev-parse", "--verify", "HEAD"]), {
 			env: gitEnv,
 		});
 		if (headCommit) {
-			await runGit(repoRoot, ["read-tree", headCommit], { env: gitEnv });
+			await runGit(repoRoot, safeArguments(["read-tree", headCommit]), { env: gitEnv });
 		} else {
-			await runGit(repoRoot, ["read-tree", "--empty"], { env: gitEnv });
+			await runGit(repoRoot, safeArguments(["read-tree", "--empty"]), { env: gitEnv });
 		}
 
-		await runGit(repoRoot, ["add", "-A", "--", "."], { env: gitEnv });
-		const treeOid = await runGit(repoRoot, ["write-tree"], { env: gitEnv });
+		await runGit(repoRoot, safeArguments(["add", "-A", "--", "."]), { env: gitEnv });
+		const treeOid = await runGit(repoRoot, safeArguments(["write-tree"]), { env: gitEnv });
 
-		const commitMessage = `kanban checkpoint task:${taskId} turn:${turn}`;
+		const commitMessage = boundMessage ?? `kanban checkpoint task:${taskId} turn:${turn}`;
 		const commitArgs = ["commit-tree", treeOid, "-m", commitMessage];
 		if (headCommit) {
 			commitArgs.push("-p", headCommit);
 		}
 
-		return await runGit(repoRoot, commitArgs, {
+		return await runGit(repoRoot, safeArguments(commitArgs), {
 			env: gitEnv,
 		});
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
 	}
+}
+
+// RVF 分界另有不可变引用；不推进普通 turn 序数，也不覆盖 latest checkpoint。
+export async function captureRvfReviewStartBoundaryCheckpoint(input: {
+	cwd: string;
+	taskId: string;
+	decisionToken: string;
+	binding: Record<string, string | null>;
+}): Promise<{ commit: string; tree: string }> {
+	if (!/^[a-f0-9]{16}$/u.test(input.decisionToken)) throw new Error("非法 RVF 决策 token。");
+	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
+	const message = `kanban RVF review start task:${input.taskId}\n\nRVF_REVIEW_START_BOUNDARY_BINDING=${JSON.stringify(input.binding)}`;
+	const commit = await createWorkingTreeCheckpointCommit(repoRoot, 0, input.taskId, message);
+	await runGit(repoRoot, [
+		"-c",
+		"core.hooksPath=/dev/null",
+		"update-ref",
+		`refs/kanban/rvf-review-start-boundaries/${encodeRefSegment(input.taskId)}/${input.decisionToken}`,
+		commit,
+	]);
+	return { commit, tree: await runGit(repoRoot, ["rev-parse", `${commit}^{tree}`]) };
 }
 
 export async function captureTaskTurnCheckpoint(input: {

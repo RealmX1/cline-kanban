@@ -2134,6 +2134,39 @@ export function registerTaskCommand(program: Command): void {
 		});
 
 	task
+		.command("capture-rvf-review-start-boundary")
+		.description("捕获当前 Codex 主会话的独立 RVF 开审分界并登记默认自动收尾。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "RVF 决策 token。")
+		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			printJson(
+				await createRuntimeTrpcClient(workspace.workspaceId).runtime.captureRvfReviewStartBoundary.mutate({
+					taskId: options.taskId,
+					decisionToken: options.decisionToken,
+				}),
+			);
+		});
+	task
+		.command("rvf-automatic-closeout-status")
+		.description("查询 RVF 自动恢复与收尾投递的持久状态。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.action(async (options: { projectPath: string; taskId: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			printJson(
+				await createRuntimeTrpcClient(workspace.workspaceId).runtime.rvfAutomaticCloseoutStatus.query({
+					taskId: options.taskId,
+				}),
+			);
+		});
+
+	task
 		.command("message")
 		.description("Inject a follow-up user message into an active task agent session.")
 		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")

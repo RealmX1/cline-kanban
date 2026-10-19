@@ -5866,6 +5866,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	publishRvfAutomaticCloseoutPaused(taskId: string, reason: string): void {
+		const entry = this.entries.get(taskId);
+		if (!entry) return;
+		const message = `RVF 自动收尾已暂停：${reason}`;
+		const summary = updateSummary(entry, { warningMessage: message });
+		const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+		entry.terminalStateMirror?.applyOutput(output);
+		for (const listener of entry.listeners.values()) {
+			listener.onOutput?.(output);
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+	}
+
+	isTaskSessionAutomaticContinuationSuppressed(taskId: string): boolean {
+		return this.entries.get(taskId)?.suppressAutoRestartOnExit ?? false;
+	}
+
 	stopTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
