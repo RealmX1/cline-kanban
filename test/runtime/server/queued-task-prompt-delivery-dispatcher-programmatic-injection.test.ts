@@ -22,9 +22,18 @@ import type {
 } from "../../../src/core/api-contract";
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 
-const testRuntimeHome = { path: "" };
+const testRuntimeHome = { path: "", mainTaskConversationSessionId: "" };
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
+	loadWorkspaceBoardById: async () => ({
+		columns: [
+			{
+				cards: testRuntimeHome.mainTaskConversationSessionId
+					? [{ id: TASK_ID, mainTaskConversationSessionId: testRuntimeHome.mainTaskConversationSessionId }]
+					: [],
+			},
+		],
+	}),
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));
@@ -109,7 +118,7 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 	const sendBehavior = options.sendBehavior ?? deliveredImmediately;
 	const sends: { request: RuntimeTaskChatSendRequest; settlePtyDelivery: TaskChatInputDeliveryOutcomeObserver }[] = [];
 	const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
-		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === TASK_ID ? currentSummary : null),
+		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === currentSummary?.taskId ? currentSummary : null),
 		hasPendingProgrammaticTaskChatInputDelivery: () => false,
 		resolveWorkspaceScope: (workspaceId) => ({ workspaceId, workspacePath: "/repo" }),
 		sendThroughTaskChatTransports: async (_scope, request, onProgrammaticTerminalDeliverySettled) => {
@@ -140,7 +149,11 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 			dispatcher.observeTaskSessionSummary(WORKSPACE_ID, summary);
 		},
 		// awaitDispatcherIdle=false：PTY 分支的出队尝试会一直等回执，先等它空闲就成了自己等自己。
-		async enqueueProgrammatic(maxWaitForAgentIdleMs = 10 * 60 * 1000, awaitDispatcherIdle = true) {
+		async enqueueProgrammatic(
+			maxWaitForAgentIdleMs = 10 * 60 * 1000,
+			awaitDispatcherIdle = true,
+			idempotencyKey = KEY,
+		) {
 			const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				{ notifyQueueMutated: dispatcher.notifyQueueMutated, now: readInjectedClockNowEpochMs },
 				WORKSPACE_ID,
@@ -148,7 +161,7 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 					taskId: TASK_ID,
 					text: "RVF 决策点边界标记",
 					source: "rvf-out-of-band-decision-point",
-					idempotencyKey: KEY,
+					idempotencyKey,
 					promptSha256: "sha-1",
 					maxWaitForAgentIdleMs,
 				},
@@ -190,6 +203,7 @@ async function readStates() {
 let harnessToStop: ReturnType<typeof createHarness> | null = null;
 
 beforeEach(async () => {
+	testRuntimeHome.mainTaskConversationSessionId = "";
 	testRuntimeHome.path = await mkdtemp(join(tmpdir(), "kanban-queued-programmatic-dispatch-"));
 	await mkdir(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID), { recursive: true });
 });
@@ -333,4 +347,55 @@ describe("出队引擎 × 程序化排队投递", () => {
 		await subject.dispatcher.whenIdle();
 		expect(subject.sends.map((send) => send.request.text)).toEqual(["人排的下一步", "RVF 决策点边界标记"]);
 	});
+});
+
+it("交接前队列固定原 session；新消息固定新主会话，等待用户期间暂停，回执仍记宿主 Task", async () => {
+	const harness = createHarness();
+	harnessToStop = harness;
+	harness.observe(generatingSummary(1));
+	await harness.enqueueProgrammatic();
+	testRuntimeHome.mainTaskConversationSessionId = "promoted-codex";
+	const promoted = stoppedSummary(2, {
+		taskId: "promoted-codex",
+		agentId: "codex",
+		taskConversationSessionMetadata: {
+			workspaceTaskId: TASK_ID,
+			taskConversationSessionRole: "main",
+			taskConversationSessionContextSource: "started_from_scratch",
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: null,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: null,
+			taskAutomationSuspendedForMainSessionHandover: true,
+		},
+	});
+	harness.observe(promoted);
+	await harness.enqueueProgrammatic(10 * 60 * 1000, true, "new-main-message");
+	const queued = await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID);
+	expect(queued.entriesByTaskId[TASK_ID][0].deliveryState).toBe("queued");
+	expect(
+		queued.entriesByTaskId["promoted-codex"][0].programmaticInjectionLedgerReceiptLink?.injectionLedgerTaskId,
+	).toBe(TASK_ID);
+	expect(harness.sends).toHaveLength(0);
+	harness.observe({
+		...promoted,
+		taskConversationSessionMetadata: {
+			...(promoted.taskConversationSessionMetadata as NonNullable<
+				RuntimeTaskSessionSummary["taskConversationSessionMetadata"]
+			>),
+			taskAutomationSuspendedForMainSessionHandover: false,
+		},
+	});
+	harness.dispatcher.requestDispatchAttempt(WORKSPACE_ID, "promoted-codex");
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends[0].request.taskId).toBe("promoted-codex");
+	const records = await readTaskMessageInjectionLedger(
+		getTaskMessageInjectionLedgerPath(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID)),
+	);
+	expect(findTaskMessageInjectionRecord(records, TASK_ID, "new-main-message")?.terminal_delivery_status).toBe(
+		"delivered_and_submit_confirmed",
+	);
+	expect(
+		(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID][0].deliveryState,
+	).toBe("queued");
 });

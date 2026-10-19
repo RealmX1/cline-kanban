@@ -74,6 +74,7 @@ export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
 	onSelectTask: () => void;
 	// 「定位并核对」中 anchor.view==="board" 时导航回看板。
 	onNavigateToBoard: () => void;
+	onCreateFollowUpTaskFromSelectedChecklistItems?: (selectedChecklistItemIds: string[]) => void;
 }
 
 // spotlight 需在导航切换视图后目标元素挂载完成才生效；视图切换是异步渲染，故延后一帧再定位。
@@ -228,6 +229,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 	onRequestComplete,
 	onSelectTask,
 	onNavigateToBoard,
+	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryWrappingRealTaskCardProps): ReactElement {
 	const currentBoardColumnIdOfTaskCard = findCardSelection(board, task.taskId)?.column.id ?? null;
 
@@ -272,6 +274,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				onRunVerificationItem={onRunVerificationItem}
 				onRequestComplete={() => onRequestComplete()}
 				onLocateChecklistItem={locateChecklistItem}
+				onCreateFollowUpTaskFromSelectedChecklistItems={onCreateFollowUpTaskFromSelectedChecklistItems}
 			/>
 		</div>
 	);

@@ -39,6 +39,11 @@ export interface PostDeployVerificationDeploymentGroupTaskEntryActions {
 	) => void;
 	onSelectTask: (taskId: string) => void;
 	onNavigateToBoard: () => void;
+	onCreateFollowUpTaskFromChecklistItems?: (
+		deploymentId: string,
+		taskId: string,
+		selectedChecklistItemIds: string[],
+	) => void;
 }
 
 interface PostDeployVerificationDeploymentGroupSharedProps {
@@ -57,7 +62,7 @@ function renderTaskEntry(
 	const { group, taskEntryActions } = props;
 	return (
 		<PostDeployVerificationTaskEntryWrappingRealTaskCard
-			key={task.taskId}
+			key={`${group.deploymentId}:${task.taskId}`}
 			postDeployVerificationTask={task}
 			board={props.board}
 			realTaskCardRenderingInputs={props.realTaskCardRenderingInputs}
@@ -80,6 +85,12 @@ function renderTaskEntry(
 			onRequestComplete={(options) => taskEntryActions.onRequestComplete(group.deploymentId, task.taskId, options)}
 			onSelectTask={() => taskEntryActions.onSelectTask(task.taskId)}
 			onNavigateToBoard={taskEntryActions.onNavigateToBoard}
+			onCreateFollowUpTaskFromSelectedChecklistItems={
+				taskEntryActions.onCreateFollowUpTaskFromChecklistItems
+					? (itemIds) =>
+							taskEntryActions.onCreateFollowUpTaskFromChecklistItems?.(group.deploymentId, task.taskId, itemIds)
+					: undefined
+			}
 		/>
 	);
 }

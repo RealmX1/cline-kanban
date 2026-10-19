@@ -290,4 +290,26 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		expect(await manager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery("task-unknown")).toBe(false);
 		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
 	});
+	it("交接后的前主会话在内存恢复时沿用新角色，不能从旧启动请求夺回主责任", async () => {
+		const manager = new TerminalSessionManager();
+		await startClaudeTaskSessionOn(manager, "former-main");
+		const metadata = {
+			workspaceTaskId: "former-main",
+			taskConversationSessionRole: "task_collaborator" as const,
+			taskConversationSessionRoleAtCreation: "main" as const,
+			taskConversationSessionContextSource: "main" as const,
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: null,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: null,
+			taskAutomationSuspendedForMainSessionHandover: true,
+		};
+		manager.applyTaskConversationSessionMetadata("former-main", metadata);
+		await manager.forceStopTaskSession("former-main", 50);
+		expect(await manager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery("former-main")).toBe(true);
+		expect(prepareAgentLaunchMock.mock.calls[1]?.[0].taskConversationSessionMetadata).toMatchObject(metadata);
+		expect(manager.getSummary("former-main")?.taskConversationSessionMetadata?.taskConversationSessionRole).toBe(
+			"task_collaborator",
+		);
+	});
 });

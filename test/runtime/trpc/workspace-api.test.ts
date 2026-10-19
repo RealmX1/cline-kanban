@@ -375,6 +375,7 @@ describe("createWorkspaceApi loadChanges", () => {
 		workspaceChangesMocks.getWorkspaceChangesFromRef.mockReset();
 		workspaceStateMocks.mutateWorkspaceState.mockReset();
 		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoard());
 		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockReset();
 		workspaceStateMocks.saveWorkspaceState.mockReset();
 
@@ -383,6 +384,55 @@ describe("createWorkspaceApi loadChanges", () => {
 		workspaceChangesMocks.getWorkspaceChanges.mockResolvedValue(createChangesResponse());
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockResolvedValue(createChangesResponse());
 		workspaceChangesMocks.getWorkspaceChangesFromRef.mockResolvedValue(createChangesResponse());
+	});
+
+	it("交接后用当前主会话的 checkpoint，工作目录仍按宿主 Task 解析", async () => {
+		const board = createBoard();
+		board.columns[1].cards.push({
+			id: "task-1",
+			title: "已交接的任务",
+			prompt: "继续实现",
+			startInPlanMode: false,
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+			mainTaskConversationSessionId: "codex-main-session",
+		});
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const terminalManager = {
+			getSummary: vi.fn((taskId: string) =>
+				createSummary({
+					taskId,
+					state: "awaiting_review",
+					latestTurnCheckpoint: { turn: 2, ref: `${taskId}/2`, commit: `${taskId}-latest`, createdAt: 2 },
+					previousTurnCheckpoint: { turn: 1, ref: `${taskId}/1`, commit: `${taskId}-previous`, createdAt: 1 },
+				}),
+			),
+		};
+		const clineTaskSessionService = { getSummary: vi.fn(() => null) };
+		const api = createWorkspaceApiForTest({
+			ensureTerminalManagerForWorkspace: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+		});
+
+		await api.loadChanges(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", baseRef: "main", mode: "last_turn" },
+		);
+
+		expect(workspaceTaskWorktreeMocks.resolveTaskCwd).toHaveBeenCalledWith({
+			cwd: "/tmp/repo",
+			taskId: "task-1",
+			baseRef: "main",
+			ensure: false,
+		});
+		expect(terminalManager.getSummary).toHaveBeenCalledWith("codex-main-session");
+		expect(clineTaskSessionService.getSummary).toHaveBeenCalledWith("codex-main-session");
+		expect(workspaceChangesMocks.getWorkspaceChangesBetweenRefs).toHaveBeenCalledWith({
+			cwd: "/tmp/worktree",
+			fromRef: "codex-main-session-previous",
+			toRef: "codex-main-session-latest",
+		});
 	});
 
 	it("shows the completed turn diff while awaiting review", async () => {

@@ -14,6 +14,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 
 // 跨项目视图（in_progress 明细、跨项目切换面板的条目）需要的**会话事实最小子集**。
 //
@@ -127,7 +128,10 @@ export function collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts(
 		return [];
 	}
 	return inProgressColumn.cards.map((card) =>
-		buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(card, sessionFactsByTaskId.get(card.id)),
+		buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
+			card,
+			sessionFactsByTaskId.get(resolveMainTaskConversationSessionId(card)),
+		),
 	);
 }
 

@@ -6,6 +6,7 @@ import type {
 } from "../core/api-contract";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/backlog-task-description-last-updated-ordering";
 import { isTaskCardWithinCrossProjectTaskSwitcherActivityScope } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	buildTaskActivityDetailFromBoardCardAndTaskSessionFacts,
 	type TaskSessionFactsForCrossProjectTaskViews,
@@ -56,7 +57,7 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 			const entry = buildCrossProjectTaskSwitcherEntryFromBoardCard(
 				card,
 				column.id,
-				input.sessionFactsByTaskId.get(card.id),
+				input.sessionFactsByTaskId.get(resolveMainTaskConversationSessionId(card)),
 				input.lastOpenedByUserAtByTaskId.get(card.id) ?? null,
 			);
 			if (isTaskCardWithinCrossProjectTaskSwitcherActivityScope(entry, activityHorizonStartAt)) {

@@ -132,6 +132,7 @@ export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 		scope: RuntimeTrpcWorkspaceScope,
 		request: RuntimeTaskChatSendRequest,
 		onProgrammaticTerminalDeliverySettled: TaskChatInputDeliveryOutcomeObserver,
+		injectionLedgerTaskId?: string,
 	) => Promise<RuntimeTaskChatSendResponse>;
 	// 既有 cancelTaskChatDelivery（PTY 单飞槽的取消）。
 	cancelProgrammaticTerminalDelivery: (
@@ -595,6 +596,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 					idempotencyKey: dispatchIdempotencyKey,
 				},
 				waiter.observer,
+				programmaticInjectionLink?.injectionLedgerTaskId,
 			);
 		} catch (error) {
 			// 统一出口自己兜住了异常并返回 ok:false；能走到这里说明是出口之外的东西抛了（例：依赖注入的包装层）。

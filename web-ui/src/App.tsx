@@ -1,3 +1,4 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 // Main React composition root for the browser app.
 // Keep this file focused on wiring top-level hooks and surfaces together, and
 // push runtime-specific orchestration down into hooks and service modules.
@@ -22,7 +23,12 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
 import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
+import { isPostDeployVerificationTaskAwaitingVerification } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
+import {
+	buildPostDeployVerificationFollowUpTaskCreationDraftSeed,
+	type PostDeployVerificationFollowUpTaskCreationDraftSeed,
+} from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
@@ -756,6 +762,11 @@ export default function App(): ReactElement {
 	useEffect(() => {
 		taskEditorResetRef.current = resetTaskEditorState;
 	}, [resetTaskEditorState]);
+	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
+		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
+	useEffect(() => {
+		if (!isInlineTaskCreateOpen) setPostDeployVerificationFollowUpTaskCreationDraftSeed(null);
+	}, [isInlineTaskCreateOpen]);
 
 	useEffect(() => {
 		if (!isProjectSwitching) {
@@ -803,10 +814,14 @@ export default function App(): ReactElement {
 
 	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId || !isBoardScopeAllProjectsSelected) {
+		if (
+			editingTaskId ||
+			postDeployVerificationFollowUpTaskCreationDraftSeed ||
+			!isBoardScopeAllProjectsSelected
+		) {
 			const workspaceId = editingTaskId
 				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
-				: projectRuntimeWorkspaceId;
+				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);
 			if (!workspaceId) return undefined;
 			const project = projects.find((entry) => entry.id === workspaceId);
 			return {
@@ -837,6 +852,7 @@ export default function App(): ReactElement {
 		projectRuntimeWorkspaceId,
 		projects,
 		taskCreationTargetWorkspaceId,
+		postDeployVerificationFollowUpTaskCreationDraftSeed,
 	]);
 
 	const handleOpenEditTaskKeepingDetailSelection = useCallback(
@@ -1231,6 +1247,59 @@ export default function App(): ReactElement {
 		moveToTrashLoadingById,
 		moveToReviewLoadingById,
 	});
+	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCallback(
+		(deploymentId: string, taskId: string, selectedChecklistItemIds: string[]) => {
+			const group = postDeployVerification.activeGroup;
+			const task = group?.tasks.find((candidate) => candidate.taskId === taskId);
+			const card = boardShownInPostDeployVerificationPanel
+				? findCardSelection(boardShownInPostDeployVerificationPanel, taskId)
+				: null;
+			const project = projects.find((candidate) => candidate.id === group?.workspaceId);
+			if (isInlineTaskCreateOpen || editingTaskId) {
+				showAppToast({ intent: "warning", message: "请先完成或关闭当前任务编辑，再从核对项创建后续任务。" });
+				return;
+			}
+			if (
+				!runtimeProjectConfig ||
+				!group ||
+				group.deploymentId !== deploymentId ||
+				!task ||
+				!isPostDeployVerificationTaskAwaitingVerification(task) ||
+				!card ||
+				card.column.id === "trash" ||
+				project?.availability.status !== "available"
+			) {
+				showAppToast({ intent: "warning", message: "来源任务或部署状态已变化，请刷新核对清单后重试。" });
+				return;
+			}
+			try {
+				const seed = buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
+					workspaceId: group.workspaceId,
+					projectName: project.name,
+					sourceTaskTitle: card.card.title,
+					sourceTaskCreatedAt: card.card.createdAt,
+					deploymentId,
+					deployedSourceCommit: group.deployedSourceCommit,
+					deployedAtIso: group.deployedAtIso,
+					task,
+					selectedChecklistItemIds,
+				});
+				handleOpenCreateTaskInBoardScope(group.workspaceId);
+				setPostDeployVerificationFollowUpTaskCreationDraftSeed(seed);
+			} catch (error) {
+				showAppToast({ intent: "warning", message: error instanceof Error ? error.message : String(error) });
+			}
+		},
+		[
+			postDeployVerification.activeGroup,
+			boardShownInPostDeployVerificationPanel,
+			projects,
+			isInlineTaskCreateOpen,
+			editingTaskId,
+			runtimeProjectConfig,
+			handleOpenCreateTaskInBoardScope,
+		],
+	);
 
 	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
 	const boardScopeFocusViewFocusedTaskProjectId =
@@ -1331,7 +1400,8 @@ export default function App(): ReactElement {
 	}, [board, handleStartTaskFromBoard, pendingTaskStartAfterEditId]);
 
 	const detailSession = selectedCard
-		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
+		? (resolveMainTaskConversationSessionSummary(selectedCard.card, sessions) ??
+			createIdleTaskSession(selectedCard.card.mainTaskConversationSessionId ?? selectedCard.card.id))
 		: null;
 	const detailTerminalSummary = detailTerminalTaskId ? (sessions[detailTerminalTaskId] ?? null) : null;
 	const detailTerminalSubtitle = useMemo(() => {
@@ -2133,6 +2203,9 @@ export default function App(): ReactElement {
 						}
 						resolvedDefaultTaskCreateBaseRef={resolvedDefaultCreateTaskBranchRefForCreationTarget}
 						taskCreationTargetProjectField={taskCreationTargetProjectFieldOfTaskEditorDialog}
+						postDeployVerificationFollowUpTaskCreationDraftSeed={
+							postDeployVerificationFollowUpTaskCreationDraftSeed
+						}
 						worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
 						onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
 						agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
@@ -2281,6 +2354,9 @@ export default function App(): ReactElement {
 							}
 							onSelectTask={onSelectTaskInPostDeployVerificationPanel}
 							onNavigateToBoard={() => setSelectedTaskId(null)}
+							onCreateFollowUpTaskFromChecklistItems={
+								handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems
+							}
 							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
 								realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
 							}
@@ -2290,7 +2366,8 @@ export default function App(): ReactElement {
 								isMoveToDoneConfirmOpen ||
 								deleteTaskTarget !== null ||
 								taskPinboardPinReasonRequest !== null ||
-								editingTaskId !== null
+								editingTaskId !== null ||
+								isInlineTaskCreateOpen
 							}
 							postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
 								postDeployVerificationWorkspaceProjectNameShownInPanelHeader

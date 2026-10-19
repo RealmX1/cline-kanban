@@ -1,6 +1,6 @@
 import type { ReferenceRelationModelingEditorDraft } from "@runtime-work-unit-relation-modeling-api-contract";
 import type { ComponentProps } from "react";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -59,6 +59,23 @@ function findCloseButton(): HTMLButtonElement | null {
 
 function hasPlanModeOverridesPermissionTierNotice(): boolean {
 	return document.body.textContent?.includes('"Start in plan mode" overrides this tier') ?? false;
+}
+
+function getPromptTextarea(): HTMLTextAreaElement {
+	const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+	if (!textarea) throw new Error("找不到任务 Prompt 输入框");
+	return textarea;
+}
+async function typeIntoPrompt(value: string): Promise<void> {
+	await act(async () => {
+		const textarea = getPromptTextarea();
+		Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, value);
+		textarea.dispatchEvent(new Event("input", { bubbles: true }));
+	});
+}
+function ControlledFollowUpTaskEditor({ input }: { input: Props }) {
+	const [prompt, setPrompt] = useState(input.prompt);
+	return <TaskEditorDialog {...input} prompt={prompt} onPromptChange={setPrompt} />;
 }
 
 describe("TaskEditorDialog interactions", () => {
@@ -287,6 +304,62 @@ describe("TaskEditorDialog interactions", () => {
 			],
 		};
 	}
+
+	function followUpSeed(workspaceId = "project-1") {
+		return {
+			initializationId: "pdv-follow-up-1",
+			workspaceId,
+			title: "[FIX]核查部署后问题",
+			prompt: "核查选中的核对项",
+			referenceRelationDrafts: restoredCreationDraft(workspaceId).referenceRelationDrafts,
+		};
+	}
+
+	it("PDV 预填等待关系草稿恢复，且只初始化一次", async () => {
+		const deferred = prepareDeferredRelationDraftRead();
+		const seed = followUpSeed();
+		const input = makeProps({ postDeployVerificationFollowUpTaskCreationDraftSeed: seed });
+		await act(async () => root.render(<ControlledFollowUpTaskEditor input={input} />));
+		expect(getPromptTextarea().value).toBe("");
+		await act(async () => deferred.resolveDraftRead(null));
+		expect(getPromptTextarea().value).toBe(seed.prompt);
+		await typeIntoPrompt("用户补充的实际现象");
+		await act(async () => root.render(<ControlledFollowUpTaskEditor input={input} />));
+		expect(getPromptTextarea().value).toBe("用户补充的实际现象");
+		expect(
+			JSON.parse(
+				localStorage.getItem(
+					`reference-relation-modeling:project-1:task-being-created:${sessionStorage.getItem("reference-relation-modeling-browser-tab-identity")}`,
+				) ?? "null",
+			).referenceRelationDrafts,
+		).toEqual(seed.referenceRelationDrafts);
+	});
+
+	it("PDV 预填不覆盖恢复的草稿，确认放弃后才使用新上下文", async () => {
+		const deferred = prepareDeferredRelationDraftRead();
+		const seed = followUpSeed();
+		await act(async () =>
+			root.render(
+				<ControlledFollowUpTaskEditor
+					input={makeProps({ postDeployVerificationFollowUpTaskCreationDraftSeed: seed })}
+				/>,
+			),
+		);
+		await act(async () => deferred.resolveDraftRead(restoredCreationDraft("project-1")));
+		expect(getPromptTextarea().value).toBe("恢复 project-1 的创建需求");
+		expect(findButtonByText("放弃草稿")).toBeDefined();
+		await act(async () => findButtonByText("放弃草稿")?.click());
+		expect(getPromptTextarea().value).toBe(seed.prompt);
+	});
+
+	it("PDV 来源项目未就绪时不初始化到当前项目", async () => {
+		const deferred = prepareDeferredRelationDraftRead();
+		const seed = followUpSeed("source-project");
+		await render(makeProps({ postDeployVerificationFollowUpTaskCreationDraftSeed: seed }));
+		await act(async () => deferred.resolveDraftRead(null));
+		expect(getPromptTextarea().value).toBe("");
+		expect(findButtonByText("Create")?.disabled).toBe(true);
+	});
 
 	it("草稿尚未水合时按钮和全部创建快捷键均等待，空草稿水合后照常创建", async () => {
 		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();

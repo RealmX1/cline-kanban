@@ -465,6 +465,17 @@ import {
 	permanentlyDeletedTaskPromptVersionsRequestSchema,
 	permanentlyDeletedTaskPromptVersionsResponseSchema,
 } from "../core/permanently-deleted-task-history-contract";
+import type {
+	TaskMainSessionHandoverPrepareResponse,
+	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRequest,
+} from "../core/task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverPrepareRequestSchema,
+	taskMainSessionHandoverPrepareResponseSchema,
+	taskMainSessionHandoverRequestSchema,
+	taskMainSessionHandoverStatusResponseSchema,
+} from "../core/task-main-session-handover-contract";
 import {
 	type ProjectVisualIdentity,
 	projectVisualIdentitySchema,
@@ -546,6 +557,29 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskMainSessionHandoverApi?: {
+		prepare: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<TaskMainSessionHandoverPrepareResponse>;
+		request: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		getStatus: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		cancel: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		retry: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+	};
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
@@ -1282,6 +1316,45 @@ export const runtimeAppRouter = t.router({
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
 	runtime: t.router({
+		prepareTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverPrepareResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.prepare(ctx.workspaceScope, input);
+			}),
+		requestTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.request(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		getTaskMainSessionHandoverStatus: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.getStatus(ctx.workspaceScope, input);
+			}),
+		cancelTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.cancel(ctx.workspaceScope, input);
+			}),
+		retryTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
 			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
