@@ -5,19 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalVirtualKeyInputBar } from "@/components/detail-panels/terminal-virtual-key-input-bar";
 import {
 	TERMINAL_ARROW_DOWN_SEQUENCE,
+	TERMINAL_ESCAPE_SEQUENCE,
 	TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE,
 	TERMINAL_SUBMIT_CARRIAGE_RETURN_SEQUENCE,
 } from "@/terminal/terminal-control-key-sequences";
 
 const sentSequences: string[] = [];
+const sentAtMilliseconds: number[] = [];
+let inputConnected = true;
+const controller = {
+	input: (sequence: string) => {
+		if (!inputConnected) return false;
+		sentSequences.push(sequence);
+		sentAtMilliseconds.push(Date.now());
+		return true;
+	},
+};
+let registeredController: typeof controller | null = controller;
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock("@/components/app-toaster", () => ({ showAppToast: showToast }));
 
 vi.mock("@/terminal/terminal-controller-registry", () => ({
-	getTerminalController: () => ({
-		input: (sequence: string) => {
-			sentSequences.push(sequence);
-			return true;
-		},
-	}),
+	getTerminalController: () => registeredController,
 }));
 
 const TASK_ID = "task-under-test";
@@ -122,6 +131,10 @@ describe("TerminalVirtualKeyInputBar", () => {
 		capturedPointerIds.length = 0;
 		vi.useFakeTimers();
 		sentSequences.length = 0;
+		sentAtMilliseconds.length = 0;
+		inputConnected = true;
+		registeredController = controller;
+		showToast.mockClear();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -150,6 +163,124 @@ describe("TerminalVirtualKeyInputBar", () => {
 		pressAndRelease(findKeyCap(container, "Interrupt the agent, or clear the current input line"));
 
 		expect(sentSequences).toEqual([TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE]);
+	});
+
+	it("一次点按在抬手后仍完成两次独立 ESC，间隔 100ms，补发 click 不产生第三次", () => {
+		pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
+		act(() => vi.advanceTimersByTime(99));
+		expect(sentSequences).toHaveLength(1);
+		act(() => vi.advanceTimersByTime(1));
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE, TERMINAL_ESCAPE_SEQUENCE]);
+		expect(sentAtMilliseconds[1]! - sentAtMilliseconds[0]!).toBe(100);
+	});
+
+	it("两步未完成时忽略重复点按，长按也不重复投递复合按键", () => {
+		const rewind = findKeyCap(container, "Open the rewind history view (double escape)");
+		pressAndRelease(rewind);
+		pressAndRelease(rewind, 5_000);
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE, TERMINAL_ESCAPE_SEQUENCE]);
+	});
+
+	it("其他虚拟按键介入时取消待发 ESC", () => {
+		pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+		pressAndRelease(findKeyCap(container, "Submit the current selection or input"));
+		act(() => vi.advanceTimersByTime(1_000));
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE, TERMINAL_SUBMIT_CARRIAGE_RETURN_SEQUENCE]);
+	});
+
+	for (const wheelInput of ["物理滚轮", "虚拟滚轮指针", "虚拟滚轮读屏"] as const) {
+		it(`${wheelInput}在两步之间介入时取消待发 ESC，仍只滚动三行`, () => {
+			const scrollLineDeltas: number[] = [];
+			act(() => {
+				root.render(
+					<TerminalVirtualKeyInputBar
+						taskId={TASK_ID}
+						onScrollByMouseWheelLines={(lineDelta) => {
+							scrollLineDeltas.push(lineDelta);
+							// 生产滚轮入口同样在 xterm screen 上派发 WheelEvent。
+							container.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: lineDelta }));
+						}}
+					/>,
+				);
+			});
+			// xterm 可以停止冒泡；取消监听必须在捕获阶段先收到滚轮。
+			container.addEventListener("wheel", (event) => event.stopPropagation());
+			pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+			act(() => vi.advanceTimersByTime(50));
+			if (wheelInput === "物理滚轮") {
+				act(() => container.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -3 })));
+			} else {
+				const wheelButton = findKeyCap(container, "向上滚动，长按加速");
+				if (wheelInput === "虚拟滚轮指针") {
+					pressDown(wheelButton);
+					act(() => {
+						wheelButton.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0 }));
+						wheelButton.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+					});
+				} else act(() => wheelButton.click());
+			}
+			act(() => vi.advanceTimersByTime(1_000));
+			expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
+			expect(scrollLineDeltas).toEqual(wheelInput === "物理滚轮" ? [] : [-3]);
+		});
+	}
+
+	for (const change of ["任务", "会话", "页签隐藏", "禁用", "卸载"] as const) {
+		it(`${change}变化后不补发待发 ESC`, () => {
+			pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+			act(() => {
+				root.render(
+					change === "卸载" ? null : (
+						<TerminalVirtualKeyInputBar
+							taskId={change === "任务" ? "other-task" : TASK_ID}
+							terminalInputTargetIdentity={change === "会话" ? "other-incarnation" : TASK_ID}
+							isTerminalKeyInputInteractive={change !== "页签隐藏"}
+							disabled={change === "禁用"}
+						/>
+					),
+				);
+			});
+			act(() => vi.advanceTimersByTime(1_000));
+			expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
+		});
+	}
+
+	for (const eventType of ["blur", "keydown", "input", "visibilitychange"] as const) {
+		it(`${eventType}中止待发 ESC，恢复页面不会重试`, () => {
+			pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+			act(() => {
+				if (eventType === "visibilitychange")
+					vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+				(eventType === "blur" ? window : document).dispatchEvent(new Event(eventType));
+				vi.restoreAllMocks();
+				vi.advanceTimersByTime(1_000);
+			});
+			expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
+		});
+	}
+
+	it("连接丢失或 controller 更换后不把剩余 ESC 写入新连接", () => {
+		pressAndRelease(findKeyCap(container, "Open the rewind history view (double escape)"));
+		registeredController = { input: controller.input };
+		act(() => vi.advanceTimersByTime(100));
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
+		expect(showToast).toHaveBeenCalledTimes(1);
+	});
+
+	it("首步失败不安排第二步；第二步断线不在恢复后补发", () => {
+		inputConnected = false;
+		const rewind = findKeyCap(container, "Open the rewind history view (double escape)");
+		pressAndRelease(rewind);
+		inputConnected = true;
+		act(() => vi.advanceTimersByTime(100));
+		expect(sentSequences).toHaveLength(0);
+		pressAndRelease(rewind);
+		inputConnected = false;
+		act(() => vi.advanceTimersByTime(100));
+		inputConnected = true;
+		act(() => vi.advanceTimersByTime(1_000));
+		expect(sentSequences).toEqual([TERMINAL_ESCAPE_SEQUENCE]);
 	});
 
 	it("auto-repeats an arrow key while it stays held down", () => {

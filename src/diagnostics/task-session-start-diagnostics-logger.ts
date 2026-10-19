@@ -13,6 +13,8 @@ export interface TaskSessionStartDiagnosticRecord {
 	taskId: string;
 	requestedAgentId: string | null;
 	effectiveAgentId: string | null;
+	requestedTerminalColumns?: number | null;
+	requestedTerminalRows?: number | null;
 	phase: string;
 	elapsedMs: number;
 	error: string | null;
@@ -47,6 +49,8 @@ export function formatTaskSessionStartDiagnosticLine(
 		`taskId=${record.taskId}`,
 		`requestedAgentId=${record.requestedAgentId ?? "(default)"}`,
 		`effectiveAgentId=${record.effectiveAgentId ?? "(unresolved)"}`,
+		`requestedTerminalColumns=${record.requestedTerminalColumns ?? null}`,
+		`requestedTerminalRows=${record.requestedTerminalRows ?? null}`,
 		`phase=${record.phase}`,
 		`elapsedMs=${record.elapsedMs}`,
 		`session=${JSON.stringify(record.session)}`,

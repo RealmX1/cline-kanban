@@ -439,6 +439,8 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
+	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
@@ -585,6 +587,10 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		activateAfterRunBinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutRunBindingActivationRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutRunBindingActivationResponseSchema>>;
 		capture: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfReviewStartBoundaryRequestSchema>,
@@ -1376,6 +1382,14 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.rvfAutomaticCloseoutApi)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.capture(ctx.workspaceScope, input);
+			}),
+		activateRvfAutomaticCloseoutAfterRunBinding: workspaceProcedure
+			.input(rvfAutomaticCloseoutRunBindingActivationRequestSchema)
+			.output(rvfAutomaticCloseoutRunBindingActivationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.activateAfterRunBinding(ctx.workspaceScope, input);
 			}),
 		rvfAutomaticCloseoutStatus: workspaceProcedure
 			.input(rvfAutomaticCloseoutStatusRequestSchema)

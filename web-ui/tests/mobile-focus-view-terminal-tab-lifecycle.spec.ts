@@ -67,6 +67,7 @@ test("手机切换页签保留终端尺寸和挂载，不重复发出用户打�
 	terminalIoSockets.get("mobile-scroll-task-1")!.send("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[H隔离终端 TUI");
 	await page.waitForTimeout(150);
 
+	await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).tap();
 	const down = page.getByRole("button", { name: "向下滚动，长按加速", exact: true });
 	await down.hover();
 	await page.mouse.down();

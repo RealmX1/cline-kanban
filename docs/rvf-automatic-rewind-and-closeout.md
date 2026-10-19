@@ -1,6 +1,6 @@
 # RVF 默认自动恢复与收尾投递
 
-Codex 主会话通过独立的 RVF 决策回合开审后，Kanban 默认登记自动收尾；不需要任务开关或手动启动。RVF 完成时，宿主创建开审前原生历史的分支，保留原 RVF 历史，切换当前主会话的原生身份，再自动投递 `$rvf-land` 与 `$base-branch-sync`。不部署、不移入 Done；原任务明确的不提交、不回 base、停止要求继续生效。
+Codex 主会话通过独立的 RVF 决策回合开审时，Kanban 先持久捕获非活跃分界；生产方成功绑定真实 run 后再显式激活默认自动收尾，不需要任务开关或用户点击。RVF 完成时，宿主创建开审前原生历史的分支，保留原 RVF 历史，切换当前主会话的原生身份，再自动投递 `$rvf-land` 与 `$base-branch-sync`。不部署、不移入 Done；原任务明确的不提交、不回 base、停止要求继续生效。
 
 ## 身份与完成证据
 
@@ -8,18 +8,23 @@ Codex 主会话通过独立的 RVF 决策回合开审后，Kanban 默认登记�
 
 凭据遵循 `rvf-independent-user-turn-boundary/v1`，与独立开审 gate 的消费契约相同。完整候选指纹重建和开审准入仍归 RVF 开审 gate；Kanban 不复制候选归属算法。
 
-RVF 把凭据复制到本轮 `inputs/automatic-closeout-review-start-receipt.json`，写 `<token>.run-binding.json`，成功 finalize 后写 `$RVF_HOME/automatic-closeout-completion-notifications/<token>.json`。通知同时绑定 run、原会话、worktree、handoff SHA256。宿主复核 run binding、finalization 和 handoff；不使用 latest run、不枚举旧 handoff。因此升级不会追溯执行历史审查。
+捕获只保存 `captured_review_start_boundary`，同一 token 重试直接复用完整 receipt、checkpoint 与 `preReviewTurnIds`；即使 bootstrap 已增加原生回合，也不重捕获。未绑定、bootstrap 失败和仅捕获的记录均不检查完成事实、不 fork、不投递，跨进程重启仍保持非活跃。
+
+RVF 把凭据复制到本轮 `inputs/automatic-closeout-review-start-receipt.json`，写 `$RVF_HOME/review-start-independent-user-turn-boundary-receipts/<token>.run-binding.json`，然后调用 `kanban task activate-rvf-automatic-closeout-after-run-binding --task-id <id> --decision-token <token> --project-path <main checkout>`。激活返回与捕获逐字段相同的 `{receipt}`；服务端核对 run id、真实目录、完整 receipt 与排序后 SHA256，再复核当前主会话、原生身份、transcript 与 worktree。只有非活跃捕获能转入等待完成；重复激活复用绑定，不覆盖阶段，已显式停止的 `paused` 记录不能重新激活。
+
+成功 finalize 后，RVF 写 `$RVF_HOME/automatic-closeout-completion-notifications/<token>.json`。通知同时绑定 run、原会话、worktree、handoff SHA256。宿主复核激活时绑定的 run、finalization 和 handoff；不使用 latest run、不枚举旧 handoff。因此升级不会追溯执行历史审查。
 
 ## 持久编排
 
 每个 workspace 保存 `rvf-automatic-rewind-and-closeout-records.json`，通过现有跨进程文件锁和原子写入更新：
 
-1. `awaiting_rvf_completion`：等待本次 token 的完成事实。
-2. `restoring_pre_review_conversation`：按 `thread/fork.lastTurnId` 创建原生前缀分支，落盘并复验身份与历史。
-3. `restored_pre_review_conversation`：停止原终端、持久切换原生身份，并按明确 ID 续跑。
-4. `submitting_closeout_prompt`：用固定幂等键交给现有持久队列，等待提交确认。
-5. `closeout_prompt_submitted`：终端确认提交 Prompt；不代表 land 或 base 同步已完成，实际动作由 skill 执行并汇报。
-6. `paused`：门禁原因留在记录和终端 warning 中；不会偷偷生成新 key 绕过失败。
+1. `captured_review_start_boundary`：持久保存开审前分界，尚未激活；runtime 和独立 coordinator 均跳过。
+2. `awaiting_rvf_completion`：真实 run 双向绑定已核验，等待本次 token 的完成事实。
+3. `restoring_pre_review_conversation`：按 `thread/fork.lastTurnId` 创建原生前缀分支，落盘并复验身份与历史。
+4. `restored_pre_review_conversation`：停止原终端、持久切换原生身份，并按明确 ID 续跑。
+5. `submitting_closeout_prompt`：用固定幂等键交给现有持久队列，等待提交确认。
+6. `closeout_prompt_submitted`：终端确认提交 Prompt；不代表 land 或 base 同步已完成，实际动作由 skill 执行并汇报。
+7. `paused`：门禁原因留在记录和终端 warning 中；不会偷偷生成新 key 绕过失败。
 
 原生 fork 发出前也记录尝试。若崩溃时连新分支身份都无法确认，暂停，避免盲目再建分支。已确认身份的恢复会复验并复用它。持久投递沿用既有账本：明确失败或跨重启未确认不能视为送达，也不自动重排。
 

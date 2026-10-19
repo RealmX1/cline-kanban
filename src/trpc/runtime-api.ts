@@ -831,6 +831,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			let diagnosticTaskId = "(unparsed)";
 			let requestedAgentIdForDiagnostics: RuntimeAgentId | null = null;
 			let effectiveAgentIdForDiagnostics: RuntimeAgentId | null = null;
+			let requestedTerminalColumnsForDiagnostics: number | null = null;
+			let requestedTerminalRowsForDiagnostics: number | null = null;
 			let startFailurePhase = "parse_request";
 			let latestStartedSummaryForDiagnostics: RuntimeTaskSessionSummary | null = null;
 			const recordStartDiagnostic = (
@@ -846,6 +848,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					taskId: diagnosticTaskId,
 					requestedAgentId: requestedAgentIdForDiagnostics,
 					effectiveAgentId: effectiveAgentIdForDiagnostics,
+					requestedTerminalColumns: requestedTerminalColumnsForDiagnostics,
+					requestedTerminalRows: requestedTerminalRowsForDiagnostics,
 					phase,
 					elapsedMs: Date.now() - startRequestReceivedAt,
 					error,
@@ -864,6 +868,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			};
 			try {
 				let body = parseTaskSessionStartRequest(input);
+				requestedTerminalColumnsForDiagnostics = body.cols ?? null;
+				requestedTerminalRowsForDiagnostics = body.rows ?? null;
 				const startBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const directCard = findWorkspaceBoardCard(startBoard, body.taskId);
 				if (

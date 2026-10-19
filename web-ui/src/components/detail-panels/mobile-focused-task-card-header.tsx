@@ -21,7 +21,7 @@ export function MobileFocusedTaskCardHeader({
 	onBackToBoard?: () => void;
 	navigationAndToolsControls?: MobileFocusViewCollapsibleControls;
 }): React.ReactElement {
-	const [isExpanded, setIsExpanded] = useState(true);
+	const [isExpanded, setIsExpanded] = useState(false);
 	const contentId = useId();
 	const lastIdleCollapseRequestSequenceNumber = useRef(idleCollapseController.idleCollapseRequestSequenceNumber);
 	useEffect(() => {
