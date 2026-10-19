@@ -6,6 +6,7 @@ import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { buildShellCommandLine, quoteShellArg } from "../core/shell";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import { renderTaskAgentNamingAndWorkPhaseGoalGuidance } from "../core/task-naming-conventions";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
 
@@ -128,7 +129,7 @@ export function resolveAppendSystemPromptCommandPrefix(
 export function renderAppendSystemPrompt(commandPrefix: string, options: RenderAppendSystemPromptOptions = {}): string {
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const selectedAgentId = options.agentId ?? null;
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Sidebar
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Sidebar
 
 You are the Kanban sidebar agent for this workspace. Help the user interact with their Kanban board directly from this side panel. When the user asks to add tasks, create tasks, break work down, or start tasks, prefer using the Kanban CLI yourself instead of describing manual steps.
 
@@ -308,7 +309,7 @@ export function renderTaskSessionWorktreeGuardPrompt(
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
 	const quotedTaskId = quoteShellArg(trimmedTaskId);
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Task Workspace
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Task Workspace
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
 \`${cwd}\`
