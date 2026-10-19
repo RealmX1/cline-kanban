@@ -1329,7 +1329,7 @@ export default function App(): ReactElement {
 		workspaceMetadataProbeFocusedTaskId,
 		workspaceMetadataProbeFocusedTaskWorkspaceId,
 	]);
-	// ⌘E 与顶栏 All projects 按钮：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	// 范围切换快捷键与顶栏 All projects 按钮：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
 	const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = useCallback(() => {
 		if (!isBoardScopeAllProjectsSelected) {
 			selectBoardScopeAllProjects();

@@ -28,7 +28,7 @@ export function topBarProjectSwitcherBoardOrSingleProjectScopeTriggerAnchorKey()
 	return "top-bar-project-switcher-board-or-single-project-scope-trigger";
 }
 
-// 顶栏的 All projects ⇄ 单项目切换按钮（Layers，与 ⌘E 同一处理器）。只在看板页（非 Focus View）渲染，全局单例、不带 id。
+// 顶栏的 All projects ⇄ 单项目切换按钮（Layers，与 ⌘⇧E 同一处理器）。只在看板页（非 Focus View）渲染，全局单例、不带 id。
 // All projects 首页（跨项目切换面板分区横排的列看板）的部署后引导验证从这里起步。
 export function topBarBoardScopeAllProjectsToggleButtonAnchorKey(): string {
 	return "top-bar-board-scope-all-projects-toggle-button";
