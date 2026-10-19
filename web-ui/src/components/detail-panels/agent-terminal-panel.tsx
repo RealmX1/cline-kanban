@@ -1215,6 +1215,13 @@ function AgentTerminalPanelLayout({
 			{showVirtualKeyInputBar && lowerKeysExpanded ? (
 				<TerminalVirtualKeyInputBar
 					taskId={taskId}
+					terminalInputTargetIdentity={JSON.stringify([
+						workspaceId,
+						taskId,
+						summary?.runtimeSessionIncarnationId ?? summary?.startedAt ?? null,
+						isTranscriptReaderOpen,
+					])}
+					isTerminalKeyInputInteractive={isVisible}
 					onScrollByMouseWheelLines={scrollByMouseWheelLines}
 					scrollInteractionIdentity={scrollInteractionIdentity}
 				/>

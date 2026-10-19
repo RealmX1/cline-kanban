@@ -1,15 +1,14 @@
 import { type ReactElement, useCallback, useRef } from "react";
 
-import { showAppToast } from "@/components/app-toaster";
 import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalVirtualKeyCapButton } from "@/components/detail-panels/terminal-virtual-key-cap-button";
 import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
+import { useTerminalVirtualControlKeyDispatch } from "@/hooks/use-terminal-virtual-control-key-dispatch";
 import {
 	TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID,
 	TERMINAL_VIRTUAL_KEY_BAR_ACTION_KEY_IDS,
 	TERMINAL_VIRTUAL_KEY_BAR_DIRECTIONAL_CLUSTER_ROWS,
 	TERMINAL_VIRTUAL_KEY_BAR_SUBMIT_KEY_ID,
-	type TerminalControlKeyDefinition,
 } from "@/terminal/terminal-control-key-sequences";
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
 import { usePublishTerminalVirtualKeyBarViewportBottomInset } from "@/terminal/terminal-virtual-key-bar-viewport-bottom-inset";
@@ -27,6 +26,8 @@ interface TerminalVirtualKeyInputBarProps {
 	disabled?: boolean;
 	onScrollByMouseWheelLines?: (lineDelta: number) => void;
 	scrollInteractionIdentity?: string;
+	terminalInputTargetIdentity?: string;
+	isTerminalKeyInputInteractive?: boolean;
 }
 
 /**
@@ -50,6 +51,8 @@ export function TerminalVirtualKeyInputBar({
 	disabled,
 	onScrollByMouseWheelLines,
 	scrollInteractionIdentity = taskId,
+	terminalInputTargetIdentity = taskId,
+	isTerminalKeyInputInteractive = true,
 }: TerminalVirtualKeyInputBarProps): ReactElement {
 	const barElementRef = useRef<HTMLDivElement | null>(null);
 	usePublishTerminalVirtualKeyBarViewportBottomInset(barElementRef);
@@ -62,15 +65,11 @@ export function TerminalVirtualKeyInputBar({
 		[onScrollByMouseWheelLines, taskId],
 	);
 
-	const handlePressKey = useCallback(
-		(keyDefinition: TerminalControlKeyDefinition) => {
-			const didSend = getTerminalController(taskId)?.input(keyDefinition.sequence) ?? false;
-			if (!didSend) {
-				showAppToast({ intent: "warning", message: "Terminal is not connected yet." }, "virtual-key-not-connected");
-			}
-		},
-		[taskId],
-	);
+	const handlePressKey = useTerminalVirtualControlKeyDispatch({
+		taskId,
+		terminalInputTargetIdentity,
+		isInteractive: !disabled && isTerminalKeyInputInteractive,
+	});
 
 	return (
 		<div

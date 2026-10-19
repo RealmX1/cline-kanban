@@ -8,11 +8,15 @@ async function openIsolatedMobileFocusView(page: Page, width: number) {
 	await page.route("**/api/**", (route) => route.abort());
 	const ioSockets = new Map<string, WebSocketRoute>();
 	const receivedInputs: string[] = [];
+	const receivedInputTimes: number[] = [];
 	await page.routeWebSocket("**/*", (socket) => {
 		const url = new URL(socket.url());
 		if (url.pathname === "/api/terminal/io") {
 			ioSockets.set(url.searchParams.get("taskId")!, socket);
-			socket.onMessage((message) => receivedInputs.push(String(message)));
+			socket.onMessage((message) => {
+				receivedInputs.push(String(message));
+				receivedInputTimes.push(Date.now());
+			});
 		} else if (url.pathname === "/api/terminal/control") {
 			socket.send(
 				JSON.stringify({
@@ -41,7 +45,7 @@ async function openIsolatedMobileFocusView(page: Page, width: number) {
 	});
 	await expect(page.locator(".xterm-screen").first()).toBeVisible();
 	await expect.poll(() => ioSockets.size).toBeGreaterThan(0);
-	return { ioSockets, receivedInputs };
+	return { ioSockets, receivedInputs, receivedInputTimes };
 }
 
 for (const width of [320, 375, 390, 768]) {
@@ -51,11 +55,10 @@ for (const width of [320, 375, 390, 768]) {
 		await openIsolatedMobileFocusView(page, width);
 		const card = page.locator("[data-task-card-render-role='focused_task_card_copy_in_mobile_detail_header']");
 		const bar = page.locator("[data-terminal-virtual-key-input-bar]");
-		await expect(card).toBeVisible();
-		await expect(bar).toBeVisible();
-		await page.getByRole("button", { name: "收起任务卡", exact: true }).tap();
-		await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-		await page.getByRole("button", { name: "收起下方按键栏", exact: true }).tap();
+		await expect(card).toHaveCount(0);
+		await expect(bar).toHaveCount(0);
+		await expect(page.locator("[data-mobile-focus-view-global-navigation]")).toBeHidden();
+		await page.screenshot({ path: test.info().outputPath(`mobile-default-collapsed-${width}.png`) });
 		await expect(page.locator("[data-mobile-terminal-floating-scroll-controls]")).toBeVisible();
 		await expect(page.getByRole("button", { name: upLabel })).toBeVisible();
 		await expect(page.getByRole("button", { name: downLabel })).toBeVisible();
@@ -89,9 +92,6 @@ for (const width of [320, 375, 390, 768]) {
 
 test("真实 xterm 普通历史滚动、TUI 鼠标滚轮协议及长按停止", async ({ page }) => {
 	const fixture = await openIsolatedMobileFocusView(page, 390);
-	await page.getByRole("button", { name: "收起任务卡", exact: true }).tap();
-	await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-	await page.getByRole("button", { name: "收起下方按键栏", exact: true }).tap();
 	const latest = page.getByRole("button", { name: "Scroll to latest output", exact: true });
 	if (await latest.isVisible()) await latest.click();
 	await expect(latest).toBeHidden();
@@ -132,9 +132,6 @@ test.describe("小数像素行高下的真实终端滚轮步长", () => {
 	for (const lineHeight of [1, 1.3, 1.7]) {
 		test(`真实 xterm 行高 ${lineHeight} 时，每次滚轮按压及长按步骤恰好滚动三行`, async ({ page }) => {
 			await openIsolatedMobileFocusView(page, 390);
-			await page.getByRole("button", { name: "收起任务卡", exact: true }).tap();
-			await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-			await page.getByRole("button", { name: "收起下方按键栏", exact: true }).tap();
 			const readViewport = () => page.evaluate(() => window.mobileFocusViewTerminalBrowserTest.readViewport());
 			await page.evaluate((height) => window.mobileFocusViewTerminalBrowserTest.setLineHeight(height), lineHeight);
 			await expect.poll(async () => (await readViewport()).baseY).toBeGreaterThan(100);
@@ -197,6 +194,9 @@ test("真实视图共用闲置收起，长按超过30秒不收起，换任务复
 	await page.clock.install({ time: start });
 	await page.clock.pauseAt(new Date(start.getTime() + 1000));
 	await openIsolatedMobileFocusView(page, 390);
+	await page.getByRole("button", { name: "展开任务卡", exact: true }).tap();
+	await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).tap();
+	await page.getByRole("button", { name: "展开下方按键栏", exact: true }).tap();
 	await page.clock.runFor(30_001);
 	await expect(page.locator("[data-terminal-virtual-key-input-bar]")).toHaveCount(0);
 	await expect(
@@ -212,8 +212,9 @@ test("真实视图共用闲置收起，长按超过30秒不收起，换任务复
 	await page.clock.runFor(30_001);
 	await expect(page.locator("[data-terminal-virtual-key-input-bar]")).toHaveCount(0);
 	await page.locator("[data-switch-browser-test-task]").evaluate((element) => (element as HTMLButtonElement).click());
-	await expect(page.locator("[data-terminal-virtual-key-input-bar]")).toBeVisible();
-	await expect(page.locator("[data-mobile-focus-view-global-navigation]")).toBeVisible();
+	await expect(page.locator("[data-terminal-virtual-key-input-bar]")).toHaveCount(0);
+	await expect(page.locator("[data-mobile-focus-view-global-navigation]")).toBeHidden();
+	await expect(page.getByRole("button", { name: "展开任务卡", exact: true })).toBeVisible();
 });
 
 test("桌面保持原视图且无手机滚轮悬浮栏", async ({ page }) => {
@@ -225,12 +226,11 @@ test("桌面保持原视图且无手机滚轮悬浮栏", async ({ page }) => {
 
 test("阅读视图滚动当前文档，不向隐藏 TUI 发送输入", async ({ page }) => {
 	const fixture = await openIsolatedMobileFocusView(page, 390);
-	await page.getByRole("button", { name: "收起任务卡", exact: true }).tap();
+	await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).tap();
 	await page.getByRole("button", { name: "Read the transcript as a document", exact: true }).tap();
 	const documentScroller = page.locator(".kb-terminal-transcript-reader-scroll-area");
 	await expect.poll(() => documentScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 	await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-	await page.getByRole("button", { name: "收起下方按键栏", exact: true }).tap();
 	await expect(page.getByRole("textbox", { name: "Filter transcript lines" })).toBeHidden();
 	const original = await documentScroller.evaluate((element) => element.scrollTop);
 	const inputCount = fixture.receivedInputs.length;
@@ -241,9 +241,6 @@ test("阅读视图滚动当前文档，不向隐藏 TUI 发送输入", async ({ 
 
 test("软键盘缩小可视窗口后，常驻滚动与展开按钮仍可见", async ({ page }) => {
 	await openIsolatedMobileFocusView(page, 390);
-	await page.getByRole("button", { name: "收起任务卡", exact: true }).tap();
-	await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-	await page.getByRole("button", { name: "收起下方按键栏", exact: true }).tap();
 	await page.evaluate(() => {
 		Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 420 });
 		window.visualViewport!.dispatchEvent(new Event("resize"));
@@ -253,3 +250,49 @@ test("软键盘缩小可视窗口后，常驻滚动与展开按钮仍可见", as
 		.toBeLessThan(376);
 	await expect(page.getByRole("button", { name: upLabel })).toBeVisible();
 });
+
+test("手机虚拟双 ESC 一次点按经真实 xterm 形成两次独立投递", async ({ page }) => {
+	const fixture = await openIsolatedMobileFocusView(page, 390);
+	await page.getByRole("button", { name: "展开下方按键栏", exact: true }).tap();
+	fixture.receivedInputs.length = 0;
+	fixture.receivedInputTimes.length = 0;
+	await page.getByRole("button", { name: "Open the rewind history view (double escape)", exact: true }).tap();
+	await expect.poll(() => fixture.receivedInputs).toEqual(["\u001b", "\u001b"]);
+	expect(fixture.receivedInputTimes[1]! - fixture.receivedInputTimes[0]!).toBeGreaterThanOrEqual(75);
+	await page.waitForTimeout(200);
+	expect(fixture.receivedInputs).toHaveLength(2);
+});
+
+for (const wheelInput of ["物理滚轮", "虚拟滚轮触屏", "虚拟滚轮读屏"] as const) {
+	test(`${wheelInput}的真实 xterm SGR 输入取消双 ESC 的第二步`, async ({ page }) => {
+		const fixture = await openIsolatedMobileFocusView(page, 390);
+		await page.getByRole("button", { name: "展开下方按键栏", exact: true }).tap();
+		fixture.ioSockets.get("mobile-scroll-task-1")!.send("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[H滚轮取消双 ESC");
+		await expect
+			.poll(() => page.evaluate(() => window.mobileFocusViewTerminalBrowserTest.readScreenText()))
+			.toContain("滚轮取消双 ESC");
+		// 固定浏览器计时，保证滚轮在两次 ESC 的 100ms 间隔内介入。
+		const start = new Date("2030-01-01T00:00:00Z");
+		await page.clock.install({ time: start });
+		await page.clock.pauseAt(new Date(start.getTime() + 1000));
+		fixture.receivedInputs.length = 0;
+		await page.getByRole("button", { name: "Open the rewind history view (double escape)", exact: true }).tap();
+		await expect.poll(() => fixture.receivedInputs).toEqual(["\x1b"]);
+		await page.clock.runFor(50);
+		if (wheelInput === "物理滚轮") {
+			await page.locator(".xterm-screen").first().hover();
+			await page.mouse.wheel(0, 120);
+		} else if (wheelInput === "虚拟滚轮触屏") {
+			await page.getByRole("button", { name: downLabel }).tap();
+		} else {
+			// 读屏激活没有 keydown 或 pointerdown；必须由真实滚轮事件取消。
+			await page.getByRole("button", { name: downLabel }).evaluate((button: HTMLButtonElement) => button.click());
+		}
+		await expect.poll(() => fixture.receivedInputs.join("")).toContain("\x1b[<65;");
+		const inputsAfterWheel = [...fixture.receivedInputs];
+		expect(inputsAfterWheel[0]).toBe("\x1b");
+		await page.clock.runFor(1000);
+		expect(fixture.receivedInputs).toEqual(inputsAfterWheel);
+		expect(fixture.receivedInputs.filter((input) => input === "\x1b")).toEqual(["\x1b"]);
+	});
+}
