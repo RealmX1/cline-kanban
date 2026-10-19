@@ -604,7 +604,8 @@ export interface StartTaskSessionRequest {
 	projectPath?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
-	byTheWayMainSessionForkSourceNativeSessionId?: string;
+	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -3879,7 +3880,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
-				byTheWayMainSessionForkSourceNativeSessionId: request.byTheWayMainSessionForkSourceNativeSessionId,
+				taskConversationSessionMainContextForkSourceNativeSessionId:
+					request.taskConversationSessionMainContextForkSourceNativeSessionId,
 				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
 				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
 				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
@@ -3895,6 +3897,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					"forked_from_main_current_turn",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
+			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
+			if (
+				!request.resumeFromTrash &&
+				!request.resumePriorAgentConversationWithoutResendingPrompt &&
+				resumeAddressing.kind !== "addressed_by_observed_agent_native_session_id"
+			) {
+				await request.revalidateTaskConversationSessionMainContextForkSource?.();
+			}
 		} catch (error) {
 			const prepareFailureMessage = error instanceof Error ? error.message : String(error);
 			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
@@ -6594,8 +6604,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 					if (entry.active !== null || entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
 						return;
 					}
+					const requestForRestart = cloneStartTaskSessionRequest(request);
+					if (requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId) {
+						const observedChildIdentity = entry.summary.agentNativeConversationSessionIdentity;
+						if (
+							!observedChildIdentity ||
+							observedChildIdentity.sourceAgentId !== requestForRestart.agentId ||
+							observedChildIdentity.nativeSessionId ===
+								requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId
+						) {
+							this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
+								entry,
+								requestForRestart,
+								"协作 fork 会话崩溃后尚未记录独立子会话原生 ID，已停止自动重启，避免重新 fork 主会话或重复投递首条消息。请检查原生会话后重新创建协作会话。",
+							);
+						}
+						// 首次 fork 请求只负责创建子会话；崩溃后必须按最新 child 身份续跑，不能再重放来源与首条消息。
+						requestForRestart.resumePriorAgentConversationWithoutResendingPrompt = true;
+					}
 					await this.startTaskSessionHoldingPerTaskStartExclusivity(
-						cloneStartTaskSessionRequest(request),
+						requestForRestart,
 						"auto_restart_after_pty_exit",
 						arrival,
 					);

@@ -19,12 +19,15 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(!packagedCliPath).each([
-	["claude", "codex"],
-	["codex", "claude"],
-	["claude", "claude"],
+	["claude", "codex", "pty_terminal"],
+	["codex", "claude", "pty_terminal"],
+	["claude", "claude", "pty_terminal"],
+	["codex", "codex", "pty_terminal"],
+	["omp", "omp", "pty_terminal"],
+	["omp", "omp", "acp_stdio_subprocess"],
 ] as const)(
-	"打包态 %s → %s：可写协作、独立恢复与卡片生命周期",
-	async (mainAgentId, collaborationAgentId) => {
+	"打包态 %s → %s/%s：可写协作、上下文复刻和独立恢复",
+	async (mainAgentId, collaborationAgentId, sessionTransport) => {
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "collaboration-browser" });
@@ -37,30 +40,63 @@ it.skipIf(!packagedCliPath).each([
 		const evidenceDirectory = join(
 			process.env.KANBAN_COLLABORATION_SESSION_BROWSER_EVIDENCE_DIRECTORY ??
 				join(fixture.fixtureRootDirectoryPath, "browser-evidence"),
-			`${mainAgentId}-to-${collaborationAgentId}`,
+			`${mainAgentId}-to-${collaborationAgentId}-${sessionTransport}`,
 		);
 		mkdirSync(evidenceDirectory, { recursive: true });
 		const fakeAgentBinaryDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-binaries");
 		mkdirSync(fakeAgentBinaryDirectory);
-		const fakeAgentProgram = `#!${process.execPath}
+		const fakeAgentProgram = String.raw`#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const agent = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
-if (args.includes('--version') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) {
-  process.stdout.write(agent + ' 2.1.200\\n'); process.exit(0);
-}
+if (args.includes('--version')) { process.stdout.write(agent + ' 2.1.200\n'); process.exit(0); }
 const sessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID;
-fs.writeFileSync(path.join(process.cwd(), 'launch-' + sessionId + '.json'), JSON.stringify({ agent, args, pid: process.pid, cwd: process.cwd(), sessionId, workspaceTaskId: process.env.KANBAN_TASK_ID }));
-if (sessionId.startsWith('task-conversation-session-')) {
-  fs.writeFileSync(path.join(process.cwd(), 'collaboration-write-proof.txt'), sessionId);
+if (!sessionId) { process.stdout.write(agent + ' 2.1.200\n'); process.exit(0); }
+const isCollaborator = sessionId.startsWith('task-conversation-session-');
+const nativePath = id => path.join(process.cwd(), 'native-session-' + id + '.json');
+const readNative = id => JSON.parse(fs.readFileSync(nativePath(id), 'utf8'));
+const saveNative = record => fs.writeFileSync(nativePath(record.nativeSessionId), JSON.stringify(record));
+const launchPath = path.join(process.cwd(), 'launch-' + sessionId + '.json');
+const launch = { agent, args, pid: process.pid, cwd: process.cwd(), sessionId, workspaceTaskId: process.env.KANBAN_TASK_ID };
+const saveLaunch = record => { Object.assign(launch, record); fs.writeFileSync(launchPath, JSON.stringify(launch)); };
+const markPromptSent = () => { if (isCollaborator) fs.writeFileSync(path.join(process.cwd(), 'collaboration-write-proof.txt'), sessionId); };
+const freshNative = () => ({ nativeSessionId: randomUUID(), model: 'source-model-after-switch', history: ['主会话已有上下文'], promptCount: 0 });
+const forkNative = id => { const record = { ...readNative(id), nativeSessionId: randomUUID(), forkSourceNativeSessionId: id }; saveNative(record); return record; };
+saveLaunch({});
+if (args.includes('acp')) {
+ let active;
+ const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
+ const notify = (sessionId, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } }) + '\n');
+ require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line); const params = message.params || {};
+  if (message.id === undefined) return;
+  switch (message.method) {
+   case 'initialize': reply(message.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { fork: {}, close: {} } } }); break;
+   case 'session/new': active = freshNative(); saveNative(active); saveLaunch(active); reply(message.id, { sessionId: active.nativeSessionId }); break;
+   case 'session/fork': active = forkNative(params.sessionId); saveLaunch(active); reply(message.id, { sessionId: active.nativeSessionId }); break;
+   case 'session/load': active = readNative(params.sessionId); saveLaunch(active); notify(params.sessionId, active.history[0]); reply(message.id, {}); break;
+   case 'session/set_mode': active.mode = params.modeId; saveNative(active); reply(message.id, {}); break;
+   case 'session/close': saveNative(active); reply(message.id, {}); break;
+   case 'session/prompt': active.promptCount++; saveNative(active); saveLaunch(active); markPromptSent(); notify(active.nativeSessionId, '协作答复'); reply(message.id, { stopReason: 'end_turn' }); break;
+   default: reply(message.id, {});
+  }
+ });
+} else {
+ const selector = args.includes('--fork') ? '--fork' : args.includes('fork') ? 'fork' : '--resume';
+ const sourceId = args[args.indexOf(selector) + 1];
+ const shouldFork = args.includes('--fork') || args.includes('fork') || args.includes('--fork-session');
+ const record = shouldFork ? forkNative(sourceId) : (args.includes('--resume') || args.includes('resume')) ? readNative(args[args.indexOf(args.includes('resume') ? 'resume' : '--resume') + 1]) : freshNative();
+ const modelIndex = args.indexOf('--model'); if (modelIndex >= 0) record.model = args[modelIndex + 1];
+ saveNative(record); saveLaunch(record); markPromptSent();
+ process.stdout.write('Claude Code · OpenAI Codex\n❯ ');
+ process.stdin.resume(); process.stdin.on('data', chunk => process.stdout.write(chunk));
 }
-process.stdout.write('Claude Code · OpenAI Codex\\n❯ ');
-process.stdin.resume();
-process.stdin.on('data', chunk => process.stdout.write(chunk));
 setInterval(() => {}, 1000);
 `;
-		for (const agent of ["claude", "codex"]) {
+
+		for (const agent of ["claude", "codex", "omp"]) {
 			const binaryPath = join(fakeAgentBinaryDirectory, agent);
 			writeFileSync(binaryPath, fakeAgentProgram);
 			chmodSync(binaryPath, 0o755);
@@ -178,8 +214,36 @@ setInterval(() => {}, 1000);
 				baseRef: card.baseRef,
 				worktreeMode: "inplace",
 				startInPlanMode: false,
+				requestedAgentSessionTransport: sessionTransport,
 			});
 			expect(mainStarted.ok).toBe(true);
+			await expect
+				.poll(() => {
+					const filename = join(repository.repositoryPath, `launch-${taskId}.json`);
+					return (
+						existsSync(filename) && typeof JSON.parse(readFileSync(filename, "utf8")).nativeSessionId === "string"
+					);
+				})
+				.toBe(true);
+			const mainLaunch = JSON.parse(
+				readFileSync(join(repository.repositoryPath, `launch-${taskId}.json`), "utf8"),
+			) as { nativeSessionId: string };
+			// 模拟用户在主会话里切换模型：源记录已更新，但初次启动 argv 仍保留原来的 default。
+			const mainNativeFile = join(repository.repositoryPath, `native-session-${mainLaunch.nativeSessionId}.json`);
+			const switchedMainState = JSON.parse(readFileSync(mainNativeFile, "utf8"));
+			switchedMainState.model = "source-model-after-switch";
+			writeFileSync(mainNativeFile, JSON.stringify(switchedMainState));
+			await scoped.hooks.ingest.mutate({
+				taskId,
+				workspaceId,
+				event: "agent_conversation_session_identity_observed",
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: mainAgentId,
+					nativeSessionId: mainLaunch.nativeSessionId,
+					transcriptPath: null,
+					observedAt: Date.now(),
+				},
+			});
 			const requireFromWeb = createRequire(join(sourcePath, "web-ui/package.json"));
 			const { chromium } = requireFromWeb("playwright-core") as { chromium: BrowserType };
 			browser = await chromium.launch({ headless: true });
@@ -205,6 +269,9 @@ setInterval(() => {}, 1000);
 				});
 			expect(await page.locator("#task-conversation-session-role").inputValue()).toBe("task_collaborator");
 			await page.locator("#task-conversation-session-agent").selectOption(collaborationAgentId);
+			expect(await page.locator("#task-conversation-context-source").inputValue()).toBe(
+				mainAgentId === collaborationAgentId ? "forked_from_main_current_turn" : "started_from_scratch",
+			);
 			await page.locator("#task-conversation-initial-question").fill("实现协作部分");
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-create-form.png") });
 			await page.getByRole("button", { name: "Create session", exact: true }).click();
@@ -216,13 +283,26 @@ setInterval(() => {}, 1000);
 			const sideSessionId = readFileSync(join(repository.repositoryPath, "collaboration-write-proof.txt"), "utf8");
 			const sideLaunch = JSON.parse(
 				readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"),
-			) as { agent: string; args: string[]; workspaceTaskId: string };
+			) as {
+				agent: string;
+				args: string[];
+				workspaceTaskId: string;
+				nativeSessionId: string;
+				forkSourceNativeSessionId?: string;
+				history: string[];
+				model: string;
+			};
 			expect(sideLaunch).toMatchObject({ agent: collaborationAgentId, workspaceTaskId: taskId });
 			expect(sideLaunch.args).not.toContain("read-only");
-			expect(sideLaunch.args).not.toContain("fork");
+			if (mainAgentId === collaborationAgentId) {
+				expect(sideLaunch.nativeSessionId).not.toBe(mainLaunch.nativeSessionId);
+				expect(sideLaunch.forkSourceNativeSessionId).toBe(mainLaunch.nativeSessionId);
+				expect(sideLaunch.history).toContain("主会话已有上下文");
+				expect(sideLaunch.model).toBe("source-model-after-switch");
+			}
 			const identity = {
 				sourceAgentId: collaborationAgentId,
-				nativeSessionId: "11111111-1111-4111-8111-111111111111",
+				nativeSessionId: sideLaunch.nativeSessionId,
 				transcriptPath: null,
 				observedAt: Date.now(),
 			};
@@ -245,19 +325,32 @@ setInterval(() => {}, 1000);
 				)?.id,
 			).toBe("in_progress");
 			const mainPid = mainStarted.summary?.pid;
-			const restarted = await scoped.runtime.refreshTaskTerminal.mutate({
-				taskId: sideSessionId,
-				cols: 100,
-				rows: 30,
-			});
+			const restartSideSession = async () => {
+				if (sessionTransport === "pty_terminal")
+					return await scoped.runtime.refreshTaskTerminal.mutate({ taskId: sideSessionId, cols: 100, rows: 30 });
+				await scoped.runtime.stopTaskSession.mutate({ taskId: sideSessionId });
+				const summary = (await scoped.workspace.getState.query()).sessions[sideSessionId];
+				return await scoped.runtime.startTaskSession.mutate({
+					taskId: sideSessionId,
+					workspaceTaskId: taskId,
+					agentId: collaborationAgentId,
+					baseRef: card.baseRef,
+					worktreeMode: card.worktreeMode,
+					prompt: "",
+					requestedAgentSessionTransport: sessionTransport,
+					taskConversationSessionMetadata: summary?.taskConversationSessionMetadata,
+					taskAgentPermissionMode: "bypass_all_permission_prompts",
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				});
+			};
+			const restarted = await restartSideSession();
 			expect(restarted.ok).toBe(true);
 			expect(restarted.summary?.agentId).toBe(collaborationAgentId);
 			await expect
 				.poll(
 					() =>
-						JSON.parse(
-							readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"),
-						).args.includes(identity.nativeSessionId),
+						JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"))
+							.nativeSessionId === identity.nativeSessionId,
 					{ timeout: 15_000 },
 				)
 				.toBe(true);
@@ -267,6 +360,8 @@ setInterval(() => {}, 1000);
 			await expect.poll(() => page.getByText("协作会话", { exact: true }).count(), { timeout: 15_000 }).toBe(1);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-desktop.png") });
 			await page.setViewportSize({ width: 390, height: 844 });
+			// 手机 Focus View 默认折叠导航，先通过真实入口展开，再检查协作会话。
+			await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).click();
 			await page.getByRole("button", { name: "Sessions", exact: true }).click();
 			await expect.poll(() => page.getByText("协作会话", { exact: true }).count()).toBe(1);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-mobile.png") });
@@ -287,16 +382,12 @@ setInterval(() => {}, 1000);
 					workspaceTaskId: taskId,
 					taskConversationSessionRole: "task_collaborator",
 					taskConversationSessionLaunchSettings: {
-						sessionTransport: "pty_terminal",
+						sessionTransport,
 						taskAgentPermissionMode: "bypass_all_permission_prompts",
 					},
 				},
 			});
-			const coldRestarted = await scoped.runtime.refreshTaskTerminal.mutate({
-				taskId: sideSessionId,
-				cols: 100,
-				rows: 30,
-			});
+			const coldRestarted = await restartSideSession();
 			expect(coldRestarted.ok).toBe(true);
 			await expect
 				.poll(
@@ -306,8 +397,9 @@ setInterval(() => {}, 1000);
 				)
 				.toBe(coldRestarted.summary?.pid);
 			expect(
-				JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8")).args,
-			).toContain(identity.nativeSessionId);
+				JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"))
+					.nativeSessionId,
+			).toBe(identity.nativeSessionId);
 			await scoped.runtime.stopTaskSession.mutate({ taskId });
 			const stoppedState = await scoped.workspace.getState.query();
 			expect(stoppedState.sessions[sideSessionId]?.pid).toBeNull();

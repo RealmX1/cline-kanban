@@ -6,6 +6,7 @@ import {
 import {
 	isTaskConversationSessionWithoutTaskLifecycleAuthority,
 	resolveByTheWayMainSessionForkSelection,
+	resolveTaskConversationSessionMainContextForkSelection,
 } from "../../../src/core/session-activity";
 
 describe("协作会话的角色与启动配置", () => {
@@ -69,6 +70,49 @@ describe("By the way 主对话身份边界", () => {
 			],
 		});
 		expect(selection.forkRejectionReason).toContain("主会话尚未记录可用的");
+		expect(selection.mainSessionNativeConversationSessionId).toBeUndefined();
+	});
+});
+
+describe("协作会话按精确主身份 fork", () => {
+	it.each(["claude", "codex", "omp"] as const)("%s 不受已有侧会话次数限制", (agentId) => {
+		const selection = resolveTaskConversationSessionMainContextForkSelection({
+			workspaceTaskId: "task-1",
+			sessionRole: "task_collaborator",
+			launchAgentId: agentId,
+			mainSessionWorkingDirectoryPath: "/repo",
+			mainSessionSummary: {
+				taskId: "current-main",
+				agentId,
+				startedAt: 1,
+				agentNativeConversationSessionIdentity: { sourceAgentId: agentId, nativeSessionId: "main-native-id" },
+			} as RuntimeTaskSessionSummary,
+			existingTaskConversationSessionSummaries: [
+				{
+					taskId: "side",
+					agentId,
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "task-1",
+						taskConversationSessionRole: "by_the_way",
+					},
+				} as RuntimeTaskSessionSummary,
+			],
+		});
+		expect(selection).toEqual({
+			forkRejectionReason: null,
+			mainSessionNativeConversationSessionId: "main-native-id",
+		});
+	});
+	it.each(["claude", "codex", "omp", "kimi"] as const)("%s 缺少可靠主身份不能回退 cwd-latest", (agentId) => {
+		const selection = resolveTaskConversationSessionMainContextForkSelection({
+			workspaceTaskId: "task-1",
+			sessionRole: "task_collaborator",
+			launchAgentId: agentId,
+			mainSessionWorkingDirectoryPath: "/repo",
+			mainSessionSummary: { agentId, startedAt: 1 } as RuntimeTaskSessionSummary,
+			existingTaskConversationSessionSummaries: [],
+		});
+		expect(selection.forkRejectionReason).toBeTruthy();
 		expect(selection.mainSessionNativeConversationSessionId).toBeUndefined();
 	});
 });

@@ -195,3 +195,88 @@ describe("ACP 原生会话映射的连接所有权", () => {
 		expect(newer.connection.close).not.toHaveBeenCalled();
 	});
 });
+
+describe("ACP 协作 fork", () => {
+	it.each(["exact-main", "", "--unsafe-child-id"])("拒绝无独立安全子身份的 fork 回执 %s", async (returnedId) => {
+		const { runtime } = createRuntime();
+		const fixture = prepareConnection();
+		fixture.connection.agent.request.mockImplementation(async (method: string) =>
+			method === "initialize"
+				? { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } }
+				: { sessionId: returnedId },
+		);
+		await expect(
+			runtime.startTaskConnection({
+				...resumeInput,
+				taskId: "fork-child",
+				resumePriorAgentConversationWithoutResendingPrompt: false,
+				taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+			}),
+		).rejects.toThrow("独立的新会话 ID");
+		expect(fixture.connection.agent.request.mock.calls.map(([method]) => method)).toEqual([
+			"initialize",
+			"session/fork",
+		]);
+		expect(runtime.getConnection("fork-child")).toBeNull();
+	});
+
+	it("握手后源身份已经变化时拒绝请求 fork，不创建空白替代会话", async () => {
+		const { runtime } = createRuntime();
+		const fixture = prepareConnection();
+		fixture.connection.agent.request.mockResolvedValue({
+			protocolVersion: 1,
+			agentCapabilities: { sessionCapabilities: { fork: {} } },
+		});
+		await expect(
+			runtime.startTaskConnection({
+				...resumeInput,
+				taskId: "fork-child",
+				resumePriorAgentConversationWithoutResendingPrompt: false,
+				taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+				revalidateTaskConversationSessionMainContextForkSource: async () => {
+					throw new Error("源身份已变化");
+				},
+			}),
+		).rejects.toThrow("源身份已变化");
+		expect(fixture.connection.agent.request.mock.calls.map(([method]) => method)).toEqual(["initialize"]);
+	});
+
+	it.each([true, false])("按精确源身份 fork，能力声明=%s", async (supported) => {
+		const { runtime } = createRuntime();
+		const fixture = prepareConnection();
+		fixture.connection.agent.request.mockImplementation(async (method: string) => {
+			if (method === "initialize")
+				return {
+					protocolVersion: 1,
+					agentCapabilities: { loadSession: true, sessionCapabilities: supported ? { fork: {} } : {} },
+				};
+			if (method === "session/fork") return { sessionId: "forked-child" };
+			return {};
+		});
+		const promise = runtime.startTaskConnection({
+			...resumeInput,
+			taskId: "fork-child",
+			resumePriorAgentConversationWithoutResendingPrompt: false,
+			taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+		});
+		if (!supported) {
+			await expect(promise).rejects.toThrow("fork");
+			expect(fixture.connection.agent.request.mock.calls.map(([method]) => method)).toEqual(["initialize"]);
+		} else {
+			const connection = await promise;
+			expect(connection.sessionId).toBe("forked-child");
+			expect(fixture.connection.agent.request).toHaveBeenCalledWith("session/fork", {
+				sessionId: "exact-main",
+				cwd: resumeInput.cwd,
+				mcpServers: [],
+			});
+			expect(fixture.connection.agent.request).toHaveBeenCalledWith("session/load", {
+				sessionId: "forked-child",
+				cwd: resumeInput.cwd,
+				mcpServers: [],
+			});
+			expect(fixture.connection.agent.request.mock.calls.some(([method]) => method === "session/new")).toBe(false);
+			connection.close();
+		}
+	});
+});
