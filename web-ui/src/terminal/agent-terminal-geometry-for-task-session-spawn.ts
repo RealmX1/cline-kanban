@@ -6,22 +6,21 @@ import {
 	type TaskSessionGeometry,
 } from "@/runtime/task-session-geometry";
 import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
+import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
 
 // 起 agent 会话时给 PTY 的尺寸：终端已挂载过就用实测的 per-task 几何；从没挂载过就按用户持久化的详情终端面板
 // 宽度估算，并用当前窗口宽度做上界——TUI 按启动宽度硬折行历史，起错宽度之后的 resize 修不回来。
 // 浏览器直接起会话（runtime.startTaskSession）与经 taskCardAction 起会话共用这一份估算。
 //
-// 持久化宽度被钳在 [320, 1400]，但没有钳到**当前**窗口：宽窗口下存的宽度可能超过窄窗口能显示的宽度（详情页把
-// agent 面板渲染成 min(persisted, container − MIN_DETAIL_DIFF_PANEL_WIDTH_PX)）。`window.innerWidth` 只是（尚未
-// 挂载的）详情容器宽度的宽松上界；clampPanelWidthToWindow 在拿不到窗口宽度时回落到持久化宽度，所以不会比改动前更窄。
+// 手机详情页的终端与 diff 分属不同 tab，终端使用整页宽度。后台启动时若仍扣掉桌面 diff 面板的 360px，
+// 常见手机视口会被估成 1–3 列，Codex 无法显示就绪提示符，首条 prompt 便会等到打开详情后的 resize 才投递。
+// 桌面仍按持久化面板宽度估算，并为并排 diff 留出空间。
 export function resolveAgentTerminalGeometryForTaskSessionSpawn(taskId: string): TaskSessionGeometry {
-	const windowDisplayableTerminalPanelWidth = clampPanelWidthToWindow(
-		loadDetailTerminalPanelWidth(),
-		MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-		window.innerWidth,
-	);
-	return (
-		getTerminalGeometry(taskId) ??
-		estimateTaskAgentTerminalGeometry(windowDisplayableTerminalPanelWidth, window.innerHeight)
-	);
+	const measuredTerminalGeometry = getTerminalGeometry(taskId);
+	if (measuredTerminalGeometry) return measuredTerminalGeometry;
+	const windowDisplayableTerminalPanelWidth =
+		matchesMobileViewportNow() && Number.isFinite(window.innerWidth) && window.innerWidth > 0
+			? window.innerWidth
+			: clampPanelWidthToWindow(loadDetailTerminalPanelWidth(), MIN_DETAIL_DIFF_PANEL_WIDTH_PX, window.innerWidth);
+	return estimateTaskAgentTerminalGeometry(windowDisplayableTerminalPanelWidth, window.innerHeight);
 }
