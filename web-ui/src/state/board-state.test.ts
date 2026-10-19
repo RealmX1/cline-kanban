@@ -1223,6 +1223,22 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
 		id: "f1e2d",
+		mainTaskConversationSessionId: "codex-peer-session",
+		taskMainSessionHandover: {
+			handoverId: "handover-1",
+			sourceTaskConversationSessionId: "f1e2d",
+			targetTaskConversationSessionId: "codex-peer-session",
+			destination: { kind: "existing_codex_session", taskConversationSessionId: "codex-peer-session" },
+			status: "awaiting_user_message",
+			createdAt: 1,
+			updatedAt: 2,
+			userContextNotes: "只汇报现状",
+			additionalPlanReferencePaths: [],
+			materialDirectoryPath: "/persistent/handover-1",
+			errorMessage: null,
+			reportDeliveryStartedAt: 2,
+			reportDeliveryAttempt: 0,
+		},
 		title: "Every field populated",
 		prompt: "Carry every field through normalization",
 		startInPlanMode: true,

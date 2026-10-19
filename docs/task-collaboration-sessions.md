@@ -24,6 +24,24 @@ PTY、ACP 和既有 SDK 通路均保留宿主与当前会话两个 ID。启动�
 
 RVF 的编辑归属仍按各会话记录；共享 worktree 的全部改动不会自动归入主会话。本功能不迁移跨 agent 历史，不聚合平级会话状态，也不实现完整 Task Force。
 
+## Claude 到 Codex 的主会话交接
+
+Sessions 提供「交接给 Codex」。默认创建全新 Codex，也可选择同任务已有且具备可靠原生身份的 Codex 协作会话。仅支持 Claude → Codex；不转换历史，不交换 Task、Kanban session 或原生 ID。原 Claude 显示为「前主会话」。任务内状态汇总由独立 Backlog `7ae0f` 跟进。
+
+`RuntimeBoardCard.mainTaskConversationSessionId` 是当前主责任的持久权威，缺省时回落到卡片 ID。`taskConversationSessionRole` 是按该绑定派生的当前角色；`taskConversationSessionRoleAtCreation` 保留创建角色。任务展示、默认选择、CLI 任务消息、任务启动/恢复、通知、移列与 checkpoint 读取当前绑定。显式选择前主会话仍可操作它；所有 hook 始终更新来源 session，不能以宿主 Task ID 冒充新主会话。旧浏览器整板保存无法覆盖主绑定或丢弃新主会话。
+
+`startTaskSession` 省略 `workspaceTaskId` 时按 Task 默认入口跟随当前主绑定；显式传入时按 session 寻址，前主的 session ID 等于宿主 Task ID 时也同样适用。Sessions 的重启按钮走 `refreshTaskTerminal`，始终按所选 session 的持久归属、原生身份与启动快照恢复，不改变主绑定。双方启动快照与主绑定一起落盘；新 Codex 尚未首次启动时安全地全新启动，已有 peer 接任 main 后仍按自己的快照冷恢复和接收已保存答案。
+
+交接材料契约在 `src/core/task-main-session-handover-contract.ts`，当前 Claude 采集器在 `src/agent-session-history/claude-main-session-handover-material.ts`。材料包括原需求与约束、当前阶段目标、计划路径与批准证据、精确 transcript 引用、最后可确认的 agent 正文及来源、工作区 git 状态和用户补充。只按已确认的原生身份寻址，不用 cwd-latest；只有成功 ExitPlanMode 回执与当前计划正文逐字匹配时才标记已批准，其余保持未确认。缺失明确列出，允许继续。
+
+材料正文独立于交接控制记录，持久保存在运行时 HOME 的 `cross-task-handoff-artifacts/<workspaceId>/task-<taskId>-main-session-handover/<handoverId>/`，包含 `HANDOVER.md`、结构化材料与计划/transcript 快照。未来 intention system 可向同一材料范式提供需求、计划与来源证据；当前不依赖该系统，也不把旧计划批准视为本次继续实施的授权。
+
+原 Claude 或所选 Codex 正在生成时，提供「暂不交接」与默认「等待两者都停下后自动交接」。等待记录跨浏览器关闭及运行时重启保留，可取消；协调器在空闲后重采材料、复核双方状态与绑定，再切换责任。不会主动中断正在生成的会话。
+
+新主会话使用自己的启动设置、权限和原生身份；已有 peer 接任时按精确 Codex ID 续跑。首条交接请求通过 `/plan` 要求只读汇报「计划总览、已经实现、有待进行」，随后等用户。交接期间及等用户期间暂停自动继续、排队投递、自动 RVF/收尾入口；真人消息解除等待。Plan 与权限轴正交，不把 Plan 起步翻译成降权。
+
+请求 ID、预留目标 ID 和投递账本保证幂等。确定尚未投递的失败可重试并复用目标 session；跨重启后回执不确定时停止自动重放，用户检查 Codex 后可直接发消息接续。绑定已切换后的失败不会静默退回 Claude。旧队列保留原 session；新任务消息在入队时固定当前 main，回执仍按调用方的 Task ID 记账。
+
 ## 自动化验证
 
 定向运行时测试覆盖角色契约、完整终端 agent 候选、ACP 启动归属和冷恢复、独立权限、混合通道停止、OMP 通道切换、通知与关系归属。前端测试覆盖候选来源、未安装禁用、创建失败保留输入和 By the way 回归。
@@ -31,3 +49,5 @@ RVF 的编辑归属仍按各会话记录；共享 worktree 的全部改动不会
 `test/integration/task-collaboration-sessions-real-browser.integration.test.ts` 使用隔离 HOME、fixture Git 仓库、随机端口、真实浏览器与真实 PTY。测试替身只模拟 agent CLI，不请求模型；矩阵覆盖 Claude → Codex、Codex → Claude、Claude → Claude，验证共享目录写入、独立刷新、浏览器重载、运行时重启与整任务停止。默认跳过，设置 `KANBAN_COLLABORATION_SESSION_PACKAGED_CLI_PATH` 后经 `npm run test:guarded -- --project runtime-integration <测试文件>` 执行；可用 `KANBAN_COLLABORATION_SESSION_BROWSER_EVIDENCE_DIRECTORY` 指定持久证据目录。
 
 真实 agent 的配置与原生身份采集由部署后自然使用验证补充。该验证只读观察现有会话，不启动模型或创建生产测试任务；尚未产生跨 agent 协作会话时如实返回未通过。
+
+`test/integration/task-main-session-handover-coordinator.integration.test.ts` 覆盖持久等待、取消、重启恢复、已有 peer、并发互斥、材料缺失、启动重试与不确定回执。`test/integration/task-main-session-handover-real-browser.integration.test.ts` 验证打包态真实浏览器和 PTY 的新建/已有 Codex 接任、迟到 Claude hook 隔离及精确冷恢复。后者需设置 `KANBAN_MAIN_SESSION_HANDOVER_PACKAGED_CLI_PATH`，可用 `KANBAN_MAIN_SESSION_HANDOVER_BROWSER_EVIDENCE_DIRECTORY` 保存持久截图；隔离 HOME 下可通过 `PLAYWRIGHT_BROWSERS_PATH` 指定已安装的浏览器缓存。构建前须检查 `dist` 和 `web-ui/dist` 是否为共享符号链接；本任务测试使用独立构建目录。

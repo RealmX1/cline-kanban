@@ -19,6 +19,7 @@ import type {
 } from "../core/api-contract";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	createPendingTaskMessageInjectionRecord,
 	findTaskMessageInjectionRecord,
@@ -31,7 +32,7 @@ import {
 	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
-import { getWorkspaceDirectoryPath } from "../state/workspace-state";
+import { getWorkspaceDirectoryPath, loadWorkspaceBoardById } from "../state/workspace-state";
 
 // 调用方最多能要求等多久。与人排条目的保质期同一个数：队列里任何条目都不该活过它（终态保留、裁剪、
 // 投影都按这个量级设计）。契约里写的是 86 400 000。
@@ -73,6 +74,9 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			error: `maxWaitForAgentIdleMs must not exceed ${MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS} (24 hours).`,
 		};
 	}
+	const board = await loadWorkspaceBoardById(workspaceId);
+	const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
+	const destinationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
 	const nowEpochMs = (deps.now ?? (() => Date.now()))();
 	const ledgerPath = buildInjectionLedgerPathForWorkspace(workspaceId);
 	const queueEntryId = buildQueuedProgrammaticInjectionQueueEntryId(idempotencyKey);
@@ -133,7 +137,9 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 		const { snapshot, outcome } = await enqueueAgentIdleGatedProgrammaticInjectionIntoQueue({
 			workspaceId,
 			enqueue: {
-				taskId,
+				taskId: destinationSessionId,
+				workspaceTaskId: card?.id ?? taskId,
+				injectionLedgerTaskId: taskId,
 				queueEntryId,
 				text: request.text,
 				injectionLedgerIdempotencyKey: idempotencyKey,
@@ -172,7 +178,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	// 回 ok:false，调用方会换 key 重投（同一段话送两遍），而真实投递结果回写账本只会拿到 already_settled，
 	// 账本那条「确定没送达」再也纠正不了。所以通知失败只吞掉，账本保持 pending、返回值保持 ok:true。
 	try {
-		await deps.notifyQueueMutated?.(workspaceId, taskId, queueSnapshotAfterDurableEnqueue);
+		await deps.notifyQueueMutated?.(workspaceId, destinationSessionId, queueSnapshotAfterDurableEnqueue);
 	} catch {
 		// 有意吞掉，理由见上。
 	}
@@ -191,19 +197,23 @@ export async function cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
 	idempotencyKey: string,
 ): Promise<"cancelled_before_delivery" | null> {
 	const findEntry = (snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot) =>
-		(snapshot.entriesByTaskId[taskId] ?? []).find(
-			(entry) => entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey === idempotencyKey,
-		) ?? null;
+		Object.values(snapshot.entriesByTaskId)
+			.flat()
+			.find(
+				(entry) =>
+					(entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerTaskId ?? entry.taskId) === taskId &&
+					entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey === idempotencyKey,
+			) ?? null;
 	const before = findEntry(await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId));
 	if (before === null || (before.deliveryState !== "queued" && before.deliveryState !== "claimed_for_dispatch")) {
 		return null;
 	}
 	const snapshot = await mutateWorkspaceQueuedTaskPromptDeliveries(
 		workspaceId,
-		{ kind: "cancel_queued_prompt_delivery", taskId, queueEntryId: before.queueEntryId },
+		{ kind: "cancel_queued_prompt_delivery", taskId: before.taskId, queueEntryId: before.queueEntryId },
 		(deps.now ?? (() => Date.now()))(),
 	);
-	await deps.notifyQueueMutated?.(workspaceId, taskId, snapshot);
+	await deps.notifyQueueMutated?.(workspaceId, before.taskId, snapshot);
 	// 读与撤之间它可能刚被交给终端投递（store 的取消只动 queued / claimed）——那就不是我们撤下的，交给 PTY 取消。
 	return findEntry(snapshot)?.deliveryState === "cancelled" ? "cancelled_before_delivery" : null;
 }

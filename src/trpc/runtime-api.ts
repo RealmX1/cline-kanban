@@ -101,6 +101,7 @@ import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-pro
 import {
 	isSessionInActiveTurn,
 	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	isTaskMainSessionHandoverSuspendingAutomaticActions,
 	resolveByTheWayMainSessionForkSelection,
 	resolveSessionFacets,
 } from "../core/session-activity";
@@ -110,6 +111,11 @@ import {
 	getTaskColumnId,
 	updateTask,
 } from "../core/task-board-mutations";
+import {
+	doesConversationSessionBelongToTask,
+	projectConversationSessionMetadataForMainSessionBinding,
+	resolveMainTaskConversationSessionId,
+} from "../core/task-main-conversation-session-binding";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -136,6 +142,7 @@ import {
 	saveAgentRaisedPendingUserDecisionAnswerDraft,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
+import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
@@ -153,7 +160,12 @@ import {
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
-import { listWorkspaceIndexEntries, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
+import {
+	listWorkspaceIndexEntries,
+	loadPersistedWorkspaceStateById,
+	loadWorkspaceBoardById,
+	mutateWorkspaceState,
+} from "../state/workspace-state";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import { isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible } from "../terminal/agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
@@ -287,7 +299,7 @@ async function persistTaskCollaborationSessionBeforeReturningLaunchResponse(
 	workspacePath: string,
 	summary: RuntimeTaskSessionSummary,
 ): Promise<void> {
-	if (summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "task_collaborator") return;
+	if (!summary.taskConversationSessionMetadata) return;
 	await mutateWorkspaceState(
 		workspacePath,
 		buildTaskMutationIntentForKanbanRuntimeSystemComponent(
@@ -502,6 +514,7 @@ async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(
 async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
 	workspaceScope: RuntimeTrpcWorkspaceScope;
 	taskId: string;
+	workspaceTaskId?: string;
 	agentId: RuntimeAgentId;
 	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 }): Promise<void> {
@@ -517,11 +530,10 @@ async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
 				"task_session_start_launched_agent_id_persistence",
 			),
 			(state) => {
-				const applied = applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
-					state.board,
-					options.taskId,
-					options.agentId,
-				);
+				const card = findWorkspaceBoardCard(state.board, options.workspaceTaskId ?? options.taskId);
+				if (!card || resolveMainTaskConversationSessionId(card) !== options.taskId)
+					return { board: state.board, value: false, save: false };
+				const applied = applyMostRecentlyLaunchedAgentSessionAgentIdToTask(state.board, card.id, options.agentId);
 				if (!applied.updated) {
 					return { board: state.board, value: false, save: false };
 				}
@@ -562,17 +574,22 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		summary: RuntimeTaskSessionSummary,
 	): Promise<RuntimeTaskSessionStartRequest | null> => {
-		const metadata = summary.taskConversationSessionMetadata;
-		const settings = metadata?.taskConversationSessionLaunchSettings;
-		const workspaceTaskId = metadata?.workspaceTaskId ?? summary.taskId;
+		const workspaceTaskId = summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId;
 		const card = findWorkspaceBoardCard(await loadWorkspaceBoardById(workspaceScope.workspaceId), workspaceTaskId);
-		if (!card) return null;
+		if (!card || !doesConversationSessionBelongToTask(summary, workspaceTaskId)) return null;
+		const metadata = projectConversationSessionMetadataForMainSessionBinding(card, summary);
+		const settings = metadata?.taskConversationSessionLaunchSettings;
 		const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
 		const observedAgentId =
 			summary.agentId ??
 			getRuntimeAgentCatalogEntry(summary.agentNativeConversationSessionIdentity?.sourceAgentId as RuntimeAgentId)
 				?.id;
-		if (metadata?.taskConversationSessionRole === "task_collaborator" && (!settings || !observedAgentId)) return null;
+		if (
+			(metadata?.taskConversationSessionRoleAtCreation ?? metadata?.taskConversationSessionRole) ===
+				"task_collaborator" &&
+			(!settings || !observedAgentId)
+		)
+			return null;
 		const agentId =
 			observedAgentId ??
 			card.mostRecentlyLaunchedAgentSessionAgentId ??
@@ -589,7 +606,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			taskAgentPermissionMode: settings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
 			requestedAgentSessionTransport:
 				settings?.sessionTransport ?? resolveRuntimeAgentSessionTransportFromSummary(summary),
-			resumePriorAgentConversationWithoutResendingPrompt: true,
+			// 原子切主时已预留、但从未启动的新 Codex 必须全新开局，不能误续同目录的其他 Codex。
+			resumePriorAgentConversationWithoutResendingPrompt:
+				summary.startedAt != null || summary.agentNativeConversationSessionIdentity != null,
 			terminalAgentModelOverrideSettings: settings
 				? settings.terminalAgentModelOverrideSettings
 				: card.terminalAgentModelOverrideSettings,
@@ -611,7 +630,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return true;
 		}
 		const persistedSummary = terminalManager.getSummary(taskId);
-		if (persistedSummary?.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") {
+		if (persistedSummary?.taskConversationSessionMetadata) {
 			const resumeRequest = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, persistedSummary);
 			if (!resumeRequest || resumeRequest.requestedAgentSessionTransport !== "pty_terminal") return false;
 			const response = await runtimeApi.startTaskSession(workspaceScope, resumeRequest);
@@ -843,7 +862,51 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				});
 			};
 			try {
-				const body = parseTaskSessionStartRequest(input);
+				let body = parseTaskSessionStartRequest(input);
+				const startBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const directCard = findWorkspaceBoardCard(startBoard, body.taskId);
+				if (
+					!body.workspaceTaskId &&
+					directCard?.mainTaskConversationSessionId &&
+					directCard.mainTaskConversationSessionId !== body.taskId
+				) {
+					const manager = await deps.getScopedTerminalManager(workspaceScope);
+					const primary = manager.getSummary(directCard.mainTaskConversationSessionId);
+					if (!primary) return { ok: false, summary: null, error: "当前主会话记录缺失，未退回原 Claude 会话。" };
+					const resumed = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, primary);
+					if (!resumed) return { ok: false, summary: null, error: "当前主会话无法恢复。" };
+					return await runtimeApi.startTaskSession(workspaceScope, resumed);
+				}
+				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
+				if (
+					body.workspaceTaskId &&
+					owningCard?.id === body.taskId &&
+					resolveMainTaskConversationSessionId(owningCard) !== body.taskId
+				) {
+					// workspaceTaskId 显式寻址会话，即使前主 session ID 恰好等于宿主 Task ID 也不重定向。
+					// 原主使用自己的 durable 身份与配置；当前卡片已属于接任者，不能从它借 agent/模型。
+					const manager = await deps.getScopedTerminalManager(workspaceScope);
+					const formerMain = manager.getSummary(body.taskId);
+					const resumed = formerMain
+						? await buildTaskConversationSessionDurableResumeRequest(workspaceScope, formerMain)
+						: null;
+					if (!resumed) return { ok: false, summary: null, error: "前主会话缺少可恢复的持久记录。" };
+					body = {
+						...resumed,
+						cols: body.cols,
+						rows: body.rows,
+						taskSessionStartOriginDeclaredByClient: body.taskSessionStartOriginDeclaredByClient,
+					};
+				}
+				if (owningCard && body.taskConversationSessionMetadata) {
+					body.taskConversationSessionMetadata = projectConversationSessionMetadataForMainSessionBinding(
+						owningCard,
+						{
+							taskId: body.taskId,
+							taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						} as RuntimeTaskSessionSummary,
+					);
+				}
 				diagnosticTaskId = body.taskId;
 				requestedAgentIdForDiagnostics = body.agentId ?? null;
 				startFailurePhase = "verify_host_task_card_persisted_on_workspace_board";
@@ -909,7 +972,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const shouldCaptureTurnCheckpoint =
 					!body.resumeFromTrash &&
 					!isHomeAgentSessionId(body.taskId) &&
-					!isTaskConversationSessionWithoutTaskLifecycleAuthority(body);
+					!isTaskConversationSessionWithoutTaskLifecycleAuthority(body) &&
+					!body.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover;
 
 				// Per-task config source-of-truth precedence:
 				//
@@ -934,13 +998,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				startFailurePhase = "validate_task_conversation_session_request";
 				let taskConversationSessionMetadata = body.taskConversationSessionMetadata;
 				let byTheWayMainSessionForkSourceNativeSessionId: string | undefined;
-				const isSideConversationSession = isTaskConversationSessionWithoutTaskLifecycleAuthority(body);
-				const isTaskCollaborator =
-					taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator";
+				const creationRole =
+					taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation ??
+					taskConversationSessionMetadata?.taskConversationSessionRole;
+				const isSideConversationSession = creationRole !== undefined && creationRole !== "main";
+				const isTaskCollaborator = creationRole === "task_collaborator";
 				const isByTheWaySession = taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way";
 				if (
 					taskConversationSessionMetadata &&
-					(taskConversationSessionMetadata.taskConversationSessionRole === "main") !==
+					(creationRole === "main") !==
 						(taskConversationSessionMetadata.taskConversationSessionContextSource === "main")
 				) {
 					throw new Error("Task conversation session role and context source are inconsistent.");
@@ -982,8 +1048,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						workspaceTaskId,
 						launchAgentId: effectiveAgentId,
 						mainSessionSummary:
-							existingTaskConversationSessionSummaries.find((summary) => summary.taskId === workspaceTaskId) ??
-							terminalManager.getSummary(workspaceTaskId),
+							existingTaskConversationSessionSummaries.find(
+								(summary) =>
+									summary.taskId ===
+									(owningCard ? resolveMainTaskConversationSessionId(owningCard) : workspaceTaskId),
+							) ??
+							terminalManager.getSummary(
+								owningCard ? resolveMainTaskConversationSessionId(owningCard) : workspaceTaskId,
+							),
 						mainSessionWorkingDirectoryPath: taskCwd,
 						existingTaskConversationSessionSummaries,
 					});
@@ -1102,6 +1174,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					}
 					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 						workspaceScope,
+						workspaceTaskId,
 						taskId: body.taskId,
 						agentId: effectiveAgentId,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -1211,6 +1284,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					// 是 Cline，卡片上必须记下这个事实。
 					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 						workspaceScope,
+						workspaceTaskId,
 						taskId: body.taskId,
 						agentId: summary.agentId ?? effectiveAgentId,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -1322,6 +1396,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 					workspaceScope,
+					workspaceTaskId,
 					taskId: body.taskId,
 					agentId: resolved.agentId,
 					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -1579,6 +1654,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 主会话下一次硬中断后会被兜底解析成侧问用的那个 agent。
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 					workspaceScope,
+					workspaceTaskId,
 					taskId: body.taskId,
 					agentId: resolved.agentId,
 					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -2552,16 +2628,83 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 搬出去是因为排队投递 dispatcher 也要用同一条出口，而它由 turn 结束边沿驱动、手上没有请求，
 		// 拿不到这个每请求新建的 runtimeApi 闭包。
 		sendTaskChatMessage: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+			const addressedCard = findWorkspaceBoardCard(board, input.taskId);
+			const addressedTaskId = input.taskId;
+			const resolvedSessionId =
+				input.targetTaskConversationSessionId ??
+				(addressedCard ? resolveMainTaskConversationSessionId(addressedCard) : input.taskId);
+			if (input.targetTaskConversationSessionId && addressedCard) {
+				const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+				const selected = state.sessions[resolvedSessionId];
+				if (!selected || !doesConversationSessionBelongToTask(selected, addressedCard.id)) {
+					return { ok: false, summary: null, error: "所选会话不属于该任务。" };
+				}
+			}
+			input = { ...input, taskId: resolvedSessionId };
+			if (
+				input.source != null &&
+				input.source !== "task_main_session_handover" &&
+				board.columns.some((column) =>
+					column.cards.some(
+						(card) =>
+							(card.id === addressedTaskId ||
+								card.mainTaskConversationSessionId === resolvedSessionId ||
+								card.taskMainSessionHandover?.sourceTaskConversationSessionId === resolvedSessionId) &&
+							isTaskMainSessionHandoverSuspendingAutomaticActions(card),
+					),
+				)
+			) {
+				return { ok: false, summary: null, error: "主会话正在交接或等待用户消息，暂不接受自动继续。" };
+			}
+			const humanMessageHandoverId =
+				input.source == null
+					? (board.columns
+							.flatMap((column) => column.cards)
+							.find((card) => card.mainTaskConversationSessionId === resolvedSessionId)?.taskMainSessionHandover
+							?.handoverId ?? null)
+					: null;
+			const completeHandoverAfterConfirmedHumanMessage = async () => {
+				if (!humanMessageHandoverId) return;
+				try {
+					const manager = await deps.getScopedTerminalManager(workspaceScope);
+					await completeTaskMainSessionHandoverAfterUserMessage({
+						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
+						taskConversationSessionId: resolvedSessionId,
+						promptText: input.text,
+						expectedHandoverId: humanMessageHandoverId,
+						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
+							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+					});
+				} catch (error) {
+					// 消息已经提交，落库失败不能把它报成投递失败；hold 保留，原生 hook 或后续真人消息可重试。
+					logAgentSessionRetentionWarning(
+						`main-session-handover-user-message-completion-failed workspaceId=${workspaceScope.workspaceId} taskId=${resolvedSessionId} reason=${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			};
 			let taskChatSendResponse: RuntimeTaskChatSendResponse | null = null;
 			try {
-				if (input.source == null) {
+				if (
+					input.source == null ||
+					(addressedCard?.mainTaskConversationSessionId &&
+						!isTaskMainSessionHandoverSuspendingAutomaticActions(addressedCard))
+				) {
 					const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 					const previousSummary =
 						acpService.getSummary(input.taskId) ?? terminalManager.getSummary?.(input.taskId);
 					const metadata = previousSummary?.taskConversationSessionMetadata;
 					const settings = metadata?.taskConversationSessionLaunchSettings;
-					if (metadata?.taskConversationSessionRole === "task_collaborator" && settings && previousSummary) {
+					if (
+						metadata &&
+						(metadata.taskConversationSessionRole === "task_collaborator" ||
+							(metadata.taskConversationSessionRole === "main" &&
+								metadata.workspaceTaskId !== previousSummary?.taskId)) &&
+						settings &&
+						previousSummary
+					) {
 						const resumedFromMemory =
 							settings.sessionTransport === "acp_stdio_subprocess"
 								? await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(input.taskId)
@@ -2585,12 +2728,33 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
 						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
 						loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
+						programmaticInjectionLedgerTaskId: addressedTaskId,
+						// 受理或粘入输入框都不算真人已继续；PTY 必须等真实提交回执，失败仍保留交接 hold。
+						...(humanMessageHandoverId
+							? {
+									onProgrammaticTerminalDeliverySettled: (outcome: TaskChatInputDeliveryOutcome) => {
+										if (
+											outcome.status === "delivered_and_submit_confirmed" ||
+											outcome.status === "delivered_queued_behind_active_agent_turn"
+										) {
+											void completeHandoverAfterConfirmedHumanMessage();
+										}
+									},
+								}
+							: {}),
 						resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
 						...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
 					},
 					workspaceScope,
 					input,
 				);
+				if (
+					taskChatSendResponse.ok &&
+					(taskChatSendResponse.terminalDelivery?.status === "delivered_and_submit_confirmed" ||
+						taskChatSendResponse.terminalDelivery?.status === "delivered_queued_behind_active_agent_turn")
+				) {
+					await completeHandoverAfterConfirmedHumanMessage();
+				}
 				return taskChatSendResponse;
 			} finally {
 				recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking({
@@ -2725,10 +2889,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					return { ok: true, cancelResult: cancelledWhileAwaitingAgentIdle };
 				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				return {
-					ok: true,
-					cancelResult: terminalManager.cancelTaskChatInputDelivery(input.taskId, input.idempotencyKey),
-				};
+				let cancelResult = terminalManager.cancelTaskChatInputDelivery(input.taskId, input.idempotencyKey);
+				if (cancelResult === "no_pending_delivery") {
+					// 回执按 Task 寻址，终端投递按固定 session 寻址；先试原 ID，再找同任务持有该 key 的会话。
+					for (const summary of terminalManager.listSummaries()) {
+						if (summary.taskId === input.taskId || !doesConversationSessionBelongToTask(summary, input.taskId))
+							continue;
+						cancelResult = terminalManager.cancelTaskChatInputDelivery(summary.taskId, input.idempotencyKey);
+						if (cancelResult !== "no_pending_delivery") break;
+					}
+				}
+				return { ok: true, cancelResult };
 			} catch (error) {
 				return {
 					ok: false,

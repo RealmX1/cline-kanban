@@ -1,4 +1,5 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, Play, RotateCcw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -135,7 +136,7 @@ function ColumnSection({
 		buildTaskCardBusinessProps({
 			card,
 			columnId: column.id,
-			sessionSummary: taskSessions[card.id],
+			sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 			selected: card.id === selectedCardId,
 			handlers: {
 				onStartTask,

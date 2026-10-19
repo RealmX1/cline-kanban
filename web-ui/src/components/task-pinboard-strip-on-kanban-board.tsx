@@ -1,3 +1,4 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, Pin } from "lucide-react";
 import type { ReactElement } from "react";
 
@@ -84,7 +85,7 @@ export function TaskPinboardStripOnKanbanBoard({
 								{...buildTaskCardBusinessProps({
 									card,
 									columnId,
-									sessionSummary: taskSessions[card.id],
+									sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 									handlers,
 									onActivateCard,
 									workspacePath,

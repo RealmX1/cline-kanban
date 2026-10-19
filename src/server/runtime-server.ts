@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
-
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import {
@@ -40,6 +39,10 @@ import {
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
+import {
+	projectConversationSessionMetadataForMainSessionBinding,
+	resolveMainTaskConversationSessionId,
+} from "../core/task-main-conversation-session-binding";
 import {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
@@ -122,6 +125,7 @@ import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-d
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
+import { createTaskMainSessionHandoverCoordinator } from "./task-main-session-handover-coordinator";
 import {
 	enumerateTaskResourceUsageAttributionRoots,
 	type TaskResourceUsageAttributionSessionSource,
@@ -429,7 +433,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
 			return workspacePath === null ? null : { workspaceId, workspacePath };
 		},
-		sendThroughTaskChatTransports: async (scope, request, onProgrammaticTerminalDeliverySettled) =>
+		sendThroughTaskChatTransports: async (
+			scope,
+			request,
+			onProgrammaticTerminalDeliverySettled,
+			injectionLedgerTaskId,
+		) =>
 			await sendTaskChatMessageAcrossSessionTransports(
 				{
 					getScopedTerminalManager,
@@ -440,6 +449,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 					onProgrammaticTerminalDeliverySettled,
+					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
 				},
 				scope,
 				request,
@@ -702,6 +712,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		resolveCurrentTaskConversationSessionSummaryForLifecycle: async (
+			workspaceId: string,
+			summary: RuntimeTaskSessionSummary,
+		) => {
+			const board = await loadWorkspaceBoardById(workspaceId);
+			const taskId = summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId;
+			const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+			return card
+				? {
+						...summary,
+						taskConversationSessionMetadata: projectConversationSessionMetadataForMainSessionBinding(
+							card,
+							summary,
+						),
+					}
+				: summary;
+		},
 		notifyPromptDraftUserPromptSubmitted: promptDraftUsageService.notifyUserPromptSubmitted,
 		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
@@ -720,12 +747,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
 
-	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
-		const requestUrl = new URL(req.url ?? "/", "http://localhost");
-		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
-		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
-		// 与路由上暴露的是同一个实例，不复制逻辑。
-		const runtimeApi = createRuntimeApi({
+	const createRuntimeApiForTaskMainSessionHandover = () =>
+		createRuntimeApi({
 			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
 			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
 			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
@@ -745,6 +768,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			runUpdateNow: deps.runUpdateNow,
 			queuedTaskPromptDeliveryDispatcher,
 		});
+	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
+		getTerminalManager: getScopedTerminalManager,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		startTaskSession: (scope, input) => createRuntimeApiForTaskMainSessionHandover().startTaskSession(scope, input),
+		sendTaskChatMessage: (scope, input, evidence) =>
+			createRuntimeApiForTaskMainSessionHandover().sendTaskChatMessage(scope, input, evidence),
+		serializer: taskCardActionPerTaskCommandSerializer,
+		runCommand: deps.runCommand,
+		warn: deps.warn,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+	});
+
+	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
+		const requestUrl = new URL(req.url ?? "/", "http://localhost");
+		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
+		// 与路由上暴露的是同一个实例，不复制逻辑。
+		const runtimeApi = createRuntimeApiForTaskMainSessionHandover();
 		const workspaceApi = createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 			getScopedClineTaskSessionService,
@@ -770,6 +811,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 			},
 			runtimeApi,
+			taskMainSessionHandoverApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActionApi({
 				runtimeApi,
@@ -850,11 +892,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const clineTaskSessionService = await getScopedClineTaskSessionService(scope);
 					const board = await loadWorkspaceBoardById(scope.workspaceId);
 					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					const conversationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
 					const isClineTask =
-						clineTaskSessionService.getSummary(taskId)?.agentId === "cline" || card?.agentId === "cline";
+						clineTaskSessionService.getSummary(conversationSessionId)?.agentId === "cline" ||
+						card?.agentId === "cline";
 					if (isClineTask) {
 						// Cline（in-process SDK）：取任务聊天记录最后一条 assistant message；拿不到时优雅降级为 null。
-						const messages = await clineTaskSessionService.loadTaskSessionMessages(taskId);
+						const messages = await clineTaskSessionService.loadTaskSessionMessages(conversationSessionId);
 						let lastAssistantMessageContent: string | null = null;
 						for (const message of messages) {
 							if (message.role === "assistant") {
@@ -870,11 +914,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					// 于是预览恒读 ACP 那份空消息表。
 					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
 					const isAcpTask = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
-						acpTaskSessionService.getSummary(taskId),
+						acpTaskSessionService.getSummary(conversationSessionId),
 					);
 					if (isAcpTask) {
 						let lastAcpAssistantMessageContent: string | null = null;
-						for (const message of acpTaskSessionService.listMessages(taskId)) {
+						for (const message of acpTaskSessionService.listMessages(conversationSessionId)) {
 							if (message.role === "assistant") {
 								lastAcpAssistantMessageContent = message.content;
 							}
@@ -883,7 +927,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					}
 					// 终端 agent（Claude 等）：取 hook 采集的最近 finalMessage；无则优雅降级为 null。
 					const manager = await getScopedTerminalManager(scope);
-					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
+					return manager.getSummary(conversationSessionId)?.latestHookActivity?.finalMessage ?? null;
 				},
 			}),
 			workUnitRelationReadApi: createWorkUnitRelationReadApi({
@@ -1180,6 +1224,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
 	queuedTaskPromptDeliveryDispatcher.start();
+	taskMainSessionHandoverApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
@@ -1190,6 +1235,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			await taskMainSessionHandoverApi.close();
 			await promptDraftUsageService.close();
 			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();

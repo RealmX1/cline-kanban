@@ -1,4 +1,5 @@
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
+import { isTaskMainSessionHandoverSuspendingAutomaticActions } from "@runtime-session-activity";
 import { useCallback, useEffect, useRef } from "react";
 
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
@@ -10,7 +11,7 @@ import { resolveTaskAutoReviewMode } from "@/types";
 const AUTO_REVIEW_ACTION_DELAY_MS = 500;
 
 function isTaskAutoReviewEnabled(task: BoardCard): boolean {
-	return task.autoReviewEnabled === true;
+	return task.autoReviewEnabled === true && !isTaskMainSessionHandoverSuspendingAutomaticActions(task);
 }
 
 interface TaskGitActionLoadingStateLike {

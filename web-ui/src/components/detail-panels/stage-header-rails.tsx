@@ -1,3 +1,4 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { MouseEvent, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -142,7 +143,7 @@ function StageHeaderRailEntry({
 						{...buildTaskCardBusinessProps({
 							card,
 							columnId,
-							sessionSummary: taskSessions[card.id],
+							sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 							selected: true,
 							handlers: taskCardActionHandlers,
 							workspacePath,

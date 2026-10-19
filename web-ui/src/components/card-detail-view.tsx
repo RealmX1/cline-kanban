@@ -1,7 +1,11 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
-import { resolveSessionFacets } from "@runtime-session-activity";
+import {
+	resolveMainTaskConversationSessionId,
+	resolveMainTaskConversationSessionSummary,
+	resolveSessionFacets,
+} from "@runtime-session-activity";
 import {
 	AlertTriangle,
 	Files,
@@ -878,7 +882,9 @@ export function CardDetailView({
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
-	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(selection.card.id);
+	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(
+		resolveMainTaskConversationSessionId(selection.card),
+	);
 	// 递增的请求 key 是发给两条 agent 通道的「把键盘焦点接过去」信号：key 不变就不重跑，
 	// 所以不会重复抢焦，也不需要下游回执（对照 `use-persistent-terminal-session` 的 searchOpenRequestKey）。
 	const [agentEntryKeyboardFocusRequestKey, setAgentEntryKeyboardFocusRequestKey] = useState(0);
@@ -947,8 +953,8 @@ export function CardDetailView({
 		taskWorktreeExists: mainTaskWorkspaceInfo?.exists,
 	});
 	const activeTaskConversationSessionSummary =
-		selectedTaskConversationSessionId === selection.card.id
-			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
+		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card)
+			? (resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ?? sessionSummary ?? null)
 			: (taskSessions[selectedTaskConversationSessionId] ?? null);
 	const pendingUserDecision = useAgentRaisedPendingUserDecision({
 		workspaceId: currentProjectId,
@@ -1171,8 +1177,8 @@ export function CardDetailView({
 	useEffect(() => {
 		setDiffComments(new Map());
 		setDiffMode("working_copy");
-		setSelectedTaskConversationSessionId(selection.card.id);
-	}, [selection.card.id]);
+		setSelectedTaskConversationSessionId(resolveMainTaskConversationSessionId(selection.card));
+	}, [selection.card.id, selection.card.mainTaskConversationSessionId]);
 
 	// 选中新卡（或切到该卡的另一个子会话）后，键盘焦点应当自动落进该卡的 agent 输入入口，
 	// 否则焦点会滞留在卡壳 div（@hello-pangea/dnd 的 dragHandleProps 会注入 tabIndex=0）上，
@@ -1205,9 +1211,9 @@ export function CardDetailView({
 				setIsDiffExpanded(false);
 				return;
 			}
-			onAddReviewComments?.(selection.card.id, formatted);
+			onAddReviewComments?.(selectedTaskConversationSessionId, formatted);
 		},
-		[onAddReviewComments, selection.card.id, showClineAgentChatPanel],
+		[onAddReviewComments, selectedTaskConversationSessionId, showClineAgentChatPanel],
 	);
 	const handleFillPromptIntoActiveInput = useCallback(
 		(text: string) => {
@@ -1326,11 +1332,37 @@ export function CardDetailView({
 		);
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
+	// 某些旧任务只剩主卡启动声明；入口仍可提供交接预览，服务端会再次确认 Claude 来源并列出材料缺失。
+	const mainSessionSummaryForSessionsPanel: RuntimeTaskSessionSummary | null =
+		sessionSummary ??
+		((selection.card.mostRecentlyLaunchedAgentSessionAgentId ?? selection.card.agentId) === "claude"
+			? {
+					taskId: resolveMainTaskConversationSessionId(selection.card),
+					agentId: "claude",
+					state: "idle",
+					workspacePath: null,
+					pid: null,
+					startedAt: null,
+					updatedAt: selection.card.updatedAt,
+					lastOutputAt: null,
+					reviewReason: null,
+					exitCode: null,
+					lastHookAt: null,
+					latestHookActivity: null,
+					turnOwner: null,
+					liveness: "none",
+					userTurnKind: null,
+				}
+			: null);
 	const taskConversationSessionsPanel =
-		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateTaskConversationSession ? (
+		effectiveTaskConversationSessionAgentId &&
+		mainSessionSummaryForSessionsPanel &&
+		onCreateTaskConversationSession ? (
 			<TaskConversationSessionsPanel
+				workspaceId={currentProjectId}
+				taskCard={selection.card}
 				workspaceTaskId={selection.card.id}
-				mainSessionSummary={sessionSummary}
+				mainSessionSummary={mainSessionSummaryForSessionsPanel}
 				mainSessionUserMessagePreview={selection.card.prompt}
 				mainSessionOriginalPromptCard={selection.card}
 				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId}
@@ -1344,7 +1376,7 @@ export function CardDetailView({
 						sessionRole,
 						initialUserQuestion,
 						contextSource,
-						mainSessionOriginTurnNumber: sessionSummary.latestTurnCheckpoint?.turn ?? 1,
+						mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
 						mainSessionOriginUserMessagePreview: selection.card.prompt,
 					});
 					if (result.ok && result.taskConversationSessionId) {
@@ -1354,7 +1386,8 @@ export function CardDetailView({
 				}}
 			/>
 		) : null;
-	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
+	const isMainTaskConversationSessionSelected =
+		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card);
 	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
 	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
 	// 「本会话 findings」section（蓝图 §G.2）：复用同一份 workspace 级 findings 集合，只在调用方传了
@@ -1610,7 +1643,10 @@ export function CardDetailView({
 					cardBusinessProps={buildTaskCardBusinessProps({
 						card: selection.card,
 						columnId: selection.column.id,
-						sessionSummary: taskSessions[selection.card.id] ?? sessionSummary ?? undefined,
+						sessionSummary:
+							resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ??
+							sessionSummary ??
+							undefined,
 						selected: true,
 						workspacePath,
 						defaultAgentId: selectedAgentId,

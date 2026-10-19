@@ -5,6 +5,8 @@ import {
 	isAwaitingUserReviewTurn,
 	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskMainSessionHandoverSuspendingAutomaticActions,
+	resolveMainTaskConversationSessionSummary,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
 import { classifyTaskCardBoardColumnTransitionRequestedByUserGesture } from "@runtime-task-card-action-board-column-transitions";
@@ -611,8 +613,14 @@ export function useBoardInteractions({
 			const boardChangedSinceLastRun = previousAutoFlowBoardRef.current !== currentBoard;
 			const deferredRetryTaskIds = new Set<string>();
 			const nowMs = Date.now();
-			for (const summary of Object.values(sessions)) {
-				const previous = previousSessions[summary.taskId];
+			const mainSessionsByTaskCardId: Record<string, RuntimeTaskSessionSummary> = {};
+			for (const card of currentBoard.columns.flatMap((column) => column.cards)) {
+				const primary = resolveMainTaskConversationSessionSummary(card, sessions);
+				if (primary && !isTaskMainSessionHandoverSuspendingAutomaticActions(card))
+					mainSessionsByTaskCardId[card.id] = primary;
+			}
+			for (const [taskId, summary] of Object.entries(mainSessionsByTaskCardId)) {
+				const previous = previousSessions[taskId];
 				// B5 引用短路：summary 引用跨 tick 稳定（runtime-state-hub merge 只替换改动 key），
 				// 引用未变即内容未变；board 也未变时本帧处理结果与上一帧相同（纯 no-op），直接跳过，
 				// 省掉每 tick 对全部 N 条 summary 的 getTaskColumnId 全板扫描与 resolveSessionFacets。
@@ -629,13 +637,13 @@ export function useBoardInteractions({
 				// 不记为已见，命令落定（board 变化）后的下一帧重新评估。
 				if (
 					currentProjectId &&
-					(readTaskCardActionCommandKindInFlight(currentProjectId, summary.taskId) !== null ||
-						hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, summary.taskId))
+					(readTaskCardActionCommandKindInFlight(currentProjectId, taskId) !== null ||
+						hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, taskId))
 				) {
-					deferredRetryTaskIds.add(summary.taskId);
+					deferredRetryTaskIds.add(taskId);
 					continue;
 				}
-				let columnId = getTaskColumnId(nextBoard, summary.taskId);
+				let columnId = getTaskColumnId(nextBoard, taskId);
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
@@ -644,26 +652,26 @@ export function useBoardInteractions({
 				const facets = resolveSessionFacets(summary);
 				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
 				if (columnId === "backlog" && summary.startedAt != null) {
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 						columnId = "in_progress";
 					}
 				}
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review", {
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "review", {
 						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：本帧未落直接移列（动画接管 / 被在途移动阻塞）的 task 不得记录为已见，
 						// 否则引用短路会吃掉下一 tick 的重试（短路前由 updatedAt guard 放行每 tick 重估）。
-						deferredRetryTaskIds.add(summary.taskId);
+						deferredRetryTaskIds.add(taskId);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "review", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -682,18 +690,18 @@ export function useBoardInteractions({
 						isAgentActivelyProducingOutput(summary, nowMs)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "in_progress", {
 						skipKickoff: true,
 						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：同 Review 落位分支——动画接管 / 被阻塞的 task 不记录为已见，保留下一 tick 重试。
-						deferredRetryTaskIds.add(summary.taskId);
+						deferredRetryTaskIds.add(taskId);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -713,42 +721,42 @@ export function useBoardInteractions({
 						evaluatePostDeployVerificationDoneEntryGatePrecheckForTask(
 							latestBoardInteractionStateRef.current
 								.postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
-							summary.taskId,
+							taskId,
 						).postDeployVerificationDoneEntryGatePrecheckOutcome !==
 						"task_not_subject_to_post_deploy_verification_done_entry_gate"
 					) {
-						showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(summary.taskId);
+						showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(taskId);
 						continue;
 					}
-					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
+					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, taskId);
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "trash", {
 						skipTrashWorkflow: true,
 						boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						if (programmaticMoveAttempt === "blocked") {
-							deferredRetryTaskIds.add(summary.taskId);
+							deferredRetryTaskIds.add(taskId);
 						}
 						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
+							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
 						);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "trash", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "trash", { insertAtTop: true });
 					if (moved.moved) {
 						recordWebUiBoardMutationInitiatorForTaskCardAspect({
-							taskId: summary.taskId,
+							taskId: taskId,
 							boardMutationAspectOfTaskCard: "task_card_column_placement",
 							boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 						});
 						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
+							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
 						);
 						nextBoard = moved.board;
 					}
 				}
 			}
-			const nextPreviousSessions = { ...sessions };
+			const nextPreviousSessions = { ...mainSessionsByTaskCardId };
 			for (const taskId of deferredRetryTaskIds) {
 				const previousSession = previousSessions[taskId];
 				if (previousSession) {
@@ -1166,7 +1174,7 @@ export function useBoardInteractions({
 			// 这里刻意只拦「确有启动记录」而不要求「从没启动过」的正面证据：启动史说不清时，详情面板把「启动」
 			// 与「续跑」都摆给人选，人选了启动就走到这里，再要求正面证据会让那个按钮点了没反应。看板 Retry 不是
 			// 人在知情下的选择，所以它在 task-card-body 里另要求正面证据（resolveTaskAgentSessionLaunchHistoryEvidence）。
-			const existingSessionSummary = sessions[taskId];
+			const existingSessionSummary = resolveMainTaskConversationSessionSummary(selection.card, sessions);
 			const isExistingSessionSummaryPlaceholderOfNeverLaunchedTask =
 				existingSessionSummary != null &&
 				isNeverStartedPlaceholderTaskSessionSummary(existingSessionSummary) &&
@@ -1613,7 +1621,11 @@ export function useBoardInteractions({
 			// "running") now stay in Validation, so the warning must use the same predicate as the
 			// bounce — keying off bare state === "running" would false-warn on those. Non-blocking,
 			// auto-dismisses after 3s.
-			if (isAgentActivelyProducingOutput(sessions[taskId], Date.now())) {
+			const card = findCardSelection(board, taskId)?.card;
+			if (
+				card &&
+				isAgentActivelyProducingOutput(resolveMainTaskConversationSessionSummary(card, sessions), Date.now())
+			) {
 				showAppToast({
 					intent: "warning",
 					icon: "info-sign",

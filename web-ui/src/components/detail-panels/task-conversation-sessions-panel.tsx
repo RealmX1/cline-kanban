@@ -10,6 +10,7 @@ import { cn } from "@/components/ui/cn";
 import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
+import { TaskMainSessionHandoverAction } from "./task-main-session-handover-action";
 
 type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
 
@@ -33,7 +34,7 @@ interface CreateTaskConversationSessionRequest {
 }
 
 // 每一行露出两个标识符：
-//   · **会话 id**（主会话时等于卡片 id）——用户拿它对照日志、URL 与运行时诊断；
+//   · **会话 id**（旧主会话可以等于卡片 id，交接后仍保留各自 ID）——用户拿它对照日志、URL 与运行时诊断；
 //   · **agent 原生会话 id**——harness 自己的 session id（`~/.claude/projects/**/<id>.jsonl` 就是它），
 //     标签用记录里的 sourceAgentId 渲染，**不硬编码 agent 名**：这条 sidecar 由 hook stdin 落下，
 //     跑的是哪个 harness 由它自己说了算。
@@ -105,6 +106,8 @@ function readTaskConversationSessionReadReceipts(): Record<string, number> {
 }
 
 export function TaskConversationSessionsPanel({
+	workspaceId,
+	taskCard,
 	workspaceTaskId,
 	mainSessionSummary,
 	mainSessionUserMessagePreview,
@@ -116,6 +119,8 @@ export function TaskConversationSessionsPanel({
 	onSelectTaskConversationSession,
 	onCreateTaskConversationSession,
 }: {
+	workspaceId?: string | null;
+	taskCard?: BoardCard;
 	workspaceTaskId: string;
 	mainSessionSummary: RuntimeTaskSessionSummary;
 	mainSessionUserMessagePreview: string;
@@ -293,6 +298,13 @@ export function TaskConversationSessionsPanel({
 
 			{activeTab === "sessions" ? (
 				<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+					{workspaceId && taskCard && (
+						<TaskMainSessionHandoverAction
+							workspaceId={workspaceId}
+							taskCard={taskCard}
+							mainSessionSummary={mainSessionSummary}
+						/>
+					)}
 					{/* 「查看完整 prompt」是行内 button，不能嵌在选择会话的 button 里（嵌套 button 是无效 HTML），
 					    故两者作为兄弟元素放进同一个 relative 容器，前者绝对定位到右下角。 */}
 					{/* 底色挂在容器上而不是 button 上：id 条是 button 的兄弟节点（见下），底色留在 button 上
@@ -300,7 +312,7 @@ export function TaskConversationSessionsPanel({
 					<div
 						className={cn(
 							"relative mb-1 rounded-md hover:bg-surface-3",
-							selectedTaskConversationSessionId === workspaceTaskId && "bg-surface-3",
+							selectedTaskConversationSessionId === mainSessionSummary.taskId && "bg-surface-3",
 						)}
 					>
 						<button
@@ -320,7 +332,7 @@ export function TaskConversationSessionsPanel({
 						</button>
 						<TaskConversationSessionIdentifierChips
 							summary={mainSessionSummary}
-							taskConversationSessionId={workspaceTaskId}
+							taskConversationSessionId={mainSessionSummary.taskId}
 						/>
 						<Button
 							variant="ghost"
@@ -364,9 +376,11 @@ export function TaskConversationSessionsPanel({
 									<div className="flex items-center gap-2">
 										<MessageCircleQuestion size={13} className="text-status-purple" />
 										<span className="text-xs font-medium text-text-primary">
-											{metadata.taskConversationSessionRole === "task_collaborator"
-												? "协作会话"
-												: "By the way"}
+											{metadata.taskConversationSessionRoleAtCreation === "main"
+												? "前主会话"
+												: metadata.taskConversationSessionRole === "task_collaborator"
+													? "协作会话"
+													: "By the way"}
 										</span>
 										<span className="text-[11px] text-text-tertiary">
 											{getRuntimeAgentCatalogEntry(summary.agentId ?? "codex")?.label ?? summary.agentId}

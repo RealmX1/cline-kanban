@@ -832,7 +832,10 @@ describe("createRuntimeApi startTaskSession", () => {
 	});
 
 	describe("协作会话完整重启后的持久化恢复", () => {
-		function createColdRuntimeFixture(sessionTransport: "pty_terminal" | "acp_stdio_subprocess") {
+		function createColdRuntimeFixture(
+			sessionTransport: "pty_terminal" | "acp_stdio_subprocess",
+			isCurrentMain = false,
+		) {
 			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
 			const metadata = createCollaborationSummary().taskConversationSessionMetadata;
 			if (!metadata?.taskConversationSessionLaunchSettings) throw new Error("协作会话夹具缺少启动快照");
@@ -842,6 +845,8 @@ describe("createRuntimeApi startTaskSession", () => {
 				sessionTransport,
 				taskConversationSessionMetadata: {
 					...metadata,
+					taskConversationSessionRole: isCurrentMain ? "main" : "task_collaborator",
+					taskConversationSessionRoleAtCreation: "task_collaborator",
 					taskConversationSessionLaunchSettings: {
 						...metadata.taskConversationSessionLaunchSettings,
 						sessionTransport,
@@ -859,6 +864,44 @@ describe("createRuntimeApi startTaskSession", () => {
 					observedAt: 1,
 				},
 			});
+			if (isCurrentMain) {
+				workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+					columns: [
+						{
+							id: "in_progress",
+							title: "进行中",
+							cards: [
+								{
+									id: "task-1",
+									title: "已交接任务",
+									prompt: "原任务需求不能在恢复时重投",
+									baseRef: "main",
+									agentId: "codex",
+									taskAgentPermissionMode: "bypass_all_permission_prompts",
+									mainTaskConversationSessionId: persisted.taskId,
+									taskMainSessionHandover: {
+										handoverId: "cold-handover",
+										sourceTaskConversationSessionId: "task-1",
+										targetTaskConversationSessionId: persisted.taskId,
+										destination: { kind: "new_codex_session" },
+										status: "report_delivery_pending",
+										createdAt: 1,
+										updatedAt: 1,
+										userContextNotes: "",
+										additionalPlanReferencePaths: [],
+										materialDirectoryPath: null,
+										errorMessage: null,
+										reportDeliveryStartedAt: null,
+										reportDeliveryAttempt: 0,
+									},
+									createdAt: 1,
+									updatedAt: 1,
+								},
+							],
+						},
+					],
+				});
+			}
 			const spawnPty = vi.fn(async (request: HostedTerminalPtyProcessSpawnRequest) => {
 				let exited = false;
 				return {
@@ -897,6 +940,164 @@ describe("createRuntimeApi startTaskSession", () => {
 			});
 			return { persisted, terminalManager, acpService, workspaceScope, api, spawnPty };
 		}
+
+		it("Task 默认启动跟随新主；显式前主启动与 Sessions 重启都保留 Claude 身份和配置", async () => {
+			const { persisted, terminalManager, workspaceScope, api } = createColdRuntimeFixture("pty_terminal", true);
+			const formerMain = createSummary({
+				taskId: "task-1",
+				agentId: "claude",
+				pid: null,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "66666666-7777-4888-8999-000000000000",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionRoleAtCreation: "main",
+					taskConversationSessionContextSource: "main",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+					taskConversationSessionLaunchSettings: {
+						sessionTransport: "pty_terminal",
+						taskAgentPermissionMode: "ask_for_every_tool_use",
+						terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "former-main-model" },
+					},
+				},
+			});
+			terminalManager.hydrateFromRecord(
+				JSON.parse(JSON.stringify({ [persisted.taskId]: persisted, [formerMain.taskId]: formerMain })),
+			);
+			agentRegistryMocks.resolveAgentCommand.mockImplementation((config: RuntimeConfigState) => ({
+				agentId: config.selectedAgentId,
+				binary: "agent",
+				args: [],
+			}));
+			const startPty = vi.spyOn(terminalManager, "startTaskSession").mockImplementation(async (request) =>
+				createSummary({
+					...(request.taskId === formerMain.taskId ? formerMain : persisted),
+					pid: 4321,
+					taskConversationSessionMetadata: request.taskConversationSessionMetadata,
+				}),
+			);
+			const refreshPty = vi.spyOn(terminalManager, "refreshTaskTerminal").mockResolvedValue(formerMain);
+			try {
+				const defaultStarted = await api.startTaskSession(workspaceScope, {
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "不能重投给旧 Claude",
+					agentId: "claude",
+				});
+				expect(defaultStarted).toMatchObject({ ok: true, summary: { taskId: persisted.taskId, agentId: "codex" } });
+				expect(startPty).toHaveBeenLastCalledWith(
+					expect.objectContaining({ taskId: persisted.taskId, workspaceTaskId: "task-1", prompt: "" }),
+					expect.any(String),
+				);
+				startPty.mockClear();
+				const explicitStarted = await api.startTaskSession(workspaceScope, {
+					taskId: "task-1",
+					workspaceTaskId: "task-1",
+					baseRef: "main",
+					prompt: "",
+					// 卡片上的当前 agent 已经变成 Codex，恢复必须采用前主自己的持久身份。
+					agentId: "codex",
+					startInPlanMode: true,
+				});
+				expect(explicitStarted).toMatchObject({ ok: true, summary: { taskId: "task-1", agentId: "claude" } });
+				expect(startPty).toHaveBeenCalledExactlyOnceWith(
+					expect.objectContaining({
+						taskId: "task-1",
+						workspaceTaskId: "task-1",
+						agentId: "claude",
+						prompt: "",
+						startInPlanMode: undefined,
+						taskAgentPermissionMode: "ask_for_every_tool_use",
+						resumePriorAgentConversationWithoutResendingPrompt: true,
+						terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "former-main-model" },
+						taskConversationSessionMetadata: expect.objectContaining({
+							taskConversationSessionRole: "task_collaborator",
+							taskConversationSessionRoleAtCreation: "main",
+						}),
+					}),
+					expect.any(String),
+				);
+				expect(terminalManager.getSummary(formerMain.taskId)?.agentNativeConversationSessionIdentity).toEqual(
+					formerMain.agentNativeConversationSessionIdentity,
+				);
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+				const refreshed = await api.refreshTaskTerminal(workspaceScope, { taskId: formerMain.taskId });
+				expect(refreshed.ok).toBe(true);
+				expect(refreshPty).toHaveBeenCalledWith(
+					expect.objectContaining({
+						taskId: formerMain.taskId,
+						workspaceTaskId: "task-1",
+						agentId: "claude",
+						taskAgentPermissionMode: "ask_for_every_tool_use",
+						terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "former-main-model" },
+					}),
+					"refresh_task_terminal",
+				);
+				expect(
+					persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId,
+				).toHaveBeenCalledWith(
+					expect.objectContaining({
+						agentNativeConversationSessionId: formerMain.agentNativeConversationSessionIdentity?.nativeSessionId,
+					}),
+				);
+				expect(
+					(await workspaceStateMocks.loadWorkspaceBoardById(workspaceScope.workspaceId)).columns[0].cards[0]
+						.mainTaskConversationSessionId,
+				).toBe(persisted.taskId);
+			} finally {
+				startPty.mockRestore();
+				refreshPty.mockRestore();
+				terminalManager.markInterruptedAndStopAll();
+			}
+		});
+
+		it("切主后首次启动之前中断，Task Start 可用已持久化快照全新启动接任 Codex", async () => {
+			const { persisted, terminalManager, workspaceScope, api, spawnPty } = createColdRuntimeFixture(
+				"pty_terminal",
+				true,
+			);
+			const reservedTarget = {
+				...persisted,
+				startedAt: null,
+				agentNativeConversationSessionIdentity: undefined,
+			};
+			terminalManager.hydrateFromRecord(JSON.parse(JSON.stringify({ [reservedTarget.taskId]: reservedTarget })));
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId: "codex", binary: "agent", args: [] });
+			const startPty = vi.spyOn(terminalManager, "startTaskSession");
+			try {
+				const response = await api.startTaskSession(workspaceScope, {
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "不能重投旧任务需求",
+				});
+				expect(response).toMatchObject({ ok: true, summary: { taskId: reservedTarget.taskId, pid: 4321 } });
+				expect(startPty).toHaveBeenCalledWith(
+					expect.objectContaining({
+						taskId: reservedTarget.taskId,
+						workspaceTaskId: "task-1",
+						agentId: "codex",
+						prompt: "",
+						taskAgentPermissionMode: "ask_for_every_tool_use",
+						resumePriorAgentConversationWithoutResendingPrompt: false,
+					}),
+					expect.any(String),
+				);
+				expect(spawnPty).toHaveBeenCalledTimes(1);
+				expect(spawnPty.mock.calls[0][0].args).not.toContain("resume");
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+			} finally {
+				startPty.mockRestore();
+				terminalManager.markInterruptedAndStopAll();
+			}
+		});
 
 		it("生产 hydrate 保留 ACP 通道，真实 refresh 分流拒绝把它重开为 PTY", async () => {
 			const { persisted, terminalManager, api, workspaceScope } = createColdRuntimeFixture("acp_stdio_subprocess");
@@ -973,11 +1174,17 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect(startAcp).not.toHaveBeenCalled();
 		});
 
-		it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
-			"%s 冷恢复后把已保存答案投回自身原生对话",
-			async (sessionTransport) => {
-				const { persisted, terminalManager, acpService, workspaceScope, api, spawnPty } =
-					createColdRuntimeFixture(sessionTransport);
+		it.each([
+			{ sessionTransport: "pty_terminal", isCurrentMain: false },
+			{ sessionTransport: "acp_stdio_subprocess", isCurrentMain: false },
+			{ sessionTransport: "pty_terminal", isCurrentMain: true },
+		] as const)(
+			"$sessionTransport 冷恢复后把已保存答案投回自身原生对话，已接任main=$isCurrentMain",
+			async ({ sessionTransport, isCurrentMain }) => {
+				const { persisted, terminalManager, acpService, workspaceScope, api, spawnPty } = createColdRuntimeFixture(
+					sessionTransport,
+					isCurrentMain,
+				);
 				const nativeIdentity = persisted.agentNativeConversationSessionIdentity;
 				agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 					agentId: persisted.agentId,

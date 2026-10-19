@@ -1,4 +1,5 @@
 import { Droppable } from "@hello-pangea/dnd";
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { FoldHorizontal, Play, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
@@ -259,7 +260,9 @@ export const BoardColumn = memo(function BoardColumn({
 											card={card}
 											index={draggableIndex}
 											columnId={column.id}
-											sessionSummary={taskSessions[card.id]}
+											sessionSummary={
+												resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined
+											}
 											onStart={onStartTask}
 											onMoveToTrash={onMoveToTrashTask}
 											onMoveToValidation={onMoveToValidationTask}

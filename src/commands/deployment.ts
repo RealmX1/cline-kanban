@@ -17,6 +17,7 @@ import { runtimePostDeployVerificationAcknowledgementSchema } from "../core/api-
 import { parsePostDeployVerificationState } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { getTaskColumnId } from "../core/task-board-mutations";
+import { resolveMainTaskConversationSessionSummaryForTaskId } from "../core/task-main-conversation-session-binding";
 import {
 	isChecklistOfPostDeployVerificationTaskFullyChecked,
 	resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask,
@@ -201,7 +202,7 @@ async function tryLoadAgentResponsePreview(workspaceId: string, taskId: string):
 	try {
 		const client = createRuntimeTrpcClient(workspaceId);
 		const state = await client.workspace.getState.query();
-		const session = state.sessions[taskId] ?? null;
+		const session = resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, taskId);
 		const finalMessage = session?.latestHookActivity?.finalMessage ?? null;
 		if (!finalMessage || finalMessage.trim().length === 0) {
 			return undefined;
