@@ -814,11 +814,7 @@ export default function App(): ReactElement {
 
 	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (
-			editingTaskId ||
-			postDeployVerificationFollowUpTaskCreationDraftSeed ||
-			!isBoardScopeAllProjectsSelected
-		) {
+		if (editingTaskId || postDeployVerificationFollowUpTaskCreationDraftSeed || !isBoardScopeAllProjectsSelected) {
 			const workspaceId = editingTaskId
 				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
 				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);

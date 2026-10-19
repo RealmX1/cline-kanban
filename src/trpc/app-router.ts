@@ -465,6 +465,15 @@ import {
 	permanentlyDeletedTaskPromptVersionsRequestSchema,
 	permanentlyDeletedTaskPromptVersionsResponseSchema,
 } from "../core/permanently-deleted-task-history-contract";
+import {
+	type ProjectVisualIdentity,
+	projectVisualIdentitySchema,
+	readProjectIconImageRequestSchema,
+	readProjectIconImageResponseSchema,
+	resetProjectVisualIdentityRequestSchema,
+	type SetProjectVisualIdentityRequest,
+	setProjectVisualIdentityRequestSchema,
+} from "../core/project-visual-identity";
 import type {
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
@@ -476,15 +485,6 @@ import {
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
 } from "../core/task-main-session-handover-contract";
-import {
-	type ProjectVisualIdentity,
-	projectVisualIdentitySchema,
-	readProjectIconImageRequestSchema,
-	readProjectIconImageResponseSchema,
-	resetProjectVisualIdentityRequestSchema,
-	type SetProjectVisualIdentityRequest,
-	setProjectVisualIdentityRequestSchema,
-} from "../core/project-visual-identity";
 import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
