@@ -33,6 +33,26 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 - 等启动 banner 用 `waitForRuntimeServerStartupBannerOrSigkillChild`（失败分支先 SIGKILL 并等退出再 reject）；判退出用 `hasChildProcessExited`（被信号结束的进程 `exitCode` 为 null）。启动等待放宽后，用例超时用 `computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts` 按冷启动次数计算，并挂在 `describe(name, { timeout }, fn)` 上——给 `it(title, fn, <标识符>)` 传非数字字面量会让 biome 放弃 test-call 排版、重缩进整个用例体。
 - `test/integration/shutdown-ipc-hook.cjs` 把 IPC 断开（vitest worker 被杀）当作父进程死亡：已装 SIGINT 处理器则发一次 SIGINT 走优雅关停并设兜底退出，仍在启动则立即退出。
 
+## 手机后台 Codex 首发的真实浏览器检查
+
+手机后台 Codex 首发的真实浏览器检查按需启用，会调用真实模型。它通过隔离 Git fixture、HOME 和 Codex 配置覆盖
+All Projects 的同项目／跨项目创建，以及单项目对照；不打开任务详情，以原生转录验收完整正文、唯一首发及 Plan Mode。
+先设置下列环境变量，再运行 guarded 用例（证据目录须为持久路径；凭据文件只读，测试不打印其内容）：
+
+```sh
+export PLAYWRIGHT_BROWSERS_PATH=/absolute/path/to/playwright-browser-cache
+export KANBAN_RUN_MOBILE_CODEX_BACKGROUND_STARTUP_BROWSER_CHECK=1
+export KANBAN_MOBILE_CODEX_STARTUP_EVIDENCE_OUTPUT_DIRECTORY=/absolute/persistent/codex-startup-evidence
+export KANBAN_MOBILE_CODEX_STARTUP_AUTHENTICATION_FILE_PATH=/absolute/path/to/codex/auth.json
+export KANBAN_MOBILE_CODEX_STARTUP_BINARY_PATH=/absolute/path/to/codex
+export KANBAN_MOBILE_CODEX_STARTUP_MODEL_ID=<当前账号可用模型>
+npm run test:guarded -- --project runtime-integration test/integration/codex-mobile-background-startup-real-browser.integration.test.ts
+```
+
+运行期间不要编辑调用仓库的文件，否则 mutation canary 会把 agent 同时编辑产生的状态变化判为测试污染。
+额外设置 `KANBAN_MOBILE_CODEX_STARTUP_USE_PACKAGED_RUNTIME=1` 可验证当前工作区的打包产物；须先在独立的
+`dist` 与 `web-ui/dist` 目录完成构建，不能通过指向在线实例的软链接覆盖其构建目录。
+
 ## 负载敏感的墙钟 / 资源断言
 
 本机高负载（load 15–33 / 10 核）下，根 `npm run check` 曾因计时与内存阈值断言时绿时红，而产品语义并没有被违反（task df9d8 的分析与两路复核见交接目录 `task-df9d8-load-sensitive-timing-test-two-tier-deadline-plan-independent-validity-reviews-2026-10-04/`）。新增或修改这类断言时按下面的类别处理。

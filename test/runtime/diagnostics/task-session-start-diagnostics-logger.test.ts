@@ -32,5 +32,28 @@ describe("task-session-start diagnostics logger", () => {
 		expect(line).toContain("elapsedMs=217871");
 		expect(line).toContain('"liveness":"live"');
 		expect(line).toContain('error="response transport closed"');
+		expect(line).toContain("requestedTerminalColumns=null");
+		expect(line).toContain("requestedTerminalRows=null");
+	});
+
+	it("记录浏览器请求的终端列数和行数，便于定位手机后台启动尺寸", () => {
+		const line = formatTaskSessionStartDiagnosticLine(
+			{
+				event: "runtime_started",
+				workspaceId: "mobile-startup-project",
+				taskId: "mobile-startup-task",
+				requestedAgentId: "codex",
+				effectiveAgentId: "codex",
+				requestedTerminalColumns: 43,
+				requestedTerminalRows: 50,
+				phase: "start_pty_terminal_runtime_session",
+				elapsedMs: 80,
+				error: null,
+				session: null,
+			},
+			"2026-10-19T10:00:00.000Z",
+		);
+		expect(line).toContain("requestedTerminalColumns=43");
+		expect(line).toContain("requestedTerminalRows=50");
 	});
 });
