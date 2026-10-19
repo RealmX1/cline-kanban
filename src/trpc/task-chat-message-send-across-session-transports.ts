@@ -41,6 +41,8 @@ export interface SendTaskChatMessageAcrossSessionTransportsDependencies {
 	onProgrammaticTerminalDeliverySettled?: TaskChatInputDeliveryOutcomeObserver;
 	// 任务级 CLI 回执仍按宿主卡寻址；实际投递可以是交接后的独立主会话。
 	programmaticInjectionLedgerTaskId?: string;
+	// 领域级投递授权在受理前与每次实际终端写入前重读，覆盖持久队列已交给 transport 的停止竞争。
+	validateBeforeTerminalWrite?: () => Promise<void>;
 }
 
 function buildTerminalTaskChatDeliveryMessage(input: {
@@ -183,8 +185,19 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					// 只有 stashed_into_prompt_library（入库**且**框已清）才算抢占成功：
 					// 「入库了但框没清」框里内容一个字没少，照写就会把 paste 接在人类那半句后面。
 					const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+					try {
+						await deps.validateBeforeTerminalWrite?.();
+					} catch (error) {
+						return {
+							ok: false,
+							summary: null,
+							error: error instanceof Error ? error.message : String(error),
+							terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+						};
+					}
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
+						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
 						idempotencyKey: injectionIdempotencyKey,
 						mayAutoStashAbsentHumanInputBox:
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,

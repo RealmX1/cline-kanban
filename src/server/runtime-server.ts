@@ -22,6 +22,7 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskChatSendRequest,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -67,6 +68,7 @@ import {
 	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
 } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
+import { createRvfAutomaticCloseoutRuntimeService } from "../rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -423,6 +425,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 发送走的是与人类聊天、RVF followup **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
+	let rvfAutomaticCloseoutPromptDeliveryValidator:
+		| ((scope: RuntimeTrpcWorkspaceScope, input: RuntimeTaskChatSendRequest) => Promise<void>)
+		| undefined;
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: findRuntimeSessionSummary,
 		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
@@ -450,6 +455,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 					onProgrammaticTerminalDeliverySettled,
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
+					validateBeforeTerminalWrite:
+						request.source === "rvf_automatic_closeout"
+							? async () => {
+									if (!rvfAutomaticCloseoutPromptDeliveryValidator)
+										throw new Error("自动收尾投递门尚未就绪。");
+									await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+								}
+							: undefined,
 				},
 				scope,
 				request,
@@ -747,33 +760,49 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
 
-	const createRuntimeApiForTaskMainSessionHandover = () =>
-		createRuntimeApi({
-			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-			setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-			getScopedTerminalManager,
-			getScopedClineTaskSessionService,
-			getScopedAcpTaskSessionService,
-			resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-			runCommand: deps.runCommand,
-			broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
-			broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-			broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
-			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-			bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
-			prepareForStateReset,
-			getUpdateStatus: deps.getUpdateStatus,
-			runUpdateNow: deps.runUpdateNow,
-			queuedTaskPromptDeliveryDispatcher,
-		});
+	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	const runtimeApi = createRuntimeApi({
+		onTaskSessionStopRequested: (workspaceId, taskId) =>
+			pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId) ?? Promise.resolve(),
+		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+		getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+		getScopedTerminalManager,
+		getScopedClineTaskSessionService,
+		getScopedAcpTaskSessionService,
+		resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+		runCommand: deps.runCommand,
+		broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
+		broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+		broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
+		prepareForStateReset,
+		getUpdateStatus: deps.getUpdateStatus,
+		runUpdateNow: deps.runUpdateNow,
+		queuedTaskPromptDeliveryDispatcher,
+	});
+
+	const rvfAutomaticCloseoutApi = createRvfAutomaticCloseoutRuntimeService({
+		taskCardActionPerTaskCommandSerializer,
+		getManager: getScopedTerminalManager,
+		runtimeApi,
+		listWorkspaces: async () =>
+			(await listWorkspaceIndexEntries()).map((entry) => ({
+				workspaceId: entry.workspaceId,
+				workspacePath: entry.repoPath,
+			})),
+		warn: deps.warn,
+	});
+	pauseAutomaticRvfCloseoutForStoppedTask = rvfAutomaticCloseoutApi.pauseForExplicitStop;
+	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
+
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
 		getTerminalManager: getScopedTerminalManager,
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-		startTaskSession: (scope, input) => createRuntimeApiForTaskMainSessionHandover().startTaskSession(scope, input),
-		sendTaskChatMessage: (scope, input, evidence) =>
-			createRuntimeApiForTaskMainSessionHandover().sendTaskChatMessage(scope, input, evidence),
+		startTaskSession: (scope, input) => runtimeApi.startTaskSession(scope, input),
+		sendTaskChatMessage: (scope, input, evidence) => runtimeApi.sendTaskChatMessage(scope, input, evidence),
 		serializer: taskCardActionPerTaskCommandSerializer,
 		runCommand: deps.runCommand,
 		warn: deps.warn,
@@ -783,9 +812,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
-		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
-		// 与路由上暴露的是同一个实例，不复制逻辑。
-		const runtimeApi = createRuntimeApiForTaskMainSessionHandover();
+		// taskCardActionApi 与自动收尾复用同一份 runtimeApi 的起停和投递漏斗。
 		const workspaceApi = createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 			getScopedClineTaskSessionService,
@@ -812,6 +839,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			},
 			runtimeApi,
 			taskMainSessionHandoverApi,
+			rvfAutomaticCloseoutApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActionApi({
 				runtimeApi,
@@ -1225,6 +1253,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	agentSessionInactivityReclamationScheduler.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskMainSessionHandoverApi.start();
+	rvfAutomaticCloseoutApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
@@ -1236,6 +1265,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
 			await taskMainSessionHandoverApi.close();
+			await rvfAutomaticCloseoutApi.stop();
 			await promptDraftUsageService.close();
 			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();

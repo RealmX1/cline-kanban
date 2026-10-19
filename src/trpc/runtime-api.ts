@@ -245,6 +245,7 @@ export interface CreateRuntimeApiDependencies {
 	getActiveRuntimeConfig?: () => RuntimeConfigState;
 	loadScopedRuntimeConfig: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeConfigState>;
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
+	onTaskSessionStopRequested?: (workspaceId: string, taskId: string) => Promise<void>;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
@@ -1676,6 +1677,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		stopTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStopRequest(input);
+				// 自动收尾的持久暂停或取消失败不能拦住用户停止 agent 本体。
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch(() => undefined);
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);

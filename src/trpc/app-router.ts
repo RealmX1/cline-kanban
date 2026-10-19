@@ -439,6 +439,10 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutStatusRequestSchema,
+	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfReviewStartBoundaryRequestSchema,
+	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
 import {
 	KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
@@ -579,6 +583,16 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+	};
+	rvfAutomaticCloseoutApi?: {
+		capture: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfReviewStartBoundaryRequestSchema>,
+		) => Promise<z.infer<typeof rvfReviewStartBoundaryResponseSchema>>;
+		status: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutStatusRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutStatusResponseSchema>>;
 	};
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
@@ -1354,6 +1368,22 @@ export const runtimeAppRouter = t.router({
 			.mutation(({ ctx, input }) => {
 				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
+		captureRvfReviewStartBoundary: workspaceProcedure
+			.input(rvfReviewStartBoundaryRequestSchema)
+			.output(rvfReviewStartBoundaryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.capture(ctx.workspaceScope, input);
+			}),
+		rvfAutomaticCloseoutStatus: workspaceProcedure
+			.input(rvfAutomaticCloseoutStatusRequestSchema)
+			.output(rvfAutomaticCloseoutStatusResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
 			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
