@@ -1,8 +1,9 @@
 import type { ReactElement } from "react";
-
+import { ProjectIcon } from "@/components/project-visual-identity";
 import { formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel } from "@/components/top-bar-project-switcher/board-or-focused-task-project-scope-toggle-hotkey-descriptor";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import type { RuntimeProjectSummary } from "@/runtime/types";
 
 /**
  * Board Scope 的 Focus View 里，顶栏「All projects」后面那段「› 焦点任务所属项目」。
@@ -10,10 +11,12 @@ import { cn } from "@/components/ui/cn";
  */
 export function BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton({
 	focusedTaskProjectName,
+	project,
 	isMobile,
 	onNarrowToFocusedTaskProject,
 }: {
 	focusedTaskProjectName: string;
+	project?: RuntimeProjectSummary;
 	isMobile: boolean;
 	onNarrowToFocusedTaskProject: () => void;
 }): ReactElement {
@@ -34,6 +37,7 @@ export function BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton({
 			<span className="shrink-0" aria-hidden>
 				›
 			</span>
+			{project ? <ProjectIcon project={project} /> : null}
 			<span className={cn("truncate", isMobile ? "max-w-[80px]" : "max-w-[140px]")}>{focusedTaskProjectName}</span>
 		</Button>
 	);

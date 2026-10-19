@@ -51,6 +51,7 @@ import {
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { ProjectIcon } from "@/components/project-visual-identity";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
@@ -1664,8 +1665,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
 					>
 						{crossProjectTaskSwitcherRowElements?.projectName ? (
-							<span className="min-w-0 max-w-full truncate text-text-tertiary">
-								{crossProjectTaskSwitcherRowElements.projectName}
+							<span className="inline-flex min-w-0 max-w-full items-center gap-1 text-text-tertiary">
+								<ProjectIcon
+									workspaceId={taskWorkspaceId ?? undefined}
+									projectName={crossProjectTaskSwitcherRowElements.projectName}
+									size={14}
+								/>
+								<span className="truncate">{crossProjectTaskSwitcherRowElements.projectName}</span>
 							</span>
 						) : null}
 						{showDirectoryRow ? taskDirectoryRow : null}

@@ -1,4 +1,20 @@
 import { z } from "zod";
+import { projectVisualIdentitySchema } from "./project-visual-identity.js";
+
+export type {
+	ProjectPresetIconId,
+	ProjectVisualColorId,
+	ProjectVisualIdentity,
+	SetProjectVisualIdentityRequest,
+} from "./project-visual-identity.js";
+export {
+	projectVisualIdentitySchema,
+	readProjectIconImageRequestSchema,
+	readProjectIconImageResponseSchema,
+	resetProjectVisualIdentityRequestSchema,
+	setProjectVisualIdentityRequestSchema,
+} from "./project-visual-identity.js";
+
 // Stage 4 全写侧反转：facet 为写时主真相源，`state` 降为 projectLegacyState(facets) 派生投影。
 // bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
@@ -1777,6 +1793,8 @@ export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
 	name: z.string(),
+	// 旧 runtime/测试 fixture 无此字段时，浏览器按名称与 workspace ID 派生默认标识。
+	visualIdentity: projectVisualIdentitySchema.optional(),
 	taskCounts: runtimeProjectTaskCountsSchema,
 	// 旧 runtime payload 未携带 availability；缺省仅用于网络兼容。新服务端始终显式检查并发送结果。
 	availability: runtimeProjectAvailabilitySchema.default({ status: "available" }),

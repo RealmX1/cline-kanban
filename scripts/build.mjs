@@ -22,7 +22,7 @@ const builtWebUiDirectoryPath = resolve("web-ui/dist");
  * and a spawn-helper binary that must live on disk, so it can't be bundled.
  * Everything else esbuild can inline.
  */
-const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring"];
+const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring", "sharp"];
 
 /** Bake OTEL telemetry env vars into the bundle at build time. */
 const define = {

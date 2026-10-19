@@ -85,6 +85,7 @@ export default defineConfig({
 				"../src/core/work-unit-relation-modeling-api-contract.ts",
 			),
 			"@": resolve(__dirname, "src"),
+			"@runtime-project-visual-identity": resolve(__dirname, "../src/core/project-visual-identity.ts"),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-agent-session-transport-selection": resolve(
 				__dirname,

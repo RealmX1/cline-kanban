@@ -47,7 +47,7 @@ export function ProjectSwitcherBoardScopeAllProjectsPseudoRow({
 		>
 			<td className="max-w-[280px] px-2 py-1.5 align-middle">
 				<div className="flex min-w-0 items-center gap-1.5">
-					<Layers size={13} className="shrink-0 text-text-secondary" aria-hidden />
+					<Layers size={18} className="shrink-0 text-text-secondary" aria-hidden />
 					<span
 						className={cn(
 							"truncate text-[13px] font-medium",

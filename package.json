@@ -117,7 +117,8 @@
     "proper-lockfile": "^4.1.2",
     "tree-kill": "^1.2.2",
     "ws": "^8.18.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "sharp": "^0.35.5"
   },
   "overrides": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.132",

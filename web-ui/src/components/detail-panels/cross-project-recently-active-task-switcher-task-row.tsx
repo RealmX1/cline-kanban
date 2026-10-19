@@ -10,6 +10,7 @@ import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
 import { CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-worktree-git-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { ProjectIcon } from "@/components/project-visual-identity";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
 import {
 	CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
@@ -134,7 +135,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						/>
 						{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
 						<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
-							{showsProjectName ? <span className="min-w-0 max-w-full truncate">{projectName}</span> : null}
+							{showsProjectName ? (
+								<span className="inline-flex min-w-0 max-w-full items-center gap-1">
+									<ProjectIcon workspaceId={workspaceId} projectName={projectName} size={14} />
+									<span className="truncate">{projectName}</span>
+								</span>
+							) : null}
 							<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 								entryInProject={entryInProject}
 								currentProjectId={currentProjectId}
