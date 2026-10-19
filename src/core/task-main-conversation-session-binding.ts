@@ -127,6 +127,7 @@ export function preserveRuntimeOwnedMainSessionBindings(
 					? persistedCards.get(card.id)?.agentId
 					: card.agentId,
 				taskMainSessionHandover: persistedCards.get(card.id)?.taskMainSessionHandover,
+				independentTaskCreationProvenance: persistedCards.get(card.id)?.independentTaskCreationProvenance,
 			})),
 		})),
 	};

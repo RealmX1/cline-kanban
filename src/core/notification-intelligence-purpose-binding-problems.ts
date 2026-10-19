@@ -7,6 +7,7 @@ import type {
 
 export type NotificationIntelligencePurposeBindingKey =
 	| "taskNameSuggestionBinding"
+	| "independentTaskCreationDraftGenerationBinding"
 	| "notificationAssessmentBinding"
 	| "notificationSpeechBinding";
 
@@ -33,16 +34,22 @@ type ProviderProfileFieldsRelevantToPurposeBinding = {
 type SettingsFieldsRelevantToPurposeBinding = Pick<
 	NotificationIntelligenceSettings,
 	| "taskNameSuggestionBinding"
+	| "independentTaskCreationDraftGenerationBinding"
 	| "notificationAssessmentBinding"
 	| "notificationSpeechBinding"
 	| "speechMode"
 	| "speechProvider"
 >;
 
-const TEXT_PURPOSE_BINDING_KEYS = ["taskNameSuggestionBinding", "notificationAssessmentBinding"] as const;
+const TEXT_PURPOSE_BINDING_KEYS = [
+	"taskNameSuggestionBinding",
+	"notificationAssessmentBinding",
+	"independentTaskCreationDraftGenerationBinding",
+] as const;
 
 const PURPOSE_BINDING_DISPLAY_NAMES: Record<NotificationIntelligencePurposeBindingKey, string> = {
 	taskNameSuggestionBinding: "任务起名",
+	independentTaskCreationDraftGenerationBinding: "分出独立任务草稿",
 	notificationAssessmentBinding: "通知判断与摘要",
 	notificationSpeechBinding: "语音合成",
 };

@@ -122,6 +122,7 @@ import {
 	recordTaskSessionStartDiagnostic,
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
+import { assertIndependentTaskSourceLandedBeforeInitialStart } from "../independent-task-creation/source-task-landing-gate";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import {
 	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking,
@@ -885,6 +886,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					return await runtimeApi.startTaskSession(workspaceScope, resumed);
 				}
 				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
+				if (owningCard?.independentTaskCreationProvenance) {
+					await assertIndependentTaskSourceLandedBeforeInitialStart({
+						workspaceId: workspaceScope.workspaceId,
+						repoPath: workspaceScope.workspacePath,
+						card: owningCard,
+					});
+				}
 				if (
 					body.workspaceTaskId &&
 					owningCard?.id === body.taskId &&
@@ -1041,6 +1049,28 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				let mainContextForkSourceSummary: RuntimeTaskSessionSummary | undefined;
 				let revalidateMainContextForkSourceBeforeLaunch: (() => Promise<void>) | undefined;
 				const isSideConversationSession = creationRole !== undefined && creationRole !== "main";
+				if (isSideConversationSession && taskConversationSessionMetadata) {
+					const persisted = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+					const previousMetadata = (terminalManager.getSummary(body.taskId) ?? persisted.sessions[body.taskId])
+						?.taskConversationSessionMetadata;
+					const originMainId = owningCard ? resolveMainTaskConversationSessionId(owningCard) : workspaceTaskId;
+					const originMain = terminalManager.getSummary(originMainId) ?? persisted.sessions[originMainId];
+					taskConversationSessionMetadata = {
+						...taskConversationSessionMetadata,
+						sideSessionCreatedAt: previousMetadata?.sideSessionCreatedAt ?? Date.now(),
+						sideSessionOriginMainSessionId: previousMetadata?.sideSessionOriginMainSessionId ?? originMainId,
+						sideSessionOriginMainAgentId:
+							previousMetadata?.sideSessionOriginMainAgentId ??
+							originMain?.agentNativeConversationSessionIdentity?.sourceAgentId,
+						sideSessionOriginMainNativeSessionId:
+							previousMetadata?.sideSessionOriginMainNativeSessionId ??
+							originMain?.agentNativeConversationSessionIdentity?.nativeSessionId,
+						sideSessionOriginMainTranscriptPath:
+							previousMetadata?.sideSessionOriginMainTranscriptPath ??
+							originMain?.agentNativeConversationSessionIdentity?.transcriptPath ??
+							undefined,
+					};
+				}
 				const isByTheWaySession = taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way";
 				if (
 					taskConversationSessionMetadata &&

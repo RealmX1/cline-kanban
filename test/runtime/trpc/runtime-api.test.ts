@@ -195,6 +195,10 @@ vi.mock(
 );
 
 vi.mock("../../../src/state/workspace-state.js", () => ({
+	loadPersistedWorkspaceStateById: async () => ({
+		sessions: {},
+		board: await workspaceStateMocks.loadWorkspaceBoardById(),
+	}),
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
 	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——

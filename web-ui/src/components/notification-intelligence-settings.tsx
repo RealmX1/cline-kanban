@@ -309,10 +309,20 @@ export function NotificationIntelligenceSettingsSection({
 					disabled={busy || disabled}
 				/>
 				<h4 className="border-t border-border pt-4 font-medium">语言模型用途</h4>
-				{(["taskNameSuggestionBinding", "notificationAssessmentBinding"] as const).map((bindingKey) => (
+				{(
+					[
+						"taskNameSuggestionBinding",
+						"notificationAssessmentBinding",
+						"independentTaskCreationDraftGenerationBinding",
+					] as const
+				).map((bindingKey) => (
 					<div key={bindingKey} className="space-y-1">
 						<label className="block" htmlFor={`notification-intelligence-selection-4-${bindingKey}`}>
-							{bindingKey === "taskNameSuggestionBinding" ? "任务起名 provider" : "通知判断与摘要 provider"}
+							{bindingKey === "taskNameSuggestionBinding"
+								? "任务起名 provider"
+								: bindingKey === "independentTaskCreationDraftGenerationBinding"
+									? "分出独立任务 provider"
+									: "通知判断与摘要 provider"}
 							<NativeSelect
 								id={`notification-intelligence-selection-4-${bindingKey}`}
 								value={settings[bindingKey]?.modelProviderId ?? ""}

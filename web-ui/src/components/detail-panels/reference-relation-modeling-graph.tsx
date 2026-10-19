@@ -16,6 +16,7 @@ export const REFERENCE_RELATION_LABELS: Record<string, string> = {
 export const RELATION_GRAPH_LABELS: Record<string, string> = {
 	...REFERENCE_RELATION_LABELS,
 	provenance_created_by: "创建来源",
+	provenance_split_from_side_conversation_of: "侧会话分出来源",
 	provenance_resumed_and_adopted_conversation_session_of: "续用会话来源",
 	provenance_forked_conversation_session_of: "派生会话来源",
 	interaction_agent_session_dispatched_or_controlled_by: "会话受其调度",

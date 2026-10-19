@@ -13,6 +13,7 @@ export const RECORDED_INTER_WORK_UNIT_RELATION_KINDS = [
 	"provenance_created_by",
 	"provenance_resumed_and_adopted_conversation_session_of",
 	"provenance_forked_conversation_session_of",
+	"provenance_split_from_side_conversation_of",
 	"interaction_agent_session_dispatched_or_controlled_by",
 	"interaction_requirements_amended_by",
 	"interaction_execution_configuration_changed_by",
@@ -37,6 +38,13 @@ export const RECORDED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY: Record<
 	RecordedInterWorkUnitRelationKind,
 	RecordedInterWorkUnitRelationKindRegistryEntry
 > = {
+	provenance_split_from_side_conversation_of: {
+		relationAxis: "provenance",
+		forwardReadingPhraseFromSubject: "分出自侧会话所属的任务",
+		inverseReadingPhraseFromAnchor: "侧会话分出了独立任务",
+		neighborhoodSummarySectionPriority: 6,
+		defaultVisibleInNeighborhoodSummary: true,
+	},
 	provenance_created_by: {
 		relationAxis: "provenance",
 		forwardReadingPhraseFromSubject: "was created by",

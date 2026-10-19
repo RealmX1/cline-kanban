@@ -29,6 +29,7 @@ import {
 	type TaskImage,
 } from "@/types";
 import {
+	independentTaskCreationProvenanceSchema,
 	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
 	runtimeTaskAgentPermissionModeSchema,
@@ -260,6 +261,7 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	id: true,
 	mainTaskConversationSessionId: true,
 	taskMainSessionHandover: true,
+	independentTaskCreationProvenance: true,
 	title: true,
 	prompt: true,
 	startInPlanMode: true,
@@ -402,6 +404,13 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			: {}),
 		title,
 		prompt,
+		...(independentTaskCreationProvenanceSchema.safeParse(card.independentTaskCreationProvenance).success
+			? {
+					independentTaskCreationProvenance: independentTaskCreationProvenanceSchema.parse(
+						card.independentTaskCreationProvenance,
+					),
+				}
+			: {}),
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
 		...(taskAgentPermissionMode !== undefined ? { taskAgentPermissionMode } : {}),
 		autoReviewEnabled: typeof card.autoReviewEnabled === "boolean" ? card.autoReviewEnabled : false,

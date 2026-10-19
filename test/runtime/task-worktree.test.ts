@@ -21,6 +21,7 @@ const workspaceStateMocks = vi.hoisted(() => ({
 	getRuntimeHomePath: vi.fn(),
 	getTaskWorktreesHomePath: vi.fn(),
 	loadWorkspaceContext: vi.fn(),
+	loadWorkspaceBoardById: vi.fn(async () => ({ columns: [] })),
 }));
 
 const taskWorktreePathMocks = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ vi.mock("../../src/state/workspace-state.js", () => ({
 	getRuntimeHomePath: workspaceStateMocks.getRuntimeHomePath,
 	getTaskWorktreesHomePath: workspaceStateMocks.getTaskWorktreesHomePath,
 	loadWorkspaceContext: workspaceStateMocks.loadWorkspaceContext,
+	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 }));
 
 vi.mock("../../src/workspace/task-worktree-path.js", () => ({

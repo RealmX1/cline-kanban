@@ -1,4 +1,4 @@
-import { isAbsolute, join, type PlatformPath, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { isHomeAgentSessionId, isHomeAgentSessionIdForWorkspace } from "../core/home-agent-session";
@@ -22,10 +22,12 @@ export interface TaskSessionSummariesOwnedByOtherWorkspacesRemoval {
 
 // 判定「会话工作目录是否在 task worktree 根下」用到的 path 操作。默认是当前平台的 node:path；
 // 测试注入 path.win32 来覆盖 Windows 跨盘符语义（posix 上 relative() 永远不会返回绝对路径）。
-export type SessionWorkingDirectoryOwnershipPathOperations = Pick<
-	PlatformPath,
-	"isAbsolute" | "join" | "relative" | "sep"
->;
+export type SessionWorkingDirectoryOwnershipPathOperations = {
+	isAbsolute: typeof isAbsolute;
+	join: typeof join;
+	relative: typeof relative;
+	sep: string;
+};
 
 const CURRENT_PLATFORM_SESSION_WORKING_DIRECTORY_OWNERSHIP_PATH_OPERATIONS: SessionWorkingDirectoryOwnershipPathOperations =
 	{ isAbsolute, join, relative, sep };

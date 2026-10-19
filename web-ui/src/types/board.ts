@@ -1,4 +1,5 @@
 import type {
+	IndependentTaskCreationProvenance,
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeBoardColumnId,
@@ -74,6 +75,7 @@ export interface BoardCard {
 	id: string;
 	mainTaskConversationSessionId?: string;
 	taskMainSessionHandover?: TaskMainSessionHandoverRecord;
+	independentTaskCreationProvenance?: IndependentTaskCreationProvenance;
 	title: string;
 	prompt: string;
 	startInPlanMode: boolean;

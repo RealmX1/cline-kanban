@@ -149,7 +149,8 @@ export async function readTaskUserPromptHistoryForDraftUsage(input: {
 						});
 					}
 					if (events.length < 500) break;
-					cursor = events[events.length - 1].globalCommittedEventSequence;
+					const lastEvent = events.at(-1);
+					if (lastEvent) cursor = lastEvent.globalCommittedEventSequence;
 				}
 			}
 		});

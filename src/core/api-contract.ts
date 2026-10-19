@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
+
+export * from "./independent-task-creation-contract.js";
+
 import { projectVisualIdentitySchema } from "./project-visual-identity.js";
 
 export type {
@@ -349,6 +353,7 @@ export const runtimeBoardCardSchema = z
 		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
 		mainTaskConversationSessionId: z.string().min(1).optional(),
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
+		independentTaskCreationProvenance: independentTaskCreationProvenanceSchema.optional(),
 		title: z.string().optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
@@ -609,6 +614,12 @@ export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 
 export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	workspaceTaskId: z.string(),
+	// 无论是否继承上下文，都记录侧会话诞生时的来源边界；不能拿重启后的 startedAt 反推。
+	sideSessionCreatedAt: z.number().optional(),
+	sideSessionOriginMainSessionId: z.string().optional(),
+	sideSessionOriginMainNativeSessionId: z.string().optional(),
+	sideSessionOriginMainTranscriptPath: z.string().optional(),
+	sideSessionOriginMainAgentId: z.string().optional(),
 	taskConversationSessionRole: z.enum(["main", "by_the_way", "task_collaborator"]),
 	// 当前角色按主会话绑定派生；创建角色与上下文来源不随交接改写。
 	taskConversationSessionRoleAtCreation: z.enum(["main", "by_the_way", "task_collaborator"]).optional(),

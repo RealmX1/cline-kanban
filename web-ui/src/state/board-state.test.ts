@@ -1222,6 +1222,17 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	// 服务端卡片 schema 的每个字段都填上非缺省值。新增字段时 typecheck 会先在
 	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
+		independentTaskCreationProvenance: {
+			creationRequestId: "11111111-1111-4111-8111-111111111111",
+			sourceWorkspaceId: "source-workspace",
+			sourceTaskId: "source",
+			sourceTaskConversationSessionId: "peer",
+			sourceNativeSessionId: null,
+			sourceContextCapturedAt: 1,
+			contextInheritance: "fresh_conversation",
+			worktreeSource: "local_main_immediately",
+			contextArtifactDirectory: "/persistent/creation",
+		},
 		id: "f1e2d",
 		mainTaskConversationSessionId: "codex-peer-session",
 		taskMainSessionHandover: {

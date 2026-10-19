@@ -447,6 +447,13 @@ import {
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
 import {
+	independentTaskCreationDraftEditSchema,
+	independentTaskCreationDraftRequestSchema,
+	independentTaskCreationDraftSchema,
+	independentTaskCreationListRequestSchema,
+	independentTaskCreationListResponseSchema,
+} from "../core/independent-task-creation-contract";
+import {
 	KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
 	kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema,
 	runtimeTaskIdAllocationForNewWebUiTaskCardResponseSchema,
@@ -540,6 +547,7 @@ import {
 	setRecordedRelationPresentationMutePreferenceRequestSchema,
 	setRecordedRelationPresentationMutePreferenceResponseSchema,
 } from "../core/work-unit-relation-read-api-contract";
+import type { IndependentTaskCreationService } from "../independent-task-creation/independent-task-creation-service";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { issueKanbanWebUiPageLoadRequestOriginNonce } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
@@ -563,6 +571,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	independentTaskCreationApi?: IndependentTaskCreationService;
 	taskMainSessionHandoverApi?: {
 		prepare: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1334,6 +1343,62 @@ export const runtimeAppRouter = t.router({
 		archivedAudio: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string() }))
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
+	}),
+	independentTaskCreation: t.router({
+		read: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid() }))
+			.output(independentTaskCreationDraftSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.read(ctx.workspaceScope, input);
+			}),
+		latestDraft: workspaceProcedure
+			.input(z.object({ sourceTaskId: z.string(), sourceTaskConversationSessionId: z.string() }))
+			.output(independentTaskCreationDraftSchema.nullable())
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.latestDraft(ctx.workspaceScope, input);
+			}),
+		prepare: workspaceProcedure
+			.input(independentTaskCreationDraftRequestSchema)
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.prepare(ctx.workspaceScope, input);
+			}),
+		saveDraft: workspaceProcedure
+			.input(independentTaskCreationDraftEditSchema)
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.saveDraft(ctx.workspaceScope, input);
+			}),
+		generate: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid(), allowIncompleteContext: z.boolean().optional() }))
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.generate(ctx.workspaceScope, input);
+			}),
+		create: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid() }))
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.create(
+					ctx.workspaceScope,
+					input,
+					ctx,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		list: workspaceProcedure
+			.input(independentTaskCreationListRequestSchema)
+			.output(independentTaskCreationListResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.list(ctx.workspaceScope, input);
+			}),
 	}),
 	runtime: t.router({
 		prepareTaskMainSessionHandover: workspaceProcedure

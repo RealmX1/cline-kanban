@@ -50,6 +50,24 @@ Sessions 提供「交接给 Codex」。默认创建全新 Codex，也可选择�
 
 请求 ID、预留目标 ID 和投递账本保证幂等。确定尚未投递的失败可重试并复用目标 session；跨重启后回执不确定时停止自动重放，用户检查 Codex 后可直接发消息接续。绑定已切换后的失败不会静默退回 Claude。旧队列保留原 session；新任务消息在入队时固定当前 main，回执仍按调用方的 Task ID 记账。
 
+## 从侧会话分出独立任务
+
+Sessions 的 By the way 与协作会话行提供「分出独立任务」。来源会话继续保留，同一来源可以分出多张卡；前主会话不提供此入口。新卡与来源会话双向链接，关系账本从建卡事件投影 `provenance_split_from_side_conversation_of`，不自动建立子任务关系。投影表版本为 4，固定历史种子不作为匿名来源展示。
+
+上下文与工作树是两项独立选择。默认完整继承来源的原生历史，使用独立的原生 ID、工作目录、hook 与任务生命周期；目前 Codex 使用带完整回合边界的 `thread/fork`，Claude 使用 SDK 的无模型 `forkSession` 固定种子，新任务再从种子 fork。不支持可靠原生分支时明确禁用完整继承，仍可选全新上下文，只提供 Initial Prompt。完整继承保留已有 compaction 和上下文，界面明确提示该取舍。
+
+工作树有三种来源：立即从 local main 新建（默认）；先建 Backlog，等来源任务完成且成果进入 local main 后手动启动，启动时才建树；立即复制来源 Git 工作状态。复制包括 HEAD 与尚未合入的提交、staged、unstaged、非 ignored 的 untracked，保留 index 区分、二进制、重命名、删除、执行位和符号链接。ignored 路径仍使用普通建树规则。快照归档 HEAD 历史与暂存 blob，避免来源清理或 GC 后丢失；不提交、stash、reset 或修改来源工作目录。冲突、子模块或无法安全复制的路径明确拒绝，复制期间发生变化则失败，不使用不完整快照启动。
+
+Backlog 的门禁在服务端，卡片启动、直接 runtime 启动及首次建树都核验。来源需在 Done，工作树及保留补丁没有未落地修改，并通过既有 exact SHA / stable patch-id 共享落地判据；Done、ahead=0 或未观测到自有提交都不能单独证明落地。成功首次授权后持久保存结果，后续恢复不重新依赖来源状态。不新增自动调度或恢复已退役的依赖自动启动。
+
+用户可填写本次分出说明；自动建议同时生成描述建议、标题与必填 Initial Prompt。默认使用 Kanban 模型 API，未绑定用途时选择 DeepSeek 的既有 Flash 浮动模型标识；用途绑定、凭据、用量日志复用现有机制。失败后可显式换 provider、手动填写，或在具备固定种子和启动参数快照的 Claude 来源上选择另开无工具 Agent 分身。分身选项明确提示历史计费成本，不自动回退或重试付费请求。
+
+自动建议使用起点前全部真人输入与最后一轮 Agent 正文，加所选侧会话起点后的全部用户和 Agent 正文，以及本次分出说明；普通工具仅保留原文引用，真人问答答案从工具结果中单独保留。起点前整理接口将来可由 Intention System 替换。缺失材料与 1.5 MB 生成输入上限明确显示，不静默截断。来源回答期间先持久等待，不中断；若已进入后续回合而错过原停止边沿，则要求显式重新固定，不混入后续聊天。
+
+草稿、来源转录快照、原生种子、生成版本及创建记录保存在运行时 HOME 的 `cross-task-handoff-artifacts/independent-task-creation/<workspace-hash>/<requestId>/`，独立于来源 worktree。编辑自动保存，更新草稿与创建才触发描述变更后的模型生成；手改标题和 Initial Prompt 保留，迟到结果不能覆盖新版本。请求 ID 幂等；重启不重放未完成的付费请求或不确定的首次启动，已创建卡保留可恢复入口。
+
+`test/integration/independent-task-creation-real-browser.integration.test.ts` 用隔离 HOME、fixture Git、模拟模型 API、真实 PTY 与桌面/手机浏览器覆盖固定材料、真人答案、手改恢复、三种建树、门禁、多卡与重复创建、运行时重启。设置 `KANBAN_INDEPENDENT_TASK_CREATION_PACKAGED_CLI_PATH`，可用 `KANBAN_INDEPENDENT_TASK_CREATION_BROWSER_EVIDENCE_DIRECTORY` 指定持久证据；浏览器缓存位置经 `PLAYWRIGHT_BROWSERS_PATH` 指定。原生历史分支另有真实 Claude SDK 文件测试与 Codex 协议测试，不调用真实模型。
+
 ## 自动化验证
 
 定向运行时测试覆盖角色契约、完整终端 agent 候选、ACP 启动归属和冷恢复、独立权限、混合通道停止、OMP 通道切换、通知与关系归属。前端测试覆盖候选来源、未安装禁用、创建失败保留输入和 By the way 回归。

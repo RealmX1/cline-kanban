@@ -101,6 +101,7 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 			);
 		const boundProviderIds = [
 			settings.taskNameSuggestionBinding,
+			settings.independentTaskCreationDraftGenerationBinding,
 			settings.notificationAssessmentBinding,
 			settings.notificationSpeechBinding,
 		].map((binding) => binding?.modelProviderId);
@@ -159,6 +160,7 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 							const next = { ...current };
 							for (const key of [
 								"taskNameSuggestionBinding",
+								"independentTaskCreationDraftGenerationBinding",
 								"notificationAssessmentBinding",
 								"notificationSpeechBinding",
 							] as const) {
@@ -186,6 +188,7 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 					candidate
 						? [
 								candidate.taskNameSuggestionBinding,
+								candidate.independentTaskCreationDraftGenerationBinding,
 								candidate.notificationAssessmentBinding,
 								candidate.notificationSpeechBinding,
 							].flatMap((binding) => (binding ? [binding.modelProviderId] : []))

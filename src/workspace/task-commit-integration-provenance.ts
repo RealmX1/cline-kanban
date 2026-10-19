@@ -39,6 +39,8 @@ export type ObservedTaskCommit = z.infer<typeof observedTaskCommitSchema>;
 const taskCommitProvenanceIncarnationSchema = z.object({
 	incarnationId: z.string(),
 	initialBaseCommit: z.string(),
+	// 复制来源时，initialBaseCommit 是继承提交的排除锚点，未必属于 base 历史；探测下界单独保存。
+	baseRefCommitHistoryProbeFloorCommit: z.string().optional(),
 	captureSource: z.enum(["worktree_creation", "live_pre_handback_backfill"]),
 	startedAt: z.number(),
 	observedTaskCommits: z.array(observedTaskCommitSchema),
@@ -182,6 +184,7 @@ export async function recordTaskWorktreeCreationCommitProvenance(input: {
 	taskId: string;
 	baseRef: string;
 	initialBaseCommit: string;
+	baseRefCommitHistoryProbeFloorCommit?: string;
 	recordedAt?: number;
 }): Promise<void> {
 	const recordedAt = input.recordedAt ?? Date.now();
@@ -190,6 +193,7 @@ export async function recordTaskWorktreeCreationCommitProvenance(input: {
 		const previousIncarnation = existing?.incarnations.at(-1);
 		if (
 			previousIncarnation?.initialBaseCommit === input.initialBaseCommit &&
+			previousIncarnation.baseRefCommitHistoryProbeFloorCommit === input.baseRefCommitHistoryProbeFloorCommit &&
 			previousIncarnation.observedTaskCommits.length === 0 &&
 			existing?.baseRef === input.baseRef
 		) {
@@ -198,6 +202,7 @@ export async function recordTaskWorktreeCreationCommitProvenance(input: {
 		const incarnation: TaskCommitProvenanceIncarnation = {
 			incarnationId: `${input.initialBaseCommit}:${recordedAt}`,
 			initialBaseCommit: input.initialBaseCommit,
+			baseRefCommitHistoryProbeFloorCommit: input.baseRefCommitHistoryProbeFloorCommit,
 			captureSource: "worktree_creation",
 			startedAt: recordedAt,
 			observedTaskCommits: [],
@@ -233,8 +238,15 @@ async function listCommitShas(cwd: string, revisionRange: string, firstParent = 
 async function listCommitShasWithMergeCommitFlag(
 	cwd: string,
 	revisionRange: string,
+	commitsReachableFromExcludedCommit?: string,
 ): Promise<Array<{ commitSha: string; isMergeCommit: boolean }> | null> {
-	const result = await runGit(cwd, ["rev-list", "--reverse", "--parents", revisionRange]);
+	const result = await runGit(cwd, [
+		"rev-list",
+		"--reverse",
+		"--parents",
+		...(commitsReachableFromExcludedCommit ? [`^${commitsReachableFromExcludedCommit}`] : []),
+		revisionRange,
+	]);
 	if (!result.ok) {
 		return null;
 	}
@@ -506,7 +518,9 @@ export async function refreshTaskCommitIntegrationProvenance(
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable");
 		}
 		let snapshot = entry.lastWorkspaceGitSnapshot;
-		const provenanceFloorCommit = entry.incarnations[0]?.initialBaseCommit;
+		const firstIncarnation = entry.incarnations[0];
+		const provenanceFloorCommit =
+			firstIncarnation?.baseRefCommitHistoryProbeFloorCommit ?? firstIncarnation?.initialBaseCommit;
 		if (input.baseRefTipCommit !== null && provenanceFloorCommit) {
 			const baseRefCommits = await loadBaseRefCommitIdentities({
 				repoPath: input.repoPath,
@@ -650,6 +664,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 	const candidateCommitsWithMergeFlag = await listCommitShasWithMergeCommitFlag(
 		input.worktreePath,
 		`${input.baseRef}..HEAD`,
+		activeIncarnation.initialBaseCommit,
 	);
 	if (candidateCommitsWithMergeFlag === null) {
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
@@ -683,7 +698,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 	for (const commit of newCommitIdentities) {
 		observedTaskCommitsBySha.set(commit.commitSha, commit);
 	}
-	// 本次探测 `baseRef..HEAD` 的全部候选都归当前活动世（含旧世已观测过、又出现在本世的，例如复用了旧分支），身份复用
+	// 本次探测排除创建锚点可达历史后，`baseRef..HEAD` 的全部候选都归当前活动世（含旧世已观测过、又出现在本世的，例如复用了旧分支），身份复用
 	// 已有观测、不重算 patch-id。从 base 吸收进来的提交从不出现在 `baseRef..HEAD`，因此不会被记成任何一世的自有提交。
 	const candidateCommitIdentities = candidateCommitShas.flatMap((commitSha) => {
 		const identity = observedTaskCommitsBySha.get(commitSha);
@@ -696,7 +711,9 @@ export async function refreshTaskCommitIntegrationProvenance(
 		]),
 	);
 
-	const provenanceFloorCommit = entry.incarnations[0]?.initialBaseCommit;
+	const firstIncarnation = entry.incarnations[0];
+	const provenanceFloorCommit =
+		firstIncarnation?.baseRefCommitHistoryProbeFloorCommit ?? firstIncarnation?.initialBaseCommit;
 	if (!provenanceFloorCommit) {
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete");
 	}
@@ -877,6 +894,34 @@ export async function readRawTaskCommitLandingSnapshotForRelationLedgerEvent(
 		lastKnownTaskHeadObservedAt: snapshot?.observedAt ?? null,
 		taskCommitIntegrationProvenanceBaseRef: entry?.baseRef ?? null,
 	};
+}
+
+/** 分出任务的手动启动复用共享落地判据，不读取 ahead 作为结案证明。 */
+export async function readSourceTaskCommitLandingReadiness(input: {
+	workspaceId: string;
+	taskId: string;
+	repoPath: string;
+	localBaseRef: string;
+}): Promise<boolean> {
+	const entry = (await readProvenanceFile(input.workspaceId)).tasks[input.taskId];
+	const incarnation = entry?.incarnations.at(-1);
+	const owned = entry?.lastWorkspaceGitSnapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
+	if (!incarnation || !owned || entry.baseRef !== input.localBaseRef) return false;
+	const base = await resolveBaseRefTipCommit(input.repoPath, input.localBaseRef);
+	if (!base) return false;
+	const commits = await loadBaseRefCommitIdentities({
+		repoPath: input.repoPath,
+		baseRef: input.localBaseRef,
+		baseRefTipCommit: base,
+		provenanceFloorCommit: incarnation.baseRefCommitHistoryProbeFloorCommit ?? incarnation.initialBaseCommit,
+	});
+	if (!commits) return false;
+	return (
+		evaluateSharedTaskCommitLandingCriterionAgainstLocalBaseCommits({
+			taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: owned,
+			localBaseRefCommits: commits,
+		}).sharedTaskCommitLandingCriterionOutcome === "all_task_owned_non_merge_commits_integrated_into_local_base"
+	);
 }
 
 // 部署归属（src/deployment/task-deployment-attribution-from-commit-integration-provenance.ts）的输入：每个 task 跨全部

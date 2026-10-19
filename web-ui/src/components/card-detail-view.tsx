@@ -1179,7 +1179,13 @@ export function CardDetailView({
 	useEffect(() => {
 		setDiffComments(new Map());
 		setDiffMode("working_copy");
-		setSelectedTaskConversationSessionId(resolveMainTaskConversationSessionId(selection.card));
+		const requestedSessionId = new URLSearchParams(window.location.search).get("conversationSession");
+		const requestedSession = requestedSessionId ? taskSessions[requestedSessionId] : null;
+		setSelectedTaskConversationSessionId(
+			requestedSession?.taskConversationSessionMetadata?.workspaceTaskId === selection.card.id
+				? requestedSession.taskId
+				: resolveMainTaskConversationSessionId(selection.card),
+		);
 	}, [selection.card.id, selection.card.mainTaskConversationSessionId]);
 
 	// 选中新卡（或切到该卡的另一个子会话）后，键盘焦点应当自动落进该卡的 agent 输入入口，

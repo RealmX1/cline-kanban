@@ -61,6 +61,7 @@ import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-t
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
+import { createIndependentTaskCreationService } from "../independent-task-creation/independent-task-creation-service";
 import {
 	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
 	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
@@ -809,6 +810,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 	});
 
+	const independentTaskCreationApi = createIndependentTaskCreationService({
+		findSession: findRuntimeSessionSummary,
+		listSessions: listProjectRuntimeSessionSummaries,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+	});
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -839,6 +845,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			},
 			runtimeApi,
 			taskMainSessionHandoverApi,
+			independentTaskCreationApi,
 			rvfAutomaticCloseoutApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActionApi({

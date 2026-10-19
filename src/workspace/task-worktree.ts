@@ -8,7 +8,21 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
-import { getRuntimeHomePath, getTaskWorktreesHomePath, loadWorkspaceContext } from "../state/workspace-state";
+import {
+	readSourceGitWorkingStateSnapshot,
+	restoreSourceGitObjectSnapshot,
+	restoreSourceGitWorkingState,
+} from "../independent-task-creation/git-working-state-snapshot";
+import {
+	assertIndependentTaskSourceLandedBeforeInitialStart,
+	readValidatedIndependentTaskCreationRecord,
+} from "../independent-task-creation/source-task-landing-gate";
+import {
+	getRuntimeHomePath,
+	getTaskWorktreesHomePath,
+	loadWorkspaceBoardById,
+	loadWorkspaceContext,
+} from "../state/workspace-state";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
 import { recordTaskWorktreeCreationCommitProvenance } from "./task-commit-integration-provenance";
 import { getWorkspaceFolderLabelForWorktreePath, normalizeTaskIdForWorktreePath } from "./task-worktree-path";
@@ -580,9 +594,37 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 					};
 				}
 				const requestedBaseCommit = baseRefResult.stdout;
+				const owningCard = (await loadWorkspaceBoardById(context.workspaceId)).columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === taskId);
+				if (owningCard) {
+					await readValidatedIndependentTaskCreationRecord(context.workspaceId, owningCard);
+					await assertIndependentTaskSourceLandedBeforeInitialStart({
+						workspaceId: context.workspaceId,
+						repoPath: context.repoPath,
+						card: owningCard,
+					});
+				}
+				const inheritedSnapshotDirectory =
+					owningCard?.independentTaskCreationProvenance?.worktreeSource ===
+					"copy_source_git_working_state_immediately"
+						? join(
+								owningCard.independentTaskCreationProvenance.contextArtifactDirectory,
+								"source-git-working-state",
+							)
+						: null;
+				const inheritedSnapshot = inheritedSnapshotDirectory
+					? await readSourceGitWorkingStateSnapshot(inheritedSnapshotDirectory)
+					: null;
+				if (
+					inheritedSnapshotDirectory &&
+					inheritedSnapshot &&
+					!(await runGit(context.repoPath, ["cat-file", "-e", inheritedSnapshot.headCommit])).ok
+				)
+					await restoreSourceGitObjectSnapshot(context.repoPath, inheritedSnapshotDirectory);
 
 				const storedPatch = await findTaskPatch(taskId);
-				let baseCommit = storedPatch?.commit ?? requestedBaseCommit;
+				let baseCommit = storedPatch?.commit ?? inheritedSnapshot?.headCommit ?? requestedBaseCommit;
 				let warning: string | undefined;
 
 				if (await pathExists(worktreePath)) {
@@ -613,6 +655,14 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 					await getGitStdout(["worktree", "add", "--detach", worktreePath, baseCommit], context.repoPath);
 				}
 				await prepareNewTaskWorktree(context.repoPath, worktreePath);
+				if (inheritedSnapshotDirectory && !storedPatch) {
+					try {
+						await restoreSourceGitWorkingState(worktreePath, inheritedSnapshotDirectory);
+					} catch (error) {
+						await removeTaskWorktreeInternal(context.repoPath, worktreePath);
+						throw error;
+					}
+				}
 
 				if (storedPatch && baseCommit === storedPatch.commit) {
 					try {
@@ -629,7 +679,9 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 					baseRef: requestedBaseRef,
 					// restored patch 可能以旧 task HEAD 为物理 checkout 起点；所有权边界仍必须是
 					// task 所声明的 baseRef tip，否则会把旧 task commits 静默当成 base 历史。
-					initialBaseCommit: requestedBaseCommit,
+					initialBaseCommit: inheritedSnapshot?.headCommit ?? requestedBaseCommit,
+					// 来源 HEAD 只界定继承历史；base 历史探测仍从创建时的本地 base tip 开始。
+					...(inheritedSnapshot ? { baseRefCommitHistoryProbeFloorCommit: requestedBaseCommit } : {}),
 				});
 
 				return {

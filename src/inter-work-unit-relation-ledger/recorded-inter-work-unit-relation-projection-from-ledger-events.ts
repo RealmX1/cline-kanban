@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { independentTaskCreationProvenanceSchema } from "../core/independent-task-creation-contract";
 import {
 	type RecordedInterWorkUnitRelation,
 	type RecordedInterWorkUnitRelationKind,
@@ -45,7 +46,7 @@ import {
 // 关系 = 事件日志 × 投影表版本的纯函数（d-vocab §2.2）：本模块按全局提交序号顺序消费已提交事件，
 // 不写账本、不落盘；runtime 在内存里持有状态并按游标增量追上（见 ...-catch-up-against-ledger-worker.ts）。
 // 投影规则改了就升版本号，持有方据此从头重放——账本只追加，所以重放的结果与「当初就按新规则投影」完全一致。
-export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 3;
+export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 4;
 
 const MOST_RECENT_PROJECTED_FROM_EVENT_IDS_RETAINED_PER_RECORDED_RELATION = 10;
 
@@ -415,6 +416,9 @@ export function collectTaskAgentSessionInitializationFieldValueSha256sReferenced
 				if (typeof initializationSha256 === "string") {
 					fieldValueSha256s.add(initializationSha256);
 				}
+				const originSha256 = (fieldValueSha256ByFieldName as Record<string, unknown>)
+					.independentTaskCreationProvenance;
+				if (typeof originSha256 === "string") fieldValueSha256s.add(originSha256);
 			}
 		} else if (
 			event.eventKind === "task_card_field_value_changed" &&
@@ -447,6 +451,53 @@ function applyTaskMutationEvent(
 		});
 	}
 	if (event.eventKind === "task_card_created_on_board") {
+		const fields = event.eventPayload.fieldValueSha256ByFieldNameAtCreation;
+		const originSha256 =
+			fields && typeof fields === "object"
+				? (fields as Record<string, unknown>).independentTaskCreationProvenance
+				: null;
+		const originJson = typeof originSha256 === "string" ? lookupRetainedFieldValueCanonicalJson(originSha256) : null;
+		let origin: unknown;
+		try {
+			origin = originJson ? JSON.parse(originJson) : null;
+		} catch {
+			origin = null;
+		}
+		const parsedOrigin = independentTaskCreationProvenanceSchema.safeParse(origin);
+		if (parsedOrigin.success) {
+			const source = findLiveKanbanBoardCardIdentityProjectionByWorkspaceAndTaskId(
+				state.kanbanBoardCardIdentityProjectionState,
+				parsedOrigin.data.sourceWorkspaceId,
+				parsedOrigin.data.sourceTaskId,
+			);
+			const sourceCard: KanbanBoardCardWorkUnitQualifiedReference | undefined =
+				parsedOrigin.data.sourceTaskIncarnationCreatedAtEpochMs === undefined
+					? source?.kanbanBoardCard
+					: {
+							workUnitType: "kanban_board_card",
+							workspaceId: parsedOrigin.data.sourceWorkspaceId,
+							taskId: parsedOrigin.data.sourceTaskId,
+							taskIncarnationCreatedAtEpochMs: parsedOrigin.data.sourceTaskIncarnationCreatedAtEpochMs,
+						};
+			if (sourceCard)
+				upsertRecordedRelationOccurrence(state, {
+					relationKind: "provenance_split_from_side_conversation_of",
+					subjectWorkUnit: subjectCard,
+					anchorWorkUnit: sourceCard,
+					occurredAt: event.occurredAt,
+					derivingEventId: event.eventId,
+					derivingEventCaptureChannel: event.recordCaptureChannel,
+					countedTaskMutationEventKind: null,
+					mergeKindSpecificAttributes: () => ({
+						sourceTaskConversationSessionId: parsedOrigin.data.sourceTaskConversationSessionId,
+						contextInheritance: parsedOrigin.data.contextInheritance,
+						worktreeSource: parsedOrigin.data.worktreeSource,
+						inheritedGitHeadCommit: parsedOrigin.data.inheritedGitHeadCommit,
+						inheritedGitWorkingStateIncludedUncommittedChanges:
+							parsedOrigin.data.inheritedGitWorkingStateIncludedUncommittedChanges,
+					}),
+				});
+		}
 		// 建卡只投影成来源（d-vocab §6）。系统组件代行时按 onBehalfOf 投影（Y-EVENT-10）。
 		const creatingWorkUnit =
 			actingWorkUnit ??
@@ -475,7 +526,8 @@ function applyTaskMutationEvent(
 			initializationFieldValueSha256,
 			lookupRetainedFieldValueCanonicalJson,
 		);
-		if (initialization) {
+		// 固定种子是运行时实现细节，侧会话分出已有显式来源，不再投影成匿名种子会话来源。
+		if (initialization && !parsedOrigin.success) {
 			applyTaskAgentSessionInitializationSetOnKanbanBoardCard(state.conversationSessionOwnershipProjectionState, {
 				card: subjectCard,
 				taskAgentSessionInitialization: initialization,
@@ -754,6 +806,7 @@ function findCreationTimePrimaryProvenanceRelationIdOfCard(
 ): string | null {
 	const cardKey = buildInterWorkUnitRelationWorkUnitKey(card);
 	let earliestForkRelation: RecordedInterWorkUnitRelation | null = null;
+	let createdByRelationId: string | null = null;
 	for (const relationId of state.recordedRelationIdsByWorkUnitKey.get(cardKey) ?? []) {
 		const relation = state.recordedRelationsByRelationId.get(relationId);
 		if (
@@ -762,8 +815,9 @@ function findCreationTimePrimaryProvenanceRelationIdOfCard(
 		) {
 			continue;
 		}
+		if (relation.relationKind === "provenance_split_from_side_conversation_of") return relation.relationId;
 		if (relation.relationKind === "provenance_created_by") {
-			return relation.relationId;
+			createdByRelationId = relation.relationId;
 		}
 		if (
 			relation.relationKind === "provenance_forked_conversation_session_of" &&
@@ -773,7 +827,7 @@ function findCreationTimePrimaryProvenanceRelationIdOfCard(
 			earliestForkRelation = relation;
 		}
 	}
-	return earliestForkRelation?.relationId ?? null;
+	return createdByRelationId ?? earliestForkRelation?.relationId ?? null;
 }
 
 // 一个工作单元的一度邻域（入边 + 出边），按建立时间排序；返回的是带主来源标记的副本，不暴露内部可变状态。

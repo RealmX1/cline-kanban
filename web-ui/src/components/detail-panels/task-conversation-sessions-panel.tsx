@@ -10,9 +10,11 @@ import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/trun
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
 import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
+import { IndependentTaskCreationAction } from "./independent-task-creation-action";
 import { TaskMainSessionHandoverAction } from "./task-main-session-handover-action";
 
 type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
@@ -299,6 +301,18 @@ export function TaskConversationSessionsPanel({
 
 			{activeTab === "sessions" ? (
 				<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+					{workspaceId && taskCard?.independentTaskCreationProvenance && (
+						<a
+							className="mb-2 block break-words px-2 text-xs text-accent underline"
+							href={`${buildProjectTaskDeepLinkUrl(taskCard.independentTaskCreationProvenance.sourceWorkspaceId, taskCard.independentTaskCreationProvenance.sourceTaskId)}&conversationSession=${encodeURIComponent(taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId)}`}
+						>
+							来自任务 {taskCard.independentTaskCreationProvenance.sourceTaskId} 的会话{" "}
+							{taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId}
+							{taskCard.independentTaskCreationProvenance.inheritedGitWorkingStateIncludedUncommittedChanges
+								? "（含来源未提交修改）"
+								: ""}
+						</a>
+					)}
 					{workspaceId && taskCard && (
 						<TaskMainSessionHandoverAction
 							workspaceId={workspaceId}
@@ -410,6 +424,13 @@ export function TaskConversationSessionsPanel({
 									summary={summary}
 									taskConversationSessionId={summary.taskId}
 								/>
+								{workspaceId && metadata.taskConversationSessionRoleAtCreation !== "main" && (
+									<IndependentTaskCreationAction
+										workspaceId={workspaceId}
+										sourceTaskId={workspaceTaskId}
+										sourceSessionId={summary.taskId}
+									/>
+								)}
 							</div>
 						);
 					})}

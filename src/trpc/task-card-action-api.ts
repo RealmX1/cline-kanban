@@ -45,6 +45,7 @@ import type {
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 } from "../deployment/post-deploy-verification-done-entry-gate";
+import { assertIndependentTaskSourceLandedBeforeInitialStart } from "../independent-task-creation/source-task-landing-gate";
 import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
@@ -581,6 +582,20 @@ export function createTaskCardActionApi(
 			kanbanRequestOriginActorEvidence,
 		) =>
 			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const initialState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+				const initialCard = initialState.board.columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === input.taskId);
+				if (
+					initialCard?.independentTaskCreationProvenance &&
+					!initialState.sessions[resolveMainTaskConversationSessionId(initialCard)]?.startedAt
+				) {
+					await assertIndependentTaskSourceLandedBeforeInitialStart({
+						workspaceId: workspaceScope.workspaceId,
+						repoPath: workspaceScope.workspacePath,
+						card: initialCard,
+					});
+				}
 				const taskMutationIntent = await resolveIntent(
 					"start_agent_session_moving_task_card_into_in_progress",
 					kanbanRequestOriginActorEvidence,

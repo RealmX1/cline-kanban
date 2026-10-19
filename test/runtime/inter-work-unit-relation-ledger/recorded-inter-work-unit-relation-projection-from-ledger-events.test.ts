@@ -31,6 +31,52 @@ function card(workspaceId: string, taskId: string, incarnation = 1_000): KanbanB
 const PARENT = card("ws-a", "p0001");
 const CHILD = card("ws-b", "c0001", 2_000);
 
+it("侧会话分出复用建卡账本投影真实来源，不把内部固定种子投影成匿名来源", () => {
+	const ledger = new SyntheticLedger();
+	ledger.cardCreated(PARENT);
+	ledger.retainedFieldValueCanonicalJsonBySha256.set(
+		"side-origin",
+		JSON.stringify({
+			creationRequestId: "11111111-1111-4111-8111-111111111111",
+			sourceWorkspaceId: PARENT.workspaceId,
+			sourceTaskId: PARENT.taskId,
+			sourceTaskConversationSessionId: "peer",
+			sourceNativeSessionId: "original-native",
+			sourceContextCapturedAt: 1,
+			contextInheritance: "fork_source_conversation",
+			worktreeSource: "copy_source_git_working_state_immediately",
+			contextArtifactDirectory: "/persistent/source",
+			inheritedGitHeadCommit: "inherited-head",
+		}),
+	);
+	ledger.retainedFieldValueCanonicalJsonBySha256.set(
+		"internal-seed",
+		JSON.stringify({
+			sourceAgentId: "codex",
+			sourceSessionId: "immutable-seed",
+			sourceSessionReuseMode: "fork_existing_session",
+		}),
+	);
+	ledger.cardCreated(CHILD, undefined, {
+		fieldValueSha256ByFieldNameAtCreation: {
+			independentTaskCreationProvenance: "side-origin",
+			taskAgentSessionInitialization: "internal-seed",
+		},
+	});
+	ledger.identityObserved(CHILD, "codex", "new-task-native");
+	const relations = listRecordedInterWorkUnitRelationsTouchingWorkUnit(ledger.project(), CHILD);
+	expect(relations).toHaveLength(1);
+	expect(relations[0]).toMatchObject({
+		relationKind: "provenance_split_from_side_conversation_of",
+		relationStatementAnchorWorkUnitRef: PARENT,
+		isCreationTimePrimaryProvenanceOfSubjectCard: true,
+		recordedRelationKindSpecificAttributes: {
+			sourceTaskConversationSessionId: "peer",
+			inheritedGitHeadCommit: "inherited-head",
+		},
+	});
+});
+
 // 照真实写入端（buildAgentConversationSessionNativeIdentityEventDraft）：subjectTaskId = kanban 会话 id，
 // 所属卡在 taskConversationSessionMetadata.workspaceTaskId。主会话的 kanban 会话 id 等于卡 id。
 interface KanbanTaskConversationSessionWithNativeIdentity {
