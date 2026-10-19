@@ -28,6 +28,7 @@ export interface AgentIdleGatedProgrammaticInjectionEnqueueInput {
 	queueEntryId: string;
 	text: string;
 	injectionLedgerIdempotencyKey: string;
+	injectionLedgerTaskId?: string;
 	injectionSource: string;
 	// 调用方给的「最多等 agent 空闲到这一刻」。直接当 expiresAt：过期收敛、投影、门控都已按它工作，
 	// 不另造一个只有程序化条目才看的截止字段。
@@ -71,6 +72,7 @@ export function applyAgentIdleGatedProgrammaticInjectionEnqueue(
 		custodianRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
 		programmaticInjectionLedgerReceiptLink: {
 			injectionLedgerIdempotencyKey: input.injectionLedgerIdempotencyKey,
+			...(input.injectionLedgerTaskId ? { injectionLedgerTaskId: input.injectionLedgerTaskId } : {}),
 			injectionSource: input.injectionSource,
 			settledTerminalDeliveryReceipt: null,
 		},

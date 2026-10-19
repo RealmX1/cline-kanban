@@ -792,7 +792,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
 	) => {
-		if (evidence?.summary) latestNotificationSummaries.set(`${workspaceId}:${taskId}`, evidence.summary);
+		if (evidence?.summary)
+			latestNotificationSummaries.set(`${workspaceId}:${evidence.summary.taskId}`, evidence.summary);
 		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
 	};
 

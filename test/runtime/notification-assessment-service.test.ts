@@ -317,4 +317,43 @@ describe("智能通知状态机", () => {
 			service.close();
 		}
 	});
+	it.each([false, true])("交接后前主会话的迟到 AI 判断不会发布通知，包括失败兜底（抛错=%s）", async (throwFailure) => {
+		let current = summary();
+		const publish = vi.fn(async () => undefined);
+		const publishUnarchived = vi.fn(async () => undefined);
+		const service = createNotificationAssessmentService({ publish, publishUnarchived, getSummary: () => current });
+		modelRequest.mockImplementation(async () => {
+			current = {
+				...current,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionRoleAtCreation: "main",
+					taskConversationSessionContextSource: "main",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			};
+			if (throwFailure) throw new Error("模拟交接期间通知判断失败");
+			return {
+				status: "completed",
+				parsedJsonObject: { decision: "completed_turn_or_user_handoff", reason: "完成", summaryText: "完成" },
+			};
+		});
+		try {
+			await service.enqueue({
+				workspaceId: "assessment",
+				taskId: "task",
+				candidateId: `former-main-${throwFailure}`,
+				userTurnKind: "review",
+				summary: current,
+			});
+			expect(publish).not.toHaveBeenCalled();
+			expect(publishUnarchived).not.toHaveBeenCalled();
+		} finally {
+			service.close();
+		}
+	});
 });

@@ -33,6 +33,7 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
+import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -48,6 +49,10 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
+	resolveCurrentTaskConversationSessionSummaryForLifecycle?: (
+		workspaceId: string,
+		summary: RuntimeTaskSessionSummary,
+	) => Promise<RuntimeTaskSessionSummary>;
 	notifyPromptDraftUserPromptSubmitted?: (input: PromptDraftUsageSubmission) => void;
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId?: typeof persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	getWorkspacePathById: (workspaceId: string) => string | null;
@@ -440,6 +445,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
 			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				if (
+					summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+					body.hookEventFiredInsideSubagentContext !== true
+				) {
+					await completeTaskMainSessionHandoverAfterUserMessage({
+						workspaceId,
+						workspacePath,
+						taskConversationSessionId: taskId,
+						promptText: body.submittedPromptText,
+						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
+							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+					});
+				}
 				if (body.hookEventFiredInsideSubagentContext !== true) {
 					deps.notifyPromptDraftUserPromptSubmitted?.({
 						workspaceId,
@@ -719,7 +737,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			const userInitiatedResume =
 				event === "to_in_progress" &&
 				(resumeContinueHookEventName === "userpromptsubmit" || resumeContinueHookEventName === "beforeagent");
-			const transitionedSummary =
+			let transitionedSummary =
 				event === "to_review"
 					? manager.transitionToReview(
 							taskId,
@@ -747,6 +765,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				manager.applyHookActivity(taskId, body.metadata);
 			}
 
+			if (deps.resolveCurrentTaskConversationSessionSummaryForLifecycle) {
+				transitionedSummary = await deps.resolveCurrentTaskConversationSessionSummaryForLifecycle(
+					workspaceId,
+					transitionedSummary,
+				);
+			}
 			void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 
 			if (
@@ -778,12 +802,16 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					{},
 					true,
 				);
-			if (event === "to_review" && !isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary)) {
+			if (
+				event === "to_review" &&
+				!isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary) &&
+				!transitionedSummary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			) {
 				// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 				// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
 				deps.broadcastTaskReadyForReview(
 					workspaceId,
-					taskId,
+					transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
 					resolveSessionFacets(transitionedSummary).userTurnKind,
 					{
 						candidateId: notificationCandidateId ?? undefined,

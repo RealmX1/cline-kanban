@@ -1,6 +1,7 @@
 // Frontend facade for task-scoped runtime actions.
 // It owns how the board and detail view start, stop, resize, and route task
 // sessions across native Cline and PTY-backed agents.
+import { resolveMainTaskConversationSessionId } from "@runtime-session-activity";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useRef } from "react";
 
@@ -340,7 +341,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 							: input.contextSource,
 						parentTaskConversationSessionId:
 							!isTaskCollaborator && input.contextSource === "forked_from_main_current_turn"
-								? input.task.id
+								? resolveMainTaskConversationSessionId(input.task)
 								: null,
 						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,
 						mainSessionOriginUserMessagePreview: input.mainSessionOriginUserMessagePreview,

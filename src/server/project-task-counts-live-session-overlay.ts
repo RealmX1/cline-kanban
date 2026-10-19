@@ -5,6 +5,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
+import { resolveMainTaskConversationSessionSummary } from "../core/task-main-conversation-session-binding";
 
 // 把「实时会话回合状态」叠加到持久化的按列任务计数上。board 落盘时记录的列归属可能落后于 agent
 // 实时回合：停在 in_progress 但已转入待审的任务应记入 review，被中断的任务应记入 trash。
@@ -31,8 +32,10 @@ export function applyLiveSessionStateToProjectTaskCounts(
 	const next = {
 		...counts,
 	};
-	for (const summary of Object.values(sessionSummaries)) {
-		const columnId = taskColumnById.get(summary.taskId);
+	for (const card of board.columns.flatMap((column) => column.cards)) {
+		const summary = resolveMainTaskConversationSessionSummary(card, sessionSummaries);
+		if (!summary) continue;
+		const columnId = taskColumnById.get(card.id);
 		if (!columnId) {
 			continue;
 		}

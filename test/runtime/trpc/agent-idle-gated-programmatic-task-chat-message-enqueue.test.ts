@@ -13,6 +13,7 @@ vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
+	loadWorkspaceBoardById: async () => ({ columns: [] }),
 }));
 
 const {

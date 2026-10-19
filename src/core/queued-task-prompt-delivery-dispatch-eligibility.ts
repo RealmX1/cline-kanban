@@ -94,6 +94,9 @@ export function resolveQueuedPromptDispatchBlockReason(
 	if (sessionSummary == null) {
 		return "session_not_live";
 	}
+	if (sessionSummary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) {
+		return "task_main_session_handover_awaiting_user";
+	}
 	const facets = resolveSessionFacets(sessionSummary);
 
 	// 1. agent 还在干活。这是最常见的一条，也是整个特性存在的理由。
