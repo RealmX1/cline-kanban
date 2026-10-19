@@ -297,6 +297,7 @@ export function ColumnContextPanel({
 	taskSessions,
 	onTaskDragEnd,
 	onCreateTask,
+	onOpenPermanentlyDeletedTaskHistory,
 	onStartTask,
 	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
@@ -321,6 +322,7 @@ export function ColumnContextPanel({
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onTaskDragEnd: (result: DropResult) => void;
 	onCreateTask?: () => void;
+	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onStartTask?: (taskId: string) => void;
 	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
@@ -610,6 +612,18 @@ export function ColumnContextPanel({
 						/>
 					</div>
 				</div>
+				{onOpenPermanentlyDeletedTaskHistory ? (
+					<div className="shrink-0 border-t border-border p-2">
+						<Button
+							fill
+							icon={<Trash2 size={14} />}
+							onClick={onOpenPermanentlyDeletedTaskHistory}
+							data-verification-anchor="permanently-deleted-task-history-focus-view-entry"
+						>
+							已删除 Task
+						</Button>
+					</div>
+				) : null}
 			</div>
 		</TaskCardBodyVisualDensityProvider>
 	);

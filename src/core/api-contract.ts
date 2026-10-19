@@ -17,6 +17,7 @@ import { projectLegacyState } from "./session-activity.js";
 import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
+export * from "./permanently-deleted-task-history-contract.js";
 // Post-Deploy Verification「移入 Done 结案」的请求侧契约（确认项、原因码、结案请求、门禁拒绝前缀）住在独立文件里
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
 export * from "./post-deploy-verification-done-entry-closure-contract.js";

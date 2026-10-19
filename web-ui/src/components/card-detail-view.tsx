@@ -681,6 +681,7 @@ function DiffToolbar({
 
 export function CardDetailView({
 	mobileFocusViewControls,
+	onOpenPermanentlyDeletedTaskHistory,
 	onBackToBoard,
 	selection,
 	currentProjectId,
@@ -755,6 +756,7 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration = 0,
 }: {
 	mobileFocusViewControls?: MobileFocusViewCollapsibleControls;
+	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onBackToBoard?: () => void;
 	selection: CardSelection;
 	currentProjectId: string | null;
@@ -1855,6 +1857,7 @@ export function CardDetailView({
 				<>
 					<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
 						<ColumnContextPanel
+							onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
 							selection={selection}
 							workspacePath={workspacePath}
 							resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
