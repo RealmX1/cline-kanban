@@ -31,6 +31,7 @@ import {
 	projectAllProjectsTaskSearchIndex,
 } from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
+import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { recordTaskLastOpenedByUser } from "../state/task-last-opened-by-user-record-store";
 import { loadWorkspaceAgentConversationProgressObservedAtByTaskId } from "../state/workspace-agent-conversation-progress-observed-at-reader";
 import {
@@ -119,6 +120,22 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 	});
 
 	return {
+		setProjectVisualIdentity: async (input) => {
+			const identity = await projectVisualIdentityStore.save(input);
+			await deps.broadcastRuntimeProjectsUpdated(null);
+			return identity;
+		},
+		resetProjectVisualIdentityToDefault: async (input) => {
+			const project = (await listWorkspaceIndexEntries()).find((entry) => entry.workspaceId === input.workspaceId);
+			if (!project) throw new Error("项目未注册或已删除");
+			const identity = await projectVisualIdentityStore.reset(
+				input.workspaceId,
+				deriveProjectDisplayNameFromRepoPath(project.repoPath),
+			);
+			await deps.broadcastRuntimeProjectsUpdated(null);
+			return identity;
+		},
+		readProjectIconImage: (input) => projectVisualIdentityStore.readImage(input.workspaceId, input.imageAssetId),
 		listProjects: async (preferredWorkspaceId) => {
 			const payload = await deps.buildProjectsPayload(preferredWorkspaceId);
 			return {
@@ -197,11 +214,17 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 				void deps.broadcastRuntimeProjectsUpdated(context.workspaceId);
 				return {
 					ok: true,
-					project: deps.createProjectSummary({
-						workspaceId: context.workspaceId,
-						repoPath: context.repoPath,
-						taskCounts,
-					}),
+					project: {
+						...deps.createProjectSummary({
+							workspaceId: context.workspaceId,
+							repoPath: context.repoPath,
+							taskCounts,
+						}),
+						visualIdentity: await projectVisualIdentityStore.read(
+							context.workspaceId,
+							deriveProjectDisplayNameFromRepoPath(context.repoPath),
+						),
+					},
 				} satisfies RuntimeProjectAddResponse;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

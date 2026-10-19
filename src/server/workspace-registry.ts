@@ -13,6 +13,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import { getDefaultProjectVisualIdentity, type ProjectVisualIdentity } from "../core/project-visual-identity";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
@@ -20,6 +21,7 @@ import {
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAgentSessionReclamationDeadlineRecords,
 } from "../state/agent-session-reclamation-deadline-store";
+import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	listWorkspaceIndexEntries,
@@ -310,6 +312,7 @@ function countTasksByColumn(board: RuntimeBoardData): RuntimeProjectTaskCounts {
 function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
+	visualIdentity?: ProjectVisualIdentity;
 	taskCounts: RuntimeProjectTaskCounts;
 	// board 列归属的原始计数（未套 live-session overlay）。原供已退役的 Stage-First Overview，现无前端消费者，
 	// 为兼容旧 bundle 暂留（ADR-0001，已 Superseded）。快路径可省略，下一次 projects_updated/snapshot 广播补齐。
@@ -328,6 +331,7 @@ function toProjectSummary(project: {
 		id: project.workspaceId,
 		path: project.repoPath,
 		name,
+		visualIdentity: project.visualIdentity ?? getDefaultProjectVisualIdentity(project.workspaceId, name),
 		taskCounts: project.taskCounts,
 		availability: project.availability ?? { status: "available" },
 		...(project.rawColumnTaskCounts ? { rawColumnTaskCounts: project.rawColumnTaskCounts } : {}),
@@ -703,6 +707,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 				return toProjectSummary({
 					workspaceId: project.workspaceId,
 					repoPath: project.repoPath,
+					visualIdentity: await projectVisualIdentityStore.read(
+						project.workspaceId,
+						deriveProjectDisplayNameFromRepoPath(project.repoPath),
+					),
 					taskCounts,
 					rawColumnTaskCounts,
 					inProgressTaskDetails,

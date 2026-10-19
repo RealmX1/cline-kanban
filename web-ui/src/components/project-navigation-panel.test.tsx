@@ -229,6 +229,45 @@ describe("ProjectNavigationPanel width persistence", () => {
 		expect(container.querySelector('[aria-label="Project unavailable"]')).not.toBeNull();
 	});
 
+	it.each(["Enter", " ", "ArrowDown"])("全项目视图用 %j 打开项目菜单时保持当前项目范围", async (key) => {
+		const onSelectProject = vi.fn();
+		renderPanel({ currentProjectId: null, onSelectProject });
+		const projectActionsTrigger = container.querySelector<HTMLButtonElement>('[aria-label="Project actions"]');
+		expect(projectActionsTrigger).not.toBeNull();
+		await act(async () => {
+			projectActionsTrigger?.focus();
+			projectActionsTrigger?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+		});
+		expect(projectActionsTrigger?.getAttribute("aria-expanded")).toBe("true");
+		expect(document.querySelector('[role="menu"]')).not.toBeNull();
+		expect(onSelectProject).not.toHaveBeenCalled();
+
+		const editVisualIdentityMenuItem = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+			(item) => item.textContent === "编辑项目图标与颜色",
+		);
+		expect(editVisualIdentityMenuItem).not.toBeUndefined();
+		await act(async () => {
+			editVisualIdentityMenuItem?.focus();
+			editVisualIdentityMenuItem?.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+			);
+		});
+		expect(document.querySelector('[role="dialog"][aria-labelledby]')?.textContent).toContain("编辑项目图标与颜色");
+		expect(onSelectProject).not.toHaveBeenCalled();
+	});
+
+	it.each(["Enter", " "])("项目行自身仍能用 %j 选择项目", (key) => {
+		const onSelectProject = vi.fn();
+		renderPanel({ currentProjectId: null, onSelectProject });
+		const projectRow = container.querySelector<HTMLElement>(".kb-project-row");
+		expect(projectRow).not.toBeNull();
+		act(() => {
+			projectRow?.focus();
+			projectRow?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+		});
+		expect(onSelectProject).toHaveBeenCalledExactlyOnceWith("project-1");
+	});
+
 	it("shows send feedback instead of report issue when Cline OAuth is available", () => {
 		renderPanel({
 			selectedAgentId: "cline",
