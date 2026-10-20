@@ -677,31 +677,47 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
 				)
 					return { review_start_boundary_pending_reason: "原生主会话身份已改变，旧分界不可用。" };
-				const observation = await withRunningCodexAppServerControlSocketConnection(async (port) => {
-					// 不 resume、不从磁盘装载旧 thread；必须已由当前 TUI 宿主持有。
-					let cursor: string | null = null;
-					const seenCursors = new Set<string>();
-					let loaded = false;
-					do {
-						const page = z
-							.object({ data: z.array(z.string()), nextCursor: z.string().nullable().optional() })
-							.parse(await port.request("thread/loaded/list", { cursor, limit: 100 }));
-						loaded ||= page.data.includes(record.receipt.session_id);
-						cursor = page.nextCursor ?? null;
-						if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
-						if (cursor) seenCursors.add(cursor);
-					} while (cursor);
-					if (!loaded) throw new Error("当前 TUI 未连接可查询的原生活动分支控制面。");
-					return observeRvfReviewStartActiveBranch({
-						port,
-						receipt: record.receipt,
-						requestNonce: input.requestNonce,
-					});
-				});
+				const endpoint = summary.codexNativeSessionControlEndpoint;
+				if (
+					!endpoint ||
+					(endpoint &&
+						(endpoint.workspaceId !== scope.workspaceId ||
+							endpoint.conversationSessionId !== summary.taskId ||
+							endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId))
+				)
+					return { review_start_boundary_pending_reason: "本代会话没有与当前身份绑定的原生活动分支控制面。" };
+				const observation = await withRunningCodexAppServerControlSocketConnection(
+					async (port) => {
+						// 不 resume、不从磁盘装载旧 thread；必须已由当前 TUI 宿主持有。
+						let cursor: string | null = null;
+						const seenCursors = new Set<string>();
+						let loaded = false;
+						do {
+							const page = z
+								.object({ data: z.array(z.string()), nextCursor: z.string().nullable().optional() })
+								.parse(await port.request("thread/loaded/list", { cursor, limit: 100 }));
+							loaded ||= page.data.includes(record.receipt.session_id);
+							cursor = page.nextCursor ?? null;
+							if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
+							if (cursor) seenCursors.add(cursor);
+						} while (cursor);
+						if (!loaded) throw new Error("当前 TUI 未连接可查询的原生活动分支控制面。");
+						return observeRvfReviewStartActiveBranch({
+							port,
+							receipt: record.receipt,
+							requestNonce: input.requestNonce,
+						});
+					},
+					{ socketPath: endpoint.socketPath },
+				);
 				const { summary: latest } = await mainSummary(scope, input.taskId);
 				if (
 					latest.taskId !== summary.taskId ||
 					latest.startedAt !== summary.startedAt ||
+					latest.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
+					latest.codexNativeSessionControlEndpoint?.socketPath !== endpoint?.socketPath ||
+					latest.codexNativeSessionControlEndpoint?.runtimeSessionIncarnationId !==
+						endpoint?.runtimeSessionIncarnationId ||
 					latest.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id ||
 					latest.agentNativeConversationSessionIdentity?.transcriptPath !==
 						summary.agentNativeConversationSessionIdentity?.transcriptPath

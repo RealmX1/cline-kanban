@@ -13,7 +13,13 @@ import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-autom
 import { enqueueAgentIdleGatedProgrammaticTaskChatMessage } from "../../../src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
-const mocked = vi.hoisted(() => ({ directory: "", board: vi.fn(), request: vi.fn(), persist: vi.fn() }));
+const mocked = vi.hoisted(() => ({
+	directory: "",
+	board: vi.fn(),
+	request: vi.fn(),
+	persist: vi.fn(),
+	controlEndpoint: vi.fn(),
+}));
 vi.mock("../../../src/state/workspace-state", () => ({
 	getWorkspaceDirectoryPath: () => mocked.directory,
 	getWorkspacesRootPath: () => dirname(mocked.directory),
@@ -27,7 +33,11 @@ vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-request-connection
 	) => operation({ request: mocked.request }),
 	withRunningCodexAppServerControlSocketConnection: async (
 		operation: (port: { request: typeof mocked.request }) => Promise<unknown>,
-	) => operation({ request: mocked.request }),
+		endpoint?: { socketPath: string },
+	) => {
+		mocked.controlEndpoint(endpoint);
+		return operation({ request: mocked.request });
+	},
 }));
 // 本套只验证收尾生命周期；原生原文与 checkpoint 的真实核验在 capture 分界专用套件覆盖。
 vi.mock("../../../src/rvf-automatic-closeout/codex-native-review-start-message-evidence", () => ({
@@ -274,6 +284,14 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 
 	it("每次查询读取当前原生分支并回显新 nonce；重启不复用旧观测", async () => {
 		const context = await setup();
+		const summary = context.manager.getSummary();
+		summary.runtimeSessionIncarnationId = "11111111-2222-4333-8444-555555555555";
+		summary.codexNativeSessionControlEndpoint = {
+			socketPath: "/isolated/current-session/s",
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: summary.taskId,
+			runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+		};
 		const request = {
 			taskId: "task",
 			idempotencyKey: `rvf-decision-point-${context.token}`,
@@ -301,6 +319,45 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		const missing = await restarted.observeBoundary(context.scope, { ...request, requestNonce: "nonce-three" });
 		expect(missing.review_start_boundary_active_branch_observation).toBeUndefined();
 		expect(missing.review_start_boundary_pending_reason).toContain("尚未确认");
+	});
+
+	it("只查询当前 incarnation 的专属端点，跨 task 或陈旧端点均等待", async () => {
+		const context = await setup();
+		const summary = context.manager.getSummary();
+		const incarnation = "11111111-2222-4333-8444-555555555555";
+		summary.runtimeSessionIncarnationId = incarnation;
+		summary.codexNativeSessionControlEndpoint = {
+			socketPath: "/isolated/current-session/s",
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: summary.taskId,
+			runtimeSessionIncarnationId: incarnation,
+		};
+		const original = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) =>
+			method === "thread/loaded/list" ? { data: ["native"], nextCursor: null } : original?.(method, parameters),
+		);
+		const request = {
+			taskId: "task",
+			idempotencyKey: `rvf-decision-point-${context.token}`,
+			requestNonce: "current-nonce",
+		};
+		const accepted = await context.service.observeBoundary(context.scope, request);
+		expect(accepted.review_start_boundary_active_branch_observation?.request_nonce).toBe("current-nonce");
+		expect(mocked.controlEndpoint).toHaveBeenLastCalledWith({ socketPath: "/isolated/current-session/s" });
+		for (const invalidEndpoint of [
+			{ ...summary.codexNativeSessionControlEndpoint, workspaceId: "another-workspace" },
+			{ ...summary.codexNativeSessionControlEndpoint, conversationSessionId: "another-session" },
+			{ ...summary.codexNativeSessionControlEndpoint, runtimeSessionIncarnationId: "stale-incarnation" },
+			null,
+			undefined,
+		]) {
+			summary.codexNativeSessionControlEndpoint = invalidEndpoint;
+			mocked.controlEndpoint.mockClear();
+			const rejected = await context.service.observeBoundary(context.scope, request);
+			expect(rejected.review_start_boundary_active_branch_observation).toBeUndefined();
+			expect(rejected.review_start_boundary_pending_reason).toContain("本代会话");
+			expect(mocked.controlEndpoint).not.toHaveBeenCalled();
+		}
 	});
 
 	it("捕获默认仅保存非活跃分界，重启和重试不重捕获或扫描完成事实", async () => {

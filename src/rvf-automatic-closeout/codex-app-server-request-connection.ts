@@ -112,12 +112,15 @@ export async function withCodexAppServerRequestConnection<T>(
 // 只连接已在运行的 TUI 宿主。独立 stdio app-server 与 proxy 的原始 WebSocket 字节流均不等于实时 RPC。
 export async function withRunningCodexAppServerControlSocketConnection<T>(
 	operation: (port: CodexAppServerRequestPort) => Promise<T>,
+	input?: { socketPath: string },
 ) {
-	const socketPath = join(
-		process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"),
-		"app-server-control",
-		"app-server-control.sock",
-	);
+	const socketPath =
+		input?.socketPath ??
+		join(
+			process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"),
+			"app-server-control",
+			"app-server-control.sock",
+		);
 	const socket = new WebSocket(`ws+unix://${socketPath}:/`);
 	const pending = new Map<
 		number,

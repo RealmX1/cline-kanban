@@ -11,9 +11,16 @@ import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutatio
 
 afterEach(() => vi.unstubAllEnvs());
 describe("真实 Codex TUI 独立开审与实时活动分支", { timeout: 90_000 }, () => {
-	it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
-		"UI rewind 保留旧 JSONL 时，本次 nonce 观测排除旧消息；不调用真实模型",
-		async () => {
+	it
+		.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")
+		.each([
+			"isolated-manual-host",
+			"managed-control-host",
+			"managed-manual-review-command",
+			"native-profile-without-control-host",
+		])(
+		"%s：保留原生配置；支持控制面时核对 rewind 与本次 nonce，不支持 profile 时保留原生启动；不调用真实模型",
+		async (hostMode) => {
 			// Unix socket 有路径长度上限；配置直接放 fixture 根目录，所有 Git 仍只经统一 fixture。
 			vi.stubEnv("TMPDIR", "/tmp");
 			const fixture = createIsolatedGitTestWorkspaceFixture({
@@ -35,6 +42,7 @@ describe("真实 Codex TUI 独立开审与实时活动分支", { timeout: 90_000
 					process.cwd(),
 					process.execPath,
 					process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					hostMode,
 				],
 				{
 					encoding: "utf8",
@@ -47,11 +55,25 @@ describe("真实 Codex TUI 独立开审与实时活动分支", { timeout: 90_000
 			if (evidenceDirectory) {
 				await mkdir(evidenceDirectory, { recursive: true });
 				await writeFile(
-					join(evidenceDirectory, "native-tui-boundary-rewind.log"),
+					join(evidenceDirectory, `${hostMode}-native-tui-boundary-rewind.log`),
 					`${result.stdout}\n${result.stderr}`,
 				);
 			}
 			expect(result.status, result.stdout + result.stderr).toBe(0);
+			if (hostMode === "native-profile-without-control-host") {
+				expect(result.stdout).toContain("PRODUCT_NATIVE_PROFILE_CONFIGURATION_VERIFIED");
+				expect(result.stdout).toContain("PRODUCT_NATIVE_CONTROL_UNAVAILABLE_FOR_PROFILE");
+				return;
+			}
+			if (hostMode.startsWith("managed-")) {
+				expect(result.stdout).toContain("PRODUCT_NATIVE_CONTROL_ENDPOINT");
+				expect(result.stdout).toContain("PRODUCT_NATIVE_HOOK_IDENTITY_AND_CONFIGURATION_VERIFIED");
+				expect(result.stdout).toContain("PRODUCT_NATIVE_CONTROL_CLEANED True");
+			}
+			if (process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY) {
+				expect(result.stdout).toContain("ACTUAL_RVF_CONSUMER_CURRENT_BRANCH_ACCEPTED");
+				expect(result.stdout).toContain("ACTUAL_RVF_CONSUMER_REWOUND_BRANCH_REJECTED");
+			}
 			const schema = z.object({
 				afterRewind: z.boolean(),
 				receipt: rvfIndependentUserTurnBoundaryReceiptSchema,
@@ -82,6 +104,9 @@ describe("真实 Codex TUI 独立开审与实时活动分支", { timeout: 90_000
 			);
 			expect(after?.observation.request_nonce).not.toBe(before?.observation.request_nonce);
 			expect(after?.receipt).toEqual(before?.receipt);
+			expect(before?.receipt.source).toBe(
+				hostMode === "managed-manual-review-command" ? "explicit_user_command" : "rvf_automatic_decision_message",
+			);
 			expect(result.stdout).toContain("Conversation reverted to this point. File changes are unchanged.");
 			expect(repo.runGit(["show", `${before?.receipt.checkpoint_commit}:implementation.txt`]).stdout).toBe(
 				"待审实现\n",

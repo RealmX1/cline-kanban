@@ -28,9 +28,21 @@ kanban task message-status --project-path <main checkout> --task-id <id> \
 
 该查询经 runtime 的 `observeRvfReviewStartBoundary` 读取当前主会话，以捕获记录定位 receipt。手动命令没有程序化投递账本，返回独立证据而不伪造终端送达状态。常规不带 nonce 的查询保持原来的投递账本语义。
 
-每次观测新建客户端连接到本地已在运行的 Codex daemon Unix WebSocket；先通过 `thread/loaded/list` 确认精确 thread 已由宿主持有，再分页读取 `thread/turns/list`。返回原生分支上的全部 UserMessage ID、当前用户 turn，以及本次 nonce/task/key/session；观测前后复核主会话身份。连接不启动、重启或停止 daemon，不 resume/装载历史 thread，不发起模型请求。无已加载控制面时返回 `review_start_boundary_pending_reason`，不返回正向观测；重启后没有可复用的 nonce 缓存。
+每次观测新建客户端连接到当前 summary 的 `codexNativeSessionControlEndpoint`，其 workspace、会话与 incarnation 必须吻合；先通过 `thread/loaded/list` 确认精确 thread 已由宿主持有，再分页读取 `thread/turns/list`。返回原生分支上的全部 UserMessage ID、当前用户 turn，以及本次 nonce/task/key/session；观测前后复核主会话、incarnation 与端点身份。连接不启动、重启或停止宿主，不 resume/装载历史 thread，不发起模型请求。缺少绑定端点或已加载控制面时返回 `review_start_boundary_pending_reason`，不返回正向观测；重启后没有可复用的 nonce 缓存。
 
 Codex 0.163.0 的真实隔离 TUI 实验证明：UI rewind 后原始 rollout 仍可保留被撤回 UserMessage，而宿主控制面的 turns 已移除该消息。单独启动的 `app-server --stdio` 只适合作历史/前缀操作，不能用于实时资格证明；`app-server proxy` 是原始 WebSocket 字节代理，也不能当 JSONL RPC 使用。此证据限定于已验证的 Codex TUI 版本，不外推其它 harness 或 GUI。
+
+## 按会话隔离的原生控制宿主
+
+runtime 在 Codex 的最终 adapter argv 确定后准备独享宿主。PTY 中的 `codex-native-session-control-host` 监督进程先启动该会话自己的前台 `app-server --listen unix://...`，就绪后以 `--remote` 启动原生 TUI。配置覆盖传给两端；模型、权限、工作目录、原生 resume/fork 参数和正文由 TUI 原样消费，Plan Mode 的 deferred prompt 仍由原有终端链提交。server 与 TUI 继承同一份本会话 hook 环境，不启动共享默认 daemon，也不把其它任务附着到先启动者的环境。
+
+每次真实启动分配新 incarnation 和独享 socket，summary 只记录该代端点。启动描述与私有日志位于 runtime home 的 `codex-native-session-control-host-launches/<incarnation>`（目录700、描述600），短 Unix socket 目录与进程同寿。prepare/spawn 失败、TUI 退出、server 失败及停止信号均清理本代资源；清理前复核目录设备号/inode，不能删替换后的目录。临时 socket 目录不是交接产物，重启后的新代不会复用它。
+
+既有 agent session PTY host 启用时，监督进程也由它持有。runtime 热重连/崩溃接管保留进程、summary incarnation 和控制端点，不通过重启 Codex 来补能力；真实停止后重开才换代。监督进程并行停止子进程，并在等待退出前撤销本代 socket 与启动目录；runtime 接管从匹配端点的持久启动描述重建带 dev/ino 校验的 cleanup，确保监督进程来不及执行 finally、被强杀时仍可清理本代资源。未启用 PTY host 时沿用原有 runtime 与会话同寿的边界。
+
+显式 `--remote`、`--no-daemon`、`-p/--profile`、不支持 Unix 控制面的原生版本及 Windows 保持原生启动选择；没有本代控制端点时独立开审门禁诚实等待。Codex 0.163.0 的 app-server 拒绝 `--profile`，`-c profile=…` 也会触发已退休的旧版配置错误；把 profile 文件转成普通 `-c` 则会改变它与项目配置的优先级。因此 profile 启动保留完整原生 argv 与原配置目录，不登记控制端点、不声称具备实时分支证明；真实隔离 TUI 测试验证了 profile 中 provider、model 与指令的消费。存量安装会话不会因升级被自动打断，它们须在合适的真实重启后获得新能力；只看到默认 daemon 中有同名 thread 不足以给旧 TUI 授权。
+
+验证入口包括 `codex-native-session-control-host-lifecycle.integration.test.ts`（进程/环境隔离与失败清理）、`codex-native-control-host-packaged-runtime-adoption.integration.test.ts`（真实打包 API/PTY host 接管）、原生 rewind 夹具的受控自动与原样命名空间手动模式。实际 e9e12 活动分支 consumer 在隔离传输中先生成自己的 nonce，再驱动当前原生宿主实时查询，分别验证当前分界可接受与回退后拒绝；没有把旧观测改写 nonce 来凑兼容。
 
 ## 完成通知
 
