@@ -8,11 +8,7 @@ import {
 	type CrossProjectTaskSwitcherFullTaskCardInListExpansionState,
 	CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
-import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
-import {
-	CrossProjectTaskSwitcherRowFirstLine,
-	CrossProjectTaskSwitcherRowLeadingActivityIndicator,
-} from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
+import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
 import {
 	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
@@ -51,8 +47,6 @@ export interface CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion 
  * 以及这一行的激活与展开开关。
  */
 export interface CrossProjectTaskSwitcherFullTaskCardRowContext {
-	section: CrossProjectTaskSwitcherTaskRowSection;
-	isUnreadHandoff: boolean;
 	// null = 只有一个项目，不显示项目名。
 	projectName: string | null;
 	promptCacheWarmthEstimate?: CrossProjectTaskSwitcherPromptCacheWarmthEstimate;
@@ -69,12 +63,6 @@ function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 	rowContext: CrossProjectTaskSwitcherFullTaskCardRowContext,
 ): TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	return {
-		firstLineLeadingActivityIndicator: (
-			<CrossProjectTaskSwitcherRowLeadingActivityIndicator
-				section={rowContext.section}
-				isUnreadHandoff={rowContext.isUnreadHandoff}
-			/>
-		),
 		projectName: rowContext.projectName,
 		promptCacheWarmthPill: rowContext.promptCacheWarmthEstimate ? (
 			<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
@@ -134,13 +122,11 @@ function ExpandedTaskCardUnavailableFallback({
 				}}
 			>
 				<CrossProjectTaskSwitcherRowFirstLine
-					section={rowContext.section}
-					isUnreadHandoff={rowContext.isUnreadHandoff}
 					agentId={entryInProject.entry.agentId}
 					title={entryInProject.entry.title}
 				/>
 			</div>
-			<div className="mt-1 flex items-center gap-1.5 pl-[19px] text-xs text-text-tertiary">{children}</div>
+			<div className="mt-1 flex items-center gap-1.5 text-xs text-text-tertiary">{children}</div>
 			<div
 				className={cn(
 					"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm",

@@ -21,14 +21,11 @@ import {
 	AlertTriangle,
 	Archive,
 	Check,
-	CircleDotDashed,
 	ClipboardCheck,
 	Clock,
 	Copy,
 	Eye,
 	FileText,
-	GitBranch,
-	Home,
 	Hourglass,
 	ListOrdered,
 	MessagesSquare,
@@ -53,6 +50,7 @@ import {
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
+import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
@@ -65,6 +63,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
+import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
@@ -211,8 +210,6 @@ export type TaskCardBodyRenderRole =
  * 行级信息与开关。并进卡体已有的位置，不在卡片上方另叠一条——另叠一条会把标题往下挤，hover 前后标题跳位。
  */
 export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
-	/** 首行前导位，替换 Spinner / 失败图标：与精简行同一个前导点，三态之间标题左沿不动。「在跑 / 失败」由下方会话活动行表达。 */
-	firstLineLeadingActivityIndicator: ReactNode;
 	/** 元信息行最左，对应精简行第 2 行最左的项目名；null = 只有一个项目。 */
 	projectName: string | null;
 	/** 元信息行右侧药丸组最前，对应精简行第 2 行右侧。 */
@@ -611,15 +608,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 			if (sessionFacets?.turnOwner === "user" && sessionFacets.liveness === "failed") {
 				return <AlertCircle size={12} className="text-status-red" />;
 			}
-			// 静态图标而非旋转的 Spinner：In Progress 列的每张卡都有这个标记，无限旋转会让看板页可见期间一直逐帧合成。
-			// agent 此刻是否在产出由下方会话活动行的呼吸点表达。
-			return (
-				<CircleDotDashed
-					size={12}
-					className="text-text-secondary"
-					data-task-card-in-progress-column-status-marker="static"
-				/>
-			);
+			// 运行指示由卡片左上角统一表达，不占标题行宽度。
+			return null;
 		}
 		return null;
 	};
@@ -727,10 +717,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
-	// 简写目录行：{worktree/inplace} ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
+	// 简写目录行：工作区类型图标 ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
 	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD，
 	// 但文件数与增删行数全为 0 时同样整体隐藏，避免无变化任务与真实脏任务争夺注意力。
-	const worktreeModeLabel = card.worktreeMode === "inplace" ? "inplace" : "worktree";
 	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
 	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
 	const taskCommitsIntegratedIntoBaseRef = reviewWorkspaceSnapshot?.taskCommitsIntegratedIntoBaseRef ?? null;
@@ -1045,13 +1034,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 				color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
 			}}
 		>
-			{card.worktreeMode === "inplace" ? (
-				<Home size={10} className="shrink-0" />
-			) : (
-				<GitBranch size={10} className="shrink-0" />
-			)}
+			<TaskWorkspaceModeIconWithTooltip worktreeMode={card.worktreeMode} />
 			<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
-				<span>{worktreeModeLabel}</span>
 				{taskWorkspaceGitStatusTooltip ? (
 					// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
 					// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
@@ -1231,7 +1215,15 @@ export const TaskCardBody = memo(function TaskCardBody(
 							)
 				}
 			>
-				{/* 标准密度：agent 图标 + 微型时长药丸合一，钉在卡片左上角、略微超出边框（不占标题横向空间）。
+				{isCrossProjectTaskSwitcherRowCopy || historicalSnapshot ? null : (
+					<TaskCardCornerStatusIndicatorsFromRuntimeState
+						taskId={card.id}
+						workspaceId={taskWorkspaceId ?? null}
+						columnId={columnId}
+						sessionSummary={sessionSummary}
+					/>
+				)}
+				{/* 标准密度：agent 图标 + 微型时长药丸合一，钉在卡片上沿；从内容左缘起，避开左上角运行角标。
 				    完整「agent · 模型」进 hover tooltip。紧凑密度不画胶囊，这些项分别并入第 1 行与元信息行。
 				    置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
@@ -1240,7 +1232,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						className={
 							isMobileDetailHeaderCopy
 								? "mb-1 flex flex-wrap items-center gap-1 leading-none"
-								: "absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
+								: "absolute left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
 						}
 					>
 						{agentBadge}
@@ -1258,9 +1250,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					}
 					style={isCompactRowInFocusViewLeftColumn ? undefined : { minHeight: 24 }}
 				>
-					{crossProjectTaskSwitcherRowElements ? (
-						crossProjectTaskSwitcherRowElements.firstLineLeadingActivityIndicator
-					) : statusMarker ? (
+					{!isCrossProjectTaskSwitcherRowCopy && statusMarker ? (
 						<div className={cn("inline-flex items-center", isCompactRowInFocusViewLeftColumn && "mt-[3px]")}>
 							{statusMarker}
 						</div>
@@ -1650,6 +1640,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
 				{sessionActivity ? (
 					<div
+						data-task-card-session-activity=""
 						className={cn("flex gap-1.5 items-start", isCompactRowInFocusViewLeftColumn ? "mt-1" : "mt-[6px]")}
 						style={{
 							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
@@ -1694,6 +1685,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					// （与标准密度胶囊里的顺序一致），窄宽度下换行而不截断。
 					<div
 						data-task-card-compact-metadata-row=""
+						data-task-card-secondary-metadata-row=""
 						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
 					>
 						{crossProjectTaskSwitcherRowElements?.projectName ? (

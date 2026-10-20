@@ -373,8 +373,6 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 					buildTaskCardActionHandlerBundleForOtherProjectTaskCard
 				}
 				rowContext={{
-					section,
-					isUnreadHandoff: unreadHandoffEntryKeys.has(entryKey),
 					projectName: showsProjectName ? entryInProject.projectName : null,
 					promptCacheWarmthEstimate: findPromptCacheWarmthEstimateShownOnRow(entryKey, section),
 					nowMs,
