@@ -1,10 +1,19 @@
 import { loadDetailTerminalPanelWidth } from "@/resize/detail-terminal-panel-width";
-import { MIN_DETAIL_DIFF_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
+import {
+	loadFocusViewDesktopPanelArrangementPreference,
+	resolveFocusViewDesktopPanelArrangement,
+} from "@/resize/focus-view-desktop-panel-arrangement";
+import { clampBetween, readPersistedResizeNumber } from "@/resize/resize-persistence";
+import {
+	loadDetailTaskCardsPanelRatioPreference,
+	MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
+} from "@/resize/use-card-detail-layout";
 import {
 	clampPanelWidthToWindow,
 	estimateTaskAgentTerminalGeometry,
 	type TaskSessionGeometry,
 } from "@/runtime/task-session-geometry";
+import { LocalStorageKey } from "@/storage/local-storage-store";
 import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
 
@@ -14,13 +23,38 @@ import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
 //
 // 手机详情页的终端与 diff 分属不同 tab，终端使用整页宽度。后台启动时若仍扣掉桌面 diff 面板的 360px，
 // 常见手机视口会被估成 1–3 列，Codex 无法显示就绪提示符，首条 prompt 便会等到打开详情后的 resize 才投递。
-// 桌面仍按持久化面板宽度估算，并为并排 diff 留出空间。
+// 桌面左右布局按持久化宽度预留 diff；上下布局按任务列表之外的整宽及终端高度比例估算。
 export function resolveAgentTerminalGeometryForTaskSessionSpawn(taskId: string): TaskSessionGeometry {
 	const measuredTerminalGeometry = getTerminalGeometry(taskId);
 	if (measuredTerminalGeometry) return measuredTerminalGeometry;
-	const windowDisplayableTerminalPanelWidth =
-		matchesMobileViewportNow() && Number.isFinite(window.innerWidth) && window.innerWidth > 0
-			? window.innerWidth
+
+	const isMobile = matchesMobileViewportNow();
+	const isStackedDesktop =
+		!isMobile &&
+		resolveFocusViewDesktopPanelArrangement(
+			loadFocusViewDesktopPanelArrangementPreference(),
+			window.innerWidth,
+			window.innerHeight,
+		) === "agent_above_workbench_below";
+	const estimatedTerminalPanelWidth = isMobile
+		? window.innerWidth
+		: isStackedDesktop
+			? window.innerWidth * (1 - loadDetailTaskCardsPanelRatioPreference()) - 1
 			: clampPanelWidthToWindow(loadDetailTerminalPanelWidth(), MIN_DETAIL_DIFF_PANEL_WIDTH_PX, window.innerWidth);
-	return estimateTaskAgentTerminalGeometry(windowDisplayableTerminalPanelWidth, window.innerHeight);
+	const estimatedTerminalHeight = isStackedDesktop
+		? window.innerHeight *
+			readPersistedResizeNumber({
+				key: LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
+				fallback: 0.6,
+				normalize: (value) => clampBetween(value, 0.25, 0.8),
+			})
+		: window.innerHeight;
+	// 视口尚未初始化或读到非有限值时，宽度沿用持久化偏好，高度交给估算器的最小行数兜底。
+	const safeTerminalPanelWidth =
+		Number.isFinite(window.innerWidth) && window.innerWidth > 0
+			? estimatedTerminalPanelWidth
+			: loadDetailTerminalPanelWidth();
+	const safeTerminalHeight =
+		Number.isFinite(estimatedTerminalHeight) && estimatedTerminalHeight > 0 ? estimatedTerminalHeight : 0;
+	return estimateTaskAgentTerminalGeometry(safeTerminalPanelWidth, safeTerminalHeight);
 }

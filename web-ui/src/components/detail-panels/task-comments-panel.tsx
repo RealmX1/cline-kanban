@@ -212,10 +212,12 @@ export function TaskCommentsPanel({
 	taskCommentEntries,
 	onTaskCommentEntriesChange,
 	headerContent,
+	submitNewCommentOnBlur = true,
 }: {
 	taskCommentEntries: TaskCommentEntry[];
 	onTaskCommentEntriesChange: (entries: TaskCommentEntry[]) => void;
 	headerContent?: ReactNode;
+	submitNewCommentOnBlur?: boolean;
 }): React.ReactElement {
 	const [newCommentText, setNewCommentText] = useState("");
 	const [newCommentHasCollapsibleContent, setNewCommentHasCollapsibleContent] = useState(false);
@@ -282,7 +284,7 @@ export function TaskCommentsPanel({
 						ref={newCommentTextareaRef}
 						value={newCommentText}
 						onChange={(event) => setNewCommentText(event.target.value)}
-						onBlur={handleAddTaskCommentEntry}
+						onBlur={submitNewCommentOnBlur ? handleAddTaskCommentEntry : undefined}
 						placeholder="Write a task comment..."
 						rows={1}
 						spellCheck={false}

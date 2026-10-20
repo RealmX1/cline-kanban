@@ -352,12 +352,14 @@ function RelationNeighborhoodHeaderSummaryBadge({
 export function WorkUnitRelationNeighborhoodPanel({
 	workspaceId,
 	kanbanBoardCardTaskId,
+	initiallyExpanded = false,
 }: {
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string;
+	initiallyExpanded?: boolean;
 }): ReactElement {
 	const controller = useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard({ workspaceId, kanbanBoardCardTaskId });
-	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(false);
+	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(initiallyExpanded);
 	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
 	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(false);
 	const modeling = useReferenceRelationModelingEditor({

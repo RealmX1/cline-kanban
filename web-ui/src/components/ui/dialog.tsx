@@ -9,6 +9,8 @@ import { cn } from "@/components/ui/cn";
 /* Dialog                                                              */
 /* ------------------------------------------------------------------ */
 
+export const DialogDescription = RadixDialog.Description;
+
 export function Dialog({
 	open,
 	onOpenChange,

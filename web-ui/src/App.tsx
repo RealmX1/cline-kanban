@@ -37,6 +37,7 @@ import { SkipValidationConfirmDialog } from "@/components/skip-validation-confir
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
+import { TaskCommentsDialogProvider } from "@/components/task-comments-dialog-provider";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
@@ -116,7 +117,7 @@ import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-re
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
-import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
+import { applyTaskDetailClineSettingsChange, findCardSelection } from "@/state/board-state";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import {
@@ -131,7 +132,7 @@ import {
 	resetWorkspaceMetadataStore,
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import type { BoardCard, BoardData, TaskCommentEntry } from "@/types";
+import type { BoardCard, BoardData } from "@/types";
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -1619,18 +1620,6 @@ export default function App(): ReactElement {
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
 
-	const handleTaskCommentEntriesChange = useCallback(
-		(taskId: string, taskCommentEntries: TaskCommentEntry[]) => {
-			setBoard(
-				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
-					const result = updateTaskCommentEntries(currentBoard, taskId, taskCommentEntries);
-					return result.updated ? result.board : currentBoard;
-				}),
-			);
-		},
-		[setBoard],
-	);
-
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
@@ -2086,7 +2075,6 @@ export default function App(): ReactElement {
 										isDocumentVisible={isDocumentVisible}
 										onClineSettingsSaved={refreshRuntimeProjectConfig}
 										onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
-										onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
 									/>
 								</div>
 							) : null}
@@ -2374,5 +2362,11 @@ export default function App(): ReactElement {
 			</LayoutCustomizationsProvider>
 		</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
 	);
-	return <ProjectVisualIdentityProvider projects={projects}>{renderedApplicationView}</ProjectVisualIdentityProvider>;
+	return (
+		<ProjectVisualIdentityProvider projects={projects}>
+			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
+				{renderedApplicationView}
+			</TaskCommentsDialogProvider>
+		</ProjectVisualIdentityProvider>
+	);
 }

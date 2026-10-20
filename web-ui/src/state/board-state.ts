@@ -864,35 +864,6 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	};
 }
 
-export function updateTaskCommentEntries(
-	board: BoardData,
-	taskId: string,
-	taskCommentEntries: TaskCommentEntry[],
-): { board: BoardData; updated: boolean } {
-	const normalizedEntries = cloneTaskCommentEntries(taskCommentEntries);
-	let updated = false;
-	const columns = board.columns.map((column) => {
-		let columnUpdated = false;
-		const cards = column.cards.map((card) => {
-			if (card.id !== taskId) {
-				return card;
-			}
-			columnUpdated = true;
-			updated = true;
-			return updateTaskTimestamp({
-				...card,
-				taskCommentEntries: normalizedEntries,
-			});
-		});
-		return columnUpdated ? { ...column, cards } : column;
-	});
-
-	if (!updated) {
-		return { board, updated: false };
-	}
-	return { board: withUpdatedColumns(board, columns), updated: true };
-}
-
 export function updateTaskTitle(
 	board: BoardData,
 	taskId: string,

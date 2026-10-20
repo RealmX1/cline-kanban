@@ -10,6 +10,7 @@ import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/trun
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
 import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
@@ -19,7 +20,14 @@ import { TaskMainSessionHandoverAction } from "./task-main-session-handover-acti
 
 type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
 
-type TaskConversationSessionsPanelTab = "sessions" | "create_session";
+interface TaskSessionCreationDraft {
+	initialUserQuestion: string;
+	contextSource: NewTaskConversationSessionContextSource;
+	sessionRole: "by_the_way" | "task_collaborator";
+	collaborationAgentId: RuntimeAgentId;
+}
+// 仅存当前页面的草稿，按项目和任务隔离；对话框关闭或工作台换格不会清空。
+const taskSessionCreationDraftsByWorkspaceAndTask = new Map<string, TaskSessionCreationDraft>();
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
 
 const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
@@ -143,14 +151,18 @@ export function TaskConversationSessionsPanel({
 	) => Promise<{ ok: boolean; message?: string }>;
 }): React.ReactElement {
 	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
-	const [activeTab, setActiveTab] = useState<TaskConversationSessionsPanelTab>("sessions");
-	const [initialUserQuestion, setInitialUserQuestion] = useState("");
+	const [isCreationDialogOpen, setCreationDialogOpen] = useState(false);
+	const draftIdentity = JSON.stringify([workspaceId, workspaceTaskId]);
+	const savedDraft = taskSessionCreationDraftsByWorkspaceAndTask.get(draftIdentity);
+	const [initialUserQuestion, setInitialUserQuestion] = useState(savedDraft?.initialUserQuestion ?? "");
 	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(
-		"forked_from_main_current_turn",
+		savedDraft?.contextSource ?? "forked_from_main_current_turn",
 	);
-	const [sessionRole, setSessionRole] = useState<"by_the_way" | "task_collaborator">("task_collaborator");
-	const [collaborationAgentId, setCollaborationAgentId] = useState<RuntimeAgentId>(() =>
-		resolveDefaultCollaborationAgentId(effectiveAgentId),
+	const [sessionRole, setSessionRole] = useState<"by_the_way" | "task_collaborator">(
+		savedDraft?.sessionRole ?? "task_collaborator",
+	);
+	const [collaborationAgentId, setCollaborationAgentId] = useState<RuntimeAgentId>(
+		() => savedDraft?.collaborationAgentId ?? resolveDefaultCollaborationAgentId(effectiveAgentId),
 	);
 	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
 	const [isCreating, setIsCreating] = useState(false);
@@ -162,12 +174,15 @@ export function TaskConversationSessionsPanel({
 			: supportedAgentCatalog.some((entry) => entry.id === selectedAgentId) &&
 				agents?.find((agent) => agent.id === selectedAgentId)?.installed !== false;
 	useEffect(() => {
-		setCollaborationAgentId(resolveDefaultCollaborationAgentId(effectiveAgentId));
-		setSessionRole("task_collaborator");
-		setContextSource("forked_from_main_current_turn");
-		setInitialUserQuestion("");
-		setCreationError(null);
-	}, [workspaceTaskId, effectiveAgentId]);
+		if (workspaceId)
+			taskSessionCreationDraftsByWorkspaceAndTask.set(draftIdentity, {
+				initialUserQuestion,
+				contextSource,
+				sessionRole,
+				collaborationAgentId,
+			});
+	}, [workspaceId, draftIdentity, initialUserQuestion, contextSource, sessionRole, collaborationAgentId]);
+
 	const [readSessionUpdatedAtById, setReadSessionUpdatedAtById] = useState<Record<string, number>>(
 		readTaskConversationSessionReadReceipts,
 	);
@@ -236,330 +251,309 @@ export function TaskConversationSessionsPanel({
 		}
 		setCreationError(null);
 		setIsCreating(true);
-		const result = await onCreateTaskConversationSession({
-			agentId: selectedAgentId,
-			sessionRole,
-			initialUserQuestion,
-			contextSource: resolvedContextSource,
-		});
-		setIsCreating(false);
-		if (!result.ok) {
-			setCreationError(result.message ?? "Could not create the session.");
-			return;
+
+		try {
+			const result = await onCreateTaskConversationSession({
+				agentId: selectedAgentId,
+				sessionRole,
+				initialUserQuestion,
+				contextSource: resolvedContextSource,
+			});
+			if (!result.ok) {
+				setCreationError(result.message ?? "无法创建会话。");
+				return;
+			}
+			setInitialUserQuestion("");
+			setCreationDialogOpen(false);
+		} catch (cause: unknown) {
+			setCreationError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setIsCreating(false);
 		}
-		setInitialUserQuestion("");
-		setActiveTab("sessions");
 	};
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
-				<div role="tablist" aria-label="Task conversation sessions" className="flex min-w-0 items-center gap-0.5">
+				<span className="text-xs font-medium">Sessions</span>
+				<Button
+					variant="ghost"
+					size="sm"
+					icon={<Plus size={14} />}
+					className="ml-auto h-6"
+					onClick={() => setCreationDialogOpen(true)}
+					disabled={isCreating}
+				>
+					新建会话
+				</Button>
+			</div>
+			<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+				{workspaceId && taskCard?.independentTaskCreationProvenance && (
+					<a
+						className="mb-2 block break-words px-2 text-xs text-accent underline"
+						href={`${buildProjectTaskDeepLinkUrl(taskCard.independentTaskCreationProvenance.sourceWorkspaceId, taskCard.independentTaskCreationProvenance.sourceTaskId)}&conversationSession=${encodeURIComponent(taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId)}`}
+					>
+						来自任务 {taskCard.independentTaskCreationProvenance.sourceTaskId} 的会话{" "}
+						{taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId}
+						{taskCard.independentTaskCreationProvenance.inheritedGitWorkingStateIncludedUncommittedChanges
+							? "（含来源未提交修改）"
+							: ""}
+					</a>
+				)}
+				{workspaceId && taskCard && (
+					<TaskMainSessionHandoverAction
+						workspaceId={workspaceId}
+						taskCard={taskCard}
+						mainSessionSummary={mainSessionSummary}
+					/>
+				)}
+				{/* 「查看完整 prompt」是行内 button，不能嵌在选择会话的 button 里（嵌套 button 是无效 HTML），
+					    故两者作为兄弟元素放进同一个 relative 容器，前者绝对定位到右下角。 */}
+				{/* 底色挂在容器上而不是 button 上：id 条是 button 的兄弟节点（见下），底色留在 button 上
+					    会让同一张卡片视觉上裂成两半。 */}
+				<div
+					className={cn(
+						"relative mb-1 rounded-md hover:bg-surface-3",
+						selectedTaskConversationSessionId === mainSessionSummary.taskId && "bg-surface-3",
+					)}
+				>
 					<button
 						type="button"
-						role="tab"
-						aria-selected={activeTab === "sessions"}
-						className={cn(
-							"h-6 rounded-sm px-2 text-xs font-medium",
-							activeTab === "sessions"
-								? "bg-surface-3 text-text-primary"
-								: "text-text-secondary hover:bg-surface-3",
-						)}
-						onClick={() => setActiveTab("sessions")}
+						className="w-full rounded-md px-2 pb-1 pt-2 text-left"
+						onClick={() => selectSession(mainSessionSummary)}
 					>
-						Sessions
+						<div className="flex items-center gap-2">
+							<span className="text-xs font-medium text-text-primary">Main session</span>
+							<span className="ml-auto text-[11px] text-text-tertiary">
+								{getSessionStatusLabel(mainSessionSummary)}
+							</span>
+						</div>
+						<p className="mt-1 line-clamp-2 pr-9 text-xs text-text-secondary">{mainSessionUserMessagePreview}</p>
 					</button>
-					<button
-						type="button"
-						role="tab"
-						aria-selected={activeTab === "create_session"}
-						className={cn(
-							"h-6 rounded-sm px-2 text-xs font-medium",
-							activeTab === "create_session"
-								? "bg-surface-3 text-text-primary"
-								: "text-text-secondary hover:bg-surface-3",
-						)}
-						onClick={() => setActiveTab("create_session")}
-						disabled={isCreating}
-					>
-						Create session
-					</button>
-				</div>
-				{activeTab === "sessions" ? (
+					<TaskConversationSessionIdentifierChips
+						summary={mainSessionSummary}
+						taskConversationSessionId={mainSessionSummary.taskId}
+					/>
 					<Button
 						variant="ghost"
 						size="sm"
-						icon={<Plus size={14} />}
-						className="ml-auto h-6"
-						onClick={() => setActiveTab("create_session")}
-						disabled={isCreating}
-					>
-						Add New
-					</Button>
+						icon={<FileText size={14} />}
+						onClick={() => setIsOriginalPromptDialogOpen(true)}
+						aria-label="View the original prompt for this task"
+						className={cn("absolute bottom-1 right-1", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
+					/>
+				</div>
+				<TaskOriginalPromptDialog
+					open={isOriginalPromptDialogOpen}
+					card={mainSessionOriginalPromptCard}
+					onClose={() => setIsOriginalPromptDialogOpen(false)}
+				/>
+				{sideConversationSessions.map((summary) => {
+					const metadata = summary.taskConversationSessionMetadata;
+					if (!metadata) {
+						return null;
+					}
+					const turnsAgo = Math.max(0, mainSessionTurnNumber - (metadata.mainSessionOriginTurnNumber ?? 0));
+					const hasUnreadCompletion =
+						resolveSessionFacets(summary).turnOwner === "user" &&
+						(readSessionUpdatedAtById[summary.taskId] ?? 0) < summary.updatedAt &&
+						selectedTaskConversationSessionId !== summary.taskId;
+					return (
+						// id 复制芯片是 button，不能嵌进这个整行可点的 button 里（嵌套 button 是无效 HTML），
+						// 故与它并列放进同一个容器；底色同样挂在容器上，保持一张卡片的观感。
+						<div
+							key={summary.taskId}
+							className={cn(
+								"mb-1 rounded-md hover:bg-surface-3",
+								selectedTaskConversationSessionId === summary.taskId && "bg-surface-3",
+							)}
+						>
+							<button
+								type="button"
+								className="w-full rounded-md px-2 pb-1 pt-2 text-left"
+								onClick={() => selectSession(summary)}
+							>
+								<div className="flex items-center gap-2">
+									<MessageCircleQuestion size={13} className="text-status-purple" />
+									<span className="text-xs font-medium text-text-primary">
+										{metadata.taskConversationSessionRoleAtCreation === "main"
+											? "前主会话"
+											: metadata.taskConversationSessionRole === "task_collaborator"
+												? "协作会话"
+												: "By the way"}
+									</span>
+									<span className="text-[11px] text-text-tertiary">
+										{getRuntimeAgentCatalogEntry(summary.agentId ?? "codex")?.label ?? summary.agentId}
+									</span>
+									{hasUnreadCompletion ? (
+										<span role="img" className="h-2 w-2 rounded-full bg-accent" aria-label="Unread answer" />
+									) : null}
+									<span className="ml-auto text-[11px] text-text-tertiary">
+										{getSessionStatusLabel(summary)}
+									</span>
+								</div>
+								<p className="mt-1 line-clamp-2 text-xs text-text-secondary">
+									{metadata.latestUserMessagePreview ?? "No question yet"}
+								</p>
+								<p className="mt-1 text-[11px] text-text-tertiary">
+									{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
+										? `Forked from main · ${turnsAgo} turns ago`
+										: `Started from scratch · ${turnsAgo} turns ago`}
+								</p>
+							</button>
+							<TaskConversationSessionIdentifierChips
+								summary={summary}
+								taskConversationSessionId={summary.taskId}
+							/>
+							{workspaceId && metadata.taskConversationSessionRoleAtCreation !== "main" && (
+								<IndependentTaskCreationAction
+									workspaceId={workspaceId}
+									sourceTaskId={workspaceTaskId}
+									sourceSessionId={summary.taskId}
+								/>
+							)}
+						</div>
+					);
+				})}
+				{sideConversationSessions.length === 0 ? (
+					<div className="flex flex-col items-center gap-2 px-4 py-6 text-center text-xs text-text-tertiary">
+						<MessageCircleQuestion size={24} />
+						<span>创建协作会话处理工作，或用 By the way 询问侧问。</span>
+					</div>
 				) : null}
 			</div>
-
-			{activeTab === "sessions" ? (
-				<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-					{workspaceId && taskCard?.independentTaskCreationProvenance && (
-						<a
-							className="mb-2 block break-words px-2 text-xs text-accent underline"
-							href={`${buildProjectTaskDeepLinkUrl(taskCard.independentTaskCreationProvenance.sourceWorkspaceId, taskCard.independentTaskCreationProvenance.sourceTaskId)}&conversationSession=${encodeURIComponent(taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId)}`}
+			<Dialog
+				open={isCreationDialogOpen}
+				onOpenChange={(open) => {
+					if (!isCreating) setCreationDialogOpen(open);
+				}}
+			>
+				<DialogHeader title="新建会话" />
+				<DialogDescription className="px-3 pt-2 text-xs text-text-secondary">
+					为当前任务创建协作会话或侧问会话。
+				</DialogDescription>
+				<DialogBody>
+					<div className="min-h-0 flex-1 overflow-y-auto p-3">
+						<label
+							className="mb-1 block text-xs font-medium text-text-secondary"
+							htmlFor="task-conversation-session-role"
 						>
-							来自任务 {taskCard.independentTaskCreationProvenance.sourceTaskId} 的会话{" "}
-							{taskCard.independentTaskCreationProvenance.sourceTaskConversationSessionId}
-							{taskCard.independentTaskCreationProvenance.inheritedGitWorkingStateIncludedUncommittedChanges
-								? "（含来源未提交修改）"
-								: ""}
-						</a>
-					)}
-					{workspaceId && taskCard && (
-						<TaskMainSessionHandoverAction
-							workspaceId={workspaceId}
-							taskCard={taskCard}
-							mainSessionSummary={mainSessionSummary}
-						/>
-					)}
-					{/* 「查看完整 prompt」是行内 button，不能嵌在选择会话的 button 里（嵌套 button 是无效 HTML），
-					    故两者作为兄弟元素放进同一个 relative 容器，前者绝对定位到右下角。 */}
-					{/* 底色挂在容器上而不是 button 上：id 条是 button 的兄弟节点（见下），底色留在 button 上
-					    会让同一张卡片视觉上裂成两半。 */}
-					<div
-						className={cn(
-							"relative mb-1 rounded-md hover:bg-surface-3",
-							selectedTaskConversationSessionId === mainSessionSummary.taskId && "bg-surface-3",
-						)}
-					>
-						<button
-							type="button"
-							className="w-full rounded-md px-2 pb-1 pt-2 text-left"
-							onClick={() => selectSession(mainSessionSummary)}
+							会话类型
+						</label>
+						<select
+							id="task-conversation-session-role"
+							className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
+							value={sessionRole}
+							disabled={isCreating}
+							onChange={(event) => {
+								setSessionRole(event.target.value as "by_the_way" | "task_collaborator");
+								setContextSource("forked_from_main_current_turn");
+								setCreationError(null);
+							}}
 						>
-							<div className="flex items-center gap-2">
-								<span className="text-xs font-medium text-text-primary">Main session</span>
-								<span className="ml-auto text-[11px] text-text-tertiary">
-									{getSessionStatusLabel(mainSessionSummary)}
-								</span>
-							</div>
-							<p className="mt-1 line-clamp-2 pr-9 text-xs text-text-secondary">
-								{mainSessionUserMessagePreview}
-							</p>
-						</button>
-						<TaskConversationSessionIdentifierChips
-							summary={mainSessionSummary}
-							taskConversationSessionId={mainSessionSummary.taskId}
-						/>
-						<Button
-							variant="ghost"
-							size="sm"
-							icon={<FileText size={14} />}
-							onClick={() => setIsOriginalPromptDialogOpen(true)}
-							aria-label="View the original prompt for this task"
-							className={cn("absolute bottom-1 right-1", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
-						/>
-					</div>
-					<TaskOriginalPromptDialog
-						open={isOriginalPromptDialogOpen}
-						card={mainSessionOriginalPromptCard}
-						onClose={() => setIsOriginalPromptDialogOpen(false)}
-					/>
-					{sideConversationSessions.map((summary) => {
-						const metadata = summary.taskConversationSessionMetadata;
-						if (!metadata) {
-							return null;
-						}
-						const turnsAgo = Math.max(0, mainSessionTurnNumber - (metadata.mainSessionOriginTurnNumber ?? 0));
-						const hasUnreadCompletion =
-							resolveSessionFacets(summary).turnOwner === "user" &&
-							(readSessionUpdatedAtById[summary.taskId] ?? 0) < summary.updatedAt &&
-							selectedTaskConversationSessionId !== summary.taskId;
-						return (
-							// id 复制芯片是 button，不能嵌进这个整行可点的 button 里（嵌套 button 是无效 HTML），
-							// 故与它并列放进同一个容器；底色同样挂在容器上，保持一张卡片的观感。
-							<div
-								key={summary.taskId}
-								className={cn(
-									"mb-1 rounded-md hover:bg-surface-3",
-									selectedTaskConversationSessionId === summary.taskId && "bg-surface-3",
-								)}
-							>
-								<button
-									type="button"
-									className="w-full rounded-md px-2 pb-1 pt-2 text-left"
-									onClick={() => selectSession(summary)}
+							<option value="task_collaborator">协作会话</option>
+							<option value="by_the_way" disabled={!isByTheWaySessionCreationSupported}>
+								By the way
+							</option>
+						</select>
+						{sessionRole === "task_collaborator" ? (
+							<>
+								<label
+									className="mb-1 block text-xs font-medium text-text-secondary"
+									htmlFor="task-conversation-session-agent"
 								>
-									<div className="flex items-center gap-2">
-										<MessageCircleQuestion size={13} className="text-status-purple" />
-										<span className="text-xs font-medium text-text-primary">
-											{metadata.taskConversationSessionRoleAtCreation === "main"
-												? "前主会话"
-												: metadata.taskConversationSessionRole === "task_collaborator"
-													? "协作会话"
-													: "By the way"}
-										</span>
-										<span className="text-[11px] text-text-tertiary">
-											{getRuntimeAgentCatalogEntry(summary.agentId ?? "codex")?.label ?? summary.agentId}
-										</span>
-										{hasUnreadCompletion ? (
-											<span
-												role="img"
-												className="h-2 w-2 rounded-full bg-accent"
-												aria-label="Unread answer"
-											/>
-										) : null}
-										<span className="ml-auto text-[11px] text-text-tertiary">
-											{getSessionStatusLabel(summary)}
-										</span>
-									</div>
-									<p className="mt-1 line-clamp-2 text-xs text-text-secondary">
-										{metadata.latestUserMessagePreview ?? "No question yet"}
-									</p>
-									<p className="mt-1 text-[11px] text-text-tertiary">
-										{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
-											? `Forked from main · ${turnsAgo} turns ago`
-											: `Started from scratch · ${turnsAgo} turns ago`}
-									</p>
-								</button>
-								<TaskConversationSessionIdentifierChips
-									summary={summary}
-									taskConversationSessionId={summary.taskId}
-								/>
-								{workspaceId && metadata.taskConversationSessionRoleAtCreation !== "main" && (
-									<IndependentTaskCreationAction
-										workspaceId={workspaceId}
-										sourceTaskId={workspaceTaskId}
-										sourceSessionId={summary.taskId}
-									/>
-								)}
-							</div>
-						);
-					})}
-					{sideConversationSessions.length === 0 ? (
-						<div className="flex flex-col items-center gap-2 px-4 py-6 text-center text-xs text-text-tertiary">
-							<MessageCircleQuestion size={24} />
-							<span>创建协作会话处理工作，或用 By the way 询问侧问。</span>
-						</div>
-					) : null}
-				</div>
-			) : (
-				<div className="min-h-0 flex-1 overflow-y-auto p-3">
-					<label
-						className="mb-1 block text-xs font-medium text-text-secondary"
-						htmlFor="task-conversation-session-role"
-					>
-						会话类型
-					</label>
-					<select
-						id="task-conversation-session-role"
-						className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-						value={sessionRole}
-						disabled={isCreating}
-						onChange={(event) => {
-							setSessionRole(event.target.value as "by_the_way" | "task_collaborator");
-							setContextSource("forked_from_main_current_turn");
-							setCreationError(null);
-						}}
-					>
-						<option value="task_collaborator">协作会话</option>
-						<option value="by_the_way" disabled={!isByTheWaySessionCreationSupported}>
-							By the way
-						</option>
-					</select>
-					{sessionRole === "task_collaborator" ? (
+									Agent
+								</label>
+								<select
+									id="task-conversation-session-agent"
+									value={collaborationAgentId}
+									disabled={isCreating}
+									className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
+									onChange={(event) => {
+										setCollaborationAgentId(event.target.value as RuntimeAgentId);
+										setContextSource("forked_from_main_current_turn");
+									}}
+								>
+									{supportedAgentCatalog.map((agent) => (
+										<option
+											key={agent.id}
+											value={agent.id}
+											disabled={agents?.find((candidate) => candidate.id === agent.id)?.installed === false}
+										>
+											{agent.label}
+											{agents?.find((candidate) => candidate.id === agent.id)?.installed === false
+												? "（未安装）"
+												: ""}
+										</option>
+									))}
+								</select>
+								<p className="mb-3 text-xs text-text-secondary">共用当前工作目录。主会话负责卡片生命周期。</p>
+							</>
+						) : null}
 						<>
 							<label
 								className="mb-1 block text-xs font-medium text-text-secondary"
-								htmlFor="task-conversation-session-agent"
+								htmlFor="task-conversation-context-source"
 							>
-								Agent
+								Context
 							</label>
 							<select
-								id="task-conversation-session-agent"
-								value={collaborationAgentId}
-								disabled={isCreating}
+								id="task-conversation-context-source"
 								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-								onChange={(event) => {
-									setCollaborationAgentId(event.target.value as RuntimeAgentId);
-									setContextSource("forked_from_main_current_turn");
-								}}
+								value={resolvedContextSource}
+								onChange={(event) =>
+									setContextSource(event.target.value as NewTaskConversationSessionContextSource)
+								}
 							>
-								{supportedAgentCatalog.map((agent) => (
-									<option
-										key={agent.id}
-										value={agent.id}
-										disabled={agents?.find((candidate) => candidate.id === agent.id)?.installed === false}
-									>
-										{agent.label}
-										{agents?.find((candidate) => candidate.id === agent.id)?.installed === false
-											? "（未安装）"
-											: ""}
-									</option>
-								))}
+								<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
+									Fork current main session
+								</option>
+								<option value="started_from_scratch">Start from scratch</option>
 							</select>
-							<p className="mb-3 text-xs text-text-secondary">共用当前工作目录。主会话负责卡片生命周期。</p>
+							{mainSessionForkSelection.forkRejectionReason ? (
+								<p className="mb-3 text-xs text-text-secondary">
+									{mainSessionForkSelection.forkRejectionReason}
+								</p>
+							) : null}
 						</>
-					) : null}
-					<>
 						<label
 							className="mb-1 block text-xs font-medium text-text-secondary"
-							htmlFor="task-conversation-context-source"
+							htmlFor="task-conversation-initial-question"
 						>
-							Context
+							{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
 						</label>
-						<select
-							id="task-conversation-context-source"
-							className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-							value={resolvedContextSource}
-							onChange={(event) =>
-								setContextSource(event.target.value as NewTaskConversationSessionContextSource)
+						<textarea
+							id="task-conversation-initial-question"
+							className="min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary placeholder:text-text-secondary focus:border-border-focus focus:outline-none"
+							placeholder={
+								sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
 							}
+							value={initialUserQuestion}
+							onChange={(event) => setInitialUserQuestion(event.target.value)}
+						/>
+						<p className="mt-1 text-[11px] text-text-tertiary">
+							{sessionRole === "task_collaborator"
+								? "可执行命令与修改文件，权限和 Plan 起步设置沿用当前卡片。"
+								: !isByTheWaySessionCreationSupported
+									? `${effectiveAgentId} By the way sessions are not available.`
+									: effectiveAgentId === "cline"
+										? "Cline will answer in read-only Plan mode."
+										: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
+						</p>
+						{creationError ? <p className="mt-2 text-xs text-status-red">{creationError}</p> : null}
+						<Button
+							variant="primary"
+							size="sm"
+							fill
+							className="mt-3"
+							disabled={!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating}
+							onClick={() => void createSession()}
 						>
-							<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
-								Fork current main session
-							</option>
-							<option value="started_from_scratch">Start from scratch</option>
-						</select>
-						{mainSessionForkSelection.forkRejectionReason ? (
-							<p className="mb-3 text-xs text-text-secondary">{mainSessionForkSelection.forkRejectionReason}</p>
-						) : null}
-					</>
-					<label
-						className="mb-1 block text-xs font-medium text-text-secondary"
-						htmlFor="task-conversation-initial-question"
-					>
-						{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
-					</label>
-					<textarea
-						id="task-conversation-initial-question"
-						className="min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary placeholder:text-text-secondary focus:border-border-focus focus:outline-none"
-						placeholder={
-							sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
-						}
-						value={initialUserQuestion}
-						onChange={(event) => setInitialUserQuestion(event.target.value)}
-					/>
-					<p className="mt-1 text-[11px] text-text-tertiary">
-						{sessionRole === "task_collaborator"
-							? "可执行命令与修改文件，权限和 Plan 起步设置沿用当前卡片。"
-							: !isByTheWaySessionCreationSupported
-								? `${effectiveAgentId} By the way sessions are not available.`
-								: effectiveAgentId === "cline"
-									? "Cline will answer in read-only Plan mode."
-									: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
-					</p>
-					{creationError ? <p className="mt-2 text-xs text-status-red">{creationError}</p> : null}
-					<Button
-						variant="primary"
-						size="sm"
-						fill
-						className="mt-3"
-						disabled={!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating}
-						onClick={() => void createSession()}
-					>
-						{isCreating ? "Creating…" : "Create session"}
-					</Button>
-				</div>
-			)}
+							{isCreating ? "Creating…" : "Create session"}
+						</Button>
+					</div>
+				</DialogBody>
+			</Dialog>
 		</div>
 	);
 }

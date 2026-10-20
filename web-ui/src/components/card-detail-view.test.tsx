@@ -970,9 +970,7 @@ describe("CardDetailView", () => {
 		);
 	});
 
-	it("switches the top-right detail utility panel from prompts to task comments and saves a new comment", async () => {
-		const onTaskCommentEntriesChange = vi.fn();
-
+	it("任务工作台不再显示 Comments 页签", async () => {
 		await act(async () => {
 			root.render(
 				<CardDetailView
@@ -983,7 +981,6 @@ describe("CardDetailView", () => {
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
-					onTaskCommentEntriesChange={onTaskCommentEntriesChange}
 					onMoveToTrash={() => {}}
 					bottomTerminalOpen={false}
 					bottomTerminalTaskId={null}
@@ -993,50 +990,10 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="prompt-library-panel"]')).toBeInstanceOf(HTMLDivElement);
-		const commentsTab = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.getAttribute("role") === "tab" && button.textContent?.trim() === "Comments",
+		expect(Array.from(container.querySelectorAll('[role="tab"]')).some((tab) => tab.textContent === "Comments")).toBe(
+			false,
 		);
-		expect(commentsTab).toBeInstanceOf(HTMLButtonElement);
-		if (!(commentsTab instanceof HTMLButtonElement)) {
-			throw new Error("Expected a Comments tab.");
-		}
-
-		await act(async () => {
-			commentsTab.click();
-		});
-
-		const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Write a task comment..."]');
-		expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
-		if (!(textarea instanceof HTMLTextAreaElement)) {
-			throw new Error("Expected a task comment textarea.");
-		}
-
-		await act(async () => {
-			const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-			valueSetter?.call(textarea, "Investigate this before final validation.");
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-
-		const addButton = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.textContent?.trim() === "Add comment",
-		);
-		expect(addButton).toBeInstanceOf(HTMLButtonElement);
-		if (!(addButton instanceof HTMLButtonElement)) {
-			throw new Error("Expected an Add comment button.");
-		}
-
-		await act(async () => {
-			addButton.click();
-		});
-
-		expect(onTaskCommentEntriesChange).toHaveBeenCalledTimes(1);
-		expect(onTaskCommentEntriesChange.mock.calls[0]?.[0]).toBe("task-1");
-		expect(onTaskCommentEntriesChange.mock.calls[0]?.[1]).toEqual([
-			expect.objectContaining({
-				commentText: "Investigate this before final validation.",
-			}),
-		]);
+		expect(container.querySelector('[aria-label="任务工作台"]')).not.toBeNull();
 	});
 
 	it("closes git history before handling other Escape behavior", async () => {

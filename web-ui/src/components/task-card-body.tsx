@@ -55,6 +55,7 @@ import { ProjectIcon } from "@/components/project-visual-identity";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
+import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
@@ -362,6 +363,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 	const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
 	const isTaskCardOwnedByOtherProject = historicalSnapshot != null || taskCardOwnedByOtherProjectWorkspaceId !== null;
+	const taskCommentsDialog = useTaskCommentsDialog();
+	const taskCommentsWorkspaceId =
+		taskCardOwnedByOtherProjectWorkspaceId ??
+		taskCardWorkspaceIdForCrossProjectGitMetadataPolling ??
+		taskCommentsDialog?.currentWorkspaceId;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
@@ -1401,6 +1407,21 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onClick={(event) => {
 									stopEvent(event);
 									taskPinboardToggle.activate();
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{taskCommentsDialog && taskCommentsWorkspaceId && !historicalContext ? (
+						<Tooltip content={revealHoverActionTooltip("任务评论")}>
+							<Button
+								aria-label="任务评论"
+								variant="ghost"
+								size="xs"
+								icon={<MessagesSquare size={12} />}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id);
 								}}
 							/>
 						</Tooltip>

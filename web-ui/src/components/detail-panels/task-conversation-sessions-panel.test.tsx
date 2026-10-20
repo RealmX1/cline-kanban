@@ -115,11 +115,11 @@ describe("TaskConversationSessionsPanel", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("Why is this read-only?");
-		expect(container.textContent).toContain("Forked from main · 2 turns ago");
-		expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+		expect(document.body.textContent).toContain("Why is this read-only?");
+		expect(document.body.textContent).toContain("Forked from main · 2 turns ago");
+		expect(document.body.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
 
-		const sideSessionButton = Array.from(container.querySelectorAll("button")).find((button) =>
+		const sideSessionButton = Array.from(document.body.querySelectorAll("button")).find((button) =>
 			button.textContent?.includes("Why is this read-only?"),
 		);
 		await act(async () => sideSessionButton?.click());
@@ -130,7 +130,7 @@ describe("TaskConversationSessionsPanel", () => {
 		).toMatchObject({ "side-1": 20 });
 	});
 
-	it("creates a fork of the current main session from the Add New form", async () => {
+	it("creates a fork of the current main session from the 新建会话 form", async () => {
 		const mainSessionSummary = createSessionSummary("task-1");
 		const onCreateTaskConversationSession = vi.fn(async () => ({ ok: true }));
 		await act(async () => {
@@ -150,18 +150,18 @@ describe("TaskConversationSessionsPanel", () => {
 		});
 
 		await act(async () => {
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click();
 		});
 		await act(async () => {
-			const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+			const roleSelect = document.body.querySelector<HTMLSelectElement>("#task-conversation-session-role");
 			if (roleSelect) {
 				roleSelect.value = "by_the_way";
 				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
 			}
 		});
-		const questionInput = container.querySelector("textarea");
+		const questionInput = document.body.querySelector("textarea");
 		expect(questionInput).toBeInstanceOf(HTMLTextAreaElement);
 		await act(async () => {
 			if (!questionInput) return;
@@ -169,7 +169,7 @@ describe("TaskConversationSessionsPanel", () => {
 			valueSetter?.call(questionInput, "Explain the relation");
 			questionInput.dispatchEvent(new Event("input", { bubbles: true }));
 		});
-		const createSessionButtons = Array.from(container.querySelectorAll("button")).filter(
+		const createSessionButtons = Array.from(document.body.querySelectorAll("button")).filter(
 			(button) => button.textContent === "Create session",
 		);
 		await act(async () => createSessionButtons.at(-1)?.click());
@@ -200,21 +200,21 @@ describe("TaskConversationSessionsPanel", () => {
 			),
 		);
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click(),
 		);
-		const agentSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-agent");
+		const agentSelect = document.body.querySelector<HTMLSelectElement>("#task-conversation-session-agent");
 		expect(Array.from(agentSelect?.options ?? []).map((option) => option.value)).toEqual(
 			getRuntimeLaunchSupportedAgentCatalog().map((agent) => agent.id),
 		);
-		expect(container.querySelector("#task-conversation-context-source")).not.toBeNull();
+		expect(document.body.querySelector("#task-conversation-context-source")).not.toBeNull();
 		await act(async () => {
 			if (agentSelect) {
 				agentSelect.value = "codex";
 				agentSelect.dispatchEvent(new Event("change", { bubbles: true }));
 			}
-			const input = container.querySelector("textarea");
+			const input = document.body.querySelector("textarea");
 			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
 				input,
 				"实现协作部分",
@@ -222,7 +222,7 @@ describe("TaskConversationSessionsPanel", () => {
 			input?.dispatchEvent(new Event("input", { bubbles: true }));
 		});
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
+			Array.from(document.body.querySelectorAll("button"))
 				.filter((button) => button.textContent === "Create session")
 				.at(-1)
 				?.click(),
@@ -233,8 +233,8 @@ describe("TaskConversationSessionsPanel", () => {
 			initialUserQuestion: "实现协作部分",
 			contextSource: "started_from_scratch",
 		});
-		expect(container.textContent).toContain("隔离启动失败");
-		expect(container.querySelector("textarea")?.value).toBe("实现协作部分");
+		expect(document.body.textContent).toContain("隔离启动失败");
+		expect(document.body.querySelector("textarea")?.value).toBe("实现协作部分");
 	});
 
 	it.each(["claude", "codex", "omp"] as const)("%s 协作会话默认复刻，已有侧问不影响；可选择全新", async (agentId) => {
@@ -276,15 +276,15 @@ describe("TaskConversationSessionsPanel", () => {
 			),
 		);
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click(),
 		);
-		const select = container.querySelector<HTMLSelectElement>("#task-conversation-context-source");
+		const select = document.body.querySelector<HTMLSelectElement>("#task-conversation-context-source");
 		expect(select?.value).toBe("forked_from_main_current_turn");
 		expect(select?.options[0]?.disabled).toBe(false);
 		await act(async () => {
-			const input = container.querySelector("textarea");
+			const input = document.body.querySelector("textarea");
 			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
 				input,
 				"处理协作工作",
@@ -292,7 +292,7 @@ describe("TaskConversationSessionsPanel", () => {
 			input?.dispatchEvent(new Event("input", { bubbles: true }));
 		});
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
+			Array.from(document.body.querySelectorAll("button"))
 				.filter((button) => button.textContent === "Create session")
 				.at(-1)
 				?.click(),
@@ -311,7 +311,7 @@ describe("TaskConversationSessionsPanel", () => {
 			}
 		});
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
+			Array.from(document.body.querySelectorAll("button"))
 				.filter((button) => button.textContent === "Create session")
 				.at(-1)
 				?.click(),
@@ -336,11 +336,11 @@ describe("TaskConversationSessionsPanel", () => {
 			);
 		await act(async () => renderPanel(createSessionSummary("task-1", { startedAt: null })));
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click(),
 		);
-		expect(container.querySelector<HTMLSelectElement>("#task-conversation-context-source")?.value).toBe(
+		expect(document.body.querySelector<HTMLSelectElement>("#task-conversation-context-source")?.value).toBe(
 			"started_from_scratch",
 		);
 		const ready = createSessionSummary("task-1", {
@@ -352,7 +352,7 @@ describe("TaskConversationSessionsPanel", () => {
 			},
 		});
 		await act(async () => renderPanel(ready));
-		const select = container.querySelector<HTMLSelectElement>("#task-conversation-context-source");
+		const select = document.body.querySelector<HTMLSelectElement>("#task-conversation-context-source");
 		expect(select?.value).toBe("forked_from_main_current_turn");
 		await act(async () => {
 			if (select) {
@@ -393,18 +393,18 @@ describe("TaskConversationSessionsPanel", () => {
 			),
 		);
 		await act(async () =>
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click(),
 		);
-		expect(container.querySelector<HTMLOptionElement>('option[value="codex"]')?.disabled).toBe(true);
-		expect(container.querySelector('option[value="codex"]')?.textContent).toContain("未安装");
+		expect(document.body.querySelector<HTMLOptionElement>('option[value="codex"]')?.disabled).toBe(true);
+		expect(document.body.querySelector('option[value="codex"]')?.textContent).toContain("未安装");
 		await act(async () => {
-			const input = container.querySelector("textarea");
+			const input = document.body.querySelector("textarea");
 			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(input, "协作工作");
 			input?.dispatchEvent(new Event("input", { bubbles: true }));
 		});
-		const submit = Array.from(container.querySelectorAll("button"))
+		const submit = Array.from(document.body.querySelectorAll("button"))
 			.filter((button) => button.textContent === "Create session")
 			.at(-1);
 		expect(submit?.disabled).toBe(true);
@@ -431,7 +431,7 @@ describe("TaskConversationSessionsPanel", () => {
 		});
 
 		expect(
-			Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("新建会话"))
 				?.disabled,
 		).toBe(false);
 	});
@@ -488,22 +488,22 @@ describe("TaskConversationSessionsPanel", () => {
 				),
 			);
 			await act(async () =>
-				Array.from(container.querySelectorAll("button"))
-					.find((button) => button.textContent?.includes("Add New"))
+				Array.from(document.body.querySelectorAll("button"))
+					.find((button) => button.textContent?.includes("新建会话"))
 					?.click(),
 			);
 			await act(async () => {
-				const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+				const roleSelect = document.body.querySelector<HTMLSelectElement>("#task-conversation-session-role");
 				if (!roleSelect) throw new Error("缺少角色选项");
 				roleSelect.value = "by_the_way";
 				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
 			});
 			const mustRefuseAmbiguousFork = !hasMainNativeIdentity && hasSameAgentCollaborator;
 			expect(
-				container.querySelector<HTMLOptionElement>('option[value="forked_from_main_current_turn"]')?.disabled,
+				document.body.querySelector<HTMLOptionElement>('option[value="forked_from_main_current_turn"]')?.disabled,
 			).toBe(mustRefuseAmbiguousFork);
-			if (mustRefuseAmbiguousFork) expect(container.textContent).toContain("主会话尚未记录可用的");
-			expect(container.textContent).not.toContain("已有 By the way 会话");
+			if (mustRefuseAmbiguousFork) expect(document.body.textContent).toContain("主会话尚未记录可用的");
+			expect(document.body.textContent).not.toContain("已有 By the way 会话");
 		},
 	);
 
@@ -538,21 +538,23 @@ describe("TaskConversationSessionsPanel", () => {
 		});
 
 		await act(async () => {
-			Array.from(container.querySelectorAll("button"))
-				.find((button) => button.textContent?.includes("Add New"))
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
 				?.click();
 		});
 		await act(async () => {
-			const roleSelect = container.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+			const roleSelect = document.body.querySelector<HTMLSelectElement>("#task-conversation-session-role");
 			if (roleSelect) {
 				roleSelect.value = "by_the_way";
 				roleSelect.dispatchEvent(new Event("change", { bubbles: true }));
 			}
 		});
-		const forkOption = container.querySelector<HTMLOptionElement>('option[value="forked_from_main_current_turn"]');
+		const forkOption = document.body.querySelector<HTMLOptionElement>(
+			'option[value="forked_from_main_current_turn"]',
+		);
 		expect(forkOption?.disabled).toBe(true);
 
-		const questionInput = container.querySelector("textarea");
+		const questionInput = document.body.querySelector("textarea");
 		await act(async () => {
 			if (!questionInput) return;
 			const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
@@ -560,7 +562,7 @@ describe("TaskConversationSessionsPanel", () => {
 			questionInput.dispatchEvent(new Event("input", { bubbles: true }));
 		});
 		await act(async () => {
-			Array.from(container.querySelectorAll("button"))
+			Array.from(document.body.querySelectorAll("button"))
 				.filter((button) => button.textContent === "Create session")
 				.at(-1)
 				?.click();
@@ -620,7 +622,7 @@ describe("TaskConversationSessionsPanel", () => {
 			);
 		});
 
-		const copyButtons = Array.from(container.querySelectorAll("button")).filter((button) =>
+		const copyButtons = Array.from(document.body.querySelectorAll("button")).filter((button) =>
 			button.getAttribute("aria-label")?.startsWith("Copy the "),
 		);
 		const copiedIdentifiers = copyButtons.map((button) => button.getAttribute("aria-label"));
@@ -657,7 +659,7 @@ describe("TaskConversationSessionsPanel", () => {
 			);
 		});
 
-		const copiedIdentifiers = Array.from(container.querySelectorAll("button"))
+		const copiedIdentifiers = Array.from(document.body.querySelectorAll("button"))
 			.map((button) => button.getAttribute("aria-label"))
 			.filter((label) => label?.startsWith("Copy the "));
 		expect(copiedIdentifiers).toEqual(["Copy the Session id task-1"]);
