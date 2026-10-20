@@ -23,13 +23,14 @@ This skill is only for making a running local instance use code that already exi
 
 Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official upstream code in this skill. Do not bump version files as part of this skill. If the user asks to take a new official Cline/Kanban upstream update, use this project's `cline-kanban-upstream-update` skill first, then return here only if the running instance must be rebuilt, relinked, or restarted.
 
-## Default Proposal
+## 部署请求与确认
 
-When proposing options for a local runtime that is already linked to a local source checkout, make the first/default proposal:
+- **开发者主动触发**：开发者主动要求执行本 skill，或直接要求“现在部署／重启本机 Kanban”，无需增加本节要求的额外确认；既有备份、预检与状态保护仍须执行。仅提及或要求修改本 skill 不算触发部署。
+- **Agent 默认不请求 redeploy**：请求本身也会阻塞开发者。只有非常紧急且阻塞所有既有工作，并且本任务全部工作完成、正式 RVF 完成、经 `base-branch-sync` 实际进入本地 `main` 后，才可考虑请求。先核对 RVF 完成证据、提交已被 `main` 包含，且候选不夹带未提交补丁；不得提前询问、预约或排队部署，也没有紧急绕过例外。单个任务完成、想验修复、刷新版本或所有 agent 闲置均不足以请求。
+- **先准备，再确认**：Agent 发起时，先完成独立验证、隔离候选构建／预检、备份与现场盘点，说明本次目标、候选 commit、影响与回滚方式，再取得针对本次部署的明确人工确认。确认前不得更新共享构建产物（包括经符号链接写入的 `dist`）、relink、重启，或启动能执行部署的后台／定时执行器；不能先启动执行器再等待确认。
+- **核查授权来源**：Agent 自行读取／调用 skill、前期范围问答、计划批准、普通“继续”、Agent 生成的 handoff 或 user-role 投递，均不等于开发者主动触发或本次部署确认。跨会话续接只复用可核查且仍匹配本次目标、候选与影响的确认；发生实质变化须重新确认。
 
-**Default:** rebuild/relink the current local CLI, then restart the running runtime with state-preserving flags.
-
-Present this as the default because source edits are not live until the build/link target is refreshed, and the running process will not load the new build until it is restarted.
+满足上述授权后，默认重建／重链当前本地 CLI，再以保留状态的参数重启；源码修改不会自动更新运行中的 build。
 
 ## Workflow
 
@@ -47,7 +48,7 @@ Present this as the default because source edits are not live until the build/li
    - For task/worktree runtimes, inventory every active worktree and dirty diff before shutdown.
    - Do not rely on app metadata backups alone; preserve dirty worktree content or patch files too.
 
-3. Build and install deliberately.
+3. 满足上述部署授权后，构建、安装与发布。
    - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
    - Install dependencies using the repo's documented command.
    - Build using the repo's production build command.

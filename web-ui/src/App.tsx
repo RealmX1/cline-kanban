@@ -534,6 +534,7 @@ export default function App(): ReactElement {
 		// 它每 tick 换引用，会把语义索引反复重建（见 controller 里叠加层那一段）。
 		taskSessionSummariesByTaskId: sessions,
 		canOpen: !hasNoProjects,
+		isBoardScopeAllProjectsSelected,
 		crossProjectWorkspaceId: currentProjectId,
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
 		onOpenTaskInProject: handleOpenTaskInProject,
