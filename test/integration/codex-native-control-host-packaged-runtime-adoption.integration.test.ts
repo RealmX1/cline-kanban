@@ -78,9 +78,10 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 				runtimeHomeDirectoryPath: join(fixture.isolatedHomeDirectoryPath, ".cline", "kanban"),
 				runtimePort,
 			};
+			const codexHomeDirectoryPath = join(fixture.fixtureRootDirectoryPath, "shared-codex-home");
 			const environment = fixture.createIsolatedChildProcessEnvironment({
 				PATH: `${executableDirectory}:${dirname(process.execPath)}:/usr/bin:/bin`,
-				CODEX_HOME: join(fixture.fixtureRootDirectoryPath, "shared-codex-home"),
+				CODEX_HOME: codexHomeDirectoryPath,
 				KANBAN_AGENT_SESSION_PTY_HOST_MODE: "enabled",
 				KANBAN_TEST_NATIVE_CONTROL_RECORDS_DIRECTORY: fixture.fixtureRootDirectoryPath,
 				KANBAN_TEST_NATIVE_CONTROL_FAILURE_MODE: failureMode,
@@ -157,20 +158,31 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 						before[taskIds[0]].pid,
 				);
 				const adopted = (await restarted.client.workspace.getState.query()).sessions;
-				// 模拟 CLI 不执行 hook；在每次刷新前经真实 API 补齐共享 cwd 所需的精确原生身份。
+				// 模拟 CLI 不执行 hook；提供隔离主转录并经真实 API 登记身份，满足共享 cwd 与持久转录预检。
 				const recordSyntheticNativeIdentityForRefresh = async (taskId: string) => {
+					const nativeSessionId = randomUUID();
+					const transcriptPath = join(codexHomeDirectoryPath, "sessions", `rollout-${nativeSessionId}.jsonl`);
+					await mkdir(dirname(transcriptPath), { recursive: true });
+					await writeFile(
+						transcriptPath,
+						`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`,
+					);
 					const recorded = await restarted.client.hooks.ingest.mutate({
 						taskId,
 						workspaceId: workspace.workspaceId,
 						event: "agent_conversation_session_identity_observed",
 						agentNativeConversationSessionIdentity: {
 							sourceAgentId: "codex",
-							nativeSessionId: randomUUID(),
-							transcriptPath: null,
+							nativeSessionId,
+							transcriptPath,
 							observedAt: Date.now(),
 						},
 					});
 					expect(recorded.ok, recorded.error).toBe(true);
+					expect(
+						(await restarted.client.workspace.getState.query()).sessions[taskId]
+							.agentNativeConversationSessionIdentity?.nativeSessionId,
+					).toBe(nativeSessionId);
 				};
 				for (const taskId of taskIds) {
 					expect(adopted[taskId].runtimeSessionIncarnationId).toBe(before[taskId].runtimeSessionIncarnationId);
