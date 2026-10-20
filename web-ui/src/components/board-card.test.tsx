@@ -347,7 +347,7 @@ describe("BoardCard", () => {
 		expect(["1", "0.45"]).toContain(dot?.style.opacity);
 		// 卡片上不再有任何无限 CSS 动画（状态点不 pulse、In Progress 标记不旋转）。
 		expect(container.querySelector(".animate-pulse, .animate-spin")).toBeNull();
-		expect(container.querySelector('[data-task-card-in-progress-column-status-marker="static"]')).toBeTruthy();
+		expect(container.querySelector('[data-task-card-corner-status-indicator="running"]')).toBeTruthy();
 	});
 
 	it("does not pulse the dot once a running agent has gone quiet (no recent output)", async () => {
@@ -1207,7 +1207,8 @@ describe("BoardCard", () => {
 		});
 
 		const directoryRow = container.querySelector("[data-task-directory]");
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).toContain("3");
 		expect(directoryRow?.textContent).toContain("12");
 		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).not.toBeNull();
@@ -1242,7 +1243,8 @@ describe("BoardCard", () => {
 
 		const directoryRow = container.querySelector("[data-task-directory]");
 		// 刚开工、尚未提交也未落后的任务不该多出一对 "0"，脏文件统计仍照常展示。
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).toContain("2 files");
 		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).toBeNull();
 		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).toBeNull();
@@ -1272,7 +1274,8 @@ describe("BoardCard", () => {
 		});
 
 		const directoryRow = container.querySelector("[data-task-directory]");
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).not.toContain("0 files");
 		expect(directoryRow?.textContent).not.toContain("+0");
 		expect(directoryRow?.textContent).not.toContain("-0");

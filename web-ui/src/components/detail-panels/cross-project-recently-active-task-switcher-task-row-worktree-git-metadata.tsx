@@ -1,9 +1,9 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { GitBranch, Home } from "lucide-react";
 import type { ReactElement } from "react";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
+import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
 	WorktreeUncommittedChangeSummaryIndicator,
@@ -42,16 +42,13 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 	if (!gitStatusAgainstBaseRefDescription && !showsUncommittedChangeSummary) {
 		return null;
 	}
-	const isInplaceWorktree = entry.worktreeMode === "inplace";
 	return (
 		<span
 			className="inline-flex shrink-0 items-center gap-1 font-mono text-text-tertiary"
 			data-cross-project-task-switcher-row-worktree-git-metadata=""
-			title={[isInplaceWorktree ? "inplace" : "worktree", gitStatusAgainstBaseRefDescription]
-				.filter((part): part is string => Boolean(part))
-				.join(" · ")}
+			title={gitStatusAgainstBaseRefDescription ?? undefined}
 		>
-			{isInplaceWorktree ? <Home size={10} className="shrink-0" /> : <GitBranch size={10} className="shrink-0" />}
+			<TaskWorkspaceModeIconWithTooltip worktreeMode={entry.worktreeMode} />
 			{gitStatusAgainstBaseRefDescription ? (
 				<>
 					<AheadBehindIndicator
