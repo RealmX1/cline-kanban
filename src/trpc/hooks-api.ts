@@ -1,3 +1,4 @@
+import { isCodexConversationWithoutPersistedTranscript } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
 import type {
 	RuntimeHookIngestRequest,
@@ -215,6 +216,16 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 		let hookNotificationAlreadyProcessed = false;
 		try {
 			const body = parseHookIngestRequest(input);
+			// 旧 CLI 与 host spool 也可能送来污染事件；必须先于通知归档、身份持久化与任何主会话写入。
+			if (
+				body.agentNativeConversationSessionIdentity &&
+				isCodexConversationWithoutPersistedTranscript(body.agentNativeConversationSessionIdentity)
+			) {
+				logAgentSessionRetentionWarning(
+					`codex-nonpersistent-hook-excluded workspaceId=${body.workspaceId} taskId=${body.taskId} event=${body.event}`,
+				);
+				return { ok: true } satisfies RuntimeHookIngestResponse;
+			}
 			hookIngestResourceUsageJournalContext = { body, summary: null };
 			const taskId = body.taskId;
 			const workspaceId = body.workspaceId;

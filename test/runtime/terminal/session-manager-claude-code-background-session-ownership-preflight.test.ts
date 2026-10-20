@@ -6,7 +6,7 @@
 //  3. 用户在终端面板上确认接管 ⇒ 不看是否安全，停掉后续跑；
 //  4. 原转录末尾有 `continued-in` ⇒ 改钉到对话最新所在的 id 再续跑；
 //  5. 全新开局、非 Claude agent 都不去问守护进程；运行时重启后「正在盯」的标记复位。
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -578,6 +578,12 @@ describe("TerminalSessionManager Claude Code background session ownership prefli
 	it("does not consult the Claude background daemon for an agent that has none", async () => {
 		const daemonClient = createFakeDaemonClient([]);
 		const { manager } = createManager(daemonClient);
+		const codexSessionsDirectory = join(transcriptDirectoryPath, "sessions");
+		mkdirSync(codexSessionsDirectory);
+		writeFileSync(
+			join(codexSessionsDirectory, "rollout-019a0000-0000-7000-8000-000000000000.jsonl"),
+			`${JSON.stringify({ type: "session_meta", payload: { id: "019a0000-0000-7000-8000-000000000000", source: "cli" } })}\n`,
+		);
 		await manager.startTaskSession({
 			taskId: TASK_ID,
 			agentId: "codex",
@@ -593,7 +599,12 @@ describe("TerminalSessionManager Claude Code background session ownership prefli
 			observedAt: 1,
 		});
 
-		await manager.refreshTaskTerminal({ ...buildRefreshRequest(), agentId: "codex", binary: "codex" });
+		await manager.refreshTaskTerminal({
+			...buildRefreshRequest(),
+			agentId: "codex",
+			binary: "codex",
+			env: { CODEX_HOME: transcriptDirectoryPath },
+		});
 
 		expect(daemonClient.listLiveSessionsStartedUnderWorkingDirectory).not.toHaveBeenCalled();
 		expect(daemonClient.stopBackgroundSession).not.toHaveBeenCalled();
