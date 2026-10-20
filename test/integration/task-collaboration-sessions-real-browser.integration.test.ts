@@ -30,6 +30,16 @@ it.skipIf(!packagedCliPath).each([
 	async (mainAgentId, collaborationAgentId, sessionTransport) => {
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const writeCodexNativeConversationTranscriptFixture = (nativeSessionId: string): string => {
+			const codexSessionsDirectoryPath = join(fixture.isolatedHomeDirectoryPath, ".codex", "sessions");
+			mkdirSync(codexSessionsDirectoryPath, { recursive: true });
+			const transcriptPath = join(codexSessionsDirectoryPath, `rollout-${nativeSessionId}.jsonl`);
+			writeFileSync(
+				transcriptPath,
+				`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`,
+			);
+			return transcriptPath;
+		};
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "collaboration-browser" });
 		writeFileSync(join(repository.repositoryPath, "initial.txt"), "隔离协作测试\n");
 		repository.commitAllRepositoryFilesAtDate({
@@ -240,7 +250,10 @@ setInterval(() => {}, 1000);
 				agentNativeConversationSessionIdentity: {
 					sourceAgentId: mainAgentId,
 					nativeSessionId: mainLaunch.nativeSessionId,
-					transcriptPath: null,
+					transcriptPath:
+						mainAgentId === "codex"
+							? writeCodexNativeConversationTranscriptFixture(mainLaunch.nativeSessionId)
+							: null,
 					observedAt: Date.now(),
 				},
 			});
@@ -303,7 +316,10 @@ setInterval(() => {}, 1000);
 			const identity = {
 				sourceAgentId: collaborationAgentId,
 				nativeSessionId: sideLaunch.nativeSessionId,
-				transcriptPath: null,
+				transcriptPath:
+					collaborationAgentId === "codex"
+						? writeCodexNativeConversationTranscriptFixture(sideLaunch.nativeSessionId)
+						: null,
 				observedAt: Date.now(),
 			};
 			await scoped.hooks.ingest.mutate({

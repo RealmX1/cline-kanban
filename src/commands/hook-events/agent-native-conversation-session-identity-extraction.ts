@@ -20,6 +20,24 @@ function readVerbatimFilesystemPathField(record: Record<string, unknown>, key: s
 	return trimmed.length > 0 ? trimmed : null;
 }
 
+export function readAgentNativeConversationTranscriptPathFromHookPayload(
+	payload: Record<string, unknown> | null,
+): string | null {
+	return payload
+		? (readVerbatimFilesystemPathField(payload, "transcript_path") ??
+				readVerbatimFilesystemPathField(payload, "transcriptPath"))
+		: null;
+}
+
+// Codex 的 memory phase-2 作业会继承主进程的 hooks 与任务 env，却没有持久转录或 agent_id。
+// 这类事件不能代表主任务；普通新会话的首个 SessionStart 已带路径（0.163.0 原生隔离探针已证）。
+export function isCodexConversationWithoutPersistedTranscript(input: {
+	sourceAgentId: string | null | undefined;
+	transcriptPath: string | null | undefined;
+}): boolean {
+	return input.sourceAgentId?.trim().toLowerCase() === "codex" && !input.transcriptPath?.trim();
+}
+
 export function extractAgentNativeConversationSessionIdentityFromHookPayload(input: {
 	payload: Record<string, unknown> | null;
 	// 已解析的 harness 来源（flag 或 inferHookSourceFromPayload）；null = 判不出来源 ⇒ 不产出身份。
@@ -34,9 +52,8 @@ export function extractAgentNativeConversationSessionIdentityFromHookPayload(inp
 	if (!nativeSessionId) {
 		return undefined;
 	}
-	const transcriptPath =
-		readVerbatimFilesystemPathField(payload, "transcript_path") ??
-		readVerbatimFilesystemPathField(payload, "transcriptPath");
+	const transcriptPath = readAgentNativeConversationTranscriptPathFromHookPayload(payload);
+	if (isCodexConversationWithoutPersistedTranscript({ sourceAgentId, transcriptPath })) return undefined;
 	return {
 		sourceAgentId: sourceAgentId.trim().toLowerCase(),
 		nativeSessionId,
