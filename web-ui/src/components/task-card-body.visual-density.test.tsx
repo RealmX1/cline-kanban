@@ -10,7 +10,7 @@ import {
 } from "@/components/task-card-body-visual-density-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import type { BoardCard } from "@/types";
+import type { BoardCard, BoardColumnId } from "@/types";
 
 // 两种视觉密度只改排版、不改内容：Focus View 左栏的紧凑行必须与主看板卡片显示同一组信息项。
 
@@ -70,13 +70,16 @@ function createSummary(): RuntimeTaskSessionSummary {
 let container: HTMLDivElement;
 let root: Root;
 
-function renderWithDensity(visualDensity: TaskCardBodyVisualDensity): HTMLDivElement {
+function renderWithDensity(
+	visualDensity: TaskCardBodyVisualDensity,
+	columnId: BoardColumnId = "review",
+): HTMLDivElement {
 	act(() =>
 		root.render(
 			<TaskCardBodyVisualDensityProvider value={visualDensity}>
 				<TaskCardBody
 					card={createCard()}
-					columnId="review"
+					columnId={columnId}
 					sessionSummary={createSummary()}
 					onCancelAutomaticAction={() => {}}
 					onUnpinFromTaskPinboard={() => {}}
@@ -118,6 +121,27 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的视觉密度", () => {
+	it("干净工作区和 Done 卡保留历史累计，dirty 零值仍隐藏", () => {
+		workspaceSnapshotMock.mockReturnValue({
+			path: "/isolated/task-1",
+			changedFiles: 0,
+			additions: 0,
+			deletions: 0,
+			taskRetainedCommittedLineChangeSummary: {
+				status: "complete",
+				commitCount: 2,
+				additions: 123,
+				deletions: 45,
+				historyVersion: "retained",
+				unavailableReason: null,
+			},
+		});
+		for (const density of ["standard_card_with_floating_capsule", "compact_row_in_focus_view_left_column"] as const) {
+			const host = renderWithDensity(density, "trash");
+			expect(host.querySelector("[data-task-directory]")?.textContent).toContain("已提交 +123 −45");
+			expect(host.querySelector("[data-task-directory]")?.textContent).not.toContain("0 files");
+		}
+	});
 	it("紧凑行与标准卡片显示同一组信息项（只改排版不改内容）", () => {
 		const standardItems = collectInformationItemsShown(renderWithDensity("standard_card_with_floating_capsule"));
 		const compactItems = collectInformationItemsShown(renderWithDensity("compact_row_in_focus_view_left_column"));
@@ -147,9 +171,9 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(cancelButton?.className).toContain("text-accent");
 	});
 
-	it("标准卡片保持原样：左上角浮动胶囊、没有紧凑元信息行", () => {
+	it("标准卡片保留浮动胶囊并避开左上角角标，没有紧凑元信息行", () => {
 		const host = renderWithDensity("standard_card_with_floating_capsule");
-		expect(host.querySelector(".-left-2 [data-agent-badge]")).not.toBeNull();
+		expect(host.querySelector(".left-2 [data-agent-badge]")).not.toBeNull();
 		expect(host.querySelector("[data-task-card-compact-metadata-row]")).toBeNull();
 	});
 });

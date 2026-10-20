@@ -26,6 +26,14 @@ it.skipIf(!packagedCliPath).each(["new_codex_session", "existing_codex_session"]
 
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const nativeCodexId = "22222222-2222-4222-8222-222222222222";
+		const codexSessionsDirectoryPath = join(fixture.isolatedHomeDirectoryPath, ".codex", "sessions");
+		mkdirSync(codexSessionsDirectoryPath, { recursive: true });
+		const codexTranscriptPath = join(codexSessionsDirectoryPath, `rollout-${nativeCodexId}.jsonl`);
+		writeFileSync(
+			codexTranscriptPath,
+			`${JSON.stringify({ type: "session_meta", payload: { id: nativeCodexId, source: "cli" } })}\n`,
+		);
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "collaboration-browser" });
 		writeFileSync(join(repository.repositoryPath, "initial.txt"), "隔离协作测试\n");
 		repository.commitAllRepositoryFilesAtDate({
@@ -238,8 +246,8 @@ setInterval(() => {}, 1000);
 					event: "agent_conversation_session_identity_observed",
 					agentNativeConversationSessionIdentity: {
 						sourceAgentId: "codex",
-						nativeSessionId: "22222222-2222-4222-8222-222222222222",
-						transcriptPath: null,
+						nativeSessionId: nativeCodexId,
+						transcriptPath: codexTranscriptPath,
 						observedAt: Date.now(),
 					},
 				});
@@ -303,8 +311,8 @@ setInterval(() => {}, 1000);
 				event: "agent_conversation_session_identity_observed",
 				agentNativeConversationSessionIdentity: {
 					sourceAgentId: "codex",
-					nativeSessionId: "22222222-2222-4222-8222-222222222222",
-					transcriptPath: null,
+					nativeSessionId: nativeCodexId,
+					transcriptPath: codexTranscriptPath,
 					observedAt: Date.now(),
 				},
 			});

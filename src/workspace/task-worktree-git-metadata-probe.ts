@@ -4,6 +4,7 @@ import { computeWorktreeGitChangeToken } from "./git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "./git-sync";
 import { runGit } from "./git-utils";
 import { refreshTaskCommitIntegrationProvenance } from "./task-commit-integration-provenance";
+import { createUnavailableTaskRetainedCommittedLineChangeHistory } from "./task-retained-committed-line-change-statistics";
 import { getTaskWorkspacePathInfo } from "./task-worktree";
 
 // 单个任务 worktree 的 git 元数据探针（ahead/behind、未提交改动统计、fork-point、集成溯源）。
@@ -148,7 +149,8 @@ function isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid(input: {
 		cached.baseCommit !== null &&
 		cached.commitsAheadOfBaseRef !== null &&
 		cached.commitsBehindBaseRef !== null &&
-		cached.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable"
+		cached.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
+		!cached.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_")
 	);
 }
 
@@ -230,15 +232,26 @@ export async function loadTaskWorkspaceMetadata(
 		baseRef: task.baseRef,
 		...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 	});
+	let retainedLineChangeSummary = createUnavailableTaskRetainedCommittedLineChangeHistory(
+		"task_commit_history_unavailable",
+	).summary;
 
 	if (!pathInfo.exists) {
+		const now = Date.now();
 		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		if (
 			current &&
 			current.data.exists === false &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
-			current.baseRefTipCommit === baseRefTipCommit
+			current.baseRefTipCommit === baseRefTipCommit &&
+			(!current.data.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_") ||
+				now - current.lastFullRefreshAtMs <
+					resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+						task,
+						lastObservedTaskWorktreeGitChangeAtMs: current.lastObservedTaskWorktreeGitChangeAtMs,
+						nowMs: now,
+					}))
 		) {
 			return current;
 		}
@@ -255,6 +268,9 @@ export async function loadTaskWorkspaceMetadata(
 			commitsAheadOfBaseRef: null,
 			commitsBehindBaseRef: null,
 			isDetached: false,
+			onTaskRetainedCommittedLineChangeSummary: (summary) => {
+				retainedLineChangeSummary = summary;
+			},
 		});
 		return {
 			data: {
@@ -266,6 +282,7 @@ export async function loadTaskWorkspaceMetadata(
 				commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
 				commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
 				workspaceGitStatus,
+				taskRetainedCommittedLineChangeSummary: retainedLineChangeSummary,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -277,7 +294,7 @@ export async function loadTaskWorkspaceMetadata(
 			stateToken: null,
 			cheapChangeToken: null,
 			baseRefTipCommit,
-			lastFullRefreshAtMs: 0,
+			lastFullRefreshAtMs: now,
 			lastObservedTaskWorktreeGitChangeAtMs: null,
 		};
 	}
@@ -324,7 +341,8 @@ export async function loadTaskWorkspaceMetadata(
 				current.stateToken === probe.stateToken &&
 				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
-				current.data.baseRef === pathInfo.baseRef
+				current.data.baseRef === pathInfo.baseRef &&
+				!current.data.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_")
 			) {
 				return {
 					...current,
@@ -376,6 +394,9 @@ export async function loadTaskWorkspaceMetadata(
 				commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
 				observedAt: now,
+				onTaskRetainedCommittedLineChangeSummary: (summary) => {
+					retainedLineChangeSummary = summary;
+				},
 			});
 			return {
 				data: {
@@ -387,6 +408,12 @@ export async function loadTaskWorkspaceMetadata(
 					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
 					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 					workspaceGitStatus,
+					taskRetainedCommittedLineChangeSummary:
+						workspaceGitStatus.taskCommitIntegrationTrackingStatus === "complete"
+							? retainedLineChangeSummary
+							: createUnavailableTaskRetainedCommittedLineChangeHistory(
+									workspaceGitStatus.taskCommitIntegrationTrackingStatus,
+								).summary,
 					branch: probe.currentBranch,
 					isDetached: probe.headCommit !== null && probe.currentBranch === null,
 					headCommit: probe.headCommit,

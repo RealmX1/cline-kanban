@@ -188,6 +188,7 @@ import type {
 	RuntimeTaskPromptDeliveryQueueMutateResponse,
 	RuntimeTaskPromptDeliveryQueueReadRequest,
 	RuntimeTaskPromptDeliveryQueueResponse,
+	RuntimeTaskRetainedCommittedLineChangeHistory,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
@@ -406,6 +407,7 @@ import {
 	runtimeTaskPromptDeliveryQueueMutateResponseSchema,
 	runtimeTaskPromptDeliveryQueueReadRequestSchema,
 	runtimeTaskPromptDeliveryQueueResponseSchema,
+	runtimeTaskRetainedCommittedLineChangeHistorySchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
@@ -898,6 +900,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskWorkspaceInfoRequest,
 		) => Promise<RuntimeTaskWorkspaceInfoResponse>;
+		loadTaskRetainedCommittedLineChangeHistory: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskWorkspaceInfoRequest,
+		) => Promise<RuntimeTaskRetainedCommittedLineChangeHistory>;
 		searchFiles: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeWorkspaceFileSearchRequest,
@@ -1997,6 +2003,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskWorkspaceInfoResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadTaskContext(ctx.workspaceScope, input);
+			}),
+		getTaskRetainedCommittedLineChangeHistory: workspaceProcedure
+			.input(runtimeTaskWorkspaceInfoRequestSchema)
+			.output(runtimeTaskRetainedCommittedLineChangeHistorySchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadTaskRetainedCommittedLineChangeHistory(ctx.workspaceScope, input);
 			}),
 		searchFiles: workspaceProcedure
 			.input(runtimeWorkspaceFileSearchRequestSchema)

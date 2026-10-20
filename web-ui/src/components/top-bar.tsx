@@ -41,6 +41,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { Tooltip } from "@/components/ui/tooltip";
 import { WorktreeUncommittedChangeSummaryIndicator } from "@/components/ui/worktree-uncommitted-change-summary-indicator";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -130,6 +131,7 @@ function GitBranchStatusControl({
 	deletions,
 	onToggleGitHistory,
 	isGitHistoryOpen,
+	retainedCommitChangeIndicator,
 }: {
 	branchLabel: string;
 	changedFiles: number;
@@ -137,6 +139,7 @@ function GitBranchStatusControl({
 	deletions: number;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
+	retainedCommitChangeIndicator?: React.ReactNode;
 }): React.ReactElement {
 	if (onToggleGitHistory) {
 		return (
@@ -160,6 +163,7 @@ function GitBranchStatusControl({
 						additions={additions}
 						deletions={deletions}
 					/>
+					{retainedCommitChangeIndicator ? <span className="ml-1.5">{retainedCommitChangeIndicator}</span> : null}
 				</span>
 			</div>
 		);
@@ -176,12 +180,14 @@ function GitBranchStatusControl({
 					deletions={deletions}
 					parenthesesAndChangedFileCountClassName="text-text-tertiary"
 				/>
+				{retainedCommitChangeIndicator ? <span className="ml-1.5">{retainedCommitChangeIndicator}</span> : null}
 			</span>
 		</span>
 	);
 }
 
 function TopBarGitStatusSection({
+	workspaceId,
 	showHomeGitSummary,
 	selectedTaskId,
 	selectedTaskBaseRef,
@@ -192,6 +198,7 @@ function TopBarGitStatusSection({
 	onGitPull,
 	onGitPush,
 }: {
+	workspaceId: string | null;
 	showHomeGitSummary: boolean;
 	selectedTaskId: string | null;
 	selectedTaskBaseRef: string | null;
@@ -283,6 +290,14 @@ function TopBarGitStatusSection({
 					changedFiles={taskWorkspaceSnapshot?.changedFiles ?? 0}
 					additions={taskWorkspaceSnapshot?.additions ?? 0}
 					deletions={taskWorkspaceSnapshot?.deletions ?? 0}
+					retainedCommitChangeIndicator={
+						<TaskRetainedCommittedLineChangeIndicator
+							workspaceId={workspaceId}
+							taskId={selectedTaskId}
+							baseRef={selectedTaskBaseRef ?? "main"}
+							summary={taskWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary}
+						/>
+					}
 					onToggleGitHistory={onToggleGitHistory}
 					isGitHistoryOpen={isGitHistoryOpen}
 				/>
@@ -580,6 +595,7 @@ export function TopBar({
 							) : null}
 							{!hideProjectDependentActions ? (
 								<TopBarGitStatusSection
+									workspaceId={projectSwitcher?.currentProjectId ?? null}
 									showHomeGitSummary={showHomeGitSummary === true}
 									selectedTaskId={selectedTaskId ?? null}
 									selectedTaskBaseRef={selectedTaskBaseRef ?? null}

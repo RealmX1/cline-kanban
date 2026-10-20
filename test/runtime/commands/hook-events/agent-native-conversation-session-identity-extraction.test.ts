@@ -30,10 +30,34 @@ describe("extractAgentNativeConversationSessionIdentityFromHookPayload", () => {
 		expect(
 			extractAgentNativeConversationSessionIdentityFromHookPayload({
 				payload: { sessionId: "thread-9" },
-				sourceAgentId: "codex",
+				sourceAgentId: "claude",
 				observedAt: 1,
 			}),
-		).toEqual({ sourceAgentId: "codex", nativeSessionId: "thread-9", transcriptPath: null, observedAt: 1 });
+		).toEqual({ sourceAgentId: "claude", nativeSessionId: "thread-9", transcriptPath: null, observedAt: 1 });
+	});
+
+	it.each([null, undefined, "", "   "])("Codex 后台记忆整理 hook 无持久转录（%s）时不建立主身份", (path) => {
+		expect(
+			extractAgentNativeConversationSessionIdentityFromHookPayload({
+				sourceAgentId: "codex",
+				payload: { session_id: "01a1592f-121b-7d31-9435-768bfffda4e8", transcript_path: path },
+			}),
+		).toBeUndefined();
+	});
+
+	it("正常 Codex SessionStart 仍记录首个持久身份，并保留路径内空格", () => {
+		expect(
+			extractAgentNativeConversationSessionIdentityFromHookPayload({
+				sourceAgentId: "Codex",
+				payload: { session_id: "main-1", transcriptPath: " /home/test  profile/rollout.jsonl " },
+				observedAt: 9,
+			}),
+		).toEqual({
+			sourceAgentId: "codex",
+			nativeSessionId: "main-1",
+			transcriptPath: "/home/test  profile/rollout.jsonl",
+			observedAt: 9,
+		});
 	});
 
 	it("缺 session id / 空白 session id / 无载荷 / 判不出来源 → 不产出身份", () => {
