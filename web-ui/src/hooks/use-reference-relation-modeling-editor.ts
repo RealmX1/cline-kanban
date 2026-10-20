@@ -12,6 +12,7 @@ import {
 	persistRelationModelingEditorDraft,
 	readRelationModelingEditorDraft,
 	readRelationModelingPreview,
+	requestReferenceRelationModelingSuggestions,
 } from "@/runtime/work-unit-relation-modeling-query";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
@@ -39,6 +40,7 @@ export function useReferenceRelationModelingEditor(input: {
 	workspaceId: string | null;
 	taskId: string | null;
 	draftTaskTitle?: string;
+	draftTaskPrompt?: string;
 	active?: boolean;
 }) {
 	const [ownerId] = useState(browserDraftOwnerId);
@@ -59,9 +61,21 @@ export function useReferenceRelationModelingEditor(input: {
 	const saving = draftScopesWithApplyInFlight.has(mirrorKey);
 	const [depth, setDepth] = useState<1 | 2 | 3>(2);
 	const [refreshSequence, setRefreshSequence] = useState(0);
+	const [suggestions, setSuggestions] = useState<Awaited<
+		ReturnType<typeof requestReferenceRelationModelingSuggestions>
+	> | null>(null);
+	const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+	const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
+	const suggestionsRequestIdentityRef = useRef<symbol | null>(null);
 	const saveTail = useRef<Promise<unknown>>(Promise.resolve());
 	const draftRef = useRef(draft);
 	draftRef.current = draft;
+	useEffect(() => {
+		suggestionsRequestIdentityRef.current = null;
+		setSuggestions(null);
+		setSuggestionsLoading(false);
+		setSuggestionsError(null);
+	}, [mirrorKey, input.draftTaskTitle, input.draftTaskPrompt]);
 
 	useEffect(() => {
 		let current = true;
@@ -276,6 +290,44 @@ export function useReferenceRelationModelingEditor(input: {
 		}
 	};
 	return {
+		suggestions,
+		suggestionsLoading,
+		suggestionsError,
+		requestSuggestions: async () => {
+			if (!input.workspaceId || suggestionsRequestIdentityRef.current) return;
+			const requestIdentity = Symbol("relation-suggestion-request");
+			suggestionsRequestIdentityRef.current = requestIdentity;
+			setSuggestionsLoading(true);
+			setSuggestionsError(null);
+			setSuggestions(null);
+			try {
+				const taskId = input.taskId ?? draftRef.current.createdTaskId;
+				const result = await requestReferenceRelationModelingSuggestions(input.workspaceId, {
+					workUnit: taskId
+						? {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: input.workspaceId,
+							}
+						: null,
+					draftTaskTitle: input.draftTaskTitle ?? draftRef.current.creationTitle ?? "待创建任务",
+					draftTaskPrompt: input.draftTaskPrompt ?? draftRef.current.creationPrompt,
+					relationNeighborhoodDepth: depth,
+					referenceRelationDrafts: [],
+					relationRevocations: [],
+				});
+				if (suggestionsRequestIdentityRef.current === requestIdentity && currentScopeRef.current === mirrorKey)
+					setSuggestions(result);
+			} catch (failure) {
+				if (suggestionsRequestIdentityRef.current === requestIdentity && currentScopeRef.current === mirrorKey)
+					setSuggestionsError(failure instanceof Error ? failure.message : String(failure));
+			} finally {
+				if (suggestionsRequestIdentityRef.current === requestIdentity) {
+					suggestionsRequestIdentityRef.current = null;
+					setSuggestionsLoading(false);
+				}
+			}
+		},
 		draft,
 		ready: ready && hydratedScope === mirrorKey,
 		preview,

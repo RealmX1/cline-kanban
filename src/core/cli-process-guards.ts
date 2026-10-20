@@ -45,12 +45,23 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
 	return parsed;
 }
 
-export function resolveCliHardTimeoutMs(): number {
-	return parsePositiveIntEnv("KANBAN_CLI_HARD_TIMEOUT_MS", DEFAULT_CLI_HARD_TIMEOUT_MS);
+export function resolveCliHardTimeoutMs(argv: readonly string[] = process.argv): number {
+	return parsePositiveIntEnv(
+		"KANBAN_CLI_HARD_TIMEOUT_MS",
+		isTaskIndexingSupportTriageInvocation(argv) ? 240_000 : DEFAULT_CLI_HARD_TIMEOUT_MS,
+	);
 }
 
-export function resolveCliTrpcTimeoutMs(): number {
-	return parsePositiveIntEnv("KANBAN_CLI_TRPC_TIMEOUT_MS", DEFAULT_CLI_TRPC_TIMEOUT_MS);
+export function resolveCliTrpcTimeoutMs(argv: readonly string[] = process.argv): number {
+	return parsePositiveIntEnv(
+		"KANBAN_CLI_TRPC_TIMEOUT_MS",
+		isTaskIndexingSupportTriageInvocation(argv) ? 210_000 : DEFAULT_CLI_TRPC_TIMEOUT_MS,
+	);
+}
+
+function isTaskIndexingSupportTriageInvocation(argv: readonly string[]): boolean {
+	const index = argv.indexOf("support");
+	return index >= 0 && argv[index + 1] === "triage-incoming-work-item";
 }
 
 export function safeErrorMessage(error: unknown): string {
@@ -129,11 +140,11 @@ export function installCliFatalErrorHandlers(): void {
 	});
 }
 
-export function installCliHardTimeoutIfNeeded(_argv: string[], isServerStyleInvocation: boolean): () => void {
+export function installCliHardTimeoutIfNeeded(argv: string[], isServerStyleInvocation: boolean): () => void {
 	if (isServerStyleInvocation) {
 		return () => {};
 	}
-	const timeoutMs = resolveCliHardTimeoutMs();
+	const timeoutMs = resolveCliHardTimeoutMs(argv);
 	const timeoutHandle = setTimeout(() => {
 		writeFatalAndExit(`kanban: fatal: command timed out after ${timeoutMs}ms`, 124);
 	}, timeoutMs);

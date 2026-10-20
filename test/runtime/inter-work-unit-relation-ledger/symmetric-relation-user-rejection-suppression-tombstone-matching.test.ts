@@ -132,6 +132,33 @@ const identityProjectionStateWithUnchangedPrompts = buildIdentityProjectionState
 ]);
 
 describe("symmetric relation user rejection suppression tombstone matching aligned by endpoint work unit key", () => {
+	it("support 建议方同时受用户全局墓碑与 agent 的建议方抑制范围约束", () => {
+		const tombstone = buildTombstoneOfUserRejectingRelationAsIncorrect({
+			relationKind: "reference_is_generally_related_with",
+			rejectedRelationSubject: cardAInRepositoryA,
+			rejectedRelationAnchor: cardBInRepositoryB,
+			identityProjectionStateAtRejection: identityProjectionStateWithUnchangedPrompts,
+		});
+		for (const scope of [
+			"all_relation_proposers_except_web_ui_user_direct_assertions",
+			"extraction_or_suggestion_origin_proposers_and_same_proposer_policy_identity_only",
+		] as const) {
+			const scoped = {
+				...tombstone,
+				suppressionScope: scope,
+				suppressedRelationProposerPolicyIdentityKey: "original-agent",
+			};
+			expect(
+				findTombstoneSuppressingReassertion({
+					tombstone: scoped,
+					proposer: { proposerKind: "runtime_task_indexing_support_unverified_reference" },
+					reassertionSubject: cardAInRepositoryA,
+					reassertionAnchor: cardBInRepositoryB,
+					identityProjectionStateAtReassertion: identityProjectionStateWithUnchangedPrompts,
+				}),
+			).toBe(scoped);
+		}
+	});
 	for (const symmetricRelationKind of [
 		"reference_is_cross_repository_counterpart_with",
 		"reference_is_generally_related_with",

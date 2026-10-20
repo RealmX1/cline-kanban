@@ -590,8 +590,71 @@ export function ReferenceRelationModelingEditor({
 				) : null}
 				<div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
 					<span className="font-medium">AI 关系建议</span>
-					<span className="text-text-secondary">项目级关系建议尚未启用。</span>
+					<Button
+						size="xs"
+						disabled={!controller.ready || controller.suggestionsLoading || controller.saving || creationInFlight}
+						onClick={() => {
+							void controller.requestSuggestions();
+						}}
+					>
+						{controller.suggestionsLoading ? "正在分析任务关系…" : "获取关系建议"}
+					</Button>
+					<span className="text-text-secondary">选择后加入草稿，保存时再确认。</span>
 				</div>
+				{controller.suggestionsError ? (
+					<p role="alert" className="text-status-orange">
+						关系建议失败：{controller.suggestionsError}
+					</p>
+				) : null}
+				{controller.suggestions?.availability === "unavailable" ? (
+					<p role="status" className="text-text-secondary">
+						{controller.suggestions.unavailableReason}
+					</p>
+				) : null}
+				{controller.suggestions?.availability === "available" && controller.suggestions.candidates.length === 0 ? (
+					<p role="status" className="text-text-secondary">
+						本次未找到相关任务。
+					</p>
+				) : null}
+				{controller.suggestions?.candidates.map((candidate) => {
+					const reference = candidate.relationDraft.counterpartWorkUnit;
+					const label =
+						reference.workUnitType === "kanban_board_card"
+							? `${reference.workspaceId}/${reference.taskId}`
+							: reference.nativeConversationSessionId;
+					const alreadySelected = controller.draft.referenceRelationDrafts.some(
+						(draft) =>
+							draft.relationKind === candidate.relationDraft.relationKind &&
+							isDeepEqual(draft.counterpartWorkUnit, reference),
+					);
+					return (
+						<div key={candidate.candidateId} className="rounded-md border border-border bg-surface-2 p-3">
+							<div className="flex flex-wrap items-center justify-between gap-2">
+								<span className="font-medium">
+									{label} · {REFERENCE_RELATION_LABELS[candidate.relationDraft.relationKind]}
+								</span>
+								<Button
+									size="xs"
+									disabled={alreadySelected || controller.saving || creationInFlight}
+									onClick={() => {
+										controller.addDraft(candidate.relationDraft);
+										onDraftInteraction?.();
+									}}
+								>
+									{alreadySelected ? "已加入草稿" : "加入草稿"}
+								</Button>
+							</div>
+							<p className="mt-2 whitespace-pre-wrap text-text-secondary">{candidate.rationale}</p>
+							{candidate.evidencePointers.length ? (
+								<ul className="mt-2 list-inside list-disc break-words text-text-secondary">
+									{candidate.evidencePointers.map((pointer, index) => (
+										<li key={`${index}:${pointer}`}>{pointer}</li>
+									))}
+								</ul>
+							) : null}
+						</div>
+					);
+				})}
 				{taskId ? (
 					<div className="flex gap-2">
 						<Button
