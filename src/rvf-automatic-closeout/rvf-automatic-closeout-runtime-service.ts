@@ -30,13 +30,17 @@ import type { TerminalSessionManager } from "../terminal/session-manager";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import type { TaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { captureRvfReviewStartBoundary, computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
-import { withCodexAppServerRequestConnection } from "./codex-app-server-request-connection";
+import {
+	withCodexAppServerRequestConnection,
+	withRunningCodexAppServerControlSocketConnection,
+} from "./codex-app-server-request-connection";
 import {
 	forkCodexConversationBeforeReviewTurn,
 	readCodexConversationTurns,
 	verifyRestoredCodexConversationPrefix,
 } from "./codex-native-conversation-prefix";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
+import { observeRvfReviewStartActiveBranch } from "./observe-rvf-review-start-active-branch";
 import {
 	createRvfAutomaticCloseoutCoordinator,
 	RvfAutomaticCloseoutPauseError,
@@ -608,6 +612,12 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					if (!record) throw new Error("本任务尚未捕获该 RVF token 的开审分界。");
 					if (record.status === "paused")
 						throw new RvfAutomaticCloseoutPauseError("本轮自动收尾已暂停，不能重新激活。");
+					// 第一条原生消息也可证明手动审查；无此前会话时不把可选自动恢复变成开审障碍。
+					if (!record.preReviewTurnIds.length || record.automaticCloseoutIneligibleReason)
+						return {
+							receipt: record.receipt,
+							automaticCloseoutActivationStatus: "skipped_no_completed_pre_review_conversation_prefix" as const,
+						};
 					const binding = await verifyBoundRunBeforeCloseoutActivation(record);
 					if (record.status !== "captured_review_start_boundary") return { receipt: record.receipt };
 					const { manager, summary } = await mainSummary(scope, input.taskId);
@@ -649,6 +659,81 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					return { receipt: record.receipt };
 				}),
 			),
+		observeBoundary: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string; idempotencyKey: string; requestNonce: string },
+		) => {
+			const record = (
+				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
+			).find((entry) => entry.taskId === input.taskId && entry.receipt.idempotency_key === input.idempotencyKey);
+			if (!record) return { review_start_boundary_pending_reason: "尚未捕获本 task/key 对应的原生分界。" };
+			try {
+				const { summary } = await mainSummary(scope, input.taskId);
+				if (
+					summary.taskId !== record.conversationSessionId ||
+					summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id ||
+					resolve(summary.agentNativeConversationSessionIdentity?.transcriptPath ?? "") !==
+						resolve(record.receipt.transcript_path) ||
+					(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
+				)
+					return { review_start_boundary_pending_reason: "原生主会话身份已改变，旧分界不可用。" };
+				const endpoint = summary.codexNativeSessionControlEndpoint;
+				if (
+					!endpoint ||
+					(endpoint &&
+						(endpoint.workspaceId !== scope.workspaceId ||
+							endpoint.conversationSessionId !== summary.taskId ||
+							endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId))
+				)
+					return { review_start_boundary_pending_reason: "本代会话没有与当前身份绑定的原生活动分支控制面。" };
+				const observation = await withRunningCodexAppServerControlSocketConnection(
+					async (port) => {
+						// 不 resume、不从磁盘装载旧 thread；必须已由当前 TUI 宿主持有。
+						let cursor: string | null = null;
+						const seenCursors = new Set<string>();
+						let loaded = false;
+						do {
+							const page = z
+								.object({ data: z.array(z.string()), nextCursor: z.string().nullable().optional() })
+								.parse(await port.request("thread/loaded/list", { cursor, limit: 100 }));
+							loaded ||= page.data.includes(record.receipt.session_id);
+							cursor = page.nextCursor ?? null;
+							if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
+							if (cursor) seenCursors.add(cursor);
+						} while (cursor);
+						if (!loaded) throw new Error("当前 TUI 未连接可查询的原生活动分支控制面。");
+						return observeRvfReviewStartActiveBranch({
+							port,
+							receipt: record.receipt,
+							requestNonce: input.requestNonce,
+						});
+					},
+					{ socketPath: endpoint.socketPath },
+				);
+				const { summary: latest } = await mainSummary(scope, input.taskId);
+				if (
+					latest.taskId !== summary.taskId ||
+					latest.startedAt !== summary.startedAt ||
+					latest.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
+					latest.codexNativeSessionControlEndpoint?.socketPath !== endpoint?.socketPath ||
+					latest.codexNativeSessionControlEndpoint?.runtimeSessionIncarnationId !==
+						endpoint?.runtimeSessionIncarnationId ||
+					latest.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id ||
+					latest.agentNativeConversationSessionIdentity?.transcriptPath !==
+						summary.agentNativeConversationSessionIdentity?.transcriptPath
+				)
+					throw new Error("观测期间原生主会话被替换。");
+				return {
+					independent_user_turn_boundary_receipt: record.receipt,
+					review_start_boundary_active_branch_observation: observation,
+				};
+			} catch (error) {
+				return {
+					independent_user_turn_boundary_receipt: record.receipt,
+					review_start_boundary_pending_reason: `实时原生分支能力尚未确认：${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+		},
 		status: async (scope: RuntimeTrpcWorkspaceScope, input: { taskId: string }) => ({
 			records: (await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))).filter(
 				(record) => record.taskId === input.taskId,

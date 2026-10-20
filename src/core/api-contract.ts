@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
 export * from "./independent-task-creation-contract.js";
@@ -1092,6 +1093,8 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
 	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
 	agentSessionForkReplayLaunchArguments: runtimeAgentSessionForkReplayLaunchArgumentsSchema.nullable().optional(),
+	// 本代 Codex TUI 独享的原生活动分支控制面；随 summary/adoption record 持久化，换代整体替换。
+	codexNativeSessionControlEndpoint: codexNativeSessionControlEndpointSchema.nullable().optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。

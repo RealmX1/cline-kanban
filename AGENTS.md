@@ -96,6 +96,7 @@ web-ui：
 | `installation.md` | 安装单一出处（前置要求 / 三项目依赖 / 全局 link / 卸载） |
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
 | `docs/rvf-automatic-rewind-and-closeout.md` | Codex RVF 开审分界、默认自动恢复与收尾投递、跨仓完成凭据及重启边界 |
+| `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
 | `docs/task-initial-prompt-structured-markup.md` | 任务起草的来源与阶段标签、实际默认设置选择、共享指导注入及历史兼容边界 |
 | `DEVELOPMENT.md` | dev/dogfood 工作流、tmux 长驻约定、hook 事件→状态迁移映射 |

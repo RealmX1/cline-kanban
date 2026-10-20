@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { prepareCodexNativeSessionControlHostLaunch } from "../../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
@@ -232,5 +233,61 @@ describe("per-task session start exclusivity", () => {
 
 		expect(manager.getSummary("task-1")?.pid).toBe(100);
 		expect(manager.getSummary("task-1")?.state).toBe("running");
+	});
+
+	it("本代控制端点与真实启动一并盖章，换代后清理旧资源并替换端点", async () => {
+		const cleanup = vi.fn(async () => {});
+		const controlledLaunch = vi.fn(
+			async (input: Parameters<typeof prepareCodexNativeSessionControlHostLaunch>[0]) => ({
+				binary: "managed-node",
+				args: ["codex-native-session-control-host.js", input.runtimeSessionIncarnationId],
+				endpoint: {
+					socketPath: `/isolated/${input.runtimeSessionIncarnationId}/s`,
+					workspaceId: input.workspaceId,
+					conversationSessionId: input.conversationSessionId,
+					runtimeSessionIncarnationId: input.runtimeSessionIncarnationId,
+				},
+				cleanup,
+			}),
+		);
+		const manager = new TerminalSessionManager({ prepareCodexNativeSessionControlHostLaunch: controlledLaunch });
+		const request = {
+			...startTaskSessionRequestFor("task-controlled"),
+			workspaceId: "workspace",
+			args: ["--no-alt-screen"],
+		};
+		const first = await manager.startTaskSession(request);
+		expect(controlledLaunch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				arguments: ["--no-alt-screen"],
+				environment: expect.objectContaining({ KANBAN_TASK_ID: "task-controlled" }),
+			}),
+		);
+		expect(ptySessionSpawnMock).toHaveBeenLastCalledWith(expect.objectContaining({ binary: "managed-node" }));
+		expect(first.codexNativeSessionControlEndpoint?.runtimeSessionIncarnationId).toBe(
+			first.runtimeSessionIncarnationId,
+		);
+		spawnedSessions[0]?.triggerExit(0);
+		await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+		const second = await manager.startTaskSession(request);
+		expect(cleanup).toHaveBeenCalledOnce();
+		expect(second.codexNativeSessionControlEndpoint?.socketPath).not.toBe(
+			first.codexNativeSessionControlEndpoint?.socketPath,
+		);
+		manager.stopTaskSession("task-controlled");
+		await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(2));
+	});
+
+	it("控制宿主准备失败时不 spawn、不写入可用端点并保留失败说明", async () => {
+		const manager = new TerminalSessionManager({
+			prepareCodexNativeSessionControlHostLaunch: vi.fn(async () => {
+				throw new Error("独享控制宿主准备失败");
+			}),
+		});
+		await expect(
+			manager.startTaskSession({ ...startTaskSessionRequestFor("task-controlled"), workspaceId: "workspace" }),
+		).rejects.toThrow("独享控制宿主准备失败");
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		expect(manager.getSummary("task-controlled")?.codexNativeSessionControlEndpoint).toBeUndefined();
 	});
 });

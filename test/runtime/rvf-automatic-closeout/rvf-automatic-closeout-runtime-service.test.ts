@@ -13,7 +13,13 @@ import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-autom
 import { enqueueAgentIdleGatedProgrammaticTaskChatMessage } from "../../../src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
-const mocked = vi.hoisted(() => ({ directory: "", board: vi.fn(), request: vi.fn(), persist: vi.fn() }));
+const mocked = vi.hoisted(() => ({
+	directory: "",
+	board: vi.fn(),
+	request: vi.fn(),
+	persist: vi.fn(),
+	controlEndpoint: vi.fn(),
+}));
 vi.mock("../../../src/state/workspace-state", () => ({
 	getWorkspaceDirectoryPath: () => mocked.directory,
 	getWorkspacesRootPath: () => dirname(mocked.directory),
@@ -25,13 +31,25 @@ vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-request-connection
 		_input: unknown,
 		operation: (port: { request: typeof mocked.request }) => Promise<unknown>,
 	) => operation({ request: mocked.request }),
+	withRunningCodexAppServerControlSocketConnection: async (
+		operation: (port: { request: typeof mocked.request }) => Promise<unknown>,
+		endpoint?: { socketPath: string },
+	) => {
+		mocked.controlEndpoint(endpoint);
+		return operation({ request: mocked.request });
+	},
+}));
+// 本套只验证收尾生命周期；原生原文与 checkpoint 的真实核验在 capture 分界专用套件覆盖。
+vi.mock("../../../src/rvf-automatic-closeout/codex-native-review-start-message-evidence", () => ({
+	isExplicitRvfManualCommand: () => false,
+	readCodexNativeReviewStartMessageEvidence: async () => ({ receivedAt: new Date().toISOString() }),
 }));
 afterEach(() => {
 	vi.unstubAllEnvs();
 	vi.clearAllMocks();
 });
 
-async function setup(mainConversationSessionId = "task") {
+async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix = false) {
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	const repo = fixture.createNonBareRepository({ repositoryDirectoryName: "rvf-runtime-closeout" });
 	await writeFile(join(repo.repositoryPath, "implementation.txt"), "实现\n");
@@ -44,7 +62,7 @@ async function setup(mainConversationSessionId = "task") {
 	const token = "0123456789abcdef";
 	const boundaryText = `RVF 发起决策点 · RVF_DECISION_TOKEN=${token}`;
 	const source = [
-		{ id: "implementation", status: "completed", items: [] },
+		...(!withoutPreReviewPrefix ? [{ id: "implementation", status: "completed", items: [] }] : []),
 		{
 			id: "boundary",
 			status: "completed",
@@ -173,7 +191,8 @@ async function setup(mainConversationSessionId = "task") {
 			state: "injected",
 			minted_at: new Date().toISOString(),
 			expires_at: new Date(Date.now() + 60_000).toISOString(),
-			candidate_summary: {},
+			initiated_by_explicit_user_request: false,
+			candidate_summary: { kanban_task_id: "task", candidates: [] },
 		}),
 	);
 	const captured = await service.capture(scope, { taskId: "task", decisionToken: token });
@@ -251,6 +270,96 @@ async function setup(mainConversationSessionId = "task") {
 	};
 }
 describe("RVF 宿主自动收尾与持久投递链", () => {
+	it("首条独立开审消息不因缺少可选自动恢复前缀而被阻断", async () => {
+		const context = await setup("task", true);
+		expect(
+			await context.service.activateAfterRunBinding(context.scope, { taskId: "task", decisionToken: context.token }),
+		).toMatchObject({
+			receipt: context.captured.receipt,
+			automaticCloseoutActivationStatus: "skipped_no_completed_pre_review_conversation_prefix",
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("每次查询读取当前原生分支并回显新 nonce；重启不复用旧观测", async () => {
+		const context = await setup();
+		const summary = context.manager.getSummary();
+		summary.runtimeSessionIncarnationId = "11111111-2222-4333-8444-555555555555";
+		summary.codexNativeSessionControlEndpoint = {
+			socketPath: "/isolated/current-session/s",
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: summary.taskId,
+			runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+		};
+		const request = {
+			taskId: "task",
+			idempotencyKey: `rvf-decision-point-${context.token}`,
+			requestNonce: "nonce-one",
+		};
+		const original = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) =>
+			method === "thread/loaded/list" ? { data: ["native"], nextCursor: null } : original?.(method, parameters),
+		);
+		const first = await context.service.observeBoundary(context.scope, request);
+		expect(first.review_start_boundary_active_branch_observation).toMatchObject({
+			request_nonce: "nonce-one",
+			native_active_branch_user_message_ids: ["boundary-message"],
+			native_active_branch_user_turn_id: "boundary",
+		});
+		context.source.pop();
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		const second = await restarted.observeBoundary(context.scope, { ...request, requestNonce: "nonce-two" });
+		expect(second.review_start_boundary_active_branch_observation).toMatchObject({
+			request_nonce: "nonce-two",
+			native_active_branch_user_message_ids: [],
+			native_active_branch_user_turn_id: "",
+		});
+		mocked.request.mockImplementation(async () => ({ data: [], nextCursor: null }));
+		const missing = await restarted.observeBoundary(context.scope, { ...request, requestNonce: "nonce-three" });
+		expect(missing.review_start_boundary_active_branch_observation).toBeUndefined();
+		expect(missing.review_start_boundary_pending_reason).toContain("尚未确认");
+	});
+
+	it("只查询当前 incarnation 的专属端点，跨 task 或陈旧端点均等待", async () => {
+		const context = await setup();
+		const summary = context.manager.getSummary();
+		const incarnation = "11111111-2222-4333-8444-555555555555";
+		summary.runtimeSessionIncarnationId = incarnation;
+		summary.codexNativeSessionControlEndpoint = {
+			socketPath: "/isolated/current-session/s",
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: summary.taskId,
+			runtimeSessionIncarnationId: incarnation,
+		};
+		const original = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) =>
+			method === "thread/loaded/list" ? { data: ["native"], nextCursor: null } : original?.(method, parameters),
+		);
+		const request = {
+			taskId: "task",
+			idempotencyKey: `rvf-decision-point-${context.token}`,
+			requestNonce: "current-nonce",
+		};
+		const accepted = await context.service.observeBoundary(context.scope, request);
+		expect(accepted.review_start_boundary_active_branch_observation?.request_nonce).toBe("current-nonce");
+		expect(mocked.controlEndpoint).toHaveBeenLastCalledWith({ socketPath: "/isolated/current-session/s" });
+		for (const invalidEndpoint of [
+			{ ...summary.codexNativeSessionControlEndpoint, workspaceId: "another-workspace" },
+			{ ...summary.codexNativeSessionControlEndpoint, conversationSessionId: "another-session" },
+			{ ...summary.codexNativeSessionControlEndpoint, runtimeSessionIncarnationId: "stale-incarnation" },
+			null,
+			undefined,
+		]) {
+			summary.codexNativeSessionControlEndpoint = invalidEndpoint;
+			mocked.controlEndpoint.mockClear();
+			const rejected = await context.service.observeBoundary(context.scope, request);
+			expect(rejected.review_start_boundary_active_branch_observation).toBeUndefined();
+			expect(rejected.review_start_boundary_pending_reason).toContain("本代会话");
+			expect(mocked.controlEndpoint).not.toHaveBeenCalled();
+		}
+	});
+
 	it("捕获默认仅保存非活跃分界，重启和重试不重捕获或扫描完成事实", async () => {
 		const context = await setup();
 		const captured = (await context.service.status(context.scope, { taskId: "task" })).records[0];
@@ -443,7 +552,8 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 				state: "injected",
 				minted_at: new Date().toISOString(),
 				expires_at: new Date(Date.now() + 60_000).toISOString(),
-				candidate_summary: {},
+				initiated_by_explicit_user_request: false,
+				candidate_summary: { kanban_task_id: "task", candidates: [] },
 			}),
 		);
 		let releaseRead!: () => void;
@@ -706,7 +816,8 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 					state: "injected",
 					minted_at: new Date().toISOString(),
 					expires_at: new Date(Date.now() + 60_000).toISOString(),
-					candidate_summary: {},
+					initiated_by_explicit_user_request: false,
+					candidate_summary: { kanban_task_id: "task", candidates: [] },
 				}),
 			);
 			await context.service.capture(context.scope, { taskId: "task", decisionToken: nextToken });

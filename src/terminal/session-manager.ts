@@ -3,6 +3,10 @@
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import type {
+	prepareCodexNativeSessionControlHostLaunch,
+	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
+} from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
 	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
@@ -1117,6 +1121,9 @@ function takeLastLines(text: string, lineCount: number): string {
 }
 
 export interface TerminalSessionManagerOptions {
+	// 由 runtime composition 注入；受控宿主与 TUI 一起交给既有 PTY host，跨 runtime 重启继续存活。
+	prepareCodexNativeSessionControlHostLaunch?: typeof prepareCodexNativeSessionControlHostLaunch;
+	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart?: typeof restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart;
 	// agent session PTY host 模式启用时由 workspace registry 注入：新会话的 PTY 交给独立长驻的 host 进程持有，
 	// runtime 重启不打断会话。缺省（未启用）时照旧在本进程内同步 PtySession.spawn。
 	hostedTerminalPtyProcessSpawner?: HostedTerminalPtyProcessSpawner;
@@ -2936,6 +2943,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			.map((line) => line.text)
 			.join("\n");
 		terminalStateMirrorMayAnswerTerminalQueries = true;
+		let adoptedCodexControlHostCleanup: (() => Promise<void>) | null = null;
+		const adoptedCodexControlEndpoint = summaryChoice.summary.codexNativeSessionControlEndpoint;
+		if (adoptedCodexControlEndpoint) {
+			try {
+				adoptedCodexControlHostCleanup =
+					(await this.terminalSessionManagerOptions.restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart?.(
+						adoptedCodexControlEndpoint,
+					)) ?? null;
+			} catch (error) {
+				logTuiFreezeWarning(`接管原生控制宿主清理失败 taskId=${taskId}：${String(error)}`);
+			}
+		}
 		if (this.entries.get(taskId)?.active != null) {
 			adoptedHandle.stop({ force: true });
 			terminalStateMirror.dispose();
@@ -2966,7 +2985,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			cols: adoptionCandidate.cols,
 			rows: adoptionCandidate.rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState(terminalProtocolFilterOptions),
-			onSessionCleanup: null,
+			onSessionCleanup: adoptedCodexControlHostCleanup,
 			deferredStartupPromptText: carriedFields?.deferredStartupPromptText ?? null,
 			detectOutputTransition: outputTransitionDetection.detectOutputTransition ?? null,
 			shouldInspectOutputForTransition: outputTransitionDetection.shouldInspectOutputForTransition ?? null,
@@ -3838,8 +3857,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			//
 			// 换代块此前全程不碰 onSessionCleanup，于是错在两头：被换掉的那一代的清理**永远不会**被执行；
 			// 而它迟到的 onExit 读到的已是新代的 active，摘走并提前跑掉的反倒是**新代**那一份。
-			// 眼下 10 个 adapter 无一给 launch.cleanup 赋值（恒为 undefined），所以这是契约加固而不是在修
-			// 一个正在发生的泄漏——但它一旦被赋值，两头的错会同时变成真实的资源泄漏。
+			// Codex 控制宿主的 spawn 失败与强杀兜底也经 launch.cleanup；监督进程同时负责自己的退出清理。
 			const supersededSessionCleanup = entry.active.onSessionCleanup;
 			entry.active.onSessionCleanup = null;
 			entry.active.session.stop();
@@ -3953,11 +3971,44 @@ export class TerminalSessionManager implements TerminalSessionService {
 			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 		};
 		const env = buildTerminalEnvironment({ forceColor: true }, request.env, launch.env, taskContextEnv);
+		const runtimeSessionIncarnationId = randomUUID();
+		let codexControlHost: Awaited<ReturnType<typeof prepareCodexNativeSessionControlHostLaunch>> = null;
+		try {
+			if (request.agentId === "codex" && request.workspaceId) {
+				codexControlHost =
+					(await this.terminalSessionManagerOptions.prepareCodexNativeSessionControlHostLaunch?.({
+						binary: launch.binary ?? request.binary,
+						arguments: launch.args,
+						workingDirectoryPath: request.cwd,
+						environment: env,
+						workspaceId: request.workspaceId,
+						conversationSessionId: request.taskId,
+						runtimeSessionIncarnationId,
+					})) ?? null;
+			}
+		} catch (error) {
+			await launch.cleanup?.();
+			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
+				entry,
+				request,
+				terminalStateMirror,
+				error instanceof Error ? error.message : String(error),
+			);
+			throw error;
+		}
+		if (codexControlHost) {
+			const adapterCleanup = launch.cleanup;
+			const hostCleanup = codexControlHost.cleanup;
+			launch.cleanup = async () => {
+				await hostCleanup();
+				await adapterCleanup?.();
+			};
+		}
 
 		// Adapters can wrap the configured agent binary when they need extra runtime wiring
 		// (for example, Codex uses a wrapper script to watch session logs for hook transitions).
-		const commandBinary = launch.binary ?? request.binary;
-		const commandArgs = [...launch.args];
+		const commandBinary = codexControlHost?.binary ?? launch.binary ?? request.binary;
+		const commandArgs = codexControlHost?.args ?? [...launch.args];
 		const hasCodexLaunchSignature = [commandBinary, ...commandArgs].some((part) =>
 			part.toLowerCase().includes("codex"),
 		);
@@ -4116,7 +4167,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				// inline transcript opt-in 时放行 CSI 3 J（该模式靠整屏重印替换旧内容，见 helper 注释）。
 				suppressScrollbackErasure: shouldSuppressTerminalScrollbackErasureForAgentLaunch(
 					request.agentId,
-					commandArgs,
+					launch.args,
 				),
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
@@ -4266,7 +4317,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				: { userTurnKind: pendingUserDecisionKindPreservedAcrossRestoration }),
 			// 新活体：每次真实 spawn 换一个 id。回收调度器据此判断「已落盘的期限说的还是不是同一个
 			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
-			runtimeSessionIncarnationId: randomUUID(),
+			runtimeSessionIncarnationId,
+			codexNativeSessionControlEndpoint: codexControlHost?.endpoint ?? null,
 			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
 			// 或换模型后整体替换」。未接入的 agent 返回 null——必须显式写 null 而不是省略，否则同一任务
 			// 从 claude 换成别的 agent 后，旧快照会留在 summary 里被误当成当前会话的启动参数。

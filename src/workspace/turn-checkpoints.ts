@@ -91,14 +91,15 @@ export async function captureRvfReviewStartBoundaryCheckpoint(input: {
 	if (!/^[a-f0-9]{16}$/u.test(input.decisionToken)) throw new Error("非法 RVF 决策 token。");
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	const message = `kanban RVF review start task:${input.taskId}\n\nRVF_REVIEW_START_BOUNDARY_BINDING=${JSON.stringify(input.binding)}`;
+	const ref = `refs/kanban/rvf-review-start-boundaries/${encodeRefSegment(input.taskId)}/${input.decisionToken}`;
+	const existing = await tryRunGit(repoRoot, ["-c", "core.hooksPath=/dev/null", "rev-parse", "--verify", ref]);
+	if (existing) {
+		if ((await runGit(repoRoot, ["show", "-s", "--format=%B", existing])).trim() !== message)
+			throw new Error("此 RVF token 的不可变 checkpoint 已绑定另一分界。");
+		return { commit: existing, tree: await runGit(repoRoot, ["rev-parse", `${existing}^{tree}`]) };
+	}
 	const commit = await createWorkingTreeCheckpointCommit(repoRoot, 0, input.taskId, message);
-	await runGit(repoRoot, [
-		"-c",
-		"core.hooksPath=/dev/null",
-		"update-ref",
-		`refs/kanban/rvf-review-start-boundaries/${encodeRefSegment(input.taskId)}/${input.decisionToken}`,
-		commit,
-	]);
+	await runGit(repoRoot, ["-c", "core.hooksPath=/dev/null", "update-ref", ref, commit, "0".repeat(40)]);
 	return { commit, tree: await runGit(repoRoot, ["rev-parse", `${commit}^{tree}`]) };
 }
 

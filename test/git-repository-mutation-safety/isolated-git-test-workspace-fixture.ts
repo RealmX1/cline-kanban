@@ -113,10 +113,14 @@ function formatGitCommand(arguments_: readonly string[]): string {
 		.join(" ");
 }
 
-export function createIsolatedGitTestWorkspaceFixture(): IsolatedGitTestWorkspaceFixture {
-	const fixtureRootDirectoryPath = mkdtempSync(
-		join(realpathSync(tmpdir()), "cline-kanban-isolated-git-test-workspace-"),
-	);
+export function createIsolatedGitTestWorkspaceFixture(
+	options: { fixtureRootDirectoryNamePrefix?: string } = {},
+): IsolatedGitTestWorkspaceFixture {
+	// 原生 Unix socket 有路径长度上限；只允许缩短目录名，隔离根、Git 所有权和清理校验保持一致。
+	const fixtureRootDirectoryNamePrefix =
+		options.fixtureRootDirectoryNamePrefix ?? "cline-kanban-isolated-git-test-workspace-";
+	assertSimpleDirectoryName(fixtureRootDirectoryNamePrefix, "隔离测试根目录前缀");
+	const fixtureRootDirectoryPath = mkdtempSync(join(realpathSync(tmpdir()), fixtureRootDirectoryNamePrefix));
 	const fixtureRootIdentity = captureFilesystemIdentity(fixtureRootDirectoryPath);
 	const protectedSiblingSentinelPath = `${fixtureRootDirectoryPath}.protected-sibling-sentinel`;
 	const protectedSiblingSentinelContents = `protected-sibling:${basename(fixtureRootDirectoryPath)}\n`;
