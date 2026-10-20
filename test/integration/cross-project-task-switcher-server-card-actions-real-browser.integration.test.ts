@@ -16,6 +16,7 @@ import {
 	hasChildProcessExited,
 	waitForChildProcessExit,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
+import { runTaskRetainedCommittedLineChangeRealBrowserCheck } from "./task-retained-committed-line-change-real-browser-check";
 
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
 const runRelationModelingBrowserCheck =
@@ -23,6 +24,7 @@ const runRelationModelingBrowserCheck =
 const runPostDeployVerificationFollowUpBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
 	runRelationModelingBrowserCheck ||
 	runPostDeployVerificationFollowUpBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
@@ -64,7 +66,9 @@ it.skipIf(!runRealBrowserCheck)(
 		expect(runtimePort).not.toBe(3484);
 		expect(webUiPort).not.toBe(3484);
 		const runtimeOrigin = `http://127.0.0.1:${runtimePort}`;
-		const webUiOrigin = `http://127.0.0.1:${webUiPort}`;
+		const usePackagedRuntimeAndWebUi =
+			process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK_WITH_PACKAGED_RUNTIME === "1";
+		const webUiOrigin = usePackagedRuntimeAndWebUi ? runtimeOrigin : `http://127.0.0.1:${webUiPort}`;
 		const isolatedExecutableDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-stub-executables");
 		mkdirSync(isolatedExecutableDirectory);
 		const agentLaunchEvidencePath = join(fixture.fixtureRootDirectoryPath, "isolated-agent-launch-evidence.jsonl");
@@ -98,7 +102,7 @@ setInterval(() => {}, 1000);
 			join(sourceCheckoutPath, "test/integration/shutdown-ipc-hook.cjs"),
 			"--import",
 			requireFromSourceCheckout.resolve("tsx"),
-			join(sourceCheckoutPath, "src/cli.ts"),
+			join(sourceCheckoutPath, usePackagedRuntimeAndWebUi ? "dist/cli.js" : "src/cli.ts"),
 		];
 		const processEvidence: Array<{ pid: number; role: string; child: ChildProcess }> = [];
 		function startOwnedProcess(role: string, executable: string, arguments_: string[], cwd: string) {
@@ -292,6 +296,43 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "Close", exact: true })
 				.click({ timeout: 10000 });
+			if (process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1") {
+				const client = runtimeClient(alphaWorkspaceId);
+				await runTaskRetainedCommittedLineChangeRealBrowserCheck({
+					page,
+					repository: firstProject,
+					workspaceId: alphaWorkspaceId,
+					taskId: focusId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					observeUntil,
+					ensureWorktree: () => client.workspace.ensureWorktree.mutate({ taskId: focusId, baseRef: "main" }),
+					readHistory: () =>
+						client.workspace.getTaskRetainedCommittedLineChangeHistory.query({
+							taskId: focusId,
+							baseRef: "main",
+						}),
+					restartRuntime: async () => {
+						initialRuntimeProcess.send({ type: "kanban.shutdown" });
+						await observeUntil(async () => hasChildProcessExited(initialRuntimeProcess), "隔离 runtime 停止");
+						startOwnedProcess(
+							"isolated-runtime-restarted",
+							process.execPath,
+							[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+							firstProject.repositoryPath,
+						);
+						await observeUntil(
+							async () =>
+								fetch(`${runtimeOrigin}/api/trpc/projects.list`)
+									.then((response) => response.ok)
+									.catch(() => false),
+							"隔离 runtime 重启",
+						);
+					},
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
 			if (runPostDeployVerificationFollowUpBrowserCheck) {
 				const client = runtimeClient(alphaWorkspaceId);
 				const sourceState = await client.workspace.getState.query();

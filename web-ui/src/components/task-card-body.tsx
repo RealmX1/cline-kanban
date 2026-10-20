@@ -61,6 +61,7 @@ import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
+import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -1064,6 +1065,16 @@ export const TaskCardBody = memo(function TaskCardBody(
 							parenthesesAndChangedFileCountStyle={{ color: SESSION_ACTIVITY_COLOR.muted }}
 						/>
 					</>
+				) : null}
+				{columnId !== "backlog" && !historicalContext ? (
+					<span className="ml-1 inline-block align-baseline">
+						<TaskRetainedCommittedLineChangeIndicator
+							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+							taskId={card.id}
+							baseRef={card.baseRef}
+							summary={reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary}
+						/>
+					</span>
 				) : null}
 			</span>
 		</div>

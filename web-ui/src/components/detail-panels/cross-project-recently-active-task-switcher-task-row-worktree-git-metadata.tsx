@@ -2,6 +2,7 @@ import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-proj
 import type { ReactElement } from "react";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
+import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import {
@@ -12,7 +13,7 @@ import { useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry } from "@/ho
 
 // 跨项目切换面板一行的 git 元数据：相对 base 分支的提交关系（ahead / behind / 已集成）与未提交改动（dirty）。
 // 显隐规则与 This project 卡片目录行一致：Backlog 没有 worktree 不显示；ahead/behind 一组只在有可说的时显示；
-// 未提交改动全为 0 时隐藏；两组都没有就整体不渲染，不留一个孤零零的图标。
+// 未提交改动全为 0 时隐藏；已提交累计保持常驻，工作区图标沿用统一 tooltip。
 export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata({
 	entryInProject,
 	currentProjectId,
@@ -39,9 +40,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 	});
 	const showsUncommittedChangeSummary =
 		snapshot.changedFiles != null && shouldDisplayWorktreeUncommittedChangeSummary(snapshot);
-	if (!gitStatusAgainstBaseRefDescription && !showsUncommittedChangeSummary) {
-		return null;
-	}
 	return (
 		<span
 			className="inline-flex shrink-0 items-center gap-1 font-mono text-text-tertiary"
@@ -73,6 +71,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 					/>
 				</span>
 			) : null}
+			<TaskRetainedCommittedLineChangeIndicator
+				workspaceId={workspaceId}
+				taskId={entry.taskId}
+				baseRef={entry.baseRef ?? "main"}
+				summary={snapshot.taskRetainedCommittedLineChangeSummary}
+			/>
 		</span>
 	);
 }

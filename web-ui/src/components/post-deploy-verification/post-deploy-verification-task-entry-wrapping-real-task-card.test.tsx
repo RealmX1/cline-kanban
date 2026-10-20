@@ -17,6 +17,19 @@ vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => undefined,
 	useTaskWorkspaceInfoValue: () => null,
 }));
+vi.mock("@/runtime/task-retained-committed-line-change-history-query", () => ({
+	fetchTaskRetainedCommittedLineChangeHistory: vi.fn(async () => ({
+		summary: {
+			status: "unavailable",
+			commitCount: null,
+			additions: null,
+			deletions: null,
+			historyVersion: "unavailable",
+			unavailableReason: "task_commit_history_unavailable",
+		},
+		commits: [],
+	})),
+}));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -382,6 +395,8 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		const taskCardActionButtonAriaLabels = Array.from(
 			container.querySelectorAll<HTMLButtonElement>(".kb-board-card-shell button[aria-label]"),
 		)
+			// 累计指标打开本地浮层，不路由卡片动作；下面单独验证它确实打开了明细。
+			.filter((button) => !button.closest("[data-task-retained-committed-line-change-indicator]"))
 			.map((button) => button.getAttribute("aria-label") ?? "")
 			.filter(
 				(ariaLabel) =>
@@ -401,5 +416,22 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 				`快照卡体上的「${ariaLabel}」点了没反应`,
 			).toEqual({ ariaLabel, explicitBehaviorTriggerCount: 1 });
 		}
+	});
+
+	it("runtime 快照卡体的累计指标打开明细，不导航卡片", async () => {
+		const card = createCard("task-1", "查看历史累计");
+		const onActivateTask = vi.fn();
+		renderEntry({
+			task: createPostDeployVerificationTaskReadModelTestFixture({ taskId: "task-1" }),
+			board: boardWithCardInColumn(card, "trash"),
+			realTaskCardRenderingInputs: runtimeBoardSnapshotRenderingInputsFor(onActivateTask),
+		});
+		const indicator = container.querySelector<HTMLButtonElement>(
+			"[data-task-retained-committed-line-change-indicator] button",
+		);
+		expect(indicator).not.toBeNull();
+		await act(async () => indicator?.click());
+		expect(document.querySelector('[role="dialog"][aria-label="任务已提交增删行明细"]')).not.toBeNull();
+		expect(onActivateTask).not.toHaveBeenCalled();
 	});
 });

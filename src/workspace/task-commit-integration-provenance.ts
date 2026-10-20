@@ -5,9 +5,12 @@ import { z } from "zod";
 
 import type {
 	RuntimeTaskCommitIntegrationTrackingStatus,
+	RuntimeTaskRetainedCommittedLineChangeHistory,
+	RuntimeTaskRetainedCommittedLineChangeSummary,
 	RuntimeTaskWorkspaceGitStatus,
 	RuntimeTaskWorktreeMode,
 } from "../core/api-contract";
+import { runtimeTaskRetainedCommittedLineChangeHistorySchema } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "../state/workspace-state";
 import { computeStablePatchId, readGitHeadInfo, runGit } from "./git-utils";
@@ -20,6 +23,11 @@ import {
 	type LastKnownTaskHeadObservationSourceForSharedLandingCriterion,
 	reportSharedTaskCommitLandingCriterionSatisfiedObservation,
 } from "./shared-task-commit-landing-criterion-satisfied-observation-port";
+import {
+	cachedTaskCommitLineChangeStatisticsSchema,
+	createUnavailableTaskRetainedCommittedLineChangeHistory,
+	refreshTaskRetainedCommittedLineChangeStatistics,
+} from "./task-retained-committed-line-change-statistics";
 import { proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation } from "./task-worktree-head-reflog-fast-forward-only-evidence";
 
 const TASK_COMMIT_INTEGRATION_PROVENANCE_FILENAME = "task-commit-integration-provenance.json";
@@ -71,6 +79,10 @@ const taskCommitIntegrationProvenanceEntrySchema = z.object({
 	baseRef: z.string(),
 	incarnations: z.array(taskCommitProvenanceIncarnationSchema),
 	lastWorkspaceGitSnapshot: persistedTaskWorkspaceGitSnapshotSchema.nullable(),
+	retainedCommittedLineChangeHistory: runtimeTaskRetainedCommittedLineChangeHistorySchema.optional(),
+	committedLineChangeStatisticsByCommitSha: z
+		.record(z.string(), cachedTaskCommitLineChangeStatisticsSchema)
+		.optional(),
 });
 type TaskCommitIntegrationProvenanceEntry = z.infer<typeof taskCommitIntegrationProvenanceEntrySchema>;
 
@@ -79,6 +91,17 @@ const taskCommitIntegrationProvenanceFileSchema = z.object({
 	tasks: z.record(z.string(), taskCommitIntegrationProvenanceEntrySchema),
 });
 type TaskCommitIntegrationProvenanceFile = z.infer<typeof taskCommitIntegrationProvenanceFileSchema>;
+
+function resolvePersistedRetainedCommittedLineChangeHistory(
+	previousHistory: RuntimeTaskRetainedCommittedLineChangeHistory | undefined,
+	refreshedHistory: RuntimeTaskRetainedCommittedLineChangeHistory,
+): RuntimeTaskRetainedCommittedLineChangeHistory {
+	// 临时统计失败只影响当前摘要，保留最后完整明细供只读请求展示，并由摘要版本差异标明它不是当前结果。
+	return previousHistory?.summary.status === "complete" &&
+		refreshedHistory.summary.unavailableReason?.startsWith("commit_statistics_")
+		? previousHistory
+		: refreshedHistory;
+}
 
 export interface TaskCommitIdentity {
 	commitSha: string;
@@ -214,6 +237,10 @@ export async function recordTaskWorktreeCreationCommitProvenance(input: {
 				existing && existing.baseRef === input.baseRef ? [...existing.incarnations, incarnation] : [incarnation],
 			lastWorkspaceGitSnapshot:
 				existing && existing.baseRef === input.baseRef ? existing.lastWorkspaceGitSnapshot : null,
+			retainedCommittedLineChangeHistory:
+				existing?.baseRef === input.baseRef ? existing.retainedCommittedLineChangeHistory : undefined,
+			committedLineChangeStatisticsByCommitSha:
+				existing?.baseRef === input.baseRef ? existing.committedLineChangeStatisticsByCommitSha : undefined,
 		};
 	});
 }
@@ -301,6 +328,33 @@ function deduplicateObservedTaskCommits(
 		}
 	}
 	return [...commitsBySha.values()];
+}
+
+function resolveRetainedTaskCommitShasForCommittedLineChangeStatistics(input: {
+	observedTaskCommits: readonly ObservedTaskCommit[];
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: readonly ObservedTaskCommit[];
+	baseRefCommits: readonly TaskCommitIdentity[];
+}): string[] {
+	const reachableTaskCommitShaSet = new Set(
+		input.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead.map((commit) => commit.commitSha),
+	);
+	// 仅为累计投影优先匹配仍可达的版本，避免旧 amend/rebase 版本抢占同一个等价落地提交。
+	// 匹配器仍优先消费 exact SHA，保留已经独立落地的提交；原集成计数与 landing/deploy 判据不变。
+	const integration = countTaskCommitsIntegratedIntoBaseRef({
+		observedTaskCommits: [
+			...input.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+			...input.observedTaskCommits.filter((commit) => !reachableTaskCommitShaSet.has(commit.commitSha)),
+		],
+		baseRefCommits: input.baseRefCommits,
+	});
+	const retainedTaskCommitShaSet = new Set([
+		...reachableTaskCommitShaSet,
+		...integration.exactHashMatchedTaskCommitShas,
+		...integration.patchIdMatchedTaskCommitShas,
+	]);
+	return input.observedTaskCommits
+		.filter((commit) => retainedTaskCommitShaSet.has(commit.commitSha))
+		.map((commit) => commit.commitSha);
 }
 
 /**
@@ -479,6 +533,8 @@ export interface RefreshTaskCommitIntegrationProvenanceInput {
 	commitsBehindBaseRef: number | null;
 	isDetached: boolean;
 	observedAt?: number;
+	// 探针复用本次已读/已写的统计，避免为卡片摘要再读一遍整个 provenance 文件。
+	onTaskRetainedCommittedLineChangeSummary?: (summary: RuntimeTaskRetainedCommittedLineChangeSummary) => void;
 }
 
 /**
@@ -518,6 +574,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable");
 		}
 		let snapshot = entry.lastWorkspaceGitSnapshot;
+		let retainedCommittedLineChangeHistory = entry.retainedCommittedLineChangeHistory;
 		const firstIncarnation = entry.incarnations[0];
 		const provenanceFloorCommit =
 			firstIncarnation?.baseRefCommitHistoryProbeFloorCommit ?? firstIncarnation?.initialBaseCommit;
@@ -554,6 +611,24 @@ export async function refreshTaskCommitIntegrationProvenance(
 							commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag: [],
 						})) ?? taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
 				}
+				const retainedLineStatistics =
+					taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead === undefined
+						? {
+								history: createUnavailableTaskRetainedCommittedLineChangeHistory(
+									"task_commit_ownership_history_incomplete",
+								),
+								cachedStatisticsByCommitSha: entry.committedLineChangeStatisticsByCommitSha ?? {},
+							}
+						: await refreshTaskRetainedCommittedLineChangeStatistics({
+								repoPath: input.repoPath,
+								retainedCommitShas: resolveRetainedTaskCommitShasForCommittedLineChangeStatistics({
+									observedTaskCommits: taskOwnedCommitsObservedAcrossIncarnations,
+									taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+									baseRefCommits,
+								}),
+								cachedStatisticsByCommitSha: entry.committedLineChangeStatisticsByCommitSha ?? {},
+							});
+				retainedCommittedLineChangeHistory = retainedLineStatistics.history;
 				const nextSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
 					...snapshot,
 					baseRefTipCommit: input.baseRefTipCommit,
@@ -570,6 +645,12 @@ export async function refreshTaskCommitIntegrationProvenance(
 				await mutateProvenanceFile(input.workspaceId, (nextFile) => {
 					const nextEntry = nextFile.tasks[input.taskId];
 					if (nextEntry) {
+						nextEntry.retainedCommittedLineChangeHistory = resolvePersistedRetainedCommittedLineChangeHistory(
+							nextEntry.retainedCommittedLineChangeHistory,
+							retainedLineStatistics.history,
+						);
+						nextEntry.committedLineChangeStatisticsByCommitSha =
+							retainedLineStatistics.cachedStatisticsByCommitSha;
 						nextEntry.baseRef = input.baseRef;
 						nextEntry.lastWorkspaceGitSnapshot = {
 							...snapshot,
@@ -597,6 +678,12 @@ export async function refreshTaskCommitIntegrationProvenance(
 				}
 			}
 		}
+		input.onTaskRetainedCommittedLineChangeSummary?.(
+			(
+				retainedCommittedLineChangeHistory ??
+				createUnavailableTaskRetainedCommittedLineChangeHistory("task_commit_history_unavailable")
+			).summary,
+		);
 		return {
 			baseRef: input.baseRef,
 			commitsAheadOfBaseRef: snapshot.commitsAheadOfBaseRef,
@@ -751,6 +838,16 @@ export async function refreshTaskCommitIntegrationProvenance(
 			commitsBehindBaseRef: input.commitsBehindBaseRef,
 		});
 	}
+	// 此投影只选择仍可达或已落地的自有提交，不删除 provenance 的历史观测，避免改变部署/关系账本的判据。
+	const retainedLineStatistics = await refreshTaskRetainedCommittedLineChangeStatistics({
+		repoPath: input.repoPath,
+		retainedCommitShas: resolveRetainedTaskCommitShasForCommittedLineChangeStatistics({
+			observedTaskCommits: [...observedTaskCommitsBySha.values()],
+			taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+			baseRefCommits,
+		}),
+		cachedStatisticsByCommitSha: entry.committedLineChangeStatisticsByCommitSha ?? {},
+	});
 	const candidateSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
 		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 		path: input.worktreePath,
@@ -781,6 +878,16 @@ export async function refreshTaskCommitIntegrationProvenance(
 		const existingSnapshot = nextEntry.lastWorkspaceGitSnapshot;
 		const candidateIsOlderThanPersistedSnapshot =
 			existingSnapshot !== null && candidateObservedAt < existingSnapshot.observedAt;
+		if (!candidateIsOlderThanPersistedSnapshot) {
+			nextEntry.retainedCommittedLineChangeHistory = resolvePersistedRetainedCommittedLineChangeHistory(
+				nextEntry.retainedCommittedLineChangeHistory,
+				retainedLineStatistics.history,
+			);
+		}
+		nextEntry.committedLineChangeStatisticsByCommitSha = {
+			...nextEntry.committedLineChangeStatisticsByCommitSha,
+			...retainedLineStatistics.cachedStatisticsByCommitSha,
+		};
 		const chronologicallyPreferredSnapshotFacts = candidateIsOlderThanPersistedSnapshot
 			? existingSnapshot
 			: candidateSnapshotFacts;
@@ -796,6 +903,12 @@ export async function refreshTaskCommitIntegrationProvenance(
 			: Math.max(candidateObservedAt, existingSnapshot?.observedAt ?? candidateObservedAt);
 		nextEntry.lastWorkspaceGitSnapshot = { ...mergedSnapshotFacts, observedAt: mergedObservedAt };
 		nextFile.tasks[input.taskId] = nextEntry;
+		input.onTaskRetainedCommittedLineChangeSummary?.(
+			(candidateIsOlderThanPersistedSnapshot
+				? (nextEntry.retainedCommittedLineChangeHistory ?? retainedLineStatistics.history)
+				: retainedLineStatistics.history
+			).summary,
+		);
 		return nextEntry.lastWorkspaceGitSnapshot;
 	});
 	// 按本次探测读到的事实求值（不按合并后的持久快照）：观测就是「此刻在 worktree 上看到的」，与快照的时序取舍无关。
@@ -933,6 +1046,18 @@ export async function readObservedTaskCommitsAcrossIncarnationsByTaskId(
 	const file = await readProvenanceFile(workspaceId);
 	return new Map(
 		Object.values(file.tasks).map((entry) => [entry.taskId, deduplicateObservedTaskCommits(entry.incarnations)]),
+	);
+}
+
+/** 明细只读持久缓存，不在 hover 请求里扫描 Git 历史或重算 diff。 */
+export async function readTaskRetainedCommittedLineChangeHistory(
+	workspaceId: string,
+	taskId: string,
+): Promise<RuntimeTaskRetainedCommittedLineChangeHistory> {
+	const file = await readProvenanceFile(workspaceId);
+	return (
+		file.tasks[taskId]?.retainedCommittedLineChangeHistory ??
+		createUnavailableTaskRetainedCommittedLineChangeHistory("task_commit_history_unavailable")
 	);
 }
 

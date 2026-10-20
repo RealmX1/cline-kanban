@@ -128,17 +128,21 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 					ref={compactRowElementRefHandingOffToggleKeyboardFocus}
 					className="group relative flex min-w-0 rounded-md hover:bg-surface-3"
 				>
-					<button
-						type="button"
-						onClick={onOpen}
-						aria-current={isFocused ? "true" : undefined}
-						className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 border-none bg-transparent py-1.5 pl-2 pr-2 text-left text-inherit"
-					>
-						<CrossProjectTaskSwitcherRowFirstLine agentId={entry.agentId} title={entry.title} />
+					<div className="relative flex min-w-0 flex-1 flex-col gap-0.5 py-1.5 pl-2 pr-2 text-left">
+						<button
+							type="button"
+							onClick={onOpen}
+							aria-current={isFocused ? "true" : undefined}
+							className="absolute inset-0 cursor-pointer rounded-md focus-visible:outline-2 focus-visible:outline-accent"
+							aria-label={`打开任务：${entry.title}`}
+						/>
+						<div className="pointer-events-none relative">
+							<CrossProjectTaskSwitcherRowFirstLine agentId={entry.agentId} title={entry.title} />
+						</div>
 						{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
 						<span
 							data-task-card-secondary-metadata-row=""
-							className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
+							className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
 						>
 							{showsProjectName ? (
 								<span className="inline-flex min-w-0 max-w-full items-center gap-1">
@@ -146,10 +150,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 									<span className="truncate">{projectName}</span>
 								</span>
 							) : null}
-							<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
-								entryInProject={entryInProject}
-								currentProjectId={currentProjectId}
-							/>
+							<span className="pointer-events-auto">
+								<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
+									entryInProject={entryInProject}
+									currentProjectId={currentProjectId}
+								/>
+							</span>
 							{section === "pinned" ? (
 								<span className="inline-flex shrink-0 items-center gap-0.5">
 									<ColumnIndicator columnId={entry.columnId} size={10} />
@@ -181,11 +187,14 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							</span>
 						</span>
 						{section === "pinned" && entry.taskPinboardPinReason ? (
-							<span className="truncate text-[11px] text-text-secondary" title={entry.taskPinboardPinReason}>
+							<span
+								className="pointer-events-none relative truncate text-[11px] text-text-secondary"
+								title={entry.taskPinboardPinReason}
+							>
 								{entry.taskPinboardPinReason}
 							</span>
 						) : null}
-					</button>
+					</div>
 					{/* hover 动作组：与完整卡片的 hover 动作组同一几何（叠在首行上方 + right-1 + px-0.5、Button xs），
 				    最右一格的展开开关因此与 hover 展开 / 固定展开卡上的开关同一坐标；不压首行的字。常驻 DOM（只切透明度），
 				    键盘 Tab 得到，聚焦时显形。 */}
