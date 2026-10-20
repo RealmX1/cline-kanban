@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
+import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import type {
 	prepareCodexNativeSessionControlHostLaunch,
 	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
@@ -3310,6 +3311,31 @@ export class TerminalSessionManager implements TerminalSessionService {
 		throw new Error(message);
 	}
 
+	private async refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+	): Promise<void> {
+		const identity = entry.summary.agentNativeConversationSessionIdentity;
+		if (
+			request.agentId !== "codex" ||
+			identity?.sourceAgentId !== "codex" ||
+			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt)
+		)
+			return;
+		const inspection = await inspectCodexNativeConversationTranscriptBeforeResume({
+			nativeSessionId: identity.nativeSessionId,
+			transcriptPath: identity.transcriptPath,
+			agentExecutionWorkingDirectoryPath: request.cwd,
+			environmentOverrides: request.env,
+		});
+		if (inspection.persistedTranscriptPath) return;
+		this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
+			entry,
+			request,
+			`无法续接 Codex 会话 ${identity.nativeSessionId}：在 ${inspection.codexSessionsDirectoryPath} 中未找到可读且身份匹配的主会话转录。请检查 CODEX_HOME，或核实后修复任务保存的原生会话身份。已在启动前停止，不会改接其它对话。`,
+		);
+	}
+
 	// 续跑前的 Cursor 预检（「kanban 分配身份」的 agent 才有，判定见 cursor-agent-chat-launch-identity-orchestration.ts）。
 	// 只在续跑时生效：全新开局不寻址，没有什么可预检的。三种结局：
 	//   - 能按记录的 id 接上 / 桶里有 ≥2 段已建立对话（维持 `--continue`）⇒ 放行；
@@ -3802,6 +3828,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// （会话正活着且在回合中），此时谈寻址没有意义。
 		//
 		// Cursor 续跑预检排在寻址解析之前：它可能把桶里唯一那段已建立的对话钉成身份，解析器随后就按 id 续跑。
+		await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(entry, request);
 		await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(entry, request);
 		// Claude 后台会话预检同样排在寻址解析之前：它可能沿 `continued-in` 链改钉身份。
 		await this.reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(entry, request);
@@ -6143,6 +6170,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
 		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
 		if (entryBeforeDestructiveRestart) {
+			await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(
+				entryBeforeDestructiveRestart,
+				request,
+			);
 			await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,

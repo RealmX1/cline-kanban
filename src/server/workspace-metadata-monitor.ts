@@ -176,6 +176,8 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
 		a.workspaceGitStatus.baseRef === b.workspaceGitStatus.baseRef &&
+		a.taskRetainedCommittedLineChangeSummary?.historyVersion ===
+			b.taskRetainedCommittedLineChangeSummary?.historyVersion &&
 		a.workspaceGitStatus.commitsAheadOfBaseRef === b.workspaceGitStatus.commitsAheadOfBaseRef &&
 		a.workspaceGitStatus.commitsBehindBaseRef === b.workspaceGitStatus.commitsBehindBaseRef &&
 		a.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef === b.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef &&

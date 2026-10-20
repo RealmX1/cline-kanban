@@ -1872,6 +1872,37 @@ export const runtimeTaskWorkspaceGitStatusesResponseSchema = z.object({
 });
 export type RuntimeTaskWorkspaceGitStatusesResponse = z.infer<typeof runtimeTaskWorkspaceGitStatusesResponseSchema>;
 
+export const runtimeTaskRetainedCommittedLineChangeCommitSchema = z.object({
+	commitSha: z.string(),
+	subject: z.string(),
+	committedAtMs: z.number(),
+	additions: z.number().int().nonnegative(),
+	deletions: z.number().int().nonnegative(),
+});
+export type RuntimeTaskRetainedCommittedLineChangeCommit = z.infer<
+	typeof runtimeTaskRetainedCommittedLineChangeCommitSchema
+>;
+
+export const runtimeTaskRetainedCommittedLineChangeSummarySchema = z.object({
+	status: z.enum(["complete", "unavailable"]),
+	commitCount: z.number().int().nonnegative().nullable(),
+	additions: z.number().int().nonnegative().nullable(),
+	deletions: z.number().int().nonnegative().nullable(),
+	historyVersion: z.string(),
+	unavailableReason: z.string().nullable(),
+});
+export type RuntimeTaskRetainedCommittedLineChangeSummary = z.infer<
+	typeof runtimeTaskRetainedCommittedLineChangeSummarySchema
+>;
+
+export const runtimeTaskRetainedCommittedLineChangeHistorySchema = z.object({
+	summary: runtimeTaskRetainedCommittedLineChangeSummarySchema,
+	commits: z.array(runtimeTaskRetainedCommittedLineChangeCommitSchema),
+});
+export type RuntimeTaskRetainedCommittedLineChangeHistory = z.infer<
+	typeof runtimeTaskRetainedCommittedLineChangeHistorySchema
+>;
+
 export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	taskId: z.string(),
 	path: z.string(),
@@ -1888,6 +1919,8 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	// behind = base 分支独有、任务尚未吸收的提交数。base 分支推进时增长，任务吸收（base-branch-sync）后归零。
 	commitsBehindBaseRef: z.number().int().nonnegative().nullable(),
 	workspaceGitStatus: runtimeTaskWorkspaceGitStatusSchema,
+	// 可选仅为兼容旧 runtime；新探针始终给出完整统计或明确的未知原因。
+	taskRetainedCommittedLineChangeSummary: runtimeTaskRetainedCommittedLineChangeSummarySchema.optional(),
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),

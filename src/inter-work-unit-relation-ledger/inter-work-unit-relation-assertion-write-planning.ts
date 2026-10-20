@@ -28,6 +28,7 @@ import {
 // 双视角回显、族 4 事件草稿。编排（读投影、守卫读、CAS 提交、错误码）在 src/trpc/work-unit-relation-assertion-write-api.ts。
 
 export type InterWorkUnitRelationAssertionProposer =
+	| { proposerKind: "runtime_task_indexing_support_unverified_reference" }
 	| {
 			proposerKind: "acting_work_unit_via_kanban_cli";
 			actingWorkUnit: InterWorkUnitRelationWorkUnitReference;
@@ -43,6 +44,8 @@ const WEB_UI_USER_RELATION_PROPOSER_POLICY_IDENTITY_KEY = "kanban_web_ui_user_wi
 // d-confirm §5.2：额度、冷却、墓碑按提议方「策略身份」计——优先原生会话身份（跨越采纳不变），退用 kanban 会话 id，
 // 再退用工作单元。与「事件记在哪个工作单元名下」是两回事。
 export function buildRelationProposerPolicyIdentityKey(proposer: InterWorkUnitRelationAssertionProposer): string {
+	if (proposer.proposerKind === "runtime_task_indexing_support_unverified_reference")
+		return "runtime_task_indexing_support_unverified_reference";
 	if (proposer.proposerKind === "web_ui_user_with_verified_page_load_nonce") {
 		return WEB_UI_USER_RELATION_PROPOSER_POLICY_IDENTITY_KEY;
 	}
@@ -173,6 +176,9 @@ export function findUserRejectionSuppressionTombstoneSuppressingAssertion(input:
 		input.userRejectionSuppressionTombstonesOfNaturalKey.find((tombstone) => {
 			const scopeApplies =
 				tombstone.suppressionScope === "all_relation_proposers_except_web_ui_user_direct_assertions" ||
+				(tombstone.suppressionScope ===
+					"extraction_or_suggestion_origin_proposers_and_same_proposer_policy_identity_only" &&
+					input.proposer.proposerKind === "runtime_task_indexing_support_unverified_reference") ||
 				tombstone.suppressedRelationProposerPolicyIdentityKey === proposerPolicyIdentityKey;
 			const rejectedEvidenceAnchors = new Set(tombstone.rejectedEvidenceAnchors);
 			return (
@@ -284,6 +290,11 @@ export function renderRelationStatementFromBothEndpointPerspectives(input: {
 }
 
 function resolveActorOfProposer(proposer: InterWorkUnitRelationAssertionProposer): KanbanActor {
+	if (proposer.proposerKind === "runtime_task_indexing_support_unverified_reference")
+		return {
+			kanbanActorKind: "kanban_runtime_system_component",
+			kanbanRuntimeSystemComponentName: "task_indexing_support_relation_triage",
+		};
 	return proposer.proposerKind === "web_ui_user_with_verified_page_load_nonce"
 		? { kanbanActorKind: "kanban_web_ui_user_gesture_with_verified_page_load_nonce" }
 		: proposer.resolvedActorWithEventEnvelopeContext.resolvedKanbanActor;

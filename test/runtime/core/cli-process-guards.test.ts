@@ -4,6 +4,7 @@ import {
 	installCliHardTimeoutIfNeeded,
 	registerCliFatalErrorReporter,
 	resolveCliHardTimeoutMs,
+	resolveCliTrpcTimeoutMs,
 	safeErrorMessage,
 	safeStringify,
 } from "../../../src/core/cli-process-guards";
@@ -17,6 +18,10 @@ describe("cli-process-guards", () => {
 			delete process.env.KANBAN_CLI_TRPC_TIMEOUT_MS;
 			try {
 				expect(resolveCliHardTimeoutMs()).toBeGreaterThan(28_000 + 500);
+				expect(resolveCliHardTimeoutMs(["support", "triage-incoming-work-item"])).toBe(240_000);
+				expect(resolveCliTrpcTimeoutMs(["support", "triage-incoming-work-item"])).toBe(210_000);
+				expect(resolveCliHardTimeoutMs(["support", "get-task-indexing-context"])).toBe(35_000);
+				expect(resolveCliTrpcTimeoutMs(["task", "list"])).toBe(28_000);
 			} finally {
 				if (previousHard === undefined) {
 					delete process.env.KANBAN_CLI_HARD_TIMEOUT_MS;

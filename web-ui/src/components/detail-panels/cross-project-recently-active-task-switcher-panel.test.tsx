@@ -1220,9 +1220,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(compactRowToggle?.parentElement?.classList.contains("right-1")).toBe(true);
 		expect(compactRowToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
 		expect(compactRowToggle?.parentElement?.lastElementChild).toBe(compactRowToggle);
-		expect(
-			queryRecentRow()?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
-		).not.toBeNull();
+		expect(queryRecentRow()?.querySelector("[data-task-card-corner-status-indicator]")).not.toBeNull();
 
 		// 指针移进行（hover 意图开始）后按下开关：意图作废，直接固定展开。
 		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
@@ -1235,7 +1233,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		const keptExpandedRow = queryRecentRow();
 		expect(rowInPlaceExpansionState(keptExpandedRow)).toBe("kept_expanded_in_list");
-		// 快照还在读：先画与精简行同一个首行（前导点 + 标题），提示放在下面，开关仍在。
+		// 快照还在读：先画同一个首行，角标仍挂在行外框，提示放在下面，开关仍在。
 		const unavailableFallback = keptExpandedRow?.querySelector(
 			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
 		);
@@ -1243,9 +1241,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			"Title recent",
 		);
 		expect(
-			unavailableFallback
-				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
-				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+			keptExpandedRow
+				?.querySelector("[data-task-card-corner-status-indicator]")
+				?.getAttribute("data-task-card-corner-status-indicator"),
 		).toBe("unread_handoff");
 		expect(unavailableFallback?.textContent).toContain("Loading task…");
 		expect(
@@ -1463,25 +1461,23 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const pinnedRunningRow = queryRow("pinned", "running-pinned");
 		expect(rowInPlaceExpansionState(pinnedRunningRow)).toBe("expanded_in_place_by_hover");
 		expect(pinnedRunningRow?.textContent).toContain("Card title running-pinned");
-		// 首行前导位换成精简行同一个前导点：Pinned 行没有前导点，也不画 In progress 的状态标记。
-		expect(
-			pinnedRunningRow?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
-		).toBeNull();
+		// Pinned 副本也按任务实际状态显示运行角标，标题内不再画 In progress 标记。
+		expect(pinnedRunningRow?.querySelector('[data-task-card-corner-status-indicator="running"]')).not.toBeNull();
 		expect(pinnedRunningRow?.querySelector("[data-task-card-in-progress-column-status-marker]")).toBeNull();
 		expect(pinnedRunningRow?.querySelector(".animate-spin")).toBeNull();
 		act(() => clickTaskCardBodyTitle(pinnedRunningRow));
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "running-pinned");
 		expect(rowInPlaceExpansionState(queryRow("pinned", "running-pinned"))).toBe("expanded_in_place_by_hover");
 		expect(section("running").querySelector('button[aria-expanded="true"]')).not.toBeNull();
-		// Running 区那一行的完整卡有 Running 的脉动前导点，与精简行一致。
+		// Running 区与 Pinned 副本显示同一个运行角标。
 		await movePointerFromRowToRow(queryRow("pinned", "running-pinned"), queryRow("running", "running-pinned"));
 		await act(async () => {
 			vi.advanceTimersByTime(400);
 		});
 		expect(
 			queryRow("running", "running-pinned")
-				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
-				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+				?.querySelector("[data-task-card-corner-status-indicator]")
+				?.getAttribute("data-task-card-corner-status-indicator"),
 		).toBe("running");
 
 		// 置顶的 Done 卡：本体卡上不可点，这里与精简行一样能打开。

@@ -52,7 +52,7 @@ export interface ModelProviderChatCompletionRequest {
 	 * 「Kanban 的哪个功能在发这次调用」。必填、没有默认值——它是用量日志唯一能把一次 HTTP 调用归因到
 	 * 功能上的钥匙，给了默认值就等于允许调用点悄悄不表态。
 	 */
-	modelUsagePurpose: ModelUsagePurpose;
+	modelUsagePurpose: Exclude<ModelUsagePurpose, "task_indexing_support_relation_analysis">;
 	/** 交代角色与输出格式的那一段。 */
 	systemPrompt: string;
 	/** 这一次真正要处理的内容。调用方负责先裁到合理长度。 */

@@ -11,6 +11,7 @@ import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
+import { registerSupportCommand } from "./commands/support";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
 import { registerWorkUnitCommand } from "./commands/work-unit";
@@ -785,6 +786,7 @@ function createProgram(invocationArgs: string[]): Command {
 	);
 
 	registerTaskCommand(program);
+	registerSupportCommand(program);
 	registerWorkUnitCommand(program);
 	registerHooksCommand(program);
 	registerExploratoryCommand(program);

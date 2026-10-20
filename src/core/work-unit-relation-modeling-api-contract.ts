@@ -83,6 +83,12 @@ export interface ReferenceRelationModelingLedgerCommit {
 }
 
 // a0401 的接入缝：候选只读，用户选择后才进入草稿。不可用与零候选明确区分。
+export const referenceRelationModelingSuggestionsRequestSchema = relationModelingPreviewRequestSchema.extend({
+	draftTaskPrompt: z.string().max(200000).optional(),
+});
+export type ReferenceRelationModelingSuggestionsRequest = z.infer<
+	typeof referenceRelationModelingSuggestionsRequestSchema
+>;
 export const referenceRelationModelingSuggestionsResponseSchema = z.object({
 	availability: z.enum(["unavailable", "available"]),
 	unavailableReason: z.string().nullable(),

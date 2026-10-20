@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
 	readBoundedJsonLines,
 	readTranscriptRecord,
 } from "./bounded-agent-transcript-reader";
+import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
 
 export interface CodexUserQuestionTranscriptExchange {
 	callId: string;
@@ -179,31 +180,6 @@ interface CodexTranscriptSegment {
 export interface RecoveredCodexUserQuestions {
 	exchanges: CodexUserQuestionTranscriptExchange[];
 	coverage: "complete" | "incomplete" | "unavailable";
-}
-
-// 只枚举文件名；内容读取严格限定到已知原生 id，不按 cwd 猜对话，也不扫描其它会话正文。
-async function listKnownCodexTranscriptSegmentPaths(root: string, sessionId: string): Promise<string[]> {
-	const paths: string[] = [];
-	const directories = [root];
-	while (directories.length > 0) {
-		const directory = directories.pop();
-		if (!directory) break;
-		try {
-			for (const entry of await readdir(directory, { withFileTypes: true })) {
-				const path = join(directory, entry.name);
-				if (entry.isDirectory()) directories.push(path);
-				else if (
-					entry.isFile() &&
-					(entry.name.endsWith(`${sessionId}.jsonl`) ||
-						(entry.name.includes(`${sessionId}_`) && entry.name.endsWith(".jsonl")))
-				)
-					paths.push(path);
-			}
-		} catch {
-			/* 缺失日期目录不影响其它已知分片。 */
-		}
-	}
-	return paths;
 }
 
 export async function recoverCodexUserQuestionsFromKnownConversation(input: {
