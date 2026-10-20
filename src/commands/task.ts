@@ -1635,8 +1635,26 @@ async function readTaskMessageStatusCommand(input: {
 	taskId: string;
 	projectPath?: string;
 	idempotencyKey: string;
-}): Promise<TaskMessageCommandResult> {
+	reviewStartBoundaryObservationNonce?: string;
+}): Promise<JsonRecord> {
 	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, { autoCreateIfMissing: false });
+	if (input.reviewStartBoundaryObservationNonce) {
+		const boundary = await createRuntimeTrpcClient(workspace.workspaceId).runtime.observeRvfReviewStartBoundary.query(
+			{
+				taskId: input.taskId.trim(),
+				idempotencyKey: input.idempotencyKey.trim(),
+				requestNonce: input.reviewStartBoundaryObservationNonce,
+			},
+		);
+		const records = await readTaskMessageInjectionLedger(getTaskMessageInjectionLedgerPath(workspace.statePath));
+		const record = findTaskMessageInjectionRecord(records, input.taskId.trim(), input.idempotencyKey.trim());
+		return {
+			...(record
+				? toTaskMessageCommandResult(record)
+				: { ok: true, task_id: input.taskId.trim(), idempotency_key: input.idempotencyKey.trim() }),
+			...boundary,
+		};
+	}
 	const record = await readTaskMessageRecordOrThrow(
 		getTaskMessageInjectionLedgerPath(workspace.statePath),
 		input.taskId.trim(),
@@ -2256,21 +2274,30 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("message-status")
+		.option("--review-start-boundary-observation-nonce <nonce>", "请求本次 RVF 独立开审分界的实时活动分支观测。")
 		.description("Read the honest delivery status of a previously injected task message.")
 		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
-		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
-			await runTaskCommand(
-				async () =>
-					await readTaskMessageStatusCommand({
-						cwd: process.cwd(),
-						projectPath: options.projectPath,
-						taskId: options.taskId,
-						idempotencyKey: options.idempotencyKey,
-					}),
-			);
-		});
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				idempotencyKey: string;
+				reviewStartBoundaryObservationNonce?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await readTaskMessageStatusCommand({
+							cwd: process.cwd(),
+							projectPath: options.projectPath,
+							taskId: options.taskId,
+							idempotencyKey: options.idempotencyKey,
+							reviewStartBoundaryObservationNonce: options.reviewStartBoundaryObservationNonce,
+						}),
+				);
+			},
+		);
 
 	task
 		.command("message-cancel")

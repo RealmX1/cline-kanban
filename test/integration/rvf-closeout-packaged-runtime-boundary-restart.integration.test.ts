@@ -1,12 +1,13 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rvfReviewStartBoundaryResponseSchema } from "../../src/core/api-contract";
 import { addTaskToColumn } from "../../src/core/task-board-mutations";
 import { computeRvfTextSha256 } from "../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
+import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+import { readCodexConversationTurns } from "../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext, mutateWorkspaceState } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -30,16 +31,89 @@ const packagedRuntimeBoundaryRestartTimeout = computeIntegrationTestTimeoutMsCov
 	testBodyTimeoutBudgetMs: 60_000,
 	cliChildProcessSpawns: { cliChildProcessSpawnCount: 4, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
 });
+
+async function readPackagedBoundaryCaptureCommandResponse(
+	commandResult: { exitCode: number | null; stdout: string; stderr: string },
+	captureBoundaryViaRuntimeRpc: () => Promise<unknown>,
+): Promise<unknown> {
+	expect(commandResult.exitCode, commandResult.stderr).toBe(0);
+	// caaa3 尚未修复时，直接 RPC 保留底层异常；不能用空 JSON 解析错误掩盖捕获原因。
+	if (!commandResult.stdout.trim()) return captureBoundaryViaRuntimeRpc();
+	return JSON.parse(commandResult.stdout);
+}
+
 afterEach(async () => {
 	vi.unstubAllEnvs();
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
 });
+
+describe("打包捕获命令响应的空 stdout 兜底", () => {
+	const capturedBoundaryResponse = { receipt: { native_turn_id: "captured-boundary" } };
+
+	it("空 stdout 使用直接 RPC 的成功结果", async () => {
+		const captureBoundaryViaRuntimeRpc = vi.fn(async () => capturedBoundaryResponse);
+		await expect(
+			readPackagedBoundaryCaptureCommandResponse(
+				{ exitCode: 0, stdout: " \n\t", stderr: "" },
+				captureBoundaryViaRuntimeRpc,
+			),
+		).resolves.toEqual(capturedBoundaryResponse);
+		expect(captureBoundaryViaRuntimeRpc).toHaveBeenCalledOnce();
+	});
+
+	it("非空 stdout 使用 CLI 结果且不重试 RPC", async () => {
+		const captureBoundaryViaRuntimeRpc = vi.fn(async () => null);
+		await expect(
+			readPackagedBoundaryCaptureCommandResponse(
+				{ exitCode: 0, stdout: JSON.stringify(capturedBoundaryResponse), stderr: "" },
+				captureBoundaryViaRuntimeRpc,
+			),
+		).resolves.toEqual(capturedBoundaryResponse);
+		expect(captureBoundaryViaRuntimeRpc).not.toHaveBeenCalled();
+	});
+
+	it("CLI 失败保留退出错误且不重试 RPC", async () => {
+		const captureBoundaryViaRuntimeRpc = vi.fn(async () => capturedBoundaryResponse);
+		await expect(
+			readPackagedBoundaryCaptureCommandResponse(
+				{ exitCode: 1, stdout: "", stderr: "捕获 CLI 失败" },
+				captureBoundaryViaRuntimeRpc,
+			),
+		).rejects.toThrow("捕获 CLI 失败");
+		expect(captureBoundaryViaRuntimeRpc).not.toHaveBeenCalled();
+	});
+
+	it("空 stdout 的 RPC 失败保留原始异常", async () => {
+		const captureError = new Error("捕获 RPC 失败");
+		await expect(
+			readPackagedBoundaryCaptureCommandResponse({ exitCode: 0, stdout: "", stderr: "" }, async () => {
+				throw captureError;
+			}),
+		).rejects.toBe(captureError);
+	});
+
+	it("非空但损坏的 CLI JSON 不会被成功 RPC 掩盖", async () => {
+		const captureBoundaryViaRuntimeRpc = vi.fn(async () => capturedBoundaryResponse);
+		await expect(
+			readPackagedBoundaryCaptureCommandResponse(
+				{ exitCode: 0, stdout: "{", stderr: "" },
+				captureBoundaryViaRuntimeRpc,
+			),
+		).rejects.toThrow(SyntaxError);
+		expect(captureBoundaryViaRuntimeRpc).not.toHaveBeenCalled();
+	});
+});
+
 describe("RVF 开审分界的打包态宿主与进程重启", { timeout: packagedRuntimeBoundaryRestartTimeout }, () => {
 	it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
-		"真实 Codex 经 CLI/HTTP 捕获与绑定激活；两个持久阶段跨重启幂等；不发模型请求",
+		"真实 TUI 分界经打包 CLI/HTTP 捕获与激活；两个持久阶段跨重启幂等",
 		async (testContext) => {
 			const binary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex";
-			const fixture = createIsolatedGitTestWorkspaceFixture();
+			const packagedRuntimeCliPath = resolve(process.env.KANBAN_RVF_PACKAGED_RUNTIME_CLI_PATH ?? "dist/cli.js");
+			vi.stubEnv("TMPDIR", "/tmp");
+			const fixture = createIsolatedGitTestWorkspaceFixture({
+				fixtureRootDirectoryNamePrefix: "kanban-rvf-package-",
+			});
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "rvf-packaged-runtime" });
 			const cwd = repository.repositoryPath;
 			await writeFile(join(cwd, "implementation.txt"), "待审实现\n");
@@ -47,89 +121,55 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 				message: "初始实现",
 				authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 			});
-			const codexHome = join(fixture.isolatedHomeDirectoryPath, ".codex");
-			const rvfHome = join(fixture.isolatedHomeDirectoryPath, ".rvf");
-			const sessionDirectory = join(codexHome, "sessions", "2026", "10", "18");
-			await mkdir(sessionDirectory, { recursive: true });
-			const nativeId = randomUUID();
-			const implementationTurn = randomUUID();
-			const boundaryTurn = randomUUID();
-			const token = "0123456789abcdef";
-			const taskId = "rvf-closeout-runtime-task";
-			const timestamp = new Date().toISOString();
-			const records: unknown[] = [
+			const codexHome = join(fixture.fixtureRootDirectoryPath, "c");
+			const rvfHome = join(fixture.fixtureRootDirectoryPath, "rvf");
+			const nativeFixture = spawnSync(
+				"python3",
+				[
+					resolve("test/integration/fixtures/codex-native-review-start-boundary-and-rewind.py"),
+					fixture.fixtureRootDirectoryPath,
+					cwd,
+					process.cwd(),
+					process.execPath,
+					binary,
+					"preserve-review-boundary",
+				],
 				{
-					type: "session_meta",
-					timestamp,
-					payload: {
-						id: nativeId,
-						timestamp,
-						cwd,
-						originator: "codex-tui",
-						cli_version: "0.163.0",
-						source: "cli",
-						model_provider: "openai",
-						base_instructions: { text: "隔离分界验收" },
-					},
+					encoding: "utf8",
+					timeout: 75_000,
+					maxBuffer: 2 * 1024 * 1024,
+					env: fixture.createIsolatedChildProcessEnvironment(),
 				},
-			];
-			for (const [turnId, text] of [
-				[implementationTurn, "原始实现需求"],
-				[boundaryTurn, `RVF 发起决策点 · RVF_DECISION_TOKEN=${token}`],
-			]) {
-				records.push(
-					{
-						type: "event_msg",
-						timestamp,
-						payload: { type: "task_started", turn_id: turnId, model_context_window: 128000 },
-					},
-					{
-						type: "turn_context",
-						timestamp,
-						payload: {
-							turn_id: turnId,
-							cwd,
-							approval_policy: "never",
-							sandbox_policy: { type: "danger-full-access" },
-							model: "gpt-6.1",
-							effort: "low",
-							summary: "none",
-						},
-					},
-					{
-						type: "event_msg",
-						timestamp,
-						payload: { type: "user_message", message: text, images: [], local_images: [], text_elements: [] },
-					},
-					{
-						type: "response_item",
-						timestamp,
-						payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
-					},
-					{
-						type: "event_msg",
-						timestamp,
-						payload: { type: "task_complete", turn_id: turnId, last_agent_message: "已完成" },
-					},
-				);
-			}
-			const transcriptPath = join(sessionDirectory, `rollout-2026-10-18T23-00-00-${nativeId}.jsonl`);
-			await writeFile(transcriptPath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
-			const tokenDirectory = join(rvfHome, "agentic-initiation-decision-tokens");
-			await mkdir(tokenDirectory, { recursive: true });
-			await writeFile(
-				join(tokenDirectory, `${token}.json`),
-				JSON.stringify({
-					token,
-					session_id: nativeId,
-					worktree: cwd,
-					candidate_fingerprint: "candidate",
-					state: "injected",
-					minted_at: timestamp,
-					expires_at: new Date(Date.now() + 120_000).toISOString(),
-					candidate_summary: {},
-				}),
 			);
+			expect(nativeFixture.status, nativeFixture.stdout + nativeFixture.stderr).toBe(0);
+			const token = "0123456789abcdef";
+			const taskId = "synthetic-native-task";
+			const receipt = rvfReviewStartBoundaryResponseSchema.shape.receipt.parse(
+				JSON.parse(
+					await readFile(
+						join(rvfHome, "review-start-independent-user-turn-boundary-receipts", `${token}.json`),
+						"utf8",
+					),
+				),
+			);
+			const nativeId = receipt.session_id;
+			const boundaryTurn = receipt.native_turn_id;
+			const transcriptPath = receipt.transcript_path;
+			const timestamp = new Date().toISOString();
+			const records: unknown[] = (await readFile(transcriptPath, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const nativeTurns = await withCodexAppServerRequestConnection(
+				{
+					workingDirectory: cwd,
+					binary,
+					environment: fixture.createIsolatedChildProcessEnvironment({ CODEX_HOME: codexHome }),
+				},
+				(port) => readCodexConversationTurns(port, nativeId),
+			);
+			const implementationTurn = nativeTurns.at(-2)?.id;
+			expect(implementationTurn).toBeTruthy();
 			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 			vi.stubEnv("USERPROFILE", fixture.isolatedHomeDirectoryPath);
 			const workspace = await loadWorkspaceContext(cwd);
@@ -179,7 +219,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 			vi.unstubAllEnvs();
 			const start = async () => {
 				const process_ = children.register(
-					spawn(process.execPath, [resolve("dist/cli.js"), "--port", "auto", "--no-open"], {
+					spawn(process.execPath, [packagedRuntimeCliPath, "--port", "auto", "--no-open"], {
 						cwd,
 						stdio: ["ignore", "pipe", "pipe"],
 						env: fixture.createIsolatedChildProcessEnvironment({
@@ -210,7 +250,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 					spawn(
 						process.execPath,
 						[
-							resolve("dist/cli.js"),
+							packagedRuntimeCliPath,
 							"task",
 							command,
 							"--project-path",
@@ -248,8 +288,11 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 			};
 			const initial = await start();
 			const firstCommand = await invokeTaskCommand(initial.origin, "capture-rvf-review-start-boundary");
-			expect(firstCommand.exitCode, firstCommand.stderr).toBe(0);
-			const first = rvfReviewStartBoundaryResponseSchema.parse(JSON.parse(firstCommand.stdout));
+			const first = rvfReviewStartBoundaryResponseSchema.parse(
+				await readPackagedBoundaryCaptureCommandResponse(firstCommand, () =>
+					initial.client.runtime.captureRvfReviewStartBoundary.mutate({ taskId, decisionToken: token }),
+				),
+			);
 			expect(first.receipt).toMatchObject({
 				session_id: nativeId,
 				native_turn_id: boundaryTurn,

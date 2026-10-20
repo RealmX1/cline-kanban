@@ -443,6 +443,8 @@ import {
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfReviewStartBoundaryObservationRequestSchema,
+	rvfReviewStartBoundaryObservationResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
@@ -596,6 +598,10 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		observeBoundary?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
+		) => Promise<z.infer<typeof rvfReviewStartBoundaryObservationResponseSchema>>;
 		activateAfterRunBinding: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfAutomaticCloseoutRunBindingActivationRequestSchema>,
@@ -1439,6 +1445,14 @@ export const runtimeAppRouter = t.router({
 			.mutation(({ ctx, input }) => {
 				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
+		observeRvfReviewStartBoundary: workspaceProcedure
+			.input(rvfReviewStartBoundaryObservationRequestSchema)
+			.output(rvfReviewStartBoundaryObservationResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.observeBoundary)
+					return { review_start_boundary_pending_reason: "宿主尚未提供实时活动分支观测。" };
+				return ctx.rvfAutomaticCloseoutApi.observeBoundary(ctx.workspaceScope, input);
 			}),
 		captureRvfReviewStartBoundary: workspaceProcedure
 			.input(rvfReviewStartBoundaryRequestSchema)
