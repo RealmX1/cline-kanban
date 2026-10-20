@@ -966,6 +966,21 @@ describe("prepareAgentLaunch hook strategies", () => {
 			});
 			const parentNativeSessionId = "11111111-2222-4333-8444-555555555555";
 			const childNativeSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+			let childNativeConversationTranscriptPath: string | null = null;
+			if (agentId === "codex") {
+				const codexHomeDirectoryPath = join(isolatedHome, ".codex");
+				vi.stubEnv("CODEX_HOME", codexHomeDirectoryPath);
+				const codexSessionsDirectoryPath = join(codexHomeDirectoryPath, "sessions");
+				mkdirSync(codexSessionsDirectoryPath, { recursive: true });
+				childNativeConversationTranscriptPath = join(
+					codexSessionsDirectoryPath,
+					`rollout-${childNativeSessionId}.jsonl`,
+				);
+				writeFileSync(
+					childNativeConversationTranscriptPath,
+					`${JSON.stringify({ type: "session_meta", payload: { id: childNativeSessionId, source: "cli" } })}\n`,
+				);
+			}
 			const revalidateForkSource = vi.fn(async () => {});
 			try {
 				manager.attach("crashed-fork-child", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
@@ -993,7 +1008,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 				manager.applyAgentNativeConversationSessionIdentity("crashed-fork-child", {
 					sourceAgentId: agentId,
 					nativeSessionId: childNativeSessionId,
-					transcriptPath: null,
+					transcriptPath: childNativeConversationTranscriptPath,
 					observedAt: Date.now(),
 				});
 				// 真实 manager 的 onExit(1) 入口，首轮快退退避也由原实现执行。

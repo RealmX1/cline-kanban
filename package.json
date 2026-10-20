@@ -87,7 +87,8 @@
     "std-env": "^4.0.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "@types/stream-json": "1.7.8"
   },
   "optionalDependencies": {
     "@biomejs/cli-linux-arm64": "2.3.5",
@@ -118,7 +119,8 @@
     "tree-kill": "^1.2.2",
     "ws": "^8.18.0",
     "zod": "^4.3.6",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "stream-json": "1.9.1"
   },
   "overrides": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.132",

@@ -48,7 +48,11 @@ import {
 	extractCodexUserQuestionResolution,
 	resolveCodexUserQuestionHookEvent,
 } from "./codex-user-question-payload-extraction";
-import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
+import {
+	extractAgentNativeConversationSessionIdentityFromHookPayload,
+	isCodexConversationWithoutPersistedTranscript,
+	readAgentNativeConversationTranscriptPathFromHookPayload,
+} from "./hook-events/agent-native-conversation-session-identity-extraction";
 import { extractAgentToolCallExecutionOutcomeFromHookPayload } from "./hook-events/agent-tool-call-execution-outcome-extraction";
 import {
 	type CodexMappedHookEvent,
@@ -1087,6 +1091,20 @@ async function runCodexHookSubcommand(
 		payload = await readStdinText();
 	} catch {
 		payload = "";
+	}
+	// 先隔离，再归档 / enrich / ingest：后台记忆作业连活动、通知与 checkpoint 都不能冒充主会话。
+	const hookPayload =
+		parseMetadataFromBase64(options.metadataBase64) ??
+		parseJsonObject(payload.trim()) ??
+		(payloadArg ? parseJsonObject(payloadArg) : null);
+	if (
+		isCodexConversationWithoutPersistedTranscript({
+			sourceAgentId: options.source ?? "codex",
+			transcriptPath: readAgentNativeConversationTranscriptPathFromHookPayload(hookPayload),
+		})
+	) {
+		process.stdout.write("{}\n");
+		return;
 	}
 
 	const notificationCandidateId = await captureRawNotificationHook(event, payload, payloadArg, options);

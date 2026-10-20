@@ -120,6 +120,8 @@ export interface UseTaskSpotlightSearchControllerInput {
 	taskSessionSummariesByTaskId: Record<string, RuntimeTaskSessionSummary>;
 	// 是否允许呼出（无项目时禁用）。
 	canOpen: boolean;
+	/** 从 All Projects 视图打开搜索时，默认开启跨项目搜索。 */
+	isBoardScopeAllProjectsSelected?: boolean;
 	// 跨项目索引查询所用的连接（非 workspace-scoped 端点忽略 scope，用当前项目连接即可）。
 	crossProjectWorkspaceId: string | null;
 	// 跨项目结果中需剔除的项目（当前项目——实时 board 流更新鲜；以及不可用项目）。
@@ -284,6 +286,7 @@ export function useTaskSpotlightSearchController({
 	currentProjectDefaultAgentId,
 	taskSessionSummariesByTaskId,
 	canOpen,
+	isBoardScopeAllProjectsSelected = false,
 	crossProjectWorkspaceId,
 	crossProjectExcludeProjectIds,
 	onOpenTaskInProject,
@@ -586,10 +589,13 @@ export function useTaskSpotlightSearchController({
 		if (!canOpen) {
 			return;
 		}
+		if (isBoardScopeAllProjectsSelected) {
+			setIncludeOtherProjects(true);
+		}
 		setQuery("");
 		setActiveIndex(-1);
 		setIsOpen(true);
-	}, [canOpen, setActiveIndex]);
+	}, [canOpen, isBoardScopeAllProjectsSelected, setActiveIndex]);
 
 	const close = useCallback(() => {
 		rememberSearchQuery(latestQueryRef.current);
@@ -607,11 +613,14 @@ export function useTaskSpotlightSearchController({
 			if (!canOpen) {
 				return false;
 			}
+			if (isBoardScopeAllProjectsSelected) {
+				setIncludeOtherProjects(true);
+			}
 			setQuery("");
 			setActiveIndex(-1);
 			return true;
 		});
-	}, [canOpen, rememberSearchQuery, setActiveIndex]);
+	}, [canOpen, isBoardScopeAllProjectsSelected, rememberSearchQuery, setActiveIndex]);
 
 	const openResultAt = useCallback(
 		(index: number) => {

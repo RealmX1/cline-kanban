@@ -171,6 +171,7 @@ describe("useTaskSpotlightSearchController", () => {
 			currentProjectDefaultAgentId: null,
 			taskSessionSummariesByTaskId: {},
 			canOpen: true,
+			isBoardScopeAllProjectsSelected: false,
 			crossProjectWorkspaceId: "proj-a",
 			crossProjectExcludeProjectIds: new Set<string>(),
 			onOpenTaskInProject: vi.fn(),
