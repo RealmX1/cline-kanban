@@ -147,9 +147,9 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(cancelButton?.className).toContain("text-accent");
 	});
 
-	it("标准卡片保持原样：左上角浮动胶囊、没有紧凑元信息行", () => {
+	it("标准卡片保留浮动胶囊并避开左上角角标，没有紧凑元信息行", () => {
 		const host = renderWithDensity("standard_card_with_floating_capsule");
-		expect(host.querySelector(".-left-2 [data-agent-badge]")).not.toBeNull();
+		expect(host.querySelector(".left-2 [data-agent-badge]")).not.toBeNull();
 		expect(host.querySelector("[data-task-card-compact-metadata-row]")).toBeNull();
 	});
 });

@@ -1,6 +1,7 @@
-import type {
-	CrossProjectTaskSwitcherEntryInProject,
-	CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
+import {
+	type CrossProjectTaskSwitcherEntryInProject,
+	type CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
+	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Pin, PinOff } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
@@ -16,6 +17,7 @@ import {
 	CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
 	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
 } from "@/components/task-card-body";
+import { TaskCardCornerStatusIndicators } from "@/components/task-card-corner-status-indicators";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
@@ -105,7 +107,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	return (
 		<div
 			className={cn(
-				"flex min-w-0 flex-col",
+				"relative flex min-w-0 flex-col",
 				// 分区第一行给伸出行顶边的 hover 动作组（连同展开开关向上扩的命中区）让出 header 下方的空间（不压 header 的折叠按钮 / 排序下拉框）。
 				CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
 				showsFullTaskCard ? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME : "rounded-md",
@@ -116,6 +118,11 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			{...rowContainerAttributes}
 			{...rowHoverExpansionTriggerProps}
 		>
+			{/* 放在持续挂载的行外框上：展开、收起及读取快照期间角标不移动，也不重复出现。 */}
+			<TaskCardCornerStatusIndicators
+				isAgentRunning={entry.columnId !== "trash" && isCrossProjectTaskSwitcherEntryRunning(entry, nowMs)}
+				hasUnreadHandoffNotification={isUnreadHandoff}
+			/>
 			{showsFullTaskCard ? null : (
 				<div
 					ref={compactRowElementRefHandingOffToggleKeyboardFocus}
@@ -127,14 +134,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						aria-current={isFocused ? "true" : undefined}
 						className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 border-none bg-transparent py-1.5 pl-2 pr-2 text-left text-inherit"
 					>
-						<CrossProjectTaskSwitcherRowFirstLine
-							section={section}
-							isUnreadHandoff={isUnreadHandoff}
-							agentId={entry.agentId}
-							title={entry.title}
-						/>
+						<CrossProjectTaskSwitcherRowFirstLine agentId={entry.agentId} title={entry.title} />
 						{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
-						<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
+						<span
+							data-task-card-secondary-metadata-row=""
+							className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
+						>
 							{showsProjectName ? (
 								<span className="inline-flex min-w-0 max-w-full items-center gap-1">
 									<ProjectIcon workspaceId={workspaceId} projectName={projectName} size={14} />
@@ -176,10 +181,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							</span>
 						</span>
 						{section === "pinned" && entry.taskPinboardPinReason ? (
-							<span
-								className="truncate pl-[19px] text-[11px] text-text-secondary"
-								title={entry.taskPinboardPinReason}
-							>
+							<span className="truncate text-[11px] text-text-secondary" title={entry.taskPinboardPinReason}>
 								{entry.taskPinboardPinReason}
 							</span>
 						) : null}
