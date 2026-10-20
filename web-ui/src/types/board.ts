@@ -11,6 +11,7 @@ import type {
 	RuntimeTaskCommitIntegrationTrackingStatus,
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
+	RuntimeTaskRetainedCommittedLineChangeSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
@@ -147,6 +148,7 @@ export interface ReviewTaskWorkspaceSnapshot {
 	taskCommitIntegrationTrackingStatus?: RuntimeTaskCommitIntegrationTrackingStatus;
 	workspaceGitStatusObservationSource?: RuntimeTaskWorkspaceGitStatusObservationSource;
 	workspaceGitStatusObservedAt?: number | null;
+	taskRetainedCommittedLineChangeSummary?: RuntimeTaskRetainedCommittedLineChangeSummary;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;

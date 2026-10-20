@@ -3,6 +3,7 @@ import { GitBranch, Home } from "lucide-react";
 import type { ReactElement } from "react";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
+import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
@@ -39,9 +40,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 	});
 	const showsUncommittedChangeSummary =
 		snapshot.changedFiles != null && shouldDisplayWorktreeUncommittedChangeSummary(snapshot);
-	if (!gitStatusAgainstBaseRefDescription && !showsUncommittedChangeSummary) {
-		return null;
-	}
 	const isInplaceWorktree = entry.worktreeMode === "inplace";
 	return (
 		<span
@@ -76,6 +74,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 					/>
 				</span>
 			) : null}
+			<TaskRetainedCommittedLineChangeIndicator
+				workspaceId={workspaceId}
+				taskId={entry.taskId}
+				baseRef={entry.baseRef ?? "main"}
+				summary={snapshot.taskRetainedCommittedLineChangeSummary}
+			/>
 		</span>
 	);
 }

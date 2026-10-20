@@ -60,7 +60,10 @@ import {
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
-import { probeAndRefreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
+import {
+	probeAndRefreshTaskCommitIntegrationProvenance,
+	readTaskRetainedCommittedLineChangeHistory,
+} from "../workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -611,6 +614,9 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				baseRef: normalizedInput.baseRef,
 				worktreeMode: normalizedInput.worktreeMode,
 			});
+		},
+		loadTaskRetainedCommittedLineChangeHistory: async (workspaceScope, input) => {
+			return await readTaskRetainedCommittedLineChangeHistory(workspaceScope.workspaceId, input.taskId);
 		},
 		searchFiles: async (workspaceScope, input) => {
 			const query = input.query.trim();
