@@ -551,6 +551,7 @@ export function TaskEditorDialog({
 		workspaceId,
 		taskId: null,
 		draftTaskTitle: taskName || "待创建任务",
+		draftTaskPrompt: promptDraft,
 		active: open && taskEditorMode === "create" && mode === "single",
 	});
 	const [processedFollowUpSeedInitializationId, setProcessedFollowUpSeedInitializationId] = useState<string | null>(

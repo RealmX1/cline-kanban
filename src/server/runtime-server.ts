@@ -95,6 +95,7 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContextById,
 } from "../state/workspace-state";
+import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -815,6 +816,19 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		listSessions: listProjectRuntimeSessionSummaries,
 		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 	});
+	const workUnitRelationAssertionWriteApi = createWorkUnitRelationAssertionWriteApi({
+		readRecordedInterWorkUnitRelationProjection:
+			readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+		runInterWorkUnitRelationLedgerClientOperation:
+			runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+	});
+	const taskIndexingSupportApi = createTaskIndexingSupportRuntimeService({
+		listLiveSessionSummaries: listProjectRuntimeSessionSummaries,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		referenceAssertionWritePort: workUnitRelationAssertionWriteApi,
+	});
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -833,6 +847,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
+			taskIndexingSupportApi,
 			workspaceScope: scope.workspaceScope,
 			kanbanRequestOriginActorEvidence: {
 				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
@@ -966,6 +981,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 			}),
 			workUnitRelationReadApi: createWorkUnitRelationReadApi({
+				suggestReferenceRelationsForTaskModeling: scope.workspaceScope
+					? (input) =>
+							taskIndexingSupportApi.suggestReferenceRelationsForTaskModeling(
+								scope.workspaceScope as RuntimeTrpcWorkspaceScope,
+								input,
+							)
+					: undefined,
 				readRecordedInterWorkUnitRelationProjection:
 					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
 				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
@@ -978,13 +1000,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				appendCommittedEventsIntoLedgerAndWaitForCommit:
 					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 			}),
-			workUnitRelationAssertionWriteApi: createWorkUnitRelationAssertionWriteApi({
-				readRecordedInterWorkUnitRelationProjection:
-					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
-				runInterWorkUnitRelationLedgerClientOperation:
-					runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
-				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
-			}),
+			workUnitRelationAssertionWriteApi,
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,
 				loadBoardCardAgentId: async (scope, taskId) => {
@@ -1266,11 +1282,20 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
 	promptDraftUsageService.startInitialHistoricalBackfill();
+	taskIndexingSupportApi.startAutomaticBackfill(
+		async () =>
+			(await listWorkspaceIndexEntries()).map((entry) => ({
+				workspaceId: entry.workspaceId,
+				workspacePath: entry.repoPath,
+			})),
+		deps.warn,
+	);
 
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			await taskIndexingSupportApi.close();
 			await taskMainSessionHandoverApi.close();
 			await rvfAutomaticCloseoutApi.stop();
 			await promptDraftUsageService.close();

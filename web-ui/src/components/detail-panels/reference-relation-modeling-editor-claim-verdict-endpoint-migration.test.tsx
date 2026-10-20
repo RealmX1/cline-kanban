@@ -95,6 +95,10 @@ async function renderExistingClaimRelation(input: {
 		projectedThroughGlobalCommittedEventSequence: 1,
 	};
 	const controller: ReferenceRelationModelingEditorController = {
+		suggestions: null,
+		suggestionsLoading: false,
+		suggestionsError: null,
+		requestSuggestions: vi.fn(),
 		draft: {
 			referenceRelationDrafts: [],
 			relationRevocations: [],

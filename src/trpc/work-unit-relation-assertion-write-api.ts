@@ -18,7 +18,9 @@ import type {
 	CommittedInterWorkUnitRelationLedgerEvent,
 	InterWorkUnitRelationLedgerEventDraft,
 	InterWorkUnitRelationWorkUnitReference,
+	KanbanBoardCardWorkUnitQualifiedReference,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
+import type { IncomingWorkItemRelationCandidate } from "../core/task-indexing-support-contract";
 import type {
 	AssertReferenceRelationAsActingWorkUnitRequest,
 	AssertReferenceRelationDirectlyAsWebUiUserRequest,
@@ -67,10 +69,13 @@ import {
 	type RelationAffectingConfirmableChangeRoutingDecisionRecordedInLedger,
 	routeRelationAffectingConfirmableChangeThroughConfirmationAuthorityRows,
 } from "../inter-work-unit-relation-ledger/relation-affecting-confirmable-change-confirmation-matrix-routing";
+import { buildTaskIndexingSupportUnverifiedReferenceRoutingDecision } from "../inter-work-unit-relation-ledger/task-indexing-support-unverified-reference-confirmation-policy";
 import {
 	buildWorkUnitDisplayEntries,
 	type WorkspaceRepositoryPathLookupByWorkspaceId,
 } from "../inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
+import { readWorkspaceBoardByIdAndRunWithBoardLockHeld } from "../state/workspace-state";
+import { taskIndexingMaterialRequirementsFingerprint } from "../task-indexing-support/incoming-work-item-relation-analysis";
 import type { RuntimeTrpcContext } from "./app-router";
 import { applyReferenceRelationModelingChanges } from "./work-unit-relation-modeling-write-api";
 import { resolveWorkUnitSelectorAgainstRecordedRelationProjection } from "./work-unit-relation-read-api";
@@ -305,6 +310,10 @@ interface ReferenceRelationAssertionWriteInput {
 	agentSelectedConfirmationStrategy: RelationAffectingConfirmableChangeConfirmationStrategy | null;
 	strategySelectionRationale: string | null;
 	dryRunWithoutWritingIntoLedger: boolean;
+	expectedSupportEndpoints?: {
+		subject: KanbanBoardCardWorkUnitQualifiedReference;
+		anchor: KanbanBoardCardWorkUnitQualifiedReference;
+	};
 }
 
 interface RelationRevocationWriteInput {
@@ -316,9 +325,17 @@ interface RelationRevocationWriteInput {
 	dryRunWithoutWritingIntoLedger: boolean;
 }
 
+export interface RuntimeTaskIndexingSupportReferenceAssertionWritePort {
+	assertUnverifiedReferenceRelationAsTaskIndexingSupport: (input: {
+		subject: KanbanBoardCardWorkUnitQualifiedReference;
+		candidate: IncomingWorkItemRelationCandidate;
+		expectedRequirementsFingerprintByTaskIdentity: Readonly<Record<string, string>>;
+	}) => Promise<void>;
+}
+
 export function createWorkUnitRelationAssertionWriteApi(
 	deps: CreateWorkUnitRelationAssertionWriteApiDependencies,
-): RuntimeTrpcContext["workUnitRelationAssertionWriteApi"] {
+): RuntimeTrpcContext["workUnitRelationAssertionWriteApi"] & RuntimeTaskIndexingSupportReferenceAssertionWritePort {
 	const kanbanActorResolutionLookups =
 		deps.kanbanActorResolutionLookups ?? createKanbanActorResolutionLookupsBackedByWorkspaceStateFiles();
 
@@ -331,6 +348,11 @@ export function createWorkUnitRelationAssertionWriteApi(
 		routingDecision: RelationAffectingConfirmableChangeRoutingDecisionRecordedInLedger;
 		decisionSource: RelationAffectingConfirmableChangeDecisionSource;
 	} {
+		if (proposer.proposerKind === "runtime_task_indexing_support_unverified_reference")
+			return {
+				routingDecision: buildTaskIndexingSupportUnverifiedReferenceRoutingDecision(),
+				decisionSource: "strategy_requires_no_user_review",
+			};
 		if (proposer.proposerKind === "web_ui_user_with_verified_page_load_nonce") {
 			return {
 				routingDecision: buildRoutingDecisionForChangeAssertedDirectlyByWebUiUser(),
@@ -443,6 +465,12 @@ export function createWorkUnitRelationAssertionWriteApi(
 					);
 				}
 				const anchor = resolveRelationEndpointFromSelector(reader, input.counterpartWorkUnit, "counterpart");
+				if (
+					input.expectedSupportEndpoints &&
+					(JSON.stringify(subject) !== JSON.stringify(input.expectedSupportEndpoints.subject) ||
+						JSON.stringify(anchor) !== JSON.stringify(input.expectedSupportEndpoints.anchor))
+				)
+					throw new Error("support 关系端点 incarnation 已变化，拒绝写入。");
 				const endpointValidation = validateAssertedReferenceRelationEndpoints({
 					relationKind: input.relationKind,
 					relationStatementSubjectWorkUnitRef: subject,
@@ -533,6 +561,13 @@ export function createWorkUnitRelationAssertionWriteApi(
 						) {
 							return { writeAttemptOutcome: "retry_after_projection_catches_up" } as const;
 						}
+						// 已有确认属于原声称。新 support 发现只在自己的备注/处置事件保存，绝不合入后继承其用户确认。
+						if (input.proposer.proposerKind === "runtime_task_indexing_support_unverified_reference")
+							return {
+								writeAttemptOutcome: "reassertion_merged_into_already_effective_assertion",
+								relationId: effectiveOfNaturalKey.relationId,
+								previewRelation: plan.effectiveRelationInProjection,
+							} as const;
 						const mergeEventDraft = buildEventDraft(
 							"inter_work_unit_relation_reassertion_merged_into_already_effective_assertion",
 							{
@@ -918,6 +953,65 @@ export function createWorkUnitRelationAssertionWriteApi(
 	}
 
 	return {
+		assertUnverifiedReferenceRelationAsTaskIndexingSupport: async ({
+			subject,
+			candidate,
+			expectedRequirementsFingerprintByTaskIdentity,
+		}) => {
+			if (candidate.cross_project || subject.workspaceId !== candidate.task_reference.workspaceId)
+				throw new Error("跨项目 support 分诊只返回候选，不写最终关系。");
+			if (
+				!["reference_concerns_behavior_or_state_of", "reference_is_generally_related_with"].includes(
+					candidate.relation_kind,
+				)
+			)
+				throw new Error("support 只能写入未核验参照关系。");
+			const selector = (reference: KanbanBoardCardWorkUnitQualifiedReference): WorkUnitSelectorForRelationRead => ({
+				workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+				bareTaskId: reference.taskId,
+				workspaceId: reference.workspaceId,
+			});
+			await readWorkspaceBoardByIdAndRunWithBoardLockHeld(subject.workspaceId, async (board) => {
+				for (const endpoint of [subject, candidate.task_reference]) {
+					const column = board.columns.find((entry) => entry.cards.some((card) => card.id === endpoint.taskId));
+					const task = column?.cards.find((card) => card.id === endpoint.taskId);
+					if (!task || !column || task.createdAt !== endpoint.taskIncarnationCreatedAtEpochMs)
+						throw new Error("support 关系端点 incarnation 已变化，拒绝写入。");
+					const expected = expectedRequirementsFingerprintByTaskIdentity[JSON.stringify(endpoint)];
+					if (
+						!expected ||
+						taskIndexingMaterialRequirementsFingerprint({
+							taskReference: endpoint,
+							title: task.title ?? "",
+							prompt: task.prompt,
+							columnId: column.id,
+						}) !== expected
+					)
+						throw new Error("support 关系端点要求在最终写入前已变化或缺少分析指纹，拒绝过时分诊。");
+				}
+				return await translateLedgerUnavailability(() =>
+					writeReferenceRelationAssertion({
+						proposer: { proposerKind: "runtime_task_indexing_support_unverified_reference" },
+						subjectWorkUnitSelectorOfWebUiUser: selector(subject),
+						counterpartWorkUnit: selector(candidate.task_reference),
+						expectedSupportEndpoints: { subject, anchor: candidate.task_reference },
+						relationKind: candidate.relation_kind,
+						relationAssertionRationaleOneSentence: candidate.rationale.slice(0, 600),
+						relationAssertionEvidencePointers: candidate.evidence,
+						assertedRelationKindSpecificAttributes:
+							candidate.relation_kind === "reference_concerns_behavior_or_state_of"
+								? {
+										concernNature: "checks_scope_overlap_with",
+										concernedAspectSummary: candidate.rationale.slice(0, 600),
+									}
+								: {},
+						agentSelectedConfirmationStrategy: null,
+						strategySelectionRationale: null,
+						dryRunWithoutWritingIntoLedger: false,
+					}),
+				);
+			});
+		},
 		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: async (input, evidence) => {
 			assertWebUiUserDecisionRequestOrigin(evidence, input.webUiUserDecisionClientCharacteristics);
 			return translateLedgerUnavailability(() => applyReferenceRelationModelingChanges(deps, input));
