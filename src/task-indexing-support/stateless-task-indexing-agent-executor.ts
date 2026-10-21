@@ -8,6 +8,7 @@ import type {
 	SharedTaskIndexingContext,
 	TaskIndexingSupportExecutorSettings,
 } from "../core/task-indexing-support-contract";
+import type { ModelUsagePurpose } from "../model-provider-access/model-provider-usage-record";
 import { recordModelProviderUsage } from "../model-provider-access/model-provider-usage-record";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
 
@@ -19,6 +20,7 @@ export interface StatelessTaskIndexingAgentRequest<T> {
 	outputSchema: z.ZodType<T>;
 	timeoutMs?: number;
 	abortSignal?: AbortSignal;
+	modelUsagePurpose?: ModelUsagePurpose;
 }
 export interface StatelessTaskIndexingAgentUsage {
 	inputTokens?: number;
@@ -347,7 +349,7 @@ export async function executeStatelessTaskIndexingAgent<T>(
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 		recordModelProviderUsage({
-			modelUsagePurpose: "task_indexing_support_relation_analysis",
+			modelUsagePurpose: request.modelUsagePurpose ?? "task_indexing_support_relation_analysis",
 			modelProviderId: `headless-${request.settings.agentId}`,
 			modelId: usage.resolvedModelId,
 			outcome: failure ? "unavailable" : "completed",

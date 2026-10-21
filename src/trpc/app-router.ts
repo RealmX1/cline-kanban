@@ -500,6 +500,14 @@ import {
 	sharedTaskIndexingContextSchema,
 	taskIndexingSupportExecutorSettingsSchema,
 } from "../core/task-indexing-support-contract";
+import {
+	createTaskLookupConversationRequestSchema,
+	submitTaskLookupTurnRequestSchema,
+	taskLookupCandidatePreviewRequestSchema,
+	taskLookupCandidatePreviewSchema,
+	taskLookupConversationIdentitySchema,
+	taskLookupConversationSchema,
+} from "../core/task-lookup-conversation-contract";
 import type {
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
@@ -580,6 +588,7 @@ import {
 } from "../notifications/notification-speech-synthesis";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
+import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -587,6 +596,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskLookupConversationApi?: TaskLookupConversationService;
 	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
 	independentTaskCreationApi?: IndependentTaskCreationService;
 	taskMainSessionHandoverApi?: {
@@ -1373,6 +1383,47 @@ export const runtimeAppRouter = t.router({
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
 	support: t.router({
+		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(createTaskLookupConversationRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.createConversation(input);
+			}),
+		listTaskLookupConversations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(z.array(taskLookupConversationSchema))
+			.query(({ ctx }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.listConversations();
+			}),
+		getTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.getConversation(input.conversationId);
+			}),
+		submitTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(submitTaskLookupTurnRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.submitTurn(input);
+			}),
+		cancelTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.cancelTurn(input.conversationId);
+			}),
+		readTaskLookupCandidatePreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupCandidatePreviewRequestSchema)
+			.output(taskLookupCandidatePreviewSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.readCandidatePreview(input.conversationId, input.taskReference);
+			}),
 		getTaskIndexingContext: workspaceProcedure.output(sharedTaskIndexingContextSchema).query(({ ctx }) => {
 			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 			return ctx.taskIndexingSupportApi.getTaskIndexingContext(ctx.workspaceScope);

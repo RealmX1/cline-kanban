@@ -40,6 +40,7 @@ import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-b
 import { TaskCommentsDialogProvider } from "@/components/task-comments-dialog-provider";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import { TaskLookupWorkbenchView } from "@/components/task-lookup-workbench-view";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
@@ -95,6 +96,7 @@ import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
+import { useTaskLookupWorkbench } from "@/hooks/use-task-lookup-workbench";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
 import { useTaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
@@ -539,6 +541,19 @@ export default function App(): ReactElement {
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
 		onOpenTaskInProject: handleOpenTaskInProject,
 	});
+	const taskLookupWorkbench = useTaskLookupWorkbench({
+		workspaceId: currentProjectId,
+		includeAllProjectsByDefault: isBoardScopeAllProjectsSelected,
+		streamSnapshotGeneration,
+	});
+	const taskLookupWorkbenchContent = taskLookupWorkbench.isOpen ? (
+		<TaskLookupWorkbenchView
+			controller={taskLookupWorkbench}
+			projects={projects}
+			onOpenTask={handleOpenTaskInProject}
+			returnLabel={selectedCard ? "返回任务" : "返回看板"}
+		/>
+	) : undefined;
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
 	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
@@ -1559,7 +1574,8 @@ export default function App(): ReactElement {
 		});
 	// Focus View 的外观（顶栏详情模式、隐藏首页布局与左侧项目栏、看板不挂载）在跨项目打开在途期间保持不变——
 	// 否则一次跨项目打开会画出「旧详情 → 首页 / 看板 → 外壳 → 新详情」四个全屏状态。
-	const isFocusViewChromeShown = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
+	const isFocusViewChromeShown =
+		selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit || taskLookupWorkbench.isOpen;
 	// 详情页（含 agent 终端）真正渲染的那张卡：在途期间不渲染；board 装的还不是当前项目的数据时也不渲染——
 	// 快照到达那一帧 currentProjectId 已是新项目、board 仍是旧项目的，拿旧卡配新 workspaceId 挂终端会在新项目里
 	// 给同号任务建出一个幽灵终端，还可能把终端 LRU 里新项目已停放的热终端挤出去。
@@ -1696,13 +1712,28 @@ export default function App(): ReactElement {
 								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
 								projectSwitcher={topBarProjectSwitcherState}
 								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
+								onToggleTaskLookupWorkbench={
+									!hasNoProjects
+										? () => {
+												if (taskLookupWorkbench.isOpen) taskLookupWorkbench.close();
+												else taskLookupWorkbench.open();
+											}
+										: undefined
+								}
+								isTaskLookupWorkbenchOpen={taskLookupWorkbench.isOpen}
 								onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
 									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 										? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
 										: undefined
 								}
 								isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
-								onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
+								onBack={
+									taskLookupWorkbench.isOpen
+										? taskLookupWorkbench.close
+										: isFocusViewChromeShown
+											? handleBackFromFocusView
+											: undefined
+								}
 								workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
 								isWorkspacePathLoading={shouldShowProjectLoadingState}
 								workspaceHint={navbarWorkspaceHint}
@@ -1740,6 +1771,7 @@ export default function App(): ReactElement {
 								}
 								onToggleTerminal={
 									hasNoProjects ||
+									taskLookupWorkbench.isOpen ||
 									isCurrentProjectRuntimeUnavailable ||
 									isFocusViewCrossProjectTaskOpenInTransit
 										? undefined
@@ -1778,7 +1810,9 @@ export default function App(): ReactElement {
 								canOpenWorkspace={canOpenWorkspace}
 								isOpeningWorkspace={isOpeningWorkspace}
 								onToggleGitHistory={
-									hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
+									hasNoProjects || isCurrentProjectRuntimeUnavailable || taskLookupWorkbench.isOpen
+										? undefined
+										: handleToggleGitHistory
 								}
 								isGitHistoryOpen={isGitHistoryOpen}
 								onToggleFindings={
@@ -1788,12 +1822,14 @@ export default function App(): ReactElement {
 								}
 								isFindingsOpen={isFindingsOpen}
 								onToggleTaskChangesSidebar={
-									selectedCardRenderedInFocusView
+									selectedCardRenderedInFocusView && !taskLookupWorkbench.isOpen
 										? () => setIsTaskChangesSidebarOpen((open) => !open)
 										: undefined
 								}
 								isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
-								hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
+								hideProjectDependentActions={
+									shouldHideProjectDependentTopBarActions || taskLookupWorkbench.isOpen
+								}
 								connectionRetrySessions={connectionRetrySessions}
 								onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 								onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
@@ -1986,9 +2022,12 @@ export default function App(): ReactElement {
 										onCancel={cancelPendingCrossProjectTaskOpenReturningToOriginTask}
 									/>
 								</div>
+							) : taskLookupWorkbench.isOpen && (!selectedCardRenderedInFocusView || !detailSession) ? (
+								<div className="absolute inset-0 flex min-h-0 min-w-0">{taskLookupWorkbenchContent}</div>
 							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
+										taskLookupWorkbenchContent={taskLookupWorkbenchContent}
 										onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
 										mobileFocusViewControls={mobileFocusViewControls}
 										onBackToBoard={handleBackFromFocusView}
@@ -2280,7 +2319,26 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 
-					<TaskSpotlightSearchDialog controller={taskSpotlightSearch} />
+					<TaskSpotlightSearchDialog
+						controller={taskSpotlightSearch}
+						onAskTaskLookupAgent={(questionText) => {
+							const filters = taskSpotlightSearch.filterSelection;
+							taskLookupWorkbench.open({
+								questionText,
+								scope: {
+									projectIds: filters.selectedProjectIds.size
+										? [...filters.selectedProjectIds]
+										: taskSpotlightSearch.includeOtherProjects
+											? []
+											: currentProjectId
+												? [currentProjectId]
+												: [],
+									columnIds: [...filters.selectedStageColumnIds],
+								},
+							});
+							taskSpotlightSearch.close();
+						}}
+					/>
 					{permanentlyDeletedTaskHistoryScope ? (
 						<PermanentlyDeletedTaskHistoryDialog
 							defaultWorkspaceId={permanentlyDeletedTaskHistoryScope.workspaceId}

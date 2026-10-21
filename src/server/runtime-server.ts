@@ -84,6 +84,7 @@ import {
 } from "../security/passcode-manager";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
@@ -95,7 +96,17 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContextById,
 } from "../state/workspace-state";
+import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
+import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
+import {
+	loadAndAdvanceSharedTaskIndexingContext,
+	readTaskIndexingSupportExecutorSettings,
+} from "../task-indexing-support/task-indexing-support-storage";
+import {
+	createTaskLookupConversationService,
+	TASK_LOOKUP_INSTRUCTION_VERSION,
+} from "../task-indexing-support/task-lookup-conversation-service";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -829,6 +840,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 		referenceAssertionWritePort: workUnitRelationAssertionWriteApi,
 	});
+	const taskLookupConversationApi = createTaskLookupConversationService({
+		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
+		collectMaterials: (workspaceId) =>
+			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
+		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
+		getContext: (workspaceId, materials, settings) =>
+			loadAndAdvanceSharedTaskIndexingContext({
+				workspaceId,
+				materials,
+				settings,
+				instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
+				now: Date.now(),
+				forModelRequest: true,
+			}),
+		executeAgent: executeStatelessTaskIndexingAgent,
+		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
+	});
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -848,6 +876,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			taskIndexingSupportApi,
+			taskLookupConversationApi,
 			workspaceScope: scope.workspaceScope,
 			kanbanRequestOriginActorEvidence: {
 				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
@@ -1295,6 +1324,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			await taskLookupConversationApi.close();
 			await taskIndexingSupportApi.close();
 			await taskMainSessionHandoverApi.close();
 			await rvfAutomaticCloseoutApi.stop();

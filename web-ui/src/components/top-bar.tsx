@@ -23,7 +23,10 @@ import {
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
-import { topBarBoardScopeAllProjectsToggleButtonAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import {
+	topBarBoardScopeAllProjectsToggleButtonAnchorKey,
+	topBarTaskLookupWorkbenchTriggerAnchorKey,
+} from "@/components/post-deploy-verification/verification-anchor-registry";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import {
 	getRuntimeShortcutIconComponent,
@@ -312,6 +315,8 @@ export function TopBar({
 	onToggleSidebar,
 	projectSwitcher,
 	onOpenTaskSpotlightSearch,
+	onToggleTaskLookupWorkbench,
+	isTaskLookupWorkbenchOpen = false,
 	onOpenPermanentlyDeletedTaskHistory,
 	onBack,
 	workspacePath,
@@ -369,6 +374,8 @@ export function TopBar({
 	// 打开任务 Spotlight 搜索。不传就不渲染入口（无项目态）。与项目切换器同理，刻意不受
 	// `hideProjectDependentActions` 影响——跨项目搜索在任务详情页里同样有效。
 	onOpenTaskSpotlightSearch?: () => void;
+	onToggleTaskLookupWorkbench?: () => void;
+	isTaskLookupWorkbenchOpen?: boolean;
 	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onBack?: () => void;
 	workspacePath?: string;
@@ -524,6 +531,18 @@ export function TopBar({
 					) : null}
 
 					{/* Workspace path */}
+					{onToggleTaskLookupWorkbench ? (
+						<Button
+							aria-pressed={isTaskLookupWorkbenchOpen}
+							aria-label="切换 AI 查卡工作台"
+							data-verification-anchor={topBarTaskLookupWorkbenchTriggerAnchorKey()}
+							onClick={onToggleTaskLookupWorkbench}
+							size="sm"
+							className="min-h-11 shrink-0 md:min-h-7"
+						>
+							{isTaskLookupWorkbenchOpen ? "返回工作区" : "AI 查卡"}
+						</Button>
+					) : null}
 					{isWorkspacePathLoading ? (
 						<span
 							className="kb-skeleton inline-block"

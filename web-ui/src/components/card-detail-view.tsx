@@ -679,6 +679,7 @@ function DiffToolbar({
 }
 
 export function CardDetailView({
+	taskLookupWorkbenchContent,
 	mobileFocusViewControls,
 	onOpenPermanentlyDeletedTaskHistory,
 	onBackToBoard,
@@ -753,6 +754,7 @@ export function CardDetailView({
 	explorationThreadGraph,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
+	taskLookupWorkbenchContent?: React.ReactNode;
 	mobileFocusViewControls?: MobileFocusViewCollapsibleControls;
 	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onBackToBoard?: () => void;
@@ -1497,7 +1499,7 @@ export function CardDetailView({
 			taskId={selectedTaskConversationSessionId}
 			workspaceId={currentProjectId}
 			terminalEnabled={isTaskTerminalEnabled}
-			isMouseWheelScrollInteractionEnabled={!isMobile || mobileTab === "chat"}
+			isMouseWheelScrollInteractionEnabled={!taskLookupWorkbenchContent && (!isMobile || mobileTab === "chat")}
 			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			// 切卡热键 alt+↑/↓ 由本视图注册，所以这个终端可以把它放行给 document。
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
@@ -1526,7 +1528,7 @@ export function CardDetailView({
 			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
 			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showSessionToolbar={false}
-			autoFocus
+			autoFocus={!taskLookupWorkbenchContent}
 			showMoveToTrash={isMainTaskConversationSessionSelected && showMoveToTrashActions}
 			onMoveToTrash={onMoveToTrash}
 			isMoveToTrashLoading={isMoveToTrashLoading}
@@ -1846,7 +1848,8 @@ export function CardDetailView({
 		return (
 			<MobileFocusViewIdleCollapseControllerProvider value={mobileFocusViewIdleCollapseController}>
 				<MobileFocusViewCollapsibleControlsProvider value={mobileControls}>
-					{mobileDetailLayout}
+					{taskLookupWorkbenchContent}
+					<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>{mobileDetailLayout}</div>
 				</MobileFocusViewCollapsibleControlsProvider>
 			</MobileFocusViewIdleCollapseControllerProvider>
 		);
@@ -1859,7 +1862,7 @@ export function CardDetailView({
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor.view==="task_detail" 可指向此任务详情容器。
 			data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
 		>
-			{!isDiffExpanded ? (
+			{!isDiffExpanded || taskLookupWorkbenchContent ? (
 				<>
 					<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
 						<ColumnContextPanel
@@ -1901,175 +1904,180 @@ export function CardDetailView({
 			) : null}
 			<div
 				className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-				style={{ width: isDiffExpanded ? "100%" : detailContentPanelPercent }}
+				style={{ width: isDiffExpanded && !taskLookupWorkbenchContent ? "100%" : detailContentPanelPercent }}
 			>
-				{gitHistoryPanel ? (
-					<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
-				) : (
-					<>
-						<div
-							ref={mainRowRef}
-							data-focus-view-panel-arrangement={desktopArrangement.arrangement}
-							className={cn("flex min-h-0 flex-1 overflow-hidden", isWorkbenchBelowAgent && "flex-col")}
-						>
-							<div className="min-h-0 min-w-0" style={agentPanelStyle}>
-								{agentChatPanel}
-							</div>
-							{!isDiffExpanded ? (
-								<ResizeHandle
-									orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
-									ariaLabel="Resize agent and diff panels"
-									onMouseDown={
-										isWorkbenchBelowAgent
-											? handleStackedAgentSeparatorMouseDown
-											: showClineAgentChatPanel
-												? handleAgentDiffSeparatorMouseDown
-												: handleTerminalDiffSeparatorMouseDown
-									}
-									className="z-10"
-								/>
-							) : null}
-							<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
-								{isTaskChangesSidebarOpen ? (
-									<div className="flex min-h-0 flex-1 flex-col">
+				{taskLookupWorkbenchContent}
+				<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>
+					{gitHistoryPanel ? (
+						<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
+					) : (
+						<>
+							<div
+								ref={mainRowRef}
+								data-focus-view-panel-arrangement={desktopArrangement.arrangement}
+								className={cn("flex min-h-0 flex-1 overflow-hidden", isWorkbenchBelowAgent && "flex-col")}
+							>
+								<div className="min-h-0 min-w-0" style={agentPanelStyle}>
+									{agentChatPanel}
+								</div>
+								{!isDiffExpanded ? (
+									<ResizeHandle
+										orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
+										ariaLabel="Resize agent and diff panels"
+										onMouseDown={
+											isWorkbenchBelowAgent
+												? handleStackedAgentSeparatorMouseDown
+												: showClineAgentChatPanel
+													? handleAgentDiffSeparatorMouseDown
+													: handleTerminalDiffSeparatorMouseDown
+										}
+										className="z-10"
+									/>
+								) : null}
+								<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
+									{isTaskChangesSidebarOpen ? (
 										<div className="flex min-h-0 flex-1 flex-col">
-											<DiffToolbar
-												mode={diffMode}
-												onModeChange={setDiffMode}
-												isExpanded={isDiffExpanded}
-												onToggleExpand={handleToggleDiffExpand}
-											/>
-											{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
-												<WorkspaceChangesStaleDataWarning
-													error={workspaceChangesError}
-													onRetry={() => void refreshWorkspaceChanges()}
-													isRequestInFlight={isWorkspaceChangesRequestInFlight}
+											<div className="flex min-h-0 flex-1 flex-col">
+												<DiffToolbar
+													mode={diffMode}
+													onModeChange={setDiffMode}
+													isExpanded={isDiffExpanded}
+													onToggleExpand={handleToggleDiffExpand}
 												/>
-											) : null}
-											<div className="flex min-h-0 flex-1">
-												{isWorkspaceChangesMissingScope ? (
-													<WorkspaceChangesUnavailablePanel />
-												) : isWorkspaceChangesInitialError && workspaceChangesError ? (
-													<WorkspaceChangesErrorPanel
+												{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+													<WorkspaceChangesStaleDataWarning
 														error={workspaceChangesError}
 														onRetry={() => void refreshWorkspaceChanges()}
 														isRequestInFlight={isWorkspaceChangesRequestInFlight}
 													/>
-												) : isWorkspaceChangesInitialLoading ? (
-													<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-												) : hasNoWorkspaceFileChanges ? (
-													<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-												) : workspaceChanges !== null ? (
-													<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
-														<div
-															className="flex min-h-0 min-w-0"
-															style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
-														>
-															<DiffViewerPanel
-																workspaceFiles={runtimeFiles}
-																selectedPath={selectedPath}
-																selectedPathExpandToken={selectedPathExpandToken}
-																onSelectedPathChange={setSelectedPath}
-																viewMode={isDiffExpanded ? "split" : "unified"}
-																onAddToTerminal={
-																	onAddReviewComments || showClineAgentChatPanel
-																		? injectTextIntoActiveInput
-																		: undefined
-																}
-																onSendToTerminal={
-																	onSendReviewComments || showClineAgentChatPanel
-																		? handleSendDiffComments
-																		: undefined
-																}
-																comments={diffComments}
-																onCommentsChange={setDiffComments}
-															/>
-														</div>
-														<ResizeHandle
-															orientation="vertical"
-															ariaLabel="Resize detail diff panels"
-															onMouseDown={handleDetailDiffSeparatorMouseDown}
-															className="z-10"
+												) : null}
+												<div className="flex min-h-0 flex-1">
+													{isWorkspaceChangesMissingScope ? (
+														<WorkspaceChangesUnavailablePanel />
+													) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+														<WorkspaceChangesErrorPanel
+															error={workspaceChangesError}
+															onRetry={() => void refreshWorkspaceChanges()}
+															isRequestInFlight={isWorkspaceChangesRequestInFlight}
 														/>
-														<div
-															className="flex min-h-0 min-w-0"
-															style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
-														>
-															<FileTreePanel
-																workspaceFiles={runtimeFiles}
-																selectedPath={selectedPath}
-																onSelectPath={handleExplicitSelectPath}
-																panelFlex="1 1 0"
+													) : isWorkspaceChangesInitialLoading ? (
+														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
+													) : hasNoWorkspaceFileChanges ? (
+														<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
+													) : workspaceChanges !== null ? (
+														<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
+															<div
+																className="flex min-h-0 min-w-0"
+																style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
+															>
+																<DiffViewerPanel
+																	workspaceFiles={runtimeFiles}
+																	selectedPath={selectedPath}
+																	selectedPathExpandToken={selectedPathExpandToken}
+																	onSelectedPathChange={setSelectedPath}
+																	viewMode={isDiffExpanded ? "split" : "unified"}
+																	onAddToTerminal={
+																		onAddReviewComments || showClineAgentChatPanel
+																			? injectTextIntoActiveInput
+																			: undefined
+																	}
+																	onSendToTerminal={
+																		onSendReviewComments || showClineAgentChatPanel
+																			? handleSendDiffComments
+																			: undefined
+																	}
+																	comments={diffComments}
+																	onCommentsChange={setDiffComments}
+																/>
+															</div>
+															<ResizeHandle
+																orientation="vertical"
+																ariaLabel="Resize detail diff panels"
+																onMouseDown={handleDetailDiffSeparatorMouseDown}
+																className="z-10"
 															/>
+															<div
+																className="flex min-h-0 min-w-0"
+																style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
+															>
+																<FileTreePanel
+																	workspaceFiles={runtimeFiles}
+																	selectedPath={selectedPath}
+																	onSelectPath={handleExplicitSelectPath}
+																	panelFlex="1 1 0"
+																/>
+															</div>
 														</div>
-													</div>
-												) : (
-													<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-												)}
+													) : (
+														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
+													)}
+												</div>
 											</div>
 										</div>
+									) : null}
+									<div
+										className="min-h-0 min-w-0 flex-1 flex-col"
+										style={{ display: isTaskChangesSidebarOpen ? "none" : "flex" }}
+									>
+										<TaskWorkbench
+											queueAnnouncement={queuedPromptRestartReminderAnnouncement}
+											onOpenQueue={() => handleDetailUtilityTabChange("queue")}
+											isBelowAgent={isWorkbenchBelowAgent}
+											arrangementPreference={desktopArrangement.preference}
+											onArrangementPreferenceChange={desktopArrangement.setPreference}
+											slotRatio={
+												isWorkbenchBelowAgent ? workbenchSideBySideSlotRatio : detailRightPromptRatio
+											}
+											onSlotRatioChange={
+												isWorkbenchBelowAgent ? setWorkbenchSideBySideSlotRatio : setDetailRightPromptRatio
+											}
+											queueNotice={
+												queuedPromptCountIndicator.pendingCount > 0 ||
+												queuedPromptCountIndicator.hasFailedEntries ? (
+													<span>
+														<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />{" "}
+														Queue
+													</span>
+												) : undefined
+											}
+											modules={{
+												task_sessions: taskConversationSessionsPanel,
+												cross_task_relations: workUnitRelationNeighborhoodPanel,
+												exploration_map:
+													explorationThreadGraphPanel || sessionFindingsSection ? (
+														<>
+															{explorationThreadGraphPanel}
+															{sessionFindingsSection}
+														</>
+													) : null,
+												prompt_tools: detailUtilityPanel,
+											}}
+										/>
 									</div>
-								) : null}
-								<div
-									className="min-h-0 min-w-0 flex-1 flex-col"
-									style={{ display: isTaskChangesSidebarOpen ? "none" : "flex" }}
-								>
-									<TaskWorkbench
-										queueAnnouncement={queuedPromptRestartReminderAnnouncement}
-										onOpenQueue={() => handleDetailUtilityTabChange("queue")}
-										isBelowAgent={isWorkbenchBelowAgent}
-										arrangementPreference={desktopArrangement.preference}
-										onArrangementPreferenceChange={desktopArrangement.setPreference}
-										slotRatio={isWorkbenchBelowAgent ? workbenchSideBySideSlotRatio : detailRightPromptRatio}
-										onSlotRatioChange={
-											isWorkbenchBelowAgent ? setWorkbenchSideBySideSlotRatio : setDetailRightPromptRatio
-										}
-										queueNotice={
-											queuedPromptCountIndicator.pendingCount > 0 ||
-											queuedPromptCountIndicator.hasFailedEntries ? (
-												<span>
-													<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />{" "}
-													Queue
-												</span>
-											) : undefined
-										}
-										modules={{
-											task_sessions: taskConversationSessionsPanel,
-											cross_task_relations: workUnitRelationNeighborhoodPanel,
-											exploration_map:
-												explorationThreadGraphPanel || sessionFindingsSection ? (
-													<>
-														{explorationThreadGraphPanel}
-														{sessionFindingsSection}
-													</>
-												) : null,
-											prompt_tools: detailUtilityPanel,
-										}}
-									/>
 								</div>
 							</div>
-						</div>
-						{bottomTerminalOpen && bottomTerminalTaskId ? (
-							<BottomTerminalSection
-								taskId={bottomTerminalTaskId}
-								workspaceId={currentProjectId}
-								summary={bottomTerminalSummary}
-								onSummary={onSessionSummary}
-								onClose={onBottomTerminalClose}
-								subtitle={bottomTerminalSubtitle}
-								terminalThemeColors={terminalThemeColors}
-								onConnectionReady={onBottomTerminalConnectionReady}
-								agentCommand={bottomTerminalAgentCommand}
-								onSendAgentCommand={onBottomTerminalSendAgentCommand}
-								paneHeight={bottomTerminalPaneHeight}
-								onPaneHeightChange={onBottomTerminalPaneHeightChange}
-								onCollapse={onBottomTerminalCollapse}
-								isExpanded={isBottomTerminalExpanded}
-								onToggleExpand={onBottomTerminalToggleExpand}
-							/>
-						) : null}
-					</>
-				)}
+							{bottomTerminalOpen && bottomTerminalTaskId ? (
+								<BottomTerminalSection
+									taskId={bottomTerminalTaskId}
+									workspaceId={currentProjectId}
+									summary={bottomTerminalSummary}
+									onSummary={onSessionSummary}
+									onClose={onBottomTerminalClose}
+									subtitle={bottomTerminalSubtitle}
+									terminalThemeColors={terminalThemeColors}
+									onConnectionReady={onBottomTerminalConnectionReady}
+									agentCommand={bottomTerminalAgentCommand}
+									onSendAgentCommand={onBottomTerminalSendAgentCommand}
+									paneHeight={bottomTerminalPaneHeight}
+									onPaneHeightChange={onBottomTerminalPaneHeightChange}
+									onCollapse={onBottomTerminalCollapse}
+									isExpanded={isBottomTerminalExpanded}
+									onToggleExpand={onBottomTerminalToggleExpand}
+								/>
+							) : null}
+						</>
+					)}
+				</div>
 			</div>
 		</div>
 	);

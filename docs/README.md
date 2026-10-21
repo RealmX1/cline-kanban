@@ -48,3 +48,5 @@
 日常上手所需的内容在本 `docs/` 目录内自足。活跃计划与交接记录可能仍留在 `.plan/docs`，但新工程师理解当前架构不需要读它们。
 
 新增工程文档时，优先把稳定的解释放在这里，并从本索引链接。
+
+- [持久多轮查卡与工作台](architecture/task-lookup-conversations-and-workbench.md)：查卡模式、持久历史、共享 Context 与查询 API。

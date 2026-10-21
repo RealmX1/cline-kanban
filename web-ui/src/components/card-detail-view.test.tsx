@@ -28,7 +28,7 @@ const {
 			panelBackgroundColor?: string;
 			terminalBackgroundColor?: string;
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
-		}) => null,
+		}): ReactNode => null,
 	),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
@@ -323,6 +323,50 @@ describe("CardDetailView", () => {
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
 
+	it.each([false, true])(
+		"查卡替换中部与工作栏时保留原任务 Agent 节点，返回后继续使用（mobile=%s）",
+		async (isMobile) => {
+			mockUseIsMobile.mockReturnValue(isMobile);
+			mockAgentTerminalPanel.mockImplementation(() => <div data-testid="agent-terminal-panel" />);
+			const render = async (showLookup: boolean) =>
+				act(async () =>
+					root.render(
+						<CardDetailView
+							selection={createSelection()}
+							currentProjectId="workspace-1"
+							selectedAgentId="claude"
+							sessionSummary={null}
+							taskSessions={{}}
+							onSessionSummary={() => {}}
+							onCardSelect={() => {}}
+							onTaskDragEnd={() => {}}
+							onMoveToTrash={() => {}}
+							bottomTerminalOpen={false}
+							bottomTerminalTaskId={null}
+							bottomTerminalSummary={null}
+							onBottomTerminalClose={() => {}}
+							taskLookupWorkbenchContent={
+								showLookup ? <section data-testid="task-lookup-replacement">查卡工作台</section> : undefined
+							}
+						/>,
+					),
+				);
+			await render(false);
+			const terminal = container.querySelector('[data-testid="agent-terminal-panel"]');
+			expect(terminal).not.toBeNull();
+			await render(true);
+			expect(container.querySelector('[data-testid="task-lookup-replacement"]')).not.toBeNull();
+			expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBe(terminal);
+			let hiddenAncestor: HTMLElement | null = terminal as HTMLElement;
+			while (hiddenAncestor && hiddenAncestor.style.display !== "none")
+				hiddenAncestor = hiddenAncestor.parentElement;
+			expect(hiddenAncestor).not.toBeNull();
+			await render(false);
+			expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBe(terminal);
+			expect(container.querySelector('[data-testid="task-lookup-replacement"]')).toBeNull();
+		},
+	);
+
 	beforeEach(() => {
 		window.localStorage.clear();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -332,6 +376,7 @@ describe("CardDetailView", () => {
 		document.body.appendChild(container);
 		root = createRootRenderingInsideTooltipProvider(container);
 		mockAgentTerminalPanel.mockClear();
+		mockAgentTerminalPanel.mockImplementation(() => null);
 		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();

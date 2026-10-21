@@ -81,8 +81,10 @@ function resolveEmptyResultsMessage({
 
 export function TaskSpotlightSearchDialog({
 	controller,
+	onAskTaskLookupAgent,
 }: {
 	controller: TaskSpotlightSearchController;
+	onAskTaskLookupAgent?: (questionText: string) => void;
 }): React.ReactElement {
 	const inputRef = useRef<HTMLInputElement | null>(null);
 	const virtuosoRef = useRef<VirtuosoHandle | null>(null);
@@ -279,6 +281,11 @@ export function TaskSpotlightSearchDialog({
 							)}
 						/>
 						{showSemanticSpinner ? <Spinner size={14} /> : null}
+						{onAskTaskLookupAgent ? (
+							<Button size="sm" disabled={!query.trim()} onClick={() => onAskTaskLookupAgent(query)}>
+								AI 查卡
+							</Button>
+						) : null}
 						{/* 浏览态也报数：那正是「现在列出的是全部 N 个任务」这句话本身。 */}
 						{isSearchActive || isBrowsingAllTasksWithoutQuery ? (
 							<span className="shrink-0 text-xs text-text-tertiary">{results.length}</span>
