@@ -21,6 +21,8 @@ import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rota
 export type ModelUsagePurpose =
 	| "task_name_suggestion"
 	| "notification_assessment"
+	| "task_indexing_support_relation_analysis"
+	| "task_lookup_conversation"
 	| "independent_task_creation_draft_generation";
 
 export type ModelProviderCallOutcome = "completed" | "unavailable";
@@ -42,6 +44,9 @@ export interface ModelProviderUsageRecord {
 	promptTokenCount?: number;
 	completionTokenCount?: number;
 	totalTokenCount?: number;
+	cacheReadTokenCount?: number;
+	cacheWriteTokenCount?: number;
+	stablePromptPrefixSha256?: string;
 }
 
 /** fire-and-forget：写入排队、失败内部吞掉，绝不影响被记录的那次调用。 */

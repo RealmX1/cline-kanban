@@ -32,6 +32,7 @@ import type {
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import { observeTaskLookupConversationUpdated } from "@/stores/task-lookup-conversation-update-store";
 import {
 	replaceTaskResourceUsageSnapshots,
 	resetTaskResourceUsageSnapshotStore,
@@ -752,6 +753,10 @@ export function useRuntimeStateStream(
 							type: "queued_task_prompt_deliveries_updated",
 							payload,
 						});
+						return;
+					}
+					if (payload.type === "task_lookup_conversation_updated") {
+						observeTaskLookupConversationUpdated();
 						return;
 					}
 					if (payload.type === "exploratory_findings_updated") {

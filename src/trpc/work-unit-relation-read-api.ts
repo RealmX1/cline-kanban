@@ -41,6 +41,7 @@ import { buildRelationModelingPreview } from "./work-unit-relation-modeling-prev
 // 上下文端口（1b 只有 L1 兜底的 global recap）。全部读同一份记录型关系投影，账本不可用时如实报 SERVICE_UNAVAILABLE。
 
 export interface CreateWorkUnitRelationReadApiDependencies {
+	suggestReferenceRelationsForTaskModeling?: RuntimeTrpcContext["workUnitRelationReadApi"]["suggestReferenceRelationsForTaskModeling"];
 	readRecordedInterWorkUnitRelationProjection: <T>(
 		read: (reader: RecordedInterWorkUnitRelationProjectionReader) => Promise<T> | T,
 	) => Promise<T>;
@@ -138,13 +139,15 @@ export function createWorkUnitRelationReadApi(
 					deps.getWorkspacePathById,
 				),
 			),
-		suggestReferenceRelationsForTaskModeling: async () => ({
-			availability: "unavailable" as const,
-			unavailableReason: "项目级关系建议服务尚未接入（a0401）。",
-			contextAsOf: null,
-			contextCompleteness: ["project_task_indexing_agent_not_implemented"],
-			candidates: [],
-		}),
+		suggestReferenceRelationsForTaskModeling:
+			deps.suggestReferenceRelationsForTaskModeling ??
+			(async () => ({
+				availability: "unavailable" as const,
+				unavailableReason: "项目级关系建议服务尚未接入（a0401）。",
+				contextAsOf: null,
+				contextCompleteness: ["project_task_indexing_agent_not_implemented"],
+				candidates: [],
+			})),
 		resolveKanbanBoardCardIdentityByBareTaskId: async (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
 		): Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse> =>

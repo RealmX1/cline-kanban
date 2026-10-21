@@ -28,12 +28,12 @@ export function resolveFocusViewDesktopPanelArrangement(
 		: preference;
 }
 
-export function selectTaskWorkbenchModuleInSlot(
-	slots: TaskWorkbenchModuleSlots,
+export function selectTaskWorkbenchModuleInSlot<Module extends string>(
+	slots: readonly [Module, Module],
 	slot: 0 | 1,
-	module: TaskWorkbenchModule,
-): TaskWorkbenchModuleSlots {
-	const next: [TaskWorkbenchModule, TaskWorkbenchModule] = [...slots];
+	module: Module,
+): readonly [Module, Module] {
+	const next: [Module, Module] = [...slots];
 	const otherSlot = slot === 0 ? 1 : 0;
 	if (next[otherSlot] === module) next[otherSlot] = next[slot];
 	next[slot] = module;

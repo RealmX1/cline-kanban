@@ -11,6 +11,7 @@ const queries = vi.hoisted(() => ({
 	readRelationModelingPreview: vi.fn(),
 	applyReferenceRelationModelingChangesFromExplicitUserGesture: vi.fn(),
 	resolveRelationModelingCounterpart: vi.fn(),
+	requestReferenceRelationModelingSuggestions: vi.fn(),
 }));
 vi.mock("@/runtime/work-unit-relation-modeling-query", () => queries);
 vi.mock("@/components/detail-panels/work-unit-relation-counterpart-kanban-board-card-picker", () => ({
@@ -56,10 +57,15 @@ function Harness({
 	showEditor = true,
 }: {
 	workspaceId?: string;
-	taskId?: string;
+	taskId?: string | null;
 	showEditor?: boolean;
 }) {
-	controller = useReferenceRelationModelingEditor({ workspaceId, taskId });
+	controller = useReferenceRelationModelingEditor({
+		workspaceId,
+		taskId,
+		draftTaskTitle: "新要求",
+		draftTaskPrompt: "当前完整要求",
+	});
 	return showEditor ? (
 		<ReferenceRelationModelingEditor
 			controller={controller}
@@ -122,6 +128,13 @@ beforeEach(async () => {
 	queries.readRelationModelingEditorDraft.mockResolvedValue(null);
 	queries.persistRelationModelingEditorDraft.mockResolvedValue({ saved: true });
 	queries.resolveRelationModelingCounterpart.mockResolvedValue(counterpartWorkUnit);
+	queries.requestReferenceRelationModelingSuggestions.mockResolvedValue({
+		availability: "available",
+		unavailableReason: null,
+		contextAsOf: 1,
+		contextCompleteness: [],
+		candidates: [],
+	});
 	container = document.body.appendChild(document.createElement("div"));
 	root = createRoot(container);
 	await act(async () => root.render(<Harness />));
@@ -131,6 +144,73 @@ afterEach(async () => {
 	container.remove();
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
+});
+
+describe("按需 AI 关系建议", () => {
+	it("创建中的完整要求参与查询，选择候选后才进入草稿", async () => {
+		await act(async () => root.render(<Harness taskId={null} />));
+		expect(queries.requestReferenceRelationModelingSuggestions).not.toHaveBeenCalled();
+		queries.requestReferenceRelationModelingSuggestions.mockResolvedValueOnce({
+			availability: "available",
+			unavailableReason: null,
+			contextAsOf: 1,
+			contextCompleteness: [],
+			candidates: [
+				{
+					candidateId: "suggested",
+					rationale: "两张卡处理同一问题",
+					evidencePointers: ["src/file.ts:1"],
+					relationDraft: {
+						draftId: "suggested",
+						replacesRelationId: null,
+						expectedAssertedRelationStateVersion: null,
+						counterpartWorkUnit,
+						relationKind: "reference_is_generally_related_with",
+						currentTaskIsStatementSubject: true,
+						relationAssertionRationaleOneSentence: "两张卡处理同一问题",
+						relationAssertionEvidencePointers: ["src/file.ts:1"],
+						assertedRelationKindSpecificAttributes: {},
+					},
+				},
+			],
+		});
+		await clickButton("获取关系建议");
+		expect(queries.requestReferenceRelationModelingSuggestions).toHaveBeenCalledWith(
+			"project-a",
+			expect.objectContaining({ workUnit: null, draftTaskPrompt: "当前完整要求", draftTaskTitle: "新要求" }),
+		);
+		expect(container.textContent).toContain("两张卡处理同一问题");
+		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+		await clickButton("加入草稿");
+		expect(controller.draft.referenceRelationDrafts).toHaveLength(1);
+		expect(queries.applyReferenceRelationModelingChangesFromExplicitUserGesture).not.toHaveBeenCalled();
+	});
+	it("已有任务请求、零候选、不可用与失败分别呈现", async () => {
+		await clickButton("获取关系建议");
+		expect(queries.requestReferenceRelationModelingSuggestions).toHaveBeenCalledWith(
+			"project-a",
+			expect.objectContaining({
+				workUnit: {
+					workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+					bareTaskId: "task-a",
+					workspaceId: "project-a",
+				},
+			}),
+		);
+		expect(container.textContent).toContain("本次未找到相关任务");
+		queries.requestReferenceRelationModelingSuggestions.mockResolvedValueOnce({
+			availability: "unavailable",
+			unavailableReason: "执行器尚未配置",
+			contextAsOf: null,
+			contextCompleteness: [],
+			candidates: [],
+		});
+		await clickButton("获取关系建议");
+		expect(container.textContent).toContain("执行器尚未配置");
+		queries.requestReferenceRelationModelingSuggestions.mockRejectedValueOnce(new Error("服务断开"));
+		await clickButton("获取关系建议");
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("关系建议失败：服务断开");
+	});
 });
 
 describe("关系表单迟到的身份解析", () => {

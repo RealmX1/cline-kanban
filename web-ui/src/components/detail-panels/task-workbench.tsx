@@ -12,25 +12,34 @@ import { ResizeHandle } from "@/resize/resize-handle";
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 
-const MODULES = Object.keys(TASK_WORKBENCH_MODULE_LABELS) as TaskWorkbenchModule[];
 const DEFAULT_SLOTS: TaskWorkbenchModuleSlots = ["task_sessions", "prompt_tools"];
-function loadModuleSlots(): TaskWorkbenchModuleSlots {
+function loadModuleSlots<Module extends string>(
+	moduleLabels: Record<Module, string>,
+	defaultSlots: readonly [Module, Module],
+	storageKey: LocalStorageKey,
+): readonly [Module, Module] {
+	const availableModules = Object.keys(moduleLabels);
 	try {
-		const stored: unknown = JSON.parse(readLocalStorageItem(LocalStorageKey.TaskWorkbenchModuleSlots) ?? "null");
+		const stored: unknown = JSON.parse(readLocalStorageItem(storageKey) ?? "null");
 		if (
 			Array.isArray(stored) &&
 			stored.length === 2 &&
 			stored[0] !== stored[1] &&
-			stored.every((entry) => MODULES.includes(entry))
+			stored.every((entry) => availableModules.includes(entry))
 		)
-			return stored as [TaskWorkbenchModule, TaskWorkbenchModule];
+			return stored as [Module, Module];
 	} catch {
 		/* 损坏的布局偏好回到默认格位。 */
 	}
-	return DEFAULT_SLOTS;
+	return defaultSlots;
 }
 
-export function TaskWorkbench({
+export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
+	moduleLabels = TASK_WORKBENCH_MODULE_LABELS as unknown as Record<Module, string>,
+	defaultSlots = DEFAULT_SLOTS as unknown as readonly [Module, Module],
+	moduleSlotsStorageKey = LocalStorageKey.TaskWorkbenchModuleSlots,
+	workbenchTitle = "任务工作台",
+	moduleSelectionRequest,
 	modules,
 	isBelowAgent,
 	arrangementPreference,
@@ -41,7 +50,12 @@ export function TaskWorkbench({
 	queueAnnouncement,
 	onOpenQueue,
 }: {
-	modules: Record<TaskWorkbenchModule, ReactNode>;
+	modules: Record<Module, ReactNode>;
+	moduleLabels?: Record<Module, string>;
+	defaultSlots?: readonly [Module, Module];
+	moduleSlotsStorageKey?: LocalStorageKey;
+	workbenchTitle?: string;
+	moduleSelectionRequest?: { slot: 0 | 1; module: Module; requestKey: number };
 	isBelowAgent: boolean;
 	arrangementPreference: FocusViewDesktopPanelArrangementPreference;
 	onArrangementPreferenceChange: (value: FocusViewDesktopPanelArrangementPreference) => void;
@@ -51,7 +65,8 @@ export function TaskWorkbench({
 	queueAnnouncement?: string | null;
 	onOpenQueue?: () => void;
 }) {
-	const [slots, setSlots] = useState(loadModuleSlots);
+	const availableModules = Object.keys(moduleLabels) as Module[];
+	const [slots, setSlots] = useState(() => loadModuleSlots(moduleLabels, defaultSlots, moduleSlotsStorageKey));
 	const rootRef = useRef<HTMLDivElement>(null);
 	const slotAwaitingKeyboardFocus = useRef<number | null>(null);
 	useEffect(() => {
@@ -62,19 +77,33 @@ export function TaskWorkbench({
 		slotAwaitingKeyboardFocus.current = null;
 	}, [slots]);
 	const { startDrag } = useResizeDrag();
-	useLayoutResetEffect(() => setSlots(DEFAULT_SLOTS));
-	const selectModule = (slot: 0 | 1, module: TaskWorkbenchModule) => {
+	const requestedSlot = moduleSelectionRequest?.slot;
+	const requestedModule = moduleSelectionRequest?.module;
+	const requestKey = moduleSelectionRequest?.requestKey;
+	useEffect(() => {
+		if (!requestKey || requestedSlot === undefined || !requestedModule) return;
+		setSlots((current) => {
+			const next = selectTaskWorkbenchModuleInSlot(current, requestedSlot, requestedModule);
+			writeLocalStorageItem(moduleSlotsStorageKey, JSON.stringify(next));
+			return next;
+		});
+	}, [requestedSlot, requestedModule, requestKey, moduleSlotsStorageKey]);
+	useLayoutResetEffect(() => setSlots(defaultSlots));
+	const selectModule = (slot: 0 | 1, module: Module) => {
 		slotAwaitingKeyboardFocus.current = slot;
 		setSlots((current) => {
 			const next = selectTaskWorkbenchModuleInSlot(current, slot, module);
-			writeLocalStorageItem(LocalStorageKey.TaskWorkbenchModuleSlots, JSON.stringify(next));
+			writeLocalStorageItem(moduleSlotsStorageKey, JSON.stringify(next));
 			return next;
 		});
 	};
 	return (
-		<section aria-label="任务工作台" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-1">
+		<section
+			aria-label={workbenchTitle}
+			className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-1"
+		>
 			<div className="flex min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs">
-				<span className="font-medium">任务工作台</span>
+				<span className="font-medium">{workbenchTitle}</span>
 				<span className="sr-only" role="status" aria-live="polite">
 					{queueAnnouncement ?? ""}
 				</span>
@@ -83,7 +112,8 @@ export function TaskWorkbench({
 						type="button"
 						className="text-status-orange"
 						onClick={() => {
-							selectModule(1, "prompt_tools");
+							const promptModule = availableModules.find((module) => module === "prompt_tools");
+							if (promptModule) selectModule(1, promptModule);
 							onOpenQueue?.();
 						}}
 					>
@@ -122,7 +152,7 @@ export function TaskWorkbench({
 							}
 				}
 			>
-				{MODULES.map((module) => {
+				{availableModules.map((module) => {
 					const slot = slots.indexOf(module);
 					return (
 						<div
@@ -137,11 +167,11 @@ export function TaskWorkbench({
 									aria-label={`工作台格位 ${slot + 1}`}
 									className="h-6 max-w-full rounded-sm bg-surface-2 px-1 text-xs text-text-primary"
 									value={module}
-									onChange={(event) => selectModule(slot as 0 | 1, event.target.value as TaskWorkbenchModule)}
+									onChange={(event) => selectModule(slot as 0 | 1, event.target.value as Module)}
 								>
-									{MODULES.map((option) => (
+									{availableModules.map((option) => (
 										<option key={option} value={option}>
-											{TASK_WORKBENCH_MODULE_LABELS[option]}
+											{moduleLabels[option]}
 										</option>
 									))}
 								</select>
@@ -149,7 +179,7 @@ export function TaskWorkbench({
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
 								{modules[module] ?? (
 									<p className="p-3 text-xs text-text-secondary">
-										此任务暂无可用的{TASK_WORKBENCH_MODULE_LABELS[module]}内容。
+										此任务暂无可用的{moduleLabels[module]}内容。
 									</p>
 								)}
 							</div>

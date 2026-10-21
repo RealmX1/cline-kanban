@@ -1,6 +1,7 @@
 import type {
 	ApplyReferenceRelationModelingChangesRequest,
 	ReferenceRelationModelingEditorDraft,
+	ReferenceRelationModelingSuggestionsRequest,
 	RelationModelingPreviewRequest,
 } from "@runtime-work-unit-relation-modeling-api-contract";
 import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "@/runtime/new-backlog-task-card-persistence-before-agent-session-start-query";
@@ -9,6 +10,12 @@ import type { RuntimeBoardCard } from "@/runtime/types";
 
 export function readRelationModelingPreview(workspaceId: string, input: RelationModelingPreviewRequest) {
 	return getRuntimeTrpcClient(workspaceId).workUnit.getRelationModelingPreview.query(input);
+}
+export function requestReferenceRelationModelingSuggestions(
+	workspaceId: string,
+	input: ReferenceRelationModelingSuggestionsRequest,
+) {
+	return getRuntimeTrpcClient(workspaceId).workUnit.suggestReferenceRelationsForTaskModeling.mutate(input);
 }
 export function applyReferenceRelationModelingChangesFromExplicitUserGesture(
 	workspaceId: string,

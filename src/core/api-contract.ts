@@ -2752,6 +2752,11 @@ export const runtimeStateStreamPromptLibraryUpdatedMessageSchema = z.object({
 });
 
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("task_lookup_conversation_updated"),
+		conversationId: z.string().uuid(),
+		revision: z.number().int(),
+	}),
 	runtimeStateStreamPromptLibraryUpdatedMessageSchema,
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,

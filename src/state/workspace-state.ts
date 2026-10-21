@@ -822,6 +822,22 @@ export async function removeWorkspaceIndexEntry(workspaceId: string): Promise<bo
 	});
 }
 
+/** 只读操作与 board 写入共用锁；回调完成前不释放，避免校验后到外部持久提交之间被改写。 */
+export async function readWorkspaceBoardByIdAndRunWithBoardLockHeld<T>(
+	workspaceId: string,
+	readAndRunWithBoardLockHeld: (board: RuntimeBoardData) => Promise<T>,
+): Promise<T> {
+	const context = await loadWorkspaceContextById(workspaceId);
+	if (!context) throw new Error(`找不到项目 ${workspaceId}。`);
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const board = await readWorkspaceBoard(workspaceId);
+		const sessions = await readWorkspaceSessions(workspaceId);
+		const meta = await readWorkspaceMeta(workspaceId);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(context, board, sessions, meta.revision);
+		return await readAndRunWithBoardLockHeld(board);
+	});
+}
+
 export async function loadPersistedWorkspaceStateById(workspaceId: string): Promise<PersistedWorkspaceStateById> {
 	const board = await readWorkspaceBoard(workspaceId);
 	const sessions = await readWorkspaceSessions(workspaceId);

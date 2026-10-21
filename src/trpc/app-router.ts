@@ -489,6 +489,23 @@ import {
 	type SetProjectVisualIdentityRequest,
 	setProjectVisualIdentityRequestSchema,
 } from "../core/project-visual-identity";
+import {
+	appendTaskCommentRequestSchema,
+	appendTaskCommentResponseSchema,
+	IncomingWorkItemTriageOperationError,
+	incomingWorkItemSchema,
+	incomingWorkItemTriageResponseSchema,
+	sharedTaskIndexingContextSchema,
+	taskIndexingSupportExecutorSettingsSchema,
+} from "../core/task-indexing-support-contract";
+import {
+	createTaskLookupConversationRequestSchema,
+	submitTaskLookupTurnRequestSchema,
+	taskLookupCandidatePreviewRequestSchema,
+	taskLookupCandidatePreviewSchema,
+	taskLookupConversationIdentitySchema,
+	taskLookupConversationSchema,
+} from "../core/task-lookup-conversation-contract";
 import type {
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
@@ -518,9 +535,11 @@ import {
 	applyReferenceRelationModelingChangesRequestSchema,
 	applyReferenceRelationModelingChangesResponseSchema,
 	type ReferenceRelationModelingEditorDraft,
+	type ReferenceRelationModelingSuggestionsRequest,
 	type RelationModelingPreviewRequest,
 	type RelationModelingPreviewResponse,
 	referenceRelationModelingEditorDraftSchema,
+	referenceRelationModelingSuggestionsRequestSchema,
 	referenceRelationModelingSuggestionsResponseSchema,
 	relationModelingEditorDraftReadRequestSchema,
 	relationModelingEditorDraftSaveRequestSchema,
@@ -566,6 +585,8 @@ import {
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
+import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -573,6 +594,8 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskLookupConversationApi?: TaskLookupConversationService;
+	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
 	independentTaskCreationApi?: IndependentTaskCreationService;
 	taskMainSessionHandoverApi?: {
 		prepare: (
@@ -1080,7 +1103,7 @@ export interface RuntimeTrpcContext {
 		}) => Promise<{ saved: boolean }>;
 		getRelationModelingPreview: (input: RelationModelingPreviewRequest) => Promise<RelationModelingPreviewResponse>;
 		suggestReferenceRelationsForTaskModeling: (
-			input: RelationModelingPreviewRequest,
+			input: ReferenceRelationModelingSuggestionsRequest,
 		) => Promise<z.infer<typeof referenceRelationModelingSuggestionsResponseSchema>>;
 		resolveKanbanBoardCardIdentityByBareTaskId: (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
@@ -1188,6 +1211,9 @@ const t = initTRPC.context<RuntimeTrpcContext>().create({
 			data: {
 				...shape.data,
 				conflictRevision,
+				...(error.cause instanceof IncomingWorkItemTriageOperationError
+					? { incomingWorkItemTriageOperationFailure: error.cause.operationFailure }
+					: {}),
 			},
 		};
 	},
@@ -1349,6 +1375,79 @@ export const runtimeAppRouter = t.router({
 		archivedAudio: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string() }))
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
+	}),
+	support: t.router({
+		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(createTaskLookupConversationRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.createConversation(input);
+			}),
+		listTaskLookupConversations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(z.array(taskLookupConversationSchema))
+			.query(({ ctx }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.listConversations();
+			}),
+		getTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.getConversation(input.conversationId);
+			}),
+		submitTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(submitTaskLookupTurnRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.submitTurn(input);
+			}),
+		cancelTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.cancelTurn(input.conversationId);
+			}),
+		readTaskLookupCandidatePreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupCandidatePreviewRequestSchema)
+			.output(taskLookupCandidatePreviewSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.readCandidatePreview(input.conversationId, input.taskReference);
+			}),
+		getTaskIndexingContext: workspaceProcedure.output(sharedTaskIndexingContextSchema).query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getTaskIndexingContext(ctx.workspaceScope);
+		}),
+		triageIncomingWorkItem: workspaceProcedure
+			.input(incomingWorkItemSchema)
+			.output(incomingWorkItemTriageResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
+			}),
+		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getExecutorSettings(ctx.workspaceScope);
+		}),
+		setExecutorSettings: workspaceProcedure
+			.input(taskIndexingSupportExecutorSettingsSchema)
+			.output(taskIndexingSupportExecutorSettingsSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
+			}),
+		scheduleRvfFindingsBackfill: workspaceProcedure.mutation(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.scheduleBackfill(ctx.workspaceScope);
+		}),
+		getRvfFindingsBackfillStatus: workspaceProcedure.query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.readBackfillStatus(ctx.workspaceScope);
+		}),
 	}),
 	independentTaskCreation: t.router({
 		read: workspaceProcedure
@@ -2052,6 +2151,17 @@ export const runtimeAppRouter = t.router({
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
 	taskCardAction: t.router({
+		appendTaskComment: workspaceProcedure
+			.input(appendTaskCommentRequestSchema)
+			.output(appendTaskCommentResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.appendTaskComment(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
 		readTaskCardWithBoardColumn: workspaceProcedure
 			.input(runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema)
 			.output(runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema)
@@ -2347,7 +2457,7 @@ export const runtimeAppRouter = t.router({
 			.output(relationModelingPreviewResponseSchema)
 			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getRelationModelingPreview(input)),
 		suggestReferenceRelationsForTaskModeling: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(relationModelingPreviewRequestSchema)
+			.input(referenceRelationModelingSuggestionsRequestSchema)
 			.output(referenceRelationModelingSuggestionsResponseSchema)
 			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.suggestReferenceRelationsForTaskModeling(input)),
 		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce

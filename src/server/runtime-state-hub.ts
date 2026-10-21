@@ -89,6 +89,7 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	broadcastTaskLookupConversationUpdated: (conversationId: string, revision: number) => void;
 	trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => void;
 	trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => void;
 	broadcastTaskChatMessage: (workspaceId: string, taskId: string, message: RuntimeTaskChatMessage) => void;
@@ -1058,6 +1059,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "acp");
 		},
 		broadcastTaskChatMessage,
+		broadcastTaskLookupConversationUpdated: (conversationId, revision) => {
+			for (const client of runtimeStateClients)
+				sendRuntimeStateMessage(client, { type: "task_lookup_conversation_updated", conversationId, revision });
+		},
 		broadcastTaskChatCleared,
 		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
 		handleUpgrade: (request, socket, head, context) => {

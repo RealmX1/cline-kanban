@@ -69,6 +69,10 @@ export function topBarTaskSpotlightSearchTriggerAnchorKey(): string {
 	return "top-bar-task-spotlight-search-trigger";
 }
 
+export function topBarTaskLookupWorkbenchTriggerAnchorKey(): string {
+	return "top-bar-task-lookup-workbench-trigger";
+}
+
 // 顶栏里的应用内通知中心铃铛。单例、不带 id：全局同时只存在一个。
 // 它背后的「全部历史」弹窗要验的东西（真实多 repo 历史的时间排序、跨重启的已读持久化、
 // 真浏览器里的 header 布局）都只有真实运行实例才验得到，因此这个锚点由引导人工型验证消费。

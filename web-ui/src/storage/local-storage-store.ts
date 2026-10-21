@@ -20,6 +20,10 @@ export enum LocalStorageKey {
 	FocusViewDesktopPanelArrangementPreference = "kanban.focus-view-desktop-panel-arrangement-preference.v1",
 	FocusViewStackedAgentPanelHeightRatio = "kanban.focus-view-stacked-agent-panel-height-ratio.v1",
 	TaskWorkbenchModuleSlots = "kanban.task-workbench-module-slots.v1",
+	TaskLookupWorkbenchModuleSlots = "kanban.task-lookup-workbench-module-slots.v1",
+	TaskLookupConversationSelection = "kanban.task-lookup-conversation-selection.v1",
+	TaskLookupAgentPanelRatio = "kanban.task-lookup-agent-panel-ratio.v1",
+	TaskLookupWorkbenchSlotRatio = "kanban.task-lookup-workbench-slot-ratio.v1",
 	TaskWorkbenchSideBySideSlotWidthRatio = "kanban.task-workbench-side-by-side-slot-width-ratio.v1",
 	// Prompt Library 的真相源已搬到服务端（~/.cline/kanban[/workspaces/<id>]/prompt-library.json）。
 	// 下面三个键只剩「升级前留下的历史数据」这一个用途，由 prompt-library-migration-from-browser-local-storage.ts
@@ -94,6 +98,9 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.FocusViewDesktopPanelArrangementPreference,
 	LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
 	LocalStorageKey.TaskWorkbenchModuleSlots,
+	LocalStorageKey.TaskLookupWorkbenchModuleSlots,
+	LocalStorageKey.TaskLookupAgentPanelRatio,
+	LocalStorageKey.TaskLookupWorkbenchSlotRatio,
 	LocalStorageKey.TaskWorkbenchSideBySideSlotWidthRatio,
 	LocalStorageKey.ProjectNavigationPanelWidth,
 	LocalStorageKey.ProjectNavigationPanelCollapsed,
