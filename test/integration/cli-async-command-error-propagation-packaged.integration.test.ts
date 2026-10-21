@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
+import { rvfReviewStartBoundaryResponseSchema } from "../../src/core/rvf-automatic-closeout-contract";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
@@ -25,7 +26,7 @@ const cliExitDeadline = {
 const packagedCliTestTimeoutMs = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
 	runtimeColdStartCount: 1,
 	testBodyTimeoutBudgetMs: 30_000,
-	cliChildProcessSpawns: { cliChildProcessSpawnCount: 4, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
+	cliChildProcessSpawns: { cliChildProcessSpawnCount: 5, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
 });
 async function buildPackagedCli(fixture: IsolatedGitTestWorkspaceFixture): Promise<string> {
 	const packageDirectory = join(fixture.fixtureRootDirectoryPath, "packaged-cli");
@@ -62,6 +63,16 @@ async function buildPackagedCli(fixture: IsolatedGitTestWorkspaceFixture): Promi
 afterEach(async () => {
 	await spawnedCliProcesses.sigkillEveryStillRunningChildProcessAndWaitForExit();
 });
+
+async function preserveRawCliContractEvidenceWhenRequested(
+	observationName: string,
+	result: { exitCode: number | null; stdout: string; stderr: string },
+): Promise<void> {
+	const evidenceDirectory = process.env.KANBAN_CLI_ASYNC_COMMAND_ERROR_PROPAGATION_EVIDENCE_DIRECTORY?.trim();
+	if (!evidenceDirectory) return;
+	await mkdir(evidenceDirectory, { recursive: true });
+	await writeFile(join(evidenceDirectory, `${observationName}.json`), `${JSON.stringify(result, null, 2)}\n`);
+}
 
 async function runPackagedCli(input: {
 	testContext: LoadSensitiveDeadlineAnnotatingTestContext;
@@ -124,13 +135,15 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 				"0123456789abcdef",
 			],
 		});
+		await preserveRawCliContractEvidenceWhenRequested("unregistered-project-async-failure", result);
 		expect(result.exitCode, result.stderr).toBe(1);
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toContain("Kanban 执行失败：");
 		expect(result.stderr).toContain(repository.repositoryPath);
+		expect(result.stderr.match(/Kanban 执行失败：/g)).toHaveLength(1);
 	});
 
-	it("真实 runtime 的 capture 拒绝不假成功，正常大 JSON 输出不截断，server 保持运行", async (testContext) => {
+	it("真实 runtime 区分已知捕获诊断与未知 RPC 异常，完整输出 JSON 并保留 server 与硬超时语义", async (testContext) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const packagedCliEntrypoint = await buildPackagedCli(fixture);
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "runtime-capture-rejection" });
@@ -162,7 +175,7 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 				args,
 				runtimePort,
 			});
-		const rejectedCapture = await command([
+		const captureArguments = [
 			"task",
 			"capture-rvf-review-start-boundary",
 			"--project-path",
@@ -171,11 +184,17 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 			"isolated-missing-task",
 			"--decision-token",
 			"0123456789abcdef",
-		]);
-		expect(rejectedCapture.exitCode, rejectedCapture.stderr).toBe(1);
-		expect(rejectedCapture.stdout).toBe("");
-		expect(rejectedCapture.stderr).toContain("任务已删除或结案，自动收尾已暂停。");
-		expect(rejectedCapture.stderr.match(/Kanban 执行失败：/g)).toHaveLength(1);
+		];
+		const rejectedCapture = await command(captureArguments);
+		await preserveRawCliContractEvidenceWhenRequested("known-missing-task-typed-capture-diagnostic", rejectedCapture);
+		expect(rejectedCapture.exitCode, rejectedCapture.stdout + rejectedCapture.stderr).toBe(12);
+		expect(rvfReviewStartBoundaryResponseSchema.parse(JSON.parse(rejectedCapture.stdout))).toEqual({
+			status: "pending",
+			reason: "任务已删除或结案，自动收尾已暂停。",
+			reason_code: "review_start_boundary_host_session_unavailable",
+			recovery_action: "inspect_boundary_diagnostic",
+		});
+		expect(rejectedCapture.stderr).not.toContain("Kanban 执行失败：");
 
 		const completePrompt = `大输出验证 ${"边界验证".repeat(8_000)} 末尾完整标记`;
 		const created = await command([
@@ -195,6 +214,34 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 		expect(JSON.parse(listed.stdout).tasks[0].prompt).toBe(completePrompt);
 		expect(server.exitCode).toBeNull();
 		expect(server.signalCode).toBeNull();
+
+		// 只破坏此 fixture 的 closeout 文件：真实 runtime 读到未知存储异常，未经 mock 的 HTTP 返回原错误。
+		const isolatedWorkspacesPath = join(fixture.isolatedHomeDirectoryPath, ".cline/kanban/workspaces");
+		const isolatedWorkspaces = (await readdir(isolatedWorkspacesPath, { withFileTypes: true })).filter((entry) =>
+			entry.isDirectory(),
+		);
+		expect(isolatedWorkspaces).toHaveLength(1);
+		const isolatedCloseoutStorePath = join(
+			isolatedWorkspacesPath,
+			isolatedWorkspaces[0].name,
+			"rvf-automatic-rewind-and-closeout-records.json",
+		);
+		const originalCloseoutStore = await readFile(isolatedCloseoutStorePath).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return null;
+			throw error;
+		});
+		try {
+			await writeFile(isolatedCloseoutStorePath, "{}");
+			const unknownRpcFailure = await command(captureArguments);
+			await preserveRawCliContractEvidenceWhenRequested("unknown-runtime-storage-rpc-failure", unknownRpcFailure);
+			expect(unknownRpcFailure.exitCode, unknownRpcFailure.stderr).toBe(1);
+			expect(unknownRpcFailure.stdout).toBe("");
+			expect(unknownRpcFailure.stderr).toContain("Invalid input: expected array, received object");
+			expect(unknownRpcFailure.stderr.match(/Kanban 执行失败：/g)).toHaveLength(1);
+		} finally {
+			if (originalCloseoutStore === null) await rm(isolatedCloseoutStorePath, { force: true });
+			else await writeFile(isolatedCloseoutStorePath, originalCloseoutStore);
+		}
 
 		let hangingRuntimeReceivedRequest = false;
 		const hangingRuntime = createServer(() => {
