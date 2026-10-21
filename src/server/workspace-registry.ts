@@ -1,3 +1,7 @@
+import {
+	prepareCodexNativeSessionControlHostLaunch,
+	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
+} from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
@@ -407,6 +411,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		const loading = (async () => {
 			const manager = new TerminalSessionManager({
+				prepareCodexNativeSessionControlHostLaunch,
+				restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
 				hostedTerminalPtyProcessSpawner: deps.createHostedTerminalPtyProcessSpawnerForWorkspace?.(
 					workspaceId,
 					repoPath,
