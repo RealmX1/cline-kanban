@@ -1,3 +1,7 @@
+import {
+	prepareCodexNativeSessionControlHostLaunch,
+	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
+} from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
@@ -13,6 +17,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import { getDefaultProjectVisualIdentity, type ProjectVisualIdentity } from "../core/project-visual-identity";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
@@ -20,6 +25,7 @@ import {
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAgentSessionReclamationDeadlineRecords,
 } from "../state/agent-session-reclamation-deadline-store";
+import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	listWorkspaceIndexEntries,
@@ -61,7 +67,7 @@ export interface CreateWorkspaceRegistryDependencies {
 	inspectRuntimeProjectAvailability?: typeof inspectRuntimeProjectAvailability;
 	onTerminalManagerReady?: (workspaceId: string, manager: TerminalSessionManager) => void;
 	// Cline SDK / ACP 会话不在 TerminalSessionManager 里，由 runtime-state-hub 订阅持有。跨项目视图
-	// （Board Overview 明细、跨项目切换面板）要覆盖全部三种 transport，故后绑定一个读口（hub 晚于 registry 创建）。
+	// （in_progress 明细、跨项目切换面板）要覆盖全部三种 transport，故后绑定一个读口（hub 晚于 registry 创建）。
 	listConversationTaskSessionSummariesForWorkspace?: (workspaceId: string) => RuntimeTaskSessionSummary[];
 	// agent session PTY host 模式启用时提供：每个 workspace 的 TerminalSessionManager 经它把 PTY 交给 host 进程持有。
 	createHostedTerminalPtyProcessSpawnerForWorkspace?: (
@@ -310,11 +316,12 @@ function countTasksByColumn(board: RuntimeBoardData): RuntimeProjectTaskCounts {
 function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
+	visualIdentity?: ProjectVisualIdentity;
 	taskCounts: RuntimeProjectTaskCounts;
-	// board 列归属的原始计数（未套 live-session overlay），供 Stage-First Overview 用。快路径可省略，
-	// 下一次 projects_updated/snapshot 广播补齐（见 ADR-0001）。
+	// board 列归属的原始计数（未套 live-session overlay）。原供已退役的 Stage-First Overview，现无前端消费者，
+	// 为兼容旧 bundle 暂留（ADR-0001，已 Superseded）。快路径可省略，下一次 projects_updated/snapshot 广播补齐。
 	rawColumnTaskCounts?: RuntimeProjectTaskCounts;
-	// in_progress 列 task 明细，供 Stage-First Overview 展开 In-Progress 阶段。快路径省略时默认空数组。
+	// in_progress 列 task 明细，供顶栏项目切换器数 live agent。快路径省略时默认空数组。
 	inProgressTaskDetails?: RuntimeInProgressTaskDetail[];
 	// 跨项目切换面板条目。快路径省略时默认空数组，下一次广播补齐。
 	crossProjectTaskSwitcherEntries?: RuntimeCrossProjectTaskSwitcherEntry[];
@@ -328,6 +335,7 @@ function toProjectSummary(project: {
 		id: project.workspaceId,
 		path: project.repoPath,
 		name,
+		visualIdentity: project.visualIdentity ?? getDefaultProjectVisualIdentity(project.workspaceId, name),
 		taskCounts: project.taskCounts,
 		availability: project.availability ?? { status: "available" },
 		...(project.rawColumnTaskCounts ? { rawColumnTaskCounts: project.rawColumnTaskCounts } : {}),
@@ -403,6 +411,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		const loading = (async () => {
 			const manager = new TerminalSessionManager({
+				prepareCodexNativeSessionControlHostLaunch,
+				restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
 				hostedTerminalPtyProcessSpawner: deps.createHostedTerminalPtyProcessSpawnerForWorkspace?.(
 					workspaceId,
 					repoPath,
@@ -490,7 +500,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		};
 	};
 
-	// 单个 project 的 board + 全部三种 transport 的会话事实 + 「我最后打开」。Board Overview 明细、跨项目切换面板
+	// 单个 project 的 board + 全部三种 transport 的会话事实 + 「我最后打开」。in_progress 明细、跨项目切换面板
 	// 条目、「显示更早」查询共用这一份读取，不各自拼一遍会话来源。
 	//   - 已加载项目：TerminalSessionManager（已 hydrate 盘上记录）+ Cline SDK / ACP 会话叠加（后写覆盖先写，
 	//     与 runtime-server 的 listProjectRuntimeSessionSummaries 同序）。
@@ -532,8 +542,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 
 	// 一次性汇总单个 project 的四样数据（共用一次 loadProjectBoardAndTaskSessionFacts，零重复 I/O）：
 	//   - taskCounts：套 live-session overlay 的计数（主看板/项目列表用）。
-	//   - rawColumnTaskCounts：board 列归属的原始计数（Stage-First Overview 的 stage 计数用，见 ADR-0001）。
-	//   - inProgressTaskDetails：in_progress 列 task 明细（Stage-First Overview 展开 In-Progress 用）。
+	//   - rawColumnTaskCounts：board 列归属的原始计数（已无前端消费者，为兼容旧 bundle 暂留，见 ADR-0001 的 Superseded 说明）。
+	//   - inProgressTaskDetails：in_progress 列 task 明细（顶栏项目切换器的 live 计数用）。
 	//   - crossProjectTaskSwitcherEntries：跨项目切换面板条目（同一个 per-card 构造函数，取景不同）。
 	const summarizeProject = async (
 		workspaceId: string,
@@ -703,6 +713,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 				return toProjectSummary({
 					workspaceId: project.workspaceId,
 					repoPath: project.repoPath,
+					visualIdentity: await projectVisualIdentityStore.read(
+						project.workspaceId,
+						deriveProjectDisplayNameFromRepoPath(project.repoPath),
+					),
 					taskCounts,
 					rawColumnTaskCounts,
 					inProgressTaskDetails,

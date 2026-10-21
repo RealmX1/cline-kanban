@@ -45,9 +45,20 @@ const EXPANDED_DIFF_FILE_TREE_RATIO_PREFERENCE: ResizeNumberPreference = {
 	normalize: (value) => clampBetween(value, 0.12, 0.6),
 };
 
-// Vertical split of the right column: top = prompt library, bottom = diff. Default 50/50.
+// 工作台位于右侧时，两格的上下分配比例；沿用历史键，保留已有尺寸偏好。
 const RIGHT_PROMPT_RATIO_PREFERENCE: ResizeNumberPreference = {
 	key: LocalStorageKey.DetailRightPromptPanelRatio,
+	defaultValue: 0.5,
+	normalize: (value) => clampBetween(value, 0.15, 0.85),
+};
+
+const STACKED_AGENT_HEIGHT_RATIO_PREFERENCE: ResizeNumberPreference = {
+	key: LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
+	defaultValue: 0.6,
+	normalize: (value) => clampBetween(value, 0.25, 0.8),
+};
+const WORKBENCH_SIDE_BY_SIDE_SLOT_RATIO_PREFERENCE: ResizeNumberPreference = {
+	key: LocalStorageKey.TaskWorkbenchSideBySideSlotWidthRatio,
 	defaultValue: 0.5,
 	normalize: (value) => clampBetween(value, 0.15, 0.85),
 };
@@ -59,6 +70,10 @@ export function loadDetailTaskCardsPanelRatioPreference(): number {
 
 export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolean }): {
 	agentPanelRatio: number;
+	stackedAgentPanelHeightRatio: number;
+	setStackedAgentPanelHeightRatio: (ratio: number) => void;
+	workbenchSideBySideSlotRatio: number;
+	setWorkbenchSideBySideSlotRatio: (ratio: number) => void;
 	detailDiffFileTreeRatio: number;
 	detailRightPromptRatio: number;
 	detailTerminalPanelWidth: number;
@@ -85,6 +100,21 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 	const [detailRightPromptRatio, setDetailRightPromptRatioState] = useState(() =>
 		loadResizePreference(RIGHT_PROMPT_RATIO_PREFERENCE),
 	);
+
+	const [stackedAgentPanelHeightRatio, setStackedAgentPanelHeightRatioState] = useState(() =>
+		loadResizePreference(STACKED_AGENT_HEIGHT_RATIO_PREFERENCE),
+	);
+	const [workbenchSideBySideSlotRatio, setWorkbenchSideBySideSlotRatioState] = useState(() =>
+		loadResizePreference(WORKBENCH_SIDE_BY_SIDE_SLOT_RATIO_PREFERENCE),
+	);
+	const setStackedAgentPanelHeightRatio = useCallback((ratio: number) => {
+		setStackedAgentPanelHeightRatioState(persistResizePreference(STACKED_AGENT_HEIGHT_RATIO_PREFERENCE, ratio));
+	}, []);
+	const setWorkbenchSideBySideSlotRatio = useCallback((ratio: number) => {
+		setWorkbenchSideBySideSlotRatioState(
+			persistResizePreference(WORKBENCH_SIDE_BY_SIDE_SLOT_RATIO_PREFERENCE, ratio),
+		);
+	}, []);
 
 	const setTaskCardsPanelRatio = useCallback((ratio: number) => {
 		setTaskCardsPanelRatioState(persistResizePreference(TASK_CARDS_RATIO_PREFERENCE, ratio));
@@ -118,6 +148,8 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 	);
 
 	useLayoutResetEffect(() => {
+		setStackedAgentPanelHeightRatioState(0.6);
+		setWorkbenchSideBySideSlotRatioState(0.5);
 		setTaskCardsPanelRatioState(getResizePreferenceDefaultValue(TASK_CARDS_RATIO_PREFERENCE));
 		setAgentPanelRatioState(getResizePreferenceDefaultValue(AGENT_RATIO_PREFERENCE));
 		setDetailTerminalPanelWidthState(getResizePreferenceDefaultValue(DETAIL_TERMINAL_WIDTH_PREFERENCE));
@@ -131,6 +163,10 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 	});
 
 	return {
+		stackedAgentPanelHeightRatio,
+		setStackedAgentPanelHeightRatio,
+		workbenchSideBySideSlotRatio,
+		setWorkbenchSideBySideSlotRatio,
 		taskCardsPanelRatio,
 		setTaskCardsPanelRatio,
 		agentPanelRatio,

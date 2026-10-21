@@ -15,7 +15,7 @@ import {
 	type TaskBoardSemanticSearchIndex,
 } from "@/search/task-board-semantic-search";
 import { findDirectSubstringTaskBoardSearchResults } from "@/search/task-direct-substring-search";
-import { hoistTaskIdExactMatchedResultsToTop } from "@/search/task-id-match-search";
+import { hoistTaskIdMatchedResultsToTopByMatchTier } from "@/search/task-id-match-search";
 import {
 	resolveEffectiveTaskSearchResultSortOrder,
 	sortTaskSearchResults,
@@ -245,15 +245,15 @@ export function useTaskBoardSearch({
 			}
 			return sortResultsByScoreDescending(mergeTaskBoardSearchResults(fuzzyResults, semanticResults ?? []));
 		}
-		// task id 置顶层跨全部四种模式统一叠加：用户从地址栏 ?task= 或 worktree 路径拷来一个 id 时，
-		// 不该被迫先切模式。它只做「提到最前 + 补进结果集」，不改动任何模式自身的排序规则；
-		// query 不是完整 id 范式时原样返回入参引用，既有行为零变化。
-		// 刻意叠在 mode 分发**之外**：hybrid / semantic 的语义结果落地前后，被顶到第 0 位的都是同一个
+		// task id 置顶层跨全部四种模式统一叠加：用户从地址栏 ?task= 或 worktree 路径拷来一个 id（或只敲出它的
+		// 前几位）时，不该被迫先切模式。它只做「按全等 > 前缀 > 子串 > 单字符容错分档提到最前 + 补进结果集」，
+		// 不改动任何模式自身的排序规则；query 不是 3–5 位 id 片段、或没有任何 id 命中时原样返回入参引用。
+		// 刻意叠在 mode 分发**之外**：hybrid / semantic 的语义结果落地前后，被顶到最前的都是同一组
 		// document，顶行因此永远不动（不会因 semantic 落地而闪烁重排）。
 		//
 		// 排序档层夹在两者之间（各模式排序之后、ID 置顶之前）：换档只重排正文结果，
-		// 「粘贴一个完整 task id → 回车直达」在任意档下都仍然置顶。
-		return hoistTaskIdExactMatchedResultsToTop(
+		// 「粘贴一个 task id → 回车直达」在任意档下都仍然置顶。
+		return hoistTaskIdMatchedResultsToTopByMatchTier(
 			sortTaskSearchResults({
 				results: resolveBaseOrderedResultsForCurrentMode(),
 				sortOrder: effectiveSortOrder,

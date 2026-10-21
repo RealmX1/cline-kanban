@@ -15,10 +15,12 @@
 import type {
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
+	RuntimeTaskSessionSummary,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	createPendingTaskMessageInjectionRecord,
 	findTaskMessageInjectionRecord,
@@ -31,7 +33,7 @@ import {
 	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
-import { getWorkspaceDirectoryPath } from "../state/workspace-state";
+import { getWorkspaceDirectoryPath, loadWorkspaceBoardById } from "../state/workspace-state";
 
 // 调用方最多能要求等多久。与人排条目的保质期同一个数：队列里任何条目都不该活过它（终态保留、裁剪、
 // 投影都按这个量级设计）。契约里写的是 86 400 000。
@@ -45,13 +47,18 @@ export interface AgentIdleGatedProgrammaticTaskChatMessageQueueDependencies {
 		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	) => Promise<void>;
 	now?: () => number;
+	getTaskSessionSummary?: (taskId: string) => RuntimeTaskSessionSummary | null;
 }
 
 function buildInjectionLedgerPathForWorkspace(workspaceId: string): string {
 	return getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceId));
 }
 
-type InjectionLedgerPreflightOutcome = "idempotency_conflict" | "already_existed" | "created";
+type InjectionLedgerPreflightOutcome =
+	| "idempotency_conflict"
+	| "already_existed"
+	| "created"
+	| "native_requirement_mismatch";
 
 export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	deps: AgentIdleGatedProgrammaticTaskChatMessageQueueDependencies,
@@ -73,6 +80,18 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			error: `maxWaitForAgentIdleMs must not exceed ${MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS} (24 hours).`,
 		};
 	}
+	const board = await loadWorkspaceBoardById(workspaceId);
+	const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
+	const destinationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
+	const requiredSessionId = request.requiredNativeIndependentUserTurnSessionId;
+	const requiredSummary = requiredSessionId ? deps.getTaskSessionSummary?.(destinationSessionId) : null;
+	const requiredSessionIncarnationId = requiredSummary?.runtimeSessionIncarnationId;
+	const nativeRequirement = requiredSessionId
+		? {
+				requiredNativeIndependentUserTurnSessionId: requiredSessionId,
+				requiredNativeIndependentUserTurnSessionIncarnationId: requiredSessionIncarnationId ?? undefined,
+			}
+		: {};
 	const nowEpochMs = (deps.now ?? (() => Date.now()))();
 	const ledgerPath = buildInjectionLedgerPathForWorkspace(workspaceId);
 	const queueEntryId = buildQueuedProgrammaticInjectionQueueEntryId(idempotencyKey);
@@ -86,9 +105,20 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			const existing = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
 			if (existing) {
 				return {
-					result: existing.prompt_sha256 === request.promptSha256 ? "already_existed" : "idempotency_conflict",
+					result:
+						existing.prompt_sha256 === request.promptSha256 &&
+						existing.required_native_independent_user_turn_session_id === requiredSessionId
+							? "already_existed"
+							: "idempotency_conflict",
 				};
 			}
+			if (
+				requiredSessionId &&
+				(!requiredSessionIncarnationId ||
+					requiredSummary?.agentId !== "codex" ||
+					requiredSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== requiredSessionId)
+			)
+				return { result: "native_requirement_mismatch" };
 			const nowIso = new Date(nowEpochMs).toISOString();
 			const created = createPendingTaskMessageInjectionRecord({
 				taskId,
@@ -100,16 +130,19 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				agentIdleGate: {
 					waitDeadlineAtIso: new Date(agentIdleWaitDeadlineAtEpochMs).toISOString(),
 					queueEntryId,
+					...nativeRequirement,
 				},
 			});
 			return { records: [...records, created], result: "created" };
 		},
 	);
+	if (preflight === "native_requirement_mismatch")
+		return { ok: false, error: "独立原生回合要求与当前 Codex 会话身份不符。" };
 	if (preflight === "idempotency_conflict") {
 		return {
 			ok: false,
 			idempotencyConflict: true,
-			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash differs.`,
+			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash or required native session differs.`,
 		};
 	}
 	// 同 key 重发（记录早已存在）：幂等的定义就是「什么都不做，返回当前记录」——无论它已落定、是一条立即投递，
@@ -133,12 +166,15 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 		const { snapshot, outcome } = await enqueueAgentIdleGatedProgrammaticInjectionIntoQueue({
 			workspaceId,
 			enqueue: {
-				taskId,
+				taskId: destinationSessionId,
+				workspaceTaskId: card?.id ?? taskId,
+				injectionLedgerTaskId: taskId,
 				queueEntryId,
 				text: request.text,
 				injectionLedgerIdempotencyKey: idempotencyKey,
 				injectionSource: source,
 				agentIdleWaitDeadlineAtEpochMs,
+				...nativeRequirement,
 			},
 			nowEpochMs,
 		});
@@ -172,7 +208,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	// 回 ok:false，调用方会换 key 重投（同一段话送两遍），而真实投递结果回写账本只会拿到 already_settled，
 	// 账本那条「确定没送达」再也纠正不了。所以通知失败只吞掉，账本保持 pending、返回值保持 ok:true。
 	try {
-		await deps.notifyQueueMutated?.(workspaceId, taskId, queueSnapshotAfterDurableEnqueue);
+		await deps.notifyQueueMutated?.(workspaceId, destinationSessionId, queueSnapshotAfterDurableEnqueue);
 	} catch {
 		// 有意吞掉，理由见上。
 	}
@@ -191,19 +227,23 @@ export async function cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
 	idempotencyKey: string,
 ): Promise<"cancelled_before_delivery" | null> {
 	const findEntry = (snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot) =>
-		(snapshot.entriesByTaskId[taskId] ?? []).find(
-			(entry) => entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey === idempotencyKey,
-		) ?? null;
+		Object.values(snapshot.entriesByTaskId)
+			.flat()
+			.find(
+				(entry) =>
+					(entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerTaskId ?? entry.taskId) === taskId &&
+					entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey === idempotencyKey,
+			) ?? null;
 	const before = findEntry(await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId));
 	if (before === null || (before.deliveryState !== "queued" && before.deliveryState !== "claimed_for_dispatch")) {
 		return null;
 	}
 	const snapshot = await mutateWorkspaceQueuedTaskPromptDeliveries(
 		workspaceId,
-		{ kind: "cancel_queued_prompt_delivery", taskId, queueEntryId: before.queueEntryId },
+		{ kind: "cancel_queued_prompt_delivery", taskId: before.taskId, queueEntryId: before.queueEntryId },
 		(deps.now ?? (() => Date.now()))(),
 	);
-	await deps.notifyQueueMutated?.(workspaceId, taskId, snapshot);
+	await deps.notifyQueueMutated?.(workspaceId, before.taskId, snapshot);
 	// 读与撤之间它可能刚被交给终端投递（store 的取消只动 queued / claimed）——那就不是我们撤下的，交给 PTY 取消。
 	return findEntry(snapshot)?.deliveryState === "cancelled" ? "cancelled_before_delivery" : null;
 }

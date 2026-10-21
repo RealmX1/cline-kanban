@@ -120,7 +120,7 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 	if (entry.turnOwner !== "agent") {
 		return false;
 	}
-	// 与 Board Overview 的 Active 同一判据（lastOutputAt 含 spinner 重绘，spinner 期应算在跑）。
+	// 读 lastOutputAt（含 spinner 重绘）：spinner 期应算在跑。
 	return (
 		entry.isParkedAwaitingDispatchedBackgroundWork ||
 		isAgentOutputWithinActiveWindow(entry.lastOutputAt, nowMs, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS)
@@ -136,7 +136,7 @@ export function isTaskCardBoardColumnEligibleForPromptCacheWarmAwaitingUserSecti
 	return columnId === "in_progress" || columnId === "review";
 }
 
-// Running 区（以及 Board Overview 的 Active 组）的排序输入。
+// Running 区的排序输入。
 export type RunningSectionArrivalOrderingFacts = Pick<
 	RuntimeInProgressTaskDetail,
 	"agentResponseGenerationTurnStarted"
@@ -153,7 +153,7 @@ export function resolveRunningSectionArrivalOrderingKeyAt(facts: RunningSectionA
 }
 
 // 先进入的在前、后进入的在后；同一时刻按稳定键兜底，保证确定性。按调用方的条目形状产出比较器：
-// 切换面板的条目跨项目，稳定键必须是 (workspaceId, taskId)；Board Overview 已按 repo 分组，taskId 即可。
+// 切换面板的条目跨项目，稳定键必须是 (workspaceId, taskId)。
 export function createComparatorByCurrentAgentTurnStartAscendingThenStableKey<TItem>(
 	resolveOrderingFacts: (item: TItem) => RunningSectionArrivalOrderingFacts,
 	resolveStableKey: (item: TItem) => string,

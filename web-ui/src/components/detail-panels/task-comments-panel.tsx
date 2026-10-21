@@ -9,19 +9,12 @@ import {
 	useRef,
 	useState,
 } from "react";
-
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { TaskCommentEntry } from "@/types";
+import { createTaskCommentEntryId } from "@/utils/create-task-comment-entry-id";
 
 const COLLAPSED_COMMENT_TEXTAREA_VISIBLE_LINE_COUNT = 4;
-
-function createTaskCommentEntryId(): string {
-	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-		return crypto.randomUUID();
-	}
-	return `task-comment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 function formatTaskCommentMetadataTimestamp(timestamp: number): string {
 	if (!Number.isFinite(timestamp)) {
@@ -219,10 +212,12 @@ export function TaskCommentsPanel({
 	taskCommentEntries,
 	onTaskCommentEntriesChange,
 	headerContent,
+	submitNewCommentOnBlur = true,
 }: {
 	taskCommentEntries: TaskCommentEntry[];
 	onTaskCommentEntriesChange: (entries: TaskCommentEntry[]) => void;
 	headerContent?: ReactNode;
+	submitNewCommentOnBlur?: boolean;
 }): React.ReactElement {
 	const [newCommentText, setNewCommentText] = useState("");
 	const [newCommentHasCollapsibleContent, setNewCommentHasCollapsibleContent] = useState(false);
@@ -289,7 +284,7 @@ export function TaskCommentsPanel({
 						ref={newCommentTextareaRef}
 						value={newCommentText}
 						onChange={(event) => setNewCommentText(event.target.value)}
-						onBlur={handleAddTaskCommentEntry}
+						onBlur={submitNewCommentOnBlur ? handleAddTaskCommentEntry : undefined}
 						placeholder="Write a task comment..."
 						rows={1}
 						spellCheck={false}

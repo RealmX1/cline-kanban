@@ -1,3 +1,4 @@
+import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import type { RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse } from "@/runtime/types";
 
 /**
@@ -5,13 +6,16 @@ import type { RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizo
  *
  * 存在理由：一次跨项目打开里，面板会在「Focus View 左栏 → 过渡外壳 → 新任务的 Focus View 左栏」之间重挂载两次
  * （三处是不同的组件树）。只放组件 state 的话，每次重挂载都把滚动位置、「展开全部置顶」、「显示更早」已拉回的
- * 旧任务一起丢掉——用户眼里就是左栏在切换中整个跳回顶部、收起。同一时刻只会挂着一个面板实例，所以不需要订阅，
- * 挂载时读、变化时写即可。
+ * 旧任务一起丢掉——用户眼里就是左栏在切换中整个跳回顶部、收起。All projects 首页的分区列看板同理：Focus View
+ * 打开时首页被卸载，Back 回来要落回原来的列滚动位置。同一时刻只会挂着一个呈现面（左栏面板 / 过渡外壳 / 首页看板
+ * 三选一），所以不需要订阅，挂载时读、变化时写即可。
  *
  * 刻意不落 localStorage：这是同一次浏览会话内的导航连续性，不是需要跨会话保留的偏好（那些已经各有 key）。
  */
 export interface CrossProjectTaskSwitcherPanelViewContinuityRecord {
 	panelScrollTopPx: number;
+	// 同一任务跨过渡壳重挂载时只恢复滚动；真正切换任务时才重新定位。
+	focusedTaskEntryKeyLastRevealedInPanel: string | null;
 	showsAllPinnedEntries: boolean;
 	// 「显示更早」拉回的快照；null = 没展开（默认 7 天窗）。
 	entriesWithinExtendedActivityHorizon: RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null;
@@ -19,14 +23,20 @@ export interface CrossProjectTaskSwitcherPanelViewContinuityRecord {
 	// 同一个任务在 Pinned 与下方区各有一行，按任务记而不是按行记：一处固定展开，两处一起换。
 	// 只存在进程内（按标签页隔离、刷新即清），不进 localStorage。
 	crossProjectTaskSwitcherEntryKeysKeptExpandedInListAsFullTaskCardByUser: readonly string[];
+	// All projects 首页分区列看板每列自己的滚动位置（键 = 这一列的分区）。没有记录的列从顶部开始。
+	boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection: Readonly<
+		Partial<Record<CrossProjectTaskSwitcherTaskRowSection, number>>
+	>;
 }
 
 const INITIAL_CROSS_PROJECT_TASK_SWITCHER_PANEL_VIEW_CONTINUITY_RECORD: CrossProjectTaskSwitcherPanelViewContinuityRecord =
 	{
 		panelScrollTopPx: 0,
+		focusedTaskEntryKeyLastRevealedInPanel: null,
 		showsAllPinnedEntries: false,
 		entriesWithinExtendedActivityHorizon: null,
 		crossProjectTaskSwitcherEntryKeysKeptExpandedInListAsFullTaskCardByUser: [],
+		boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection: {},
 	};
 
 let crossProjectTaskSwitcherPanelViewContinuityRecord =
@@ -36,13 +46,20 @@ export function readCrossProjectTaskSwitcherPanelViewContinuity(): CrossProjectT
 	return crossProjectTaskSwitcherPanelViewContinuityRecord;
 }
 
+function isUsableScrollTopPx(scrollTopPx: number | undefined): boolean {
+	return scrollTopPx !== undefined && Number.isFinite(scrollTopPx) && scrollTopPx >= 0;
+}
+
 export function writeCrossProjectTaskSwitcherPanelViewContinuity(
 	patch: Partial<CrossProjectTaskSwitcherPanelViewContinuityRecord>,
 ): void {
 	// 损坏的滚动值一旦入记忆，重挂载时会被原样还原回 DOM，直接拒写。
+	if (patch.panelScrollTopPx !== undefined && !isUsableScrollTopPx(patch.panelScrollTopPx)) {
+		return;
+	}
 	if (
-		patch.panelScrollTopPx !== undefined &&
-		(!Number.isFinite(patch.panelScrollTopPx) || patch.panelScrollTopPx < 0)
+		patch.boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection !== undefined &&
+		!Object.values(patch.boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection).every(isUsableScrollTopPx)
 	) {
 		return;
 	}
@@ -50,6 +67,19 @@ export function writeCrossProjectTaskSwitcherPanelViewContinuity(
 		...crossProjectTaskSwitcherPanelViewContinuityRecord,
 		...patch,
 	};
+}
+
+/** All projects 首页某一列滚动了：只改这一列的记录，其他列不动。 */
+export function writeBoardScopeAllProjectsHomePageSectionColumnScrollTopPx(
+	section: CrossProjectTaskSwitcherTaskRowSection,
+	scrollTopPx: number,
+): void {
+	writeCrossProjectTaskSwitcherPanelViewContinuity({
+		boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection: {
+			...crossProjectTaskSwitcherPanelViewContinuityRecord.boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection,
+			[section]: scrollTopPx,
+		},
+	});
 }
 
 /** 测试用：回到初始记忆。 */

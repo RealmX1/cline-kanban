@@ -22,7 +22,7 @@ const builtWebUiDirectoryPath = resolve("web-ui/dist");
  * and a spawn-helper binary that must live on disk, so it can't be bundled.
  * Everything else esbuild can inline.
  */
-const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring"];
+const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring", "sharp"];
 
 /** Bake OTEL telemetry env vars into the bundle at build time. */
 const define = {
@@ -125,6 +125,12 @@ try {
 			entryPoints: ["src/index.ts"],
 			outfile: join(distributionDirectoryPath, "index.js"),
 		}),
+		// Codex 控制宿主监督进程；由该会话 PTY 持有，不进入通用 PTY host 的 build identity。
+		buildBundleIntoStagingDirectory({
+			...shared,
+			entryPoints: ["src/codex-native-session-control-host/codex-native-session-control-host-process-entry.ts"],
+			outfile: join(distributionDirectoryPath, "codex-native-session-control-host.js"),
+		}),
 		// agent session PTY host（独立长驻进程，持有 agent 会话的 PTY master）
 		buildBundleIntoStagingDirectory({
 			...shared,
@@ -134,7 +140,7 @@ try {
 		}).then((result) => assertAgentSessionPtyHostBundleImportsOnlyAllowedSources(result.metafile)),
 	]);
 
-	console.log("esbuild: bundled cli.js, index.js and agent-session-pty-host.js");
+	console.log("esbuild: bundled cli.js, index.js, agent-session-pty-host.js and codex-native-session-control-host.js");
 
 	await copyFile(
 		"src/notifications/notification-lifecycle-database-worker.mjs",

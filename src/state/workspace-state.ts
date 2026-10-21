@@ -21,6 +21,10 @@ import {
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
+import {
+	preserveRuntimeOwnedMainSessionBindings,
+	projectTaskConversationSessionsForMainSessionBinding,
+} from "../core/task-main-conversation-session-binding";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
@@ -371,14 +375,16 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 	let reconciledSessions = incomingSessions;
 	for (const column of incomingBoard.columns) {
 		for (const card of column.cards) {
-			const persistedSession = persistedSessions[card.id];
-			if (incomingSessions[card.id] || !persistedSession || persistedSession.startedAt == null) {
-				continue;
+			for (const persistedSession of Object.values(persistedSessions)) {
+				const sessionId = persistedSession.taskId;
+				const belongs =
+					sessionId === card.id || persistedSession.taskConversationSessionMetadata?.workspaceTaskId === card.id;
+				const isBoundMain = sessionId === card.mainTaskConversationSessionId;
+				if (!belongs || incomingSessions[sessionId] || (persistedSession.startedAt == null && !isBoundMain))
+					continue;
+				if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
+				reconciledSessions[sessionId] = persistedSession;
 			}
-			if (reconciledSessions === incomingSessions) {
-				reconciledSessions = { ...incomingSessions };
-			}
-			reconciledSessions[card.id] = persistedSession;
 		}
 	}
 	return reconciledSessions;
@@ -395,6 +401,7 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
+	preservePersistedMainSessionHandoverMetadata = false,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
@@ -417,6 +424,16 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			) {
 				reconciledSummary = { ...incomingSummary, agentNativeConversationSessionIdentity: persistedIdentity };
 			}
+		}
+		if (
+			preservePersistedMainSessionHandoverMetadata &&
+			persistedSummary.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation
+		) {
+			// 旧 bundle 不认识新的角色与恢复快照；整板保存不能删除运行时已经确认的会话归属。
+			reconciledSummary = {
+				...reconciledSummary,
+				taskConversationSessionMetadata: persistedSummary.taskConversationSessionMetadata,
+			};
 		}
 		if (reconciledSummary === incomingSummary) continue;
 		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
@@ -708,7 +725,7 @@ function toWorkspaceStateResponse(
 		statePath: context.statePath,
 		git: context.git,
 		board,
-		sessions,
+		sessions: projectTaskConversationSessionsForMainSessionBinding(board, sessions),
 		revision,
 	};
 }
@@ -805,6 +822,22 @@ export async function removeWorkspaceIndexEntry(workspaceId: string): Promise<bo
 	});
 }
 
+/** 只读操作与 board 写入共用锁；回调完成前不释放，避免校验后到外部持久提交之间被改写。 */
+export async function readWorkspaceBoardByIdAndRunWithBoardLockHeld<T>(
+	workspaceId: string,
+	readAndRunWithBoardLockHeld: (board: RuntimeBoardData) => Promise<T>,
+): Promise<T> {
+	const context = await loadWorkspaceContextById(workspaceId);
+	if (!context) throw new Error(`找不到项目 ${workspaceId}。`);
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const board = await readWorkspaceBoard(workspaceId);
+		const sessions = await readWorkspaceSessions(workspaceId);
+		const meta = await readWorkspaceMeta(workspaceId);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(context, board, sessions, meta.revision);
+		return await readAndRunWithBoardLockHeld(board);
+	});
+}
+
 export async function loadPersistedWorkspaceStateById(workspaceId: string): Promise<PersistedWorkspaceStateById> {
 	const board = await readWorkspaceBoard(workspaceId);
 	const sessions = await readWorkspaceSessions(workspaceId);
@@ -813,7 +846,7 @@ export async function loadPersistedWorkspaceStateById(workspaceId: string): Prom
 		workspaceId,
 		statePath: getWorkspaceDirectoryPath(workspaceId),
 		board,
-		sessions,
+		sessions: projectTaskConversationSessionsForMainSessionBinding(board, sessions),
 		revision: meta.revision,
 	};
 }
@@ -991,10 +1024,11 @@ export async function saveWorkspaceState(
 		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
-				parsedPayload.board,
+				preserveRuntimeOwnedMainSessionBindings(persistedBoard, parsedPayload.board),
 				persistedSessions,
 				incomingSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
+			true,
 		);
 		const boardWithoutStartedTasksReenteringBacklog =
 			reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
@@ -1016,7 +1050,10 @@ export async function saveWorkspaceState(
 				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
 			});
 		}
-		const board = postDeployVerificationDoneEntryGuarded.board;
+		const board = preserveRuntimeOwnedMainSessionBindings(
+			persistedBoard,
+			postDeployVerificationDoneEntryGuarded.board,
+		);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,
@@ -1028,7 +1065,7 @@ export async function saveWorkspaceState(
 			previousBoard: persistedBoard,
 			previousSessions: persistedSessions,
 			nextBoard: board,
-			nextSessions: sessions,
+			nextSessions: projectTaskConversationSessionsForMainSessionBinding(board, sessions),
 			nextMeta,
 			taskMutationIntentWithResolvedActor,
 		});
@@ -1123,7 +1160,7 @@ export async function mutateWorkspaceState<T>(
 			previousBoard: currentBoard,
 			previousSessions: currentSessions,
 			nextBoard,
-			nextSessions,
+			nextSessions: projectTaskConversationSessionsForMainSessionBinding(nextBoard, nextSessions),
 			nextMeta,
 			taskMutationIntentWithResolvedActor,
 		});

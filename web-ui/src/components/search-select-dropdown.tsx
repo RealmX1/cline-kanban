@@ -15,6 +15,7 @@ import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-eve
 export interface SearchSelectOption {
 	value: string;
 	label: string;
+	icon?: ReactNode;
 }
 
 const DEFAULT_CUSTOM_VALUE_LABEL = (query: string) => `Use "${query}" as custom ID`;
@@ -308,7 +309,7 @@ export function SearchSelectDropdown({
 					handleOpenChange(false);
 				}}
 			>
-				{isCustomValue ? <Plus size={14} className="shrink-0" /> : null}
+				{isCustomValue ? <Plus size={14} className="shrink-0" /> : (option.icon ?? null)}
 				<span className="flex-1 break-all">
 					{isCustomValue
 						? option.label

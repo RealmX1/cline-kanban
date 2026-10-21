@@ -11,6 +11,7 @@ import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
+import { registerSupportCommand } from "./commands/support";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
 import { registerWorkUnitCommand } from "./commands/work-unit";
@@ -785,6 +786,7 @@ function createProgram(invocationArgs: string[]): Command {
 	);
 
 	registerTaskCommand(program);
+	registerSupportCommand(program);
 	registerWorkUnitCommand(program);
 	registerHooksCommand(program);
 	registerExploratoryCommand(program);
@@ -833,21 +835,34 @@ async function run(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const isServerStyleInvocation = shouldAutoOpenBrowserTabForInvocation(argv);
 	const cancelCliHardTimeout = installCliHardTimeoutIfNeeded(argv, isServerStyleInvocation);
-	const program = createProgram(argv);
+	let invocationFailed = false;
 	try {
+		const program = createProgram(argv);
 		await program.parseAsync(argv, { from: "user" });
+	} catch (error) {
+		invocationFailed = true;
+		process.exitCode = 1;
+		console.error(`Kanban 执行失败：${safeErrorMessage(error)}`);
+		captureNodeException(error, { area: "startup" });
 	} finally {
-		if (!isServerStyleInvocation) {
-			cancelCliHardTimeout();
+		if (!isServerStyleInvocation || invocationFailed) {
 			await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry(DEFAULT_CLI_TELEMETRY_FLUSH_MS)]);
+			// 空写回调在此前已排队的 JSON / 错误正文之后执行，避免 process.exit 截断 pipe 输出。
+			await Promise.allSettled(
+				[process.stdout, process.stderr].map(
+					(stream) =>
+						new Promise<void>((resolveFlush, rejectFlush) => {
+							stream.write("", (error) => {
+								if (error) rejectFlush(error);
+								else resolveFlush();
+							});
+						}),
+				),
+			);
+			cancelCliHardTimeout();
 			process.exit(process.exitCode ?? 0);
 		}
 	}
 }
 
-void run().catch(async (error) => {
-	captureNodeException(error, { area: "startup" });
-	await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry()]);
-	console.error(`Failed to start Kanban: ${safeErrorMessage(error)}`);
-	process.exit(1);
-});
+void run();

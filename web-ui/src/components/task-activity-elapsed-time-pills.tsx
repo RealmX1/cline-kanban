@@ -4,7 +4,7 @@ import type { RuntimeInProgressTaskDetail } from "@/runtime/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 
 /**
- * 跨项目视图（Board Overview 的 In-Progress 行、跨项目切换面板的行）共用的时长药丸，与主看板卡片头部逐字同源、同语义：
+ * 跨项目切换面板的行（Focus View 左栏与 All projects 首页）用的时长药丸，与主看板卡片头部逐字同源、同语义：
  *   Clock          = 自创建至今；
  *   Activity       = 本轮停止生成至今（agent 回合 / park 期间无值 ⇒ 不显）；
  *   MessagesSquare = 对话上次推进至今（低置信来源加 `~` 前缀）。

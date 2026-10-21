@@ -120,6 +120,8 @@ export interface UseTaskSpotlightSearchControllerInput {
 	taskSessionSummariesByTaskId: Record<string, RuntimeTaskSessionSummary>;
 	// 是否允许呼出（无项目时禁用）。
 	canOpen: boolean;
+	/** 从 All Projects 视图打开搜索时，默认开启跨项目搜索。 */
+	isBoardScopeAllProjectsSelected?: boolean;
 	// 跨项目索引查询所用的连接（非 workspace-scoped 端点忽略 scope，用当前项目连接即可）。
 	crossProjectWorkspaceId: string | null;
 	// 跨项目结果中需剔除的项目（当前项目——实时 board 流更新鲜；以及不可用项目）。
@@ -161,7 +163,7 @@ export interface TaskSpotlightSearchController {
 	isBrowsingAllTasksWithoutQuery: boolean;
 	semanticSearchStatus: TaskBoardSemanticSearchStatus;
 	results: TaskBoardSearchResult[];
-	/** task id 全等命中、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
+	/** task id 命中（全等 / 片段 / 容错）、却被过滤条件挡在 results 之外的条数（空态据此说明原因，见下方 useMemo）。 */
 	taskIdMatchedResultCountHiddenByFilters: number;
 	/** 因「会话状态维度已启用、但跨项目行判不了」而被排除的条数（空态同样要说明）。 */
 	resultCountExcludedBecauseSessionActivityIsNotObservable: number;
@@ -284,6 +286,7 @@ export function useTaskSpotlightSearchController({
 	currentProjectDefaultAgentId,
 	taskSessionSummariesByTaskId,
 	canOpen,
+	isBoardScopeAllProjectsSelected = false,
 	crossProjectWorkspaceId,
 	crossProjectExcludeProjectIds,
 	onOpenTaskInProject,
@@ -529,7 +532,7 @@ export function useTaskSpotlightSearchController({
 	);
 	const results = filterApplication.filteredRows;
 
-	// ID 全等命中却被过滤条件挡掉时，空态必须说明原因 —— 否则用户拷了个完整 id 却看到
+	// ID 命中（全等 / 片段 / 容错）却被过滤条件挡掉时，空态必须说明原因 —— 否则用户拷了个 id 却看到
 	// "No matching tasks"，会以为任务不存在。过滤是用户显式设定的 scope，不为 ID 命中豁免，
 	// 只补一句诚实的解释。
 	const taskIdMatchedResultCountHiddenByFilters = useMemo(() => {
@@ -586,10 +589,13 @@ export function useTaskSpotlightSearchController({
 		if (!canOpen) {
 			return;
 		}
+		if (isBoardScopeAllProjectsSelected) {
+			setIncludeOtherProjects(true);
+		}
 		setQuery("");
 		setActiveIndex(-1);
 		setIsOpen(true);
-	}, [canOpen, setActiveIndex]);
+	}, [canOpen, isBoardScopeAllProjectsSelected, setActiveIndex]);
 
 	const close = useCallback(() => {
 		rememberSearchQuery(latestQueryRef.current);
@@ -607,11 +613,14 @@ export function useTaskSpotlightSearchController({
 			if (!canOpen) {
 				return false;
 			}
+			if (isBoardScopeAllProjectsSelected) {
+				setIncludeOtherProjects(true);
+			}
 			setQuery("");
 			setActiveIndex(-1);
 			return true;
 		});
-	}, [canOpen, rememberSearchQuery, setActiveIndex]);
+	}, [canOpen, isBoardScopeAllProjectsSelected, rememberSearchQuery, setActiveIndex]);
 
 	const openResultAt = useCallback(
 		(index: number) => {

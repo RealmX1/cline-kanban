@@ -13,6 +13,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
+      "@runtime-project-visual-identity": ["../src/core/project-visual-identity.ts"],
       "@runtime-agent-catalog": ["../src/core/agent-catalog.ts"],
       "@runtime-agent-session-transport-selection": ["../src/core/agent-session-transport-selection.ts"],
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],
@@ -27,6 +28,7 @@
       "@runtime-inter-work-unit-relation-assertion-lifecycle-event-contract": [
         "../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract.ts"
       ],
+      "@runtime-work-unit-relation-modeling-api-contract": ["../src/core/work-unit-relation-modeling-api-contract.ts"],
       "@runtime-work-unit-relation-read-api-contract": ["../src/core/work-unit-relation-read-api-contract.ts"],
       "@runtime-work-unit-relation-assertion-write-api-contract": [
         "../src/core/work-unit-relation-assertion-write-api-contract.ts"

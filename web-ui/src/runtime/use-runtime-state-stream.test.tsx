@@ -9,6 +9,10 @@ import type {
 } from "@/runtime/use-runtime-state-stream";
 import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
 import {
+	readTaskLookupConversationUpdateGeneration,
+	subscribeToTaskLookupConversationUpdates,
+} from "@/stores/task-lookup-conversation-update-store";
+import {
 	resetTaskResourceUsageSnapshotStore,
 	useTaskResourceUsageSnapshotValue,
 } from "@/stores/task-resource-usage-snapshot-store";
@@ -397,6 +401,28 @@ describe("useRuntimeStateStream", () => {
 		});
 		expect(captured.current?.notificationLogByWorkspaceId["ws-a"]).toHaveLength(2);
 		expect(captured.current?.notificationLogByWorkspaceId["ws-b"]).toHaveLength(1);
+	});
+
+	it("查卡会话通知通过全局状态流更新，供查询面板重新读取持久结果", async () => {
+		await act(async () => root.render(<RuntimeStateStreamHarness onSnapshot={() => {}} />));
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) throw new Error("缺少状态流连接。");
+		const before = readTaskLookupConversationUpdateGeneration();
+		const changed = vi.fn();
+		const unsubscribe = subscribeToTaskLookupConversationUpdates(changed);
+		try {
+			act(() =>
+				socket.triggerMessage({
+					type: "task_lookup_conversation_updated",
+					conversationId: "9fe0ae6d-1c0f-4fde-8aca-3bf417ab7b80",
+					revision: 2,
+				}),
+			);
+			expect(readTaskLookupConversationUpdateGeneration()).toBe(before + 1);
+			expect(changed).toHaveBeenCalledTimes(1);
+		} finally {
+			unsubscribe();
+		}
 	});
 
 	it("exploratory_findings_updated 全量替换落 store、按 workspace 过滤；快照保留 last-known", async () => {

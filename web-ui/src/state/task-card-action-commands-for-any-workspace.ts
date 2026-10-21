@@ -1,6 +1,5 @@
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@runtime-task-pinboard-pinning";
-
 import {
 	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace,
 	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
@@ -32,6 +31,7 @@ import {
 	type TaskCardActionCommandExecutionResult,
 } from "@/state/task-card-action-command-execution";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 // 每个用户交互卡片动作在浏览器侧的唯一入口，主看板、Focus View（This project）、跨项目切换面板（All projects）共用。
 // 差别只在调用方给不给 `currentProjectBoardForOptimisticOverlay`：
@@ -229,6 +229,7 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	// 拖放 / 动画落点；缺省 = 列顶。
 	insertAtIndexWithinDoneBoardColumn?: number;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
@@ -251,6 +252,9 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 		sendCommand: () =>
 			moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.taskCommentToAppendWhenMovingIntoDone
+					? { taskCommentToAppendWhenMovingIntoDone: input.taskCommentToAppendWhenMovingIntoDone }
+					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 				// 落点必须发给服务端：只进 overlay 的话，广播回灌后卡片会跳回列顶。
 				...(input.insertAtIndexWithinDoneBoardColumn !== undefined

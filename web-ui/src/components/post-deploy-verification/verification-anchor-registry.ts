@@ -28,10 +28,21 @@ export function topBarProjectSwitcherBoardOrSingleProjectScopeTriggerAnchorKey()
 	return "top-bar-project-switcher-board-or-single-project-scope-trigger";
 }
 
+// 顶栏的 All projects ⇄ 单项目切换按钮（Layers，与 ⌘⇧E 同一处理器）。只在看板页（非 Focus View）渲染，全局单例、不带 id。
+// All projects 首页（跨项目切换面板分区横排的列看板）的部署后引导验证从这里起步。
+export function topBarBoardScopeAllProjectsToggleButtonAnchorKey(): string {
+	return "top-bar-board-scope-all-projects-toggle-button";
+}
+
 // 跨项目「最近活跃任务」切换面板里 Running / 缓存倒计时 / 剩余区的一行（Pinned 区的行不带它：Pinned 点击后
 // 要跳到的正是下方区里的这一行）。taskId 跨项目会撞号，必须带 workspaceId。
 export function crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId: string, taskId: string): string {
 	return `cross-project-task-switcher-section-row:${workspaceId}:${taskId}`;
+}
+
+// All projects Focus View 的焦点任务展示与 Sticky 共用面板。副本不输出本体卡锚点。
+export function crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey(): string {
+	return "cross-project-task-switcher-focused-task-visibility-panel";
 }
 
 // 看板某一列容器。
@@ -56,6 +67,10 @@ export function verificationPanelTaskAnchorKey(taskId: string): string {
 // 因此这个锚点由引导人工型验证消费。
 export function topBarTaskSpotlightSearchTriggerAnchorKey(): string {
 	return "top-bar-task-spotlight-search-trigger";
+}
+
+export function topBarTaskLookupWorkbenchTriggerAnchorKey(): string {
+	return "top-bar-task-lookup-workbench-trigger";
 }
 
 // 顶栏里的应用内通知中心铃铛。单例、不带 id：全局同时只存在一个。

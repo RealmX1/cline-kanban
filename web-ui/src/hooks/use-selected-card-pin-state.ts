@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
@@ -25,6 +25,8 @@ export type SelectedCardPinState = "hidden" | "pinTop" | "pinBottom";
 export interface UseSelectedCardPinStateOptions {
 	/** 被选中任务的 id；用于在滚动容器内定位真实卡片元素（`data-task-id`）。 */
 	selectedTaskId: string;
+	/** 非阶段列表可指定带 workspace 身份的定位行；副本不参与测量。 */
+	selectedCardElementSelector?: string;
 	/** 滚动容器（`.kb-detail-task-list-scroll`）的 ref，作为几何判定的视口基准。 */
 	scrollRootRef: RefObject<HTMLElement | null>;
 	/** 为 `false` 时（如拖拽进行中，真实卡会被 portal 到 body 致目标丢失）暂停侦测并归为 `hidden`。 */
@@ -33,12 +35,13 @@ export interface UseSelectedCardPinStateOptions {
 
 export function useSelectedCardPinState({
 	selectedTaskId,
+	selectedCardElementSelector,
 	scrollRootRef,
 	enabled = true,
 }: UseSelectedCardPinStateOptions): SelectedCardPinState {
 	const [pinState, setPinState] = useState<SelectedCardPinState>("hidden");
 
-	useEffect(() => {
+	useLayoutEffect(() => {
 		if (!enabled) {
 			setPinState("hidden");
 			return;
@@ -48,13 +51,14 @@ export function useSelectedCardPinState({
 			setPinState("hidden");
 			return;
 		}
-		const selector = `[data-task-id="${escapeCssAttributeSelectorValue(selectedTaskId)}"]`;
+		const selector =
+			selectedCardElementSelector ?? `[data-task-id="${escapeCssAttributeSelectorValue(selectedTaskId)}"]`;
 
 		let frameId = 0;
 		let target: Element | null = root.querySelector(selector);
 
 		const resolveTarget = (): void => {
-			if (!target || !target.isConnected || !root.contains(target)) {
+			if (!target || !target.isConnected || !root.contains(target) || !target.matches(selector)) {
 				target = root.querySelector(selector);
 			}
 		};
@@ -129,7 +133,7 @@ export function useSelectedCardPinState({
 			resizeObserver?.disconnect();
 			mutationObserver.disconnect();
 		};
-	}, [selectedTaskId, enabled, scrollRootRef]);
+	}, [selectedTaskId, selectedCardElementSelector, enabled, scrollRootRef]);
 
 	return pinState;
 }

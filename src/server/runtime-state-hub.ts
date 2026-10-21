@@ -55,10 +55,15 @@ import type {
 } from "../core/api-contract";
 import { runtimeStateStreamClientMessageSchema } from "../core/api-contract";
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
-import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
+import {
+	isNotifiableUserTurn,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
+import { subscribeToPromptLibraryChanges } from "../state/prompt-library-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
@@ -66,6 +71,13 @@ import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
 
 const TASK_SESSION_STREAM_BATCH_MS = 150;
+/**
+ * summary flush 触发的 projects_updated 合并窗口。projects payload 是全局的（约 115 KB，每次构建要读、解析、校验
+ * 全部项目的 board），而 flush 每个工作区每 150ms 就可能来一次；窗口内的多次 flush 只在窗口结束时构建、广播一次。
+ * 只合并 flush 这一路：board 变化、tRPC mutation、首帧后补发仍即时广播。
+ */
+// EXPERIMENT_NODE: summary flush 触发的 projects_updated 合并窗口（1 秒）
+const PROJECTS_BROADCAST_COALESCING_WINDOW_AFTER_TASK_SESSION_SUMMARY_FLUSH_MS = 1_000;
 
 export interface CreateRuntimeStateHubDependencies {
 	workspaceRegistry: Pick<
@@ -77,6 +89,7 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	broadcastTaskLookupConversationUpdated: (conversationId: string, revision: number) => void;
 	trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => void;
 	trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => void;
 	broadcastTaskChatMessage: (workspaceId: string, taskId: string, message: RuntimeTaskChatMessage) => void;
@@ -197,6 +210,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
+	const unsubscribePromptLibraryChanges = subscribeToPromptLibraryChanges((workspaceId) => {
+		for (const client of runtimeStateClients) {
+			sendRuntimeStateMessage(client, { type: "prompt_library_updated", workspaceId });
+		}
+	});
 	// 已进全局广播集合、首帧 snapshot 尚未发出的连接：projects_updated 广播跳过它们（不变式见连接握手处）。
 	const runtimeStateClientsStillAwaitingInitialSnapshotMessage = new Set<WebSocket>();
 	// 上面集合里被某次 projects_updated 广播跳过的连接：首帧发出后要补发一次最新 projects。
@@ -256,9 +274,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	// projects payload 是全局的（覆盖全部已注册 project、同一份发往所有在场客户端），故去重指纹也只
 	// 需一份全局值：与上次实际发送的序列化结果相同 ⇒ 每个在场客户端都已持有这份数据，可整条跳过。
 	// 命中条件是「两次构建的 payload 字节级相同」：agent 无输出窗口、纯心跳 flush 这类场景挡掉
-	// flushTaskSessionSummaries 每 150ms 触发的重发（前端每收一条 projects_updated 都要重 dispatch
-	// 一轮）；agent 活跃输出期间 inProgressTaskDetails 的 lastOutputAt 随每个非空 PTY chunk 刷新，
-	// payload 每次都不同、广播照常发送——那是合法新数据而非浪费。失效是天然的、无需按 workspace 记账：项目增删 /
+	// flushTaskSessionSummaries 触发的重发（前端每收一条 projects_updated 都要重 dispatch 一轮）。为让它在 agent
+	// 活跃输出期间也能命中：flush 这一路先合并到每秒最多一次、且不带各自的 workspaceId（否则 currentProjectId 随
+	// 轮到 flush 的工作区来回切，见 scheduleProjectsBroadcastCoalescedAfterTaskSessionSummaryFlush）；跨项目视图的
+	// lastOutputAt 也按 15 秒取整（见 in-progress-task-detail-projection）。失效是天然的、无需按 workspace 记账：项目增删 /
 	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接的首帧 snapshot 发出后会把指纹
 	// 置回 null（见 releaseRuntimeStateClientFromAwaitingInitialSnapshot），保证此后下一次广播必定发送——snapshot
 	// 全量替换可能把该客户端回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
@@ -368,7 +387,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				sendRuntimeStateMessage(client, payload);
 			}
 		}
-		void broadcastRuntimeProjectsUpdated(workspaceId);
+		scheduleProjectsBroadcastCoalescedAfterTaskSessionSummaryFlush();
+	};
+
+	// flush 触发的 projects 广播：窗口内只排一次，窗口结束时按最新状态构建。传 null 让 currentProjectId 落到服务端
+	// 稳定的 active workspace——浏览器自己的当前项目仍有效时本来就忽略这个字段（resolveProjectIdAfterProjectsUpdate），
+	// 按各自 workspaceId 传只会让它随轮到 flush 的工作区来回切、使去重永不命中。
+	let projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush: NodeJS.Timeout | null = null;
+	const scheduleProjectsBroadcastCoalescedAfterTaskSessionSummaryFlush = () => {
+		if (projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush !== null) {
+			return;
+		}
+		const timer = setTimeout(() => {
+			projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush = null;
+			void broadcastRuntimeProjectsUpdated(null);
+		}, PROJECTS_BROADCAST_COALESCING_WINDOW_AFTER_TASK_SESSION_SUMMARY_FLUSH_MS);
+		timer.unref();
+		projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush = timer;
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
@@ -436,6 +471,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			const currentFacets = resolveSessionFacets(summary);
 			if (
 				previousSummary &&
+				!isTaskConversationSessionWithoutTaskLifecycleAuthority(summary) &&
 				!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
 				isNotifiableUserTurn(currentFacets)
 			) {
@@ -758,7 +794,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
 	) => {
-		if (evidence?.summary) latestNotificationSummaries.set(`${workspaceId}:${taskId}`, evidence.summary);
+		if (evidence?.summary)
+			latestNotificationSummaries.set(`${workspaceId}:${evidence.summary.taskId}`, evidence.summary);
 		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
 	};
 
@@ -1024,6 +1061,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "acp");
 		},
 		broadcastTaskChatMessage,
+		broadcastTaskLookupConversationUpdated: (conversationId, revision) => {
+			for (const client of runtimeStateClients)
+				sendRuntimeStateMessage(client, { type: "task_lookup_conversation_updated", conversationId, revision });
+		},
 		broadcastTaskChatCleared,
 		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
 		handleUpgrade: (request, socket, head, context) => {
@@ -1051,12 +1092,17 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastQueuedTaskPromptDeliveriesUpdated,
 		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
+			unsubscribePromptLibraryChanges();
 			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);
 			}
 			taskSessionBroadcastTimersByWorkspaceId.clear();
 			pendingTaskSessionSummariesByWorkspaceId.clear();
+			if (projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush !== null) {
+				clearTimeout(projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush);
+				projectsBroadcastCoalescingTimerAfterTaskSessionSummaryFlush = null;
+			}
 			for (const unsubscribe of terminalSummaryUnsubscribeByWorkspaceId.values()) {
 				try {
 					unsubscribe();

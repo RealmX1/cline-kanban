@@ -12,11 +12,12 @@
 // ## 正文编辑必须本地回显 + 去抖落盘
 //
 // 面板的 textarea 每次击键都会调 `updatePromptText`。逐次击键发一趟 tRPC + 跨进程文件锁是不可接受的
-// （既卡输入又把库文件锁成热点）。所以正文编辑先进本地 `locallyEditedTextByPromptId` 立即回显，静默
+// （既卡输入又把库文件锁成热点）。所以正文编辑先进按项目隔离的本地正文缓冲立即回显，静默
 // 一段时间后才落盘；组件卸载时强制冲刷，避免「打完字直接切走」丢掉最后一段。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
+import { showAppToast } from "@/components/app-toaster";
+import { subscribeToPromptLibraryInvalidations } from "@/runtime/prompt-library-invalidation-events";
 import {
 	buildPromptLibraryMigrationMarkersWithWorkspaceMarked,
 	hasUploadedPromptLibraryToServer,
@@ -42,8 +43,16 @@ const PROMPT_TEXT_PERSIST_DEBOUNCE_MS = 600;
 export type PromptScope = PromptLibraryScope;
 export type StoredPrompt = StoredPromptLibraryEntry;
 
+interface PendingPromptTextEdit {
+	text: string;
+	taskId: string;
+}
+
+type PendingPromptTextEditsByProjectId = Record<string, Record<string, PendingPromptTextEdit>>;
+
 export interface PromptLibraryController {
 	prompts: StoredPrompt[];
+	reusableCommands: StoredPrompt[];
 	/**
 	 * 归属的任务已经不在看板上的 task-scoped 条目。
 	 *
@@ -59,6 +68,15 @@ export interface PromptLibraryController {
 	setPromptScope: (id: string, scope: PromptScope) => void;
 	/** 把一条孤儿条目认领到当前任务名下（它随即出现在上面的 prompts 里）。 */
 	claimOrphanedPrompt: (id: string) => void;
+	setPromptUsageStatus: (id: string, isUsed: boolean) => void;
+	convertPromptToReusableCommand: (id: string, scope: "repo" | "global") => void;
+}
+
+export function comparePromptLibraryEntriesByUsageThenTextEditRecency(left: StoredPrompt, right: StoredPrompt): number {
+	return (
+		Number(left.draftUsage?.markedUsedAtEpochMs != null) - Number(right.draftUsage?.markedUsedAtEpochMs != null) ||
+		(right.textLastEditedAtEpochMs ?? right.updatedAt) - (left.textLastEditedAtEpochMs ?? left.updatedAt)
+	);
 }
 
 /**
@@ -133,19 +151,78 @@ export function usePromptLibrary(
 	projectId: string,
 	taskIdsOnBoard: ReadonlySet<string> | null = null,
 ): PromptLibraryController {
-	const [librarySnapshot, setLibrarySnapshot] = useState<WorkspacePromptLibrarySnapshot>(
-		EMPTY_WORKSPACE_PROMPT_LIBRARY_SNAPSHOT,
-	);
-	// 正在编辑、尚未落盘的正文。它盖在服务端快照之上，于是打字是即时的，落盘是去抖的。
-	const [locallyEditedTextByPromptId, setLocallyEditedTextByPromptId] = useState<Record<string, string>>({});
+	const [projectLibrarySnapshot, setProjectLibrarySnapshot] = useState({
+		projectId,
+		snapshot: EMPTY_WORKSPACE_PROMPT_LIBRARY_SNAPSHOT,
+	});
+	// 切换项目后的首帧也不能显示旧库；新项目读失败时仍保持空列表。
+	const librarySnapshot =
+		projectLibrarySnapshot.projectId === projectId
+			? projectLibrarySnapshot.snapshot
+			: EMPTY_WORKSPACE_PROMPT_LIBRARY_SNAPSHOT;
+	// 待落盘正文按项目隔离，并保留编辑时的任务归属；切走后的失败请求仍可在原项目重试。
+	const [pendingPromptTextEditsByProjectId, setPendingPromptTextEditsByProjectId] =
+		useState<PendingPromptTextEditsByProjectId>({});
+	const currentProjectPendingPromptTextEditsByPromptId = pendingPromptTextEditsByProjectId[projectId] ?? {};
 
-	// 去抖冲刷要读「此刻最新的待落盘正文」，而定时器回调拿到的是它注册那一刻的闭包，所以走 ref。
-	const locallyEditedTextByPromptIdRef = useRef(locallyEditedTextByPromptId);
-	locallyEditedTextByPromptIdRef.current = locallyEditedTextByPromptId;
+	// 去抖与卸载冲刷读最新缓冲，但只能读取各自闭包所属项目的那一桶。
+	const pendingPromptTextEditsByProjectIdRef = useRef(pendingPromptTextEditsByProjectId);
+	pendingPromptTextEditsByProjectIdRef.current = pendingPromptTextEditsByProjectId;
 	const persistDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	// workspace 切换后旧请求的响应可能才回来，直接 setState 会把新库覆盖成旧库。用它标记「当前是谁」。
 	const activeProjectIdRef = useRef(projectId);
 	activeProjectIdRef.current = projectId;
+	const snapshotRequestSequenceRef = useRef(0);
+	const latestAppliedSnapshotSequenceRef = useRef(0);
+	const successfulMutationGenerationByProjectIdRef = useRef(new Map<string, number>());
+	const applyServerSnapshot = useCallback(
+		(snapshot: WorkspacePromptLibrarySnapshot, requestSequence: number, requestedProjectId: string) => {
+			if (activeProjectIdRef.current === requestedProjectId) {
+				if (requestSequence < latestAppliedSnapshotSequenceRef.current) return;
+				latestAppliedSnapshotSequenceRef.current = requestSequence;
+				setProjectLibrarySnapshot({ projectId: requestedProjectId, snapshot });
+			}
+			// 当前项目只在即将显示的快照确认正文时清覆盖；旧项目的成功响应也要清理它自己的缓冲。
+			const serverTextByPromptId = new Map(
+				[
+					...snapshot.globalScopedPrompts,
+					...snapshot.repoScopedPrompts,
+					...Object.values(snapshot.taskScopedPromptsByTaskId).flat(),
+				].map((entry) => [entry.id, entry.text]),
+			);
+			setPendingPromptTextEditsByProjectId((current) => {
+				const projectEdits = current[requestedProjectId] ?? {};
+				const remaining = Object.fromEntries(
+					Object.entries(projectEdits).filter(([id, edit]) => serverTextByPromptId.get(id) !== edit.text),
+				);
+				return Object.keys(remaining).length === Object.keys(projectEdits).length
+					? current
+					: { ...current, [requestedProjectId]: remaining };
+			});
+		},
+		[],
+	);
+
+	const refreshProjectLibrarySnapshot = useCallback(
+		async function refreshProjectSnapshotUntilNoLocalWriteCompletesDuringRead(
+			requestedProjectId: string,
+		): Promise<WorkspacePromptLibrarySnapshot | null> {
+			const requestSequence = ++snapshotRequestSequenceRef.current;
+			const successfulMutationGenerationAtReadStart =
+				successfulMutationGenerationByProjectIdRef.current.get(requestedProjectId) ?? 0;
+			const snapshot = await fetchWorkspacePromptLibrary(requestedProjectId).catch(() => null);
+			if (activeProjectIdRef.current !== requestedProjectId) return null;
+			if (
+				successfulMutationGenerationAtReadStart !==
+				(successfulMutationGenerationByProjectIdRef.current.get(requestedProjectId) ?? 0)
+			) {
+				// 这趟查询可能在写入前读到旧库；成功写入之后再读一次，不把旧正文或状态盖回来。
+				return refreshProjectSnapshotUntilNoLocalWriteCompletesDuringRead(requestedProjectId);
+			}
+			if (snapshot) applyServerSnapshot(snapshot, requestSequence, requestedProjectId);
+			return snapshot;
+		},
+		[applyServerSnapshot],
+	);
 
 	// 每个调用点都是 fire-and-forget（用户点一下就走，没人等这个 promise），所以异常必须**在这里**吞掉：
 	// 让它漏出去就是一条 unhandled rejection——在生产里会被 Sentry 当成崩溃上报，在测试里会污染别的用例。
@@ -157,32 +234,38 @@ export function usePromptLibrary(
 	// `mutateWorkspacePromptLibrary` 返回 null——统一折成 `false` 如实报出去，而不是只吞不报。
 	const applyMutation = useCallback(
 		async (mutation: WorkspacePromptLibraryMutation): Promise<boolean> => {
+			const requestSequence = ++snapshotRequestSequenceRef.current;
 			const requestedProjectId = projectId;
 			const nextSnapshot = await mutateWorkspacePromptLibrary(requestedProjectId, mutation).catch(() => null);
 			if (nextSnapshot === null) {
 				return false;
 			}
-			// 切了 workspace 之后旧请求才回来时不去覆盖界面：拿旧库覆盖新库会让用户看到上一个项目的模板。
-			// 但这一趟**写入本身是成功的**，所以照样报 true——报 false 会让冲刷以为没落盘，把一份已经落进
-			// 上一个 workspace 的正文永远挂在本地。
-			if (activeProjectIdRef.current !== requestedProjectId) {
-				return true;
+			successfulMutationGenerationByProjectIdRef.current.set(
+				requestedProjectId,
+				(successfulMutationGenerationByProjectIdRef.current.get(requestedProjectId) ?? 0) + 1,
+			);
+			applyServerSnapshot(nextSnapshot, requestSequence, requestedProjectId);
+			if (
+				activeProjectIdRef.current === requestedProjectId &&
+				requestSequence < latestAppliedSnapshotSequenceRef.current
+			) {
+				// 较晚发出的查询可能先读到旧库，也可能读到外部的新状态；保留当前显示并在写入后重读。
+				void refreshProjectLibrarySnapshot(requestedProjectId);
 			}
-			setLibrarySnapshot(nextSnapshot);
 			return true;
 		},
-		[projectId],
+		[applyServerSnapshot, projectId, refreshProjectLibrarySnapshot],
 	);
 
 	const flushPendingPromptTextEdits = useCallback((): void => {
-		const pendingEdits = locallyEditedTextByPromptIdRef.current;
+		const pendingEdits = pendingPromptTextEditsByProjectIdRef.current[projectId] ?? {};
 		const pendingPromptIds = Object.keys(pendingEdits);
 		if (pendingPromptIds.length === 0) {
 			return;
 		}
 		for (const promptId of pendingPromptIds) {
-			const text = pendingEdits[promptId];
-			if (text === undefined) {
+			const pendingEdit = pendingEdits[promptId];
+			if (pendingEdit === undefined) {
 				continue;
 			}
 			// 这里的 `scope`/`taskId` 只在「服务端找不到这个 id、要新建」时才生效——upsert_prompt 对
@@ -190,34 +273,21 @@ export function usePromptLibrary(
 			// 全局/仓库作用域的条目改文也不会把它拽进当前任务。仅有的落差是：某条目在两次击键之间被
 			// 别处删掉时，这次冲刷会把它按 task scope 重建出来。可接受——重建回来的是用户刚打的字，
 			// 而反过来（丢掉）才是真损失。
-			void applyMutation({ kind: "upsert_prompt", promptId, text, scope: "task", taskId }).then(
-				(didServerPersistThisText) => {
-					// 没落盘就**不能**清：清掉等于界面立刻回落成服务端旧正文，用户刚打的字凭空消失且无处
-					// 找回。留着它则界面继续显示用户打的那份，下一次击键的去抖冲刷或卸载冲刷会再送一遍。
-					// 刻意不在这里自己起重试定时器：服务端持续写失败时那会退化成 600ms 一发的请求风暴，而
-					// 这条路径上没有任何错误提示能让用户知道后台正在反复重试。
-					if (!didServerPersistThisText) {
-						return;
-					}
-					// 只清掉「落盘的正是当前这份」的条目：请求在途时用户又打了字的话，那份新正文必须留下来
-					// 等下一轮冲刷，否则最后几个字符会被静默丢掉。
-					setLocallyEditedTextByPromptId((current) => {
-						if (current[promptId] !== text) {
-							return current;
-						}
-						const { [promptId]: _flushed, ...remaining } = current;
-						return remaining;
-					});
-				},
-			);
+			void applyMutation({
+				kind: "upsert_prompt",
+				promptId,
+				text: pendingEdit.text,
+				scope: "task",
+				taskId: pendingEdit.taskId,
+			});
 		}
-	}, [applyMutation, taskId]);
+	}, [applyMutation, projectId]);
 
 	// 载入服务端库，并把这台浏览器里的历史条目合并上去。
 	useEffect(() => {
 		let isCurrent = true;
 		void (async () => {
-			const snapshot = await fetchWorkspacePromptLibrary(projectId).catch(() => null);
+			const snapshot = await refreshProjectLibrarySnapshot(projectId);
 			if (!isCurrent) {
 				return;
 			}
@@ -225,7 +295,6 @@ export function usePromptLibrary(
 			if (snapshot === null) {
 				return;
 			}
-			setLibrarySnapshot(snapshot);
 			if (hasUploadedPromptLibraryToServer(projectId)) {
 				return;
 			}
@@ -233,15 +302,14 @@ export function usePromptLibrary(
 			if (promptsToMigrate.length === 0) {
 				return;
 			}
-			const mergedSnapshot = await mutateWorkspacePromptLibrary(projectId, {
+			const migrationSucceeded = await applyMutation({
 				kind: "merge_prompts_migrated_from_browser_local_storage",
 				prompts: promptsToMigrate,
-			}).catch(() => null);
-			if (!isCurrent || mergedSnapshot === null) {
+			});
+			if (!isCurrent || !migrationSucceeded) {
 				// 迁移失败就不打标记，下次挂载再试。合并是幂等的，重试不会造出重复条目。
 				return;
 			}
-			setLibrarySnapshot(mergedSnapshot);
 			writeLocalStorageItem(
 				PROMPT_LIBRARY_MIGRATION_MARKER_STORAGE_KEY,
 				JSON.stringify(buildPromptLibraryMigrationMarkersWithWorkspaceMarked(projectId, Date.now())),
@@ -250,7 +318,16 @@ export function usePromptLibrary(
 		return () => {
 			isCurrent = false;
 		};
-	}, [projectId]);
+	}, [applyMutation, projectId, refreshProjectLibrarySnapshot]);
+
+	useEffect(
+		() =>
+			subscribeToPromptLibraryInvalidations((changedWorkspaceId) => {
+				if (changedWorkspaceId !== null && changedWorkspaceId !== projectId) return;
+				void refreshProjectLibrarySnapshot(projectId);
+			}),
+		[projectId, refreshProjectLibrarySnapshot],
+	);
 
 	// 卸载时冲刷：面板经常是「打完字直接切走」，等去抖到点已经来不及了。
 	useEffect(() => {
@@ -263,27 +340,42 @@ export function usePromptLibrary(
 		};
 	}, [flushPendingPromptTextEdits]);
 
-	const prompts = useMemo(() => {
+	const visibleEntries = useMemo(() => {
 		const visiblePrompts = resolveVisiblePrompts(librarySnapshot, taskId);
-		if (Object.keys(locallyEditedTextByPromptId).length === 0) {
-			return visiblePrompts;
+		if (Object.keys(currentProjectPendingPromptTextEditsByPromptId).length === 0) {
+			return visiblePrompts.sort(comparePromptLibraryEntriesByUsageThenTextEditRecency);
 		}
-		return visiblePrompts.map((prompt) => {
-			const locallyEditedText = locallyEditedTextByPromptId[prompt.id];
-			return locallyEditedText === undefined ? prompt : { ...prompt, text: locallyEditedText };
-		});
-	}, [librarySnapshot, locallyEditedTextByPromptId, taskId]);
+		return visiblePrompts
+			.map((prompt) => {
+				const locallyEditedText = currentProjectPendingPromptTextEditsByPromptId[prompt.id]?.text;
+				return locallyEditedText === undefined || locallyEditedText === prompt.text
+					? prompt
+					: { ...prompt, text: locallyEditedText, draftUsage: undefined };
+			})
+			.sort(comparePromptLibraryEntriesByUsageThenTextEditRecency);
+	}, [librarySnapshot, currentProjectPendingPromptTextEditsByPromptId, taskId]);
 
 	const addPrompt = useCallback((): string => {
 		const promptId = createPromptId();
-		setLibrarySnapshot((current) => withOptimisticallyCreatedPrompt(current, promptId, taskId, Date.now()));
+		setProjectLibrarySnapshot((current) => ({
+			projectId,
+			snapshot: withOptimisticallyCreatedPrompt(
+				current.projectId === projectId ? current.snapshot : EMPTY_WORKSPACE_PROMPT_LIBRARY_SNAPSHOT,
+				promptId,
+				taskId,
+				Date.now(),
+			),
+		}));
 		void applyMutation({ kind: "upsert_prompt", promptId, text: "", scope: "task", taskId, origin: "manual" });
 		return promptId;
-	}, [applyMutation, taskId]);
+	}, [applyMutation, projectId, taskId]);
 
 	const updatePromptText = useCallback(
 		(promptId: string, text: string) => {
-			setLocallyEditedTextByPromptId((current) => ({ ...current, [promptId]: text }));
+			setPendingPromptTextEditsByProjectId((current) => ({
+				...current,
+				[projectId]: { ...current[projectId], [promptId]: { text, taskId } },
+			}));
 			if (persistDebounceTimerRef.current !== null) {
 				clearTimeout(persistDebounceTimerRef.current);
 			}
@@ -292,19 +384,19 @@ export function usePromptLibrary(
 				flushPendingPromptTextEdits();
 			}, PROMPT_TEXT_PERSIST_DEBOUNCE_MS);
 		},
-		[flushPendingPromptTextEdits],
+		[flushPendingPromptTextEdits, projectId, taskId],
 	);
 
 	const removePrompt = useCallback(
 		(promptId: string) => {
 			// 连本地那份待落盘正文一起丢掉：留着它会让这条被删的条目在下一次冲刷时又被 upsert 回来。
-			setLocallyEditedTextByPromptId((current) => {
-				const { [promptId]: _removed, ...remaining } = current;
-				return remaining;
+			setPendingPromptTextEditsByProjectId((current) => {
+				const { [promptId]: _removed, ...remaining } = current[projectId] ?? {};
+				return { ...current, [projectId]: remaining };
 			});
 			void applyMutation({ kind: "remove_prompt", promptId });
 		},
-		[applyMutation],
+		[applyMutation, projectId],
 	);
 
 	const setPromptScope = useCallback(
@@ -322,11 +414,63 @@ export function usePromptLibrary(
 		},
 		[applyMutation, taskId],
 	);
+	const performPromptMutationAfterFlushingItsText = useCallback(
+		async (promptId: string, mutation: WorkspacePromptLibraryMutation) => {
+			const pendingEdit = pendingPromptTextEditsByProjectIdRef.current[projectId]?.[promptId];
+			if (pendingEdit !== undefined) {
+				if (
+					!(await applyMutation({
+						kind: "upsert_prompt",
+						promptId,
+						text: pendingEdit.text,
+						scope: "task",
+						taskId: pendingEdit.taskId,
+					}))
+				) {
+					showAppToast({ intent: "danger", message: "正文尚未保存，请重试。" });
+					return;
+				}
+			}
+			if (!(await applyMutation(mutation))) showAppToast({ intent: "danger", message: "草稿状态未保存，请重试。" });
+		},
+		[applyMutation, projectId],
+	);
+	const setPromptUsageStatus = useCallback(
+		(promptId: string, isUsed: boolean) => {
+			void performPromptMutationAfterFlushingItsText(promptId, {
+				kind: "set_prompt_usage_status",
+				promptId,
+				isUsed,
+			});
+		},
+		[performPromptMutationAfterFlushingItsText],
+	);
+	const convertPromptToReusableCommand = useCallback(
+		(promptId: string, scope: "repo" | "global") => {
+			void performPromptMutationAfterFlushingItsText(promptId, {
+				kind: "convert_prompt_to_reusable_command",
+				promptId,
+				scope,
+			});
+		},
+		[performPromptMutationAfterFlushingItsText],
+	);
 
 	const orphanedPrompts = useMemo(
 		() => resolveOrphanedPrompts(librarySnapshot, taskIdsOnBoard),
 		[librarySnapshot, taskIdsOnBoard],
 	);
 
-	return { prompts, orphanedPrompts, addPrompt, updatePromptText, removePrompt, setPromptScope, claimOrphanedPrompt };
+	return {
+		prompts: visibleEntries.filter((entry) => entry.entryKind !== "reusable_command"),
+		reusableCommands: visibleEntries.filter((entry) => entry.entryKind === "reusable_command"),
+		orphanedPrompts,
+		addPrompt,
+		updatePromptText,
+		removePrompt,
+		setPromptScope,
+		claimOrphanedPrompt,
+		setPromptUsageStatus,
+		convertPromptToReusableCommand,
+	};
 }

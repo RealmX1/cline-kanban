@@ -752,14 +752,18 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		"cccccccc-3333-4333-8333-cccccccccccc",
 	];
 	const sessionKeys = ["task-1", "task-conversation-session-fork", "task-conversation-session-scratch"];
-	function createNativeSummary(taskId: string, nativeSessionId: string): RuntimeTaskSessionSummary {
+	function createNativeSummary(
+		taskId: string,
+		nativeSessionId: string,
+		transcriptPath: string | null = null,
+	): RuntimeTaskSessionSummary {
 		return {
 			...createSessionSummary(taskId),
 			agentId: "codex",
 			agentNativeConversationSessionIdentity: {
 				sourceAgentId: "codex",
 				nativeSessionId,
-				transcriptPath: null,
+				transcriptPath,
 				observedAt: 1,
 			},
 		};
@@ -793,9 +797,15 @@ describe.sequential("原生会话身份的独立持久化", () => {
 			try {
 				for (const [index, key] of sessionKeys.entries()) {
 					const previous = await loadPersistedWorkspaceStateById(context.workspaceId);
+					const transcriptPath = join(repo.repositoryPath, `rollout-${nativeSessionIds[index]}.jsonl`);
+					writeFileSync(
+						transcriptPath,
+						`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionIds[index], source: "cli" } })}\n`,
+					);
 					const identity = createNativeSummary(
 						key,
 						nativeSessionIds[index],
+						transcriptPath,
 					).agentNativeConversationSessionIdentity;
 					expect(
 						await api.ingest({

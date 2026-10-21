@@ -492,7 +492,7 @@ export function useTaskEditor({
 		? (gitRepositoryInfoOfOtherProjectBeingEdited?.defaultBranch ?? editingTaskCardInOtherProject.taskCard.baseRef)
 		: defaultTaskBranchRef;
 
-	// Board Scope 建卡的目标项目（Task Creation Target Project，docs/context-stage-first-overview.md）。null = 当前项目：
+	// Board Scope 建卡的目标项目（Task Creation Target Project，docs/context-board-scope-all-projects-and-single-project-scope.md）。null = 当前项目：
 	// 单项目范围的唯一形态，建卡路径与改动前一致（乐观插入本页 board）。Board Scope 打开建卡框时由调用方显式给出目标并钉住，
 	// 之后焦点 / 当前项目变化都不改它；目标是其他项目时卡不进本页 board，用那个项目的预分配 id 与同一个 persist 端点直接
 	// 落到那个项目。分支选项、默认 base ref、记住的终端模型都跟着目标项目走。
@@ -833,7 +833,7 @@ export function useTaskEditor({
 		[currentProjectId, resolvedDefaultCreateTaskBranchRef, selectedAgentId],
 	);
 
-	// Board Scope 的建卡入口（热键 c、跨项目面板的 Create task、Board Overview 的 New task）：对话框带目标项目字段，
+	// Board Scope 的建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：对话框带目标项目字段，
 	// 默认目标由调用方按入口上下文给出。
 	const handleOpenCreateTaskInBoardScope = useCallback(
 		(defaultTargetWorkspaceId: string) => {
@@ -1448,6 +1448,7 @@ export function useTaskEditor({
 	// Create more（keepDialogOpen）保留用户选的目标项目。
 	const resetNewTaskFormAfterTaskCardsCreatedInOtherProject = useCallback(
 		(workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
+			if (options?.preserveFormUntilCreationConfirmed) return;
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
@@ -1508,6 +1509,7 @@ export function useTaskEditor({
 				if (!createdTaskCard) {
 					return null;
 				}
+				options?.onTaskCardAllocatedForRelationModeling?.(createdTaskCard);
 				if (!explicitTaskName) {
 					backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject(
 						taskCreationTargetOtherProjectWorkspaceId,
@@ -1562,6 +1564,7 @@ export function useTaskEditor({
 				},
 				runtimeAllocatedTaskId,
 			);
+			options?.onTaskCardAllocatedForRelationModeling?.(created.task);
 			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
 				boardBeforeMutation: board,
 				boardAfterMutation: created.board,
@@ -1586,6 +1589,7 @@ export function useTaskEditor({
 				...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 				prompt_character_count: prompt.length,
 			});
+			if (options?.preserveFormUntilCreationConfirmed) return created.task.id;
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);

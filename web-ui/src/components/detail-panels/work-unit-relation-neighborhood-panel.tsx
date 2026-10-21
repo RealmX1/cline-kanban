@@ -1,3 +1,5 @@
+import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
+import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 // dd2db 1b：任务详情（Focus View 右栏）里的 Relations 可折叠 section——当前卡的一度记录型关系邻域。
 // 挂载点由 card-detail-view 决定：与「探索线 / 本会话 findings」同位、在 sessions 面板下方；不在 BoardCard 上加任何入口
 // （BoardCard 有主看板与 Focus View 两条宿主链，加入口就得两边 gating 同步）。
@@ -350,13 +352,21 @@ function RelationNeighborhoodHeaderSummaryBadge({
 export function WorkUnitRelationNeighborhoodPanel({
 	workspaceId,
 	kanbanBoardCardTaskId,
+	initiallyExpanded = false,
 }: {
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string;
+	initiallyExpanded?: boolean;
 }): ReactElement {
 	const controller = useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard({ workspaceId, kanbanBoardCardTaskId });
-	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(false);
+	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(initiallyExpanded);
 	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
+	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(false);
+	const modeling = useReferenceRelationModelingEditor({
+		workspaceId,
+		taskId: kanbanBoardCardTaskId,
+		active: isRelationNeighborhoodPanelExpanded && isModelingEditorOpen,
+	});
 	const readState = controller.relationNeighborhoodReadState;
 	const handleReferenceRelationAssertionWriteSucceeded = (
 		writeResponse: InterWorkUnitRelationAssertionWriteResponse,
@@ -370,7 +380,13 @@ export function WorkUnitRelationNeighborhoodPanel({
 	};
 
 	return (
-		<section className="flex shrink-0 flex-col border-t border-border bg-surface-1" aria-label="Relations">
+		<section
+			className={cn(
+				"flex flex-col border-t border-border bg-surface-1",
+				isModelingEditorOpen ? "min-h-0 shrink" : "shrink-0",
+			)}
+			aria-label="Relations"
+		>
 			<div className="flex h-8 shrink-0 items-center hover:bg-surface-3">
 				<button
 					type="button"
@@ -396,6 +412,18 @@ export function WorkUnitRelationNeighborhoodPanel({
 				</button>
 				{isRelationNeighborhoodPanelExpanded && workspaceId ? (
 					<Button
+						size="xs"
+						variant="ghost"
+						onClick={() => {
+							setIsModelingEditorOpen((value) => !value);
+							controller.refetchRelationNeighborhood();
+						}}
+					>
+						{isModelingEditorOpen ? "查看关系摘要" : "关系图与建模"}
+					</Button>
+				) : null}
+				{isRelationNeighborhoodPanelExpanded && workspaceId && !isModelingEditorOpen ? (
+					<Button
 						variant="ghost"
 						size="xs"
 						className="mr-0.5"
@@ -406,7 +434,7 @@ export function WorkUnitRelationNeighborhoodPanel({
 						Add relation
 					</Button>
 				) : null}
-				{isRelationNeighborhoodPanelExpanded ? (
+				{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
 					<Button
 						variant="ghost"
 						size="xs"
@@ -429,7 +457,23 @@ export function WorkUnitRelationNeighborhoodPanel({
 					onReferenceRelationAssertionWriteSucceeded={handleReferenceRelationAssertionWriteSucceeded}
 				/>
 			) : null}
-			{isRelationNeighborhoodPanelExpanded ? (
+			{isRelationNeighborhoodPanelExpanded && isModelingEditorOpen && workspaceId ? (
+				<div className="max-h-[65vh] min-h-0 overflow-y-auto border-t border-border px-3">
+					<ReferenceRelationModelingEditor
+						key={`${workspaceId}:${kanbanBoardCardTaskId}`}
+						controller={modeling}
+						workspaceId={workspaceId}
+						taskId={kanbanBoardCardTaskId}
+						onRelationsSaved={controller.refetchRelationNeighborhood}
+						rootTitle={
+							modeling.preview?.workUnits.find(
+								(entry) => entry.workUnitKey === modeling.preview?.rootWorkUnitKey,
+							)?.kanbanBoardCardIdentity?.currentTitle ?? `任务 ${kanbanBoardCardTaskId}`
+						}
+					/>
+				</div>
+			) : null}
+			{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
 				<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
 					{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
 						<div className="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary">

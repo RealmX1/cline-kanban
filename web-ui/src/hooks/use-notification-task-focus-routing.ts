@@ -9,7 +9,7 @@ import { requestWorkspaceTabFocusViaServiceWorker } from "@/utils/workspace-tab-
 //  ① 同项目：交给 openTaskInProjectInPlace 的同项目分支选中（找不到卡时提示、不清掉当前 Focus View）；
 //  ② 本 tab 正切向目标项目途中：交给原地跳转（它挂 pending、目标 board 加载出该任务后再选中）；
 //  ③ 真·跨项目：经 SW 中转定位既有目标项目标签页，聚焦成功时本 tab 保持不动；没有开着目标项目的标签页、
-//     浏览器不许切过去（当前 Chromium 的常态）、或机制不可用时，在本 tab **原地跳转**——与跨项目切换面板、Board Overview 走同一条
+//     浏览器不许切过去（当前 Chromium 的常态）、或机制不可用时，在本 tab **原地跳转**——与跨项目切换面板、All projects 首页走同一条
 //     openTaskInProjectInPlace（use-cross-project-task-open-in-project.ts），不再新开深链标签页：
 //     一个标签页管全部项目是一等用法（docs/context-cross-project-recently-active-task-switcher.md）。
 export function useNotificationTaskFocusRouting(input: {

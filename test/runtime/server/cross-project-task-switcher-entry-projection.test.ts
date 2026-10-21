@@ -9,7 +9,7 @@ import {
 // 跨项目切换面板条目的取景（哪些卡进 projects_updated 广播）。不变量：
 //   - 置顶的卡不论哪一列都进（含 Done）；
 //   - 其余只取非 Done 列，且 agent 正持有回合、或「最后被碰」/ 停止生成时刻在时间窗内；
-//   - 条目是 Board Overview in_progress 明细的超集，由同一个 per-card 构造函数产出。
+//   - 条目是 in_progress 明细（inProgressTaskDetails）的超集，由同一个 per-card 构造函数产出。
 
 const NOW_MS = 10_000_000_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -149,7 +149,7 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 		);
 	});
 
-	it("条目是 Board Overview in_progress 明细的超集（同一个 per-card 构造函数）", () => {
+	it("条目是 in_progress 明细的超集（同一个 per-card 构造函数）", () => {
 		const board = makeBoard({ in_progress: [makeCard("a", { taskDescriptionLastUpdatedAt: NOW_MS })] });
 		const sessionFactsByTaskId = new Map([
 			["a", makeFacts({ turnOwner: "user", liveness: "exited", userTurnKind: "review", lastOutputAt: 5 })],

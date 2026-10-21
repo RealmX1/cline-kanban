@@ -28,7 +28,7 @@ const STALE_REASON_DISPLAY: Record<string, string> = {
 };
 
 const NOT_STARTED_REASON_DISPLAY: Record<string, string> = {
-	not_exploratory_mode: "这张卡片不是探索模式，不维护探索线",
+	not_exploratory_mode: "这张卡片不是探索模式，不维护探索地图",
 	no_usable_sessions: "没有可用会话（缺少原生会话身份或启动参数快照，需重启会话后重试）",
 	already_in_flight: "已有一次维护在进行中",
 	throttled: "新轮次还不够，暂不维护",
@@ -36,7 +36,7 @@ const NOT_STARTED_REASON_DISPLAY: Record<string, string> = {
 };
 
 const JOB_OUTCOME_DISPLAY: Record<string, string> = {
-	accepted: "探索线已更新",
+	accepted: "探索地图已更新",
 	rejected: "判定结果未通过校验，本次未改动",
 	skipped: "没有需要判定的轮次",
 	fork_failed: "分身进程未能完成判定",
@@ -46,12 +46,14 @@ export function ExplorationThreadGraphPanel({
 	workspaceId,
 	explorationId,
 	data,
+	initiallyExpanded = false,
 }: {
 	workspaceId: string;
 	explorationId: string;
 	data: ExplorationThreadGraphData;
+	initiallyExpanded?: boolean;
 }): ReactElement {
-	const [open, setOpen] = useState(false);
+	const [open, setOpen] = useState(initiallyExpanded);
 	const [expandedTurnRowIds, setExpandedTurnRowIds] = useState<ReadonlySet<string>>(new Set());
 	const [isMaintenancePending, setIsMaintenancePending] = useState(false);
 
@@ -122,7 +124,7 @@ export function ExplorationThreadGraphPanel({
 					<ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
 				)}
 				<GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="text-xs font-medium">探索线</span>
+				<span className="text-xs font-medium">探索地图</span>
 				{turnRows.length > 0 ? (
 					<span className="text-[11px] text-muted-foreground">
 						{threadCount} 条线 · {turnRows.length} 轮
@@ -172,7 +174,7 @@ export function ExplorationThreadGraphPanel({
 					{turnRows.length === 0 ? (
 						<div className="px-2 pb-2 text-[11px] text-muted-foreground">
 							{data.queryPhase === "error"
-								? "探索线读取失败。"
+								? "探索地图读取失败。"
 								: "还没有归位的轮次——探索几轮之后它会自己长出来。"}
 						</div>
 					) : (

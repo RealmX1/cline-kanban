@@ -58,6 +58,8 @@ export interface AcpTaskConnectionStartInput {
 	// 上下文接上了，而且这条新会话会顶掉「最近一条」，令之后切回 TUI 的 --continue 也接错。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	observedAgentNativeSessionId?: string;
+	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	// 连接完成前任务可能已停止或重开；拒绝旧连接注册和迟到事件。
 	isRuntimeSessionIncarnationCurrent?: () => boolean;
 	env?: Record<string, string | undefined>;
@@ -195,6 +197,10 @@ export class AcpClientConnectionRuntime {
 				cwd: input.cwd,
 				initializeResponse,
 				observedAgentNativeSessionId: input.observedAgentNativeSessionId,
+				taskConversationSessionMainContextForkSourceNativeSessionId:
+					input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				revalidateTaskConversationSessionMainContextForkSource:
+					input.revalidateTaskConversationSessionMainContextForkSource,
 				agentId: input.agentId,
 				resumePriorAgentConversationWithoutResendingPrompt: Boolean(
 					input.resumePriorAgentConversationWithoutResendingPrompt,
@@ -290,39 +296,51 @@ export class AcpClientConnectionRuntime {
 			taskId: string;
 			resumePriorAgentConversationWithoutResendingPrompt: boolean;
 			observedAgentNativeSessionId?: string;
+			taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+			revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 		},
 	) {
+		const openSession = async () => {
+			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
+				return input.observedAgentNativeSessionId
+					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
+					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
+			}
+			const sourceSessionId = input.taskConversationSessionMainContextForkSourceNativeSessionId;
+			if (sourceSessionId) {
+				if (!input.initializeResponse.agentCapabilities?.sessionCapabilities?.fork) {
+					throw new Error("当前 ACP Agent 未声明 session/fork 能力，无法复刻主会话。");
+				}
+				await input.revalidateTaskConversationSessionMainContextForkSource?.();
+				const forked = await connection.agent.request(ACP_AGENT_METHODS.session_fork, {
+					sessionId: sourceSessionId,
+					cwd: input.cwd,
+					mcpServers: [],
+				});
+				if (
+					!forked.sessionId?.trim() ||
+					forked.sessionId.startsWith("-") ||
+					Array.from(forked.sessionId).some(
+						(character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+					) ||
+					forked.sessionId === sourceSessionId
+				) {
+					throw new Error("ACP fork 未返回独立的新会话 ID，未向源会话发送消息。");
+				}
+				// fork 响应不重播历史；只加载新 ID，让面板展示继承的消息，并复用现有重播守卫。
+				await this.loadAgentSessionById(connection, input, forked.sessionId);
+				return forked;
+			}
+			return await connection.agent.request(ACP_AGENT_METHODS.session_new, { cwd: input.cwd, mcpServers: [] });
+		};
 		try {
-			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
-				return input.observedAgentNativeSessionId
-					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
-					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
-			}
-			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
-				cwd: input.cwd,
-				mcpServers: [],
-			});
+			return await openSession();
 		} catch (error) {
-			if (!isAcpAuthenticationRequiredError(error)) {
-				throw error;
-			}
-			// agent 要求先认证。挑第一个它声明的方法走一遍——对 omp 而言 "agent" 方法是个 no-op，
-			// 只是确认「用它已配置好的本地凭据」；真的没有凭据时 session/new 会再次失败，
-			// 那时把原始错误原样抛出，好让用户看到是要去终端里登录。
+			if (!isAcpAuthenticationRequiredError(error)) throw error;
 			const authMethodId = input.initializeResponse.authMethods?.[0]?.id;
-			if (!authMethodId) {
-				throw error;
-			}
+			if (!authMethodId) throw error;
 			await connection.agent.request(ACP_AGENT_METHODS.authenticate, { methodId: authMethodId });
-			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
-				return input.observedAgentNativeSessionId
-					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
-					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
-			}
-			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
-				cwd: input.cwd,
-				mcpServers: [],
-			});
+			return await openSession();
 		}
 	}
 

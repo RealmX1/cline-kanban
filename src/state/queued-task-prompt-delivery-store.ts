@@ -693,6 +693,7 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 	sessionIncarnationId: string;
 	turnSequence: number;
 	nowEpochMs?: number;
+	expectedQueueHeadEntryId?: string;
 }): Promise<ClaimedQueuedTaskPromptDeliveryRun | null> {
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
 	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
@@ -711,7 +712,11 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 				return { next: pruned, result: null };
 			}
 			const dispatchable = entries.filter((entry) => isQueuedTaskPromptDeliveryAwaitingDispatch(entry, nowEpochMs));
-			if (dispatchable.length === 0) {
+			if (
+				dispatchable.length === 0 ||
+				(input.expectedQueueHeadEntryId !== undefined &&
+					dispatchable[0]?.queueEntryId !== input.expectedQueueHeadEntryId)
+			) {
 				return { next: pruned, result: null };
 			}
 			const chain = collectQueuedTaskPromptDeliveryChainFromHead(dispatchable);

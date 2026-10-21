@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @theme {
+
 	/* Surface hierarchy */
 	--color-surface-0: #1F2428;
 	--color-surface-1: #24292E;
@@ -48,6 +49,23 @@
 	--radius-md: 6px;
 	--radius-lg: 8px;
 	--radius-xl: 12px;
+
+}
+
+:root {
+	/* 项目标识颜色与选中、运行状态独立；明暗主题各自保证图标可读。 */
+	--color-project-identity-slate: #B5C1D1;
+	--color-project-identity-blue: #8DC5FF;
+	--color-project-identity-cyan: #67E8F9;
+	--color-project-identity-teal: #5EEAD4;
+	--color-project-identity-green: #86EFAC;
+	--color-project-identity-lime: #BEF264;
+	--color-project-identity-amber: #FCD34D;
+	--color-project-identity-orange: #FDBA74;
+	--color-project-identity-red: #FCA5A5;
+	--color-project-identity-rose: #FDA4AF;
+	--color-project-identity-purple: #D8B4FE;
+	--color-project-identity-indigo: #C7D2FE;
 
 }
 
@@ -380,6 +398,12 @@ body,
 	visibility: hidden;
 }
 
+/* All projects 的定位行不持有 canonical 卡片身份；Sticky 在 scrollport 外，隐藏源行仍保留测量几何。 */
+[data-cross-project-focused-task-pin-state]:not([data-cross-project-focused-task-pin-state="hidden"])
+	[data-cross-project-focused-task-scroll-anchor] {
+	visibility: hidden;
+}
+
 /*
  * Focus View 全 stage 卡头手风琴：顶沿 rail（已滚过卡头，顶→下堆叠）+ 底沿 rail（未到达卡头）。
  * 脱离文档流的 overlay，不挤动布局；条目用 flexbox 自然堆叠（不手算逐条偏移）。焦点 stage 的条目在
@@ -450,10 +474,12 @@ body,
 }
 
 .kb-project-row-actions {
-	opacity: 0;
+	opacity: 1;
 }
 
 @media (hover: hover) {
+	.kb-project-row-actions { opacity: 0; }
+	.kb-project-row:focus-within .kb-project-row-actions { opacity: 1; }
 	.kb-project-row:hover {
 		background: var(--color-surface-2);
 	}
@@ -465,8 +491,9 @@ body,
 
 .kb-project-row-selected,
 .kb-project-row-selected:hover {
-	background: var(--color-accent);
-	color: var(--color-accent-fg);
+	background: var(--color-surface-3);
+	color: var(--color-text-primary);
+	box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
 .kb-project-count-tag {
@@ -1300,4 +1327,19 @@ body,
 	.queued-prompt-restart-reminder-active {
 		animation: none;
 	}
+}
+
+[data-theme="light"], [data-theme="overcast"], [data-theme="solarized-light"], [data-theme="latte"], [data-theme="high-contrast-light"] {
+	--color-project-identity-slate: #475569;
+	--color-project-identity-blue: #1D4ED8;
+	--color-project-identity-cyan: #0E7490;
+	--color-project-identity-teal: #0F766E;
+	--color-project-identity-green: #15803D;
+	--color-project-identity-lime: #4D7C0F;
+	--color-project-identity-amber: #92400E;
+	--color-project-identity-orange: #C2410C;
+	--color-project-identity-red: #B91C1C;
+	--color-project-identity-rose: #BE123C;
+	--color-project-identity-purple: #7E22CE;
+	--color-project-identity-indigo: #4338CA;
 }

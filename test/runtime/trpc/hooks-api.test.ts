@@ -1622,59 +1622,62 @@ describe("createHooksApi", () => {
 		expect(notifyExplorationThreadGraphAgentTurnStopped).not.toHaveBeenCalled();
 	});
 
-	it("B.2：by-the-way 会话的自然 Stop 照样触发维护，explorationId 解析回主任务卡片", async () => {
-		// 图挂在卡片上、不挂在单条会话上；这一块必须留在 by_the_way 守卫**之外**（那道守卫管的是
-		// 转审通知 + checkpoint，与图无关）。
-		const transitionedSummary = createSummary({
-			taskId: "task-1-btw",
-			state: "awaiting_review",
-			reviewReason: "hook",
-			taskConversationSessionMetadata: {
-				workspaceTaskId: "task-1",
-				taskConversationSessionRole: "by_the_way",
-				taskConversationSessionContextSource: "started_from_scratch",
-				parentTaskConversationSessionId: null,
-				mainSessionOriginTurnNumber: null,
-				mainSessionOriginUserMessagePreview: null,
-				latestUserMessagePreview: null,
-			},
-		});
-		const manager = {
-			getSummary: vi.fn(() => createSummary({ taskId: "task-1-btw", state: "running" })),
-			transitionToReview: vi.fn(() => transitionedSummary),
-			transitionToRunning: vi.fn(),
-			applyHookActivity: vi.fn(),
-			recordAgentLifecycleHookConversationProgress: vi.fn(),
-			recordMainAgentConversationModelRequestDispatch: vi.fn(),
-			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
-			applyTurnCheckpoint: vi.fn(),
-		} as unknown as TerminalSessionManager;
+	it.each(["by_the_way", "task_collaborator"] as const)(
+		"%s 的 Stop 不发主卡转审通知，但仍触发图维护",
+		async (role) => {
+			// 图挂在卡片上、不挂在单条会话上；这一块必须留在 by_the_way 守卫**之外**（那道守卫管的是
+			// 转审通知 + checkpoint，与图无关）。
+			const transitionedSummary = createSummary({
+				taskId: "task-1-btw",
+				state: "awaiting_review",
+				reviewReason: "hook",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: role,
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			});
+			const manager = {
+				getSummary: vi.fn(() => createSummary({ taskId: "task-1-btw", state: "running" })),
+				transitionToReview: vi.fn(() => transitionedSummary),
+				transitionToRunning: vi.fn(),
+				applyHookActivity: vi.fn(),
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
+				completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
+				applyTurnCheckpoint: vi.fn(),
+			} as unknown as TerminalSessionManager;
 
-		const notifyExplorationThreadGraphAgentTurnStopped = vi.fn();
-		const broadcastTaskReadyForReview = vi.fn();
-		const api = createHooksApi({
-			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
-			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
-			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
-			broadcastTaskReadyForReview,
-			notifyExplorationThreadGraphAgentTurnStopped,
-		});
+			const notifyExplorationThreadGraphAgentTurnStopped = vi.fn();
+			const broadcastTaskReadyForReview = vi.fn();
+			const api = createHooksApi({
+				getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+				ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview,
+				notifyExplorationThreadGraphAgentTurnStopped,
+			});
 
-		const response = await api.ingest({
-			taskId: "task-1-btw",
-			workspaceId: "workspace-1",
-			event: "to_review",
-			metadata: { source: "claude", hookEventName: "Stop" },
-		});
+			const response = await api.ingest({
+				taskId: "task-1-btw",
+				workspaceId: "workspace-1",
+				event: "to_review",
+				metadata: { source: "claude", hookEventName: "Stop" },
+			});
 
-		expect(response).toEqual({ ok: true });
-		expect(notifyExplorationThreadGraphAgentTurnStopped).toHaveBeenCalledWith({
-			workspaceId: "workspace-1",
-			explorationId: "task-1",
-		});
-		// by_the_way 守卫仍然照常抑制转审通知——两件事互不牵连。
-		expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
-	});
+			expect(response).toEqual({ ok: true });
+			expect(notifyExplorationThreadGraphAgentTurnStopped).toHaveBeenCalledWith({
+				workspaceId: "workspace-1",
+				explorationId: "task-1",
+			});
+			// by_the_way 守卫仍然照常抑制转审通知——两件事互不牵连。
+			expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
+		},
+	);
 	it("恢复守卫武装期间放行本活体自己 dispatch 的后台工作完成通知——那是 agent 在等的唤醒信号", async () => {
 		const manager = {
 			getSummary: vi.fn(() =>

@@ -103,6 +103,7 @@ function resolveLedgerRecordHistoryResolution(
 		case "superseded":
 			return "superseded_by_later_question_without_answer";
 		default:
+			if (record.status === "pending" && record.nativeToolCallOutcome) return record.nativeToolCallOutcome;
 			// pending 仍在面板上等人答，不属于「记录」。
 			return null;
 	}
@@ -121,7 +122,11 @@ export function buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(
 		// 旧版本一问两记：被同正文后继顶掉的那条只是重复记录，不是一次「没被回答的提问」。
 		if (record.status === "superseded" && record.supersededByDecisionId !== null) {
 			const successor = recordsByDecisionId.get(record.supersededByDecisionId);
-			if (successor !== undefined && successor.questionMarkdown === record.questionMarkdown) {
+			if (
+				record.agentId !== "codex" &&
+				successor !== undefined &&
+				successor.questionMarkdown === record.questionMarkdown
+			) {
 				continue;
 			}
 		}
@@ -136,7 +141,12 @@ export function buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(
 			recordSource: "kanban_decision_ledger",
 			decisionKind: record.decisionKind,
 			askedAt: record.askedAt,
-			resolvedAt: record.status === "answered" ? (record.answer?.answeredAt ?? record.updatedAt) : record.updatedAt,
+			resolvedAt:
+				record.status === "pending"
+					? null
+					: record.status === "answered"
+						? (record.answer?.answeredAt ?? record.updatedAt)
+						: record.updatedAt,
 			resolution,
 			orderedQuestions,
 			questionAnswers: buildQuestionAnswersFromLedgerRecord(record, orderedQuestions),

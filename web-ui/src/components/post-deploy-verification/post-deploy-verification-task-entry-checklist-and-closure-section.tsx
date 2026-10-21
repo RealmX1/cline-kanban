@@ -1,5 +1,15 @@
-import { CheckCircle2, ChevronDown, ChevronRight, ClipboardList, GitCommit, Plus } from "lucide-react";
-import { type ReactElement, useState } from "react";
+import * as RadixCheckbox from "@radix-ui/react-checkbox";
+import {
+	Check,
+	CheckCircle2,
+	ChevronDown,
+	ChevronRight,
+	ClipboardList,
+	GitBranchPlus,
+	GitCommit,
+	Plus,
+} from "lucide-react";
+import { type ReactElement, useEffect, useId, useState } from "react";
 
 import {
 	isPostDeployVerificationTaskAwaitingVerification,
@@ -19,6 +29,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
+import { Tooltip } from "@/components/ui/tooltip";
 import type {
 	RuntimePostDeployVerificationChecklistItem,
 	RuntimePostDeployVerificationDeploymentGroup,
@@ -46,6 +57,7 @@ export interface PostDeployVerificationTaskEntryChecklistAndClosureSectionProps 
 	onRunVerificationItem: (itemId: string) => void;
 	onRequestComplete: () => void;
 	onLocateChecklistItem: (item: RuntimePostDeployVerificationChecklistItem) => void;
+	onCreateFollowUpTaskFromSelectedChecklistItems?: (selectedChecklistItemIds: string[]) => void;
 }
 
 const DEPLOYMENT_ATTRIBUTION_BADGE_TONE_CLASS_NAME: Record<
@@ -128,9 +140,13 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	onRunVerificationItem,
 	onRequestComplete,
 	onLocateChecklistItem,
+	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryChecklistAndClosureSectionProps): ReactElement {
 	const [isChecklistExpanded, setIsChecklistExpanded] = useState(checklistInitiallyExpanded);
 	const [customChecklistItemDraft, setCustomChecklistItemDraft] = useState("");
+	const followUpContextSelectionIdPrefix = useId();
+	const [isCustomChecklistItemInputExpanded, setIsCustomChecklistItemInputExpanded] = useState(false);
+	const [followUpSelectedChecklistItemIds, setFollowUpSelectedChecklistItemIds] = useState<string[] | null>(null);
 
 	const attributionBadge = describePostDeployVerificationTaskDeploymentAttributionForPanelEntry({
 		postDeployVerificationTask: task,
@@ -145,6 +161,22 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	const isChecklistInteractive = interactive && isAwaitingVerification && carriedForwardIntoDeploymentId === null;
 	// 完成区：仍在看板上（含已在 Done 但未结案的滞留态，走 controller 的恢复分支）才有按钮。
 	const canRequestComplete = isChecklistInteractive && currentBoardColumnIdOfTaskCard !== null;
+	const canCreateFollowUpTask =
+		canRequestComplete &&
+		currentBoardColumnIdOfTaskCard !== "trash" &&
+		!!onCreateFollowUpTaskFromSelectedChecklistItems &&
+		task.checklist.some((item) => !item.checked);
+	const isSelectingFollowUpContext = canCreateFollowUpTask && followUpSelectedChecklistItemIds !== null;
+	const selectedChecklistItemIds = task.checklist
+		.filter((item) => !item.checked && followUpSelectedChecklistItemIds?.includes(item.id))
+		.map((item) => item.id);
+	useEffect(() => {
+		setFollowUpSelectedChecklistItemIds((previous) => {
+			if (!previous || !canCreateFollowUpTask) return null;
+			const remaining = previous.filter((id) => task.checklist.some((item) => item.id === id && !item.checked));
+			return remaining.length === previous.length ? previous : remaining;
+		});
+	}, [task.checklist, canCreateFollowUpTask]);
 
 	const addCustomChecklistItem = (): void => {
 		const trimmedLabel = customChecklistItemDraft.trim();
@@ -153,6 +185,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 		}
 		onAddCustomChecklistItem(trimmedLabel);
 		setCustomChecklistItemDraft("");
+		setIsCustomChecklistItemInputExpanded(false);
 	};
 
 	return (
@@ -215,37 +248,121 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 			) : null}
 
 			{/* 可折叠的核对清单 */}
-			<button
-				type="button"
-				aria-expanded={isChecklistExpanded}
-				onClick={() => setIsChecklistExpanded((expanded) => !expanded)}
-				className="flex w-full cursor-pointer items-center gap-1 text-left text-[11px] text-text-secondary hover:text-text-primary"
-			>
-				{isChecklistExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-				<span>核对清单</span>
-				<span className={areAllChecklistItemsChecked ? "text-status-green" : "text-text-tertiary"}>
-					{checkedChecklistItemCount}/{task.checklist.length} 已核对
-				</span>
-			</button>
+			<div className="flex items-center gap-1">
+				<button
+					type="button"
+					aria-expanded={isChecklistExpanded}
+					onClick={() => setIsChecklistExpanded((expanded) => !expanded)}
+					className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left text-[11px] text-text-secondary hover:text-text-primary"
+				>
+					{isChecklistExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+					<span>核对清单</span>
+					<span className={areAllChecklistItemsChecked ? "text-status-green" : "text-text-tertiary"}>
+						{checkedChecklistItemCount}/{task.checklist.length} 已核对
+					</span>
+				</button>
+				{isChecklistInteractive && !isSelectingFollowUpContext ? (
+					<Tooltip content="添加自定义核对项">
+						<Button
+							size="xs"
+							variant="ghost"
+							icon={<Plus size={12} />}
+							aria-label="添加自定义核对项"
+							disabled={isCompleting}
+							onClick={() => {
+								setIsChecklistExpanded(true);
+								setIsCustomChecklistItemInputExpanded((value) => !value);
+							}}
+						/>
+					</Tooltip>
+				) : null}
+				{canCreateFollowUpTask && !isSelectingFollowUpContext ? (
+					<Tooltip content="从核对项新建后续任务">
+						<Button
+							size="xs"
+							variant="ghost"
+							icon={<GitBranchPlus size={12} />}
+							aria-label="从核对项新建后续任务"
+							disabled={isCompleting}
+							onClick={() => {
+								setIsChecklistExpanded(true);
+								setIsCustomChecklistItemInputExpanded(false);
+								setFollowUpSelectedChecklistItemIds([]);
+							}}
+						/>
+					</Tooltip>
+				) : null}
+			</div>
+			{isSelectingFollowUpContext ? (
+				<div className="flex flex-wrap items-center gap-1 text-[11px]">
+					<span className="min-w-0 flex-1 text-text-secondary">
+						选择作为新任务上下文的核对项（已选 {selectedChecklistItemIds.length}）
+					</span>
+					<Button size="xs" variant="ghost" onClick={() => setFollowUpSelectedChecklistItemIds(null)}>
+						取消
+					</Button>
+					<Button
+						size="xs"
+						disabled={selectedChecklistItemIds.length === 0 || isCompleting}
+						onClick={() => {
+							onCreateFollowUpTaskFromSelectedChecklistItems?.(selectedChecklistItemIds);
+							setFollowUpSelectedChecklistItemIds(null);
+						}}
+					>
+						下一步
+					</Button>
+				</div>
+			) : null}
 			{isChecklistExpanded ? (
 				<div className="space-y-1">
-					{task.checklist.map((item) => (
-						<PostDeployVerificationChecklistItem
-							key={item.id}
-							item={item}
-							interactive={isChecklistInteractive}
-							isCompleting={isCompleting}
-							taskVerified={task.verifiedAt !== null}
-							onToggle={(checked) => onToggleChecklistItem(item.id, checked)}
-							onRun={() => onRunVerificationItem(item.id)}
-							onRemoveCustom={() => onRemoveCustomChecklistItem(item.id)}
-							onLocate={() => onLocateChecklistItem(item)}
-						/>
-					))}
+					{task.checklist.map((item) =>
+						isSelectingFollowUpContext ? (
+							<label
+								key={item.id}
+								htmlFor={`${followUpContextSelectionIdPrefix}:${item.id}`}
+								className="flex items-start gap-2 text-[12px] text-text-secondary"
+							>
+								<RadixCheckbox.Root
+									id={`${followUpContextSelectionIdPrefix}:${item.id}`}
+									aria-label={`选择核对项：${item.label}`}
+									checked={selectedChecklistItemIds.includes(item.id)}
+									disabled={item.checked || isCompleting}
+									onCheckedChange={(checked) =>
+										setFollowUpSelectedChecklistItemIds((previous) =>
+											checked === true
+												? [...(previous ?? []), item.id]
+												: (previous ?? []).filter((id) => id !== item.id),
+										)
+									}
+									className="mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border border-border-bright data-[state=checked]:bg-accent disabled:opacity-40"
+								>
+									<RadixCheckbox.Indicator>
+										<Check size={11} className="text-white" />
+									</RadixCheckbox.Indicator>
+								</RadixCheckbox.Root>
+								<span className="min-w-0 flex-1 break-words">
+									{item.label}
+									{item.checked ? "（已核对）" : ""}
+								</span>
+							</label>
+						) : (
+							<PostDeployVerificationChecklistItem
+								key={item.id}
+								item={item}
+								interactive={isChecklistInteractive}
+								isCompleting={isCompleting}
+								taskVerified={task.verifiedAt !== null}
+								onToggle={(checked) => onToggleChecklistItem(item.id, checked)}
+								onRun={() => onRunVerificationItem(item.id)}
+								onRemoveCustom={() => onRemoveCustomChecklistItem(item.id)}
+								onLocate={() => onLocateChecklistItem(item)}
+							/>
+						),
+					)}
 					{task.checklist.length === 0 ? (
 						<p className="m-0 text-[12px] italic text-text-tertiary">无核对项</p>
 					) : null}
-					{isChecklistInteractive ? (
+					{isChecklistInteractive && isCustomChecklistItemInputExpanded && !isSelectingFollowUpContext ? (
 						<div className="flex items-center gap-1.5 pt-0.5">
 							<input
 								type="text"
@@ -260,8 +377,15 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 										event.preventDefault();
 										addCustomChecklistItem();
 									}
+									if (event.key === "Escape") {
+										event.preventDefault();
+										event.stopPropagation();
+										setIsCustomChecklistItemInputExpanded(false);
+										setCustomChecklistItemDraft("");
+									}
 								}}
 								placeholder="添加自定义核对项"
+								ref={(element) => element?.focus()}
 								className="h-6 min-w-0 flex-1 rounded-sm border border-border bg-surface-2 px-1.5 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
 							/>
 							<Button
@@ -270,7 +394,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 								icon={<Plus size={12} />}
 								disabled={customChecklistItemDraft.trim().length === 0}
 								onClick={addCustomChecklistItem}
-								aria-label="添加自定义核对项"
+								aria-label="保存自定义核对项"
 								className="shrink-0"
 							/>
 						</div>
@@ -280,7 +404,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 
 			<PostDeployVerificationTaskEntryClosureRecord postDeployVerificationTask={task} />
 
-			{canRequestComplete ? (
+			{canRequestComplete && !isSelectingFollowUpContext ? (
 				<div>
 					<Button
 						size="sm"

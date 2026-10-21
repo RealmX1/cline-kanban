@@ -661,10 +661,9 @@ export function createTerminalWebSocketBridge({
 
 		ws.on("message", (rawMessage: RawData) => {
 			try {
-				const summary = terminalManager.writeInput(taskId, rawDataToBuffer(rawMessage));
-				if (!summary) {
-					ws.close(1011, "Task session is not running.");
-				}
+				// 进程已回收时，保留画面仍可能产生鼠标或焦点报告。没有输入接收者不代表传输故障；
+				// 丢弃这些字节并保留 viewer，续跑后的新进程仍可复用同一条连接。
+				terminalManager.writeInput(taskId, rawDataToBuffer(rawMessage));
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ws.close(1011, message);

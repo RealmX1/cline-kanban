@@ -1,13 +1,14 @@
-import { act, type ReactNode } from "react";
+import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
-import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { CrossProjectRecentlyActiveTaskSwitcherPanel as ProductionCrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
 	collectUnreadHandoffEntryKeysFromNotificationLog,
+	useCrossProjectRecentlyActiveTaskSwitcherSections,
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { resetLastLoadedOtherProjectTaskCardSnapshotCache } from "@/hooks/use-task-card-snapshot-of-other-project-for-cross-project-task-switcher-row-expansion";
 import type {
@@ -20,6 +21,23 @@ import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross
 import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
 import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/workspace-metadata-store";
+import type { BoardColumnId } from "@/types";
+
+function CrossProjectRecentlyActiveTaskSwitcherPanel(
+	props: ComponentProps<typeof ProductionCrossProjectRecentlyActiveTaskSwitcherPanel>,
+) {
+	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		projects: props.host.projects,
+		notificationLogByWorkspaceId: props.host.notificationLogByWorkspaceId,
+		currentProjectId: props.host.currentProjectId,
+	});
+	return (
+		<ProductionCrossProjectRecentlyActiveTaskSwitcherPanel
+			{...props}
+			host={{ ...props.host, crossProjectTaskSwitcherSectionsModel: sectionsModel }}
+		/>
+	);
+}
 
 // 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：四个区、Running 默认收起、
 // Pinned 与下方区重复、点击走宿主的跨项目打开、对非当前项目的卡取消置顶走 runtime。
@@ -317,6 +335,259 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
+	function renderFocusedTask(
+		taskId: string,
+		columnId: BoardColumnId,
+		host = makeHost(),
+		fullCardTitle = `完整焦点卡 ${taskId}`,
+	) {
+		const currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion = {
+			currentProjectDisplayedBoard: {
+				columns: [
+					{
+						id: columnId,
+						title: columnId,
+						cards: [
+							{
+								id: taskId,
+								title: fullCardTitle,
+								prompt: "搜索命中的完整任务需求",
+								baseRef: "main",
+								startInPlanMode: false,
+								createdAt: NOW_MS - 60 * DAY_MS,
+								updatedAt: NOW_MS - 60 * DAY_MS,
+							},
+						],
+					},
+				],
+			},
+			currentProjectTaskSessions: {},
+			currentProjectTaskCardActionHandlers: { onRestoreFromTrashTask: vi.fn() },
+			currentProjectWorkspacePath: "/repos/project-a",
+		};
+		act(() =>
+			root.render(
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={host}
+					currentProjectTaskCards={currentProjectTaskCards}
+				/>,
+			),
+		);
+		return currentProjectTaskCards;
+	}
+
+	it("搜索命中的未置顶 Done 即使完全不在广播里，也从完整 board 展示焦点卡，且不伪造分组成员", () => {
+		const host = makeHost({ focusedTaskInProject: { workspaceId: "project-a", taskId: "outside" } });
+		const taskCards = renderFocusedTask("outside", "trash", host);
+		const fallback = container.querySelector("[data-cross-project-focused-task-outside-sections]");
+		expect(fallback?.textContent).toContain("完整焦点卡 outside");
+		expect(fallback?.textContent).toContain("Done");
+		expect(fallback?.querySelector("[data-task-id]")).toBeNull();
+		expect(
+			container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:outside"]'),
+		).toHaveLength(1);
+		expect(rowTaskIds(section("remaining"))).not.toContain("outside");
+		const restore = fallback?.querySelector<HTMLButtonElement>('button[aria-label="Restore task from done"]');
+		act(() => restore?.click());
+		expect(taskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith("outside");
+	});
+
+	it.each(["most_recent_conversation_progress_only", "unread_handoffs_then_recently_opened_by_user"])(
+		"Recent 模式 %s 排除当前任务时显示独立焦点区，任务正常归组后移除独立区并重绑唯一定位行",
+		(mode) => {
+			window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRemainingSectionOrderingMode, mode);
+			const host = makeHost({
+				projects: [
+					makeProject("project-a", [makeEntry("outside", { taskDescriptionLastUpdatedAt: NOW_MS - 60 * DAY_MS })]),
+				],
+				focusedTaskInProject: { workspaceId: "project-a", taskId: "outside" },
+			});
+			renderFocusedTask("outside", "review", host);
+			expect(container.querySelector("[data-cross-project-focused-task-outside-sections]")).not.toBeNull();
+			renderFocusedTask("outside", "review", {
+				...host,
+				projects: [
+					makeProject("project-a", [
+						makeEntry("outside", {
+							lastConversationProgressObservation: {
+								observedAtMs: NOW_MS,
+								evidenceKind: "persisted_agent_transcript",
+							},
+							lastOpenedByUserAt: NOW_MS,
+						}),
+					]),
+				],
+			});
+			expect(container.querySelector("[data-cross-project-focused-task-outside-sections]")).toBeNull();
+			expect(
+				container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:outside"]'),
+			).toHaveLength(1);
+		},
+	);
+
+	it("Running 收起时保留当前任务行，不修改收起偏好，优先于重复的 Pinned 行作为定位源", () => {
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", [
+					makeEntry("running", {
+						turnOwner: "agent",
+						liveness: "live",
+						lastOutputAt: NOW_MS,
+						pinnedToTaskPinboardAt: 1,
+					}),
+				]),
+			],
+			focusedTaskInProject: { workspaceId: "project-a", taskId: "running" },
+		});
+		renderFocusedTask("running", "in_progress", host);
+		expect(rowTaskIds(section("running"))).toEqual(["running"]);
+		expect(section("running").querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe("false");
+		expect(section("running").querySelector("[data-cross-project-focused-task-scroll-anchor]")).not.toBeNull();
+		expect(section("pinned").querySelector("[data-cross-project-focused-task-scroll-anchor]")).toBeNull();
+		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded)).not.toBe(
+			"true",
+		);
+	});
+
+	it("仅在 Pinned 的焦点卡超出前五条仍保留，收起 Pinned 后只留它且偏好仍为收起", () => {
+		const entries = Array.from({ length: 8 }, (_, index) =>
+			makeEntry(`pinned-${index}`, {
+				columnId: "trash",
+				pinnedToTaskPinboardAt: index + 1,
+			}),
+		);
+		const host = makeHost({
+			projects: [makeProject("project-a", entries)],
+			focusedTaskInProject: { workspaceId: "project-a", taskId: "pinned-0" },
+		});
+		renderFocusedTask("pinned-0", "trash", host);
+		expect(rowTaskIds(section("pinned"))).toContain("pinned-0");
+		expect(rowTaskIds(section("pinned"))).toHaveLength(6);
+		act(() => section("pinned").querySelector<HTMLButtonElement>("button[aria-expanded]")?.click());
+		expect(rowTaskIds(section("pinned"))).toEqual(["pinned-0"]);
+		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed)).toBe("true");
+	});
+
+	it("跨项目在途同号任务绝不拿旧项目 board 充当目标卡，显示目标占位且不创建 Sticky 副本", () => {
+		const host = makeHost({
+			projects: [makeProject("project-a", []), makeProject("project-b", [])],
+			focusedTaskInProject: { workspaceId: "project-b", taskId: "outside" },
+		});
+		renderFocusedTask("outside", "review", host);
+		const fallback = container.querySelector("[data-cross-project-focused-task-outside-sections]");
+		expect(fallback).not.toBeNull();
+		expect(fallback?.textContent).not.toContain("完整焦点卡 outside");
+		expect(fallback?.textContent).toContain("加载");
+		expect(container.querySelector("[data-cross-project-focused-task-sticky-edge]")).toBeNull();
+	});
+
+	it.each(["running_collapsed", "pinned_collapsed", "pinned_truncated"] as const)(
+		"跨项目未水合的 %s 按复合身份保留定位行，水合后升级目标卡且不改折叠偏好",
+		async (scenario) => {
+			vi.useFakeTimers();
+			const targetTaskId = "same-id";
+			const targetSection = scenario === "running_collapsed" ? "running" : "pinned";
+			const targetColumnId = scenario === "running_collapsed" ? "in_progress" : "trash";
+			if (scenario === "pinned_collapsed") {
+				window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed, "true");
+			}
+			const targetEntry = makeEntry(targetTaskId, {
+				title: "目标项目的定位任务",
+				columnId: targetColumnId,
+				pinnedToTaskPinboardAt: 1,
+				...(scenario === "running_collapsed"
+					? { turnOwner: "agent" as const, liveness: "live" as const, lastOutputAt: NOW_MS }
+					: {}),
+			});
+			const targetEntries = [
+				targetEntry,
+				...Array.from({ length: 7 }, (_, index) =>
+					makeEntry(`other-pinned-${index}`, { columnId: "trash", pinnedToTaskPinboardAt: index + 2 }),
+				),
+			];
+			const host = makeHost({
+				projects: [
+					makeProject("project-a", [makeEntry(targetTaskId, { title: "旧项目同号任务" })]),
+					makeProject("project-b", targetEntries),
+				],
+				currentProjectId: "project-a",
+				focusedTaskInProject: { workspaceId: "project-b", taskId: targetTaskId },
+			});
+			const queryTargetAnchor = () =>
+				section(targetSection).querySelector<HTMLElement>(
+					'[data-cross-project-focused-task-scroll-anchor="project-b:same-id"]',
+				);
+			const assertCollapsedPreferencesAndUniqueTarget = () => {
+				expect(
+					container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-b:same-id"]'),
+				).toHaveLength(1);
+				expect(queryTargetAnchor()?.textContent).toContain("目标项目的定位任务");
+				expect(queryTargetAnchor()?.dataset.crossProjectTaskSwitcherWorkspaceId).toBe("project-b");
+				expect(container.querySelector("[data-cross-project-focused-task-outside-sections]")).toBeNull();
+				if (scenario === "running_collapsed") {
+					expect(rowTaskIds(section("running"))).toEqual([targetTaskId]);
+					expect(section("running").querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe(
+						"false",
+					);
+					expect(
+						window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded),
+					).not.toBe("true");
+				} else if (scenario === "pinned_collapsed") {
+					expect(rowTaskIds(section("pinned"))).toEqual([targetTaskId]);
+					expect(section("pinned").querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe(
+						"false",
+					);
+					expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed)).toBe(
+						"true",
+					);
+				} else {
+					expect(rowTaskIds(section("pinned"))).toHaveLength(6);
+					expect(rowTaskIds(section("pinned"))).toContain(targetTaskId);
+				}
+			};
+			act(() =>
+				root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} currentProjectTaskCards={null} />),
+			);
+			assertCollapsedPreferencesAndUniqueTarget();
+			expect(
+				container.querySelector(
+					'[data-task-card-render-role="focused_task_card_copy_in_cross_project_task_switcher"]',
+				),
+			).toBeNull();
+
+			// 旧项目的同号完整 board 仍在时，不能把它当成目标项目的卡片。
+			renderFocusedTask(targetTaskId, "review", host, "旧项目同号完整卡");
+			assertCollapsedPreferencesAndUniqueTarget();
+			expect(queryTargetAnchor()?.textContent).not.toContain("旧项目同号完整卡");
+			expect(
+				container.querySelector(
+					'[data-task-card-render-role="focused_task_card_copy_in_cross_project_task_switcher"]',
+				),
+			).toBeNull();
+
+			const hydratedTaskCards = renderFocusedTask(
+				targetTaskId,
+				targetColumnId,
+				{ ...host, currentProjectId: "project-b" },
+				"水合后的目标项目完整卡",
+			);
+			assertCollapsedPreferencesAndUniqueTarget();
+			await hoverRowUntilExpandedInPlace(queryTargetAnchor());
+			expect(queryTargetAnchor()?.textContent).toContain("水合后的目标项目完整卡");
+			expect(queryTargetAnchor()?.textContent).not.toContain("旧项目同号任务");
+			if (scenario !== "running_collapsed") {
+				act(() =>
+					queryTargetAnchor()
+						?.querySelector<HTMLButtonElement>('button[aria-label="Restore task from done"]')
+						?.click(),
+				);
+				expect(hydratedTaskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith(
+					targetTaskId,
+				);
+			}
+		},
+	);
+
 	it("四个区按归属渲染：Running 默认收起只显示计数，Pinned 与剩余区重复同一任务", () => {
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
 
@@ -949,9 +1220,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(compactRowToggle?.parentElement?.classList.contains("right-1")).toBe(true);
 		expect(compactRowToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
 		expect(compactRowToggle?.parentElement?.lastElementChild).toBe(compactRowToggle);
-		expect(
-			queryRecentRow()?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
-		).not.toBeNull();
+		expect(queryRecentRow()?.querySelector("[data-task-card-corner-status-indicator]")).not.toBeNull();
 
 		// 指针移进行（hover 意图开始）后按下开关：意图作废，直接固定展开。
 		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
@@ -964,7 +1233,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		const keptExpandedRow = queryRecentRow();
 		expect(rowInPlaceExpansionState(keptExpandedRow)).toBe("kept_expanded_in_list");
-		// 快照还在读：先画与精简行同一个首行（前导点 + 标题），提示放在下面，开关仍在。
+		// 快照还在读：先画同一个首行，角标仍挂在行外框，提示放在下面，开关仍在。
 		const unavailableFallback = keptExpandedRow?.querySelector(
 			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
 		);
@@ -972,9 +1241,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			"Title recent",
 		);
 		expect(
-			unavailableFallback
-				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
-				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+			keptExpandedRow
+				?.querySelector("[data-task-card-corner-status-indicator]")
+				?.getAttribute("data-task-card-corner-status-indicator"),
 		).toBe("unread_handoff");
 		expect(unavailableFallback?.textContent).toContain("Loading task…");
 		expect(
@@ -1192,24 +1461,23 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const pinnedRunningRow = queryRow("pinned", "running-pinned");
 		expect(rowInPlaceExpansionState(pinnedRunningRow)).toBe("expanded_in_place_by_hover");
 		expect(pinnedRunningRow?.textContent).toContain("Card title running-pinned");
-		// 首行前导位换成精简行同一个前导点：Pinned 行没有前导点，也不画 In progress 的 Spinner。
-		expect(
-			pinnedRunningRow?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
-		).toBeNull();
+		// Pinned 副本也按任务实际状态显示运行角标，标题内不再画 In progress 标记。
+		expect(pinnedRunningRow?.querySelector('[data-task-card-corner-status-indicator="running"]')).not.toBeNull();
+		expect(pinnedRunningRow?.querySelector("[data-task-card-in-progress-column-status-marker]")).toBeNull();
 		expect(pinnedRunningRow?.querySelector(".animate-spin")).toBeNull();
 		act(() => clickTaskCardBodyTitle(pinnedRunningRow));
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "running-pinned");
 		expect(rowInPlaceExpansionState(queryRow("pinned", "running-pinned"))).toBe("expanded_in_place_by_hover");
 		expect(section("running").querySelector('button[aria-expanded="true"]')).not.toBeNull();
-		// Running 区那一行的完整卡有 Running 的脉动前导点，与精简行一致。
+		// Running 区与 Pinned 副本显示同一个运行角标。
 		await movePointerFromRowToRow(queryRow("pinned", "running-pinned"), queryRow("running", "running-pinned"));
 		await act(async () => {
 			vi.advanceTimersByTime(400);
 		});
 		expect(
 			queryRow("running", "running-pinned")
-				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
-				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+				?.querySelector("[data-task-card-corner-status-indicator]")
+				?.getAttribute("data-task-card-corner-status-indicator"),
 		).toBe("running");
 
 		// 置顶的 Done 卡：本体卡上不可点，这里与精简行一样能打开。

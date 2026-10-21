@@ -2,6 +2,8 @@
 
 Use this reference for Cline Kanban, Vibe Kanban, or any local runtime that owns task cards, agent sessions, per-task worktrees, terminal streams, or cleanup-on-shutdown behavior.
 
+以下所有部署命令均须先满足 [SKILL.md 的部署请求与确认规则](../SKILL.md#部署请求与确认)；本清单、原生依赖预检通过或后台执行方式均不替代部署授权。
+
 ## Before Restart
 
 - Capture the listening process:
@@ -36,6 +38,7 @@ When the global `kanban` CLI is symlinked to a local custom branch, source edits
 If the long-lived server is run by a `while true` supervisor script (e.g. `run-cline-kanban-<port>-service.sh`), do NOT recreate the tmux session and do NOT kill by process name. Rebuild, then restart by signalling the single listener PID and letting the supervisor respawn it:
 
 ```sh
+# 已完成上述部署授权、备份与现场盘点后才执行（构建会更新共享产物）。
 cd /Users/bominzhang/Documents/GitHub/cline-kanban
 # 从 supervisor 的实际启动命令确认路径；下列路径只是本机示例。
 KANBAN_DEPLOY_NODE_BINARY=/Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node
@@ -70,6 +73,7 @@ After respawn (the supervisor waits ~5s), validate: new PID ≠ old, listens on 
 When no supervisor loop owns the server, rebuild first, then recreate the tmux session with an explicit PATH so agent detection still works:
 
 ```sh
+# 已完成上述部署授权、备份与现场盘点后才执行（构建会更新共享产物）。
 cd /Users/bominzhang/Documents/GitHub/cline-kanban
 git status --short --branch
 # 构建和下方服务启动使用同一 Node；预检失败时不得停止旧服务。

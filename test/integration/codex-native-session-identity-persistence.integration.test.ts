@@ -1,5 +1,5 @@
 // 显式 opt-in：需要本机 Codex，使用隔离 HOME、空白配置及阻断 hook，绝不请求真实模型。
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -229,6 +229,50 @@ process.stdout.write(JSON.stringify({continue:false, stopReason:'隔离身份测
 				}
 			}
 			expect(new Set(nativeIds).size).toBe(3);
+			// 真实 SessionStart / 用户提交已落盘后，再投递 memory phase-2 的真实坏样本形状。
+			// 同时守住打包 CLI 入口和旧 CLI / spool 直投入口，不能只测身份抽取函数。
+			const beforeBackgroundHooks = await rpc<RuntimeWorkspaceStateResponse>("workspace.getState", workspaceId);
+			for (const event of ["activity", "to_review", "to_in_progress"] as const) {
+				expect(
+					await rpc("hooks.ingest", workspaceId, {
+						taskId: keys[0],
+						workspaceId,
+						event,
+						metadata: { source: "codex", hookEventName: "PostToolUse", toolName: "Bash" },
+						agentNativeConversationSessionIdentity: {
+							sourceAgentId: "codex",
+							nativeSessionId: "01a1592f-121b-7d31-9435-768bfffda4e8",
+							transcriptPath: null,
+							observedAt: Date.now(),
+						},
+					}),
+				).toEqual({ ok: true });
+			}
+			const excluded = spawnSync(
+				process.execPath,
+				[cliPath, "hooks", "codex-hook", "--event", "to_review", "--source", "codex"],
+				{
+					cwd: repository.repositoryPath,
+					env: {
+						...environment,
+						KANBAN_RUNTIME_HOST: "127.0.0.1",
+						KANBAN_RUNTIME_PORT: String(port),
+						KANBAN_HOOK_WORKSPACE_ID: workspaceId,
+						KANBAN_HOOK_TASK_ID: keys[0],
+					},
+					input: JSON.stringify({
+						hook_event_name: "Stop",
+						session_id: "01a1592f-121b-7d31-9435-768bfffda4e8",
+						transcript_path: null,
+					}),
+					encoding: "utf8",
+					timeout: 15000,
+				},
+			);
+			expect(excluded.status, excluded.stderr).toBe(0);
+			expect(excluded.stdout.trim()).toBe("{}");
+			const afterBackgroundHooks = await rpc<RuntimeWorkspaceStateResponse>("workspace.getState", workspaceId);
+			expect(afterBackgroundHooks.sessions[keys[0]]).toEqual(beforeBackgroundHooks.sessions[keys[0]]);
 			await killServer();
 			await startServer();
 			const restored = await rpc<RuntimeWorkspaceStateResponse>("workspace.getState", workspaceId);

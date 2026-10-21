@@ -1,11 +1,17 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
 import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import type * as GitUtilsModule from "../../src/workspace/git-utils";
-import { probeAndRefreshTaskCommitIntegrationProvenance } from "../../src/workspace/task-commit-integration-provenance";
+import {
+	probeAndRefreshTaskCommitIntegrationProvenance,
+	readObservedTaskCommitsAcrossIncarnationsByTaskId,
+	readRawTaskCommitLandingSnapshotForRelationLedgerEvent,
+	readSourceTaskCommitLandingReadiness,
+	recordTaskWorktreeCreationCommitProvenance,
+} from "../../src/workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -127,6 +133,95 @@ describe.sequential("task-worktree integration", () => {
 		repository.runGit(["add", fileName]);
 		repository.runGit(["commit", "-m", `advance base ${fileName}`]);
 	}
+
+	it("复制来源后只追踪新任务提交，来源 squash 落地和删除工作树后仍可证明归属", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("copied-task-commit-ownership-repository");
+			const repoPath = repository.repositoryPath;
+			writeFileSync(join(repoPath, "initial.txt"), "base\n");
+			const baseCommit = repository.commitAllRepositoryFilesAtDate({
+				message: "初始版本",
+				authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
+			});
+			const source = repository.createLinkedWorktree({
+				worktreeDirectoryName: "source-task-before-landing",
+				branchName: "source-task",
+			});
+			for (const fileName of ["source-first.txt", "source-second.txt"]) {
+				writeFileSync(join(source.worktreePath, fileName), `${fileName}\n`);
+				repository.runGit(["add", fileName], { workingDirectoryPath: source.worktreePath });
+				repository.runGit(["commit", "-m", "来源独有提交"], { workingDirectoryPath: source.worktreePath });
+			}
+			const sourceHead = repository.runGit(["rev-parse", "source-task"]).stdout.trim();
+			const { worktreePath } = repository.createLinkedWorktree({
+				worktreeDirectoryName: "copied-independent-task",
+				branchName: "copied-independent-task",
+				startPoint: sourceHead,
+			});
+			const taskId = "copied-independent-task";
+			const { workspaceId } = await loadWorkspaceContext(repoPath);
+			const creationProvenanceInput = {
+				workspaceId,
+				taskId,
+				baseRef: "main",
+				initialBaseCommit: sourceHead,
+				baseRefCommitHistoryProbeFloorCommit: baseCommit,
+			};
+			await recordTaskWorktreeCreationCommitProvenance(creationProvenanceInput);
+			const probeInput = { workspaceId, taskId, repoPath, worktreePath, baseRef: "main", worktreeExists: true };
+			expect(await probeAndRefreshTaskCommitIntegrationProvenance(probeInput)).toMatchObject({
+				taskCommitIntegrationTrackingStatus: "complete",
+				taskCommitsIntegratedIntoBaseRef: 0,
+			});
+			expect((await readObservedTaskCommitsAcrossIncarnationsByTaskId(workspaceId)).get(taskId)).toEqual([]);
+
+			writeFileSync(join(worktreePath, "independent-change.txt"), "新任务独有成果\n");
+			repository.runGit(["add", "independent-change.txt"], { workingDirectoryPath: worktreePath });
+			repository.runGit(["commit", "-m", "新任务独有提交"], { workingDirectoryPath: worktreePath });
+			const taskCommit = repository
+				.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: worktreePath })
+				.stdout.trim();
+			expect(await probeAndRefreshTaskCommitIntegrationProvenance(probeInput)).toMatchObject({
+				taskCommitIntegrationTrackingStatus: "complete",
+				taskCommitsIntegratedIntoBaseRef: 0,
+			});
+			const ownedCommitShas = async () =>
+				(await readObservedTaskCommitsAcrossIncarnationsByTaskId(workspaceId))
+					.get(taskId)
+					?.map((commit) => commit.commitSha);
+			expect(await ownedCommitShas()).toEqual([taskCommit]);
+			const readinessInput = { workspaceId, taskId, repoPath, localBaseRef: "main" };
+			expect(await readSourceTaskCommitLandingReadiness(readinessInput)).toBe(false);
+
+			repository.runGit(["merge", "--squash", "source-task"]);
+			repository.runGit(["commit", "-m", "来源合并为一个提交"]);
+			repository.runGit(["merge-base", "--is-ancestor", sourceHead, "main"], { expectedExitCodes: [1] });
+			expect(await probeAndRefreshTaskCommitIntegrationProvenance(probeInput)).toMatchObject({
+				taskCommitIntegrationTrackingStatus: "complete",
+				taskCommitsIntegratedIntoBaseRef: 0,
+			});
+			expect(await ownedCommitShas()).toEqual([taskCommit]);
+			expect(await readSourceTaskCommitLandingReadiness(readinessInput)).toBe(false);
+
+			// 删除后仍须用原有持久快照识别新任务的 patch 等价落地，不能要求来源 HEAD 成为 main 祖先。
+			rmSync(worktreePath, { recursive: true });
+			repository.runGit(["cherry-pick", taskCommit]);
+			expect(
+				await probeAndRefreshTaskCommitIntegrationProvenance({ ...probeInput, worktreeExists: false }),
+			).toMatchObject({
+				taskCommitIntegrationTrackingStatus: "complete",
+				taskCommitsIntegratedIntoBaseRef: 1,
+				observationSource: "persisted_final_snapshot",
+			});
+			expect(await ownedCommitShas()).toEqual([taskCommit]);
+			expect(
+				(
+					await readRawTaskCommitLandingSnapshotForRelationLedgerEvent(workspaceId, taskId)
+				).taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead?.map((commit) => commit.commitSha),
+			).toEqual([taskCommit]);
+			expect(await readSourceTaskCommitLandingReadiness(readinessInput)).toBe(true);
+		});
+	});
 
 	async function probeTaskCommitIntegration(input: { repoPath: string; worktreePath: string; taskId: string }) {
 		const workspaceContext = await loadWorkspaceContext(input.repoPath);

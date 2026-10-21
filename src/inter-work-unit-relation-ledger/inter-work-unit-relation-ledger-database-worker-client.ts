@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
-
 import type { AssertedInterWorkUnitRelationEffectivenessState } from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
 import type { UserRejectionSuppressionTombstone } from "../core/inter-work-unit-relation-assertion-lifecycle-event-contract";
 import {
@@ -9,6 +8,7 @@ import {
 	committedInterWorkUnitRelationLedgerEventSchema,
 	type InterWorkUnitRelationLedgerEventDraft,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
+import type { ReferenceRelationModelingLedgerCommit } from "../core/work-unit-relation-modeling-api-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type {
 	TaskCardFieldValueRetainedContent,
@@ -29,6 +29,11 @@ export interface WorkspaceBoardCommittedTaskMutationCaptureSnapshot {
 	boardFileSha256: string | null;
 	boardRevision: number | null;
 	workspaceBoardSnapshot: WorkspaceBoardSnapshotForTaskMutationDiff;
+}
+
+export interface RetainedTaskCardFieldKeywordMatch {
+	fieldValueSha256: string;
+	matchedQueryTokenIndexes: number[];
 }
 
 export interface PendingBoardFileWriteTaskMutationEventBatch {
@@ -243,6 +248,21 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		return result.newlyReservedTaskIdCount;
 	}
 
+	async readReferenceRelationModelingSubmissionFingerprint(idempotencyKey: string): Promise<string | null> {
+		return (await this.request("readReferenceRelationModelingSubmissionFingerprint", { idempotencyKey })) as
+			| string
+			| null;
+	}
+
+	async commitReferenceRelationModelingChanges(
+		input: ReferenceRelationModelingLedgerCommit,
+	): Promise<"applied" | "already_applied" | "conflict"> {
+		return (await this.request("commitReferenceRelationModelingChanges", input)) as
+			| "applied"
+			| "already_applied"
+			| "conflict";
+	}
+
 	async readInterWorkUnitRelationAssertionWriteGuardState(input: {
 		relationAssertionNaturalKey: string | null;
 		relationId: string | null;
@@ -294,6 +314,16 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		return (await this.request("readRetainedFieldContents", {
 			fieldValueSha256s,
 		})) as TaskCardFieldValueRetainedContent[];
+	}
+
+	async findRetainedTaskCardFieldKeywordMatches(input: {
+		fieldValueSha256s: string[];
+		normalizedQueryTokens: string[];
+	}): Promise<RetainedTaskCardFieldKeywordMatch[]> {
+		return (await this.request(
+			"findRetainedTaskCardFieldKeywordMatches",
+			input,
+		)) as RetainedTaskCardFieldKeywordMatch[];
 	}
 
 	async close(): Promise<void> {

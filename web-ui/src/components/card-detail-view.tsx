@@ -1,7 +1,11 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
-import { resolveSessionFacets } from "@runtime-session-activity";
+import {
+	resolveMainTaskConversationSessionId,
+	resolveMainTaskConversationSessionSummary,
+	resolveSessionFacets,
+} from "@runtime-session-activity";
 import {
 	AlertTriangle,
 	Files,
@@ -28,11 +32,12 @@ import { ColumnContextPanel } from "@/components/detail-panels/column-context-pa
 import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { MobileFocusedTaskCardHeader } from "@/components/detail-panels/mobile-focused-task-card-header";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
-import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
@@ -41,6 +46,7 @@ import {
 	taskDetailAnchorKey,
 	VERIFICATION_ANCHOR_ATTR,
 } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
@@ -48,7 +54,14 @@ import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actio
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
+import { useFocusViewDesktopPanelArrangement } from "@/hooks/use-focus-view-desktop-panel-arrangement";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import {
+	type MobileFocusViewCollapsibleControls,
+	MobileFocusViewCollapsibleControlsProvider,
+	useMobileFocusViewCollapsibleControls,
+} from "@/hooks/use-mobile-focus-view-collapsible-controls";
+import { MobileFocusViewIdleCollapseControllerProvider } from "@/hooks/use-mobile-focus-view-idle-collapse-controller";
 import type { StoredPrompt } from "@/hooks/use-prompt-library";
 import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
 import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
@@ -83,7 +96,7 @@ import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
+import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
@@ -435,14 +448,14 @@ function WorkspaceChangesStaleDataWarning({
 	);
 }
 
-type MobileTab = "chat" | "sessions" | "prompts" | "queue" | "comments" | "diff" | "files";
+type MobileTab = "chat" | "sessions" | "prompts" | "commands" | "queue" | "diff" | "files";
 
 const MOBILE_DEFAULT_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "sessions", label: "Sessions", icon: <List size={14} /> },
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "commands", label: "Commands", icon: <FileText size={14} /> },
 	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
-	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
 const MOBILE_WORKSPACE_CHANGES_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
@@ -450,19 +463,19 @@ const MOBILE_WORKSPACE_CHANGES_TABS: { id: MobileTab; label: string; icon: React
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
 ];
 
-type DetailUtilityTab = "prompts" | "queue" | "comments";
+type DetailUtilityTab = "prompts" | "commands" | "queue";
 
 const DETAIL_UTILITY_TABS: { id: DetailUtilityTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "commands", label: "Commands", icon: <FileText size={14} /> },
 	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
-	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
 function isDetailUtilityTab(tab: MobileTab): tab is DetailUtilityTab {
-	return tab === "prompts" || tab === "queue" || tab === "comments";
+	return tab === "prompts" || tab === "commands" || tab === "queue";
 }
 
-// Queue 页签上的计数角标。页签条在 Prompts / Queue / Comments 三个 tab 下都渲染，所以不管停在哪个 tab，
+// Queue 页签上的计数角标。页签条在 Prompts / Commands / Queue 三个页签下都渲染，所以不管停在哪个页签，
 // 「还有几条在排队」都看得见、点一下就过去。有失败条目时转红；有重启后待确认的条目时转 warning 色。
 function QueuedTaskPromptDeliveryCountBadge({
 	indicator,
@@ -555,7 +568,11 @@ function DetailUtilityTabList({
 	emitsQueueTabAnchor: boolean;
 }): React.ReactElement {
 	return (
-		<div role="tablist" aria-label="Task detail utility panel" className="flex min-w-0 items-center gap-0.5">
+		<div
+			role="tablist"
+			aria-label="Task detail utility panel"
+			className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
+		>
 			{DETAIL_UTILITY_TABS.map((tab) => (
 				<button
 					key={tab.id}
@@ -563,7 +580,7 @@ function DetailUtilityTabList({
 					role="tab"
 					aria-selected={activeTab === tab.id}
 					className={cn(
-						"inline-flex h-6 min-w-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium transition-colors",
+						"inline-flex h-6 min-w-0 shrink-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium transition-colors",
 						activeTab === tab.id
 							? "bg-surface-3 text-text-primary"
 							: "text-text-secondary hover:bg-surface-3 hover:text-text-primary",
@@ -662,6 +679,10 @@ function DiffToolbar({
 }
 
 export function CardDetailView({
+	taskLookupWorkbenchContent,
+	mobileFocusViewControls,
+	onOpenPermanentlyDeletedTaskHistory,
+	onBackToBoard,
 	selection,
 	currentProjectId,
 	workspacePath,
@@ -695,6 +716,7 @@ export function CardDetailView({
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
 	moveToTrashLoadingById,
+	moveToReviewLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
 	onSendClineChatMessage,
@@ -725,14 +747,17 @@ export function CardDetailView({
 	isDocumentVisible = true,
 	onClineSettingsSaved,
 	onTaskClineSettingsChanged,
-	onTaskCommentEntriesChange,
 	isTaskChangesSidebarOpen = false,
-	onCreateByTheWayTaskConversationSession,
+	onCreateTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratoryFindings,
 	explorationThreadGraph,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
+	taskLookupWorkbenchContent?: React.ReactNode;
+	mobileFocusViewControls?: MobileFocusViewCollapsibleControls;
+	onOpenPermanentlyDeletedTaskHistory?: () => void;
+	onBackToBoard?: () => void;
 	selection: CardSelection;
 	currentProjectId: string | null;
 	workspacePath?: string | null;
@@ -770,6 +795,7 @@ export function CardDetailView({
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
+	moveToReviewLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
 	onSendClineChatMessage?: (
@@ -812,9 +838,10 @@ export function CardDetailView({
 		modelId: string;
 		reasoningEffort: RuntimeClineReasoningEffort | "";
 	}) => void;
-	onTaskCommentEntriesChange?: (taskId: string, entries: TaskCommentEntry[]) => void;
 	isTaskChangesSidebarOpen?: boolean;
-	onCreateByTheWayTaskConversationSession?: (input: {
+	onCreateTaskConversationSession?: (input: {
+		agentId: RuntimeAgentId;
+		sessionRole?: "by_the_way" | "task_collaborator";
 		initialUserQuestion: string;
 		contextSource: "started_from_scratch" | "forked_from_main_current_turn";
 		mainSessionOriginTurnNumber: number;
@@ -833,6 +860,17 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
+	const desktopArrangement = useFocusViewDesktopPanelArrangement();
+	const isWorkbenchBelowAgent = desktopArrangement.arrangement === "agent_above_workbench_below";
+	const mobileFocusedTaskIdentity = JSON.stringify([currentProjectId, selection.card.id]);
+	const localMobileFocusViewControls = useMobileFocusViewCollapsibleControls({
+		enabled: mobileFocusViewControls === undefined && isMobile,
+		focusedTaskIdentity: mobileFocusedTaskIdentity,
+		isDocumentVisible,
+	});
+	const mobileControls = mobileFocusViewControls ?? localMobileFocusViewControls;
+	const mobileFocusViewIdleCollapseController = mobileControls.idleCollapseController;
+	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const terminalThemeColors = useTerminalThemeColors();
@@ -847,13 +885,19 @@ export function CardDetailView({
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
-	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(selection.card.id);
+	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(
+		resolveMainTaskConversationSessionId(selection.card),
+	);
 	// 递增的请求 key 是发给两条 agent 通道的「把键盘焦点接过去」信号：key 不变就不重跑，
 	// 所以不会重复抢焦，也不需要下游回执（对照 `use-persistent-terminal-session` 的 searchOpenRequestKey）。
 	const [agentEntryKeyboardFocusRequestKey, setAgentEntryKeyboardFocusRequestKey] = useState(0);
 	const {
 		taskCardsPanelRatio,
 		setTaskCardsPanelRatio,
+		stackedAgentPanelHeightRatio,
+		setStackedAgentPanelHeightRatio,
+		workbenchSideBySideSlotRatio,
+		setWorkbenchSideBySideSlotRatio,
 		agentPanelRatio,
 		setAgentPanelRatio,
 		detailTerminalPanelWidth,
@@ -870,13 +914,12 @@ export function CardDetailView({
 	const { startDrag: startDetailDiffResize } = useResizeDrag();
 	const { startDrag: startRightPromptResize } = useResizeDrag();
 	const detailLayoutRef = useRef<HTMLDivElement | null>(null);
-	const rightColumnRef = useRef<HTMLDivElement | null>(null);
+
 	const hasExplicitTaskClineSettings =
 		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
 	const detailDiffRowRef = useRef<HTMLDivElement | null>(null);
 	const clineAgentChatPanelRef = useRef<ClineAgentChatPanelHandle | null>(null);
-	const taskCommentEntries = selection.card.taskCommentEntries ?? [];
 
 	const handleSeparatorMouseDown = useResizeHandler(
 		detailLayoutRef,
@@ -903,12 +946,13 @@ export function CardDetailView({
 		startDetailDiffResize,
 		true,
 	);
-	const handleRightPromptSeparatorMouseDown = useVerticalResizeHandler(
-		rightColumnRef,
-		detailRightPromptRatio,
-		setDetailRightPromptRatio,
+	const handleStackedAgentSeparatorMouseDown = useVerticalResizeHandler(
+		mainRowRef,
+		stackedAgentPanelHeightRatio,
+		setStackedAgentPanelHeightRatio,
 		startRightPromptResize,
 	);
+
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
 	const mainTaskWorkspaceInfo = useTaskWorkspaceInfoValue(selection.card.id, selection.card.baseRef);
 	const mainTaskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
@@ -916,8 +960,8 @@ export function CardDetailView({
 		taskWorktreeExists: mainTaskWorkspaceInfo?.exists,
 	});
 	const activeTaskConversationSessionSummary =
-		selectedTaskConversationSessionId === selection.card.id
-			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
+		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card)
+			? (resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ?? sessionSummary ?? null)
 			: (taskSessions[selectedTaskConversationSessionId] ?? null);
 	const pendingUserDecision = useAgentRaisedPendingUserDecision({
 		workspaceId: currentProjectId,
@@ -965,7 +1009,7 @@ export function CardDetailView({
 	const detailDiffFileTreePanelPercent = `${(detailDiffFileTreeRatio * 100).toFixed(1)}%`;
 	const detailDiffContentPanelPercent = `${((1 - detailDiffFileTreeRatio) * 100).toFixed(1)}%`;
 	const detailDiffFileTreePanelFlex = `0 0 ${detailDiffFileTreePanelPercent}`;
-	const rightPromptPanelPercent = `${(detailRightPromptRatio * 100).toFixed(1)}%`;
+
 	// In Progress no longer offers Move to Validation / Move to Done from the agent TUI — those
 	// shortcuts only make sense once a task is in Review (or, for Done, already in Validation).
 	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "validation";
@@ -1043,17 +1087,21 @@ export function CardDetailView({
 		conversationSessionTaskId: turnProjectionConversationSessionTaskId,
 		refreshKey: turnProjectionRefreshKey,
 	});
-	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
-		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
-		: {
-				display: isDiffExpanded ? "none" : "flex",
-				flex: "0 0 auto",
-				maxWidth: `calc(100% - ${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px)`,
-				width: detailTerminalPanelWidth,
-			};
-	const diffPanelStyle: CSSProperties = showClineAgentChatPanel
-		? { width: isDiffExpanded ? "100%" : diffPanelPercent }
-		: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
+	const agentPanelStyle: CSSProperties = isWorkbenchBelowAgent
+		? { display: isDiffExpanded ? "none" : "flex", width: "100%", flex: `0 0 ${stackedAgentPanelHeightRatio * 100}%` }
+		: showClineAgentChatPanel
+			? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
+			: {
+					display: isDiffExpanded ? "none" : "flex",
+					flex: "0 0 auto",
+					maxWidth: `calc(100% - ${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px)`,
+					width: detailTerminalPanelWidth,
+				};
+	const diffPanelStyle: CSSProperties = isWorkbenchBelowAgent
+		? { flex: "1 1 0", width: "100%", minHeight: 0 }
+		: showClineAgentChatPanel
+			? { width: isDiffExpanded ? "100%" : diffPanelPercent }
+			: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
 	const availablePaths = useMemo(() => {
 		if (!runtimeFiles || runtimeFiles.length === 0) {
 			return [];
@@ -1140,8 +1188,14 @@ export function CardDetailView({
 	useEffect(() => {
 		setDiffComments(new Map());
 		setDiffMode("working_copy");
-		setSelectedTaskConversationSessionId(selection.card.id);
-	}, [selection.card.id]);
+		const requestedSessionId = new URLSearchParams(window.location.search).get("conversationSession");
+		const requestedSession = requestedSessionId ? taskSessions[requestedSessionId] : null;
+		setSelectedTaskConversationSessionId(
+			requestedSession?.taskConversationSessionMetadata?.workspaceTaskId === selection.card.id
+				? requestedSession.taskId
+				: resolveMainTaskConversationSessionId(selection.card),
+		);
+	}, [selection.card.id, selection.card.mainTaskConversationSessionId]);
 
 	// 选中新卡（或切到该卡的另一个子会话）后，键盘焦点应当自动落进该卡的 agent 输入入口，
 	// 否则焦点会滞留在卡壳 div（@hello-pangea/dnd 的 dragHandleProps 会注入 tabIndex=0）上，
@@ -1174,9 +1228,9 @@ export function CardDetailView({
 				setIsDiffExpanded(false);
 				return;
 			}
-			onAddReviewComments?.(selection.card.id, formatted);
+			onAddReviewComments?.(selectedTaskConversationSessionId, formatted);
 		},
-		[onAddReviewComments, selection.card.id, showClineAgentChatPanel],
+		[onAddReviewComments, selectedTaskConversationSessionId, showClineAgentChatPanel],
 	);
 	const handleFillPromptIntoActiveInput = useCallback(
 		(text: string) => {
@@ -1201,13 +1255,6 @@ export function CardDetailView({
 			setIsDiffExpanded(false);
 		},
 		[onSendReviewComments, selection.card.id, showClineAgentChatPanel],
-	);
-
-	const handleTaskCommentEntriesChange = useCallback(
-		(entries: TaskCommentEntry[]) => {
-			onTaskCommentEntriesChange?.(selection.card.id, entries);
-		},
-		[onTaskCommentEntriesChange, selection.card.id],
 	);
 
 	const promptLibraryProjectId = currentProjectId ?? "__unknown_project__";
@@ -1271,8 +1318,9 @@ export function CardDetailView({
 		</>
 	);
 	const detailUtilityPanel =
-		detailUtilityTab === "prompts" ? (
+		detailUtilityTab === "prompts" || detailUtilityTab === "commands" ? (
 			<PromptLibraryPanel
+				entryKind={detailUtilityTab === "commands" ? "reusable_command" : "draft_prompt"}
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
 				onFillInput={handleFillPromptIntoActiveInput}
@@ -1280,36 +1328,60 @@ export function CardDetailView({
 				headerContent={detailUtilityTabs}
 				taskIdsOnBoard={taskIdsOnBoard ?? null}
 			/>
-		) : detailUtilityTab === "queue" ? (
+		) : (
 			<QueuedTaskPromptDeliveryQueuePanel
 				controller={queuedPromptQueueController}
-				headerContent={detailUtilityTabs}
-			/>
-		) : (
-			<TaskCommentsPanel
-				taskCommentEntries={taskCommentEntries}
-				onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
 				headerContent={detailUtilityTabs}
 			/>
 		);
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
+	// 某些旧任务只剩主卡启动声明；入口仍可提供交接预览，服务端会再次确认 Claude 来源并列出材料缺失。
+	const mainSessionSummaryForSessionsPanel: RuntimeTaskSessionSummary | null =
+		sessionSummary ??
+		((selection.card.mostRecentlyLaunchedAgentSessionAgentId ?? selection.card.agentId) === "claude"
+			? {
+					taskId: resolveMainTaskConversationSessionId(selection.card),
+					agentId: "claude",
+					state: "idle",
+					workspacePath: null,
+					pid: null,
+					startedAt: null,
+					updatedAt: selection.card.updatedAt,
+					lastOutputAt: null,
+					reviewReason: null,
+					exitCode: null,
+					lastHookAt: null,
+					latestHookActivity: null,
+					turnOwner: null,
+					liveness: "none",
+					userTurnKind: null,
+				}
+			: null);
 	const taskConversationSessionsPanel =
-		effectiveTaskConversationSessionAgentId && sessionSummary && onCreateByTheWayTaskConversationSession ? (
+		effectiveTaskConversationSessionAgentId &&
+		mainSessionSummaryForSessionsPanel &&
+		onCreateTaskConversationSession ? (
 			<TaskConversationSessionsPanel
+				key={JSON.stringify([currentProjectId, selection.card.id])}
+				workspaceId={currentProjectId}
+				taskCard={selection.card}
 				workspaceTaskId={selection.card.id}
-				mainSessionSummary={sessionSummary}
+				mainSessionSummary={mainSessionSummaryForSessionsPanel}
 				mainSessionUserMessagePreview={selection.card.prompt}
 				mainSessionOriginalPromptCard={selection.card}
-				effectiveAgentId={effectiveTaskConversationSessionAgentId}
+				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId}
+				agents={runtimeConfig?.agents}
 				taskSessions={taskSessions}
 				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
 				onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
-				onCreateByTheWaySession={async ({ initialUserQuestion, contextSource }) => {
-					const result = await onCreateByTheWayTaskConversationSession({
+				onCreateTaskConversationSession={async ({ agentId, sessionRole, initialUserQuestion, contextSource }) => {
+					const result = await onCreateTaskConversationSession({
+						agentId,
+						sessionRole,
 						initialUserQuestion,
 						contextSource,
-						mainSessionOriginTurnNumber: sessionSummary.latestTurnCheckpoint?.turn ?? 1,
+						mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
 						mainSessionOriginUserMessagePreview: selection.card.prompt,
 					});
 					if (result.ok && result.taskConversationSessionId) {
@@ -1319,7 +1391,8 @@ export function CardDetailView({
 				}}
 			/>
 		) : null;
-	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
+	const isMainTaskConversationSessionSelected =
+		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card);
 	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
 	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
 	// 「本会话 findings」section（蓝图 §G.2）：复用同一份 workspace 级 findings 集合，只在调用方传了
@@ -1331,6 +1404,7 @@ export function CardDetailView({
 	const explorationThreadGraphPanel =
 		explorationThreadGraph !== undefined && currentProjectId ? (
 			<ExplorationThreadGraphPanel
+				initiallyExpanded={!isMobile}
 				workspaceId={currentProjectId}
 				explorationId={selection.card.id}
 				data={explorationThreadGraph}
@@ -1347,7 +1421,11 @@ export function CardDetailView({
 	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
 	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
 	const workUnitRelationNeighborhoodPanel = (
-		<WorkUnitRelationNeighborhoodPanel workspaceId={currentProjectId} kanbanBoardCardTaskId={selection.card.id} />
+		<WorkUnitRelationNeighborhoodPanel
+			initiallyExpanded={!isMobile}
+			workspaceId={currentProjectId}
+			kanbanBoardCardTaskId={selection.card.id}
+		/>
 	);
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
@@ -1362,7 +1440,12 @@ export function CardDetailView({
 			// 会话面板由多种传输形态共用，面板内部据此决定是否显示 Cline 专属的 provider/模型控件。
 			agentId={effectiveTaskConversationSessionAgentId ?? undefined}
 			taskColumnId={selection.column.id}
-			defaultMode={isMainTaskConversationSessionSelected ? "act" : "plan"}
+			defaultMode={
+				activeTaskConversationSessionSummary?.taskConversationSessionMetadata?.taskConversationSessionRole ===
+				"by_the_way"
+					? "plan"
+					: "act"
+			}
 			showComposerModeToggle={false}
 			workspaceId={currentProjectId}
 			runtimeConfig={runtimeConfig}
@@ -1416,6 +1499,7 @@ export function CardDetailView({
 			taskId={selectedTaskConversationSessionId}
 			workspaceId={currentProjectId}
 			terminalEnabled={isTaskTerminalEnabled}
+			isMouseWheelScrollInteractionEnabled={!taskLookupWorkbenchContent && (!isMobile || mobileTab === "chat")}
 			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			// 切卡热键 alt+↑/↓ 由本视图注册，所以这个终端可以把它放行给 document。
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
@@ -1444,7 +1528,7 @@ export function CardDetailView({
 			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
 			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showSessionToolbar={false}
-			autoFocus
+			autoFocus={!taskLookupWorkbenchContent}
 			showMoveToTrash={isMainTaskConversationSessionSelected && showMoveToTrashActions}
 			onMoveToTrash={onMoveToTrash}
 			isMoveToTrashLoading={isMoveToTrashLoading}
@@ -1486,17 +1570,27 @@ export function CardDetailView({
 		pendingUserDecision.decision.originRuntimeSessionIncarnationId !== null &&
 		pendingUserDecision.decision.originRuntimeSessionIncarnationId ===
 			(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null) &&
-		pendingUserDecisionSessionFacets?.turnOwner === "user" &&
-		pendingUserDecisionSessionFacets.liveness === "live" &&
-		pendingUserDecisionSessionFacets.userTurnKind === "question";
+		pendingUserDecision.decision.nativeToolCallOutcome === undefined &&
+		(pendingUserDecision.decision.agentId === "codex" || pendingUserDecisionSessionFacets?.turnOwner === "user") &&
+		pendingUserDecisionSessionFacets?.liveness === "live" &&
+		(pendingUserDecision.decision.agentId === "codex" ||
+			pendingUserDecisionSessionFacets.userTurnKind === "question");
 	const isPendingQuestionRaisedByEarlierAgentSessionIncarnation =
 		pendingUserDecision.decision !== null &&
-		(pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
+		(pendingUserDecision.decision.nativeToolCallOutcome !== undefined ||
+			pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
 			pendingUserDecision.decision.originRuntimeSessionIncarnationId !==
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-			<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
+			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
+				<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
+			</div>
+			{pendingUserDecision.transcriptRecoveryNotice ? (
+				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
+					{pendingUserDecision.transcriptRecoveryNotice}
+				</p>
+			) : null}
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
 					key={JSON.stringify([
@@ -1521,16 +1615,18 @@ export function CardDetailView({
 					}
 				/>
 			) : null}
-			<AgentRaisedUserDecisionHistoryPanel
-				workspaceId={currentProjectId}
-				taskId={selectedTaskConversationSessionId}
-				pendingUserDecisionIdentityForRefresh={
-					pendingUserDecision.decision
-						? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
-						: null
-				}
-			/>
-			<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
+			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
+				<AgentRaisedUserDecisionHistoryPanel
+					workspaceId={currentProjectId}
+					taskId={selectedTaskConversationSessionId}
+					pendingUserDecisionIdentityForRefresh={
+						pendingUserDecision.decision
+							? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+							: null
+					}
+				/>
+				<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
+			</div>
 			{agentSessionContent}
 		</div>
 	);
@@ -1542,15 +1638,63 @@ export function CardDetailView({
 				setDetailUtilityTab(tab);
 			}
 		};
-		return (
-			<div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0">
-				<MobileDetailTabBar
-					activeTab={mobileTab}
-					onTabChange={handleMobileTabChange}
-					showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
-					queuedPromptTaskId={selectedTaskConversationSessionId}
-					queuedPromptCountIndicator={queuedPromptCountIndicator}
+		const mobileDetailLayout = (
+			<div
+				ref={mobileFocusViewRootRef}
+				className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
+				data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
+			>
+				<MobileFocusedTaskCardHeader
+					onBackToBoard={onBackToBoard}
+					navigationAndToolsControls={mobileControls}
+					key={mobileFocusedTaskIdentity}
+					stageDisplayName={selection.column.title}
+					idleCollapseController={mobileFocusViewIdleCollapseController}
+					cardBusinessProps={buildTaskCardBusinessProps({
+						card: selection.card,
+						columnId: selection.column.id,
+						sessionSummary:
+							resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ??
+							sessionSummary ??
+							undefined,
+						selected: true,
+						workspacePath,
+						defaultAgentId: selectedAgentId,
+						defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
+						handlers: {
+							onStartTask,
+							onEditTask,
+							onSaveTitle: onSaveTaskTitle,
+							onMoveToTrashTask: onMoveReviewCardToTrash,
+							onMoveToValidationTask: onMoveReviewCardToValidation,
+							onMoveToReviewTask: onMoveCardToReview,
+							onRestoreFromTrashTask: onRestoreTaskFromTrash,
+							onDeleteTask,
+							onCancelAutomaticTaskAction,
+							onRequestPinToTaskPinboard,
+							onUnpinFromTaskPinboard,
+							resolveTaskWorkspaceAbsoluteDirectoryPath,
+							moveToTrashLoadingById: moveToTrashLoadingById ?? {
+								[selection.card.id]: isMoveToTrashLoading ?? false,
+							},
+							moveToValidationLoadingById: { [selection.card.id]: isMoveToValidationLoading ?? false },
+							moveToReviewLoadingById,
+						},
+					})}
 				/>
+				<div
+					hidden={!mobileControls.upperNavigationAndToolsExpanded}
+					className="shrink-0"
+					data-mobile-focus-view-detail-tabs=""
+				>
+					<MobileDetailTabBar
+						activeTab={mobileTab}
+						onTabChange={handleMobileTabChange}
+						showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
+						queuedPromptTaskId={selectedTaskConversationSessionId}
+						queuedPromptCountIndicator={queuedPromptCountIndicator}
+					/>
+				</div>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
 						{/* Chat panel. 终端 agent 的阅读模式与虚拟按键条都由 AgentTerminalPanel 自己承载，
@@ -1571,7 +1715,7 @@ export function CardDetailView({
 							{sessionFindingsSection}
 							{workUnitRelationNeighborhoodPanel}
 						</div>
-						{/* Prompts / comments utility panel */}
+						{/* Prompts / Commands / Queue 工具面板 */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: isDetailUtilityTab(mobileTab) ? "flex" : "none" }}
@@ -1701,6 +1845,14 @@ export function CardDetailView({
 				</div>
 			</div>
 		);
+		return (
+			<MobileFocusViewIdleCollapseControllerProvider value={mobileFocusViewIdleCollapseController}>
+				<MobileFocusViewCollapsibleControlsProvider value={mobileControls}>
+					{taskLookupWorkbenchContent}
+					<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>{mobileDetailLayout}</div>
+				</MobileFocusViewCollapsibleControlsProvider>
+			</MobileFocusViewIdleCollapseControllerProvider>
+		);
 	}
 
 	return (
@@ -1710,10 +1862,11 @@ export function CardDetailView({
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor.view==="task_detail" 可指向此任务详情容器。
 			data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
 		>
-			{!isDiffExpanded ? (
+			{!isDiffExpanded || taskLookupWorkbenchContent ? (
 				<>
 					<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
 						<ColumnContextPanel
+							onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
 							selection={selection}
 							workspacePath={workspacePath}
 							resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
@@ -1751,150 +1904,180 @@ export function CardDetailView({
 			) : null}
 			<div
 				className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-				style={{ width: isDiffExpanded ? "100%" : detailContentPanelPercent }}
+				style={{ width: isDiffExpanded && !taskLookupWorkbenchContent ? "100%" : detailContentPanelPercent }}
 			>
-				{gitHistoryPanel ? (
-					<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
-				) : (
-					<>
-						<div ref={mainRowRef} className="flex min-h-0 flex-1 overflow-hidden">
-							<div className="min-h-0 min-w-0" style={agentPanelStyle}>
-								{agentChatPanel}
+				{taskLookupWorkbenchContent}
+				<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>
+					{gitHistoryPanel ? (
+						<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
+					) : (
+						<>
+							<div
+								ref={mainRowRef}
+								data-focus-view-panel-arrangement={desktopArrangement.arrangement}
+								className={cn("flex min-h-0 flex-1 overflow-hidden", isWorkbenchBelowAgent && "flex-col")}
+							>
+								<div className="min-h-0 min-w-0" style={agentPanelStyle}>
+									{agentChatPanel}
+								</div>
+								{!isDiffExpanded ? (
+									<ResizeHandle
+										orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
+										ariaLabel="Resize agent and diff panels"
+										onMouseDown={
+											isWorkbenchBelowAgent
+												? handleStackedAgentSeparatorMouseDown
+												: showClineAgentChatPanel
+													? handleAgentDiffSeparatorMouseDown
+													: handleTerminalDiffSeparatorMouseDown
+										}
+										className="z-10"
+									/>
+								) : null}
+								<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
+									{isTaskChangesSidebarOpen ? (
+										<div className="flex min-h-0 flex-1 flex-col">
+											<div className="flex min-h-0 flex-1 flex-col">
+												<DiffToolbar
+													mode={diffMode}
+													onModeChange={setDiffMode}
+													isExpanded={isDiffExpanded}
+													onToggleExpand={handleToggleDiffExpand}
+												/>
+												{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+													<WorkspaceChangesStaleDataWarning
+														error={workspaceChangesError}
+														onRetry={() => void refreshWorkspaceChanges()}
+														isRequestInFlight={isWorkspaceChangesRequestInFlight}
+													/>
+												) : null}
+												<div className="flex min-h-0 flex-1">
+													{isWorkspaceChangesMissingScope ? (
+														<WorkspaceChangesUnavailablePanel />
+													) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+														<WorkspaceChangesErrorPanel
+															error={workspaceChangesError}
+															onRetry={() => void refreshWorkspaceChanges()}
+															isRequestInFlight={isWorkspaceChangesRequestInFlight}
+														/>
+													) : isWorkspaceChangesInitialLoading ? (
+														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
+													) : hasNoWorkspaceFileChanges ? (
+														<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
+													) : workspaceChanges !== null ? (
+														<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
+															<div
+																className="flex min-h-0 min-w-0"
+																style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
+															>
+																<DiffViewerPanel
+																	workspaceFiles={runtimeFiles}
+																	selectedPath={selectedPath}
+																	selectedPathExpandToken={selectedPathExpandToken}
+																	onSelectedPathChange={setSelectedPath}
+																	viewMode={isDiffExpanded ? "split" : "unified"}
+																	onAddToTerminal={
+																		onAddReviewComments || showClineAgentChatPanel
+																			? injectTextIntoActiveInput
+																			: undefined
+																	}
+																	onSendToTerminal={
+																		onSendReviewComments || showClineAgentChatPanel
+																			? handleSendDiffComments
+																			: undefined
+																	}
+																	comments={diffComments}
+																	onCommentsChange={setDiffComments}
+																/>
+															</div>
+															<ResizeHandle
+																orientation="vertical"
+																ariaLabel="Resize detail diff panels"
+																onMouseDown={handleDetailDiffSeparatorMouseDown}
+																className="z-10"
+															/>
+															<div
+																className="flex min-h-0 min-w-0"
+																style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
+															>
+																<FileTreePanel
+																	workspaceFiles={runtimeFiles}
+																	selectedPath={selectedPath}
+																	onSelectPath={handleExplicitSelectPath}
+																	panelFlex="1 1 0"
+																/>
+															</div>
+														</div>
+													) : (
+														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
+													)}
+												</div>
+											</div>
+										</div>
+									) : null}
+									<div
+										className="min-h-0 min-w-0 flex-1 flex-col"
+										style={{ display: isTaskChangesSidebarOpen ? "none" : "flex" }}
+									>
+										<TaskWorkbench
+											queueAnnouncement={queuedPromptRestartReminderAnnouncement}
+											onOpenQueue={() => handleDetailUtilityTabChange("queue")}
+											isBelowAgent={isWorkbenchBelowAgent}
+											arrangementPreference={desktopArrangement.preference}
+											onArrangementPreferenceChange={desktopArrangement.setPreference}
+											slotRatio={
+												isWorkbenchBelowAgent ? workbenchSideBySideSlotRatio : detailRightPromptRatio
+											}
+											onSlotRatioChange={
+												isWorkbenchBelowAgent ? setWorkbenchSideBySideSlotRatio : setDetailRightPromptRatio
+											}
+											queueNotice={
+												queuedPromptCountIndicator.pendingCount > 0 ||
+												queuedPromptCountIndicator.hasFailedEntries ? (
+													<span>
+														<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />{" "}
+														Queue
+													</span>
+												) : undefined
+											}
+											modules={{
+												task_sessions: taskConversationSessionsPanel,
+												cross_task_relations: workUnitRelationNeighborhoodPanel,
+												exploration_map:
+													explorationThreadGraphPanel || sessionFindingsSection ? (
+														<>
+															{explorationThreadGraphPanel}
+															{sessionFindingsSection}
+														</>
+													) : null,
+												prompt_tools: detailUtilityPanel,
+											}}
+										/>
+									</div>
+								</div>
 							</div>
-							{!isDiffExpanded ? (
-								<ResizeHandle
-									orientation="vertical"
-									ariaLabel="Resize agent and diff panels"
-									onMouseDown={
-										showClineAgentChatPanel
-											? handleAgentDiffSeparatorMouseDown
-											: handleTerminalDiffSeparatorMouseDown
-									}
-									className="z-10"
+							{bottomTerminalOpen && bottomTerminalTaskId ? (
+								<BottomTerminalSection
+									taskId={bottomTerminalTaskId}
+									workspaceId={currentProjectId}
+									summary={bottomTerminalSummary}
+									onSummary={onSessionSummary}
+									onClose={onBottomTerminalClose}
+									subtitle={bottomTerminalSubtitle}
+									terminalThemeColors={terminalThemeColors}
+									onConnectionReady={onBottomTerminalConnectionReady}
+									agentCommand={bottomTerminalAgentCommand}
+									onSendAgentCommand={onBottomTerminalSendAgentCommand}
+									paneHeight={bottomTerminalPaneHeight}
+									onPaneHeightChange={onBottomTerminalPaneHeightChange}
+									onCollapse={onBottomTerminalCollapse}
+									isExpanded={isBottomTerminalExpanded}
+									onToggleExpand={onBottomTerminalToggleExpand}
 								/>
 							) : null}
-							<div ref={rightColumnRef} className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
-								{isTaskChangesSidebarOpen ? (
-									<div className="flex min-h-0 flex-1 flex-col">
-										<DiffToolbar
-											mode={diffMode}
-											onModeChange={setDiffMode}
-											isExpanded={isDiffExpanded}
-											onToggleExpand={handleToggleDiffExpand}
-										/>
-										{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
-											<WorkspaceChangesStaleDataWarning
-												error={workspaceChangesError}
-												onRetry={() => void refreshWorkspaceChanges()}
-												isRequestInFlight={isWorkspaceChangesRequestInFlight}
-											/>
-										) : null}
-										<div className="flex min-h-0 flex-1">
-											{isWorkspaceChangesMissingScope ? (
-												<WorkspaceChangesUnavailablePanel />
-											) : isWorkspaceChangesInitialError && workspaceChangesError ? (
-												<WorkspaceChangesErrorPanel
-													error={workspaceChangesError}
-													onRetry={() => void refreshWorkspaceChanges()}
-													isRequestInFlight={isWorkspaceChangesRequestInFlight}
-												/>
-											) : isWorkspaceChangesInitialLoading ? (
-												<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-											) : hasNoWorkspaceFileChanges ? (
-												<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-											) : workspaceChanges !== null ? (
-												<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
-													<div
-														className="flex min-h-0 min-w-0"
-														style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
-													>
-														<DiffViewerPanel
-															workspaceFiles={runtimeFiles}
-															selectedPath={selectedPath}
-															selectedPathExpandToken={selectedPathExpandToken}
-															onSelectedPathChange={setSelectedPath}
-															viewMode={isDiffExpanded ? "split" : "unified"}
-															onAddToTerminal={
-																onAddReviewComments || showClineAgentChatPanel
-																	? injectTextIntoActiveInput
-																	: undefined
-															}
-															onSendToTerminal={
-																onSendReviewComments || showClineAgentChatPanel
-																	? handleSendDiffComments
-																	: undefined
-															}
-															comments={diffComments}
-															onCommentsChange={setDiffComments}
-														/>
-													</div>
-													<ResizeHandle
-														orientation="vertical"
-														ariaLabel="Resize detail diff panels"
-														onMouseDown={handleDetailDiffSeparatorMouseDown}
-														className="z-10"
-													/>
-													<div
-														className="flex min-h-0 min-w-0"
-														style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
-													>
-														<FileTreePanel
-															workspaceFiles={runtimeFiles}
-															selectedPath={selectedPath}
-															onSelectPath={handleExplicitSelectPath}
-															panelFlex="1 1 0"
-														/>
-													</div>
-												</div>
-											) : (
-												<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-											)}
-										</div>
-									</div>
-								) : (
-									<>
-										<div
-											className="min-h-0 overflow-hidden"
-											style={{ flex: `0 0 ${rightPromptPanelPercent}` }}
-										>
-											{taskConversationSessionsPanel}
-										</div>
-										{/* 探索线（B.2）+ 本会话 findings + Relations：同位下方的独立可折叠 section（蓝图 §G.2） */}
-										{explorationThreadGraphPanel}
-										{sessionFindingsSection}
-										{workUnitRelationNeighborhoodPanel}
-										<ResizeHandle
-											orientation="horizontal"
-											ariaLabel="Resize task conversation sessions and utility panels"
-											onMouseDown={handleRightPromptSeparatorMouseDown}
-											className="z-10"
-										/>
-										<div className="flex min-h-0 flex-1 flex-col">{detailUtilityPanel}</div>
-									</>
-								)}
-							</div>
-						</div>
-						{bottomTerminalOpen && bottomTerminalTaskId ? (
-							<BottomTerminalSection
-								taskId={bottomTerminalTaskId}
-								workspaceId={currentProjectId}
-								summary={bottomTerminalSummary}
-								onSummary={onSessionSummary}
-								onClose={onBottomTerminalClose}
-								subtitle={bottomTerminalSubtitle}
-								terminalThemeColors={terminalThemeColors}
-								onConnectionReady={onBottomTerminalConnectionReady}
-								agentCommand={bottomTerminalAgentCommand}
-								onSendAgentCommand={onBottomTerminalSendAgentCommand}
-								paneHeight={bottomTerminalPaneHeight}
-								onPaneHeightChange={onBottomTerminalPaneHeightChange}
-								onCollapse={onBottomTerminalCollapse}
-								isExpanded={isBottomTerminalExpanded}
-								onToggleExpand={onBottomTerminalToggleExpand}
-							/>
-						) : null}
-					</>
-				)}
+						</>
+					)}
+				</div>
 			</div>
 		</div>
 	);

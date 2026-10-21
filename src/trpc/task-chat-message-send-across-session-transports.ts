@@ -39,6 +39,10 @@ export interface SendTaskChatMessageAcrossSessionTransportsDependencies {
 	// 把一条队列条目从 handed_to_transport 结算掉。它是函数级依赖，**不进**请求 schema——
 	// 跨进程调用方（CLI）没有也不该有这个能力。
 	onProgrammaticTerminalDeliverySettled?: TaskChatInputDeliveryOutcomeObserver;
+	// 任务级 CLI 回执仍按宿主卡寻址；实际投递可以是交接后的独立主会话。
+	programmaticInjectionLedgerTaskId?: string;
+	// 领域级投递授权在受理前与每次实际终端写入前重读，覆盖持久队列已交给 transport 的停止竞争。
+	validateBeforeTerminalWrite?: () => Promise<void>;
 }
 
 function buildTerminalTaskChatDeliveryMessage(input: {
@@ -93,7 +97,7 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					// runtime 启动清扫，违反账本自己的「唯一非终态必然有界收敛」不变量。
 					// 不报 queued_behind：那描述的是「写进 TUI 输入框时 agent 正占着回合」，ACP 侧压根没有
 					// 排队模型（并发投递就是并发 session/prompt），报「排在后面」等于编造不存在的语义。
-					...(body.idempotencyKey
+					...(body.idempotencyKey || deps.onProgrammaticTerminalDeliverySettled
 						? {
 								terminalDelivery: {
 									status: "delivered_and_submit_confirmed" as const,
@@ -181,8 +185,19 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					// 只有 stashed_into_prompt_library（入库**且**框已清）才算抢占成功：
 					// 「入库了但框没清」框里内容一个字没少，照写就会把 paste 接在人类那半句后面。
 					const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+					try {
+						await deps.validateBeforeTerminalWrite?.();
+					} catch (error) {
+						return {
+							ok: false,
+							summary: null,
+							error: error instanceof Error ? error.message : String(error),
+							terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+						};
+					}
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
-						deferWhileUserTurn: body.source != null,
+						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
+						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
 						idempotencyKey: injectionIdempotencyKey,
 						mayAutoStashAbsentHumanInputBox:
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -213,7 +228,7 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 										if (injectionLedgerPath && injectionIdempotencyKey) {
 											void recordTaskMessageTerminalDeliveryOutcome({
 												ledgerPath: injectionLedgerPath,
-												taskId: body.taskId,
+												taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
 												idempotencyKey: injectionIdempotencyKey,
 												status: outcome.status,
 												...(outcome.reason ? { failureReason: outcome.reason } : {}),
@@ -280,7 +295,7 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 			// 不存在 PTY 那种「粘进框但 CR 被吞」的失败形态，故直接给确认终态、无 pending 阶段。
 			// 不报 queued_behind：那个区分描述的是「写进 TUI 输入框时 agent 正占着回合」，
 			// 是终端通道特有的现象；SDK 侧队列由 runtime 自己持有，摄入即确认。
-			...(body.idempotencyKey
+			...(body.idempotencyKey || deps.onProgrammaticTerminalDeliverySettled
 				? {
 						terminalDelivery: {
 							status: "delivered_and_submit_confirmed" as const,

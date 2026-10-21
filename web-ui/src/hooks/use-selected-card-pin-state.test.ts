@@ -24,13 +24,29 @@ function toDomRect(rect: Rect): DOMRect {
 	} as DOMRect;
 }
 
-function ScrollHarness({ enabled }: { enabled: boolean }): React.ReactElement {
+function ScrollHarness({
+	enabled,
+	selectedCardElementSelector,
+}: {
+	enabled: boolean;
+	selectedCardElementSelector?: string;
+}): React.ReactElement {
 	const rootRef = useRef<HTMLDivElement | null>(null);
-	const pinState = useSelectedCardPinState({ selectedTaskId: "task-1", scrollRootRef: rootRef, enabled });
+	const pinState = useSelectedCardPinState({
+		selectedTaskId: "task-1",
+		selectedCardElementSelector,
+		scrollRootRef: rootRef,
+		enabled,
+	});
 	return createElement(
 		"div",
 		null,
-		createElement("div", { ref: rootRef, "data-testid": "root" }, createElement("div", { "data-task-id": "task-1" })),
+		createElement(
+			"div",
+			{ ref: rootRef, "data-testid": "root" },
+			createElement("div", { "data-task-id": "task-1" }),
+			createElement("div", { "data-workspace-id": "project-b", "data-task-key": "task-1" }),
+		),
 		createElement("span", { "data-testid": "pin-state" }, pinState),
 	);
 }
@@ -94,6 +110,41 @@ describe("useSelectedCardPinState", () => {
 			root.render(createElement(ScrollHarness, { enabled }));
 		});
 	};
+
+	it("自定义定位选择器区分不同项目的同号任务，定位行被替换后重新绑定仍连接的 DOM", async () => {
+		let animationFrameSequenceNumber = 0;
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			queueMicrotask(() => callback(0));
+			return ++animationFrameSequenceNumber;
+		});
+		cardRect = { top: -80, bottom: -10, width: 200, height: 70 };
+		const selectedCardElementSelector = '[data-workspace-id="project-b"][data-task-key="task-1"]';
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			if (this.dataset.testid === "root") return toDomRect(rootRect);
+			if (this.dataset.workspaceId === "project-b" && this.dataset.taskKey === "task-1") {
+				return toDomRect(
+					this.dataset.taskId
+						? { top: 560, bottom: 640, width: 200, height: 80 }
+						: { top: 30, bottom: 110, width: 200, height: 80 },
+				);
+			}
+			return toDomRect(cardRect);
+		});
+		await act(async () => root.render(createElement(ScrollHarness, { enabled: true, selectedCardElementSelector })));
+		expect(readPinState()).toBe("hidden");
+		const previousTarget = container.querySelector<HTMLElement>(selectedCardElementSelector)!;
+		const replacement = container.querySelector<HTMLElement>('[data-task-id="task-1"]')!;
+		previousTarget.removeAttribute("data-task-key");
+		replacement.dataset.workspaceId = "project-b";
+		replacement.dataset.taskKey = "task-1";
+		await dispatchScroll();
+		expect(readPinState()).toBe("pinBottom");
+		previousTarget.dataset.taskKey = "task-1";
+		replacement.dataset.workspaceId = "project-a";
+		previousTarget.dataset.workspaceId = "project-a";
+		await dispatchScroll();
+		expect(readPinState()).toBe("hidden");
+	});
 
 	it("is hidden while the selected card sits fully inside the viewport", async () => {
 		cardRect = { top: 10, bottom: 90, width: 200, height: 80 };

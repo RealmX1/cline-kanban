@@ -1,6 +1,7 @@
 // Frontend facade for task-scoped runtime actions.
 // It owns how the board and detail view start, stop, resize, and route task
 // sessions across native Cline and PTY-backed agents.
+import { resolveMainTaskConversationSessionId } from "@runtime-session-activity";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useRef } from "react";
 
@@ -51,9 +52,10 @@ interface StartTaskSessionResult {
 	taskConversationSessionId?: string;
 }
 
-export interface CreateByTheWayTaskConversationSessionInput {
+export interface CreateTaskConversationSessionInput {
 	task: BoardCard;
 	agentId: RuntimeAgentId;
+	sessionRole?: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
 	contextSource: "started_from_scratch" | "forked_from_main_current_turn";
 	mainSessionOriginTurnNumber: number;
@@ -85,9 +87,7 @@ export interface UseTaskSessionsResult {
 	upsertSession: (summary: RuntimeTaskSessionSummary) => void;
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
-	createByTheWayTaskConversationSession: (
-		input: CreateByTheWayTaskConversationSessionInput,
-	) => Promise<StartTaskSessionResult>;
+	createTaskConversationSession: (input: CreateTaskConversationSessionInput) => Promise<StartTaskSessionResult>;
 	stopTaskSession: (taskId: string) => Promise<void>;
 	// 手动「移至 Review」：把一个停在 agent 回合的终端 agent 任务翻入「等人审查」回合（不杀进程）。
 	// 成功时即时 upsert 返回的 summary（携 turnOwner=user）→ 由 use-board-interactions 的 Rule A 自动落位
@@ -295,11 +295,13 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId],
 	);
 
-	const createByTheWayTaskConversationSession = useCallback(
-		async (input: CreateByTheWayTaskConversationSessionInput): Promise<StartTaskSessionResult> => {
+	const createTaskConversationSession = useCallback(
+		async (input: CreateTaskConversationSessionInput): Promise<StartTaskSessionResult> => {
 			if (!currentProjectId) {
 				return { ok: false, message: "No project selected." };
 			}
+			const sessionRole = input.sessionRole ?? "by_the_way";
+			const isTaskCollaborator = sessionRole === "task_collaborator";
 			const initialUserQuestion = input.initialUserQuestion.trim();
 			if (!initialUserQuestion) {
 				return { ok: false, message: "Enter a question for the new session." };
@@ -312,30 +314,40 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					taskId: taskConversationSessionId,
 					workspaceTaskId: input.task.id,
 					prompt: initialUserQuestion,
-					taskTitle: `By the way: ${initialUserQuestion.slice(0, 80)}`,
+					taskTitle: `${isTaskCollaborator ? "协作会话" : "By the way"}: ${initialUserQuestion.slice(0, 80)}`,
 					baseRef: input.task.baseRef,
 					cols: geometry.cols,
 					rows: geometry.rows,
 					agentId: input.agentId,
-					clineSettings: input.task.clineSettings,
-					terminalAgentModelOverrideSettings: input.task.terminalAgentModelOverrideSettings,
+					clineSettings: isTaskCollaborator ? undefined : input.task.clineSettings,
+					terminalAgentModelOverrideSettings: isTaskCollaborator
+						? undefined
+						: input.task.terminalAgentModelOverrideSettings,
+					...(isTaskCollaborator
+						? {
+								taskAgentPermissionMode: input.task.taskAgentPermissionMode,
+								startInPlanMode: input.task.startInPlanMode,
+							}
+						: {}),
 					// By the way 侧会话刻意不传 taskConversationMode：它被 system prompt/adapter 强制
 					// 只读（无命令执行），exploratory 注入的「kanban exploratory CLI 写回 map」维护协议
 					// 永远履行不了。省略 = 服务端缺省 operational（api-contract startTaskSession 注释）。
 					...(input.task.worktreeMode ? { worktreeMode: input.task.worktreeMode } : {}),
 					taskConversationSessionMetadata: {
 						workspaceTaskId: input.task.id,
-						taskConversationSessionRole: "by_the_way",
+						taskConversationSessionRole: sessionRole,
 						taskConversationSessionContextSource: input.contextSource,
 						parentTaskConversationSessionId:
-							input.contextSource === "forked_from_main_current_turn" ? input.task.id : null,
+							input.contextSource === "forked_from_main_current_turn"
+								? resolveMainTaskConversationSessionId(input.task)
+								: null,
 						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,
 						mainSessionOriginUserMessagePreview: input.mainSessionOriginUserMessagePreview,
 						latestUserMessagePreview: initialUserQuestion,
 					},
 				});
 				if (!payload.ok || !payload.summary) {
-					return { ok: false, message: payload.error ?? "Could not create the By the way session." };
+					return { ok: false, message: payload.error ?? "无法创建会话。" };
 				}
 				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				return { ok: true, taskConversationSessionId };
@@ -500,7 +512,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		upsertSession,
 		ensureTaskWorkspace,
 		startTaskSession,
-		createByTheWayTaskConversationSession,
+		createTaskConversationSession,
 		stopTaskSession,
 		transitionTaskToReview,
 		continueConnectionRetrySessions,

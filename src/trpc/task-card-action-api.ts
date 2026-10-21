@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { TRPCError } from "@trpc/server";
-
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
@@ -34,6 +33,10 @@ import {
 	buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch,
 	resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard,
 } from "../core/task-card-field-patch-resolution";
+import {
+	resolveMainTaskConversationSessionId,
+	resolveMainTaskConversationSessionSummaryForTaskId,
+} from "../core/task-main-conversation-session-binding";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { buildTaskSessionStartRequestFromBoardCard } from "../core/task-session-start-request-from-board-card";
 import { buildTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
@@ -42,6 +45,7 @@ import type {
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 } from "../deployment/post-deploy-verification-done-entry-gate";
+import { assertIndependentTaskSourceLandedBeforeInitialStart } from "../independent-task-creation/source-task-landing-gate";
 import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
@@ -201,7 +205,7 @@ export function createTaskCardActionApi(
 		boardColumnIdContainingTaskCard: found.boardColumnId,
 		taskSessionSummaryLiveInRuntimeProcessMemory: deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(
 			workspaceScope.workspaceId,
-			found.taskCard.id,
+			resolveMainTaskConversationSessionId(found.taskCard),
 		),
 		taskSessionSummaryPersistedInWorkspaceSessionsFile,
 	});
@@ -241,7 +245,11 @@ export function createTaskCardActionApi(
 		);
 		return {
 			...found,
-			taskSessionSummaryPersistedInWorkspaceSessionsFile: persistedWorkspaceState.sessions[taskId] ?? null,
+			taskSessionSummaryPersistedInWorkspaceSessionsFile: resolveMainTaskConversationSessionSummaryForTaskId(
+				persistedWorkspaceState.board,
+				persistedWorkspaceState.sessions,
+				taskId,
+			),
 		};
 	};
 
@@ -486,7 +494,22 @@ export function createTaskCardActionApi(
 					input.taskId,
 					workspaceScope.workspacePath,
 				);
-				const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+				const taskSessionSummaryPersistedInWorkspaceSessionsFile =
+					resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
+				const completionComment = input.taskCommentToAppendWhenMovingIntoDone;
+				const existingCompletionComment = completionComment
+					? found.taskCard.taskCommentEntries?.find(
+							(entry) => entry.taskCommentEntryId === completionComment.taskCommentEntryId,
+						)
+					: undefined;
+				if (
+					completionComment &&
+					((existingCompletionComment &&
+						existingCompletionComment.commentText !== completionComment.commentText) ||
+						(found.boardColumnId === "trash" && !existingCompletionComment))
+				) {
+					throw new TRPCError({ code: "CONFLICT", message: "任务或评论已被其他操作更新，未提交本次评论。" });
+				}
 				if (found.boardColumnId === "trash") {
 					return {
 						board: state.board,
@@ -498,7 +521,21 @@ export function createTaskCardActionApi(
 						save: false,
 					};
 				}
-				const trashed = moveTaskToColumn(state.board, input.taskId, "trash", undefined, {
+				const timestamp = Date.now();
+				const boardWithCompletionComment =
+					completionComment && !existingCompletionComment
+						? updateTask(
+								state.board,
+								input.taskId,
+								buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch(found.taskCard, {
+									taskCommentEntries: [
+										...(found.taskCard.taskCommentEntries ?? []),
+										{ ...completionComment, createdAt: timestamp, updatedAt: timestamp },
+									],
+								}),
+							).board
+						: state.board;
+				const trashed = moveTaskToColumn(boardWithCompletionComment, input.taskId, "trash", undefined, {
 					insertAtIndex: input.insertAtIndexWithinDoneBoardColumn,
 				});
 				if (!trashed.moved || !trashed.task) {
@@ -530,7 +567,11 @@ export function createTaskCardActionApi(
 				taskCardSnapshot: buildTaskCardSnapshot(
 					workspaceScope,
 					found,
-					persistedWorkspaceState.sessions[input.taskId] ?? null,
+					resolveMainTaskConversationSessionSummaryForTaskId(
+						persistedWorkspaceState.board,
+						persistedWorkspaceState.sessions,
+						input.taskId,
+					),
 				),
 			};
 		},
@@ -541,6 +582,20 @@ export function createTaskCardActionApi(
 			kanbanRequestOriginActorEvidence,
 		) =>
 			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const initialState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+				const initialCard = initialState.board.columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === input.taskId);
+				if (
+					initialCard?.independentTaskCreationProvenance &&
+					!initialState.sessions[resolveMainTaskConversationSessionId(initialCard)]?.startedAt
+				) {
+					await assertIndependentTaskSourceLandedBeforeInitialStart({
+						workspaceId: workspaceScope.workspaceId,
+						repoPath: workspaceScope.workspacePath,
+						card: initialCard,
+					});
+				}
 				const taskMutationIntent = await resolveIntent(
 					"start_agent_session_moving_task_card_into_in_progress",
 					kanbanRequestOriginActorEvidence,
@@ -564,7 +619,8 @@ export function createTaskCardActionApi(
 							`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be started from backlog or in_progress.`,
 						);
 					}
-					const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
+						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 					if (found.boardColumnId === "in_progress") {
 						// 本来就在 in_progress：没有卡片级变化，不写盘、不产生空事件批次。
 						return {
@@ -629,7 +685,10 @@ export function createTaskCardActionApi(
 				// 放行即可——startTaskSession 会自己加载该项目的会话管理器（同一条 hydrate 对账），不会与盘上状态冲突。
 				// 采信持久化摘要会让重启后对未加载项目的卡 start 被静默跳过：卡留在 in_progress、却没有会话。
 				const existingTaskSessionSummaryLiveInRuntimeProcessMemory =
-					deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(workspaceScope.workspaceId, input.taskId);
+					deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(
+						workspaceScope.workspaceId,
+						resolveMainTaskConversationSessionId(foundAfterMovement.taskCard),
+					);
 				if (
 					existingTaskSessionSummaryLiveInRuntimeProcessMemory &&
 					resolveSessionFacets(existingTaskSessionSummaryLiveInRuntimeProcessMemory).turnOwner === "agent"
@@ -690,7 +749,9 @@ export function createTaskCardActionApi(
 					);
 				}
 				const handoff = await deps.runtimeApi
-					.transitionTaskToReview(workspaceScope, { taskId: input.taskId })
+					.transitionTaskToReview(workspaceScope, {
+						taskId: resolveMainTaskConversationSessionId(foundBeforeHandoff.taskCard),
+					})
 					.catch((error: unknown) => ({ ok: false, summary: null, error: toErrorMessage(error) }));
 				if (!handoff.ok) {
 					return {
@@ -722,7 +783,8 @@ export function createTaskCardActionApi(
 							input.taskId,
 							workspaceScope.workspacePath,
 						);
-						const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+						const taskSessionSummaryPersistedInWorkspaceSessionsFile =
+							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 						// 已在 review（浏览器的列自动流转抢先一步）或已被挪到别处：尊重现状，不再移。
 						if (found.boardColumnId !== "in_progress") {
 							return {
@@ -800,7 +862,12 @@ export function createTaskCardActionApi(
 							value: {
 								foundAfterMovement: found,
 								boardColumnIdOfTaskCardBeforeAction: found.boardColumnId,
-								taskSessionSummaryPersistedInWorkspaceSessionsFile: state.sessions[input.taskId] ?? null,
+								taskSessionSummaryPersistedInWorkspaceSessionsFile:
+									resolveMainTaskConversationSessionSummaryForTaskId(
+										state.board,
+										state.sessions,
+										input.taskId,
+									),
 							},
 							save: false,
 						};
@@ -972,7 +1039,8 @@ export function createTaskCardActionApi(
 									message: `Task "${input.taskId}" could not be moved from done to review.`,
 								});
 							}
-							const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+							const taskSessionSummaryPersistedInWorkspaceSessionsFile =
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 							const restoredWithoutAutoReviewChange = {
 								board: restored.board,
 								value: {
@@ -1148,7 +1216,11 @@ export function createTaskCardActionApi(
 									.map((found) => ({
 										...found,
 										taskSessionSummaryPersistedInWorkspaceSessionsFile:
-											state.sessions[found.taskCard.id] ?? null,
+											resolveMainTaskConversationSessionSummaryForTaskId(
+												state.board,
+												state.sessions,
+												found.taskCard.id,
+											),
 									})),
 							};
 						},
@@ -1203,7 +1275,13 @@ export function createTaskCardActionApi(
 					// 残余窗口：这里无法 await runtime 侧已派生的在途捕获，理论上仍可能有批删后才落定的孤儿 ref——
 					// 与草稿清理同一套失败语义：这是删除已成之后的收尾，失败只吞不抛，残留几个无人认领的 ref，
 					// 不该让已经删成的任务被报成失败。
-					for (const taskId of deletedTaskIds) {
+					const checkpointOwnerSessionIds = new Set(
+						permanentlyDeletedTaskCards.flatMap(({ taskCard }) => [
+							taskCard.id,
+							resolveMainTaskConversationSessionId(taskCard),
+						]),
+					);
+					for (const taskId of checkpointOwnerSessionIds) {
 						try {
 							await deleteAllTaskTurnCheckpointRefs({ cwd: workspaceScope.workspacePath, taskId });
 						} catch {
@@ -1250,7 +1328,11 @@ export function createTaskCardActionApi(
 						throw new TRPCError({ code: "FORBIDDEN", message: "当前 Task 身份已失效。" });
 					}
 					const snapshot = () =>
-						buildTaskCardSnapshot(workspaceScope, found, state.sessions[identity.taskId] ?? null);
+						buildTaskCardSnapshot(
+							workspaceScope,
+							found,
+							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, identity.taskId),
+						);
 					if (found.taskCard.title === input.title) return { board: state.board, value: snapshot(), save: false };
 					const timestamp = Date.now();
 					const updated = updateTask(
@@ -1274,7 +1356,7 @@ export function createTaskCardActionApi(
 						value: buildTaskCardSnapshot(
 							workspaceScope,
 							{ ...found, taskCard: updated.task ?? found.taskCard },
-							state.sessions[identity.taskId] ?? null,
+							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, identity.taskId),
 						),
 					};
 				},
@@ -1305,7 +1387,11 @@ export function createTaskCardActionApi(
 					if (expected && (found.taskCard.title !== expected.title || found.taskCard.prompt !== expected.prompt)) {
 						return {
 							board: state.board,
-							value: buildTaskCardSnapshot(workspaceScope, found, state.sessions[input.taskId] ?? null),
+							value: buildTaskCardSnapshot(
+								workspaceScope,
+								found,
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
+							),
 							save: false,
 						};
 					}
@@ -1331,7 +1417,7 @@ export function createTaskCardActionApi(
 						value: buildTaskCardSnapshot(
 							workspaceScope,
 							{ taskCard: updated.task, boardColumnId: found.boardColumnId },
-							state.sessions[input.taskId] ?? null,
+							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
 						),
 					};
 				},
@@ -1358,7 +1444,8 @@ export function createTaskCardActionApi(
 						input.taskId,
 						workspaceScope.workspacePath,
 					);
-					const taskSessionSummaryPersistedInWorkspaceSessionsFile = state.sessions[input.taskId] ?? null;
+					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
+						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 					const mutation =
 						input.taskPinboardPinAction === "unpin_task_card"
 							? unpinTaskFromTaskPinboard(state.board, input.taskId)

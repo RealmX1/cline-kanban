@@ -411,4 +411,24 @@ describe("TerminalSessionManager Cursor chat identity", () => {
 
 		expect(manager.getSummary(TASK_ID)?.restorationContinuationGuardState).toBe("inactive");
 	});
+
+	// 2026-10-11 a768a 形态：首个真人提交晚于恢复启动 30 分钟。解除漏斗曾先判带 30 分钟兜底的谓词，超时后
+	// 直接返回，声明态永久残留，排队投递被门控 5 挡到过期。
+	it("still disarms on Enter when the first continuation comes after the guard's maximum armed duration", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(new Date("2026-10-11T16:28:16Z"));
+		const { manager } = createManager({});
+		await manager.startTaskSession(cursorStartRequest());
+		const chatId = manager.getSummary(TASK_ID)?.agentNativeConversationSessionIdentity?.nativeSessionId ?? "";
+		await writeCursorChat(chatId, { hasConversation: true });
+		await manager.refreshTaskTerminal(cursorRefreshRequest());
+		expect(manager.getSummary(TASK_ID)?.restorationContinuationGuardState).toBe(
+			"restored_agent_conversation_waiting_for_explicit_user_input",
+		);
+
+		vi.setSystemTime(new Date("2026-10-11T17:16:12Z"));
+		manager.writeInput(TASK_ID, Buffer.from("continue please\r", "utf8"));
+
+		expect(manager.getSummary(TASK_ID)?.restorationContinuationGuardState).toBe("inactive");
+	});
 });

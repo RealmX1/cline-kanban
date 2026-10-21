@@ -201,13 +201,20 @@ export async function resolveKanbanProviderAccess(
 	return apiKey ? { profile, apiKey } : null;
 }
 export async function resolveKanbanChatCredential(
-	purpose: "task_name_suggestion" | "notification_assessment",
+	purpose: "task_name_suggestion" | "notification_assessment" | "independent_task_creation_draft_generation",
 	explicitProviderId?: string,
 ): Promise<ModelProviderCredential | null> {
 	const settings = await readNotificationIntelligenceSettings();
 	const binding =
-		purpose === "task_name_suggestion" ? settings.taskNameSuggestionBinding : settings.notificationAssessmentBinding;
-	const providerId = explicitProviderId ?? binding?.modelProviderId ?? resolveDefaultModelProviderId();
+		purpose === "task_name_suggestion"
+			? settings.taskNameSuggestionBinding
+			: purpose === "independent_task_creation_draft_generation"
+				? settings.independentTaskCreationDraftGenerationBinding
+				: settings.notificationAssessmentBinding;
+	const providerId =
+		explicitProviderId ??
+		binding?.modelProviderId ??
+		(purpose === "independent_task_creation_draft_generation" ? "deepseek" : resolveDefaultModelProviderId());
 	if (!providerId) return null;
 	const access = await resolveKanbanProviderAccess(providerId);
 	if (!access || access.profile.providerProtocol !== "openai_compatible") return null;

@@ -20,6 +20,8 @@
 
 - [`session-facet-model.md`](./session-facet-model.md)——双轴会话状态 facet 模型（turnOwner / liveness / userTurnKind）及其三条铁律。
 - [`agent-output-timestamps.md`](./agent-output-timestamps.md)——卡片时长药丸的字段模型与 `lastSubstantiveOutputAt` 写路径。
+- [`task-reference-relation-modeling.md`](./task-reference-relation-modeling.md)——创建任务与既有 Relations Section 的共享人工建模、多跳图、原子保存、草稿恢复及索引 agent 接入边界。
+- [`architecture/shared-task-indexing-support-agent.md`](./architecture/shared-task-indexing-support-agent.md)——共享任务 Context、无状态 Claude/Codex 内核、关系分诊与 RVF 接口、幂等处置和补查。
 - [`terminal-io.md`](./terminal-io.md)——output-reaction 框架、持久终端 visibility 协议，以及 PTY/argv 特殊字符安全。
 - [`agent-harness-kimi.md`](./agent-harness-kimi.md)——Kimi Code 终端 harness 接入（延迟 prompt 注入、TOML hooks、预置 home）。
 - [`agent-harness-omp-acp.md`](./agent-harness-omp-acp.md)——oh-my-pi（omp）ACP 传输层及其协议坑。
@@ -32,13 +34,13 @@
 
 ## 决策记录与事故复盘
 
-- [`adr/0001-stage-first-overview-uses-raw-column-membership.md`](./adr/0001-stage-first-overview-uses-raw-column-membership.md)——stage-first overview 按 raw 列归属判定 stage 成员。
+- [`adr/0001-stage-first-overview-uses-raw-column-membership.md`](./adr/0001-stage-first-overview-uses-raw-column-membership.md)——（已 Superseded）已退役的 Board Scope 旧首页按 raw 列归属判定 stage 成员。
 - [`adr/0002-plan-mode-permission-mode-orthogonal.md`](./adr/0002-plan-mode-permission-mode-orthogonal.md)——plan 起步与权限档位是两条正交轴。
 - [`post-mortems/event-loop-stall-lock-crash.md`](./post-mortems/event-loop-stall-lock-crash.md)——事件循环停摆被文件锁 compromise 处理放大，导致整个多项目服务器进程退出。
 
 ## 功能术语表
 
-- [`context-stage-first-overview.md`](./context-stage-first-overview.md)——跨仓库 stage-first overview 的领域语言（从仓库根 `CONTEXT.md` 迁入）。
+- [`context-board-scope-all-projects-and-single-project-scope.md`](./context-board-scope-all-projects-and-single-project-scope.md)——Board Scope（All projects）与单项目范围、All projects 首页分区列看板、建卡目标项目的领域语言。
 - [`context-inter-work-unit-relation-modeling-overhaul.md`](./context-inter-work-unit-relation-modeling-overhaul.md)——dd2db 工作单元间关系建模重构的领域语言：工作单元、行动者、关系账本事件、记录型与断言型关系等（从仓库根 `CONTEXT.md` 迁入）。
 
 说明：`docs/architecture.md`、`DEVELOPMENT.md`、`web-ui/README.md` 等上游继承的人类向文档仍为英文（属既定策略）；新增 agent 向文档以中文为主。
@@ -46,3 +48,5 @@
 日常上手所需的内容在本 `docs/` 目录内自足。活跃计划与交接记录可能仍留在 `.plan/docs`，但新工程师理解当前架构不需要读它们。
 
 新增工程文档时，优先把稳定的解释放在这里，并从本索引链接。
+
+- [持久多轮查卡与工作台](architecture/task-lookup-conversations-and-workbench.md)：查卡模式、持久历史、共享 Context 与查询 API。

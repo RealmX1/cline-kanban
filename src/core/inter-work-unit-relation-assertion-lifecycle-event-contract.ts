@@ -3,13 +3,14 @@
 // §4.2（决策来源）、§8（创建事件必填字段）。读盘一律容忍未知取值（同 inter-work-unit-relation-ledger-event-contract.ts 的纪律）。
 
 // 每条族 4 事件都记这个版本：将来改矩阵或规则时，重放据此知道当初按哪套规则路由（d-confirm §4.8：已发生的迁移不重判）。
-export const RELATION_AFFECTING_CONFIRMABLE_CHANGE_CONFIRMATION_POLICY_VERSION = 1;
+export const RELATION_AFFECTING_CONFIRMABLE_CHANGE_CONFIRMATION_POLICY_VERSION = 2;
 
 // 自然键的推导规则版本（kind + 有序限定端点 + 影响语义的关键属性，d-confirm §4.7）。改推导规则必须升版本，
 // 否则新旧事件的自然键对不上，去重与墓碑抑制会悄悄失效。
 export const RELATION_ASSERTION_NATURAL_KEY_DERIVATION_VERSION = 1;
 
 export const INTER_WORK_UNIT_RELATION_ASSERTION_LIFECYCLE_EVENT_KINDS = [
+	"reference_relation_modeling_changes_applied_by_web_ui_user",
 	// 变更创建并完成路由（d-confirm §8 的判定依据全部记在这条上）。
 	"relation_affecting_confirmable_change_created_and_routed",
 	// 变更生效：创建类 → 关系生效；撤销类 → 被撤销关系失效（撤销理由与墓碑四字段写在同一条事件里，Y-CONF-9）。

@@ -6,6 +6,7 @@ import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { buildShellCommandLine, quoteShellArg } from "../core/shell";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import { renderTaskAgentNamingAndWorkPhaseGoalGuidance } from "../core/task-naming-conventions";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
 
@@ -128,7 +129,7 @@ export function resolveAppendSystemPromptCommandPrefix(
 export function renderAppendSystemPrompt(commandPrefix: string, options: RenderAppendSystemPromptOptions = {}): string {
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const selectedAgentId = options.agentId ?? null;
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Sidebar
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Sidebar
 
 You are the Kanban sidebar agent for this workspace. Help the user interact with their Kanban board directly from this side panel. When the user asks to add tasks, create tasks, break work down, or start tasks, prefer using the Kanban CLI yourself instead of describing manual steps.
 
@@ -308,7 +309,7 @@ export function renderTaskSessionWorktreeGuardPrompt(
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
 	const quotedTaskId = quoteShellArg(trimmedTaskId);
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n# Kanban Task Workspace
+	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Task Workspace
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
 \`${cwd}\`
@@ -335,6 +336,18 @@ To look up a *different* task instead: Kanban lays task worktrees out as \`.clin
 # Recording How This Task Relates To Other Tasks
 
 When this task studies or diagnoses another task, verifies its claims, reuses its outputs, takes its requirements from it, or is its counterpart in another repository, record that once with \`${kanbanCommand} work-unit assert-reference-relation\` (this task is always the subject; see \`--help\` for the counterpart flags). Read what is already recorded with \`${kanbanCommand} work-unit get-relation-neighborhood-summary\`.`;
+}
+
+export function renderTaskCollaborationSessionResponsibilityGuidance(
+	workspaceTaskId: string,
+	taskConversationSessionId: string,
+): string {
+	return `# 协作会话的责任边界
+
+当前会话是任务 ${workspaceTaskId} 的可写协作会话，会话 ID 为 ${taskConversationSessionId}。
+与主会话共用工作目录，文件修改立即相互可见。只执行本会话用户要求的工作。
+主会话负责卡片生命周期；不要自行修改卡片标题、阶段目标、看板列或宣告整个任务完成。
+RVF 的编辑归属以各会话为准，不要把共享目录的所有改动认作本会话产出。`;
 }
 
 export function resolveTaskSessionAppendSystemPrompt(

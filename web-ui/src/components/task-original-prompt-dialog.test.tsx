@@ -89,6 +89,33 @@ describe("TaskOriginalPromptDialog", () => {
 		expect(writeText).toHaveBeenCalledExactlyOnceWith(MULTILINE_PROMPT);
 	});
 
+	it("结构化正文原样显示和复制，不执行标签也不解码实体", async () => {
+		const structuredPrompt = [
+			'<task-initial-prompt schema-version="1">',
+			'  <task-original-user-request request-id="request-1" source-reference="synthetic:&quot;request-1&quot;">',
+			'保留 &amp; &lt; &gt; "引号" 和 &lt;/task-original-user-request&gt;。',
+			"  </task-original-user-request>",
+			"</task-initial-prompt>",
+		].join("\n");
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+		await act(async () => {
+			root.render(
+				<TaskOriginalPromptDialog open card={createTask({ prompt: structuredPrompt })} onClose={() => {}} />,
+			);
+		});
+		expect(document.body.querySelector("pre")?.textContent).toBe(structuredPrompt);
+		expect(document.body.querySelector("task-initial-prompt")).toBeNull();
+		const copyButton = Array.from(document.body.querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === "Copy prompt",
+		);
+		expect(copyButton).toBeDefined();
+		await act(async () => {
+			copyButton?.click();
+		});
+		expect(writeText).toHaveBeenCalledExactlyOnceWith(structuredPrompt);
+	});
+
 	it("renders read-only image chips when the task has attached images", async () => {
 		const card = createTask({
 			images: [{ id: "image-1", data: "aGVsbG8=", mimeType: "image/png", name: "screenshot.png" }],

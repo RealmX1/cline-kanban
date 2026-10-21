@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
-// 「在某个项目里打开某个任务」的唯一入口：Board Overview、Spotlight、跨项目切换面板、通知点击共用。
+// 「在某个项目里打开某个任务」的唯一入口：All projects 首页、Spotlight、跨项目切换面板、通知点击共用。
 
 const showAppToastMock = vi.hoisted(() => vi.fn());
 const readTaskCardMock = vi.hoisted(() => vi.fn());

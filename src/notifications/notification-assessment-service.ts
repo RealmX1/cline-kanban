@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "../core/api-contract";
 import type { NotificationCandidate } from "../core/notification-lifecycle-contract";
-import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import {
+	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import {
 	readNotificationIntelligenceSettings,
 	resolveKanbanChatCredential,
@@ -82,8 +86,36 @@ export function createNotificationAssessmentService(input: {
 	let recovering = false;
 	let activeAssessments = 0;
 	let closed = false;
+	async function originatingSessionHasLostLifecycleAuthority(
+		workspaceId: string,
+		sessionId: string,
+	): Promise<boolean> {
+		const summary = await input.getSummary(workspaceId, sessionId);
+		return Boolean(
+			summary &&
+				(isTaskConversationSessionWithoutTaskLifecycleAuthority(summary) ||
+					summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover),
+		);
+	}
 	async function publish(candidate: NotificationCandidate, reason: string) {
 		if (closed) return;
+		const originatingSessionId = candidate.evidence?.originatingTaskConversationSessionId;
+		if (typeof originatingSessionId === "string") {
+			const latest = await input.getSummary(candidate.workspaceId, originatingSessionId);
+			if (
+				latest &&
+				(isTaskConversationSessionWithoutTaskLifecycleAuthority(latest) ||
+					latest.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover)
+			) {
+				await getNotificationLifecycleArchive().update(
+					candidate.candidateId,
+					{ notificationProcessingStatus: "excluded", notificationPanelVisibility: "excluded" },
+					"main_session_authority_changed_before_publication",
+					{},
+				);
+				return;
+			}
+		}
 		// AI 路径、基础路径、延期兜底三条发布路径共用这一处定稿播报脚本，留档即实际朗读内容。
 		const published = await getNotificationLifecycleArchive().update(
 			candidate.candidateId,
@@ -114,7 +146,12 @@ export function createNotificationAssessmentService(input: {
 		);
 	}
 	async function stillCurrent(candidate: NotificationCandidate): Promise<boolean> {
-		const current = await input.getSummary(candidate.workspaceId, candidate.taskId);
+		const current = await input.getSummary(
+			candidate.workspaceId,
+			typeof candidate.evidence?.originatingTaskConversationSessionId === "string"
+				? candidate.evidence.originatingTaskConversationSessionId
+				: candidate.taskId,
+		);
 		return (
 			current !== null &&
 			(!current || candidate.evidence?.summaryProgressIdentity === notificationSummaryProgressIdentity(current))
@@ -249,7 +286,15 @@ export function createNotificationAssessmentService(input: {
 				// 暂时不能持久化时保留内存闸；恢复周期只重试此写入。
 			}
 			try {
-				if (!closed)
+				if (
+					!closed &&
+					!(await originatingSessionHasLostLifecycleAuthority(
+						candidate.workspaceId,
+						typeof candidate.evidence?.originatingTaskConversationSessionId === "string"
+							? candidate.evidence.originatingTaskConversationSessionId
+							: candidate.taskId,
+					))
+				)
 					await input.publishUnarchived?.({
 						workspaceId: candidate.workspaceId,
 						taskId: candidate.taskId,
@@ -290,7 +335,8 @@ export function createNotificationAssessmentService(input: {
 				rawPayload: redactNotificationEvidence(notification),
 			});
 			const summary =
-				notification.summary ?? (await input.getSummary(notification.workspaceId, notification.taskId));
+				(await input.getSummary(notification.workspaceId, notification.summary?.taskId ?? notification.taskId)) ??
+				notification.summary;
 			const feed = await buildNotificationFeedEntries(notification.workspaceId, [
 				{
 					id: candidateId,
@@ -317,6 +363,7 @@ export function createNotificationAssessmentService(input: {
 						summary?.latestHookActivity?.finalMessage ??
 						`Task ${notification.taskId}`,
 					evidence: {
+						originatingTaskConversationSessionId: summary?.taskId ?? notification.taskId,
 						summaryProgressIdentity: summary ? notificationSummaryProgressIdentity(summary) : null,
 						summary: redactNotificationEvidence(summary),
 						finalMessage: redactNotificationEvidence(notification.finalMessage),
@@ -334,7 +381,8 @@ export function createNotificationAssessmentService(input: {
 			if (
 				summary &&
 				((isParkedAwaitingDispatchedBackgroundWork(summary) && enriched.userTurnKind === "review") ||
-					summary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+					isTaskConversationSessionWithoutTaskLifecycleAuthority(summary) ||
+					summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover)
 			) {
 				await archive.update(
 					candidateId,
@@ -347,7 +395,14 @@ export function createNotificationAssessmentService(input: {
 			await process(enriched);
 		} catch {
 			reportNotificationArchiveFailure();
-			if (!closed) await input.publishUnarchived?.(notification);
+			if (
+				!closed &&
+				!(await originatingSessionHasLostLifecycleAuthority(
+					notification.workspaceId,
+					notification.summary?.taskId ?? notification.taskId,
+				))
+			)
+				await input.publishUnarchived?.(notification);
 		} finally {
 			enqueuing.delete(candidateId);
 		}

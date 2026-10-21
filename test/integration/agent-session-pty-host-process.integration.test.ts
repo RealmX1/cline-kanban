@@ -203,6 +203,44 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe.skipIf(process.platform === "win32")("agent session pty host process", () => {
+	it("真 hosted PTY 保留高位鼠标坐标和拆分的中文输入字节", async (testContext) => {
+		const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
+		startHostProcessFromSourceWithoutDaemonizing(socketPath, "binary-input-integration-test-build");
+		const controller = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+		const events = recordControllerEvents(controller);
+		const hostedSessionKey = "binary-terminal-input-session";
+		try {
+			const { hostedSessionChannelNumber } = await spawnHostedShellSession(
+				controller,
+				hostedSessionKey,
+				"stty raw -echo; echo ready; od -An -tx1 -N 12",
+			);
+			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+				testContext,
+				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+				() => (events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes("ready"),
+			);
+			const mouseReport = Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0xcb, 0x2d]);
+			const chineseInput = Buffer.from("中文", "utf8");
+			for (const chunk of [mouseReport, chineseInput.subarray(0, 1), chineseInput.subarray(1)]) {
+				controller.sendHostedSessionInputBytes(hostedSessionChannelNumber, chunk);
+			}
+			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+				testContext,
+				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+				() => events.exitRecordsByHostedSessionKey.has(hostedSessionKey),
+			);
+
+			expect(events.exitRecordsByHostedSessionKey.get(hostedSessionKey)?.exitCode).toBe(0);
+			expect((events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").replace(/\s/g, "")).toContain(
+				Buffer.concat([mouseReport, chineseInput]).toString("hex"),
+			);
+		} finally {
+			controller.sendControlMessage({ type: "stop_hosted_session", hostedSessionKey, force: true });
+			await controller.closeAfterFlushingPendingFrames();
+		}
+	}, 80000);
+
 	it(
 		"keeps a hosted shell alive across controller disconnects, streams contiguous offsets, and retains its exit until acknowledged",
 		async (testContext) => {

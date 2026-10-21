@@ -24,6 +24,7 @@ import type {
 } from "@/runtime/types";
 import { getTaskColumnId } from "@/state/board-state";
 import type { BoardData } from "@/types";
+import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 
 export interface PostDeployVerificationDeploymentGroupTaskEntryActions {
 	completingTaskId: string | null;
@@ -31,9 +32,18 @@ export interface PostDeployVerificationDeploymentGroupTaskEntryActions {
 	onAddCustomChecklistItem: (deploymentId: string, taskId: string, label: string) => void;
 	onRemoveCustomChecklistItem: (deploymentId: string, taskId: string, itemId: string) => void;
 	onRunVerificationItem: (deploymentId: string, taskId: string, itemId: string) => void;
-	onRequestComplete: (deploymentId: string, taskId: string) => void;
+	onRequestComplete: (
+		deploymentId: string,
+		taskId: string,
+		options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1],
+	) => void;
 	onSelectTask: (taskId: string) => void;
 	onNavigateToBoard: () => void;
+	onCreateFollowUpTaskFromChecklistItems?: (
+		deploymentId: string,
+		taskId: string,
+		selectedChecklistItemIds: string[],
+	) => void;
 }
 
 interface PostDeployVerificationDeploymentGroupSharedProps {
@@ -52,7 +62,7 @@ function renderTaskEntry(
 	const { group, taskEntryActions } = props;
 	return (
 		<PostDeployVerificationTaskEntryWrappingRealTaskCard
-			key={task.taskId}
+			key={`${group.deploymentId}:${task.taskId}`}
 			postDeployVerificationTask={task}
 			board={props.board}
 			realTaskCardRenderingInputs={props.realTaskCardRenderingInputs}
@@ -72,9 +82,15 @@ function renderTaskEntry(
 			onRunVerificationItem={(itemId) =>
 				taskEntryActions.onRunVerificationItem(group.deploymentId, task.taskId, itemId)
 			}
-			onRequestComplete={() => taskEntryActions.onRequestComplete(group.deploymentId, task.taskId)}
+			onRequestComplete={(options) => taskEntryActions.onRequestComplete(group.deploymentId, task.taskId, options)}
 			onSelectTask={() => taskEntryActions.onSelectTask(task.taskId)}
 			onNavigateToBoard={taskEntryActions.onNavigateToBoard}
+			onCreateFollowUpTaskFromSelectedChecklistItems={
+				taskEntryActions.onCreateFollowUpTaskFromChecklistItems
+					? (itemIds) =>
+							taskEntryActions.onCreateFollowUpTaskFromChecklistItems?.(group.deploymentId, task.taskId, itemIds)
+					: undefined
+			}
 		/>
 	);
 }

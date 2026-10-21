@@ -17,8 +17,10 @@ import type {
 	RuntimePostDeployVerificationTask,
 	RuntimeTaskSessionSummary,
 } from "@/runtime/types";
+import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
 import { findCardSelection } from "@/state/board-state";
 import type { BoardCard, BoardData } from "@/types";
+import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 
 // PDV 面板的一个任务条目：上半部分**直接渲染真实的任务卡体**（TaskCardBody，紧凑密度、角色
 // task_card_copy_in_post_deploy_verification_panel_entry），任务信息与动作和看板上那张卡逐字一致；
@@ -26,18 +28,34 @@ import type { BoardCard, BoardData } from "@/types";
 // 条目 DOM 身份（`verification-panel-task:<taskId>` 引导定位锚点）挂在本 wrapper 上，卡体副本不输出 data-task-id。
 
 /**
- * 渲染真实卡体所需的当前项目数据与看板动作：App 用看板同一份 displayedBoard、推流 session summaries 与同一组
- * handler 组装（与 Focus View 的 column-context-panel 同一套），于是条目上的「移入 Done」等按钮同样经过 PDV 门禁。
+ * 渲染真实卡体所需的数据与动作，按面板读的 board 分两路（见
+ * post-deploy-verification-workspace-and-panel-task-card-board-source-for-board-or-single-project-scope.ts）：
+ *   - current_project_board_hydrated_in_browser：App 用看板同一份推流 session summaries 与同一组 handler 组装（与 Focus View
+ *     的 column-context-panel 同一套），于是条目上的「移入 Done」等按钮同样经过 PDV 门禁；
+ *   - runtime_board_snapshot_of_workspace_not_hydrated_in_browser：PDV workspace 的 board 不在浏览器里（All projects 视图），
+ *     卡体只做展示——Done 按钮走条目自己的完成核对（同一个原因对话框），点卡或卡上其余按列画出的动作按钮
+ *     （Start / Move to validation / Move to review / Restore）都在它所属的项目里打开该任务，动作到那边再用。
+ *     不叫 "otherProject"：跨项目打开的过渡窗口里，快照的 workspace 可能正是 currentProjectId。
  */
-export interface RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries {
-	currentProjectDisplayedBoard: BoardData;
-	currentProjectTaskSessions: Record<string, RuntimeTaskSessionSummary>;
-	currentProjectTaskCardActionHandlers: TaskCardActionHandlerBundle;
-	currentProjectWorkspacePath: string | null;
-	onActivateTaskCardOpeningTaskDetail: (card: BoardCard) => void;
-	defaultAgentId: RuntimeAgentId | null;
-	defaultClineModelId: string | null;
-}
+export type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
+	| {
+			realTaskCardRenderingInputsBoardSourceKind: "current_project_board_hydrated_in_browser";
+			currentProjectTaskSessions: Record<string, RuntimeTaskSessionSummary>;
+			currentProjectTaskCardActionHandlers: TaskCardActionHandlerBundle;
+			currentProjectWorkspacePath: string | null;
+			onActivateTaskCardOpeningTaskDetail: (card: BoardCard) => void;
+			defaultAgentId: RuntimeAgentId | null;
+			defaultClineModelId: string | null;
+	  }
+	| {
+			realTaskCardRenderingInputsBoardSourceKind: "runtime_board_snapshot_of_workspace_not_hydrated_in_browser";
+			workspaceIdOwningRuntimeBoardSnapshot: string;
+			taskSessionsFromRuntimeBoardSnapshot: Record<string, RuntimeTaskSessionSummary>;
+			workspacePathOwningRuntimeBoardSnapshot: string | null;
+			onActivateTaskCardOpeningTaskInItsProject: (card: BoardCard) => void;
+			defaultAgentId: RuntimeAgentId | null;
+			defaultClineModelId: string | null;
+	  };
 
 export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
 	postDeployVerificationTask: RuntimePostDeployVerificationTask;
@@ -52,24 +70,68 @@ export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
 	onAddCustomChecklistItem: (label: string) => void;
 	onRemoveCustomChecklistItem: (itemId: string) => void;
 	onRunVerificationItem: (itemId: string) => void;
-	onRequestComplete: () => void;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
 	onSelectTask: () => void;
 	// 「定位并核对」中 anchor.view==="board" 时导航回看板。
 	onNavigateToBoard: () => void;
+	onCreateFollowUpTaskFromSelectedChecklistItems?: (selectedChecklistItemIds: string[]) => void;
 }
 
 // spotlight 需在导航切换视图后目标元素挂载完成才生效；视图切换是异步渲染，故延后一帧再定位。
 const SPOTLIGHT_AFTER_NAVIGATION_DELAY_MS = 80;
 
+// 快照模式卡体的动作：只给 Done（= 条目自己的完成核对）与「在所属项目打开」，其余动作点开任务后在那个项目里用。
+// TaskCardBody 有几颗按钮只按列渲染、不看 handler 在不在（Done：review / validation；Start：backlog；
+// Move to validation：review；Move to review：in_progress 且是终端 agent 会话；Restore：trash），不给 handler 就是
+// 「画出来了、点了没反应」。所以这几颗一律接上：Done 在条目可交互时走完成核对，其余（含不可交互历史组的 Done）
+// 都改为在所属项目打开任务，到那边再做。其他按钮（改标题、置顶、Delete、取消自动动作）按 handler 门控，这里不给就不画。
+// 接上 onStartTask 后 in_progress 卡在「从没起过会话」时也会画出 Retry 按钮，与看板上那张卡一致，点了同样去所属项目。
+function buildTaskCardActionHandlersForRuntimeBoardSnapshotTaskCardCopy(input: {
+	card: BoardCard;
+	workspaceIdOwningRuntimeBoardSnapshot: string;
+	interactive: boolean;
+	isCompleting: boolean;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
+	onActivateTaskCardOpeningTaskInItsProject: (card: BoardCard) => void;
+}): TaskCardActionHandlerBundle {
+	const openTaskCardInItsProjectToUseColumnActionThere = (): void =>
+		input.onActivateTaskCardOpeningTaskInItsProject(input.card);
+	return {
+		resolveTaskWorkspaceAbsoluteDirectoryPath: async (card) =>
+			(
+				await fetchTaskWorkspaceInfoForWorkspace(input.workspaceIdOwningRuntimeBoardSnapshot, {
+					taskId: card.id,
+					baseRef: card.baseRef,
+					worktreeMode: card.worktreeMode,
+				})
+			).path,
+		onMoveToTrashTask: input.interactive
+			? (_taskId, options) => input.onRequestComplete(options)
+			: openTaskCardInItsProjectToUseColumnActionThere,
+		moveToTrashLoadingById: { [input.card.id]: input.isCompleting },
+		onStartTask: openTaskCardInItsProjectToUseColumnActionThere,
+		onMoveToValidationTask: openTaskCardInItsProjectToUseColumnActionThere,
+		onMoveToReviewTask: openTaskCardInItsProjectToUseColumnActionThere,
+		onRestoreFromTrashTask: openTaskCardInItsProjectToUseColumnActionThere,
+		onEditTask: input.onActivateTaskCardOpeningTaskInItsProject,
+	};
+}
+
 function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 	taskId,
 	board,
 	realTaskCardRenderingInputs,
+	interactive,
+	isCompleting,
+	onRequestComplete,
 	onSelectTask,
 }: {
 	taskId: string;
 	board: BoardData;
 	realTaskCardRenderingInputs: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
+	interactive: boolean;
+	isCompleting: boolean;
+	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
 	onSelectTask: () => void;
 }): ReactElement {
 	const selection = findCardSelection(board, taskId);
@@ -97,6 +159,40 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 			>
 				{taskTitle}
 			</button>
+		);
+	}
+	if (
+		realTaskCardRenderingInputs.realTaskCardRenderingInputsBoardSourceKind ===
+		"runtime_board_snapshot_of_workspace_not_hydrated_in_browser"
+	) {
+		return (
+			<TaskCardBodyVisualDensityProvider value="compact_row_in_focus_view_left_column">
+				<TaskCardBody
+					renderRole="task_card_copy_in_post_deploy_verification_panel_entry"
+					taskCardOwnedByOtherProjectWorkspaceId={
+						realTaskCardRenderingInputs.workspaceIdOwningRuntimeBoardSnapshot
+					}
+					{...buildTaskCardBusinessProps({
+						card: selection.card,
+						columnId: selection.column.id,
+						sessionSummary: realTaskCardRenderingInputs.taskSessionsFromRuntimeBoardSnapshot[taskId],
+						handlers: buildTaskCardActionHandlersForRuntimeBoardSnapshotTaskCardCopy({
+							card: selection.card,
+							workspaceIdOwningRuntimeBoardSnapshot:
+								realTaskCardRenderingInputs.workspaceIdOwningRuntimeBoardSnapshot,
+							interactive,
+							isCompleting,
+							onRequestComplete,
+							onActivateTaskCardOpeningTaskInItsProject:
+								realTaskCardRenderingInputs.onActivateTaskCardOpeningTaskInItsProject,
+						}),
+						onActivateCard: realTaskCardRenderingInputs.onActivateTaskCardOpeningTaskInItsProject,
+						workspacePath: realTaskCardRenderingInputs.workspacePathOwningRuntimeBoardSnapshot,
+						defaultAgentId: realTaskCardRenderingInputs.defaultAgentId,
+						defaultClineModelId: realTaskCardRenderingInputs.defaultClineModelId,
+					})}
+				/>
+			</TaskCardBodyVisualDensityProvider>
 		);
 	}
 	return (
@@ -133,6 +229,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 	onRequestComplete,
 	onSelectTask,
 	onNavigateToBoard,
+	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryWrappingRealTaskCardProps): ReactElement {
 	const currentBoardColumnIdOfTaskCard = findCardSelection(board, task.taskId)?.column.id ?? null;
 
@@ -159,6 +256,9 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				taskId={task.taskId}
 				board={board}
 				realTaskCardRenderingInputs={realTaskCardRenderingInputs}
+				interactive={interactive}
+				isCompleting={isCompleting}
+				onRequestComplete={onRequestComplete}
 				onSelectTask={onSelectTask}
 			/>
 			<PostDeployVerificationTaskEntryChecklistAndClosureSection
@@ -172,8 +272,9 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				onAddCustomChecklistItem={onAddCustomChecklistItem}
 				onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
 				onRunVerificationItem={onRunVerificationItem}
-				onRequestComplete={onRequestComplete}
+				onRequestComplete={() => onRequestComplete()}
 				onLocateChecklistItem={locateChecklistItem}
+				onCreateFollowUpTaskFromSelectedChecklistItems={onCreateFollowUpTaskFromSelectedChecklistItems}
 			/>
 		</div>
 	);

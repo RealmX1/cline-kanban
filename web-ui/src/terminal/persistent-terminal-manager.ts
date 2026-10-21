@@ -1,3 +1,4 @@
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -48,6 +49,8 @@ const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
 const TERMINAL_RECONNECT_INITIAL_DELAY_MS = 250;
 const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
+// EXPERIMENT_NODE: 连接连续健康 5 秒后清零重连退避，后续按真实弱网体验校准稳定窗口。
+const TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
 // 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
@@ -62,6 +65,8 @@ const RESYNC_TERMINAL_VIEW_ESCALATED_RECONNECT_RESTORE_SNAPSHOT_DEADLINE_MS = 4_
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
+// xterm 6 的 ScrollableElement 把旧滚轮字段归一化后按每单位 50 CSS 像素滚动。
+const XTERM_NORMALIZED_MOUSE_WHEEL_DELTA_PIXEL_DISTANCE = 50;
 const SEARCH_DECORATIONS: NonNullable<ISearchOptions["decorations"]> = {
 	activeMatchBackground: "#0084FF",
 	activeMatchBorder: "#66B7FF",
@@ -315,6 +320,7 @@ class PersistentTerminal {
 	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
 	private reconnectTimer: number | null = null;
 	private reconnectAttempt = 0;
+	private terminalTransportConnectionStabilityTimer: number | null = null;
 	private disposed = false;
 	// User-initiated refresh swaps the backing PTY but should NOT wipe the visible
 	// scrollback. The hook reads and clears this flag before deciding whether the
@@ -685,6 +691,7 @@ class PersistentTerminal {
 			// 关不掉就让它自己超时；重要的是本实例已经不再认它。
 		}
 		this.clearReconnectTimer();
+		this.clearTerminalTransportConnectionStabilityTimer();
 		this.reconnectAttempt = 0;
 		this.ensureConnected();
 	}
@@ -728,7 +735,22 @@ class PersistentTerminal {
 	}
 
 	private notifyConnectionReady(): void {
+		if (
+			this.connectionReady ||
+			this.ioSocket?.readyState !== WebSocket.OPEN ||
+			this.controlSocket?.readyState !== WebSocket.OPEN ||
+			!this.restoreCompleted
+		) {
+			return;
+		}
 		this.connectionReady = true;
+		this.clearReconnectTimer();
+		this.lastError = null;
+		this.notifyLastError();
+		this.terminalTransportConnectionStabilityTimer = window.setTimeout(() => {
+			this.terminalTransportConnectionStabilityTimer = null;
+			this.reconnectAttempt = 0;
+		}, TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS);
 		for (const subscriber of this.subscribers) {
 			subscriber.onConnectionReady?.(this.taskId);
 		}
@@ -802,11 +824,11 @@ class PersistentTerminal {
 		}, delay);
 	}
 
-	private markSocketOpen(): void {
-		this.reconnectAttempt = 0;
-		this.clearReconnectTimer();
-		this.lastError = null;
-		this.notifyLastError();
+	private clearTerminalTransportConnectionStabilityTimer(): void {
+		if (this.terminalTransportConnectionStabilityTimer !== null) {
+			window.clearTimeout(this.terminalTransportConnectionStabilityTimer);
+			this.terminalTransportConnectionStabilityTimer = null;
+		}
 	}
 
 	private sendControlMessage(message: RuntimeTerminalWsClientMessage): boolean {
@@ -817,12 +839,25 @@ class PersistentTerminal {
 		return true;
 	}
 
-	private sendIoData(data: string | Uint8Array): boolean {
+	private canSendTerminalInputToCurrentSession(): boolean {
 		if (
 			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
 			!this.ioSocket ||
 			this.ioSocket.readyState !== WebSocket.OPEN
 		) {
+			return false;
+		}
+		if (this.latestSummary?.pid === null) {
+			const { liveness } = resolveSessionFacets(this.latestSummary);
+			if (liveness === "none" || liveness === "exited" || liveness === "failed" || liveness === "interrupted") {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private sendIoData(data: string | Uint8Array): boolean {
+		if (!this.canSendTerminalInputToCurrentSession() || !this.ioSocket) {
 			return false;
 		}
 		this.ioSocket.send(data);
@@ -947,19 +982,20 @@ class PersistentTerminal {
 		if (!this.visibleContainer || !this.isMountedContainerVisible) {
 			return;
 		}
+		// 手机页签用 display:none 保留挂载；此时百分比样式不能作为可用尺寸，保留最后可见几何。
+		const containerBounds = this.visibleContainer.getBoundingClientRect();
+		if (containerBounds.width <= 0 || containerBounds.height <= 0) {
+			return;
+		}
 		const proposedDimensions = this.fitAddon.proposeDimensions();
 		const nextCols =
 			proposedDimensions && Number.isFinite(proposedDimensions.cols)
 				? Math.max(1, Math.floor(proposedDimensions.cols))
 				: this.terminal.cols;
-		// 行数与列数一样如实跟随可视高度（含移动端）。曾短暂尝试过「移动端把行数钉在首次
-		// 适配值以躲开软键盘抖动」，已移除：(1) 其依据——codex resize 触发 ESC[2J ESC[3J 全量
-		// 重印 + 20k 行 mirror 重放——是 `--no-alt-screen` 强制 inline 专属的历史顽疾，codex 现在
-		// 跑原生 alt-screen（`agent-session-adapters.test.ts` 有防回灌断言），resize 只原地重绘
-		// 一屏，服务端 resize 路径也不回放 mirror；(2) app 根布局是 `h-[100svh]`（静态小视口
-		// 单位），软键盘开合只改 visual viewport，本就不会驱动这里的 ResizeObserver；(3) 钉住
-		// 行数会让 TUI 把输入行/选择区绘到已被裁掉且不属于 scrollback 的底部行里，用户无法靠
-		// 滚动找回，直接毁掉「手机上就地回答 AskUserQuestion」这一目标。
+		// 行数与列数一样如实跟随可视高度。手机 Focus View 会随 visualViewport 收缩避开软键盘，
+		// 折叠区域也会改变可用高度；这些尺寸变化必须正常传到 PTY，不能固定首次行数，否则 TUI
+		// 的输入或选择区会落在被裁掉且不属于 scrollback 的底部。旧版 inline 全量重印问题已随
+		// Codex 恢复原生 alternate screen 解决，不应以锁定行数规避 resize。
 		const nextRows =
 			proposedDimensions && Number.isFinite(proposedDimensions.rows)
 				? Math.max(1, Math.floor(proposedDimensions.rows))
@@ -1053,7 +1089,6 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
-			this.markSocketOpen();
 			if (this.restoreCompleted && this.visibleContainer) {
 				this.requestResize();
 			}
@@ -1065,6 +1100,7 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal stream failed.";
 			this.notifyLastError();
 		};
@@ -1075,6 +1111,7 @@ class PersistentTerminal {
 			this.ioSocket = null;
 			this.outputTextDecoder = new TextDecoder();
 			this.connectionReady = false;
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal stream closed. Reconnecting...";
 			this.notifyLastError();
 			this.scheduleReconnect();
@@ -1092,7 +1129,7 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
-			this.markSocketOpen();
+			this.notifyConnectionReady();
 		};
 		controlSocket.onmessage = (event) => {
 			// 与 onopen / onerror / onclose 同源的守卫，必须在解析帧之前：升级重连
@@ -1115,6 +1152,8 @@ class PersistentTerminal {
 				// 恢复快照已到达:解除可见性恢复门控。此后到 restore_complete 之间服务端不再
 				// 转发实时输出(restoreComplete=false 缓冲),不存在门控漏窗。
 				this.endAwaitingRestoreSnapshotGate();
+				this.connectionReady = false;
+				this.clearTerminalTransportConnectionStabilityTimer();
 				this.restoreCompleted = false;
 				// 到达序号在此刻定死（而非等落屏时再取），resync 才能分辨「本次请求到的那一份」与「更早在途、
 				// 恰好此刻才落屏的那一份」。
@@ -1171,6 +1210,7 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.lastError = "Terminal control connection failed.";
 			this.notifyLastError();
 		};
@@ -1180,6 +1220,7 @@ class PersistentTerminal {
 			}
 			this.controlSocket = null;
 			this.connectionReady = false;
+			this.clearTerminalTransportConnectionStabilityTimer();
 			this.restoreCompleted = false;
 			this.lastError = "Terminal control connection closed. Reconnecting...";
 			this.notifyLastError();
@@ -1188,7 +1229,7 @@ class PersistentTerminal {
 	}
 
 	private ensureConnected(): void {
-		if (this.disposed) {
+		if (this.disposed || this.reconnectTimer !== null) {
 			return;
 		}
 		if (!this.ioSocket) {
@@ -1337,11 +1378,7 @@ class PersistentTerminal {
 	}
 
 	input(text: string): boolean {
-		if (
-			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
-			!this.ioSocket ||
-			this.ioSocket.readyState !== WebSocket.OPEN
-		) {
+		if (!this.canSendTerminalInputToCurrentSession()) {
 			return false;
 		}
 		this.terminal.input(text);
@@ -1349,11 +1386,7 @@ class PersistentTerminal {
 	}
 
 	paste(text: string): boolean {
-		if (
-			this.shouldDeferAutomaticSessionResumeUntilVisibleMount ||
-			!this.ioSocket ||
-			this.ioSocket.readyState !== WebSocket.OPEN
-		) {
+		if (!this.canSendTerminalInputToCurrentSession()) {
 			return false;
 		}
 		this.terminal.paste(text);
@@ -1370,6 +1403,48 @@ class PersistentTerminal {
 
 	isScrolledAwayFromLatest(): boolean {
 		return this.scrolledAwayFromLatest;
+	}
+
+	/** 经 xterm 的滚轮入口，保留普通历史、鼠标协议和 alternate buffer 各自的原生行为。 */
+	scrollByMouseWheelLines(lineDelta: number): boolean {
+		const screen = this.terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+		if (this.disposed || !this.isMountedContainerVisible || !screen || !Number.isFinite(lineDelta) || lineDelta === 0)
+			return false;
+		const bounds = screen.getBoundingClientRect();
+		if (bounds.width <= 0 || bounds.height <= 0) return false;
+		const wheelEvent = new WheelEvent("wheel", {
+			bubbles: true,
+			cancelable: true,
+			deltaMode: WheelEvent.DOM_DELTA_LINE,
+			deltaY: lineDelta,
+			clientX: bounds.left + bounds.width / 2,
+			clientY: bounds.top + bounds.height / 2,
+		});
+		// 普通历史优先读取旧字段，按实际行高抵消 xterm 的固定像素倍率。
+		// deltaY 仍保留行单位，鼠标协议与 alternate buffer 继续由 xterm 原生分流。
+		// WebGL 的屏幕 CSS 总高度经过取整，须从画布的设备像素恢复精确行高；DOM 渲染器直接均分屏幕。
+		const rendererCanvas = screen.querySelector("canvas");
+		const renderedRowHeight = rendererCanvas
+			? rendererCanvas.height / window.devicePixelRatio / this.terminal.rows
+			: bounds.height / this.terminal.rows;
+		const scrollSensitivity = this.terminal.options.scrollSensitivity ?? 1;
+		const currentViewportRow = this.terminal.buffer.active.viewportY;
+		// xterm 会把每次滚动距离向外取整为整数像素；按相邻行边界计算，避免小数行高累计偏移。
+		const scrollPixelDistance =
+			Math.round((currentViewportRow + lineDelta) * renderedRowHeight) -
+			Math.round(currentViewportRow * renderedRowHeight);
+		// 取目标整数像素对应区间的中点，避免归一化浮点误差再次向外多取整一像素。
+		const scrollPixelDistanceBeforeXtermRounding = scrollPixelDistance - Math.sign(scrollPixelDistance) * 0.5;
+		const legacyWheelDelta =
+			(-scrollPixelDistanceBeforeXtermRounding * 120) /
+			(XTERM_NORMALIZED_MOUSE_WHEEL_DELTA_PIXEL_DISTANCE * scrollSensitivity);
+		Object.defineProperties(wheelEvent, {
+			wheelDeltaY: { value: legacyWheelDelta },
+			wheelDelta: { value: legacyWheelDelta },
+			wheelDeltaX: { value: 0 },
+		});
+		screen.dispatchEvent(wheelEvent);
+		return true;
 	}
 
 	scrollToLatest(): void {
@@ -1618,6 +1693,7 @@ class PersistentTerminal {
 			document.removeEventListener("visibilitychange", this.handleVisibilityChange);
 		}
 		this.clearReconnectTimer();
+		this.clearTerminalTransportConnectionStabilityTimer();
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
 		// 在途的 resync 等待者不再可能被唤醒；丢掉引用，让它们各自到点以「没等到」收场。
 		this.restoreSnapshotApplicationWaiters.clear();

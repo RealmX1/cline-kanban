@@ -602,11 +602,83 @@ const commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet = dat
 	},
 );
 
+const readRelationModelingSubmissionEventStatement = database.prepare(
+	"SELECT event_json FROM inter_work_unit_relation_ledger_events WHERE idempotency_key = ? AND event_commit_status = 'committed' LIMIT 1",
+);
+function readReferenceRelationModelingSubmissionFingerprint({ idempotencyKey }) {
+	const row = readRelationModelingSubmissionEventStatement.get(idempotencyKey);
+	return row ? JSON.parse(row.event_json).eventPayload.modelingSubmissionFingerprint : null;
+}
+
+// 先检查整批版本，再统一撤销和插入；事务中任何错误都回滚，避免改类型时只撤销未重建。
+const commitReferenceRelationModelingChanges = database.transaction(
+	({ expectations, relationsAfterChange, eventDraft }) => {
+		const previousFingerprint = readReferenceRelationModelingSubmissionFingerprint({
+			idempotencyKey: eventDraft.idempotencyKey,
+		});
+		if (previousFingerprint !== null)
+			return previousFingerprint === eventDraft.eventPayload.modelingSubmissionFingerprint ? "already_applied" : "conflict";
+		const revokedIds = new Set(expectations.map((entry) => entry.relationId));
+		for (const expectation of expectations) {
+			const row = readAssertedRelationStateStatement.get(expectation.relationId);
+			if (
+				!row ||
+				row.assertion_effectiveness_state !== "applied_and_effective" ||
+				row.asserted_relation_state_version !== expectation.assertedRelationStateVersion
+			) return "conflict";
+		}
+		const effectiveRelationsAfterChange = relationsAfterChange.filter(
+			(entry) => entry.assertionEffectivenessState === "applied_and_effective",
+		);
+		for (const relation of effectiveRelationsAfterChange) {
+			const row = readEffectiveAssertedRelationOfNaturalKeyStatement.get(relation.relationAssertionNaturalKey);
+			if (row && !revokedIds.has(row.relation_id)) return "conflict";
+		}
+		for (const expectation of expectations)
+			updateAssertedRelationStateWithVersionCheckStatement.run(
+				"revoked", eventDraft.occurredAt, expectation.relationId, expectation.assertedRelationStateVersion,
+			);
+		for (const relation of effectiveRelationsAfterChange)
+			insertAssertedRelationStateStatement.run(
+				relation.relationId, relation.relationAssertionNaturalKey, relation.relationKind, eventDraft.occurredAt,
+			);
+		for (const tombstone of eventDraft.eventPayload.userRejectionSuppressionTombstones ?? [])
+			insertUserRejectionSuppressionTombstoneStatement.run(
+				tombstone.relationAssertionNaturalKey, JSON.stringify(tombstone), eventDraft.occurredAt,
+			);
+		insertEventDraft(eventDraft, "committed", null);
+		return "applied";
+	},
+);
+
 function readRetainedFieldContents({ fieldValueSha256s }) {
 	return fieldValueSha256s
 		.map((sha256) => readContentStatement.get(sha256))
 		.filter(Boolean)
 		.map((row) => ({ fieldValueSha256: row.content_sha256, fieldValueCanonicalJson: row.content_canonical_json }));
+}
+
+// 全文匹配留在 worker：逐字段解析，不把未命中的长正文传回主线程或常驻正文缓存。
+// 沿用 JS 的 Unicode 大小写规则；SQLite lower/LIKE 的 ASCII 规则会改变既有搜索结果。
+function findRetainedTaskCardFieldKeywordMatches({ fieldValueSha256s, normalizedQueryTokens }) {
+	const matches = [];
+	for (const fieldValueSha256 of fieldValueSha256s) {
+		const row = readContentStatement.get(fieldValueSha256);
+		if (!row) continue;
+		let value;
+		try {
+			value = JSON.parse(row.content_canonical_json);
+		} catch {
+			continue;
+		}
+		if (typeof value !== "string") continue;
+		const normalizedText = value.toLocaleLowerCase();
+		const matchedQueryTokenIndexes = normalizedQueryTokens.flatMap((token, index) =>
+			normalizedText.includes(token) ? [index] : [],
+		);
+		if (matchedQueryTokenIndexes.length) matches.push({ fieldValueSha256, matchedQueryTokenIndexes });
+	}
+	return matches;
 }
 
 const commands = {
@@ -621,12 +693,15 @@ const commands = {
 		allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry.immediate(input),
 	seedTaskIdReservationsFromExistingLocalTraces: (input) => seedTaskIdReservationsFromExistingLocalTraces.immediate(input),
 	readInterWorkUnitRelationAssertionWriteGuardState,
+	readReferenceRelationModelingSubmissionFingerprint,
+	commitReferenceRelationModelingChanges: (input) => commitReferenceRelationModelingChanges.immediate(input),
 	commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet: (input) =>
 		commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet.immediate(input),
 	listInterWorkUnitAssertedRelationCurrentStateRows: () =>
 		listAssertedRelationCurrentStateRowsStatement.all().map(toAssertedRelationStateRow),
 	listCommittedEvents,
 	readRetainedFieldContents,
+	findRetainedTaskCardFieldKeywordMatches,
 	close: () => {
 		database.close();
 		return true;

@@ -210,7 +210,7 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 			return;
 		}
 		try {
-			hostedSession.ptyProcess.write(bytes.toString("utf8"));
+			hostedSession.ptyProcess.write(bytes);
 		} catch {
 			// EIO / EBADF：PTY 正在拆除，与 PtySession.write 一样忽略。
 		}

@@ -100,6 +100,7 @@ import type {
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse,
 	RuntimeListDeferredNaturalUsageObservationRecordsResponse,
+	RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse,
 	RuntimeNotificationClearRequest,
@@ -187,6 +188,7 @@ import type {
 	RuntimeTaskPromptDeliveryQueueMutateResponse,
 	RuntimeTaskPromptDeliveryQueueReadRequest,
 	RuntimeTaskPromptDeliveryQueueResponse,
+	RuntimeTaskRetainedCommittedLineChangeHistory,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
@@ -317,6 +319,7 @@ import {
 	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema,
 	runtimeListDeferredNaturalUsageObservationRecordsResponseSchema,
+	runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -404,6 +407,7 @@ import {
 	runtimeTaskPromptDeliveryQueueMutateResponseSchema,
 	runtimeTaskPromptDeliveryQueueReadRequestSchema,
 	runtimeTaskPromptDeliveryQueueResponseSchema,
+	runtimeTaskRetainedCommittedLineChangeHistorySchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
@@ -437,7 +441,22 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
+	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
+	rvfAutomaticCloseoutStatusRequestSchema,
+	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfReviewStartBoundaryObservationRequestSchema,
+	rvfReviewStartBoundaryObservationResponseSchema,
+	rvfReviewStartBoundaryRequestSchema,
+	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
+import {
+	independentTaskCreationDraftEditSchema,
+	independentTaskCreationDraftRequestSchema,
+	independentTaskCreationDraftSchema,
+	independentTaskCreationListRequestSchema,
+	independentTaskCreationListResponseSchema,
+} from "../core/independent-task-creation-contract";
 import {
 	KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
 	kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema,
@@ -454,6 +473,53 @@ import {
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
 import {
+	type ListPermanentlyDeletedTaskCardsRequest,
+	type ListPermanentlyDeletedTaskCardsResponse,
+	listPermanentlyDeletedTaskCardsRequestSchema,
+	listPermanentlyDeletedTaskCardsResponseSchema,
+	type PermanentlyDeletedTaskPromptVersionsRequest,
+	type PermanentlyDeletedTaskPromptVersionsResponse,
+	permanentlyDeletedTaskPromptVersionsRequestSchema,
+	permanentlyDeletedTaskPromptVersionsResponseSchema,
+} from "../core/permanently-deleted-task-history-contract";
+import {
+	type ProjectVisualIdentity,
+	projectVisualIdentitySchema,
+	readProjectIconImageRequestSchema,
+	readProjectIconImageResponseSchema,
+	resetProjectVisualIdentityRequestSchema,
+	type SetProjectVisualIdentityRequest,
+	setProjectVisualIdentityRequestSchema,
+} from "../core/project-visual-identity";
+import {
+	appendTaskCommentRequestSchema,
+	appendTaskCommentResponseSchema,
+	IncomingWorkItemTriageOperationError,
+	incomingWorkItemSchema,
+	incomingWorkItemTriageResponseSchema,
+	sharedTaskIndexingContextSchema,
+	taskIndexingSupportExecutorSettingsSchema,
+} from "../core/task-indexing-support-contract";
+import {
+	createTaskLookupConversationRequestSchema,
+	submitTaskLookupTurnRequestSchema,
+	taskLookupCandidatePreviewRequestSchema,
+	taskLookupCandidatePreviewSchema,
+	taskLookupConversationIdentitySchema,
+	taskLookupConversationSchema,
+} from "../core/task-lookup-conversation-contract";
+import type {
+	TaskMainSessionHandoverPrepareResponse,
+	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRequest,
+} from "../core/task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverPrepareRequestSchema,
+	taskMainSessionHandoverPrepareResponseSchema,
+	taskMainSessionHandoverRequestSchema,
+	taskMainSessionHandoverStatusResponseSchema,
+} from "../core/task-main-session-handover-contract";
+import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
 	assertReferenceRelationAsActingWorkUnitRequestSchema,
@@ -465,6 +531,23 @@ import {
 	revokeEffectiveRelationAssertionAsActingWorkUnitRequestSchema,
 	revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema,
 } from "../core/work-unit-relation-assertion-write-api-contract";
+import {
+	type ApplyReferenceRelationModelingChangesRequest,
+	type ApplyReferenceRelationModelingChangesResponse,
+	applyReferenceRelationModelingChangesRequestSchema,
+	applyReferenceRelationModelingChangesResponseSchema,
+	type ReferenceRelationModelingEditorDraft,
+	type ReferenceRelationModelingSuggestionsRequest,
+	type RelationModelingPreviewRequest,
+	type RelationModelingPreviewResponse,
+	referenceRelationModelingEditorDraftSchema,
+	referenceRelationModelingSuggestionsRequestSchema,
+	referenceRelationModelingSuggestionsResponseSchema,
+	relationModelingEditorDraftReadRequestSchema,
+	relationModelingEditorDraftSaveRequestSchema,
+	relationModelingPreviewRequestSchema,
+	relationModelingPreviewResponseSchema,
+} from "../core/work-unit-relation-modeling-api-contract";
 import {
 	type GetRelationNeighborhoodSummaryRequest,
 	type GetRelationNeighborhoodSummaryResponse,
@@ -487,6 +570,7 @@ import {
 	setRecordedRelationPresentationMutePreferenceRequestSchema,
 	setRecordedRelationPresentationMutePreferenceResponseSchema,
 } from "../core/work-unit-relation-read-api-contract";
+import type { IndependentTaskCreationService } from "../independent-task-creation/independent-task-creation-service";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { issueKanbanWebUiPageLoadRequestOriginNonce } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
@@ -503,6 +587,8 @@ import {
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
+import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -510,6 +596,50 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskLookupConversationApi?: TaskLookupConversationService;
+	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
+	independentTaskCreationApi?: IndependentTaskCreationService;
+	taskMainSessionHandoverApi?: {
+		prepare: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<TaskMainSessionHandoverPrepareResponse>;
+		request: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		getStatus: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		cancel: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		retry: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+	};
+	rvfAutomaticCloseoutApi?: {
+		observeBoundary?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
+		) => Promise<z.infer<typeof rvfReviewStartBoundaryObservationResponseSchema>>;
+		activateAfterRunBinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutRunBindingActivationRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutRunBindingActivationResponseSchema>>;
+		capture: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfReviewStartBoundaryRequestSchema>,
+		) => Promise<z.infer<typeof rvfReviewStartBoundaryResponseSchema>>;
+		status: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutStatusRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutStatusResponseSchema>>;
+	};
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
@@ -786,6 +916,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskWorkspaceInfoRequest,
 		) => Promise<RuntimeTaskWorkspaceInfoResponse>;
+		loadTaskRetainedCommittedLineChangeHistory: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskWorkspaceInfoRequest,
+		) => Promise<RuntimeTaskRetainedCommittedLineChangeHistory>;
 		searchFiles: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeWorkspaceFileSearchRequest,
@@ -888,6 +1022,12 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse>;
 	};
 	projectsApi: {
+		setProjectVisualIdentity: (input: SetProjectVisualIdentityRequest) => Promise<ProjectVisualIdentity>;
+		resetProjectVisualIdentityToDefault: (input: { workspaceId: string }) => Promise<ProjectVisualIdentity>;
+		readProjectIconImage: (input: {
+			workspaceId: string;
+			imageAssetId: string;
+		}) => Promise<{ mediaType: "image/png"; base64Content: string }>;
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
 		addProject: (
 			preferredWorkspaceId: string | null,
@@ -947,9 +1087,30 @@ export interface RuntimeTrpcContext {
 		listDeferredNaturalUsageObservationRecords: (
 			scope: RuntimeTrpcWorkspaceScope,
 		) => Promise<RuntimeListDeferredNaturalUsageObservationRecordsResponse>;
+		// 跨 workspace、只读：All projects 视图据此挑 PDV 面板绑定的 workspace（不带 scope）。
+		listWorkspacesHavingPostDeployVerificationDeploymentGroups: () => Promise<RuntimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponse>;
 	};
 	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
 	workUnitRelationReadApi: {
+		listPermanentlyDeletedTaskCards: (
+			input: ListPermanentlyDeletedTaskCardsRequest,
+		) => Promise<ListPermanentlyDeletedTaskCardsResponse>;
+		getPermanentlyDeletedTaskPromptVersions: (
+			input: PermanentlyDeletedTaskPromptVersionsRequest,
+		) => Promise<PermanentlyDeletedTaskPromptVersionsResponse>;
+		readRelationModelingEditorDraft: (input: {
+			workspaceId: string;
+			draftScopeId: string;
+		}) => Promise<ReferenceRelationModelingEditorDraft | null>;
+		saveRelationModelingEditorDraft: (input: {
+			workspaceId: string;
+			draftScopeId: string;
+			draft: ReferenceRelationModelingEditorDraft | null;
+		}) => Promise<{ saved: boolean }>;
+		getRelationModelingPreview: (input: RelationModelingPreviewRequest) => Promise<RelationModelingPreviewResponse>;
+		suggestReferenceRelationsForTaskModeling: (
+			input: ReferenceRelationModelingSuggestionsRequest,
+		) => Promise<z.infer<typeof referenceRelationModelingSuggestionsResponseSchema>>;
 		resolveKanbanBoardCardIdentityByBareTaskId: (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
 		) => Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse>;
@@ -970,6 +1131,10 @@ export interface RuntimeTrpcContext {
 	};
 	// dd2db 2.1：断言型关系的写入面。agent 经 CLI（主语 = 请求方工作单元，走确认矩阵）；Web UI 用户带 nonce 直接断言 / 撤销。
 	workUnitRelationAssertionWriteApi: {
+		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: (
+			input: ApplyReferenceRelationModelingChangesRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<ApplyReferenceRelationModelingChangesResponse>;
 		assertReferenceRelationAsActingWorkUnit: (
 			input: AssertReferenceRelationAsActingWorkUnitRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
@@ -1052,6 +1217,9 @@ const t = initTRPC.context<RuntimeTrpcContext>().create({
 			data: {
 				...shape.data,
 				conflictRevision,
+				...(error.cause instanceof IncomingWorkItemTriageOperationError
+					? { incomingWorkItemTriageOperationFailure: error.cause.operationFailure }
+					: {}),
 			},
 		};
 	},
@@ -1214,7 +1382,207 @@ export const runtimeAppRouter = t.router({
 			.input(z.object({ candidateId: z.string() }))
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
+	support: t.router({
+		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(createTaskLookupConversationRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.createConversation(input);
+			}),
+		listTaskLookupConversations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(z.array(taskLookupConversationSchema))
+			.query(({ ctx }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.listConversations();
+			}),
+		getTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.getConversation(input.conversationId);
+			}),
+		submitTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(submitTaskLookupTurnRequestSchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.submitTurn(input);
+			}),
+		cancelTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupConversationIdentitySchema)
+			.output(taskLookupConversationSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.cancelTurn(input.conversationId);
+			}),
+		readTaskLookupCandidatePreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskLookupCandidatePreviewRequestSchema)
+			.output(taskLookupCandidatePreviewSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskLookupConversationApi.readCandidatePreview(input.conversationId, input.taskReference);
+			}),
+		getTaskIndexingContext: workspaceProcedure.output(sharedTaskIndexingContextSchema).query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getTaskIndexingContext(ctx.workspaceScope);
+		}),
+		triageIncomingWorkItem: workspaceProcedure
+			.input(incomingWorkItemSchema)
+			.output(incomingWorkItemTriageResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
+			}),
+		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getExecutorSettings(ctx.workspaceScope);
+		}),
+		setExecutorSettings: workspaceProcedure
+			.input(taskIndexingSupportExecutorSettingsSchema)
+			.output(taskIndexingSupportExecutorSettingsSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
+			}),
+		scheduleRvfFindingsBackfill: workspaceProcedure.mutation(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.scheduleBackfill(ctx.workspaceScope);
+		}),
+		getRvfFindingsBackfillStatus: workspaceProcedure.query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.readBackfillStatus(ctx.workspaceScope);
+		}),
+	}),
+	independentTaskCreation: t.router({
+		read: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid() }))
+			.output(independentTaskCreationDraftSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.read(ctx.workspaceScope, input);
+			}),
+		latestDraft: workspaceProcedure
+			.input(z.object({ sourceTaskId: z.string(), sourceTaskConversationSessionId: z.string() }))
+			.output(independentTaskCreationDraftSchema.nullable())
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.latestDraft(ctx.workspaceScope, input);
+			}),
+		prepare: workspaceProcedure
+			.input(independentTaskCreationDraftRequestSchema)
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.prepare(ctx.workspaceScope, input);
+			}),
+		saveDraft: workspaceProcedure
+			.input(independentTaskCreationDraftEditSchema)
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.saveDraft(ctx.workspaceScope, input);
+			}),
+		generate: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid(), allowIncompleteContext: z.boolean().optional() }))
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.generate(ctx.workspaceScope, input);
+			}),
+		create: workspaceProcedure
+			.input(z.object({ requestId: z.string().uuid() }))
+			.output(independentTaskCreationDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.create(
+					ctx.workspaceScope,
+					input,
+					ctx,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		list: workspaceProcedure
+			.input(independentTaskCreationListRequestSchema)
+			.output(independentTaskCreationListResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.independentTaskCreationApi.list(ctx.workspaceScope, input);
+			}),
+	}),
 	runtime: t.router({
+		prepareTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverPrepareResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.prepare(ctx.workspaceScope, input);
+			}),
+		requestTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.request(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		getTaskMainSessionHandoverStatus: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.getStatus(ctx.workspaceScope, input);
+			}),
+		cancelTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.cancel(ctx.workspaceScope, input);
+			}),
+		retryTaskMainSessionHandover: workspaceProcedure
+			.input(taskMainSessionHandoverPrepareRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
+		observeRvfReviewStartBoundary: workspaceProcedure
+			.input(rvfReviewStartBoundaryObservationRequestSchema)
+			.output(rvfReviewStartBoundaryObservationResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.observeBoundary)
+					return { review_start_boundary_pending_reason: "宿主尚未提供实时活动分支观测。" };
+				return ctx.rvfAutomaticCloseoutApi.observeBoundary(ctx.workspaceScope, input);
+			}),
+		captureRvfReviewStartBoundary: workspaceProcedure
+			.input(rvfReviewStartBoundaryRequestSchema)
+			.output(rvfReviewStartBoundaryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.capture(ctx.workspaceScope, input);
+			}),
+		activateRvfAutomaticCloseoutAfterRunBinding: workspaceProcedure
+			.input(rvfAutomaticCloseoutRunBindingActivationRequestSchema)
+			.output(rvfAutomaticCloseoutRunBindingActivationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.activateAfterRunBinding(ctx.workspaceScope, input);
+			}),
+		rvfAutomaticCloseoutStatus: workspaceProcedure
+			.input(rvfAutomaticCloseoutStatusRequestSchema)
+			.output(rvfAutomaticCloseoutStatusResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
+			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
 			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
@@ -1701,6 +2069,12 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadTaskContext(ctx.workspaceScope, input);
 			}),
+		getTaskRetainedCommittedLineChangeHistory: workspaceProcedure
+			.input(runtimeTaskWorkspaceInfoRequestSchema)
+			.output(runtimeTaskRetainedCommittedLineChangeHistorySchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadTaskRetainedCommittedLineChangeHistory(ctx.workspaceScope, input);
+			}),
 		searchFiles: workspaceProcedure
 			.input(runtimeWorkspaceFileSearchRequestSchema)
 			.output(runtimeWorkspaceFileSearchResponseSchema)
@@ -1791,6 +2165,17 @@ export const runtimeAppRouter = t.router({
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
 	taskCardAction: t.router({
+		appendTaskComment: workspaceProcedure
+			.input(appendTaskCommentRequestSchema)
+			.output(appendTaskCommentResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.appendTaskComment(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
 		readTaskCardWithBoardColumn: workspaceProcedure
 			.input(runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema)
 			.output(runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema)
@@ -1891,6 +2276,18 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	projects: t.router({
+		setProjectVisualIdentity: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(setProjectVisualIdentityRequestSchema)
+			.output(projectVisualIdentitySchema)
+			.mutation(({ ctx, input }) => ctx.projectsApi.setProjectVisualIdentity(input)),
+		resetProjectVisualIdentityToDefault: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(resetProjectVisualIdentityRequestSchema)
+			.output(projectVisualIdentitySchema)
+			.mutation(({ ctx, input }) => ctx.projectsApi.resetProjectVisualIdentityToDefault(input)),
+		readProjectIconImage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(readProjectIconImageRequestSchema)
+			.output(readProjectIconImageResponseSchema)
+			.query(({ ctx, input }) => ctx.projectsApi.readProjectIconImage(input)),
 		list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeProjectsResponseSchema)
 			.query(async ({ ctx }) => {
@@ -2010,9 +2407,23 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx }) => {
 				return await ctx.deploymentApi.listDeferredNaturalUsageObservationRecords(ctx.workspaceScope);
 			}),
+		listWorkspacesHavingPostDeployVerificationDeploymentGroups:
+			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+				.output(runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema)
+				.query(async ({ ctx }) => {
+					return await ctx.deploymentApi.listWorkspacesHavingPostDeployVerificationDeploymentGroups();
+				}),
 	}),
 	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。
 	workUnit: t.router({
+		listPermanentlyDeletedTaskCards: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(listPermanentlyDeletedTaskCardsRequestSchema)
+			.output(listPermanentlyDeletedTaskCardsResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.listPermanentlyDeletedTaskCards(input)),
+		getPermanentlyDeletedTaskPromptVersions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(permanentlyDeletedTaskPromptVersionsRequestSchema)
+			.output(permanentlyDeletedTaskPromptVersionsResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getPermanentlyDeletedTaskPromptVersions(input)),
 		resolveKanbanBoardCardIdentityByBareTaskId: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema)
 			.output(resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema)
@@ -2047,6 +2458,32 @@ export const runtimeAppRouter = t.router({
 				);
 			}),
 		// dd2db 2.1 断言型关系写入（R3.4 `assert-reference-relation` / `revoke-effective-relation-assertion`）。
+		readRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingEditorDraftReadRequestSchema)
+			.output(referenceRelationModelingEditorDraftSchema.nullable())
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input)),
+		saveRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingEditorDraftSaveRequestSchema)
+			.output(z.object({ saved: z.boolean() }))
+			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft(input)),
+		getRelationModelingPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(relationModelingPreviewRequestSchema)
+			.output(relationModelingPreviewResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getRelationModelingPreview(input)),
+		suggestReferenceRelationsForTaskModeling: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(referenceRelationModelingSuggestionsRequestSchema)
+			.output(referenceRelationModelingSuggestionsResponseSchema)
+			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.suggestReferenceRelationsForTaskModeling(input)),
+		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(applyReferenceRelationModelingChangesRequestSchema)
+			.output(applyReferenceRelationModelingChangesResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.workUnitRelationAssertionWriteApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
+
 		assertReferenceRelationAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(assertReferenceRelationAsActingWorkUnitRequestSchema)
 			.output(interWorkUnitRelationAssertionWriteResponseSchema)

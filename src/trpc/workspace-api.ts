@@ -26,6 +26,7 @@ import {
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import { recordTaskSessionStartDiagnostic } from "../diagnostics/task-session-start-diagnostics-logger";
 import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
@@ -59,7 +60,10 @@ import {
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
-import { probeAndRefreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
+import {
+	probeAndRefreshTaskCommitIntegrationProvenance,
+	readTaskRetainedCommittedLineChangeHistory,
+} from "../workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -436,14 +440,22 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				return await createEmptyWorkspaceChangesResponse(workspaceScope.workspacePath);
 			}
 			if (normalizedInput.mode === "last_turn") {
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const card = board.columns
+					.flatMap((column) => column.cards)
+					.find((entry) => entry.id === normalizedInput.taskId);
+				// 目录属于宿主 Task；checkpoint 属于持久绑定的当前主会话。
+				const mainTaskConversationSessionId = card
+					? resolveMainTaskConversationSessionId(card)
+					: normalizedInput.taskId;
 				const terminalManager = await deps.ensureTerminalManagerForWorkspace(
 					workspaceScope.workspaceId,
 					workspaceScope.workspacePath,
 				);
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const summary = selectLastTurnSummary(
-					terminalManager.getSummary(normalizedInput.taskId),
-					clineTaskSessionService.getSummary(normalizedInput.taskId),
+					terminalManager.getSummary(mainTaskConversationSessionId),
+					clineTaskSessionService.getSummary(mainTaskConversationSessionId),
 				);
 				const fromCheckpoint = summary?.previousTurnCheckpoint;
 				const toCheckpoint = summary?.latestTurnCheckpoint;
@@ -602,6 +614,9 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				baseRef: normalizedInput.baseRef,
 				worktreeMode: normalizedInput.worktreeMode,
 			});
+		},
+		loadTaskRetainedCommittedLineChangeHistory: async (workspaceScope, input) => {
+			return await readTaskRetainedCommittedLineChangeHistory(workspaceScope.workspaceId, input.taskId);
 		},
 		searchFiles: async (workspaceScope, input) => {
 			const query = input.query.trim();

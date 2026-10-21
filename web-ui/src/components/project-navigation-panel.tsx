@@ -4,6 +4,8 @@ import { AlertTriangle, ChevronDown, ChevronUp, Ellipsis, ExternalLink, Info, Li
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { canShowFeaturebaseFeedbackButton } from "@/components/featurebase-feedback-button";
 import { PermanentProjectDataDeletionDialog } from "@/components/permanent-project-data-deletion-dialog";
+import { ProjectIcon } from "@/components/project-visual-identity";
+import { ProjectVisualIdentityEditorDialog } from "@/components/project-visual-identity-editor-dialog";
 import { Button } from "@/components/ui/button";
 import { ClineIcon } from "@/components/ui/cline-icon";
 import { cn } from "@/components/ui/cn";
@@ -101,6 +103,15 @@ export function ProjectNavigationPanel({
 
 	const isMobile = useIsMobile();
 	const [isMobileClosing, setIsMobileClosing] = useState(false);
+	const [projectIdBeingVisuallyEdited, setProjectIdBeingVisuallyEdited] = useState<string | null>(null);
+	const projectBeingVisuallyEdited = projects.find((project) => project.id === projectIdBeingVisuallyEdited);
+	const projectVisualIdentityEditor = projectBeingVisuallyEdited ? (
+		<ProjectVisualIdentityEditorDialog
+			key={projectBeingVisuallyEdited.id}
+			project={projectBeingVisuallyEdited}
+			onClose={() => setProjectIdBeingVisuallyEdited(null)}
+		/>
+	) : null;
 
 	useEffect(() => {
 		if (isMobile) {
@@ -197,13 +208,13 @@ export function ProjectNavigationPanel({
 	);
 
 	if (isMobile && isCollapsed && !isMobileClosing) {
-		return <></>;
+		return projectVisualIdentityEditor ?? <></>;
 	}
 
 	const collapsedWidth = COLLAPSED_WIDTH;
 
 	if (isCollapsed) {
-		return (
+		const collapsedProjectNavigationPanel = (
 			<aside
 				className="flex flex-col items-center min-h-0 overflow-hidden bg-surface-1 relative shrink-0 py-2 gap-1.5"
 				style={{
@@ -223,7 +234,6 @@ export function ProjectNavigationPanel({
 				)}
 				{sortedProjects.map((project) => {
 					const isCurrent = currentProjectId === project.id;
-					const letter = project.name.charAt(0).toUpperCase();
 					return (
 						<button
 							key={project.id}
@@ -241,11 +251,11 @@ export function ProjectNavigationPanel({
 								"relative rounded-md text-xs font-semibold shrink-0 border-0 cursor-pointer flex items-center justify-center",
 								isMobile ? "w-11 h-11" : "w-8 h-8",
 								isCurrent
-									? "bg-accent text-accent-fg"
+									? "bg-surface-3 ring-1 ring-accent"
 									: "bg-surface-3 text-text-secondary hover:text-text-primary hover:bg-surface-4",
 							)}
 						>
-							{letter}
+							<ProjectIcon project={project} />
 							{project.availability.status === "unavailable" ? (
 								<AlertTriangle
 									size={10}
@@ -270,9 +280,15 @@ export function ProjectNavigationPanel({
 				</button>
 			</aside>
 		);
+		return (
+			<>
+				{collapsedProjectNavigationPanel}
+				{projectVisualIdentityEditor}
+			</>
+		);
 	}
 
-	return (
+	const expandedProjectNavigationPanel = (
 		<aside
 			className={cn(
 				"flex flex-col min-h-0 overflow-hidden bg-surface-1 shrink-0",
@@ -379,6 +395,13 @@ export function ProjectNavigationPanel({
 										setCollapsed(true);
 									}
 								}}
+								onEditVisualIdentity={(projectId) => {
+									setProjectIdBeingVisuallyEdited(projectId);
+									if (isMobile) {
+										setIsMobileClosing(false);
+										setSidebarCollapsed(true, false);
+									}
+								}}
 								onRequestPermanentDataDeletion={(projectId) => {
 									const found = sortedProjects.find((item) => item.id === projectId);
 									if (!found) {
@@ -432,6 +455,12 @@ export function ProjectNavigationPanel({
 				}}
 			/>
 		</aside>
+	);
+	return (
+		<>
+			{expandedProjectNavigationPanel}
+			{projectVisualIdentityEditor}
+		</>
 	);
 }
 
@@ -653,12 +682,14 @@ function ProjectRow({
 	permanentlyDeletingProjectId,
 	onSelect,
 	onRequestPermanentDataDeletion,
+	onEditVisualIdentity,
 }: {
 	project: RuntimeProjectSummary;
 	isCurrent: boolean;
 	permanentlyDeletingProjectId: string | null;
 	onSelect: (id: string) => void;
 	onRequestPermanentDataDeletion: (id: string) => void;
+	onEditVisualIdentity: (projectId: string) => void;
 }): React.ReactElement {
 	const displayPath = formatPathForDisplay(project.path);
 	const isPermanentlyDeletingProjectData = permanentlyDeletingProjectId === project.id;
@@ -724,10 +755,11 @@ function ProjectRow({
 		>
 			<div className="flex-1 min-w-0">
 				<div className="flex min-w-0 items-center gap-1.5">
+					<ProjectIcon project={project} />
 					<div
 						className={cn(
 							"font-medium whitespace-nowrap overflow-hidden text-ellipsis text-sm",
-							isCurrent ? "text-accent-fg" : "text-text-primary",
+							"text-text-primary",
 						)}
 					>
 						{project.name}
@@ -738,7 +770,7 @@ function ProjectRow({
 							aria-label="Project unavailable"
 							className={cn(
 								"inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[10px] font-medium",
-								isCurrent ? "bg-accent-fg/20 text-accent-fg" : "bg-status-orange/20 text-status-orange",
+								"bg-status-orange/20 text-status-orange",
 							)}
 						>
 							<AlertTriangle size={10} />
@@ -749,7 +781,7 @@ function ProjectRow({
 				<div
 					className={cn(
 						"font-mono text-[10px] whitespace-nowrap overflow-hidden text-ellipsis",
-						isCurrent ? "text-accent-fg/60" : "text-text-secondary",
+						"text-text-secondary",
 					)}
 				>
 					{displayPath}
@@ -761,7 +793,7 @@ function ProjectRow({
 								key={badge.id}
 								className={cn(
 									"inline-flex items-center gap-1 rounded-full text-[10px] px-1.5 py-px font-medium",
-									isCurrent ? "bg-accent-fg/20 text-accent-fg" : badge.toneClassName,
+									badge.toneClassName,
 								)}
 								title={badge.title}
 							>
@@ -781,14 +813,11 @@ function ProjectRow({
 							size="sm"
 							icon={isPermanentlyDeletingProjectData ? <Spinner size={12} /> : <Ellipsis size={14} />}
 							disabled={hasAnyPermanentProjectDataDeletion && !isPermanentlyDeletingProjectData}
-							className={
-								isCurrent
-									? "text-accent-fg hover:bg-accent-fg/20 hover:text-accent-fg active:bg-accent-fg/30"
-									: undefined
-							}
+							className={isCurrent ? "text-text-primary hover:bg-surface-4" : undefined}
 							onClick={(e) => {
 								e.stopPropagation();
 							}}
+							onKeyDown={(event) => event.stopPropagation()}
 							aria-label="Project actions"
 						/>
 					</DropdownMenu.Trigger>
@@ -798,8 +827,16 @@ function ProjectRow({
 							align="end"
 							sideOffset={4}
 							className="z-50 min-w-[140px] rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
+							onClick={(event) => event.stopPropagation()}
+							onKeyDown={(event) => event.stopPropagation()}
 							onCloseAutoFocus={(event) => event.preventDefault()}
 						>
+							<DropdownMenu.Item
+								className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-text-primary outline-none data-[highlighted]:bg-surface-3"
+								onSelect={() => onEditVisualIdentity(project.id)}
+							>
+								编辑项目图标与颜色
+							</DropdownMenu.Item>
 							<DropdownMenu.Item
 								className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-status-red cursor-pointer outline-none data-[highlighted]:bg-surface-3"
 								onSelect={() => onRequestPermanentDataDeletion(project.id)}

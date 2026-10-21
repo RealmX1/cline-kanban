@@ -17,6 +17,7 @@
 import type { ConversationSessionRef } from "agent-conversation-exploration-thread-graph/core";
 import { CLAUDE_CODE_HARNESS_KIND } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import { isTaskConversationSessionWithoutTaskLifecycleAuthority } from "../core/session-activity";
 
 // 会话被排除的原因。只用于诊断与测试断言——调用方不据此分支，缺就是缺。
 export type ExplorationThreadGraphSessionRefExclusionReason =
@@ -143,7 +144,9 @@ export function assembleExplorationThreadGraphSessionRefs(input: {
 	);
 
 	const hostTaskIdByNativeSessionId: Record<string, string> = {};
-	const mainSummary = belongingSummaries.find((summary) => summary.taskId === input.explorationId);
+	const mainSummary = belongingSummaries.find(
+		(summary) => !isTaskConversationSessionWithoutTaskLifecycleAuthority(summary),
+	);
 	if (mainSummary === undefined) {
 		return { sessionRefs: [], excludedSessions, hostTaskIdByNativeSessionId };
 	}
@@ -155,7 +158,7 @@ export function assembleExplorationThreadGraphSessionRefs(input: {
 
 	const byTheWaySessionRefs: ConversationSessionRef[] = [];
 	const byTheWaySummaries = belongingSummaries
-		.filter((summary) => summary.taskId !== input.explorationId)
+		.filter((summary) => summary.taskId !== mainSummary.taskId)
 		.sort((left, right) => (left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0));
 	for (const summary of byTheWaySummaries) {
 		const sessionRef = buildConversationSessionRefFromSummary(summary, excludedSessions);

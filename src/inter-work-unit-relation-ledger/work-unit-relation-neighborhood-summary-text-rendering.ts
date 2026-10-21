@@ -40,6 +40,13 @@ function abbreviateNativeConversationSessionIdentity(identityKey: unknown): stri
 function renderRelationDetails(relation: RecordedInterWorkUnitRelation): string {
 	const attributes = relation.recordedRelationKindSpecificAttributes;
 	const details: string[] = [];
+	if (relation.relationKind === "provenance_split_from_side_conversation_of") {
+		details.push(
+			`来源会话：${String(attributes.sourceTaskConversationSessionId)}；上下文：${String(attributes.contextInheritance)}；工作树：${String(attributes.worktreeSource)}`,
+		);
+		if (attributes.inheritedGitHeadCommit)
+			details.push(`继承的 Git 基线：${String(attributes.inheritedGitHeadCommit)}`);
+	}
 	const occurrenceCount = Object.values(relation.occurrenceCountByTaskMutationEventKind).reduce(
 		(total, count) => total + count,
 		0,

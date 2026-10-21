@@ -324,9 +324,9 @@ describe("BoardCard", () => {
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
-	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点
-	// animate-pulse；静默 / 非 agent 回合 → 静止点。下面三例钉住这条接线（派生逻辑本身见
-	// session-activity.test.ts 的 deriveDisplayLiveness 单测）。
+	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点按共享细时钟
+	// 1Hz 呼吸（离散切换 opacity，不用 animate-pulse：无限 CSS 动画会让看板页可见期间逐帧合成）；静默 / 非 agent
+	// 回合 → 静止点。下面三例钉住这条接线（派生逻辑本身见 session-activity.test.ts 的 deriveDisplayLiveness 单测）。
 	it("pulses the session-activity dot while a running agent is actively producing output (computing)", async () => {
 		await act(async () => {
 			root.render(
@@ -341,9 +341,13 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
 		expect(dot).toBeInstanceOf(HTMLSpanElement);
-		expect(dot?.className).toContain("animate-pulse");
+		expect(dot?.dataset.sessionActivityDotBreathingOnSharedFineClock).toBe("true");
+		expect(["1", "0.45"]).toContain(dot?.style.opacity);
+		// 卡片上不再有任何无限 CSS 动画（状态点不 pulse、In Progress 标记不旋转）。
+		expect(container.querySelector(".animate-pulse, .animate-spin")).toBeNull();
+		expect(container.querySelector('[data-task-card-corner-status-indicator="running"]')).toBeTruthy();
 	});
 
 	it("does not pulse the dot once a running agent has gone quiet (no recent output)", async () => {
@@ -360,9 +364,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
 		expect(dot).toBeInstanceOf(HTMLSpanElement);
-		expect(dot?.className).not.toContain("animate-pulse");
+		expect(dot?.dataset.sessionActivityDotBreathingOnSharedFineClock).toBeUndefined();
+		expect(dot?.style.opacity).toBe("");
 	});
 
 	it("never pulses on a user-turn card even when its agent process is still live (awaiting review)", async () => {
@@ -379,9 +384,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
 		expect(dot).toBeInstanceOf(HTMLSpanElement);
-		expect(dot?.className).not.toContain("animate-pulse");
+		expect(dot?.dataset.sessionActivityDotBreathingOnSharedFineClock).toBeUndefined();
+		expect(dot?.style.opacity).toBe("");
 	});
 
 	// channel B（distinction ②）：exited（进程已退）的 awaiting 卡片状态点渲染为「空心环」
@@ -1201,7 +1207,8 @@ describe("BoardCard", () => {
 		});
 
 		const directoryRow = container.querySelector("[data-task-directory]");
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).toContain("3");
 		expect(directoryRow?.textContent).toContain("12");
 		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).not.toBeNull();
@@ -1236,7 +1243,8 @@ describe("BoardCard", () => {
 
 		const directoryRow = container.querySelector("[data-task-directory]");
 		// 刚开工、尚未提交也未落后的任务不该多出一对 "0"，脏文件统计仍照常展示。
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).toContain("2 files");
 		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).toBeNull();
 		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).toBeNull();
@@ -1266,7 +1274,8 @@ describe("BoardCard", () => {
 		});
 
 		const directoryRow = container.querySelector("[data-task-directory]");
-		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.querySelector('[data-task-workspace-mode-icon="worktree"]')).not.toBeNull();
+		expect(directoryRow?.textContent).not.toContain("worktree");
 		expect(directoryRow?.textContent).not.toContain("0 files");
 		expect(directoryRow?.textContent).not.toContain("+0");
 		expect(directoryRow?.textContent).not.toContain("-0");

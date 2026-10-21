@@ -51,6 +51,7 @@ import {
 	cloneTaskClineSettings,
 	type ParsedTaskClineReasoningEffort,
 } from "../core/task-card-field-patch-resolution";
+import { resolveMainTaskConversationSessionSummary } from "../core/task-main-conversation-session-binding";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -380,7 +381,12 @@ function formatTaskRecord(
 	columnId: RuntimeBoardColumnId,
 	workspaceGitStatus: RuntimeTaskWorkspaceGitStatus | null = null,
 ): JsonRecord {
-	return formatTaskRecordWithSessionSummary(task, columnId, state.sessions[task.id] ?? null, workspaceGitStatus);
+	return formatTaskRecordWithSessionSummary(
+		task,
+		columnId,
+		resolveMainTaskConversationSessionSummary(task, state.sessions),
+		workspaceGitStatus,
+	);
 }
 
 // 写动词迁到 runtime procedure 之后，CLI 手里没有整份 state，只有 runtime 回传的卡片、列与盘上会话摘要。
@@ -1281,6 +1287,8 @@ interface TaskMessageCommandResult extends JsonRecord {
 	// 非 null ⇒ 已交给终端投递、卡在终端门。契约：terminal-delivery-interface-contract.md § agent 空闲门控的排队投递。
 	agent_idle_wait_deadline_at?: string;
 	agent_idle_gate_passed_at?: string | null;
+	required_native_independent_user_turn_session_id?: string;
+	required_native_independent_user_turn_session_incarnation_id?: string;
 }
 
 function hashPrompt(prompt: string): string {
@@ -1298,6 +1306,14 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.required_native_independent_user_turn_session_id
+			? {
+					required_native_independent_user_turn_session_id:
+						record.required_native_independent_user_turn_session_id,
+					required_native_independent_user_turn_session_incarnation_id:
+						record.required_native_independent_user_turn_session_incarnation_id,
+				}
+			: {}),
 		...(record.attempt_id ? { attempt_id: record.attempt_id } : {}),
 		...(record.turn_id ? { turn_id: record.turn_id } : {}),
 		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
@@ -1363,12 +1379,15 @@ async function sendTaskMessageCommand(input: {
 	waitTimeoutMs?: number;
 	deliverWhenAgentIdle?: boolean;
 	maxWaitForAgentIdleMs?: number;
+	requiredNativeIndependentUserTurnSessionId?: string;
 }): Promise<TaskMessageCommandResult> {
 	const agentIdleGate = resolveTaskMessageAgentIdleGateOptions({
 		deliverWhenAgentIdle: input.deliverWhenAgentIdle ?? false,
 		maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
 		maxWaitForAgentIdleUpperBoundMs: MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS,
 	});
+	if (input.requiredNativeIndependentUserTurnSessionId && !agentIdleGate)
+		throw new Error("--require-native-independent-user-turn-for-session 必须配合 --deliver-when-agent-idle 使用。");
 	const taskId = input.taskId.trim();
 	if (!taskId) {
 		throw new Error("task message requires --task-id.");
@@ -1415,6 +1434,7 @@ async function sendTaskMessageCommand(input: {
 			promptSha256,
 			...(attemptId ? { attemptId } : {}),
 			maxWaitForAgentIdleMs: agentIdleGate.maxWaitForAgentIdleMs,
+			requiredNativeIndependentUserTurnSessionId: input.requiredNativeIndependentUserTurnSessionId,
 		});
 		if (!enqueueResponse.ok) {
 			throw new Error(enqueueResponse.error ?? "enqueueAgentIdleGatedProgrammaticTaskChatMessage failed.");
@@ -1629,8 +1649,26 @@ async function readTaskMessageStatusCommand(input: {
 	taskId: string;
 	projectPath?: string;
 	idempotencyKey: string;
-}): Promise<TaskMessageCommandResult> {
+	reviewStartBoundaryObservationNonce?: string;
+}): Promise<JsonRecord> {
 	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, { autoCreateIfMissing: false });
+	if (input.reviewStartBoundaryObservationNonce) {
+		const boundary = await createRuntimeTrpcClient(workspace.workspaceId).runtime.observeRvfReviewStartBoundary.query(
+			{
+				taskId: input.taskId.trim(),
+				idempotencyKey: input.idempotencyKey.trim(),
+				requestNonce: input.reviewStartBoundaryObservationNonce,
+			},
+		);
+		const records = await readTaskMessageInjectionLedger(getTaskMessageInjectionLedgerPath(workspace.statePath));
+		const record = findTaskMessageInjectionRecord(records, input.taskId.trim(), input.idempotencyKey.trim());
+		return {
+			...(record
+				? toTaskMessageCommandResult(record)
+				: { ok: true, task_id: input.taskId.trim(), idempotency_key: input.idempotencyKey.trim() }),
+			...boundary,
+		};
+	}
 	const record = await readTaskMessageRecordOrThrow(
 		getTaskMessageInjectionLedgerPath(workspace.statePath),
 		input.taskId.trim(),
@@ -2128,6 +2166,60 @@ export function registerTaskCommand(program: Command): void {
 		});
 
 	task
+		.command("capture-rvf-review-start-boundary")
+		.description("捕获并持久保存当前 Codex 主会话的独立 RVF 开审分界，等待真实 run 绑定后激活。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "RVF 决策 token。")
+		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			const captured = await createRuntimeTrpcClient(
+				workspace.workspaceId,
+			).runtime.captureRvfReviewStartBoundary.mutate({
+				taskId: options.taskId,
+				decisionToken: options.decisionToken,
+			});
+			printJson(captured);
+			if (captured.status !== "captured") process.exitCode = 12;
+		});
+	task
+		.command("activate-rvf-automatic-closeout-after-run-binding")
+		.description("核对已捕获分界与真实 RVF run 的双向绑定，激活默认自动收尾。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "RVF 决策 token。")
+		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			printJson(
+				await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.activateRvfAutomaticCloseoutAfterRunBinding.mutate({
+					taskId: options.taskId,
+					decisionToken: options.decisionToken,
+				}),
+			);
+		});
+	task
+		.command("rvf-automatic-closeout-status")
+		.description("查询 RVF 自动恢复与收尾投递的持久状态。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.action(async (options: { projectPath: string; taskId: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			printJson(
+				await createRuntimeTrpcClient(workspace.workspaceId).runtime.rvfAutomaticCloseoutStatus.query({
+					taskId: options.taskId,
+				}),
+			);
+		});
+
+	task
 		.command("message")
 		.description("Inject a follow-up user message into an active task agent session.")
 		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
@@ -2150,6 +2242,10 @@ export function registerTaskCommand(program: Command): void {
 			"Queue the message in Kanban's durable prompt queue and hand it to the terminal only once the agent is idle (not generating, not parked awaiting background work, not waiting on a question/plan/permission). Requires --max-wait-for-agent-idle-ms. The receipt stays accepted_pending_submit_confirmation while queued.",
 		)
 		.option(
+			"--require-native-independent-user-turn-for-session <session-id>",
+			"仅在绑定的当前 Codex TUI 原生回合完成后投递；必须同时使用空闲投递参数。",
+		)
+		.option(
 			"--max-wait-for-agent-idle-ms <ms>",
 			"With --deliver-when-agent-idle: give up after this many milliseconds (at most 86400000) without the agent becoming idle, settling the receipt as delivery_failed{agent_never_became_idle_before_queued_delivery_deadline}.",
 		)
@@ -2166,6 +2262,7 @@ export function registerTaskCommand(program: Command): void {
 				waitTimeoutMs?: string;
 				deliverWhenAgentIdle?: boolean;
 				maxWaitForAgentIdleMs?: string;
+				requireNativeIndependentUserTurnForSession?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -2183,6 +2280,7 @@ export function registerTaskCommand(program: Command): void {
 								? { waitTimeoutMs: parsePositiveIntegerOption(options.waitTimeoutMs, "--wait-timeout-ms") }
 								: {}),
 							deliverWhenAgentIdle: options.deliverWhenAgentIdle ?? false,
+							requiredNativeIndependentUserTurnSessionId: options.requireNativeIndependentUserTurnForSession,
 							...(options.maxWaitForAgentIdleMs
 								? {
 										maxWaitForAgentIdleMs: parsePositiveIntegerOption(
@@ -2198,21 +2296,30 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("message-status")
+		.option("--review-start-boundary-observation-nonce <nonce>", "请求本次 RVF 独立开审分界的实时活动分支观测。")
 		.description("Read the honest delivery status of a previously injected task message.")
 		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
-		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
-			await runTaskCommand(
-				async () =>
-					await readTaskMessageStatusCommand({
-						cwd: process.cwd(),
-						projectPath: options.projectPath,
-						taskId: options.taskId,
-						idempotencyKey: options.idempotencyKey,
-					}),
-			);
-		});
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				idempotencyKey: string;
+				reviewStartBoundaryObservationNonce?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await readTaskMessageStatusCommand({
+							cwd: process.cwd(),
+							projectPath: options.projectPath,
+							taskId: options.taskId,
+							idempotencyKey: options.idempotencyKey,
+							reviewStartBoundaryObservationNonce: options.reviewStartBoundaryObservationNonce,
+						}),
+				);
+			},
+		);
 
 	task
 		.command("message-cancel")

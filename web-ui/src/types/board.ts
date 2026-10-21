@@ -1,4 +1,5 @@
 import type {
+	IndependentTaskCreationProvenance,
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeBoardColumnId,
@@ -10,9 +11,11 @@ import type {
 	RuntimeTaskCommitIntegrationTrackingStatus,
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
+	RuntimeTaskRetainedCommittedLineChangeSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
+	TaskMainSessionHandoverRecord,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -37,6 +40,8 @@ export type TaskCommentEntry = RuntimeTaskCommentEntry;
  * 处理方据此还会去异步取一个 AI 名字回填。
  */
 export interface TaskEditorSubmitOptions {
+	preserveFormUntilCreationConfirmed?: boolean;
+	onTaskCardAllocatedForRelationModeling?: (card: BoardCard) => void;
 	keepDialogOpen?: boolean;
 	promptOverride?: string;
 	taskNameOverride?: string;
@@ -69,6 +74,9 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 
 export interface BoardCard {
 	id: string;
+	mainTaskConversationSessionId?: string;
+	taskMainSessionHandover?: TaskMainSessionHandoverRecord;
+	independentTaskCreationProvenance?: IndependentTaskCreationProvenance;
 	title: string;
 	prompt: string;
 	startInPlanMode: boolean;
@@ -140,6 +148,7 @@ export interface ReviewTaskWorkspaceSnapshot {
 	taskCommitIntegrationTrackingStatus?: RuntimeTaskCommitIntegrationTrackingStatus;
 	workspaceGitStatusObservationSource?: RuntimeTaskWorkspaceGitStatusObservationSource;
 	workspaceGitStatusObservedAt?: number | null;
+	taskRetainedCommittedLineChangeSummary?: RuntimeTaskRetainedCommittedLineChangeSummary;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;

@@ -2,13 +2,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
 	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
 	prepareAgentLaunch,
 } from "../../../src/terminal/agent-session-adapters";
+import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import type {
+	HostedTerminalPtyProcessSpawnRequest,
+	TerminalPtyProcessHandle,
+} from "../../../src/terminal/terminal-pty-process-handle";
 
 // cursorAdapter 会从模型目录动态解析启动默认值。这里换成一个**故意不存在于任何真实目录**的哨兵值，
 // 既让测试不去 spawn `cursor-agent`，又能证明 argv 里的 `--model` 确实来自探测结果而非某个写死的常量：
@@ -365,6 +370,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
 		expect(launch.args[appendPromptIndex + 1]).toContain("Kanban sidebar agent");
+		expect(
+			launch.args[appendPromptIndex + 1].split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
+		).toHaveLength(2);
 		expect(launch.args[appendPromptIndex + 1]).toContain(
 			"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
 		);
@@ -385,6 +393,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
 		expect(developerInstructions[0]).toContain("Kanban sidebar agent");
+		expect(
+			JSON.parse(developerInstructions[0]).split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
+		).toHaveLength(2);
 		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
@@ -417,6 +428,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
 		expect(developerInstructions[0]).toContain("Kanban-managed task session");
+		const decodedInstructions: string = JSON.parse(developerInstructions[0]);
+		expect(decodedInstructions.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
+		expect(decodedInstructions).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(developerInstructions[0]).toContain("`/tmp/worktrees/task-1/repo`");
 		expect(developerInstructions[0]).toContain("ask the user to confirm which workspace owns the work");
 	});
@@ -521,6 +535,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
 		const appendedPrompt = launch.args[appendPromptIndex + 1];
 		expect(appendedPrompt).toContain("Kanban-managed task session");
+		expect(appendedPrompt.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
+		expect(appendedPrompt).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(appendedPrompt).toContain("`/tmp/worktrees/task-1/repo`");
 		expect(appendedPrompt).toContain("ask the user to confirm which workspace owns the work");
 	});
@@ -803,6 +819,322 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 		expect(launch.args).toContain("--resume");
 		expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
+	});
+
+	it.each(["claude", "codex"] as const)(
+		"首次 By the way 按主原生 ID fork %s，保持只读并清除最近会话选择",
+		async (agentId) => {
+			setupTempHome();
+			const mainNativeSessionId = "11111111-2222-4333-8444-555555555555";
+			const launch = await prepareAgentLaunch({
+				taskId: "first-by-the-way",
+				agentId,
+				binary: agentId,
+				args:
+					agentId === "claude"
+						? ["--continue", "--resume", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "--dangerously-skip-permissions"]
+						: ["fork", "--last", "--dangerously-bypass-approvals-and-sandbox"],
+				cwd: "/tmp/task-worktree",
+				prompt: "解释实现",
+				readOnlyQuestionSession: true,
+				forkLatestWorkingDirectorySession: true,
+				taskConversationSessionMainContextForkSourceNativeSessionId: mainNativeSessionId,
+			});
+			expect(launch.args).not.toContain("--last");
+			expect(launch.args).not.toContain("--continue");
+			expect(launch.args).not.toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+			if (agentId === "claude") {
+				expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(mainNativeSessionId);
+				expect(launch.args).toContain("--fork-session");
+				expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
+				expect(launch.args).not.toContain("--dangerously-skip-permissions");
+			} else {
+				expect(launch.args[launch.args.indexOf("fork") + 1]).toBe(mainNativeSessionId);
+				expect(launch.args).toContain("read-only");
+				expect(launch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+			}
+		},
+	);
+
+	it.each(["claude", "codex", "omp"] as const)(
+		"协作 fork %s 使用精确来源，保持可写且不注入陈旧默认模型",
+		async (agentId) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "collaborator",
+				agentId,
+				binary: agentId,
+				args: ["--model", "stale-default"],
+				cwd: "/tmp/task-worktree",
+				prompt: "执行新的工作",
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "执行新的工作",
+				},
+			});
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+			expect(launch.args).toContain("11111111-2222-4333-8444-555555555555");
+			expect(launch.args).not.toContain("stale-default");
+			expect(launch.args).not.toContain("read-only");
+			expect(launch.args).not.toContain("default");
+			if (agentId === "omp") expect(launch.args).toContain("--fork");
+		},
+	);
+
+	it("OMP 协作 fork 的 Plan 起步携带仅对子会话生效的原生模式落盘扩展", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "omp-plan-child",
+			agentId: "omp",
+			binary: "omp",
+			args: [],
+			cwd: "/tmp/worktree",
+			prompt: "先规划新工作",
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+			taskConversationSessionMainContextForkSourceNativeSessionId: "parent-native",
+		});
+		expect(launch.args).toContain("--fork");
+		expect(launch.args).toContain("parent-native");
+		expect(launch.args.filter((arg) => arg.endsWith("omp-plan-child.fork-initial-plan-mode.mjs"))).toHaveLength(1);
+		expect(launch.args.filter((arg) => arg.includes("先规划新工作"))).toHaveLength(1);
+	});
+
+	it.each(["claude", "codex", "omp"] as const)(
+		"协作 fork 的 %s 重启优先恢复子身份，不重复 fork 或首条消息",
+		async (agentId) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "child",
+				agentId,
+				binary: agentId,
+				args: [],
+				cwd: "/tmp/worktree",
+				prompt: "不能重投的首条消息",
+				startInPlanMode: true,
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+				taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: agentId,
+					sourceSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			});
+			expect(launch.args).toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+			expect(launch.args).not.toContain("11111111-2222-4333-8444-555555555555");
+			expect(launch.args.some((arg) => arg.includes("不能重投的首条消息"))).toBe(false);
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+			expect(launch.args).not.toContain("--fork");
+			expect(launch.args).not.toContain("fork");
+			expect(launch.args).not.toContain("--fork-session");
+		},
+	);
+
+	it.each(["claude", "codex", "omp"] as const)(
+		"协作 fork 的 %s 真实崩溃重启恢复独立 child，不重投首条消息或 Plan 起步",
+		async (agentId) => {
+			const isolatedHome = setupTempHome();
+			vi.useFakeTimers();
+			const spawnRequests: HostedTerminalPtyProcessSpawnRequest[] = [];
+			const handles: TerminalPtyProcessHandle[] = [];
+			const manager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: {
+					spawnHostedTerminalPtyProcess: async (request) => {
+						spawnRequests.push(request);
+						const handle: TerminalPtyProcessHandle = {
+							pid: 100 + spawnRequests.length,
+							write: vi.fn(),
+							resize: vi.fn(),
+							pause: vi.fn(),
+							resume: vi.fn(),
+							stop: vi.fn(),
+							hasExited: () => false,
+							wasInterrupted: () => false,
+						};
+						handles.push(handle);
+						return handle;
+					},
+				},
+			});
+			const parentNativeSessionId = "11111111-2222-4333-8444-555555555555";
+			const childNativeSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+			let childNativeConversationTranscriptPath: string | null = null;
+			if (agentId === "codex") {
+				const codexHomeDirectoryPath = join(isolatedHome, ".codex");
+				vi.stubEnv("CODEX_HOME", codexHomeDirectoryPath);
+				const codexSessionsDirectoryPath = join(codexHomeDirectoryPath, "sessions");
+				mkdirSync(codexSessionsDirectoryPath, { recursive: true });
+				childNativeConversationTranscriptPath = join(
+					codexSessionsDirectoryPath,
+					`rollout-${childNativeSessionId}.jsonl`,
+				);
+				writeFileSync(
+					childNativeConversationTranscriptPath,
+					`${JSON.stringify({ type: "session_meta", payload: { id: childNativeSessionId, source: "cli" } })}\n`,
+				);
+			}
+			const revalidateForkSource = vi.fn(async () => {});
+			try {
+				manager.attach("crashed-fork-child", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+				await manager.startTaskSession({
+					taskId: "crashed-fork-child",
+					agentId,
+					binary: "fixture-agent",
+					args: [],
+					cwd: isolatedHome,
+					prompt: "不能重投的首条消息",
+					startInPlanMode: true,
+					taskConversationSessionMainContextForkSourceNativeSessionId: parentNativeSessionId,
+					revalidateTaskConversationSessionMainContextForkSource: revalidateForkSource,
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "parent-task",
+						taskConversationSessionRole: "task_collaborator",
+						taskConversationSessionContextSource: "forked_from_main_current_turn",
+						parentTaskConversationSessionId: "parent-task",
+						mainSessionOriginTurnNumber: 1,
+						mainSessionOriginUserMessagePreview: null,
+						latestUserMessagePreview: "不能重投的首条消息",
+					},
+				});
+				expect(spawnRequests[0].args).toContain(parentNativeSessionId);
+				manager.applyAgentNativeConversationSessionIdentity("crashed-fork-child", {
+					sourceAgentId: agentId,
+					nativeSessionId: childNativeSessionId,
+					transcriptPath: childNativeConversationTranscriptPath,
+					observedAt: Date.now(),
+				});
+				// 真实 manager 的 onExit(1) 入口，首轮快退退避也由原实现执行。
+				spawnRequests[0].onExit({ exitCode: 1 });
+				await vi.waitFor(() => expect(spawnRequests).toHaveLength(2));
+				const restarted = spawnRequests[1];
+				expect(restarted.args).toContain(childNativeSessionId);
+				expect(restarted.args).not.toContain(parentNativeSessionId);
+				expect(restarted.args).not.toContain("fork");
+				expect(restarted.args).not.toContain("--fork");
+				expect(restarted.args).not.toContain("--fork-session");
+				expect(restarted.args.some((arg) => arg.includes("不能重投的首条消息"))).toBe(false);
+				expect(restarted.args).not.toContain("plan");
+				expect(restarted.args.some((arg) => arg.endsWith(".fork-initial-plan-mode.mjs"))).toBe(false);
+				if (agentId === "omp") {
+					expect(
+						JSON.parse(readFileSync(restarted.args[restarted.args.indexOf("--config") + 1], "utf8")),
+					).not.toHaveProperty("plan");
+				}
+				restarted.onData(Buffer.from("model: fixture\r\n› "));
+				await vi.advanceTimersByTimeAsync(5_000);
+				expect(handles[1].write).not.toHaveBeenCalled();
+				expect(revalidateForkSource).toHaveBeenCalledTimes(1);
+			} finally {
+				manager.markInterruptedAndStopAll();
+				manager.dispose();
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it.each(
+		(["claude", "codex", "omp"] as const).flatMap((agentId) =>
+			(["missing", "parent", "different_agent"] as const).map((identityState) => ({ agentId, identityState })),
+		),
+	)(
+		"协作 fork 的 $agentId 无可靠 child 身份（$identityState）时崩溃不重新 fork 或按 cwd 猜测恢复",
+		async ({ agentId, identityState }) => {
+			const isolatedHome = setupTempHome();
+			vi.useFakeTimers();
+			const spawnRequests: HostedTerminalPtyProcessSpawnRequest[] = [];
+			const manager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: {
+					spawnHostedTerminalPtyProcess: async (request) => {
+						spawnRequests.push(request);
+						return {
+							pid: 100,
+							write: vi.fn(),
+							resize: vi.fn(),
+							pause: vi.fn(),
+							resume: vi.fn(),
+							stop: vi.fn(),
+							hasExited: () => false,
+							wasInterrupted: () => false,
+						};
+					},
+				},
+			});
+			try {
+				manager.attach("unobserved-fork-child", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+				await manager.startTaskSession({
+					taskId: "unobserved-fork-child",
+					agentId,
+					binary: "fixture-agent",
+					args: [],
+					cwd: isolatedHome,
+					prompt: "不能重投的首条消息",
+					taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				});
+				if (identityState !== "missing") {
+					manager.applyAgentNativeConversationSessionIdentity("unobserved-fork-child", {
+						sourceAgentId:
+							identityState === "different_agent" ? (agentId === "codex" ? "claude" : "codex") : agentId,
+						nativeSessionId:
+							identityState === "parent"
+								? "11111111-2222-4333-8444-555555555555"
+								: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+						transcriptPath: null,
+						observedAt: Date.now(),
+					});
+				}
+				spawnRequests[0].onExit({ exitCode: 1 });
+				await vi.waitFor(() => {
+					expect(manager.getSummary("unobserved-fork-child")?.warningMessage).toContain(
+						"尚未记录独立子会话原生 ID",
+					);
+				});
+				await vi.advanceTimersByTimeAsync(60_000);
+				expect(spawnRequests).toHaveLength(1);
+				expect(manager.getSummary("unobserved-fork-child")?.pid).toBeNull();
+			} finally {
+				manager.markInterruptedAndStopAll();
+				manager.dispose();
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("启动准备期间来源变化时，不 spawn 过期的协作 fork", async () => {
+		setupTempHome();
+		const spawn = vi.fn();
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: { spawnHostedTerminalPtyProcess: spawn },
+		});
+		try {
+			await expect(
+				manager.startTaskSession(
+					{
+						taskId: "fork-child",
+						agentId: "claude",
+						binary: "fixture-agent",
+						args: [],
+						cwd: "/tmp/worktree",
+						prompt: "新工作",
+						taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+						revalidateTaskConversationSessionMainContextForkSource: async () => {
+							throw new Error("来源已变化");
+						},
+					},
+					"external_entry_point",
+				),
+			).rejects.toThrow("来源已变化");
+			expect(spawn).not.toHaveBeenCalled();
+		} finally {
+			manager.markInterruptedAndStopAll();
+		}
 	});
 
 	it("forks the latest Codex session in read-only mode for a By the way session", async () => {
@@ -2701,4 +3033,32 @@ describe("Codex 当前任务目录最近会话隔离", () => {
 			expect(launch.args[launch.args.indexOf("--cd") + 1]).toBe("/tmp/task-b");
 		},
 	);
+});
+
+describe("可写协作会话启动", () => {
+	it.each(["claude", "codex"] as const)("%s 保留写权限并声明两个 ID，不 fork 主会话", async (agentId) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-independent",
+			agentId,
+			args: [],
+			cwd: "/tmp/collaboration-worktree",
+			prompt: "仅处理本次协作",
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "owner-task",
+				taskConversationSessionRole: "task_collaborator",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+			},
+		});
+		expect(launch.args).not.toContain("read-only");
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args).not.toContain("--fork-session");
+		expect(JSON.stringify(launch)).toContain("owner-task");
+		expect(JSON.stringify(launch)).toContain("task-conversation-session-independent");
+	});
 });

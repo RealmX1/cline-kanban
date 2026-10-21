@@ -30,7 +30,7 @@ describe("relation-affecting confirmable change routing through the confirmation
 				confirmationStrategyUpgradedByPolicyFloor: false,
 				userFacingPresentationChannels: ["relations_panel_passive_display_only"],
 				proposingAgentWaitBehavior: "proposing_agent_continues_without_waiting",
-				confirmationPolicyVersion: 1,
+				confirmationPolicyVersion: 2,
 			},
 		});
 	});

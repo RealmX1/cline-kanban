@@ -6,13 +6,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkspaceQueuedTaskPromptDeliverySnapshot } from "../../../src/core/api-contract";
+import type {
+	RuntimeTaskSessionSummary,
+	WorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../../../src/core/api-contract";
 
 const testRuntimeHome = { path: "" };
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
+	loadWorkspaceBoardById: async () => ({ columns: [] }),
 }));
 
 const {
@@ -30,6 +34,7 @@ const {
 } = await import("../../../src/state/queued-task-prompt-delivery-store");
 const {
 	createPendingTaskMessageInjectionRecord,
+	recordTaskMessageTerminalDeliveryOutcome,
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
@@ -357,5 +362,57 @@ describe("cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle", () => {
 				"other",
 			),
 		).toBeNull();
+	});
+	it("严格要求持久绑定session和incarnation，同key不能去掉或改写要求；重启后同key不重新投递", async () => {
+		let summary: RuntimeTaskSessionSummary | null = {
+			agentId: "codex",
+			runtimeSessionIncarnationId: "original-incarnation",
+			agentNativeConversationSessionIdentity: { nativeSessionId: "native" },
+		} as RuntimeTaskSessionSummary;
+		const deps = { ...createDeps().deps, getTaskSessionSummary: () => summary };
+		const strict = request({ requiredNativeIndependentUserTurnSessionId: "native" });
+		expect(await enqueueAgentIdleGatedProgrammaticTaskChatMessage(deps, WORKSPACE_ID, strict)).toMatchObject({
+			ok: true,
+			injectionLedgerRecordDisposition: "created",
+		});
+		expect(await readLedgerRecord()).toMatchObject({
+			required_native_independent_user_turn_session_id: "native",
+			required_native_independent_user_turn_session_incarnation_id: "original-incarnation",
+		});
+		expect((await readEntries())[0]).toMatchObject({
+			requiredNativeIndependentUserTurnSessionId: "native",
+			requiredNativeIndependentUserTurnSessionIncarnationId: "original-incarnation",
+		});
+		expect(await enqueueAgentIdleGatedProgrammaticTaskChatMessage(deps, WORKSPACE_ID, request())).toMatchObject({
+			ok: false,
+			idempotencyConflict: true,
+		});
+		expect(
+			await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				deps,
+				WORKSPACE_ID,
+				request({ requiredNativeIndependentUserTurnSessionId: "other" }),
+			),
+		).toMatchObject({ ok: false, idempotencyConflict: true });
+		summary = null;
+		expect(await enqueueAgentIdleGatedProgrammaticTaskChatMessage(deps, WORKSPACE_ID, strict)).toMatchObject({
+			ok: true,
+			injectionLedgerRecordDisposition: "already_existed",
+		});
+		expect(await readEntries()).toHaveLength(1);
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath: ledgerPath(),
+			taskId: TASK_ID,
+			idempotencyKey: KEY,
+			status: "delivered_and_submit_confirmed",
+			nowIso: new Date(NOW + 1000).toISOString(),
+		});
+		const terminalBefore = await readLedgerRecord();
+		expect(await enqueueAgentIdleGatedProgrammaticTaskChatMessage(deps, WORKSPACE_ID, strict)).toMatchObject({
+			ok: true,
+			injectionLedgerRecordDisposition: "already_existed",
+		});
+		expect(await readLedgerRecord()).toEqual(terminalBefore);
+		expect(await readEntries()).toHaveLength(1);
 	});
 });

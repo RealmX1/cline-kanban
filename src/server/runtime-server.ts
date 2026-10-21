@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
-
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import {
@@ -23,6 +22,7 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskChatSendRequest,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -41,6 +41,10 @@ import {
 } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
+	projectConversationSessionMetadataForMainSessionBinding,
+	resolveMainTaskConversationSessionId,
+} from "../core/task-main-conversation-session-binding";
+import {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
 	listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
@@ -57,6 +61,7 @@ import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-t
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
+import { createIndependentTaskCreationService } from "../independent-task-creation/independent-task-creation-service";
 import {
 	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
 	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
@@ -64,6 +69,7 @@ import {
 	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
 } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
+import { createRvfAutomaticCloseoutRuntimeService } from "../rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -78,6 +84,7 @@ import {
 } from "../security/passcode-manager";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
@@ -89,6 +96,17 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContextById,
 } from "../state/workspace-state";
+import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
+import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
+import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
+import {
+	loadAndAdvanceSharedTaskIndexingContext,
+	readTaskIndexingSupportExecutorSettings,
+} from "../task-indexing-support/task-indexing-support-storage";
+import {
+	createTaskLookupConversationService,
+	TASK_LOOKUP_INSTRUCTION_VERSION,
+} from "../task-indexing-support/task-lookup-conversation-service";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -117,10 +135,12 @@ import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
+import { createPromptDraftUsageService } from "./prompt-draft-usage-service";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
+import { createTaskMainSessionHandoverCoordinator } from "./task-main-session-handover-coordinator";
 import {
 	enumerateTaskResourceUsageAttributionRoots,
 	type TaskResourceUsageAttributionSessionSource,
@@ -255,6 +275,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
 
 	// exploration thread graph（B.2）。
 	//
@@ -298,6 +319,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			service = createAcpTaskSessionService({
 				workspaceId: scope.workspaceId,
 				workspaceRepositoryPath: scope.workspacePath,
+			});
+			service.setUserPromptSubmittedListener((taskId, text) => {
+				const summary = service?.getSummary(taskId);
+				promptDraftUsageService.notifyUserPromptSubmitted({
+					workspaceId: scope.workspaceId,
+					taskId: summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+					submittedAtEpochMs: Date.now(),
+					submittedPromptText: text,
+					sourceAgentId: summary?.agentId ?? "omp",
+					currentIdentity: summary?.agentNativeConversationSessionIdentity,
+				});
 			});
 			acpTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			acpWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
@@ -406,6 +438,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 发送走的是与人类聊天、RVF followup **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
+	let rvfAutomaticCloseoutPromptDeliveryValidator:
+		| ((scope: RuntimeTrpcWorkspaceScope, input: RuntimeTaskChatSendRequest) => Promise<void>)
+		| undefined;
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: findRuntimeSessionSummary,
 		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
@@ -416,7 +451,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
 			return workspacePath === null ? null : { workspaceId, workspacePath };
 		},
-		sendThroughTaskChatTransports: async (scope, request, onProgrammaticTerminalDeliverySettled) =>
+		sendThroughTaskChatTransports: async (
+			scope,
+			request,
+			onProgrammaticTerminalDeliverySettled,
+			injectionLedgerTaskId,
+			validateBeforeTerminalWrite,
+		) =>
 			await sendTaskChatMessageAcrossSessionTransports(
 				{
 					getScopedTerminalManager,
@@ -427,6 +468,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 					onProgrammaticTerminalDeliverySettled,
+					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
+					validateBeforeTerminalWrite:
+						request.source === "rvf_automatic_closeout" || validateBeforeTerminalWrite
+							? async () => {
+									await validateBeforeTerminalWrite?.();
+									if (request.source === "rvf_automatic_closeout") {
+										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
+											throw new Error("自动收尾投递门尚未就绪。");
+										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+									}
+								}
+							: undefined,
 				},
 				scope,
 				request,
@@ -689,6 +742,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		resolveCurrentTaskConversationSessionSummaryForLifecycle: async (
+			workspaceId: string,
+			summary: RuntimeTaskSessionSummary,
+		) => {
+			const board = await loadWorkspaceBoardById(workspaceId);
+			const taskId = summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId;
+			const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+			return card
+				? {
+						...summary,
+						taskConversationSessionMetadata: projectConversationSessionMetadataForMainSessionBinding(
+							card,
+							summary,
+						),
+					}
+				: summary;
+		},
+		notifyPromptDraftUserPromptSubmitted: promptDraftUsageService.notifyUserPromptSubmitted,
 		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
@@ -706,31 +777,94 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
 
+	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	const runtimeApi = createRuntimeApi({
+		onTaskSessionStopRequested: (workspaceId, taskId) =>
+			pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId) ?? Promise.resolve(),
+		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+		getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+		getScopedTerminalManager,
+		getScopedClineTaskSessionService,
+		getScopedAcpTaskSessionService,
+		resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+		runCommand: deps.runCommand,
+		broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
+		broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+		broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
+		prepareForStateReset,
+		getUpdateStatus: deps.getUpdateStatus,
+		runUpdateNow: deps.runUpdateNow,
+		queuedTaskPromptDeliveryDispatcher,
+	});
+
+	const rvfAutomaticCloseoutApi = createRvfAutomaticCloseoutRuntimeService({
+		taskCardActionPerTaskCommandSerializer,
+		getManager: getScopedTerminalManager,
+		runtimeApi,
+		listWorkspaces: async () =>
+			(await listWorkspaceIndexEntries()).map((entry) => ({
+				workspaceId: entry.workspaceId,
+				workspacePath: entry.repoPath,
+			})),
+		warn: deps.warn,
+	});
+	pauseAutomaticRvfCloseoutForStoppedTask = rvfAutomaticCloseoutApi.pauseForExplicitStop;
+	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
+
+	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
+		getTerminalManager: getScopedTerminalManager,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		startTaskSession: (scope, input) => runtimeApi.startTaskSession(scope, input),
+		sendTaskChatMessage: (scope, input, evidence) => runtimeApi.sendTaskChatMessage(scope, input, evidence),
+		serializer: taskCardActionPerTaskCommandSerializer,
+		runCommand: deps.runCommand,
+		warn: deps.warn,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+	});
+
+	const independentTaskCreationApi = createIndependentTaskCreationService({
+		findSession: findRuntimeSessionSummary,
+		listSessions: listProjectRuntimeSessionSummaries,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+	});
+	const workUnitRelationAssertionWriteApi = createWorkUnitRelationAssertionWriteApi({
+		readRecordedInterWorkUnitRelationProjection:
+			readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+		runInterWorkUnitRelationLedgerClientOperation:
+			runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+	});
+	const taskIndexingSupportApi = createTaskIndexingSupportRuntimeService({
+		listLiveSessionSummaries: listProjectRuntimeSessionSummaries,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		referenceAssertionWritePort: workUnitRelationAssertionWriteApi,
+	});
+	const taskLookupConversationApi = createTaskLookupConversationService({
+		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
+		collectMaterials: (workspaceId) =>
+			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
+		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
+		getContext: (workspaceId, materials, settings) =>
+			loadAndAdvanceSharedTaskIndexingContext({
+				workspaceId,
+				materials,
+				settings,
+				instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
+				now: Date.now(),
+				forModelRequest: true,
+			}),
+		executeAgent: executeStatelessTaskIndexingAgent,
+		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
+	});
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
-		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
-		// 与路由上暴露的是同一个实例，不复制逻辑。
-		const runtimeApi = createRuntimeApi({
-			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-			setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-			getScopedTerminalManager,
-			getScopedClineTaskSessionService,
-			getScopedAcpTaskSessionService,
-			resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-			runCommand: deps.runCommand,
-			broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
-			broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-			broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
-			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-			bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
-			prepareForStateReset,
-			getUpdateStatus: deps.getUpdateStatus,
-			runUpdateNow: deps.runUpdateNow,
-			queuedTaskPromptDeliveryDispatcher,
-		});
+		// taskCardActionApi 与自动收尾复用同一份 runtimeApi 的起停和投递漏斗。
 		const workspaceApi = createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 			getScopedClineTaskSessionService,
@@ -745,6 +879,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
+			taskIndexingSupportApi,
+			taskLookupConversationApi,
 			workspaceScope: scope.workspaceScope,
 			kanbanRequestOriginActorEvidence: {
 				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
@@ -756,6 +892,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 			},
 			runtimeApi,
+			taskMainSessionHandoverApi,
+			independentTaskCreationApi,
+			rvfAutomaticCloseoutApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActionApi({
 				runtimeApi,
@@ -836,11 +975,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const clineTaskSessionService = await getScopedClineTaskSessionService(scope);
 					const board = await loadWorkspaceBoardById(scope.workspaceId);
 					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					const conversationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
 					const isClineTask =
-						clineTaskSessionService.getSummary(taskId)?.agentId === "cline" || card?.agentId === "cline";
+						clineTaskSessionService.getSummary(conversationSessionId)?.agentId === "cline" ||
+						card?.agentId === "cline";
 					if (isClineTask) {
 						// Cline（in-process SDK）：取任务聊天记录最后一条 assistant message；拿不到时优雅降级为 null。
-						const messages = await clineTaskSessionService.loadTaskSessionMessages(taskId);
+						const messages = await clineTaskSessionService.loadTaskSessionMessages(conversationSessionId);
 						let lastAssistantMessageContent: string | null = null;
 						for (const message of messages) {
 							if (message.role === "assistant") {
@@ -856,11 +997,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					// 于是预览恒读 ACP 那份空消息表。
 					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
 					const isAcpTask = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
-						acpTaskSessionService.getSummary(taskId),
+						acpTaskSessionService.getSummary(conversationSessionId),
 					);
 					if (isAcpTask) {
 						let lastAcpAssistantMessageContent: string | null = null;
-						for (const message of acpTaskSessionService.listMessages(taskId)) {
+						for (const message of acpTaskSessionService.listMessages(conversationSessionId)) {
 							if (message.role === "assistant") {
 								lastAcpAssistantMessageContent = message.content;
 							}
@@ -869,10 +1010,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					}
 					// 终端 agent（Claude 等）：取 hook 采集的最近 finalMessage；无则优雅降级为 null。
 					const manager = await getScopedTerminalManager(scope);
-					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
+					return manager.getSummary(conversationSessionId)?.latestHookActivity?.finalMessage ?? null;
 				},
 			}),
 			workUnitRelationReadApi: createWorkUnitRelationReadApi({
+				suggestReferenceRelationsForTaskModeling: scope.workspaceScope
+					? (input) =>
+							taskIndexingSupportApi.suggestReferenceRelationsForTaskModeling(
+								scope.workspaceScope as RuntimeTrpcWorkspaceScope,
+								input,
+							)
+					: undefined,
 				readRecordedInterWorkUnitRelationProjection:
 					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
 				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
@@ -885,13 +1033,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				appendCommittedEventsIntoLedgerAndWaitForCommit:
 					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 			}),
-			workUnitRelationAssertionWriteApi: createWorkUnitRelationAssertionWriteApi({
-				readRecordedInterWorkUnitRelationProjection:
-					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
-				runInterWorkUnitRelationLedgerClientOperation:
-					runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
-				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
-			}),
+			workUnitRelationAssertionWriteApi,
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,
 				loadBoardCardAgentId: async (scope, taskId) => {
@@ -1166,15 +1308,31 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
 	queuedTaskPromptDeliveryDispatcher.start();
+	taskMainSessionHandoverApi.start();
+	rvfAutomaticCloseoutApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
+	promptDraftUsageService.startInitialHistoricalBackfill();
+	taskIndexingSupportApi.startAutomaticBackfill(
+		async () =>
+			(await listWorkspaceIndexEntries()).map((entry) => ({
+				workspaceId: entry.workspaceId,
+				workspacePath: entry.repoPath,
+			})),
+		deps.warn,
+	);
 
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			await taskLookupConversationApi.close();
+			await taskIndexingSupportApi.close();
+			await taskMainSessionHandoverApi.close();
+			await rvfAutomaticCloseoutApi.stop();
+			await promptDraftUsageService.close();
 			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();
 			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。

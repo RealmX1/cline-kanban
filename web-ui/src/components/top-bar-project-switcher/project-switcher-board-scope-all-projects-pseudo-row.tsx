@@ -10,9 +10,9 @@ import { cn } from "@/components/ui/cn";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 
 /**
- * 项目切换器表格首行的「All projects」伪行 = Board Scope（docs/context-stage-first-overview.md）。
- * 选中后看板页显示 Board Overview、Focus View 左栏显示跨项目「最近活跃任务」切换面板
- * （见 use-selected-board-or-single-project-scope）。与项目行共用同一套键盘高亮索引（它是第 0 行）。
+ * 项目切换器表格首行的「All projects」伪行 = Board Scope（docs/context-board-scope-all-projects-and-single-project-scope.md）。
+ * 选中后看板页显示 All projects 首页（跨项目切换面板的分区横排成列）、Focus View 左栏显示跨项目「最近活跃任务」
+ * 切换面板（见 use-selected-board-or-single-project-scope）。与项目行共用同一套键盘高亮索引（它是第 0 行）。
  */
 export function ProjectSwitcherBoardScopeAllProjectsPseudoRow({
 	projects,
@@ -47,7 +47,7 @@ export function ProjectSwitcherBoardScopeAllProjectsPseudoRow({
 		>
 			<td className="max-w-[280px] px-2 py-1.5 align-middle">
 				<div className="flex min-w-0 items-center gap-1.5">
-					<Layers size={13} className="shrink-0 text-text-secondary" aria-hidden />
+					<Layers size={18} className="shrink-0 text-text-secondary" aria-hidden />
 					<span
 						className={cn(
 							"truncate text-[13px] font-medium",
@@ -63,8 +63,8 @@ export function ProjectSwitcherBoardScopeAllProjectsPseudoRow({
 					) : null}
 				</div>
 				<div className="truncate text-[10px] text-text-secondary">
-					Board overview · recent tasks across projects · {formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel()}{" "}
-					toggles with the focused task's project
+					Recent tasks across projects · {formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel()} toggles with the
+					focused task's project
 				</div>
 			</td>
 			{columnVisibility.numeric_slot_group ? <td className="px-2 py-1.5" /> : null}

@@ -25,6 +25,7 @@ export class TerminalStateMirror {
 	private readonly terminal: InstanceType<typeof Terminal>;
 	private readonly serializeAddon = new SerializeAddon();
 	private operationQueue: Promise<void> = Promise.resolve();
+	private mouseReportCoordinateEncodingRestoreEscapeSequence = "";
 	// 序列化 20,000 行 scrollback 是一次同步、阻塞事件循环的重活。连续 attach 多个空闲（stalled）终端会把
 	// 多次 serialize 背靠背排上事件循环。dirty-flag 缓存：仅当自上次 serialize 以来终端状态确有变化时才重新
 	// 序列化，否则直接返回上次结果，让「打开一个没有新输出的终端」从重跑 20k 行坍缩为瞬时命中。
@@ -45,6 +46,28 @@ export class TerminalStateMirror {
 			scrollback: TERMINAL_SCROLLBACK,
 		});
 		this.terminal.loadAddon(this.serializeAddon);
+		// SerializeAddon 只保存鼠标跟踪模式；坐标编码必须先恢复，防止分片恢复期间发出旧式二进制报告。
+		for (const privateModeSetOrResetFinalCharacter of ["h", "l"]) {
+			this.terminal.parser.registerCsiHandler(
+				{ prefix: "?", final: privateModeSetOrResetFinalCharacter },
+				(terminalPrivateModeParameters) => {
+					for (const terminalPrivateModeParameter of terminalPrivateModeParameters) {
+						if (
+							typeof terminalPrivateModeParameter === "number" &&
+							(terminalPrivateModeParameter === 1006 || terminalPrivateModeParameter === 1016)
+						) {
+							this.mouseReportCoordinateEncodingRestoreEscapeSequence =
+								privateModeSetOrResetFinalCharacter === "h" ? `\u001b[?${terminalPrivateModeParameter}h` : "";
+						}
+					}
+					return false;
+				},
+			);
+		}
+		this.terminal.parser.registerEscHandler({ final: "c" }, () => {
+			this.mouseReportCoordinateEncodingRestoreEscapeSequence = "";
+			return false;
+		});
 		this.terminal.onData((data) => {
 			options.onInputResponse?.(data);
 		});
@@ -85,7 +108,8 @@ export class TerminalStateMirror {
 	async getViewportSnapshot(): Promise<TerminalRestoreSnapshot> {
 		await this.operationQueue;
 		return {
-			snapshot: this.serializeAddon.serialize({ scrollback: 0 }),
+			snapshot:
+				this.mouseReportCoordinateEncodingRestoreEscapeSequence + this.serializeAddon.serialize({ scrollback: 0 }),
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
 		};
@@ -152,7 +176,9 @@ export class TerminalStateMirror {
 		const snapshot: TerminalRestoreSnapshot = {
 			// 显式封顶 serialize 的 scrollback，使恢复 payload 不超过约定上限（即便 mirror buffer 更大）。
 			// 直接决定客户端回收终端后 revisit 的重连+重放成本。
-			snapshot: this.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK }),
+			snapshot:
+				this.mouseReportCoordinateEncodingRestoreEscapeSequence +
+				this.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK }),
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
 		};

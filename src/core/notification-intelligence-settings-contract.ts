@@ -25,6 +25,7 @@ export const notificationIntelligenceSettingsSchema = z.object({
 	summaryLanguage: z.enum(["zh-CN", "en-US"]).default("zh-CN"),
 	fallbackAfterMinutes: z.number().int().min(1).max(60).default(10),
 	taskNameSuggestionBinding: kanbanModelPurposeBindingSchema.default(null),
+	independentTaskCreationDraftGenerationBinding: kanbanModelPurposeBindingSchema.optional(),
 	notificationAssessmentBinding: kanbanModelPurposeBindingSchema.default(null),
 	notificationSpeechBinding: kanbanModelPurposeBindingSchema.default(null),
 	speechMode: z.enum(["off", "chime", "summary"]).default("chime"),

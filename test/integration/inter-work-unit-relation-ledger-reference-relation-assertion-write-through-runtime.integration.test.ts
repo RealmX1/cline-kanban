@@ -478,6 +478,115 @@ describe("reference relation assertion write through the runtime", () => {
 					]);
 					expect(new Set(concurrentOutcomes.map((outcome) => outcome.assertedRelation.relationId)).size).toBe(1);
 
+					// 用户建模是替代而非合并：整批 CAS、相同提交可重试、旧证据可删除。
+					const selectedForRevision = concurrentOutcomes[0].assertedRelation;
+					const revisionRequest = {
+						workUnit: cardASelector,
+						modelingSubmissionId: "user-revision-test",
+						referenceRelationDrafts: [
+							{
+								draftId: "revision",
+								replacesRelationId: selectedForRevision.relationId,
+								expectedAssertedRelationStateVersion: 2,
+								counterpartWorkUnit: selectedForRevision.relationStatementAnchorWorkUnitRef,
+								relationKind: "reference_requirement_originates_from" as const,
+								currentTaskIsStatementSubject: true,
+								relationAssertionRationaleOneSentence: "用户核对后的需求来源",
+								relationAssertionEvidencePointers: ["new-evidence.md"],
+								assertedRelationKindSpecificAttributes: {},
+							},
+						],
+						relationRevocations: [],
+						webUiUserDecisionClientCharacteristics: TRUSTED_USER_GESTURE,
+					};
+					await expect(
+						writeApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							revisionRequest,
+							WEB_UI_USER_EVIDENCE,
+						),
+					).resolves.toMatchObject({ alreadyApplied: false });
+					await expect(
+						writeApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							revisionRequest,
+							WEB_UI_USER_EVIDENCE,
+						),
+					).resolves.toMatchObject({ alreadyApplied: true });
+					const revised = (
+						await readApi.getRelationNeighborhoodSummary({ workUnit: cardASelector })
+					).assertedRelations.find((entry) => entry.relationKind === "reference_requirement_originates_from");
+					expect(revised?.relationAssertionEvidencePointers).toEqual(["new-evidence.md"]);
+					expect(revised?.relationId).not.toBe(selectedForRevision.relationId);
+					await expect(
+						writeApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							{
+								...revisionRequest,
+								modelingSubmissionId: "stale-revision",
+								referenceRelationDrafts: [
+									...revisionRequest.referenceRelationDrafts,
+									{
+										...revisionRequest.referenceRelationDrafts[0],
+										draftId: "other-new",
+										replacesRelationId: null,
+										expectedAssertedRelationStateVersion: null,
+										relationKind: "reference_is_cross_repository_counterpart_with" as const,
+									},
+								],
+							},
+							WEB_UI_USER_EVIDENCE,
+						),
+					).rejects.toMatchObject({ code: "CONFLICT" });
+					await expect(
+						writeApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							{
+								...revisionRequest,
+								webUiUserDecisionClientCharacteristics: {
+									...TRUSTED_USER_GESTURE,
+									triggeringDomEventIsTrusted: false,
+								},
+							},
+							WEB_UI_USER_EVIDENCE,
+						),
+					).rejects.toMatchObject({ code: "FORBIDDEN" });
+					const preview = await readApi.getRelationModelingPreview({
+						workUnit: cardASelector,
+						draftTaskTitle: "",
+						relationNeighborhoodDepth: 3,
+						referenceRelationDrafts: [],
+						relationRevocations: [],
+					});
+					expect(preview.relations.some((entry) => entry.relationId === revised?.relationId)).toBe(true);
+					expect(
+						await readApi.suggestReferenceRelationsForTaskModeling({
+							workUnit: cardASelector,
+							draftTaskTitle: "",
+							relationNeighborhoodDepth: 2,
+							referenceRelationDrafts: [],
+							relationRevocations: [],
+						}),
+					).toMatchObject({ availability: "unavailable", candidates: [] });
+					if (!revised) throw new Error("缺少修改后的关系");
+					const competingEdits = await Promise.allSettled(
+						["first-editor", "second-editor"].map((submissionId) =>
+							writeApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+								{
+									...revisionRequest,
+									modelingSubmissionId: submissionId,
+									referenceRelationDrafts: [
+										{
+											...revisionRequest.referenceRelationDrafts[0],
+											replacesRelationId: revised.relationId,
+											expectedAssertedRelationStateVersion: revised.assertedRelationStateVersion,
+											relationAssertionRationaleOneSentence: submissionId,
+										},
+									],
+								},
+								WEB_UI_USER_EVIDENCE,
+							),
+						),
+					);
+					expect(competingEdits.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+					expect(competingEdits.filter((result) => result.status === "rejected")).toHaveLength(1);
+
 					// 写侧当前态表只是缓存：与从族 4 事件推出的投影逐条一致（全量重建 = 增量维护）。
 					const currentStateRows =
 						await runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture(

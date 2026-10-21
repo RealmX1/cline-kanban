@@ -15,16 +15,20 @@ import {
 // EXPERIMENT_NODE: 读时增量投影 vs 写时物化投影表——账本事件量涨到每次冷启动全量重放明显拖慢首读时再评估物化。
 const LEDGER_EVENT_PAGE_SIZE_FOR_PROJECTION_CATCH_UP = 5000;
 
-// 追赶只用到账本客户端的这两个读能力（单测可用最小 fake 实现）。
+// 投影追赶与正文查询只使用账本客户端的只读能力（单测可用最小 fake 实现）。
 export type InterWorkUnitRelationLedgerReadCapabilitiesUsedByRecordedRelationProjectionCatchUp = Pick<
 	InterWorkUnitRelationLedgerDatabaseWorkerClient,
-	"listCommittedEvents" | "readRetainedFieldContents"
+	"listCommittedEvents" | "readRetainedFieldContents" | "findRetainedTaskCardFieldKeywordMatches"
 >;
 
 export interface RecordedInterWorkUnitRelationProjectionReader {
 	readonly projectionState: RecordedInterWorkUnitRelationProjectionState;
 	// 字段正文（标题、prompt……）按指纹读取；账本里没有的（images 不留正文）返回 null。
 	readRetainedTaskCardFieldValuesBySha256(fieldValueSha256s: string[]): Promise<Map<string, unknown>>;
+	findRetainedTaskCardFieldKeywordMatchesBySha256(
+		fieldValueSha256s: string[],
+		normalizedQueryTokens: string[],
+	): Promise<Map<string, number[]>>;
 }
 
 export class RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger {
@@ -122,6 +126,15 @@ export class RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger {
 		await this.catchUpWithLedger();
 		return await read({
 			projectionState: this.projectionState,
+			findRetainedTaskCardFieldKeywordMatchesBySha256: async (fieldValueSha256s, normalizedQueryTokens) =>
+				new Map(
+					(
+						await this.ledgerClient.findRetainedTaskCardFieldKeywordMatches({
+							fieldValueSha256s,
+							normalizedQueryTokens,
+						})
+					).map((match) => [match.fieldValueSha256, match.matchedQueryTokenIndexes]),
+				),
 			readRetainedTaskCardFieldValuesBySha256: async (fieldValueSha256s) => {
 				await this.prefetchRetainedFieldValues(fieldValueSha256s);
 				const fieldValuesBySha256 = new Map<string, unknown>();

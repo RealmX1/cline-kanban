@@ -479,6 +479,56 @@ describe("taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress", () =>
 });
 
 describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree", () => {
+	it("评论与移列一次写盘，保留既有评论，重试不重复追加或清理", async () => {
+		const previousComment = { taskCommentEntryId: "previous", commentText: "旧评论", createdAt: 1, updatedAt: 1 };
+		seedWorkspace(
+			createBoard({ validation: [createCard("task-comment", { taskCommentEntries: [previousComment] })] }),
+		);
+		const { api } = createApiForTest();
+		const request = {
+			taskId: "task-comment",
+			boardMutationInitiator: "web_ui_user_gesture" as const,
+			taskCommentToAppendWhenMovingIntoDone: {
+				taskCommentEntryId: "completion-comment",
+				commentText: "已验证\n可以完成",
+			},
+		};
+		const response = await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+		expect(response.taskCardSnapshotAfterAction.taskCard.taskCommentEntries).toEqual([
+			previousComment,
+			expect.objectContaining(request.taskCommentToAppendWhenMovingIntoDone),
+		]);
+		expect(readColumnTaskIds("trash")).toEqual(["task-comment"]);
+		expect(harness.callOrder.filter((entry) => entry.startsWith("boardWrite:"))).toHaveLength(1);
+		const previousCallOrder = [...harness.callOrder];
+		await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+		expect(harness.callOrder).toEqual(previousCallOrder);
+	});
+
+	it("其他操作已移入 Done 时拒绝新评论，不静默丢弃输入或再次清理", async () => {
+		seedWorkspace(createBoard({ trash: [createCard("task-already-done")] }));
+		const { api } = createApiForTest();
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "task-already-done",
+					taskCommentToAppendWhenMovingIntoDone: { taskCommentEntryId: "new-comment", commentText: "待保存评论" },
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(harness.callOrder).toEqual([]);
+	});
+
 	it("移入 Done → 并行停 agent 会话与详情 shell 终端 → 按卡片 worktreeMode 删 worktree", async () => {
 		seedWorkspace(createBoard({ review: [createCard("task-r", { worktreeMode: "inplace" })] }), {
 			"task-r": createSummary("task-r"),
@@ -1344,7 +1394,14 @@ describe("taskCardAction.moveTaskCardIntoDone… 的 Post-Deploy Verification �
 		await expect(
 			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
 				WORKSPACE_SCOPE,
-				{ taskId: "task-v", boardMutationInitiator: "web_ui_user_gesture" },
+				{
+					taskId: "task-v",
+					boardMutationInitiator: "web_ui_user_gesture",
+					taskCommentToAppendWhenMovingIntoDone: {
+						taskCommentEntryId: "blocked-comment",
+						commentText: "不应被保存",
+					},
+				},
 				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
 			),
 		).rejects.toMatchObject({
@@ -1354,6 +1411,9 @@ describe("taskCardAction.moveTaskCardIntoDone… 的 Post-Deploy Verification �
 			),
 		});
 		expect(readColumnTaskIds("validation")).toEqual(["task-v"]);
+		expect(
+			readBoard().columns.find((column) => column.id === "validation")?.cards[0].taskCommentEntries,
+		).toBeUndefined();
 		expect(harness.callOrder).toEqual(["authorizePostDeployVerificationDoneEntry"]);
 		expect(gate.authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone).toHaveBeenCalledWith(
 			expect.objectContaining({

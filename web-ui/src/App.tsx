@@ -1,3 +1,4 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 // Main React composition root for the browser app.
 // Keep this file focused on wiring top-level hooks and surfaces together, and
 // push runtime-specific orchestration down into hooks and service modules.
@@ -5,14 +6,13 @@ import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
+import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
 import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
-import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository-stage-first-overview";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -22,17 +22,25 @@ import { FindingsView } from "@/components/findings/findings-view";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
+import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
+import { isPostDeployVerificationTaskAwaitingVerification } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
-import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
+import {
+	buildPostDeployVerificationFollowUpTaskCreationDraftSeed,
+	type PostDeployVerificationFollowUpTaskCreationDraftSeed,
+} from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
+import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
-import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
+import { TaskCommentsDialogProvider } from "@/components/task-comments-dialog-provider";
 import type { TaskCreationTargetProjectField } from "@/components/task-creation-target-project-field";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import { TaskLookupWorkbenchView } from "@/components/task-lookup-workbench-view";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
@@ -56,8 +64,11 @@ import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallba
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
+import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
+import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
+import { useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage } from "@/hooks/use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
@@ -67,11 +78,13 @@ import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-w
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
-import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
+import { usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-controller-inputs-for-board-or-single-project-scope";
+import { usePostDeployVerificationForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-for-board-or-single-project-scope";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
@@ -83,6 +96,7 @@ import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
+import { useTaskLookupWorkbench } from "@/hooks/use-task-lookup-workbench";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
 import { useTaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
@@ -105,7 +119,7 @@ import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-re
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
-import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
+import { applyTaskDetailClineSettingsChange, findCardSelection } from "@/state/board-state";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import {
@@ -120,7 +134,7 @@ import {
 	resetWorkspaceMetadataStore,
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import type { BoardCard, BoardData, TaskCommentEntry } from "@/types";
+import type { BoardCard, BoardData } from "@/types";
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -134,7 +148,7 @@ export default function App(): ReactElement {
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	// Exploratory findings 浏览器开关（蓝图 §G.2）：isGitHistoryOpen 同款形态——
-	// 开启时置换 home 主视图，非 overlay；与 git history / board overview 互斥。
+	// 开启时置换 home 主视图，非 overlay；与 git history / All projects 首页互斥。
 	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
@@ -308,7 +322,7 @@ export default function App(): ReactElement {
 	const {
 		upsertSession,
 		startTaskSession,
-		createByTheWayTaskConversationSession,
+		createTaskConversationSession,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
@@ -446,25 +460,25 @@ export default function App(): ReactElement {
 		pushedUpdate: latestExplorationThreadGraphUpdate,
 	});
 
-	// 范围（顶栏项目切换器首行 All projects = Board Scope，见 docs/context-stage-first-overview.md）：看板页据此在
-	// Stage-First Overview（跨-repo 概览）与当前项目看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表
-	// 之间切换。下面还有跨-workspace 打开某 task 的待定跳转。
+	// 范围（顶栏项目切换器首行 All projects = Board Scope，见 docs/context-board-scope-all-projects-and-single-project-scope.md）：
+	// 看板页据此在 All projects 首页（跨项目切换面板的分区横排成列）与当前项目看板之间切换，Focus View 左栏据此在
+	// 跨项目切换面板与 stage 列表之间切换。下面还有跨-workspace 打开某 task 的待定跳转。
 	const { selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope } =
 		useSelectedBoardOrSingleProjectScope();
 	const isBoardScopeAllProjectsSelected = selectedBoardOrSingleProjectScope === "board_scope_all_projects";
+	const [permanentlyDeletedTaskHistoryScope, setPermanentlyDeletedTaskHistoryScope] = useState<{
+		workspaceId: string | null;
+	} | null>(null);
+	const openPermanentlyDeletedTaskHistory = useCallback(() => {
+		setPermanentlyDeletedTaskHistoryScope({ workspaceId: isBoardScopeAllProjectsSelected ? null : currentProjectId });
+	}, [isBoardScopeAllProjectsSelected, currentProjectId]);
+
 	const selectBoardScopeAllProjects = useCallback(() => {
 		setSelectedBoardOrSingleProjectScope("board_scope_all_projects");
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 	}, [setSelectedBoardOrSingleProjectScope]);
-	const handleToggleBoardOverview = useCallback(() => {
-		if (isBoardScopeAllProjectsSelected) {
-			setSelectedBoardOrSingleProjectScope("single_project_scope");
-			return;
-		}
-		selectBoardScopeAllProjects();
-	}, [isBoardScopeAllProjectsSelected, selectBoardScopeAllProjects, setSelectedBoardOrSingleProjectScope]);
-	// 用户明确选了某个项目（顶栏切换器、数字槽热键、首页侧栏、概览里点 stage）：范围收窄到它。
+	// 用户明确选了某个项目（顶栏切换器、数字槽热键、首页侧栏）：范围收窄到它。
 	// 跨项目打开任务（面板、Spotlight、通知）不走这里——Board Scope 下点别的项目的任务，范围不变。
 	const handleSelectProjectNarrowingToSingleProjectScope = useCallback(
 		(projectId: string) => {
@@ -522,16 +536,24 @@ export default function App(): ReactElement {
 		// 它每 tick 换引用，会把语义索引反复重建（见 controller 里叠加层那一段）。
 		taskSessionSummariesByTaskId: sessions,
 		canOpen: !hasNoProjects,
+		isBoardScopeAllProjectsSelected,
 		crossProjectWorkspaceId: currentProjectId,
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
 		onOpenTaskInProject: handleOpenTaskInProject,
 	});
-	const handleOpenOverviewStage = useCallback(
-		(repoId: string) => {
-			handleSelectProjectNarrowingToSingleProjectScope(repoId);
-		},
-		[handleSelectProjectNarrowingToSingleProjectScope],
-	);
+	const taskLookupWorkbench = useTaskLookupWorkbench({
+		workspaceId: currentProjectId,
+		includeAllProjectsByDefault: isBoardScopeAllProjectsSelected,
+		streamSnapshotGeneration,
+	});
+	const taskLookupWorkbenchContent = taskLookupWorkbench.isOpen ? (
+		<TaskLookupWorkbenchView
+			controller={taskLookupWorkbench}
+			projects={projects}
+			onOpenTask={handleOpenTaskInProject}
+			returnLabel={selectedCard ? "返回任务" : "返回看板"}
+		/>
+	) : undefined;
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
 	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
@@ -757,6 +779,11 @@ export default function App(): ReactElement {
 	useEffect(() => {
 		taskEditorResetRef.current = resetTaskEditorState;
 	}, [resetTaskEditorState]);
+	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
+		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
+	useEffect(() => {
+		if (!isInlineTaskCreateOpen) setPostDeployVerificationFollowUpTaskCreationDraftSeed(null);
+	}, [isInlineTaskCreateOpen]);
 
 	useEffect(() => {
 		if (!isProjectSwitching) {
@@ -777,7 +804,7 @@ export default function App(): ReactElement {
 		resetTaskEditorState();
 	}, [isProjectSwitching, resetTaskEditorState]);
 
-	// Board Scope 建卡入口（热键 c、跨项目面板的 Create task、Board Overview 的 New task）：默认目标取上下文项目——
+	// Board Scope 建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：默认目标取上下文项目——
 	// 跨项目打开在途时是目标项目，否则是当前项目（Focus View 的焦点任务总在当前项目里）。
 	// EXPERIMENT_NODE: Board Scope 建卡默认目标项目取上下文项目，还是跨次记忆的上次所用项目
 	const handleOpenCreateTaskInCurrentScope = useCallback(() => {
@@ -802,27 +829,31 @@ export default function App(): ReactElement {
 		projects,
 	]);
 
-	// 编辑对话框的「目标项目」字段：编辑其他项目的卡 → 只读标签；Board Scope 建卡 → 可选；单项目范围 → 不显示
-	//（对话框与改动前一致）。
+	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId) {
-			if (!editTaskWorkspaceId || editTaskWorkspaceId === projectRuntimeWorkspaceId) {
-				return undefined;
-			}
+		if (editingTaskId || postDeployVerificationFollowUpTaskCreationDraftSeed || !isBoardScopeAllProjectsSelected) {
+			const workspaceId = editingTaskId
+				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
+				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);
+			if (!workspaceId) return undefined;
+			const project = projects.find((entry) => entry.id === workspaceId);
 			return {
 				taskCreationTargetProjectFieldPresentation: "target_project_shown_read_only",
-				projectName: projects.find((project) => project.id === editTaskWorkspaceId)?.name ?? editTaskWorkspaceId,
+				workspaceId,
+				projectName: project?.name ?? workspaceId,
+				visualIdentity: project?.visualIdentity,
 			};
-		}
-		if (!isBoardScopeAllProjectsSelected) {
-			return undefined;
 		}
 		return {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
 			selectableProjects: projects
 				.filter((project) => project.availability.status === "available")
 				.sort((left, right) => left.name.localeCompare(right.name))
-				.map((project) => ({ workspaceId: project.id, projectName: project.name })),
+				.map((project) => ({
+					workspaceId: project.id,
+					projectName: project.name,
+					visualIdentity: project.visualIdentity,
+				})),
 			selectedTargetWorkspaceId: taskCreationTargetWorkspaceId,
 			onSelectTargetWorkspaceId: handleSelectTaskCreationTargetProject,
 		};
@@ -834,6 +865,7 @@ export default function App(): ReactElement {
 		projectRuntimeWorkspaceId,
 		projects,
 		taskCreationTargetWorkspaceId,
+		postDeployVerificationFollowUpTaskCreationDraftSeed,
 	]);
 
 	const handleOpenEditTaskKeepingDetailSelection = useCallback(
@@ -1071,11 +1103,37 @@ export default function App(): ReactElement {
 		});
 	}, [hasNoProjects, setSelectedBoardOrSingleProjectScope]);
 
-	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例，同时供顶栏 badge 派生待核对数、
-	// 并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例（在下面这个 hook 里），同时供顶栏 badge
+	// 派生待核对数、并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	// 单项目范围绑定当前项目；All projects 下不跟随当前项目，绑定有部署组的项目（见 hook）。
 	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
-	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
+	const postDeployVerificationForBoardOrSingleProjectScope = usePostDeployVerificationForBoardOrSingleProjectScope({
+		selectedBoardOrSingleProjectScope,
+		currentProjectRuntimeWorkspaceId: projectRuntimeWorkspaceId,
+		projectIdOwningHydratedBoard,
+		projects,
+		currentProjectDisplayedBoard: displayedBoard,
+		currentProjectTaskSessions: sessions,
+		currentProjectWorkspacePath: workspacePath ?? null,
+	});
+	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
+	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		isTaskSwitcherSectionModelActive:
+			isBoardScopeAllProjectsSelected && !isRuntimeDisconnected && !isKanbanAccessBlocked,
+		projects,
+		notificationLogByWorkspaceId,
+		currentProjectId,
+	});
+	const captureCacheWarmTaskFocusNavigationAfterValidationMove = useCacheWarmTaskFocusNavigationAfterValidationMove({
+		isBoardScopeAllProjectsSelected,
+		currentProjectId,
+		selectedTaskId,
+		isCrossProjectTaskOpenPending: pendingCrossProjectTaskOpen !== null,
+		promptCacheWarmAwaitingUserEntries:
+			crossProjectTaskSwitcherSectionsModel.sections.promptCacheWarmAwaitingUserEntries,
+		onOpenTaskInProject: handleOpenTaskInProject,
+	});
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1086,6 +1144,8 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		taskCommentBeforeMoveIntoDone,
+		confirmTaskCommentBeforeMoveIntoDone,
 		completePostDeployVerificationMoveToDone,
 		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
@@ -1117,6 +1177,7 @@ export default function App(): ReactElement {
 		moveToTrashLoadingById,
 		trashTaskCount,
 	} = useBoardInteractions({
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		board,
 		setBoard,
 		sessions,
@@ -1132,8 +1193,10 @@ export default function App(): ReactElement {
 		readyForReviewNotificationsEnabled,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
-		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck: postDeployVerification.activeGroup,
-		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection: postDeployVerification.refresh,
+		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck:
+			postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationActiveDeploymentGroupForCurrentProjectDoneEntryGatePrecheck,
+		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection:
+			postDeployVerificationForBoardOrSingleProjectScope.refreshPostDeployVerificationReadModelAfterCurrentProjectDoneEntryGateRejection,
 	});
 
 	const {
@@ -1161,59 +1224,95 @@ export default function App(): ReactElement {
 	const handleOpenPostDeployVerification = useCallback(() => {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
-	// PDV 面板条目上半部分是真实任务卡体：数据与动作和主看板同一份（displayedBoard、推流 session、同一组 handler，
-	// 参照 Focus View column-context-panel 的 TaskCardActionHandlerBundle），条目上的「移入 Done」因此同样过门禁。
-	const defaultAgentIdOfCurrentProject = runtimeProjectConfig?.selectedAgentId ?? null;
-	const defaultClineModelIdOfCurrentProject = runtimeProjectConfig?.clineProviderSettings?.modelId ?? null;
-	const realTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
-		useMemo((): RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries => {
-			const currentProjectTaskCardActionHandlers: TaskCardActionHandlerBundle = {
-				resolveTaskWorkspaceAbsoluteDirectoryPath,
-				onStartTask: handleStartTaskFromBoard,
-				onMoveToTrashTask: handleMoveReviewCardToTrash,
-				onMoveToValidationTask: handleMoveCardToValidation,
-				onMoveToReviewTask: handleMoveCardToReview,
-				onRestoreFromTrashTask: handleRestoreTaskFromTrash,
-				onDeleteTask: handleOpenDeleteTask,
-				onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
-				onSaveTitle: handleSaveTaskTitle,
-				onEditTask: handleOpenEditTaskKeepingDetailSelection,
-				onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
-				onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
-				moveToTrashLoadingById,
-				moveToReviewLoadingById,
-			};
-			return {
-				currentProjectDisplayedBoard: displayedBoard,
-				currentProjectTaskSessions: sessions,
-				currentProjectTaskCardActionHandlers,
-				currentProjectWorkspacePath: workspacePath ?? null,
-				onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
-				defaultAgentId: defaultAgentIdOfCurrentProject,
-				defaultClineModelId: defaultClineModelIdOfCurrentProject,
-			};
-		}, [
-			defaultAgentIdOfCurrentProject,
-			defaultClineModelIdOfCurrentProject,
-			displayedBoard,
-			handleCancelAutomaticTaskAction,
-			handleCardSelect,
-			handleMoveCardToReview,
-			handleMoveCardToValidation,
-			handleMoveReviewCardToTrash,
-			handleOpenDeleteTask,
-			handleOpenEditTaskKeepingDetailSelection,
-			handleRequestPinTaskToTaskPinboard,
-			handleRestoreTaskFromTrash,
-			handleSaveTaskTitle,
-			handleStartTaskFromBoard,
-			handleUnpinTaskFromTaskPinboard,
-			moveToReviewLoadingById,
-			moveToTrashLoadingById,
-			resolveTaskWorkspaceAbsoluteDirectoryPath,
-			sessions,
-			workspacePath,
-		]);
+	// PDV 面板条目上半部分是真实任务卡体：面板读浏览器里当前项目的 board 时，数据与动作和主看板同一份（条目上的
+	// 「移入 Done」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
+	const {
+		boardShownInPostDeployVerificationPanel,
+		completePostDeployVerificationMoveToDone: completePostDeployVerificationMoveToDoneForPanelBoardSource,
+		onSelectTaskInPostDeployVerificationPanel,
+		realTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
+		postDeployVerificationWorkspaceProjectNameShownInPanelHeader,
+	} = usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope({
+		selectedBoardOrSingleProjectScope,
+		postDeployVerificationForBoardOrSingleProjectScope,
+		projects,
+		currentProjectDisplayedBoard: displayedBoard,
+		currentProjectTaskSessions: sessions,
+		currentProjectWorkspacePath: workspacePath ?? null,
+		completeCurrentProjectPostDeployVerificationMoveToDone: completePostDeployVerificationMoveToDone,
+		setSelectedTaskId,
+		handleCardSelect,
+		handleOpenTaskInProject,
+		defaultAgentIdOfCurrentProject: runtimeProjectConfig?.selectedAgentId ?? null,
+		defaultClineModelIdOfCurrentProject: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
+		resolveTaskWorkspaceAbsoluteDirectoryPath,
+		onStartTask: handleStartTaskFromBoard,
+		onMoveToTrashTask: handleMoveReviewCardToTrash,
+		onMoveToValidationTask: handleMoveCardToValidation,
+		onMoveToReviewTask: handleMoveCardToReview,
+		onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+		onDeleteTask: handleOpenDeleteTask,
+		onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
+		onSaveTitle: handleSaveTaskTitle,
+		onEditTask: handleOpenEditTaskKeepingDetailSelection,
+		onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
+		onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+		moveToTrashLoadingById,
+		moveToReviewLoadingById,
+	});
+	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCallback(
+		(deploymentId: string, taskId: string, selectedChecklistItemIds: string[]) => {
+			const group = postDeployVerification.activeGroup;
+			const task = group?.tasks.find((candidate) => candidate.taskId === taskId);
+			const card = boardShownInPostDeployVerificationPanel
+				? findCardSelection(boardShownInPostDeployVerificationPanel, taskId)
+				: null;
+			const project = projects.find((candidate) => candidate.id === group?.workspaceId);
+			if (isInlineTaskCreateOpen || editingTaskId) {
+				showAppToast({ intent: "warning", message: "请先完成或关闭当前任务编辑，再从核对项创建后续任务。" });
+				return;
+			}
+			if (
+				!runtimeProjectConfig ||
+				!group ||
+				group.deploymentId !== deploymentId ||
+				!task ||
+				!isPostDeployVerificationTaskAwaitingVerification(task) ||
+				!card ||
+				card.column.id === "trash" ||
+				project?.availability.status !== "available"
+			) {
+				showAppToast({ intent: "warning", message: "来源任务或部署状态已变化，请刷新核对清单后重试。" });
+				return;
+			}
+			try {
+				const seed = buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
+					workspaceId: group.workspaceId,
+					projectName: project.name,
+					sourceTaskTitle: card.card.title,
+					sourceTaskCreatedAt: card.card.createdAt,
+					deploymentId,
+					deployedSourceCommit: group.deployedSourceCommit,
+					deployedAtIso: group.deployedAtIso,
+					task,
+					selectedChecklistItemIds,
+				});
+				handleOpenCreateTaskInBoardScope(group.workspaceId);
+				setPostDeployVerificationFollowUpTaskCreationDraftSeed(seed);
+			} catch (error) {
+				showAppToast({ intent: "warning", message: error instanceof Error ? error.message : String(error) });
+			}
+		},
+		[
+			postDeployVerification.activeGroup,
+			boardShownInPostDeployVerificationPanel,
+			projects,
+			isInlineTaskCreateOpen,
+			editingTaskId,
+			runtimeProjectConfig,
+			handleOpenCreateTaskInBoardScope,
+		],
+	);
 
 	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
 	const boardScopeFocusViewFocusedTaskProjectId =
@@ -1247,7 +1346,7 @@ export default function App(): ReactElement {
 		workspaceMetadataProbeFocusedTaskId,
 		workspaceMetadataProbeFocusedTaskWorkspaceId,
 	]);
-	// ⌘E：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	// 范围切换快捷键与顶栏 All projects 按钮：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
 	const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = useCallback(() => {
 		if (!isBoardScopeAllProjectsSelected) {
 			selectBoardScopeAllProjects();
@@ -1314,7 +1413,8 @@ export default function App(): ReactElement {
 	}, [board, handleStartTaskFromBoard, pendingTaskStartAfterEditId]);
 
 	const detailSession = selectedCard
-		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
+		? (resolveMainTaskConversationSessionSummary(selectedCard.card, sessions) ??
+			createIdleTaskSession(selectedCard.card.mainTaskConversationSessionId ?? selectedCard.card.id))
 		: null;
 	const detailTerminalSummary = detailTerminalTaskId ? (sessions[detailTerminalTaskId] ?? null) : null;
 	const detailTerminalSubtitle = useMemo(() => {
@@ -1436,6 +1536,7 @@ export default function App(): ReactElement {
 		isFocusViewCrossProjectTaskOpenInTransit,
 		crossProjectTaskOpenInTransitTarget,
 	} = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		crossProjectTaskSwitcherSectionsModel,
 		projects,
 		notificationLogByWorkspaceId,
 		currentProjectId,
@@ -1449,9 +1550,32 @@ export default function App(): ReactElement {
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
 	});
+	// All projects 首页分区列看板里，当前项目的行展开成完整卡片时与主看板同数据、同动作。
+	const currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage =
+		useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage({
+			isDisplayedBoardHydratedForCurrentProject:
+				projectRuntimeWorkspaceId !== null && projectIdOwningHydratedBoard === projectRuntimeWorkspaceId,
+			currentProjectDisplayedBoard: displayedBoard,
+			currentProjectTaskSessions: sessions,
+			currentProjectWorkspacePath: workspacePath ?? null,
+			resolveTaskWorkspaceAbsoluteDirectoryPath,
+			onStartTask: handleStartTaskFromBoard,
+			onMoveToTrashTask: handleMoveReviewCardToTrash,
+			onMoveToValidationTask: handleMoveCardToValidation,
+			onMoveToReviewTask: handleMoveCardToReview,
+			onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+			onDeleteTask: handleOpenDeleteTask,
+			onSaveTitle: handleSaveTaskTitle,
+			onEditTask: handleOpenEditTask,
+			onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
+			onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+			onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
+			moveToTrashLoadingById,
+		});
 	// Focus View 的外观（顶栏详情模式、隐藏首页布局与左侧项目栏、看板不挂载）在跨项目打开在途期间保持不变——
 	// 否则一次跨项目打开会画出「旧详情 → 首页 / 看板 → 外壳 → 新详情」四个全屏状态。
-	const isFocusViewChromeShown = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
+	const isFocusViewChromeShown =
+		selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit || taskLookupWorkbench.isOpen;
 	// 详情页（含 agent 终端）真正渲染的那张卡：在途期间不渲染；board 装的还不是当前项目的数据时也不渲染——
 	// 快照到达那一帧 currentProjectId 已是新项目、board 仍是旧项目的，拿旧卡配新 workspaceId 挂终端会在新项目里
 	// 给同号任务建出一个幽灵终端，还可能把终端 LRU 里新项目已停放的热终端挤出去。
@@ -1464,6 +1588,11 @@ export default function App(): ReactElement {
 		!isFocusViewCrossProjectTaskOpenInTransit && projectIdOwningHydratedBoard === projectRuntimeWorkspaceId
 			? selectedCard
 			: null;
+	const mobileFocusViewControls = useMobileFocusViewCollapsibleControls({
+		enabled: selectedCardRenderedInFocusView !== null,
+		focusedTaskIdentity: JSON.stringify([currentProjectId, selectedCardRenderedInFocusView?.card.id ?? null]),
+		isDocumentVisible,
+	});
 	const latestSelectedTaskChatMessage = selectLatestTaskChatMessageForTask(
 		selectedCard?.card.id,
 		latestTaskChatMessage,
@@ -1508,18 +1637,6 @@ export default function App(): ReactElement {
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
 
-	const handleTaskCommentEntriesChange = useCallback(
-		(taskId: string, taskCommentEntries: TaskCommentEntry[]) => {
-			setBoard(
-				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
-					const result = updateTaskCommentEntries(currentBoard, taskId, taskCommentEntries);
-					return result.updated ? result.board : currentBoard;
-				}),
-			);
-		},
-		[setBoard],
-	);
-
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
@@ -1540,12 +1657,16 @@ export default function App(): ReactElement {
 		return <KanbanAccessBlockedFallback />;
 	}
 
-	return (
+	const renderedApplicationView = (
 		<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectRecentlyActiveTaskSwitcherHost}>
 			<LayoutCustomizationsProvider
 				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
 			>
-				<div className="flex h-[100svh] min-w-0 overflow-hidden">
+				<div
+					ref={mobileFocusViewControls.focusViewRootRef}
+					style={{ height: mobileFocusViewControls.visibleViewportHeightPx }}
+					className="flex h-[100svh] min-w-0 overflow-hidden"
+				>
 					{!isFocusViewChromeShown ? (
 						<ProjectNavigationPanel
 							projects={displayedProjects}
@@ -1574,135 +1695,173 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-						<TopBar
-							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
-							projectSwitcher={topBarProjectSwitcherState}
-							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
-							onToggleBoardOverview={
-								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-									? handleToggleBoardOverview
-									: undefined
+						<div
+							hidden={
+								mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded
 							}
-							isBoardOverviewOpen={isBoardScopeAllProjectsSelected}
-							onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
-							workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
-							isWorkspacePathLoading={shouldShowProjectLoadingState}
-							workspaceHint={navbarWorkspaceHint}
-							runtimeHint={navbarRuntimeHint}
-							selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
-							selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
-							showHomeGitSummary={
-								!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
-							}
-							runningGitAction={
-								isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
-									? null
-									: runningGitAction
-							}
-							onGitFetch={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("fetch");
+							className="shrink-0"
+							data-mobile-focus-view-global-navigation=""
+							data-mobile-focus-view-collapsible-region=""
+						>
+							<TopBar
+								onOpenPermanentlyDeletedTaskHistory={
+									!isFocusViewChromeShown || mobileFocusViewControls.isEnabled
+										? openPermanentlyDeletedTaskHistory
+										: undefined
+								}
+								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
+								projectSwitcher={topBarProjectSwitcherState}
+								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
+								onToggleTaskLookupWorkbench={
+									!hasNoProjects
+										? () => {
+												if (taskLookupWorkbench.isOpen) taskLookupWorkbench.close();
+												else taskLookupWorkbench.open();
+											}
+										: undefined
+								}
+								isTaskLookupWorkbenchOpen={taskLookupWorkbench.isOpen}
+								onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
+									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+										? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
+										: undefined
+								}
+								isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+								onBack={
+									taskLookupWorkbench.isOpen
+										? taskLookupWorkbench.close
+										: isFocusViewChromeShown
+											? handleBackFromFocusView
+											: undefined
+								}
+								workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
+								isWorkspacePathLoading={shouldShowProjectLoadingState}
+								workspaceHint={navbarWorkspaceHint}
+								runtimeHint={navbarRuntimeHint}
+								selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
+								selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
+								showHomeGitSummary={
+									!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
+								}
+								runningGitAction={
+									isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
+										? null
+										: runningGitAction
+								}
+								onGitFetch={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("fetch");
+											}
+								}
+								onGitPull={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("pull");
+											}
+								}
+								onGitPush={
+									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+										? undefined
+										: () => {
+												void runGitAction("push");
+											}
+								}
+								onToggleTerminal={
+									hasNoProjects ||
+									taskLookupWorkbench.isOpen ||
+									isCurrentProjectRuntimeUnavailable ||
+									isFocusViewCrossProjectTaskOpenInTransit
+										? undefined
+										: selectedCard
+											? handleToggleDetailTerminal
+											: handleToggleHomeTerminal
+								}
+								isTerminalOpen={
+									isFocusViewCrossProjectTaskOpenInTransit
+										? false
+										: selectedCard
+											? isDetailTerminalOpen
+											: showHomeBottomTerminal
+								}
+								isTerminalLoading={
+									isFocusViewCrossProjectTaskOpenInTransit
+										? false
+										: selectedCard
+											? isDetailTerminalStarting
+											: isHomeTerminalStarting
+								}
+								onOpenSettings={handleOpenSettings}
+								showDebugButton={debugModeEnabled}
+								onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
+								shortcuts={shortcuts}
+								selectedShortcutLabel={selectedShortcutLabel}
+								onSelectShortcutLabel={handleSelectShortcutLabel}
+								runningShortcutLabel={runningShortcutLabel}
+								onRunShortcut={handleRunShortcut}
+								onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
+								openTargetOptions={openTargetOptions}
+								openTargetOptionsFootnote={openTargetOptionsFootnote}
+								selectedOpenTargetId={selectedOpenTargetId}
+								onSelectOpenTarget={onSelectOpenTarget}
+								onOpenWorkspace={onOpenWorkspace}
+								canOpenWorkspace={canOpenWorkspace}
+								isOpeningWorkspace={isOpeningWorkspace}
+								onToggleGitHistory={
+									hasNoProjects || isCurrentProjectRuntimeUnavailable || taskLookupWorkbench.isOpen
+										? undefined
+										: handleToggleGitHistory
+								}
+								isGitHistoryOpen={isGitHistoryOpen}
+								onToggleFindings={
+									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+										? handleToggleFindings
+										: undefined
+								}
+								isFindingsOpen={isFindingsOpen}
+								onToggleTaskChangesSidebar={
+									selectedCardRenderedInFocusView && !taskLookupWorkbench.isOpen
+										? () => setIsTaskChangesSidebarOpen((open) => !open)
+										: undefined
+								}
+								isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
+								hideProjectDependentActions={
+									shouldHideProjectDependentTopBarActions || taskLookupWorkbench.isOpen
+								}
+								connectionRetrySessions={connectionRetrySessions}
+								onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
+								onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+								notificationCenter={
+									<NotificationCenter
+										panelGroups={notificationCenter.panelGroups}
+										onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
+										hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
+										archiveReadError={notificationCenter.archiveReadError}
+										allGroups={notificationCenter.allGroups}
+										allEntriesSortedByTriggeredAtDescending={
+											notificationCenter.allEntriesSortedByTriggeredAtDescending
 										}
-							}
-							onGitPull={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("pull");
-										}
-							}
-							onGitPush={
-								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-									? undefined
-									: () => {
-											void runGitAction("push");
-										}
-							}
-							onToggleTerminal={
-								hasNoProjects || isCurrentProjectRuntimeUnavailable || isFocusViewCrossProjectTaskOpenInTransit
-									? undefined
-									: selectedCard
-										? handleToggleDetailTerminal
-										: handleToggleHomeTerminal
-							}
-							isTerminalOpen={
-								isFocusViewCrossProjectTaskOpenInTransit
-									? false
-									: selectedCard
-										? isDetailTerminalOpen
-										: showHomeBottomTerminal
-							}
-							isTerminalLoading={
-								isFocusViewCrossProjectTaskOpenInTransit
-									? false
-									: selectedCard
-										? isDetailTerminalStarting
-										: isHomeTerminalStarting
-							}
-							onOpenSettings={handleOpenSettings}
-							showDebugButton={debugModeEnabled}
-							onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
-							shortcuts={shortcuts}
-							selectedShortcutLabel={selectedShortcutLabel}
-							onSelectShortcutLabel={handleSelectShortcutLabel}
-							runningShortcutLabel={runningShortcutLabel}
-							onRunShortcut={handleRunShortcut}
-							onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
-							openTargetOptions={openTargetOptions}
-							openTargetOptionsFootnote={openTargetOptionsFootnote}
-							selectedOpenTargetId={selectedOpenTargetId}
-							onSelectOpenTarget={onSelectOpenTarget}
-							onOpenWorkspace={onOpenWorkspace}
-							canOpenWorkspace={canOpenWorkspace}
-							isOpeningWorkspace={isOpeningWorkspace}
-							onToggleGitHistory={
-								hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
-							}
-							isGitHistoryOpen={isGitHistoryOpen}
-							onToggleFindings={
-								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-									? handleToggleFindings
-									: undefined
-							}
-							isFindingsOpen={isFindingsOpen}
-							onToggleTaskChangesSidebar={
-								selectedCardRenderedInFocusView ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
-							}
-							isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
-							hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
-							connectionRetrySessions={connectionRetrySessions}
-							onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
-							onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
-							notificationCenter={
-								<NotificationCenter
-									panelGroups={notificationCenter.panelGroups}
-									onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
-									hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
-									archiveReadError={notificationCenter.archiveReadError}
-									allGroups={notificationCenter.allGroups}
-									allEntriesSortedByTriggeredAtDescending={
-										notificationCenter.allEntriesSortedByTriggeredAtDescending
-									}
-									unreadCount={notificationCenter.unreadCount}
-									onFocusTask={focusNotificationTask}
-									onMarkGroupVisited={handleMarkTaskNotificationsVisited}
-									onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
-									onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
-									onClearAll={notificationCenter.clearAll}
-								/>
-							}
-							postDeployVerificationPendingCount={postDeployVerificationPendingCount}
-							onOpenPostDeployVerification={handleOpenPostDeployVerification}
-							bugReportTriggerButton={
-								<BugReportTriggerButton
-									projects={projects}
-									currentProjectId={currentProjectId}
-									activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
-								/>
-							}
-						/>
+										unreadCount={notificationCenter.unreadCount}
+										onFocusTask={focusNotificationTask}
+										onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+										onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
+										onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
+										onClearAll={notificationCenter.clearAll}
+									/>
+								}
+								postDeployVerificationPendingCount={postDeployVerificationPendingCount}
+								onOpenPostDeployVerification={handleOpenPostDeployVerification}
+								bugReportTriggerButton={
+									<BugReportTriggerButton
+										projects={projects}
+										currentProjectId={currentProjectId}
+										activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+									/>
+								}
+							/>
+						</div>
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 							<div
 								className="kb-home-layout"
@@ -1745,11 +1904,12 @@ export default function App(): ReactElement {
 										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
 										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
 											{isFocusViewChromeShown ? null : isBoardScopeAllProjectsSelected ? (
-												<CrossRepositoryStageFirstOverview
-													projects={projects}
-													onOpenTask={handleOpenTaskInProject}
-													onOpenStage={handleOpenOverviewStage}
-													onRequestCreateTask={handleOpenCreateTaskInCurrentScope}
+												<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+													host={crossProjectRecentlyActiveTaskSwitcherHost}
+													currentProjectTaskCards={
+														currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage
+													}
+													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 												/>
 											) : isGitHistoryOpen ? (
 												<GitHistoryView
@@ -1862,9 +2022,15 @@ export default function App(): ReactElement {
 										onCancel={cancelPendingCrossProjectTaskOpenReturningToOriginTask}
 									/>
 								</div>
+							) : taskLookupWorkbench.isOpen && (!selectedCardRenderedInFocusView || !detailSession) ? (
+								<div className="absolute inset-0 flex min-h-0 min-w-0">{taskLookupWorkbenchContent}</div>
 							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
+										taskLookupWorkbenchContent={taskLookupWorkbenchContent}
+										onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
+										mobileFocusViewControls={mobileFocusViewControls}
+										onBackToBoard={handleBackFromFocusView}
 										selection={selectedCardRenderedInFocusView}
 										currentProjectId={currentProjectId}
 										taskIdsOnBoard={taskIdsOnBoard}
@@ -1879,30 +2045,12 @@ export default function App(): ReactElement {
 										explorationThreadGraph={explorationThreadGraphData}
 										runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 										isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
-										onCreateByTheWayTaskConversationSession={async (input) => {
-											const effectiveAgentId =
-												detailSession.agentId ??
-												selectedCardRenderedInFocusView.card.agentId ??
-												runtimeProjectConfig?.selectedAgentId;
-											if (
-												!effectiveAgentId ||
-												!(["cline", "claude", "codex"] as const).includes(
-													effectiveAgentId as "cline" | "claude" | "codex",
-												)
-											) {
-												return {
-													ok: false,
-													message: effectiveAgentId
-														? `${effectiveAgentId} By the way sessions are not available.`
-														: "No supported agent is selected.",
-												};
-											}
-											return await createByTheWayTaskConversationSession({
+										onCreateTaskConversationSession={async (input) =>
+											await createTaskConversationSession({
 												task: selectedCardRenderedInFocusView.card,
-												agentId: effectiveAgentId,
 												...input,
-											});
-										}}
+											})
+										}
 										onSessionSummary={upsertSession}
 										onCardSelect={handleCardSelect}
 										onTaskDragEnd={handleDetailTaskDragEnd}
@@ -1920,6 +2068,7 @@ export default function App(): ReactElement {
 										onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
 										onMoveReviewCardToValidation={handleMoveCardToValidation}
 										onMoveCardToReview={handleMoveCardToReview}
+										moveToReviewLoadingById={moveToReviewLoadingById}
 										onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
 										onStartFreshTaskSessionWithOriginalPrompt={handleStartFreshTaskSessionWithOriginalPrompt}
 										onDeleteTask={handleOpenDeleteTask}
@@ -1966,7 +2115,6 @@ export default function App(): ReactElement {
 										isDocumentVisible={isDocumentVisible}
 										onClineSettingsSaved={refreshRuntimeProjectConfig}
 										onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
-										onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
 									/>
 								</div>
 							) : null}
@@ -2011,6 +2159,7 @@ export default function App(): ReactElement {
 						onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
 						images={editingTaskId ? editTaskImages : newTaskImages}
 						onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
+						onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
 						onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 						onCreateAndStart={
 							editingTaskId
@@ -2078,6 +2227,9 @@ export default function App(): ReactElement {
 						}
 						resolvedDefaultTaskCreateBaseRef={resolvedDefaultCreateTaskBranchRefForCreationTarget}
 						taskCreationTargetProjectField={taskCreationTargetProjectFieldOfTaskEditorDialog}
+						postDeployVerificationFollowUpTaskCreationDraftSeed={
+							postDeployVerificationFollowUpTaskCreationDraftSeed
+						}
 						worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
 						onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
 						agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
@@ -2144,6 +2296,10 @@ export default function App(): ReactElement {
 
 					<UpdateNotificationController />
 
+					<TaskCommentBeforeMoveIntoDoneDialog
+						controller={taskCommentBeforeMoveIntoDone}
+						onSubmit={confirmTaskCommentBeforeMoveIntoDone}
+					/>
 					<SkipValidationConfirmDialog
 						open={isMoveToDoneConfirmOpen}
 						onCancel={cancelMoveToDone}
@@ -2163,7 +2319,34 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 
-					<TaskSpotlightSearchDialog controller={taskSpotlightSearch} />
+					<TaskSpotlightSearchDialog
+						controller={taskSpotlightSearch}
+						onAskTaskLookupAgent={(questionText) => {
+							const filters = taskSpotlightSearch.filterSelection;
+							taskLookupWorkbench.open({
+								questionText,
+								scope: {
+									projectIds: filters.selectedProjectIds.size
+										? [...filters.selectedProjectIds]
+										: taskSpotlightSearch.includeOtherProjects
+											? []
+											: currentProjectId
+												? [currentProjectId]
+												: [],
+									columnIds: [...filters.selectedStageColumnIds],
+								},
+							});
+							taskSpotlightSearch.close();
+						}}
+					/>
+					{permanentlyDeletedTaskHistoryScope ? (
+						<PermanentlyDeletedTaskHistoryDialog
+							defaultWorkspaceId={permanentlyDeletedTaskHistoryScope.workspaceId}
+							currentProjectId={currentProjectId}
+							projects={projects}
+							onClose={() => setPermanentlyDeletedTaskHistoryScope(null)}
+						/>
+					) : null}
 
 					<StartAllReadyBacklogTasksConfirmDialog
 						tasks={pendingStartAllReadyBacklogTaskCards}
@@ -2199,25 +2382,50 @@ export default function App(): ReactElement {
 						</AlertDialogFooter>
 					</AlertDialog>
 
-					<PostDeployVerificationController
-						verification={postDeployVerification}
-						board={displayedBoard}
-						completePostDeployVerificationMoveToDone={completePostDeployVerificationMoveToDone}
-						onSelectTask={setSelectedTaskId}
-						onNavigateToBoard={() => setSelectedTaskId(null)}
-						realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
-							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
-						}
-						isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
-							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
-							isMoveToDoneConfirmOpen ||
-							deleteTaskTarget !== null ||
-							taskPinboardPinReasonRequest !== null ||
-							editingTaskId !== null
-						}
-					/>
+					{/* 面板该读的 board 还没到（快照未读到）时不挂，免得条目全显示「已从看板删除」；换绑 workspace 时重挂，
+					    丢掉上一个 workspace 的在途完成流程。 */}
+					{boardShownInPostDeployVerificationPanel ? (
+						<PostDeployVerificationController
+							key={
+								postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ??
+								"no-post-deploy-verification-workspace"
+							}
+							verification={postDeployVerification}
+							board={boardShownInPostDeployVerificationPanel}
+							completePostDeployVerificationMoveToDone={
+								completePostDeployVerificationMoveToDoneForPanelBoardSource
+							}
+							onSelectTask={onSelectTaskInPostDeployVerificationPanel}
+							onNavigateToBoard={() => setSelectedTaskId(null)}
+							onCreateFollowUpTaskFromChecklistItems={
+								handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems
+							}
+							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
+								realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
+							}
+							isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
+								taskCommentBeforeMoveIntoDone.request !== null ||
+								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
+								isMoveToDoneConfirmOpen ||
+								deleteTaskTarget !== null ||
+								taskPinboardPinReasonRequest !== null ||
+								editingTaskId !== null ||
+								isInlineTaskCreateOpen
+							}
+							postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
+								postDeployVerificationWorkspaceProjectNameShownInPanelHeader
+							}
+						/>
+					) : null}
 				</div>
 			</LayoutCustomizationsProvider>
 		</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+	);
+	return (
+		<ProjectVisualIdentityProvider projects={projects}>
+			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
+				{renderedApplicationView}
+			</TaskCommentsDialogProvider>
+		</ProjectVisualIdentityProvider>
 	);
 }

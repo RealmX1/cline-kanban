@@ -7,6 +7,17 @@ import {
 } from "../../src/core/task-title.js";
 
 describe("task title helpers", () => {
+	it("结构化任务正文继续从首个有内容的行生成兜底标题，显式标题保持优先", () => {
+		const prompt = [
+			'<task-initial-prompt schema-version="1">',
+			'  <task-original-user-request request-id="request-1" source-reference="synthetic:request-1">',
+			"先调查并提出方案，等批准后实施。",
+			"  </task-original-user-request>",
+			"</task-initial-prompt>",
+		].join("\n");
+		expect(deriveTaskTitleFromPrompt(prompt)).toBe("先调查并提出方案，等批准后实施。");
+		expect(resolveTaskTitle("[RESEARCH]调查登录问题", prompt)).toBe("[RESEARCH]调查登录问题");
+	});
 	it("derives a title from the first non-empty prompt line", () => {
 		expect(deriveTaskTitleFromPrompt("\n\nImplement editable task titles\nWith prompt details")).toBe(
 			"Implement editable task titles",

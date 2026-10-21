@@ -269,7 +269,9 @@ describe("pending user decision transcript salvage", () => {
 					type: "function_call",
 					name: "request_user_input",
 					call_id: "call-question",
-					arguments: JSON.stringify(CLAUDE_QUESTION),
+					arguments: JSON.stringify({
+						questions: CLAUDE_QUESTION.questions.map((question) => ({ ...question, id: "recovery" })),
+					}),
 				},
 			}),
 		]);
@@ -278,7 +280,7 @@ describe("pending user decision transcript salvage", () => {
 		expect(result?.sourceHarnessSignal).toBe("codex:request_user_input:transcript_salvage");
 	});
 
-	it("Codex 有 function_call_output 或之后有 user_message 时不补录", () => {
+	it("Codex 仅有失败结果或后续用户恢复消息时仍保留未答问题", () => {
 		const question = line({
 			timestamp: "2026-08-12T15:07:24.728Z",
 			type: "response_item",
@@ -286,7 +288,9 @@ describe("pending user decision transcript salvage", () => {
 				type: "function_call",
 				name: "request_user_input",
 				call_id: "call-question",
-				arguments: JSON.stringify(CLAUDE_QUESTION),
+				arguments: JSON.stringify({
+					questions: CLAUDE_QUESTION.questions.map((question) => ({ ...question, id: "recovery" })),
+				}),
 			},
 		});
 		expect(
@@ -297,12 +301,12 @@ describe("pending user decision transcript salvage", () => {
 					payload: { type: "function_call_output", call_id: "call-question", output: "selected" },
 				}),
 			]),
-		).toBeNull();
+		).not.toBeNull();
 		expect(
 			salvageLatestUnansweredCodexUserQuestionFromTranscriptLines([
 				question,
 				line({ type: "event_msg", payload: { type: "user_message", message: "continue" } }),
 			]),
-		).toBeNull();
+		).not.toBeNull();
 	});
 });

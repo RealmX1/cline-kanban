@@ -31,11 +31,57 @@ function card(workspaceId: string, taskId: string, incarnation = 1_000): KanbanB
 const PARENT = card("ws-a", "p0001");
 const CHILD = card("ws-b", "c0001", 2_000);
 
+it("侧会话分出复用建卡账本投影真实来源，不把内部固定种子投影成匿名来源", () => {
+	const ledger = new SyntheticLedger();
+	ledger.cardCreated(PARENT);
+	ledger.retainedFieldValueCanonicalJsonBySha256.set(
+		"side-origin",
+		JSON.stringify({
+			creationRequestId: "11111111-1111-4111-8111-111111111111",
+			sourceWorkspaceId: PARENT.workspaceId,
+			sourceTaskId: PARENT.taskId,
+			sourceTaskConversationSessionId: "peer",
+			sourceNativeSessionId: "original-native",
+			sourceContextCapturedAt: 1,
+			contextInheritance: "fork_source_conversation",
+			worktreeSource: "copy_source_git_working_state_immediately",
+			contextArtifactDirectory: "/persistent/source",
+			inheritedGitHeadCommit: "inherited-head",
+		}),
+	);
+	ledger.retainedFieldValueCanonicalJsonBySha256.set(
+		"internal-seed",
+		JSON.stringify({
+			sourceAgentId: "codex",
+			sourceSessionId: "immutable-seed",
+			sourceSessionReuseMode: "fork_existing_session",
+		}),
+	);
+	ledger.cardCreated(CHILD, undefined, {
+		fieldValueSha256ByFieldNameAtCreation: {
+			independentTaskCreationProvenance: "side-origin",
+			taskAgentSessionInitialization: "internal-seed",
+		},
+	});
+	ledger.identityObserved(CHILD, "codex", "new-task-native");
+	const relations = listRecordedInterWorkUnitRelationsTouchingWorkUnit(ledger.project(), CHILD);
+	expect(relations).toHaveLength(1);
+	expect(relations[0]).toMatchObject({
+		relationKind: "provenance_split_from_side_conversation_of",
+		relationStatementAnchorWorkUnitRef: PARENT,
+		isCreationTimePrimaryProvenanceOfSubjectCard: true,
+		recordedRelationKindSpecificAttributes: {
+			sourceTaskConversationSessionId: "peer",
+			inheritedGitHeadCommit: "inherited-head",
+		},
+	});
+});
+
 // 照真实写入端（buildAgentConversationSessionNativeIdentityEventDraft）：subjectTaskId = kanban 会话 id，
 // 所属卡在 taskConversationSessionMetadata.workspaceTaskId。主会话的 kanban 会话 id 等于卡 id。
 interface KanbanTaskConversationSessionWithNativeIdentity {
 	kanbanTaskConversationSessionId?: string;
-	taskConversationSessionRole?: "main" | "by_the_way";
+	taskConversationSessionRole?: "main" | "by_the_way" | "task_collaborator";
 	agentId: string;
 	nativeId: string;
 	sidecarObservedAt: number;
@@ -934,64 +980,69 @@ describe("recorded inter-work-unit relation projection over live-capture-activat
 		expect(summarize(rebuiltState, adoptingCard)).toEqual(summarize(ledger.project(), adoptingCard));
 	});
 
-	it("attributes live and activation-seeded by-the-way session identities to the owning card and anchors later forks of them onto that card", () => {
-		const byTheWaySessionOwningCard = card("ws-a", "k0001", 1_500);
-		const forkingCard = card("ws-a", "f0009", 9_000);
-		const ledger = new SyntheticLedger();
-		ledger.liveCaptureActivationBatch("ws-a", [
-			{
-				card: byTheWaySessionOwningCard,
-				boardColumnId: "in_progress",
-				sessions: [
-					{ agentId: "claude", nativeId: "native-k-main", sidecarObservedAt: 40 },
-					{
-						kanbanTaskConversationSessionId: "btw-seeded-1",
-						taskConversationSessionRole: "by_the_way",
-						agentId: "claude",
-						nativeId: "native-btw-seeded",
-						sidecarObservedAt: 45,
-					},
-				],
-			},
-		]);
-		ledger.liveConversationSessionIdentityObserved(byTheWaySessionOwningCard, {
-			kanbanTaskConversationSessionId: "btw-live-2",
-			taskConversationSessionRole: "by_the_way",
-			agentId: "claude",
-			nativeId: "native-btw-live",
-			sidecarObservedAt: 60,
-		});
-		ledger.retainedFieldValueCanonicalJsonBySha256.set(
-			"init-fork-of-by-the-way-session",
-			JSON.stringify({
-				sourceAgentId: "claude",
-				sourceSessionId: "native-btw-live",
-				sourceSessionReuseMode: "fork_existing_session",
-			}),
-		);
-		ledger.cardCreated(forkingCard, undefined, {
-			fieldValueSha256ByFieldNameAtCreation: { taskAgentSessionInitialization: "init-fork-of-by-the-way-session" },
-		});
-		ledger.liveConversationSessionIdentityObserved(forkingCard, {
-			agentId: "claude",
-			nativeId: "native-f",
-			sidecarObservedAt: 70,
-		});
-		const state = ledger.project();
-		expect(
-			summarizeOwnershipPeriods(state, byTheWaySessionOwningCard).map((period) => [
-				period.nativeId,
-				period.observedInKanbanTaskConversationSessionIds,
-			]),
-		).toEqual([
-			["native-k-main", ["k0001"]],
-			["native-btw-seeded", ["btw-seeded-1"]],
-			["native-btw-live", ["btw-live-2"]],
-		]);
-		expect(summarizeRelationKindSubjectAnchor(state, forkingCard)).toEqual([
-			["provenance_forked_conversation_session_of", "f0009", "k0001"],
-		]);
-	});
+	it.each(["by_the_way", "task_collaborator"] as const)(
+		"%s 原生身份归属宿主卡片，后续 fork 关系不冒充主会话",
+		(role) => {
+			const byTheWaySessionOwningCard = card("ws-a", "k0001", 1_500);
+			const forkingCard = card("ws-a", "f0009", 9_000);
+			const ledger = new SyntheticLedger();
+			ledger.liveCaptureActivationBatch("ws-a", [
+				{
+					card: byTheWaySessionOwningCard,
+					boardColumnId: "in_progress",
+					sessions: [
+						{ agentId: "claude", nativeId: "native-k-main", sidecarObservedAt: 40 },
+						{
+							kanbanTaskConversationSessionId: "btw-seeded-1",
+							taskConversationSessionRole: role,
+							agentId: "claude",
+							nativeId: "native-btw-seeded",
+							sidecarObservedAt: 45,
+						},
+					],
+				},
+			]);
+			ledger.liveConversationSessionIdentityObserved(byTheWaySessionOwningCard, {
+				kanbanTaskConversationSessionId: "btw-live-2",
+				taskConversationSessionRole: role,
+				agentId: "claude",
+				nativeId: "native-btw-live",
+				sidecarObservedAt: 60,
+			});
+			ledger.retainedFieldValueCanonicalJsonBySha256.set(
+				"init-fork-of-by-the-way-session",
+				JSON.stringify({
+					sourceAgentId: "claude",
+					sourceSessionId: "native-btw-live",
+					sourceSessionReuseMode: "fork_existing_session",
+				}),
+			);
+			ledger.cardCreated(forkingCard, undefined, {
+				fieldValueSha256ByFieldNameAtCreation: {
+					taskAgentSessionInitialization: "init-fork-of-by-the-way-session",
+				},
+			});
+			ledger.liveConversationSessionIdentityObserved(forkingCard, {
+				agentId: "claude",
+				nativeId: "native-f",
+				sidecarObservedAt: 70,
+			});
+			const state = ledger.project();
+			expect(
+				summarizeOwnershipPeriods(state, byTheWaySessionOwningCard).map((period) => [
+					period.nativeId,
+					period.observedInKanbanTaskConversationSessionIds,
+				]),
+			).toEqual([
+				["native-k-main", ["k0001"]],
+				["native-btw-seeded", ["btw-seeded-1"]],
+				["native-btw-live", ["btw-live-2"]],
+			]);
+			expect(summarizeRelationKindSubjectAnchor(state, forkingCard)).toEqual([
+				["provenance_forked_conversation_session_of", "f0009", "k0001"],
+			]);
+		},
+	);
 
 	it("does not treat a by-the-way session start as the start of the card's main session awaited by its fork initialization", () => {
 		const awaitingCard = card("ws-a", "w0001", 1_600);
@@ -1036,7 +1087,7 @@ describe("recorded inter-work-unit relation projection over live-capture-activat
 	});
 });
 
-// 最小 fake：只实现持有器追赶用到的两个读能力，并数 listCommittedEvents 的调用次数（验证单飞）。
+// 最小 fake：实现持有器需要的只读能力，并数 listCommittedEvents 的调用次数（验证单飞）。
 function createInMemoryLedgerReadCapabilitiesOverSyntheticLedger(ledger: SyntheticLedger): {
 	ledgerReadCapabilities: InterWorkUnitRelationLedgerReadCapabilitiesUsedByRecordedRelationProjectionCatchUp;
 	countListCommittedEventsCalls: () => number;
@@ -1055,6 +1106,7 @@ function createInMemoryLedgerReadCapabilitiesOverSyntheticLedger(ledger: Synthet
 					const fieldValueCanonicalJson = ledger.retainedFieldValueCanonicalJsonBySha256.get(fieldValueSha256);
 					return fieldValueCanonicalJson === undefined ? [] : [{ fieldValueSha256, fieldValueCanonicalJson }];
 				}),
+			findRetainedTaskCardFieldKeywordMatches: async () => [],
 		},
 		countListCommittedEventsCalls: () => listCommittedEventsCallCount,
 	};
@@ -1107,5 +1159,9 @@ describe("recorded inter-work-unit relation projection kept caught up with ledge
 });
 
 function readerOf(state: RecordedInterWorkUnitRelationProjectionState): RecordedInterWorkUnitRelationProjectionReader {
-	return { projectionState: state, readRetainedTaskCardFieldValuesBySha256: async () => new Map() };
+	return {
+		projectionState: state,
+		readRetainedTaskCardFieldValuesBySha256: async () => new Map(),
+		findRetainedTaskCardFieldKeywordMatchesBySha256: async () => new Map(),
+	};
 }

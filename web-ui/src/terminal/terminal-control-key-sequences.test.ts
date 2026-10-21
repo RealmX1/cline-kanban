@@ -13,7 +13,7 @@ describe("terminal control key sequences", () => {
 		const sequencesById = Object.fromEntries(
 			Object.entries(TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID).map(([keyId, definition]) => [
 				keyId,
-				definition.sequence,
+				definition.inputSequences.join(""),
 			]),
 		);
 
@@ -33,7 +33,7 @@ describe("terminal control key sequences", () => {
 	it("uses CSI cursor keys rather than the application-cursor-key form", () => {
 		// ESC O A 只在终端开启 DECCKM 时有效，而 xterm 不暴露该模式状态。见模块头注释。
 		for (const keyId of ["arrow_up", "arrow_down", "arrow_left", "arrow_right"] as const) {
-			expect(TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId].sequence.startsWith("\u001b[")).toBe(true);
+			expect(TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[keyId].inputSequences[0]?.startsWith("\u001b[")).toBe(true);
 		}
 	});
 

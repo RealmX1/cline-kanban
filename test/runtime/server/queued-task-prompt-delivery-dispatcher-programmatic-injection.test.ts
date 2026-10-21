@@ -20,11 +20,22 @@ import type {
 	RuntimeTaskChatSendResponse,
 	RuntimeTaskSessionSummary,
 } from "../../../src/core/api-contract";
+import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 
-const testRuntimeHome = { path: "" };
+const testRuntimeHome = { path: "", mainTaskConversationSessionId: "" };
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
+	loadWorkspaceBoardById: async () => ({
+		columns: [
+			{
+				cards: testRuntimeHome.mainTaskConversationSessionId
+					? [{ id: TASK_ID, mainTaskConversationSessionId: testRuntimeHome.mainTaskConversationSessionId }]
+					: [],
+			},
+		],
+	}),
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));
@@ -101,19 +112,35 @@ const acceptedPendingPtyConfirmation: SendBehavior = () => ({
 	terminalDelivery: { status: "accepted_pending_submit_confirmation", reason: null },
 });
 
-function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
+function createHarness(
+	options: {
+		sendBehavior?: SendBehavior;
+		readNativeConversationTurns?: () => Promise<CodexNativeConversationTurn[]>;
+	} = {},
+) {
 	let currentSummary: RuntimeTaskSessionSummary | null = null;
 	// 入队与出队共用一只可推进的时钟：截止时刻相关的断言不依赖真实时间流逝。
 	let injectedClockOffsetMs = 0;
 	const readInjectedClockNowEpochMs = () => Date.now() + injectedClockOffsetMs;
 	const sendBehavior = options.sendBehavior ?? deliveredImmediately;
-	const sends: { request: RuntimeTaskChatSendRequest; settlePtyDelivery: TaskChatInputDeliveryOutcomeObserver }[] = [];
+	const sends: {
+		request: RuntimeTaskChatSendRequest;
+		settlePtyDelivery: TaskChatInputDeliveryOutcomeObserver;
+		validateBeforeTerminalWrite?: () => Promise<void>;
+	}[] = [];
 	const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
-		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === TASK_ID ? currentSummary : null),
+		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === currentSummary?.taskId ? currentSummary : null),
+		readNativeConversationTurns: options.readNativeConversationTurns,
 		hasPendingProgrammaticTaskChatInputDelivery: () => false,
 		resolveWorkspaceScope: (workspaceId) => ({ workspaceId, workspacePath: "/repo" }),
-		sendThroughTaskChatTransports: async (_scope, request, onProgrammaticTerminalDeliverySettled) => {
-			sends.push({ request, settlePtyDelivery: onProgrammaticTerminalDeliverySettled });
+		sendThroughTaskChatTransports: async (
+			_scope,
+			request,
+			onProgrammaticTerminalDeliverySettled,
+			_ledgerTaskId,
+			validateBeforeTerminalWrite,
+		) => {
+			sends.push({ request, settlePtyDelivery: onProgrammaticTerminalDeliverySettled, validateBeforeTerminalWrite });
 			return sendBehavior(request);
 		},
 		cancelProgrammaticTerminalDelivery: async () => "cancelled_before_delivery",
@@ -140,17 +167,28 @@ function createHarness(options: { sendBehavior?: SendBehavior } = {}) {
 			dispatcher.observeTaskSessionSummary(WORKSPACE_ID, summary);
 		},
 		// awaitDispatcherIdle=false：PTY 分支的出队尝试会一直等回执，先等它空闲就成了自己等自己。
-		async enqueueProgrammatic(maxWaitForAgentIdleMs = 10 * 60 * 1000, awaitDispatcherIdle = true) {
+		async enqueueProgrammatic(
+			maxWaitForAgentIdleMs = 10 * 60 * 1000,
+			awaitDispatcherIdle = true,
+			idempotencyKey = KEY,
+			requiredNativeIndependentUserTurnSessionId?: string,
+			text = "RVF 决策点边界标记",
+		) {
 			const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-				{ notifyQueueMutated: dispatcher.notifyQueueMutated, now: readInjectedClockNowEpochMs },
+				{
+					notifyQueueMutated: dispatcher.notifyQueueMutated,
+					now: readInjectedClockNowEpochMs,
+					getTaskSessionSummary: () => currentSummary,
+				},
 				WORKSPACE_ID,
 				{
 					taskId: TASK_ID,
-					text: "RVF 决策点边界标记",
+					text,
 					source: "rvf-out-of-band-decision-point",
-					idempotencyKey: KEY,
+					idempotencyKey,
 					promptSha256: "sha-1",
 					maxWaitForAgentIdleMs,
+					requiredNativeIndependentUserTurnSessionId,
 				},
 			);
 			expect(response.ok).toBe(true);
@@ -190,6 +228,7 @@ async function readStates() {
 let harnessToStop: ReturnType<typeof createHarness> | null = null;
 
 beforeEach(async () => {
+	testRuntimeHome.mainTaskConversationSessionId = "";
 	testRuntimeHome.path = await mkdtemp(join(tmpdir(), "kanban-queued-programmatic-dispatch-"));
 	await mkdir(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID), { recursive: true });
 });
@@ -333,4 +372,298 @@ describe("出队引擎 × 程序化排队投递", () => {
 		await subject.dispatcher.whenIdle();
 		expect(subject.sends.map((send) => send.request.text)).toEqual(["人排的下一步", "RVF 决策点边界标记"]);
 	});
+});
+
+it("交接前队列固定原 session；新消息固定新主会话，等待用户期间暂停，回执仍记宿主 Task", async () => {
+	const harness = createHarness();
+	harnessToStop = harness;
+	harness.observe(generatingSummary(1));
+	await harness.enqueueProgrammatic();
+	testRuntimeHome.mainTaskConversationSessionId = "promoted-codex";
+	const promoted = stoppedSummary(2, {
+		taskId: "promoted-codex",
+		agentId: "codex",
+		taskConversationSessionMetadata: {
+			workspaceTaskId: TASK_ID,
+			taskConversationSessionRole: "main",
+			taskConversationSessionContextSource: "started_from_scratch",
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: null,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: null,
+			taskAutomationSuspendedForMainSessionHandover: true,
+		},
+	});
+	harness.observe(promoted);
+	await harness.enqueueProgrammatic(10 * 60 * 1000, true, "new-main-message");
+	const queued = await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID);
+	expect(queued.entriesByTaskId[TASK_ID][0].deliveryState).toBe("queued");
+	expect(
+		queued.entriesByTaskId["promoted-codex"][0].programmaticInjectionLedgerReceiptLink?.injectionLedgerTaskId,
+	).toBe(TASK_ID);
+	expect(harness.sends).toHaveLength(0);
+	harness.observe({
+		...promoted,
+		taskConversationSessionMetadata: {
+			...(promoted.taskConversationSessionMetadata as NonNullable<
+				RuntimeTaskSessionSummary["taskConversationSessionMetadata"]
+			>),
+			taskAutomationSuspendedForMainSessionHandover: false,
+		},
+	});
+	harness.dispatcher.requestDispatchAttempt(WORKSPACE_ID, "promoted-codex");
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends[0].request.taskId).toBe("promoted-codex");
+	const records = await readTaskMessageInjectionLedger(
+		getTaskMessageInjectionLedgerPath(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID)),
+	);
+	expect(findTaskMessageInjectionRecord(records, TASK_ID, "new-main-message")?.terminal_delivery_status).toBe(
+		"delivered_and_submit_confirmed",
+	);
+	expect(
+		(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID][0].deliveryState,
+	).toBe("queued");
+});
+it("summary 已空闲但原生仍 inProgress 时不认领；完成后才交出，截止不延长", async () => {
+	let nativeCompleted = false;
+	const readNative = vi.fn(async () => [
+		{ id: "implementation-turn", status: nativeCompleted ? "completed" : "inProgress", items: [] },
+	]);
+	const harness = createHarness({ readNativeConversationTurns: readNative });
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				observedAt: NOW,
+				transcriptPath: "/isolated/transcript",
+			},
+		}),
+	);
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	const before = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0];
+	expect(before).toMatchObject({
+		deliveryState: "queued",
+		deliveryAttemptCount: 0,
+		requiredNativeIndependentUserTurnSessionId: "native",
+		requiredNativeIndependentUserTurnSessionIncarnationId: "incarnation-1",
+	});
+	expect(harness.sends).toHaveLength(0);
+	nativeCompleted = true;
+	harness.dispatcher.requestDispatchAttempt(WORKSPACE_ID, TASK_ID);
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends).toHaveLength(1);
+	const after = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0];
+	expect(after?.expiresAt).toBe(before?.expiresAt);
+	harness.dispatcher.stop();
+});
+
+it("当前 TUI 缺少控制能力时明确失败，绝不退回普通投递", async () => {
+	const harness = createHarness({
+		readNativeConversationTurns: async () => {
+			throw new NativeIndependentUserTurnDeliveryError(
+				"native_independent_user_turn_capability_unavailable",
+				"测试缺少当前控制面",
+			);
+		},
+	});
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				observedAt: NOW,
+				transcriptPath: "/isolated/transcript",
+			},
+		}),
+	);
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	expect(harness.sends).toHaveLength(0);
+	expect(await readLedgerRecord()).toMatchObject({
+		terminal_delivery_status: "delivery_failed",
+		terminal_delivery_failure_reason: "native_independent_user_turn_capability_unavailable",
+	});
+	harness.dispatcher.stop();
+});
+
+it("原生查询期间取消后不认领，不消耗投递次数", async () => {
+	let release!: () => void;
+	let started!: () => void;
+	const waiting = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const begun = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	const harness = createHarness({
+		readNativeConversationTurns: async () => {
+			started();
+			await waiting;
+			return [{ id: "predecessor", status: "completed", items: [] }];
+		},
+	});
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				observedAt: NOW,
+				transcriptPath: "/isolated/transcript",
+			},
+		}),
+	);
+	await harness.enqueueProgrammatic(60_000, false, KEY, "native");
+	await begun;
+	const entry = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0];
+	if (!entry) throw new Error("缺少隔离测试条目");
+	await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, {
+		kind: "cancel_queued_prompt_delivery",
+		taskId: TASK_ID,
+		queueEntryId: entry.queueEntryId,
+	});
+	release();
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends).toHaveLength(0);
+	expect(
+		(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0],
+	).toMatchObject({ deliveryState: "cancelled", deliveryAttemptCount: 0 });
+	harness.dispatcher.stop();
+});
+
+it("锁外普通队首被取消后，不会以旧核验认领后继的严格原生消息", async () => {
+	const readNative = vi.fn(async () => [{ id: "implementation", status: "inProgress", items: [] }]);
+	const harness = createHarness({ readNativeConversationTurns: readNative });
+	const nativeIdentity = {
+		sourceAgentId: "codex",
+		nativeSessionId: "native",
+		observedAt: NOW,
+		transcriptPath: "/isolated/transcript",
+	};
+	harness.observe({
+		...generatingSummary(1),
+		agentId: "codex",
+		agentNativeConversationSessionIdentity: nativeIdentity,
+	});
+	await harness.enqueueHuman("ordinary-head", "普通队首");
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, {
+		kind: "cancel_queued_prompt_delivery",
+		taskId: TASK_ID,
+		queueEntryId: "ordinary-head",
+	});
+	harness.observe(stoppedSummary(1, { agentId: "codex", agentNativeConversationSessionIdentity: nativeIdentity }));
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends).toHaveLength(0);
+	expect(readNative).toHaveBeenCalled();
+	const strict = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.find(
+		(entry) => entry.requiredNativeIndependentUserTurnSessionId,
+	);
+	expect(strict).toMatchObject({ deliveryState: "queued", deliveryAttemptCount: 0 });
+	harness.dispatcher.stop();
+});
+
+it("pending严格消息遇同native会话新incarnation时失败，保留首次绑定不重排", async () => {
+	const harness = createHarness();
+	const nativeIdentity = {
+		sourceAgentId: "codex",
+		nativeSessionId: "native",
+		observedAt: NOW,
+		transcriptPath: "/isolated/transcript",
+	};
+	harness.observe({
+		...generatingSummary(1),
+		agentId: "codex",
+		agentNativeConversationSessionIdentity: nativeIdentity,
+	});
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			runtimeSessionIncarnationId: "replacement-incarnation",
+			agentNativeConversationSessionIdentity: nativeIdentity,
+		}),
+	);
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends).toHaveLength(0);
+	expect(await readLedgerRecord()).toMatchObject({
+		terminal_delivery_status: "delivery_failed",
+		terminal_delivery_failure_reason: "native_independent_user_turn_session_replaced",
+		required_native_independent_user_turn_session_incarnation_id: "incarnation-1",
+	});
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	expect((await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]).toHaveLength(1);
+	expect(harness.sends).toHaveLength(0);
+	harness.dispatcher.stop();
+});
+
+it("没有summary新边沿也轮询原生完成；停止后清理轮询", async () => {
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+	let completed = false;
+	const readNative = vi.fn(async () => [
+		{ id: "implementation", status: completed ? "completed" : "inProgress", items: [] },
+	]);
+	const harness = createHarness({ readNativeConversationTurns: readNative });
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				observedAt: NOW,
+				transcriptPath: "/isolated/transcript",
+			},
+		}),
+	);
+	await harness.enqueueProgrammatic(60_000, true, KEY, "native");
+	expect(harness.sends).toHaveLength(0);
+	completed = true;
+	await harness.advanceInjectedClockAndFakeTimersTogetherBy(550);
+	await harness.dispatcher.whenIdle();
+	expect(harness.sends).toHaveLength(1);
+	harness.dispatcher.stop();
+	const calls = readNative.mock.calls.length;
+	await harness.advanceInjectedClockAndFakeTimersTogetherBy(1000);
+	expect(readNative).toHaveBeenCalledTimes(calls);
+});
+
+it("文件尾换行与首尾空白的投递，用实际发送正文识别已摄入消息", async () => {
+	let turns: CodexNativeConversationTurn[] = [{ id: "implementation", status: "completed", items: [] }];
+	const harness = createHarness({
+		sendBehavior: acceptedPendingPtyConfirmation,
+		readNativeConversationTurns: async () => turns,
+	});
+	harness.observe(
+		stoppedSummary(1, {
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				observedAt: NOW,
+				transcriptPath: "/isolated/transcript",
+			},
+		}),
+	);
+	await harness.enqueueProgrammatic(60_000, false, KEY, "native", "  \n边界正文\n  ");
+	await vi.waitFor(() => expect(harness.sends).toHaveLength(1));
+	const sent = harness.sends[0];
+	expect(sent.request.text).toBe("边界正文");
+	turns = [
+		...turns,
+		{
+			id: "boundary",
+			status: "inProgress",
+			items: [
+				{ id: "native-message", type: "userMessage", content: [{ type: "input_text", text: sent.request.text }] },
+			],
+		},
+	];
+	await expect(sent.validateBeforeTerminalWrite?.()).rejects.toMatchObject({
+		message: "本条消息已进入后继原生回合，停止补发回车。",
+	});
+	sent.settlePtyDelivery({ status: "delivered_and_submit_confirmed", reason: null });
+	await harness.dispatcher.whenIdle();
+	harness.dispatcher.stop();
 });

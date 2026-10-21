@@ -17,6 +17,14 @@ export enum LocalStorageKey {
 	DetailDiffFileTreePanelRatio = "kanban.detail-diff-file-tree-panel-ratio",
 	DetailExpandedDiffFileTreePanelRatio = "kanban.detail-expanded-diff-file-tree-panel-ratio",
 	DetailRightPromptPanelRatio = "kanban.detail-right-prompt-panel-ratio",
+	FocusViewDesktopPanelArrangementPreference = "kanban.focus-view-desktop-panel-arrangement-preference.v1",
+	FocusViewStackedAgentPanelHeightRatio = "kanban.focus-view-stacked-agent-panel-height-ratio.v1",
+	TaskWorkbenchModuleSlots = "kanban.task-workbench-module-slots.v1",
+	TaskLookupWorkbenchModuleSlots = "kanban.task-lookup-workbench-module-slots.v1",
+	TaskLookupConversationSelection = "kanban.task-lookup-conversation-selection.v1",
+	TaskLookupAgentPanelRatio = "kanban.task-lookup-agent-panel-ratio.v1",
+	TaskLookupWorkbenchSlotRatio = "kanban.task-lookup-workbench-slot-ratio.v1",
+	TaskWorkbenchSideBySideSlotWidthRatio = "kanban.task-workbench-side-by-side-slot-width-ratio.v1",
 	// Prompt Library 的真相源已搬到服务端（~/.cline/kanban[/workspaces/<id>]/prompt-library.json）。
 	// 下面三个键只剩「升级前留下的历史数据」这一个用途，由 prompt-library-migration-from-browser-local-storage.ts
 	// 合并上去；合并按「桶 + 正文」去重且幂等，所以刻意**不删**它们——留着既是回退备份也不会造成重复。
@@ -64,8 +72,8 @@ export enum LocalStorageKey {
 	// state/kanban-board-column-collapse-and-width-preferences.ts。
 	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
 	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
-	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-stage-first-overview.md）vs 单个项目。
-	// 看板页据此在 Board Overview 与看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
+	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-board-scope-all-projects-and-single-project-scope.md）vs 单个项目。
+	// 看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
 	// localStorage 里这份只是新开标签页的默认值；每个标签页的实际范围存在 sessionStorage 同名键里
 	// （见 use-selected-board-or-single-project-scope）。便利项，丢了回落到单项目。
 	SelectedBoardOrSingleProjectScope = "kanban.selected-board-or-single-project-scope.v1",
@@ -87,6 +95,13 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.DetailDiffFileTreePanelRatio,
 	LocalStorageKey.DetailExpandedDiffFileTreePanelRatio,
 	LocalStorageKey.DetailRightPromptPanelRatio,
+	LocalStorageKey.FocusViewDesktopPanelArrangementPreference,
+	LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
+	LocalStorageKey.TaskWorkbenchModuleSlots,
+	LocalStorageKey.TaskLookupWorkbenchModuleSlots,
+	LocalStorageKey.TaskLookupAgentPanelRatio,
+	LocalStorageKey.TaskLookupWorkbenchSlotRatio,
+	LocalStorageKey.TaskWorkbenchSideBySideSlotWidthRatio,
 	LocalStorageKey.ProjectNavigationPanelWidth,
 	LocalStorageKey.ProjectNavigationPanelCollapsed,
 	LocalStorageKey.GitHistoryRefsPanelWidth,

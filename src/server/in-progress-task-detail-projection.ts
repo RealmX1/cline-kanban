@@ -14,8 +14,9 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 
-// 跨项目视图（Board Overview 的 in_progress 明细、跨项目切换面板的条目）需要的**会话事实最小子集**。
+// 跨项目视图（in_progress 明细、跨项目切换面板的条目）需要的**会话事实最小子集**。
 //
 // 为什么不直接传整条 summary：未加载项目的会话只能读 sessions.json，本机 28 个项目合计约 31 MB（单个最大
 // 2.8 MB），每 150ms 一次的 projects_updated 广播不可能每次重新解析；workspace-registry 按文件 mtime 缓存，
@@ -26,15 +27,35 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	lastSubstantiveOutputAt: number | null;
 	agentResponseGenerationStopped: RuntimeAgentResponseGenerationStopped | null;
 	lastConversationProgressObservation: RuntimeLastConversationProgressObservation | null;
-	// 概览 Active 组与切换面板 Running 区的排序键（本轮 agent 回合的开始时刻）。
+	// 切换面板 Running 区的排序键（本轮 agent 回合的开始时刻）。
 	agentResponseGenerationTurnStarted: RuntimeAgentResponseGenerationTurnStarted | null;
-	// 只有跨项目切换面板的 Cache warm 估算要读这两个（Board Overview 明细不投影它们）。
+	// 只有跨项目切换面板的 Cache warm 估算要读这两个（in_progress 明细不投影它们）。
 	lastMainAgentConversationModelRequestDispatchObservation: RuntimeLastMainAgentConversationModelRequestDispatchObservation | null;
 	agentProcessStartedAt: number | null;
 	turnOwner: RuntimeTaskSessionTurnOwner;
 	liveness: RuntimeTaskSessionLiveness;
 	userTurnKind: RuntimeTaskSessionUserTurnKind;
 	isParkedAwaitingDispatchedBackgroundWork: boolean;
+}
+
+/**
+ * 跨项目视图里 lastOutputAt 的取整粒度。这些视图只拿它判断「是否在 5 分钟活跃窗口内」
+ * （RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS），15 秒的误差无关紧要；而原值随每个非空 PTY chunk 刷新（含 spinner 重绘），
+ * 让整份约 115 KB 的 projects_updated 几乎每次构建都不同、按内容去重失效。按墙钟整桶向下取整后，同一桶内的输出
+ * 不再改变 payload。只取整这一个字段：lastSubstantiveOutputAt 与 lastConversationProgressObservation 是真实进展，
+ * 原样保留。
+ */
+// EXPERIMENT_NODE: 跨项目视图 lastOutputAt 的取整粒度（15 秒）
+export const LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS = 15_000;
+
+function roundLastOutputAtDownForCrossProjectTaskViews(lastOutputAt: number | null): number | null {
+	if (lastOutputAt === null) {
+		return null;
+	}
+	return (
+		Math.floor(lastOutputAt / LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS) *
+		LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS
+	);
 }
 
 // facet 经真相源 resolveSessionFacets 解析，绝不读 summary.state。
@@ -44,7 +65,7 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 	const facets = resolveSessionFacets(summary);
 	return {
 		agentId: summary.agentId,
-		lastOutputAt: summary.lastOutputAt,
+		lastOutputAt: roundLastOutputAtDownForCrossProjectTaskViews(summary.lastOutputAt),
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
 		agentResponseGenerationStopped: summary.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: summary.lastConversationProgressObservation ?? null,
@@ -69,7 +90,7 @@ export function extractTaskSessionFactsByTaskIdForCrossProjectTaskViews(
 	return factsByTaskId;
 }
 
-// 单张卡的活动明细。Board Overview 的 in_progress 明细与跨项目切换面板的条目都从这里出（后者是前者的超集），
+// 单张卡的活动明细。in_progress 明细与跨项目切换面板的条目都从这里出（后者是前者的超集），
 // 是同一份代码而不是两份实现。agentId 优先取运行时 session、回退卡片声明；无 session 的卡回退
 // turnOwner=null / liveness=none。
 export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
@@ -83,7 +104,7 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 		createdAt: card.createdAt,
 		lastOutputAt: sessionFacts?.lastOutputAt ?? null,
 		lastSubstantiveOutputAt: sessionFacts?.lastSubstantiveOutputAt ?? null,
-		// 概览行与主看板卡片头部显示同样的两颗时长药丸，故两个量都要投影过来。
+		// 切换面板的行与主看板卡片头部显示同样的两颗时长药丸，故两个量都要投影过来。
 		// 只投影、不在此合并或推断——合并是 mergeSummaryWithFacets 里那个唯一 reducer 的事。
 		agentResponseGenerationStopped: sessionFacts?.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: sessionFacts?.lastConversationProgressObservation ?? null,
@@ -93,10 +114,9 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 	};
 }
 
-// 把 board `in_progress` 列的全部 task 投影为 Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md）
-// 所需的精简明细。按「列归属」判定成员——in_progress 列有几张卡就出几条，awaiting_review / interrupted
-// 的卡也一并保留（**不**套用主看板的 live-session overlay，见 ADR-0001）；前端据 turnOwner + lastOutputAt
-// 把它们二分为 Active / Stale。
+// 把 board `in_progress` 列的全部 task 投影为精简明细（现供顶栏项目切换器数 live agent）。按「列归属」判定成员——
+// in_progress 列有几张卡就出几条，awaiting_review / interrupted 的卡也一并保留（**不**套用主看板的 live-session
+// overlay）。原消费者 Stage-First Overview 已退役（ADR-0001，已 Superseded）。
 //
 // 纯函数：无 I/O、无闭包状态，可独立单测（见 in-progress-task-detail-projection.test.ts）。
 export function collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts(
@@ -108,7 +128,10 @@ export function collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts(
 		return [];
 	}
 	return inProgressColumn.cards.map((card) =>
-		buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(card, sessionFactsByTaskId.get(card.id)),
+		buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
+			card,
+			sessionFactsByTaskId.get(resolveMainTaskConversationSessionId(card)),
+		),
 	);
 }
 

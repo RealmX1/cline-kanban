@@ -9,14 +9,25 @@ import { afterEach, expect, it } from "vitest";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { runPostDeployVerificationFollowUpTaskRealBrowserCheck } from "./post-deploy-verification-follow-up-task-real-browser-check";
+import { runReferenceRelationModelingRealBrowserCheck } from "./reference-relation-modeling-real-browser-check";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	hasChildProcessExited,
 	waitForChildProcessExit,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
+import { runTaskRetainedCommittedLineChangeRealBrowserCheck } from "./task-retained-committed-line-change-real-browser-check";
 
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
-const runRealBrowserCheck = process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
+const runRelationModelingBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_REFERENCE_RELATION_MODELING_BROWSER_CHECK === "1";
+const runPostDeployVerificationFollowUpBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
+const runRealBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
+	runRelationModelingBrowserCheck ||
+	runPostDeployVerificationFollowUpBrowserCheck ||
+	process.env.KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK === "1";
 const spawnedChildProcessRegistry = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => spawnedChildProcessRegistry.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
@@ -55,7 +66,9 @@ it.skipIf(!runRealBrowserCheck)(
 		expect(runtimePort).not.toBe(3484);
 		expect(webUiPort).not.toBe(3484);
 		const runtimeOrigin = `http://127.0.0.1:${runtimePort}`;
-		const webUiOrigin = `http://127.0.0.1:${webUiPort}`;
+		const usePackagedRuntimeAndWebUi =
+			process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK_WITH_PACKAGED_RUNTIME === "1";
+		const webUiOrigin = usePackagedRuntimeAndWebUi ? runtimeOrigin : `http://127.0.0.1:${webUiPort}`;
 		const isolatedExecutableDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-stub-executables");
 		mkdirSync(isolatedExecutableDirectory);
 		const agentLaunchEvidencePath = join(fixture.fixtureRootDirectoryPath, "isolated-agent-launch-evidence.jsonl");
@@ -89,7 +102,7 @@ setInterval(() => {}, 1000);
 			join(sourceCheckoutPath, "test/integration/shutdown-ipc-hook.cjs"),
 			"--import",
 			requireFromSourceCheckout.resolve("tsx"),
-			join(sourceCheckoutPath, "src/cli.ts"),
+			join(sourceCheckoutPath, usePackagedRuntimeAndWebUi ? "dist/cli.js" : "src/cli.ts"),
 		];
 		const processEvidence: Array<{ pid: number; role: string; child: ChildProcess }> = [];
 		function startOwnedProcess(role: string, executable: string, arguments_: string[], cwd: string) {
@@ -134,7 +147,7 @@ setInterval(() => {}, 1000);
 				stderr += String(chunk);
 			});
 			if (!(await waitForChildProcessExit(child, 45000))) throw new Error(`隔离 CLI 未退出：${stderr}`);
-			if (child.exitCode !== 0) throw new Error(`隔离 CLI 失败：${stderr}`);
+			if (child.exitCode !== 0) throw new Error(`隔离 CLI 失败：${stderr}\n${output}`);
 			return JSON.parse(output);
 		}
 		async function createTask(projectPath: string, title: string, extraArguments: string[] = []) {
@@ -230,7 +243,7 @@ setInterval(() => {}, 1000);
 			writeFileSync(
 				viteConfigurationPath,
 				`import baseConfiguration from ${JSON.stringify(join(sourceCheckoutPath, "web-ui/vite.config.ts"))};
-export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
+export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringify(join(sourceCheckoutPath, "web-ui/index.html"))}], include: ["react", "react-dom/client", "react/jsx-runtime", "@xyflow/react", "@dagrejs/dagre"] }, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "isolated-vite-dependency-cache"))}, server: { ...baseConfiguration.server, host: "127.0.0.1", port: ${webUiPort}, strictPort: true, proxy: { "/api": { target: ${JSON.stringify(runtimeOrigin)}, changeOrigin: true, ws: true, headers: { origin: ${JSON.stringify(runtimeOrigin)} } } } } };`,
 			);
 			startOwnedProcess(
 				"isolated-vite",
@@ -256,7 +269,15 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			const page = await context.newPage();
 			page.setDefaultTimeout(10000);
 			const pageErrors: string[] = [];
-			page.on("pageerror", (error) => pageErrors.push(error.message));
+			writeFileSync(join(evidenceOutputDirectory, "page-errors.json"), "[]");
+			page.on("pageerror", (error) => {
+				pageErrors.push(error.stack ?? error.message);
+				writeFileSync(join(evidenceOutputDirectory, "page-errors.json"), JSON.stringify(pageErrors, null, 2));
+			});
+			page.on("console", (message) => {
+				if (message.type() === "error")
+					writeFileSync(join(evidenceOutputDirectory, "last-browser-console-error.txt"), message.text());
+			});
 			const pageRequests: string[] = [];
 			const pendingTaskCardActionRequests = new Set<Request>();
 			page.on("requestfinished", (request) => pendingTaskCardActionRequests.delete(request));
@@ -275,6 +296,165 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "Close", exact: true })
 				.click({ timeout: 10000 });
+			if (process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1") {
+				const client = runtimeClient(alphaWorkspaceId);
+				await runTaskRetainedCommittedLineChangeRealBrowserCheck({
+					page,
+					repository: firstProject,
+					workspaceId: alphaWorkspaceId,
+					taskId: focusId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					observeUntil,
+					ensureWorktree: () => client.workspace.ensureWorktree.mutate({ taskId: focusId, baseRef: "main" }),
+					readHistory: () =>
+						client.workspace.getTaskRetainedCommittedLineChangeHistory.query({
+							taskId: focusId,
+							baseRef: "main",
+						}),
+					restartRuntime: async () => {
+						initialRuntimeProcess.send({ type: "kanban.shutdown" });
+						await observeUntil(async () => hasChildProcessExited(initialRuntimeProcess), "隔离 runtime 停止");
+						startOwnedProcess(
+							"isolated-runtime-restarted",
+							process.execPath,
+							[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+							firstProject.repositoryPath,
+						);
+						await observeUntil(
+							async () =>
+								fetch(`${runtimeOrigin}/api/trpc/projects.list`)
+									.then((response) => response.ok)
+									.catch(() => false),
+							"隔离 runtime 重启",
+						);
+					},
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
+			if (runPostDeployVerificationFollowUpBrowserCheck) {
+				const client = runtimeClient(alphaWorkspaceId);
+				const sourceState = await client.workspace.getState.query();
+				const sourceColumn = sourceState.board.columns.find((column) =>
+					column.cards.some((card) => card.id === focusId),
+				);
+				const sourceCard = sourceColumn?.cards.find((card) => card.id === focusId);
+				if (!sourceColumn || !sourceCard) throw new Error("缺少 PDV 来源任务");
+				sourceColumn.cards = sourceColumn.cards.filter((card) => card.id !== focusId);
+				sourceState.board.columns.find((column) => column.id === "validation")?.cards.push(sourceCard);
+				await client.workspace.saveState.mutate({
+					board: sourceState.board,
+					sessions: sourceState.sessions,
+					expectedRevision: sourceState.revision,
+				});
+				await runCli(
+					[
+						"deployment",
+						"record",
+						"--project-path",
+						firstProject.repositoryPath,
+						"--source-checkout-path",
+						firstProject.repositoryPath,
+						"--new-commit",
+						firstProject.runGit(["rev-parse", "HEAD"]).stdout.trim(),
+					],
+					firstProject.repositoryPath,
+				);
+				const verification = await client.deployment.getPostDeployVerificationState.query({ activeOnly: true });
+				const deploymentId = verification.activeDeploymentId;
+				if (!deploymentId) throw new Error("未创建隔离部署记录");
+				for (const label of ["浏览器核对项甲", "浏览器核对项乙"]) {
+					await client.deployment.updateVerificationChecklist.mutate({
+						operation: "add_custom_checklist_item",
+						deploymentId,
+						taskId: focusId,
+						label,
+					});
+				}
+				await runPostDeployVerificationFollowUpTaskRealBrowserCheck({
+					page,
+					sourceWorkspaceId: alphaWorkspaceId,
+					otherWorkspaceId: betaWorkspaceId,
+					sourceTaskId: focusId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					observeUntil,
+					recordCheck,
+					readSourceBoard: async () => (await client.workspace.getState.query()).board,
+					readOtherBoard: async () => (await runtimeClient(betaWorkspaceId).workspace.getState.query()).board,
+					readSourceVerificationTask: async () => {
+						const state = await client.deployment.getPostDeployVerificationState.query({ activeOnly: true });
+						const task = state.deploymentGroups
+							.flatMap((group) => group.tasks)
+							.find((task) => task.taskId === focusId);
+						if (!task) throw new Error("来源核对任务缺失");
+						return task;
+					},
+					readNeighborhood: (taskId) =>
+						client.workUnit.getRelationNeighborhoodSummary.query({
+							workUnit: {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: alphaWorkspaceId,
+							},
+						}),
+				});
+				expect(pageErrors).toEqual([]);
+				writeFileSync(
+					join(evidenceOutputDirectory, "browser-check-results.json"),
+					JSON.stringify({ checks, pageErrors, runtimePort, webUiPort }, null, 2),
+				);
+				return;
+			}
+			if (runRelationModelingBrowserCheck) {
+				await runReferenceRelationModelingRealBrowserCheck({
+					page,
+					workspaceId: alphaWorkspaceId,
+					webUiOrigin,
+					evidenceOutputDirectory,
+					focusId,
+					chainStartId: singleStartId,
+					chainMiddleId: allReadyId,
+					chainEndId: retryId,
+					observeUntil,
+					recordCheck,
+					seedRelation: (subjectTaskId, anchorTaskId) =>
+						runCli(
+							[
+								"work-unit",
+								"assert-reference-relation",
+								"--is-generally-related-with",
+								`${alphaWorkspaceId}/${anchorTaskId}`,
+								"--relation-assertion-rationale",
+								"隔离浏览器多跳图种子",
+								"--json",
+							],
+							firstProject.repositoryPath,
+							{
+								KANBAN_TASK_ID: subjectTaskId,
+								KANBAN_HOOK_WORKSPACE_ID: alphaWorkspaceId,
+								KANBAN_TASK_CONVERSATION_SESSION_ID: subjectTaskId,
+							},
+						),
+					readBoard: async () => (await runtimeClient(alphaWorkspaceId).workspace.getState.query()).board,
+					readNeighborhood: (taskId) =>
+						runtimeClient(alphaWorkspaceId).workUnit.getRelationNeighborhoodSummary.query({
+							workUnit: {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: alphaWorkspaceId,
+							},
+						}),
+				});
+				expect(pageErrors).toEqual([]);
+				writeFileSync(
+					join(evidenceOutputDirectory, "browser-check-results.json"),
+					JSON.stringify({ checks, pageErrors, runtimePort, webUiPort }, null, 2),
+				);
+				return;
+			}
+
 			const card = (taskId: string) => page.locator(`[data-task-id="${taskId}"]`).first();
 			const clickCardAction = async (taskId: string, action: string) => {
 				await card(taskId).hover();
@@ -775,11 +955,34 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接。列表顶边固定（经典手风琴，用户 2026-10-08
 			// 选定）：收起的行在上方，新行跟着上移那一行多出的高度；不补 scrollTop、不垫面板顶部空白，上方的内容不动。
 			// 之后指针静止，不得再有任何展开 / 收起（指针可能落到新行下沿之外，同坐标事件不得连锁展开再下一行）。
-			const measureHandOffToNextRowBelow = async (handOffCaseLabel: string) => {
+			// 量的是「一个滚动容器自持一个 hover 原地展开」：阶段 6 是 Focus View 左栏面板（整个面板一个滚动容器），
+			// 阶段 7 是 All projects 首页的 Recent 列（列的内容容器自己滚动）。
+			type CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost = {
+				scrollContainer: ReturnType<typeof page.locator>;
+				remainingSectionSelector: string;
+				expansionStateChangeObservationRootSelector: string;
+				leaveScrollContainerAndWaitForHoverExpansionToCollapse: () => Promise<void>;
+			};
+			const focusViewLeftColumnPanelHandOffMeasurementScrollContainerHost: CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost =
+				{
+					scrollContainer: panel,
+					remainingSectionSelector: '[data-testid="cross-project-task-switcher-section-remaining"]',
+					expansionStateChangeObservationRootSelector:
+						'[data-testid="cross-project-recently-active-task-switcher-panel"]',
+					leaveScrollContainerAndWaitForHoverExpansionToCollapse: leavePanelAndWaitForHoverExpansionToCollapse,
+				};
+			const measureHandOffToNextRowBelow = async (
+				handOffCaseLabel: string,
+				handOffMeasurementScrollContainerHost: CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost = focusViewLeftColumnPanelHandOffMeasurementScrollContainerHost,
+			) => {
+				const {
+					scrollContainer,
+					remainingSectionSelector,
+					expansionStateChangeObservationRootSelector,
+					leaveScrollContainerAndWaitForHoverExpansionToCollapse,
+				} = handOffMeasurementScrollContainerHost;
 				const remainingRowTaskIds = await page
-					.locator(
-						'[data-testid="cross-project-task-switcher-section-remaining"] [data-cross-project-task-switcher-task-id]',
-					)
+					.locator(`${remainingSectionSelector} [data-cross-project-task-switcher-task-id]`)
 					.evaluateAll((rows) =>
 						rows.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")),
 					);
@@ -788,20 +991,18 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				if (!upperTaskId || !lowerTaskId) throw new Error("Recent 区不足两行，无法验证交接");
 				// 同一个任务可能也在 Pinned：只认 Recent 区里的那两行。
 				const remainingRow = (taskId: string) =>
-					page
-						.locator('[data-testid="cross-project-task-switcher-section-remaining"]')
-						.locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+					page.locator(remainingSectionSelector).locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
 				const remainingRowExpandedByHover = (taskId: string) =>
 					remainingRow(taskId).and(
 						page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`),
 					);
 				const readPanelScrollState = () =>
-					panel.evaluate((element) => ({
+					scrollContainer.evaluate((element) => ({
 						scrollTop: element.scrollTop,
 						maxScrollTop: element.scrollHeight - element.clientHeight,
 						paddingTop: element.style.paddingTop,
 					}));
-				await panel.evaluate((element) => {
+				await scrollContainer.evaluate((element) => {
 					element.scrollTop = element.scrollHeight;
 				});
 				const upperRowCompactHeight = (await measureRect(remainingRow(upperTaskId))).height;
@@ -810,7 +1011,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				await remainingRowExpandedByHover(upperTaskId).locator("[data-task-card-title]").waitFor();
 				const upperRowGrowthPx = (await measureRect(remainingRow(upperTaskId))).height - upperRowCompactHeight;
 				// 展开后内容变高：再滚到底，让下一行进入视野。
-				await panel.evaluate((element) => {
+				await scrollContainer.evaluate((element) => {
 					element.scrollTop = element.scrollHeight;
 				});
 				const panelScrollStateBeforeHandOff = await readPanelScrollState();
@@ -827,7 +1028,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 								mutation.target.getAttribute("data-cross-project-task-switcher-task-id") + ":" + mutation.target.getAttribute(attributeName),
 							);
 						}
-					}).observe(document.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'), {
+					}).observe(document.querySelector(${JSON.stringify(expansionStateChangeObservationRootSelector)}), {
 						subtree: true,
 						attributes: true,
 						attributeFilter: [attributeName],
@@ -853,7 +1054,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				// 唯一的例外：交接把新行顶边（连同伸出顶边 12px 的 hover 动作组，见
 				// CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX）带出面板可视区上沿时，
 				// 回滚到刚好露出，最多回滚它被带上去的距离。按交接前量到的几何预测这一项，本夹具里一般为 0。
-				const panelViewportTopPx = (await measureRect(panel)).top;
+				const panelViewportTopPx = (await measureRect(scrollContainer)).top;
 				const lowerRowCarriedUpwardByHandOffPx = upperRowGrowthPx - panelScrollTopClampedByBrowserPx;
 				const panelScrollTopScrolledBackToRevealLowerRowTopEdgePx = Math.max(
 					0,
@@ -906,9 +1107,9 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				expect(recordedExpansionStateChanges.sort(), `${handOffCaseLabel} 只交接一次、不连锁`).toEqual(
 					[`${lowerTaskId}:expanded_in_place_by_hover`, `${upperTaskId}:compact_row`].sort(),
 				);
-				await leavePanelAndWaitForHoverExpansionToCollapse();
+				await leaveScrollContainerAndWaitForHoverExpansionToCollapse();
 				expect((await readPanelScrollState()).paddingTop).toBe("");
-				await panel.evaluate((element) => {
+				await scrollContainer.evaluate((element) => {
 					element.scrollTop = 0;
 				});
 			};
@@ -1105,9 +1306,377 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			recordCheck("面板顶部 Create task 入口");
 			await page.getByRole("button", { name: "Back to board", exact: true }).click();
 
-			await page.getByRole("button", { name: /New task$/ }).click();
-			await createOtherProjectTaskViaDialog("概览按钮往另一个项目建卡");
-			recordCheck("Board Overview New task 入口");
+			// 阶段 7：Back 落回的 All projects 首页（分区列看板，取代原 Board Overview）。同一组分区横排成列，每列的内容容器
+			// 自己滚动、自持一个 hover 原地展开；断言沿用阶段 6 的量法，只是滚动容器换成列。
+			const boardScopeHomePageSelector =
+				'[data-testid="board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board"]';
+			const boardScopeHomePage = page.locator(boardScopeHomePageSelector);
+			await boardScopeHomePage.waitFor();
+			await boardScopeHomePage.getByRole("button", { name: "Create task", exact: true }).click();
+			await createOtherProjectTaskViaDialog("首页按钮往另一个项目建卡");
+			recordCheck("All projects 首页页头 Create task 入口");
+			const homePageSectionColumnSelector = (sectionTestIdSuffix: string) =>
+				`${boardScopeHomePageSelector} [data-testid="cross-project-task-switcher-section-${sectionTestIdSuffix}"]`;
+			const homePageSectionColumnScrollContainer = (sectionTestIdSuffix: string) =>
+				boardScopeHomePage.locator(
+					`[data-testid="cross-project-task-switcher-section-column-scroll-container-${sectionTestIdSuffix}"]`,
+				);
+			const homePageRow = (sectionTestIdSuffix: string, taskId: string) =>
+				page
+					.locator(homePageSectionColumnSelector(sectionTestIdSuffix))
+					.locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+			const homePageRowInExpansionState = (
+				sectionTestIdSuffix: string,
+				taskId: string,
+				inPlaceExpansionState: "compact_row" | "expanded_in_place_by_hover" | "kept_expanded_in_list",
+			) =>
+				homePageRow(sectionTestIdSuffix, taskId).and(
+					page.locator(`[${rowInPlaceExpansionStateAttribute}="${inPlaceExpansionState}"]`),
+				);
+			// 首页的列铺满宽度，阶段 6 那个「挪到右下角」可能落进 Running 列：改挪到首页页头的标题上。
+			const leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse = async () => {
+				const homePageTitleBox = await boardScopeHomePage.locator("h1").boundingBox();
+				if (!homePageTitleBox) throw new Error("首页页头未渲染");
+				await page.mouse.move(
+					homePageTitleBox.x + homePageTitleBox.width / 2,
+					homePageTitleBox.y + homePageTitleBox.height / 2,
+				);
+				await boardScopeHomePage
+					.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`)
+					.first()
+					.waitFor({ state: "detached" });
+			};
+			// 固定展开按任务记、跨重挂载保留：阶段 6 在左栏固定展开的卡，在首页同样固定展开。验证后全部收起，后面按精简行量。
+			const keptExpandedRowsOnHomePage = boardScopeHomePage.locator(
+				`[${rowInPlaceExpansionStateAttribute}="kept_expanded_in_list"]`,
+			);
+			await keptExpandedRowsOnHomePage
+				.and(page.locator(`[data-cross-project-task-switcher-task-id="${dragStartId}"]`))
+				.first()
+				.waitFor();
+			while ((await keptExpandedRowsOnHomePage.count()) > 0) {
+				const keptExpandedRowCountBeforeCollapse = await keptExpandedRowsOnHomePage.count();
+				// 动作组（含开关）只在指针停在卡上时才开放 pointer-events：先把指针移到这一行上，再点开关。
+				await keptExpandedRowsOnHomePage.first().hover();
+				await keptExpandedRowsOnHomePage.first().getByTestId(inListExpansionToggleTestId).click();
+				await observeUntil(
+					async () => (await keptExpandedRowsOnHomePage.count()) < keptExpandedRowCountBeforeCollapse,
+					"首页收起固定展开的卡",
+				);
+			}
+			await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
+			// 让 Pinned 列有行（它的 header 在列呈现下没有折叠按钮，但首行同样要让位于 header）。
+			await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskId: focusId,
+				taskPinboardPinReason: null,
+			});
+			await homePageRow("pinned", focusId).waitFor();
+			expect(
+				await boardScopeHomePage
+					.locator('section[data-testid^="cross-project-task-switcher-section-"]')
+					.evaluateAll((sectionColumns) =>
+						sectionColumns.map((sectionColumn) => sectionColumn.getAttribute("data-testid")),
+					),
+				"首页列序与 Focus View 一致",
+			).toEqual([
+				"cross-project-task-switcher-section-pinned",
+				"cross-project-task-switcher-section-running",
+				"cross-project-task-switcher-section-prompt-cache-warm",
+				"cross-project-task-switcher-section-remaining",
+			]);
+			expect(
+				await page.getByTestId("toggle-board-scope-all-projects-button").getAttribute("aria-pressed"),
+				"顶栏 All projects 按钮处于按下态",
+			).toBe("true");
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "board-scope-all-projects-home-page-section-columns.png"),
+			});
+			recordCheck(
+				"阶段 7 All projects 首页分区列看板：列序 Pinned | Running | Cache warm · your turn | Recent；左栏固定展开的卡在首页同样固定展开",
+			);
+			// 各列首行：动作组盒子与展开开关命中区的顶边不高于列 header 底边（不截 header 控件的点击），也不高于列滚动容器的上沿
+			// （不被 overflow 裁掉）。行必须是滚动容器的直接子节点，行根节点的 first:mt-4 才作用在首行上。
+			const homePageSectionColumnFirstRowHoverActionGroupGeometry = (await page.evaluate(`(() => {
+				const toggleTestId = ${JSON.stringify(inListExpansionToggleTestId)};
+				const boardScopeHomePage = document.querySelector(${JSON.stringify(boardScopeHomePageSelector)});
+				return [...boardScopeHomePage.querySelectorAll('section[data-testid^="cross-project-task-switcher-section-"]')].flatMap((sectionColumn) => {
+					const sectionHeader = sectionColumn.children[0];
+					const sectionColumnScrollContainer = sectionColumn.children[1];
+					const firstRow = sectionColumnScrollContainer.querySelector("[data-cross-project-task-switcher-task-id]");
+					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]');
+					const hoverActionGroup = inListExpansionToggle?.parentElement;
+					if (!hoverActionGroup) return [];
+					return [{
+						sectionTestId: sectionColumn.getAttribute("data-testid"),
+						firstRowIsFirstChildOfSectionColumnScrollContainer: sectionColumnScrollContainer.firstElementChild === firstRow,
+						sectionColumnScrollContainerScrollTop: sectionColumnScrollContainer.scrollTop,
+						hoverActionGroupTopPx: hoverActionGroup.getBoundingClientRect().top,
+						inListExpansionToggleHitAreaTopPx:
+							inListExpansionToggle.getBoundingClientRect().top +
+							Number.parseFloat(getComputedStyle(inListExpansionToggle, "::after").top),
+						sectionHeaderBottomPx: sectionHeader.getBoundingClientRect().bottom,
+						sectionColumnScrollContainerTopPx: sectionColumnScrollContainer.getBoundingClientRect().top,
+						headerInteractiveControlBottomsPx: [...sectionHeader.querySelectorAll("button, select")].map(
+							(control) => control.getBoundingClientRect().bottom,
+						),
+					}];
+				});
+			})()`)) as Array<{
+				sectionTestId: string;
+				firstRowIsFirstChildOfSectionColumnScrollContainer: boolean;
+				sectionColumnScrollContainerScrollTop: number;
+				hoverActionGroupTopPx: number;
+				inListExpansionToggleHitAreaTopPx: number;
+				sectionHeaderBottomPx: number;
+				sectionColumnScrollContainerTopPx: number;
+				headerInteractiveControlBottomsPx: number[];
+			}>;
+			titleAndToggleGeometryEvidence.board_scope_home_page_section_column_first_row_hover_action_group_geometry =
+				homePageSectionColumnFirstRowHoverActionGroupGeometry;
+			expect(
+				homePageSectionColumnFirstRowHoverActionGroupGeometry.map((geometry) => geometry.sectionTestId),
+				"Pinned 与 Recent 列首行都已渲染",
+			).toEqual(
+				expect.arrayContaining([
+					"cross-project-task-switcher-section-pinned",
+					"cross-project-task-switcher-section-remaining",
+				]),
+			);
+			for (const geometry of homePageSectionColumnFirstRowHoverActionGroupGeometry) {
+				expect(
+					geometry.firstRowIsFirstChildOfSectionColumnScrollContainer,
+					`${geometry.sectionTestId} 首行是滚动容器首个子节点`,
+				).toBe(true);
+				expect(geometry.sectionColumnScrollContainerScrollTop, `${geometry.sectionTestId} 列从顶部开始`).toBe(0);
+				for (const [measuredTopEdgeLabel, measuredTopEdgePx] of [
+					["动作组盒子", geometry.hoverActionGroupTopPx],
+					["展开开关命中区", geometry.inListExpansionToggleHitAreaTopPx],
+				] as const) {
+					expect(
+						measuredTopEdgePx,
+						`${geometry.sectionTestId} 首行${measuredTopEdgeLabel}顶边不高于列 header 底边`,
+					).toBeGreaterThanOrEqual(geometry.sectionHeaderBottomPx - 0.5);
+					expect(
+						measuredTopEdgePx,
+						`${geometry.sectionTestId} 首行${measuredTopEdgeLabel}不被列滚动容器上沿裁掉`,
+					).toBeGreaterThanOrEqual(geometry.sectionColumnScrollContainerTopPx - 0.5);
+					for (const controlBottomPx of geometry.headerInteractiveControlBottomsPx) {
+						expect(
+							measuredTopEdgePx,
+							`${geometry.sectionTestId} 首行${measuredTopEdgeLabel}不压列 header 控件`,
+						).toBeGreaterThanOrEqual(controlBottomPx);
+					}
+				}
+			}
+			// hover 时取点（与阶段 6 同一个取点函数）：开关命中区右上角的阳性对照还顺带证明动作组没被列的 overflow 裁掉
+			// （被裁掉的部分 elementFromPoint 命中不到）。
+			const homePageSectionColumnFirstRowHitTestingEvidence: FirstRowHoverActionGroupHitTestingAgainstSectionHeaderControls[] =
+				[];
+			for (const { sectionTestId } of homePageSectionColumnFirstRowHoverActionGroupGeometry) {
+				const sectionColumnFirstRow = page
+					.locator(
+						`${boardScopeHomePageSelector} [data-testid="${sectionTestId}"] [data-cross-project-task-switcher-task-id]`,
+					)
+					.first();
+				await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
+				await sectionColumnFirstRow.locator("button").first().hover();
+				homePageSectionColumnFirstRowHitTestingEvidence.push(
+					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
+				);
+				await sectionColumnFirstRow
+					.and(page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`))
+					.getByTestId(inListExpansionToggleTestId)
+					.waitFor();
+				homePageSectionColumnFirstRowHitTestingEvidence.push(
+					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
+				);
+			}
+			await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
+			titleAndToggleGeometryEvidence.board_scope_home_page_section_column_first_row_hit_testing =
+				homePageSectionColumnFirstRowHitTestingEvidence;
+			expect(
+				homePageSectionColumnFirstRowHitTestingEvidence.some(
+					(hitTesting) =>
+						hitTesting.sectionTestId === "cross-project-task-switcher-section-remaining" &&
+						hitTesting.hitTestingProbes.some(
+							(hitTestingProbe) =>
+								hitTestingProbe.probedTargetKind ===
+								"section_header_interactive_control_bottom_edge_inner_side",
+						),
+				),
+				"Recent 列排序下拉框底沿被取点",
+			).toBe(true);
+			for (const hitTesting of homePageSectionColumnFirstRowHitTestingEvidence) {
+				const hitTestingLabel = `首页 ${hitTesting.sectionTestId} 首行（${hitTesting.firstRowInPlaceExpansionState}）`;
+				expect(hitTesting.inListExpansionTogglePointerEvents, `${hitTestingLabel} 动作组可点`).toBe("auto");
+				expect(
+					hitTesting.inListExpansionToggleExtendedHitAreaCornerHitsToggle,
+					`${hitTestingLabel} 开关命中区生效且没被列裁掉`,
+				).toBe(true);
+				for (const hitTestingProbe of hitTesting.hitTestingProbes) {
+					const hitTestingProbeLabel = `${hitTestingLabel} ${hitTestingProbe.probedTargetKind} ${hitTestingProbe.probedHeaderControlDescription ?? ""} (${hitTestingProbe.probeXPx}, ${hitTestingProbe.probeYPx}) 命中 ${hitTestingProbe.hitElementDescription}`;
+					expect(hitTestingProbe.hitElementIsInsideHoverActionGroup, `${hitTestingProbeLabel}：不得截走`).toBe(
+						false,
+					);
+					if (hitTestingProbe.hitElementIsInsideProbedHeaderControl !== null) {
+						expect(
+							hitTestingProbe.hitElementIsInsideProbedHeaderControl,
+							`${hitTestingProbeLabel}：应命中列 header 控件`,
+						).toBe(true);
+					}
+				}
+			}
+			recordCheck(
+				"阶段 7 各列首行 hover 动作组与展开开关命中区顶边不高于列 header 底边、不被列滚动容器上沿裁掉，hover 时 elementFromPoint 在排序下拉框底沿命中控件本身",
+			);
+			// 列内三态：精简行 → hover 原地展开 → 固定展开，标题首行与开关同一坐标，动作组叠在首行上方不压字。
+			await homePageRow("remaining", betaInProgressGeometryAnchorId).waitFor();
+			const homePageCompactRowGeometry = await measureCompactRow(
+				betaInProgressGeometryAnchorId,
+				homePageRow("remaining", betaInProgressGeometryAnchorId),
+			);
+			await homePageRow("remaining", betaInProgressGeometryAnchorId).locator("button").first().hover();
+			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "expanded_in_place_by_hover")
+				.locator("[data-task-card-title]")
+				.filter({ hasText: "进行中几何锚点" })
+				.waitFor();
+			const homePageHoverExpandedRowGeometry = await measureExpandedRow(
+				homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "expanded_in_place_by_hover"),
+			);
+			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "expanded_in_place_by_hover")
+				.getByTestId(inListExpansionToggleTestId)
+				.click();
+			await homePageRowInExpansionState(
+				"remaining",
+				betaInProgressGeometryAnchorId,
+				"kept_expanded_in_list",
+			).waitFor();
+			const homePageKeptExpandedRowGeometry = await measureExpandedRow(
+				homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "kept_expanded_in_list"),
+			);
+			for (const [expandedGeometryLabel, expandedGeometry] of [
+				["hover 展开", homePageHoverExpandedRowGeometry],
+				["固定展开", homePageKeptExpandedRowGeometry],
+			] as const) {
+				expectSamePlacementWithinOnePixel(
+					expandedGeometry.row,
+					homePageCompactRowGeometry.row,
+					`首页 Recent 列${expandedGeometryLabel} 行`,
+				);
+				expectSamePlacementWithinOnePixel(
+					expandedGeometry.title,
+					homePageCompactRowGeometry.title,
+					`首页 Recent 列${expandedGeometryLabel} 标题`,
+				);
+				expectSamePlacementWithinOnePixel(
+					expandedGeometry.toggle,
+					homePageCompactRowGeometry.toggle,
+					`首页 Recent 列${expandedGeometryLabel} 开关`,
+				);
+				expectHoverActionGroupAboveFirstLine(expandedGeometry, `首页 Recent 列${expandedGeometryLabel}`);
+			}
+			expectHoverActionGroupAboveFirstLine(homePageCompactRowGeometry, "首页 Recent 列精简行");
+			titleAndToggleGeometryEvidence.board_scope_home_page_recent_column_other_project_in_progress_without_session =
+				{
+					compactRowGeometry: homePageCompactRowGeometry,
+					hoverExpandedGeometry: homePageHoverExpandedRowGeometry,
+					keptExpandedGeometry: homePageKeptExpandedRowGeometry,
+				};
+			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "kept_expanded_in_list")
+				.getByTestId(inListExpansionToggleTestId)
+				.click();
+			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "compact_row").waitFor();
+			await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
+			recordCheck("阶段 7 列内精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标");
+			// 列内往下挪到下一行：与阶段 6 同一个测量函数，滚动容器换成 Recent 列。
+			const boardScopeHomePageRecentColumnHandOffMeasurementScrollContainerHost: CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost =
+				{
+					scrollContainer: homePageSectionColumnScrollContainer("remaining"),
+					remainingSectionSelector: homePageSectionColumnSelector("remaining"),
+					expansionStateChangeObservationRootSelector: boardScopeHomePageSelector,
+					leaveScrollContainerAndWaitForHoverExpansionToCollapse:
+						leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse,
+				};
+			await measureHandOffToNextRowBelow(
+				"board_scope_home_page_recent_column_hand_off_viewport_1000px",
+				boardScopeHomePageRecentColumnHandOffMeasurementScrollContainerHost,
+			);
+			await page.setViewportSize({ width: 1600, height: 420 });
+			await measureHandOffToNextRowBelow(
+				"board_scope_home_page_recent_column_hand_off_viewport_420px_scrollable",
+				boardScopeHomePageRecentColumnHandOffMeasurementScrollContainerHost,
+			);
+			recordCheck(
+				"阶段 7 列内往下挪到下一行：交接一次、不连锁；列表顶边固定（不补 scrollTop、不垫顶部空白，上方的行不被往下拖）",
+			);
+			// 点行进 Focus View（首页被卸载），Back 回首页：Recent 列的滚动位置原样还原。矮视口下 Recent 列可滚。
+			const homePageRecentColumnScrollContainer = homePageSectionColumnScrollContainer("remaining");
+			await homePageRecentColumnScrollContainer.evaluate((element) => {
+				element.scrollTop = element.scrollHeight;
+			});
+			await waitForNextObservation(300);
+			const homePageRecentColumnScrollTopBeforeOpeningTaskPx = await homePageRecentColumnScrollContainer.evaluate(
+				(element) => element.scrollTop,
+			);
+			expect(homePageRecentColumnScrollTopBeforeOpeningTaskPx, "矮视口下 Recent 列可滚").toBeGreaterThan(0);
+			await homePageRow("pinned", focusId).locator("button").first().click();
+			await observeUntil(async () => page.url().includes(`task=${focusId}`), "首页点行进 Focus View");
+			await boardScopeHomePage.waitFor({ state: "detached" });
+			await page.getByRole("button", { name: "Back to board", exact: true }).click();
+			await boardScopeHomePage.waitFor();
+			const homePageRecentColumnScrollTopAfterBackPx = await homePageRecentColumnScrollContainer.evaluate(
+				(element) => element.scrollTop,
+			);
+			titleAndToggleGeometryEvidence.board_scope_home_page_recent_column_scroll_top_across_focus_view_round_trip = {
+				homePageRecentColumnScrollTopBeforeOpeningTaskPx,
+				homePageRecentColumnScrollTopAfterBackPx,
+			};
+			expect(
+				Math.abs(homePageRecentColumnScrollTopAfterBackPx - homePageRecentColumnScrollTopBeforeOpeningTaskPx),
+				"Back 回首页后 Recent 列滚动位置保留",
+			).toBeLessThanOrEqual(1);
+			recordCheck("阶段 7 点首页的行进 Focus View，Back 回首页后列滚动位置保留");
+			await page.setViewportSize({ width: 1600, height: 1000 });
+			await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+				taskPinboardPinAction: "unpin_task_card",
+				taskId: focusId,
+			});
+			await page.locator(homePageSectionColumnSelector("pinned")).waitFor({ state: "detached" });
+			writeFileSync(
+				join(evidenceOutputDirectory, "cross-project-row-title-and-toggle-geometry.json"),
+				JSON.stringify(titleAndToggleGeometryEvidence, null, 2),
+			);
+			// 顶栏 All projects 按钮（Layers）与 ⌘⇧E / Ctrl+Shift+E 是同一个处理器：tooltip 写明快捷键；收窄到当前项目看板后切回首页。
+			const boardScopeToggleButton = page.getByTestId("toggle-board-scope-all-projects-button");
+			await boardScopeToggleButton.hover();
+			await page
+				.getByRole("tooltip")
+				.filter({ hasText: /^Show only the current project \((⌘⇧E|Ctrl\+Shift\+E)\)$/ })
+				.first()
+				.waitFor();
+			await boardScopeToggleButton.click();
+			await boardScopeHomePage.waitFor({ state: "detached" });
+			await page.locator('[data-column-id="backlog"]').first().waitFor();
+			expect(await boardScopeToggleButton.getAttribute("aria-pressed")).toBe("false");
+			expect(page.url()).toContain(`/${alphaWorkspaceId}`);
+			await page.mouse.move(800, 600);
+			await page.keyboard.press("ControlOrMeta+Shift+e");
+			await boardScopeHomePage.waitFor();
+			expect(await boardScopeToggleButton.getAttribute("aria-pressed")).toBe("true");
+			recordCheck(
+				"顶栏 All projects 按钮 tooltip 写明 ⌘⇧E / Ctrl+Shift+E，点它收窄到当前项目看板，新快捷键切回 All projects 首页",
+			);
+			// 移动端放不下多列：首页回落竖排的切换面板。
+			await page.setViewportSize({ width: 700, height: 900 });
+			await page.locator('[data-testid="board-scope-all-projects-home-page-stacked-panel-on-mobile"]').waitFor();
+			await page.locator('[data-testid="cross-project-recently-active-task-switcher-panel"]').waitFor();
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "board-scope-all-projects-home-page-mobile-stacked-panel.png"),
+			});
+			await page.setViewportSize({ width: 1600, height: 1000 });
+			await boardScopeHomePage.waitFor();
+			recordCheck("移动端视口下 All projects 首页回落竖排切换面板");
 
 			await page.evaluate(() => {
 				sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "single_project_scope");
@@ -1259,6 +1828,13 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			await clickCardAction(namingBacklogId, "Pin task to pinboard");
 			const namingPinDialog = page.getByRole("dialog").filter({ hasText: /Pin task|Pin to/ });
 			if (await namingPinDialog.count()) await namingPinDialog.getByRole("button", { name: /Pin/ }).last().click();
+			// 置顶副本是乐观渲染的，比置顶命令返回得早；命令在途时保存会被浏览器侧按卡幂等闸拒绝（编辑存回草稿并提示）。
+			// 等置顶落盘、在途请求清空，再打开编辑器。
+			await observeUntil(
+				async () => (await taskState(namingBacklogId)).card?.pinnedToTaskPinboardAt != null,
+				"Backlog 卡置顶落盘",
+			);
+			await observeUntil(async () => pendingTaskCardActionRequests.size === 0, "置顶请求完成");
 			const compactNamingCard = page
 				.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]')
 				.filter({ hasText: "Backlog 已保存名称" });

@@ -1,9 +1,10 @@
 import pLimit from "p-limit";
-import type { RuntimeTaskWorkspaceMetadata, RuntimeTaskWorktreeMode } from "../core/api-contract";
+import type { RuntimeBoardColumnId, RuntimeTaskWorkspaceMetadata, RuntimeTaskWorktreeMode } from "../core/api-contract";
 import { computeWorktreeGitChangeToken } from "./git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "./git-sync";
 import { runGit } from "./git-utils";
 import { refreshTaskCommitIntegrationProvenance } from "./task-commit-integration-provenance";
+import { createUnavailableTaskRetainedCommittedLineChangeHistory } from "./task-retained-committed-line-change-statistics";
 import { getTaskWorkspacePathInfo } from "./task-worktree";
 
 // 单个任务 worktree 的 git 元数据探针（ahead/behind、未提交改动统计、fork-point、集成溯源）。
@@ -13,10 +14,29 @@ import { getTaskWorkspacePathInfo } from "./task-worktree";
 // 两者也共用同一个 git spawn 并发上限（见下）。
 
 /**
- * 兜底全量刷新窗口：即使廉价变更 token 未变，距上次真探针超过此时长也强制跑一次 `probeGitWorkspaceState`，
+ * 兜底全量刷新窗口（热档）：即使廉价变更 token 未变，距上次真探针超过此时长也强制跑一次 `probeGitWorkspaceState`，
  * 以补上廉价 token 捕获不到的「就地未暂存编辑」。看板 git 元数据可接受这点最坏延迟，换取每 poll 不再无条件 spawn git。
+ * 用于项目主仓库，以及可能有人正在改的 task worktree（见 resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs）。
  */
-export const GIT_METADATA_FULL_REFRESH_INTERVAL_MS = 10_000;
+export const GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS = 10_000;
+
+/**
+ * 兜底全量刷新窗口（冷档）：闲置 task worktree 的兜底间隔下限。实际间隔再加上按 taskId 算出的确定性抖动，
+ * 让几百个闲置任务的到期时刻散开，不在同一个 poll tick 里成阵 spawn git。
+ * 冷档只放宽「就地未暂存编辑」这一种最坏延迟：提交、暂存、base 推进仍由廉价 token 与 base tip 门控在 3 秒内发现。
+ * 2026-10-12 实测：455 个闲置 worktree 按 10 秒热档兜底时，kanban 每秒约 50 个 git 子进程、常驻约 40% 个核。
+ */
+// EXPERIMENT_NODE: 闲置 task worktree 兜底全量刷新的间隔下限（60 秒）
+export const GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS = 60_000;
+// EXPERIMENT_NODE: 闲置 task worktree 兜底刷新的抖动跨度（[0, 30 秒)，按 taskId 哈希确定）
+const GIT_METADATA_FULL_REFRESH_JITTER_SPAN_FOR_IDLE_TASK_WORKTREE_MS = 30_000;
+
+/**
+ * 最近一次观察到 task worktree 有 git 层面的变化（廉价 token 或 stateToken 变了）后，这段时间内仍按热档兜底刷新：
+ * 刚被人动过的 worktree 很可能接着被改，就地未暂存编辑应当仍在 10 秒内可见。
+ */
+// EXPERIMENT_NODE: 观察到 worktree 变化后维持热档的时长（10 分钟）
+export const TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS = 10 * 60_000;
 
 /**
  * 周期性后台 git 探针的**并发 spawn 上限**（保守小常数，可调）。
@@ -41,6 +61,9 @@ export interface TaskWorktreeGitMetadataProbeTarget {
 	taskId: string;
 	baseRef: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
+	// 卡片当前所在列与 auto-review 开关：决定兜底全量刷新走热档还是冷档。
+	taskCardBoardColumnId: RuntimeBoardColumnId;
+	taskCardAutoReviewEnabled: boolean;
 }
 
 export interface CachedTaskWorkspaceMetadata {
@@ -51,6 +74,84 @@ export interface CachedTaskWorkspaceMetadata {
 	// 都只反映 worktree 自身，捕获不到 base 分支单方面推进；不比对这一项，commitsBehindBaseRef 会被永久冻结。
 	baseRefTipCommit: string | null;
 	lastFullRefreshAtMs: number;
+	// 最近一次观察到 worktree 有 git 层面变化的时刻（与上次缓存相比廉价 token 或 stateToken 变了）；首轮探测没有
+	// 比较基准，不算变化，记 null。决定兜底刷新是否仍在热档。
+	lastObservedTaskWorktreeGitChangeAtMs: number | null;
+}
+
+// FNV-1a 32 位：同一个 taskId 每次得到同一个抖动，到期时刻在进程内稳定散开。
+function computeDeterministicFullRefreshJitterForIdleTaskWorktreeMs(taskId: string): number {
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < taskId.length; index += 1) {
+		hash ^= taskId.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0) % GIT_METADATA_FULL_REFRESH_JITTER_SPAN_FOR_IDLE_TASK_WORKTREE_MS;
+}
+
+/**
+ * 一个 task worktree 当前该用的兜底全量刷新间隔。热档（10 秒）给可能有人正在改的 worktree：
+ *   - 卡在 In Progress 列（agent 在跑）；
+ *   - 卡在 Review 列且开了 auto-review（自动提交 / 自动 PR 要及时看到未提交改动）；
+ *   - 最近一段时间内观察到过 worktree 变化。
+ * 其余为冷档：60 秒 + 按 taskId 的确定性抖动。
+ */
+export function resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs(input: {
+	task: TaskWorktreeGitMetadataProbeTarget;
+	lastObservedTaskWorktreeGitChangeAtMs: number | null;
+	nowMs: number;
+}): number {
+	const isTaskCardWithAgentPossiblyEditingWorktree = input.task.taskCardBoardColumnId === "in_progress";
+	const isAutoReviewTaskCardInReviewColumn =
+		input.task.taskCardBoardColumnId === "review" && input.task.taskCardAutoReviewEnabled;
+	const hasRecentlyObservedTaskWorktreeGitChange =
+		input.lastObservedTaskWorktreeGitChangeAtMs !== null &&
+		input.nowMs - input.lastObservedTaskWorktreeGitChangeAtMs <
+			TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS;
+	if (
+		isTaskCardWithAgentPossiblyEditingWorktree ||
+		isAutoReviewTaskCardInReviewColumn ||
+		hasRecentlyObservedTaskWorktreeGitChange
+	) {
+		return GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS;
+	}
+	return (
+		GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS +
+		computeDeterministicFullRefreshJitterForIdleTaskWorktreeMs(input.task.taskId)
+	);
+}
+
+/**
+ * stateToken 变了，但 HEAD、分支与 base tip 都没变（只是工作树里的文件变了）时，fork-point、ahead/behind 与提交集成
+ * 溯源的全部输入都不变：`merge-base HEAD <baseRef>` 与 `rev-list <baseRef>...HEAD` 只取决于 HEAD 和 base tip，
+ * 溯源与落地观测的输入也只是这几项（落地观测的幂等键只含 workspace / task / incarnation / 已集成提交集合）。
+ * 这时沿用缓存里这几项，只重算未提交改动统计，省掉 merge-base、rev-list 与溯源的 3–5 个 git spawn。
+ * 上次结果不完整（git 探测失败、分叉点或分歧没算出来）时不复用，让下一次变化重试完整链路。
+ */
+function isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid(input: {
+	current: CachedTaskWorkspaceMetadata;
+	pathOfTaskWorktree: string;
+	baseRef: string;
+	headCommit: string | null;
+	currentBranch: string | null;
+	baseRefTipCommit: string | null;
+}): boolean {
+	const cached = input.current.data;
+	return (
+		cached.exists &&
+		cached.path === input.pathOfTaskWorktree &&
+		cached.baseRef === input.baseRef &&
+		input.headCommit !== null &&
+		cached.headCommit === input.headCommit &&
+		cached.branch === input.currentBranch &&
+		input.baseRefTipCommit !== null &&
+		input.current.baseRefTipCommit === input.baseRefTipCommit &&
+		cached.baseCommit !== null &&
+		cached.commitsAheadOfBaseRef !== null &&
+		cached.commitsBehindBaseRef !== null &&
+		cached.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
+		!cached.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_")
+	);
 }
 
 /**
@@ -131,15 +232,26 @@ export async function loadTaskWorkspaceMetadata(
 		baseRef: task.baseRef,
 		...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 	});
+	let retainedLineChangeSummary = createUnavailableTaskRetainedCommittedLineChangeHistory(
+		"task_commit_history_unavailable",
+	).summary;
 
 	if (!pathInfo.exists) {
+		const now = Date.now();
 		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		if (
 			current &&
 			current.data.exists === false &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
-			current.baseRefTipCommit === baseRefTipCommit
+			current.baseRefTipCommit === baseRefTipCommit &&
+			(!current.data.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_") ||
+				now - current.lastFullRefreshAtMs <
+					resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+						task,
+						lastObservedTaskWorktreeGitChangeAtMs: current.lastObservedTaskWorktreeGitChangeAtMs,
+						nowMs: now,
+					}))
 		) {
 			return current;
 		}
@@ -156,6 +268,9 @@ export async function loadTaskWorkspaceMetadata(
 			commitsAheadOfBaseRef: null,
 			commitsBehindBaseRef: null,
 			isDetached: false,
+			onTaskRetainedCommittedLineChangeSummary: (summary) => {
+				retainedLineChangeSummary = summary;
+			},
 		});
 		return {
 			data: {
@@ -167,6 +282,7 @@ export async function loadTaskWorkspaceMetadata(
 				commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
 				commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
 				workspaceGitStatus,
+				taskRetainedCommittedLineChangeSummary: retainedLineChangeSummary,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -178,7 +294,8 @@ export async function loadTaskWorkspaceMetadata(
 			stateToken: null,
 			cheapChangeToken: null,
 			baseRefTipCommit,
-			lastFullRefreshAtMs: 0,
+			lastFullRefreshAtMs: now,
+			lastObservedTaskWorktreeGitChangeAtMs: null,
 		};
 	}
 
@@ -189,6 +306,11 @@ export async function loadTaskWorkspaceMetadata(
 		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		// 第一层门控（不 spawn git）：廉价 token 与 base tip 均未变、路径/baseRef 一致且未超兜底窗口 → 复用缓存。
 		const cheapTokenBeforeProbe = await computeWorktreeGitChangeToken(pathInfo.path);
+		const fullRefreshIntervalMs = resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+			task,
+			lastObservedTaskWorktreeGitChangeAtMs: current?.lastObservedTaskWorktreeGitChangeAtMs ?? null,
+			nowMs: now,
+		});
 		if (
 			current &&
 			current.cheapChangeToken !== null &&
@@ -196,30 +318,66 @@ export async function loadTaskWorkspaceMetadata(
 			current.baseRefTipCommit === baseRefTipCommit &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
-			now - current.lastFullRefreshAtMs < GIT_METADATA_FULL_REFRESH_INTERVAL_MS
+			now - current.lastFullRefreshAtMs < fullRefreshIntervalMs
 		) {
 			return current;
 		}
+		const cheapTokenChangedSinceCachedProbe =
+			current !== null && current.cheapChangeToken !== null && current.cheapChangeToken !== cheapTokenBeforeProbe;
 		// 门控放行后才进入限流器：真正 spawn git 的探针工作（probe + getGitSyncSummary +
 		// loadTaskForkPointCommit + loadTaskBaseRefDivergence）钳进共享并发上限。
 		return await workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
 			const probe = await probeGitWorkspaceState(pathInfo.path, { knownRepoRoot: pathInfo.path });
 			// 真探针可能刷新 index 的 stat 缓存，故其后重算 token 存下，保证后续跳过判定稳定。
 			const cheapTokenAfterProbe = await computeWorktreeGitChangeToken(pathInfo.path);
+			const lastObservedTaskWorktreeGitChangeAtMs =
+				current === null
+					? null
+					: cheapTokenChangedSinceCachedProbe || current.stateToken !== probe.stateToken
+						? now
+						: current.lastObservedTaskWorktreeGitChangeAtMs;
 			if (
 				current &&
 				current.stateToken === probe.stateToken &&
 				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
-				current.data.baseRef === pathInfo.baseRef
+				current.data.baseRef === pathInfo.baseRef &&
+				!current.data.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_")
 			) {
 				return {
 					...current,
 					cheapChangeToken: cheapTokenAfterProbe,
 					lastFullRefreshAtMs: now,
+					lastObservedTaskWorktreeGitChangeAtMs,
 				};
 			}
 			const summary = await getGitSyncSummary(pathInfo.path, { probe });
+			if (
+				current &&
+				isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid({
+					current,
+					pathOfTaskWorktree: pathInfo.path,
+					baseRef: pathInfo.baseRef,
+					headCommit: probe.headCommit,
+					currentBranch: probe.currentBranch,
+					baseRefTipCommit,
+				})
+			) {
+				return {
+					data: {
+						...current.data,
+						changedFiles: summary.changedFiles,
+						additions: summary.additions,
+						deletions: summary.deletions,
+						stateVersion: Date.now(),
+					},
+					stateToken: probe.stateToken,
+					cheapChangeToken: cheapTokenAfterProbe,
+					baseRefTipCommit,
+					lastFullRefreshAtMs: now,
+					lastObservedTaskWorktreeGitChangeAtMs,
+				};
+			}
 			const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
 			const divergence = await loadTaskBaseRefDivergence(pathInfo.path, pathInfo.baseRef);
 			const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
@@ -236,6 +394,9 @@ export async function loadTaskWorkspaceMetadata(
 				commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
 				observedAt: now,
+				onTaskRetainedCommittedLineChangeSummary: (summary) => {
+					retainedLineChangeSummary = summary;
+				},
 			});
 			return {
 				data: {
@@ -247,6 +408,12 @@ export async function loadTaskWorkspaceMetadata(
 					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
 					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 					workspaceGitStatus,
+					taskRetainedCommittedLineChangeSummary:
+						workspaceGitStatus.taskCommitIntegrationTrackingStatus === "complete"
+							? retainedLineChangeSummary
+							: createUnavailableTaskRetainedCommittedLineChangeHistory(
+									workspaceGitStatus.taskCommitIntegrationTrackingStatus,
+								).summary,
 					branch: probe.currentBranch,
 					isDetached: probe.headCommit !== null && probe.currentBranch === null,
 					headCommit: probe.headCommit,
@@ -259,6 +426,7 @@ export async function loadTaskWorkspaceMetadata(
 				cheapChangeToken: cheapTokenAfterProbe,
 				baseRefTipCommit,
 				lastFullRefreshAtMs: now,
+				lastObservedTaskWorktreeGitChangeAtMs,
 			};
 		});
 	} catch {
@@ -295,6 +463,7 @@ export async function loadTaskWorkspaceMetadata(
 			cheapChangeToken: null,
 			baseRefTipCommit: null,
 			lastFullRefreshAtMs: 0,
+			lastObservedTaskWorktreeGitChangeAtMs: null,
 		};
 	}
 }

@@ -29,11 +29,13 @@ import {
 	type TaskImage,
 } from "@/types";
 import {
+	independentTaskCreationProvenanceSchema,
 	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskConversationModeSchema,
+	taskMainSessionHandoverRecordSchema,
 } from "../../../src/core/api-contract";
 
 export interface TaskDraft {
@@ -257,6 +259,9 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 // 登记后还要在下面真正带过它，并补进 board-state 测试里的「全字段往返」夹具。
 export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	id: true,
+	mainTaskConversationSessionId: true,
+	taskMainSessionHandover: true,
+	independentTaskCreationProvenance: true,
 	title: true,
 	prompt: true,
 	startInPlanMode: true,
@@ -391,8 +396,21 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
+		...(typeof card.mainTaskConversationSessionId === "string" && card.mainTaskConversationSessionId
+			? { mainTaskConversationSessionId: card.mainTaskConversationSessionId }
+			: {}),
+		...(taskMainSessionHandoverRecordSchema.safeParse(card.taskMainSessionHandover).success
+			? { taskMainSessionHandover: taskMainSessionHandoverRecordSchema.parse(card.taskMainSessionHandover) }
+			: {}),
 		title,
 		prompt,
+		...(independentTaskCreationProvenanceSchema.safeParse(card.independentTaskCreationProvenance).success
+			? {
+					independentTaskCreationProvenance: independentTaskCreationProvenanceSchema.parse(
+						card.independentTaskCreationProvenance,
+					),
+				}
+			: {}),
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
 		...(taskAgentPermissionMode !== undefined ? { taskAgentPermissionMode } : {}),
 		autoReviewEnabled: typeof card.autoReviewEnabled === "boolean" ? card.autoReviewEnabled : false,
@@ -844,35 +862,6 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 		),
 		updated: true,
 	};
-}
-
-export function updateTaskCommentEntries(
-	board: BoardData,
-	taskId: string,
-	taskCommentEntries: TaskCommentEntry[],
-): { board: BoardData; updated: boolean } {
-	const normalizedEntries = cloneTaskCommentEntries(taskCommentEntries);
-	let updated = false;
-	const columns = board.columns.map((column) => {
-		let columnUpdated = false;
-		const cards = column.cards.map((card) => {
-			if (card.id !== taskId) {
-				return card;
-			}
-			columnUpdated = true;
-			updated = true;
-			return updateTaskTimestamp({
-				...card,
-				taskCommentEntries: normalizedEntries,
-			});
-		});
-		return columnUpdated ? { ...column, cards } : column;
-	});
-
-	if (!updated) {
-		return { board, updated: false };
-	}
-	return { board: withUpdatedColumns(board, columns), updated: true };
 }
 
 export function updateTaskTitle(

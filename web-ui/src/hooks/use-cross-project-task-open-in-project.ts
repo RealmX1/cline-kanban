@@ -18,7 +18,7 @@ export interface PendingCrossProjectTaskOpen {
 }
 
 /**
- * 「在某个项目里打开某个任务」——Board Overview、Spotlight、跨项目切换面板共用的唯一入口。
+ * 「在某个项目里打开某个任务」——All projects 首页、Spotlight、跨项目切换面板共用的唯一入口。
  *
  * 同项目直接选中；跨项目先切 workspace（原地切，WS 重连），待目标 board 落定后再 setSelectedTaskId——
  * 绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。
@@ -78,9 +78,9 @@ export function useCrossProjectTaskOpenInProject({
 
 	const handleOpenTaskInProject = useCallback(
 		(repoId: string, taskId: string) => {
-			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
-			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Post-Deploy Verification 面板点 task
-			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
+			// 刻意不改范围：All projects 首页点进任务时仍留在 Board Scope，从 detail 返回（handleBack 清 selectedTaskId）
+			// 即回到首页（Focus View 打开时首页被卸载，列滚动位置由 continuity store 补回）——与 Post-Deploy Verification
+			// 面板点 task 后返回回到面板的行为一致（避免「从首页点进去、返回却落到单项目看板」的困惑）。
 			if (repoId === currentProjectId && projectIdOwningHydratedBoard === repoId) {
 				setPendingCrossProjectTaskOpen(null);
 				// 在途期间点回当前项目的任务：先撤销在途切换（handleSelectProject 选回当前项目即撤销；

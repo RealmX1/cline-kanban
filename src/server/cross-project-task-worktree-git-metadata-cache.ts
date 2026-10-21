@@ -21,7 +21,8 @@ import {
 // 按需轮询 + 这里按 (workspaceId, taskId) 缓存：多个标签页的请求在服务端去重；条目不再被请求就自然淘汰。
 //
 // 每个键复用 workspace-metadata-monitor 的同一个探针（loadTaskWorkspaceMetadata）：先用 fs-stat 门控，token
-// 与 base tip 不变且未超兜底窗口就 0 次 git spawn；真要跑 git 时走同一个全局 spawn 并发上限。
+// 与 base tip 不变且未超兜底窗口（按卡片所在列与近期活跃度分热 / 冷两档）就 0 次 git spawn；真要跑 git 时走同一个
+// 全局 spawn 并发上限。
 
 // EXPERIMENT_NODE: 跨项目 git 元数据缓存键多久没被请求就淘汰（5 分钟）；面板收起或条目滑出窗口后释放内存。
 const CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_CACHE_ENTRY_EVICTION_AFTER_UNREQUESTED_MS = 5 * 60_000;
@@ -152,6 +153,8 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 								taskId,
 								baseRef: located.card.baseRef,
 								...(located.card.worktreeMode ? { worktreeMode: located.card.worktreeMode } : {}),
+								taskCardBoardColumnId: located.columnId,
+								taskCardAutoReviewEnabled: located.card.autoReviewEnabled === true,
 							},
 							current,
 							resolveBaseRefTip,

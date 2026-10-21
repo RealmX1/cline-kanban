@@ -24,6 +24,7 @@ import {
 	type StartAcpTaskSessionRequest,
 } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 
 const TASK_ID = "task-1";
 
@@ -51,20 +52,75 @@ function createPendingTaskConnection() {
 	return { settleAsEstablished, settleAsFailed };
 }
 
-function startServiceWithSummaryRecorder(): {
+function startServiceWithSummaryRecorder(
+	workspaceIdentity: { workspaceId: string; workspaceRepositoryPath: string } | null = null,
+): {
 	service: AcpTaskSessionService;
 	emittedSummaries: RuntimeTaskSessionSummary[];
 } {
 	acpClientConnectionRuntimeTestDouble.startTaskConnection.mockReset();
 	acpClientConnectionRuntimeTestDouble.getConnection.mockReset();
 	acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValue(null);
-	const service = new AcpTaskSessionService();
+	const service = new AcpTaskSessionService(workspaceIdentity);
 	const emittedSummaries: RuntimeTaskSessionSummary[] = [];
 	service.onSummary((summary) => emittedSummaries.push(summary));
 	return { service, emittedSummaries };
 }
 
 describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
+	it.each(["task-1", "__home_agent__:workspace-1:omp"])("%s 的 ACP 初始请求包含共享起草指导", async (taskId) => {
+		const { service } = startServiceWithSummaryRecorder();
+		const { settleAsEstablished } = createPendingTaskConnection();
+		const started = service.startTaskSession(buildStartRequest({ taskId }));
+		const connection = createIdentityTestConnection("guidance-test-native-id");
+		settleAsEstablished(connection);
+		await started;
+		expect(connection.prompt).toHaveBeenCalledExactlyOnceWith([
+			{ type: "text", text: expect.stringContaining(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()) },
+		]);
+	});
+
+	it("协作 ACP 会话在连接前后均保留宿主归属", async () => {
+		const { service, emittedSummaries } = startServiceWithSummaryRecorder({
+			workspaceId: "workspace-1",
+			workspaceRepositoryPath: "/workspace",
+		});
+		const { settleAsEstablished } = createPendingTaskConnection();
+		const metadata = {
+			workspaceTaskId: "owner-task",
+			taskConversationSessionRole: "task_collaborator" as const,
+			taskConversationSessionContextSource: "started_from_scratch" as const,
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: 1,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: "协作工作",
+		};
+		const started = service.startTaskSession(
+			buildStartRequest({ workspaceTaskId: "owner-task", taskConversationSessionMetadata: metadata }),
+		);
+		expect(emittedSummaries[0]?.taskConversationSessionMetadata).toEqual(metadata);
+		expect(acpClientConnectionRuntimeTestDouble.startTaskConnection).toHaveBeenCalledWith(
+			expect.objectContaining({
+				env: expect.objectContaining({
+					KANBAN_TASK_ID: "owner-task",
+					KANBAN_TASK_CONVERSATION_SESSION_ID: TASK_ID,
+				}),
+			}),
+		);
+		const connection = createIdentityTestConnection("collaboration-native-id");
+		settleAsEstablished(connection);
+		await started;
+		expect(service.getSummary(TASK_ID)?.taskConversationSessionMetadata).toEqual(metadata);
+		expect(connection.prompt).toHaveBeenCalledWith(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: "text",
+					text: expect.stringContaining("协作会话的责任边界"),
+				}),
+			]),
+		);
+	});
+
 	it("续跑重开在连接建立前把回合留给用户，而不是假装 agent 在跑", async () => {
 		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
 		const { settleAsEstablished } = createPendingTaskConnection();
@@ -176,6 +232,24 @@ function createIdentityTestConnection(sessionId: string) {
 	};
 }
 describe("ACP 原生身份恢复", () => {
+	it("新提交报告原始用户正文，续跑重播不会触发提交监听", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const listener = vi.fn();
+		service.setUserPromptSubmittedListener(listener);
+		const connection = createIdentityTestConnection("native-prompt-usage");
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(connection);
+		await service.startTaskSession(buildStartRequest({ prompt: "首次用户正文" }));
+		expect(listener.mock.calls).toEqual([[TASK_ID, "首次用户正文"]]);
+		acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValueOnce(connection as never);
+		await service.sendTaskSessionInput(TASK_ID, "后续用户正文");
+		expect(listener.mock.calls).toEqual([
+			[TASK_ID, "首次用户正文"],
+			[TASK_ID, "后续用户正文"],
+		]);
+		await service.stopTaskSession(TASK_ID);
+		await service.startTaskSession(buildStartRequest({ resumePriorAgentConversationWithoutResendingPrompt: true }));
+		expect(listener).toHaveBeenCalledTimes(2);
+	});
 	it("保存协议 ID，下一次恢复按此 ID 且不重发 prompt", async () => {
 		const { service } = startServiceWithSummaryRecorder();
 		const first = createIdentityTestConnection("native-A");

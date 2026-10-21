@@ -1,4 +1,5 @@
 import { AlertTriangle } from "lucide-react";
+import { ProjectIcon } from "@/components/project-visual-identity";
 
 import {
 	FUZZY_MATCHED_TEXT_STYLE,
@@ -126,12 +127,8 @@ export function ProjectSwitcherTableRow({
 		>
 			<td className="max-w-[280px] px-2 py-1.5 align-middle">
 				<div className="flex min-w-0 items-center gap-1.5">
-					<span
-						className={cn(
-							"truncate text-[13px] font-medium",
-							isCurrentProject ? "text-accent" : "text-text-primary",
-						)}
-					>
+					<ProjectIcon project={project} />
+					<span className={cn("truncate text-[13px] font-medium", "text-text-primary")}>
 						{renderFuzzyHighlightedText(
 							project.name,
 							row.projectNameMatchPositions ?? undefined,

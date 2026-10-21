@@ -5,6 +5,8 @@ import {
 	isAwaitingUserReviewTurn,
 	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskMainSessionHandoverSuspendingAutomaticActions,
+	resolveMainTaskConversationSessionSummary,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
 import { classifyTaskCardBoardColumnTransitionRequestedByUserGesture } from "@runtime-task-card-action-board-column-transitions";
@@ -27,6 +29,10 @@ import {
 } from "@/hooks/use-post-deploy-verification-done-entry-closure-dialog-for-board-moves-into-done";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
+import {
+	type TaskCommentBeforeMoveIntoDoneController,
+	useTaskCommentBeforeMoveIntoDone,
+} from "@/hooks/use-task-comment-before-move-into-done";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import type {
 	RuntimePostDeployVerificationDeploymentGroup,
@@ -64,6 +70,10 @@ import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
+import type {
+	TaskCardMoveIntoDoneRequestHandler,
+	TaskCommentToAppendWhenMovingIntoDone,
+} from "@/types/task-card-move-into-done-request";
 import {
 	getNextDetailTaskIdAfterTrashMove,
 	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
@@ -111,6 +121,8 @@ interface UseBoardInteractionsInput {
 	readyForReviewNotificationsEnabled: boolean;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
+	// All projects Focus View 的分组导航：操作前捕获，成功后调用；null 才回退到普通 Review 列顺序。
+	captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null;
 	// Post-Deploy Verification「移入 Done」门禁的客户端预检数据：当前项目的活跃部署组（App 持有的唯一
 	// usePostDeployVerification 实例）。缺省 = 不预检，全靠服务端拒绝后的兜底。
 	postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck?: RuntimePostDeployVerificationDeploymentGroup | null;
@@ -132,7 +144,9 @@ export interface UseBoardInteractionsResult {
 	handleDetailTaskDragEnd: (result: DropResult) => void;
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
-	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleMoveReviewCardToTrash: TaskCardMoveIntoDoneRequestHandler;
+	taskCommentBeforeMoveIntoDone: TaskCommentBeforeMoveIntoDoneController;
+	confirmTaskCommentBeforeMoveIntoDone: (commentText: string) => void;
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
@@ -195,6 +209,7 @@ export function useBoardInteractions({
 	readyForReviewNotificationsEnabled,
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
+	captureCacheWarmTaskFocusNavigationAfterValidationMove,
 	postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck = null,
 	refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
@@ -204,6 +219,7 @@ export function useBoardInteractions({
 		board,
 		sessions,
 		selectedTaskId,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
 		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 	});
@@ -211,6 +227,7 @@ export function useBoardInteractions({
 		board,
 		sessions,
 		selectedTaskId,
+		captureCacheWarmTaskFocusNavigationAfterValidationMove,
 		postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
 		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection,
 	};
@@ -245,9 +262,20 @@ export function useBoardInteractions({
 	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
 	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
 	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
-	const [pendingMoveToDone, setPendingMoveToDone] = useState<{ taskId: string; fromColumnId: BoardColumnId } | null>(
-		null,
-	);
+	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
+	const {
+		open: openTaskCommentBeforeMoveIntoDone,
+		complete: completeTaskCommentBeforeMoveIntoDone,
+		returnToEditing: returnToEditingTaskCommentBeforeMoveIntoDone,
+		suspendForConfirmation: suspendTaskCommentBeforeMoveIntoDone,
+		cancel: cancelTaskCommentBeforeMoveIntoDone,
+		prepareSubmission: prepareTaskCommentBeforeMoveIntoDone,
+	} = taskCommentBeforeMoveIntoDone;
+	const [pendingMoveToDone, setPendingMoveToDone] = useState<{
+		taskId: string;
+		fromColumnId: BoardColumnId;
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+	} | null>(null);
 	const [deleteTaskTarget, setDeleteTaskTarget] = useState<BoardCard | null>(null);
 	// 置顶原因对话框的在途请求（null = 未打开）。新 pin 与「编辑已有原因」共用同一个对话框，
 	// 靠 isEditingExistingPin 区分按钮文案与「确认时是否要写入置顶时间」。
@@ -585,8 +613,14 @@ export function useBoardInteractions({
 			const boardChangedSinceLastRun = previousAutoFlowBoardRef.current !== currentBoard;
 			const deferredRetryTaskIds = new Set<string>();
 			const nowMs = Date.now();
-			for (const summary of Object.values(sessions)) {
-				const previous = previousSessions[summary.taskId];
+			const mainSessionsByTaskCardId: Record<string, RuntimeTaskSessionSummary> = {};
+			for (const card of currentBoard.columns.flatMap((column) => column.cards)) {
+				const primary = resolveMainTaskConversationSessionSummary(card, sessions);
+				if (primary && !isTaskMainSessionHandoverSuspendingAutomaticActions(card))
+					mainSessionsByTaskCardId[card.id] = primary;
+			}
+			for (const [taskId, summary] of Object.entries(mainSessionsByTaskCardId)) {
+				const previous = previousSessions[taskId];
 				// B5 引用短路：summary 引用跨 tick 稳定（runtime-state-hub merge 只替换改动 key），
 				// 引用未变即内容未变；board 也未变时本帧处理结果与上一帧相同（纯 no-op），直接跳过，
 				// 省掉每 tick 对全部 N 条 summary 的 getTaskColumnId 全板扫描与 resolveSessionFacets。
@@ -603,13 +637,13 @@ export function useBoardInteractions({
 				// 不记为已见，命令落定（board 变化）后的下一帧重新评估。
 				if (
 					currentProjectId &&
-					(readTaskCardActionCommandKindInFlight(currentProjectId, summary.taskId) !== null ||
-						hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, summary.taskId))
+					(readTaskCardActionCommandKindInFlight(currentProjectId, taskId) !== null ||
+						hasPendingTaskCardCommandBoardOverlayEntryForTaskCard(currentProjectId, taskId))
 				) {
-					deferredRetryTaskIds.add(summary.taskId);
+					deferredRetryTaskIds.add(taskId);
 					continue;
 				}
-				let columnId = getTaskColumnId(nextBoard, summary.taskId);
+				let columnId = getTaskColumnId(nextBoard, taskId);
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
@@ -618,26 +652,26 @@ export function useBoardInteractions({
 				const facets = resolveSessionFacets(summary);
 				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
 				if (columnId === "backlog" && summary.startedAt != null) {
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 						columnId = "in_progress";
 					}
 				}
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review", {
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "review", {
 						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：本帧未落直接移列（动画接管 / 被在途移动阻塞）的 task 不得记录为已见，
 						// 否则引用短路会吃掉下一 tick 的重试（短路前由 updatedAt guard 放行每 tick 重估）。
-						deferredRetryTaskIds.add(summary.taskId);
+						deferredRetryTaskIds.add(taskId);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "review", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -656,18 +690,18 @@ export function useBoardInteractions({
 						isAgentActivelyProducingOutput(summary, nowMs)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "in_progress", {
 						skipKickoff: true,
 						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：同 Review 落位分支——动画接管 / 被阻塞的 task 不记录为已见，保留下一 tick 重试。
-						deferredRetryTaskIds.add(summary.taskId);
+						deferredRetryTaskIds.add(taskId);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
-						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
+						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -687,42 +721,42 @@ export function useBoardInteractions({
 						evaluatePostDeployVerificationDoneEntryGatePrecheckForTask(
 							latestBoardInteractionStateRef.current
 								.postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
-							summary.taskId,
+							taskId,
 						).postDeployVerificationDoneEntryGatePrecheckOutcome !==
 						"task_not_subject_to_post_deploy_verification_done_entry_gate"
 					) {
-						showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(summary.taskId);
+						showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(taskId);
 						continue;
 					}
-					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
+					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, taskId);
+					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "trash", {
 						skipTrashWorkflow: true,
 						boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						if (programmaticMoveAttempt === "blocked") {
-							deferredRetryTaskIds.add(summary.taskId);
+							deferredRetryTaskIds.add(taskId);
 						}
 						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
+							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
 						);
 						continue;
 					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "trash", { insertAtTop: true });
+					const moved = moveTaskToColumn(nextBoard, taskId, "trash", { insertAtTop: true });
 					if (moved.moved) {
 						recordWebUiBoardMutationInitiatorForTaskCardAspect({
-							taskId: summary.taskId,
+							taskId: taskId,
 							boardMutationAspectOfTaskCard: "task_card_column_placement",
 							boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 						});
 						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
+							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
 						);
 						nextBoard = moved.board;
 					}
 				}
 			}
-			const nextPreviousSessions = { ...sessions };
+			const nextPreviousSessions = { ...mainSessionsByTaskCardId };
 			for (const taskId of deferredRetryTaskIds) {
 				const previousSession = previousSessions[taskId];
 				if (previousSession) {
@@ -761,10 +795,12 @@ export function useBoardInteractions({
 				boardMutationInitiator?: WebUiBoardMutationInitiator;
 				insertAtIndexWithinDoneBoardColumn?: number;
 				postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest;
+				taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 			},
 		): Promise<void> => {
 			const { board } = latestBoardInteractionStateRef.current;
 			if (!currentProjectId || !findCardSelection(board, taskId)) {
+				if (options?.taskCommentToAppendWhenMovingIntoDone) throw new Error("任务已不在当前项目中，未提交评论。");
 				return;
 			}
 			setSelectedTaskId((currentSelectedTaskId) =>
@@ -773,6 +809,9 @@ export function useBoardInteractions({
 			const result = await moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
 				workspaceId: currentProjectId,
 				taskId,
+				...(options?.taskCommentToAppendWhenMovingIntoDone
+					? { taskCommentToAppendWhenMovingIntoDone: options.taskCommentToAppendWhenMovingIntoDone }
+					: {}),
 				currentProjectBoardForOptimisticOverlay: board,
 				...(options?.insertAtIndexWithinDoneBoardColumn !== undefined
 					? { insertAtIndexWithinDoneBoardColumn: options.insertAtIndexWithinDoneBoardColumn }
@@ -795,7 +834,9 @@ export function useBoardInteractions({
 					})
 				) {
 					case "open_board_level_closure_reason_dialog_for_user_gesture":
+						if (options?.taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 						openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+							taskCommentToAppendWhenMovingIntoDone: options?.taskCommentToAppendWhenMovingIntoDone,
 							taskId,
 							insertAtIndexWithinDoneBoardColumn: options?.insertAtIndexWithinDoneBoardColumn,
 							runtimeRejectedMoveIntoDoneForMissingClosureReasons: true,
@@ -837,6 +878,7 @@ export function useBoardInteractions({
 			currentProjectId,
 			openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			setSelectedTaskId,
+			suspendTaskCommentBeforeMoveIntoDone,
 			showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard,
 		],
 	);
@@ -1055,11 +1097,21 @@ export function useBoardInteractions({
 						});
 					return;
 				}
-				case "board_column_transition_without_session_side_effects":
+				case "board_column_transition_without_session_side_effects": {
 					if (!currentProjectId) {
 						return;
 					}
-					if (drop.fromColumnId === "review" && drop.toColumnId === "validation") {
+					const completeCacheWarmFocusNavigation =
+						drop.fromColumnId === "review" && drop.toColumnId === "validation"
+							? latestBoardInteractionStateRef.current.captureCacheWarmTaskFocusNavigationAfterValidationMove?.(
+									drop.taskId,
+								)
+							: null;
+					if (
+						drop.fromColumnId === "review" &&
+						drop.toColumnId === "validation" &&
+						!completeCacheWarmFocusNavigation
+					) {
 						moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, drop.taskId);
 					}
 					void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
@@ -1072,11 +1124,18 @@ export function useBoardInteractions({
 							? { boardMutationInitiator: boardMutationInitiatorForCommand }
 							: {}),
 					}).then((commandResult) => {
+						if (
+							commandResult.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+							commandResult.response.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard === "validation"
+						) {
+							completeCacheWarmFocusNavigation?.();
+						}
 						if (commandResult.taskCardActionCommandExecutionOutcome === "command_failed") {
 							notifyError(`Could not move the task: ${commandResult.commandFailureMessage}`);
 						}
 					});
 					return;
+				}
 				default:
 					// 只对浏览器端自动流转放行的移动已在上面的自动流转分支处理。
 					resolvePendingProgrammaticStartMove(drop.taskId, false);
@@ -1115,7 +1174,7 @@ export function useBoardInteractions({
 			// 这里刻意只拦「确有启动记录」而不要求「从没启动过」的正面证据：启动史说不清时，详情面板把「启动」
 			// 与「续跑」都摆给人选，人选了启动就走到这里，再要求正面证据会让那个按钮点了没反应。看板 Retry 不是
 			// 人在知情下的选择，所以它在 task-card-body 里另要求正面证据（resolveTaskAgentSessionLaunchHistoryEvidence）。
-			const existingSessionSummary = sessions[taskId];
+			const existingSessionSummary = resolveMainTaskConversationSessionSummary(selection.card, sessions);
 			const isExistingSessionSummaryPlaceholderOfNeverLaunchedTask =
 				existingSessionSummary != null &&
 				isNeverStartedPlaceholderTaskSessionSummary(existingSessionSummary) &&
@@ -1198,11 +1257,38 @@ export function useBoardInteractions({
 	// Actually perform the move to Done. Pass the card's source column so the Review→Done slide
 	// animation only runs for Review cards and other columns fall back to a direct trash move.
 	const performMoveToTrash = useCallback(
-		(taskId: string, fromColumnId: BoardColumnId) => {
+		(
+			taskId: string,
+			fromColumnId: BoardColumnId,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
 				return;
 			}
 			setTaskMoveToTrashLoading(taskId, true);
+			if (taskCommentToAppendWhenMovingIntoDone) {
+				void requestMoveTaskToTrash(taskId, fromColumnId, {
+					boardMutationInitiator: "web_ui_user_gesture",
+					taskCommentToAppendWhenMovingIntoDone,
+				})
+					.then(() =>
+						completeTaskCommentBeforeMoveIntoDone(
+							taskId,
+							taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						),
+					)
+					.catch((error: unknown) => {
+						const message = error instanceof Error ? error.message : String(error);
+						if (!isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(message))
+							returnToEditingTaskCommentBeforeMoveIntoDone(
+								taskId,
+								message,
+								taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+							);
+					})
+					.finally(() => setTaskMoveToTrashLoading(taskId, false));
+				return;
+			}
 			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
 				boardMutationInitiator: "web_ui_user_gesture",
 			})
@@ -1213,7 +1299,13 @@ export function useBoardInteractions({
 					setTaskMoveToTrashLoading(taskId, false);
 				});
 		},
-		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
+		[
+			requestMoveTaskToTrashWithAnimation,
+			requestMoveTaskToTrash,
+			completeTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+			setTaskMoveToTrashLoading,
+		],
 	);
 
 	// Post-Deploy Verification 面板的移列入口。与 performMoveToTrash 等价——服务端的 Done 命令照常停会话、删 worktree，
@@ -1272,6 +1364,12 @@ export function useBoardInteractions({
 			const fromColumnId = getTaskColumnId(latestBoardInteractionStateRef.current.board, taskId);
 			if (!postDeployVerificationDoneEntryClosure || fromColumnId === null || fromColumnId === "trash") {
 				closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+				if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+					returnToEditingTaskCommentBeforeMoveIntoDone(
+						taskId,
+						"任务或完成条件已变化，未提交评论。",
+						dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+					);
 				return;
 			}
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
@@ -1282,9 +1380,15 @@ export function useBoardInteractions({
 			void requestMoveTaskToTrash(taskId, fromColumnId, {
 				boardMutationInitiator: "web_ui_user_gesture",
 				postDeployVerificationDoneEntryClosure,
+				taskCommentToAppendWhenMovingIntoDone: dialogRequest.taskCommentToAppendWhenMovingIntoDone,
 				...(insertAtIndexWithinDoneBoardColumn !== undefined ? { insertAtIndexWithinDoneBoardColumn } : {}),
 			})
 				.then(() => {
+					if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+						completeTaskCommentBeforeMoveIntoDone(
+							taskId,
+							dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						);
 					closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
 				})
 				.catch((error: unknown) => {
@@ -1313,6 +1417,12 @@ export function useBoardInteractions({
 						return;
 					}
 					closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+					if (dialogRequest.taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskCommentBeforeMoveIntoDone(
+							taskId,
+							moveIntoDoneFailureMessage,
+							dialogRequest.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+						);
 				})
 				.finally(() => {
 					setTaskMoveToTrashLoading(taskId, false);
@@ -1322,6 +1432,8 @@ export function useBoardInteractions({
 			closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 			markPostDeployVerificationDoneEntryClosureDialogTaskRejectedByRuntime,
+			completeTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
 			postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 			requestMoveTaskToTrash,
 			setIsPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
@@ -1333,8 +1445,13 @@ export function useBoardInteractions({
 		if (isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting) {
 			return;
 		}
+		const commentRequest = postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone?.dialogRequest;
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
+		if (commentRequest?.taskCommentToAppendWhenMovingIntoDone)
+			returnToEditingTaskCommentBeforeMoveIntoDone(commentRequest.taskId);
 	}, [
+		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
+		returnToEditingTaskCommentBeforeMoveIntoDone,
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 	]);
@@ -1344,8 +1461,14 @@ export function useBoardInteractions({
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
 	// 受 Post-Deploy Verification 门禁（有未勾项）的卡改开原因对话框：跳过 Validation 的确认是它的条件段落，不叠两层。
 	const requestMoveToTrash = useCallback(
-		(taskId: string, fromColumnId: BoardColumnId) => {
+		(
+			taskId: string,
+			fromColumnId: BoardColumnId,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
+				if (taskCommentToAppendWhenMovingIntoDone)
+					returnToEditingTaskCommentBeforeMoveIntoDone(taskId, "任务操作仍在进行中，请稍后重试。");
 				return;
 			}
 			if (
@@ -1355,7 +1478,9 @@ export function useBoardInteractions({
 					taskId,
 				)
 			) {
+				if (taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 				openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+					taskCommentToAppendWhenMovingIntoDone,
 					taskId,
 					insertAtIndexWithinDoneBoardColumn: undefined,
 					runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
@@ -1363,12 +1488,18 @@ export function useBoardInteractions({
 				return;
 			}
 			if (fromColumnId === "review" || fromColumnId === "in_progress") {
-				setPendingMoveToDone({ taskId, fromColumnId });
+				if (taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
+				setPendingMoveToDone({ taskId, fromColumnId, taskCommentToAppendWhenMovingIntoDone });
 				return;
 			}
-			performMoveToTrash(taskId, fromColumnId);
+			performMoveToTrash(taskId, fromColumnId, taskCommentToAppendWhenMovingIntoDone);
 		},
-		[openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone, performMoveToTrash],
+		[
+			openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
+			performMoveToTrash,
+			suspendTaskCommentBeforeMoveIntoDone,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+		],
 	);
 
 	const handleMoveToTrash = useCallback(() => {
@@ -1378,24 +1509,78 @@ export function useBoardInteractions({
 		requestMoveToTrash(selectedCard.card.id, selectedCard.column.id);
 	}, [requestMoveToTrash, selectedCard]);
 
-	const handleMoveReviewCardToTrash = useCallback(
-		(taskId: string) => {
+	const handleMoveReviewCardToTrash = useCallback<TaskCardMoveIntoDoneRequestHandler>(
+		(taskId, options) => {
 			const { board } = latestBoardInteractionStateRef.current;
+			const selection = findCardSelection(board, taskId);
+			if (options?.requestTaskCommentBeforeMovingIntoDone) {
+				if (currentProjectId && selection) openTaskCommentBeforeMoveIntoDone(currentProjectId, selection.card);
+				return;
+			}
 			requestMoveToTrash(taskId, getTaskColumnId(board, taskId) ?? "review");
 		},
-		[requestMoveToTrash],
+		[currentProjectId, openTaskCommentBeforeMoveIntoDone, requestMoveToTrash],
+	);
+
+	const confirmTaskCommentBeforeMoveIntoDone = useCallback(
+		(commentText: string) => {
+			const request = taskCommentBeforeMoveIntoDone.request;
+			if (!request) return;
+			const selection = findCardSelection(latestBoardInteractionStateRef.current.board, request.taskId);
+			if (request.workspaceId !== currentProjectId || !selection) {
+				returnToEditingTaskCommentBeforeMoveIntoDone(request.taskId, "任务已移动或当前项目已切换，未提交评论。");
+				return;
+			}
+			const comment = prepareTaskCommentBeforeMoveIntoDone(commentText);
+			if (!comment) return;
+			if (selection.column.id === "trash") {
+				// 响应可能在写盘后丢失；仅用广播中已保存的同 ID、同正文评论结算原草稿。
+				if (
+					selection.card.taskCommentEntries?.some(
+						(entry) =>
+							entry.taskCommentEntryId === comment.taskCommentEntryId &&
+							entry.commentText === comment.commentText,
+					)
+				)
+					completeTaskCommentBeforeMoveIntoDone(request.taskId, comment.taskCommentEntryId);
+				else
+					returnToEditingTaskCommentBeforeMoveIntoDone(
+						request.taskId,
+						"任务已移动或评论已变化，未提交评论。",
+						comment.taskCommentEntryId,
+					);
+				return;
+			}
+			requestMoveToTrash(request.taskId, selection.column.id, comment);
+		},
+		[
+			taskCommentBeforeMoveIntoDone.request,
+			currentProjectId,
+			completeTaskCommentBeforeMoveIntoDone,
+			prepareTaskCommentBeforeMoveIntoDone,
+			requestMoveToTrash,
+			returnToEditingTaskCommentBeforeMoveIntoDone,
+		],
 	);
 
 	const confirmMoveToDone = useCallback(() => {
 		if (pendingMoveToDone) {
-			performMoveToTrash(pendingMoveToDone.taskId, pendingMoveToDone.fromColumnId);
+			// 本次命令尚未执行时保留确认，草稿仍可取消或在其他操作结束后重试。
+			if (moveToTrashLoadingByIdRef.current[pendingMoveToDone.taskId]) return;
+			performMoveToTrash(
+				pendingMoveToDone.taskId,
+				pendingMoveToDone.fromColumnId,
+				pendingMoveToDone.taskCommentToAppendWhenMovingIntoDone,
+			);
 		}
 		setPendingMoveToDone(null);
 	}, [pendingMoveToDone, performMoveToTrash]);
 
 	const cancelMoveToDone = useCallback(() => {
+		if (pendingMoveToDone?.taskCommentToAppendWhenMovingIntoDone)
+			returnToEditingTaskCommentBeforeMoveIntoDone(pendingMoveToDone.taskId);
 		setPendingMoveToDone(null);
-	}, []);
+	}, [pendingMoveToDone, returnToEditingTaskCommentBeforeMoveIntoDone]);
 
 	// Pure board move into the manual-validation buffer. No session stop, no worktree teardown —
 	// the developer keeps the running agent/diff while validating. Goes through taskCardAction (the
@@ -1407,17 +1592,27 @@ export function useBoardInteractions({
 			if (!currentProjectId || (fromColumnId !== "in_progress" && fromColumnId !== "review")) {
 				return;
 			}
+			const completeCacheWarmFocusNavigation =
+				fromColumnId === "review"
+					? latestBoardInteractionStateRef.current.captureCacheWarmTaskFocusNavigationAfterValidationMove?.(taskId)
+					: null;
 			void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
 				workspaceId: currentProjectId,
 				taskId,
 				targetBoardColumnId: "validation",
 				currentProjectBoardForOptimisticOverlay: board,
 			}).then((result) => {
+				if (
+					result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+					result.response.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard === "validation"
+				) {
+					completeCacheWarmFocusNavigation?.();
+				}
 				if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
 					notifyError(`Could not move the task to Validation: ${result.commandFailureMessage}`);
 				}
 			});
-			if (fromColumnId === "review") {
+			if (fromColumnId === "review" && !completeCacheWarmFocusNavigation) {
 				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
 			}
 			// A session that is *actively producing output* in Validation gets auto-migrated back to
@@ -1426,7 +1621,11 @@ export function useBoardInteractions({
 			// "running") now stay in Validation, so the warning must use the same predicate as the
 			// bounce — keying off bare state === "running" would false-warn on those. Non-blocking,
 			// auto-dismisses after 3s.
-			if (isAgentActivelyProducingOutput(sessions[taskId], Date.now())) {
+			const card = findCardSelection(board, taskId)?.card;
+			if (
+				card &&
+				isAgentActivelyProducingOutput(resolveMainTaskConversationSessionSummary(card, sessions), Date.now())
+			) {
 				showAppToast({
 					intent: "warning",
 					icon: "info-sign",
@@ -1719,6 +1918,8 @@ export function useBoardInteractions({
 	]);
 
 	const resetBoardInteractionsState = useCallback(() => {
+		cancelTaskCommentBeforeMoveIntoDone();
+		setPendingMoveToDone(null);
 		previousSessionsRef.current = {};
 		previousAutoFlowBoardRef.current = null;
 		moveToTrashLoadingByIdRef.current = {};
@@ -1732,6 +1933,7 @@ export function useBoardInteractions({
 		setTaskPinboardPinReasonRequest(null);
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone();
 	}, [
+		cancelTaskCommentBeforeMoveIntoDone,
 		closePostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
 		resetProgrammaticCardMoves,
 		resolvePendingProgrammaticStartMove,
@@ -1751,6 +1953,8 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		taskCommentBeforeMoveIntoDone,
+		confirmTaskCommentBeforeMoveIntoDone,
 		isMoveToDoneConfirmOpen: pendingMoveToDone !== null,
 		confirmMoveToDone,
 		cancelMoveToDone,

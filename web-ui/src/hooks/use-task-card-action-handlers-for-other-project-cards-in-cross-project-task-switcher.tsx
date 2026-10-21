@@ -1,5 +1,4 @@
 import { type ReactElement, useCallback, useState } from "react";
-
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import {
@@ -8,6 +7,9 @@ import {
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
+import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
+import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
 import type { TaskCardActionCommandExecutionResult } from "@/state/task-card-action-command-execution";
 import {
@@ -22,6 +24,7 @@ import {
 import type { TaskCardActionCommandKind } from "@/stores/task-card-action-commands-in-flight-store";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { BoardCard, BoardColumnId } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 /**
  * All projects 面板里**其他项目**的卡片动作。与当前项目（use-board-interactions）调的是同一组 `taskCardAction.*`
@@ -41,6 +44,7 @@ function reportTaskCardActionCommandFailure(
 }
 
 interface PendingOtherProjectTaskCardConfirmation {
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	workspaceId: string;
 	taskCard: BoardCard;
 }
@@ -64,21 +68,42 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 	onUnpinTaskCardInOtherProjectFromTaskPinboard: (workspaceId: string, taskId: string) => void;
 	onRequestEditBacklogTaskCardInOtherProject?: (workspaceId: string, taskCard: BoardCard) => void;
 }): TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher {
+	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
+	const {
+		open: openTaskComment,
+		complete: completeTaskComment,
+		returnToEditing: returnToEditingTaskComment,
+		suspendForConfirmation: suspendTaskComment,
+		prepareSubmission: prepareTaskComment,
+	} = taskCommentBeforeMoveIntoDone;
 	const [pendingDeleteConfirmation, setPendingDeleteConfirmation] =
 		useState<PendingOtherProjectTaskCardConfirmation | null>(null);
 	// 从 Review / In Progress 直接进 Done 会跳过人工 Validation，与当前项目一样先确认。
 	const [pendingSkipValidationConfirmation, setPendingSkipValidationConfirmation] =
 		useState<PendingOtherProjectTaskCardConfirmation | null>(null);
 
-	const moveTaskCardInOtherProjectIntoDone = useCallback((workspaceId: string, taskId: string) => {
-		void moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({ workspaceId, taskId }).then(
-			(result) => {
+	const moveTaskCardInOtherProjectIntoDone = useCallback(
+		(
+			workspaceId: string,
+			taskId: string,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
+			void moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
+				workspaceId,
+				taskId,
+				taskCommentToAppendWhenMovingIntoDone,
+			}).then((result) => {
 				// 其他项目的 PDV 读模型不在这个页面里，没法在这里列出未勾项问原因：受门禁时给一句可读提示，
 				// 让用户切到那个项目里带原因移入 Done（当前项目的卡走 use-board-interactions，会直接打开原因对话框）。
 				if (
 					result.taskCardActionCommandExecutionOutcome === "command_failed" &&
 					isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(result.commandFailureMessage)
 				) {
+					if (taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskComment(
+							taskId,
+							`${describePostDeployVerificationDoneEntryGateRejectionForHumans(result.commandFailureMessage)}——请在该项目里带原因移入 Done。`,
+						);
 					showAppToast({
 						intent: "warning",
 						icon: "warning-sign",
@@ -89,8 +114,17 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				}
 				reportTaskCardActionCommandFailure("move the task to Done", result);
 				if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
+					if (taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskComment(
+							taskId,
+							result.taskCardActionCommandExecutionOutcome === "command_failed"
+								? result.commandFailureMessage
+								: "任务另有操作正在进行，请稍后重试。",
+						);
 					return;
 				}
+				if (taskCommentToAppendWhenMovingIntoDone)
+					completeTaskComment(taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
 				const worktreeDeletionErrorMessage =
 					result.response.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? null;
 				if (worktreeDeletionErrorMessage) {
@@ -101,9 +135,10 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 						timeout: 7000,
 					});
 				}
-			},
-		);
-	}, []);
+			});
+		},
+		[completeTaskComment, returnToEditingTaskComment],
+	);
 
 	const buildTaskCardActionHandlerBundleForOtherProjectTaskCard = useCallback(
 		({
@@ -132,7 +167,11 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
 				}).then((result) => reportTaskCardActionCommandFailure("start the task", result));
 			},
-			onMoveToTrashTask: (taskId) => {
+			onMoveToTrashTask: (taskId, options) => {
+				if (options?.requestTaskCommentBeforeMovingIntoDone) {
+					openTaskComment(workspaceId, taskCard);
+					return;
+				}
 				if (boardColumnIdContainingTaskCard === "review" || boardColumnIdContainingTaskCard === "in_progress") {
 					setPendingSkipValidationConfirmation({ workspaceId, taskCard });
 					return;
@@ -192,6 +231,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			},
 		}),
 		[
+			openTaskComment,
 			moveTaskCardInOtherProjectIntoDone,
 			onRequestEditBacklogTaskCardInOtherProject,
 			onRequestPinTaskCardInOtherProjectToTaskPinboard,
@@ -201,6 +241,56 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 
 	const otherProjectTaskCardActionConfirmationDialogs = (
 		<>
+			<TaskCommentBeforeMoveIntoDoneDialog
+				controller={taskCommentBeforeMoveIntoDone}
+				onSubmit={(text) => {
+					const request = taskCommentBeforeMoveIntoDone.request;
+					if (!request) return;
+					const comment = prepareTaskComment(text);
+					if (!comment) return;
+					void readTaskCardWithBoardColumnInWorkspace(request.workspaceId, request.taskId)
+						.then((snapshot) => {
+							if (snapshot.taskCardLookupOutcome !== "task_card_found_on_workspace_board") {
+								returnToEditingTaskComment(request.taskId, "任务已移动或已删除，未提交评论。");
+								return;
+							}
+							if (snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard === "trash") {
+								// 读回已保存的同一条评论后结算，避免响应丢失时重跑 Done 或补加新评论。
+								if (
+									snapshot.taskCardSnapshot.taskCard.taskCommentEntries?.some(
+										(entry) =>
+											entry.taskCommentEntryId === comment.taskCommentEntryId &&
+											entry.commentText === comment.commentText,
+									)
+								)
+									completeTaskComment(request.taskId, comment.taskCommentEntryId);
+								else
+									returnToEditingTaskComment(
+										request.taskId,
+										"任务已移动或评论已变化，未提交评论。",
+										comment.taskCommentEntryId,
+									);
+								return;
+							}
+							if (
+								snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard === "review" ||
+								snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard === "in_progress"
+							) {
+								suspendTaskComment(request.taskId);
+								setPendingSkipValidationConfirmation({
+									workspaceId: request.workspaceId,
+									taskCard: snapshot.taskCardSnapshot.taskCard,
+									taskCommentToAppendWhenMovingIntoDone: comment,
+								});
+								return;
+							}
+							moveTaskCardInOtherProjectIntoDone(request.workspaceId, request.taskId, comment);
+						})
+						.catch((error: unknown) =>
+							returnToEditingTaskComment(request.taskId, error instanceof Error ? error.message : String(error)),
+						);
+				}}
+			/>
 			<DeleteTaskDialog
 				task={pendingDeleteConfirmation?.taskCard ?? null}
 				onCancel={() => setPendingDeleteConfirmation(null)}
@@ -222,12 +312,20 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			/>
 			<SkipValidationConfirmDialog
 				open={pendingSkipValidationConfirmation !== null}
-				onCancel={() => setPendingSkipValidationConfirmation(null)}
+				onCancel={() => {
+					if (pendingSkipValidationConfirmation?.taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskComment(pendingSkipValidationConfirmation.taskCard.id);
+					setPendingSkipValidationConfirmation(null);
+				}}
 				onConfirm={() => {
 					const confirmation = pendingSkipValidationConfirmation;
 					setPendingSkipValidationConfirmation(null);
 					if (confirmation) {
-						moveTaskCardInOtherProjectIntoDone(confirmation.workspaceId, confirmation.taskCard.id);
+						moveTaskCardInOtherProjectIntoDone(
+							confirmation.workspaceId,
+							confirmation.taskCard.id,
+							confirmation.taskCommentToAppendWhenMovingIntoDone,
+						);
 					}
 				}}
 			/>

@@ -14,12 +14,17 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-work-unit-relation-modeling-api-contract": resolve(
+				__dirname,
+				"../src/core/work-unit-relation-modeling-api-contract.ts",
+			),
 			// 模型只由插件间接依赖；统一身份以允许离线测试替换模型。
 			"@tensorflow-models/universal-sentence-encoder": require.resolve(
 				"@tensorflow-models/universal-sentence-encoder",
 				{ paths: [require.resolve("@orama/plugin-embeddings")] },
 			),
 			"@": resolve(__dirname, "src"),
+			"@runtime-project-visual-identity": resolve(__dirname, "../src/core/project-visual-identity.ts"),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-agent-session-transport-selection": resolve(
 				__dirname,

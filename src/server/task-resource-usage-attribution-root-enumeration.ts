@@ -98,7 +98,7 @@ export function resolveSessionCategoryAndAttributedTaskCardId(summary: {
 		};
 	}
 	const conversationSessionMetadata = summary.taskConversationSessionMetadata;
-	if (conversationSessionMetadata?.taskConversationSessionRole === "by_the_way") {
+	if (conversationSessionMetadata && conversationSessionMetadata.taskConversationSessionRole !== "main") {
 		return {
 			sessionCategory: "task_card_side_conversation_agent_session",
 			attributedTaskCardId: conversationSessionMetadata.workspaceTaskId,

@@ -10,7 +10,7 @@ import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync
 import {
 	type CachedTaskWorkspaceMetadata,
 	createBaseRefTipResolver,
-	GIT_METADATA_FULL_REFRESH_INTERVAL_MS,
+	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS,
 	loadTaskWorkspaceMetadata,
 	type TaskWorktreeGitMetadataProbeTarget,
 	workspaceMetadataGitSpawnConcurrencyLimiter,
@@ -20,7 +20,7 @@ import {
 export { workspaceMetadataGitSpawnConcurrencyLimiter };
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 3_000;
-// 最后一个订阅断开后，缓存再留这么久才删：切回这个项目（或 ⌘E 来回切范围）时，没变的 worktree 只需一条
+// 最后一个订阅断开后，缓存再留这么久才删：切回这个项目（或通过范围切换快捷键来回切范围）时，没变的 worktree 只需一条
 // git status 复核，不必五条命令重新探。期间不轮询。
 // EXPERIMENT_NODE: 最后一个订阅断开后元数据缓存保留多久（5 分钟）
 const WORKSPACE_METADATA_CACHE_RETENTION_AFTER_LAST_SUBSCRIBER_DISCONNECTED_MS = 5 * 60_000;
@@ -134,6 +134,8 @@ function collectTrackedTasks(board: RuntimeBoardData): TaskWorktreeGitMetadataPr
 				taskId: card.id,
 				baseRef: card.baseRef,
 				...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
+				taskCardBoardColumnId: column.id,
+				taskCardAutoReviewEnabled: card.autoReviewEnabled === true,
 			});
 		}
 	}
@@ -174,6 +176,8 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
 		a.workspaceGitStatus.baseRef === b.workspaceGitStatus.baseRef &&
+		a.taskRetainedCommittedLineChangeSummary?.historyVersion ===
+			b.taskRetainedCommittedLineChangeSummary?.historyVersion &&
 		a.workspaceGitStatus.commitsAheadOfBaseRef === b.workspaceGitStatus.commitsAheadOfBaseRef &&
 		a.workspaceGitStatus.commitsBehindBaseRef === b.workspaceGitStatus.commitsBehindBaseRef &&
 		a.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef === b.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef &&
@@ -254,7 +258,8 @@ async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<Cache
 		if (
 			cached.cheapChangeToken !== null &&
 			cached.cheapChangeToken === cheapTokenBeforeProbe &&
-			now - cached.lastFullRefreshAtMs < GIT_METADATA_FULL_REFRESH_INTERVAL_MS
+			now - cached.lastFullRefreshAtMs <
+				GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS
 		) {
 			return cached;
 		}

@@ -26,8 +26,8 @@ export const ACTIVE_PROCESS_STATE_FIELD_DISPOSITION_ACROSS_RUNTIME_RESTART = {
 	cols: "taken_from_agent_session_pty_host",
 	rows: "taken_from_agent_session_pty_host",
 	terminalProtocolFilter: "rederived_on_adoption",
-	// 闭包不能跨进程；10 个 adapter 目前无一设置 launch.cleanup。
-	onSessionCleanup: "reset_on_adoption",
+	// 闭包不能跨进程；Codex 接管按本代端点读取持久启动描述，重建带 dev/ino 校验的强杀清理兜底。
+	onSessionCleanup: "rederived_on_adoption",
 	deferredStartupPromptText: "carried_in_adoption_record",
 	detectOutputTransition: "rederived_on_adoption",
 	shouldInspectOutputForTransition: "rederived_on_adoption",

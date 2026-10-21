@@ -12,7 +12,7 @@
 2. `src/server/runtime-state-hub.ts`：批量广播**自动**携带新字段，无改动。
 3. `web-ui/src/runtime/use-runtime-state-stream.ts` 的 `mergeTaskSessionSummaries`（:37）：按 `updatedAt` 合并 summary map，**自动**带上新字段，无改动。注意 150ms 一批的 `task_sessions_updated` **不进 reducer**——它由 `use-workspace-sync.ts` 注册的 applier 旁路直送，一次 `setSessions` 并入（App 每批只渲染一次）；reducer 内仅剩 snapshot 类汇入点（:264 / :381）。
 4. `App.tsx` 的 `sessions` → 看板卡片 / top-bar：消费方在这里读新字段。
-5. **只在要给跨项目视图（Board Overview 明细、跨项目切换面板条目）用时**：这两处不读整条 summary，而是读 `src/server/in-progress-task-detail-projection.ts` 的会话事实子集，要改三处——`TaskSessionFactsForCrossProjectTaskViews` 接口、`extractTaskSessionFactsForCrossProjectTaskViews` 抽取、`buildTaskActivityDetailFromBoardCardAndTaskSessionFacts`（或条目构造）投影，外加 `runtimeInProgressTaskDetailSchema` / `runtimeCrossProjectTaskSwitcherEntrySchema` 的字段。漏掉任何一处，字段到不了面板，且不报错。范例：`agentResponseGenerationTurnStarted`。
+5. **只在要给跨项目视图（`inProgressTaskDetails` 明细、跨项目切换面板条目）用时**：这两处不读整条 summary，而是读 `src/server/in-progress-task-detail-projection.ts` 的会话事实子集，要改三处——`TaskSessionFactsForCrossProjectTaskViews` 接口、`extractTaskSessionFactsForCrossProjectTaskViews` 抽取、`buildTaskActivityDetailFromBoardCardAndTaskSessionFacts`（或条目构造）投影，外加 `runtimeInProgressTaskDetailSchema` / `runtimeCrossProjectTaskSwitcherEntrySchema` 的字段。漏掉任何一处，字段到不了面板，且不报错。范例：`agentResponseGenerationTurnStarted`。
 
 **例外**：`turnOwner` / `liveness` / `userTurnKind` 三个 facet 字段不适用这条「自由加」链路——它们有共现/合法组合的 `superRefine` 守卫与写入漏斗约束，动它们先读 `src/core/session-activity.ts` 与 facet 模型文档，别按本 runbook 走。
 

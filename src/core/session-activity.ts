@@ -1,6 +1,12 @@
 import { mergeWorkPhaseGoalConversationOwnership } from "./agent-current-work-phase-goal";
 
 export { resolveAgentCurrentWorkPhaseGoalForDisplay } from "./agent-current-work-phase-goal";
+export {
+	doesConversationSessionBelongToTask,
+	resolveMainTaskConversationSessionId,
+	resolveMainTaskConversationSessionSummary,
+} from "./task-main-conversation-session-binding";
+export { isTaskMainSessionHandoverSuspendingAutomaticActions } from "./task-main-session-handover-contract";
 
 // 会话「执行活性」派生的单一真相源（纯函数、零运行时依赖，可被 Node 后端 / 浏览器前端 /
 // 部署探针共享 import；唯一的类型 import 在编译期被擦除，故打进浏览器 bundle 不会带入任何
@@ -38,8 +44,96 @@ import { mergeLastMainAgentConversationModelRequestDispatchObservation } from ".
 export const VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS = 5_000;
 export const AGENT_OUTPUT_QUIET_THRESHOLD_MS = 2_000;
 
-// 「近期活跃」窗口（毫秒）：Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md）据此把 In-Progress
-// 阶段的 task 二分为 Active（agent 回合且距最近 PTY 输出 lastOutputAt 在本窗口内）/ Stale（其余）。
+// 写权限与卡片生命周期权限正交：By the way 只读，协作会话可写，两者都不是主会话。
+export function isTaskConversationSessionWithoutTaskLifecycleAuthority(
+	summary: Pick<RuntimeTaskSessionSummary, "taskConversationSessionMetadata">,
+): boolean {
+	const metadata = summary.taskConversationSessionMetadata;
+	return metadata !== undefined && metadata.taskConversationSessionRole !== "main";
+}
+
+// 首次侧问 fork 与协作会话共用目录时，前后端必须采用同一份寻址判据。
+export function resolveTaskConversationSessionMainContextForkSelection(input: {
+	sessionRole?: "by_the_way" | "task_collaborator";
+	workspaceTaskId: string;
+	launchAgentId: RuntimeAgentId;
+	mainSessionSummary: RuntimeTaskSessionSummary | null | undefined;
+	mainSessionWorkingDirectoryPath: string | null;
+	existingTaskConversationSessionSummaries: readonly RuntimeTaskSessionSummary[];
+}): { forkRejectionReason: string | null; mainSessionNativeConversationSessionId?: string } {
+	const sessions = input.existingTaskConversationSessionSummaries;
+	const isTaskCollaborator = input.sessionRole === "task_collaborator";
+	if (isTaskCollaborator) {
+		if (!["claude", "codex", "omp"].includes(input.launchAgentId)) {
+			return { forkRejectionReason: "当前 Agent 不支持复刻主会话，请使用全新上下文。" };
+		}
+		if (input.mainSessionSummary?.startedAt == null) {
+			return { forkRejectionReason: "主会话尚未建立，请使用全新上下文。" };
+		}
+	}
+	if (
+		!isTaskCollaborator &&
+		sessions.some(
+			(summary) =>
+				summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId &&
+				summary.taskConversationSessionMetadata.taskConversationSessionRole === "by_the_way",
+		)
+	) {
+		return { forkRejectionReason: "已有 By the way 会话，后续侧问请从全新上下文开始。" };
+	}
+	// Cline 按宿主任务 id 加载消息，不使用 cwd-latest。
+	if (!isTaskCollaborator && input.launchAgentId !== "claude" && input.launchAgentId !== "codex") {
+		return { forkRejectionReason: null };
+	}
+	const mainSummary = input.mainSessionSummary;
+	if (mainSummary?.agentId && mainSummary.agentId !== input.launchAgentId) {
+		return {
+			forkRejectionReason: isTaskCollaborator
+				? "所选 Agent 与主会话不同，无法复刻主会话，请使用全新上下文。"
+				: "主会话的 agent 与当前 By the way agent 不同，无法 fork 主对话，请从全新上下文开始。",
+		};
+	}
+	const identity = mainSummary?.agentNativeConversationSessionIdentity;
+	if (identity?.sourceAgentId === input.launchAgentId) {
+		const nativeSessionId = identity.nativeSessionId.trim();
+		if (
+			!nativeSessionId ||
+			nativeSessionId.startsWith("-") ||
+			Array.from(nativeSessionId).some(
+				(character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+			)
+		) {
+			return { forkRejectionReason: "主会话记录的原生会话 ID 无效，无法安全 fork，请从全新上下文开始。" };
+		}
+		return { forkRejectionReason: null, mainSessionNativeConversationSessionId: nativeSessionId };
+	}
+	if (isTaskCollaborator) {
+		return { forkRejectionReason: "主会话尚未记录可靠的原生会话 ID，无法安全复刻，请使用全新上下文。" };
+	}
+	const hasCompetingSession = sessions.some(
+		(summary) =>
+			summary.taskId !== input.workspaceTaskId &&
+			summary.agentId === input.launchAgentId &&
+			(summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId ||
+				(input.mainSessionWorkingDirectoryPath !== null &&
+					summary.workspacePath === input.mainSessionWorkingDirectoryPath)),
+	);
+	return {
+		forkRejectionReason: hasCompetingSession
+			? `主会话尚未记录可用的 ${input.launchAgentId} 原生会话 ID，且同一工作目录存在其他 ${input.launchAgentId} 会话，无法安全 fork 主对话，请从全新上下文开始。`
+			: null,
+	};
+}
+
+// 保留既有侧问入口及其次数规则；协作会话必须显式声明角色并满足更严格的身份要求。
+export function resolveByTheWayMainSessionForkSelection(
+	input: Omit<Parameters<typeof resolveTaskConversationSessionMainContextForkSelection>[0], "sessionRole">,
+): ReturnType<typeof resolveTaskConversationSessionMainContextForkSelection> {
+	return resolveTaskConversationSessionMainContextForkSelection({ ...input, sessionRole: "by_the_way" });
+}
+
+// 「近期活跃」窗口（毫秒）：跨项目切换面板的 Running 区（docs/context-cross-project-recently-active-task-switcher.md）
+// 据此判定 agent 回合里的任务是否还在跑（距最近 PTY 输出 lastOutputAt 在本窗口内）。
 // 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，
 // 宽窗口下 spinner 噪声无影响，故读 lastOutputAt（而非实质戳）即可。复用 isAgentOutputWithinActiveWindow。
 export const RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS = 5 * 60_000;
@@ -684,6 +778,14 @@ export function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(
 // 放行 = 在用户从没继续过对话的情况下，把几小时前排的一句话发进一个刚恢复的会话。那一侧的代价是「不提醒
 // 就发」，而等下去的代价只是「队列一直等到用户继续」（面板如实写着原因）。所以排队门控读声明态，
 // 不读带兜底过期的那一个。两态的枚举仍只在这里定义一次。
+//
+// 「等到用户继续」成立的前提：**解除侧也只看声明态**。解除只走 session-manager 的
+// disarmRestorationContinuationGuard 一个漏斗，它绝不能读带兜底的谓词——那样首个真人提交一旦晚于启动
+// 30 分钟就清不掉声明态，队列永远等不到（2026-10-11 a768a，d0304b47 与 f1d61259 两次修复叠出的接缝）。
+//
+// EXPERIMENT_NODE: 门控 5 是否叠加「本次 spawn 之后已有真人提交」的独立证据作纵深防御。现成候选
+// lastMainAgentConversationModelRequestDispatchObservation 不合格：它的 user_prompt_submit 证据包含 harness
+// task-notification（兜底过期后放行的正是孤儿通知），且只存最后一次观测、会被 PostToolUse 覆盖。
 export function isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(
 	summary: RuntimeTaskSessionSummary,
 ): boolean {

@@ -28,7 +28,7 @@ const {
 			panelBackgroundColor?: string;
 			terminalBackgroundColor?: string;
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
-		}) => null,
+		}): ReactNode => null,
 	),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
@@ -105,6 +105,7 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
 	useTaskWorkspaceInfoValue: () => null,
+	useTaskWorkspaceSnapshotValue: () => undefined,
 }));
 
 vi.mock("@/hooks/use-conversation-session-turn-projection", () => ({
@@ -322,6 +323,50 @@ describe("CardDetailView", () => {
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
 
+	it.each([false, true])(
+		"查卡替换中部与工作栏时保留原任务 Agent 节点，返回后继续使用（mobile=%s）",
+		async (isMobile) => {
+			mockUseIsMobile.mockReturnValue(isMobile);
+			mockAgentTerminalPanel.mockImplementation(() => <div data-testid="agent-terminal-panel" />);
+			const render = async (showLookup: boolean) =>
+				act(async () =>
+					root.render(
+						<CardDetailView
+							selection={createSelection()}
+							currentProjectId="workspace-1"
+							selectedAgentId="claude"
+							sessionSummary={null}
+							taskSessions={{}}
+							onSessionSummary={() => {}}
+							onCardSelect={() => {}}
+							onTaskDragEnd={() => {}}
+							onMoveToTrash={() => {}}
+							bottomTerminalOpen={false}
+							bottomTerminalTaskId={null}
+							bottomTerminalSummary={null}
+							onBottomTerminalClose={() => {}}
+							taskLookupWorkbenchContent={
+								showLookup ? <section data-testid="task-lookup-replacement">查卡工作台</section> : undefined
+							}
+						/>,
+					),
+				);
+			await render(false);
+			const terminal = container.querySelector('[data-testid="agent-terminal-panel"]');
+			expect(terminal).not.toBeNull();
+			await render(true);
+			expect(container.querySelector('[data-testid="task-lookup-replacement"]')).not.toBeNull();
+			expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBe(terminal);
+			let hiddenAncestor: HTMLElement | null = terminal as HTMLElement;
+			while (hiddenAncestor && hiddenAncestor.style.display !== "none")
+				hiddenAncestor = hiddenAncestor.parentElement;
+			expect(hiddenAncestor).not.toBeNull();
+			await render(false);
+			expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBe(terminal);
+			expect(container.querySelector('[data-testid="task-lookup-replacement"]')).toBeNull();
+		},
+	);
+
 	beforeEach(() => {
 		window.localStorage.clear();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -331,6 +376,7 @@ describe("CardDetailView", () => {
 		document.body.appendChild(container);
 		root = createRootRenderingInsideTooltipProvider(container);
 		mockAgentTerminalPanel.mockClear();
+		mockAgentTerminalPanel.mockImplementation(() => null);
 		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
@@ -403,7 +449,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="codex"
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -421,9 +467,11 @@ describe("CardDetailView", () => {
 		expect(container.textContent).toContain("Main session");
 		expect(container.querySelector('[data-testid="prompt-library-panel"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
+		expect(container.querySelector("[data-mobile-focused-task-card-header]")).toBeNull();
 	});
 
 	it("按当前选中的主/By-the-way 会话隔离待答 taskId、实时 hook signal 与 turn sequence", async () => {
+		mockUseIsMobile.mockReturnValue(true);
 		const mainHookActivity = {
 			activityText: "main activity",
 			toolName: "Read",
@@ -489,7 +537,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="claude"
 					sessionSummary={mainSummary}
 					taskSessions={{ "task-1": mainSummary, [childTaskId]: childSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -526,6 +574,63 @@ describe("CardDetailView", () => {
 				agentResponseGenerationTurnSequence: 9,
 			}),
 		);
+		await act(async () => container.querySelector<HTMLButtonElement>("button[aria-label='展开任务卡']")!.click());
+		const mainTaskCard = container.querySelector("[data-mobile-focused-task-card-header]");
+		expect(mainTaskCard?.textContent).toContain("main activity");
+		expect(mainTaskCard?.textContent).not.toContain("child question");
+	});
+
+	it("手机任务卡在移至 Review 请求中禁用按钮，完成后恢复", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const selection = createSelectionInColumn("in_progress");
+		const sessionSummary = createSessionSummary();
+		const onMoveCardToReview = vi.fn();
+		const renderWithMoveToReviewLoadingById = async (moveToReviewLoadingById: Record<string, boolean>) => {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId="workspace-1"
+						selectedAgentId="codex"
+						sessionSummary={sessionSummary}
+						taskSessions={{ "task-1": sessionSummary }}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveCardToReview={onMoveCardToReview}
+						moveToReviewLoadingById={moveToReviewLoadingById}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+
+		await renderWithMoveToReviewLoadingById({});
+		await act(async () => container.querySelector<HTMLButtonElement>("button[aria-label='展开任务卡']")!.click());
+		const moveToReviewButton = container.querySelector(
+			'[data-mobile-focused-task-card-header] button[aria-label="Move task to review"]',
+		);
+		expect(moveToReviewButton).toBeInstanceOf(HTMLButtonElement);
+		if (!(moveToReviewButton instanceof HTMLButtonElement)) {
+			throw new Error("手机任务卡应提供移至 Review 按钮");
+		}
+		expect(moveToReviewButton.disabled).toBe(false);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledExactlyOnceWith("task-1");
+
+		await renderWithMoveToReviewLoadingById({ "task-1": true });
+		expect(moveToReviewButton.disabled).toBe(true);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledTimes(1);
+
+		await renderWithMoveToReviewLoadingById({});
+		expect(moveToReviewButton.disabled).toBe(false);
+		await act(async () => moveToReviewButton.click());
+		expect(onMoveCardToReview).toHaveBeenCalledTimes(2);
 	});
 
 	it("keeps mobile Sessions and Prompts reachable without rendering disabled workspace changes", async () => {
@@ -547,7 +652,7 @@ describe("CardDetailView", () => {
 					selectedAgentId="codex"
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -562,6 +667,8 @@ describe("CardDetailView", () => {
 
 		expect(mockUseRuntimeWorkspaceChanges.mock.calls.at(-1)?.[0]).toBeNull();
 		expect(container.querySelector(".kb-skeleton")).toBeNull();
+		expect(container.querySelector("[data-mobile-focused-task-card-header]")?.textContent).toContain("Task task-1");
+		expect(container.querySelector('[data-verification-anchor="task-detail:task-1"]')).not.toBeNull();
 		expect(() => requireButtonWithExactText(container, "Diff")).toThrow();
 		expect(() => requireButtonWithExactText(container, "Files")).toThrow();
 
@@ -589,7 +696,7 @@ describe("CardDetailView", () => {
 					isTaskChangesSidebarOpen
 					sessionSummary={sessionSummary}
 					taskSessions={{ "task-1": sessionSummary }}
-					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
@@ -908,9 +1015,7 @@ describe("CardDetailView", () => {
 		);
 	});
 
-	it("switches the top-right detail utility panel from prompts to task comments and saves a new comment", async () => {
-		const onTaskCommentEntriesChange = vi.fn();
-
+	it("任务工作台不再显示 Comments 页签", async () => {
 		await act(async () => {
 			root.render(
 				<CardDetailView
@@ -921,7 +1026,6 @@ describe("CardDetailView", () => {
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}
 					onTaskDragEnd={() => {}}
-					onTaskCommentEntriesChange={onTaskCommentEntriesChange}
 					onMoveToTrash={() => {}}
 					bottomTerminalOpen={false}
 					bottomTerminalTaskId={null}
@@ -931,50 +1035,10 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="prompt-library-panel"]')).toBeInstanceOf(HTMLDivElement);
-		const commentsTab = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.getAttribute("role") === "tab" && button.textContent?.trim() === "Comments",
+		expect(Array.from(container.querySelectorAll('[role="tab"]')).some((tab) => tab.textContent === "Comments")).toBe(
+			false,
 		);
-		expect(commentsTab).toBeInstanceOf(HTMLButtonElement);
-		if (!(commentsTab instanceof HTMLButtonElement)) {
-			throw new Error("Expected a Comments tab.");
-		}
-
-		await act(async () => {
-			commentsTab.click();
-		});
-
-		const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Write a task comment..."]');
-		expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
-		if (!(textarea instanceof HTMLTextAreaElement)) {
-			throw new Error("Expected a task comment textarea.");
-		}
-
-		await act(async () => {
-			const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-			valueSetter?.call(textarea, "Investigate this before final validation.");
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-
-		const addButton = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.textContent?.trim() === "Add comment",
-		);
-		expect(addButton).toBeInstanceOf(HTMLButtonElement);
-		if (!(addButton instanceof HTMLButtonElement)) {
-			throw new Error("Expected an Add comment button.");
-		}
-
-		await act(async () => {
-			addButton.click();
-		});
-
-		expect(onTaskCommentEntriesChange).toHaveBeenCalledTimes(1);
-		expect(onTaskCommentEntriesChange.mock.calls[0]?.[0]).toBe("task-1");
-		expect(onTaskCommentEntriesChange.mock.calls[0]?.[1]).toEqual([
-			expect.objectContaining({
-				commentText: "Investigate this before final validation.",
-			}),
-		]);
+		expect(container.querySelector('[aria-label="任务工作台"]')).not.toBeNull();
 	});
 
 	it("closes git history before handling other Escape behavior", async () => {
@@ -1939,7 +2003,7 @@ describe("CardDetailView", () => {
 						selectedAgentId="cline"
 						sessionSummary={sessionSummary}
 						taskSessions={{ "task-1": sessionSummary }}
-						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onCreateTaskConversationSession={async () => ({ ok: true })}
 						onSessionSummary={() => {}}
 						onCardSelect={() => {}}
 						onTaskDragEnd={() => {}}

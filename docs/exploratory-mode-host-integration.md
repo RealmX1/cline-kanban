@@ -264,7 +264,7 @@ superseded → 非 pending 最旧 updatedAt，**pending 永不静默裁**。该�
   turnOwner / liveness facet 翻转 + latestTurnCheckpoint 落地 + 流重连代数，**绝不许拼
   `summary.updatedAt`**——Cline 流式期间 ~150ms 批次广播会形成无界重算与 `git for-each-ref` 子进程
   轮询，见 `docs/post-mortems/event-loop-stall-lock-crash.md`；短路用 `JSON.stringify` 全内容比较）。
-- **findings 浏览器 = `App.tsx` 的 `isFindingsOpen` home 置换**（与 overview/git history 三向互斥；
+- **findings 浏览器 = `App.tsx` 的 `isFindingsOpen` home 置换**（与 All projects 首页 / git history 三向互斥；
   入口在 top-bar）。
 - **任务级切片 = `web-ui/src/components/findings/session-findings-section.tsx`**（「本会话 findings」
   可折叠 section，挂在 Focus View 侧栏 TaskConversationSessionsPanel 同位下方，`card-detail-view.tsx`

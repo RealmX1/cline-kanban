@@ -81,6 +81,25 @@ function createRegistryWithFakePtyProcesses() {
 }
 
 describe("AgentSessionPtyHostHostedSessionRegistry", () => {
+	it("向 hosted PTY 逐字转发二进制鼠标报告和拆分的 UTF-8 输入", () => {
+		const { registry, fakePtyProcesses } = createRegistryWithFakePtyProcesses();
+		const outcome = registry.spawnHostedSession(buildSpawnRequest("binary-input-session"));
+		if (outcome.kind !== "spawned") throw new Error("测试 PTY 未启动");
+		const chineseInput = Buffer.from("中文", "utf8");
+		const inputChunks = [
+			Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0xcb, 0x2d]),
+			chineseInput.subarray(0, 1),
+			chineseInput.subarray(1),
+		];
+
+		for (const chunk of inputChunks) registry.writeHostedSessionInput(outcome.hostedSessionChannelNumber, chunk);
+
+		expect(fakePtyProcesses[0].write).toHaveBeenCalledTimes(inputChunks.length);
+		for (const [index, chunk] of inputChunks.entries()) {
+			expect(fakePtyProcesses[0].write).toHaveBeenNthCalledWith(index + 1, chunk);
+		}
+	});
+
 	it("streams output with absolute offsets while the controller is subscribed and keeps buffering after it disconnects", () => {
 		const { registry, fakePtyProcesses, subscribedOutput } = createRegistryWithFakePtyProcesses();
 		const outcome = registry.spawnHostedSession(buildSpawnRequest("session-a"));

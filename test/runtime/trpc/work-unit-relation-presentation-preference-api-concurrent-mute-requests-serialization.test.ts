@@ -74,6 +74,7 @@ function createFakeLedgerBackedPresentationPreferenceApi(options: { failingAppen
 			return await read({
 				projectionState,
 				readRetainedTaskCardFieldValuesBySha256: async () => new Map(),
+				findRetainedTaskCardFieldKeywordMatchesBySha256: async () => new Map(),
 			});
 		},
 		appendCommittedEventsIntoLedgerAndWaitForCommit: async (buildEventDrafts) => {

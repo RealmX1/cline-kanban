@@ -56,6 +56,11 @@ const TERMINAL_QUEUED_PROMPT_TERMINAL_DELIVERY_FAILURE_NOTES: Partial<Record<Ter
 		"The prompt was pasted but its submission was never confirmed. It may still be sitting in the input box — check before requeueing.",
 	runtime_restarted_before_confirmation:
 		"Kanban restarted before the delivery was confirmed, so the prompt may or may not have been sent.",
+	// 独立回合门禁也会在粘贴后的提交前复检失败；保留终态，不能自动重投或退回普通投递。
+	native_independent_user_turn_capability_unavailable:
+		"无法核实所需原生会话的独立回合控制能力，投递已停止。重新排队前请先检查任务终端。",
+	native_independent_user_turn_session_replaced:
+		"所需原生会话、代次或回合已改变，投递已停止。重新排队前请先检查任务终端。",
 };
 
 const DELIVERED_TERMINAL_DELIVERY_STATUSES: ReadonlySet<TerminalDeliveryStatus> = new Set([

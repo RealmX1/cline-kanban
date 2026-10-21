@@ -1,8 +1,8 @@
 import { Activity, Clock, PencilLine } from "lucide-react";
 import type { CSSProperties } from "react";
-
 import { getAgentVisual } from "@/components/agent-visual";
 import type { CardSessionActivity } from "@/components/board-card-session-activity";
+import { ProjectIcon } from "@/components/project-visual-identity";
 import { renderFuzzyHighlightedText } from "@/components/shared/render-fuzzy-highlighted-text";
 import type { TaskSpotlightSearchResultRowFieldVisibility } from "@/components/task-spotlight-search-result-row-field-visibility";
 import { cn } from "@/components/ui/cn";
@@ -20,7 +20,8 @@ const HIGHLIGHTED_TEXT_STYLE: CSSProperties = {
 	fontWeight: 600,
 };
 
-// 与文本高亮同源的金色：task id 全等命中即整体高亮，不需要字符级位置集。
+// 与文本高亮同源的金色：凭 task id 命中的那条整枚徽标描金边，被 query 对上的那几位再按位加粗
+// （见 taskIdMatchCharacterPositions），部分 / 容错命中时一眼看出对上的是哪一段。
 const TASK_ID_BADGE_MATCHED_STYLE: CSSProperties = {
 	color: "var(--color-status-gold)",
 	borderColor: "var(--color-status-gold)",
@@ -187,18 +188,23 @@ export function TaskSpotlightSearchResultRow({
 								)}
 								style={isTaskIdMatched ? TASK_ID_BADGE_MATCHED_STYLE : undefined}
 							>
-								{document.taskId}
+								{renderFuzzyHighlightedText(
+									document.taskId,
+									result.taskIdMatchCharacterPositions,
+									HIGHLIGHTED_TEXT_STYLE,
+								)}
 							</span>
 						) : null}
 						{fieldVisibility.project_name_badge ? (
 							<span
 								className={cn(
-									"inline-flex h-4 max-w-[140px] items-center truncate rounded-sm border border-border bg-surface-2 px-1.5 text-[10px] font-medium",
+									"inline-flex h-4 max-w-[140px] items-center gap-1 rounded-sm border border-border bg-surface-2 px-1.5 text-[10px] font-medium",
 									// 跨项目行的项目名是「这条不在你当前项目里」的关键信号，比当前项目那条更该被看见。
 									isCrossProject ? "text-text-secondary" : "text-text-tertiary",
 								)}
 							>
-								{document.projectName}
+								<ProjectIcon workspaceId={document.projectId} projectName={document.projectName} size={14} />
+								<span className="truncate">{document.projectName}</span>
 							</span>
 						) : null}
 						{fieldVisibility.stage_label_badge ? (

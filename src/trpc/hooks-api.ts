@@ -1,3 +1,4 @@
+import { isCodexConversationWithoutPersistedTranscript } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
 import type {
 	RuntimeHookIngestRequest,
@@ -14,7 +15,11 @@ import {
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
-import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import {
+	isParkedAwaitingDispatchedBackgroundWork,
+	isTaskConversationSessionWithoutTaskLifecycleAuthority,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { recordHookIngestToolCallAndHookCliResourceUsageToJournal } from "../diagnostics/hook-ingest-tool-call-and-hook-cli-resource-usage-journal-recorder";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
@@ -24,10 +29,12 @@ import {
 	captureNotificationSignal,
 	recordNotificationSignalDecision,
 } from "../notifications/notification-signal-capture";
+import type { PromptDraftUsageSubmission } from "../server/prompt-draft-usage-service";
 import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
+import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -43,6 +50,11 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
+	resolveCurrentTaskConversationSessionSummaryForLifecycle?: (
+		workspaceId: string,
+		summary: RuntimeTaskSessionSummary,
+	) => Promise<RuntimeTaskSessionSummary>;
+	notifyPromptDraftUserPromptSubmitted?: (input: PromptDraftUsageSubmission) => void;
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId?: typeof persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
@@ -113,7 +125,11 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 			options: question.options,
 			allowsFreeformAnswer: question.allowsFreeformAnswer,
 			orderedQuestions: question.orderedQuestions,
-			sourceHarnessSignal: `${body.metadata?.source ?? "unknown"}:AskUserQuestion`,
+			nativeConversationSessionId: question.nativeConversationSessionId,
+			sourceHarnessSignal:
+				body.metadata?.source === "codex"
+					? "codex:request_user_input"
+					: `${body.metadata?.source ?? "unknown"}:AskUserQuestion`,
 		});
 		return;
 	}
@@ -200,6 +216,16 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 		let hookNotificationAlreadyProcessed = false;
 		try {
 			const body = parseHookIngestRequest(input);
+			// 旧 CLI 与 host spool 也可能送来污染事件；必须先于通知归档、身份持久化与任何主会话写入。
+			if (
+				body.agentNativeConversationSessionIdentity &&
+				isCodexConversationWithoutPersistedTranscript(body.agentNativeConversationSessionIdentity)
+			) {
+				logAgentSessionRetentionWarning(
+					`codex-nonpersistent-hook-excluded workspaceId=${body.workspaceId} taskId=${body.taskId} event=${body.event}`,
+				);
+				return { ok: true } satisfies RuntimeHookIngestResponse;
+			}
 			hookIngestResourceUsageJournalContext = { body, summary: null };
 			const taskId = body.taskId;
 			const workspaceId = body.workspaceId;
@@ -430,6 +456,30 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
 			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				if (
+					summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+					body.hookEventFiredInsideSubagentContext !== true
+				) {
+					await completeTaskMainSessionHandoverAfterUserMessage({
+						workspaceId,
+						workspacePath,
+						taskConversationSessionId: taskId,
+						promptText: body.submittedPromptText,
+						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
+							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+					});
+				}
+				if (body.hookEventFiredInsideSubagentContext !== true) {
+					deps.notifyPromptDraftUserPromptSubmitted?.({
+						workspaceId,
+						taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+						submittedAtEpochMs: hookEventObservedAtEpochMs ?? Date.now(),
+						submittedPromptText: body.submittedPromptText,
+						currentIdentity:
+							body.agentNativeConversationSessionIdentity ?? summary.agentNativeConversationSessionIdentity,
+						sourceAgentId: body.metadata?.source ?? summary.agentId ?? undefined,
+					});
+				}
 				manager.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt?.(
 					taskId,
 					hookEventObservedAtEpochMs ?? Date.now(),
@@ -698,7 +748,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			const userInitiatedResume =
 				event === "to_in_progress" &&
 				(resumeContinueHookEventName === "userpromptsubmit" || resumeContinueHookEventName === "beforeagent");
-			const transitionedSummary =
+			let transitionedSummary =
 				event === "to_review"
 					? manager.transitionToReview(
 							taskId,
@@ -726,6 +776,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				manager.applyHookActivity(taskId, body.metadata);
 			}
 
+			if (deps.resolveCurrentTaskConversationSessionSummaryForLifecycle) {
+				transitionedSummary = await deps.resolveCurrentTaskConversationSessionSummaryForLifecycle(
+					workspaceId,
+					transitionedSummary,
+				);
+			}
 			void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 
 			if (
@@ -750,7 +806,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
 			}
 
-			if (transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+			if (isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary))
 				await recordNotificationSignalDecision(
 					notificationCandidateId,
 					"by_the_way_notification_excluded",
@@ -759,13 +815,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				);
 			if (
 				event === "to_review" &&
-				transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
+				!isTaskConversationSessionWithoutTaskLifecycleAuthority(transitionedSummary) &&
+				!transitionedSummary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
 			) {
 				// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 				// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
 				deps.broadcastTaskReadyForReview(
 					workspaceId,
-					taskId,
+					transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
 					resolveSessionFacets(transitionedSummary).userTurnKind,
 					{
 						candidateId: notificationCandidateId ?? undefined,

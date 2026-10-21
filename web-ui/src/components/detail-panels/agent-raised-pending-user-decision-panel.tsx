@@ -44,6 +44,8 @@ export function AgentRaisedPendingUserDecisionPanel({
 	const initialAgentResponseGenerationTurnSequenceRef = useRef(agentResponseGenerationTurnSequence);
 	const { questionAnswerDrafts, updateQuestionAnswerDraft, discardAnswerDraft, draftSaveStatusText } =
 		useAgentRaisedPendingUserDecisionAnswerDraft({ workspaceId, decision, onDecisionNoLongerPending });
+	const requiresAnswerInCodexTerminal =
+		decision.agentId === "codex" && isAgentStoppedOnThisQuestionSelectorInLiveTerminal;
 	const answerIsRecordedButNotYetDelivered = decision.recordedAnswerQuestionAnswers !== null;
 	const answers = useMemo(
 		() =>
@@ -106,11 +108,17 @@ export function AgentRaisedPendingUserDecisionPanel({
 			: "Agent 有一个尚未回答的问题";
 	const headerHint =
 		!answerIsRecordedButNotYetDelivered && isAgentStoppedOnThisQuestionSelectorInLiveTerminal && !isExpanded
-			? "可直接在终端作答，或展开在此作答"
+			? requiresAnswerInCodexTerminal
+				? "请在终端作答，可展开查看问题"
+				: "可直接在终端作答，或展开在此作答"
 			: null;
 
 	return (
-		<section className="shrink-0 border-b border-status-gold/30 bg-status-gold/5" aria-label="Agent 等待你的回答">
+		<section
+			className="shrink-0 border-b border-status-gold/30 bg-status-gold/5"
+			aria-label="Agent 等待你的回答"
+			data-verification-anchor="agent-raised-pending-user-decision-panel"
+		>
 			<div className="flex items-center gap-2 px-3 py-2">
 				<CircleHelp size={16} className="shrink-0 text-status-gold" />
 				<button
@@ -131,6 +139,13 @@ export function AgentRaisedPendingUserDecisionPanel({
 			</div>
 			{isExpanded ? (
 				<div className="max-h-[55vh] space-y-4 overflow-y-auto border-t border-status-gold/20 px-3 py-3">
+					{decision.nativeToolCallOutcome && !answerIsRecordedButNotYetDelivered ? (
+						<p role="status" className="text-xs text-text-secondary">
+							{decision.nativeToolCallOutcome === "interrupted_without_answer"
+								? "上次提问已中断，尚未收到完整答案。可以在这里继续回答。"
+								: "上次提问工具未完成，尚未收到完整答案。可以在这里继续回答。"}
+						</p>
+					) : null}
 					{answerIsRecordedButNotYetDelivered ? (
 						<RecordedAnswerAwaitingDelivery
 							decision={decision}
@@ -232,7 +247,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 							})}
 							{isAgentStoppedOnThisQuestionSelectorInLiveTerminal ? (
 								<p className="text-[11px] text-text-secondary">
-									提交后会先在终端里按 Esc 关闭提问选择器，再把你的答案作为一条消息发给 agent。
+									{requiresAnswerInCodexTerminal
+										? "请在 Codex 终端中完成当前选择题；会话恢复后，可在此面板回答尚未完成的问题。"
+										: "提交后会先在终端里按 Esc 关闭提问选择器，再把你的答案作为一条消息发给 agent。"}
 								</p>
 							) : null}
 							<div className="flex justify-end gap-2">
@@ -255,7 +272,7 @@ export function AgentRaisedPendingUserDecisionPanel({
 								<Button
 									variant="primary"
 									size="sm"
-									disabled={isSubmitting}
+									disabled={isSubmitting || requiresAnswerInCodexTerminal}
 									onClick={async () => {
 										if (await onAnswer(answers)) {
 											discardAnswerDraft();

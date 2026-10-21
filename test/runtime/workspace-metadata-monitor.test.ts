@@ -57,6 +57,13 @@ import {
 	type WorkspaceMetadataMonitor,
 	workspaceMetadataGitSpawnConcurrencyLimiter,
 } from "../../src/server/workspace-metadata-monitor";
+import {
+	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS,
+	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS,
+	resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs,
+	TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS,
+	type TaskWorktreeGitMetadataProbeTarget,
+} from "../../src/workspace/task-worktree-git-metadata-probe";
 
 const WORKSPACE_PATH = "/repo/project";
 const BRANCH_TASK_WORKTREE_PATH = "/repo/.cline/worktrees/abc/task-branch";
@@ -795,5 +802,314 @@ describe("createWorkspaceMetadataMonitor", () => {
 		expect(peakProbeConcurrency).toBeGreaterThan(1);
 		// 核心断言：观测到的并发峰值被钳在共享上限内，不随 task 数线性增长。
 		expect(peakProbeConcurrency).toBeLessThanOrEqual(concurrencyLimit);
+	});
+
+	describe("兜底全量刷新按活跃度分热 / 冷两档", () => {
+		const idleTaskTarget = (
+			overrides: Partial<TaskWorktreeGitMetadataProbeTarget> = {},
+		): TaskWorktreeGitMetadataProbeTarget => ({
+			taskId: "task-idle",
+			baseRef: "main",
+			taskCardBoardColumnId: "review",
+			taskCardAutoReviewEnabled: false,
+			...overrides,
+		});
+		const NOW_MS = 1_800_000_000_000;
+
+		it("In Progress、Review 列开了 auto-review、近期观察到变化的卡走 10 秒热档", () => {
+			const hotIntervalMs = GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS;
+			expect(
+				resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+					task: idleTaskTarget({ taskCardBoardColumnId: "in_progress" }),
+					lastObservedTaskWorktreeGitChangeAtMs: null,
+					nowMs: NOW_MS,
+				}),
+			).toBe(hotIntervalMs);
+			expect(
+				resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+					task: idleTaskTarget({ taskCardAutoReviewEnabled: true }),
+					lastObservedTaskWorktreeGitChangeAtMs: null,
+					nowMs: NOW_MS,
+				}),
+			).toBe(hotIntervalMs);
+			expect(
+				resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+					task: idleTaskTarget(),
+					lastObservedTaskWorktreeGitChangeAtMs:
+						NOW_MS - TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS + 1,
+					nowMs: NOW_MS,
+				}),
+			).toBe(hotIntervalMs);
+		});
+
+		it("其余为冷档：60 秒起、按 taskId 确定性抖动，不足 90 秒；auto-review 只在 Review 列算热", () => {
+			const coldIntervalOf = (task: TaskWorktreeGitMetadataProbeTarget, lastObservedAtMs: number | null = null) =>
+				resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
+					task,
+					lastObservedTaskWorktreeGitChangeAtMs: lastObservedAtMs,
+					nowMs: NOW_MS,
+				});
+			const intervals = Array.from({ length: 200 }, (_unused, index) =>
+				coldIntervalOf(idleTaskTarget({ taskId: `task-${index}` })),
+			);
+			for (const intervalMs of intervals) {
+				expect(intervalMs).toBeGreaterThanOrEqual(GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS);
+				expect(intervalMs).toBeLessThan(GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS + 30_000);
+			}
+			// 抖动真的散开了：200 个任务落在远多于一个 3 秒 poll tick 的不同桶里。
+			expect(new Set(intervals.map((intervalMs) => Math.floor(intervalMs / 3_000))).size).toBeGreaterThanOrEqual(8);
+			// 同一 taskId 每次得到同一个间隔。
+			expect(coldIntervalOf(idleTaskTarget({ taskId: "task-7" }))).toBe(intervals[7]);
+			// 变化超过 10 分钟前、Done / Trash 里开着 auto-review：都按冷档。
+			expect(
+				coldIntervalOf(
+					idleTaskTarget(),
+					NOW_MS - TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS,
+				),
+			).toBeGreaterThanOrEqual(GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS);
+			expect(
+				coldIntervalOf(idleTaskTarget({ taskCardBoardColumnId: "trash", taskCardAutoReviewEnabled: true })),
+			).toBeGreaterThanOrEqual(GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS);
+		});
+
+		describe("按 3 秒一轮推进假时钟", () => {
+			const TASK_WORKTREE_PATH_PREFIX = "/repo/.cline/worktrees";
+			const pathOfTaskWorktree = (taskId: string) => `${TASK_WORKTREE_PATH_PREFIX}/${taskId}/project`;
+			const countTaskWorktreeProbeCalls = () =>
+				gitSyncMocks.probeGitWorkspaceState.mock.calls.filter((call) =>
+					(call[0] as string).startsWith(TASK_WORKTREE_PATH_PREFIX),
+				).length;
+
+			beforeEach(() => {
+				vi.useFakeTimers({ toFake: ["Date"] });
+				vi.setSystemTime(new Date(0));
+				// 每个任务一个已落地的独立 worktree，便于把 task 探针与主仓库探针分开计数。
+				taskWorktreeMocks.getTaskWorkspacePathInfo.mockImplementation(
+					async (options: TaskWorkspacePathInfoOptions) => ({
+						taskId: options.taskId,
+						path: pathOfTaskWorktree(options.taskId),
+						exists: true,
+						baseRef: options.baseRef,
+					}),
+				);
+			});
+
+			afterEach(() => {
+				vi.useRealTimers();
+			});
+
+			const boardWithCardsInColumn = (
+				columnId: "in_progress" | "review",
+				taskIds: readonly string[],
+			): RuntimeBoardData => ({
+				columns: [{ id: columnId, title: columnId, cards: taskIds.map((taskId) => createBoardCard(taskId)) }],
+			});
+
+			const runPollTicksUntil = async (input: {
+				board: RuntimeBoardData;
+				startMs: number;
+				endMs: number;
+				onTick?: (tickAtMs: number) => void;
+			}): Promise<number[]> => {
+				const taskWorktreeProbeCountPerTick: number[] = [];
+				for (let tickAtMs = input.startMs; tickAtMs <= input.endMs; tickAtMs += 3_000) {
+					vi.setSystemTime(new Date(tickAtMs));
+					input.onTick?.(tickAtMs);
+					const probeCountBeforeTick = countTaskWorktreeProbeCalls();
+					await monitor.updateWorkspaceState({
+						workspaceId: "workspace-1",
+						workspacePath: WORKSPACE_PATH,
+						board: input.board,
+					});
+					taskWorktreeProbeCountPerTick.push(countTaskWorktreeProbeCalls() - probeCountBeforeTick);
+				}
+				return taskWorktreeProbeCountPerTick;
+			};
+
+			it("300 个闲置 worktree 在 120 秒里每个只兜底 1 次（10 秒热档要 12 次），到期时刻散在多个 tick", async () => {
+				const idleTaskIds = Array.from({ length: 300 }, (_unused, index) => `task-${index}`);
+				const board = boardWithCardsInColumn("review", idleTaskIds);
+				await connectWorkspaceAsWholeProjectSubscriber({
+					workspaceId: "workspace-1",
+					workspacePath: WORKSPACE_PATH,
+					board,
+				});
+				expect(countTaskWorktreeProbeCalls()).toBe(idleTaskIds.length);
+
+				const probeCountPerTick = await runPollTicksUntil({ board, startMs: 3_000, endMs: 120_000 });
+				const probesAfterInitialRound = probeCountPerTick.reduce((sum, count) => sum + count, 0);
+
+				// 冷档间隔在 [60, 90) 秒：120 秒内每个闲置 worktree 恰好兜底一次——仍有兜底，但只有热档的 1/12。
+				expect(probesAfterInitialRound).toBeGreaterThanOrEqual(idleTaskIds.length);
+				expect(probesAfterInitialRound).toBeLessThanOrEqual(idleTaskIds.length + 5);
+				// 不抖动时 300 个会挤在同一个 tick（60 秒）里成阵 spawn；抖动后单 tick 远小于总数。
+				expect(Math.max(...probeCountPerTick)).toBeLessThanOrEqual(idleTaskIds.length / 4);
+			});
+
+			it("In Progress 的卡仍每 10 秒兜底", async () => {
+				const board = boardWithCardsInColumn("in_progress", ["task-running"]);
+				await connectWorkspaceAsWholeProjectSubscriber({
+					workspaceId: "workspace-1",
+					workspacePath: WORKSPACE_PATH,
+					board,
+				});
+				const probeCountPerTick = await runPollTicksUntil({ board, startMs: 3_000, endMs: 60_000 });
+				expect(probeCountPerTick.reduce((sum, count) => sum + count, 0)).toBe(5);
+			});
+
+			it("闲置卡上观察到变化后 10 分钟内按热档兜底，之后回落冷档", async () => {
+				const board = boardWithCardsInColumn("review", ["task-touched"]);
+				gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("token-before-change");
+				await connectWorkspaceAsWholeProjectSubscriber({
+					workspaceId: "workspace-1",
+					workspacePath: WORKSPACE_PATH,
+					board,
+				});
+
+				// t=3 秒有人在这个 worktree 里提交 / 暂存（廉价 token 变了）→ 立刻探一次，并进入热档。
+				gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("token-after-change");
+				const probeCountPerTickWhileRecentlyChanged = await runPollTicksUntil({
+					board,
+					startMs: 3_000,
+					endMs: 60_000,
+				});
+				// t=3 的变化 + 之后每 10 秒兜底（15、27、39、51 秒的 tick）；冷档下 60 秒内一次兜底都不会有。
+				expect(probeCountPerTickWhileRecentlyChanged.reduce((sum, count) => sum + count, 0)).toBe(5);
+
+				// 变化过去 10 分钟以后：两分钟里只兜底 1–2 次（冷档 60–90 秒）。
+				const recencyWindowEndMs = 3_000 + TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS;
+				await runPollTicksUntil({ board, startMs: 63_000, endMs: recencyWindowEndMs });
+				const probeCountPerTickAfterRecencyWindow = await runPollTicksUntil({
+					board,
+					startMs: recencyWindowEndMs + 3_000,
+					endMs: recencyWindowEndMs + 120_000,
+				});
+				const probesAfterRecencyWindow = probeCountPerTickAfterRecencyWindow.reduce((sum, count) => sum + count, 0);
+				expect(probesAfterRecencyWindow).toBeGreaterThanOrEqual(1);
+				expect(probesAfterRecencyWindow).toBeLessThanOrEqual(2);
+			});
+		});
+	});
+
+	describe("HEAD 与 base tip 未变、只有工作树文件变化时，沿用与提交相关的结果", () => {
+		const countGitCallsOf = (subcommand: string) =>
+			gitUtilsMocks.runGit.mock.calls.filter((call) => (call[1] as string[])[0] === subcommand).length;
+		let stubbedHeadCommit: string;
+		let stubbedWorkingTreeStateToken: string;
+		let stubbedChangedFiles: number;
+		const inplaceTaskBoard: RuntimeBoardData = {
+			columns: [{ id: "in_progress", title: "In Progress", cards: [createBoardCard("task-inplace", "inplace")] }],
+		};
+		const inplaceTaskMetadataOf = (metadata: { taskWorkspaces: { taskId: string }[] }) =>
+			metadata.taskWorkspaces.find((task) => task.taskId === "task-inplace");
+
+		beforeEach(() => {
+			stubbedHeadCommit = "abcdef1234567890";
+			stubbedWorkingTreeStateToken = "working-tree-v1";
+			stubbedChangedFiles = 2;
+			gitSyncMocks.probeGitWorkspaceState.mockImplementation(async (cwd: string) => ({
+				repoRoot: cwd,
+				headCommit: stubbedHeadCommit,
+				currentBranch: "main",
+				upstreamBranch: null,
+				aheadCount: 0,
+				behindCount: 0,
+				changedFiles: stubbedChangedFiles,
+				untrackedPaths: [],
+				stateToken: `${stubbedHeadCommit}:${stubbedWorkingTreeStateToken}`,
+			}));
+			gitSyncMocks.getGitSyncSummary.mockImplementation(async () => ({
+				currentBranch: "main",
+				upstreamBranch: null,
+				changedFiles: stubbedChangedFiles,
+				additions: stubbedChangedFiles * 10,
+				deletions: 1,
+				aheadCount: 0,
+				behindCount: 0,
+			}));
+		});
+
+		it("只重算未提交改动统计，不跑 merge-base / rev-list / 溯源；HEAD 一变就恢复完整链路", async () => {
+			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("cheap-v1");
+			const firstMetadata = await connectWorkspaceAsWholeProjectSubscriber({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: inplaceTaskBoard,
+			});
+			expect(inplaceTaskMetadataOf(firstMetadata)).toMatchObject({ changedFiles: 2, baseCommit: FORK_POINT_COMMIT });
+			const mergeBaseCallsAfterFirstRefresh = countGitCallsOf("merge-base");
+			const revListCallsAfterFirstRefresh = countGitCallsOf("rev-list");
+			const provenanceCallsAfterFirstRefresh =
+				taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance.mock.calls.length;
+
+			// agent 改了文件：廉价 token 与 stateToken 都变，HEAD 不变。
+			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("cheap-v2");
+			stubbedWorkingTreeStateToken = "working-tree-v2";
+			stubbedChangedFiles = 5;
+			const metadataAfterWorkingTreeEdit = await monitor.updateWorkspaceState({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: inplaceTaskBoard,
+			});
+			expect(inplaceTaskMetadataOf(metadataAfterWorkingTreeEdit)).toMatchObject({
+				changedFiles: 5,
+				additions: 50,
+				baseCommit: FORK_POINT_COMMIT,
+				commitsAheadOfBaseRef: DEFAULT_COMMITS_AHEAD_OF_BASE_REF,
+				commitsBehindBaseRef: DEFAULT_COMMITS_BEHIND_BASE_REF,
+			});
+			expect(countGitCallsOf("merge-base")).toBe(mergeBaseCallsAfterFirstRefresh);
+			expect(countGitCallsOf("rev-list")).toBe(revListCallsAfterFirstRefresh);
+			expect(taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance.mock.calls.length).toBe(
+				provenanceCallsAfterFirstRefresh,
+			);
+
+			// agent 提交：HEAD 变了 → 完整链路。
+			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("cheap-v3");
+			stubbedHeadCommit = "1234567890abcdef";
+			stubbedChangedFiles = 0;
+			const metadataAfterCommit = await monitor.updateWorkspaceState({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: inplaceTaskBoard,
+			});
+			expect(inplaceTaskMetadataOf(metadataAfterCommit)).toMatchObject({
+				changedFiles: 0,
+				headCommit: "1234567890abcdef",
+			});
+			expect(countGitCallsOf("merge-base")).toBeGreaterThan(mergeBaseCallsAfterFirstRefresh);
+			expect(countGitCallsOf("rev-list")).toBeGreaterThan(revListCallsAfterFirstRefresh);
+			expect(taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance.mock.calls.length).toBe(
+				provenanceCallsAfterFirstRefresh + 1,
+			);
+		});
+
+		it("上次分歧没算出来（rev-list 失败）时不沿用，下一次变化重试完整链路", async () => {
+			gitUtilsMocks.runGit.mockImplementation(async (_cwd: string, args: string[]) => {
+				if (args[0] === "merge-base") {
+					return { ok: true, stdout: FORK_POINT_COMMIT, stderr: "", output: "", error: null, exitCode: 0 };
+				}
+				if (args[0] === "rev-parse") {
+					return { ok: true, stdout: BASE_REF_TIP_COMMIT, stderr: "", output: "", error: null, exitCode: 0 };
+				}
+				return { ok: false, stdout: "", stderr: "", output: "", error: "rev-list failed", exitCode: 1 };
+			});
+			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("cheap-v1");
+			await connectWorkspaceAsWholeProjectSubscriber({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: inplaceTaskBoard,
+			});
+			const revListCallsAfterFirstRefresh = countGitCallsOf("rev-list");
+
+			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("cheap-v2");
+			stubbedWorkingTreeStateToken = "working-tree-v2";
+			await monitor.updateWorkspaceState({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: inplaceTaskBoard,
+			});
+			expect(countGitCallsOf("rev-list")).toBeGreaterThan(revListCallsAfterFirstRefresh);
+		});
 	});
 });

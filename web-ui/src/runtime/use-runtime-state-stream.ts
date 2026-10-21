@@ -6,6 +6,7 @@ import {
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
+import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExploratoryFindingEntry,
@@ -31,6 +32,7 @@ import type {
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import { observeTaskLookupConversationUpdated } from "@/stores/task-lookup-conversation-update-store";
 import {
 	replaceTaskResourceUsageSnapshots,
 	resetTaskResourceUsageSnapshotStore,
@@ -632,7 +634,12 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "prompt_library_updated") {
+						notifyPromptLibraryInvalidated(payload.workspaceId);
+						return;
+					}
 					if (payload.type === "snapshot") {
+						notifyPromptLibraryInvalidated(payload.currentProjectId);
 						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
 						dispatch({ type: "snapshot", payload });
 						return;
@@ -746,6 +753,10 @@ export function useRuntimeStateStream(
 							type: "queued_task_prompt_deliveries_updated",
 							payload,
 						});
+						return;
+					}
+					if (payload.type === "task_lookup_conversation_updated") {
+						observeTaskLookupConversationUpdated();
 						return;
 					}
 					if (payload.type === "exploratory_findings_updated") {

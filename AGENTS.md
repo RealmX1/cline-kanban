@@ -58,6 +58,8 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
+- **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。
+- **后台启动终端的估算尺寸须匹配响应式布局**：手机终端使用整页宽度，不能扣掉桌面并排 diff 的宽度；否则 Codex 可能以 1–3 列启动，首条提示词一直等到打开详情后才投递。证据与验收见 `docs/post-mortems/codex-mobile-background-startup-terminal-width-2026-10-19.md`。
 - **Focus View 的 stage 卡头也有两份渲染**：行内卡头 + `StageHeaderRails` 钉住的孪生卡头（不透明 overlay，钉住时盖住行内卡头）。卡头上的状态与交互必须两边都接（孪生卡头曾写死「已展开」、折不动，两次被报）；跳到某 stage 不能用 `scrollIntoView({block:"start"})`（落点正在 rail 之下），rail 条目几何与滚动落点的单一真源是 `stage-header-rail-geometry.ts`。
 - **隐式续跑的 cwd-latest 必须保持任务目录范围**：Codex `resume/fork --last` 的隔离配置放在子命令后；显式 ID 的跨目录复用保留。不能用「切换执行 cwd」代替「重新选会话」。原生回归、OMP 例外与后备方案见 `docs/runbooks/agent-conversation-resume-working-directory-isolation.md`。
 - **Claude `/background`，或在空输入框按 ←（agent view 手势，改不了键但可在 `/config` 关掉「← opens agents」，kanban 里多为误触），会把对话搬进 Claude 自己的守护进程**，之后按 id 续跑会被拒绝并秒退。续跑前预检 `claude-code-background-session-ownership-preflight-before-resume.ts` 负责处理：后台会话 idle 且输入框为空时才自动收回，否则拒绝，并盯梢等待或交给终端面板一键接管。注意 Claude 报的 `idle` 不排除外部编辑器 / 未提交草稿；`claude agents --json` 还会列出退役后台任务的残留（无 `pid`），不算占用。守护进程的 env 继承自第一个拉起它的进程（已实测），所以 `/bg` 出去的会话，hook 可能报到别的任务上（未修）。全文：`docs/post-mortems/claude-code-background-session-resume-refusal-2026-10-07.md`。
@@ -93,6 +95,10 @@ web-ui：
 | --- | --- |
 | `installation.md` | 安装单一出处（前置要求 / 三项目依赖 / 全局 link / 卸载） |
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
+| `docs/rvf-automatic-rewind-and-closeout.md` | Codex RVF 开审分界、默认自动恢复与收尾投递、跨仓完成凭据及重启边界 |
+| `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
+| `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
+| `docs/task-initial-prompt-structured-markup.md` | 任务起草的来源与阶段标签、实际默认设置选择、共享指导注入及历史兼容边界 |
 | `DEVELOPMENT.md` | dev/dogfood 工作流、tmux 长驻约定、hook 事件→状态迁移映射 |
 | `test/README.md` | 测试执行形态与 git 安全契约 |
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
@@ -101,9 +107,11 @@ web-ui：
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |
 | `docs/post-deploy-verification.md` / `docs/post-deploy-verification-natural-usage-observation-pipeline-design.md` | PDV 现行机制（三区归属、门禁、原因码、待观察记录）与「自然使用中多模态判定」pipeline 设计稿 |
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
+| `docs/post-mortems/codex-memory-consolidation-hook-overwrites-resume-identity-2026-10-20.md` | Codex 后台记忆整理 hook 的整事件隔离、原生转录续接预检与坏身份现场恢复 |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` / `docs/agent-harness-cursor.md` | Kimi、oh-my-pi(ACP) 与 Cursor 接入坑（Cursor：chat store 布局、trust、启动前分配 id、续跑预检） |
 | `docs/post-mortems/native-session-identity-rewind-resume-2026-09-24.md` | Rewind 原生 ID 追踪、Codex 配置层丢 hook、Kimi/OMP 恢复与跨重启验证 |
+| `docs/post-mortems/codex-request-user-input-recovery-and-history-2026-10-17.md` | Codex 原生问答 envelope、分页恢复链、真实答案与 aborted 区分、恢复答题与历史去重 |
 | `docs/runbooks/` | 跨层改动 runbook（summary 字段/设置开关、agent CLI 能力探测） |
 | `docs/adr/` / `docs/post-mortems/` | 决策记录与事故复盘 |
 | `.plan/docs/` | 活跃计划与大型重构历史（非上手必读） |

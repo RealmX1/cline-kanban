@@ -13,11 +13,13 @@ import type {
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskConversationMode,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import {
+	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
@@ -65,6 +67,8 @@ import { AcpTaskSessionRegistry } from "./acp-task-session-registry";
 
 export interface StartAcpTaskSessionRequest {
 	taskId: string;
+	workspaceTaskId?: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
 	cwd: string;
 	prompt: string;
@@ -81,6 +85,8 @@ export interface StartAcpTaskSessionRequest {
 	// **同时不重放 startInPlanMode**：omp 的 loadSession 会返回该会话当前的 modes，
 	// 重新按 plan 起步会把用户在对话中途已经切走的模式按回去。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
 	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
@@ -106,6 +112,10 @@ const DENY_ALL_USER_DECISION_BROKER: AcpUserDecisionBroker = {
 };
 
 export class AcpTaskSessionService {
+	private userPromptSubmittedListener: ((taskId: string, text: string) => void) | null = null;
+	setUserPromptSubmittedListener(listener: (taskId: string, text: string) => void): void {
+		this.userPromptSubmittedListener = listener;
+	}
 	private readonly registry = new AcpTaskSessionRegistry();
 	private readonly connectionRuntime: AcpClientConnectionRuntime;
 	// 决策以聊天消息承载：presentDecision 落一条带 meta.userDecision 的消息，
@@ -266,12 +276,18 @@ export class AcpTaskSessionService {
 		const startedAt = now();
 		const runtimeSessionIncarnationId = randomUUID();
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
+		const isForkingMainContext =
+			!shouldResumeWithoutResendingPrompt &&
+			Boolean(request.taskConversationSessionMainContextForkSourceNativeSessionId);
 
 		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
 		// 免得进程冷启动那几秒里卡片看起来毫无反应。
 		// 续跑重开不走这条：没有新的用户输入可落，卡片也不该被推成 running（会话很可能正停在 Review）。
 		const promptText = shouldResumeWithoutResendingPrompt ? "" : request.prompt.trim();
-		if (promptText || (!shouldResumeWithoutResendingPrompt && (request.images?.length ?? 0) > 0)) {
+		if (
+			!isForkingMainContext &&
+			(promptText || (!shouldResumeWithoutResendingPrompt && (request.images?.length ?? 0) > 0))
+		) {
 			this.emitMessage(
 				request.taskId,
 				appendAcpMessage(
@@ -303,6 +319,9 @@ export class AcpTaskSessionService {
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
+				...(request.taskConversationSessionMetadata
+					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+					: {}),
 				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
 				startedAt,
 				runtimeSessionIncarnationId,
@@ -348,11 +367,17 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
-				// omp 每张卡一个进程：工作单元身份直接写进进程 env，工具 shell 里的 kanban CLI 才能声明「是哪张卡」。
-				// omp 的卡片只有一条 agent 会话，会话 id 就是 workspace task id。
+				taskConversationSessionMainContextForkSourceNativeSessionId: isForkingMainContext
+					? request.taskConversationSessionMainContextForkSourceNativeSessionId
+					: undefined,
+				revalidateTaskConversationSessionMainContextForkSource: isForkingMainContext
+					? request.revalidateTaskConversationSessionMainContextForkSource
+					: undefined,
+				// 工作单元身份写进每条会话的进程 env，工具 shell 中的 kanban CLI 才能声明宿主与行动者。
+				// 宿主任务与会话分别寻址：协作会话共用任务目录，但 hook 与原生身份归各自会话。
 				env: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
 					? buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
-							workspaceTaskId: request.taskId,
+							workspaceTaskId: request.workspaceTaskId ?? request.taskId,
 							kanbanTaskConversationSessionId: request.taskId,
 							workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
 							workspaceRepositoryPath:
@@ -383,6 +408,19 @@ export class AcpTaskSessionService {
 					},
 				}),
 			);
+			if (isForkingMainContext) {
+				for (const message of finishAcpStreamedReasoningMessages(entry)) this.emitMessage(request.taskId, message);
+				clearAcpStreamingGrouping(entry);
+				if (promptText || (request.images?.length ?? 0) > 0) {
+					this.emitMessage(
+						request.taskId,
+						appendAcpMessage(
+							entry,
+							createAcpMessage(request.taskId, "user", request.prompt, { source: "acp" }, request.images),
+						),
+					);
+				}
+			}
 			if (shouldResumeWithoutResendingPrompt) {
 				// session/load 的历史在 startTaskConnection 返回前就已推完，所以这里是这条分支唯一的**回合边界**
 				// ——它不发 session/prompt，永远走不到 applyAcpPromptTurnCompletion 那个收尾点。不收尾会留下两笔
@@ -406,9 +444,10 @@ export class AcpTaskSessionService {
 					request.taskId,
 					connection,
 					buildAcpPromptBlocks(
-						`${resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.prompt}`,
+						`${resolveTaskSessionAppendSystemPrompt(request.workspaceTaskId ?? request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator" ? renderTaskCollaborationSessionResponsibilityGuidance(request.workspaceTaskId ?? request.taskId, request.taskId) : ""}\n\n${request.prompt}`,
 						request.images,
 					),
+					request.prompt,
 				);
 			}
 		} catch (error) {
@@ -444,7 +483,7 @@ export class AcpTaskSessionService {
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
-		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images));
+		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images), text);
 		return summary;
 	}
 
@@ -688,9 +727,11 @@ export class AcpTaskSessionService {
 		taskId: string,
 		connection: AcpTaskConnection,
 		promptBlocks: AcpContentBlock[],
+		originalSubmittedPromptText: string,
 	): Promise<void> {
 		try {
 			const promptTurn = connection.prompt(promptBlocks);
+			this.userPromptSubmittedListener?.(taskId, originalSubmittedPromptText);
 			const liveEntry = this.registry.getEntry(taskId);
 			if (liveEntry && this.connectionRuntime.getConnection(taskId) === connection) {
 				this.emitSummary(updateAcpSummary(liveEntry, { agentCurrentWorkPhaseGoalInvalidatedAt: now() }));
