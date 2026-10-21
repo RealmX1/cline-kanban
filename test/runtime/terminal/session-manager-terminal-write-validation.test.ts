@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
-import { NativeIndependentUserTurnMessageAlreadyAccepted } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import {
+	NativeIndependentUserTurnDeliveryError,
+	NativeIndependentUserTurnMessageAlreadyAccepted,
+} from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
 
@@ -137,6 +140,58 @@ describe("程序化终端投递的实际写入前核验", () => {
 		expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(phase === "first_submit" ? 0 : 1);
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
 	});
+
+	for (const nativeIndependentUserTurnDeliveryFailureReason of [
+		"native_independent_user_turn_capability_unavailable",
+		"native_independent_user_turn_session_replaced",
+	] as const) {
+		it.each(["before_paste", "first_submit", "resend_submit"] as const)(
+			`${nativeIndependentUserTurnDeliveryFailureReason} 在 %s 拒绝写入后保留准确原因，不再粘贴或补发 Enter`,
+			async (terminalWriteValidationPhase) => {
+				const terminalSessionManager = new TerminalSessionManager();
+				const { write: writeToIsolatedTerminal, entry: isolatedTerminalSessionEntry } =
+					installIsolatedFakeTerminal(terminalSessionManager);
+				let rejectNativeIndependentUserTurnWrite = terminalWriteValidationPhase === "before_paste";
+				const terminalDeliveryOutcomes: TaskChatInputDeliveryOutcome[] = [];
+				terminalSessionManager.submitTaskChatInputWhenReady("guarded-answer", "独立原生回合正文", {
+					validateBeforeTerminalWrite: async () => {
+						if (rejectNativeIndependentUserTurnWrite)
+							throw new NativeIndependentUserTurnDeliveryError(
+								nativeIndependentUserTurnDeliveryFailureReason,
+								"测试原生独立回合门禁拒绝写入",
+							);
+					},
+					onDeliveryOutcome: (outcome) => terminalDeliveryOutcomes.push(outcome),
+				});
+				await vi.advanceTimersByTimeAsync(1000);
+				if (terminalWriteValidationPhase !== "before_paste") {
+					expect(writeToIsolatedTerminal).toHaveBeenCalledTimes(1);
+					isolatedTerminalSessionEntry.active.ptyOutputChunkArrivalSequenceNumber++;
+					if (terminalWriteValidationPhase === "resend_submit") await vi.advanceTimersByTimeAsync(60);
+					rejectNativeIndependentUserTurnWrite = true;
+				}
+				await vi.advanceTimersByTimeAsync(3000);
+				const expectedTerminalWriteCount =
+					terminalWriteValidationPhase === "before_paste"
+						? 0
+						: terminalWriteValidationPhase === "first_submit"
+							? 1
+							: 2;
+				expect(writeToIsolatedTerminal).toHaveBeenCalledTimes(expectedTerminalWriteCount);
+				expect(writeToIsolatedTerminal.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(
+					terminalWriteValidationPhase === "resend_submit" ? 1 : 0,
+				);
+				expect(terminalDeliveryOutcomes).toEqual([
+					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+				]);
+				await vi.advanceTimersByTimeAsync(10_000);
+				expect(writeToIsolatedTerminal).toHaveBeenCalledTimes(expectedTerminalWriteCount);
+				expect(terminalDeliveryOutcomes).toEqual([
+					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+				]);
+			},
+		);
+	}
 
 	it("没有领域 guard 的 Claude 调用沿用原有粘贴与提交行为", async () => {
 		const manager = new TerminalSessionManager();

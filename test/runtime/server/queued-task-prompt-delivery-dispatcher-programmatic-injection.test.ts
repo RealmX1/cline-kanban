@@ -312,6 +312,102 @@ describe("出队引擎 × 程序化排队投递", () => {
 		expect(subject.sends).toHaveLength(1);
 	});
 
+	for (const terminalDeliveryOutcomeTiming of ["immediate_receipt", "deferred_receipt"] as const) {
+		it.each([
+			{
+				terminalDeliveryFailureReason: "native_independent_user_turn_capability_unavailable",
+				expectedDeliveryFailureNoteFragment: "独立回合控制能力",
+			},
+			{
+				terminalDeliveryFailureReason: "native_independent_user_turn_session_replaced",
+				expectedDeliveryFailureNoteFragment: "原生会话、代次或回合已改变",
+			},
+		] as const)(
+			`${terminalDeliveryOutcomeTiming}：$terminalDeliveryFailureReason 保留真实回执与明确说明，后续回合不重投`,
+			async ({ terminalDeliveryFailureReason, expectedDeliveryFailureNoteFragment }) => {
+				const requiredNativeConversationSessionIdentity = {
+					sourceAgentId: "codex",
+					nativeSessionId: "native",
+					observedAt: NOW,
+					transcriptPath: "/isolated/transcript",
+				};
+				const dispatcherHarness = harness({
+					readNativeConversationTurns: async () => [{ id: "implementation-turn", status: "completed", items: [] }],
+					sendBehavior:
+						terminalDeliveryOutcomeTiming === "deferred_receipt"
+							? acceptedPendingPtyConfirmation
+							: () => ({
+									ok: false,
+									summary: null,
+									terminalDelivery: { status: "delivery_failed", reason: terminalDeliveryFailureReason },
+								}),
+				});
+				dispatcherHarness.observe(
+					stoppedSummary(1, {
+						agentId: "codex",
+						agentNativeConversationSessionIdentity: requiredNativeConversationSessionIdentity,
+					}),
+				);
+				await dispatcherHarness.enqueueProgrammatic(
+					60_000,
+					terminalDeliveryOutcomeTiming === "immediate_receipt",
+					KEY,
+					"native",
+				);
+				if (terminalDeliveryOutcomeTiming === "deferred_receipt") {
+					await vi.waitFor(() => expect(dispatcherHarness.sends).toHaveLength(1));
+					dispatcherHarness.sends[0]?.settlePtyDelivery({
+						status: "delivery_failed",
+						reason: terminalDeliveryFailureReason,
+					});
+				}
+				await dispatcherHarness.dispatcher.whenIdle();
+
+				const [settledProgrammaticInjectionQueueEntry] =
+					(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID] ?? [];
+				expect(settledProgrammaticInjectionQueueEntry).toMatchObject({
+					deliveryState: "settled_failed",
+					deliveryAttemptCount: 1,
+					programmaticInjectionLedgerReceiptLink: {
+						settledTerminalDeliveryReceipt: { status: "delivery_failed", reason: terminalDeliveryFailureReason },
+					},
+				});
+				expect(settledProgrammaticInjectionQueueEntry?.lastDeliveryFailureNote).toContain(
+					expectedDeliveryFailureNoteFragment,
+				);
+				expect(settledProgrammaticInjectionQueueEntry?.lastDeliveryFailureNote).not.toContain(
+					"it is unclear whether",
+				);
+				expect(await readLedgerRecord()).toMatchObject({
+					terminal_delivery_status: "delivery_failed",
+					terminal_delivery_failure_reason: terminalDeliveryFailureReason,
+				});
+
+				dispatcherHarness.observe({
+					...generatingSummary(2),
+					agentId: "codex",
+					agentNativeConversationSessionIdentity: requiredNativeConversationSessionIdentity,
+				});
+				dispatcherHarness.observe(
+					stoppedSummary(2, {
+						agentId: "codex",
+						agentNativeConversationSessionIdentity: requiredNativeConversationSessionIdentity,
+					}),
+				);
+				await dispatcherHarness.dispatcher.whenIdle();
+				await dispatcherHarness.dispatcher.runFallbackSweep();
+				await dispatcherHarness.dispatcher.whenIdle();
+				await dispatcherHarness.enqueueProgrammatic(60_000, true, KEY, "native");
+				expect(dispatcherHarness.sends).toHaveLength(1);
+				expect(await readStates()).toEqual(["settled_failed"]);
+				expect(await readLedgerRecord()).toMatchObject({
+					terminal_delivery_status: "delivery_failed",
+					terminal_delivery_failure_reason: terminalDeliveryFailureReason,
+				});
+			},
+		);
+	}
+
 	it("④a agent 一直不闲 ⇒ 专用截止定时器到点自行落 agent_never_became_idle_before_queued_delivery_deadline（不靠兜底 sweep）", async () => {
 		// 只假 setTimeout / clearTimeout，截止定时器才能被确定性地推到点。shouldAdvanceTime：假时钟仍随真实时间
 		// 前进——proper-lockfile 的取锁重试与 mtime 刷新也走 setTimeout，同进程争用同一把文件锁时冻住它们，
