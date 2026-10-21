@@ -24,18 +24,20 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	deletions,
 	parenthesesAndChangedFileCountClassName,
 	parenthesesAndChangedFileCountStyle,
+	showUncommittedChangeBackground = false,
 }: {
 	changedFiles: number;
 	additions: number;
 	deletions: number;
 	parenthesesAndChangedFileCountClassName?: string;
 	parenthesesAndChangedFileCountStyle?: CSSProperties;
+	showUncommittedChangeBackground?: boolean;
 }): ReactElement {
 	const mutedProps = {
 		className: parenthesesAndChangedFileCountClassName,
 		style: parenthesesAndChangedFileCountStyle,
 	};
-	return (
+	const changeSummary = (
 		<>
 			<span {...mutedProps}>(</span>
 			<span {...mutedProps}>
@@ -45,5 +47,12 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 			<span className="text-status-red"> -{deletions}</span>
 			<span {...mutedProps}>)</span>
 		</>
+	);
+	return showUncommittedChangeBackground ? (
+		<span className="inline-block rounded-sm bg-status-orange/15 px-0.5 align-baseline whitespace-nowrap">
+			{changeSummary}
+		</span>
+	) : (
+		changeSummary
 	);
 }
