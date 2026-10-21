@@ -1062,6 +1062,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						{" "}
 						<WorktreeUncommittedChangeSummaryIndicator
 							{...reviewChangeSummary}
+							showUncommittedChangeBackground
 							parenthesesAndChangedFileCountStyle={{ color: SESSION_ACTIVITY_COLOR.muted }}
 						/>
 					</>
@@ -1069,6 +1070,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				{columnId !== "backlog" && !historicalContext ? (
 					<span className="ml-1 inline-block align-baseline">
 						<TaskRetainedCommittedLineChangeIndicator
+							showCommittedChangeBackground
 							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
 							taskId={card.id}
 							baseRef={card.baseRef}
