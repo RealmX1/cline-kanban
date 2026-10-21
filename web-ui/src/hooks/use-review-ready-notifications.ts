@@ -374,6 +374,7 @@ export function useReviewReadyNotifications({
 									summaryLanguage: latestTaskReadyForReview.summaryLanguage ?? settings.summaryLanguage,
 								},
 								text: latestTaskReadyForReview.summaryText ?? notificationBody,
+								announcementScript: latestTaskReadyForReview.notificationSpeechAnnouncementScript,
 								candidateId,
 								clientId,
 								triggeredAt: latestTaskReadyForReview.triggeredAt,

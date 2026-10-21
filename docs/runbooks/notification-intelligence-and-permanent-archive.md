@@ -63,9 +63,33 @@
 | 来源 | 首批模型与能力 | 限制 |
 | --- | --- | --- |
 | 浏览器系统语音 | 当前设备音色、语言、语速、音调、音量 | 浏览器支持和用户激活限制；没有音频导出，历史记录这一事实 |
-| DeepInfra | `hexgrad/Kokoro-82M`；核对过的中英文音色、语速 | 音色必须匹配语言，无风格指令；MP3/base64 原生接口 |
-| 阿里 | `qwen-audio-3.0-tts-plus/flash`；音色、语速、音调、风格 | Audio HTTP 接口仅北京；与 Qwen3 接口分离 |
+| DeepInfra | `hexgrad/Kokoro-82M`；核对过的中英文音色、语速 | 音色必须匹配语言，无风格指令；WAV/base64 原生接口 |
+| 阿里 | **`qwen-audio-3.0-tts-plus`（推荐）**/`flash`；音色、语速、音调、风格 | Audio HTTP 接口仅北京；与 Qwen3 接口分离 |
 | 阿里 | `qwen3-tts-flash`、`qwen3-tts-instruct-flash` | 后者支持风格指令；地域与 workspace 配置显式保存 |
+
+**模型推荐（2026-10 调研）**：coding agent 通知是中英混读、夹带技术名词的场景，推荐 `qwen-audio-3.0-tts-plus` + 双语音色 `longanlingxin`（女）/`longanlufeng`（男）。它是百炼推荐表首位，支持 SSML 与 instruction，官方难读文本基准中文 68.7%、英文 65.7%、中文「代码」类 89.7%；`qwen3-tts-flash` 无发音控制，官方 FAQ 承认可能把符号念出来，同一基准 57.0%/60.5%。价格约 ¥1.4 对 ¥0.8 每万字符，单条播报约 150 字。`qwen-audio-3.1-tts-flash` 没有中英混读音色，不收录；`qwen-tts`、`cosyvoice-v1` 将于 2026-10-10 退役。设置页模型下拉框给推荐模型标「（推荐）」，目录字段为 `isRecommendedForCodingAgentNotificationSpeech`。
+
+### 播报文本适配：先导 + 停顿 + 口语化正文
+
+任何模型在难读文本上都会错约三分之一，所以无论选哪个模型，送进 TTS 的文本都先经过以下三层适配：
+
+1. **AI 摘要分两份**（`notification-assessment-service.ts`，`promptVersion: 2`）：`summaryText` 给面板看，路径一律写仓库相对路径；新增可选的 `spokenSummaryText` 专为朗读而写，1–2 句、中文 ≤100 字，不写路径、行号、哈希、URL、markdown 和符号，名字非说不可时用反引号包一次（这是给规整器的内部标记，本身不会送进 TTS——括号进 TTS 要么被念出来要么无效）。模型漏给或给错类型时回退 `summaryText`，不会让评估失败。落档为 candidate 字段 `spokenSummaryTextForNotificationSpeech`；延期兜底发布时清空，避免念出与兜底文案矛盾的「还在等」。
+2. **确定性规整器**（`notification-speech-technical-text-to-spoken-form.ts`）：所有路径都经过，用于 AI 评估关闭或失败、延期兜底文案，以及 LLM 漏网的符号。
+   - 路径与文件名只念最后一段，去掉扩展名和 `:行号`；以 `/` 结尾的念「X 目录」。
+   - kebab-case、snake_case、camelCase 拆成词，`-` 不再有机会被读成「减」；`--flag` 念「flag 参数」。
+   - 提交哈希连同括号和前置连接词去掉，5 位任务 ID 保留。
+   - 数字与符号：数字范围念「到」，`a/b` 念「或」，分数念「b 分之 a」；日期、时长单位、`~`、`→`、`&`、`#123` 改成口语；markdown 和 emoji 不念。
+   - 正文中文上限 200 字、英文 400 字符，在句界截断。
+3. **先导 + 停顿**（`notification-speech-announcement-script.ts`）：每条播报先念「项目 X，任务：Y。」，再念正文。
+   - Y 从卡片标题确定性派生：去掉 `[TAG]` 前缀，截到第一个分句，再用 `Intl.Segmenter` 在词边界截到约 20 个汉字；没有真实标题时念任务 ID。不交给 LLM 起名，保证同一任务每次念得一样。
+   - 脚本在 `publish()` 定稿，落档为 candidate 字段 `notificationSpeechAnnouncementScript`；旧记录在合成前现场组装。
+   - 第三方 TTS：先导和正文分两次并行请求（统一要 WAV），服务端用 `notification-speech-pcm-wav-segment-join.ts` 拼成一个 WAV，中间插入 1200 ms 静音（两段各自还有首尾留白，听感约 1.5 秒）。档案、重放、重新合成链路不变；任一段失败即整体失败、不自动重试。
+   - 不用 SSML `<break>` 的原因：`qwen3-tts-flash` 和 Kokoro 不支持，qwen-audio 内置音色是否支持也没有官方确认。
+   - DashScope qwen3-tts 返回的是流式 WAV，RIFF 与 data 的长度字段是占位值，拼接时以实际字节为准。
+   - 浏览器系统语音：推流消息带上 `notificationSpeechAnnouncementScript`，前端先念先导，`setTimeout` 1500 ms 后再念正文。
+   - 试听样例故意带文件路径、行号范围和哈希，一次就能听到先导、停顿和规整效果。
+
+待实验的选择点都标了 `EXPERIMENT_NODE:`：静音时长、任务标签长度、先导是否附带任务 ID、`language_type` 选 `Chinese` 还是 `Auto`。
 
 仅允许代码目录中已核对的模型/音色，不把上游浮动别名改写成某个当前版本号。模型不支持的控件会禁用。阿里返回的临时音频 URL 立即下载为永久本地文件，下载不带 API Key、禁止跨主机重定向，并限制结果域名、响应大小和音频格式。落盘先记录 hash/暂存文件名，再 fsync+rename；重启可恢复文件与候选的关联。
 
@@ -75,7 +99,7 @@
 
 ## 验证入口
 
-运行时测试使用 `npm run test:guarded`，Web 使用 `npm run web:test`。专项测试涵盖十万条记录、清空/全量已读、跨连接领取、并发去重、迟到 AI 结果、期限恢复、凭据来源隔离、第三方协议、失败不自动计费、音频崩溃恢复和过时播放。
+运行时测试使用 `npm run test:guarded`，Web 使用 `npm run web:test`。专项测试涵盖十万条记录、清空/全量已读、跨连接领取、并发去重、迟到 AI 结果、期限恢复、凭据来源隔离、第三方协议、失败不自动计费、音频崩溃恢复和过时播放，以及播报文本规整（用例取自档案里真实读错的摘要）、先导派生、流式 WAV 拼接与静音、两段式浏览器播报。
 
 真实系统音色、系统凭据库授权弹窗和用户账户上的第三方模型可用性仍需部署后的设备/账户验证；测试不使用真实付费密钥。不能把请求构造测试或模拟音频当作听感、provider 账户权限验证。
 

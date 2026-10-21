@@ -28,6 +28,7 @@ import {
 	webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema,
 	webUiBoardMutationInitiatorSchema,
 } from "./kanban-web-ui-page-load-request-origin-nonce.js";
+import { notificationSpeechAnnouncementScriptSchema } from "./notification-lifecycle-contract.js";
 import {
 	runtimePostDeployVerificationAcknowledgementSchema,
 	runtimePostDeployVerificationClosureOutcomeSchema,
@@ -38,6 +39,7 @@ import { projectLegacyState } from "./session-activity.js";
 import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
+export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
 export * from "./permanently-deleted-task-history-contract.js";
 // Post-Deploy Verification「移入 Done 结案」的请求侧契约（确认项、原因码、结案请求、门禁拒绝前缀）住在独立文件里
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
@@ -2031,6 +2033,8 @@ export const runtimeStateStreamTaskReadyForReviewMessageSchema = z.object({
 	summaryText: z.string().optional(),
 	summaryLanguage: z.enum(["zh-CN", "en-US"]).optional(),
 	taskTitleSnapshot: z.string().optional(),
+	// 浏览器系统语音据此分两段念（先导 → 停顿 → 正文）；第三方 TTS 由服务端合成同一份脚本。
+	notificationSpeechAnnouncementScript: notificationSpeechAnnouncementScriptSchema.optional(),
 	type: z.literal("task_ready_for_review"),
 	workspaceId: z.string(),
 	taskId: z.string(),
