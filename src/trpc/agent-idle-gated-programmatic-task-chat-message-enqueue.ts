@@ -15,6 +15,7 @@
 import type {
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
+	RuntimeTaskSessionSummary,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
@@ -46,13 +47,18 @@ export interface AgentIdleGatedProgrammaticTaskChatMessageQueueDependencies {
 		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	) => Promise<void>;
 	now?: () => number;
+	getTaskSessionSummary?: (taskId: string) => RuntimeTaskSessionSummary | null;
 }
 
 function buildInjectionLedgerPathForWorkspace(workspaceId: string): string {
 	return getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceId));
 }
 
-type InjectionLedgerPreflightOutcome = "idempotency_conflict" | "already_existed" | "created";
+type InjectionLedgerPreflightOutcome =
+	| "idempotency_conflict"
+	| "already_existed"
+	| "created"
+	| "native_requirement_mismatch";
 
 export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	deps: AgentIdleGatedProgrammaticTaskChatMessageQueueDependencies,
@@ -77,6 +83,15 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	const board = await loadWorkspaceBoardById(workspaceId);
 	const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
 	const destinationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
+	const requiredSessionId = request.requiredNativeIndependentUserTurnSessionId;
+	const requiredSummary = requiredSessionId ? deps.getTaskSessionSummary?.(destinationSessionId) : null;
+	const requiredSessionIncarnationId = requiredSummary?.runtimeSessionIncarnationId;
+	const nativeRequirement = requiredSessionId
+		? {
+				requiredNativeIndependentUserTurnSessionId: requiredSessionId,
+				requiredNativeIndependentUserTurnSessionIncarnationId: requiredSessionIncarnationId ?? undefined,
+			}
+		: {};
 	const nowEpochMs = (deps.now ?? (() => Date.now()))();
 	const ledgerPath = buildInjectionLedgerPathForWorkspace(workspaceId);
 	const queueEntryId = buildQueuedProgrammaticInjectionQueueEntryId(idempotencyKey);
@@ -90,9 +105,20 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			const existing = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
 			if (existing) {
 				return {
-					result: existing.prompt_sha256 === request.promptSha256 ? "already_existed" : "idempotency_conflict",
+					result:
+						existing.prompt_sha256 === request.promptSha256 &&
+						existing.required_native_independent_user_turn_session_id === requiredSessionId
+							? "already_existed"
+							: "idempotency_conflict",
 				};
 			}
+			if (
+				requiredSessionId &&
+				(!requiredSessionIncarnationId ||
+					requiredSummary?.agentId !== "codex" ||
+					requiredSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== requiredSessionId)
+			)
+				return { result: "native_requirement_mismatch" };
 			const nowIso = new Date(nowEpochMs).toISOString();
 			const created = createPendingTaskMessageInjectionRecord({
 				taskId,
@@ -104,16 +130,19 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				agentIdleGate: {
 					waitDeadlineAtIso: new Date(agentIdleWaitDeadlineAtEpochMs).toISOString(),
 					queueEntryId,
+					...nativeRequirement,
 				},
 			});
 			return { records: [...records, created], result: "created" };
 		},
 	);
+	if (preflight === "native_requirement_mismatch")
+		return { ok: false, error: "独立原生回合要求与当前 Codex 会话身份不符。" };
 	if (preflight === "idempotency_conflict") {
 		return {
 			ok: false,
 			idempotencyConflict: true,
-			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash differs.`,
+			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash or required native session differs.`,
 		};
 	}
 	// 同 key 重发（记录早已存在）：幂等的定义就是「什么都不做，返回当前记录」——无论它已落定、是一条立即投递，
@@ -145,6 +174,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				injectionLedgerIdempotencyKey: idempotencyKey,
 				injectionSource: source,
 				agentIdleWaitDeadlineAtEpochMs,
+				...nativeRequirement,
 			},
 			nowEpochMs,
 		});

@@ -456,6 +456,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			request,
 			onProgrammaticTerminalDeliverySettled,
 			injectionLedgerTaskId,
+			validateBeforeTerminalWrite,
 		) =>
 			await sendTaskChatMessageAcrossSessionTransports(
 				{
@@ -469,11 +470,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					onProgrammaticTerminalDeliverySettled,
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
 					validateBeforeTerminalWrite:
-						request.source === "rvf_automatic_closeout"
+						request.source === "rvf_automatic_closeout" || validateBeforeTerminalWrite
 							? async () => {
-									if (!rvfAutomaticCloseoutPromptDeliveryValidator)
-										throw new Error("自动收尾投递门尚未就绪。");
-									await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+									await validateBeforeTerminalWrite?.();
+									if (request.source === "rvf_automatic_closeout") {
+										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
+											throw new Error("自动收尾投递门尚未就绪。");
+										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+									}
 								}
 							: undefined,
 				},

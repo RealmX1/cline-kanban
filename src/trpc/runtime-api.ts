@@ -3027,7 +3027,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				// 还在等 agent 空闲的程序化排队投递不在 PTY 单飞槽里，PTY 取消对它无效——先在队列里撤下它。
 				const cancelledWhileAwaitingAgentIdle = await cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
-					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					{
+						notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated,
+					},
 					workspaceScope.workspaceId,
 					input.taskId,
 					input.idempotencyKey,
@@ -3186,8 +3188,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			kanbanRequestOriginActorEvidence,
 		) => {
 			try {
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const enqueueResponse = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					{
+						notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated,
+						getTaskSessionSummary: (taskId) => terminalManager.getSummary(taskId),
+					},
 					workspaceScope.workspaceId,
 					input,
 				);

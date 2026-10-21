@@ -33,6 +33,8 @@ export interface AgentIdleGatedProgrammaticInjectionEnqueueInput {
 	// 调用方给的「最多等 agent 空闲到这一刻」。直接当 expiresAt：过期收敛、投影、门控都已按它工作，
 	// 不另造一个只有程序化条目才看的截止字段。
 	agentIdleWaitDeadlineAtEpochMs: number;
+	requiredNativeIndependentUserTurnSessionId?: string;
+	requiredNativeIndependentUserTurnSessionIncarnationId?: string;
 }
 
 // 纯函数。与人排的入队同一套过期收敛、幂等与容量判据，只有条目形状不同。
@@ -53,6 +55,13 @@ export function applyAgentIdleGatedProgrammaticInjectionEnqueue(
 		queueEntryId: input.queueEntryId,
 		taskId: input.taskId,
 		text: input.text,
+		...(input.requiredNativeIndependentUserTurnSessionId
+			? {
+					requiredNativeIndependentUserTurnSessionId: input.requiredNativeIndependentUserTurnSessionId,
+					requiredNativeIndependentUserTurnSessionIncarnationId:
+						input.requiredNativeIndependentUserTurnSessionIncarnationId,
+				}
+			: {}),
 		deliverTogetherWithNextQueuedEntry: false,
 		sourcePromptLibraryEntryId: null,
 		sourcePromptLibraryEntryTextSha256: null,

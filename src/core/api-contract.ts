@@ -2335,6 +2335,8 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"session_ended_before_delivery",
 	"cancelled_before_delivery",
 	"runtime_restarted_before_confirmation",
+	"native_independent_user_turn_capability_unavailable",
+	"native_independent_user_turn_session_replaced",
 ]);
 export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
 
@@ -2490,6 +2492,8 @@ export const queuedTaskPromptDeliveryEntrySchema = z.object({
 	//   - 不跨重启：托管实例死了就落 settled_failed，不盖「等人确认」的章（那是给人看的）；
 	//   - 永不合并：正文要逐字发出，合并开关在它两侧都不生效。
 	// expiresAt 对它而言就是调用方给的「最多等 agent 空闲多久」的截止时刻。
+	requiredNativeIndependentUserTurnSessionId: z.string().min(1).optional(),
+	requiredNativeIndependentUserTurnSessionIncarnationId: z.string().min(1).optional(),
 	programmaticInjectionLedgerReceiptLink: z
 		.object({
 			// 账本记录的 idempotency key（= 调用方传的 --idempotency-key）。交给终端投递时也用它，
@@ -2666,6 +2670,7 @@ export const runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchem
 	attemptId: z.string().optional(),
 	// 最多等 agent 空闲多久。上限（24h）在 runtime 侧校验，契约这里只要求正整数。
 	maxWaitForAgentIdleMs: z.number().int().positive(),
+	requiredNativeIndependentUserTurnSessionId: z.string().min(1).optional(),
 });
 export type RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest = z.infer<
 	typeof runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema

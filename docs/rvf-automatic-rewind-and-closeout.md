@@ -18,6 +18,16 @@ RVF 把凭据复制到本轮 `inputs/automatic-closeout-review-start-receipt.jso
 
 若手动开审消息就是第一条用户消息，或前一回合已中断而没有可自动恢复的完整前缀，仍可提供独立开审 receipt；记录保留真实前缀 IDs，并另记自动恢复不可用的原因。激活入口在 run 绑定核验与当前主会话复核之前返回 `automaticCloseoutActivationStatus=skipped_no_completed_pre_review_conversation_prefix`；此响应只表示复用已捕获的 receipt 并跳过可选自动收尾，不表示 run 绑定已核验。记录保持 `captured_review_start_boundary`，不写入 run 绑定、不 fork 或投递；已有的 `paused` 记录仍拒绝激活。独立开审证明与可选自动恢复的能力分开，捕获或跳过状态不替代原生独立消息、本次 nonce 的活动分支观测或 rewind 完成证据。
 
+## 自动决策点的独立原生回合投递
+
+自动决策点首次投递与重新请求均使用 `task message --deliver-when-agent-idle --max-wait-for-agent-idle-ms <TTL> --require-native-independent-user-turn-for-session <native session id>`。调用方只指定原生 session；宿主在首次入队时保存 `requiredNativeIndependentUserTurnSessionId` 与当前 `requiredNativeIndependentUserTurnSessionIncarnationId`，并在注入账本保存对应 snake_case 字段。同 key 必须保持正文与 session 要求；重发只返回首次投递事实，不重新排队、不延长 TTL、不把原始 incarnation 换成本代。
+
+summary 空闲仅是初筛。dispatcher 认领前连接该 TUI 当前绑定的控制端点，确认 thread 已加载，再要求最后原生 turn 为 `completed`。未完成时每 500ms 重查，始终受首次 TTL 约束，不占 PTY、不增加投递次数。claim 在文件锁内核对已经核验的精确队首，避免普通队首取消后误认领严格后继消息。查询后重读取消与到期状态；缺控制面或会话换代时明确失败，不降级普通投递。已过期、取消或跨 runtime 重启的程序化条目沿原有终态纪律处理，不复活。
+
+粘贴、首个 CR 和补发 CR 前都复核同一 incarnation 与完成的前置 turn。若本条正文已经成为唯一后继原生 UserMessage，则停止补发并确认原始投递；该结果仍不能代替开审捕获的原生证据与 checkpoint/nonce 门禁。缺控制能力和会话替换分别在 message-status 暴露 `native_independent_user_turn_capability_unavailable`、`native_independent_user_turn_session_replaced`；截止仍使用 `agent_never_became_idle_before_queued_delivery_deadline`，原始要求字段说明所等待的原生约束。
+
+捕获成功仅返回 `{status:"captured",receipt}`。已知失败返回 `{status:"pending"|"invalidated",reason,reason_code,recovery_action}`，CLI 以 12 退出；未知基础设施异常由顶层报告正文并以 1 退出。原因码区分未取证能力、尚未观测分界、同 turn 多消息、未完成前置回合、token 到期和绑定失效。恢复动作分别为等待原生完成、完成后请求新分界、修复宿主能力、重试捕获或检查诊断。带 nonce 的 message-status 失败也给出结构化原因与恢复动作。终态/失效 token 不能经捕获重新激活；已保存 receipt 的幂等返回仅复用历史事实，实时资格仍须单独核验。
+
 ## 本次 nonce 的实时分支观测
 
 ```

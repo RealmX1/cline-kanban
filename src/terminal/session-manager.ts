@@ -72,6 +72,10 @@ import {
 } from "../diagnostics/pty-session-spawn-attribution-probe";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
+	NativeIndependentUserTurnDeliveryError,
+	NativeIndependentUserTurnMessageAlreadyAccepted,
+} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import {
 	createAgentOutputSubstanceMemory,
 	detectFreshSubstantiveAgentOutputFromStripped,
 } from "./agent-output-substance";
@@ -2142,14 +2146,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		try {
 			await validateBeforeTerminalWrite();
 		} catch (error) {
+			if (error instanceof NativeIndependentUserTurnMessageAlreadyAccepted) {
+				if (this.entries.get(taskId)?.active === active && isCurrentGeneration())
+					settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+						active,
+						"delivered_and_submit_confirmed",
+						null,
+					);
+				return false;
+			}
 			// 核验期间可能已被另一条投递取代；只结算仍属于本次的回执与可见性。
 			if (this.entries.get(taskId)?.active !== active || !isCurrentGeneration()) return false;
 			settleActiveProgrammaticDelivery(
 				active,
 				"delivery_failed",
-				active.programmaticDeliveryReceipt?.phase === "awaiting_readiness"
-					? "cancelled_before_delivery"
-					: "submit_confirmation_budget_exhausted",
+				error instanceof NativeIndependentUserTurnDeliveryError
+					? error.reason
+					: active.programmaticDeliveryReceipt?.phase === "awaiting_readiness"
+						? "cancelled_before_delivery"
+						: "submit_confirmation_budget_exhausted",
 			);
 			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 			logTuiFreezeWarning(`[tui-freeze] terminal-write-validation-rejected taskId=${taskId} error=${String(error)}`);

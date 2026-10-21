@@ -41,6 +41,7 @@ import {
 } from "./codex-native-conversation-prefix";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { observeRvfReviewStartActiveBranch } from "./observe-rvf-review-start-active-branch";
+import { boundaryCaptureError, ReviewStartBoundaryCaptureError } from "./review-start-boundary-capture-diagnostic";
 import {
 	createRvfAutomaticCloseoutCoordinator,
 	RvfAutomaticCloseoutPauseError,
@@ -537,7 +538,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					const existing = (await readRvfAutomaticCloseoutRecords(storePath)).find(
 						(record) => record.taskId === input.taskId && record.receipt.decision_token === input.decisionToken,
 					);
-					if (existing) return { receipt: existing.receipt };
+					if (existing) return { status: "captured" as const, receipt: existing.receipt };
 					const stopKey = `${scope.workspaceId}:${input.taskId}`;
 					const stopSequenceBeforeCapture = explicitlyStoppedTasks.get(stopKey);
 					const { manager, summary } = await mainSummary(scope, input.taskId);
@@ -545,7 +546,13 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					const conversationStopSequenceBeforeCapture = explicitlyStoppedTasks.get(conversationStopKey);
 					const identity = summary.agentNativeConversationSessionIdentity;
 					const transcriptPath = identity?.transcriptPath;
-					if (!identity || !transcriptPath) throw new Error("主会话缺少原生 transcript。");
+					if (!identity || !transcriptPath)
+						throw boundaryCaptureError(
+							"主会话缺少原生 transcript。",
+							"native_independent_user_turn_capability_unverified",
+							"pending",
+							"repair_host_capability",
+						);
 					const captured = await withCodexAppServerRequestConnection(
 						{ workingDirectory: summary.workspacePath ?? "" },
 						(port) =>
@@ -596,9 +603,19 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							throw new RvfAutomaticCloseoutPauseError("保存分界期间用户已停止会话。");
 						return { records: [...records, record], value: null };
 					});
-					return { receipt: captured.receipt };
+					return { status: "captured" as const, receipt: captured.receipt };
 				}),
-			),
+			).catch((error: unknown) => {
+				if (error instanceof ReviewStartBoundaryCaptureError) return error.diagnostic;
+				if (error instanceof RvfAutomaticCloseoutPauseError || error instanceof RvfAutomaticCloseoutWaitError)
+					return {
+						status: "pending" as const,
+						reason: error.message,
+						reason_code: "review_start_boundary_host_session_unavailable" as const,
+						recovery_action: "inspect_boundary_diagnostic" as const,
+					};
+				throw error;
+			}),
 		activateAfterRunBinding: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string; decisionToken: string },
@@ -666,7 +683,12 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			const record = (
 				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
 			).find((entry) => entry.taskId === input.taskId && entry.receipt.idempotency_key === input.idempotencyKey);
-			if (!record) return { review_start_boundary_pending_reason: "尚未捕获本 task/key 对应的原生分界。" };
+			if (!record)
+				return {
+					review_start_boundary_pending_reason: "尚未捕获本 task/key 对应的原生分界。",
+					reason_code: "native_independent_user_turn_boundary_not_yet_observed" as const,
+					recovery_action: "retry_capture" as const,
+				};
 			try {
 				const { summary } = await mainSummary(scope, input.taskId);
 				if (
@@ -676,7 +698,11 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 						resolve(record.receipt.transcript_path) ||
 					(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
 				)
-					return { review_start_boundary_pending_reason: "原生主会话身份已改变，旧分界不可用。" };
+					return {
+						review_start_boundary_pending_reason: "原生主会话身份已改变，旧分界不可用。",
+						reason_code: "review_start_boundary_binding_invalidated" as const,
+						recovery_action: "request_new_boundary_after_turn_completion" as const,
+					};
 				const endpoint = summary.codexNativeSessionControlEndpoint;
 				if (
 					!endpoint ||
@@ -685,7 +711,11 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							endpoint.conversationSessionId !== summary.taskId ||
 							endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId))
 				)
-					return { review_start_boundary_pending_reason: "本代会话没有与当前身份绑定的原生活动分支控制面。" };
+					return {
+						review_start_boundary_pending_reason: "本代会话没有与当前身份绑定的原生活动分支控制面。",
+						reason_code: "native_independent_user_turn_capability_unverified" as const,
+						recovery_action: "repair_host_capability" as const,
+					};
 				const observation = await withRunningCodexAppServerControlSocketConnection(
 					async (port) => {
 						// 不 resume、不从磁盘装载旧 thread；必须已由当前 TUI 宿主持有。

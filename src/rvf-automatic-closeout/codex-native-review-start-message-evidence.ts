@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { boundaryCaptureError } from "./review-start-boundary-capture-diagnostic";
 
 const nativeRecordSchema = z.object({
 	type: z.string(),
@@ -40,7 +41,12 @@ export async function readCodexNativeReviewStartMessageEvidence(input: {
 		metadata.cli_version !== "0.163.0" ||
 		!["cli", "vscode"].includes(String(metadata.source))
 	)
-		throw new Error("此原生会话或 Codex 版本的独立回退能力尚未取证。");
+		throw boundaryCaptureError(
+			"此原生会话或 Codex 版本的独立回退能力尚未取证。",
+			"native_independent_user_turn_capability_unverified",
+			"pending",
+			"repair_host_capability",
+		);
 	let currentTurn: string | undefined;
 	let userInitiated = false;
 	let userMessagesInBoundaryTurn = 0;
@@ -53,10 +59,10 @@ export async function readCodexNativeReviewStartMessageEvidence(input: {
 			currentTurn = event.turn_id;
 			userInitiated = event.turn_attribution?.turn_trigger === "user";
 			if (receivedAt && userInitiated && currentTurn !== input.nativeTurnId)
-				throw new Error("开审消息之后已进入另一用户回合。");
+				throw boundaryCaptureError("开审消息之后已进入另一用户回合。", "review_start_boundary_binding_invalidated");
 		}
 		if (receivedAt && ["thread_rolled_back", "thread_reverted", "conversation_reverted"].includes(event.type ?? ""))
-			throw new Error("开审消息之后原生历史已回退。");
+			throw boundaryCaptureError("开审消息之后原生历史已回退。", "review_start_boundary_binding_invalidated");
 		if (event.type !== "item_completed" || event.item?.type !== "UserMessage") continue;
 		if (event.turn_id === input.nativeTurnId) userMessagesInBoundaryTurn++;
 		if (event.item.id !== input.nativeMessageId) continue;
@@ -70,11 +76,17 @@ export async function readCodexNativeReviewStartMessageEvidence(input: {
 			content.some((part) => !["text", "input_text"].includes(part.type) || typeof part.text !== "string") ||
 			content.map((part) => part.text).join("") !== input.text
 		)
-			throw new Error("原生消息正文、独立 user turn 与当前分界不一致。");
+			throw boundaryCaptureError(
+				"原生消息正文、独立 user turn 与当前分界不一致。",
+				"review_start_boundary_binding_invalidated",
+			);
 		receivedAt = record.timestamp;
 	}
 	if (foundCount !== 1 || userMessagesInBoundaryTurn !== 1 || !receivedAt || !Number.isFinite(Date.parse(receivedAt)))
-		throw new Error("当前消息没有唯一的原生独立 user turn 证据。");
+		throw boundaryCaptureError(
+			"当前消息没有唯一的原生独立 user turn 证据。",
+			"review_start_boundary_binding_invalidated",
+		);
 	return { receivedAt };
 }
 

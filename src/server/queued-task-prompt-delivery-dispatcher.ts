@@ -76,6 +76,11 @@ import {
 	routeQueuedTaskPromptDeliveryTerminalOutcome,
 } from "../core/queued-task-prompt-delivery-outcome-routing";
 import { buildRuntimeQueuedTaskPromptDeliveryProjectionsByTaskId } from "../core/queued-task-prompt-delivery-projection";
+import {
+	assertIndependentUserTurnImmediatelyBeforeTerminalWrite,
+	NativeIndependentUserTurnDeliveryError,
+	readCurrentTuiNativeConversationTurns,
+} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { reconcileInjectionLedgerWithSettledProgrammaticInjections } from "../state/mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import {
 	claimNextQueuedTaskPromptDeliveryRunForDispatch,
@@ -133,6 +138,7 @@ export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 		request: RuntimeTaskChatSendRequest,
 		onProgrammaticTerminalDeliverySettled: TaskChatInputDeliveryOutcomeObserver,
 		injectionLedgerTaskId?: string,
+		validateBeforeTerminalWrite?: () => Promise<void>,
 	) => Promise<RuntimeTaskChatSendResponse>;
 	// 既有 cancelTaskChatDelivery（PTY 单飞槽的取消）。
 	cancelProgrammaticTerminalDelivery: (
@@ -146,6 +152,8 @@ export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 		workspaceId: string,
 		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	) => void;
+	readNativeConversationTurns?: typeof readCurrentTuiNativeConversationTurns;
+	nativeTurnCompletionPollIntervalMs?: number;
 	now?: () => number;
 	createDispatchIdempotencyKey?: () => string;
 	fallbackSweepIntervalMs?: number;
@@ -235,6 +243,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		string,
 		{ timer: NodeJS.Timeout; firesForDeadlineAtEpochMs: number }
 	>();
+	const nativeTurnPollTimerByTaskKey = new Map<string, NodeJS.Timeout>();
 	const pendingOperations = new Set<Promise<unknown>>();
 	let fallbackSweepTimer: NodeJS.Timeout | null = null;
 	let stopped = false;
@@ -514,7 +523,46 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 
+		let nativePredecessorTurnId: string | null = null;
+		if (headEntry.requiredNativeIndependentUserTurnSessionId) {
+			try {
+				const turns = await (deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
+					workspaceId,
+					entry: headEntry,
+					getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
+				});
+				// 查询跨 await；取消、到期或队首变化后绝不可继续认领。
+				const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+				rememberSnapshot(workspaceId, fresh);
+				if (listAwaitingDispatchEntries(fresh, taskId, now())[0]?.queueEntryId !== headEntry.queueEntryId) return;
+				if (turns.at(-1)?.status !== "completed") {
+					if (!stopped && !nativeTurnPollTimerByTaskKey.has(taskKey)) {
+						const timer = setTimeout(
+							() => {
+								nativeTurnPollTimerByTaskKey.delete(taskKey);
+								requestDispatchAttempt(workspaceId, taskId);
+							},
+							Math.min(deps.nativeTurnCompletionPollIntervalMs ?? 500, Math.max(1, headEntry.expiresAt - now())),
+						);
+						timer.unref?.();
+						nativeTurnPollTimerByTaskKey.set(taskKey, timer);
+					}
+					return;
+				}
+				nativePredecessorTurnId = turns.at(-1)?.id ?? null;
+			} catch (error) {
+				if (!(error instanceof NativeIndependentUserTurnDeliveryError)) throw error;
+				await settleHandedOffRun(workspaceId, taskId, [headEntry.queueEntryId], {
+					outcome: "terminal_failure",
+					failureNote: error.message,
+					terminalDeliveryReceiptForInjectionLedger: { status: "delivery_failed", reason: error.reason },
+				});
+				return;
+			}
+		}
+
 		const claimed = await claimNextQueuedTaskPromptDeliveryRunForDispatch({
+			expectedQueueHeadEntryId: headEntry.queueEntryId,
 			workspaceId,
 			taskId,
 			sessionIncarnationId,
@@ -522,6 +570,10 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			nowEpochMs: now(),
 		});
 		if (claimed === null) {
+			const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+			rememberSnapshot(workspaceId, fresh);
+			if (listAwaitingDispatchEntries(fresh, taskId, now())[0]?.queueEntryId !== headEntry.queueEntryId)
+				requestDispatchAttempt(workspaceId, taskId);
 			return;
 		}
 		await commitSnapshotAndBroadcast(workspaceId, claimed.snapshot);
@@ -585,18 +637,43 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 
 		handedOffAtTurnKeyByTaskKey.set(taskKey, turnKey);
 		const waiter = createProgrammaticTerminalDeliveryOutcomeWaiter();
+		const dispatchedText = buildMergedQueuedTaskPromptDeliveryText(claimed.claimedEntries);
 		let response: RuntimeTaskChatSendResponse;
 		try {
 			response = await deps.sendThroughTaskChatTransports(
 				scope,
 				{
 					taskId,
-					text: buildMergedQueuedTaskPromptDeliveryText(claimed.claimedEntries),
+					text: dispatchedText,
 					source: programmaticInjectionLink?.injectionSource ?? QUEUED_TASK_PROMPT_DELIVERY_CHAT_MESSAGE_SOURCE,
 					idempotencyKey: dispatchIdempotencyKey,
 				},
 				waiter.observer,
 				programmaticInjectionLink?.injectionLedgerTaskId,
+				nativePredecessorTurnId
+					? async () => {
+							const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+							const current = fresh.entriesByTaskId[taskId]?.find(
+								(entry) => entry.queueEntryId === claimedHead.queueEntryId,
+							);
+							if (
+								stopped ||
+								!current ||
+								current.deliveryState !== "handed_to_transport" ||
+								current.dispatchIdempotencyKey !== dispatchIdempotencyKey
+							)
+								throw new Error("独立原生回合投递已取消或失效。");
+							assertIndependentUserTurnImmediatelyBeforeTerminalWrite({
+								turns: await (deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
+									workspaceId,
+									entry: claimedHead,
+									getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
+								}),
+								predecessorTurnId: nativePredecessorTurnId ?? "",
+								text: dispatchedText,
+							});
+						}
+					: undefined,
 			);
 		} catch (error) {
 			// 统一出口自己兜住了异常并返回 ok:false；能走到这里说明是出口之外的东西抛了（例：依赖注入的包装层）。
@@ -832,6 +909,8 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		},
 		stop: () => {
 			stopped = true;
+			for (const timer of nativeTurnPollTimerByTaskKey.values()) clearTimeout(timer);
+			nativeTurnPollTimerByTaskKey.clear();
 			if (fallbackSweepTimer !== null) {
 				clearInterval(fallbackSweepTimer);
 				fallbackSweepTimer = null;

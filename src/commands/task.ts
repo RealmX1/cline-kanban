@@ -1287,6 +1287,8 @@ interface TaskMessageCommandResult extends JsonRecord {
 	// 非 null ⇒ 已交给终端投递、卡在终端门。契约：terminal-delivery-interface-contract.md § agent 空闲门控的排队投递。
 	agent_idle_wait_deadline_at?: string;
 	agent_idle_gate_passed_at?: string | null;
+	required_native_independent_user_turn_session_id?: string;
+	required_native_independent_user_turn_session_incarnation_id?: string;
 }
 
 function hashPrompt(prompt: string): string {
@@ -1304,6 +1306,14 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.required_native_independent_user_turn_session_id
+			? {
+					required_native_independent_user_turn_session_id:
+						record.required_native_independent_user_turn_session_id,
+					required_native_independent_user_turn_session_incarnation_id:
+						record.required_native_independent_user_turn_session_incarnation_id,
+				}
+			: {}),
 		...(record.attempt_id ? { attempt_id: record.attempt_id } : {}),
 		...(record.turn_id ? { turn_id: record.turn_id } : {}),
 		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
@@ -1369,12 +1379,15 @@ async function sendTaskMessageCommand(input: {
 	waitTimeoutMs?: number;
 	deliverWhenAgentIdle?: boolean;
 	maxWaitForAgentIdleMs?: number;
+	requiredNativeIndependentUserTurnSessionId?: string;
 }): Promise<TaskMessageCommandResult> {
 	const agentIdleGate = resolveTaskMessageAgentIdleGateOptions({
 		deliverWhenAgentIdle: input.deliverWhenAgentIdle ?? false,
 		maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
 		maxWaitForAgentIdleUpperBoundMs: MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS,
 	});
+	if (input.requiredNativeIndependentUserTurnSessionId && !agentIdleGate)
+		throw new Error("--require-native-independent-user-turn-for-session 必须配合 --deliver-when-agent-idle 使用。");
 	const taskId = input.taskId.trim();
 	if (!taskId) {
 		throw new Error("task message requires --task-id.");
@@ -1421,6 +1434,7 @@ async function sendTaskMessageCommand(input: {
 			promptSha256,
 			...(attemptId ? { attemptId } : {}),
 			maxWaitForAgentIdleMs: agentIdleGate.maxWaitForAgentIdleMs,
+			requiredNativeIndependentUserTurnSessionId: input.requiredNativeIndependentUserTurnSessionId,
 		});
 		if (!enqueueResponse.ok) {
 			throw new Error(enqueueResponse.error ?? "enqueueAgentIdleGatedProgrammaticTaskChatMessage failed.");
@@ -2161,12 +2175,14 @@ export function registerTaskCommand(program: Command): void {
 			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
 				autoCreateIfMissing: false,
 			});
-			printJson(
-				await createRuntimeTrpcClient(workspace.workspaceId).runtime.captureRvfReviewStartBoundary.mutate({
-					taskId: options.taskId,
-					decisionToken: options.decisionToken,
-				}),
-			);
+			const captured = await createRuntimeTrpcClient(
+				workspace.workspaceId,
+			).runtime.captureRvfReviewStartBoundary.mutate({
+				taskId: options.taskId,
+				decisionToken: options.decisionToken,
+			});
+			printJson(captured);
+			if (captured.status !== "captured") process.exitCode = 12;
 		});
 	task
 		.command("activate-rvf-automatic-closeout-after-run-binding")
@@ -2226,6 +2242,10 @@ export function registerTaskCommand(program: Command): void {
 			"Queue the message in Kanban's durable prompt queue and hand it to the terminal only once the agent is idle (not generating, not parked awaiting background work, not waiting on a question/plan/permission). Requires --max-wait-for-agent-idle-ms. The receipt stays accepted_pending_submit_confirmation while queued.",
 		)
 		.option(
+			"--require-native-independent-user-turn-for-session <session-id>",
+			"仅在绑定的当前 Codex TUI 原生回合完成后投递；必须同时使用空闲投递参数。",
+		)
+		.option(
 			"--max-wait-for-agent-idle-ms <ms>",
 			"With --deliver-when-agent-idle: give up after this many milliseconds (at most 86400000) without the agent becoming idle, settling the receipt as delivery_failed{agent_never_became_idle_before_queued_delivery_deadline}.",
 		)
@@ -2242,6 +2262,7 @@ export function registerTaskCommand(program: Command): void {
 				waitTimeoutMs?: string;
 				deliverWhenAgentIdle?: boolean;
 				maxWaitForAgentIdleMs?: string;
+				requireNativeIndependentUserTurnForSession?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -2259,6 +2280,7 @@ export function registerTaskCommand(program: Command): void {
 								? { waitTimeoutMs: parsePositiveIntegerOption(options.waitTimeoutMs, "--wait-timeout-ms") }
 								: {}),
 							deliverWhenAgentIdle: options.deliverWhenAgentIdle ?? false,
+							requiredNativeIndependentUserTurnSessionId: options.requireNativeIndependentUserTurnForSession,
 							...(options.maxWaitForAgentIdleMs
 								? {
 										maxWaitForAgentIdleMs: parsePositiveIntegerOption(

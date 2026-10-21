@@ -195,7 +195,9 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 			candidate_summary: { kanban_task_id: "task", candidates: [] },
 		}),
 	);
-	const captured = await service.capture(scope, { taskId: "task", decisionToken: token });
+	const result = await service.capture(scope, { taskId: "task", decisionToken: token });
+	if (result.status !== "captured") throw new Error(JSON.stringify(result));
+	const captured = { receipt: result.receipt };
 	const run = join(fixture.fixtureRootDirectoryPath, "runs", "run");
 	const bindingPath = join(
 		rvfHome,
@@ -368,6 +370,7 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		context.source.push({ id: "bootstrap-followup", status: "completed", items: [] });
 		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
 		expect(await restarted.capture(context.scope, { taskId: "task", decisionToken: context.token })).toEqual({
+			status: "captured",
 			receipt: captured?.receipt,
 		});
 		await restarted.sweepPendingCloseoutsOnce();
@@ -526,7 +529,7 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
 		await expect(restarted.activateAfterRunBinding(context.scope, input)).rejects.toThrow("暂停");
 		expect((await restarted.status(context.scope, { taskId: "task" })).records[0]?.status).toBe("paused");
-		expect(await restarted.capture(context.scope, input)).toEqual(context.captured);
+		expect(await restarted.capture(context.scope, input)).toEqual({ status: "captured", ...context.captured });
 	});
 	it("捕获期间按当前主会话停止，不会登记晚到的非活跃分界", async () => {
 		const context = await setup("codex-handover-target");
@@ -571,7 +574,10 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 			return request?.(method, parameters);
 		});
 		const capture = context.service.capture(context.scope, { taskId: "task", decisionToken: nextToken });
-		const rejectedCapture = expect(capture).rejects.toThrow("停止");
+		const rejectedCapture = expect(capture).resolves.toMatchObject({
+			status: "pending",
+			reason_code: "review_start_boundary_host_session_unavailable",
+		});
 		await readStarted;
 		await context.service.pauseForExplicitStop(context.scope.workspaceId, "codex-handover-target");
 		releaseRead();
@@ -838,5 +844,38 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		await context.service.sweepPendingCloseoutsOnce();
 		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe("paused");
 		expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+	});
+	it.each(["same_turn", "expired", "withdrawn"])("已知捕获失败 %s 返回可恢复诊断，且不写正式记录", async (kind) => {
+		const context = await setup();
+		const token = "fedcba9876543210";
+		const original = JSON.parse(
+			await readFile(join(context.rvfHome, "agentic-initiation-decision-tokens", `${context.token}.json`), "utf8"),
+		);
+		await writeFile(
+			join(context.rvfHome, "agentic-initiation-decision-tokens", `${token}.json`),
+			JSON.stringify({
+				...original,
+				token,
+				state: kind === "withdrawn" ? "withdrawn" : "injected",
+				expires_at: kind === "expired" ? new Date(0).toISOString() : new Date(Date.now() + 60000).toISOString(),
+			}),
+		);
+		if (kind === "same_turn")
+			context.source.at(-1)?.items.push({
+				id: "extra-message",
+				type: "userMessage",
+				content: [{ type: "input_text", text: "同回合附加消息" }],
+			});
+		expect(await context.service.capture(context.scope, { taskId: "task", decisionToken: token })).toMatchObject({
+			status: "invalidated",
+			reason_code:
+				kind === "expired"
+					? "review_start_boundary_token_expired"
+					: kind === "same_turn"
+						? "native_independent_user_turn_contains_multiple_messages"
+						: "review_start_boundary_binding_invalidated",
+			recovery_action: "request_new_boundary_after_turn_completion",
+		});
+		expect((await context.service.status(context.scope, { taskId: "task" })).records).toHaveLength(1);
 	});
 });

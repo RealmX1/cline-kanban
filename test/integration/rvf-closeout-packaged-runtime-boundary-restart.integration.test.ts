@@ -3,7 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { rvfReviewStartBoundaryResponseSchema } from "../../src/core/api-contract";
+import {
+	rvfIndependentUserTurnBoundaryReceiptSchema,
+	rvfReviewStartBoundaryResponseSchema,
+} from "../../src/core/api-contract";
 import { addTaskToColumn } from "../../src/core/task-board-mutations";
 import { computeRvfTextSha256 } from "../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
@@ -144,7 +147,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 			expect(nativeFixture.status, nativeFixture.stdout + nativeFixture.stderr).toBe(0);
 			const token = "0123456789abcdef";
 			const taskId = "synthetic-native-task";
-			const receipt = rvfReviewStartBoundaryResponseSchema.shape.receipt.parse(
+			const receipt = rvfIndependentUserTurnBoundaryReceiptSchema.parse(
 				JSON.parse(
 					await readFile(
 						join(rvfHome, "review-start-independent-user-turn-boundary-receipts", `${token}.json`),
@@ -293,6 +296,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 					initial.client.runtime.captureRvfReviewStartBoundary.mutate({ taskId, decisionToken: token }),
 				),
 			);
+			if (first.status !== "captured") throw new Error(JSON.stringify(first));
 			expect(first.receipt).toMatchObject({
 				session_id: nativeId,
 				native_turn_id: boundaryTurn,

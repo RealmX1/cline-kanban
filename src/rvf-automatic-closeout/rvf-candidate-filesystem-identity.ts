@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { boundaryCaptureError } from "./review-start-boundary-capture-diagnostic";
 
 export interface RvfBoundaryCandidateFile {
 	path: string;
@@ -19,7 +20,7 @@ export async function computeRvfCandidateFilesystemIdentitySha256(
 	)) {
 		if (!candidate.included_in_candidate_set) continue;
 		if (isAbsolute(candidate.path) || candidate.path.split(/[\\/]/u).includes(".."))
-			throw new Error("候选文件不能位于仓库之外。");
+			throw boundaryCaptureError("候选文件不能位于仓库之外。", "review_start_boundary_binding_invalidated");
 		const path = join(repositoryPath, candidate.path);
 		let metadata: bigint[] | null;
 		try {
@@ -62,6 +63,10 @@ export async function assertRvfCandidateContentsMatchToken(
 				throw error;
 			digest = "absent";
 		}
-		if (digest !== candidate.content_sha256) throw new Error(`候选内容在铸造 token 后改变：${candidate.path}`);
+		if (digest !== candidate.content_sha256)
+			throw boundaryCaptureError(
+				`候选内容在铸造 token 后改变：${candidate.path}`,
+				"review_start_boundary_binding_invalidated",
+			);
 	}
 }

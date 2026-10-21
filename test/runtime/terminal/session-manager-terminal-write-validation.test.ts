@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { NativeIndependentUserTurnMessageAlreadyAccepted } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
 
@@ -34,9 +35,11 @@ function installIsolatedFakeTerminal(manager: TerminalSessionManager) {
 		entries: Map<string, typeof entry>;
 		resolveInteractivePromptReadiness: () => Promise<"prompt">;
 		resolveProgrammaticDeliveryInputBoxContentionForTask: () => Promise<null>;
+		invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt: () => void;
 	};
 	internals.entries.set("guarded-answer", entry);
 	vi.spyOn(internals, "resolveInteractivePromptReadiness").mockResolvedValue("prompt");
+	vi.spyOn(internals, "invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt").mockImplementation(() => undefined);
 	vi.spyOn(internals, "resolveProgrammaticDeliveryInputBoxContentionForTask").mockResolvedValue(null);
 	return { write, entry, internals };
 }
@@ -176,4 +179,24 @@ describe("程序化终端投递的实际写入前核验", () => {
 			},
 		);
 	}
+	it("首个 CR 已摄入本条唯一原生消息时停止补发，回执仍为确认送达", async () => {
+		const manager = new TerminalSessionManager();
+		const { write, entry } = installIsolatedFakeTerminal(manager);
+		let accepted = false;
+		const outcomes: TaskChatInputDeliveryOutcome[] = [];
+		manager.submitTaskChatInputWhenReady("guarded-answer", "独立边界", {
+			validateBeforeTerminalWrite: async () => {
+				if (accepted) throw new NativeIndependentUserTurnMessageAlreadyAccepted();
+			},
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+		});
+		await vi.advanceTimersByTimeAsync(1000);
+		entry.active.ptyOutputChunkArrivalSequenceNumber++;
+		await vi.advanceTimersByTimeAsync(60);
+		expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(1);
+		accepted = true;
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(1);
+		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
+	});
 });

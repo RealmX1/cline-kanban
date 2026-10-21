@@ -60,6 +60,8 @@ export const TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS = [
 	"agent_never_became_idle_before_queued_delivery_deadline",
 	// 入队即被拒：该 task 或整个 workspace 的非终态排队条目已达上限。
 	"agent_idle_gated_delivery_queue_capacity_exhausted",
+	"native_independent_user_turn_capability_unavailable",
+	"native_independent_user_turn_session_replaced",
 ] as const;
 export type TaskMessageTerminalDeliveryFailureReason = (typeof TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS)[number];
 
@@ -94,6 +96,8 @@ export interface TaskMessageInjectionRecord {
 	agent_idle_gate_passed_at?: string;
 	// prompt queue 里对应条目的 id（诊断用：账本 ↔ 队列文件对照）。
 	agent_idle_gated_queue_entry_id?: string;
+	required_native_independent_user_turn_session_id?: string;
+	required_native_independent_user_turn_session_incarnation_id?: string;
 }
 
 export function isTaskMessageInjectionRecordGatedUntilAgentIdle(record: TaskMessageInjectionRecord): boolean {
@@ -148,6 +152,15 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
+		...(typeof record.required_native_independent_user_turn_session_id === "string"
+			? { required_native_independent_user_turn_session_id: record.required_native_independent_user_turn_session_id }
+			: {}),
+		...(typeof record.required_native_independent_user_turn_session_incarnation_id === "string"
+			? {
+					required_native_independent_user_turn_session_incarnation_id:
+						record.required_native_independent_user_turn_session_incarnation_id,
+				}
+			: {}),
 		...(typeof record.agent_idle_wait_deadline_at === "string"
 			? { agent_idle_wait_deadline_at: record.agent_idle_wait_deadline_at }
 			: {}),
@@ -235,7 +248,12 @@ export function createPendingTaskMessageInjectionRecord(input: {
 	promptSha256: string;
 	nowIso: string;
 	// 仅 agent 空闲门控的排队投递传。
-	agentIdleGate?: { waitDeadlineAtIso: string; queueEntryId: string };
+	agentIdleGate?: {
+		waitDeadlineAtIso: string;
+		queueEntryId: string;
+		requiredNativeIndependentUserTurnSessionId?: string;
+		requiredNativeIndependentUserTurnSessionIncarnationId?: string;
+	};
 }): TaskMessageInjectionRecord {
 	return {
 		task_id: input.taskId,
@@ -252,6 +270,14 @@ export function createPendingTaskMessageInjectionRecord(input: {
 			? {
 					agent_idle_wait_deadline_at: input.agentIdleGate.waitDeadlineAtIso,
 					agent_idle_gated_queue_entry_id: input.agentIdleGate.queueEntryId,
+					...(input.agentIdleGate.requiredNativeIndependentUserTurnSessionId
+						? {
+								required_native_independent_user_turn_session_id:
+									input.agentIdleGate.requiredNativeIndependentUserTurnSessionId,
+								required_native_independent_user_turn_session_incarnation_id:
+									input.agentIdleGate.requiredNativeIndependentUserTurnSessionIncarnationId,
+							}
+						: {}),
 				}
 			: {}),
 	};

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reviewStartBoundaryCaptureDiagnosticSchema } from "../rvf-automatic-closeout/review-start-boundary-capture-diagnostic";
 
 export const rvfReviewStartBoundaryRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -27,9 +28,13 @@ export const rvfIndependentUserTurnBoundaryReceiptSchema = z.object({
 	idempotency_key: z.string(),
 });
 export type RvfIndependentUserTurnBoundaryReceipt = z.infer<typeof rvfIndependentUserTurnBoundaryReceiptSchema>;
-export const rvfReviewStartBoundaryResponseSchema = z.object({ receipt: rvfIndependentUserTurnBoundaryReceiptSchema });
+export const rvfReviewStartBoundaryResponseSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("captured"), receipt: rvfIndependentUserTurnBoundaryReceiptSchema }),
+	reviewStartBoundaryCaptureDiagnosticSchema,
+]);
 export const rvfAutomaticCloseoutRunBindingActivationRequestSchema = rvfReviewStartBoundaryRequestSchema;
-export const rvfAutomaticCloseoutRunBindingActivationResponseSchema = rvfReviewStartBoundaryResponseSchema.extend({
+export const rvfAutomaticCloseoutRunBindingActivationResponseSchema = z.object({
+	receipt: rvfIndependentUserTurnBoundaryReceiptSchema,
 	automaticCloseoutActivationStatus: z.enum(["skipped_no_completed_pre_review_conversation_prefix"]).optional(),
 });
 export const rvfAutomaticCloseoutRecordSchema = z.object({
@@ -88,4 +93,6 @@ export const rvfReviewStartBoundaryObservationResponseSchema = z.object({
 		})
 		.optional(),
 	review_start_boundary_pending_reason: z.string().optional(),
+	reason_code: reviewStartBoundaryCaptureDiagnosticSchema.shape.reason_code.optional(),
+	recovery_action: reviewStartBoundaryCaptureDiagnosticSchema.shape.recovery_action.optional(),
 });
