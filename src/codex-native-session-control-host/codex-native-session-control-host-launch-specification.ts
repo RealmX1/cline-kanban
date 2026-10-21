@@ -1,6 +1,7 @@
 import { lstat, rm } from "node:fs/promises";
 import { z } from "zod";
 import { codexNativeSessionControlEndpointSchema } from "../core/codex-native-session-control-endpoint-contract";
+import { codexRemoteConversationLaunchPlanSchema } from "./codex-remote-conversation-launch-plan";
 
 export type { CodexNativeSessionControlEndpoint } from "../core/codex-native-session-control-endpoint-contract";
 
@@ -13,6 +14,8 @@ export const codexNativeSessionControlHostLaunchSpecificationSchema = z.object({
 	codexBinary: z.string().min(1),
 	codexTuiArguments: z.array(z.string()),
 	appServerRootArguments: z.array(z.string()),
+	// 可选以兼容升级前仍由 PTY host 持有的启动描述与清理接管。
+	remoteConversationLaunchPlan: codexRemoteConversationLaunchPlanSchema.optional(),
 	workingDirectoryPath: z.string().min(1),
 	ownedLaunchDirectory: ownedDirectorySchema,
 	ownedSocketDirectory: ownedDirectorySchema,

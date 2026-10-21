@@ -15,6 +15,7 @@ import {
 	type OwnedCodexNativeSessionControlHostDirectory,
 	removeOwnedCodexNativeSessionControlHostDirectories,
 } from "./codex-native-session-control-host-launch-specification";
+import { prepareCodexRemoteConversationLaunchPlan } from "./codex-remote-conversation-launch-plan";
 
 const execFileAsync = promisify(execFile);
 const FAILED_CODEX_CONTROL_HOST_CAPABILITY_PROBE_RETRY_DELAY_MS = 30_000;
@@ -24,7 +25,7 @@ interface CachedCodexControlHostCapabilityProbe {
 }
 const capabilityProbes = new Map<string, CachedCodexControlHostCapabilityProbe>();
 
-// 仅复制配置层；模型、权限、resume/fork 和原始 prompt 仍由原生 TUI 原样提交。
+// 新建会话只复制配置层；恢复/fork 的权限由后续启动计划交给原生 RPC。
 export function inspectCodexNativeSessionControlHostArguments(arguments_: readonly string[]) {
 	const appServerRootArguments: string[] = [];
 	for (let index = 0; index < arguments_.length; index += 1) {
@@ -115,6 +116,10 @@ export async function prepareCodexNativeSessionControlHostLaunch(input: {
 		!(await supportsCodexUnixControlHost(input.binary, input.environment))
 	)
 		return null;
+	const remoteConversationLaunchPlan = prepareCodexRemoteConversationLaunchPlan(
+		input.arguments,
+		input.workingDirectoryPath,
+	);
 
 	const endpointIdentity = codexNativeSessionControlEndpointSchema.omit({ socketPath: true }).parse({
 		workspaceId: input.workspaceId,
@@ -145,7 +150,9 @@ export async function prepareCodexNativeSessionControlHostLaunch(input: {
 			endpoint,
 			codexBinary: input.binary,
 			codexTuiArguments: [...input.arguments],
-			appServerRootArguments: inspected.appServerRootArguments,
+			appServerRootArguments:
+				remoteConversationLaunchPlan?.appServerRootArguments ?? inspected.appServerRootArguments,
+			...(remoteConversationLaunchPlan ? { remoteConversationLaunchPlan } : {}),
 			workingDirectoryPath: input.workingDirectoryPath,
 			ownedLaunchDirectory,
 			ownedSocketDirectory,

@@ -51,24 +51,23 @@ async function createFixture() {
 	return { fixture, binary };
 }
 
-async function start(context: Awaited<ReturnType<typeof createFixture>>, taskId: string, failureMode?: string) {
+async function start(
+	context: Awaited<ReturnType<typeof createFixture>>,
+	taskId: string,
+	failureMode?: string,
+	conversationArguments = ["resume", "explicit-native-id"],
+) {
 	const environment = context.fixture.createIsolatedChildProcessEnvironment({
 		KANBAN_TASK_ID: taskId,
 		KANBAN_HOOK_TASK_ID: taskId,
+		KANBAN_TEST_NATIVE_CONTROL_WS_MODULE_PATH: resolve("node_modules/ws"),
 		KANBAN_TEST_NATIVE_CONTROL_RECORDS_DIRECTORY: context.fixture.fixtureRootDirectoryPath,
 		KANBAN_TEST_NATIVE_CONTROL_FAILURE_MODE: failureMode,
 		CODEX_HOME: join(context.fixture.fixtureRootDirectoryPath, "shared-codex-home"),
 	});
 	const launch = await prepareCodexNativeSessionControlHostLaunch({
 		binary: context.binary,
-		arguments: [
-			"-c",
-			'developer_instructions="仅用于隔离测试"',
-			"--model",
-			"test-model",
-			"resume",
-			"explicit-native-id",
-		],
+		arguments: ["-c", 'developer_instructions="仅用于隔离测试"', "--model", "test-model", ...conversationArguments],
 		workingDirectoryPath: context.fixture.fixtureRootDirectoryPath,
 		environment,
 		workspaceId: "isolated-workspace",
@@ -97,6 +96,97 @@ async function waitReady(test: TestContext, host: Awaited<ReturnType<typeof star
 }
 
 describe.skipIf(process.platform === "win32")("独享原生控制宿主生命周期", { timeout: 80_000 }, () => {
+	it("携带 bypass 的真实监督进程先恢复原生 thread，再以无权限覆盖的 TUI 接入", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "task-bypass-resume", undefined, [
+			"--dangerously-bypass-approvals-and-sandbox",
+			"resume",
+			"explicit-native-id",
+		]);
+		await waitReady(test, host);
+		const receipt = JSON.parse(
+			await readFile(
+				join(dirname(host.launch.args.at(-1) ?? ""), "remote-conversation-bootstrap-receipt.json"),
+				"utf8",
+			),
+		);
+		expect(receipt).toMatchObject({
+			nativeSessionId: "explicit-native-id",
+			effectiveApprovalPolicy: "never",
+			effectiveSandbox: { type: "dangerFullAccess" },
+		});
+		expect(host.output()).not.toContain("Permission overrides");
+	});
+	it("只读 fork 的限制先经 RPC 生效，TUI 恢复新身份并保留正文", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "task-read-only-fork", undefined, [
+			"--sandbox",
+			"read-only",
+			"--ask-for-approval",
+			"untrusted",
+			"fork",
+			"source-native-id",
+			"只回答问题",
+		]);
+		await waitReady(test, host);
+		const observations = (
+			await readFile(join(context.fixture.fixtureRootDirectoryPath, "process-observations.jsonl"), "utf8")
+		)
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		const tui = observations.find((record) => record.kind === "tui");
+		expect(tui.args.slice(-3)).toEqual(["resume", "fork-source-native-id", "只回答问题"]);
+		expect(tui.args).not.toContain("--ask-for-approval");
+		const requests = (await readFile(join(context.fixture.fixtureRootDirectoryPath, "native-requests.jsonl"), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(requests.find((record) => record.method === "thread/fork")?.params).toMatchObject({
+			approvalPolicy: "untrusted",
+			sandbox: "read-only",
+			deferGoalContinuation: true,
+		});
+		expect(requests.some((record) => record.method === "turn/start")).toBe(false);
+	});
+	it("latest 无目标时不启动 TUI，并清理失败宿主", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "task-missing-latest", "no-resume-candidate", ["resume", "--last"]);
+		await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(test, host.child, deadline);
+		expect(host.output()).toContain("没有可接续的 Codex 会话");
+		await expect(stat(dirname(host.launch.endpoint.socketPath))).rejects.toThrow();
+	});
+	it("原生端拒绝收紧权限时不投递正文，清理失败代", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "refused-permissions", "refused-permissions", [
+			"-s",
+			"read-only",
+			"resume",
+			"source-id",
+			"不得在高权限下投递的正文",
+		]);
+		await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(test, host.child, deadline);
+		expect(host.output()).toContain("有效权限与任务要求不一致");
+		expect(host.output()).not.toContain("SYNTHETIC_CODEX_TUI_READY");
+		await expect(stat(dirname(host.launch.endpoint.socketPath))).rejects.toThrow();
+		await expect(stat(dirname(host.launch.args.at(-1) ?? ""))).rejects.toThrow();
+	});
+	it("恢复 RPC 未返回时停止监督进程会取消连接并回收资源", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "stalled-resume", "stalled-resume");
+		await waitForConditionWithinLoadSensitiveTwoTierDeadline(test, deadline, async () =>
+			(
+				await readFile(join(context.fixture.fixtureRootDirectoryPath, "native-requests.jsonl"), "utf8").catch(
+					() => "",
+				)
+			).includes('"method":"thread/resume"'),
+		);
+		host.child.kill("SIGTERM");
+		await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(test, host.child, deadline);
+		expect(host.output()).not.toContain("SYNTHETIC_CODEX_TUI_READY");
+		await expect(stat(dirname(host.launch.endpoint.socketPath))).rejects.toThrow();
+		await expect(stat(dirname(host.launch.args.at(-1) ?? ""))).rejects.toThrow();
+	});
 	it("prepare 未 spawn 时可幂等清理，重复 incarnation 不覆盖原启动描述", async () => {
 		const context = await createFixture();
 		const input = {

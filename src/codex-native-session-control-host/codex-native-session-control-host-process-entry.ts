@@ -1,13 +1,16 @@
 // 此进程由原有 PTY host 持有；runtime 热重启不结束它，TUI 与 app-server 则与它同寿。
 import { type ChildProcess, spawn } from "node:child_process";
-import { open, readFile } from "node:fs/promises";
+import { open, readFile, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rotating-jsonl-diagnostic-event-journal";
+import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import {
 	codexNativeSessionControlHostLaunchSpecificationSchema,
 	removeOwnedCodexNativeSessionControlHostDirectories,
 } from "./codex-native-session-control-host-launch-specification";
+import { bootstrapCodexRemoteConversationBeforeTuiAttach } from "./codex-remote-conversation-bootstrap";
 
 interface OwnedChildExit {
 	code: number | null;
@@ -101,23 +104,57 @@ async function runOwnedCodexNativeSessionControlHost() {
 				throw new Error("本代原生控制宿主在启动期间收到停止信号。");
 			}),
 		]);
-		const tui = spawn(
-			specification.codexBinary,
-			["--remote", `unix://${specification.endpoint.socketPath}`, ...specification.codexTuiArguments],
-			{ cwd: specification.workingDirectoryPath, stdio: "inherit" },
-		);
-		const tuiExit = observeOwnedChildExit(tui);
-		children.push({ child: tui, exited: tuiExit });
-		const outcome = await Promise.race([
-			tuiExit.then((exit) => ({ kind: "tui" as const, exit })),
-			serverExit.then((exit) => ({ kind: "server" as const, exit })),
-			stopped.then(() => ({ kind: "stopped" as const })),
-		]);
-		if (outcome.kind === "tui") {
-			if (outcome.exit.error) throw outcome.exit.error;
-			process.exitCode = outcome.exit.code ?? 1;
-		} else if (outcome.kind === "server") {
-			throw outcome.exit.error ?? new Error("当前会话的原生控制宿主已退出，TUI 无法继续使用旧端点。");
+		const runTui = async (tuiArguments: string[]) => {
+			const tui = spawn(
+				specification.codexBinary,
+				["--remote", `unix://${specification.endpoint.socketPath}`, ...tuiArguments],
+				{ cwd: specification.workingDirectoryPath, stdio: "inherit" },
+			);
+			const tuiExit = observeOwnedChildExit(tui);
+			children.push({ child: tui, exited: tuiExit });
+			const outcome = await Promise.race([
+				tuiExit.then((exit) => ({ kind: "tui" as const, exit })),
+				serverExit.then((exit) => ({ kind: "server" as const, exit })),
+				stopped.then(() => ({ kind: "stopped" as const })),
+			]);
+			if (outcome.kind === "tui") {
+				if (outcome.exit.error) throw outcome.exit.error;
+				process.exitCode = outcome.exit.code ?? 1;
+			} else if (outcome.kind === "server") {
+				throw outcome.exit.error ?? new Error("当前会话的原生控制宿主已退出，TUI 无法继续使用旧端点。");
+			}
+		};
+		const plan = specification.remoteConversationLaunchPlan;
+		if (plan) {
+			await withRunningCodexAppServerControlSocketConnection(
+				async (port) => {
+					const receipt = await bootstrapCodexRemoteConversationBeforeTuiAttach(port, plan);
+					const evidence = {
+						...specification.endpoint,
+						operation: plan.operation,
+						nativeSessionId: receipt.nativeSessionId,
+						nativeTranscriptPath: receipt.nativeTranscriptPath,
+						effectiveApprovalPolicy: receipt.effectiveApprovalPolicy,
+						effectiveSandbox: receipt.effectiveSandbox,
+					};
+					await writeFile(
+						join(specification.ownedLaunchDirectory.path, "remote-conversation-bootstrap-receipt.json"),
+						JSON.stringify(evidence),
+						{ mode: 0o600, flag: "wx" },
+					);
+					appendDiagnosticEventToRotatingJsonlJournal("codex-remote-conversation-bootstrap-confirmed", evidence);
+					// 保持启动连接存活，直到 TUI 退出；避免接入间隙中原生 thread 被卸载而丢失已核对的配置。
+					await runTui(receipt.tuiArguments);
+				},
+				{
+					socketPath: specification.endpoint.socketPath,
+					clientName: "kanban_owned_conversation_bootstrap",
+					requestTimeoutMs: 20_000,
+					signal: cancellation.signal,
+				},
+			);
+		} else {
+			await runTui(specification.codexTuiArguments);
 		}
 	} finally {
 		cancellation.abort();

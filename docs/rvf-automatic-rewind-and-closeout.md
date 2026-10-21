@@ -44,7 +44,11 @@ Codex 0.163.0 的真实隔离 TUI 实验证明：UI rewind 后原始 rollout 仍
 
 ## 按会话隔离的原生控制宿主
 
-runtime 在 Codex 的最终 adapter argv 确定后准备独享宿主。PTY 中的 `codex-native-session-control-host` 监督进程先启动该会话自己的前台 `app-server --listen unix://...`，就绪后以 `--remote` 启动原生 TUI。配置覆盖传给两端；模型、权限、工作目录、原生 resume/fork 参数和正文由 TUI 原样消费，Plan Mode 的 deferred prompt 仍由原有终端链提交。server 与 TUI 继承同一份本会话 hook 环境，不启动共享默认 daemon，也不把其它任务附着到先启动者的环境。
+runtime 在 Codex 的最终 adapter argv 确定后准备独享宿主。PTY 中的 `codex-native-session-control-host` 监督进程先启动该会话自己的前台 `app-server --listen unix://...`，就绪后以 `--remote` 启动原生 TUI。新建会话继续由 TUI 消费完整 argv；恢复与 fork 先走下面的原生握手。Plan Mode 的 deferred prompt 仍由原有终端链提交。server 与 TUI 继承同一份本会话 hook 环境，不启动共享默认 daemon，也不把其它任务附着到先启动者的环境。
+
+Codex 0.163.0 拒绝 remote resume/fork 的权限旗标及权限配置覆盖，不能把原始权限参数直接转发给远程 TUI。受管启动把 approval、sandbox、reviewer 与附加可写目录交给 `thread/resume` / `thread/fork`，核对返回的身份、工作目录和有效权限后，才以不含权限覆盖的 `resume <confirmed-id>` 接入 TUI；fork 正文只随这次 TUI 启动提交。已加载 thread 的 resume 若忽略覆盖，使用 `thread/settings/update` 后无覆盖读回，仍不一致则失败并清理，不能降为全放行。此适配不迁移新建会话的原生权限模型。
+
+显式 ID 保持跨目录寻址；`--last` 通过原生 `config/read` 与 `thread/list` 按 provider、来源及 cwd 选择，先查状态 DB，无命中才让原生扫描修复索引。无目标不创建空会话，非幂等 fork 不盲目重试。启动握手不调用 `turn/start`，其连接在 TUI 存续期间保留订阅，进程数仍为原有的监督进程、app-server 与 TUI 三个。成功核对的权限与身份写入本代私有 `remote-conversation-bootstrap-receipt.json` 及轮转诊断通道 `codex-remote-conversation-bootstrap-confirmed`，不记录正文；退出时清理本代 receipt，轮转日志保留诊断证据。
 
 每次真实启动分配新 incarnation 和独享 socket，summary 只记录该代端点。启动描述与私有日志位于 runtime home 的 `codex-native-session-control-host-launches/<incarnation>`（目录700、描述600），短 Unix socket 目录与进程同寿。prepare/spawn 失败、TUI 退出、server 失败及停止信号均清理本代资源；清理前复核目录设备号/inode，不能删替换后的目录。临时 socket 目录不是交接产物，重启后的新代不会复用它。
 
@@ -52,7 +56,7 @@ runtime 在 Codex 的最终 adapter argv 确定后准备独享宿主。PTY 中�
 
 显式 `--remote`、`--no-daemon`、`-p/--profile`、不支持 Unix 控制面的原生版本及 Windows 保持原生启动选择；没有本代控制端点时独立开审门禁诚实等待。Codex 0.163.0 的 app-server 拒绝 `--profile`，`-c profile=…` 也会触发已退休的旧版配置错误；把 profile 文件转成普通 `-c` 则会改变它与项目配置的优先级。因此 profile 启动保留完整原生 argv 与原配置目录，不登记控制端点、不声称具备实时分支证明；真实隔离 TUI 测试验证了 profile 中 provider、model 与指令的消费。存量安装会话不会因升级被自动打断，它们须在合适的真实重启后获得新能力；只看到默认 daemon 中有同名 thread 不足以给旧 TUI 授权。
 
-验证入口包括 `codex-native-session-control-host-lifecycle.integration.test.ts`（进程/环境隔离与失败清理）、`codex-native-control-host-packaged-runtime-adoption.integration.test.ts`（真实打包 API/PTY host 接管）、原生 rewind 夹具的受控自动与原样命名空间手动模式。实际 e9e12 活动分支 consumer 在隔离传输中先生成自己的 nonce，再驱动当前原生宿主实时查询，分别验证当前分界可接受与回退后拒绝；没有把旧观测改写 nonce 来凑兼容。
+验证入口包括 `codex-remote-conversation-real-cli.integration.test.ts`（真实 Codex + 回环模型的恢复对话、工具执行、只读 fork 拒写及 Hook 身份）、`codex-native-session-control-host-lifecycle.integration.test.ts`（进程/环境隔离与失败清理）、`codex-native-control-host-packaged-runtime-adoption.integration.test.ts`（真实打包 API/PTY host 接管）、原生 rewind 夹具的受控自动与原样命名空间手动模式。实际 e9e12 活动分支 consumer 在隔离传输中先生成自己的 nonce，再驱动当前原生宿主实时查询，分别验证当前分界可接受与回退后拒绝；没有把旧观测改写 nonce 来凑兼容。
 
 ## 完成通知
 

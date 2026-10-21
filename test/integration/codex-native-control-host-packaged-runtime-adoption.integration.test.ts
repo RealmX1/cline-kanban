@@ -83,6 +83,7 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 				PATH: `${executableDirectory}:${dirname(process.execPath)}:/usr/bin:/bin`,
 				CODEX_HOME: codexHomeDirectoryPath,
 				KANBAN_AGENT_SESSION_PTY_HOST_MODE: "enabled",
+				KANBAN_TEST_NATIVE_CONTROL_WS_MODULE_PATH: resolve("node_modules/ws"),
 				KANBAN_TEST_NATIVE_CONTROL_RECORDS_DIRECTORY: fixture.fixtureRootDirectoryPath,
 				KANBAN_TEST_NATIVE_CONTROL_FAILURE_MODE: failureMode,
 				KANBAN_RUNTIME_PORT: String(runtimePort),

@@ -109,10 +109,10 @@ export async function withCodexAppServerRequestConnection<T>(
 	}
 }
 
-// 只连接已在运行的 TUI 宿主。独立 stdio app-server 与 proxy 的原始 WebSocket 字节流均不等于实时 RPC。
+// 连接既有原生宿主；RVF 观测方保持只读，受管启动方可在 TUI 接入前恢复本代会话。
 export async function withRunningCodexAppServerControlSocketConnection<T>(
 	operation: (port: CodexAppServerRequestPort) => Promise<T>,
-	input?: { socketPath: string },
+	input?: { socketPath: string; clientName?: string; requestTimeoutMs?: number; signal?: AbortSignal },
 ) {
 	const socketPath =
 		input?.socketPath ??
@@ -122,6 +122,7 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 			"app-server-control.sock",
 		);
 	const socket = new WebSocket(`ws+unix://${socketPath}:/`);
+	const requestTimeoutMs = input?.requestTimeoutMs ?? 2000;
 	const pending = new Map<
 		number,
 		{ resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
@@ -152,7 +153,13 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 	});
 	socket.on("error", (error) => rejectPending(error));
 	socket.on("close", () => rejectPending(new Error("原生活动分支控制面已断开。")));
+	const abortConnection = () => {
+		rejectPending(new Error("原生控制面连接已取消。"));
+		socket.terminate();
+	};
+	input?.signal?.addEventListener("abort", abortConnection, { once: true });
 	try {
+		if (input?.signal?.aborted) throw new Error("原生控制面连接已取消。");
 		await new Promise<void>((resolveOpen, rejectOpen) => {
 			const timer = setTimeout(() => rejectOpen(new Error("原生控制面连接超时。")), 2000);
 			socket.once("open", () => {
@@ -162,6 +169,10 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 			socket.once("error", (error) => {
 				clearTimeout(timer);
 				rejectOpen(error);
+			});
+			socket.once("close", () => {
+				clearTimeout(timer);
+				rejectOpen(new Error("原生控制面在建立连接前断开。"));
 			});
 		});
 		const port: CodexAppServerRequestPort = {
@@ -175,7 +186,7 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 					const timer = setTimeout(() => {
 						pending.delete(id);
 						rejectRequest(new Error(`原生实时查询超时：${method}`));
-					}, 2000);
+					}, requestTimeoutMs);
 					pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
 					socket.send(JSON.stringify({ id, method, params: parameters }), (error) => {
 						if (error) {
@@ -187,12 +198,13 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 				}),
 		};
 		await port.request("initialize", {
-			clientInfo: { name: "kanban_rvf_review_boundary_observer", version: "1" },
+			clientInfo: { name: input?.clientName ?? "kanban_rvf_review_boundary_observer", version: "1" },
 			capabilities: { experimentalApi: true },
 		});
 		socket.send(JSON.stringify({ method: "initialized" }));
 		return await operation(port);
 	} finally {
+		input?.signal?.removeEventListener("abort", abortConnection);
 		rejectPending(new Error("本次实时观测已结束。"));
 		// terminate 只关闭本次客户端 socket，不发送 daemon stop、thread/unsubscribe 或任何会话变更请求。
 		socket.terminate();

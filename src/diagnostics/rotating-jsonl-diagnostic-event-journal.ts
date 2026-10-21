@@ -43,6 +43,7 @@ export type DiagnosticEventJournalChannel =
 	// 刷新逐字同形），自动重启打点回答「是不是它在成环」，fd 计数回答「这次有没有真的漏」。
 	| "pty-session-spawn"
 	| "pty-session-exit"
+	| "codex-remote-conversation-bootstrap-confirmed"
 	| "task-session-auto-restart-scheduled"
 	| "process-file-descriptor-count-sample"
 	// Kanban 每次调用外部模型 provider 的一条用量记录（用途角色、provider、模型、结果、耗时、token）。

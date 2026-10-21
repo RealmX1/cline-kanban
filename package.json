@@ -80,6 +80,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.5",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/stream-json": "1.7.8",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.27.4",
     "husky": "^9.1.7",
@@ -87,8 +88,7 @@
     "std-env": "^4.0.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0",
-    "@types/stream-json": "1.7.8"
+    "vitest": "^4.1.0"
   },
   "optionalDependencies": {
     "@biomejs/cli-linux-arm64": "2.3.5",
@@ -118,6 +118,7 @@
     "p-limit": "^7.3.0",
     "proper-lockfile": "^4.1.2",
     "sharp": "^0.35.5",
+    "smol-toml": "1.9.1",
     "stream-json": "1.9.1",
     "tree-kill": "^1.2.2",
     "ws": "^8.18.0",
