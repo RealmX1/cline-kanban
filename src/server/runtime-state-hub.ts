@@ -776,6 +776,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				summaryText: candidate.summaryText,
 				summaryLanguage: candidate.summaryLanguage,
 				taskTitleSnapshot: candidate.taskTitleSnapshot,
+				notificationSpeechAnnouncementScript: candidate.notificationSpeechAnnouncementScript ?? undefined,
 				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
 				...(isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate(candidate.evidence)
 					? { notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate: true }
@@ -992,6 +993,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaryText: candidate.summaryText,
 							summaryLanguage: candidate.summaryLanguage,
 							taskTitleSnapshot: candidate.taskTitleSnapshot,
+							notificationSpeechAnnouncementScript: candidate.notificationSpeechAnnouncementScript ?? undefined,
 						});
 					}
 				} catch {

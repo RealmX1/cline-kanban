@@ -16,9 +16,11 @@ describe("第三方语音协议", () => {
 			providerProtocol: "deepinfra" as const,
 			alibabaRegion: "beijing" as const,
 		};
+		// 先导与正文要按 PCM 拼接插入停顿，所有 provider 一律请求 WAV。
 		expect(buildNotificationSpeechProviderRequest(settings, profile, "任务完成").body).toMatchObject({
 			preset_voice: ["zf_xiaobei"],
 			text: "任务完成",
+			output_format: "wav",
 			stream: false,
 		});
 		const alibaba = { ...profile, providerProtocol: "alibaba" as const };
@@ -33,7 +35,7 @@ describe("第三方语音协议", () => {
 			"任务完成",
 		);
 		expect(audio.url).toContain("/audio/tts/SpeechSynthesizer");
-		expect(audio.body).toMatchObject({ input: { language_hints: ["zh"] } });
+		expect(audio.body).toMatchObject({ input: { language_hints: ["zh"], format: "wav" } });
 		const qwen3 = buildNotificationSpeechProviderRequest(
 			{
 				...settings,

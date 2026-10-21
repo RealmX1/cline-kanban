@@ -11,7 +11,12 @@ import {
 	resolveKanbanProviderAccess,
 } from "../model-provider-access/kanban-model-provider-settings";
 import { getNotificationArchiveDirectory, getNotificationLifecycleArchive } from "./notification-lifecycle-archive";
+import { composeNotificationSpeechAnnouncementScript } from "./notification-speech-announcement-script";
+import { joinPcmWavSegmentsWithSilenceGap } from "./notification-speech-pcm-wav-segment-join";
 import { validateNotificationSpeechConfiguration } from "./notification-speech-provider-catalog";
+
+// EXPERIMENT_NODE: 先导与正文之间插入的静音时长（两段各自还带首尾留白，实际听感约多 0.3 秒）
+export const NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_SILENCE_GAP_MILLISECONDS = 1200;
 
 export function buildNotificationSpeechProviderRequest(
 	settings: NotificationIntelligenceSettings,
@@ -27,7 +32,8 @@ export function buildNotificationSpeechProviderRequest(
 				text,
 				preset_voice: [settings.speechVoice],
 				speed: settings.speechSpeed,
-				output_format: "mp3",
+				// 一律要未压缩 WAV：先导与正文要在服务端按 PCM 拼接并插入静音。
+				output_format: "wav",
 				stream: false,
 			},
 		};
@@ -46,7 +52,7 @@ export function buildNotificationSpeechProviderRequest(
 					text,
 					voice: settings.speechVoice,
 					language_hints: [settings.summaryLanguage === "zh-CN" ? "zh" : "en"],
-					format: "mp3",
+					format: "wav",
 					sample_rate: 24000,
 					rate: settings.speechSpeed,
 					pitch: settings.speechPitch,
@@ -63,6 +69,7 @@ export function buildNotificationSpeechProviderRequest(
 			input: {
 				text,
 				voice: settings.speechVoice,
+				// EXPERIMENT_NODE: 中英混读时 language_type 用 "Chinese" 还是 "Auto"（官方称 Auto 不保证准确，社区实测说法不一）
 				language_type: settings.summaryLanguage === "zh-CN" ? "Chinese" : "English",
 				...(settings.speechStyleInstruction
 					? { instructions: settings.speechStyleInstruction, optimize_instructions: false }
@@ -135,6 +142,59 @@ export async function readArchivedNotificationAudio(candidateId: string) {
 	);
 	return { audioBase64: bytes.toString("base64"), mimeType: detectAudioMime(bytes), sha256: candidate.audioSha256 };
 }
+async function requestSynthesizedAudioSegmentFromProvider(
+	settings: NotificationIntelligenceSettings,
+	request: { url: string; body: Record<string, unknown> },
+	apiKey: string,
+	fetchImplementation: typeof globalThis.fetch,
+): Promise<{ bytes: Buffer; usage: unknown; requestId: string | undefined }> {
+	const response = await fetchImplementation(request.url, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+		body: JSON.stringify(request.body),
+		signal: AbortSignal.timeout(30_000),
+		redirect: "error",
+	});
+	const reply: unknown = JSON.parse((await readLimitedResponse(response, MAX_AUDIO_BYTES * 2)).toString("utf8"));
+	let bytes: Buffer;
+	let usage: unknown;
+	let requestId: string | undefined;
+	if (settings.speechProvider === "deepinfra") {
+		const parsed = z
+			.object({ audio: z.string(), request_id: z.string().nullish(), inference_status: z.unknown().optional() })
+			.parse(reply);
+		bytes = Buffer.from(parsed.audio.replace(/^data:[^,]+,/u, ""), "base64");
+		usage = parsed.inference_status;
+		requestId = parsed.request_id ?? undefined;
+	} else {
+		const parsed = z
+			.object({
+				request_id: z.string().optional(),
+				usage: z.unknown().optional(),
+				output: z.object({ audio: z.object({ url: z.string().url() }) }),
+			})
+			.parse(reply);
+		const url = new URL(parsed.output.audio.url);
+		if (
+			!/^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/u.test(url.hostname) ||
+			!["http:", "https:"].includes(url.protocol) ||
+			url.port ||
+			url.username ||
+			url.password
+		)
+			throw new Error("语音下载目标不在 provider 结果域名范围内");
+		url.protocol = "https:";
+		// 结果下载不携带 API Key；禁止重定向到其它主机。
+		bytes = await readLimitedResponse(
+			await fetchImplementation(url, { signal: AbortSignal.timeout(30_000), redirect: "error" }),
+			MAX_AUDIO_BYTES,
+		);
+		usage = parsed.usage;
+		requestId = parsed.request_id;
+	}
+	if (bytes.length > MAX_AUDIO_BYTES) throw new Error("音频超过大小限制");
+	return { bytes, usage, requestId };
+}
 const activeSyntheses = new Set<string>();
 export async function synthesizeNotificationSpeech(
 	input: { candidateId: string; clientId?: string; preview?: boolean; retry?: boolean },
@@ -163,61 +223,30 @@ export async function synthesizeNotificationSpeech(
 		const providerId = settings.notificationSpeechBinding?.modelProviderId;
 		const access = providerId ? await resolveKanbanProviderAccess(providerId) : null;
 		if (!access) throw new Error("未配置所选 TTS provider 的凭据");
-		const request = buildNotificationSpeechProviderRequest(
-			settings,
-			access.profile,
-			candidate.summaryText.slice(0, 500),
+		const announcementScript =
+			candidate.notificationSpeechAnnouncementScript ?? composeNotificationSpeechAnnouncementScript(candidate);
+		// 先导与正文分两次请求、并行合成，再在服务端拼成一个带停顿的音频；留档、重放、重新合成链路都不用改。
+		const requests = [announcementScript.leadInText, announcementScript.bodyText].map((text) =>
+			buildNotificationSpeechProviderRequest(settings, access.profile, text),
 		);
 		await archive.update(input.candidateId, {}, "speech_synthesis_requested", {
 			modelProviderId: providerId,
-			request,
+			announcementScript,
+			requests,
 			settings,
 			retry: Boolean(input.retry),
 		});
-		const response = await fetchImplementation(request.url, {
-			method: "POST",
-			headers: { Authorization: `Bearer ${access.apiKey}`, "Content-Type": "application/json" },
-			body: JSON.stringify(request.body),
-			signal: AbortSignal.timeout(30_000),
-			redirect: "error",
-		});
-		const reply: unknown = JSON.parse((await readLimitedResponse(response, MAX_AUDIO_BYTES * 2)).toString("utf8"));
-		let bytes: Buffer;
-		let usage: unknown;
-		let requestId: string | undefined;
-		if (settings.speechProvider === "deepinfra") {
-			const parsed = z
-				.object({ audio: z.string(), request_id: z.string().nullish(), inference_status: z.unknown().optional() })
-				.parse(reply);
-			bytes = Buffer.from(parsed.audio.replace(/^data:[^,]+,/u, ""), "base64");
-			usage = parsed.inference_status;
-			requestId = parsed.request_id ?? undefined;
-		} else {
-			const parsed = z
-				.object({
-					request_id: z.string().optional(),
-					usage: z.unknown().optional(),
-					output: z.object({ audio: z.object({ url: z.string().url() }) }),
-				})
-				.parse(reply);
-			const url = new URL(parsed.output.audio.url);
-			if (
-				!/^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/u.test(url.hostname) ||
-				!["http:", "https:"].includes(url.protocol) ||
-				url.port ||
-				url.username ||
-				url.password
-			)
-				throw new Error("语音下载目标不在 provider 结果域名范围内");
-			url.protocol = "https:";
-			// 结果下载不携带 API Key；禁止重定向到其它主机。
-			bytes = await readLimitedResponse(
-				await fetchImplementation(url, { signal: AbortSignal.timeout(30_000), redirect: "error" }),
-				MAX_AUDIO_BYTES,
-			);
-			usage = parsed.usage;
-			requestId = parsed.request_id;
-		}
+		// 任一段失败即整体失败：沿用「不自动重试、回退提示音」的计费边界。
+		const segments = await Promise.all(
+			requests.map((request) =>
+				requestSynthesizedAudioSegmentFromProvider(settings, request, access.apiKey, fetchImplementation),
+			),
+		);
+		const bytes = joinPcmWavSegmentsWithSilenceGap(
+			segments.map((segment) => segment.bytes),
+			NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_SILENCE_GAP_MILLISECONDS,
+			MAX_AUDIO_BYTES,
+		);
 		if (bytes.length > MAX_AUDIO_BYTES) throw new Error("音频超过大小限制");
 		const mimeType = detectAudioMime(bytes);
 		const sha256 = await persistAudio(bytes, input.candidateId);
@@ -225,8 +254,12 @@ export async function synthesizeNotificationSpeech(
 			sha256,
 			mimeType,
 			byteLength: bytes.length,
-			requestId,
-			usage,
+			silenceGapMilliseconds: NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_SILENCE_GAP_MILLISECONDS,
+			segments: segments.map((segment) => ({
+				requestId: segment.requestId,
+				usage: segment.usage,
+				byteLength: segment.bytes.length,
+			})),
 			elapsedMs: Date.now() - startedAt,
 		});
 		return { audioBase64: bytes.toString("base64"), mimeType, sha256 };
@@ -242,23 +275,42 @@ export async function synthesizeNotificationSpeech(
 		activeSyntheses.delete(input.candidateId);
 	}
 }
+// 试听故意带上文件路径、行号范围和提交哈希，让用户一次听到先导、停顿和技术文本规整的效果。
+const NOTIFICATION_SPEECH_PREVIEW_SAMPLE_BY_SUMMARY_LANGUAGE = {
+	"zh-CN": {
+		repositoryNameSnapshot: "kanban-demo-project",
+		taskTitleSnapshot: "[DEMO] 通知语音试听：检查先导与停顿",
+		summaryText:
+			"这是一条通知语音试听：已修复 `web-ui/src/hooks/use-review-ready-notifications.ts:280-370` 的播报逻辑并提交（d017a1e3），测试 T1–T3 全部通过，可以查看结果。",
+	},
+	"en-US": {
+		repositoryNameSnapshot: "kanban-demo-project",
+		taskTitleSnapshot: "[DEMO] Notification voice preview: lead-in and pause",
+		summaryText:
+			"This is a notification voice preview: fixed the playback logic in `web-ui/src/hooks/use-review-ready-notifications.ts:280-370` and committed it (d017a1e3); tests T1–T3 passed, ready for review.",
+	},
+} as const;
 export async function previewNotificationSpeech() {
 	const settings = await readNotificationIntelligenceSettings();
 	const candidateId = randomUUID();
+	const previewSample = NOTIFICATION_SPEECH_PREVIEW_SAMPLE_BY_SUMMARY_LANGUAGE[settings.summaryLanguage];
+	const taskId = "notification-speech-preview";
 	await getNotificationLifecycleArchive().capture({
 		candidateId,
 		workspaceId: "notification-speech-preview",
-		taskId: "notification-speech-preview",
+		taskId,
 		userTurnKind: "review",
 		sourceKind: "user_requested_speech_preview",
 		triggeredAt: Date.now(),
 		notificationPanelVisibility: "excluded",
 		notificationProcessingStatus: "preview",
 		summaryLanguage: settings.summaryLanguage,
-		summaryText:
-			settings.summaryLanguage === "zh-CN"
-				? "这是一条通知语音试听。任务已完成，可以查看结果。"
-				: "This is a notification voice preview. The task has finished; you can review the result.",
+		...previewSample,
+		notificationSpeechAnnouncementScript: composeNotificationSpeechAnnouncementScript({
+			...previewSample,
+			taskId,
+			summaryLanguage: settings.summaryLanguage,
+		}),
 	});
 	return { candidateId, ...(await synthesizeNotificationSpeech({ candidateId, preview: true })) };
 }
