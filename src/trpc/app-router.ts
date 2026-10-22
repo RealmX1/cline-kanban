@@ -511,11 +511,14 @@ import {
 import type {
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
+	TaskMainSessionHandoverStatusResponse,
 } from "../core/task-main-session-handover-contract";
 import {
 	taskMainSessionHandoverPrepareRequestSchema,
 	taskMainSessionHandoverPrepareResponseSchema,
+	taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema,
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
 } from "../core/task-main-session-handover-contract";
@@ -612,7 +615,12 @@ export interface RuntimeTrpcContext {
 		getStatus: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
-		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
+		) => Promise<TaskMainSessionHandoverStatusResponse>;
+		recoverWithNewCodexSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
+		) => Promise<TaskMainSessionHandoverStatusResponse>;
 		cancel: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
@@ -1550,6 +1558,17 @@ export const runtimeAppRouter = t.router({
 			.mutation(({ ctx, input }) => {
 				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
+		recoverTaskMainSessionHandoverWithNewCodexSession: workspaceProcedure
+			.input(taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.recoverWithNewCodexSession(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		observeRvfReviewStartBoundary: workspaceProcedure
 			.input(rvfReviewStartBoundaryObservationRequestSchema)

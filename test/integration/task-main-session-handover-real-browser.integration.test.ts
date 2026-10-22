@@ -59,12 +59,26 @@ if (args.includes('--version') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_
 }
 const sessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID;
 fs.writeFileSync(path.join(process.cwd(), 'launch-' + sessionId + '.json'), JSON.stringify({ agent, args, pid: process.pid, cwd: process.cwd(), sessionId, workspaceTaskId: process.env.KANBAN_TASK_ID }));
-process.stdout.write('Claude Code · OpenAI Codex\n› \n❯ ');
+const firstFailedSessionFile = path.join(process.cwd(), 'codex-original-failure-session.txt');
+if (agent === 'codex' && process.env.KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO === '1' && !fs.existsSync(firstFailedSessionFile)) fs.writeFileSync(firstFailedSessionFile, sessionId);
+const simulatesUnconfirmedFirstReport = agent === 'codex' && fs.existsSync(firstFailedSessionFile) && fs.readFileSync(firstFailedSessionFile, 'utf8') === sessionId;
+let startupReady = !simulatesUnconfirmedFirstReport;
+let failureExitScheduled = false;
+process.stdout.write(startupReady ? 'Claude Code · OpenAI Codex\nmodel: gpt-test\n› \n❯ ' : 'OpenAI Codex\nmodel: loading\n› ');
+if (!startupReady) setTimeout(() => {
+ startupReady = true;
+ process.stdout.write('\x1b[2J\x1b[HOpenAI Codex\nmodel: gpt-test\n› ');
+}, 20000);
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.on('data', chunk => {
  fs.appendFileSync(path.join(process.cwd(), 'input-' + sessionId + '.txt'), chunk);
+ if (!startupReady && chunk.toString().includes('/plan ')) fs.writeFileSync(path.join(process.cwd(), 'incorrect-input-before-codex-ready.txt'), chunk);
  if (chunk.toString() === '\r') {
+  if (simulatesUnconfirmedFirstReport) {
+   if (!failureExitScheduled) { failureExitScheduled = true; setTimeout(() => process.exit(1), 20000); }
+   return;
+  }
   process.stdout.write('\x1b[2J\x1b[HWorking…\n');
   let ticks = 0;
   const output = setInterval(() => { process.stdout.write('只读核对材料…\n'); if (++ticks >= 12) clearInterval(output); }, 150);
@@ -91,6 +105,7 @@ setInterval(() => {}, 1000);
 		Object.assign(environment, {
 			PATH: `${fakeAgentBinaryDirectory}:${dirname(process.execPath)}:/usr/bin:/bin`,
 			KANBAN_RUNTIME_PORT: String(port),
+			KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO: destinationKind === "new_codex_session" ? "1" : "0",
 		});
 		const shutdownHook = join(sourcePath, "test/integration/shutdown-ipc-hook.cjs");
 		const startRuntime = async () => {
@@ -269,7 +284,7 @@ setInterval(() => {}, 1000);
 			const onboarding = page.getByRole("dialog").filter({ hasText: "Get started" });
 			await onboarding.waitFor({ state: "visible" });
 			await onboarding.getByRole("button", { name: "Close", exact: true }).click();
-			await page.getByRole("tab", { name: "Sessions", exact: true }).click();
+			await page.getByLabel("工作台格位 1").selectOption("task_sessions");
 			await page.screenshot({ path: join(evidenceDirectory, "sessions-before-handover.png") });
 			writeFileSync(join(evidenceDirectory, "sessions-before-handover.html"), await page.content());
 			await page.getByRole("button", { name: "交接给 Codex", exact: true }).click();
@@ -289,11 +304,64 @@ setInterval(() => {}, 1000);
 				.toBeTruthy();
 			const record = (await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record;
 			if (!record) throw new Error("缺少已持久化的交接记录");
-			const targetId = record.targetTaskConversationSessionId;
+			let targetId = record.targetTaskConversationSessionId;
+			let failedTargetId: string | undefined;
 			if (destinationKind === "existing_codex_session") expect(targetId).toBe(existingPeerId);
 			await expect
 				.poll(() => existsSync(join(repository.repositoryPath, `launch-${targetId}.json`)), { timeout: 30_000 })
 				.toBe(true);
+			if (destinationKind === "new_codex_session") {
+				failedTargetId = targetId;
+				await expect
+					.poll(
+						async () => {
+							const status = await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId });
+							return status.record?.status === "failed" && status.recoveryAvailability?.canRecreateCodexSession;
+						},
+						{ timeout: 90_000 },
+					)
+					.toBe(true);
+				expect(existsSync(join(repository.repositoryPath, "incorrect-input-before-codex-ready.txt"))).toBe(false);
+				const refresh = await scoped.runtime.refreshTaskTerminal.mutate({ taskId: failedTargetId });
+				expect(refresh.ok).toBe(false);
+				expect(refresh.error).toContain("新建 Codex 并重新交接");
+				await page.getByRole("button", { name: "新建 Codex 并重新交接", exact: true }).click();
+				await expect
+					.poll(() => page.getByText("旧汇报的提交结果无法确认，重新交接可能重复汇报。", { exact: true }).count())
+					.toBe(1);
+				await page.screenshot({
+					path: join(evidenceDirectory, "recovery-confirmation-desktop.png"),
+					animations: "disabled",
+				});
+				await page.getByRole("button", { name: "取消恢复", exact: true }).click();
+				await page.setViewportSize({ width: 390, height: 844 });
+				const mobileNavigationAndToolsToggle = page.getByRole("button", { name: /^(展开|收起)上方导航与工具$/u });
+				await mobileNavigationAndToolsToggle.waitFor({ state: "visible" });
+				if ((await mobileNavigationAndToolsToggle.getAttribute("aria-expanded")) === "false")
+					await mobileNavigationAndToolsToggle.click();
+				await page.getByRole("button", { name: "Sessions", exact: true }).click();
+				await page.getByRole("button", { name: "新建 Codex 并重新交接", exact: true }).click();
+				await page.screenshot({
+					path: join(evidenceDirectory, "recovery-confirmation-mobile.png"),
+					animations: "disabled",
+				});
+				await page.getByRole("button", { name: "确认新建并重新交接", exact: true }).click();
+				await expect
+					.poll(
+						async () =>
+							(await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record
+								?.targetTaskConversationSessionId,
+					)
+					.not.toBe(failedTargetId);
+				const recovered = (await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record;
+				if (!recovered) throw new Error("恢复后交接记录缺失");
+				targetId = recovered.targetTaskConversationSessionId;
+				expect(recovered.recoveryReceipts).toHaveLength(1);
+				const retained = await scoped.workspace.getState.query();
+				expect(retained.sessions[failedTargetId]).toBeDefined();
+				expect(retained.sessions[taskId].agentId).toBe("claude");
+				await page.setViewportSize({ width: 1600, height: 1000 });
+			}
 			await expect
 				.poll(
 					async () => {
@@ -340,7 +408,7 @@ setInterval(() => {}, 1000);
 				)
 				.toBe("awaiting_user_message");
 			await page.reload();
-			await page.getByRole("tab", { name: "Sessions", exact: true }).click();
+			await page.getByLabel("工作台格位 1").selectOption("task_sessions");
 			await expect.poll(() => page.getByText("前主会话", { exact: true }).count()).toBe(1);
 			await page.screenshot({ path: join(evidenceDirectory, "codex-main-former-claude.png") });
 			const beforeLateHook = await scoped.workspace.getState.query();
@@ -394,7 +462,14 @@ setInterval(() => {}, 1000);
 			writeFileSync(
 				join(evidenceDirectory, "handover-result.json"),
 				JSON.stringify(
-					{ taskId, targetId, pageErrors, lateHookIsolationVerified: true, coldResumeVerified: true },
+					{
+						taskId,
+						targetId,
+						failedTargetId,
+						pageErrors,
+						lateHookIsolationVerified: true,
+						coldResumeVerified: true,
+					},
 					null,
 					2,
 				),

@@ -1,5 +1,21 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { TaskMainSessionHandoverRequest } from "@/runtime/types";
+import type {
+	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+	TaskMainSessionHandoverRequest,
+} from "@/runtime/types";
+
+export async function getTaskMainSessionHandoverStatus(workspaceId: string, taskId: string) {
+	return await getRuntimeTrpcClient(workspaceId).runtime.getTaskMainSessionHandoverStatus.query({ taskId });
+}
+
+export async function recoverTaskMainSessionHandoverWithNewCodexSession(
+	workspaceId: string,
+	input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+) {
+	return await getRuntimeTrpcClient(workspaceId).runtime.recoverTaskMainSessionHandoverWithNewCodexSession.mutate(
+		input,
+	);
+}
 
 export async function prepareTaskMainSessionHandover(workspaceId: string, taskId: string) {
 	return await getRuntimeTrpcClient(workspaceId).runtime.prepareTaskMainSessionHandover.query({ taskId });

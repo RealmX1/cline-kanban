@@ -29,6 +29,15 @@ export const taskMainSessionHandoverMaterialSchema = z.object({
 });
 export type TaskMainSessionHandoverMaterial = z.infer<typeof taskMainSessionHandoverMaterialSchema>;
 
+export const taskMainSessionHandoverRecoveryReceiptReferenceSchema = z.object({
+	requestId: z.string().uuid(),
+	replacedTargetTaskConversationSessionId: z.string().min(1),
+	replacementTargetTaskConversationSessionId: z.string().min(1),
+	previousReportDeliveryAttempt: z.number().int().nonnegative(),
+	receiptFilePath: z.string().min(1),
+	createdAt: z.number(),
+});
+
 // 正文写持久交接目录；卡片只保存小型控制记录，以免热路径反复广播整份 transcript。
 export const taskMainSessionHandoverRecordSchema = z.object({
 	handoverId: z.string(),
@@ -52,6 +61,7 @@ export const taskMainSessionHandoverRecordSchema = z.object({
 	// 在产生任何投递副作用之前持久化；崩溃后的不确定投递不自动重放。
 	reportDeliveryStartedAt: z.number().nullable(),
 	reportDeliveryAttempt: z.number().int().nonnegative().default(0),
+	recoveryReceipts: z.array(taskMainSessionHandoverRecoveryReceiptReferenceSchema).optional(),
 });
 export type TaskMainSessionHandoverRecord = z.infer<typeof taskMainSessionHandoverRecordSchema>;
 
@@ -66,6 +76,23 @@ export const taskMainSessionHandoverRequestSchema = z.object({
 });
 export type TaskMainSessionHandoverRequest = z.infer<typeof taskMainSessionHandoverRequestSchema>;
 
+export const taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedHandoverId: z.string().min(1),
+	expectedReportDeliveryAttempt: z.number().int().nonnegative(),
+	requestId: z.string().uuid(),
+	acknowledgePossibleDuplicateReport: z.literal(true),
+});
+export type TaskMainSessionHandoverRecoverWithNewCodexSessionRequest = z.infer<
+	typeof taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema
+>;
+
+export const taskMainSessionHandoverRecoveryReceiptSchema =
+	taskMainSessionHandoverRecoveryReceiptReferenceSchema.extend({
+		taskId: z.string().min(1),
+		previousHandoverRecord: taskMainSessionHandoverRecordSchema,
+	});
+
 export const taskMainSessionHandoverPrepareResponseSchema = z.object({
 	material: taskMainSessionHandoverMaterialSchema,
 	mainTaskConversationSessionId: z.string(),
@@ -76,7 +103,16 @@ export type TaskMainSessionHandoverPrepareResponse = z.infer<typeof taskMainSess
 
 export const taskMainSessionHandoverStatusResponseSchema = z.object({
 	record: taskMainSessionHandoverRecordSchema.nullable(),
+	recoveryAvailability: z
+		.object({
+			canRetryUndeliveredReport: z.boolean(),
+			canRecreateCodexSession: z.boolean(),
+			terminalDeliveryFailureReason: z.string().nullable(),
+			blockReason: z.string().nullable(),
+		})
+		.optional(),
 });
+export type TaskMainSessionHandoverStatusResponse = z.infer<typeof taskMainSessionHandoverStatusResponseSchema>;
 
 export function isTaskMainSessionHandoverSuspendingAutomaticActions(card: {
 	taskMainSessionHandover?: TaskMainSessionHandoverRecord;

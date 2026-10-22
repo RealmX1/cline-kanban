@@ -49,7 +49,9 @@ export type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
+	TaskMainSessionHandoverStatusResponse,
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 

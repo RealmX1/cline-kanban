@@ -50,6 +50,12 @@ Sessions 提供「交接给 Codex」。默认创建全新 Codex，也可选择�
 
 请求 ID、预留目标 ID 和投递账本保证幂等。确定尚未投递的失败可重试并复用目标 session；跨重启后回执不确定时停止自动重放，用户检查 Codex 后可直接发消息接续。绑定已切换后的失败不会静默退回 Claude。旧队列保留原 session；新任务消息在入队时固定当前 main，回执仍按调用方的 Task ID 记账。
 
+交接汇报的首次投递必须等待 Codex 当前视口完成启动；loading 横幅、目录信任菜单、历史中的 `›` 或终端静默均不能代替启动就绪。预算耗尽而尚未写入时，记录 `terminal_prompt_readiness_timeout`，允许普通重试。`submit_confirmation_budget_exhausted` 表示提交结果不确定，不自动重发，也不因刷新而清除失败记录。
+
+失败的接任会话缺少可靠原生身份时，刷新在 spawn 前停止，不走 `resume --last`。Sessions 按服务端返回的 `recoveryAvailability` 展示普通重试或「新建 Codex 并重新交接」。后者通过 `runtime.recoverTaskMainSessionHandoverWithNewCodexSession`，要求原交接 ID、投递次数、幂等请求 ID 和可能重复汇报的明确确认；原目标仍生成或投递仍在处理时拒绝重建。
+
+显式恢复新建独立 Kanban session 与原生对话，复用原交接材料并原子切换 main，保留原 Claude、旧 Codex 和失败账本。切换前把原控制记录及预留目标写入同一持久材料目录的 `recovery-attempts/<requestId>.json`，控制记录保留 `recoveryReceipts` 引用；重复确认或崩溃后重试复用已预留目标。启动失败可以按确定未投递规则重试，不将此前结果不明的汇报改记为成功。
+
 ## 从侧会话分出独立任务
 
 Sessions 的 By the way 与协作会话行提供「分出独立任务」。来源会话继续保留，同一来源可以分出多张卡；前主会话不提供此入口。新卡与来源会话双向链接，关系账本从建卡事件投影 `provenance_split_from_side_conversation_of`，不自动建立子任务关系。投影表版本为 4，固定历史种子不作为匿名来源展示。

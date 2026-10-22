@@ -1,14 +1,20 @@
 import { ArrowRightLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import {
 	cancelTaskMainSessionHandover,
+	getTaskMainSessionHandoverStatus,
 	prepareTaskMainSessionHandover,
+	recoverTaskMainSessionHandoverWithNewCodexSession,
 	requestTaskMainSessionHandover,
 	retryTaskMainSessionHandover,
 } from "@/runtime/task-main-session-handover-query";
-import type { RuntimeTaskSessionSummary, TaskMainSessionHandoverPrepareResponse } from "@/runtime/types";
+import type {
+	RuntimeTaskSessionSummary,
+	TaskMainSessionHandoverPrepareResponse,
+	TaskMainSessionHandoverStatusResponse,
+} from "@/runtime/types";
 import type { BoardCard } from "@/types";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
@@ -16,7 +22,7 @@ const handoverStatusLabels = {
 	waiting_for_sessions_to_stop: "正在等待相关会话停下，随后自动交接。",
 	report_delivery_pending: "Codex 正在接任并读取交接材料。",
 	awaiting_user_message: "Codex 已接任，汇报后等待你的下一条消息。",
-	failed: "交接未完成，可查看原因并重试。",
+	failed: "交接未完成。请查看投递结果并选择恢复方式。",
 	cancelled: "已取消交接。",
 	completed: "主会话交接已完成。",
 };
@@ -41,13 +47,58 @@ export function TaskMainSessionHandoverAction({
 	const requestId = useRef(createRandomUuidV4WithInsecureContextFallback());
 	const requestEpoch = useRef(0);
 	const record = taskCard.taskMainSessionHandover;
+	const [recoveryAvailability, setRecoveryAvailability] =
+		useState<TaskMainSessionHandoverStatusResponse["recoveryAvailability"]>();
+	const [recoveryConfirmationOpen, setRecoveryConfirmationOpen] = useState(false);
+	const recoveryRequestId = useRef<string | null>(null);
+	const recoveryRequestInFlightEpoch = useRef<number | null>(null);
+	const [recoveryStatusRequestSequence, setRecoveryStatusRequestSequence] = useState(0);
 	useEffect(() => {
+		// 新交接或新投递轮次不复用旧恢复凭据，也不接收旧轮次的异步结果。
 		requestEpoch.current += 1;
 		setOpen(false);
 		setPreview(null);
 		setError(null);
 		setBusy(false);
-	}, [workspaceId, taskCard.id]);
+		setRecoveryAvailability(undefined);
+		setRecoveryConfirmationOpen(false);
+		recoveryRequestId.current = null;
+	}, [workspaceId, taskCard.id, record?.handoverId, record?.reportDeliveryAttempt]);
+	useEffect(() => {
+		setRecoveryAvailability(undefined);
+		if (record?.status !== "failed") {
+			setRecoveryConfirmationOpen(false);
+			return;
+		}
+		let cancelled = false;
+		const epoch = requestEpoch.current;
+		void getTaskMainSessionHandoverStatus(workspaceId, taskCard.id)
+			.then((result) => {
+				if (cancelled || requestEpoch.current !== epoch) return;
+				if (
+					result.record?.handoverId === record.handoverId &&
+					result.record.reportDeliveryAttempt === record.reportDeliveryAttempt
+				)
+					setRecoveryAvailability(result.recoveryAvailability);
+			})
+			.catch((cause: unknown) => {
+				if (!cancelled && requestEpoch.current === epoch)
+					setError(cause instanceof Error ? cause.message : String(cause));
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [
+		workspaceId,
+		taskCard.id,
+		record?.handoverId,
+		record?.status,
+		record?.updatedAt,
+		record?.reportDeliveryAttempt,
+		mainSessionSummary.turnOwner,
+		mainSessionSummary.liveness,
+		recoveryStatusRequestSequence,
+	]);
 	const isClaudeMain =
 		mainSessionSummary.agentId === "claude" ||
 		(mainSessionSummary.agentId == null &&
@@ -125,6 +176,31 @@ export function TaskMainSessionHandoverAction({
 			if (requestEpoch.current === epoch) setBusy(false);
 		}
 	}
+	async function confirmRecovery() {
+		const epoch = requestEpoch.current;
+		if (!record || !recoveryRequestId.current || recoveryRequestInFlightEpoch.current === epoch) return;
+		recoveryRequestInFlightEpoch.current = epoch;
+		setBusy(true);
+		setError(null);
+		try {
+			const result = await recoverTaskMainSessionHandoverWithNewCodexSession(workspaceId, {
+				taskId: taskCard.id,
+				expectedHandoverId: record.handoverId,
+				expectedReportDeliveryAttempt: record.reportDeliveryAttempt,
+				requestId: recoveryRequestId.current,
+				acknowledgePossibleDuplicateReport: true,
+			});
+			if (requestEpoch.current === epoch) {
+				setRecoveryAvailability(result.recoveryAvailability);
+				setRecoveryConfirmationOpen(false);
+			}
+		} catch (cause) {
+			if (requestEpoch.current === epoch) setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			if (recoveryRequestInFlightEpoch.current === epoch) recoveryRequestInFlightEpoch.current = null;
+			if (requestEpoch.current === epoch) setBusy(false);
+		}
+	}
 	return (
 		<div
 			data-verification-anchor={`task-main-session-handover:${taskCard.id}`}
@@ -141,9 +217,43 @@ export function TaskMainSessionHandoverAction({
 							取消等待
 						</Button>
 					)}
-					{record.status === "failed" && (
+					{record.status === "failed" && recoveryAvailability?.canRetryUndeliveredReport && (
 						<Button size="sm" variant="ghost" disabled={busy} onClick={() => void actOnRecord("retry")}>
 							重试交接
+						</Button>
+					)}
+					{record.status === "failed" && recoveryAvailability?.canRecreateCodexSession && (
+						<Button
+							size="sm"
+							variant="ghost"
+							disabled={busy}
+							onClick={() => {
+								recoveryRequestId.current ??= createRandomUuidV4WithInsecureContextFallback();
+								setError(null);
+								setRecoveryConfirmationOpen(true);
+							}}
+						>
+							新建 Codex 并重新交接
+						</Button>
+					)}
+					{record.status === "failed" && recoveryAvailability?.terminalDeliveryFailureReason && (
+						<p>
+							{recoveryAvailability.canRetryUndeliveredReport
+								? "汇报尚未提交，可以重试。"
+								: "无法确认汇报是否已提交，系统不会自动重发。"}
+						</p>
+					)}
+					{record.status === "failed" && recoveryAvailability?.blockReason && (
+						<p>{recoveryAvailability.blockReason}</p>
+					)}
+					{record.status === "failed" && !recoveryAvailability && (
+						<Button
+							size="sm"
+							variant="ghost"
+							disabled={busy}
+							onClick={() => setRecoveryStatusRequestSequence((value) => value + 1)}
+						>
+							重新检查恢复状态
 						</Button>
 					)}
 				</div>
@@ -153,11 +263,36 @@ export function TaskMainSessionHandoverAction({
 					交接给 Codex
 				</Button>
 			)}
-			{error && !open && (
+			{error && !open && !recoveryConfirmationOpen && (
 				<p role="alert" className="mt-1 break-words text-status-red">
 					{error}
 				</p>
 			)}
+			<Dialog
+				open={recoveryConfirmationOpen}
+				onOpenChange={(value) => {
+					if (!busy) setRecoveryConfirmationOpen(value);
+				}}
+			>
+				<DialogHeader title="新建 Codex 接任会话" />
+				<DialogBody className="space-y-3 text-sm">
+					<DialogDescription>旧汇报的提交结果无法确认，重新交接可能重复汇报。</DialogDescription>
+					<p>原 Claude、旧 Codex、交接材料和失败记录都会保留。新 Codex 将读取原交接材料，汇报后等待你的消息。</p>
+					{error && (
+						<p role="alert" className="break-words text-status-red">
+							{error}
+						</p>
+					)}
+				</DialogBody>
+				<DialogFooter>
+					<Button variant="ghost" disabled={busy} onClick={() => setRecoveryConfirmationOpen(false)}>
+						取消恢复
+					</Button>
+					<Button disabled={busy} onClick={() => void confirmRecovery()}>
+						确认新建并重新交接
+					</Button>
+				</DialogFooter>
+			</Dialog>
 			<Dialog
 				open={open}
 				onOpenChange={(value) => {
