@@ -16,7 +16,7 @@ export const appendTaskCommentResponseSchema = z.object({
 export type AppendTaskCommentResponse = z.infer<typeof appendTaskCommentResponseSchema>;
 
 export const taskIndexingSupportExecutorSettingsSchema = z.object({
-	agentId: z.enum(["claude", "codex"]).default("claude"),
+	agentId: z.enum(["claude", "codex"]).default("codex"),
 	modelId: z.string().trim().min(1).max(200).nullable().default(null),
 });
 export type TaskIndexingSupportExecutorSettings = z.infer<typeof taskIndexingSupportExecutorSettingsSchema>;

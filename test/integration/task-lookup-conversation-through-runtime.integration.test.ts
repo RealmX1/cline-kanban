@@ -50,19 +50,24 @@ it(
 			sessions: {},
 		});
 		const workspace = await loadWorkspaceContext(projectPath, { autoCreateIfMissing: false });
+		expect(await readTaskIndexingSupportExecutorSettings(workspace.workspaceId)).toEqual({
+			agentId: "codex",
+			modelId: null,
+		});
 		const originalBoard = await loadWorkspaceBoardById(workspace.workspaceId);
 		const executableDirectory = join(fixture.isolatedHomeDirectoryPath, "task-lookup-model-executables");
 		await mkdir(executableDirectory, { recursive: true });
 		const auditPath = join(executableDirectory, "model-calls.jsonl");
-		const executablePath = join(executableDirectory, "claude");
+		const executablePath = join(executableDirectory, "codex");
 		await writeFile(
 			executablePath,
 			`#!${process.execPath}
 const fs = require('node:fs');let text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>{
 const query=JSON.parse(text.split('L4 本次查询：\\n').at(-1));
 fs.appendFileSync(${JSON.stringify(auditPath)}, JSON.stringify(query)+'\\n');
-const structured_output=query.phase==='recall'?{candidateTaskReferences:query.eligibleTaskReferences}:{answerText:'找到符合范围的任务，尚未核验是否已经实现。',candidates:query.completeCandidateRequirements.map(m=>({taskReference:m.taskReference,matchingReason:'当前要求包含查卡与历史留档',evidence:[m.prompt],limitations:['所在列不证明实现完成']}))};
-process.stdout.write(JSON.stringify({type:'result',subtype:'success',structured_output,usage:{input_tokens:100,output_tokens:20}})+'\\n');});`,
+const structuredResponse=query.phase==='recall'?{candidateTaskReferences:query.eligibleTaskReferences}:{answerText:'找到符合范围的任务，尚未核验是否已经实现。',candidates:query.completeCandidateRequirements.map(m=>({taskReference:m.taskReference,matchingReason:'当前要求包含查卡与历史留档',evidence:[m.prompt],limitations:['所在列不证明实现完成']}))};
+process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(structuredResponse)}})+'\\n');
+process.stdout.write(JSON.stringify({type:'turn.completed',usage:{input_tokens:100,output_tokens:20}})+'\\n');});`,
 		);
 		await chmod(executablePath, 0o700);
 		vi.stubEnv("PATH", `${executableDirectory}:${process.env.PATH ?? ""}`);

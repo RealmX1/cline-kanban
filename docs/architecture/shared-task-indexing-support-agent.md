@@ -16,7 +16,7 @@ kanban support backfill-untriaged-rvf-findings --project-path /path/to/main-repo
 kanban support get-backfill-status --project-path /path/to/main-repository
 ```
 
-执行器支持 `claude`、`codex`，默认 `claude`；省略 model 时使用该 harness 的默认。执行器设置独立保存，和新卡将来运行的 agent 无关。CLI 等待大 Context 完整刷入 stdout 后才返回，避免管道截断。
+执行器支持 `codex`、`claude`，未配置时默认 `codex`；显式保存的执行器选择保持不变，省略 model 时使用该 harness 的默认。执行器设置独立保存，和新卡将来运行的 agent 无关。CLI 等待大 Context 完整刷入 stdout 后才返回，避免管道截断。
 
 `get-task-indexing-context` 不调用模型、不修改任务或关系。它维护可丢弃的 Context 缓存，返回 `levelOneBoardTaskIndexText`、`levelTwoProjectTaskRecapsText`、`levelThreeAppendedChangesText`、`snapshotFingerprint`、`contextCompleteness`、`asOf` 和可空的 `rebuildReason`。L0 指令由消费者决定，不能把分诊专用指令当成通用查卡指令。
 
