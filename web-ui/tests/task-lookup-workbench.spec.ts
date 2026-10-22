@@ -1,6 +1,23 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
-test("Search 共用多轮查卡，候选先预览再打开，重载留档且手机与竖屏布局可用", async ({ page }) => {
+for (const browserAccessContext of ["localhost", "tailnet_plain_http"] as const) {
+	test(`${browserAccessContext}：直接查询、Search 转入、多轮留档和响应式布局均可用`, async ({ page, baseURL }) => {
+		if (!baseURL) throw new Error("查卡浏览器测试需要配置 Vite 服务的 baseURL。");
+		const browserOrigin =
+			browserAccessContext === "tailnet_plain_http" ? "http://task-lookup-tailnet-http.test:3485" : baseURL;
+		if (browserAccessContext === "tailnet_plain_http") {
+			// 保留浏览器的真实 HTTP 安全判定，仅将测试页面资源映射到隔离的 Vite 服务。
+			await page.route(`${browserOrigin}/**`, async (route) => {
+				const requestUrl = new URL(route.request().url());
+				const response = await route.fetch({ url: new URL(requestUrl.pathname + requestUrl.search, baseURL).href });
+				await route.fulfill({ response });
+			});
+		}
+		await verifyTaskLookupQueryFlows(page, browserOrigin, browserAccessContext === "localhost");
+	});
+}
+
+async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isSecureContextExpected: boolean) {
 	const errors: string[] = [];
 	page.on("pageerror", (error) => errors.push(error.message));
 	const conversationId = "9fe0ae6d-1c0f-4fde-8aca-3bf417ab7b80";
@@ -99,7 +116,11 @@ test("Search 共用多轮查卡，候选先预览再打开，重载留档且手�
 				body: "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body></body></html>",
 			}),
 		);
-		await page.goto("/isolated-task-lookup-workbench");
+		await page.goto(new URL("/isolated-task-lookup-workbench", browserOrigin).href);
+		expect(await page.evaluate(() => window.isSecureContext)).toBe(isSecureContextExpected);
+		expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe(
+			isSecureContextExpected ? "function" : "undefined",
+		);
 		await page.addScriptTag({
 			type: "module",
 			content:
@@ -108,18 +129,27 @@ test("Search 共用多轮查卡，候选先预览再打开，重载留档且手�
 		await page.addScriptTag({ type: "module", url: "/tests/task-lookup-workbench-browser-harness.tsx" });
 	};
 	await openHarness();
+	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
+	await page.getByRole("textbox", { name: "查卡问题" }).fill("直接发起新的查卡查询");
+	await page.getByRole("button", { name: "查询任务", exact: true }).click();
+	await expect.poll(() => submissions.length).toBe(1);
+	await expect(page.getByRole("log").getByText("直接发起新的查卡查询", { exact: true })).toBeVisible();
+	await expect(page.getByRole("textbox", { name: "查卡问题" })).toHaveValue("");
+	await expect(page.getByRole("alert")).toHaveCount(0);
 	await page.getByRole("button", { name: "打开 Search", exact: true }).click();
 	await page.getByRole("textbox", { name: "Search tasks", exact: true }).fill("查找多轮留档任务");
 	await page.getByRole("button", { name: "AI 查卡", exact: true }).click();
+	await expect.poll(() => submissions.length).toBe(2);
 	await expect(page.getByRole("button", { name: "预览候选 查卡任务 abc12" })).toBeVisible();
 	await page.getByRole("button", { name: "预览候选 查卡任务 abc12" }).click();
 	await expect(page.getByText("完整要求：持久多轮查卡。")).toBeVisible();
 	await expect(page.getByText("已打开任务：isolated-project/abc12")).toHaveCount(0);
 	await page.getByRole("textbox", { name: "查卡问题" }).fill("只看计划中的任务");
 	await page.getByRole("button", { name: "查询任务", exact: true }).click();
-	await expect.poll(() => submissions.length).toBe(2);
+	await expect.poll(() => submissions.length).toBe(3);
 	await expect(page.getByRole("log").getByText("只看计划中的任务", { exact: true })).toBeVisible();
-	expect(submissions[0]?.conversationId).toBe(submissions[1]?.conversationId);
+	expect(submissions[1]?.conversationId).toBe(submissions[2]?.conversationId);
+	await expect(page.getByRole("textbox", { name: "查卡问题" })).toHaveValue("");
 	await page.screenshot({ path: test.info().outputPath("task-lookup-desktop.png") });
 	await page.getByRole("button", { name: "打开任务", exact: true }).click();
 	await expect(page.getByText("已打开任务：isolated-project/abc12")).toBeVisible();
@@ -147,5 +177,10 @@ test("Search 共用多轮查卡，候选先预览再打开，重载留档且手�
 	await expect(page.getByText("模型认证已过期")).toBeVisible();
 	await page.screenshot({ path: test.info().outputPath("task-lookup-mobile.png") });
 	expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+	expect(submissions).toHaveLength(5);
+	for (const submission of submissions) {
+		expect(submission.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+	}
+	expect(new Set(submissions.map((submission) => submission.requestId)).size).toBe(submissions.length);
 	expect(errors).toEqual([]);
-});
+}

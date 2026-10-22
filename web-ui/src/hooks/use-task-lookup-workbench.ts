@@ -12,6 +12,7 @@ import {
 	readTaskLookupConversationUpdateGeneration,
 	subscribeToTaskLookupConversationUpdates,
 } from "@/stores/task-lookup-conversation-update-store";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 export function useTaskLookupWorkbench({
 	workspaceId,
@@ -146,7 +147,7 @@ export function useTaskLookupWorkbench({
 			const updated = await taskLookupConversationQueries.submit({
 				conversationId: active.conversationId,
 				questionText,
-				requestId: crypto.randomUUID(),
+				requestId: createRandomUuidV4WithInsecureContextFallback(),
 				scope,
 			});
 			adoptConversation(updated);
@@ -170,7 +171,7 @@ export function useTaskLookupWorkbench({
 						conversationId: next.conversationId,
 						questionText: seed.questionText,
 						scope: seed.scope,
-						requestId: crypto.randomUUID(),
+						requestId: createRandomUuidV4WithInsecureContextFallback(),
 					}),
 				);
 				setDraftQuestion("");
