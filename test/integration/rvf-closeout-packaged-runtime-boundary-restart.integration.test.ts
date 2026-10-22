@@ -348,7 +348,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 				"activate-rvf-automatic-closeout-after-run-binding",
 			);
 			expect(activation.exitCode, activation.stderr).toBe(0);
-			expect(JSON.parse(activation.stdout)).toEqual(first);
+			expect(JSON.parse(activation.stdout)).toEqual({ receipt: first.receipt });
 			const active = (await resumed.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId })).records[0];
 			expect(active).toMatchObject({
 				status: "awaiting_rvf_completion",
@@ -367,7 +367,7 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 				"activate-rvf-automatic-closeout-after-run-binding",
 			);
 			expect(repeated.exitCode, repeated.stderr).toBe(0);
-			expect(JSON.parse(repeated.stdout)).toEqual(first);
+			expect(JSON.parse(repeated.stdout)).toEqual({ receipt: first.receipt });
 			const afterRepeat = (await activatedRestart.client.runtime.rvfAutomaticCloseoutStatus.query({ taskId }))
 				.records[0];
 			expect(afterRepeat).toMatchObject({
