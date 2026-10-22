@@ -30,7 +30,7 @@ async function canonicalPath(path: string) {
 async function selectSourceNativeSessionId(port: CodexAppServerRequestPort, plan: CodexRemoteConversationLaunchPlan) {
 	if (plan.sourceNativeSessionId) return plan.sourceNativeSessionId;
 	const configuration = z
-		.object({ config: z.looseObject({ model_provider: z.string().optional() }) })
+		.object({ config: z.looseObject({ model_provider: z.string().nullish() }) })
 		.parse(await port.request("config/read", { includeLayers: false, cwd: plan.workingDirectoryPath }));
 	const parameters = {
 		limit: 1,

@@ -28,7 +28,7 @@ if (args.includes("--version") || args.includes("-V")) {
     const params = request.params || {};
     if (mode === "stalled-resume" && request.method === "thread/resume") return;
     let result = {};
-    if (request.method === "config/read") result = { config: { model_provider: "openai" } };
+    if (request.method === "config/read") result = { config: { model_provider: mode === "null-config-model-provider" ? null : "openai" } };
     if (request.method === "thread/list") result = { data: mode === "no-resume-candidate" ? [] : [{ id: "latest-native-id" }], nextCursor: null };
     if (request.method === "thread/resume" || request.method === "thread/fork") {
      const id = request.method === "thread/fork" ? "fork-" + params.threadId : params.threadId;

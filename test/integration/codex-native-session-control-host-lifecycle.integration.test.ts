@@ -149,6 +149,34 @@ describe.skipIf(process.platform === "win32")("独享原生控制宿主生命周
 		});
 		expect(requests.some((record) => record.method === "turn/start")).toBe(false);
 	});
+	it("latest 遇到原生 provider 为 null 时按 openai 选会话并启动 TUI", async (test) => {
+		const context = await createFixture();
+		const host = await start(context, "task-null-config-model-provider", "null-config-model-provider", [
+			"resume",
+			"--last",
+		]);
+		await waitReady(test, host);
+		const requests = (await readFile(join(context.fixture.fixtureRootDirectoryPath, "native-requests.jsonl"), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(requests.find((record) => record.method === "thread/list")?.params).toMatchObject({
+			cwd: context.fixture.fixtureRootDirectoryPath,
+			modelProviders: ["openai"],
+			sourceKinds: ["cli", "vscode"],
+			useStateDbOnly: true,
+		});
+		expect(requests.find((record) => record.method === "thread/resume")?.params.threadId).toBe("latest-native-id");
+		const receipt = JSON.parse(
+			await readFile(
+				join(dirname(host.launch.args.at(-1) ?? ""), "remote-conversation-bootstrap-receipt.json"),
+				"utf8",
+			),
+		);
+		expect(receipt.nativeSessionId).toBe("latest-native-id");
+		expect(host.output()).not.toContain("Kanban 原生控制宿主失败");
+		expect(requests.some((record) => record.method === "turn/start" || record.method === "thread/start")).toBe(false);
+	});
 	it("latest 无目标时不启动 TUI，并清理失败宿主", async (test) => {
 		const context = await createFixture();
 		const host = await start(context, "task-missing-latest", "no-resume-candidate", ["resume", "--last"]);

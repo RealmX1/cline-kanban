@@ -177,6 +177,39 @@ describe("远程 TUI 接入前的原生恢复握手", () => {
 		expect(request.mock.calls[2][1]).not.toHaveProperty("useStateDbOnly");
 		expect(request.mock.calls[3][1]).toMatchObject({ threadId: "source-id" });
 	});
+	it.each([
+		{ providerCaseDescription: "显式 null", nativeConfiguration: { model_provider: null } },
+		{ providerCaseDescription: "字段缺省", nativeConfiguration: {} },
+	])(
+		"latest 在 provider 为 $providerCaseDescription 时按 openai 过滤并恢复原会话",
+		async ({ nativeConfiguration }) => {
+			const request = vi
+				.fn()
+				.mockResolvedValueOnce({ config: nativeConfiguration })
+				.mockResolvedValueOnce({ data: [{ id: "source-id" }], nextCursor: null })
+				.mockResolvedValueOnce(readOnlyResponse);
+			const result = await bootstrapCodexRemoteConversationBeforeTuiAttach({ request }, plan(["resume", "--last"]));
+			expect(request.mock.calls.map(([method]) => method)).toEqual(["config/read", "thread/list", "thread/resume"]);
+			expect(request.mock.calls[1][1]).toMatchObject({
+				cwd: "/work",
+				modelProviders: ["openai"],
+				sourceKinds: ["cli", "vscode"],
+				useStateDbOnly: true,
+			});
+			expect(request.mock.calls[2][1]).toMatchObject({ threadId: "source-id" });
+			expect(result.tuiArguments).toEqual(["resume", "source-id"]);
+		},
+	);
+	it.each([{ model_provider: 42 }, { model_provider: false }, { model_provider: {} }, { model_provider: [] }])(
+		"latest 拒绝非法 provider 类型（$model_provider），不查询或恢复历史",
+		async (nativeConfiguration) => {
+			const request = vi.fn().mockResolvedValue({ config: nativeConfiguration });
+			await expect(
+				bootstrapCodexRemoteConversationBeforeTuiAttach({ request }, plan(["resume", "--last"])),
+			).rejects.toThrow(/model_provider/u);
+			expect(request).toHaveBeenCalledExactlyOnceWith("config/read", { includeLayers: false, cwd: "/work" });
+		},
+	);
 	it("拒绝错误身份与无法兑现的权限，不发起模型回合", async () => {
 		const input = plan(["--sandbox", "read-only", "resume", "source-id"]);
 		const wrongIdentity = {
