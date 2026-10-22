@@ -16,6 +16,7 @@ import type { RuntimeAgentId } from "@/runtime/types";
 // 首页列顺序与 Focus View 左栏的 All projects 分区顺序一致。
 const BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER: readonly CrossProjectTaskSwitcherTaskRowSection[] = [
 	"pinned",
+	"backlog",
 	"running",
 	"prompt_cache_warm",
 	"remaining",

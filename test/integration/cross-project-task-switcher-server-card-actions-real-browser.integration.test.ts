@@ -9,6 +9,7 @@ import { afterEach, expect, it } from "vitest";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { runAllProjectsBacklogSectionRealBrowserCheck } from "./all-projects-backlog-section-real-browser-check";
 import { runPostDeployVerificationFollowUpTaskRealBrowserCheck } from "./post-deploy-verification-follow-up-task-real-browser-check";
 import { runReferenceRelationModelingRealBrowserCheck } from "./reference-relation-modeling-real-browser-check";
 import {
@@ -23,7 +24,9 @@ const runRelationModelingBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_REFERENCE_RELATION_MODELING_BROWSER_CHECK === "1";
 const runPostDeployVerificationFollowUpBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
+const runAllProjectsBacklogBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PROJECTS_BACKLOG_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
+	runAllProjectsBacklogBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
 	runRelationModelingBrowserCheck ||
 	runPostDeployVerificationFollowUpBrowserCheck ||
@@ -328,6 +331,54 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 									.catch(() => false),
 							"隔离 runtime 重启",
 						);
+					},
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
+			if (runAllProjectsBacklogBrowserCheck) {
+				const betaBacklogTaskId = await createTask(secondProject.repositoryPath, "跨项目旧待办");
+				for (const [workspaceId, taskId] of [
+					[alphaWorkspaceId, singleStartId],
+					[betaWorkspaceId, betaBacklogTaskId],
+				]) {
+					const client = runtimeClient(workspaceId);
+					const backlogState = await client.workspace.getState.query();
+					const backlogCard = backlogState.board.columns
+						.find((column) => column.id === "backlog")
+						?.cards.find((card) => card.id === taskId);
+					if (!backlogCard) throw new Error("缺少旧 Backlog 卡片");
+					backlogCard.updatedAt = backlogCard.taskDescriptionLastUpdatedAt = Date.now() - 60 * 24 * 60 * 60_000;
+					await client.workspace.saveState.mutate({
+						board: backlogState.board,
+						sessions: backlogState.sessions,
+						expectedRevision: backlogState.revision,
+					});
+				}
+				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+					taskId: singleStartId,
+					taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+					taskPinboardPinReason: "隔离 Backlog 顺序验证",
+				});
+				await runAllProjectsBacklogSectionRealBrowserCheck({
+					page,
+					webUiOrigin,
+					alphaWorkspaceId,
+					betaWorkspaceId,
+					alphaBacklogTaskId: singleStartId,
+					betaBacklogTaskId,
+					alphaFocusTaskId: focusId,
+					betaFocusTaskId: betaId,
+					evidenceOutputDirectory,
+					observeUntil,
+					readBetaBacklogTask: async () => {
+						const boardState = await runtimeClient(betaWorkspaceId).workspace.getState.query();
+						const column = boardState.board.columns.find((c) =>
+							c.cards.some((card) => card.id === betaBacklogTaskId),
+						);
+						const card = column?.cards.find((card) => card.id === betaBacklogTaskId);
+						if (!column || !card) throw new Error("跨项目 Backlog 卡片不存在");
+						return { columnId: column.id, prompt: card.prompt };
 					},
 				});
 				expect(pageErrors).toEqual([]);
@@ -1218,6 +1269,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			recordCheck("对别的项目卡执行动作，当前项目与焦点不变");
 			// 点展开卡片原来顶条所在的位置（卡框上沿往下 0–18px）= 点精简行：backlog 行原地打开编辑框。
 			await leavePanelAndWaitForHoverExpansionToCollapse();
+			await page.getByRole("button", { name: "Expand Backlog", exact: true }).click();
 			await hoverRowUntilExpandedInPlace(betaBacklogClickAnchorId, "顶部点击锚点");
 			const backlogExpandedRowBox = await rowInPlaceExpandedByHover(betaBacklogClickAnchorId).boundingBox();
 			if (!backlogExpandedRowBox) throw new Error("展开的 backlog 行未渲染");

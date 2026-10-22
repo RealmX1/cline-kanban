@@ -45,6 +45,10 @@ export function crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey(): s
 	return "cross-project-task-switcher-focused-task-visibility-panel";
 }
 
+export function crossProjectTaskSwitcherBacklogSectionAnchorKey(): string {
+	return "cross-project-task-switcher-backlog-section";
+}
+
 // 看板某一列容器。
 // 主看板的列容器（board-column.tsx）已挂本锚点；Focus View 的列面板（column-context-panel.tsx）仍未挂——
 // 创作指向 Focus View 列的引导验证时，须在同一变更内给那边补上，否则 spotlightAnchor 只能走降级路径。

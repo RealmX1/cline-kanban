@@ -39,7 +39,7 @@ function CrossProjectRecentlyActiveTaskSwitcherPanel(
 	);
 }
 
-// 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：四个区、Running 默认收起、
+// 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：五个区、Running 默认收起、
 // Pinned 与下方区重复、点击走宿主的跨项目打开、对非当前项目的卡取消置顶走 runtime。
 
 const setTaskPinboardPinStateOfTaskCardInWorkspace = vi.hoisted(() => vi.fn());
@@ -335,6 +335,36 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
+	it("Backlog 位于 Pinned 后 Running 前，默认折叠；展开显示所有项目旧待办且不混入 Recent", () => {
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", [makeEntry("pinned-backlog", { columnId: "backlog", pinnedToTaskPinboardAt: 1 })]),
+				makeProject("project-b", [
+					makeEntry("old-backlog", { columnId: "backlog", taskDescriptionLastUpdatedAt: NOW_MS - 60 * DAY_MS }),
+				]),
+			],
+		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		expect(
+			[...container.querySelectorAll('section[data-testid^="cross-project-task-switcher-section-"]')].map(
+				(element) => element.getAttribute("data-testid"),
+			),
+		).toEqual([
+			"cross-project-task-switcher-section-pinned",
+			"cross-project-task-switcher-section-backlog",
+			"cross-project-task-switcher-section-running",
+			"cross-project-task-switcher-section-prompt-cache-warm",
+			"cross-project-task-switcher-section-remaining",
+		]);
+		expect(section("backlog").textContent).toBe("Backlog2");
+		expect(rowTaskIds(section("backlog"))).toEqual([]);
+		act(() => section("backlog").querySelector<HTMLButtonElement>("button[aria-expanded]")?.click());
+		expect(rowTaskIds(section("backlog"))).toEqual(["pinned-backlog", "old-backlog"]);
+		expect(rowTaskIds(section("pinned"))).toEqual(["pinned-backlog"]);
+		expect(rowTaskIds(section("remaining"))).toEqual([]);
+		act(() => section("backlog").querySelector<HTMLButtonElement>("button[aria-expanded]")?.click());
+		expect(rowTaskIds(section("backlog"))).toEqual([]);
+	});
 	function renderFocusedTask(
 		taskId: string,
 		columnId: BoardColumnId,
@@ -375,6 +405,25 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		);
 		return currentProjectTaskCards;
 	}
+
+	it("焦点任务回到 Backlog 时在折叠组内保留唯一定位行，不另造组外副本", () => {
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", [
+					makeEntry("focused-backlog", { columnId: "backlog", pinnedToTaskPinboardAt: 1 }),
+				]),
+			],
+			focusedTaskInProject: { workspaceId: "project-a", taskId: "focused-backlog" },
+		});
+		renderFocusedTask("focused-backlog", "backlog", host);
+		expect(section("backlog").querySelector('button[aria-expanded="false"]')).not.toBeNull();
+		expect(rowTaskIds(section("backlog"))).toEqual(["focused-backlog"]);
+		expect(
+			container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:focused-backlog"]'),
+		).toHaveLength(1);
+		expect(section("pinned").querySelector("[data-cross-project-focused-task-scroll-anchor]")).toBeNull();
+		expect(container.querySelector("[data-cross-project-focused-task-outside-sections]")).toBeNull();
+	});
 
 	it("搜索命中的未置顶 Done 即使完全不在广播里，也从完整 board 展示焦点卡，且不伪造分组成员", () => {
 		const host = makeHost({ focusedTaskInProject: { workspaceId: "project-a", taskId: "outside" } });
@@ -588,7 +637,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		},
 	);
 
-	it("四个区按归属渲染：Running 默认收起只显示计数，Pinned 与剩余区重复同一任务", () => {
+	it("各区按归属渲染：Running 默认收起只显示计数，Pinned 与剩余区重复同一任务", () => {
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
 
 		expect(section("running").textContent).toContain("Running1");
@@ -911,8 +960,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			onOpenBacklogTaskEditorInProject: vi.fn(),
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		act(() => section("backlog").querySelector<HTMLButtonElement>("button[aria-expanded]")?.click());
 		act(() =>
-			section("remaining")
+			section("backlog")
 				.querySelector<HTMLButtonElement>(
 					'[data-cross-project-task-switcher-task-id="backlog-task"] button:not([aria-expanded])',
 				)
@@ -1489,11 +1539,12 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "done-pinned");
 
 		// Backlog：原地打开编辑框（与点精简行同一条路径，不是卡体自己的编辑回调）。
-		await movePointerFromRowToRow(queryRow("pinned", "done-pinned"), queryRow("remaining", "backlog-task"));
+		act(() => section("backlog").querySelector<HTMLButtonElement>("button[aria-expanded]")?.click());
+		await movePointerFromRowToRow(queryRow("pinned", "done-pinned"), queryRow("backlog", "backlog-task"));
 		await act(async () => {
 			vi.advanceTimersByTime(400);
 		});
-		act(() => clickTaskCardBodyTitle(queryRow("remaining", "backlog-task")));
+		act(() => clickTaskCardBodyTitle(queryRow("backlog", "backlog-task")));
 		expect(host.onOpenBacklogTaskEditorInProject).toHaveBeenCalledWith("project-b", "backlog-task");
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalledWith("project-b", "backlog-task");
 

@@ -3,6 +3,7 @@ import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-re
 import { type ReactElement, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
+	CrossProjectTaskSwitcherBacklogSectionBlock,
 	CrossProjectTaskSwitcherPinnedSectionBlock,
 	CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock,
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
@@ -23,7 +24,7 @@ import { writeCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross
 
 /**
  * Focus View 左栏的 All projects 模式：跨项目「最近活跃任务」切换面板（docs/context-cross-project-recently-active-task-switcher.md）。
- * 自上而下四个区：Pinned（可与下面重复）→ Running（默认收起）→ Cache warm · your turn（按失效时刻升序）→ 剩余区（三种排序）。
+ * 自上而下五个区：Pinned（可与下面重复）→ Backlog（默认收起）→ Running（默认收起）→ Cache warm · your turn（按失效时刻升序）→ 剩余区（三种排序）。
  * 区归属全在 src/core/cross-project-recently-active-task-switcher-section-assignment.ts，这里只渲染。
  * 同一组分区在 All projects 首页横排成列（board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board.tsx）；
  * 移动端首页直接渲染本面板。
@@ -145,6 +146,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					</div>
 				) : null}
 				<CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherBacklogSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherRemainingRecentSectionBlock {...sectionBlockProps} />

@@ -7,14 +7,15 @@ import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS 
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
-// 四个区自上而下：
-//   Pinned                      —— 各项目 Task Pinboard 的汇总。**允许**与下面三区重复。
+// 五个区自上而下：
+//   Pinned                      —— 各项目 Task Pinboard 的汇总。**允许**与下面四区重复。
+//   Backlog                     —— 各项目的完整待办，不受时间窗限制；按 Description 更新时间倒序。
 //   Running                     —— agent 正持有回合且近 5 分钟有输出，或已 park 在等自己派发的后台工作；按本轮
 //                                  agent 回合开始时刻升序（后来的放后面），不随输出抖动。
 //   Cache warm · your turn      —— agent 没在持有回合、且按 agent 的实测 TTL 估算主对话 prompt cache 仍热；按失效时刻升序。
 //   剩余区                       —— 其余全部，三种排序模式可切换。
-// 下面三区**互斥**，优先级 Running > 缓存倒计时 > 剩余。区归属只读 session facet 与时间戳，**不读 board 列**
-// （例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
+// 下面四区**互斥**，Backlog 按列优先归属，其余优先级 Running > 缓存倒计时 > 剩余。
+// 其余区归属只读 session facet 与时间戳（例外：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
 //
 // 纯函数，前后端共用（web-ui 经 @runtime-cross-project-recently-active-task-switcher-section-assignment 引用）。
 
@@ -87,6 +88,7 @@ export type CrossProjectTaskSwitcherRemainingSection =
 
 export interface CrossProjectTaskSwitcherSections {
 	pinnedEntries: CrossProjectTaskSwitcherEntryInProject[];
+	backlogEntries: CrossProjectTaskSwitcherEntryInProject[];
 	runningEntries: CrossProjectTaskSwitcherEntryInProject[];
 	promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[];
 	remainingSection: CrossProjectTaskSwitcherRemainingSection;
@@ -296,6 +298,7 @@ export function resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(
 // 取景判据（哪些卡进条目列表）——服务端投影与前端合并共用的**单一判据**，两侧不得各写一份。
 // 刻意比面板任何一个区都宽、但有上界：
 //   - 已置顶的卡，不论在哪一列（Pinned 区是各项目 Pinboard 的汇总，Pinboard 本身也收 Done 列的卡）；
+//   - Backlog 全量进入，不受时间窗限制；
 //   - 其余只取非 Done 列，且满足其一：agent 正持有回合（Running 候选，turnOwner==="agent" 蕴含活进程），
 //     或「最后被碰」/ 本轮停止生成的时刻落在时间窗内。
 // 服务端：广播用默认 7 天窗、「显示更早」用 30 天窗。前端：「显示更早」快照里落在**广播**取景范围内、
@@ -318,6 +321,10 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	}
 	if (entry.columnId === "trash") {
 		return false;
+	}
+	// Backlog 是完整待办列表，不受近期活动时间窗限制；前端快照合并也用此判据避免复活旧条目。
+	if (entry.columnId === "backlog") {
+		return true;
 	}
 	if (entry.turnOwner === "agent") {
 		return true;
@@ -412,6 +419,7 @@ export function assignCrossProjectTaskSwitcherSections(
 	input: AssignCrossProjectTaskSwitcherSectionsInput,
 ): CrossProjectTaskSwitcherSections {
 	const pinnedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
+	const backlogEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const runningEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[] = [];
 	const remainingCandidates: CrossProjectTaskSwitcherEntryInProject[] = [];
@@ -421,6 +429,10 @@ export function assignCrossProjectTaskSwitcherSections(
 			pinnedEntries.push(entryInProject);
 		}
 		if (entry.columnId === "trash") {
+			continue;
+		}
+		if (entry.columnId === "backlog") {
+			backlogEntries.push(entryInProject);
 			continue;
 		}
 		if (isCrossProjectTaskSwitcherEntryRunning(entry, input.nowMs)) {
@@ -450,6 +462,13 @@ export function assignCrossProjectTaskSwitcherSections(
 				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
 			),
 	);
+	backlogEntries.sort(
+		(left, right) =>
+			right.entry.taskDescriptionLastUpdatedAt - left.entry.taskDescriptionLastUpdatedAt ||
+			buildCrossProjectTaskSwitcherEntryKey(left.workspaceId, left.entry.taskId).localeCompare(
+				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
+			),
+	);
 	// Running 内先进入的在前、后进入的在后；顺序只在回合边沿变化，不随 agent 输出抖动。
 	runningEntries.sort(compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey);
 	// 最快失效的排最前；同一失效时刻按键兜底。
@@ -463,6 +482,7 @@ export function assignCrossProjectTaskSwitcherSections(
 	);
 	return {
 		pinnedEntries,
+		backlogEntries,
 		runningEntries,
 		promptCacheWarmAwaitingUserEntries,
 		remainingSection: assignRemainingSection(remainingCandidates, input),

@@ -1119,6 +1119,11 @@ export default function App(): ReactElement {
 	});
 	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
 	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
+		allProjectsTaskSwitcherView: !isBoardScopeAllProjectsSelected
+			? "outside_all_projects"
+			: selectedTaskId !== null || pendingCrossProjectTaskOpen?.originatedFromFocusView || taskLookupWorkbench.isOpen
+				? "task_focus"
+				: "kanban_board",
 		isTaskSwitcherSectionModelActive:
 			isBoardScopeAllProjectsSelected && !isRuntimeDisconnected && !isKanbanAccessBlocked,
 		projects,

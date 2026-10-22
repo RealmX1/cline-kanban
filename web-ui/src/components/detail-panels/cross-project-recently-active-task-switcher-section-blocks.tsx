@@ -3,7 +3,7 @@ import type {
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { Activity, ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin } from "lucide-react";
+import { Activity, ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin, UnfoldHorizontal } from "lucide-react";
 import {
 	type MutableRefObject,
 	type ReactElement,
@@ -13,6 +13,8 @@ import {
 	useState,
 } from "react";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
+import { crossProjectTaskSwitcherBacklogSectionAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
@@ -29,6 +31,7 @@ import { useBooleanLocalStorageValue } from "@/utils/react-use";
  *   Pinned 可折叠、默认露 5 条；Running 遵循 localStorage 里的收起偏好。
  * - section_column_on_board_scope_all_projects_home_page：All projects 首页横排成列，每列的内容容器自己滚动。
  *   Pinned 全量显示、不折叠；Running 始终列出行。
+ * Backlog 两种呈现均在每次进入视图时默认折叠，展开态仅保存在共享模型内存中。
  * Cache warm 与 Recent 两种呈现相同。
  */
 export type CrossProjectTaskSwitcherSectionBlockPresentation =
@@ -80,21 +83,36 @@ function CrossProjectTaskSwitcherSectionFrame({
 	testIdSuffix,
 	sectionBlockPresentation,
 	sectionColumnScrollContainerBinding,
+	isSectionColumnCollapsed = false,
 }: {
 	header: ReactNode;
 	children?: ReactNode;
 	testIdSuffix: string;
 	sectionBlockPresentation: CrossProjectTaskSwitcherSectionBlockPresentation;
 	sectionColumnScrollContainerBinding?: CrossProjectTaskSwitcherSectionColumnScrollContainerBinding;
+	isSectionColumnCollapsed?: boolean;
 }): ReactElement {
 	if (sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page") {
 		return (
 			<section
-				className="flex min-h-0 min-w-[260px] flex-1 basis-0 flex-col rounded-lg border border-border bg-surface-1"
+				className={cn(
+					"flex min-h-0 flex-col rounded-lg border border-border bg-surface-1",
+					isSectionColumnCollapsed ? "w-10 shrink-0" : "min-w-[260px] flex-1 basis-0",
+				)}
 				data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
+				data-verification-anchor={
+					testIdSuffix === "backlog" ? crossProjectTaskSwitcherBacklogSectionAnchorKey() : undefined
+				}
 			>
 				{/* 列 header 固定在滚动区之外。 */}
-				<div className="flex h-9 shrink-0 items-center gap-2 px-2">{header}</div>
+				<div
+					className={cn(
+						"flex",
+						isSectionColumnCollapsed ? "min-h-0 flex-1" : "h-9 shrink-0 items-center gap-2 px-2",
+					)}
+				>
+					{header}
+				</div>
 				<div
 					ref={sectionColumnScrollContainerBinding?.sectionColumnScrollContainerRef}
 					onScroll={sectionColumnScrollContainerBinding?.onSectionColumnScroll}
@@ -103,7 +121,10 @@ function CrossProjectTaskSwitcherSectionFrame({
 					onPointerDownCapture={sectionColumnScrollContainerBinding?.onSectionColumnPointerDownCapture}
 					// overflow-anchor: none —— 与 Focus View 左栏面板同理：hover 交接时列表顶边固定，浏览器自带的 scroll
 					// anchoring 会在列滚动过时自己补 scrollTop。这个容器的顶边也是 hook 判断「交接是否把新行顶边带出可视区」的基准。
-					className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-1 pb-1.5 [overflow-anchor:none]"
+					className={cn(
+						"flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-1 pb-1.5 [overflow-anchor:none]",
+						isSectionColumnCollapsed && "hidden",
+					)}
 					data-testid={`cross-project-task-switcher-section-column-scroll-container-${testIdSuffix}`}
 				>
 					{children}
@@ -115,6 +136,9 @@ function CrossProjectTaskSwitcherSectionFrame({
 		<section
 			className="flex shrink-0 flex-col rounded-lg border border-border bg-surface-1"
 			data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
+			data-verification-anchor={
+				testIdSuffix === "backlog" ? crossProjectTaskSwitcherBacklogSectionAnchorKey() : undefined
+			}
 		>
 			<div className="flex h-9 shrink-0 items-center gap-2 px-2">{header}</div>
 			{children ? <div className="flex flex-col gap-0.5 px-1 pb-1.5">{children}</div> : null}
@@ -128,6 +152,73 @@ function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string;
 			<span className="truncate text-[13px] font-semibold text-text-primary">{title}</span>
 			<span className="text-xs text-text-tertiary">{count}</span>
 		</>
+	);
+}
+
+/** Backlog 全量待办：每次进入视图默认折叠；展开态由常驻共享模型持有，过渡壳重挂载不丢失。 */
+export function CrossProjectTaskSwitcherBacklogSectionBlock({
+	sectionBlockPresentation,
+	sectionsModel,
+	renderRowInHostingScrollContainer,
+	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
+}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
+	const { sections, isBacklogSectionExpanded, setIsBacklogSectionExpanded } = sectionsModel;
+	const isSectionColumnCollapsed =
+		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" && !isBacklogSectionExpanded;
+	return (
+		<CrossProjectTaskSwitcherSectionFrame
+			testIdSuffix="backlog"
+			sectionBlockPresentation={sectionBlockPresentation}
+			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
+			isSectionColumnCollapsed={isSectionColumnCollapsed}
+			header={
+				<button
+					type="button"
+					onClick={() => setIsBacklogSectionExpanded(!isBacklogSectionExpanded)}
+					aria-expanded={isBacklogSectionExpanded}
+					aria-label={isBacklogSectionExpanded ? "Collapse Backlog" : "Expand Backlog"}
+					className={cn(
+						"flex min-w-0 flex-1 cursor-pointer border-none bg-transparent text-left text-inherit rounded-md hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
+						isSectionColumnCollapsed ? "min-h-0 flex-col items-center gap-2 py-3" : "h-8 items-center gap-2",
+					)}
+				>
+					{isSectionColumnCollapsed ? (
+						<>
+							<UnfoldHorizontal size={14} aria-hidden className="shrink-0 text-text-secondary" />
+							<span className="text-xs text-text-tertiary">{sections.backlogEntries.length}</span>
+							<span className="text-sm font-semibold text-text-primary whitespace-nowrap [writing-mode:vertical-rl]">
+								Backlog
+							</span>
+						</>
+					) : (
+						<>
+							{isBacklogSectionExpanded ? (
+								<ChevronDown size={14} aria-hidden className="shrink-0 text-text-secondary" />
+							) : (
+								<ChevronRight size={14} aria-hidden className="shrink-0 text-text-secondary" />
+							)}
+							<CrossProjectTaskSwitcherSectionTitle title="Backlog" count={sections.backlogEntries.length} />
+						</>
+					)}
+				</button>
+			}
+		>
+			{isBacklogSectionExpanded && sections.backlogEntries.length === 0 ? (
+				<div className="px-2 py-1.5 text-xs text-text-tertiary">No backlog tasks.</div>
+			) : (
+				sections.backlogEntries
+					.filter(
+						({ workspaceId, entry }) =>
+							isBacklogSectionExpanded ||
+							(!isSectionColumnCollapsed &&
+								focusedTaskRowToKeepMounted?.section === "backlog" &&
+								buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) ===
+									focusedTaskRowToKeepMounted.entryKey),
+					)
+					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "backlog"))
+			)}
+		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }
 

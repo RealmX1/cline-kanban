@@ -69,6 +69,15 @@ function collect(
 }
 
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
+	it("完整 Backlog 不受活动时间窗限制，其他旧卡仍排除", () => {
+		const entries = collect(
+			makeBoard({
+				backlog: [makeCard("old-backlog", { taskDescriptionLastUpdatedAt: NOW_MS - 60 * DAY_MS })],
+				review: [makeCard("old-review")],
+			}),
+		);
+		expect(entries.map((entry) => entry.taskId)).toEqual(["old-backlog"]);
+	});
 	it("时间窗外、无会话、未置顶的卡不进广播", () => {
 		expect(collect(makeBoard({ review: [makeCard("old")] }))).toEqual([]);
 	});

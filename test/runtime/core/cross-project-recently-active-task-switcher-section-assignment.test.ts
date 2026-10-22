@@ -104,6 +104,36 @@ function remainingTaskIds(sections: ReturnType<typeof assign>): string[] {
 	return section.entries.map(({ entry }) => entry.taskId);
 }
 
+describe("跨项目完整 Backlog", () => {
+	it("按 Description 更新时间倒序、复合键稳定排序；置顶可重复，其他主分组互斥", () => {
+		const sections = assign([
+			inProject("ws-b", makeEntry("same-id", { columnId: "backlog", taskDescriptionLastUpdatedAt: 1 })),
+			inProject(
+				"ws-a",
+				makeEntry("same-id", { columnId: "backlog", taskDescriptionLastUpdatedAt: 1, pinnedToTaskPinboardAt: 2 }),
+			),
+			inProject(
+				"ws-a",
+				makeEntry("newer", {
+					columnId: "backlog",
+					taskDescriptionLastUpdatedAt: 2,
+					...AGENT_RUNNING,
+					lastOutputAt: NOW_MS,
+				}),
+			),
+		]);
+		expect(sections.backlogEntries.map(({ workspaceId, entry }) => [workspaceId, entry.taskId])).toEqual([
+			["ws-a", "newer"],
+			["ws-a", "same-id"],
+			["ws-b", "same-id"],
+		]);
+		expect(sections.pinnedEntries.map(({ entry }) => entry.taskId)).toEqual(["same-id"]);
+		expect(sections.runningEntries).toEqual([]);
+		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		expect(remainingTaskIds(sections)).toEqual([]);
+	});
+});
+
 describe("isCrossProjectTaskSwitcherEntryRunning", () => {
 	it("agent 回合 + 5 分钟内有输出 → Running", () => {
 		expect(

@@ -219,10 +219,47 @@ function rowTaskIds(scope: ParentNode): string[] {
 }
 
 describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard", () => {
-	it("同一组分区横排成列，与 Focus View 同序：Pinned | Running | Cache warm · your turn | Recent", () => {
+	it("Backlog 默认折成窄列，键盘焦点跨展开收起保留；再次进入回到折叠", () => {
+		const host = makeHost();
+		renderBoard(host);
+		const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand Backlog"]');
+		expect(toggle).not.toBeNull();
+		expect(toggle?.closest("section")?.className).toContain("w-10");
+		expect(rowTaskIds(sectionColumnScrollContainer("backlog"))).toEqual([]);
+		toggle?.focus();
+		act(() => toggle?.click());
+		expect(document.activeElement).toBe(toggle);
+		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+		expect(rowTaskIds(sectionColumnScrollContainer("backlog"))).toEqual(["backlog-task"]);
+		renderBoard({ ...host, projects: [...host.projects] });
+		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+		act(() => toggle?.click());
+		expect(document.activeElement).toBe(toggle);
+		expect(rowTaskIds(sectionColumnScrollContainer("backlog"))).toEqual([]);
+		act(() => toggle?.click());
+		act(() => root.render(<div />));
+		renderBoard(host);
+		expect(container.querySelector('button[aria-label="Expand Backlog"]')).not.toBeNull();
+		expect(rowTaskIds(sectionColumnScrollContainer("backlog"))).toEqual([]);
+	});
+
+	it("没有 Backlog 也保留数量和展开空态", () => {
+		renderBoard(makeHost({ projects: [makeProject("project-a", [])] }));
+		const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand Backlog"]');
+		expect(toggle?.textContent).toContain("0");
+		act(() => toggle?.click());
+		expect(sectionColumnScrollContainer("backlog").textContent).toContain("No backlog tasks.");
+	});
+	it("同一组分区横排成列，与 Focus View 同序：Pinned | Backlog | Running | Cache warm · your turn | Recent", () => {
 		renderBoard(makeHost());
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
+			"pinned",
+			"backlog",
+			"running",
+			"prompt-cache-warm",
+			"remaining",
+		]);
 		expect(rowTaskIds(sectionColumnScrollContainer("pinned"))).toEqual(["recent"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("prompt-cache-warm"))).toEqual(["warm"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("running"))).toEqual(["running"]);
@@ -241,7 +278,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			}),
 		);
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["backlog", "running", "prompt-cache-warm", "remaining"]);
 	});
 
 	it("Pinned 列全量显示、不折叠；Running 列不读左栏的收起偏好，始终列出行", () => {
@@ -283,8 +320,9 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		);
 		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
 
+		act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Expand Backlog"]')?.click());
 		act(() =>
-			sectionColumnScrollContainer("remaining")
+			sectionColumnScrollContainer("backlog")
 				.querySelector<HTMLButtonElement>(
 					'[data-cross-project-task-switcher-task-id="backlog-task"] button:not([aria-expanded])',
 				)
@@ -310,7 +348,13 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		isMobileViewportForTest.value = true;
 		renderBoard(makeHost());
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
+			"pinned",
+			"backlog",
+			"running",
+			"prompt-cache-warm",
+			"remaining",
+		]);
 		expect(
 			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
 		).not.toBeNull();

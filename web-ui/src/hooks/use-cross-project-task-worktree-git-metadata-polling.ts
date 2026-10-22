@@ -17,7 +17,7 @@ const CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_POLL_INTERVAL_MS = 5_000;
 // web-ui 只能从 api-contract 引类型，故在此另记一份。
 const CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT = 100;
 
-// 面板四个区里会显示的全部条目（Pinned 与下方区重复的，由下面的选择函数按键去重）。
+// 面板五个区里会显示的全部条目（Pinned 与下方区重复的，由下面的选择函数按键去重）。
 export function collectEntriesShownInCrossProjectTaskSwitcherSections(
 	sections: CrossProjectTaskSwitcherSections,
 ): CrossProjectTaskSwitcherEntryInProject[] {
@@ -27,6 +27,7 @@ export function collectEntriesShownInCrossProjectTaskSwitcherSections(
 			: sections.remainingSection.entries;
 	return [
 		...sections.pinnedEntries,
+		...sections.backlogEntries,
 		...sections.runningEntries,
 		...sections.promptCacheWarmAwaitingUserEntries,
 		...remainingEntries,

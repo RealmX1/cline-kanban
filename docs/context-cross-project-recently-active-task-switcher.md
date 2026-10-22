@@ -14,11 +14,14 @@
 _Avoid_: dashboard, global view, left column scope toggle
 
 **Cross-Project Task Switcher Entry（切换面板条目）**：
-`RuntimeProjectSummary.crossProjectTaskSwitcherEntries` 里的一条，是 `inProgressTaskDetails`（in_progress 列明细，现只供顶栏切换器的 live 计数）的超集，由同一个 per-card 构造函数产出（`src/server/in-progress-task-detail-projection.ts`）。取景判据是 `src/core/cross-project-recently-active-task-switcher-section-assignment.ts` 的 `isTaskCardWithinCrossProjectTaskSwitcherActivityScope`（服务端投影与前端合并共用，不得两边各写一份）：置顶的卡不论哪一列都进；其余只取非 Done 列、且 agent 正持有回合或「最后被碰」在 7 天内的卡。会话事实覆盖三种 transport；未加载项目读 sessions.json（按文件戳缓存，单个可达数 MB）。
+`RuntimeProjectSummary.crossProjectTaskSwitcherEntries` 里的一条，是 `inProgressTaskDetails`（in_progress 列明细，现只供顶栏切换器的 live 计数）的超集，由同一个 per-card 构造函数产出（`src/server/in-progress-task-detail-projection.ts`）。取景判据是 `src/core/cross-project-recently-active-task-switcher-section-assignment.ts` 的 `isTaskCardWithinCrossProjectTaskSwitcherActivityScope`（服务端投影与前端合并共用，不得两边各写一份）：置顶的卡不论哪一列都进；Backlog 全量进入，不受活动时间窗限制；其余只取非 Done 列、且 agent 正持有回合或「最后被碰」在 7 天内的卡。会话事实覆盖三种 transport；未加载项目读 sessions.json（按文件戳缓存，单个可达数 MB）。
 _Avoid_: card（它不是 board 卡片，没有 prompt / 动作按钮）
 
 **Pinned（置顶区）**：
-各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面三区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。置顶 / 取消置顶 / 改原因一律走 `taskCardAction.setTaskPinboardPinStateOfTaskCard`：当前项目的卡由宿主弹原因对话框、带 overlay；其他项目的卡由面板弹同一个对话框、不带 overlay（结果随广播回来）。
+各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面四区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。置顶 / 取消置顶 / 改原因一律走 `taskCardAction.setTaskPinboardPinStateOfTaskCard`：当前项目的卡由宿主弹原因对话框、带 overlay；其他项目的卡由面板弹同一个对话框、不带 overlay（结果随广播回来）。
+
+**Backlog（待办区）**：
+各可用项目的完整 Backlog，位于 Pinned 后、Running 前；按 Description 最后更新时间倒序，同值按 `(workspaceId, taskId)` 稳定排序。与其他主分组互斥，置顶的 Backlog 卡仍同时出现在 Pinned。两处每次进入均折叠，不持久保存展开偏好：看板收为约 40px 窄列，Focus View 与移动端收为标题和数量。同一次视图访问内编辑、切换任务与跨项目过渡壳重挂载保留展开；切换看板与 Focus、离开 All projects 后返回、刷新则折叠。空列表也保留入口与数量。行交互复用下述原地编辑与卡片展开。
 
 **Running（运行区）**：
 `turnOwner === "agent"` 且（近 5 分钟有 PTY 输出，或已 park 在等自己派发的后台工作）。默认收起成一行「Running N」：在跑的任务暂时不需要人。
@@ -83,7 +86,7 @@ _Avoid_: hot tasks, urgent
 Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列（`board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board.tsx`，2026-10-12 取代 Board Overview）。与单项目对称：单项目首页是阶段列看板、Focus View 左栏是阶段竖列表；All projects 首页是分区列看板、Focus View 左栏是同一组分区的竖列表。
 - 两处共用同一份「区数据 + 一行怎么画、点了做什么」（`use-cross-project-task-switcher-section-row-rendering-shared-across-scroll-containers.tsx`）与同一组区块组件（`cross-project-recently-active-task-switcher-section-blocks.tsx`，参数 `sectionBlockPresentation` 区分两种呈现）。
 - 分区模型由 App 持有，经宿主的 `crossProjectTaskSwitcherSectionsModel` 供首页、Focus View 与动作导航共用；渲染 hook 不再单独创建分区模型。
-- 列序 Pinned（没有置顶时隐藏）| Running | Cache warm · your turn | Recent，与 Focus View 左栏的 All projects 分区同序；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
+- 列序 Pinned（没有置顶时隐藏）| Backlog（默认折叠窄列）| Running | Cache warm · your turn | Recent，与 Focus View 左栏的 All projects 分区同序；列宽 `flex-1`、最窄 260px，放不下时整排横向滚动。
 - 与左栏的呈现差异：Pinned 全量显示、不折叠（不读左栏的折叠 / 只露 5 条偏好）；Running 始终列出行（不读左栏的收起偏好）；Pinned 行点击不做「跳到下方区那一行」（点行就进了 Focus View，首页随即卸载）。Cache warm 与 Recent 两处相同。
 - 每列一个滚动容器（列 header 固定在滚动区外、滚动容器就是分区内容容器），各持一个 hover 原地展开 hook 实例：手风琴语义与左栏相同，「指针离开面板」「在面板外按下」都以这一列为面板（「列外」同样按这一列的 React 子树判断，列里卡上弹出的 portal 弹窗算列内），指针从 A 列移到 B 列时 A 列展开的行约 300ms 后收起。各列滚动位置记在 continuity store 的 `boardScopeAllProjectsHomePageSectionColumnScrollTopPxBySection`：Focus View 打开时首页被卸载，Back 回来落回原位。
 - 当前项目的行展开成完整卡片时与主看板同数据、同动作（`use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page.ts`，与 ColumnContextPanel 同构）；board 还不是当前项目的数据时改读服务端。
@@ -97,15 +100,15 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 默认 7 天窗；「Show older」按需查询 30 天窗（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不进广播）。快照只补广播取景范围**之外**的旧任务：落在取景范围内却不在广播里的快照条目已失效（取消置顶 / 移入 Done / 已删除），不补回；扩展期间随面板 30 秒 tick 重新拉取快照，范围外任务的变化在一个 tick 内收敛。
 
 **Focused Task Visibility（当前聚焦任务留存与 Sticky）**：
-- All projects Focus View 的当前任务不以四组取景为存在条件：Spotlight 可以打开未置顶 Done、时间窗外、或被 Recent 当前排序模式排除的任务。这时在创建按钮下方临时显示「当前聚焦任务」完整紧凑卡；任务进入正常分组后移除临时区，不改四组归属、计数或排序。
+- All projects Focus View 的当前任务不以五组取景为存在条件：Spotlight 可以打开未置顶 Done、时间窗外、或被 Recent 当前排序模式排除的任务。这时在创建按钮下方临时显示「当前聚焦任务」完整紧凑卡；任务进入正常分组后移除临时区，不改五组归属、计数或排序。
 - 当前任务以 `(workspaceId, taskId)` 定位，完整卡读已水合的当前项目 board、推流 session 与共享 `buildTaskCardBusinessProps`；跨项目在途只显示目标占位，不复用旧项目同号卡。手机详情顶部卡片继续使用独立的移动端角色。
 - 主分组行优先于 Pinned 副本作为唯一定位源；Running 收起、仅在 Pinned 的任务被折叠或截断时仍保留这一行，用户的持久化收起偏好不变。分组内沿用精简行 / hover 展开的交互。
 - 复用 `useSelectedCardPinState` 的实时几何判定：完整可见时不显示副本，上下前沿触边即在对应边缘显示完整 Sticky 卡。源行只改 `visibility`、保留几何；副本不带 canonical `data-task-id` 或验证锚点。卡体或「返回当前任务所在位置」按钮只滚回定位源，卡片动作与 Portal 弹窗不触发导航。
 - 明确切换任务后定位新任务；同一任务跨过渡壳重挂载时恢复原滚动位置。临时区与组内定位源切换时重新绑定测量。没有聚焦任务的 All projects 首页不增加焦点区或 Sticky。
 - 当前聚焦的 Cache warm 任务从 Review 移入 Validation 时，按操作前的同组显示顺序选择下一项，末尾选上一项，单项保留当前焦点；跨项目沿用统一打开入口。普通卡片、Sticky 副本与 Review → Validation 拖拽共用此规则。仅服务端确认移入 Validation 后接续，失败、候选退出分组或用户已切走时不自动导航（`use-cache-warm-task-focus-navigation-after-validation-move.ts`）；其他场景仍按既有 Review 列导航。
 
-**Section Exclusivity（三区互斥）**：
-Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。区归属**只读 session facet 与时间戳，不读 board 列**（例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。
+**Section Exclusivity（主分组互斥）**：
+Backlog 按列优先归属；其余 Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。其余区归属**只读 session facet 与时间戳，不读 board 列**（例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。
 
 **Unread Handoff（未读交接）**：
 通知中心里该 (workspaceId, taskId) 还有 `visitedAt` 为空的条目，与铃铛同源。三种模式下都用圆点标出。

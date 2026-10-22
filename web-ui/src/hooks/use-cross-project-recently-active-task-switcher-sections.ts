@@ -41,6 +41,8 @@ export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
 	setRemainingSectionOrderingMode: (mode: CrossProjectTaskSwitcherRemainingSectionOrderingMode) => void;
 	isRunningSectionExpanded: boolean;
 	setIsRunningSectionExpanded: (expanded: boolean) => void;
+	isBacklogSectionExpanded: boolean;
+	setIsBacklogSectionExpanded: (expanded: boolean) => void;
 	extendedActivityHorizonLoadState: CrossProjectTaskSwitcherExtendedActivityHorizonLoadState;
 	requestEntriesWithinExtendedActivityHorizon: () => void;
 }
@@ -113,16 +115,32 @@ export function collectCrossProjectTaskSwitcherEntriesInProjects(
 
 export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	isTaskSwitcherSectionModelActive = true,
+	allProjectsTaskSwitcherView = "task_focus",
 	projects,
 	notificationLogByWorkspaceId,
 	currentProjectId,
 }: {
 	isTaskSwitcherSectionModelActive?: boolean;
+	allProjectsTaskSwitcherView?: "kanban_board" | "task_focus" | "outside_all_projects";
 	projects: readonly RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
 }): CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
 	const [nowMs, setNowMs] = useState(() => Date.now());
+	// 只保留本次视图内的展开态。模型常驻 App，过渡壳重挂载或切焦点不会重置；真正换视图立即折叠。
+	const [backlogSectionExpansion, setBacklogSectionExpansion] = useState({
+		view: allProjectsTaskSwitcherView,
+		isExpanded: false,
+	});
+	if (backlogSectionExpansion.view !== allProjectsTaskSwitcherView) {
+		setBacklogSectionExpansion({ view: allProjectsTaskSwitcherView, isExpanded: false });
+	}
+	const isBacklogSectionExpanded =
+		backlogSectionExpansion.view === allProjectsTaskSwitcherView && backlogSectionExpansion.isExpanded;
+	const setIsBacklogSectionExpanded = useCallback(
+		(isExpanded: boolean) => setBacklogSectionExpansion({ view: allProjectsTaskSwitcherView, isExpanded }),
+		[allProjectsTaskSwitcherView],
+	);
 
 	const [remainingSectionOrderingMode, setRemainingSectionOrderingMode] =
 		useRawLocalStorageValue<CrossProjectTaskSwitcherRemainingSectionOrderingMode>(
@@ -263,6 +281,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		setRemainingSectionOrderingMode,
 		isRunningSectionExpanded,
 		setIsRunningSectionExpanded,
+		isBacklogSectionExpanded,
+		setIsBacklogSectionExpanded,
 		extendedActivityHorizonLoadState,
 		requestEntriesWithinExtendedActivityHorizon,
 	};

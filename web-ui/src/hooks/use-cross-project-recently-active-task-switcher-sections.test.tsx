@@ -155,6 +155,38 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).toHaveBeenCalledWith("project-a");
 	});
 
+	it("Backlog 在真实视图切换时折叠，同一视图切项目或更新数据不重置，刷新不保存", () => {
+		render({ allProjectsTaskSwitcherView: "kanban_board" });
+		expect(model.isBacklogSectionExpanded).toBe(false);
+		act(() => model.setIsBacklogSectionExpanded(true));
+		render({ currentProjectId: "project-b", projects: [...inputs.projects] });
+		expect(model.isBacklogSectionExpanded).toBe(true);
+		render({ allProjectsTaskSwitcherView: "task_focus" });
+		expect(model.isBacklogSectionExpanded).toBe(false);
+		act(() => model.setIsBacklogSectionExpanded(true));
+		render({ currentProjectId: "project-a" });
+		expect(model.isBacklogSectionExpanded).toBe(true);
+		render({ allProjectsTaskSwitcherView: "outside_all_projects" });
+		render({ allProjectsTaskSwitcherView: "task_focus" });
+		expect(model.isBacklogSectionExpanded).toBe(false);
+		act(() => model.setIsBacklogSectionExpanded(true));
+		act(() => root.unmount());
+		root = createRoot(document.createElement("div"));
+		render();
+		expect(model.isBacklogSectionExpanded).toBe(false);
+	});
+
+	it("显示更早的旧 Backlog 快照不能恢复已删除或已移出取景范围的卡", () => {
+		const snapshot = makeExtendedActivityHorizonSnapshot("removed-backlog");
+		const entry = snapshot.projects[0]?.crossProjectTaskSwitcherEntries[0];
+		if (!entry) throw new Error("缺少旧快照测试条目");
+		entry.columnId = "backlog";
+		writeCrossProjectTaskSwitcherPanelViewContinuity({ entriesWithinExtendedActivityHorizon: snapshot });
+		render();
+		expect(model.sections.backlogEntries).toEqual([]);
+		expect(model.sections.remainingSection).toMatchObject({ entries: [] });
+	});
+
 	it("活动期间保留 30 秒 tick，停用后不重渲染，恢复时不等下一次 tick", async () => {
 		render();
 		expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);

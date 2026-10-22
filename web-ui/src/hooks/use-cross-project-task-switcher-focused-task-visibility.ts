@@ -23,6 +23,7 @@ function findFocusedTaskSourceSection(
 	const matchesFocusedTask = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
 		buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskEntryKey;
 	// 主分组优先于 Pinned 副本，同一任务只有一个几何测量源。
+	if (sections.backlogEntries.some(matchesFocusedTask)) return "backlog";
 	if (sections.runningEntries.some(matchesFocusedTask)) return "running";
 	if (sections.promptCacheWarmAwaitingUserEntries.some(matchesFocusedTask)) return "prompt_cache_warm";
 	const remaining = sections.remainingSection;
