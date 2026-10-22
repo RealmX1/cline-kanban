@@ -47,7 +47,7 @@ const STAGE_LABELS: Record<string, string> = {
 const conversationScrollPositions = new Map<string, number>();
 
 function TaskLookupExecutorSettings({ controller }: { controller: TaskLookupWorkbenchController }) {
-	const [agentId, setAgentId] = useState<"claude" | "codex">("claude");
+	const [agentId, setAgentId] = useState<"claude" | "codex">("codex");
 	const [modelId, setModelId] = useState("");
 	useEffect(() => {
 		if (controller.executorSettings) {
@@ -68,8 +68,8 @@ function TaskLookupExecutorSettings({ controller }: { controller: TaskLookupWork
 					onChange={(event) => setAgentId(event.target.value as "claude" | "codex")}
 					className="h-11 rounded-md border border-border bg-surface-2 px-2 text-base md:h-9 md:text-xs"
 				>
-					<option value="claude">Claude</option>
 					<option value="codex">Codex</option>
+					<option value="claude">Claude</option>
 				</select>
 			</label>
 			<label className="flex flex-col gap-1 text-xs">

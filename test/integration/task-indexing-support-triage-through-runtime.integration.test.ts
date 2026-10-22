@@ -24,6 +24,7 @@ import {
 	taskIndexingMaterialRequirementsFingerprint,
 } from "../../src/task-indexing-support/incoming-work-item-relation-analysis";
 import { createTaskIndexingSupportRuntimeService } from "../../src/task-indexing-support/task-indexing-support-runtime-service";
+import { saveTaskIndexingSupportExecutorSettings } from "../../src/task-indexing-support/task-indexing-support-storage";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
 import { createWorkUnitRelationAssertionWriteApi } from "../../src/trpc/work-unit-relation-assertion-write-api";
 import { createWorkUnitRelationReadApi } from "../../src/trpc/work-unit-relation-read-api";
@@ -75,6 +76,7 @@ describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账�
 		await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, { board, sessions: {} });
 		const workspace = await loadWorkspaceContext(projectPath, { autoCreateIfMissing: false });
 		const scope = { workspaceId: workspace.workspaceId, workspacePath: workspace.repoPath };
+		await saveTaskIndexingSupportExecutorSettings(workspace.workspaceId, { agentId: "claude", modelId: null });
 		const activeCapture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
 		const relationWrite = createWorkUnitRelationAssertionWriteApi({
 			readRecordedInterWorkUnitRelationProjection:
