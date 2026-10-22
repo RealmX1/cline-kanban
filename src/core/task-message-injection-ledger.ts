@@ -76,6 +76,7 @@ const LEGACY_STATUS_MIRROR: Record<TaskMessageTerminalDeliveryStatus, string> = 
 
 export interface TaskMessageInjectionRecord {
 	task_id: string;
+	// 新请求总是记录受理时解析的真实目标会话；旧记录缺省时保持原样，不推断历史主会话。
 	attempt_id?: string;
 	source: string;
 	idempotency_key: string;
@@ -238,6 +239,17 @@ export function findTaskMessageInjectionRecord(
 
 export function buildTaskMessageInjectionMessageId(taskId: string, idempotencyKey: string): string {
 	return `terminal:${taskId}:${idempotencyKey}`;
+}
+
+// 省略目标的重试沿用首次绑定，不按当前主会话重算。旧记录仅兼容其原有 task/attempt ID，绝不借重试补投。
+export function doesTaskMessageInjectionRecordMatchRequestedConversationSession(
+	record: TaskMessageInjectionRecord,
+	requestedTaskConversationSessionId: string | undefined,
+): boolean {
+	return (
+		requestedTaskConversationSessionId === undefined ||
+		requestedTaskConversationSessionId === (record.attempt_id ?? record.task_id)
+	);
 }
 
 export function createPendingTaskMessageInjectionRecord(input: {

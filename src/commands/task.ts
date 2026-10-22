@@ -51,7 +51,10 @@ import {
 	cloneTaskClineSettings,
 	type ParsedTaskClineReasoningEffort,
 } from "../core/task-card-field-patch-resolution";
-import { resolveMainTaskConversationSessionSummary } from "../core/task-main-conversation-session-binding";
+import {
+	resolveMainTaskConversationSessionSummary,
+	resolveTaskChatMessageTargetConversationSessionSummary,
+} from "../core/task-main-conversation-session-binding";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -59,6 +62,7 @@ import type {
 } from "../core/task-message-injection-ledger";
 import {
 	createPendingTaskMessageInjectionRecord,
+	doesTaskMessageInjectionRecordMatchRequestedConversationSession,
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	isTaskMessageTerminalDeliveryStatusSettled,
@@ -1401,9 +1405,6 @@ async function sendTaskMessageCommand(input: {
 		throw new Error("task message requires --idempotency-key.");
 	}
 	const attemptId = input.attemptId?.trim() || undefined;
-	if (attemptId && attemptId !== taskId) {
-		throw new Error(`Attempt "${attemptId}" does not belong to task "${taskId}".`);
-	}
 	const prompt = await resolvePromptInput({ prompt: input.prompt, promptFile: input.promptFile });
 	if (!prompt.trim()) {
 		throw new Error("task message prompt cannot be empty.");
@@ -1452,28 +1453,37 @@ async function sendTaskMessageCommand(input: {
 	// 第一段（锁内）：幂等判定 + 落一条 pending。
 	// 与旧实现的差别：上一条仍 pending 时**不再报错**。pending 现在是合法的、会自行收敛的状态，
 	// 报错反而逼得调用方要么盲等要么换 key 重投——后者恰恰会造成重复投递。
-	const preflight = await withTaskMessageInjectionLedgerLock<{
-		kind: "existing" | "created";
-		record: TaskMessageInjectionRecord;
-	}>(ledgerPath, async (records) => {
+	const preflight = await withTaskMessageInjectionLedgerLock<
+		| { kind: "existing"; record: TaskMessageInjectionRecord }
+		| { kind: "created"; record: TaskMessageInjectionRecord; targetTaskConversationSessionId: string }
+	>(ledgerPath, async (records) => {
 		const existing = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
 		if (existing) {
-			if (existing.prompt_sha256 !== promptSha256) {
+			if (
+				existing.prompt_sha256 !== promptSha256 ||
+				!doesTaskMessageInjectionRecordMatchRequestedConversationSession(existing, attemptId) ||
+				existing.required_native_independent_user_turn_session_id !== undefined
+			) {
 				throw new Error(
-					`Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash differs.`,
+					`Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash, target conversation session or required native session differs.`,
 				);
 			}
 			return { result: { kind: "existing", record: existing } };
 		}
+		const target = resolveTaskChatMessageTargetConversationSessionSummary(taskRecord.task, state.sessions, attemptId);
+		if (!target) throw new Error("目标会话不存在或不属于该任务。");
 		const pendingRecord = createPendingTaskMessageInjectionRecord({
 			taskId,
-			...(attemptId ? { attemptId } : {}),
+			attemptId: target.taskId,
 			source,
 			idempotencyKey,
 			promptSha256,
 			nowIso: new Date().toISOString(),
 		});
-		return { records: [...records, pendingRecord], result: { kind: "created", record: pendingRecord } };
+		return {
+			records: [...records, pendingRecord],
+			result: { kind: "created", record: pendingRecord, targetTaskConversationSessionId: target.taskId },
+		};
 	});
 
 	// 同 key 已存在：直接返回当前记录，不重新投递（idempotency 的定义）。想重投请换新 key。
@@ -1504,6 +1514,7 @@ async function sendTaskMessageCommand(input: {
 	const chatResponse = await runtimeClient.runtime.sendTaskChatMessage
 		.mutate({
 			taskId,
+			targetTaskConversationSessionId: preflight.targetTaskConversationSessionId,
 			text: prompt,
 			mode: "act",
 			source,
@@ -2228,7 +2239,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--prompt <text>", "Follow-up message text.")
 		.requiredOption("--source <source>", "Message source label.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key.")
-		.option("--attempt-id <id>", "Optional task attempt/session ID.")
+		.option("--attempt-id <id>", "目标任务所属的会话 ID；省略时选择当前主会话。")
 		.option(
 			"--wait-for-terminal-status",
 			"Block until the delivery reaches a terminal status (or --wait-timeout-ms elapses). Timing out is not a failure: the reported status is still the true current one.",

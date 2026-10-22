@@ -2671,6 +2671,7 @@ export const runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchem
 	source: z.string(),
 	idempotencyKey: z.string(),
 	promptSha256: z.string(),
+	// 显式目标会话，必须属于 taskId 指定的卡片；省略时固定受理时的当前主会话。
 	attemptId: z.string().optional(),
 	// 最多等 agent 空闲多久。上限（24h）在 runtime 侧校验，契约这里只要求正整数。
 	maxWaitForAgentIdleMs: z.number().int().positive(),

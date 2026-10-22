@@ -16,6 +16,7 @@ import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-muta
 const mocked = vi.hoisted(() => ({
 	directory: "",
 	board: vi.fn(),
+	persistedConversationSessions: vi.fn(),
 	request: vi.fn(),
 	persist: vi.fn(),
 	controlEndpoint: vi.fn(),
@@ -24,6 +25,10 @@ vi.mock("../../../src/state/workspace-state", () => ({
 	getWorkspaceDirectoryPath: () => mocked.directory,
 	getWorkspacesRootPath: () => dirname(mocked.directory),
 	loadWorkspaceBoardById: mocked.board,
+	loadPersistedWorkspaceStateById: async () => ({
+		board: await mocked.board(),
+		sessions: mocked.persistedConversationSessions(),
+	}),
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: mocked.persist,
 }));
 vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-request-connection", () => ({
@@ -113,6 +118,7 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 			observedAt: 1,
 		},
 	};
+	mocked.persistedConversationSessions.mockImplementation(() => ({ [summary.taskId]: summary }));
 	mocked.board.mockResolvedValue({
 		columns: [
 			{

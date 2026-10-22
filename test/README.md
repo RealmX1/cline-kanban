@@ -91,6 +91,20 @@ npm run test:guarded -- --project runtime-integration test/integration/codex-mob
 
 ## 命令
 
+### RVF 独立主会话的打包态原生投递联调
+
+`rvf-decision-point-target-conversation-session.integration.test.ts` 使用隔离 HOME、Git fixture、真实 runtime 与真实 Codex TUI，模型只连接本地响应桩，不访问账号或调用付费模型。真实 RVF Stop 经打包 CLI 投递到独立主会话，UPS 使用指定 RVF 仓库的真实实现，验证原生 user message、正文唯一注入、真实终态和幂等重试。默认跳过，完整运行需显式设置：
+
+```sh
+KANBAN_RVF_SESSION_DELIVERY_PACKAGED_CLI_PATH=/absolute/task-build/dist/cli.js \
+KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY=/absolute/path/to/codex \
+KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY=/absolute/path/to/review-validate-fix \
+KANBAN_RVF_SESSION_DELIVERY_EVIDENCE_DIRECTORY=/absolute/persistent/rvf-delivery-evidence \
+npm run test:guarded -- --project runtime-integration test/integration/rvf-decision-point-target-conversation-session.integration.test.ts
+```
+
+CLI 构建目录不能指向在线实例的共享 `dist` 软链接。测试结束或失败时都会回收自身启动的子进程，并把指定目录中的证据持久保留。
+
 - `npm run test:policy`：只运行 Git 测试安全策略。
 - `npm run test:guarded -- <vitest args>`：在 policy 与宿主仓 canary 下运行指定 Vitest 参数。
 - `npm run test:precommit`：运行 `precommit-safe`。

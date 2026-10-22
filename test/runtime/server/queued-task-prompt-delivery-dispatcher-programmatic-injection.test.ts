@@ -24,18 +24,29 @@ import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-clo
 import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 
-const testRuntimeHome = { path: "", mainTaskConversationSessionId: "" };
-vi.mock("../../../src/state/workspace-state", () => ({
-	getRuntimeHomePath: () => testRuntimeHome.path,
-	loadWorkspaceBoardById: async () => ({
+const testRuntimeHome = {
+	path: "",
+	mainTaskConversationSessionId: "",
+	sessions: {} as Record<string, RuntimeTaskSessionSummary>,
+};
+function workspaceBoard() {
+	return {
 		columns: [
 			{
-				cards: testRuntimeHome.mainTaskConversationSessionId
-					? [{ id: TASK_ID, mainTaskConversationSessionId: testRuntimeHome.mainTaskConversationSessionId }]
-					: [],
+				cards: [
+					{
+						id: TASK_ID,
+						mainTaskConversationSessionId: testRuntimeHome.mainTaskConversationSessionId || undefined,
+					},
+				],
 			},
 		],
-	}),
+	};
+}
+vi.mock("../../../src/state/workspace-state", () => ({
+	getRuntimeHomePath: () => testRuntimeHome.path,
+	loadWorkspaceBoardById: async () => workspaceBoard(),
+	loadPersistedWorkspaceStateById: async () => ({ board: workspaceBoard(), sessions: testRuntimeHome.sessions }),
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));
@@ -164,6 +175,7 @@ function createHarness(
 		},
 		observe(summary: RuntimeTaskSessionSummary) {
 			currentSummary = summary;
+			testRuntimeHome.sessions[summary.taskId] = summary;
 			dispatcher.observeTaskSessionSummary(WORKSPACE_ID, summary);
 		},
 		// awaitDispatcherIdle=false：PTY 分支的出队尝试会一直等回执，先等它空闲就成了自己等自己。
@@ -228,6 +240,7 @@ async function readStates() {
 let harnessToStop: ReturnType<typeof createHarness> | null = null;
 
 beforeEach(async () => {
+	testRuntimeHome.sessions = { [TASK_ID]: stoppedSummary(1) };
 	testRuntimeHome.mainTaskConversationSessionId = "";
 	testRuntimeHome.path = await mkdtemp(join(tmpdir(), "kanban-queued-programmatic-dispatch-"));
 	await mkdir(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID), { recursive: true });

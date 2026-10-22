@@ -20,7 +20,11 @@ import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal
 import { createRuntimeApi } from "../../../src/trpc/runtime-api";
 import { sendTaskChatMessageAcrossSessionTransports } from "../../../src/trpc/task-chat-message-send-across-session-transports";
 
-const workspace = vi.hoisted(() => ({ root: "", directory: "" }));
+const workspace = vi.hoisted(() => ({
+	root: "",
+	directory: "",
+	persistedConversationSessions: {} as Record<string, RuntimeTaskSessionSummary>,
+}));
 const createdDispatchers: Array<ReturnType<typeof createQueuedTaskPromptDeliveryDispatcher>> = [];
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => workspace.root,
@@ -29,12 +33,19 @@ vi.mock("../../../src/state/workspace-state", () => ({
 	loadWorkspaceBoardById: async () => ({
 		columns: [{ id: "review", cards: [{ id: "task", mainTaskConversationSessionId: "main-session" }] }],
 	}),
+	loadPersistedWorkspaceStateById: async () => ({
+		board: {
+			columns: [{ id: "review", cards: [{ id: "task", mainTaskConversationSessionId: "main-session" }] }],
+		},
+		sessions: workspace.persistedConversationSessions,
+	}),
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(),
 }));
 beforeEach(async () => {
 	workspace.root = await mkdtemp(join(tmpdir(), "rvf-closeout-stop-"));
 	workspace.directory = join(workspace.root, "workspace");
 	await mkdir(workspace.directory);
+	workspace.persistedConversationSessions = {};
 });
 afterEach(async () => {
 	for (const dispatcher of createdDispatchers.splice(0)) dispatcher.stop();
@@ -132,6 +143,7 @@ async function setup() {
 			observedAt: 1,
 		},
 	};
+	workspace.persistedConversationSessions = { [summary.taskId]: summary };
 	let observer: TaskChatInputDeliveryOutcomeObserver | undefined;
 	const terminalOptions: Array<{ validateBeforeTerminalWrite?: () => Promise<void> }> = [];
 	const terminalManager = {

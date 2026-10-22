@@ -249,7 +249,7 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 
 	function createSendingApi(manager: TerminalSessionManager, acpSummary: RuntimeTaskSessionSummary | null = null) {
 		const acpService = {
-			getSummary: vi.fn(() => acpSummary),
+			getSummary: vi.fn((sessionId: string) => (sessionId === acpSummary?.taskId ? acpSummary : null)),
 			sendTaskSessionInput: vi.fn(async () => acpSummary),
 			listMessages: vi.fn(() => [
 				{ id: "human-message", role: "user", content: humanPrompt, createdAt: Date.now() },
@@ -296,6 +296,142 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 		);
 		return outcomes;
 	}
+
+	it.each(["main", "task_collaborator", "home"] as const)(
+		"真人面板以会话 ID 直寻址可发送给未落盘的 ACP %s 会话",
+		async (role) => {
+			const sessionId = role === "home" ? `__home_agent__:${scope.workspaceId}:omp` : `omp-${role}`;
+			const baseSummary = createSession(sessionId, "codex");
+			if (!baseSummary.taskConversationSessionMetadata) throw new Error("测试会话缺少任务归属");
+			const summary: RuntimeTaskSessionSummary = {
+				...baseSummary,
+				agentId: "omp",
+				sessionTransport: "acp_stdio_subprocess",
+				taskConversationSessionMetadata:
+					role === "home"
+						? undefined
+						: {
+								...baseSummary.taskConversationSessionMetadata,
+								taskConversationSessionRole: role,
+							},
+			};
+			const { api, acpService } = createSendingApi(new TerminalSessionManager(), summary);
+			expect(
+				await api.sendTaskChatMessage(
+					scope,
+					{ taskId: sessionId, targetTaskConversationSessionId: sessionId, text: humanPrompt },
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+				),
+			).toMatchObject({ ok: true });
+			expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(sessionId, humanPrompt, undefined);
+		},
+	);
+
+	it("CLI 显式即时投递可使用尚未落盘的 legacy 主会话", async () => {
+		delete currentCard().mainTaskConversationSessionId;
+		delete currentCard().taskMainSessionHandover;
+		persistedState.sessions = {};
+		const manager = new TerminalSessionManager();
+		const summary = { ...createSession("task-1", "codex"), taskConversationSessionMetadata: undefined };
+		installTerminalSession(manager, summary);
+		const submit = vi.spyOn(manager, "submitTaskChatInputWhenReady");
+		expect(
+			await createSendingApi(manager).api.sendTaskChatMessage(
+				scope,
+				{ taskId: "task-1", targetTaskConversationSessionId: "task-1", text: humanPrompt, source: "rvf" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).toMatchObject({ ok: true });
+		expect(submit).toHaveBeenCalledWith("task-1", humanPrompt, expect.any(Object));
+	});
+
+	it.each(["foreign-owner", "inconsistent-id"])("当前摘要 %s 不能被旧持久摘要放行", async (scenario) => {
+		const manager = new TerminalSessionManager();
+		const summary = structuredClone(persistedState.sessions[targetSessionId]);
+		if (!summary.taskConversationSessionMetadata) throw new Error("测试会话缺少任务归属");
+		if (scenario === "foreign-owner") summary.taskConversationSessionMetadata.workspaceTaskId = "another-task";
+		const { entry } = installTerminalSession(manager, summary);
+		if (scenario === "inconsistent-id") entry.summary.taskId = "another-session";
+		const submit = vi.spyOn(manager, "submitTaskChatInputWhenReady");
+		expect(
+			await createSendingApi(manager).api.sendTaskChatMessage(
+				scope,
+				{ taskId: "task-1", targetTaskConversationSessionId: targetSessionId, text: humanPrompt },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).toMatchObject({ ok: false });
+		expect(submit).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"unknown-session",
+		"deleted-host",
+		"foreign-workspace-home",
+		"programmatic-home",
+		"different-explicit-target",
+	])("会话直寻址仍拒绝 %s，不触达 transport", async (scenario) => {
+		const sessionId = scenario.includes("home")
+			? `__home_agent__:${scenario === "foreign-workspace-home" ? "another-workspace" : scope.workspaceId}:omp`
+			: scenario === "unknown-session"
+				? "unknown-direct-session"
+				: targetSessionId;
+		const summary: RuntimeTaskSessionSummary = {
+			...createSession(sessionId, "codex"),
+			agentId: "omp",
+			sessionTransport: "acp_stdio_subprocess",
+		};
+		if (scenario === "deleted-host") persistedState.board.columns[0].cards = [];
+		const manager = new TerminalSessionManager();
+		const submit = vi.spyOn(manager, "submitTaskChatInputWhenReady");
+		const { api, acpService } = createSendingApi(manager, scenario === "unknown-session" ? null : summary);
+		expect(
+			await api.sendTaskChatMessage(
+				scope,
+				{
+					taskId: scenario === "different-explicit-target" ? "another-session" : sessionId,
+					targetTaskConversationSessionId: sessionId,
+					text: humanPrompt,
+					...(scenario === "programmatic-home" || scenario === "deleted-host" ? { source: "rvf" } : {}),
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).toMatchObject({ ok: false });
+		expect(acpService.sendTaskSessionInput).not.toHaveBeenCalled();
+		expect(submit).not.toHaveBeenCalled();
+	});
+
+	it.each(["missing-session", "foreign-session", "deleted-card"])(
+		"runtime 在 transport 前拒绝显式目标 %s",
+		async (scenario) => {
+			const manager = new TerminalSessionManager();
+			const send = vi.spyOn(manager, "submitTaskChatInputWhenReady");
+			const { api } = createSendingApi(manager);
+			const requestedSession = scenario === "deleted-card" ? targetSessionId : scenario;
+			if (scenario === "foreign-session") {
+				const original = persistedState.sessions[targetSessionId];
+				if (!original.taskConversationSessionMetadata) throw new Error("测试会话缺少任务归属");
+				persistedState.sessions[scenario] = {
+					...original,
+					taskId: scenario,
+					taskConversationSessionMetadata: {
+						...original.taskConversationSessionMetadata,
+						workspaceTaskId: "another-task",
+					},
+				};
+			}
+			if (scenario === "deleted-card") {
+				for (const column of persistedState.board.columns) column.cards = [];
+			}
+			expect(
+				await api.sendTaskChatMessage(
+					scope,
+					{ taskId: "task-1", targetTaskConversationSessionId: requestedSession, text: "精确目标" },
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+				),
+			).toMatchObject({ ok: false });
+			expect(send).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each(["awaiting_user_message", "failed"] as const)("无活跃终端时保留 %s 与暂停状态", async (status) => {
 		currentCard().taskMainSessionHandover = createHandover(status);

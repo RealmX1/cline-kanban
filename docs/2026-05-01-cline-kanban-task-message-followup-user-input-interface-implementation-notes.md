@@ -1,5 +1,9 @@
 # Cline Kanban `task message` Follow-up User Input Interface Handoff
 
+> 2026-10-22 更新：本文保留五月实现的历史记录。`attempt_id === task_id` 是独立会话模型出现前的临时限制，现已移除。
+> 当前 `--task-id` 指宿主卡片，`--attempt-id` 指该卡片所属的目标会话，省略目标时选择当前主会话；即时与排队投递均校验归属。
+> 新账本记录的 `attempt_id` 保存受理时选定的实际会话；排队、原生身份校验及 incarnation 均固定该目标。省略目标的同 key 重试沿用首次绑定，显式改目标或改变原生身份要求时报幂等冲突。旧记录不补写或重新投递。
+
 Annotated copy of original plan:
 `/Users/bominzhang/Documents/GitHub/review-validate-fix/docs/2026-05-01-cline-kanban-task-message-followup-user-input-interface-handoff-for-rvf-kanban-followup.md`
 

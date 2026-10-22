@@ -20,9 +20,10 @@ import type {
 } from "../core/api-contract";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
-import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
+import { resolveTaskChatMessageTargetConversationSessionSummary } from "../core/task-main-conversation-session-binding";
 import {
 	createPendingTaskMessageInjectionRecord,
+	doesTaskMessageInjectionRecordMatchRequestedConversationSession,
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
@@ -33,7 +34,7 @@ import {
 	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
-import { getWorkspaceDirectoryPath, loadWorkspaceBoardById } from "../state/workspace-state";
+import { getWorkspaceDirectoryPath, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 调用方最多能要求等多久。与人排条目的保质期同一个数：队列里任何条目都不该活过它（终态保留、裁剪、
 // 投影都按这个量级设计）。契约里写的是 86 400 000。
@@ -58,6 +59,7 @@ type InjectionLedgerPreflightOutcome =
 	| "idempotency_conflict"
 	| "already_existed"
 	| "created"
+	| "target_session_mismatch"
 	| "native_requirement_mismatch";
 
 export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
@@ -80,11 +82,30 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			error: `maxWaitForAgentIdleMs must not exceed ${MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS} (24 hours).`,
 		};
 	}
-	const board = await loadWorkspaceBoardById(workspaceId);
-	const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
-	const destinationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
+	const { board, sessions } = await loadPersistedWorkspaceStateById(workspaceId);
+	const cards = board.columns.flatMap((column) => column.cards);
+	const addressedConversationSession = deps.getTaskSessionSummary?.(taskId) ?? sessions[taskId];
+	// 内部自动收尾沿用会话 ID 寻址；先核实真实宿主卡片，再保留调用方原有的账本键。
+	const card =
+		cards.find((candidate) => candidate.id === taskId) ??
+		cards.find(
+			(candidate) =>
+				addressedConversationSession?.taskId === taskId &&
+				candidate.id === addressedConversationSession.taskConversationSessionMetadata?.workspaceTaskId,
+		);
+	const requestedConversationSessionId = request.attemptId?.trim() || undefined;
+	const destinationSummary = card
+		? resolveTaskChatMessageTargetConversationSessionSummary(
+				card,
+				sessions,
+				requestedConversationSessionId ?? (card.id !== taskId ? taskId : undefined),
+				deps.getTaskSessionSummary,
+			)
+		: null;
+	const destinationSessionId = destinationSummary?.taskId;
 	const requiredSessionId = request.requiredNativeIndependentUserTurnSessionId;
-	const requiredSummary = requiredSessionId ? deps.getTaskSessionSummary?.(destinationSessionId) : null;
+	const requiredSummary =
+		requiredSessionId && destinationSessionId ? deps.getTaskSessionSummary?.(destinationSessionId) : null;
 	const requiredSessionIncarnationId = requiredSummary?.runtimeSessionIncarnationId;
 	const nativeRequirement = requiredSessionId
 		? {
@@ -107,14 +128,20 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				return {
 					result:
 						existing.prompt_sha256 === request.promptSha256 &&
+						doesTaskMessageInjectionRecordMatchRequestedConversationSession(
+							existing,
+							requestedConversationSessionId,
+						) &&
 						existing.required_native_independent_user_turn_session_id === requiredSessionId
 							? "already_existed"
 							: "idempotency_conflict",
 				};
 			}
+			if (!destinationSessionId) return { result: "target_session_mismatch" };
 			if (
 				requiredSessionId &&
 				(!requiredSessionIncarnationId ||
+					requiredSummary?.taskId !== destinationSessionId ||
 					requiredSummary?.agentId !== "codex" ||
 					requiredSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== requiredSessionId)
 			)
@@ -122,7 +149,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			const nowIso = new Date(nowEpochMs).toISOString();
 			const created = createPendingTaskMessageInjectionRecord({
 				taskId,
-				...(request.attemptId ? { attemptId: request.attemptId } : {}),
+				attemptId: destinationSessionId,
 				source,
 				idempotencyKey,
 				promptSha256: request.promptSha256,
@@ -136,13 +163,14 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			return { records: [...records, created], result: "created" };
 		},
 	);
+	if (preflight === "target_session_mismatch") return { ok: false, error: "目标会话不存在或不属于该任务。" };
 	if (preflight === "native_requirement_mismatch")
 		return { ok: false, error: "独立原生回合要求与当前 Codex 会话身份不符。" };
 	if (preflight === "idempotency_conflict") {
 		return {
 			ok: false,
 			idempotencyConflict: true,
-			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash or required native session differs.`,
+			error: `Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash, target conversation session or required native session differs.`,
 		};
 	}
 	// 同 key 重发（记录早已存在）：幂等的定义就是「什么都不做，返回当前记录」——无论它已落定、是一条立即投递，
@@ -159,6 +187,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	if (preflight === "already_existed") {
 		return { ok: true, injectionLedgerRecordDisposition: preflight };
 	}
+	if (!destinationSessionId) return { ok: false, error: "目标会话不存在或不属于该任务。" };
 
 	// 第二段（账本锁外）：入队。只有本次调用新建了记录才走到这里，截止时刻就是刚写进记录的那个。
 	let queueSnapshotAfterDurableEnqueue: WorkspaceQueuedTaskPromptDeliverySnapshot;

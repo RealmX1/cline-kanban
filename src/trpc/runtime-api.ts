@@ -96,7 +96,7 @@ import {
 	parseTerminalAgentModelSelectionOptionsRequest,
 } from "../core/api-validation";
 import { formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt } from "../core/harness-generated-restoration-prompt";
-import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { isHomeAgentSessionId, isHomeAgentSessionIdForWorkspace } from "../core/home-agent-session";
 import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import {
 	isSessionInActiveTurn,
@@ -115,6 +115,7 @@ import {
 	doesConversationSessionBelongToTask,
 	projectConversationSessionMetadataForMainSessionBinding,
 	resolveMainTaskConversationSessionId,
+	resolveTaskChatMessageTargetConversationSessionSummary,
 } from "../core/task-main-conversation-session-binding";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
@@ -2781,11 +2782,41 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const resolvedSessionId =
 				input.targetTaskConversationSessionId ??
 				(addressedCard ? resolveMainTaskConversationSessionId(addressedCard) : input.taskId);
-			if (input.targetTaskConversationSessionId && addressedCard) {
-				const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
-				const selected = state.sessions[resolvedSessionId];
-				if (!selected || !doesConversationSessionBelongToTask(selected, addressedCard.id)) {
-					return { ok: false, summary: null, error: "所选会话不属于该任务。" };
+			if (input.targetTaskConversationSessionId !== undefined) {
+				const [state, acpService, terminalManager] = await Promise.all([
+					loadPersistedWorkspaceStateById(workspaceScope.workspaceId),
+					deps.getScopedAcpTaskSessionService(workspaceScope),
+					deps.getScopedTerminalManager(workspaceScope),
+				]);
+				const getCurrentTaskSessionSummary = (sessionId: string) =>
+					acpService.getSummary?.(sessionId) ?? terminalManager.getSummary?.(sessionId) ?? null;
+				const summary = getCurrentTaskSessionSummary(resolvedSessionId) ?? state.sessions[resolvedSessionId];
+				const addressesConversationSessionDirectly = input.taskId === resolvedSessionId;
+				// 真人 home 面板没有卡片，也允许首条消息沿既有路径启动会话；自动投递仍必须有真实宿主卡片。
+				const addressesWorkspaceHomeAgent =
+					input.source == null &&
+					addressesConversationSessionDirectly &&
+					isHomeAgentSessionIdForWorkspace(resolvedSessionId, workspaceScope.workspaceId) &&
+					(!summary || summary.taskId === resolvedSessionId);
+				if (!addressesWorkspaceHomeAgent) {
+					if (isHomeAgentSessionId(resolvedSessionId)) {
+						return { ok: false, summary: null, error: "home agent 消息必须由所属工作区的真人面板发送。" };
+					}
+					const owningCard =
+						addressedCard ??
+						(addressesConversationSessionDirectly && summary?.taskId === resolvedSessionId
+							? findWorkspaceBoardCard(board, summary.taskConversationSessionMetadata?.workspaceTaskId ?? "")
+							: null);
+					if (!owningCard) return { ok: false, summary: null, error: "目标任务不存在。" };
+					const selected = resolveTaskChatMessageTargetConversationSessionSummary(
+						owningCard,
+						state.sessions,
+						resolvedSessionId,
+						getCurrentTaskSessionSummary,
+					);
+					if (!selected) {
+						return { ok: false, summary: null, error: "所选会话不属于该任务。" };
+					}
 				}
 			}
 			input = { ...input, taskId: resolvedSessionId };
@@ -3188,11 +3219,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			kanbanRequestOriginActorEvidence,
 		) => {
 			try {
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const [terminalManager, acpService] = await Promise.all([
+					deps.getScopedTerminalManager(workspaceScope),
+					deps.getScopedAcpTaskSessionService(workspaceScope),
+				]);
 				const enqueueResponse = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 					{
 						notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated,
-						getTaskSessionSummary: (taskId) => terminalManager.getSummary(taskId),
+						getTaskSessionSummary: (taskId) =>
+							acpService.getSummary?.(taskId) ?? terminalManager.getSummary(taskId),
 					},
 					workspaceScope.workspaceId,
 					input,

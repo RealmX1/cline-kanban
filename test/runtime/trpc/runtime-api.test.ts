@@ -81,6 +81,7 @@ const persistedAgentTranscriptModelProbeMocks = vi.hoisted(() => ({
 
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
+	loadPersistedConversationSessions: vi.fn(() => ({})),
 	mutateWorkspaceState: vi.fn(),
 	// Prompt Library 的全局桶落在 kanban 根目录下。测试要一个自己的根，否则终端暂存用例会在
 	// 开发者**真实**的 ~/.cline/kanban 上取锁写文件。每次运行取唯一路径，避免并行 worker 互踩。
@@ -196,7 +197,7 @@ vi.mock(
 
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadPersistedWorkspaceStateById: async () => ({
-		sessions: {},
+		sessions: workspaceStateMocks.loadPersistedConversationSessions(),
 		board: await workspaceStateMocks.loadWorkspaceBoardById(),
 	}),
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
@@ -6891,12 +6892,15 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 	function createQueueApi(
 		scope: { workspaceId: string },
 		dispatcher: CreateRuntimeApiDependencies["queuedTaskPromptDeliveryDispatcher"],
+		currentSessionSummaries: Record<string, RuntimeTaskSessionSummary> = {},
 	) {
 		return createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedTerminalManager: vi.fn(
+				async () => ({ getSummary: (taskId: string) => currentSessionSummaries[taskId] ?? null }) as never,
+			),
 			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -7049,7 +7053,37 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 		expect(recordUserQueued).toHaveBeenCalledTimes(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK);
 	});
 
+	it("CLI 显式排队在持久摘要为空时使用当前 legacy 主会话", async () => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({ columns: [{ cards: [{ id: "task-1" }] }] });
+		workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue({});
+		const scope = createQueueWorkspaceScope();
+		const dispatcher = createDispatcherDouble();
+		const api = createQueueApi(scope, dispatcher, { "task-1": createSummary({ taskId: "task-1" }) });
+		expect(
+			await api.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				scope,
+				{
+					taskId: "task-1",
+					attemptId: "task-1",
+					text: "尚未落盘的主会话",
+					source: "rvf",
+					idempotencyKey: "live-legacy",
+					promptSha256: "sha-live-legacy",
+					maxWaitForAgentIdleMs: 600_000,
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).toMatchObject({ ok: true, injectionLedgerRecordDisposition: "created" });
+		expect(dispatcher.notifyQueueMutated).toHaveBeenCalledWith(scope.workspaceId, "task-1", expect.any(Object));
+	});
+
 	it("CLI 空闲门控入队只在新建注入账本记录时记投递请求，同 key 重发不记", async () => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ cards: [{ id: "task-1" }] }],
+		});
+		workspaceStateMocks.loadPersistedConversationSessions.mockReturnValueOnce({
+			"task-1": createSummary({ taskId: "task-1" }),
+		});
 		const recordAgentIdleGated =
 			queuedTaskMessageDeliveryRecordingMocks.recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking;
 		recordAgentIdleGated.mockClear();

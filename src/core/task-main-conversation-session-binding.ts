@@ -32,8 +32,19 @@ export function resolveMainTaskConversationSessionSummary(
 	card: TaskMainConversationSessionCardIdentity,
 	sessions: Readonly<Record<string, RuntimeTaskSessionSummary>>,
 ): RuntimeTaskSessionSummary | null {
-	const summary = sessions[resolveMainTaskConversationSessionId(card)];
-	return summary && doesConversationSessionBelongToTask(summary, card.id) ? summary : null;
+	return resolveTaskChatMessageTargetConversationSessionSummary(card, sessions);
+}
+
+export function resolveTaskChatMessageTargetConversationSessionSummary(
+	card: TaskMainConversationSessionCardIdentity,
+	sessions: Readonly<Record<string, RuntimeTaskSessionSummary>>,
+	targetTaskConversationSessionId?: string,
+	getCurrentTaskSessionSummary?: (sessionId: string) => RuntimeTaskSessionSummary | null,
+): RuntimeTaskSessionSummary | null {
+	const sessionId = targetTaskConversationSessionId ?? resolveMainTaskConversationSessionId(card);
+	// 活动 manager 的摘要优先；它已存在但归属或 ID 不符时，不能用陈旧持久摘要放行。
+	const summary = getCurrentTaskSessionSummary?.(sessionId) ?? sessions[sessionId];
+	return summary?.taskId === sessionId && doesConversationSessionBelongToTask(summary, card.id) ? summary : null;
 }
 
 export function projectConversationSessionMetadataForMainSessionBinding(
