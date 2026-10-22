@@ -65,6 +65,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 			{showsUncommittedChangeSummary && snapshot.changedFiles != null ? (
 				<span>
 					<WorktreeUncommittedChangeSummaryIndicator
+						showUncommittedChangeBackground
 						changedFiles={snapshot.changedFiles}
 						additions={snapshot.additions ?? 0}
 						deletions={snapshot.deletions ?? 0}
@@ -72,6 +73,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 				</span>
 			) : null}
 			<TaskRetainedCommittedLineChangeIndicator
+				showCommittedChangeBackground
 				workspaceId={workspaceId}
 				taskId={entry.taskId}
 				baseRef={entry.baseRef ?? "main"}
