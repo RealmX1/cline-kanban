@@ -33,23 +33,31 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	parenthesesAndChangedFileCountStyle?: CSSProperties;
 	showUncommittedChangeBackground?: boolean;
 }): ReactElement {
-	const mutedProps = {
-		className: parenthesesAndChangedFileCountClassName,
-		style: parenthesesAndChangedFileCountStyle,
-	};
+	const mutedProps = showUncommittedChangeBackground
+		? {}
+		: {
+				className: parenthesesAndChangedFileCountClassName,
+				style: parenthesesAndChangedFileCountStyle,
+			};
+	const additionsTextColorClassName = showUncommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-green)_30%,var(--color-text-primary))]"
+		: "text-status-green";
+	const deletionsTextColorClassName = showUncommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-red)_30%,var(--color-text-primary))]"
+		: "text-status-red";
 	const changeSummary = (
 		<>
 			<span {...mutedProps}>(</span>
 			<span {...mutedProps}>
 				{changedFiles} {changedFiles === 1 ? "file" : "files"}
 			</span>
-			<span className="text-status-green"> +{additions}</span>
-			<span className="text-status-red"> -{deletions}</span>
+			<span className={additionsTextColorClassName}> +{additions}</span>
+			<span className={deletionsTextColorClassName}> -{deletions}</span>
 			<span {...mutedProps}>)</span>
 		</>
 	);
 	return showUncommittedChangeBackground ? (
-		<span className="inline-block rounded-sm bg-status-orange/15 px-0.5 align-baseline whitespace-nowrap">
+		<span className="inline-block rounded-sm bg-status-orange/30 px-0.5 align-baseline whitespace-nowrap text-text-primary ring-1 ring-inset ring-status-orange/70">
 			{changeSummary}
 		</span>
 	) : (
