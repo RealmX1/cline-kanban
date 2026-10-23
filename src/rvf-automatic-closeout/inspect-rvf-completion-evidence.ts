@@ -23,6 +23,31 @@ const finalizeSchema = z.object({
 	errors: z.array(z.unknown()).length(0),
 });
 export async function inspectRvfCompletionEvidence(record: RvfAutomaticCloseoutRecord, rvfHome: string) {
+	if (record.runDirectory) {
+		try {
+			const registration = z
+				.object({
+					run_id: z.string(),
+					decision_token: z.string(),
+					status: z.enum(["pending", "registered", "disabled"]),
+				})
+				.parse(
+					JSON.parse(
+						await readFile(
+							join(record.runDirectory, "artifacts", "automatic-closeout-registration.json"),
+							"utf8",
+						),
+					),
+				);
+			if (registration.run_id !== record.runId || registration.decision_token !== record.receipt.decision_token)
+				throw new Error("自动收尾注册记录的 run/token 绑定不一致。");
+			if (registration.status === "disabled")
+				throw new Error("本轮自动收尾注册未确认，已交接人工收尾；不自动恢复或投递。");
+			if (registration.status === "pending") return null;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
 	const path = join(rvfHome, "automatic-closeout-completion-notifications", `${record.receipt.decision_token}.json`);
 	let raw: string;
 	try {
@@ -65,10 +90,7 @@ export async function inspectRvfCompletionEvidence(record: RvfAutomaticCloseoutR
 		throw new Error("RVF 完成凭据与开审身份不一致。");
 	const runDirectory = await realpath(completion.run_dir);
 	const expectedHandoff = join(runDirectory, "artifacts", "handoff.md");
-	if (
-		completion.run_id !== runDirectory.split(/[\\/]/u).at(-1) ||
-		(await realpath(completion.handoff_path)) !== expectedHandoff
-	)
+	if ((await realpath(completion.handoff_path)) !== expectedHandoff)
 		throw new Error("RVF 完成凭据的 run 或 handoff 路径错误。");
 	const binding = z
 		.object({ run_id: z.string(), run_dir: z.string(), receipt_sha256: z.string() })

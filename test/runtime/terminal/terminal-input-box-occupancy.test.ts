@@ -328,8 +328,39 @@ describe("resolveTerminalInputBoxOccupancy — 两路保守的并", () => {
 		expect(occupancy).toEqual({
 			hasUncommittedInput: false,
 			inputSideByteTrackingSaysNonEmpty: false,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
 			screenReadingSaysNonEmpty: false,
 			unrecoverablePasteCount: 0,
+		});
+	});
+	it.each(["", CURSOR_UP, BACKSPACE, "补充草稿", LINE_FEED])(
+		"未知起点的空账本不会被后续普通输入 %j 变成可信空框",
+		(inputText) => {
+			const state = createTerminalInputBoxOccupancyTrackerState("unknown");
+			feed(state, inputText);
+			const occupancy = resolveTerminalInputBoxOccupancy({ trackerState: state, inputBoxReading: null });
+			expect(occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition).toBe(false);
+		},
+	);
+	it.each([CARRIAGE_RETURN, CTRL_C, CTRL_S])("明确提交或整框清空 %j 为接管后的跟踪建立已知空起点", (inputText) => {
+		const state = createTerminalInputBoxOccupancyTrackerState("unknown");
+		feed(state, `补充草稿${inputText}`);
+		expect(resolveTerminalInputBoxOccupancy({ trackerState: state, inputBoxReading: null })).toMatchObject({
+			hasUncommittedInput: false,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+		});
+		feed(state, "下一份草稿");
+		expect(resolveTerminalInputBoxOccupancy({ trackerState: state, inputBoxReading: null })).toMatchObject({
+			hasUncommittedInput: true,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+		});
+	});
+	it("粘贴载荷内的回车不会替未知组合建立空框起点", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState("unknown");
+		feed(state, `${PASTE_START}第一行${CARRIAGE_RETURN}第二行${PASTE_END}`);
+		expect(resolveTerminalInputBoxOccupancy({ trackerState: state, inputBoxReading: null })).toMatchObject({
+			hasUncommittedInput: true,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: false,
 		});
 	});
 

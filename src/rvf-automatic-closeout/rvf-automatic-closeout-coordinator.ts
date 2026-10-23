@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { RvfAutomaticCloseoutRecord } from "../core/rvf-automatic-closeout-contract";
+import type {
+	RvfAutomaticCloseoutRecord,
+	RvfAutomaticCloseoutWaitingReasonCode,
+} from "../core/rvf-automatic-closeout-contract";
 import {
 	RvfAutomaticCloseoutRecordOperationClaimLostError,
 	readRvfAutomaticCloseoutRecords,
@@ -7,7 +10,14 @@ import {
 	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
 
-export class RvfAutomaticCloseoutWaitError extends Error {}
+export class RvfAutomaticCloseoutWaitError extends Error {
+	constructor(
+		public readonly reasonCode: RvfAutomaticCloseoutWaitingReasonCode = "automatic_closeout_precondition_not_ready",
+		message = "自动收尾的前置条件尚未就绪。",
+	) {
+		super(message);
+	}
+}
 export class RvfAutomaticCloseoutPauseError extends Error {}
 export type RvfCompletionEvidence = Pick<
 	RvfAutomaticCloseoutRecord,
@@ -22,6 +32,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 	) => Promise<void>;
 	enqueue: (record: RvfAutomaticCloseoutRecord, assertOperationStillOwned: () => Promise<void>) => Promise<void>;
 	onPaused?: (record: RvfAutomaticCloseoutRecord) => Promise<unknown>;
+	onWaiting?: (record: RvfAutomaticCloseoutRecord) => Promise<unknown>;
 }) {
 	let inFlight: Promise<void> | null = null;
 	async function processRecord(
@@ -58,10 +69,12 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					const current = records.find((entry) => entry.receipt.decision_token === token);
 					if (current?.activeCoordinatorOperationClaimId !== claimId)
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError("自动收尾记录已被其他运行时认领。");
-					if (current.status === "paused") {
+					if (current.status === "paused" || current.status === "completed") {
 						record = current;
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError(
-							current.pauseReason ?? "自动收尾已暂停。",
+							current.status === "completed"
+								? "自动收尾已完成，不能覆盖终态。"
+								: (current.pauseReason ?? "自动收尾已暂停。"),
 						);
 					}
 					const replacement = {
@@ -89,7 +102,13 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 				}
 				if (record.status === "restoring_pre_review_conversation") {
 					await deps.restore(record, save);
-					await save({ status: "restored_pre_review_conversation" });
+					await save({
+						status: "restored_pre_review_conversation",
+						waitingReasonCode: null,
+						waitingReason: null,
+						waitingSince: null,
+						waitingNotificationSentAt: null,
+					});
 				}
 				if (
 					record.status === "restored_pre_review_conversation" ||
@@ -98,14 +117,33 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					await save({ status: "submitting_closeout_prompt" });
 					// 同一持久幂等键贯穿重启；投递账本不确定时不能生成新键绕过它。
 					await deps.enqueue(record, () => save({}));
-					await save({ status: "closeout_prompt_submitted" });
+					await save({
+						status: "closeout_prompt_submitted",
+						waitingReasonCode: null,
+						waitingReason: null,
+						waitingSince: null,
+						waitingNotificationSentAt: null,
+					});
 				}
 			} catch (error) {
-				if (
-					error instanceof RvfAutomaticCloseoutWaitError ||
-					error instanceof RvfAutomaticCloseoutRecordOperationClaimLostError
-				)
+				if (error instanceof RvfAutomaticCloseoutRecordOperationClaimLostError) return;
+				if (error instanceof RvfAutomaticCloseoutWaitError) {
+					if (record.waitingReasonCode !== error.reasonCode || record.waitingSince == null)
+						await save({
+							waitingReasonCode: error.reasonCode,
+							waitingReason: error.message,
+							waitingSince: Date.now(),
+							waitingNotificationSentAt: null,
+						});
+					if (
+						record.waitingNotificationSentAt == null &&
+						Date.now() - (record.waitingSince ?? Date.now()) >= 30_000
+					) {
+						await deps.onWaiting?.(record);
+						await save({ waitingNotificationSentAt: Date.now() });
+					}
 					return;
+				}
 				if (!(error instanceof RvfAutomaticCloseoutPauseError)) throw error;
 				if (record.status !== "paused") await save({ status: "paused", pauseReason: error.message });
 				await deps.onPaused?.(record);

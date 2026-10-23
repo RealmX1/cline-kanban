@@ -328,6 +328,11 @@ describe("RVF 开审分界的打包态宿主与进程重启", { timeout: package
 			);
 			const run = join(rvfHome, "run-logs", "runs", "bound-native-run");
 			await mkdir(join(run, "inputs"), { recursive: true });
+			await mkdir(join(run, "artifacts", "inputs"), { recursive: true });
+			await writeFile(
+				join(run, "artifacts", "inputs", "scope.contract.json"),
+				JSON.stringify({ run_id: "bound-native-run" }),
+			);
 			await writeFile(
 				join(run, "inputs", "automatic-closeout-review-start-receipt.json"),
 				JSON.stringify(first.receipt),
