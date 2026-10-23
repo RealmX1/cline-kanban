@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
+import {
+	resolveLastAgentConversationPromptCacheReferenceObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "../../../src/core/agent-conversation-activity-observation";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeTaskSessionSummary,
 } from "../../../src/core/api-contract";
-import { collectInProgressTaskDetailsFromBoard } from "../../../src/server/in-progress-task-detail-projection";
+import {
+	buildTaskActivityDetailFromBoardCardAndTaskSessionFacts,
+	collectInProgressTaskDetailsFromBoard,
+	extractTaskSessionFactsForCrossProjectTaskViews,
+} from "../../../src/server/in-progress-task-detail-projection";
 
 // in_progress 明细投影（顶栏项目切换器的 live 计数读它）。核心不变量：按「列归属」取 in_progress 列全部卡，
 // awaiting_review 的卡不被挪走；无 session 的卡回退 null/none。
@@ -58,6 +66,68 @@ function sessionsOf(...summaries: RuntimeTaskSessionSummary[]): Record<string, R
 }
 
 describe("collectInProgressTaskDetailsFromBoard", () => {
+	it("明确清空的新活动、缓存、交棒与接受字段必须保留null，不能复活旧值", () => {
+		const facts = extractTaskSessionFactsForCrossProjectTaskViews(
+			makeSummary({
+				lastEffectiveAgentConversationActivityObservation: null,
+				lastAgentConversationPromptCacheReferenceObservation: null,
+				lastAgentConversationUserHandoffObservation: null,
+				agentConversationPromptSubmissionAcceptance: null,
+				lastConversationProgressObservation: { observedAtMs: 100, evidenceKind: "persisted_agent_transcript" },
+				lastMainAgentConversationModelRequestDispatchObservation: {
+					observedAtMs: 200,
+					evidenceKind: "post_tool_use_hook_event",
+				},
+				agentResponseGenerationStopped: {
+					stoppedAt: 300,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 1,
+				},
+			}),
+		);
+		const detail = buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(makeCard("task-1"), facts);
+		for (const field of [
+			"lastEffectiveAgentConversationActivityObservation",
+			"lastAgentConversationPromptCacheReferenceObservation",
+			"lastAgentConversationUserHandoffObservation",
+			"agentConversationPromptSubmissionAcceptance",
+		])
+			expect(detail).toHaveProperty(field, null);
+		expect(resolveLastEffectiveAgentConversationActivityObservation(detail)).toBeNull();
+		expect(resolveLastAgentConversationPromptCacheReferenceObservation(detail)).toBeNull();
+	});
+
+	it.each([undefined, "another-card"])("交接后主会话缺归属或归属错误（%s）时保持未知", (workspaceTaskId) => {
+		const board = makeBoard({ in_progress: ["card"] });
+		const card = board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (!card) throw new Error("缺少待交接的测试卡片");
+		card.mainTaskConversationSessionId = "new-main";
+		const metadata = workspaceTaskId
+			? {
+					workspaceTaskId,
+					taskConversationSessionRole: "main" as const,
+					taskConversationSessionContextSource: "main" as const,
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				}
+			: undefined;
+		const [detail] = collectInProgressTaskDetailsFromBoard(
+			board,
+			sessionsOf(
+				makeSummary({
+					taskId: "new-main",
+					state: "running",
+					taskConversationSessionMetadata: metadata,
+					lastConversationProgressObservation: { observedAtMs: 100, evidenceKind: "persisted_agent_transcript" },
+				}),
+			),
+		);
+		expect(detail).toMatchObject({ turnOwner: null, liveness: "none" });
+		expect(resolveLastEffectiveAgentConversationActivityObservation(detail)).toBeNull();
+	});
+
 	it("in_progress 列无卡 → 空数组", () => {
 		expect(collectInProgressTaskDetailsFromBoard(makeBoard({}), {})).toEqual([]);
 	});
@@ -111,8 +181,12 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				agentId: "claude",
 				createdAt: 0,
 				lastOutputAt: 0,
-				// 实质戳是真实进展，原样透传、不取整。
+				// 旧实质戳仅兼容透传，不能替代新的可信活动。
 				lastSubstantiveOutputAt: 4_000,
+				lastEffectiveAgentConversationActivityObservation: null,
+				lastAgentConversationPromptCacheReferenceObservation: null,
+				lastAgentConversationUserHandoffObservation: null,
+				agentConversationPromptSubmissionAcceptance: null,
 				// agent 回合期间没有停止事件；本用例的 summary 也没带推进观测 ⇒ 两颗都是 null。
 				agentResponseGenerationStopped: null,
 				lastConversationProgressObservation: null,

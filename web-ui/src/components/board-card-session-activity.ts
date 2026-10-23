@@ -221,7 +221,7 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		} else if (text.startsWith("Failed ")) {
 			dotColor = SESSION_ACTIVITY_COLOR.error;
 		} else if (text === "Agent active" || text === "Working on task" || text.startsWith("Resumed")) {
-			return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
+			return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" };
 		}
 		return { dotColor, text };
 	}
@@ -235,7 +235,7 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		return { dotColor, text: placeholder };
 	}
 	if (facets.turnOwner === "agent") {
-		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
+		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" };
 	}
 	return null;
 }

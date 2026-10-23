@@ -46,6 +46,12 @@ function summary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTas
 		lastHookAt: null,
 		latestHookActivity: null,
 		runtimeSessionIncarnationId: "incarnation-first",
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "claude",
+			nativeSessionId: "main",
+			transcriptPath: "/isolated/main.jsonl",
+			observedAt: 1,
+		},
 		...overrides,
 	});
 }
@@ -95,6 +101,37 @@ function createManuallyReleasedProbe() {
 }
 
 describe("持久转录推进观察器", () => {
+	it("转录读取跨 await 后复核原生身份，晚到结果不能写入新绑定", async () => {
+		let current = summary();
+		let release: ((observation: RuntimeLastConversationProgressObservation) => void) | undefined;
+		const probe = vi.fn(
+			() =>
+				new Promise<RuntimeLastConversationProgressObservation>((resolve) => {
+					release = resolve;
+				}),
+		);
+		const { manager, recorded } = createRecordingManager();
+		manager.getSummary = () => current;
+		const observer = createObserver({ probe, nowMs: () => 0 });
+		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, current, manager);
+		current = summary({
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "replacement",
+				transcriptPath: "/isolated/replacement.jsonl",
+				observedAt: 2,
+			},
+		});
+		release?.(TRANSCRIPT_OBSERVATION);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(recorded).toHaveLength(0);
+		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, current, manager);
+		expect(probe).toHaveBeenCalledTimes(2);
+		release?.(TRANSCRIPT_OBSERVATION);
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
+		observer.dispose();
+	});
+
 	it("首次见到一个任务即探测，并把结果写回管理器", async () => {
 		const probe = vi.fn(async () => TRANSCRIPT_OBSERVATION);
 		const { manager, recorded } = createRecordingManager();
@@ -104,12 +141,16 @@ describe("持久转录推进观察器", () => {
 		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		expect(probe).toHaveBeenCalledTimes(1);
-		expect(probe).toHaveBeenCalledWith({ agentId: "claude", workspacePath: "/tmp/worktree" });
+		expect(probe).toHaveBeenCalledWith({
+			agentId: "claude",
+			workspacePath: "/tmp/worktree",
+			agentNativeConversationSessionIdentity: summary().agentNativeConversationSessionIdentity,
+		});
 		expect(recorded[0]).toEqual({ taskId: "task-1", observation: TRANSCRIPT_OBSERVATION });
 	});
 
 	// 闸门①：不支持按工作目录寻址转录的 agent 一律不发起探测（否则就是给每个任务白跑一次读盘）。
-	it.each(["codex", "cursor", "gemini", "cline", "omp"] as const)("agent=%s ⇒ 不探测", async (agentId) => {
+	it.each(["cursor", "gemini", "cline"] as const)("agent=%s ⇒ 不探测", async (agentId) => {
 		const probe = vi.fn(async () => TRANSCRIPT_OBSERVATION);
 		const { manager } = createRecordingManager();
 		const observer = createObserver({ probe, nowMs: () => 0 });
@@ -119,12 +160,16 @@ describe("持久转录推进观察器", () => {
 		expect(probe).not.toHaveBeenCalled();
 	});
 
-	it("没有 workspacePath ⇒ 不探测（无从定位转录目录）", () => {
+	it("没有原生转录路径 ⇒ 不探测（不从 cwd 猜其他会话）", () => {
 		const probe = vi.fn(async () => TRANSCRIPT_OBSERVATION);
 		const { manager } = createRecordingManager();
 		const observer = createObserver({ probe, nowMs: () => 0 });
 
-		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary({ workspacePath: null }), manager);
+		observer.observeTaskSessionSummary(
+			WORKSPACE_ALPHA,
+			summary({ agentNativeConversationSessionIdentity: null }),
+			manager,
+		);
 
 		expect(probe).not.toHaveBeenCalled();
 	});
@@ -289,8 +334,16 @@ describe("持久转录推进观察器", () => {
 			() => expect(probe).toHaveBeenCalledTimes(2),
 			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
 		);
-		expect(probe).toHaveBeenNthCalledWith(1, { agentId: "claude", workspacePath: "/tmp/worktree-alpha" });
-		expect(probe).toHaveBeenNthCalledWith(2, { agentId: "claude", workspacePath: "/tmp/worktree-beta" });
+		expect(probe).toHaveBeenNthCalledWith(1, {
+			agentId: "claude",
+			workspacePath: "/tmp/worktree-alpha",
+			agentNativeConversationSessionIdentity: summary().agentNativeConversationSessionIdentity,
+		});
+		expect(probe).toHaveBeenNthCalledWith(2, {
+			agentId: "claude",
+			workspacePath: "/tmp/worktree-beta",
+			agentNativeConversationSessionIdentity: summary().agentNativeConversationSessionIdentity,
+		});
 	});
 
 	// 在途去重同理：另一个 workspace 的同号任务不该被它挡住。

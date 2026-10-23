@@ -61,11 +61,15 @@ import {
 	resolveSessionFacets,
 } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
+import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
 import { subscribeToPromptLibraryChanges } from "../state/prompt-library-store";
+import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import { moveTaskCardIntoInProgressAfterAcceptedMainConversationInput } from "../trpc/task-card-action-api";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
+import { createNativeAgentConversationActivityObserver } from "./native-agent-conversation-activity-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
@@ -89,6 +93,13 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	registerAgentConversationInputAcceptedListener?: (
+		listener: (input: {
+			workspaceId: string;
+			summary: RuntimeTaskSessionSummary;
+			submittedPromptText?: string;
+		}) => void,
+	) => () => void;
 	broadcastTaskLookupConversationUpdated: (conversationId: string, revision: number) => void;
 	trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => void;
 	trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => void;
@@ -167,6 +178,76 @@ export interface QueuedTaskPromptDeliveryDispatchObserver {
 }
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
+	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
+	const acceptedEdgeBySession = new Map<string, string | null>();
+	const pendingAttemptBySession = new Map<string, string>();
+	const acceptedTransitionsInFlight = new Set<string>();
+	const acceptedTransitionRetryTimers = new Set<ReturnType<typeof setTimeout>>();
+	const acceptedTransitionAttemptCount = new Map<string, number>();
+	let acceptedInputListener:
+		| ((input: { workspaceId: string; summary: RuntimeTaskSessionSummary; submittedPromptText?: string }) => void)
+		| null = null;
+	const nativeActivityObserver = createNativeAgentConversationActivityObserver({
+		cooldownMs: 1_000,
+		onActivity: (observation) => {
+			if (observation.activityKind === "accepted_user_input") return;
+			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			const current = manager?.getSummary(observation.conversationSessionId);
+			if (current?.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId) return;
+			manager?.recordEffectiveAgentConversationActivity(observation.conversationSessionId, observation, {
+				nativeAgentResponsePromptCacheReferenceObservation:
+					observation.nativeAgentResponsePromptCacheReferenceObservation,
+				nativeAgentResponseAcceptedUserInputEventId: observation.nativeAgentResponseAcceptedUserInputEventId,
+			});
+		},
+		onAccepted: async (observation) => {
+			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			if (!manager || !observation.runtimeSessionIncarnationId || !observation.eventId) return;
+			const before = manager.getSummary(observation.conversationSessionId);
+			if (
+				before?.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId ||
+				before.agentNativeConversationSessionIdentity?.nativeSessionId !== observation.nativeSessionId
+			)
+				return;
+			if (before.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) {
+				const workspace = await loadWorkspaceContextById(observation.workspaceId);
+				if (!workspace) throw new Error("原生输入已接受，但暂时无法定位主会话交接工作区");
+				await completeTaskMainSessionHandoverAfterUserMessage({
+					workspaceId: observation.workspaceId,
+					workspacePath: workspace.repoPath,
+					taskConversationSessionId: observation.conversationSessionId,
+					promptText: observation.submittedPromptText,
+					isAcceptedConversationIdentityStillCurrent: () => {
+						const current = manager.getSummary(observation.conversationSessionId);
+						return (
+							current?.runtimeSessionIncarnationId === observation.runtimeSessionIncarnationId &&
+							current.agentNativeConversationSessionIdentity?.nativeSessionId === observation.nativeSessionId &&
+							current.agentNativeConversationSessionIdentity?.transcriptPath ===
+								before.agentNativeConversationSessionIdentity?.transcriptPath
+						);
+					},
+					onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
+						manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+				});
+			}
+			const confirmed = manager.confirmAcceptedAgentConversationInput(observation.conversationSessionId, {
+				...observation,
+				eventId: observation.eventId,
+				runtimeSessionIncarnationId: observation.runtimeSessionIncarnationId,
+			});
+			if (confirmed)
+				acceptedInputListener?.({
+					workspaceId: observation.workspaceId,
+					summary: confirmed,
+					submittedPromptText: observation.submittedPromptText,
+				});
+		},
+		onReadFailed: (error, context) =>
+			logAgentSessionRetentionWarning(
+				`native-activity-read-failed workspaceId=${context.workspaceId} taskId=${context.conversationSessionId} reason=${error instanceof Error ? error.message : String(error)}`,
+			),
+	});
+
 	const latestNotificationAssistantMessages = new Map<string, string>();
 	const latestNotificationSummaries = new Map<string, RuntimeTaskSessionSummary>();
 	const terminalSummaryUnsubscribeByWorkspaceId = new Map<string, () => void>();
@@ -407,6 +488,63 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		const sessionKey = `${workspaceId}:${summary.taskId}`;
+		const previousEdgeWasObserved = acceptedEdgeBySession.has(sessionKey);
+		const accepted = summary.agentConversationPromptSubmissionAcceptance;
+		const acceptedEdge =
+			accepted?.status === "accepted" ? `${accepted.runtimeSessionIncarnationId}:${accepted.eventId}` : null;
+		const previousEdge = acceptedEdgeBySession.get(sessionKey);
+		if (!previousEdgeWasObserved || !acceptedEdge) acceptedEdgeBySession.set(sessionKey, acceptedEdge);
+		const transitionKey = `${sessionKey}:${acceptedEdge}`;
+		// 交接 hold 解除会再次发布同一接受事件；解除前不能消耗这个边沿。
+		if (
+			previousEdgeWasObserved &&
+			acceptedEdge &&
+			!summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+			acceptedEdge !== previousEdge &&
+			!acceptedTransitionsInFlight.has(transitionKey) &&
+			(acceptedTransitionAttemptCount.get(transitionKey) ?? 0) < 3
+		) {
+			acceptedTransitionsInFlight.add(transitionKey);
+			acceptedTransitionAttemptCount.set(
+				transitionKey,
+				(acceptedTransitionAttemptCount.get(transitionKey) ?? 0) + 1,
+			);
+			void moveTaskCardIntoInProgressAfterAcceptedMainConversationInput({
+				workspaceId,
+				summary,
+				getCurrentSummary: () => latestNotificationSummaries.get(sessionKey) ?? null,
+			})
+				.then(async (result) => {
+					if (
+						latestNotificationSummaries.get(sessionKey)?.agentConversationPromptSubmissionAcceptance?.eventId ===
+						accepted?.eventId
+					)
+						acceptedEdgeBySession.set(sessionKey, acceptedEdge);
+					acceptedTransitionAttemptCount.delete(transitionKey);
+					if (result.saved && result.workspacePath) {
+						await broadcastRuntimeWorkspaceStateUpdated(workspaceId, result.workspacePath);
+						await broadcastRuntimeProjectsUpdated(null);
+					}
+				})
+				.catch((error: unknown) => {
+					logAgentSessionRetentionWarning(
+						`accepted-input-board-transition-failed workspaceId=${workspaceId} taskId=${summary.taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+					);
+					if ((acceptedTransitionAttemptCount.get(transitionKey) ?? 0) < 3) {
+						const retry = setTimeout(() => {
+							acceptedTransitionRetryTimers.delete(retry);
+							const latest = latestNotificationSummaries.get(sessionKey);
+							if (latest && latest.agentConversationPromptSubmissionAcceptance?.eventId === accepted?.eventId)
+								queueTaskSessionSummaryBroadcast(workspaceId, latest);
+						}, 1_000);
+						retry.unref();
+						acceptedTransitionRetryTimers.add(retry);
+					}
+				})
+				.finally(() => acceptedTransitionsInFlight.delete(transitionKey));
+		}
+
 		latestNotificationSummaries.set(`${workspaceId}:${summary.taskId}`, summary);
 		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
 		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
@@ -563,6 +701,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 		}
 		terminalSummaryUnsubscribeByWorkspaceId.delete(workspaceId);
+		terminalManagersByWorkspaceId.delete(workspaceId);
+		nativeActivityObserver.forgetWorkspace(workspaceId);
+		for (const key of acceptedEdgeBySession.keys())
+			if (key.startsWith(`${workspaceId}:`)) {
+				acceptedEdgeBySession.delete(key);
+				pendingAttemptBySession.delete(key);
+			}
 		for (const subscriptionKey of listConversationSubscriptionKeys(workspaceId)) {
 			for (const unsubscribeMap of [
 				conversationSummaryUnsubscribeBySubscriptionKey,
@@ -1020,11 +1165,30 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	});
 
 	return {
+		registerAgentConversationInputAcceptedListener: (listener) => {
+			acceptedInputListener = listener;
+			return () => {
+				if (acceptedInputListener === listener) acceptedInputListener = null;
+			};
+		},
 		trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => {
 			if (terminalSummaryUnsubscribeByWorkspaceId.has(workspaceId)) {
 				return;
 			}
+			terminalManagersByWorkspaceId.set(workspaceId, manager);
 			const unsubscribe = manager.onSummary((summary) => {
+				void nativeActivityObserver.observeTaskSessionSummary(workspaceId, summary, () =>
+					manager.getSummary(summary.taskId),
+				);
+				const pending = summary.agentConversationPromptSubmissionAcceptance;
+				const pendingKey = `${workspaceId}:${summary.taskId}`;
+				const attemptKey = pending ? `${pending.runtimeSessionIncarnationId}:${pending.attemptedAtMs}` : null;
+				if (pending?.status === "pending" && attemptKey && pendingAttemptBySession.get(pendingKey) !== attemptKey) {
+					pendingAttemptBySession.set(pendingKey, attemptKey);
+					nativeActivityObserver.wakeForPotentialUserPromptSubmission(workspaceId, summary, () =>
+						manager.getSummary(summary.taskId),
+					);
+				}
 				queueTaskSessionSummaryBroadcast(workspaceId, summary);
 				// 转录探测只挂在终端通道：能按工作目录直接寻址转录的目前只有 claude（PTY），Cline/ACP 的
 				// 「对话上次推进」由它们自己的结构化事件直接给出，不需要读盘反推。观察器内部自带
@@ -1046,6 +1210,15 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			// 这个循环的条数 = 该 project 下的全部历史任务（数百条量级），但它**不是**同等数量的瞬时读盘：
 			// 观察器的闸门④把整个进程的在途探测压到常数，这里只是把条目一次性喂进它的队列。
 			for (const hydratedSummary of manager.listSummaries()) {
+				acceptedEdgeBySession.set(
+					`${workspaceId}:${hydratedSummary.taskId}`,
+					hydratedSummary.agentConversationPromptSubmissionAcceptance?.status === "accepted"
+						? `${hydratedSummary.runtimeSessionIncarnationId}:${hydratedSummary.agentConversationPromptSubmissionAcceptance.eventId}`
+						: null,
+				);
+				void nativeActivityObserver.observeTaskSessionSummary(workspaceId, hydratedSummary, () =>
+					manager.getSummary(hydratedSummary.taskId),
+				);
 				persistedAgentTranscriptConversationProgressObserver.observeTaskSessionSummary(
 					workspaceId,
 					hydratedSummary,
@@ -1113,6 +1286,14 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.clear();
 			// 关停后在途探测的回调不得再写 summary（会写进一个正在被拆掉的管理器）。
 			persistedAgentTranscriptConversationProgressObserver.dispose();
+			nativeActivityObserver.dispose();
+			terminalManagersByWorkspaceId.clear();
+			acceptedEdgeBySession.clear();
+			pendingAttemptBySession.clear();
+			for (const timer of acceptedTransitionRetryTimers) clearTimeout(timer);
+			acceptedTransitionRetryTimers.clear();
+			acceptedTransitionAttemptCount.clear();
+			acceptedTransitionsInFlight.clear();
 			for (const unsubscribe of conversationSummaryUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();

@@ -1,3 +1,4 @@
+import { collectTaskConversationSessionActivityObservations } from "../core/agent-conversation-activity-observation";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
@@ -9,6 +10,7 @@ import { isTaskCardWithinCrossProjectTaskSwitcherActivityScope } from "../core/c
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	buildTaskActivityDetailFromBoardCardAndTaskSessionFacts,
+	resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership,
 	type TaskSessionFactsForCrossProjectTaskViews,
 } from "./in-progress-task-detail-projection";
 
@@ -52,13 +54,36 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 }): RuntimeCrossProjectTaskSwitcherEntry[] {
 	const activityHorizonStartAt = input.nowMs - input.activityHorizonMs;
 	const entries: RuntimeCrossProjectTaskSwitcherEntry[] = [];
+	// 同一广播按 owner 只分组一次；避免每张卡都重新扫描全部 session。
+	const sessionActivityFactsByOwningCardId = new Map<
+		string,
+		Array<TaskSessionFactsForCrossProjectTaskViews & { taskId: string }>
+	>();
+	for (const [taskId, facts] of input.sessionFactsByTaskId) {
+		const owningCardId = facts.taskConversationSessionMetadata?.workspaceTaskId ?? taskId;
+		const group = sessionActivityFactsByOwningCardId.get(owningCardId) ?? [];
+		group.push({ taskId, ...facts });
+		sessionActivityFactsByOwningCardId.set(owningCardId, group);
+	}
 	for (const column of input.board.columns) {
 		for (const card of column.cards) {
 			const entry = buildCrossProjectTaskSwitcherEntryFromBoardCard(
 				card,
 				column.id,
-				input.sessionFactsByTaskId.get(resolveMainTaskConversationSessionId(card)),
+				resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(card, input.sessionFactsByTaskId),
 				input.lastOpenedByUserAtByTaskId.get(card.id) ?? null,
+			);
+			const sessionActivityFacts = sessionActivityFactsByOwningCardId.get(card.id) ?? [];
+			const mainSessionId = resolveMainTaskConversationSessionId(card);
+			const mainSessionFacts = resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(
+				card,
+				input.sessionFactsByTaskId,
+			);
+			entry.taskConversationSessionActivityObservations = collectTaskConversationSessionActivityObservations(
+				card,
+				mainSessionFacts && !sessionActivityFacts.some((facts) => facts.taskId === mainSessionId)
+					? [...sessionActivityFacts, { taskId: mainSessionId, ...mainSessionFacts }]
+					: sessionActivityFacts,
 			);
 			if (isTaskCardWithinCrossProjectTaskSwitcherActivityScope(entry, activityHorizonStartAt)) {
 				entries.push(entry);

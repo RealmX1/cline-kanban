@@ -62,7 +62,7 @@ export function CrossProjectTaskSwitcherFocusedTaskCard({
 							{...buildTaskCardBusinessProps({
 								card: selection.card,
 								columnId: selection.column.id,
-								sessionSummary: currentProjectTaskCards.currentProjectTaskSessions[selection.card.id],
+								taskSessions: currentProjectTaskCards.currentProjectTaskSessions,
 								handlers: currentProjectTaskCards.currentProjectTaskCardActionHandlers,
 								selected: true,
 								workspacePath: currentProjectTaskCards.currentProjectWorkspacePath,

@@ -25,7 +25,7 @@ export const CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID = "connection-drop-auto-c
 const BACKOFF_SCHEDULE_MS: readonly number[] = [4_000, 15_000, 60_000, 240_000, 480_000];
 
 // 「输出静默」阈值（AGENT_OUTPUT_QUIET_THRESHOLD_MS，2s）现由 src/core/session-activity.ts 统一持有：
-// session-manager 注入的 isAgentOutputQuiet 动作复用该阈值，仅当距 agent 最近一次输出已超过它、
+// session-manager 注入的 isEffectiveAgentConversationActivityQuiet 动作复用该阈值，仅当距 agent 最近一次输出已超过它、
 // 判定 agent 确实停在原地时，本反应才注入续跑。
 
 // attempt 触发时若尚未就绪（agent 仍在忙 / deferred input 未注入完 / 用户刚输入），
@@ -141,7 +141,7 @@ function performAttempt(
 	// 此时结束 episode（清掉 UI「重连中」），绝不注入打断正在工作的 agent。
 	// 首档退避（4s）大于静默阈值（2s），故真实连接中断到首个 attempt 时一定已静默、不被误清。
 	// 手动「立即续跑」豁免此门控。
-	if (!options.manual && !actions.isAgentOutputQuiet()) {
+	if (!options.manual && !actions.isEffectiveAgentConversationActivityQuiet()) {
 		endEpisode(state, actions, "agent-output-still-flowing");
 		return;
 	}

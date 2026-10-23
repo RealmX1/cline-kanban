@@ -1,3 +1,4 @@
+import { confirmTestNativeUserInputAcceptance } from "../../utilities/confirm-test-native-user-input-acceptance";
 // 热重启 P3：runtime 缺席期间的 hook 事件先进 agent session PTY host 的 spool，runtime 回来后才送达。
 // 两条契约只有把 hook 摄入与真实 TerminalSessionManager 串起来才验得出来：
 //   1) 领域时刻（停止 / 开始 / 对话推进 / 提问）按 hooks CLI 的捕获时刻记，而不是送达时刻；
@@ -128,8 +129,8 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 		expect(response.ok).toBe(true);
 		const summary = manager.getSummary(TASK_ID);
 		expect(summary?.turnOwner).toBe("user");
-		expect(summary?.agentResponseGenerationStopped?.stoppedAt).toBe(hookEventCapturedAtEpochMs);
-		expect(summary?.lastConversationProgressObservation?.observedAtMs).toBe(hookEventCapturedAtEpochMs);
+		expect(summary?.currentAgentProcessUserTurnIdleRetentionStarted?.stoppedAt).toBe(hookEventCapturedAtEpochMs);
+		expect(summary?.lastEffectiveAgentConversationActivityObservation?.observedAtMs).toBe(hookEventCapturedAtEpochMs);
 		// updatedAt 仍是写入墙钟。
 		expect(summary?.updatedAt).toBe(RUNTIME_ABSENT_STARTED_AT_EPOCH_MS + TWO_HOURS_MS);
 		// 就绪通知照常发出，并带上「晚到了多久」：前端据此不朗读过时语音。
@@ -149,10 +150,12 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 
 		await api.ingest(buildClaudeStopHookIngestRequest({ hookEventCapturedAtEpochMs: deliveredAtEpochMs + 10_000 }));
 
-		expect(manager.getSummary(TASK_ID)?.agentResponseGenerationStopped?.stoppedAt).toBe(deliveredAtEpochMs);
+		expect(manager.getSummary(TASK_ID)?.currentAgentProcessUserTurnIdleRetentionStarted?.stoppedAt).toBe(
+			deliveredAtEpochMs,
+		);
 	});
 
-	it("a UserPromptSubmit delivered late stamps the turn start at capture time", async () => {
+	it("迟到提交hook只登记候选，原生接受后才盖回合开始章", async () => {
 		await api.ingest(buildClaudeStopHookIngestRequest({}));
 		const hookEventCapturedAtEpochMs = RUNTIME_ABSENT_STARTED_AT_EPOCH_MS + 10 * 60 * 1000;
 		vi.setSystemTime(RUNTIME_ABSENT_STARTED_AT_EPOCH_MS + TWO_HOURS_MS);
@@ -166,6 +169,17 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 			hookEventCapturedAtEpochMs,
 		});
 
+		expect(manager.getSummary(TASK_ID)?.turnOwner).toBe("user");
+		expect(manager.getSummary(TASK_ID)?.agentConversationPromptSubmissionAcceptance?.attemptedAtMs).toBe(
+			hookEventCapturedAtEpochMs,
+		);
+		confirmTestNativeUserInputAcceptance({
+			manager,
+			taskId: TASK_ID,
+			promptText: "接着做",
+			observedAtMs: hookEventCapturedAtEpochMs,
+		});
+
 		const summary = manager.getSummary(TASK_ID);
 		expect(summary?.turnOwner).toBe("agent");
 		expect(summary?.agentResponseGenerationTurnStarted?.startedAt).toBe(hookEventCapturedAtEpochMs);
@@ -173,6 +187,8 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 
 	it("a second delivery of an already applied event is acknowledged without being applied again", async () => {
 		await api.ingest(buildClaudeStopHookIngestRequest({ hookEventDeliveryIdempotencyKey: "stop-1" }));
+		// 新一轮输入发生在前一轮真实交棒之后；相同毫秒属于迟到证据的保守边界。
+		await vi.advanceTimersByTimeAsync(1);
 		await api.ingest({
 			taskId: TASK_ID,
 			workspaceId: "workspace-1",
@@ -181,6 +197,7 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 			submittedPromptText: "继续",
 			hookEventDeliveryIdempotencyKey: "prompt-1",
 		});
+		confirmTestNativeUserInputAcceptance({ manager, taskId: TASK_ID, promptText: "继续" });
 		const turnSequenceBeforeReplay = manager.getSummary(TASK_ID)?.agentResponseGenerationTurnSequence;
 		expect(manager.getSummary(TASK_ID)?.turnOwner).toBe("agent");
 

@@ -42,6 +42,7 @@ vi.mock("../../../src/terminal/output-reactions/network-interruption-continuatio
 }));
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { applySessionFacets } from "../../../src/core/session-activity";
 import {
 	TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
 	TerminalSessionManager,
@@ -52,6 +53,7 @@ import {
 	resetTerminalInputBoxOccupancyTrackerComposition,
 	type TerminalInputBoxOccupancyTrackerState,
 } from "../../../src/terminal/terminal-input-box-occupancy";
+import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
 
 interface MockSpawnRequest {
 	env?: Record<string, string | undefined>;
@@ -133,14 +135,30 @@ function installFakeClaudeEntry(
 	},
 ) {
 	const write = vi.fn();
-	const summary = {
+	const summary = applySessionFacets({
 		taskId,
 		agentId: "claude",
+		workspacePath: "/isolated",
+		pid: 12,
+		startedAt: Date.now() - 60_000,
+		updatedAt: Date.now(),
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		runtimeSessionIncarnationId: `${taskId}-incarnation`,
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "claude",
+			nativeSessionId: `${taskId}-native`,
+			transcriptPath: null,
+			observedAt: Date.now() - 60_000,
+		},
 		state: options.state,
 		reviewReason: options.reviewReason ?? null,
 		lastOutputAt: options.lastOutputAt ?? null,
 		...(options.facets ?? {}),
-	} as unknown as RuntimeTaskSessionSummary;
+	} as unknown as RuntimeTaskSessionSummary);
+	// applySessionFacets 会按 legacy reviewReason 推导 review；显式模态三元组必须最后覆盖完整 fixture。
+	if (options.facets) Object.assign(summary, options.facets);
 	const entry = {
 		summary,
 		active: {
@@ -153,7 +171,7 @@ function installFakeClaudeEntry(
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
-			programmaticDeliveryReceipt: null,
+			programmaticDeliveryReceipt: null as PendingProgrammaticDeliveryReceipt | null,
 			awaitingCodexPromptAfterEnter: false,
 			// 争用判据（框空即放行）读它；默认空账本 = 输入侧说「框里没有未提交内容」。
 			inputBoxOccupancyTracker: options.inputBoxOccupancyTracker ?? createTerminalInputBoxOccupancyTrackerState(),
@@ -172,6 +190,44 @@ function installFakeClaudeEntry(
 	};
 	(manager as unknown as { entries: Map<string, typeof entry> }).entries.set(taskId, entry);
 	return { write, entry };
+}
+
+function confirmCorrespondingNativeInput(
+	manager: TerminalSessionManager,
+	taskId: string,
+	text = "继续 RVF",
+	eventId = "new-native-message",
+	observedAtMs = Date.now(),
+	acceptedNativeAgentTurnIsInProgress?: boolean,
+): void {
+	const entry = (
+		manager as unknown as {
+			entries: Map<
+				string,
+				{
+					summary: RuntimeTaskSessionSummary;
+					active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null };
+				}
+			>;
+		}
+	).entries.get(taskId);
+	if (!entry?.summary.runtimeSessionIncarnationId || !entry.summary.agentNativeConversationSessionIdentity)
+		throw new Error("测试缺少确切原生身份");
+	const receipt = entry.active.programmaticDeliveryReceipt;
+	if (receipt)
+		receipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+			transport: "codex_control",
+			predecessorTurnId: "before",
+			seenEventIds: ["previous-native-message"],
+		};
+	manager.confirmAcceptedAgentConversationInput(taskId, {
+		observedAtMs,
+		eventId,
+		nativeSessionId: entry.summary.agentNativeConversationSessionIdentity.nativeSessionId,
+		runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+		submittedPromptText: text,
+		acceptedNativeAgentTurnIsInProgress,
+	});
 }
 
 function spawnManagerWithSession(pid: number) {
@@ -203,6 +259,584 @@ async function startSession(
 		autoContinueOnConnectionDropEnabled: options.autoContinue ?? true,
 	});
 }
+
+describe("session-manager · 原生提交接受与前置 hook 的时序", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.clearAllTimers();
+		vi.useRealTimers();
+	});
+
+	it.each([
+		"processed",
+		"accepted_then_response",
+		"unrelated_response",
+		"queued",
+		"different_prompt",
+		"different_native_identity",
+		"different_incarnation",
+		"missing_predecessor",
+		"expired_receipt",
+		"pending_only",
+		"replayed_input",
+		"superseded_submission",
+	] as const)("Codex 首次读取已完成回合：%s 仅有确切匹配及真实响应才用原提交时间估计缓存", async (scenario) => {
+		const manager = new TerminalSessionManager();
+		const taskId = "completed-native-turn-cache-reference";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: "model: test\n› ",
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		entry.summary.agentId = "codex";
+		const identity = entry.summary.agentNativeConversationSessionIdentity;
+		if (!identity || !entry.summary.runtimeSessionIncarnationId) throw new Error("测试缺少原生身份");
+		identity.sourceAgentId = "codex";
+		manager.submitTaskChatInputWhenReady(taskId, "确切的新输入", { onDeliveryOutcome: vi.fn() });
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+		const receipt = entry.active.programmaticDeliveryReceipt;
+		if (!receipt?.firstSubmitCarriageReturnAtEpochMs) throw new Error("测试缺少首次 CR");
+		const attemptedAtMs = receipt.firstSubmitCarriageReturnAtEpochMs;
+		if (scenario !== "missing_predecessor")
+			receipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+				transport: "codex_control",
+				predecessorTurnId: "before",
+				seenEventIds:
+					scenario === "replayed_input" ? ["codex:native:new-turn:new-input"] : ["previous-native-message"],
+			};
+		if (scenario === "pending_only") entry.active.programmaticDeliveryReceipt = null;
+		if (scenario === "superseded_submission") manager.submitTaskChatInputWhenReady(taskId, "后续提交");
+		expect(entry.summary.lastAgentConversationPromptCacheReferenceObservation).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(scenario === "expired_receipt" ? 60_000 : 5_000);
+		manager.confirmAcceptedAgentConversationInput(taskId, {
+			observedAtMs: Date.now(),
+			eventId: "codex:native:new-turn:new-input",
+			nativeSessionId: scenario === "different_native_identity" ? "wrong-native" : identity.nativeSessionId,
+			runtimeSessionIncarnationId:
+				scenario === "different_incarnation" ? "wrong-incarnation" : entry.summary.runtimeSessionIncarnationId,
+			submittedPromptText: scenario === "different_prompt" ? "另一个输入" : "确切的新输入",
+			acceptedNativeAgentTurnIsInProgress: false,
+			acceptedNativeAgentTurnHasModelResponse: !["queued", "accepted_then_response", "unrelated_response"].includes(
+				scenario,
+			),
+		});
+		if (scenario === "accepted_then_response" || scenario === "unrelated_response") {
+			expect(entry.summary.lastAgentConversationPromptCacheReferenceObservation).toBeUndefined();
+			manager.recordEffectiveAgentConversationActivity(
+				taskId,
+				{
+					observedAtMs: Date.now(),
+					activityKind: "agent_output",
+					evidenceKind: "structured_agent_session_event",
+					eventId: "codex:native:new-turn:response",
+					nativeSessionId: identity.nativeSessionId,
+				},
+				{
+					nativeAgentResponseAcceptedUserInputEventId:
+						scenario === "accepted_then_response" ? "codex:native:new-turn:new-input" : "unrelated-native-input",
+				},
+			);
+		}
+		if (scenario === "processed" || scenario === "accepted_then_response")
+			expect(entry.summary.lastAgentConversationPromptCacheReferenceObservation).toEqual({
+				observedAtMs: attemptedAtMs,
+				evidenceKind: "main_agent_conversation_request_processing_cache_reference_estimate",
+			});
+		else expect(entry.summary.lastAgentConversationPromptCacheReferenceObservation).toBeUndefined();
+		const requestReference = entry.summary.lastAgentConversationPromptCacheReferenceObservation;
+		manager.transitionToReview(taskId, "hook");
+		manager.recordEffectiveAgentConversationActivity(taskId, {
+			observedAtMs: Date.now() + 1,
+			activityKind: "tool_activity",
+			evidenceKind: "agent_lifecycle_hook_event",
+		});
+		expect(entry.summary.lastAgentConversationPromptCacheReferenceObservation).toBe(requestReference);
+	});
+
+	it.each(["same_attempt", "older_attempt", "between_attempt_and_acceptance", "at_acceptance"] as const)(
+		"已接受后迟到的 %s 前置 hook 不降级为 pending，也不重新启动确认计时",
+		async (delayedAttempt) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "accepted-input-delayed-pre-submit-hook";
+			const { entry } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: CLAUDE_READY_PROMPT,
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			const attemptedAtMs = Date.now();
+			manager.markAgentConversationPromptSubmissionPending(taskId, attemptedAtMs);
+			await vi.advanceTimersByTimeAsync(10);
+			confirmCorrespondingNativeInput(manager, taskId);
+			const accepted = entry.summary.agentConversationPromptSubmissionAcceptance;
+			const onSummary = vi.fn();
+			manager.onSummary(onSummary);
+			const delayedAttemptedAtMs =
+				delayedAttempt === "same_attempt"
+					? attemptedAtMs
+					: delayedAttempt === "older_attempt"
+						? attemptedAtMs - 1
+						: delayedAttempt === "at_acceptance"
+							? Date.now()
+							: attemptedAtMs + 5;
+			manager.markAgentConversationPromptSubmissionPending(taskId, delayedAttemptedAtMs);
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(accepted);
+			expect(onSummary).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(15_001);
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(accepted);
+			expect(onSummary).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["pending", "unconfirmed"] as const)(
+		"当前 %s 尝试不会被旧尝试覆盖，同一尝试重复到达也不重开计时",
+		async (status) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "pending-input-attempt-order";
+			const { entry } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: CLAUDE_READY_PROMPT,
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			const oldAttemptedAtMs = Date.now();
+			manager.markAgentConversationPromptSubmissionPending(taskId, oldAttemptedAtMs);
+			await vi.advanceTimersByTimeAsync(10);
+			const currentAttemptedAtMs = Date.now();
+			manager.markAgentConversationPromptSubmissionPending(taskId, currentAttemptedAtMs);
+			if (status === "unconfirmed") await vi.advanceTimersByTimeAsync(15_000);
+			const current = entry.summary.agentConversationPromptSubmissionAcceptance;
+			const timerCount = vi.getTimerCount();
+			const onSummary = vi.fn();
+			manager.onSummary(onSummary);
+			manager.markAgentConversationPromptSubmissionPending(taskId, oldAttemptedAtMs);
+			manager.markAgentConversationPromptSubmissionPending(taskId, currentAttemptedAtMs);
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(current);
+			expect(current?.status).toBe(status);
+			expect(vi.getTimerCount()).toBe(timerCount);
+			expect(onSummary).not.toHaveBeenCalled();
+		},
+	);
+
+	it("接受后的真正后续 Enter 仍开启新 pending，并独立在十五秒后变为 unconfirmed", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "accepted-input-following-enter";
+		const { entry, write } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		manager.markAgentConversationPromptSubmissionPending(taskId);
+		await vi.advanceTimersByTimeAsync(10);
+		confirmCorrespondingNativeInput(manager, taskId);
+		await vi.advanceTimersByTimeAsync(1);
+		const nextAttemptedAtMs = Date.now();
+		manager.writeInput(taskId, Buffer.from("\r"));
+		expect(write).toHaveBeenCalledExactlyOnceWith(Buffer.from("\r"));
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toEqual({
+			status: "pending",
+			attemptedAtMs: nextAttemptedAtMs,
+			runtimeSessionIncarnationId: `${taskId}-incarnation`,
+		});
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("pending");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toEqual({
+			status: "unconfirmed",
+			attemptedAtMs: nextAttemptedAtMs,
+			runtimeSessionIncarnationId: `${taskId}-incarnation`,
+		});
+		expect(write).toHaveBeenCalledTimes(1);
+	});
+
+	it("重放已接受的 A 不覆盖新 pending B，B 仍按原十五秒预算提示未确认", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "accepted-event-replay-preserves-next-pending-input";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		const acceptedAAtMs = Date.now();
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-A", acceptedAAtMs);
+		await vi.advanceTimersByTimeAsync(10);
+		manager.writeInput(taskId, Buffer.from("\r"));
+		const pendingB = entry.summary.agentConversationPromptSubmissionAcceptance;
+		const onSummary = vi.fn();
+		manager.onSummary(onSummary);
+		await vi.advanceTimersByTimeAsync(7_500);
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-A", acceptedAAtMs);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(pendingB);
+		expect(onSummary).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(7_499);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("pending");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toEqual({ ...pendingB, status: "unconfirmed" });
+		const unconfirmedB = entry.summary.agentConversationPromptSubmissionAcceptance;
+		onSummary.mockClear();
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-A", acceptedAAtMs);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(unconfirmedB);
+		expect(onSummary).not.toHaveBeenCalled();
+	});
+
+	it("相同正文的新原生 eventId 仍可确认，原生记录早于迟到前置 hook 也不被拒绝", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "distinct-native-input-event-before-late-pending-hook";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-A");
+		await vi.advanceTimersByTimeAsync(10);
+		const acceptedBAtMs = Date.now();
+		await vi.advanceTimersByTimeAsync(10);
+		manager.markAgentConversationPromptSubmissionPending(taskId);
+		const attemptedBAtMs = Date.now();
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-B", acceptedBAtMs);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toMatchObject({
+			status: "accepted",
+			eventId: "accepted-event-B",
+			attemptedAtMs: attemptedBAtMs,
+			confirmedAtMs: acceptedBAtMs,
+		});
+	});
+
+	it("接管已有 accepted marker 后开启新 pending，仍记住被替换的原生接受事件", () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "restored-accepted-event-preserved-before-next-pending-input";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		entry.summary = {
+			...entry.summary,
+			agentConversationPromptSubmissionAcceptance: {
+				status: "accepted",
+				attemptedAtMs: Date.now() - 20,
+				confirmedAtMs: Date.now() - 10,
+				eventId: "accepted-before-adoption",
+				nativeSessionId: `${taskId}-native`,
+				runtimeSessionIncarnationId: `${taskId}-incarnation`,
+			},
+		};
+		manager.markAgentConversationPromptSubmissionPending(taskId);
+		const pending = entry.summary.agentConversationPromptSubmissionAcceptance;
+		confirmCorrespondingNativeInput(manager, taskId, "旧输入", "accepted-before-adoption", Date.now() - 10);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(pending);
+	});
+
+	it("活体接受事件记忆有界，超过容量后近期非最新事件重放仍不覆盖新 pending", () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "bounded-recent-accepted-input-event-identities";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		const acceptedAtMs = Date.now();
+		for (let eventIndex = 0; eventIndex < 512; eventIndex += 1) {
+			confirmCorrespondingNativeInput(manager, taskId, "相同正文", `accepted-event-${eventIndex}`, acceptedAtMs);
+		}
+		const acceptedEventIdentities = (
+			manager as unknown as {
+				recentlyAcceptedAgentConversationInputEventIdentitiesByActiveProcess: WeakMap<object, Set<string>>;
+			}
+		).recentlyAcceptedAgentConversationInputEventIdentitiesByActiveProcess.get(entry.active);
+		expect(acceptedEventIdentities?.size).toBe(128);
+		manager.markAgentConversationPromptSubmissionPending(taskId, acceptedAtMs + 1);
+		const pending = entry.summary.agentConversationPromptSubmissionAcceptance;
+		confirmCorrespondingNativeInput(manager, taskId, "相同正文", "accepted-event-510", acceptedAtMs);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(pending);
+	});
+
+	it.each(["native_session", "runtime_incarnation"] as const)(
+		"相同 eventId 在不同 %s 下不共享接受事件去重，旧身份仍被拒绝",
+		async (changedIdentityPart) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "accepted-event-deduplication-identity-boundary";
+			const { entry } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: CLAUDE_READY_PROMPT,
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			confirmCorrespondingNativeInput(manager, taskId, "旧身份输入", "same-event-id");
+			const previousIdentity = entry.summary.agentNativeConversationSessionIdentity;
+			if (!previousIdentity) throw new Error("测试缺少原生身份");
+			const previousIncarnation = entry.summary.runtimeSessionIncarnationId;
+			entry.summary = {
+				...entry.summary,
+				...(changedIdentityPart === "native_session"
+					? {
+							agentNativeConversationSessionIdentity: {
+								...previousIdentity,
+								nativeSessionId: "next-native-session",
+							},
+						}
+					: { runtimeSessionIncarnationId: "next-runtime-incarnation" }),
+			};
+			await vi.advanceTimersByTimeAsync(10);
+			const beforeOldIdentityReplay = entry.summary;
+			expect(
+				manager.confirmAcceptedAgentConversationInput(taskId, {
+					observedAtMs: Date.now(),
+					eventId: "same-event-id",
+					nativeSessionId: previousIdentity.nativeSessionId,
+					runtimeSessionIncarnationId: previousIncarnation ?? "",
+				}),
+			).toBeNull();
+			expect(entry.summary).toBe(beforeOldIdentityReplay);
+			confirmCorrespondingNativeInput(manager, taskId, "新身份输入", "same-event-id");
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).toMatchObject({
+				status: "accepted",
+				confirmedAtMs: Date.now(),
+				nativeSessionId: entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId,
+				runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+			});
+		},
+	);
+
+	it("本轮 Stop 后才读到先前原生接受时，确认对应回执但保留已交回用户的回合", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "native-acceptance-observed-after-turn-stop";
+		const { entry, write } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		const outcomes: Array<{ status: string; reason: string | null }> = [];
+		manager.submitTaskChatInputWhenReady(taskId, "本轮输入", {
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+		const nativeAcceptedAtMs = Date.now();
+		await vi.advanceTimersByTimeAsync(10);
+		// 原生记录可先落盘，前置 hook 随后才捕获；接受不能仅因时间早于 attemptedAtMs 被拒绝。
+		manager.markAgentConversationPromptSubmissionPending(taskId);
+		manager.transitionToRunning(taskId);
+		await vi.advanceTimersByTimeAsync(10);
+		manager.transitionToReview(taskId, "hook", undefined, { domainEventObservedAtEpochMs: Date.now() });
+		const stopped = entry.summary;
+		expect(stopped.lastAgentConversationUserHandoffObservation?.observedAtMs).toBe(Date.now());
+		confirmCorrespondingNativeInput(manager, taskId, "本轮输入", "accepted-before-stop", nativeAcceptedAtMs);
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted");
+		expect(entry.summary.turnOwner).toBe("user");
+		expect(entry.summary.liveness).toBe(stopped.liveness);
+		expect(entry.summary.userTurnKind).toBe(stopped.userTurnKind);
+		expect(entry.summary.reviewReason).toBe(stopped.reviewReason);
+		expect(entry.summary.awaitingDispatchedBackgroundWork).toBe(stopped.awaitingDispatchedBackgroundWork);
+		expect(entry.summary.agentResponseGenerationTurnSequence).toBe(stopped.agentResponseGenerationTurnSequence);
+		expect(entry.summary.lastAgentConversationUserHandoffObservation).toBe(
+			stopped.lastAgentConversationUserHandoffObservation,
+		);
+		expect(entry.summary.currentAgentProcessUserTurnIdleRetentionStarted).toBe(
+			stopped.currentAgentProcessUserTurnIdleRetentionStarted,
+		);
+		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(entry.summary.turnOwner).toBe("user");
+		expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(1);
+		expect(outcomes).toHaveLength(1);
+	});
+
+	it.each(["pending", "unconfirmed"] as const)(
+		"无工具 follow-up 在 %s 时先完成，再确认原生接受，仍保留本轮交棒且只广播用户态",
+		async (acceptanceStatus) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "pending-follow-up-stopped-before-native-acceptance";
+			const { entry } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: CLAUDE_READY_PROMPT,
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			manager.transitionToRunning(taskId);
+			await vi.advanceTimersByTimeAsync(10);
+			manager.transitionToReview(taskId, "hook");
+			const previousTurn = entry.summary;
+			await vi.advanceTimersByTimeAsync(10);
+			manager.markAgentConversationPromptSubmissionPending(taskId);
+			const nativeAcceptedAtMs = Date.now();
+			expect(entry.summary.turnOwner).toBe("user");
+			expect(entry.summary.lastAgentConversationUserHandoffObservation).toBe(
+				previousTurn.lastAgentConversationUserHandoffObservation,
+			);
+			await vi.advanceTimersByTimeAsync(acceptanceStatus === "unconfirmed" ? 15_000 : 10);
+			const completedAtMs = Date.now();
+			const beforeDelayedOldStop = entry.summary;
+			manager.transitionToReview(taskId, "hook", undefined, {
+				domainEventObservedAtEpochMs: nativeAcceptedAtMs - 1,
+			});
+			expect(entry.summary).toBe(beforeDelayedOldStop);
+			await vi.advanceTimersByTimeAsync(10);
+			const onSummary = vi.fn();
+			manager.onSummary(onSummary);
+			manager.transitionToReview(taskId, "hook", undefined, { domainEventObservedAtEpochMs: completedAtMs });
+			const completedTurn = entry.summary;
+			expect(completedTurn.agentConversationPromptSubmissionAcceptance?.status).toBe(acceptanceStatus);
+			expect(completedTurn.lastAgentConversationUserHandoffObservation).toEqual({
+				observedAtMs: completedAtMs,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: (previousTurn.agentResponseGenerationTurnSequence ?? 0) + 1,
+			});
+			expect(completedTurn.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
+				stoppedAt: completedAtMs,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: completedTurn.agentResponseGenerationTurnSequence,
+			});
+			expect(onSummary).toHaveBeenCalledTimes(1);
+			expect(onSummary.mock.calls.every(([summary]) => summary.turnOwner === "user")).toBe(true);
+			manager.transitionToReview(taskId, "hook");
+			expect(entry.summary).toBe(completedTurn);
+			confirmCorrespondingNativeInput(
+				manager,
+				taskId,
+				"本轮输入",
+				"accepted-before-follow-up-stop",
+				nativeAcceptedAtMs,
+			);
+			expect(entry.summary.turnOwner).toBe("user");
+			expect(entry.summary.agentResponseGenerationTurnSequence).toBe(
+				completedTurn.agentResponseGenerationTurnSequence,
+			);
+			expect(entry.summary.lastAgentConversationUserHandoffObservation).toBe(
+				completedTurn.lastAgentConversationUserHandoffObservation,
+			);
+			expect(entry.summary.currentAgentProcessUserTurnIdleRetentionStarted).toBe(
+				completedTurn.currentAgentProcessUserTurnIdleRetentionStarted,
+			);
+			manager.transitionToReview(taskId, "hook");
+			expect(entry.summary.lastAgentConversationUserHandoffObservation).toBe(
+				completedTurn.lastAgentConversationUserHandoffObservation,
+			);
+			await vi.advanceTimersByTimeAsync(10);
+			manager.markAgentConversationPromptSubmissionPending(taskId);
+			confirmCorrespondingNativeInput(manager, taskId, "真正后续输入", "accepted-after-follow-up-stop");
+			expect(entry.summary.turnOwner).toBe("agent");
+			expect(entry.summary.agentResponseGenerationTurnSequence).toBe(
+				(completedTurn.agentResponseGenerationTurnSequence ?? 0) + 1,
+			);
+			expect(entry.summary.currentAgentProcessUserTurnIdleRetentionStarted).toBeNull();
+		},
+	);
+
+	it.each([
+		{ currentTurn: "stopped", acceptedNativeAgentTurnIsInProgress: false },
+		{ currentTurn: "stopped", acceptedNativeAgentTurnIsInProgress: true },
+		{ currentTurn: "parked", acceptedNativeAgentTurnIsInProgress: false },
+		{ currentTurn: "parked", acceptedNativeAgentTurnIsInProgress: true },
+	] as const)(
+		"Codex 读取晚于 $currentTurn，原生回合状态=$acceptedNativeAgentTurnIsInProgress 时按当前状态核验",
+		async ({ currentTurn, acceptedNativeAgentTurnIsInProgress }) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "codex-native-turn-state-after-current-turn-change";
+			const { entry, write } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: "model: test\n› ",
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			entry.summary.agentId = "codex";
+			entry.summary.agentNativeConversationSessionIdentity = {
+				sourceAgentId: "codex",
+				nativeSessionId: `${taskId}-native`,
+				transcriptPath: null,
+				observedAt: Date.now(),
+			};
+			const outcomes: Array<{ status: string; reason: string | null }> = [];
+			manager.submitTaskChatInputWhenReady(taskId, "先前已经接受的输入", {
+				onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			});
+			await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+			expect(write).toHaveBeenCalledWith("SUBMIT[先前已经接受的输入]");
+			expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(1);
+			expect(entry.active.programmaticDeliveryReceipt?.phase).toBe("awaiting_submit_confirmation");
+			const firstSubmitCarriageReturnAtEpochMs =
+				entry.active.programmaticDeliveryReceipt?.firstSubmitCarriageReturnAtEpochMs;
+			expect(firstSubmitCarriageReturnAtEpochMs).toBeTypeOf("number");
+			manager.transitionToRunning(taskId);
+			await vi.advanceTimersByTimeAsync(10);
+			if (currentTurn === "stopped") manager.transitionToReview(taskId, "hook");
+			else
+				expect(
+					manager.parkTaskSessionAwaitingDispatchedBackgroundWork(taskId, { label: "较新的后台工作" }).ok,
+				).toBe(true);
+			entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt = Date.now();
+			const beforeRead = entry.summary;
+			await vi.advanceTimersByTimeAsync(10);
+			const invalidation = vi.spyOn(manager, "invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt");
+			const disarmRestoration = vi.spyOn(manager, "disarmRestorationContinuationGuard");
+			confirmCorrespondingNativeInput(
+				manager,
+				taskId,
+				"先前已经接受的输入",
+				"codex-late-native-acceptance",
+				Date.now(),
+				acceptedNativeAgentTurnIsInProgress,
+			);
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted");
+			expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).not.toHaveProperty(
+				"acceptedNativeAgentTurnIsInProgress",
+			);
+			expect(entry.summary.lastEffectiveAgentConversationActivityObservation).not.toHaveProperty(
+				"acceptedNativeAgentTurnIsInProgress",
+			);
+			if (!acceptedNativeAgentTurnIsInProgress) {
+				expect(entry.summary.turnOwner).toBe(beforeRead.turnOwner);
+				expect(entry.summary.liveness).toBe(beforeRead.liveness);
+				expect(entry.summary.userTurnKind).toBe(beforeRead.userTurnKind);
+				expect(entry.summary.reviewReason).toBe(beforeRead.reviewReason);
+				expect(entry.summary.awaitingDispatchedBackgroundWork).toBe(beforeRead.awaitingDispatchedBackgroundWork);
+				expect(entry.summary.currentAgentProcessUserTurnIdleRetentionStarted).toBe(
+					beforeRead.currentAgentProcessUserTurnIdleRetentionStarted,
+				);
+				expect(entry.summary.agentResponseGenerationTurnSequence).toBe(
+					beforeRead.agentResponseGenerationTurnSequence,
+				);
+				expect(entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt).toBe(
+					beforeRead.agentCurrentWorkPhaseGoalInvalidatedAt,
+				);
+				expect(invalidation).toHaveBeenCalledExactlyOnceWith(taskId, firstSubmitCarriageReturnAtEpochMs);
+				expect(invalidation).not.toHaveBeenCalledWith(taskId, Date.now());
+				expect(disarmRestoration).not.toHaveBeenCalled();
+			} else {
+				expect(entry.summary.turnOwner).toBe("agent");
+				expect(entry.summary.userTurnKind).toBeNull();
+				expect(entry.summary.reviewReason).toBeNull();
+				expect(entry.summary.awaitingDispatchedBackgroundWork).toBeNull();
+				expect(entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt).toBe(Date.now());
+			}
+			invalidation.mockRestore();
+			disarmRestoration.mockRestore();
+		},
+	);
+
+	it("原生接受发生在真实交棒之后时仍开启新的 Agent 回合", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "native-acceptance-after-prior-turn-handoff";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		manager.transitionToRunning(taskId);
+		await vi.advanceTimersByTimeAsync(10);
+		manager.transitionToReview(taskId, "hook");
+		const stopped = entry.summary;
+		await vi.advanceTimersByTimeAsync(10);
+		confirmCorrespondingNativeInput(manager, taskId, "新回合输入", "accepted-after-handoff");
+		expect(entry.summary.turnOwner).toBe("agent");
+		expect(entry.summary.userTurnKind).toBeNull();
+		expect(entry.summary.reviewReason).toBeNull();
+		expect(entry.summary.agentResponseGenerationTurnSequence).toBe(
+			(stopped.agentResponseGenerationTurnSequence ?? 0) + 1,
+		);
+		expect(entry.summary.lastAgentConversationUserHandoffObservation).toBe(
+			stopped.lastAgentConversationUserHandoffObservation,
+		);
+	});
+});
 
 describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪门控投递）", () => {
 	beforeEach(() => {
@@ -765,10 +1399,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(write).toHaveBeenCalledWith("SUBMIT[新消息]");
 	});
 
-	it("A2 idle 兜底：提示符正则整窗不命中但 agent 已让出回合且终端静默 → 沉降后即投递（via=output-quiet），不拖到 deadline", async () => {
+	it("终端静默与 user 回合不能替代输入就绪证明，无匹配提示符时不投递", async () => {
 		// 真实 RVF 现场的稳健兜底：镜像视口未呈现可匹配的 idle 框（scanBuffer 也为 null）→ predicate 整窗不命中。
 		// state:"awaiting_review" → turnOwner:"user"（agent 已让出回合）；lastOutputAt:null → 视为已字节静默。
-		// 二者同时成立时 A2 判就绪，避免拖满 60s deadline。
+		// 两者只说明进程待命，不能替代输入框或原生就绪证明。
 		const manager = new TerminalSessionManager();
 		const { write } = installFakeClaudeEntry(manager, "task-deliver-quiet", {
 			mirrorSnapshot: "正在收尾，本视口没有可匹配的输入框…",
@@ -779,11 +1413,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		manager.submitTaskChatInputWhenReady("task-deliver-quiet", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		expect(write).toHaveBeenCalledTimes(1);
-		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
-		expect(
-			tuiFreezeWarnings.some((m) => m.includes("task-chat-input-delivered") && m.includes("via=output-quiet")),
-		).toBe(true);
+		expect(write).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write).not.toHaveBeenCalled();
+		expect(tuiFreezeWarnings.some((message) => message.includes("via=output-quiet"))).toBe(false);
 	});
 
 	// 形态 3：让路判据从「距上次击键不足 8s」换成读框。旧判据分不出「刚敲完回车提交了」（框已空，
@@ -1524,13 +2157,11 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		// 过确认延时（≥静默阈值）→ 判定 CR 被吞 → 补发一个裸回车（非又一段 paste）。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
-		expect(write).toHaveBeenCalledTimes(3);
-		expect(write.mock.calls[2]?.[0]).toBe("\r");
-		expect(write.mock.calls[2]?.[0]).not.toContain("SUBMIT[");
-		expect(tuiFreezeWarnings.some((m) => m.includes("submit-resend-cr"))).toBe(true);
+		expect(write).toHaveBeenCalledTimes(2);
+		expect(tuiFreezeWarnings.some((m) => m.includes("submit-resend-cr"))).toBe(false);
 	});
 
-	it("写后确认 · 真提交（投递后输出恢复流动）→ 不补发、打 submit-confirmed", async () => {
+	it("写后确认 · 原始输出恢复流动仍不能确认对应正文已接受", async () => {
 		const manager = new TerminalSessionManager();
 		const { write, entry } = installFakeClaudeEntry(manager, "task-confirm-landed", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -1548,12 +2179,12 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS - 500);
 		entry.summary.lastOutputAt = Date.now();
 		await vi.advanceTimersByTimeAsync(500); // 触发确认 tick
-		// 非静默 → 判定已落地 → 不补发裸回车。
+		// 新 PTY 字节也可能只是重绘；不能把它升级成原生接受证明。
 		expect(write).toHaveBeenCalledTimes(2);
-		expect(tuiFreezeWarnings.some((m) => m.includes("submit-confirmed"))).toBe(true);
+		expect(tuiFreezeWarnings.some((m) => m.includes("submit-confirmed"))).toBe(false);
 	});
 
-	it("写后确认 · 仍静默但用户在打字 → 让位不补发（保护 stashed/在打的 prompt），停手越窗后才补发", async () => {
+	it("写后确认 · 真人编辑期间与停手后，缺少原生证明均不补发回车", async () => {
 		const manager = new TerminalSessionManager();
 		const { write, entry } = installFakeClaudeEntry(manager, "task-confirm-yield", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -1573,13 +2204,12 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(200); // 触发首个确认 tick
 		expect(write).toHaveBeenCalledTimes(2); // 让位：无补发裸回车
 
-		// 用户停手、越过 8s 抑制窗 → 后续某一拍确认 tick 放行补发裸回车。
+		// 用户停手后仍缺确切接受/失败证明，也不能替用户追加回车。
 		await vi.advanceTimersByTimeAsync(USER_INPUT_SUPPRESS_MS + SUBMIT_CONFIRM_DELAY_MS);
-		expect(write).toHaveBeenCalledTimes(3);
-		expect(write.mock.calls[2]?.[0]).toBe("\r");
+		expect(write).toHaveBeenCalledTimes(2);
 	});
 
-	it("写后确认 · 持续静默：补发至 SUBMIT_CONFIRM_MAX_RESENDS 次后打 submit-unconfirmed 收尾、不再补发", async () => {
+	it("写后确认 · 持续未知在十五秒预算内收敛，不盲目重投", async () => {
 		const manager = new TerminalSessionManager();
 		const { write } = installFakeClaudeEntry(manager, "task-confirm-exhaust", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -1591,17 +2221,16 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(SETTLE_MS); // 投递 paste 框架（write #1）
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR（write #2）
 
-		// 始终静默 + 可注入 → 每隔确认延时补发一次裸回车，至多 MAX_RESENDS 次，之后打醒目 submit-unconfirmed 收尾。
-		// CR 写入总数 = 提交 CR 1 次 + 补发 MAX_RESENDS 次（两者字节相同，只能按序数区分）。
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
+		// 缺少可靠原生证据时只保留首次提交 CR；十五秒后诚实收敛为未确认。
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS + SUBMIT_CONFIRM_DELAY_MS);
 		const crWrites = write.mock.calls.filter((call) => call[0] === "\r");
-		expect(crWrites).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
+		expect(crWrites).toHaveLength(1);
 		expect(tuiFreezeErrors.some((m) => m.includes("submit-unconfirmed"))).toBe(true);
 
-		// 预算耗尽后再推进也不会有第 4 次补发。
+		// 预算耗尽后也不能恢复自动补发。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * 2);
 		const crWritesAfter = write.mock.calls.filter((call) => call[0] === "\r");
-		expect(crWritesAfter).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
+		expect(crWritesAfter).toHaveLength(1);
 	});
 
 	// 让位那一支曾是回执链路上唯一没有结论的出口。以下两例分别钉住它的两个破口：
@@ -1626,13 +2255,13 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		// 前几拍用户不在场 → 正常补发裸回车，直到预算耗尽（CR 总数含最前面那次提交 CR）。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * SUBMIT_CONFIRM_MAX_RESENDS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(1);
 		expect(outcomes).toEqual([]);
 
 		// 收尾那一拍之前用户手敲 → 走让位分支（预算已为 0）。
 		entry.active.lastUserInputAt = Date.now();
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(1);
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
 	});
 
@@ -1799,6 +2428,31 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		};
 	}
 
+	it.each(["human", "question"] as const)(
+		"A 正文未接受而同会话接受 B 后，%s 接管不能借 B 确认 A",
+		async (intervention) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "receipt-mismatched-native-acceptance";
+			const { entry, write } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: CLAUDE_READY_PROMPT,
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			const { outcomes, onDeliveryOutcome } = collectOutcomes();
+			manager.submitTaskChatInputWhenReady(taskId, "正文 A", { onDeliveryOutcome });
+			await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+			confirmCorrespondingNativeInput(manager, taskId, "正文 B", "accepted-message-B");
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted");
+			expect(outcomes).toEqual([]);
+			if (intervention === "human") manager.writeInput(taskId, Buffer.from("真人编辑"));
+			else manager.transitionToReview(taskId, "hook", "question");
+			expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
+			await vi.advanceTimersByTimeAsync(20_000);
+			expect(write.mock.calls.filter(([bytes]) => bytes === "\r")).toHaveLength(1);
+			expect(outcomes).toHaveLength(1);
+		},
+	);
+
 	it.each([
 		{ intervention: "human", afterSubmit: false, outputProgress: true, confirmed: false },
 		{ intervention: "human", afterSubmit: true, outputProgress: false, confirmed: false },
@@ -1824,6 +2478,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
 			entry.summary.lastOutputAt = Date.now();
 		}
+		if (scenario.confirmed) confirmCorrespondingNativeInput(manager, taskId);
 		if (scenario.intervention === "human") manager.writeInput(taskId, Buffer.from("真人未提交编辑"));
 		else {
 			manager.transitionToRunning(taskId);
@@ -1862,8 +2517,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		await vi.advanceTimersByTimeAsync(70_000);
 		expect(outcomes).toEqual([
 			{
-				status: promptRemainsInComposer ? "delivery_failed" : "delivered_and_submit_confirmed",
-				reason: promptRemainsInComposer ? "submit_confirmation_budget_exhausted" : null,
+				status: "delivery_failed",
+				reason: "submit_confirmation_budget_exhausted",
 			},
 		]);
 		expect(write.mock.calls.filter(([input]) => input === "\r")).toHaveLength(1);
@@ -1887,13 +2542,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
 		entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
 		entry.summary.lastOutputAt = Date.now();
-		let finishSnapshot: (screen: ReturnType<typeof toScreenSnapshot>) => void = () => {
-			throw new Error("尚未读取快照");
-		};
-		entry.terminalStateMirror.getScreenSnapshot = () =>
-			new Promise((resolve) => {
-				finishSnapshot = resolve;
-			});
+		const readScreenAfterHumanIntervention = vi.fn(async () => toScreenSnapshot("model: test\n› "));
+		entry.terminalStateMirror.getScreenSnapshot = readScreenAfterHumanIntervention;
 		manager.writeInput(taskId, Buffer.from("真人编辑"));
 		const later = collectOutcomes();
 		if (replacement === "new_incarnation") entry.active = { ...entry.active };
@@ -1901,12 +2551,12 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			idempotencyKey: "later",
 			onDeliveryOutcome: later.onDeliveryOutcome,
 		});
-		finishSnapshot(toScreenSnapshot("model: test\n› "));
+		expect(readScreenAfterHumanIntervention).not.toHaveBeenCalled();
 		await Promise.resolve();
 		expect(original.outcomes).toEqual([
 			{
-				status: replacement === "new_incarnation" ? "delivery_failed" : "delivered_and_submit_confirmed",
-				reason: replacement === "new_incarnation" ? "submit_confirmation_budget_exhausted" : null,
+				status: "delivery_failed",
+				reason: "submit_confirmation_budget_exhausted",
 			},
 		]);
 		expect(later.outcomes).toEqual([]);
@@ -1941,8 +2591,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		expect(outcomes).toHaveLength(0);
 		expect(manager.getSummary("task-receipt-confirmed")?.agentCurrentWorkPhaseGoalInvalidatedAt).toBeUndefined();
 
-		// agent 开始干活 → 输出恢复流动 → 确认 tick 判定已提交。
-		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
+		// 对应正文的新原生消息位于已捕获前驱之后，才能结算本条回执。
+		confirmCorrespondingNativeInput(manager, "task-receipt-confirmed");
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
 		expect(manager.getSummary("task-receipt-confirmed")?.agentCurrentWorkPhaseGoalInvalidatedAt).toBeGreaterThan(
@@ -1952,7 +2602,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 
 	it("写入时 agent 已在自己的回合中 → delivered_queued_behind_active_agent_turn（该标记在写入时捕获，不是确认时）", async () => {
 		const manager = new TerminalSessionManager();
-		const { entry } = installFakeClaudeEntry(manager, "task-receipt-queued", {
+		installFakeClaudeEntry(manager, "task-receipt-queued", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
 			state: "running",
 			lastOutputAt: null,
@@ -1965,7 +2615,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
-		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
+		confirmCorrespondingNativeInput(manager, "task-receipt-queued");
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_queued_behind_active_agent_turn", reason: null }]);
 	});
@@ -1986,8 +2636,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
-		// 输出始终静默（lastOutputAt 恒 null）→ 每拍补发裸 CR，直至预算耗尽。
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
+		// 始终没有可靠接受证明，等待统一确认预算耗尽。
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS + SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
 	});
 
@@ -2160,7 +2810,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 
 		// 它自己的确认链才有资格下结论（分离写：先等摄入预算发出提交 CR，确认链自那一刻起跑）。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
-		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
+		confirmCorrespondingNativeInput(manager, "task-receipt-continuation-race");
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_queued_behind_active_agent_turn", reason: null }]);
 	});
@@ -2187,7 +2837,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		// agent 收下的是**续跑指令**，输出恢复流动 → 续跑那条确认链判定已提交。
 		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
-		expect(tuiFreezeWarnings.some((m) => m.includes("submit-confirmed"))).toBe(true);
+		expect(tuiFreezeWarnings.some((m) => m.includes("submit-confirmed"))).toBe(false);
 		// 这条投递的文本一个字节都没写过，绝不可因此被判成 delivered_*。
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(0);
 		expect(outcomes).toEqual([]);
@@ -2212,7 +2862,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
 
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS + SUBMIT_CONFIRM_DELAY_MS);
 		expect(tuiFreezeErrors.some((m) => m.includes("submit-unconfirmed"))).toBe(true);
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(0);
 		expect(outcomes).toEqual([]);
@@ -2276,13 +2926,13 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		// 用户不在场的前几拍：续跑链正常补发裸回车，直到预算耗尽。
 		// CR 写入总数含续跑自己那次提交 CR（分离写的第二步），故补发次数要 +1 才对得上。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * SUBMIT_CONFIRM_MAX_RESENDS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(1);
 		expect(outcomes).toEqual([]);
 
 		// 收尾那一拍之前用户手敲 → 走「让位 + 补发预算已耗尽」那一支。
 		entry.active.lastUserInputAt = Date.now();
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
-		expect(tuiFreezeErrors.some((m) => m.includes("reason=user-input-yield-with-resends-exhausted"))).toBe(true);
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS);
+		expect(tuiFreezeErrors.some((m) => m.includes("reason=confirm-chain-convergence-deadline"))).toBe(true);
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(0);
 		expect(outcomes).toEqual([]);
 	});

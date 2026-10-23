@@ -127,8 +127,8 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 		const manager = new TerminalSessionManager();
 		await manager.startTaskSession({
 			taskId: "task-throttle",
-			agentId: "codex",
-			binary: "codex",
+			agentId: "cursor",
+			binary: "cursor",
 			args: [],
 			cwd: "/tmp/task-throttle",
 			prompt: "Implement the task",
@@ -141,7 +141,9 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 			// 每批都是全新的实质内容行——无节流时每批都会推进实质戳。
 			spawnedSessions[0]?.triggerData(`Streaming a brand new content line number ${batchIndex}\n`);
 			await vi.advanceTimersByTimeAsync(OUTPUT_ANALYSIS_BATCH_WINDOW_MS);
-			const stamp = manager.getSummary("task-throttle")?.lastSubstantiveOutputAt ?? null;
+			const stamp =
+				manager.getSummary("task-throttle")?.lastAgentConversationPromptCacheReferenceObservation?.observedAtMs ??
+				null;
 			if (stamp !== null && observedStamps.at(-1) !== stamp) {
 				observedStamps.push(stamp);
 			}
@@ -182,7 +184,10 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 		}
 
 		expect(substanceDetectorCallSpy).not.toHaveBeenCalled();
-		expect(manager.getSummary("task-throttle-guarded")?.lastSubstantiveOutputAt ?? null).toBeNull();
+		expect(
+			manager.getSummary("task-throttle-guarded")?.lastAgentConversationPromptCacheReferenceObservation
+				?.observedAtMs ?? null,
+		).toBeNull();
 	});
 
 	// 节流只作用于实质输出分析：adapter 的输出转移检测仍逐攒批执行，故 Codex 的
@@ -225,12 +230,12 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 	// 失败序列「先 spinner chrome 吃掉配额 → 空档内产出唯一一段简短真实回复 → 随即停止输出」下，
 	// 此后再无 flush 触发分析，那段真实回复永远无人观察，卡片少报一次响应、
 	// isAgentActivelyProducingOutput 在该轮里也看不到活性。
-	it("still stamps a short reply that lands in the throttle gap and is followed by silence", async () => {
+	it("Cursor 短回复落入节流空档后仍更新专用缓存估计，不推进业务活动", async () => {
 		const manager = new TerminalSessionManager();
 		await manager.startTaskSession({
 			taskId: "task-throttle-gap-tail",
-			agentId: "codex",
-			binary: "codex",
+			agentId: "cursor",
+			binary: "cursor",
 			args: [],
 			cwd: "/tmp/task-throttle-gap-tail",
 			prompt: "Implement the task",
@@ -240,7 +245,10 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 		spawnedSessions[0]?.triggerData(SPINNER_CHROME_LINE);
 		await vi.advanceTimersByTimeAsync(OUTPUT_ANALYSIS_BATCH_WINDOW_MS);
 		expect(substanceDetectorCallSpy.mock.calls.length).toBe(1);
-		expect(manager.getSummary("task-throttle-gap-tail")?.lastSubstantiveOutputAt ?? null).toBeNull();
+		expect(
+			manager.getSummary("task-throttle-gap-tail")?.lastAgentConversationPromptCacheReferenceObservation
+				?.observedAtMs ?? null,
+		).toBeNull();
 
 		// ② 节流空档内的唯一一段真实回复，随后 agent 彻底静默（不再有任何输出触发 flush）。
 		spawnedSessions[0]?.triggerData("Done: the failing regression now passes.\n");
@@ -252,7 +260,12 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 		await vi.advanceTimersByTimeAsync(SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS);
 
 		// 那段真实回复必须最终被观察到，且时间戳落在它到达的时刻（不晚于 lastOutputAt）。
-		const stampedAt = manager.getSummary("task-throttle-gap-tail")?.lastSubstantiveOutputAt ?? null;
+		const stampedAt =
+			manager.getSummary("task-throttle-gap-tail")?.lastAgentConversationPromptCacheReferenceObservation
+				?.observedAtMs ?? null;
+		expect(
+			manager.getSummary("task-throttle-gap-tail")?.lastEffectiveAgentConversationActivityObservation ?? null,
+		).toBeNull();
 		expect(stampedAt).toBe(outputAtOfReply);
 		expect(substanceDetectorCallSpy.mock.calls.some(([text]) => String(text).includes("failing regression"))).toBe(
 			true,
@@ -267,8 +280,8 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 		const manager = new TerminalSessionManager();
 		await manager.startTaskSession({
 			taskId: "task-throttle-gap-flood",
-			agentId: "codex",
-			binary: "codex",
+			agentId: "cursor",
+			binary: "cursor",
 			args: [],
 			cwd: "/tmp/task-throttle-gap-flood",
 			prompt: "Implement the task",
@@ -293,6 +306,12 @@ describe("TerminalSessionManager substantive output analysis throttle", () => {
 				MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS + MAX_PENDING_OUTPUT_ANALYSIS_CHARS,
 			);
 		}
-		expect(manager.getSummary("task-throttle-gap-flood")?.lastSubstantiveOutputAt ?? null).not.toBeNull();
+		expect(
+			manager.getSummary("task-throttle-gap-flood")?.lastAgentConversationPromptCacheReferenceObservation
+				?.observedAtMs ?? null,
+		).not.toBeNull();
+		expect(
+			manager.getSummary("task-throttle-gap-flood")?.lastEffectiveAgentConversationActivityObservation ?? null,
+		).toBeNull();
 	});
 });

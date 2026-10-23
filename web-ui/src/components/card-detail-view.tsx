@@ -1584,6 +1584,12 @@ export function CardDetailView({
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
+				<div data-task-created-at-details="" className="px-3 py-1 text-xs text-text-secondary">
+					任务创建于{" "}
+					<time dateTime={new Date(selection.card.createdAt).toISOString()}>
+						{new Date(selection.card.createdAt).toLocaleString()}
+					</time>
+				</div>
 				<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
 			</div>
 			{pendingUserDecision.transcriptRecoveryNotice ? (
@@ -1652,6 +1658,7 @@ export function CardDetailView({
 					idleCollapseController={mobileFocusViewIdleCollapseController}
 					cardBusinessProps={buildTaskCardBusinessProps({
 						card: selection.card,
+						taskSessions,
 						columnId: selection.column.id,
 						sessionSummary:
 							resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ??

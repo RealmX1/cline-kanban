@@ -138,8 +138,12 @@ describe("阶段目标与稳定 Task 名称的边界", () => {
 			seeded.liveness,
 			seeded.userTurnKind,
 		]);
-		expect(next.lastConversationProgressObservation).toEqual(seeded.lastConversationProgressObservation);
-		expect(next.agentResponseGenerationStopped).toBeNull();
+		expect(next.lastEffectiveAgentConversationActivityObservation).toEqual({
+			...seeded.lastConversationProgressObservation,
+			activityKind: "agent_output",
+		});
+		expect(next.currentAgentProcessUserTurnIdleRetentionStarted).toBeUndefined();
+		expect(next.agentResponseGenerationStopped).toBeUndefined();
 	});
 	it("原生清单仅接受唯一进行中项，优先 activeForm，过长目标不截断猜测", () => {
 		expect(

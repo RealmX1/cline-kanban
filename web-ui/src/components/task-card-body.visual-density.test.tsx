@@ -54,8 +54,8 @@ function createSummary(): RuntimeTaskSessionSummary {
 		exitCode: null,
 		lastHookAt: NOW - 12 * 60_000,
 		latestHookActivity: null,
-		agentResponseGenerationStopped: {
-			stoppedAt: NOW - 12 * 60_000,
+		lastAgentConversationUserHandoffObservation: {
+			observedAtMs: NOW - 12 * 60_000,
 			signalConfidence: "harness_turn_complete",
 			turnSequence: 3,
 		},

@@ -522,6 +522,36 @@ describe("useTaskSpotlightSearchController", () => {
 		expect(get().results.map((result) => result.document.taskId)).toEqual(["task-alpha"]);
 	});
 
+	it("主会话交接后，Direct 排序和显示只取新主活动，不混入原主或 peer", () => {
+		const board = createBoard();
+		board.columns[0]!.cards[0]!.mainTaskConversationSessionId = "new-main";
+		const { get } = renderController(
+			baseProps({
+				board,
+				taskSessionSummariesByTaskId: {
+					"task-alpha": sessionSummaryWithAgentConversationProgress("task-alpha", 900),
+					"new-main": {
+						...sessionSummaryWithAgentConversationProgress("new-main", 200),
+						taskConversationSessionMetadata: {
+							workspaceTaskId: "task-alpha",
+							taskConversationSessionRole: "main",
+							taskConversationSessionContextSource: "started_from_scratch",
+							parentTaskConversationSessionId: null,
+							mainSessionOriginTurnNumber: null,
+							mainSessionOriginUserMessagePreview: null,
+							latestUserMessagePreview: null,
+						},
+					},
+					peer: sessionSummaryWithAgentConversationProgress("peer", 1000),
+				},
+			}),
+		);
+		act(() => get().open());
+		act(() => get().setQuery("Alpha"));
+		const alpha = get().results.find((result) => result.document.taskId === "task-alpha")!;
+		expect(get().resolveResultRowDisplayContext(alpha.document).agentConversationProgressAtEpochMs).toBe(200);
+	});
+
 	it("ranks other-project rows by their projected agent activity and shows it on the row", () => {
 		// 跨项目行的推进时刻来自索引快照（文档字段），当前项目的来自会话推流——两路比较的是同一个量，
 		// 跨项目行不再在 Agent activity 档与 direct 的 relevance 档里一律垫底。

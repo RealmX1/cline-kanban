@@ -40,7 +40,7 @@ const NOW = 1_700_000_000_000;
 
 // ── 会话摘要构造 ────────────────────────────────────────────────────────────
 
-// agent 这一轮刚停下、球在人这边（review）。turnSequence 是「这是第几轮」，stoppedAt 区分两次停止。
+// agent 这一轮刚停下、球在人这边（review）。turnSequence 是「这是第几轮」，observedAtMs 区分两次停止。
 function stoppedSummary(
 	turnSequence: number,
 	overrides: Partial<RuntimeTaskSessionSummary> = {},
@@ -63,8 +63,8 @@ function stoppedSummary(
 		userTurnKind: "review",
 		runtimeSessionIncarnationId: "incarnation-1",
 		agentResponseGenerationTurnSequence: turnSequence,
-		agentResponseGenerationStopped: {
-			stoppedAt: NOW + turnSequence,
+		lastAgentConversationUserHandoffObservation: {
+			observedAtMs: NOW + turnSequence,
 			signalConfidence: "harness_turn_complete",
 			turnSequence,
 		},
@@ -78,7 +78,7 @@ function generatingSummary(turnSequence: number): RuntimeTaskSessionSummary {
 		reviewReason: null,
 		turnOwner: "agent",
 		userTurnKind: null,
-		agentResponseGenerationStopped: null,
+		lastAgentConversationUserHandoffObservation: null,
 	});
 }
 
@@ -379,8 +379,8 @@ describe("queued-task-prompt-delivery-dispatcher — 重启跨越", () => {
 		harness.observe(generatingSummary(2));
 		harness.observe(
 			stoppedSummary(2, {
-				agentResponseGenerationStopped: {
-					stoppedAt: Date.now() + 1_000,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: Date.now() + 1_000,
 					signalConfidence: "harness_turn_complete",
 					turnSequence: 2,
 				},

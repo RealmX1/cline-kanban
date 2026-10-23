@@ -327,7 +327,7 @@ describe("BoardCard", () => {
 	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点按共享细时钟
 	// 1Hz 呼吸（离散切换 opacity，不用 animate-pulse：无限 CSS 动画会让看板页可见期间逐帧合成）；静默 / 非 agent
 	// 回合 → 静止点。下面三例钉住这条接线（派生逻辑本身见 session-activity.test.ts 的 deriveDisplayLiveness 单测）。
-	it("pulses the session-activity dot while a running agent is actively producing output (computing)", async () => {
+	it("已确认的近期有效活动使状态点脉动，PTY输出不参与判定", async () => {
 		await act(async () => {
 			root.render(
 				<TooltipProvider>
@@ -335,7 +335,14 @@ describe("BoardCard", () => {
 						card={createCard()}
 						index={0}
 						columnId="in_progress"
-						sessionSummary={createSummary("running", { lastOutputAt: Date.now() })}
+						sessionSummary={createSummary("running", {
+							lastOutputAt: null,
+							lastEffectiveAgentConversationActivityObservation: {
+								observedAtMs: Date.now(),
+								evidenceKind: "persisted_agent_transcript",
+								activityKind: "agent_output",
+							},
+						})}
 					/>
 				</TooltipProvider>,
 			);

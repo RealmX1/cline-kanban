@@ -276,6 +276,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
+	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
+		({ workspaceId, summary, submittedPromptText }) => {
+			promptDraftUsageService.notifyUserPromptSubmitted({
+				workspaceId,
+				taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId,
+				submittedAtEpochMs: summary.agentConversationPromptSubmissionAcceptance?.confirmedAtMs ?? Date.now(),
+				submittedPromptText,
+				currentIdentity: summary.agentNativeConversationSessionIdentity,
+				sourceAgentId: summary.agentId ?? undefined,
+			});
+		},
+	);
 
 	// exploration thread graph（B.2）。
 	//

@@ -1,7 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { RuntimeHookIngestResponse, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import * as agentSessionRetentionLogger from "../../../src/diagnostics/agent-session-retention-logger";
 import {
@@ -12,6 +10,7 @@ import {
 import { getNotificationLifecycleArchive } from "../../../src/notifications/notification-lifecycle-archive";
 import { captureNotificationSignal } from "../../../src/notifications/notification-signal-capture";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
+import { confirmTestNativeUserInputAcceptance } from "../../utilities/confirm-test-native-user-input-acceptance";
 import { createTempDir } from "../../utilities/temp-dir";
 
 // 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
@@ -526,7 +525,7 @@ describe("createHooksApi", () => {
 			processingDecision: "allow",
 			additionalContextMarkdown: expect.stringContaining("历史通知"),
 		});
-		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	});
 
 	it("读取暂存通知失败时仍放行非空真人 UserPromptSubmit，并保留账本供下次重试", async () => {
@@ -567,7 +566,7 @@ describe("createHooksApi", () => {
 		});
 
 		expect(response).toEqual({ ok: true });
-		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	});
 
 	it("treats ineligible hook transitions as successful no-ops", async () => {
@@ -1216,7 +1215,7 @@ describe("createHooksApi", () => {
 		});
 
 		expect(response).toEqual({ ok: true });
-		expect(manager.unparkTaskSession).toHaveBeenCalledWith("task-1");
+		expect(manager.unparkTaskSession).not.toHaveBeenCalled();
 	});
 
 	it("parked + PostToolUse（to_in_progress 的中途活动）：**不**清 park（避免结束本轮前误清）", async () => {
@@ -1279,7 +1278,7 @@ describe("createHooksApi", () => {
 		});
 
 		expect(response).toEqual({ ok: true });
-		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	});
 
 	it("to_in_progress + UserPromptSubmit：userInitiatedResume=true（Claude/Codex/Droid 用户提交）", async () => {
@@ -1308,11 +1307,8 @@ describe("createHooksApi", () => {
 		});
 
 		expect(response).toEqual({ ok: true });
-		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
-		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
-			"task-1",
-			"user_prompt_submit_hook_event_accepted",
-		);
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
 	});
 
 	it("to_in_progress + PostToolUse：userInitiatedResume=false（自动续跑中途活动，不解除 guard）", async () => {
@@ -1761,7 +1757,7 @@ describe("createHooksApi", () => {
 			submittedPromptText: "接着把 handoff 补完",
 		});
 
-		expect(manager.disarmRestorationContinuationGuard).toHaveBeenCalledWith("task-1");
+		expect(manager.disarmRestorationContinuationGuard).not.toHaveBeenCalled();
 	});
 });
 
@@ -1870,6 +1866,7 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 				metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
 				submittedPromptText: "接着把 handoff 补完",
 			});
+			confirmTestNativeUserInputAcceptance({ manager, taskId, promptText: "接着把 handoff 补完" });
 			expect(manager.isRestorationContinuationGuardArmed(taskId)).toBe(false);
 			expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId)).toBe(true);
 

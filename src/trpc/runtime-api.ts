@@ -2100,10 +2100,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						sessionTransport,
 						text,
 						originRuntimeSessionIncarnationId,
+						idempotencyKey,
 					}) => {
 						if (sessionTransport === "acp_stdio_subprocess") {
 							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-							return (await acpService.sendTaskSessionInput(taskId, text)) !== null;
+							// ACP 的同步 summary 只代表已发出；等待有界的协议接受回执，不等待整轮结束。
+							return await new Promise<boolean>((resolveAcceptance) => {
+								void acpService
+									.sendTaskSessionInput(taskId, text, undefined, resolveAcceptance, idempotencyKey)
+									.then((summary) => {
+										if (!summary || !summary.agentConversationPromptSubmissionAcceptance)
+											resolveAcceptance(false);
+										else if (summary.agentConversationPromptSubmissionAcceptance.status !== "pending") {
+											resolveAcceptance(
+												summary.agentConversationPromptSubmissionAcceptance.status === "accepted",
+											);
+										}
+									})
+									.catch(() => resolveAcceptance(false));
+							});
 						}
 						if (sessionTransport === "in_process_cline_sdk") {
 							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
@@ -2845,15 +2860,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const completeHandoverAfterConfirmedHumanMessage = async () => {
 				if (!humanMessageHandoverId) return;
 				try {
-					const manager = await deps.getScopedTerminalManager(workspaceScope);
+					const [manager, acpService] = await Promise.all([
+						deps.getScopedTerminalManager(workspaceScope),
+						deps.getScopedAcpTaskSessionService(workspaceScope),
+					]);
 					await completeTaskMainSessionHandoverAfterUserMessage({
 						workspaceId: workspaceScope.workspaceId,
 						workspacePath: workspaceScope.workspacePath,
 						taskConversationSessionId: resolvedSessionId,
 						promptText: input.text,
 						expectedHandoverId: humanMessageHandoverId,
-						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
-							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+						onTaskConversationSessionMetadataChanged: (sessionId, metadata) => {
+							manager.applyTaskConversationSessionMetadata(sessionId, metadata);
+							if (acpService.getSummary(sessionId))
+								acpService.applyTaskConversationSessionMetadata(sessionId, metadata);
+						},
 					});
 				} catch (error) {
 					// 消息已经提交，落库失败不能把它报成投递失败；hold 保留，原生 hook 或后续真人消息可重试。

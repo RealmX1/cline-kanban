@@ -131,6 +131,10 @@ export default defineConfig({
 				__dirname,
 				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
 			),
+			"@runtime-agent-conversation-activity-observation": resolve(
+				__dirname,
+				"../src/core/agent-conversation-activity-observation.ts",
+			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-state-stream-workspace-metadata-probe-scope-declaration": resolve(
 				__dirname,

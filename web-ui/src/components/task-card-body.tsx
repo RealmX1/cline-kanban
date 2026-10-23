@@ -7,9 +7,13 @@ import {
 	getRuntimeAgentCatalogEntry,
 	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
 } from "@runtime-agent-catalog";
-import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import {
-	deriveDisplayLiveness,
+	collectTaskConversationSessionActivityObservations,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "@runtime-agent-conversation-activity-observation";
+import {
+	deriveSessionRecentEffectiveActivityDisplayLiveness,
 	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
@@ -22,7 +26,6 @@ import {
 	Archive,
 	Check,
 	ClipboardCheck,
-	Clock,
 	Copy,
 	Eye,
 	FileText,
@@ -54,6 +57,7 @@ import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/tas
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
+import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
@@ -73,7 +77,12 @@ import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } f
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
-import type { PermanentlyDeletedTaskCardEntry, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type {
+	PermanentlyDeletedTaskCardEntry,
+	RuntimeAgentId,
+	RuntimeTaskConversationSessionActivityObservation,
+	RuntimeTaskSessionSummary,
+} from "@/runtime/types";
 import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
@@ -136,6 +145,7 @@ export interface TaskCardBusinessProps {
 	card: BoardCardModel;
 	columnId: BoardColumnId;
 	sessionSummary?: RuntimeTaskSessionSummary;
+	taskConversationSessionActivityObservations?: RuntimeTaskConversationSessionActivityObservation[];
 	selected?: boolean;
 	onClick?: (card: BoardCardModel) => void;
 	onStart?: (taskId: string) => void;
@@ -311,6 +321,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		card,
 		columnId,
 		sessionSummary,
+		taskConversationSessionActivityObservations,
 		selected = false,
 		onClick,
 		onStart,
@@ -437,15 +448,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 		lastSessionActivityRef.current = rawSessionActivity;
 	}
 	const sessionActivity = rawSessionActivity ?? lastSessionActivityRef.current;
-	// 「computing 脉动」（双轴重构 Stage 3，distinction ①）：agent 回合且最近 5s 内仍在产出 PTY 输出时，
-	// 状态点脉动表示「在算」；静默(quiet)/其它态保持现状静止点。computing/quiet 是随时间漂移的派生叠加
-	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需一个秒级 tick 让卡片在
-	// 跨过静默边界后停止脉动；tick 走共享细时钟（use-shared-fine-clock），且仅在「agent 回合 + liveness=live
-	// 且未 parked」时订阅，空闲 / 待审 / 已结束卡不订阅、不随秒级 tick 重渲。
+	// 状态点脉动只表示最近有可信有效活动；静默不代表模型停算或回合结束。
 	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
-	// parked（已派发后台工作、等自行恢复）：纯展示信号——它是普通 agent 回合 {agent,live,null}，但**不在算**，
-	// 是在等自己派发的后台工作。读 sidecar（非 facet，deriveDisplayLiveness 不动），抑制 computing 脉冲并渲染
-	// parked 徽标，让卡片不再误显示「转圈在算」。
+	// 已派发后台工作期间保留等待徽标，不以屏幕重绘制造活动脉冲。
 	const isParkedAwaitingBackgroundWork = isParkedAwaitingDispatchedBackgroundWork(sessionSummary);
 	// 程序化投递正等着这张卡的终端输入框腾出来（计划 §4.4）：在看板上就要看得见，否则又是一次「机器在等、屏幕不说」。
 	// 排队 prompt（主会话的队列；by-the-way 子会话的队列只在详情视图里看）。按 taskId 订阅 store，
@@ -467,57 +472,48 @@ export const TaskCardBody = memo(function TaskCardBody(
 	const isExitedAwaiting = sessionFacets?.liveness === "exited";
 	const activityNowMs = useSharedFineClockTimestampMs(isLiveAgentTurn && !isParkedAwaitingBackgroundWork);
 	// 头部时长读数的常开粗 tick（30s）：读数粒度是分/时/天，30s 足够，且常开不分 live/idle
-	// （与上面仅 live 卡的 1s computing tick 解耦）。走进程内单例时钟而非每卡一个 setInterval：
+	// （与上面仅 live 卡的 1s 活动 tick 解耦）。走进程内单例时钟而非每卡一个 setInterval：
 	// 200 张卡原先 = 200 个常开定时器，且完全不分标签页可见性。共享时钟只留一个定时器 +
 	// 一个 visibilitychange 监听，隐藏时整体停摆。
 	const elapsedNowMs = useSharedCoarseClockTimestampMs();
 
-	// ── 头部两颗时长药丸，读的是**两个不同的量**，别再合并回一个 ────────────────────────────────
-	// 历史上这里只有一颗，读 lastSubstantiveOutputAt 冒充「agent 上次回复」，于是「今天重开一个七天前
-	// 的会话」会把它刷成 now——旧对话被重播进新 TUI，实质分类器的行签名记忆是空的，整段旧内容被判成
-	// 新产出。实测 26% 的 claude 任务因此显示错误（偏差中位数 26.8 小时）。修法不是继续给分类器打补丁，
-	// 而是承认这里本来就要显示两件不同的事：
-	//   Stopped（本轮停了多久）——读 agentResponseGenerationStopped，per-incarnation 的离散状态转移。
-	//     会话重开时刷新是**正确**的（新活体新一轮），它与 2h 回收共用同一个锚点定义。
-	//     agent 回合 / park 期间为 null ⇒ 不显示，此刻由 computing 脉动 / parked 徽标表达。
-	//   Progress（对话上次推进）——读 lastConversationProgressObservation，**跨 incarnation 的历史事实**。
-	//     进程重启、会话重开、旧对话被重播，它都不该动；权威来源是 agent 自己的落盘转录。
-	const agentResponseGenerationStoppedAt = sessionSummary?.agentResponseGenerationStopped?.stoppedAt ?? null;
-	const lastConversationProgressObservation = sessionSummary?.lastConversationProgressObservation ?? null;
-	// 低置信来源（无转录、无 hook 的 agent 落到 TUI 刮取分类器）以 `~` 前缀如实标注「大约」，
-	// 而不是假装精确。判据集中在 core，避免前端各处手写枚举比对。
+	// 卡面表示真实历史交棒与有效对话活动；进程待命期限独立，不参与这两颗药丸。
+	const handoffObservation = sessionSummary
+		? resolveLastAgentConversationUserHandoffObservation(sessionSummary)
+		: null;
+	const lastAgentConversationUserHandoffAtMs =
+		sessionFacets?.turnOwner !== "agent" && !isParkedAwaitingBackgroundWork
+			? (handoffObservation?.observedAtMs ?? null)
+			: null;
+	const lastEffectiveAgentConversationActivityObservation = sessionSummary
+		? resolveLastEffectiveAgentConversationActivityObservation(sessionSummary)
+		: null;
 	const isConversationProgressApproximate =
-		lastConversationProgressObservation !== null &&
-		isLowConfidenceLastConversationProgressEvidence(lastConversationProgressObservation.evidenceKind);
-	// 三处头部 tooltip 的绝对时间文案按时间戳记忆：toLocaleString 每次调用都不便宜，而卡片会随
-	// 1s 细时钟 / 30s 粗时钟 / hover 反复重渲，时间戳本身却极少变化。
-	const createdAtTooltipContent = useMemo(
-		() => `Created · ${new Date(card.createdAt).toLocaleString()}`,
-		[card.createdAt],
-	);
-	const agentResponseGenerationStoppedTooltipContent = useMemo(
+		lastEffectiveAgentConversationActivityObservation?.evidenceKind === "terminal_output_heuristic_classification";
+	const lastAgentConversationUserHandoffTooltipContent = useMemo(
 		() =>
-			agentResponseGenerationStoppedAt != null
-				? `Stopped generating · ${new Date(agentResponseGenerationStoppedAt).toLocaleString()}`
+			lastAgentConversationUserHandoffAtMs != null
+				? `交回用户 · ${new Date(lastAgentConversationUserHandoffAtMs).toLocaleString()}`
 				: null,
-		[agentResponseGenerationStoppedAt],
+		[lastAgentConversationUserHandoffAtMs],
 	);
-	const lastConversationProgressTooltipContent = useMemo(
+	const sessionActivityObservations = useMemo(
 		() =>
-			lastConversationProgressObservation != null
-				? `Conversation last advanced · ${new Date(
-						lastConversationProgressObservation.observedAtMs,
-					).toLocaleString()} · source: ${lastConversationProgressObservation.evidenceKind}`
-				: null,
-		[lastConversationProgressObservation],
+			taskConversationSessionActivityObservations ??
+			collectTaskConversationSessionActivityObservations(card, sessionSummary ? [sessionSummary] : []),
+		[taskConversationSessionActivityObservations, card, sessionSummary],
 	);
-	const isAgentComputing =
-		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
-			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
+	const taskConversationSessionActivityTooltipContent = useMemo(
+		() => describeTaskConversationSessionActivityObservations(sessionActivityObservations, elapsedNowMs),
+		[sessionActivityObservations, elapsedNowMs],
+	);
+	const isAgentRecentlyActive =
+		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null
+			? deriveSessionRecentEffectiveActivityDisplayLiveness(sessionSummary, activityNowMs) ===
+				"recent_effective_activity"
 			: false;
-	// computing 时会话活动点按 1Hz 呼吸（不用 animate-pulse，理由见该 hook）；activityNowMs 在 computing 时本就订阅着细时钟。
 	const sessionActivityDotBreathingOpacity =
-		!isTrashCard && isAgentComputing
+		!isTrashCard && isAgentRecentlyActive
 			? resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp(activityNowMs)
 			: undefined;
 	const displayTitle = useMemo(
@@ -835,65 +831,57 @@ export const TaskCardBody = memo(function TaskCardBody(
 			</span>
 		</Tooltip>
 	) : null;
-	// Clock=自创建至今（恒显）；PencilLine=Description 最后更新至今（仅 backlog，即该列排序键）；
-	// Activity / MessagesSquare 见上方两颗时长药丸的注释。各段 hover 显绝对本地时间。
 	const elapsedTimePills = (
 		<>
-			<Tooltip content={revealHoverActionTooltip(createdAtTooltipContent)}>
+			{columnId === "backlog" ? (
+				<BacklogTaskDescriptionLastUpdatedPill
+					card={card}
+					elapsedNowMs={elapsedNowMs}
+					revealHoverActionTooltip={revealHoverActionTooltip}
+				/>
+			) : null}
+			{lastAgentConversationUserHandoffAtMs != null ? (
+				<Tooltip content={lastAgentConversationUserHandoffTooltipContent}>
+					<span
+						data-agent-response-generation-stopped-pill=""
+						title={lastAgentConversationUserHandoffTooltipContent ?? undefined}
+						className="inline-flex items-center gap-0.5 text-[10px] leading-none text-text-secondary"
+					>
+						<Activity size={8} className="shrink-0" />
+						{formatCompactElapsedSince(lastAgentConversationUserHandoffAtMs, elapsedNowMs)}
+					</span>
+				</Tooltip>
+			) : null}
+			<Tooltip
+				content={<span className="whitespace-pre-line">{taskConversationSessionActivityTooltipContent}</span>}
+			>
 				<span
-					className={cn(
-						"inline-flex items-center gap-0.5 text-[10px] leading-none",
-						isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-					)}
+					role="group"
+					tabIndex={0}
+					aria-label="各会话独立活动时间"
+					data-last-conversation-progress-pill={lastEffectiveAgentConversationActivityObservation ? "" : undefined}
+					data-task-conversation-session-activity-details=""
+					title={taskConversationSessionActivityTooltipContent}
+					className="inline-flex items-center gap-0.5 text-[10px] leading-none text-text-secondary"
 				>
-					<Clock size={8} className="shrink-0" />
-					{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
+					<MessagesSquare size={8} className="shrink-0" />
+					{lastEffectiveAgentConversationActivityObservation
+						? `${isConversationProgressApproximate ? "~" : ""}${formatCompactElapsedSince(lastEffectiveAgentConversationActivityObservation.observedAtMs, elapsedNowMs)}`
+						: "活动未知"}
 				</span>
 			</Tooltip>
-			{columnId === "backlog" ? (
-				<>
-					<span className="text-text-tertiary">·</span>
-					<BacklogTaskDescriptionLastUpdatedPill
-						card={card}
-						elapsedNowMs={elapsedNowMs}
-						revealHoverActionTooltip={revealHoverActionTooltip}
-					/>
-				</>
-			) : null}
-			{agentResponseGenerationStoppedAt != null ? (
-				<>
-					<span className="text-text-tertiary">·</span>
-					<Tooltip content={revealHoverActionTooltip(agentResponseGenerationStoppedTooltipContent)}>
-						<span
-							data-agent-response-generation-stopped-pill=""
-							className={cn(
-								"inline-flex items-center gap-0.5 text-[10px] leading-none",
-								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-							)}
-						>
-							<Activity size={8} className="shrink-0" />
-							{formatCompactElapsedSince(agentResponseGenerationStoppedAt, elapsedNowMs)}
-						</span>
-					</Tooltip>
-				</>
-			) : null}
-			{lastConversationProgressObservation != null ? (
-				<>
-					<span className="text-text-tertiary">·</span>
-					<Tooltip content={revealHoverActionTooltip(lastConversationProgressTooltipContent)}>
-						<span
-							data-last-conversation-progress-pill=""
-							className={cn(
-								"inline-flex items-center gap-0.5 text-[10px] leading-none",
-								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-							)}
-						>
-							<MessagesSquare size={8} className="shrink-0" />
-							{isConversationProgressApproximate ? "~" : ""}
-							{formatCompactElapsedSince(lastConversationProgressObservation.observedAtMs, elapsedNowMs)}
-						</span>
-					</Tooltip>
-				</>
+			{sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "pending" ||
+			sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
+				<span
+					role="status"
+					title="正在核验 harness 是否已接受输入；写入终端或前置 hook 放行不能证明提交成功。"
+					className="inline-flex items-center gap-0.5 text-[10px] text-status-gold"
+				>
+					<Hourglass size={10} />
+					{sessionSummary.agentConversationPromptSubmissionAcceptance.status === "pending"
+						? "提交待确认"
+						: "尚未确认接受"}
+				</span>
 			) : null}
 		</>
 	);
@@ -1656,7 +1644,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 							title={
 								!isTrashCard && isExitedAwaiting
 									? "Agent process exited — still awaiting your review"
-									: undefined
+									: isAgentRecentlyActive
+										? "近期有效活动（不能推断模型是否正在计算）"
+										: undefined
 							}
 							style={{
 								width: 6,

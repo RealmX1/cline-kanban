@@ -1,16 +1,20 @@
+import {
+	resolveLastAgentConversationPromptCacheReferenceObservation,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "./agent-conversation-activity-observation";
 import type { RuntimeAgentId, RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "./api-contract";
 import {
 	CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 	type CodingAgentPromptCacheRetentionMeasuredLowerBound,
 } from "./coding-agent-prompt-cache-retention-measured-ttl-lower-bounds";
-import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "./session-activity";
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
 // 五个区自上而下：
 //   Pinned                      —— 各项目 Task Pinboard 的汇总。**允许**与下面四区重复。
 //   Backlog                     —— 各项目的完整待办，不受时间窗限制；按 Description 更新时间倒序。
-//   Running                     —— agent 正持有回合且近 5 分钟有输出，或已 park 在等自己派发的后台工作；按本轮
+//   Running                     —— agent 正持有已确认回合且进程存活，或明确在等待已派发后台工作；按本轮
 //                                  agent 回合开始时刻升序（后来的放后面），不随输出抖动。
 //   Cache warm · your turn      —— agent 没在持有回合、且按 agent 的实测 TTL 估算主对话 prompt cache 仍热；按失效时刻升序。
 //   剩余区                       —— 其余全部，三种排序模式可切换。
@@ -52,10 +56,12 @@ export type CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource =
 	| "main_agent_conversation_model_request_dispatch_observation"
 	// 手动 /compact 完成后、还没有新请求：对话层已被摘要替换。行上不显示倒计时，改显示「已压缩」。
 	| "manual_compaction_replaced_main_conversation_without_follow_up_request"
+	| "cursor_agent_output_cache_reference_estimate"
+	| "main_agent_conversation_request_processing_cache_reference_estimate"
 	| "last_substantive_agent_terminal_output";
 
 export interface CrossProjectTaskSwitcherPromptCacheWarmthEstimate {
-	// 计时起点：主对话最后一次向模型发请求的时刻；Cursor 用实质终端输出。
+	// 计时起点来自请求专用投影；Cursor 使用单独标识的新输出近似。
 	promptCacheWarmthAnchorAt: number;
 	// 起点读自哪个信号；倒计时药丸的 tooltip 据此说明。
 	promptCacheWarmthAnchorSource: CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource;
@@ -115,18 +121,15 @@ export function buildCrossProjectTaskSwitcherEntryKey(workspaceId: string, taskI
 export function isCrossProjectTaskSwitcherEntryRunning(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		"turnOwner" | "lastOutputAt" | "isParkedAwaitingDispatchedBackgroundWork"
+		"turnOwner" | "liveness" | "isParkedAwaitingDispatchedBackgroundWork"
 	>,
-	nowMs: number,
+	_nowMs: number,
 ): boolean {
 	if (entry.turnOwner !== "agent") {
 		return false;
 	}
-	// 读 lastOutputAt（含 spinner 重绘）：spinner 期应算在跑。
-	return (
-		entry.isParkedAwaitingDispatchedBackgroundWork ||
-		isAgentOutputWithinActiveWindow(entry.lastOutputAt, nowMs, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS)
-	);
+	// 静默、转圈和重绘均不能证明回合结束。存活性由运行时负责，明确 park 仍由 agent 持有回合。
+	return entry.liveness === "live" || entry.isParkedAwaitingDispatchedBackgroundWork;
 }
 
 // Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或
@@ -194,6 +197,7 @@ export function estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgen
 		| "agentId"
 		| "lastSubstantiveOutputAt"
 		| "lastMainAgentConversationModelRequestDispatchObservation"
+		| "lastAgentConversationPromptCacheReferenceObservation"
 		| "agentProcessStartedAt"
 	>,
 	nowMs: number,
@@ -233,19 +237,21 @@ export function estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgen
 	return { ...anchor, promptCacheExpectedExpiryAt };
 }
 
-// 倒计时起点。**绝不读 agentResponseGenerationStopped**：会话恢复（换 incarnation）也算一次「停止生成」
-// 边沿，起点会被刷成恢复时刻（2026-10-03 实测偏差 11~21 小时），runtime 重启后它又被清空。
+// 缓存只读取请求专用参考。真实交棒、进程恢复和普通活动都不能补满缓存期限。
 function resolveMainAgentConversationPromptCacheWarmthAnchor(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		"lastSubstantiveOutputAt" | "lastMainAgentConversationModelRequestDispatchObservation"
+		| "lastSubstantiveOutputAt"
+		| "lastMainAgentConversationModelRequestDispatchObservation"
+		| "lastAgentConversationPromptCacheReferenceObservation"
 	>,
 	measuredLowerBound: CodingAgentPromptCacheRetentionMeasuredLowerBound,
 ): Omit<CrossProjectTaskSwitcherPromptCacheWarmthEstimate, "promptCacheExpectedExpiryAt"> | null {
+	const cacheReferenceObservation = resolveLastAgentConversationPromptCacheReferenceObservation(entry);
 	if (
 		measuredLowerBound.promptCacheWarmthAnchorSignal === "main_agent_conversation_model_request_dispatch_hook_events"
 	) {
-		const dispatchObservation = entry.lastMainAgentConversationModelRequestDispatchObservation;
+		const dispatchObservation = cacheReferenceObservation;
 		if (
 			dispatchObservation?.evidenceKind ===
 			"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request"
@@ -268,13 +274,18 @@ function resolveMainAgentConversationPromptCacheWarmthAnchor(
 		if (dispatchObservation) {
 			return {
 				promptCacheWarmthAnchorAt: dispatchObservation.observedAtMs,
-				promptCacheWarmthAnchorSource: "main_agent_conversation_model_request_dispatch_observation",
+				promptCacheWarmthAnchorSource:
+					dispatchObservation.evidenceKind === "cursor_agent_output_cache_reference_estimate" ||
+					dispatchObservation.evidenceKind ===
+						"main_agent_conversation_request_processing_cache_reference_estimate"
+						? dispatchObservation.evidenceKind
+						: "main_agent_conversation_model_request_dispatch_observation",
 			};
 		}
-	} else if (entry.lastSubstantiveOutputAt != null) {
+	} else if (cacheReferenceObservation != null) {
 		return {
-			promptCacheWarmthAnchorAt: entry.lastSubstantiveOutputAt,
-			promptCacheWarmthAnchorSource: "last_substantive_agent_terminal_output",
+			promptCacheWarmthAnchorAt: cacheReferenceObservation.observedAtMs,
+			promptCacheWarmthAnchorSource: "cursor_agent_output_cache_reference_estimate",
 		};
 	}
 	return null;
@@ -285,11 +296,14 @@ function resolveMainAgentConversationPromptCacheWarmthAnchor(
 export function resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		"lastConversationProgressObservation" | "lastOpenedByUserAt" | "taskDescriptionLastUpdatedAt"
+		| "lastConversationProgressObservation"
+		| "lastEffectiveAgentConversationActivityObservation"
+		| "lastOpenedByUserAt"
+		| "taskDescriptionLastUpdatedAt"
 	>,
 ): number {
 	return Math.max(
-		entry.lastConversationProgressObservation?.observedAtMs ?? 0,
+		resolveLastEffectiveAgentConversationActivityObservation(entry)?.observedAtMs ?? 0,
 		entry.lastOpenedByUserAt ?? 0,
 		entry.taskDescriptionLastUpdatedAt,
 	);
@@ -311,6 +325,8 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 		| "turnOwner"
 		| "agentResponseGenerationStopped"
 		| "lastConversationProgressObservation"
+		| "lastEffectiveAgentConversationActivityObservation"
+		| "lastAgentConversationUserHandoffObservation"
 		| "lastOpenedByUserAt"
 		| "taskDescriptionLastUpdatedAt"
 	>,
@@ -331,7 +347,7 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	}
 	return (
 		resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(entry) >= activityHorizonStartAt ||
-		(entry.agentResponseGenerationStopped?.stoppedAt ?? 0) >= activityHorizonStartAt
+		(resolveLastAgentConversationUserHandoffObservation(entry)?.observedAtMs ?? 0) >= activityHorizonStartAt
 	);
 }
 
@@ -368,7 +384,9 @@ function assignRemainingSection(
 		case "most_recent_conversation_progress_only": {
 			const entries: CrossProjectTaskSwitcherRemainingEntryInProject[] = [];
 			for (const entryInProject of remainingCandidates) {
-				const observedAtMs = entryInProject.entry.lastConversationProgressObservation?.observedAtMs;
+				const observedAtMs = resolveLastEffectiveAgentConversationActivityObservation(
+					entryInProject.entry,
+				)?.observedAtMs;
 				if (observedAtMs === undefined || observedAtMs < activityHorizonStartAt) {
 					continue;
 				}

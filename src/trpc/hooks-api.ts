@@ -16,6 +16,7 @@ import {
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
 import {
+	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
 	isParkedAwaitingDispatchedBackgroundWork,
 	isTaskConversationSessionWithoutTaskLifecycleAuthority,
 	resolveSessionFacets,
@@ -34,7 +35,6 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
-import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -226,6 +226,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				);
 				return { ok: true } satisfies RuntimeHookIngestResponse;
 			}
+			if (
+				body.hookEventFiredInsideSubagentContext === true ||
+				body.metadata?.hookEventName?.trim().toLowerCase() === "subagentstop"
+			)
+				return { ok: true } satisfies RuntimeHookIngestResponse;
+
 			hookIngestResourceUsageJournalContext = { body, summary: null };
 			const taskId = body.taskId;
 			const workspaceId = body.workspaceId;
@@ -349,7 +355,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				const compactionEvidenceKind = classifyHookEventAsMainAgentConversationModelRequestDispatch({
 					event,
 					normalizedHookEventName: body.metadata?.hookEventName?.trim().toLowerCase() ?? "",
-					hookEventFiredInsideSubagentContext: body.hookEventFiredInsideSubagentContext === true,
+					hookEventFiredInsideSubagentContext: false,
 					sessionFacetsBeforeTransition: resolveSessionFacets(summary),
 					mainAgentConversationContextCompactionTriggerReportedByHarness:
 						body.mainAgentConversationContextCompactionTriggerReportedByHarness,
@@ -365,6 +371,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						...(hookEventObservedAtEpochMs !== null ? ([hookEventObservedAtEpochMs] as const) : ([] as const)),
 					);
 				}
+				manager.recordEffectiveAgentConversationActivity?.(taskId, {
+					observedAtMs: hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+					evidenceKind: "agent_lifecycle_hook_event",
+					activityKind: "context_compaction",
+					eventId: body.hookEventDeliveryIdempotencyKey,
+				});
 				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
 			}
 
@@ -455,37 +467,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			const isExplicitUserTurnStartHookEvent =
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
-			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
-				if (
-					summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
-					body.hookEventFiredInsideSubagentContext !== true
-				) {
-					await completeTaskMainSessionHandoverAfterUserMessage({
-						workspaceId,
-						workspacePath,
-						taskConversationSessionId: taskId,
-						promptText: body.submittedPromptText,
-						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
-							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
-					});
-				}
-				if (body.hookEventFiredInsideSubagentContext !== true) {
-					deps.notifyPromptDraftUserPromptSubmitted?.({
-						workspaceId,
-						taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
-						submittedAtEpochMs: hookEventObservedAtEpochMs ?? Date.now(),
-						submittedPromptText: body.submittedPromptText,
-						currentIdentity:
-							body.agentNativeConversationSessionIdentity ?? summary.agentNativeConversationSessionIdentity,
-						sourceAgentId: body.metadata?.source ?? summary.agentId ?? undefined,
-					});
-				}
-				manager.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt?.(
-					taskId,
-					hookEventObservedAtEpochMs ?? Date.now(),
-				);
-				manager.disarmRestorationContinuationGuard?.(taskId);
-			}
 			if (isClaudeUserPromptSubmit && !isClaudeHarnessGeneratedTaskNotification) {
 				try {
 					// 迟到通知可能在真人恢复首轮进行期间才被拦截；因此每个真人 Claude prompt 都尝试
@@ -500,6 +481,25 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					);
 					// 读取暂存上下文失败不能阻塞真人输入；账本未消费，下一次真人 prompt 会重试。
 				}
+			}
+
+			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				manager.markAgentConversationPromptSubmissionPending?.(
+					taskId,
+					hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+				);
+				if (body.metadata) manager.applyHookActivity(taskId, body.metadata);
+				return respondAfterRememberingAppliedHookDelivery({
+					...identityPersistenceResponse,
+					...(deferredHarnessNotificationsAdditionalContext
+						? {
+								harnessUserPromptProcessingDirective: {
+									processingDecision: "allow" as const,
+									additionalContextMarkdown: deferredHarnessNotificationsAdditionalContext,
+								},
+							}
+						: {}),
+				});
 			}
 
 			// Claude（终端 agent）采集增强：必须在 parked gate **之前**完成分类。parked 只抑制裸
@@ -561,7 +561,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 			if (
 				body.claudeNativeTaskListIdForPhaseGoalProjection !== undefined &&
-				body.hookEventFiredInsideSubagentContext !== true &&
 				body.metadata?.source?.toLowerCase() === "claude" &&
 				normalizedHookEventName === "posttooluse" &&
 				/^task(create|update|list|get)$/iu.test(body.metadata?.toolName ?? "")
@@ -648,18 +647,53 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				manager.unparkTaskSession(taskId);
 			}
 
+			// 缺接受ACK的harness仍可凭本代主工具执行证明已在工作，但不会宣称具体输入已被接受。
+			const pendingSubmission = summary.agentConversationPromptSubmissionAcceptance;
+			if (
+				event === "activity" &&
+				/^(pretooluse|posttooluse|posttoolusefailure|beforetool|aftertool)$/u.test(normalizedHookEventName) &&
+				resolveSessionFacets(summary).turnOwner === "user" &&
+				pendingSubmission &&
+				pendingSubmission.status !== "accepted" &&
+				pendingSubmission?.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
+				(hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs) >= pendingSubmission.attemptedAtMs
+			) {
+				manager.transitionToRunning(taskId, { domainEventTiming: hookEventDomainEventTiming });
+			}
+			// 无工具回合可能先完成、后被原生读取确认接受。只放行明确主回合完成信号，泛 to_review、
+			// question/permission 和旧 Stop 不会据此创造回合；重复完成也由已有交棒锚点排除。
+			const completedCurrentUnacceptedPromptSubmission =
+				event === "to_review" &&
+				userTurnKindOverride === null &&
+				/^(stop|afteragent|agent-turn-complete)$/u.test(normalizedHookEventName) &&
+				canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission(
+					summary,
+					hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+				);
+
 			// 「对话上次推进」的低延迟前进信号。**只认 agent 侧事件**：
 			//   - activity（PostToolUse 等中途活动）与 to_review（Stop / 回合结束）⇒ agent 确实又往前走了一步。
 			//   - to_in_progress（UserPromptSubmit / BeforeAgent）⇒ 说话的是**用户**，绝不推进；把它算进来
 			//     就等于让用户自己的输入刷新「agent 上次回复」，正是本次要根治的那类错误。
 			// 放在转移门之前：activity 事件通常过不了 canTransitionTaskForHookEvent（它不改变列状态），
 			// 但它同样是货真价实的 agent 推进证据，不能因为「没换列」就丢掉。
-			const isAgentSideConversationProgressHookEvent = event === "activity" || event === "to_review";
+			const isAgentSideConversationProgressHookEvent =
+				(event === "activity" || event === "to_review") &&
+				(resolveSessionFacets(manager.getSummary(taskId) ?? summary).turnOwner === "agent" ||
+					completedCurrentUnacceptedPromptSubmission);
 			if (isAgentSideConversationProgressHookEvent) {
-				manager.recordAgentLifecycleHookConversationProgress(
-					taskId,
-					...(hookEventObservedAtEpochMs !== null ? ([hookEventObservedAtEpochMs] as const) : ([] as const)),
-				);
+				if (manager.recordEffectiveAgentConversationActivity) {
+					manager.recordEffectiveAgentConversationActivity(taskId, {
+						observedAtMs: hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+						evidenceKind: "agent_lifecycle_hook_event",
+						activityKind: event === "to_review" ? "agent_turn_boundary" : "tool_activity",
+						eventId: body.hookEventDeliveryIdempotencyKey,
+					});
+				} else
+					manager.recordAgentLifecycleHookConversationProgress(
+						taskId,
+						hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+					);
 			}
 			// Cache warm 倒计时起点：「harness 紧接着要向主对话模型发请求」的事件（判据见分类函数）。
 			// 同样放在转移门之前——Codex 的 PostToolUse 是 activity，过不了闸，但它确实触发了一次请求。
@@ -668,7 +702,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				classifyHookEventAsMainAgentConversationModelRequestDispatch({
 					event,
 					normalizedHookEventName,
-					hookEventFiredInsideSubagentContext: body.hookEventFiredInsideSubagentContext === true,
+					hookEventFiredInsideSubagentContext: false,
 					sessionFacetsBeforeTransition: resolveSessionFacets(summary),
 				});
 			if (mainAgentConversationModelRequestDispatchEvidenceKind !== null) {
@@ -692,7 +726,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				manager.completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn?.(taskId);
 			}
 
-			if (!canTransitionTaskForHookEvent(summary, event, userTurnKindOverride)) {
+			if (
+				!canTransitionTaskForHookEvent(summary, event, userTurnKindOverride) &&
+				!completedCurrentUnacceptedPromptSubmission
+			) {
 				await recordNotificationSignalDecision(
 					notificationCandidateId,
 					"hook_transition_gate_excluded",

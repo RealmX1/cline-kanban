@@ -2,13 +2,15 @@ import type { RuntimeTaskConversationSessionMetadata } from "../core/api-contrac
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { loadWorkspaceBoardById, mutateWorkspaceState } from "./workspace-state";
 
-// 同时供聊天 API 与终端 UserPromptSubmit 使用。报告自身携带标记，不把机器首轮当作真人继续。
+// 聊天 API 与终端原生输入接受证明共用；前置 UserPromptSubmit 不完成交接。报告标记排除机器首轮。
 export async function completeTaskMainSessionHandoverAfterUserMessage(input: {
 	workspaceId: string;
 	workspacePath: string;
 	taskConversationSessionId: string;
 	promptText: string | undefined;
 	expectedHandoverId?: string;
+	// 接受证据读取跨 await 时，由调用方在持久化锁内复核仍是同一原生活体。
+	isAcceptedConversationIdentityStillCurrent?: () => boolean;
 	onTaskConversationSessionMetadataChanged?: (
 		sessionId: string,
 		metadata: RuntimeTaskConversationSessionMetadata,
@@ -36,13 +38,14 @@ export async function completeTaskMainSessionHandoverAfterUserMessage(input: {
 			"main_session_handover_user_message",
 		),
 		(state) => {
-			// 原生 UserPromptSubmit 与异步提交回执可能同时到达；锁内重查，后到者不重写完成时刻。
+			// 原生接受证明与异步提交回执可能同时到达；锁内重查，后到者不重写完成时刻。
 			// 也不能让旧投递的迟到回执完成同一目标会话上的新一轮交接。
 			const currentCard = state.board.columns
 				.flatMap((column) => column.cards)
 				.find((entry) => entry.id === card.id);
 			const currentHandover = currentCard?.taskMainSessionHandover;
 			if (
+				input.isAcceptedConversationIdentityStillCurrent?.() === false ||
 				!currentHandover ||
 				currentHandover.handoverId !== card.taskMainSessionHandover?.handoverId ||
 				currentCard.mainTaskConversationSessionId !== input.taskConversationSessionId ||

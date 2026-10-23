@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { resolveLastEffectiveAgentConversationActivityObservation } from "../../../src/core/agent-conversation-activity-observation";
 import type { RuntimeBoardCard, RuntimeBoardColumnId, RuntimeBoardData } from "../../../src/core/api-contract";
+import { estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "../../../src/server/cross-project-task-switcher-entry-projection";
 import {
 	collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts,
@@ -69,6 +71,142 @@ function collect(
 }
 
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
+	it("跨项目条目保留显式null，使旧推进和请求值无法重启业务时钟", () => {
+		const [entry] = collect(
+			makeBoard({ review: [makeCard("card", { taskDescriptionLastUpdatedAt: NOW_MS })] }),
+			new Map([
+				[
+					"card",
+					makeFacts({
+						turnOwner: "user",
+						liveness: "live",
+						userTurnKind: "review",
+						lastEffectiveAgentConversationActivityObservation: null,
+						lastAgentConversationPromptCacheReferenceObservation: null,
+						lastAgentConversationUserHandoffObservation: null,
+						agentConversationPromptSubmissionAcceptance: null,
+						lastConversationProgressObservation: {
+							observedAtMs: NOW_MS,
+							evidenceKind: "persisted_agent_transcript",
+						},
+						lastMainAgentConversationModelRequestDispatchObservation: {
+							observedAtMs: NOW_MS,
+							evidenceKind: "post_tool_use_hook_event",
+						},
+					}),
+				],
+			]),
+		);
+		expect(entry).toBeDefined();
+		if (!entry) throw new Error("缺少跨项目测试条目");
+		for (const field of [
+			"lastEffectiveAgentConversationActivityObservation",
+			"lastAgentConversationPromptCacheReferenceObservation",
+			"lastAgentConversationUserHandoffObservation",
+			"agentConversationPromptSubmissionAcceptance",
+		])
+			expect(entry).toHaveProperty(field, null);
+		expect(resolveLastEffectiveAgentConversationActivityObservation(entry)).toBeNull();
+		expect(estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn(entry, NOW_MS)).toBeNull();
+	});
+
+	it.each([undefined, "another-card"])("跨项目与主卡一致拒绝缺归属或错误归属的新主（%s）", (workspaceTaskId) => {
+		const [entry] = collect(
+			makeBoard({
+				review: [
+					makeCard("card", { mainTaskConversationSessionId: "new-main", taskDescriptionLastUpdatedAt: NOW_MS }),
+				],
+			}),
+			new Map([
+				[
+					"new-main",
+					makeFacts({
+						turnOwner: "agent",
+						liveness: "live",
+						lastEffectiveAgentConversationActivityObservation: {
+							observedAtMs: NOW_MS,
+							evidenceKind: "persisted_agent_transcript",
+							activityKind: "agent_output",
+						},
+						taskConversationSessionMetadata: workspaceTaskId
+							? {
+									workspaceTaskId,
+									taskConversationSessionRole: "main",
+									taskConversationSessionContextSource: "main",
+									parentTaskConversationSessionId: null,
+									mainSessionOriginTurnNumber: null,
+									mainSessionOriginUserMessagePreview: null,
+									latestUserMessagePreview: null,
+								}
+							: undefined,
+					}),
+				],
+			]),
+		);
+		expect(entry).toMatchObject({ turnOwner: null, liveness: "none" });
+		expect(entry?.taskConversationSessionActivityObservations).toEqual([
+			{
+				sessionId: "new-main",
+				role: "main",
+				agentId: null,
+				lastEffectiveAgentConversationActivityObservation: null,
+			},
+		]);
+	});
+
+	it("主交接后主投影只读新主，peer/By the way/前主保留独立活动与归属", () => {
+		const activity = (observedAtMs: number) =>
+			({ observedAtMs, evidenceKind: "persisted_agent_transcript", activityKind: "agent_output" }) as const;
+		const metadata = (role: "by_the_way" | "task_collaborator" | "main") => ({
+			workspaceTaskId: "card",
+			taskConversationSessionRole: role,
+			taskConversationSessionContextSource: "started_from_scratch" as const,
+			parentTaskConversationSessionId: null,
+			mainSessionOriginTurnNumber: null,
+			mainSessionOriginUserMessagePreview: null,
+			latestUserMessagePreview: null,
+		});
+		const entries = collect(
+			makeBoard({
+				review: [makeCard("card", { mainTaskConversationSessionId: "main", taskDescriptionLastUpdatedAt: NOW_MS })],
+			}),
+			new Map([
+				["card", makeFacts({ lastEffectiveAgentConversationActivityObservation: activity(NOW_MS) })],
+				[
+					"main",
+					makeFacts({
+						taskConversationSessionMetadata: metadata("main"),
+						lastEffectiveAgentConversationActivityObservation: activity(NOW_MS - 1000),
+					}),
+				],
+				[
+					"peer",
+					makeFacts({
+						taskConversationSessionMetadata: metadata("task_collaborator"),
+						lastEffectiveAgentConversationActivityObservation: activity(NOW_MS + 1000),
+					}),
+				],
+				[
+					"side",
+					makeFacts({
+						taskConversationSessionMetadata: metadata("by_the_way"),
+						lastEffectiveAgentConversationActivityObservation: null,
+					}),
+				],
+				["unrelated", makeFacts({ lastEffectiveAgentConversationActivityObservation: activity(NOW_MS + 2000) })],
+			]),
+		);
+		expect(entries[0]?.lastEffectiveAgentConversationActivityObservation?.observedAtMs).toBe(NOW_MS - 1000);
+		expect(
+			entries[0]?.taskConversationSessionActivityObservations?.map(({ sessionId, role }) => [sessionId, role]),
+		).toEqual([
+			["main", "main"],
+			["card", "former_main"],
+			["peer", "task_collaborator"],
+			["side", "by_the_way"],
+		]);
+	});
+
 	it("完整 Backlog 不受活动时间窗限制，其他旧卡仍排除", () => {
 		const entries = collect(
 			makeBoard({
