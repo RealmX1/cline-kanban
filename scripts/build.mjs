@@ -119,6 +119,25 @@ try {
 			outfile: join(distributionDirectoryPath, "cli.js"),
 			banner: { js: `#!/usr/bin/env node\n${cjsShimBanner}` },
 		}),
+		// Hook 独立入口：依赖闭包本身就是每次工具调用的固定成本。
+		buildBundleIntoStagingDirectory({
+			...shared,
+			entryPoints: ["src/kanban-agent-hook-cli.ts"],
+			outfile: join(distributionDirectoryPath, "kanban-agent-hook-cli.js"),
+			metafile: true,
+			banner: { js: `#!/usr/bin/env node\n${cjsShimBanner}` },
+		}).then((result) => {
+			const forbidden = Object.keys(result.metafile.inputs).filter((path) =>
+				path.includes("node_modules/@clinebot/") ||
+				path.includes("node_modules/@sentry/") ||
+				path.startsWith("src/server/") ||
+				path.startsWith("src/trpc/") ||
+				path === "src/terminal/session-manager.ts",
+			);
+			if (forbidden.length > 0) throw new Error(`轻量 hook 入口引入了服务依赖：${forbidden.join(", ")}`);
+			const javascript = result.outputFiles.find((file) => file.path.endsWith("kanban-agent-hook-cli.js"));
+			if (!javascript || javascript.contents.length > 2_500_000) throw new Error("轻量 hook 入口超过 2.5 MB 构建预算");
+		}),
 		// Library export
 		buildBundleIntoStagingDirectory({
 			...shared,
@@ -140,7 +159,9 @@ try {
 		}).then((result) => assertAgentSessionPtyHostBundleImportsOnlyAllowedSources(result.metafile)),
 	]);
 
-	console.log("esbuild: bundled cli.js, index.js, agent-session-pty-host.js and codex-native-session-control-host.js");
+	console.log(
+		"esbuild：已打包 cli.js、kanban-agent-hook-cli.js、index.js、agent-session-pty-host.js 和 codex-native-session-control-host.js",
+	);
 
 	await copyFile(
 		"src/notifications/notification-lifecycle-database-worker.mjs",
@@ -153,6 +174,7 @@ try {
 	// dereference：task worktree 的 `web-ui/dist` 是软链接，必须复制它指向的真实文件，不能把软链接本身放进产物。
 	await cp(builtWebUiDirectoryPath, join(stagingDirectoryPath, "web-ui"), { recursive: true, dereference: true });
 	await chmod(join(stagingDirectoryPath, "cli.js"), 0o755);
+	await chmod(join(stagingDirectoryPath, "kanban-agent-hook-cli.js"), 0o755);
 
 	// sentry-cli 的 inject 会改写产物本身，必须在换入前对暂存目录做。
 	const sentryUpload = spawnSync(process.execPath, ["scripts/upload-sentry-sourcemaps.mjs"], {

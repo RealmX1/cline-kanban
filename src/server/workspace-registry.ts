@@ -25,9 +25,11 @@ import {
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAgentSessionReclamationDeadlineRecords,
 } from "../state/agent-session-reclamation-deadline-store";
+import { createParsedPersistedJsonFileReadCache } from "../state/parsed-persisted-json-file-read-cache";
 import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
+	getPersistedWorkspaceBoardFilePathById,
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
@@ -374,6 +376,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		{ repoPath: string; availability: RuntimeProjectAvailability }
 	>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
+	const projectSummaryBoardReadCache = createParsedPersistedJsonFileReadCache<RuntimeBoardData>();
 	const persistedTaskSessionFactsCacheForUnloadedProjects = createPersistedTaskSessionFactsCacheForUnloadedProjects();
 	const now = deps.now ?? Date.now;
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
@@ -490,6 +493,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			terminalManagerLoadPromises.delete(workspaceId);
 		}
 		projectTaskCountsByWorkspaceId.delete(workspaceId);
+		projectSummaryBoardReadCache.forget(getPersistedWorkspaceBoardFilePathById(workspaceId));
 		runtimeProjectAvailabilityByWorkspaceId.delete(workspaceId);
 		persistedTaskSessionFactsCacheForUnloadedProjects.forgetWorkspace(workspaceId);
 		const workspacePath = workspacePathsById.get(workspaceId) ?? null;
@@ -514,7 +518,9 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
 		lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
 	}> => {
-		const board = await loadWorkspaceBoardById(workspaceId);
+		const board = await projectSummaryBoardReadCache.read(getPersistedWorkspaceBoardFilePathById(workspaceId), () =>
+			loadWorkspaceBoardById(workspaceId),
+		);
 		const terminalManager = getTerminalManagerForWorkspace(workspaceId);
 		let terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null = null;
 		let sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;

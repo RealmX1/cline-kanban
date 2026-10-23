@@ -75,6 +75,7 @@ export function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata):
 		commitsBehindBaseRef: metadata.commitsBehindBaseRef,
 		taskCommitsIntegratedIntoBaseRef: metadata.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef,
 		taskCommitIntegrationTrackingStatus: metadata.workspaceGitStatus.taskCommitIntegrationTrackingStatus,
+		taskCommitCoverageInCurrentDeployment: metadata.taskCommitCoverageInCurrentDeployment,
 		workspaceGitStatusObservationSource: metadata.workspaceGitStatus.observationSource,
 		workspaceGitStatusObservedAt: metadata.workspaceGitStatus.observedAt,
 		taskRetainedCommittedLineChangeSummary: metadata.taskRetainedCommittedLineChangeSummary,
@@ -162,6 +163,8 @@ export function areTaskWorkspaceSnapshotsEqual(
 		a.commitsBehindBaseRef === b.commitsBehindBaseRef &&
 		a.taskCommitsIntegratedIntoBaseRef === b.taskCommitsIntegratedIntoBaseRef &&
 		a.taskCommitIntegrationTrackingStatus === b.taskCommitIntegrationTrackingStatus &&
+		a.taskCommitCoverageInCurrentDeployment?.coverageVersion ===
+			b.taskCommitCoverageInCurrentDeployment?.coverageVersion &&
 		a.workspaceGitStatusObservationSource === b.workspaceGitStatusObservationSource &&
 		a.workspaceGitStatusObservedAt === b.workspaceGitStatusObservedAt &&
 		a.changedFiles === b.changedFiles &&

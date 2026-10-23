@@ -2,6 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
+import { StatelessTaskIndexingAgentExecutionError } from "../../../src/task-indexing-support/stateless-task-indexing-agent-execution-diagnostics";
 import type { TaskIndexingMaterial } from "../../../src/core/task-indexing-support-contract";
 import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createTaskLookupConversationService } from "../../../src/task-indexing-support/task-lookup-conversation-service";
@@ -70,6 +72,7 @@ async function setup() {
 				stablePromptPrefixSha256: "prefix",
 				elapsedMs: 1,
 				diagnosticWarnings: [],
+				diagnosticWarnings: [],
 			};
 		},
 	};
@@ -109,7 +112,7 @@ describe("持久多轮查卡服务", () => {
 		const recoveryTimer = vi.spyOn(globalThis, "setInterval");
 		const observer = createTaskLookupConversationService({
 			...dependencies,
-			readExecutionOwnerLiveness: async () => "live",
+			readRuntimeOwnerLiveness: async () => "live",
 		});
 		try {
 			observer.start();
@@ -143,9 +146,9 @@ describe("持久多轮查卡服务", () => {
 			const historyPath = join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`);
 			if (discoveryMode === "new_conversation") await rm(historyPath);
 			let ownerLiveness: "live" | "dead" | "unknown" = "live";
-			const readExecutionOwnerLiveness = vi.fn(async () => ownerLiveness);
+			const readRuntimeOwnerLiveness = vi.fn(async () => ownerLiveness);
 			const recoveryTimer = vi.spyOn(globalThis, "setInterval");
-			const observer = createTaskLookupConversationService({ ...dependencies, readExecutionOwnerLiveness });
+			const observer = createTaskLookupConversationService({ ...dependencies, readRuntimeOwnerLiveness });
 			try {
 				observer.start();
 				const recoveryTick = recoveryTimer.mock.calls.at(-1)?.[0];
@@ -158,12 +161,12 @@ describe("持久多轮查卡服务", () => {
 				runningTurn.finishedAt = null;
 				await writeFile(historyPath, JSON.stringify(saved));
 				await recoveryTick();
-				expect(readExecutionOwnerLiveness).toHaveBeenCalledWith(runningTurn.executionOwnerRuntimeProcessInstanceId);
+				expect(readRuntimeOwnerLiveness).toHaveBeenCalledWith(runningTurn.owningRuntimeProcessInstanceId);
 				expect(JSON.parse(await readFile(historyPath, "utf8")).turns[0].status).toBe("running");
-				readExecutionOwnerLiveness.mockClear();
+				readRuntimeOwnerLiveness.mockClear();
 				ownerLiveness = "unknown";
 				await recoveryTick();
-				expect(readExecutionOwnerLiveness).toHaveBeenCalledOnce();
+				expect(readRuntimeOwnerLiveness).toHaveBeenCalledOnce();
 				expect(JSON.parse(await readFile(historyPath, "utf8")).turns[0].status).toBe("running");
 				ownerLiveness = "dead";
 				await recoveryTick();
@@ -195,13 +198,13 @@ describe("持久多轮查卡服务", () => {
 		const ownerCheckEntered = createSynchronizationBarrier();
 		const ownerCheckReleased = createSynchronizationBarrier();
 		let pauseOwnerCheck = false;
-		const readExecutionOwnerLiveness = vi.fn(async () => {
+		const readRuntimeOwnerLiveness = vi.fn(async () => {
 			if (!pauseOwnerCheck) return "live" as const;
 			ownerCheckEntered.release();
 			await ownerCheckReleased.promise;
 			return "dead" as const;
 		});
-		const observer = createTaskLookupConversationService({ ...dependencies, readExecutionOwnerLiveness });
+		const observer = createTaskLookupConversationService({ ...dependencies, readRuntimeOwnerLiveness });
 		const recoveryTimer = vi.spyOn(globalThis, "setInterval");
 		try {
 			observer.start();
@@ -219,9 +222,9 @@ describe("持久多轮查卡服务", () => {
 			expect(closeReturned).toBe(false);
 			ownerCheckReleased.release();
 			await Promise.all([recovery, closing]);
-			readExecutionOwnerLiveness.mockClear();
+			readRuntimeOwnerLiveness.mockClear();
 			await recoveryTick();
-			expect(readExecutionOwnerLiveness).not.toHaveBeenCalled();
+			expect(readRuntimeOwnerLiveness).not.toHaveBeenCalled();
 			expect((await observer.getConversation(conversation.conversationId)).turns[0]?.status).toBe("interrupted");
 		} finally {
 			ownerCheckReleased.release();
@@ -426,6 +429,7 @@ describe("持久多轮查卡服务", () => {
 				stablePromptPrefixSha256: "prefix",
 				elapsedMs: 1,
 				diagnosticWarnings: [],
+				diagnosticWarnings: [],
 			}),
 		});
 		const conversation = await emptyService.createConversation({
@@ -490,7 +494,7 @@ describe("持久多轮查卡服务", () => {
 		);
 		const restarted = createTaskLookupConversationService({
 			...dependencies,
-			readExecutionOwnerLiveness: async () => "dead",
+			readRuntimeOwnerLiveness: async () => "dead",
 		});
 		expect((await restarted.getConversation(conversation.conversationId)).turns[0]?.status).toBe("interrupted");
 		await restarted.close();
@@ -526,7 +530,7 @@ describe("持久多轮查卡服务", () => {
 		await executing.promise;
 		const second = createTaskLookupConversationService({
 			...dependencies,
-			readExecutionOwnerLiveness: async () => "live",
+			readRuntimeOwnerLiveness: async () => "live",
 		});
 		try {
 			expect((await second.getConversation(conversation.conversationId)).turns[0]?.status).toBe("running");
@@ -562,7 +566,7 @@ describe("持久多轮查卡服务", () => {
 		let ownerHasExited = false;
 		const observer = createTaskLookupConversationService({
 			...dependencies,
-			readExecutionOwnerLiveness: async () => {
+			readRuntimeOwnerLiveness: async () => {
 				if (!ownerHasExited) throw new Error("心跳暂不可读");
 				return "dead";
 			},
@@ -594,7 +598,7 @@ describe("持久多轮查卡服务", () => {
 		const saved = await waitForTurn(service, conversation.conversationId);
 		if (!saved.turns[0]) throw new Error("缺少轮次");
 		saved.turns[0].status = "running";
-		delete saved.turns[0].executionOwnerRuntimeProcessInstanceId;
+		delete saved.turns[0].owningRuntimeProcessInstanceId;
 		await writeFile(
 			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
 			JSON.stringify(saved),
@@ -731,5 +735,373 @@ describe("持久多轮查卡服务", () => {
 			}),
 		).rejects.toThrow("不可用于不同查询");
 		await service.close();
+	});	it("轮次已被外部终止时，迟到模型结果既不覆盖终态，也不再启动下一次调用", async () => {
+		const { service: initial, dependencies, requests } = await setup();
+		await initial.close();
+		const entered = createSynchronizationBarrier(),
+			released = createSynchronizationBarrier();
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				entered.release();
+				await released.promise;
+				return dependencies.executeAgent(request);
+			},
+		});
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "late-result",
+			questionText: "迟到结果",
+		});
+		await entered.promise;
+		try {
+			const persisted = await service.getConversation(conversation.conversationId);
+			const turn = persisted.turns[0];
+			if (!turn) throw new Error("缺少轮次");
+			turn.status = "interrupted";
+			turn.phase = "finished";
+			turn.finishedAt = Date.now();
+			turn.errorMessage = "外部已结束";
+			await writeFile(
+				join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+				JSON.stringify(persisted),
+			);
+		} finally {
+			released.release();
+			await service.waitForIdle();
+			await service.close();
+		}
+		expect((await service.getConversation(conversation.conversationId)).turns[0]).toMatchObject({
+			status: "interrupted",
+			errorMessage: "外部已结束",
+			result: null,
+		});
+		expect(requests).toHaveLength(1);
 	});
+	it.each(["live", "unknown", "unreadable", "legacy"] as const)(
+		"恢复时保留 %s 归属的轮次，不把未知状态写成重启",
+		async (ownership) => {
+			const { service, dependencies } = await setup();
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "original",
+				questionText: "保留历史",
+			});
+			const persisted = await waitForTurn(service, conversation.conversationId);
+			await service.close();
+			const turn = persisted.turns[0];
+			if (!turn) throw new Error("缺少轮次");
+			turn.status = "running";
+			turn.result = null;
+			turn.finishedAt = null;
+			if (ownership === "legacy") delete turn.owningRuntimeProcessInstanceId;
+			await writeFile(
+				join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+				JSON.stringify(persisted),
+			);
+			const observer = createTaskLookupConversationService({
+				...dependencies,
+				runtimeProcessInstanceId: "another-runtime",
+				readRuntimeOwnerLiveness: async () => {
+					if (ownership === "unreadable") throw new Error("EACCES");
+					return ownership === "live" ? "live" : "unknown";
+				},
+			});
+			try {
+				const observed = (await observer.getConversation(conversation.conversationId)).turns[0];
+				expect(observed?.status).toBe("running");
+				expect(observed?.executionOwnershipWarning).toBeTruthy();
+				expect(observed?.errorMessage).toBeNull();
+			} finally {
+				await observer.close();
+			}
+		},
+	);
+	it("模型活动在执行中落盘并推送，失败后保留召回用量、失败阶段和有界时间线", async () => {
+		const { service: initial, dependencies } = await setup();
+		await initial.close();
+		const entered = createSynchronizationBarrier(),
+			released = createSynchronizationBarrier();
+		const notified = vi.fn();
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			onConversationUpdated: notified,
+			executeAgent: async (request) => {
+				if (JSON.parse(request.queryText).phase === "recall") return dependencies.executeAgent(request);
+				for (let index = 0; index < 220; index++)
+					request.onExecutionActivity?.({
+						eventKind: "agent_response_received",
+						occurredAtEpochMs: Date.now(),
+						message: `活动 ${index}`,
+					});
+				entered.release();
+				await released.promise;
+				const error = new StatelessTaskIndexingAgentExecutionError("execution_timeout", "模型超时");
+				error.exitCode = null;
+				error.signal = "SIGKILL";
+				throw error;
+			},
+		});
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "activity",
+			questionText: "进度",
+		});
+		await entered.promise;
+		try {
+			await vi.waitFor(
+				async () =>
+					expect(
+						(await service.getConversation(conversation.conversationId)).turns[0]?.executionActivityTimeline?.at(
+							-1,
+						)?.message,
+					).toBe("活动 219"),
+				{ timeout: 10000 },
+			);
+			expect(notified).toHaveBeenCalled();
+		} finally {
+			released.release();
+			await service.waitForIdle();
+		}
+		const turn = (await service.getConversation(conversation.conversationId)).turns[0];
+		expect(turn).toMatchObject({
+			status: "failed",
+			executorSettings: { agentId: "codex" },
+			executionFailureDiagnostic: {
+				reasonCode: "execution_timeout",
+				failedPhase: "explaining_candidates",
+				signal: "SIGKILL",
+			},
+		});
+		expect(turn?.executions).toHaveLength(1);
+		expect(turn?.inputByteCount).toBeGreaterThan(0);
+		expect(turn?.executionActivityTimeline).toHaveLength(200);
+		expect(turn?.omittedExecutionActivityCount).toBeGreaterThan(0);
+		await service.close();
+	});
+	it("另一服务初始化和读取历史不会中断仍在执行的轮次", async () => {
+		const { service: initial, dependencies } = await setup();
+		await initial.close();
+		const entered = createSynchronizationBarrier();
+		const released = createSynchronizationBarrier();
+		const first = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				entered.release();
+				await released.promise;
+				return dependencies.executeAgent(request);
+			},
+		});
+		const conversation = await first.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await first.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "live-owner",
+			questionText: "保持执行",
+		});
+		await entered.promise;
+		const second = createTaskLookupConversationService(dependencies);
+		try {
+			expect((await second.getConversation(conversation.conversationId)).turns[0]?.status).toBe("running");
+			await expect(second.cancelTurn(conversation.conversationId)).rejects.toThrow("不由当前");
+		} finally {
+			released.release();
+			await first.waitForIdle();
+			await first.close();
+			await second.close();
+		}
+		expect((await first.getConversation(conversation.conversationId)).turns[0]?.status).toBe("completed");
+	});
+	it.each(["completed", "owner_changed"] as const)(
+		"观察方等待心跳时不占用会话锁，迟到失活观测不覆盖 %s 轮次",
+		async (concurrentChange) => {
+			const { service: initial, dependencies } = await setup();
+			await initial.close();
+			const executionStarted = createSynchronizationBarrier();
+			const executionReleased = createSynchronizationBarrier();
+			const heartbeatStarted = createSynchronizationBarrier();
+			const heartbeatReleased = createSynchronizationBarrier();
+			const owner = createTaskLookupConversationService({
+				...dependencies,
+				runtimeProcessInstanceId: "owner-runtime",
+				executeAgent: async (request) => {
+					executionStarted.release();
+					await executionReleased.promise;
+					return dependencies.executeAgent(request);
+				},
+			});
+			const conversation = await owner.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await owner.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "complete-during-heartbeat-observation",
+				questionText: "观察期间继续执行",
+			});
+			await executionStarted.promise;
+			let heldConversationLockCount = 0;
+			let heartbeatObservedWhileConversationLocked = false;
+			const conversationPath = join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`);
+			const withLock = lockedFileSystem.withLock.bind(lockedFileSystem);
+			vi.spyOn(lockedFileSystem, "withLock").mockImplementation(
+				async <T>(request: LockRequest, operation: () => Promise<T>) =>
+					await withLock(request, async () => {
+						if (request.path === conversationPath) heldConversationLockCount++;
+						try {
+							return await operation();
+						} finally {
+							if (request.path === conversationPath) heldConversationLockCount--;
+						}
+					}),
+			);
+			const observer = createTaskLookupConversationService({
+				...dependencies,
+				runtimeProcessInstanceId: "observer-runtime",
+				readRuntimeOwnerLiveness: async (observedOwnerId) => {
+					if (observedOwnerId === "replacement-runtime") return "live";
+					heartbeatObservedWhileConversationLocked = heldConversationLockCount > 0;
+					heartbeatStarted.release();
+					await heartbeatReleased.promise;
+					return "dead";
+				},
+			});
+			const observation = observer.getConversation(conversation.conversationId);
+			try {
+				await heartbeatStarted.promise;
+				expect(heartbeatObservedWhileConversationLocked).toBe(false);
+				if (concurrentChange === "owner_changed") {
+					const transferred = await owner.getConversation(conversation.conversationId);
+					const turn = transferred.turns[0];
+					if (!turn) throw new Error("缺少轮次");
+					turn.owningRuntimeProcessInstanceId = "replacement-runtime";
+					await lockedFileSystem.withLock({ path: conversationPath }, async () => {
+						await lockedFileSystem.writeJsonFileAtomic(conversationPath, transferred, { lock: null });
+					});
+				}
+				executionReleased.release();
+				await owner.waitForIdle();
+				heartbeatReleased.release();
+				const observed = (await observation).turns[0];
+				expect(observed).toMatchObject(
+					concurrentChange === "completed"
+						? { status: "completed", result: { answerText: "找到两个可能相关任务" } }
+						: { status: "running", owningRuntimeProcessInstanceId: "replacement-runtime", result: null },
+				);
+				expect(observed?.executionFailureDiagnostic).toBeUndefined();
+			} finally {
+				executionReleased.release();
+				heartbeatReleased.release();
+				await Promise.all([observation, owner.close(), observer.close()]);
+			}
+		},
+	);
+	it("材料读取尚未结束也能取消，迟到返回不会启动模型", async () => {
+		const { service: initial, dependencies, requests } = await setup();
+		await initial.close();
+		const entered = createSynchronizationBarrier();
+		const released = createSynchronizationBarrier();
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async () => {
+				entered.release();
+				await released.promise;
+				return dependencies.collectMaterials();
+			},
+		});
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "cancel-materials",
+			questionText: "取消读取",
+		});
+		await entered.promise;
+		try {
+			const cancelled = await service.cancelTurn(conversation.conversationId);
+			expect(cancelled.turns[0]).toMatchObject({
+				status: "cancelled",
+				executionFailureDiagnostic: { failedPhase: "collecting_materials" },
+			});
+		} finally {
+			released.release();
+			await service.close();
+		}
+		expect(requests).toHaveLength(0);
+	});
+	it.each(["cancel", "close"] as const)("保存结果阶段发生 %s 时不再提交成功结果", async (stopOperation) => {
+		const { service: originalService, dependencies } = await setup();
+		await originalService.close();
+		const savingStarted = createSynchronizationBarrier();
+		const savingReleased = createSynchronizationBarrier();
+		const executionAborted = createSynchronizationBarrier();
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				request.abortSignal?.addEventListener("abort", executionAborted.release, { once: true });
+				return dependencies.executeAgent(request);
+			},
+		});
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		const writeJsonFileAtomic = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
+		vi.spyOn(lockedFileSystem, "writeJsonFileAtomic").mockImplementation(async (...parameters) => {
+			const persisted = parameters[1];
+			if (
+				parameters[0] === join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`) &&
+				persisted &&
+				typeof persisted === "object" &&
+				"turns" in persisted &&
+				Array.isArray(persisted.turns) &&
+				persisted.turns[0]?.phase === "saving_result"
+			) {
+				savingStarted.release();
+				await savingReleased.promise;
+			}
+			await writeJsonFileAtomic(...parameters);
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "stop-while-saving-result",
+			questionText: "保存期间停止",
+		});
+		await savingStarted.promise;
+		const stopping = stopOperation === "cancel" ? service.cancelTurn(conversation.conversationId) : service.close();
+		try {
+			await executionAborted.promise;
+		} finally {
+			savingReleased.release();
+			await stopping;
+			await service.close();
+		}
+		const turn = (await service.getConversation(conversation.conversationId)).turns[0];
+		expect(turn).toMatchObject({
+			status: stopOperation === "cancel" ? "cancelled" : "interrupted",
+			result: null,
+			executionFailureDiagnostic: {
+				reasonCode: stopOperation === "cancel" ? "user_cancelled" : "runtime_closed",
+				failedPhase: "saving_result",
+			},
+		});
+		expect(turn?.executionActivityTimeline?.some((activity) => activity.eventKind === "query_completed")).toBe(false);
+	});
+
 });

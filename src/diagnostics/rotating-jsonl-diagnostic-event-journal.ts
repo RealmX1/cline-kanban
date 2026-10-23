@@ -35,6 +35,7 @@ const DIAGNOSTIC_EVENT_JOURNAL_DEFAULT_RETAINED_ROTATED_FILE_COUNT = 4;
 // 既是单一声明点，也从类型上杜绝路径注入。
 export type DiagnosticEventJournalChannel =
 	| "event-loop-delay-window-sample"
+	| "codex-native-control-socket-request-diagnostic"
 	| "git-command-failure"
 	// 以下四个通道原是 2026-08 那次 fd 耗尽调查的临时探针，现已转为常设绊线。转正的理由是根因修复
 	// 本身会**抹掉症状而不抹掉成因**：node-pty 的 kqueue 泄漏一旦补上，「谁在高速创建 pty」就不再

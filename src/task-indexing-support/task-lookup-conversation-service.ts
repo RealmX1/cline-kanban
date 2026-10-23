@@ -14,16 +14,32 @@ import {
 	type SubmitTaskLookupTurnRequest,
 	submitTaskLookupTurnRequestSchema,
 	type TaskLookupConversation,
+	type TaskLookupExecutionActivity,
+	type TaskLookupExecutionPhase,
 	type TaskLookupScope,
 	taskLookupConversationSchema,
 	taskLookupModelAnswerSchema,
 } from "../core/task-lookup-conversation-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { readPersistentAgentPromptImageAttachments } from "../state/persistent-agent-prompt-image-attachments";
-import type {
-	StatelessTaskIndexingAgentRequest,
-	StatelessTaskIndexingAgentResult,
+import {
+	readRuntimeProcessInstanceLiveness,
+} from "../state/runtime-process-instance-heartbeat-registry";
+import {
+	classifyStatelessAgentFailureReason,
+	StatelessTaskIndexingAgentExecutionError,
+	sanitizeStatelessAgentFailureDetail,
+} from "./stateless-task-indexing-agent-execution-diagnostics";
+import {
+	assembleStatelessTaskIndexingAgentPrompt,
+	type StatelessTaskIndexingAgentExecutionActivity,
+	type StatelessTaskIndexingAgentRequest,
+	type StatelessTaskIndexingAgentResult,
 } from "./stateless-task-indexing-agent-executor";
+import {
+	appendTaskLookupExecutionActivities,
+	awaitTaskLookupOperationOrCancellation,
+} from "./task-lookup-turn-execution-activity";
 
 export const TASK_LOOKUP_INSTRUCTION_VERSION = "task-lookup-conversation-v2";
 export const TASK_LOOKUP_INSTRUCTIONS = `你是看板查卡助手，只分析给定材料，输出约定 JSON，不调用工具。
@@ -40,8 +56,8 @@ const recallSchema = z.object({
 
 export interface TaskLookupConversationDependencies {
 	storageDirectoryPath: string;
-	executionOwnerRuntimeProcessInstanceId?: string;
-	readExecutionOwnerLiveness?: (runtimeProcessInstanceId: string) => Promise<"live" | "dead" | "unknown">;
+	runtimeProcessInstanceId?: string;
+	readRuntimeOwnerLiveness?: (runtimeProcessInstanceId: string) => Promise<"live" | "dead" | "unknown">;
 	collectMaterials: (
 		workspaceId: string,
 	) => Promise<{ materials: TaskIndexingMaterial[]; missingContextParts: string[] }>;
@@ -63,7 +79,7 @@ const inScope = (material: TaskIndexingMaterial, scope: TaskLookupScope) =>
 	(scope.columnIds.length === 0 || scope.columnIds.includes(material.columnId));
 
 export function createTaskLookupConversationService(deps: TaskLookupConversationDependencies) {
-	const executionOwnerRuntimeProcessInstanceId = deps.executionOwnerRuntimeProcessInstanceId ?? randomUUID();
+	const runtimeProcessInstanceId = deps.runtimeProcessInstanceId ?? randomUUID();
 	const activeRuns = new Map<string, { controller: AbortController; promise: Promise<void> }>();
 	const pendingConversationWrites = new Set<Promise<unknown>>();
 	const recoveryConversationFileSnapshots = new Map<
@@ -72,6 +88,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 	>();
 	let recoveryTimer: ReturnType<typeof setInterval> | null = null;
 	let recoveryInFlight: Promise<unknown> | null = null;
+	const observedConversationRevisions = new Map<string, number>();
 	let closed = false;
 	const assertServiceOpen = () => {
 		if (closed) throw new Error("查卡服务已关闭。");
@@ -80,18 +97,36 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 		z.string().uuid().parse(conversationId);
 		return join(deps.storageDirectoryPath, `${conversationId}.json`);
 	};
-	const readConversation = async (id: string) =>
-		taskLookupConversationSchema.parse(JSON.parse(await readFile(pathForConversation(id), "utf8")));
+	const readConversation = async (id: string) => {
+		const conversation = taskLookupConversationSchema.parse(JSON.parse(await readFile(pathForConversation(id), "utf8")));
+		// 两条分支曾使用不同字段；读取旧候选历史时统一到已落地的归属字段。
+		for (const turn of conversation.turns)
+			turn.owningRuntimeProcessInstanceId ??= turn.executionOwnerRuntimeProcessInstanceId ?? undefined;
+		return conversation;
+	};
 	const writeConversation = async (conversation: TaskLookupConversation) => {
 		await lockedFileSystem.writeJsonFileAtomic(pathForConversation(conversation.conversationId), conversation, {
 			lock: null,
 		});
+		const metadata = await stat(pathForConversation(conversation.conversationId), { bigint: true });
+		recoveryConversationFileSnapshots.set(conversation.conversationId, {
+			fileVersion: [metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs].join(":"),
+			foreignExecutionOwnerRuntimeProcessInstanceIds: [
+				...new Set(conversation.turns.flatMap((turn) =>
+					turn.status === "running" && turn.owningRuntimeProcessInstanceId && turn.owningRuntimeProcessInstanceId !== runtimeProcessInstanceId
+						? [turn.owningRuntimeProcessInstanceId] : [])),
+			],
+		});
+		observedConversationRevisions.set(conversation.conversationId, conversation.revision);
 		deps.onConversationUpdated?.(conversation.conversationId, conversation.revision);
 	};
-	const mutate = async (id: string, change: (conversation: TaskLookupConversation) => boolean | undefined) =>
+	const mutate = async (
+		id: string,
+		change: (conversation: TaskLookupConversation) => boolean | undefined | Promise<boolean | undefined>,
+	) =>
 		await lockedFileSystem.withLock({ path: pathForConversation(id) }, async () => {
 			const conversation = await readConversation(id);
-			if (change(conversation) !== false) {
+			if ((await change(conversation)) !== false) {
 				conversation.updatedAt = Date.now();
 				conversation.revision++;
 				await writeConversation(conversation);
@@ -100,41 +135,90 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 		});
 	// 创建服务或监听失败都不应改写别的实例；恢复由归属心跳驱动。
 	const initialized = mkdir(deps.storageDirectoryPath, { recursive: true });
-	const readExecutionOwnerLiveness = async (owner: string) =>
-		(await deps.readExecutionOwnerLiveness?.(owner).catch(() => "unknown" as const)) ?? "unknown";
+	const readRuntimeOwnerLiveness = async (owner: string) =>
+		await (deps.readRuntimeOwnerLiveness ?? readRuntimeProcessInstanceLiveness)(owner).catch(() => "unknown" as const);
 	const recoverConversation = async (id: string) => {
 		await initialized;
+		if (activeRuns.has(id)) return await readConversation(id);
 		const snapshot = await readConversation(id);
-		const deadOwnerTurnIds = new Set<string>();
-		for (const turn of snapshot.turns) {
-			if (turn.status !== "running") continue;
-			const owner = turn.executionOwnerRuntimeProcessInstanceId;
-			if (owner === executionOwnerRuntimeProcessInstanceId) continue;
-			if (!owner) {
-				turn.executionRecoveryMessage = "历史查询未记录执行归属，无法确认是否仍在执行；可显式结束旧轮并重新提问。";
-				continue;
-			}
-			const liveness = await readExecutionOwnerLiveness(owner);
-			if (liveness === "dead") deadOwnerTurnIds.add(turn.turnId);
-			else
-				turn.executionRecoveryMessage =
-					liveness === "live"
-						? "本轮由另一个仍在运行的实例执行。"
-						: "暂时无法确认执行实例的心跳，保留查询状态；未自动重新发送。";
-		}
-		if (!deadOwnerTurnIds.size) return snapshot;
-		return await mutate(id, (current) => {
+		const ownershipObservations = await Promise.all(
+			snapshot.turns
+				.filter((turn) => turn.status === "running")
+				.map(async (turn) => {
+					let liveness: "live" | "dead" | "unknown" = "unknown";
+					if (turn.owningRuntimeProcessInstanceId) {
+						try {
+							liveness = await readRuntimeOwnerLiveness(turn.owningRuntimeProcessInstanceId);
+						} catch {
+							/* 无法观测不等于已失活。 */
+						}
+					}
+					return {
+						turnId: turn.turnId,
+						owningRuntimeProcessInstanceId: turn.owningRuntimeProcessInstanceId,
+						liveness,
+					};
+				}),
+		);
+		const recovered = await mutate(id, (conversation) => {
+			if (activeRuns.has(id)) return false;
 			let changed = false;
-			for (const turn of current.turns) {
-				if (turn.status !== "running" || !deadOwnerTurnIds.has(turn.turnId)) continue;
-				turn.status = "interrupted";
-				turn.phase = "finished";
-				turn.finishedAt = Date.now();
-				turn.errorMessage = "执行本轮查询的运行实例已退出；历史已保留，可显式重新提问。";
-				changed = true;
+			for (const observation of ownershipObservations) {
+				const turn = conversation.turns.find((entry) => entry.turnId === observation.turnId);
+				if (
+					!turn ||
+					turn.status !== "running" ||
+					turn.owningRuntimeProcessInstanceId !== observation.owningRuntimeProcessInstanceId
+				)
+					continue;
+				const { liveness } = observation;
+				if (liveness === "dead") {
+					const now = Date.now();
+					turn.executionFailureDiagnostic = {
+						reasonCode: "owning_runtime_unavailable",
+						failedPhase: turn.phase,
+						detail: "所属运行时已失活，本轮中断；可显式重新查询。",
+						exitCode: null,
+						signal: null,
+						stderrTail: null,
+					};
+					appendTaskLookupExecutionActivities(turn, [
+						{
+							occurredAtEpochMs: now,
+							phase: turn.phase,
+							eventKind: "query_interrupted",
+							message: "所属运行时已失活",
+						},
+					]);
+					turn.status = "interrupted";
+					turn.phase = "finished";
+					turn.finishedAt = now;
+					turn.errorMessage = turn.executionFailureDiagnostic.detail;
+					delete turn.executionOwnershipWarning;
+					delete turn.executionRecoveryMessage;
+					changed = true;
+				} else {
+					const warning =
+						liveness === "unknown"
+							? "无法确认执行归属或实例活性，未自动中断；可在原运行时确认，或新建查询会话。"
+							: turn.owningRuntimeProcessInstanceId !== runtimeProcessInstanceId
+								? "本轮由另一个仍在线的运行时执行。"
+								: undefined;
+					if (turn.executionOwnershipWarning !== warning) {
+						turn.executionOwnershipWarning = warning;
+						turn.executionRecoveryMessage = warning;
+						changed = true;
+					}
+				}
 			}
 			return changed;
 		});
+		// 共享历史可由另一实例推进；复用服务端恢复节拍转发其新 revision，浏览器仍只订阅状态流。
+		if ((observedConversationRevisions.get(id) ?? -1) < recovered.revision) {
+			observedConversationRevisions.set(id, recovered.revision);
+			deps.onConversationUpdated?.(id, recovered.revision);
+		}
+		return recovered;
 	};
 	const recoverChangedOrAbandonedConversations = async () => {
 		await initialized;
@@ -155,7 +239,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				if (previous?.fileVersion === fileVersion) {
 					let hasDeadExecutionOwner = false;
 					for (const owner of previous.foreignExecutionOwnerRuntimeProcessInstanceIds) {
-						if ((await readExecutionOwnerLiveness(owner)) === "dead") {
+						if ((await readRuntimeOwnerLiveness(owner)) === "dead") {
 							hasDeadExecutionOwner = true;
 							break;
 						}
@@ -164,13 +248,14 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				}
 				const conversation = await recoverConversation(id);
 				// 只缓存文件版本与执行归属；不在后台常驻保留或反复解析图片历史。
+				if (recoveryConversationFileSnapshots.get(id) !== previous) continue;
 				recoveryConversationFileSnapshots.set(id, {
 					fileVersion,
 					foreignExecutionOwnerRuntimeProcessInstanceIds: [
 						...new Set(
 							conversation.turns.flatMap((turn) => {
-								const owner = turn.executionOwnerRuntimeProcessInstanceId;
-								return turn.status === "running" && owner && owner !== executionOwnerRuntimeProcessInstanceId
+								const owner = turn.owningRuntimeProcessInstanceId;
+								return turn.status === "running" && owner && owner !== runtimeProcessInstanceId
 									? [owner]
 									: [];
 							}),
@@ -202,22 +287,74 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				if (
 					!turn ||
 					turn.status !== "running" ||
-					turn.executionOwnerRuntimeProcessInstanceId !== executionOwnerRuntimeProcessInstanceId
-				)
+					turn.owningRuntimeProcessInstanceId !== runtimeProcessInstanceId
+				) {
+					controller.abort(new Error("查卡轮次状态或执行归属已变化，已停止后续执行。"));
 					return false;
+				}
 				change(turn);
 			});
+		let phase: TaskLookupExecutionPhase = "collecting_materials";
+		let pendingActivities: TaskLookupExecutionActivity[] = [];
+		let omittedBufferedActivities = 0;
+		let activityTimer: ReturnType<typeof setTimeout> | undefined;
+		let activityWrite: Promise<unknown> = Promise.resolve();
+		const flushActivities = () => {
+			clearTimeout(activityTimer);
+			activityTimer = undefined;
+			const activities = pendingActivities;
+			const omitted = omittedBufferedActivities;
+			pendingActivities = [];
+			omittedBufferedActivities = 0;
+			if (activities.length)
+				activityWrite = activityWrite
+					.catch(() => undefined)
+					.then(() =>
+						updateTurn((current) => {
+							appendTaskLookupExecutionActivities(current, activities);
+							current.omittedExecutionActivityCount = (current.omittedExecutionActivityCount ?? 0) + omitted;
+						}),
+					);
+			return activityWrite;
+		};
+		const setPhase = async (nextPhase: TaskLookupExecutionPhase) => {
+			controller.signal.throwIfAborted();
+			await flushActivities();
+			phase = nextPhase;
+			await updateTurn((current) => {
+				current.phase = nextPhase;
+				current.phaseStartedAt = Date.now();
+				appendTaskLookupExecutionActivities(current, [
+					{
+						occurredAtEpochMs: current.phaseStartedAt,
+						phase: nextPhase,
+						eventKind: "phase_started",
+						message: "阶段开始",
+					},
+				]);
+			});
+		};
+		const cancellable = <T>(operation: () => Promise<T>) => {
+			controller.signal.throwIfAborted();
+			return awaitTaskLookupOperationOrCancellation(controller.signal, operation());
+		};
 		try {
 			controller.signal.throwIfAborted();
 			const conversation = await readConversation(conversationId);
 			const turn = conversation.turns.find((entry) => entry.turnId === turnId);
 			if (!turn) throw new Error("查卡轮次不存在。");
-			const collected = await deps.collectMaterials(conversation.contextWorkspaceId);
+			const collected = await cancellable(() => deps.collectMaterials(conversation.contextWorkspaceId));
 			controller.signal.throwIfAborted();
 			const eligible = collected.materials.filter((material) => inScope(material, turn.scope));
 			const identities = new Map(eligible.map((material) => [identityKey(material.taskReference), material]));
-			const settings = await deps.getExecutorSettings(conversation.contextWorkspaceId);
-			const context = await deps.getContext(conversation.contextWorkspaceId, collected.materials, settings);
+			await setPhase("preparing_context");
+			const settings = await cancellable(() => deps.getExecutorSettings(conversation.contextWorkspaceId));
+			await updateTurn((current) => {
+				current.executorSettings = settings;
+			});
+			const context = await cancellable(() =>
+				deps.getContext(conversation.contextWorkspaceId, collected.materials, settings),
+			);
 			context.contextCompleteness = [...new Set([...context.contextCompleteness, ...collected.missingContextParts])];
 			const questionImages: RuntimeTaskImage[] = [];
 			const imageInputNumberByContentFingerprint = new Map<string, number>();
@@ -253,7 +390,11 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				scope: turn.scope,
 				eligibleTaskReferences: eligible.map((material) => material.taskReference),
 			};
-			const execute = async (phase: "recall" | "answer", query: unknown, outputSchema: z.ZodType<unknown>) => {
+			const execute = async (
+				executionPhase: "recall" | "answer",
+				query: unknown,
+				outputSchema: z.ZodType<unknown>,
+			) => {
 				controller.signal.throwIfAborted();
 				const request = {
 					settings,
@@ -264,10 +405,32 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 					abortSignal: controller.signal,
 					modelUsagePurpose: "task_lookup_conversation" as const,
 					questionImages,
+					onExecutionActivity: (activity: StatelessTaskIndexingAgentExecutionActivity) => {
+						if (controller.signal.aborted) return;
+						pendingActivities.push({
+							occurredAtEpochMs: activity.occurredAtEpochMs,
+							phase,
+							eventKind: activity.eventKind,
+							message: activity.message.slice(0, 1000),
+						});
+						if (pendingActivities.length > 200) {
+							pendingActivities.shift();
+							omittedBufferedActivities++;
+						}
+						if (!activityTimer)
+							activityTimer = setTimeout(() => {
+								void flushActivities().catch(() => undefined);
+							}, 1000);
+					},
 				};
+				const prompt = assembleStatelessTaskIndexingAgentPrompt(request);
+				await updateTurn((current) => {
+					current.inputByteCount = Buffer.byteLength(prompt.stablePrefix + prompt.query);
+					current.modelExecutionTimeoutMs = 180_000;
+				});
 				// 保存实际输入与材料版本，历史留档不依赖可覆盖的 Context 缓存或临时 CLI 文件。
 				await lockedFileSystem.writeJsonFileAtomic(
-					join(deps.storageDirectoryPath, conversationId, `${turnId}-${phase}-input.json`),
+					join(deps.storageDirectoryPath, conversationId, `${turnId}-${executionPhase}-input.json`),
 					{
 						instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
 						settings,
@@ -277,10 +440,11 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 						questionImages,
 					},
 				);
-				const result = await deps.executeAgent(request);
+				const result = await cancellable(() => deps.executeAgent(request));
+				await flushActivities();
 				await updateTurn((current) =>
 					current.executions.push({
-						phase,
+						phase: executionPhase,
 						elapsedMs: result.elapsedMs,
 						stablePromptPrefixSha256: result.stablePromptPrefixSha256,
 						...result.usage,
@@ -288,9 +452,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				);
 				return result.value;
 			};
-			await updateTurn((current) => {
-				current.phase = "recalling_candidates";
-			});
+			await setPhase("recalling_candidates");
 			const recall = recallSchema.parse(await execute("recall", { ...commonQuery, phase: "recall" }, recallSchema));
 			const selected = new Map<string, TaskIndexingMaterial>();
 			for (const reference of recall.candidateTaskReferences) {
@@ -298,9 +460,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				if (!material) throw new Error("模型返回了范围外或不存在的候选任务，未采用结果。");
 				selected.set(identityKey(reference), material);
 			}
-			await updateTurn((current) => {
-				current.phase = "explaining_candidates";
-			});
+			await setPhase("explaining_candidates");
 			const answer = taskLookupModelAnswerSchema.parse(
 				await execute(
 					"answer",
@@ -309,7 +469,8 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				),
 			);
 			controller.signal.throwIfAborted();
-			const latest = await deps.collectMaterials(conversation.contextWorkspaceId);
+			await setPhase("validating_candidates");
+			const latest = await cancellable(() => deps.collectMaterials(conversation.contextWorkspaceId));
 			const latestByIdentity = new Map(
 				latest.materials.map((material) => [identityKey(material.taskReference), material]),
 			);
@@ -331,8 +492,14 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				seen.add(key);
 				return { ...candidate, projectName: current.projectName, title: current.title, columnId: current.columnId };
 			});
+			await setPhase("saving_result");
 			await updateTurn((current) => {
+				controller.signal.throwIfAborted();
+				appendTaskLookupExecutionActivities(current, [
+					{ occurredAtEpochMs: Date.now(), phase, eventKind: "query_completed", message: "查询结果已保存" },
+				]);
 				current.status = "completed";
+				delete current.executionOwnershipWarning;
 				current.phase = "finished";
 				current.finishedAt = Date.now();
 				current.result = {
@@ -343,8 +510,23 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				};
 			});
 		} catch (error) {
+			await flushActivities().catch(() => undefined);
 			await updateTurn((current) => {
 				current.status = controller.signal.aborted ? (closed ? "interrupted" : "cancelled") : "failed";
+				appendTaskLookupExecutionActivities(current, [
+					{
+						occurredAtEpochMs: Date.now(),
+						phase,
+						eventKind:
+							current.status === "interrupted"
+								? "query_interrupted"
+								: current.status === "cancelled"
+									? "query_cancelled"
+									: "query_failed",
+						message: current.status === "failed" ? "查询执行失败" : "查询执行已停止",
+					},
+				]);
+				delete current.executionOwnershipWarning;
 				current.phase = "finished";
 				current.finishedAt = Date.now();
 				current.errorMessage = controller.signal.aborted
@@ -352,9 +534,31 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 						? "运行时已关闭，本轮查询中断；可显式重新提问。"
 						: "用户已取消本轮查询。"
 					: error instanceof Error
-						? error.message
-						: String(error);
+						? sanitizeStatelessAgentFailureDetail(error.message)
+						: sanitizeStatelessAgentFailureDetail(String(error));
+				current.executionFailureDiagnostic = {
+					reasonCode: controller.signal.aborted
+						? closed
+							? "runtime_closed"
+							: "user_cancelled"
+						: error instanceof StatelessTaskIndexingAgentExecutionError
+							? error.reasonCode
+							: phase === "collecting_materials" || phase === "validating_candidates"
+								? "material_collection_failed"
+								: phase === "preparing_context"
+									? "context_preparation_failed"
+									: phase === "saving_result"
+										? "result_persistence_failed"
+										: classifyStatelessAgentFailureReason(current.errorMessage),
+					failedPhase: phase,
+					detail: current.errorMessage,
+					exitCode: error instanceof StatelessTaskIndexingAgentExecutionError ? error.exitCode : null,
+					signal: error instanceof StatelessTaskIndexingAgentExecutionError ? error.signal : null,
+					stderrTail: error instanceof StatelessTaskIndexingAgentExecutionError ? error.stderrTail : null,
+				};
 			});
+		} finally {
+			clearTimeout(activityTimer);
 		}
 	};
 	const service = {
@@ -440,7 +644,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 					}
 					if (input.explicitlyRecoveredUnownedTurnId) {
 						const unowned = current.turns.find((turn) => turn.turnId === input.explicitlyRecoveredUnownedTurnId);
-						if (!unowned || unowned.status !== "running" || unowned.executionOwnerRuntimeProcessInstanceId)
+						if (!unowned || unowned.status !== "running" || unowned.owningRuntimeProcessInstanceId)
 							throw new Error("旧轮状态已变化，未结束仍有执行归属的查询。");
 						unowned.status = "interrupted";
 						unowned.phase = "finished";
@@ -457,10 +661,20 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 						requestId: input.requestId,
 						questionText: input.questionText,
 						questionImages: input.questionImages,
-						executionOwnerRuntimeProcessInstanceId,
 						scope: current.scope,
 						status: "running",
+						owningRuntimeProcessInstanceId: runtimeProcessInstanceId,
 						phase: "collecting_materials",
+						phaseStartedAt: Date.now(),
+						lastExecutionActivityAt: Date.now(),
+						executionActivityTimeline: [
+							{
+								occurredAtEpochMs: Date.now(),
+								phase: "collecting_materials",
+								eventKind: "phase_started",
+								message: "查询已受理，开始读取任务材料",
+							},
+						],
 						startedAt: Date.now(),
 						finishedAt: null,
 						result: null,
@@ -484,7 +698,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 		cancelTurn: async (id: string) => {
 			await initialized;
 			if (!activeRuns.has(id) && (await recoverConversation(id)).turns.some((turn) => turn.status === "running"))
-				throw new Error("当前实例不持有本轮查询，尚未取消；请在执行该轮的实例中取消。");
+				throw new Error("本轮不由当前运行时执行，当前实例不持有本轮查询，尚未取消；请在所属运行时操作。");
 			activeRuns.get(id)?.controller.abort(new Error("用户取消查卡。"));
 			await activeRuns.get(id)?.promise;
 			return await readConversation(id);

@@ -8,7 +8,7 @@ import {
 
 // 跨项目切换面板条目的取景（哪些卡进 projects_updated 广播）。不变量：
 //   - 置顶的卡不论哪一列都进（含 Done）；
-//   - 其余只取非 Done 列，且 agent 正持有回合、或「最后被碰」/ 停止生成时刻在时间窗内；
+//   - 其余所有阶段，且 agent 正持有回合、或最近触达时刻在时间窗内；
 //   - 条目是 in_progress 明细（inProgressTaskDetails）的超集，由同一个 per-card 构造函数产出。
 
 const NOW_MS = 10_000_000_000;
@@ -69,14 +69,14 @@ function collect(
 }
 
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
-	it("完整 Backlog 不受活动时间窗限制，其他旧卡仍排除", () => {
+	it("Backlog 与其他阶段一样排除时间窗外的旧卡", () => {
 		const entries = collect(
 			makeBoard({
 				backlog: [makeCard("old-backlog", { taskDescriptionLastUpdatedAt: NOW_MS - 60 * DAY_MS })],
 				review: [makeCard("old-review")],
 			}),
 		);
-		expect(entries.map((entry) => entry.taskId)).toEqual(["old-backlog"]);
+		expect(entries.map((entry) => entry.taskId)).toEqual([]);
 	});
 	it("时间窗外、无会话、未置顶的卡不进广播", () => {
 		expect(collect(makeBoard({ review: [makeCard("old")] }))).toEqual([]);
@@ -144,17 +144,21 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 		]);
 	});
 
-	it("置顶的卡即使在 Done 列、很久没碰也进；未置顶的 Done 卡即使刚碰过也不进", () => {
+	it("Done 中的置顶卡和近期触达卡进入广播，旧卡排除", () => {
 		const entries = collect(
 			makeBoard({
 				trash: [
 					makeCard("pinned-done", { pinnedToTaskPinboardAt: 1, taskPinboardPinReason: "watch" }),
 					makeCard("recent-done", { taskDescriptionLastUpdatedAt: NOW_MS }),
+					makeCard("old-done"),
 				],
 			}),
 		);
 		expect(entries.map((entry) => [entry.taskId, entry.pinnedToTaskPinboardAt, entry.taskPinboardPinReason])).toEqual(
-			[["pinned-done", 1, "watch"]],
+			[
+				["pinned-done", 1, "watch"],
+				["recent-done", null, null],
+			],
 		);
 	});
 

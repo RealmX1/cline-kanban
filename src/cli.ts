@@ -301,15 +301,13 @@ async function canReachKanbanServer(workspaceId: string | null): Promise<boolean
 }
 
 async function tryOpenExistingServer(options: { noOpen: boolean; shouldAutoOpenBrowser: boolean }): Promise<boolean> {
+	// 先识别服务，再读取或登记 cwd；重复启动不进入运行时初始化。
+	if (!(await canReachKanbanServer(null))) return false;
 	let workspaceId: string | null = null;
 	if (hasGitRepository(process.cwd())) {
 		const { loadWorkspaceContext } = await import("./state/workspace-state.js");
 		const context = await loadWorkspaceContext(process.cwd());
 		workspaceId = context.workspaceId;
-	}
-	const running = await canReachKanbanServer(workspaceId);
-	if (!running) {
-		return false;
 	}
 	const projectUrl = workspaceId
 		? buildKanbanRuntimeUrl(`/${encodeURIComponent(workspaceId)}`)
@@ -613,6 +611,8 @@ async function startServerWithAutoPortRetry(options: CliOptions): Promise<Awaite
 	}
 }
 
+let runtimeServerStartedByThisInvocation = false;
+
 async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolean): Promise<void> {
 	if (options.host) {
 		setKanbanRuntimeHost(options.host);
@@ -636,6 +636,13 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 	const tlsResult = await resolveRuntimeTls(options);
 	if (tlsResult.enabled) {
 		console.log(`HTTPS enabled on ${getKanbanRuntimeOrigin()}`);
+	}
+
+	if (
+		options.port?.mode !== "auto" &&
+		(await tryOpenExistingServer({ noOpen: options.noOpen, shouldAutoOpenBrowser }))
+	) {
+		return;
 	}
 
 	// Handle passcode generation for remote mode — deferred until after TLS
@@ -670,6 +677,7 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		}
 		throw error;
 	}
+	runtimeServerStartedByThisInvocation = true;
 	console.log(`Cline Kanban running at ${runtime.url}`);
 	if (!options.noOpen && shouldAutoOpenBrowser) {
 		try {
@@ -845,7 +853,7 @@ async function run(): Promise<void> {
 		console.error(`Kanban 执行失败：${safeErrorMessage(error)}`);
 		captureNodeException(error, { area: "startup" });
 	} finally {
-		if (!isServerStyleInvocation || invocationFailed) {
+		if (!isServerStyleInvocation || invocationFailed || !runtimeServerStartedByThisInvocation) {
 			await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry(DEFAULT_CLI_TELEMETRY_FLUSH_MS)]);
 			// 空写回调在此前已排队的 JSON / 错误正文之后执行，避免 process.exit 截断 pipe 输出。
 			await Promise.allSettled(

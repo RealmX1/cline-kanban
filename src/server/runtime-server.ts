@@ -95,7 +95,7 @@ import {
 	getTaskWorktreesHomePath,
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
-	loadWorkspaceContextById,
+	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
@@ -258,7 +258,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				workspaceScope: null,
 			};
 		}
-		const requestedWorkspaceContext = await loadWorkspaceContextById(requestedWorkspaceId);
+		const requestedWorkspaceContext = await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(requestedWorkspaceId);
 		if (!requestedWorkspaceContext) {
 			return {
 				requestedWorkspaceId,
@@ -847,8 +847,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	const taskLookupConversationApi = createTaskLookupConversationService({
 		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
-		executionOwnerRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
-		readExecutionOwnerLiveness: readRuntimeProcessInstanceLiveness,
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
 		collectMaterials: (workspaceId) =>
 			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
 		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
@@ -1290,13 +1290,73 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		socket.destroy();
 	});
 
-	await new Promise<void>((resolveListen, rejectListen) => {
-		server.once("error", rejectListen);
-		server.listen(getKanbanRuntimePort(), getKanbanRuntimeHost(), () => {
-			server.off("error", rejectListen);
-			resolveListen();
+	const closeRuntimeServerResources = async (): Promise<void> => {
+		await taskLookupConversationApi.close();
+		await taskIndexingSupportApi.close();
+		await taskMainSessionHandoverApi.close();
+		await rvfAutomaticCloseoutApi.stop();
+		await promptDraftUsageService.close();
+		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
+		agentSessionInactivityReclamationScheduler.stop();
+		// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
+		queuedTaskPromptDeliveryDispatcher.stop();
+		unregisterQueuedTaskPromptDeliveryDispatchObserver();
+		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
+		taskAttributedProcessTreeResourceSampler.stop();
+		taskAgentConversationModelTokenUsageJournalMonitor.stop();
+		taskWorktreeDiskUsageMeasurementMonitor.stop();
+		stopKanbanRuntimeProcessSelfResourceSampleMonitor();
+		// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
+		// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
+		for (const service of acpTaskSessionServiceByWorkspaceId.values()) {
+			service.disposeAllTaskSessions();
+		}
+		acpTaskSessionServiceByWorkspaceId.clear();
+		acpWorkspacePathByWorkspaceId.clear();
+		await Promise.all(
+			Array.from(clineTaskSessionServiceByWorkspaceId.values()).map(async (service) => {
+				await service.dispose();
+			}),
+		);
+		clineTaskSessionServiceByWorkspaceId.clear();
+		clineWorkspacePathByWorkspaceId.clear();
+		await clineWatcherRegistry.close();
+		// 优雅退出主动销号，于是下一个实例不必等满宽限期才敢判本实例已死——重启后的排队 prompt
+		// 提醒因此立刻生效，而不是迟到一个宽限期。非优雅退出没有这一步，靠宽限期兜底。
+		await runtimeProcessInstanceHeartbeat.stop();
+		await deps.runtimeStateHub.close();
+		stopEventLoopDelayMonitor();
+		stopProcessFileDescriptorWatermarkMonitor();
+		await terminalWebSocketBridge.close();
+		await activatedInterWorkUnitRelationLedgerLiveCapture.deactivate();
+		if (!server.listening) return;
+		await new Promise<void>((resolveClose, rejectClose) => {
+			server.close((error) => {
+				if (error) {
+					rejectClose(error);
+					return;
+				}
+				resolveClose();
+			});
 		});
-	});
+	};
+
+	try {
+		await new Promise<void>((resolveListen, rejectListen) => {
+			server.once("error", rejectListen);
+			server.listen(getKanbanRuntimePort(), getKanbanRuntimeHost(), () => {
+				server.off("error", rejectListen);
+				resolveListen();
+			});
+		});
+	} catch (error) {
+		await closeRuntimeServerResources().catch((cleanupError: unknown) => {
+			deps.warn(
+				`启动失败后的资源释放失败：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+			);
+		});
+		throw error;
+	}
 
 	const address = server.address();
 	if (!address || typeof address === "string") {
@@ -1331,54 +1391,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
-		close: async () => {
-			await taskLookupConversationApi.close();
-			await taskIndexingSupportApi.close();
-			await taskMainSessionHandoverApi.close();
-			await rvfAutomaticCloseoutApi.stop();
-			await promptDraftUsageService.close();
-			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
-			agentSessionInactivityReclamationScheduler.stop();
-			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
-			queuedTaskPromptDeliveryDispatcher.stop();
-			unregisterQueuedTaskPromptDeliveryDispatchObserver();
-			// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
-			taskAttributedProcessTreeResourceSampler.stop();
-			taskAgentConversationModelTokenUsageJournalMonitor.stop();
-			taskWorktreeDiskUsageMeasurementMonitor.stop();
-			stopKanbanRuntimeProcessSelfResourceSampleMonitor();
-			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
-			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
-			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {
-				service.disposeAllTaskSessions();
-			}
-			acpTaskSessionServiceByWorkspaceId.clear();
-			acpWorkspacePathByWorkspaceId.clear();
-			await Promise.all(
-				Array.from(clineTaskSessionServiceByWorkspaceId.values()).map(async (service) => {
-					await service.dispose();
-				}),
-			);
-			clineTaskSessionServiceByWorkspaceId.clear();
-			clineWorkspacePathByWorkspaceId.clear();
-			await clineWatcherRegistry.close();
-			// 优雅退出主动销号，于是下一个实例不必等满宽限期才敢判本实例已死——重启后的排队 prompt
-			// 提醒因此立刻生效，而不是迟到一个宽限期。非优雅退出没有这一步，靠宽限期兜底。
-			await runtimeProcessInstanceHeartbeat.stop();
-			await deps.runtimeStateHub.close();
-			stopEventLoopDelayMonitor();
-			stopProcessFileDescriptorWatermarkMonitor();
-			await terminalWebSocketBridge.close();
-			await activatedInterWorkUnitRelationLedgerLiveCapture.deactivate();
-			await new Promise<void>((resolveClose, rejectClose) => {
-				server.close((error) => {
-					if (error) {
-						rejectClose(error);
-						return;
-					}
-					resolveClose();
-				});
-			});
-		},
+		close: closeRuntimeServerResources,
 	};
 }

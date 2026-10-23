@@ -12,6 +12,19 @@ import type {
 import type { ModelUsagePurpose } from "../model-provider-access/model-provider-usage-record";
 import { recordModelProviderUsage } from "../model-provider-access/model-provider-usage-record";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
+import {
+	classifyStatelessAgentFailureReason,
+	StatelessTaskIndexingAgentExecutionError,
+	sanitizeStatelessAgentFailureDetail,
+} from "./stateless-task-indexing-agent-execution-diagnostics";
+
+export interface StatelessTaskIndexingAgentExecutionActivity {
+	eventKind: "agent_process_started" | "agent_response_received" | "agent_execution_completed" | "diagnostic_warning";
+	occurredAtEpochMs: number;
+	message: string;
+	inputByteCount?: number;
+	modelExecutionTimeoutMs?: number;
+}
 
 export interface StatelessTaskIndexingAgentRequest<T> {
 	settings: TaskIndexingSupportExecutorSettings;
@@ -23,6 +36,7 @@ export interface StatelessTaskIndexingAgentRequest<T> {
 	abortSignal?: AbortSignal;
 	modelUsagePurpose?: ModelUsagePurpose;
 	questionImages?: RuntimeTaskImage[];
+	onExecutionActivity?: (activity: StatelessTaskIndexingAgentExecutionActivity) => void;
 }
 export interface StatelessTaskIndexingAgentUsage {
 	inputTokens?: number;
@@ -170,13 +184,14 @@ export function readStatelessTaskIndexingAgentFailureDetail(stdout: string): str
 			/* 不把非结构化 stdout 或任务正文复制到错误信息。 */
 		}
 	}
-	return details.join("\n").slice(-3000);
+	return details.join("\n");
 }
 
 /** 拒绝执行工具、错误与不完整回合；结构化输出工具只是 Claude 的返回通道。 */
 export function parseStatelessTaskIndexingAgentEvents(
 	agentId: "claude" | "codex",
 	lines: readonly string[],
+	inputMaterialTexts: readonly string[] = [],
 ): { structured: unknown; usage: StatelessTaskIndexingAgentUsage; diagnosticWarnings: string[] } {
 	let structured: unknown;
 	let lastCodexAgentMessage: string | null = null;
@@ -186,7 +201,14 @@ export function parseStatelessTaskIndexingAgentEvents(
 	for (const line of lines) {
 		if (!line.trim()) continue;
 		const event = jsonRecordSchema.parse(JSON.parse(line));
-		if (event.type === "error" || event.type === "turn.failed") throw new Error("共享索引 Agent 返回错误回合。");
+		if (event.type === "error" || event.type === "turn.failed") {
+			const detail = readStatelessTaskIndexingAgentFailureDetail(line) || "共享索引 Agent 返回错误回合。";
+			throw new StatelessTaskIndexingAgentExecutionError(
+				classifyStatelessAgentFailureReason(detail),
+				detail,
+				inputMaterialTexts,
+			);
+		}
 		if (agentId === "claude") {
 			if (event.type === "assistant") {
 				const message = jsonRecordSchema.parse(event.message);
@@ -198,7 +220,14 @@ export function parseStatelessTaskIndexingAgentEvents(
 				}
 			}
 			if (event.type !== "result") continue;
-			if (event.is_error === true || event.subtype !== "success") throw new Error("共享索引 Agent 未成功完成。");
+			if (event.is_error === true || event.subtype !== "success") {
+				const detail = readStatelessTaskIndexingAgentFailureDetail(line) || "共享索引 Agent 未成功完成。";
+				throw new StatelessTaskIndexingAgentExecutionError(
+					classifyStatelessAgentFailureReason(detail),
+					detail,
+					inputMaterialTexts,
+				);
+			}
 			structured =
 				event.structured_output ?? (typeof event.result === "string" ? JSON.parse(event.result) : undefined);
 			const counts = jsonRecordSchema.parse(event.usage ?? {});
@@ -220,18 +249,26 @@ export function parseStatelessTaskIndexingAgentEvents(
 						message.startsWith("Code Mode is unavailable because code-mode host is disabled.") &&
 						message.includes("Code mode will fail closed")
 					) {
-						diagnosticWarnings.push(message);
+						diagnosticWarnings.push(sanitizeStatelessAgentFailureDetail(message, inputMaterialTexts));
 						continue;
 					}
 					// EXPERIMENT_NODE: skip_host_skill_discovery 仍是实验选项；保留其明确诊断，版本升级时复测是否仍能隔离全局 skills。
 					if (message.startsWith("Under-development features enabled: skip_host_skill_discovery.")) {
-						diagnosticWarnings.push(message);
+						diagnosticWarnings.push(sanitizeStatelessAgentFailureDetail(message, inputMaterialTexts));
 						continue;
 					}
-					throw new Error(`共享索引 Agent 返回错误：${message}`);
+					throw new StatelessTaskIndexingAgentExecutionError(
+						classifyStatelessAgentFailureReason(message),
+						`共享索引 Agent 返回错误：${message}`,
+						inputMaterialTexts,
+					);
 				}
 				if (!["agent_message", "reasoning"].includes(String(item.type)))
-					throw new Error(`共享索引 Agent 返回不允许的工具或条目：${String(item.type)}`);
+					throw new StatelessTaskIndexingAgentExecutionError(
+						"agent_execution_failed",
+						`共享索引 Agent 返回不允许的工具或条目：${String(item.type)}`,
+						inputMaterialTexts,
+					);
 				if (event.type === "item.completed" && item.type === "agent_message" && typeof item.text === "string")
 					lastCodexAgentMessage = item.text;
 			}
@@ -255,12 +292,32 @@ export async function executeStatelessTaskIndexingAgent<T>(
 	const startedAt = Date.now();
 	const prompt = assembleStatelessTaskIndexingAgentPrompt(request);
 	const prefixHash = taskIndexingTextFingerprint(prompt.stablePrefix);
+	const inputByteCount = Buffer.byteLength(prompt.stablePrefix + prompt.query);
+	const emitActivity = (activity: Omit<StatelessTaskIndexingAgentExecutionActivity, "occurredAtEpochMs">) => {
+		request.onExecutionActivity?.({ ...activity, occurredAtEpochMs: Date.now() });
+	};
 	// EXPERIMENT_NODE: 按 UTF-8 字节保守预检 argv 与模型输入；后续可按已解析模型的实际 context 上限细分。
-	if (Buffer.byteLength(prompt.stablePrefix + prompt.query) > 1_200_000)
-		throw new Error("共享任务 Context 超出执行器输入预算；未静默丢弃任务，请缩小项目或调整显式限额。");
+	if (inputByteCount > 1_200_000)
+		throw new StatelessTaskIndexingAgentExecutionError(
+			"input_budget_exceeded",
+			"共享任务 Context 超出执行器输入预算；未静默丢弃任务，请缩小项目或调整显式限额。",
+		);
 	const directory = await mkdtemp(join(tmpdir(), "kanban-stateless-task-indexing-agent-"));
 	let usage: StatelessTaskIndexingAgentUsage = { resolvedModelId: request.settings.modelId };
 	let failure: string | undefined;
+	let processExitCode: number | null = null;
+	let processSignal: string | null = null;
+	let processStderrTail: string | null = null;
+	const inputMaterialTexts = [
+		prompt.query,
+		prompt.stablePrefix,
+		request.queryText,
+		request.instructionText,
+		request.context.levelOneBoardTaskIndexText,
+		request.context.levelTwoProjectTaskRecapsText,
+		request.context.levelThreeAppendedChangesText,
+	];
+	const sanitizeFailureDetail = (detail: string) => sanitizeStatelessAgentFailureDetail(detail, inputMaterialTexts);
 	try {
 		const schema = JSON.stringify(z.toJSONSchema(request.outputSchema, { target: "draft-7" }));
 		const schemaPath = join(directory, "structured-response-schema.json");
@@ -289,7 +346,10 @@ export async function executeStatelessTaskIndexingAgent<T>(
 			questionImageFilePaths,
 		});
 		if (args.some((arg) => Buffer.byteLength(arg) > 100_000))
-			throw new Error("共享索引执行器单个启动参数超出保守系统限额。");
+			throw new StatelessTaskIndexingAgentExecutionError(
+				"launch_argument_budget_exceeded",
+				"共享索引执行器单个启动参数超出保守系统限额。",
+			);
 		// 身份认证沿用原位置；不复制凭据，不修改 HOME/CODEX_HOME，也不继承宿主 task 行动者声明。
 		const environment = buildStatelessTaskIndexingAgentEnvironment(process.env);
 		const output = await new Promise<string>((resolve, reject) => {
@@ -303,8 +363,52 @@ export async function executeStatelessTaskIndexingAgent<T>(
 			let stdout = "",
 				stderr = "",
 				stdoutByteCount = 0,
+				stderrByteCount = 0,
+				stderrOutputBudgetExceeded = false,
 				rejected: Error | null = null;
 			const stdoutDecoder = new StringDecoder("utf8");
+			const stderrDecoder = new StringDecoder("utf8");
+			let pendingEventLine = "";
+			const observeEventLines = (decoded: string) => {
+				pendingEventLine += decoded;
+				let newlineIndex = pendingEventLine.indexOf("\n");
+				while (newlineIndex >= 0) {
+					const line = pendingEventLine.slice(0, newlineIndex);
+					pendingEventLine = pendingEventLine.slice(newlineIndex + 1);
+					try {
+						const event = jsonRecordSchema.parse(JSON.parse(line));
+						if (
+							[
+								"thread.started",
+								"turn.started",
+								"system",
+								"assistant",
+								"item.started",
+								"item.completed",
+								"result",
+								"turn.completed",
+								"error",
+								"turn.failed",
+							].includes(String(event.type))
+						)
+							emitActivity({
+								eventKind: "agent_response_received",
+								message: `收到 Agent 事件：${String(event.type)}`,
+							});
+					} catch {
+						/* 完整解析仍由退出后的 fail-closed 校验负责。 */
+					}
+					newlineIndex = pendingEventLine.indexOf("\n");
+				}
+			};
+			child.once("spawn", () =>
+				emitActivity({
+					eventKind: "agent_process_started",
+					message: "Agent 进程已启动，等待响应",
+					inputByteCount,
+					modelExecutionTimeoutMs: request.timeoutMs ?? 180_000,
+				}),
+			);
 			const stop = (error: Error) => {
 				rejected ??= error;
 				try {
@@ -315,21 +419,48 @@ export async function executeStatelessTaskIndexingAgent<T>(
 				}
 			};
 			const timeout = setTimeout(
-				() => stop(new Error("共享索引 Agent 调用超时，未自动重试。")),
+				() =>
+					stop(
+						new StatelessTaskIndexingAgentExecutionError(
+							"execution_timeout",
+							"共享索引 Agent 调用超时，未自动重试。",
+						),
+					),
 				request.timeoutMs ?? 180_000,
 			);
-			const onAbort = () => stop(new Error("runtime 停止，共享索引 Agent 调用已取消。"));
+			const onAbort = () =>
+				stop(new StatelessTaskIndexingAgentExecutionError("execution_cancelled", "共享索引 Agent 调用已取消。"));
 			request.abortSignal?.addEventListener("abort", onAbort, { once: true });
 			child.stdout.on("data", (chunk: Buffer) => {
 				stdoutByteCount += chunk.length;
 				if (stdoutByteCount > 4 * 1024 * 1024) {
-					stop(new Error("共享索引 Agent 输出超过预算。"));
+					stop(
+						new StatelessTaskIndexingAgentExecutionError(
+							"output_budget_exceeded",
+							"共享索引 Agent 输出超过预算。",
+						),
+					);
 					return;
 				}
-				stdout += stdoutDecoder.write(chunk);
+				const decoded = stdoutDecoder.write(chunk);
+				stdout += decoded;
+				observeEventLines(decoded);
 			});
 			child.stderr.on("data", (chunk: Buffer) => {
-				stderr = (stderr + chunk.toString("utf8")).slice(-4000);
+				stderrByteCount += chunk.length;
+				if (stderrByteCount > 4 * 1024 * 1024) {
+					stderrOutputBudgetExceeded = true;
+					stderr = "";
+					stop(
+						new StatelessTaskIndexingAgentExecutionError(
+							"output_budget_exceeded",
+							"共享索引 Agent 错误输出超过预算，未保留原文。",
+						),
+					);
+					return;
+				}
+				// 在完整缓冲上脱敏后才截断，避免分块回显被裁成无法匹配的输入片段。
+				stderr += stderrDecoder.write(chunk);
 			});
 			const cleanup = () => {
 				clearTimeout(timeout);
@@ -337,19 +468,38 @@ export async function executeStatelessTaskIndexingAgent<T>(
 			};
 			child.on("error", (error) => {
 				cleanup();
-				reject(error);
+				reject(
+					new StatelessTaskIndexingAgentExecutionError(
+						"process_spawn_failed",
+						`共享索引 Agent 无法启动：${error.message}`,
+						inputMaterialTexts,
+					),
+				);
 			});
-			child.on("close", (code) => {
+			child.on("close", (code, signal) => {
 				cleanup();
 				stdout += stdoutDecoder.end();
-				if (rejected) reject(rejected);
-				else if (code !== 0)
-					reject(
-						new Error(
-							`共享索引 Agent 退出码 ${code}：${readStatelessTaskIndexingAgentFailureDetail(stdout) || stderr || "无结构化错误详情"}`,
-						),
+				const trailingStderr = stderrDecoder.end();
+				stderr = stderrOutputBudgetExceeded ? "错误输出超过预算，未保留原文。" : stderr + trailingStderr;
+				processExitCode = code;
+				processSignal = signal;
+				processStderrTail = stderr ? sanitizeFailureDetail(stderr) : null;
+				if (rejected || code !== 0) {
+					const detail = sanitizeFailureDetail(
+						readStatelessTaskIndexingAgentFailureDetail(stdout) || stderr || "无结构化错误详情",
 					);
-				else resolve(stdout);
+					const failureError =
+						rejected instanceof StatelessTaskIndexingAgentExecutionError
+							? rejected
+							: new StatelessTaskIndexingAgentExecutionError(
+									classifyStatelessAgentFailureReason(detail),
+									`共享索引 Agent 退出码 ${code}：${detail}`,
+								);
+					failureError.exitCode = code;
+					failureError.signal = signal;
+					failureError.stderrTail = processStderrTail;
+					reject(failureError);
+				} else resolve(stdout);
 			});
 			child.stdin.on("error", () => {});
 			child.stdin.end(
@@ -370,24 +520,52 @@ export async function executeStatelessTaskIndexingAgent<T>(
 					: prompt.query,
 			);
 		});
-		const parsed = parseStatelessTaskIndexingAgentEvents(request.settings.agentId, output.split(/\r?\n/u));
-		usage = { ...parsed.usage, resolvedModelId: parsed.usage.resolvedModelId ?? request.settings.modelId };
+		const parsed = parseStatelessTaskIndexingAgentEvents(
+			request.settings.agentId,
+			output.split(/\r?\n/u),
+			inputMaterialTexts,
+		);
+		usage = parsed.usage;
+		const value = request.outputSchema.parse(parsed.structured);
+		for (const warning of parsed.diagnosticWarnings)
+			emitActivity({
+				eventKind: "diagnostic_warning",
+				message: sanitizeStatelessAgentFailureDetail(warning).slice(0, 1000),
+			});
+		emitActivity({ eventKind: "agent_execution_completed", message: "Agent 已返回完整结构化结果" });
 		return {
-			value: request.outputSchema.parse(parsed.structured),
+			value,
 			usage,
 			stablePromptPrefixSha256: prefixHash,
 			elapsedMs: Date.now() - startedAt,
 			diagnosticWarnings: parsed.diagnosticWarnings,
 		};
 	} catch (error) {
-		failure = error instanceof Error ? error.message : String(error);
-		throw error;
+		const failureError =
+			error instanceof StatelessTaskIndexingAgentExecutionError
+				? error
+				: new StatelessTaskIndexingAgentExecutionError(
+						error instanceof SyntaxError || error instanceof z.ZodError
+							? "invalid_agent_response"
+							: classifyStatelessAgentFailureReason(error instanceof Error ? error.message : String(error)),
+						error instanceof SyntaxError || error instanceof z.ZodError
+							? "共享索引 Agent 返回的结构化结果无效。"
+							: error instanceof Error
+								? error.message
+								: String(error),
+						inputMaterialTexts,
+					);
+		failureError.exitCode ??= processExitCode;
+		failureError.signal ??= processSignal;
+		failureError.stderrTail ??= processStderrTail;
+		failure = failureError.message;
+		throw failureError;
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 		recordModelProviderUsage({
 			modelUsagePurpose: request.modelUsagePurpose ?? "task_indexing_support_relation_analysis",
 			modelProviderId: `headless-${request.settings.agentId}`,
-			modelId: usage.resolvedModelId,
+			modelId: usage.resolvedModelId ?? request.settings.modelId,
 			outcome: failure ? "unavailable" : "completed",
 			unavailableReason: failure,
 			elapsedMs: Date.now() - startedAt,

@@ -19,6 +19,7 @@ import {
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
 } from "../core/task-message-injection-ledger";
+import { createRvfReviewStartBoundaryNativeQueryDiagnosticRecorder } from "../diagnostics/rvf-review-start-boundary-native-query-diagnostic-recorder";
 import { readAgentRaisedPendingUserDecisions } from "../state/agent-raised-pending-user-decision-store";
 import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../state/queued-task-prompt-delivery-store";
 import {
@@ -680,42 +681,61 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string; idempotencyKey: string; requestNonce: string },
 		) => {
+			const diagnosticRecorder = createRvfReviewStartBoundaryNativeQueryDiagnosticRecorder({
+				workspaceId: scope.workspaceId,
+				taskId: input.taskId,
+				requestNonce: input.requestNonce,
+			});
 			const record = (
 				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
 			).find((entry) => entry.taskId === input.taskId && entry.receipt.idempotency_key === input.idempotencyKey);
-			if (!record)
+			if (!record) {
+				diagnosticRecorder.finishObservation("capability_unavailable");
 				return {
 					review_start_boundary_pending_reason: "尚未捕获本 task/key 对应的原生分界。",
 					reason_code: "native_independent_user_turn_boundary_not_yet_observed" as const,
 					recovery_action: "retry_capture" as const,
 				};
+			}
 			try {
 				const { summary } = await mainSummary(scope, input.taskId);
+				diagnosticRecorder.bindIdentity({
+					conversationSessionId: summary.taskId,
+					runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+					nativeSessionId: summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? "unknown",
+				});
 				if (
 					summary.taskId !== record.conversationSessionId ||
 					summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id ||
 					resolve(summary.agentNativeConversationSessionIdentity?.transcriptPath ?? "") !==
 						resolve(record.receipt.transcript_path) ||
 					(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
-				)
+				) {
+					diagnosticRecorder.finishObservation("binding_invalidated");
 					return {
 						review_start_boundary_pending_reason: "原生主会话身份已改变，旧分界不可用。",
 						reason_code: "review_start_boundary_binding_invalidated" as const,
 						recovery_action: "request_new_boundary_after_turn_completion" as const,
 					};
-				const endpoint = summary.codexNativeSessionControlEndpoint;
+				}
+				const observedTranscriptPath = summary.agentNativeConversationSessionIdentity?.transcriptPath;
+				const endpoint = summary.codexNativeSessionControlEndpoint
+					? { ...summary.codexNativeSessionControlEndpoint }
+					: null;
 				if (
 					!endpoint ||
 					(endpoint &&
 						(endpoint.workspaceId !== scope.workspaceId ||
 							endpoint.conversationSessionId !== summary.taskId ||
 							endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId))
-				)
+				) {
+					diagnosticRecorder.finishObservation("capability_unavailable");
 					return {
 						review_start_boundary_pending_reason: "本代会话没有与当前身份绑定的原生活动分支控制面。",
 						reason_code: "native_independent_user_turn_capability_unverified" as const,
 						recovery_action: "repair_host_capability" as const,
 					};
+				}
 				const observation = await withRunningCodexAppServerControlSocketConnection(
 					async (port) => {
 						// 不 resume、不从磁盘装载旧 thread；必须已由当前 TUI 宿主持有。
@@ -738,29 +758,46 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							requestNonce: input.requestNonce,
 						});
 					},
-					{ socketPath: endpoint.socketPath },
+					{ socketPath: endpoint.socketPath, onDiagnostic: diagnosticRecorder.onDiagnostic },
 				);
 				const { summary: latest } = await mainSummary(scope, input.taskId);
 				if (
 					latest.taskId !== summary.taskId ||
 					latest.startedAt !== summary.startedAt ||
 					latest.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
+					latest.workspacePath !== summary.workspacePath ||
 					latest.codexNativeSessionControlEndpoint?.socketPath !== endpoint?.socketPath ||
+					latest.codexNativeSessionControlEndpoint?.workspaceId !== endpoint.workspaceId ||
+					latest.codexNativeSessionControlEndpoint?.conversationSessionId !== endpoint.conversationSessionId ||
 					latest.codexNativeSessionControlEndpoint?.runtimeSessionIncarnationId !==
 						endpoint?.runtimeSessionIncarnationId ||
 					latest.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id ||
-					latest.agentNativeConversationSessionIdentity?.transcriptPath !==
-						summary.agentNativeConversationSessionIdentity?.transcriptPath
-				)
-					throw new Error("观测期间原生主会话被替换。");
+					latest.agentNativeConversationSessionIdentity?.transcriptPath !== observedTranscriptPath
+				) {
+					diagnosticRecorder.finishObservation("binding_invalidated");
+					return {
+						independent_user_turn_boundary_receipt: record.receipt,
+						review_start_boundary_pending_reason: "实时原生分支能力尚未确认：观测期间原生主会话被替换。",
+						reason_code: "review_start_boundary_binding_invalidated" as const,
+						recovery_action: "request_new_boundary_after_turn_completion" as const,
+					};
+				}
+				diagnosticRecorder.finishObservation("observation_verified");
 				return {
 					independent_user_turn_boundary_receipt: record.receipt,
 					review_start_boundary_active_branch_observation: observation,
 				};
 			} catch (error) {
+				diagnosticRecorder.finishObservation("observation_failed");
 				return {
 					independent_user_turn_boundary_receipt: record.receipt,
-					review_start_boundary_pending_reason: `实时原生分支能力尚未确认：${error instanceof Error ? error.message : String(error)}`,
+					review_start_boundary_pending_reason: `实时原生分支能力尚未确认：${
+						error instanceof z.ZodError
+							? "原生回合响应结构不合法。"
+							: error instanceof Error
+								? error.message
+								: "观测失败。"
+					}`,
 				};
 			}
 		},

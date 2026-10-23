@@ -9,7 +9,7 @@ import { afterEach, expect, it } from "vitest";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
-import { runAllProjectsBacklogSectionRealBrowserCheck } from "./all-projects-backlog-section-real-browser-check";
+import { runAllProjectsRecentSectionRealBrowserCheck } from "./all-projects-recent-section-real-browser-check";
 import { runPostDeployVerificationFollowUpTaskRealBrowserCheck } from "./post-deploy-verification-follow-up-task-real-browser-check";
 import { runReferenceRelationModelingRealBrowserCheck } from "./reference-relation-modeling-real-browser-check";
 import {
@@ -24,9 +24,9 @@ const runRelationModelingBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_REFERENCE_RELATION_MODELING_BROWSER_CHECK === "1";
 const runPostDeployVerificationFollowUpBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
-const runAllProjectsBacklogBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PROJECTS_BACKLOG_BROWSER_CHECK === "1";
+const runAllProjectsRecentBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PROJECTS_RECENT_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
-	runAllProjectsBacklogBrowserCheck ||
+	runAllProjectsRecentBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
 	runRelationModelingBrowserCheck ||
 	runPostDeployVerificationFollowUpBrowserCheck ||
@@ -69,7 +69,9 @@ it.skipIf(!runRealBrowserCheck)(
 		expect(runtimePort).not.toBe(3484);
 		expect(webUiPort).not.toBe(3484);
 		const runtimeOrigin = `http://127.0.0.1:${runtimePort}`;
+		const packagedRuntimeCliPath = process.env.KANBAN_ISOLATED_REAL_BROWSER_CHECK_PACKAGED_RUNTIME_CLI_PATH;
 		const usePackagedRuntimeAndWebUi =
+			packagedRuntimeCliPath !== undefined ||
 			process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK_WITH_PACKAGED_RUNTIME === "1";
 		const webUiOrigin = usePackagedRuntimeAndWebUi ? runtimeOrigin : `http://127.0.0.1:${webUiPort}`;
 		const isolatedExecutableDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-stub-executables");
@@ -105,7 +107,7 @@ setInterval(() => {}, 1000);
 			join(sourceCheckoutPath, "test/integration/shutdown-ipc-hook.cjs"),
 			"--import",
 			requireFromSourceCheckout.resolve("tsx"),
-			join(sourceCheckoutPath, usePackagedRuntimeAndWebUi ? "dist/cli.js" : "src/cli.ts"),
+			packagedRuntimeCliPath ?? join(sourceCheckoutPath, usePackagedRuntimeAndWebUi ? "dist/cli.js" : "src/cli.ts"),
 		];
 		const processEvidence: Array<{ pid: number; role: string; child: ChildProcess }> = [];
 		function startOwnedProcess(role: string, executable: string, arguments_: string[], cwd: string) {
@@ -336,37 +338,54 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				expect(pageErrors).toEqual([]);
 				return;
 			}
-			if (runAllProjectsBacklogBrowserCheck) {
-				const betaBacklogTaskId = await createTask(secondProject.repositoryPath, "跨项目旧待办");
-				for (const [workspaceId, taskId] of [
-					[alphaWorkspaceId, singleStartId],
-					[betaWorkspaceId, betaBacklogTaskId],
-				]) {
-					const client = runtimeClient(workspaceId);
-					const backlogState = await client.workspace.getState.query();
-					const backlogCard = backlogState.board.columns
-						.find((column) => column.id === "backlog")
-						?.cards.find((card) => card.id === taskId);
-					if (!backlogCard) throw new Error("缺少旧 Backlog 卡片");
-					backlogCard.updatedAt = backlogCard.taskDescriptionLastUpdatedAt = Date.now() - 60 * 24 * 60 * 60_000;
-					await client.workspace.saveState.mutate({
-						board: backlogState.board,
-						sessions: backlogState.sessions,
-						expectedRevision: backlogState.revision,
-					});
+			if (runAllProjectsRecentBrowserCheck) {
+				const betaBacklogTaskId = await createTask(secondProject.repositoryPath, "跨项目近期待办");
+				const olderBacklogTaskId = await createTask(firstProject.repositoryPath, "二十天前的待办");
+				const expiredBacklogTaskId = await createTask(firstProject.repositoryPath, "六十天前的待办");
+				const validationTaskId = await createTask(firstProject.repositoryPath, "待验证任务");
+				const doneTaskId = await createTask(firstProject.repositoryPath, "已完成任务");
+				const recentFixtureClient = runtimeClient(alphaWorkspaceId);
+				const recentFixtureState = await recentFixtureClient.workspace.getState.query();
+				const recentFixtureBacklog = recentFixtureState.board.columns.find((column) => column.id === "backlog");
+				if (!recentFixtureBacklog) throw new Error("缺少隔离待办列");
+				for (const [taskId, ageDays] of [
+					[olderBacklogTaskId, 20],
+					[expiredBacklogTaskId, 60],
+				] as const) {
+					const card = recentFixtureBacklog.cards.find((card) => card.id === taskId);
+					if (!card) throw new Error("缺少时间窗口测试卡片");
+					card.updatedAt = card.taskDescriptionLastUpdatedAt = Date.now() - ageDays * 24 * 60 * 60_000;
 				}
+				for (const [taskId, columnId] of [
+					[validationTaskId, "validation"],
+					[doneTaskId, "trash"],
+				] as const) {
+					const card = recentFixtureBacklog.cards.find((card) => card.id === taskId);
+					if (!card) throw new Error("缺少阶段测试卡片");
+					recentFixtureBacklog.cards = recentFixtureBacklog.cards.filter((card) => card.id !== taskId);
+					recentFixtureState.board.columns.find((column) => column.id === columnId)?.cards.push(card);
+				}
+				await recentFixtureClient.workspace.saveState.mutate({
+					board: recentFixtureState.board,
+					sessions: recentFixtureState.sessions,
+					expectedRevision: recentFixtureState.revision,
+				});
 				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
 					taskId: singleStartId,
 					taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
-					taskPinboardPinReason: "隔离 Backlog 顺序验证",
+					taskPinboardPinReason: "隔离 Recent 置顶副本验证",
 				});
-				await runAllProjectsBacklogSectionRealBrowserCheck({
+				await runAllProjectsRecentSectionRealBrowserCheck({
 					page,
 					webUiOrigin,
 					alphaWorkspaceId,
 					betaWorkspaceId,
 					alphaBacklogTaskId: singleStartId,
 					betaBacklogTaskId,
+					olderBacklogTaskId,
+					expiredBacklogTaskId,
+					validationTaskId,
+					doneTaskId,
 					alphaFocusTaskId: focusId,
 					betaFocusTaskId: betaId,
 					evidenceOutputDirectory,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { RuntimeHookEvent } from "../core/api-contract";
-import { buildKanbanCommandParts } from "../core/kanban-command";
+import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
 
 // codex 在该秒数后回收 hook 进程，即 codex 路径单条 hook 的总时间预算。F2 给 `kanban hooks ingest`
@@ -107,7 +107,7 @@ function addCodexConfigOverrideBeforeSubcommand(args: string[], key: string, val
 }
 
 function buildCodexHookCommand(event: RuntimeHookEvent): string {
-	return buildKanbanCommandParts(["hooks", "codex-hook", "--event", event, "--source", "codex"])
+	return buildKanbanAgentHookCommandParts(["codex-hook", "--event", event, "--source", "codex"])
 		.map(quoteShellArg)
 		.join(" ");
 }

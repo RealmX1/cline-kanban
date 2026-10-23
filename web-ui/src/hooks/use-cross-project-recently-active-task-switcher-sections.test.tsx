@@ -6,6 +6,7 @@ import type {
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
 	RuntimeCrossProjectTaskSwitcherEntry,
 } from "@/runtime/types";
+import { LocalStorageKey } from "@/storage/local-storage-store";
 import {
 	readCrossProjectTaskSwitcherPanelViewContinuity,
 	resetCrossProjectTaskSwitcherPanelViewContinuity,
@@ -155,36 +156,62 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).toHaveBeenCalledWith("project-a");
 	});
 
-	it("Backlog 在真实视图切换时折叠，同一视图切项目或更新数据不重置，刷新不保存", () => {
+	it("Recent 和 Cache warm 默认展开，阶段默认 In progress / Review；导航保留，刷新恢复默认", () => {
 		render({ allProjectsTaskSwitcherView: "kanban_board" });
-		expect(model.isBacklogSectionExpanded).toBe(false);
-		act(() => model.setIsBacklogSectionExpanded(true));
-		render({ currentProjectId: "project-b", projects: [...inputs.projects] });
-		expect(model.isBacklogSectionExpanded).toBe(true);
-		render({ allProjectsTaskSwitcherView: "task_focus" });
-		expect(model.isBacklogSectionExpanded).toBe(false);
-		act(() => model.setIsBacklogSectionExpanded(true));
-		render({ currentProjectId: "project-a" });
-		expect(model.isBacklogSectionExpanded).toBe(true);
-		render({ allProjectsTaskSwitcherView: "outside_all_projects" });
-		render({ allProjectsTaskSwitcherView: "task_focus" });
-		expect(model.isBacklogSectionExpanded).toBe(false);
-		act(() => model.setIsBacklogSectionExpanded(true));
+		expect(model.isRecentSectionExpanded).toBe(true);
+		expect(model.isPromptCacheWarmSectionExpanded).toBe(true);
+		expect(model.selectedRecentTaskStageFilters).toEqual(["in_progress_and_review"]);
+		expect(model.selectedRecentProjectWorkspaceIds).toEqual([]);
+		act(() => {
+			model.setIsRecentSectionExpanded(false);
+			model.setIsPromptCacheWarmSectionExpanded(false);
+			model.setSelectedRecentTaskStageFilters(["backlog", "done"]);
+			model.setSelectedRecentProjectWorkspaceIds(["project-a"]);
+		});
+		render({ allProjectsTaskSwitcherView: "task_focus", currentProjectId: "project-b" });
+		expect(model.isRecentSectionExpanded).toBe(false);
+		expect(model.isPromptCacheWarmSectionExpanded).toBe(false);
+		expect(model.selectedRecentTaskStageFilters).toEqual(["backlog", "done"]);
+		expect(model.selectedRecentProjectWorkspaceIds).toEqual(["project-a"]);
 		act(() => root.unmount());
 		root = createRoot(document.createElement("div"));
 		render();
-		expect(model.isBacklogSectionExpanded).toBe(false);
+		expect(model.isRecentSectionExpanded).toBe(true);
+		expect(model.isPromptCacheWarmSectionExpanded).toBe(true);
+		expect(model.selectedRecentTaskStageFilters).toEqual(["in_progress_and_review"]);
+		expect(model.selectedRecentProjectWorkspaceIds).toEqual([]);
 	});
 
-	it("显示更早的旧 Backlog 快照不能恢复已删除或已移出取景范围的卡", () => {
-		const snapshot = makeExtendedActivityHorizonSnapshot("removed-backlog");
+	it("旧 Unread + opened 排序偏好回落 Recently touched，现有 Conversation progress 偏好继续生效", () => {
+		window.localStorage.setItem(
+			LocalStorageKey.CrossProjectTaskSwitcherRemainingSectionOrderingMode,
+			"unread_handoffs_then_recently_opened_by_user",
+		);
+		render();
+		expect(model.remainingSectionOrderingMode).toBe(
+			"most_recently_touched_by_conversation_progress_or_user_open_or_description_edit",
+		);
+		act(() => model.setRemainingSectionOrderingMode("most_recent_conversation_progress_only"));
+		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRemainingSectionOrderingMode)).toBe(
+			"most_recent_conversation_progress_only",
+		);
+	});
+
+	it("扩展快照中的旧 Backlog 可进入 Recent，更新快照后删除的卡不复活", async () => {
+		const snapshot = makeExtendedActivityHorizonSnapshot("old-backlog");
 		const entry = snapshot.projects[0]?.crossProjectTaskSwitcherEntries[0];
 		if (!entry) throw new Error("缺少旧快照测试条目");
 		entry.columnId = "backlog";
 		writeCrossProjectTaskSwitcherPanelViewContinuity({ entriesWithinExtendedActivityHorizon: snapshot });
+		fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockResolvedValue({
+			activityHorizonMs: 30 * DAY_MS,
+			projects: [],
+		});
 		render();
-		expect(model.sections.backlogEntries).toEqual([]);
-		expect(model.sections.remainingSection).toMatchObject({ entries: [] });
+		act(() => model.setSelectedRecentTaskStageFilters([]));
+		expect(model.sections.remainingSection.entries.map(({ entry }) => entry.taskId)).toEqual(["old-backlog"]);
+		await advanceTime(30_000);
+		expect(model.sections.remainingSection.entries).toEqual([]);
 	});
 
 	it("活动期间保留 30 秒 tick，停用后不重渲染，恢复时不等下一次 tick", async () => {

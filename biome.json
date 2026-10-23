@@ -43,6 +43,7 @@
 				"src/**/*.ts",
 				"src/**/*.tsx",
 				"!src/cli.ts",
+				"!src/kanban-agent-hook-cli.ts",
 				"!src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"
 			],
 			"plugins": ["grit/no-console.grit", "grit/no-process-exit.grit"]

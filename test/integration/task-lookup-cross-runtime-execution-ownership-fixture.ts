@@ -13,8 +13,8 @@ const heartbeat = await startRuntimeProcessInstanceHeartbeat();
 const runtimeHome = getRuntimeHomePath();
 const service = createTaskLookupConversationService({
 	storageDirectoryPath: join(runtimeHome, "task-lookup-conversations"),
-	executionOwnerRuntimeProcessInstanceId: heartbeat.runtimeProcessInstanceId,
-	readExecutionOwnerLiveness: readRuntimeProcessInstanceLiveness,
+	runtimeProcessInstanceId: heartbeat.runtimeProcessInstanceId,
+	readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
 	collectMaterials: async () => ({ materials: [], missingContextParts: [] }),
 	getExecutorSettings: async () => ({ agentId: "codex", modelId: null }),
 	getContext: async () => ({
