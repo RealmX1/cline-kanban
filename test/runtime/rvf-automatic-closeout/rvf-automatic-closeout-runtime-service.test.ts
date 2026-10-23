@@ -351,7 +351,10 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		};
 		const accepted = await context.service.observeBoundary(context.scope, request);
 		expect(accepted.review_start_boundary_active_branch_observation?.request_nonce).toBe("current-nonce");
-		expect(mocked.controlEndpoint).toHaveBeenLastCalledWith({ socketPath: "/isolated/current-session/s" });
+		expect(mocked.controlEndpoint).toHaveBeenLastCalledWith({
+			socketPath: "/isolated/current-session/s",
+			onDiagnostic: expect.any(Function),
+		});
 		for (const invalidEndpoint of [
 			{ ...summary.codexNativeSessionControlEndpoint, workspaceId: "another-workspace" },
 			{ ...summary.codexNativeSessionControlEndpoint, conversationSessionId: "another-session" },
@@ -366,6 +369,53 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 			expect(rejected.review_start_boundary_pending_reason).toContain("本代会话");
 			expect(mocked.controlEndpoint).not.toHaveBeenCalled();
 		}
+	});
+
+	it.each([
+		"socket_path",
+		"endpoint_workspace",
+		"endpoint_conversation",
+		"incarnation",
+		"transcript_path",
+		"native_session",
+		"started_at",
+		"workspace_path",
+	])("观测中 %s 改变（含原地修改）时不返回成功观测", async (replacement) => {
+		const context = await setup();
+		const summary = context.manager.getSummary();
+		summary.runtimeSessionIncarnationId = "11111111-2222-4333-8444-555555555555";
+		summary.codexNativeSessionControlEndpoint = {
+			socketPath: "/isolated/current-session/s",
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: summary.taskId,
+			runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+		};
+		const original = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/loaded/list") return { data: ["native"], nextCursor: null };
+			const response = await original?.(method, parameters);
+			if (method === "thread/turns/list") {
+				const endpoint = summary.codexNativeSessionControlEndpoint;
+				const identity = summary.agentNativeConversationSessionIdentity;
+				if (replacement === "socket_path" && endpoint) endpoint.socketPath = "/isolated/replacement/s";
+				if (replacement === "endpoint_workspace" && endpoint) endpoint.workspaceId = "replacement";
+				if (replacement === "endpoint_conversation" && endpoint) endpoint.conversationSessionId = "replacement";
+				if (replacement === "incarnation") summary.runtimeSessionIncarnationId = "replacement";
+				if (replacement === "transcript_path" && identity) identity.transcriptPath = "/replacement.jsonl";
+				if (replacement === "native_session" && identity) identity.nativeSessionId = "replacement";
+				if (replacement === "started_at") summary.startedAt = 2;
+				if (replacement === "workspace_path") summary.workspacePath = "/replacement";
+			}
+			return response;
+		});
+		const response = await context.service.observeBoundary(context.scope, {
+			taskId: "task",
+			idempotencyKey: `rvf-decision-point-${context.token}`,
+			requestNonce: `replacement-${replacement}`,
+		});
+		expect(response.review_start_boundary_active_branch_observation).toBeUndefined();
+		expect(response.reason_code).toBe("review_start_boundary_binding_invalidated");
+		expect(response.recovery_action).toBe("request_new_boundary_after_turn_completion");
 	});
 
 	it("捕获默认仅保存非活跃分界，重启和重试不重捕获或扫描完成事实", async () => {
