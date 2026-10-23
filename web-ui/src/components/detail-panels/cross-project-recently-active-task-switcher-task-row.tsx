@@ -145,12 +145,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
 						>
 							{showsProjectName ? (
-								<span className="inline-flex min-w-0 max-w-full items-center gap-1">
+								<span className="inline-flex min-w-[min(14ch,100%)] max-w-full items-center gap-1">
 									<ProjectIcon workspaceId={workspaceId} projectName={projectName} size={14} />
-									<span className="truncate">{projectName}</span>
+									<span className="min-w-0 [overflow-wrap:anywhere]">{projectName}</span>
 								</span>
 							) : null}
-							<span className="pointer-events-auto">
+							<span className="pointer-events-auto contents">
 								<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 									entryInProject={entryInProject}
 									currentProjectId={currentProjectId}

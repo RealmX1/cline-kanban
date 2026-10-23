@@ -61,7 +61,10 @@ import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
-import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
+import {
+	shouldDisplayTaskRetainedCommittedLineChangeSummary,
+	TaskRetainedCommittedLineChangeIndicator,
+} from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -1024,23 +1027,38 @@ export const TaskCardBody = memo(function TaskCardBody(
 			),
 		});
 	}
+	const showsRetainedCommittedLineChangeSummary =
+		columnId !== "backlog" &&
+		!historicalContext &&
+		shouldDisplayTaskRetainedCommittedLineChangeSummary(
+			reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary,
+		);
 	const taskDirectoryRow = (
 		<div
 			data-task-directory=""
-			className={cn("flex items-start gap-1 font-mono", isCompactRowInFocusViewLeftColumn ? "min-w-0" : "mt-1")}
+			className={cn(
+				"flex w-max min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono",
+				!isCompactRowInFocusViewLeftColumn && "mt-1",
+			)}
 			style={{
 				fontSize: isCompactRowInFocusViewLeftColumn ? 11 : 12,
 				lineHeight: 1.4,
 				color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
 			}}
 		>
-			<TaskWorkspaceModeIconWithTooltip worktreeMode={card.worktreeMode} />
-			<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
+			<span
+				data-task-card-base-branch-relation-group=""
+				className={cn(
+					"inline-flex min-w-[13ch] max-w-full flex-wrap items-center gap-1",
+					isTrashCard && "line-through",
+				)}
+			>
+				<TaskWorkspaceModeIconWithTooltip worktreeMode={card.worktreeMode} />
 				{taskWorkspaceGitStatusTooltip ? (
 					// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
 					// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
 					<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
-						<span className="mx-1 inline-flex align-middle">
+						<span className="inline-flex flex-wrap items-center gap-1 align-middle">
 							<AheadBehindIndicator
 								ahead={commitsAheadOfBaseRef}
 								behind={commitsBehindBaseRef}
@@ -1048,7 +1066,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								iconSize={10}
 							/>
 							{showTaskCommitIntegrationIndicator ? (
-								<span className="ml-1">
+								<span>
 									<TaskCommitsIntegratedIntoBaseRefIndicator
 										taskCommitsIntegratedIntoBaseRef={taskCommitsIntegratedIntoBaseRef}
 									/>
@@ -1057,28 +1075,32 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</span>
 					</Tooltip>
 				) : null}
-				{reviewChangeSummary ? (
-					<>
-						{" "}
+			</span>
+			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
+				<span
+					data-task-card-line-change-statistics-group=""
+					className="inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-1"
+				>
+					{reviewChangeSummary ? (
 						<WorktreeUncommittedChangeSummaryIndicator
 							{...reviewChangeSummary}
 							showUncommittedChangeBackground
+							allowLineWrapping
 							parenthesesAndChangedFileCountStyle={{ color: SESSION_ACTIVITY_COLOR.muted }}
 						/>
-					</>
-				) : null}
-				{columnId !== "backlog" && !historicalContext ? (
-					<span className="ml-1 inline-block align-baseline">
+					) : null}
+					{showsRetainedCommittedLineChangeSummary ? (
 						<TaskRetainedCommittedLineChangeIndicator
 							showCommittedChangeBackground
+							allowLineWrapping
 							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
 							taskId={card.id}
 							baseRef={card.baseRef}
 							summary={reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary}
 						/>
-					</span>
-				) : null}
-			</span>
+					) : null}
+				</span>
+			) : null}
 		</div>
 	);
 
@@ -1691,13 +1713,15 @@ export const TaskCardBody = memo(function TaskCardBody(
 						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
 					>
 						{crossProjectTaskSwitcherRowElements?.projectName ? (
-							<span className="inline-flex min-w-0 max-w-full items-center gap-1 text-text-tertiary">
+							<span className="inline-flex min-w-[min(14ch,100%)] max-w-full items-center gap-1 text-text-tertiary">
 								<ProjectIcon
 									workspaceId={taskWorkspaceId ?? undefined}
 									projectName={crossProjectTaskSwitcherRowElements.projectName}
 									size={14}
 								/>
-								<span className="truncate">{crossProjectTaskSwitcherRowElements.projectName}</span>
+								<span className="min-w-0 [overflow-wrap:anywhere]">
+									{crossProjectTaskSwitcherRowElements.projectName}
+								</span>
 							</span>
 						) : null}
 						{showDirectoryRow ? taskDirectoryRow : null}
