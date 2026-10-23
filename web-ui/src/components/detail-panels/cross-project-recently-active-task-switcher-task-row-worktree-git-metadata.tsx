@@ -3,7 +3,10 @@ import type { ReactElement } from "react";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { TaskCommitCoverageInCurrentDeploymentIndicator } from "@/components/ui/task-commit-coverage-in-current-deployment-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
-import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
+import {
+	shouldDisplayTaskRetainedCommittedLineChangeSummary,
+	TaskRetainedCommittedLineChangeIndicator,
+} from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import {
@@ -14,7 +17,7 @@ import { useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry } from "@/ho
 
 // 跨项目切换面板一行的 git 元数据：相对 base 分支的提交关系（ahead / behind / 已集成）与未提交改动（dirty）。
 // 显隐规则与 This project 卡片目录行一致：Backlog 没有 worktree 不显示；ahead/behind 一组只在有可说的时显示；
-// 未提交改动全为 0 时隐藏；已提交累计保持常驻，工作区图标沿用统一 tooltip。
+// 已确认的零值改动统计隐藏；未知历史保留占位，工作区图标沿用统一 tooltip。
 export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata({
 	entryInProject,
 	currentProjectId,
@@ -41,46 +44,63 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 	});
 	const showsUncommittedChangeSummary =
 		snapshot.changedFiles != null && shouldDisplayWorktreeUncommittedChangeSummary(snapshot);
+	const showsCommittedLineChangeSummary = shouldDisplayTaskRetainedCommittedLineChangeSummary(
+		snapshot.taskRetainedCommittedLineChangeSummary,
+	);
 	return (
 		<span
-			className="inline-flex shrink-0 items-center gap-1 font-mono text-text-tertiary"
+			className="inline-flex w-max min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-text-tertiary"
 			data-cross-project-task-switcher-row-worktree-git-metadata=""
 			title={gitStatusAgainstBaseRefDescription ?? undefined}
 		>
-			<TaskWorkspaceModeIconWithTooltip worktreeMode={entry.worktreeMode} />
-			{gitStatusAgainstBaseRefDescription ? (
-				<>
-					<AheadBehindIndicator
-						ahead={snapshot.commitsAheadOfBaseRef}
-						behind={snapshot.commitsBehindBaseRef}
-						tone="semantic"
-						iconSize={10}
-					/>
-					{snapshot.taskCommitIntegrationTrackingStatus !== undefined ? (
-						<TaskCommitsIntegratedIntoBaseRefIndicator
-							taskCommitsIntegratedIntoBaseRef={snapshot.taskCommitsIntegratedIntoBaseRef ?? null}
+			<span
+				data-task-card-base-branch-relation-group=""
+				className="inline-flex min-w-[20ch] max-w-full flex-wrap items-center gap-1"
+			>
+				<TaskWorkspaceModeIconWithTooltip worktreeMode={entry.worktreeMode} />
+				{gitStatusAgainstBaseRefDescription ? (
+					<>
+						<AheadBehindIndicator
+							ahead={snapshot.commitsAheadOfBaseRef}
+							behind={snapshot.commitsBehindBaseRef}
+							tone="semantic"
+							iconSize={10}
+						/>
+						{snapshot.taskCommitIntegrationTrackingStatus !== undefined ? (
+							<TaskCommitsIntegratedIntoBaseRefIndicator
+								taskCommitsIntegratedIntoBaseRef={snapshot.taskCommitsIntegratedIntoBaseRef ?? null}
+							/>
+						) : null}
+					</>
+				) : null}
+				<TaskCommitCoverageInCurrentDeploymentIndicator coverage={snapshot.taskCommitCoverageInCurrentDeployment} />
+			</span>
+			{showsUncommittedChangeSummary || showsCommittedLineChangeSummary ? (
+				<span
+					data-task-card-line-change-statistics-group=""
+					className="inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-1"
+				>
+					{showsUncommittedChangeSummary && snapshot.changedFiles != null ? (
+						<WorktreeUncommittedChangeSummaryIndicator
+							showUncommittedChangeBackground
+							allowLineWrapping
+							changedFiles={snapshot.changedFiles}
+							additions={snapshot.additions ?? 0}
+							deletions={snapshot.deletions ?? 0}
 						/>
 					) : null}
-				</>
-			) : null}
-			<TaskCommitCoverageInCurrentDeploymentIndicator coverage={snapshot.taskCommitCoverageInCurrentDeployment} />
-			{showsUncommittedChangeSummary && snapshot.changedFiles != null ? (
-				<span>
-					<WorktreeUncommittedChangeSummaryIndicator
-						showUncommittedChangeBackground
-						changedFiles={snapshot.changedFiles}
-						additions={snapshot.additions ?? 0}
-						deletions={snapshot.deletions ?? 0}
-					/>
+					{showsCommittedLineChangeSummary ? (
+						<TaskRetainedCommittedLineChangeIndicator
+							showCommittedChangeBackground
+							allowLineWrapping
+							workspaceId={workspaceId}
+							taskId={entry.taskId}
+							baseRef={entry.baseRef ?? "main"}
+							summary={snapshot.taskRetainedCommittedLineChangeSummary}
+						/>
+					) : null}
 				</span>
 			) : null}
-			<TaskRetainedCommittedLineChangeIndicator
-				showCommittedChangeBackground
-				workspaceId={workspaceId}
-				taskId={entry.taskId}
-				baseRef={entry.baseRef ?? "main"}
-				summary={snapshot.taskRetainedCommittedLineChangeSummary}
-			/>
 		</span>
 	);
 }
