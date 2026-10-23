@@ -1,5 +1,6 @@
 import type {
 	CrossProjectTaskSwitcherEntryInProject,
+	CrossProjectTaskSwitcherRecentTaskStageFilter,
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
@@ -13,7 +14,7 @@ import {
 	useState,
 } from "react";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
-import { crossProjectTaskSwitcherBacklogSectionAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { CrossProjectTaskSwitcherRecentProjectMultiSelectFilter } from "@/components/detail-panels/cross-project-task-switcher-recent-project-multi-select-filter";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
@@ -31,8 +32,7 @@ import { useBooleanLocalStorageValue } from "@/utils/react-use";
  *   Pinned 可折叠、默认露 5 条；Running 遵循 localStorage 里的收起偏好。
  * - section_column_on_board_scope_all_projects_home_page：All projects 首页横排成列，每列的内容容器自己滚动。
  *   Pinned 全量显示、不折叠；Running 始终列出行。
- * Backlog 两种呈现均在每次进入视图时默认折叠，展开态仅保存在共享模型内存中。
- * Cache warm 与 Recent 两种呈现相同。
+ * Cache warm 与 Recent 默认展开；两种呈现共用展开态，首页收起时呈现窄列。
  */
 export type CrossProjectTaskSwitcherSectionBlockPresentation =
 	| "stacked_section_in_focus_view_left_column_panel"
@@ -42,8 +42,7 @@ export type CrossProjectTaskSwitcherSectionBlockPresentation =
 const DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER = 5;
 
 const REMAINING_SECTION_ORDERING_MODE_LABELS: Record<CrossProjectTaskSwitcherRemainingSectionOrderingMode, string> = {
-	most_recently_touched_by_conversation_progress_or_user_open_or_description_edit: "Last touched",
-	unread_handoffs_then_recently_opened_by_user: "Unread + opened",
+	most_recently_touched_by_conversation_progress_or_user_open_or_description_edit: "Recently touched",
 	most_recent_conversation_progress_only: "Conversation progress",
 };
 
@@ -79,6 +78,7 @@ export interface CrossProjectTaskSwitcherSectionBlockProps {
 // 中间不得再插包装层。
 function CrossProjectTaskSwitcherSectionFrame({
 	header,
+	controls,
 	children,
 	testIdSuffix,
 	sectionBlockPresentation,
@@ -86,6 +86,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 	isSectionColumnCollapsed = false,
 }: {
 	header: ReactNode;
+	controls?: ReactNode;
 	children?: ReactNode;
 	testIdSuffix: string;
 	sectionBlockPresentation: CrossProjectTaskSwitcherSectionBlockPresentation;
@@ -100,9 +101,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 					isSectionColumnCollapsed ? "w-10 shrink-0" : "min-w-[260px] flex-1 basis-0",
 				)}
 				data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
-				data-verification-anchor={
-					testIdSuffix === "backlog" ? crossProjectTaskSwitcherBacklogSectionAnchorKey() : undefined
-				}
+				data-verification-anchor={`cross-project-task-switcher-section:${testIdSuffix}`}
 			>
 				{/* 列 header 固定在滚动区之外。 */}
 				<div
@@ -113,6 +112,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 				>
 					{header}
 				</div>
+				{controls}
 				<div
 					ref={sectionColumnScrollContainerBinding?.sectionColumnScrollContainerRef}
 					onScroll={sectionColumnScrollContainerBinding?.onSectionColumnScroll}
@@ -136,11 +136,10 @@ function CrossProjectTaskSwitcherSectionFrame({
 		<section
 			className="flex shrink-0 flex-col rounded-lg border border-border bg-surface-1"
 			data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
-			data-verification-anchor={
-				testIdSuffix === "backlog" ? crossProjectTaskSwitcherBacklogSectionAnchorKey() : undefined
-			}
+			data-verification-anchor={`cross-project-task-switcher-section:${testIdSuffix}`}
 		>
 			<div className="flex h-9 shrink-0 items-center gap-2 px-2">{header}</div>
+			{controls}
 			{children ? <div className="flex flex-col gap-0.5 px-1 pb-1.5">{children}</div> : null}
 		</section>
 	);
@@ -155,70 +154,58 @@ function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string;
 	);
 }
 
-/** Backlog 全量待办：每次进入视图默认折叠；展开态由常驻共享模型持有，过渡壳重挂载不丢失。 */
-export function CrossProjectTaskSwitcherBacklogSectionBlock({
-	sectionBlockPresentation,
-	sectionsModel,
-	renderRowInHostingScrollContainer,
-	sectionColumnScrollContainerBinding,
-	focusedTaskRowToKeepMounted,
-}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
-	const { sections, isBacklogSectionExpanded, setIsBacklogSectionExpanded } = sectionsModel;
-	const isSectionColumnCollapsed =
-		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" && !isBacklogSectionExpanded;
+/** 同一展开动作在首页窄列与竖排组头中使用一致的键盘和可访问语义。 */
+function CrossProjectTaskSwitcherSectionExpansionButton({
+	title,
+	count,
+	isExpanded,
+	setIsExpanded,
+	isSectionColumnCollapsed,
+}: {
+	title: string;
+	count: number;
+	isExpanded: boolean;
+	setIsExpanded: (expanded: boolean) => void;
+	isSectionColumnCollapsed: boolean;
+}): ReactElement {
 	return (
-		<CrossProjectTaskSwitcherSectionFrame
-			testIdSuffix="backlog"
-			sectionBlockPresentation={sectionBlockPresentation}
-			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
-			isSectionColumnCollapsed={isSectionColumnCollapsed}
-			header={
-				<button
-					type="button"
-					onClick={() => setIsBacklogSectionExpanded(!isBacklogSectionExpanded)}
-					aria-expanded={isBacklogSectionExpanded}
-					aria-label={isBacklogSectionExpanded ? "Collapse Backlog" : "Expand Backlog"}
-					className={cn(
-						"flex min-w-0 flex-1 cursor-pointer border-none bg-transparent text-left text-inherit rounded-md hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
-						isSectionColumnCollapsed ? "min-h-0 flex-col items-center gap-2 py-3" : "h-8 items-center gap-2",
-					)}
-				>
-					{isSectionColumnCollapsed ? (
-						<>
-							<UnfoldHorizontal size={14} aria-hidden className="shrink-0 text-text-secondary" />
-							<span className="text-xs text-text-tertiary">{sections.backlogEntries.length}</span>
-							<span className="text-sm font-semibold text-text-primary whitespace-nowrap [writing-mode:vertical-rl]">
-								Backlog
-							</span>
-						</>
-					) : (
-						<>
-							{isBacklogSectionExpanded ? (
-								<ChevronDown size={14} aria-hidden className="shrink-0 text-text-secondary" />
-							) : (
-								<ChevronRight size={14} aria-hidden className="shrink-0 text-text-secondary" />
-							)}
-							<CrossProjectTaskSwitcherSectionTitle title="Backlog" count={sections.backlogEntries.length} />
-						</>
-					)}
-				</button>
-			}
-		>
-			{isBacklogSectionExpanded && sections.backlogEntries.length === 0 ? (
-				<div className="px-2 py-1.5 text-xs text-text-tertiary">No backlog tasks.</div>
-			) : (
-				sections.backlogEntries
-					.filter(
-						({ workspaceId, entry }) =>
-							isBacklogSectionExpanded ||
-							(!isSectionColumnCollapsed &&
-								focusedTaskRowToKeepMounted?.section === "backlog" &&
-								buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) ===
-									focusedTaskRowToKeepMounted.entryKey),
-					)
-					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "backlog"))
+		<button
+			type="button"
+			onClick={() => setIsExpanded(!isExpanded)}
+			aria-expanded={isExpanded}
+			aria-label={`${isExpanded ? "Collapse" : "Expand"} ${title}`}
+			className={cn(
+				"flex min-w-0 flex-1 cursor-pointer border-none bg-transparent text-left text-inherit rounded-md hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
+				isSectionColumnCollapsed ? "min-h-0 flex-col items-center gap-2 py-3" : "h-8 items-center gap-2",
 			)}
-		</CrossProjectTaskSwitcherSectionFrame>
+		>
+			{isSectionColumnCollapsed ? (
+				<>
+					<UnfoldHorizontal size={14} aria-hidden className="shrink-0 text-text-secondary" />
+					<span className="text-xs text-text-tertiary">{count}</span>
+					<span className="text-sm font-semibold text-text-primary whitespace-nowrap [writing-mode:vertical-rl]">
+						{title}
+					</span>
+				</>
+			) : (
+				<>
+					{isExpanded ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+					<CrossProjectTaskSwitcherSectionTitle title={title} count={count} />
+				</>
+			)}
+		</button>
+	);
+}
+
+function isEntryFocusedTaskRowToKeepMounted(
+	entryInProject: CrossProjectTaskSwitcherEntryInProject,
+	section: CrossProjectTaskSwitcherTaskRowSection,
+	focusedTaskRowToKeepMounted: CrossProjectTaskSwitcherSectionBlockProps["focusedTaskRowToKeepMounted"],
+): boolean {
+	return (
+		focusedTaskRowToKeepMounted?.section === section &&
+		buildCrossProjectTaskSwitcherEntryKey(entryInProject.workspaceId, entryInProject.entry.taskId) ===
+			focusedTaskRowToKeepMounted.entryKey
 	);
 }
 
@@ -385,120 +372,192 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	);
 }
 
-/** Cache warm · your turn 区：等用户回话、prompt cache 还热着的任务，按失效时刻升序。 */
+/** Cache warm · your turn 区：按失效时刻升序，支持独立展开与收起。 */
 export function CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock({
 	sectionBlockPresentation,
 	sectionsModel,
 	renderRowInHostingScrollContainer,
 	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
-	const { sections } = sectionsModel;
+	const { sections, isPromptCacheWarmSectionExpanded, setIsPromptCacheWarmSectionExpanded } = sectionsModel;
+	const isSectionColumnCollapsed =
+		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" &&
+		!isPromptCacheWarmSectionExpanded;
 	return (
 		<CrossProjectTaskSwitcherSectionFrame
 			testIdSuffix="prompt-cache-warm"
 			sectionBlockPresentation={sectionBlockPresentation}
 			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
+			isSectionColumnCollapsed={isSectionColumnCollapsed}
 			header={
 				<>
-					<Flame size={13} className="shrink-0 text-status-orange" />
-					<CrossProjectTaskSwitcherSectionTitle
+					{!isSectionColumnCollapsed ? (
+						<Flame size={13} aria-hidden className="shrink-0 text-status-orange" />
+					) : null}
+					<CrossProjectTaskSwitcherSectionExpansionButton
 						title="Cache warm · your turn"
 						count={sections.promptCacheWarmAwaitingUserEntries.length}
+						isExpanded={isPromptCacheWarmSectionExpanded}
+						setIsExpanded={setIsPromptCacheWarmSectionExpanded}
+						isSectionColumnCollapsed={isSectionColumnCollapsed}
 					/>
 				</>
 			}
 		>
-			{sections.promptCacheWarmAwaitingUserEntries.length > 0 ? (
-				sections.promptCacheWarmAwaitingUserEntries.map((entryInProject) =>
-					renderRowInHostingScrollContainer(entryInProject, "prompt_cache_warm"),
-				)
-			) : (
+			{isPromptCacheWarmSectionExpanded && sections.promptCacheWarmAwaitingUserEntries.length === 0 ? (
 				<div className="px-2 py-1.5 text-xs text-text-tertiary">No warm prompt caches waiting on you.</div>
+			) : (
+				sections.promptCacheWarmAwaitingUserEntries
+					.filter(
+						(entryInProject) =>
+							isPromptCacheWarmSectionExpanded ||
+							(!isSectionColumnCollapsed &&
+								isEntryFocusedTaskRowToKeepMounted(
+									entryInProject,
+									"prompt_cache_warm",
+									focusedTaskRowToKeepMounted,
+								)),
+					)
+					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "prompt_cache_warm"))
 			)}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }
 
-/** Recent（剩余区）：三种排序，可「显示更早」拉回 30 天内的旧任务。 */
+const RECENT_TASK_STAGE_FILTER_LABELS: Record<CrossProjectTaskSwitcherRecentTaskStageFilter, string> = {
+	in_progress_and_review: "In progress / Review",
+	backlog: "Backlog",
+	validation: "Validation",
+	done: "Done",
+};
+
+/** Recent：阶段筛选取并集，排序不改变候选集合，可按需扩展到 30 天。 */
 export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 	sectionBlockPresentation,
 	sectionsModel,
 	renderRowInHostingScrollContainer,
 	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const {
 		sections,
 		remainingSectionOrderingMode,
 		setRemainingSectionOrderingMode,
+		isRecentSectionExpanded,
+		setIsRecentSectionExpanded,
+		selectedRecentTaskStageFilters,
+		setSelectedRecentTaskStageFilters,
 		extendedActivityHorizonLoadState,
 		requestEntriesWithinExtendedActivityHorizon,
 	} = sectionsModel;
-	const remainingSection = sections.remainingSection;
-	const remainingEntryCount =
-		remainingSection.orderingMode === "unread_handoffs_then_recently_opened_by_user"
-			? remainingSection.unreadHandoffEntries.length + remainingSection.recentlyOpenedByUserEntries.length
-			: remainingSection.entries.length;
+	const entries = sections.remainingSection.entries;
+	const isSectionColumnCollapsed =
+		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" && !isRecentSectionExpanded;
+	const filterButtonClassName = (isSelected: boolean) =>
+		cn(
+			"cursor-pointer rounded-md border px-2 py-1 text-[11px] focus-visible:outline-2 focus-visible:outline-accent",
+			isSelected
+				? "border-accent bg-accent/15 text-text-primary"
+				: "border-border bg-surface-2 text-text-secondary hover:bg-surface-3",
+		);
 	return (
 		<CrossProjectTaskSwitcherSectionFrame
 			testIdSuffix="remaining"
 			sectionBlockPresentation={sectionBlockPresentation}
 			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
+			isSectionColumnCollapsed={isSectionColumnCollapsed}
 			header={
 				<>
-					<History size={13} className="shrink-0 text-text-secondary" />
-					<CrossProjectTaskSwitcherSectionTitle title="Recent" count={remainingEntryCount} />
-					<NativeSelect
-						size="sm"
-						aria-label="Order recent tasks by"
-						containerClassName="ml-auto min-w-0"
-						className="h-6 max-w-[150px] text-[11px]"
-						value={remainingSectionOrderingMode}
-						onChange={(event) =>
-							setRemainingSectionOrderingMode(
-								event.target.value as CrossProjectTaskSwitcherRemainingSectionOrderingMode,
-							)
-						}
-					>
-						{Object.entries(REMAINING_SECTION_ORDERING_MODE_LABELS).map(([mode, label]) => (
-							<option key={mode} value={mode}>
-								{label}
-							</option>
-						))}
-					</NativeSelect>
+					{!isSectionColumnCollapsed ? (
+						<History size={13} aria-hidden className="shrink-0 text-text-secondary" />
+					) : null}
+					<CrossProjectTaskSwitcherSectionExpansionButton
+						title="Recent"
+						count={entries.length}
+						isExpanded={isRecentSectionExpanded}
+						setIsExpanded={setIsRecentSectionExpanded}
+						isSectionColumnCollapsed={isSectionColumnCollapsed}
+					/>
 				</>
 			}
+			controls={
+				isRecentSectionExpanded ? (
+					<div className="flex shrink-0 flex-col gap-2 border-b border-border px-2 pb-2">
+						<div className="flex flex-wrap items-center gap-2">
+							<NativeSelect
+								size="sm"
+								aria-label="Order recent tasks by"
+								containerClassName="min-w-0"
+								value={remainingSectionOrderingMode}
+								onChange={(event) =>
+									setRemainingSectionOrderingMode(
+										event.target.value as CrossProjectTaskSwitcherRemainingSectionOrderingMode,
+									)
+								}
+							>
+								{Object.entries(REMAINING_SECTION_ORDERING_MODE_LABELS).map(([mode, label]) => (
+									<option key={mode} value={mode}>
+										{label}
+									</option>
+								))}
+							</NativeSelect>
+							<CrossProjectTaskSwitcherRecentProjectMultiSelectFilter
+								projectOptions={sectionsModel.recentProjectFilterOptions}
+								selectedProjectWorkspaceIds={sectionsModel.selectedRecentProjectWorkspaceIds}
+								onSelectedProjectWorkspaceIdsChange={sectionsModel.setSelectedRecentProjectWorkspaceIds}
+							/>
+						</div>
+						<div role="group" aria-label="Filter recent tasks by stage" className="flex flex-wrap gap-1">
+							<button
+								type="button"
+								aria-pressed={selectedRecentTaskStageFilters.length === 0}
+								onClick={() => setSelectedRecentTaskStageFilters([])}
+								className={filterButtonClassName(selectedRecentTaskStageFilters.length === 0)}
+							>
+								All
+							</button>
+							{Object.entries(RECENT_TASK_STAGE_FILTER_LABELS).map(([filter, label]) => {
+								const stageFilter = filter as CrossProjectTaskSwitcherRecentTaskStageFilter;
+								const isSelected = selectedRecentTaskStageFilters.includes(stageFilter);
+								return (
+									<button
+										key={stageFilter}
+										type="button"
+										aria-pressed={isSelected}
+										onClick={() =>
+											setSelectedRecentTaskStageFilters(
+												isSelected
+													? selectedRecentTaskStageFilters.filter(
+															(selectedFilter) => selectedFilter !== stageFilter,
+														)
+													: [...selectedRecentTaskStageFilters, stageFilter],
+											)
+										}
+										className={filterButtonClassName(isSelected)}
+									>
+										{label}
+									</button>
+								);
+							})}
+						</div>
+					</div>
+				) : null
+			}
 		>
-			{remainingSection.orderingMode === "unread_handoffs_then_recently_opened_by_user" ? (
-				<>
-					<div className="px-2 pt-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
-						Unread
-					</div>
-					{remainingSection.unreadHandoffEntries.length > 0 ? (
-						remainingSection.unreadHandoffEntries.map((entryInProject) =>
-							renderRowInHostingScrollContainer(entryInProject, "remaining"),
-						)
-					) : (
-						<div className="px-2 py-1 text-xs text-text-tertiary">No unread handoffs.</div>
-					)}
-					<div className="px-2 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
-						Recently opened
-					</div>
-					{remainingSection.recentlyOpenedByUserEntries.length > 0 ? (
-						remainingSection.recentlyOpenedByUserEntries.map((entryInProject) =>
-							renderRowInHostingScrollContainer(entryInProject, "remaining"),
-						)
-					) : (
-						<div className="px-2 py-1 text-xs text-text-tertiary">Nothing opened recently.</div>
-					)}
-				</>
-			) : remainingSection.entries.length > 0 ? (
-				remainingSection.entries.map((entryInProject) =>
-					renderRowInHostingScrollContainer(entryInProject, "remaining"),
-				)
+			{isRecentSectionExpanded && entries.length === 0 ? (
+				<div className="px-2 py-1.5 text-xs text-text-tertiary">No recent tasks match these filters.</div>
 			) : (
-				<div className="px-2 py-1.5 text-xs text-text-tertiary">No other recent tasks.</div>
+				entries
+					.filter(
+						(entryInProject) =>
+							isRecentSectionExpanded ||
+							(!isSectionColumnCollapsed &&
+								isEntryFocusedTaskRowToKeepMounted(entryInProject, "remaining", focusedTaskRowToKeepMounted)),
+					)
+					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "remaining"))
 			)}
-			{extendedActivityHorizonLoadState === "loaded" ? null : (
+			{!isRecentSectionExpanded || extendedActivityHorizonLoadState === "loaded" ? null : (
 				<button
 					type="button"
 					onClick={requestEntriesWithinExtendedActivityHorizon}

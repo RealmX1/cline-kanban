@@ -25,12 +25,7 @@ import { resolveBoardColumnTitle } from "@/data/board-data";
 import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 
-export type CrossProjectTaskSwitcherTaskRowSection =
-	| "pinned"
-	| "backlog"
-	| "running"
-	| "prompt_cache_warm"
-	| "remaining";
+export type CrossProjectTaskSwitcherTaskRowSection = "pinned" | "running" | "prompt_cache_warm" | "remaining";
 
 /**
  * 一行在列表里的形态。hover 展开是临时的（指针挪到别的行停够、或离开面板就收回，见
