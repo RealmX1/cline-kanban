@@ -1,6 +1,8 @@
 import { ArrowLeft, ExternalLink, Plus, Search, Send, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
+import { TaskLookupTurnQuestion } from "@/components/task-lookup-turn-question";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
@@ -11,7 +13,6 @@ import { ResizeHandle } from "@/resize/resize-handle";
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import type { TaskLookupCandidate } from "@/runtime/task-lookup-conversation-query";
 import { LocalStorageKey } from "@/storage/local-storage-store";
-import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { useJsonLocalStorageValue } from "@/utils/react-use";
 
 type TaskLookupWorkbenchModule = "query_history" | "candidate_details" | "query_scope_and_executor";
@@ -116,6 +117,7 @@ export function TaskLookupWorkbenchView({
 	);
 	const [mobilePanel, setMobilePanel] = useState<"conversation" | TaskLookupWorkbenchModule>("conversation");
 	const [previewRequestKey, setPreviewRequestKey] = useState(0);
+	const [isPreparingQuestionImages, setIsPreparingQuestionImages] = useState(false);
 	const layoutRef = useRef<HTMLDivElement>(null);
 	const transcriptRef = useRef<HTMLDivElement>(null);
 	const shouldFollowLatestTurnRef = useRef(true);
@@ -347,7 +349,7 @@ export function TaskLookupWorkbenchView({
 					shouldFollowLatestTurnRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
 					if (conversationId) conversationScrollPositions.set(conversationId, event.currentTarget.scrollTop);
 				}}
-				className="min-h-0 flex-1 space-y-6 overflow-auto p-4"
+				className="min-h-0 flex-1 space-y-10 overflow-auto p-4"
 			>
 				{!controller.conversation?.turns.length ? (
 					<div className="mx-auto max-w-[70ch] space-y-3 py-8">
@@ -358,15 +360,37 @@ export function TaskLookupWorkbenchView({
 						</p>
 					</div>
 				) : null}
-				{controller.conversation?.turns.map((turn) => (
-					<article key={turn.turnId} className="mx-auto max-w-[75ch] space-y-3">
-						<p className="whitespace-pre-wrap break-words border-b border-border pb-2 font-medium">
-							{turn.questionText}
-						</p>
+				{controller.conversation?.turns.map((turn, turnIndex) => (
+					<article
+						key={turn.turnId}
+						aria-label={`第 ${turnIndex + 1} 轮查询`}
+						data-task-lookup-turn={turn.turnId}
+						className="mx-auto max-w-[75ch] space-y-3 border-t border-border-bright pt-4"
+					>
+						<header className="flex flex-wrap items-center justify-between gap-2">
+							<h2 className="text-base font-semibold">第 {turnIndex + 1} 轮查询</h2>
+							<span
+								className={cn(
+									"rounded px-2 py-1 text-xs",
+									turn.status === "completed"
+										? "bg-surface-2 text-status-green"
+										: turn.status === "failed" || turn.status === "interrupted"
+											? "bg-surface-2 text-status-orange"
+											: "bg-surface-2 text-text-secondary",
+								)}
+							>
+								{STATUS_LABELS[turn.status]}
+							</span>
+						</header>
 						<p className="text-xs text-text-secondary">
-							{new Date(turn.startedAt).toLocaleString()} · {STATUS_LABELS[turn.status]} ·{" "}
+							{new Date(turn.startedAt).toLocaleString()} ·{" "}
 							{turn.scope.projectIds.length ? turn.scope.projectIds.join(", ") : "全部项目"}
 						</p>
+						<TaskLookupTurnQuestion
+							questionKey={`${conversationId}/${turn.turnId}`}
+							questionText={turn.questionText}
+							questionImages={turn.questionImages}
+						/>
 						{turn.status === "running" ? (
 							<p role="status" className="text-sm text-text-secondary">
 								{PHASE_LABELS[turn.phase]}…
@@ -377,8 +401,23 @@ export function TaskLookupWorkbenchView({
 								{turn.errorMessage}
 							</p>
 						) : null}
+						{turn.executionRecoveryMessage ? (
+							<p role="status" className="text-xs text-status-orange">
+								{turn.executionRecoveryMessage}
+							</p>
+						) : null}
+						{turn.status !== "running" || !turn.executionOwnerRuntimeProcessInstanceId ? (
+							<Button
+								size="sm"
+								disabled={controller.isPending || (controller.isRunning && turn.status !== "running")}
+								onClick={() => void controller.resubmitQuestion(turn)}
+							>
+								{turn.status === "running" ? "结束旧轮并重新提问" : "重新提问"}
+							</Button>
+						) : null}
 						{turn.result ? (
 							<>
+								<h3 className="text-sm font-semibold">查卡结果</h3>
 								<p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
 									{turn.result.answerText}
 								</p>
@@ -438,6 +477,7 @@ export function TaskLookupWorkbenchView({
 				className="shrink-0 space-y-2 border-t border-border p-3"
 				onSubmit={(event) => {
 					event.preventDefault();
+					if (isPreparingQuestionImages) return;
 					void controller.submitQuestion();
 				}}
 			>
@@ -447,23 +487,18 @@ export function TaskLookupWorkbenchView({
 						? controller.scope.columnIds.map((id) => STAGE_LABELS[id] ?? id).join(", ")
 						: "全部列"}
 				</p>
-				<textarea
+				<TaskPromptComposer
+					key={conversationId ?? "new"}
 					aria-label="查卡问题"
 					value={controller.draftQuestion}
-					onChange={(event) => controller.setDraftQuestion(event.target.value)}
+					onValueChange={(value) => controller.setQuestionDraftForConversation(conversationId ?? null, value)}
 					placeholder="描述任务，或补充上一轮的条件…"
-					rows={3}
-					onKeyDown={(event) => {
-						if (
-							event.key === "Enter" &&
-							(event.metaKey || event.ctrlKey) &&
-							!isKeyboardEventEmittedDuringImeComposition(event)
-						) {
-							event.preventDefault();
-							void controller.submitQuestion();
-						}
+					onSubmit={() => {
+						if (!controller.isRunning && !controller.isPending) void controller.submitQuestion();
 					}}
-					className="w-full resize-none rounded-md border border-border-bright bg-surface-1 p-2 text-base placeholder:text-text-secondary outline-none focus:border-accent md:text-sm"
+					workspaceId={controller.contextWorkspaceId}
+					onImagePreparationPendingChange={setIsPreparingQuestionImages}
+					disabled={controller.isPending}
 				/>
 				<div className="flex justify-end gap-2">
 					{controller.isRunning ? (
@@ -479,7 +514,12 @@ export function TaskLookupWorkbenchView({
 						variant="primary"
 						type="submit"
 						icon={<Send size={13} />}
-						disabled={controller.isRunning || controller.isPending || !controller.draftQuestion.trim()}
+						disabled={
+							controller.isRunning ||
+							controller.isPending ||
+							isPreparingQuestionImages ||
+							!controller.draftQuestion.trim()
+						}
 					>
 						查询任务
 					</Button>
@@ -488,7 +528,11 @@ export function TaskLookupWorkbenchView({
 		</section>
 	);
 	return (
-		<div data-task-lookup-workbench="" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+		<div
+			data-task-lookup-workbench=""
+			data-verification-anchor="task-lookup-workbench"
+			className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+		>
 			<header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2">
 				<Button icon={<ArrowLeft size={14} />} onClick={controller.close}>
 					{returnLabel}

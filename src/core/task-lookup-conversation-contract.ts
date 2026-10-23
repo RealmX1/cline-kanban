@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { runtimeTaskImageSchema } from "./api-contract";
 import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "./inter-work-unit-relation-ledger-event-contract";
 
 export const taskLookupScopeSchema = z.object({
@@ -30,6 +31,9 @@ export const taskLookupTurnSchema = z.object({
 	turnId: z.string(),
 	requestId: z.string(),
 	questionText: z.string(),
+	questionImages: z.array(runtimeTaskImageSchema).optional(),
+	executionOwnerRuntimeProcessInstanceId: z.string().uuid().nullable().optional(),
+	executionRecoveryMessage: z.string().optional(),
 	scope: taskLookupScopeSchema,
 	status: z.enum(["running", "completed", "failed", "cancelled", "interrupted"]),
 	phase: z.enum(["collecting_materials", "recalling_candidates", "explaining_candidates", "finished"]),
@@ -68,6 +72,8 @@ export const submitTaskLookupTurnRequestSchema = z.object({
 	conversationId: z.string().uuid(),
 	requestId: z.string().min(1).max(200),
 	questionText: z.string().trim().min(1).max(100000),
+	questionImages: z.array(runtimeTaskImageSchema).default([]),
+	explicitlyRecoveredUnownedTurnId: z.string().optional(),
 	scope: taskLookupScopeSchema.optional(),
 });
 export const taskLookupConversationIdentitySchema = z.object({ conversationId: z.string().uuid() });
@@ -85,4 +91,4 @@ export type TaskLookupConversation = z.infer<typeof taskLookupConversationSchema
 export type TaskLookupTurn = z.infer<typeof taskLookupTurnSchema>;
 export type TaskLookupCandidate = z.infer<typeof taskLookupResultSchema>["candidates"][number];
 export type TaskLookupScope = z.infer<typeof taskLookupScopeSchema>;
-export type SubmitTaskLookupTurnRequest = z.infer<typeof submitTaskLookupTurnRequestSchema>;
+export type SubmitTaskLookupTurnRequest = z.input<typeof submitTaskLookupTurnRequestSchema>;

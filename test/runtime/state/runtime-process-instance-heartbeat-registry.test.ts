@@ -19,6 +19,7 @@ const {
 	getRuntimeProcessInstanceHeartbeatsDirectoryPath,
 	getThisRuntimeProcessInstanceId,
 	readLiveRuntimeProcessInstanceIds,
+	readRuntimeProcessInstanceLiveness,
 	RUNTIME_PROCESS_INSTANCE_CONSIDERED_DEAD_AFTER_MS,
 	RUNTIME_PROCESS_INSTANCE_HEARTBEAT_INTERVAL_MS,
 	startRuntimeProcessInstanceHeartbeat,
@@ -63,6 +64,26 @@ describe("runtime-process-instance-heartbeat-registry — 判活", () => {
 
 	it("目录不存在时返回空集（还没有任何实例写过心跳）", async () => {
 		expect(await readLiveRuntimeProcessInstanceIds({ nowEpochMs: NOW })).toEqual(new Set());
+	});
+	it("查卡判活保留损坏心跳的未知态，只有缺失和过期才判死", async () => {
+		const ownerId = "b2572b72-6c2d-4d75-9363-57f2dab76f72";
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("dead");
+		await writeHeartbeatFile(`${ownerId}.json`, "incomplete-json");
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("unknown");
+		await writeHeartbeatFile(`${ownerId}.json`, {
+			runtimeProcessInstanceId: ownerId,
+			pid: 1,
+			startedAtEpochMs: Date.now(),
+			lastHeartbeatAtEpochMs: Date.now(),
+		});
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("live");
+		await writeHeartbeatFile(`${ownerId}.json`, {
+			runtimeProcessInstanceId: ownerId,
+			pid: 1,
+			startedAtEpochMs: NOW,
+			lastHeartbeatAtEpochMs: NOW,
+		});
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("dead");
 	});
 
 	it("宽限期内的心跳判活，宽限期外的判死", async () => {

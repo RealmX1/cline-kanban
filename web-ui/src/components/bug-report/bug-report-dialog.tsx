@@ -8,8 +8,7 @@ import {
 	collectBugReportDiagnostics,
 	deriveBugReportTitle,
 } from "@/components/bug-report/build-bug-report-content";
-import { collectImageFilesFromDataTransfer, fileToTaskImage } from "@/components/task-image-input-utils";
-import { TaskImageStrip } from "@/components/task-image-strip";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
@@ -59,24 +58,6 @@ export function BugReportDialog({
 		setAutoCreateTask(true);
 		setIsSubmitting(false);
 	}, [open, initialScreenshot]);
-
-	const handlePaste = useCallback((event: React.ClipboardEvent) => {
-		const files = collectImageFilesFromDataTransfer(event.clipboardData);
-		if (files.length === 0) {
-			return;
-		}
-		event.preventDefault();
-		void Promise.all(files.map((file) => fileToTaskImage(file))).then((results) => {
-			const added = results.filter((image): image is TaskImage => image !== null);
-			if (added.length > 0) {
-				setImages((current) => [...current, ...added]);
-			}
-		});
-	}, []);
-
-	const handleRemoveImage = useCallback((imageId: string) => {
-		setImages((current) => current.filter((image) => image.id !== imageId));
-	}, []);
 
 	const handleSubmit = useCallback(async () => {
 		const diagnostics = collectBugReportDiagnostics({
@@ -170,27 +151,18 @@ export function BugReportDialog({
 					<label htmlFor="bug-report-description" className="mb-1.5 block text-[12px] text-text-secondary">
 						What went wrong?
 					</label>
-					<textarea
+					<TaskPromptComposer
 						id="bug-report-description"
 						value={description}
-						onChange={(event) => setDescription(event.target.value)}
-						onPaste={handlePaste}
-						rows={6}
+						onValueChange={setDescription}
+						images={images}
+						onImagesChange={setImages}
+						workspaceId={devProject?.id ?? currentProject?.id}
+						onSubmit={() => {
+							if (!isSubmitting) void handleSubmit();
+						}}
 						placeholder={"复现步骤 / 期望结果 / 实际结果。\n可直接粘贴图片作为附件。"}
-						className="w-full resize-y rounded-md border border-border bg-surface-2 px-2.5 py-2 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:outline-none"
 					/>
-				</div>
-
-				<div>
-					<div className="mb-1.5 text-[12px] text-text-secondary">Attachments</div>
-					{images.length > 0 ? (
-						<TaskImageStrip images={images} onRemoveImage={handleRemoveImage} />
-					) : (
-						<p className="text-[12px] text-text-tertiary">
-							No attachments. Paste an image to attach it (page screenshot is added automatically when
-							available).
-						</p>
-					)}
 				</div>
 			</DialogBody>
 			<DialogFooter>

@@ -14,6 +14,7 @@ import {
 	Undo2,
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -31,10 +32,12 @@ function QueuePromptForAfterCurrentTurnButton({
 	prompt,
 	onQueue,
 	ariaLabel,
+	disabled = false,
 }: {
 	prompt: StoredPrompt;
 	onQueue: (prompt: StoredPrompt) => void;
 	ariaLabel: string;
+	disabled?: boolean;
 }): React.ReactElement {
 	return (
 		<Tooltip content={QUEUE_PROMPT_FOR_AFTER_CURRENT_TURN_TOOLTIP}>
@@ -43,7 +46,7 @@ function QueuePromptForAfterCurrentTurnButton({
 				size="xs"
 				icon={<ListPlus size={14} />}
 				aria-label={ariaLabel}
-				disabled={prompt.text.trim().length === 0}
+				disabled={disabled || prompt.text.trim().length === 0}
 				onClick={() => onQueue(prompt)}
 			/>
 		</Tooltip>
@@ -269,6 +272,7 @@ function PromptRow({
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [isFocusedWithin, setIsFocusedWithin] = useState(false);
 	const [isCommandScopeChoiceOpen, setIsCommandScopeChoiceOpen] = useState(false);
+	const [isPreparingPromptImages, setIsPreparingPromptImages] = useState(false);
 	const rowRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	useAutosizedPromptTextarea({
@@ -293,7 +297,7 @@ function PromptRow({
 	}, [shouldAutoFocus, onAutoFocusHandled]);
 
 	const isGlobal = prompt.scope === "global";
-	const canFill = prompt.text.trim().length > 0;
+	const canFill = prompt.text.trim().length > 0 && !isPreparingPromptImages;
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
 	const isReusableCommand = prompt.entryKind === "reusable_command";
 	const isUsed = prompt.draftUsage?.markedUsedAtEpochMs != null;
@@ -312,14 +316,16 @@ function PromptRow({
 			}}
 		>
 			<PromptMetadataPill prompt={prompt} />
-			<textarea
-				ref={textareaRef}
+			<TaskPromptComposer
+				textareaRef={textareaRef}
 				value={prompt.text}
-				onChange={(event) => onChangeText(prompt.id, event.target.value)}
+				onImagePreparationPendingChange={setIsPreparingPromptImages}
+				onValueChange={(value) => onChangeText(prompt.id, value)}
 				placeholder="Prompt text…"
-				rows={1}
-				spellCheck={false}
-				className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden bg-transparent p-1.5 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
+				manageTextareaHeight={false}
+				showExpandedEditingControl={false}
+				minimumTextareaHeight={24}
+				textareaClassName="block border-0 overflow-x-hidden bg-transparent p-1.5 leading-5"
 			/>
 			<PromptFidelityWarning prompt={prompt} />
 			{hasCollapsibleContent ? (
@@ -362,6 +368,7 @@ function PromptRow({
 				</Tooltip>
 				{onQueue ? (
 					<QueuePromptForAfterCurrentTurnButton
+						disabled={isPreparingPromptImages}
 						prompt={prompt}
 						onQueue={onQueue}
 						ariaLabel="Queue prompt for after the current turn"

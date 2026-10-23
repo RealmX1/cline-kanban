@@ -228,6 +228,7 @@ import {
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
+	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
@@ -339,6 +340,7 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeReadAgentPromptImageAttachmentsRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
@@ -354,6 +356,7 @@ import {
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveAgentPromptImageAttachmentsRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
@@ -397,6 +400,7 @@ import {
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
+	runtimeTaskImageSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskNameSuggestionRequestSchema,
@@ -589,6 +593,10 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import {
+	readPersistentAgentPromptImageAttachments,
+	savePersistentAgentPromptImageAttachments,
+} from "../state/persistent-agent-prompt-image-attachments";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
@@ -1391,6 +1399,14 @@ export const runtimeAppRouter = t.router({
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
 	support: t.router({
+		saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
+			.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))
+			.mutation(({ input }) => savePersistentAgentPromptImageAttachments(input.images)),
+		readAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeReadAgentPromptImageAttachmentsRequestSchema)
+			.output(z.array(runtimeTaskImageSchema))
+			.query(({ input }) => readPersistentAgentPromptImageAttachments(input.imageAttachmentIds)),
 		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(createTaskLookupConversationRequestSchema)
 			.output(taskLookupConversationSchema)

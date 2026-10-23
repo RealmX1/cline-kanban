@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
+import type { RuntimeTaskImage } from "../core/api-contract";
 import type {
 	SharedTaskIndexingContext,
 	TaskIndexingSupportExecutorSettings,
@@ -21,6 +22,7 @@ export interface StatelessTaskIndexingAgentRequest<T> {
 	timeoutMs?: number;
 	abortSignal?: AbortSignal;
 	modelUsagePurpose?: ModelUsagePurpose;
+	questionImages?: RuntimeTaskImage[];
 }
 export interface StatelessTaskIndexingAgentUsage {
 	inputTokens?: number;
@@ -52,11 +54,13 @@ export function buildStatelessTaskIndexingAgentLaunchArguments(input: {
 	isolatedDirectoryPath: string;
 	outputSchemaPath: string;
 	outputSchemaJson: string;
+	questionImageFilePaths?: string[];
 }): string[] {
 	const { settings } = input;
 	if (settings.agentId === "claude")
 		return [
 			"-p",
+			...(input.questionImageFilePaths?.length ? ["--input-format", "stream-json"] : []),
 			"--safe-mode",
 			...(Buffer.byteLength(input.stablePrefix) <= 100_000
 				? ["--system-prompt", input.stablePrefix]
@@ -89,6 +93,7 @@ export function buildStatelessTaskIndexingAgentLaunchArguments(input: {
 		input.isolatedDirectoryPath,
 		"--output-schema",
 		input.outputSchemaPath,
+		...(input.questionImageFilePaths ?? []).flatMap((path) => ["--image", path]),
 		"-c",
 		`model_instructions_file=${JSON.stringify(join(input.isolatedDirectoryPath, "stable-model-instructions.txt"))}`,
 		"-c",
@@ -261,12 +266,27 @@ export async function executeStatelessTaskIndexingAgent<T>(
 		const schemaPath = join(directory, "structured-response-schema.json");
 		await writeFile(schemaPath, schema);
 		await writeFile(join(directory, "stable-model-instructions.txt"), prompt.stablePrefix);
+		const questionImageFilePaths = await Promise.all(
+			(request.questionImages ?? []).map(async (image, index) => {
+				const extension = (
+					{ "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" } as Record<
+						string,
+						string
+					>
+				)[image.mimeType];
+				if (!extension) throw new Error("查卡图片格式不受支持。");
+				const imageFilePath = join(directory, `query-reference-image-${index}${extension}`);
+				await writeFile(imageFilePath, Buffer.from(image.data, "base64"));
+				return imageFilePath;
+			}),
+		);
 		const args = buildStatelessTaskIndexingAgentLaunchArguments({
 			settings: request.settings,
 			stablePrefix: prompt.stablePrefix,
 			isolatedDirectoryPath: directory,
 			outputSchemaPath: schemaPath,
 			outputSchemaJson: schema,
+			questionImageFilePaths,
 		});
 		if (args.some((arg) => Buffer.byteLength(arg) > 100_000))
 			throw new Error("共享索引执行器单个启动参数超出保守系统限额。");
@@ -332,7 +352,23 @@ export async function executeStatelessTaskIndexingAgent<T>(
 				else resolve(stdout);
 			});
 			child.stdin.on("error", () => {});
-			child.stdin.end(prompt.query);
+			child.stdin.end(
+				request.settings.agentId === "claude" && request.questionImages?.length
+					? `${JSON.stringify({
+							type: "user",
+							message: {
+								role: "user",
+								content: [
+									{ type: "text", text: prompt.query },
+									...request.questionImages.map((image) => ({
+										type: "image",
+										source: { type: "base64", media_type: image.mimeType, data: image.data },
+									})),
+								],
+							},
+						})}\n`
+					: prompt.query,
+			);
 		});
 		const parsed = parseStatelessTaskIndexingAgentEvents(request.settings.agentId, output.split(/\r?\n/u));
 		usage = { ...parsed.usage, resolvedModelId: parsed.usage.resolvedModelId ?? request.settings.modelId };

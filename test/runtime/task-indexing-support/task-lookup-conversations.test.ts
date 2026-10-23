@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -80,6 +80,154 @@ async function waitForTurn(service: ReturnType<typeof createTaskLookupConversati
 	return await service.getConversation(conversationId);
 }
 describe("持久多轮查卡服务", () => {
+	it.each(["completed", "running"] as const)("空闲恢复扫描不重复解析 %s 大图片历史", async (status) => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		const imageId = "large-completed-history-image";
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "large-image-history",
+			questionText: "带大图片的已完成查询",
+			questionImages: [{ id: imageId, data: "YQ==".repeat(524288), mimeType: "image/png", name: "历史参考图" }],
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		await service.close();
+		if (saved.turns[0]) saved.turns[0].status = status;
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		const parseJson = JSON.parse;
+		let parsedHistoryCharacters = 0;
+		vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+			if (text.includes(imageId)) parsedHistoryCharacters += text.length;
+			return parseJson(text, reviver);
+		});
+		const recoveryTimer = vi.spyOn(globalThis, "setInterval");
+		const observer = createTaskLookupConversationService({
+			...dependencies,
+			readExecutionOwnerLiveness: async () => "live",
+		});
+		try {
+			observer.start();
+			const recoveryTick = recoveryTimer.mock.calls.at(-1)?.[0];
+			if (typeof recoveryTick !== "function") throw new Error("缺少恢复定时器。");
+			await recoveryTick();
+			const initiallyParsedHistoryCharacters = parsedHistoryCharacters;
+			expect(initiallyParsedHistoryCharacters).toBeGreaterThan(2_000_000);
+			await recoveryTick();
+			await recoveryTick();
+			expect(parsedHistoryCharacters).toBe(initiallyParsedHistoryCharacters);
+		} finally {
+			await observer.close();
+		}
+	});
+	it.each(["new_conversation", "changed_conversation"] as const)(
+		"后台发现其他实例的 %s，缓存归属仍遵守 live/unknown/dead 三态",
+		async (discoveryMode) => {
+			const { service, dependencies } = await setup();
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "cached-owner",
+				questionText: "归属待检查的查询",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			await service.close();
+			const historyPath = join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`);
+			if (discoveryMode === "new_conversation") await rm(historyPath);
+			let ownerLiveness: "live" | "dead" | "unknown" = "live";
+			const readExecutionOwnerLiveness = vi.fn(async () => ownerLiveness);
+			const recoveryTimer = vi.spyOn(globalThis, "setInterval");
+			const observer = createTaskLookupConversationService({ ...dependencies, readExecutionOwnerLiveness });
+			try {
+				observer.start();
+				const recoveryTick = recoveryTimer.mock.calls.at(-1)?.[0];
+				if (typeof recoveryTick !== "function") throw new Error("缺少恢复定时器。");
+				await recoveryTick();
+				const runningTurn = saved.turns[0];
+				if (!runningTurn) throw new Error("缺少查询轮次。");
+				runningTurn.status = "running";
+				runningTurn.result = null;
+				runningTurn.finishedAt = null;
+				await writeFile(historyPath, JSON.stringify(saved));
+				await recoveryTick();
+				expect(readExecutionOwnerLiveness).toHaveBeenCalledWith(runningTurn.executionOwnerRuntimeProcessInstanceId);
+				expect(JSON.parse(await readFile(historyPath, "utf8")).turns[0].status).toBe("running");
+				readExecutionOwnerLiveness.mockClear();
+				ownerLiveness = "unknown";
+				await recoveryTick();
+				expect(readExecutionOwnerLiveness).toHaveBeenCalledOnce();
+				expect(JSON.parse(await readFile(historyPath, "utf8")).turns[0].status).toBe("running");
+				ownerLiveness = "dead";
+				await recoveryTick();
+				expect(JSON.parse(await readFile(historyPath, "utf8")).turns[0].status).toBe("interrupted");
+			} finally {
+				await observer.close();
+			}
+		},
+	);
+	it("关闭会等待已开始的缓存归属检查，返回后不再执行恢复", async () => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "closing-recovery",
+			questionText: "等待归属检查的查询",
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		await service.close();
+		if (!saved.turns[0]) throw new Error("缺少查询轮次。");
+		saved.turns[0].status = "running";
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		const ownerCheckEntered = createSynchronizationBarrier();
+		const ownerCheckReleased = createSynchronizationBarrier();
+		let pauseOwnerCheck = false;
+		const readExecutionOwnerLiveness = vi.fn(async () => {
+			if (!pauseOwnerCheck) return "live" as const;
+			ownerCheckEntered.release();
+			await ownerCheckReleased.promise;
+			return "dead" as const;
+		});
+		const observer = createTaskLookupConversationService({ ...dependencies, readExecutionOwnerLiveness });
+		const recoveryTimer = vi.spyOn(globalThis, "setInterval");
+		try {
+			observer.start();
+			const recoveryTick = recoveryTimer.mock.calls.at(-1)?.[0];
+			if (typeof recoveryTick !== "function") throw new Error("缺少恢复定时器。");
+			await recoveryTick();
+			pauseOwnerCheck = true;
+			const recovery = recoveryTick();
+			await ownerCheckEntered.promise;
+			let closeReturned = false;
+			const closing = observer.close().then(() => {
+				closeReturned = true;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(closeReturned).toBe(false);
+			ownerCheckReleased.release();
+			await Promise.all([recovery, closing]);
+			readExecutionOwnerLiveness.mockClear();
+			await recoveryTick();
+			expect(readExecutionOwnerLiveness).not.toHaveBeenCalled();
+			expect((await observer.getConversation(conversation.conversationId)).turns[0]?.status).toBe("interrupted");
+		} finally {
+			ownerCheckReleased.release();
+			await observer.close();
+		}
+	});
 	it.each(["waiting_for_conversation_lock", "persisting_running_turn"] as const)(
 		"关闭会等待提交退出 %s 边界，且不会启动模型",
 		async (submissionBoundary) => {
@@ -340,7 +488,10 @@ describe("持久多轮查卡服务", () => {
 			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
 			JSON.stringify(persisted),
 		);
-		const restarted = createTaskLookupConversationService(dependencies);
+		const restarted = createTaskLookupConversationService({
+			...dependencies,
+			readExecutionOwnerLiveness: async () => "dead",
+		});
 		expect((await restarted.getConversation(conversation.conversationId)).turns[0]?.status).toBe("interrupted");
 		await restarted.close();
 		await writeFile(join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`), "broken-json");
@@ -350,5 +501,235 @@ describe("持久多轮查卡服务", () => {
 			corrupted.createConversation({ contextWorkspaceId: "project-a", scope: { projectIds: [], columnIds: [] } }),
 		).resolves.toHaveProperty("conversationId");
 		await corrupted.close();
+	});
+	it("并存实例不能中断活跃查询、取消它或覆盖正常完成的结果", async () => {
+		const { dependencies } = await setup();
+		const executing = createSynchronizationBarrier();
+		const released = createSynchronizationBarrier();
+		const first = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				executing.release();
+				await released.promise;
+				return dependencies.executeAgent(request);
+			},
+		});
+		const conversation = await first.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await first.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "first-instance",
+			questionText: "正常慢查询",
+		});
+		await executing.promise;
+		const second = createTaskLookupConversationService({
+			...dependencies,
+			readExecutionOwnerLiveness: async () => "live",
+		});
+		try {
+			expect((await second.getConversation(conversation.conversationId)).turns[0]?.status).toBe("running");
+			await expect(second.cancelTurn(conversation.conversationId)).rejects.toThrow("不持有");
+			released.release();
+			await first.waitForIdle();
+			expect((await second.getConversation(conversation.conversationId)).turns[0]?.status).toBe("completed");
+		} finally {
+			released.release();
+			await first.close();
+			await second.close();
+		}
+	});
+	it("心跳读取异常保留执行状态，后续确认归属退出才恢复为中断", async () => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "owner",
+			questionText: "查卡",
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		await service.close();
+		if (!saved.turns[0]) throw new Error("缺少轮次");
+		saved.turns[0].status = "running";
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		let ownerHasExited = false;
+		const observer = createTaskLookupConversationService({
+			...dependencies,
+			readExecutionOwnerLiveness: async () => {
+				if (!ownerHasExited) throw new Error("心跳暂不可读");
+				return "dead";
+			},
+		});
+		try {
+			const unknown = await observer.getConversation(conversation.conversationId);
+			expect(unknown.turns[0]).toMatchObject({
+				status: "running",
+				executionRecoveryMessage: expect.stringContaining("无法确认"),
+			});
+			expect(unknown.revision).toBe(saved.revision);
+			ownerHasExited = true;
+			expect((await observer.getConversation(conversation.conversationId)).turns[0]?.status).toBe("interrupted");
+		} finally {
+			await observer.close();
+		}
+	});
+	it("无归属的旧记录只有显式恢复才结束，重新提问保存新轮而不抹去旧轮", async () => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "legacy",
+			questionText: "旧查询",
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		if (!saved.turns[0]) throw new Error("缺少轮次");
+		saved.turns[0].status = "running";
+		delete saved.turns[0].executionOwnerRuntimeProcessInstanceId;
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		expect((await service.getConversation(conversation.conversationId)).turns[0]?.status).toBe("running");
+		await expect(
+			service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "blocked",
+				questionText: "旧查询",
+			}),
+		).rejects.toThrow("已有正在执行");
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "explicit",
+			questionText: "旧查询",
+			explicitlyRecoveredUnownedTurnId: saved.turns[0].turnId,
+		});
+		const recovered = await waitForTurn(service, conversation.conversationId);
+		expect(recovered.turns.map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+		await service.close();
+	});
+	it("重复提问按图片内容去重，两阶段保留当前与历史问题的图片归属", async () => {
+		const { dependencies } = await setup();
+		const executeAgent = vi.fn(dependencies.executeAgent);
+		const service = createTaskLookupConversationService({ ...dependencies, executeAgent });
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		const originalImage = { id: "reference-image", data: "aW1hZ2U=", mimeType: "image/png", name: "原图" };
+		const repeatedImage = { ...originalImage, id: "retry-reference-image", name: "重问时重新选的同图" };
+		const differentImage = { ...originalImage, data: "b3RoZXI=", name: "沿用旧 ID 的另一张图" };
+		try {
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "original-image",
+				questionText: "查找原图中的任务",
+				questionImages: [originalImage],
+			});
+			await service.waitForIdle();
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "repeat-with-comparison-image",
+				questionText: "再找一次，并与另一张图比较",
+				questionImages: [repeatedImage, differentImage],
+			});
+			const repeated = await waitForTurn(service, conversation.conversationId);
+			expect(executeAgent).toHaveBeenCalledTimes(4);
+			for (const [request] of executeAgent.mock.calls.slice(2)) {
+				expect(request).toHaveProperty("questionImages", [originalImage, differentImage]);
+				expect(JSON.parse(request.queryText)).toMatchObject({
+					turnId: repeated.turns[1]?.turnId,
+					questionImageReferences: [
+						{ imageInputNumber: 1, imageAttachmentId: repeatedImage.id, imageDisplayName: repeatedImage.name },
+						{ imageInputNumber: 2, imageAttachmentId: differentImage.id, imageDisplayName: differentImage.name },
+					],
+					history: [
+						{
+							turnId: repeated.turns[0]?.turnId,
+							questionText: "查找原图中的任务",
+							questionImageReferences: [{ imageInputNumber: 1, imageAttachmentId: originalImage.id }],
+						},
+					],
+				});
+			}
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "text-only-followup",
+				questionText: "另查修复输入框的任务",
+			});
+			const followedUp = await waitForTurn(service, conversation.conversationId);
+			expect(executeAgent).toHaveBeenCalledTimes(6);
+			for (const [request] of executeAgent.mock.calls.slice(4)) {
+				expect(request).toHaveProperty("questionImages", [originalImage, differentImage]);
+				const query = JSON.parse(request.queryText);
+				expect(query).toMatchObject({
+					turnId: followedUp.turns[2]?.turnId,
+					questionText: "另查修复输入框的任务",
+					questionImageReferences: [],
+					history: [
+						{ turnId: followedUp.turns[0]?.turnId, questionImageReferences: [{ imageInputNumber: 1 }] },
+						{
+							turnId: followedUp.turns[1]?.turnId,
+							questionImageReferences: [{ imageInputNumber: 1 }, { imageInputNumber: 2 }],
+						},
+					],
+				});
+			}
+			expect(followedUp.turns.map((turn) => turn.questionImages)).toEqual([
+				[originalImage],
+				[repeatedImage, differentImage],
+				[],
+			]);
+			const archivedInput = JSON.parse(
+				await readFile(
+					join(
+						dependencies.storageDirectoryPath,
+						conversation.conversationId,
+						`${followedUp.turns[2]?.turnId}-answer-input.json`,
+					),
+					"utf8",
+				),
+			);
+			expect(archivedInput.questionImages).toEqual([originalImage, differentImage]);
+			expect(archivedInput.queryText).toBe(executeAgent.mock.calls[5]?.[0].queryText);
+		} finally {
+			await service.close();
+		}
+	});
+	it("两阶段均接收图片，图片变化不能复用同一 requestId", async () => {
+		const { dependencies } = await setup();
+		const executeAgent = vi.fn(dependencies.executeAgent);
+		const service = createTaskLookupConversationService({ ...dependencies, executeAgent });
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		const questionImages = [{ id: "reference-image", data: "aW1hZ2U=", mimeType: "image/png", name: "参考图" }];
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "image",
+			questionText: "查找图片中的任务",
+			questionImages,
+		});
+		await service.waitForIdle();
+		expect(executeAgent).toHaveBeenCalledTimes(2);
+		for (const [request] of executeAgent.mock.calls) expect(request).toHaveProperty("questionImages", questionImages);
+		await expect(
+			service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "image",
+				questionText: "查找图片中的任务",
+			}),
+		).rejects.toThrow("不可用于不同查询");
+		await service.close();
 	});
 });

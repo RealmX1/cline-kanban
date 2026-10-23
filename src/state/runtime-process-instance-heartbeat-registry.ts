@@ -78,6 +78,24 @@ export function getRuntimeProcessInstanceHeartbeatsDirectoryPath(): string {
 	return join(getRuntimeHomePath(), RUNTIME_PROCESS_INSTANCE_HEARTBEATS_DIR);
 }
 
+/** 查询结果不可被误清除；心跳不可读时必须保留未知态，不能沿用排队投递的判死兜底。 */
+export async function readRuntimeProcessInstanceLiveness(
+	runtimeProcessInstanceId: string,
+): Promise<"live" | "dead" | "unknown"> {
+	if (!z.string().uuid().safeParse(runtimeProcessInstanceId).success) return "unknown";
+	try {
+		const heartbeat = runtimeProcessInstanceHeartbeatSchema.parse(
+			JSON.parse(await readFile(getRuntimeProcessInstanceHeartbeatPath(runtimeProcessInstanceId), "utf8")),
+		);
+		if (heartbeat.runtimeProcessInstanceId !== runtimeProcessInstanceId) return "unknown";
+		return Date.now() - heartbeat.lastHeartbeatAtEpochMs < RUNTIME_PROCESS_INSTANCE_CONSIDERED_DEAD_AFTER_MS
+			? "live"
+			: "dead";
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "dead" : "unknown";
+	}
+}
+
 function getRuntimeProcessInstanceHeartbeatPath(runtimeProcessInstanceId: string): string {
 	return join(getRuntimeProcessInstanceHeartbeatsDirectoryPath(), `${runtimeProcessInstanceId}.json`);
 }

@@ -1,5 +1,5 @@
-import { ImagePlus, Paperclip } from "lucide-react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactElement } from "react";
+import { ChevronDown, ChevronUp, ImagePlus, Paperclip } from "lucide-react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactElement, Ref } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -19,6 +19,7 @@ import { TaskPromptPseudoHtmlBlockInsertControl } from "@/components/task-prompt
 import { buildTaskPromptWithPseudoHtmlBlockInserted } from "@/components/task-prompt-pseudo-html-block-insertion";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { usePersistentAgentPromptImageAttachments } from "@/hooks/use-persistent-agent-prompt-image-attachments";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { TaskImage } from "@/types";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
@@ -46,15 +47,22 @@ interface TaskPromptComposerProps {
 	workspaceId?: string | null;
 	showAttachImageButton?: boolean;
 	showPseudoHtmlBlockInsertButton?: boolean;
+	"aria-label"?: string;
+	textareaRef?: Ref<HTMLTextAreaElement>;
+	textareaClassName?: string;
+	minimumTextareaHeight?: number;
+	manageTextareaHeight?: boolean;
+	showExpandedEditingControl?: boolean;
+	onImagePreparationPendingChange?: (pending: boolean) => void;
 }
 
 export function TaskPromptComposer({
 	id,
-	value,
-	onValueChange,
+	value: storedPromptValue,
+	onValueChange: onStoredPromptValueChange,
 	onValueBlur,
-	images = [],
-	onImagesChange,
+	images: providedImages = [],
+	onImagesChange: onProvidedImagesChange,
 	onSubmit,
 	onSubmitAndStart,
 	onEscape,
@@ -65,7 +73,34 @@ export function TaskPromptComposer({
 	workspaceId = null,
 	showAttachImageButton = true,
 	showPseudoHtmlBlockInsertButton = true,
+	"aria-label": ariaLabel,
+	textareaRef: providedTextareaRef,
+	textareaClassName,
+	minimumTextareaHeight = 80,
+	manageTextareaHeight = true,
+	showExpandedEditingControl = true,
+	onImagePreparationPendingChange,
 }: TaskPromptComposerProps): ReactElement {
+	const persistentAttachments = usePersistentAgentPromptImageAttachments({
+		value: storedPromptValue,
+		onValueChange: onStoredPromptValueChange,
+		enabled: !onProvidedImagesChange && showAttachImageButton,
+	});
+	const value = persistentAttachments.visibleText;
+	const onValueChange = persistentAttachments.onVisibleTextChange;
+	const images = onProvidedImagesChange ? providedImages : persistentAttachments.images;
+	const latestImagesRef = useRef(images);
+	latestImagesRef.current = images;
+	const onImagesChange = onProvidedImagesChange ?? persistentAttachments.onImagesChange;
+	const [isExpanded, setIsExpanded] = useState(false);
+	const [hasOverflow, setHasOverflow] = useState(false);
+	const [expandedMaximumHeight, setExpandedMaximumHeight] = useState(400);
+	useEffect(() => {
+		onImagePreparationPendingChange?.(persistentAttachments.isPreparingImages);
+	}, [onImagePreparationPendingChange, persistentAttachments.isPreparingImages]);
+	useEffect(() => {
+		if (!storedPromptValue && !images.length) setIsExpanded(false);
+	}, [storedPromptValue, images.length]);
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const mentionSearchRequestIdRef = useRef(0);
@@ -87,12 +122,13 @@ export function TaskPromptComposer({
 
 	const autoResizeTextarea = useCallback(() => {
 		const textarea = textareaRef.current;
-		if (!textarea) {
+		if (!textarea || !manageTextareaHeight) {
 			return;
 		}
 		textarea.style.height = "auto";
-		textarea.style.height = `${Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT)}px`;
-	}, []);
+		setHasOverflow(textarea.scrollHeight > TEXTAREA_MAX_HEIGHT);
+		textarea.style.height = `${Math.min(textarea.scrollHeight, isExpanded ? expandedMaximumHeight : TEXTAREA_MAX_HEIGHT)}px`;
+	}, [expandedMaximumHeight, isExpanded, manageTextareaHeight]);
 
 	useEffect(() => {
 		autoResizeTextarea();
@@ -211,6 +247,7 @@ export function TaskPromptComposer({
 			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 				event.preventDefault();
+				if (persistentAttachments.isPreparingImages) return;
 				if (event.shiftKey) {
 					if (onSubmitAndStart) {
 						onSubmitAndStart();
@@ -266,6 +303,7 @@ export function TaskPromptComposer({
 			onSubmitAndStart,
 			selectedSuggestionIndex,
 			suggestions,
+			persistentAttachments.isPreparingImages,
 		],
 	);
 
@@ -274,9 +312,10 @@ export function TaskPromptComposer({
 			if (!onImagesChange || newImages.length === 0) {
 				return;
 			}
-			onImagesChange([...images, ...newImages]);
+			latestImagesRef.current = [...latestImagesRef.current, ...newImages];
+			onImagesChange(latestImagesRef.current);
 		},
-		[images, onImagesChange],
+		[onImagesChange],
 	);
 
 	const handlePaste = useCallback(
@@ -342,9 +381,10 @@ export function TaskPromptComposer({
 
 	const handleRemoveImage = useCallback(
 		(imageId: string) => {
-			onImagesChange?.(images.filter((image) => image.id !== imageId));
+			latestImagesRef.current = latestImagesRef.current.filter((image) => image.id !== imageId);
+			onImagesChange?.(latestImagesRef.current);
 		},
-		[images, onImagesChange],
+		[onImagesChange],
 	);
 
 	const handleAttachClick = useCallback(() => {
@@ -410,7 +450,8 @@ export function TaskPromptComposer({
 			if (!onImagesChange || !event.currentTarget.files) {
 				return;
 			}
-			const files = Array.from(event.currentTarget.files);
+			const fileInput = event.currentTarget;
+			const files = Array.from(fileInput.files ?? []);
 			void (async () => {
 				const newImages: TaskImage[] = [];
 				for (const file of files) {
@@ -420,7 +461,7 @@ export function TaskPromptComposer({
 					}
 				}
 				appendImages(newImages);
-				event.currentTarget.value = "";
+				fileInput.value = "";
 			})();
 		},
 		[appendImages, onImagesChange],
@@ -432,7 +473,10 @@ export function TaskPromptComposer({
 	const isComposerToolbarVisible = isAttachImageButtonVisible || showPseudoHtmlBlockInsertButton;
 
 	return (
-		<div>
+		<div
+			data-agent-prompt-composer=""
+			data-image-preparation-pending={persistentAttachments.isPreparingImages || undefined}
+		>
 			<div className="relative" onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}>
 				<InlineCompletionPicker
 					open={showSuggestions}
@@ -446,7 +490,13 @@ export function TaskPromptComposer({
 				>
 					<textarea
 						id={id}
-						ref={textareaRef}
+						aria-label={ariaLabel}
+						ref={(element) => {
+							textareaRef.current = element;
+							if (typeof providedTextareaRef === "function") providedTextareaRef(element);
+							else if (providedTextareaRef)
+								(providedTextareaRef as { current: HTMLTextAreaElement | null }).current = element;
+						}}
 						value={value}
 						onChange={(event) => {
 							onValueChange(event.target.value);
@@ -462,12 +512,17 @@ export function TaskPromptComposer({
 						placeholder={placeholder ?? "Describe the task"}
 						disabled={disabled}
 						className={cn(
-							"w-full rounded-md border bg-surface-3 p-3 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none",
+							"w-full rounded-md border bg-surface-3 p-3 text-base text-text-primary placeholder:text-text-primary/70 focus:border-border-focus focus:outline-none md:text-[13px]",
 							isDragOver ? "border-accent border-dashed" : "border-border-bright",
+							textareaClassName,
 						)}
 						style={{
-							minHeight: 80,
-							maxHeight: TEXTAREA_MAX_HEIGHT,
+							minHeight: minimumTextareaHeight,
+							maxHeight: manageTextareaHeight
+								? isExpanded
+									? expandedMaximumHeight
+									: TEXTAREA_MAX_HEIGHT
+								: undefined,
 							resize: "none",
 							overflowY: "auto",
 						}}
@@ -518,7 +573,33 @@ export function TaskPromptComposer({
 							Attach image
 						</Button>
 					) : null}
+					{showExpandedEditingControl && (hasOverflow || isExpanded) ? (
+						<Button
+							variant="ghost"
+							size="sm"
+							icon={isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+							aria-expanded={isExpanded}
+							onClick={() => {
+								const panelHeight =
+									textareaRef.current?.closest("section, [role=dialog]")?.clientHeight ?? window.innerHeight;
+								setExpandedMaximumHeight(Math.max(TEXTAREA_MAX_HEIGHT, panelHeight / 2));
+								setIsExpanded((expanded) => !expanded);
+							}}
+						>
+							{isExpanded ? "收起编辑区" : "扩展编辑区"}
+						</Button>
+					) : null}
 				</div>
+			) : null}
+			{persistentAttachments.isPreparingImages ? (
+				<p role="status" className="mt-1 text-xs text-text-secondary">
+					图片正在保存，完成后再提交。
+				</p>
+			) : null}
+			{persistentAttachments.errorMessage ? (
+				<p role="alert" className="mt-1 text-xs text-status-red">
+					{persistentAttachments.errorMessage}
+				</p>
 			) : null}
 		</div>
 	);

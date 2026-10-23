@@ -1,5 +1,6 @@
 import { GitBranch } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
@@ -24,8 +25,11 @@ export function IndependentTaskCreationAction({
 	sourceSessionId: string;
 }) {
 	const creation = useIndependentTaskCreation(workspaceId, sourceTaskId, sourceSessionId);
+	const promptInputIdPrefix = useId();
 	const { draft, busy } = creation;
 	const [allowIncompleteContext, setAllowIncompleteContext] = useState(false);
+	const [isPreparingDescriptionImages, setIsPreparingDescriptionImages] = useState(false);
+	const [isPreparingInitialPromptImages, setIsPreparingInitialPromptImages] = useState(false);
 	const [providers, setProviders] = useState<NotificationProviderProfile[]>([]);
 	const [derivedTasks, setDerivedTasks] = useState<{ taskId: string; title: string }[]>([]);
 	useEffect(() => {
@@ -107,13 +111,15 @@ export function IndependentTaskCreationAction({
 					) : (
 						draft && (
 							<fieldset disabled={Boolean(unavailable)} className="space-y-4 disabled:opacity-60">
-								<label className="block space-y-1">
+								<label className="block space-y-1" htmlFor={`${promptInputIdPrefix}-description`}>
 									<span>本次分出说明（可选）</span>
-									<textarea
+									<TaskPromptComposer
+										id={`${promptInputIdPrefix}-description`}
 										aria-label="本次分出说明"
-										className={`${inputClassName} min-h-20`}
+										workspaceId={workspaceId}
 										value={draft.userTaskDescription}
-										onChange={(event) => creation.edit({ userTaskDescription: event.target.value })}
+										onValueChange={(value) => creation.edit({ userTaskDescription: value })}
+										onImagePreparationPendingChange={setIsPreparingDescriptionImages}
 										placeholder="这次分出要完成什么；留空时自动建议"
 									/>
 								</label>
@@ -222,6 +228,8 @@ export function IndependentTaskCreationAction({
 									<Button
 										variant="default"
 										disabled={
+											isPreparingDescriptionImages ||
+											isPreparingInitialPromptImages ||
 											busy ||
 											draft.contextCapturedAt === null ||
 											(draft.contextWarnings.length > 0 && !allowIncompleteContext)
@@ -273,15 +281,18 @@ export function IndependentTaskCreationAction({
 								{draft.sourceAgentGenerationUnavailableReason && (
 									<p className="text-xs">{draft.sourceAgentGenerationUnavailableReason}</p>
 								)}
-								<label className="block space-y-1">
+								<label className="block space-y-1" htmlFor={`${promptInputIdPrefix}-initial-prompt`}>
 									<span>Initial Prompt（必填，可手动编辑）</span>
-									<textarea
+									<TaskPromptComposer
+										id={`${promptInputIdPrefix}-initial-prompt`}
 										aria-label="Initial Prompt"
-										className={`${inputClassName} min-h-40`}
+										workspaceId={workspaceId}
+										minimumTextareaHeight={160}
 										value={draft.initialPrompt}
-										onChange={(event) =>
+										onImagePreparationPendingChange={setIsPreparingInitialPromptImages}
+										onValueChange={(value) =>
 											creation.edit({
-												initialPrompt: event.target.value,
+												initialPrompt: value,
 												initialPromptWasEditedByUser: true,
 											})
 										}
@@ -301,6 +312,8 @@ export function IndependentTaskCreationAction({
 					{!draft?.createdTaskId && (
 						<Button
 							disabled={
+								isPreparingDescriptionImages ||
+								isPreparingInitialPromptImages ||
 								busy ||
 								!draft ||
 								draft.contextCapturedAt === null ||

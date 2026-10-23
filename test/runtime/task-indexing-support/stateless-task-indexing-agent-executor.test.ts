@@ -33,6 +33,7 @@ function mockHeadlessAgentProcessWithControlledStdout(stdoutChunks: readonly Buf
 		stdout.end();
 		queueMicrotask(() => child.emit("close", exitCode, null));
 	});
+	return { child, stdin };
 }
 
 const expectedStructuredChineseResult = { reason: "中文理由", evidence: ["中文证据"] };
@@ -61,6 +62,40 @@ const controlledExecutorRequest = {
 afterEach(() => vi.restoreAllMocks());
 
 describe("共享索引执行器的 stdout 字节流边界", () => {
+	it("Claude 原生 content block 与 Codex 独立图片参数均保留输入顺序且不进入共享前缀", async () => {
+		const { stdin } = mockHeadlessAgentProcessWithControlledStdout([
+			Buffer.from(
+				`${JSON.stringify({ type: "result", subtype: "success", structured_output: expectedStructuredChineseResult })}\n`,
+			),
+		]);
+		let receivedInput = "";
+		stdin.on("data", (chunk) => {
+			receivedInput += chunk.toString();
+		});
+		const questionImages = [
+			{ id: "query-image", mimeType: "image/png", data: "aW1hZ2U=", name: "参考图.png" },
+			{ id: "comparison-image", mimeType: "image/jpeg", data: "b3RoZXI=", name: "比较图.jpg" },
+		];
+		await executeStatelessTaskIndexingAgent({
+			...controlledExecutorRequest,
+			settings: { agentId: "claude", modelId: null },
+			questionImages,
+		});
+		expect(JSON.parse(receivedInput).message.content).toEqual([
+			{ type: "text", text: expect.stringContaining("验证中文输出") },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: questionImages[0]?.data } },
+			{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: questionImages[1]?.data } },
+		]);
+		expect(vi.mocked(childProcess.spawn).mock.calls[0]?.[1]).toContain("--input-format");
+		mockHeadlessAgentProcessWithControlledStdout([Buffer.from(successfulCodexStdout)]);
+		await executeStatelessTaskIndexingAgent({ ...controlledExecutorRequest, questionImages });
+		const args = vi.mocked(childProcess.spawn).mock.calls.at(-1)?.[1] as string[];
+		expect(args.flatMap((argument, index) => (argument === "--image" ? [args[index + 1]] : []))).toEqual([
+			expect.stringMatching(/query-reference-image-0\.png$/u),
+			expect.stringMatching(/query-reference-image-1\.jpg$/u),
+		]);
+		expect(args).not.toContain(questionImages[0]?.data);
+	});
 	it("中文的每个 UTF-8 字节分别到达时，理由和证据保持原文", async () => {
 		mockHeadlessAgentProcessWithControlledStdout(
 			Array.from(Buffer.from(successfulCodexStdout), (byte) => Buffer.from([byte])),

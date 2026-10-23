@@ -39,6 +39,8 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	let conversation: Record<string, unknown> | null = null;
 	const submissions: Record<string, unknown>[] = [];
 	let answerMode: "candidates" | "empty" | "failure" = "candidates";
+	const savedImages: Record<string, unknown>[] = [];
+	let rejectNextSubmission = true;
 	await page.route("**/api/trpc/**", async (route) => {
 		const url = new URL(route.request().url());
 		const procedures = url.pathname.split("/api/trpc/")[1]?.split(",") ?? [];
@@ -46,6 +48,19 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 		const responses = procedures.map((procedure, index) => {
 			const input = inputs[String(index)] ?? {};
 			let response: unknown = {};
+			if (procedure === "support.saveAgentPromptImageAttachments") {
+				response = input.images.map((image: Record<string, unknown>) => {
+					const id = "a".repeat(64);
+					savedImages.push({ ...image, id });
+					return {
+						imageAttachmentId: id,
+						imageFilePath: `/isolated-persistent-images/${id}.png`,
+						imageMimeType: image.mimeType,
+						imageDisplayName: image.name,
+					};
+				});
+			}
+			if (procedure === "support.readAgentPromptImageAttachments") response = savedImages;
 			if (procedure === "support.getExecutorSettings") response = { agentId: "codex", modelId: null };
 			if (procedure === "projects.getAllProjectsTaskSearchIndex") response = { projects: [] };
 			if (procedure === "support.listTaskLookupConversations") response = conversation ? [conversation] : [];
@@ -65,6 +80,16 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 				response = conversation;
 			}
 			if (procedure === "support.submitTaskLookupTurn") {
+				if (rejectNextSubmission) {
+					rejectNextSubmission = false;
+					return {
+						error: {
+							message: "提交失败，测试确认保留草稿和图片",
+							code: -32603,
+							data: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500 },
+						},
+					};
+				}
 				submissions.push(input);
 				const turns = (conversation?.turns as unknown[]) ?? [];
 				conversation = {
@@ -79,6 +104,9 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 							turnId: `turn-${submissions.length}`,
 							requestId: input.requestId,
 							questionText: input.questionText,
+							questionImages: String(input.questionText).includes("<attached-reference-images>")
+								? savedImages
+								: [],
 							scope: input.scope,
 							status: answerMode === "failure" ? "failed" : "completed",
 							phase: "finished",
@@ -130,11 +158,48 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	};
 	await openHarness();
 	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
-	await page.getByRole("textbox", { name: "查卡问题" }).fill("直接发起新的查卡查询");
+	const questionInput = page.getByRole("textbox", { name: "查卡问题" });
+	await questionInput.fill("需要引用的执行轨迹");
+	await questionInput.press("ControlOrMeta+A");
+	await page.getByRole("button", { name: "Insert block", exact: true }).click();
+	await page.getByRole("button", { name: "<trajectory>", exact: true }).click();
+	await expect(questionInput).toHaveValue("<trajectory>\n需要引用的执行轨迹\n</trajectory>");
+	await expect(questionInput).toBeFocused();
+	const longQuestion = `直接发起新的查卡查询\n${"这是需要完整保留的查询条件。\n".repeat(12)}`.trim();
+	await questionInput.fill(longQuestion);
+	await page.getByRole("button", { name: "扩展编辑区", exact: true }).click();
+	await expect(page.getByRole("button", { name: "收起编辑区", exact: true })).toHaveAttribute("aria-expanded", "true");
+	await page.locator('[data-agent-prompt-composer] input[type="file"]').setInputFiles({
+		name: "参考图.png",
+		mimeType: "image/png",
+		buffer: Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n2QAAAAASUVORK5CYII=",
+			"base64",
+		),
+	});
+	await expect(page.getByRole("button", { name: "Delete 参考图.png", exact: true })).toBeVisible();
+	await page.getByRole("button", { name: "查询任务", exact: true }).click();
+	await expect(page.getByRole("alert")).toContainText("提交失败，测试确认保留草稿和图片");
+	await expect(questionInput).toHaveValue(longQuestion);
+	await openHarness();
+	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
+	await expect(page.getByRole("textbox", { name: "查卡问题" })).toHaveValue(longQuestion);
+	await expect(page.getByRole("button", { name: "Delete 参考图.png", exact: true })).toBeVisible();
 	await page.getByRole("button", { name: "查询任务", exact: true }).click();
 	await expect.poll(() => submissions.length).toBe(1);
-	await expect(page.getByRole("log").getByText("直接发起新的查卡查询", { exact: true })).toBeVisible();
+	expect(String(submissions[0]?.questionText)).toContain("<attached-reference-images>");
+	const firstRound = page.getByRole("article", { name: "第 1 轮查询", exact: true });
+	await expect(firstRound.getByRole("button", { name: "展开完整问题", exact: true })).toBeVisible();
+	await expect(firstRound.locator("[data-task-lookup-question] p")).toHaveClass(/line-clamp-4/u);
+	await firstRound.getByRole("button", { name: "展开完整问题", exact: true }).click();
+	await expect(firstRound.getByRole("button", { name: "收起问题", exact: true })).toHaveAttribute(
+		"aria-expanded",
+		"true",
+	);
+	await expect(firstRound.locator("[data-task-lookup-question] p")).not.toHaveClass(/line-clamp-4/u);
+	await firstRound.getByRole("button", { name: "收起问题", exact: true }).click();
 	await expect(page.getByRole("textbox", { name: "查卡问题" })).toHaveValue("");
+	await expect(page.getByRole("button", { name: "Insert block", exact: true })).toBeVisible();
 	await expect(page.getByRole("alert")).toHaveCount(0);
 	await page.getByRole("button", { name: "打开 Search", exact: true }).click();
 	await page.getByRole("textbox", { name: "Search tasks", exact: true }).fill("查找多轮留档任务");
@@ -155,9 +220,11 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	await expect(page.getByText("已打开任务：isolated-project/abc12")).toBeVisible();
 	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
 	await expect(page.getByText("只看计划中的任务", { exact: true })).toBeVisible();
+	await page.getByRole("textbox", { name: "查卡问题" }).fill("跨刷新保留的未提交草稿");
 	await openHarness();
 	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
 	await expect(page.getByText("只看计划中的任务", { exact: true })).toBeVisible();
+	await expect(page.getByRole("textbox", { name: "查卡问题" })).toHaveValue("跨刷新保留的未提交草稿");
 	await page.setViewportSize({ width: 900, height: 1200 });
 	await expect(page.locator("[data-task-lookup-workbench] [data-focus-view-panel-arrangement]")).toHaveAttribute(
 		"data-focus-view-panel-arrangement",
