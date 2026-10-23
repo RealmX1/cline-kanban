@@ -9,6 +9,10 @@ import type {
 import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import { parseTranscriptJsonRecord, readBoundedJsonLines } from "./bounded-agent-transcript-reader";
 import {
+	type KimiNativeConversationActivityReadCursor,
+	readKimiNativeConversationActivity,
+} from "./kimi-native-conversation-activity-reader";
+import {
 	type NativeAgentConversationTranscriptActivityObservation,
 	parseNativeAgentConversationTranscriptActivity,
 } from "./native-agent-conversation-transcript-activity";
@@ -20,6 +24,7 @@ export const MAX_RECENT_CODEX_NATIVE_ACTIVITY_TURNS = 32;
 const MAX_REMEMBERED_NATIVE_ACTIVITY_EVENT_IDS = 512;
 
 export type NativeAgentConversationActivityReadCursor =
+	| KimiNativeConversationActivityReadCursor
 	| {
 			transport: "transcript";
 			fileIdentity: string;
@@ -294,5 +299,6 @@ export async function readNativeAgentConversationActivity(
 ): Promise<NativeAgentConversationActivityReadResult | null> {
 	if (input.signal?.aborted) return null;
 	if (input.summary.agentId === "codex") return readCurrentCodexNativeActivity(input);
+	if (input.summary.agentId === "kimi") return readKimiNativeConversationActivity(input);
 	return readExactNativeTranscriptActivity(input);
 }
