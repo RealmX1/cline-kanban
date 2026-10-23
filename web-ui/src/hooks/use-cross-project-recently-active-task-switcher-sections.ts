@@ -4,6 +4,7 @@ import {
 	CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
 	CROSS_PROJECT_TASK_SWITCHER_REMAINING_SECTION_ORDERING_MODES,
 	type CrossProjectTaskSwitcherEntryInProject,
+	type CrossProjectTaskSwitcherRecentTaskStageFilter,
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 	type CrossProjectTaskSwitcherSections,
 	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
@@ -24,7 +25,7 @@ import { useBooleanLocalStorageValue, useInterval, useRawLocalStorageValue } fro
 
 // 区归属随时间漂移（Running 的 5 分钟窗、缓存倒计时到期），广播不会为此专门推送，故本地 tick 重算。
 // 30 秒与卡片头部的 tick 同口径；倒计时显示到分钟，30 秒足够。
-// 「显示更早」开启期间同一 tick 也重新拉取快照：广播取景范围外的旧任务状态变化（移入 Done / 删除）只能靠它收敛。
+// 「显示更早」开启期间同一 tick 也重新拉取快照：广播取景范围外的旧任务状态变化（阶段变化 / 删除）只能靠它收敛。
 const CROSS_PROJECT_TASK_SWITCHER_SECTION_REASSIGNMENT_TICK_MS = 30_000;
 
 export type CrossProjectTaskSwitcherExtendedActivityHorizonLoadState =
@@ -41,8 +42,15 @@ export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
 	setRemainingSectionOrderingMode: (mode: CrossProjectTaskSwitcherRemainingSectionOrderingMode) => void;
 	isRunningSectionExpanded: boolean;
 	setIsRunningSectionExpanded: (expanded: boolean) => void;
-	isBacklogSectionExpanded: boolean;
-	setIsBacklogSectionExpanded: (expanded: boolean) => void;
+	isRecentSectionExpanded: boolean;
+	setIsRecentSectionExpanded: (expanded: boolean) => void;
+	isPromptCacheWarmSectionExpanded: boolean;
+	setIsPromptCacheWarmSectionExpanded: (expanded: boolean) => void;
+	selectedRecentTaskStageFilters: readonly CrossProjectTaskSwitcherRecentTaskStageFilter[];
+	setSelectedRecentTaskStageFilters: (filters: readonly CrossProjectTaskSwitcherRecentTaskStageFilter[]) => void;
+	selectedRecentProjectWorkspaceIds: readonly string[];
+	setSelectedRecentProjectWorkspaceIds: (workspaceIds: readonly string[]) => void;
+	recentProjectFilterOptions: readonly { workspaceId: string; projectName: string; projectPath: string }[];
 	extendedActivityHorizonLoadState: CrossProjectTaskSwitcherExtendedActivityHorizonLoadState;
 	requestEntriesWithinExtendedActivityHorizon: () => void;
 }
@@ -69,7 +77,7 @@ export function collectUnreadHandoffEntryKeysFromNotificationLog(
 }
 
 // 广播条目（新鲜）优先；「显示更早」拉回的快照只补**广播取景范围之外**的旧任务。快照是拉取那一刻的状态，
-// 它里面落在广播取景范围内、却不在广播里的条目说明已失效（取消置顶 / 移入 Done / 已删除），不得按旧状态补回。
+// 它里面落在广播取景范围内、却不在广播里的条目说明已失效（取消置顶 / 已删除），不得按旧状态补回。
 // 取景判据与服务端投影共用 core 的单一判据；broadcastActivityScopeEvaluatedAtMs 应不早于广播的计算时刻，
 // 否则刚滑出 7 天窗、已不在广播里的任务会被误判为「范围内失效」而暂时消失。
 // 不可用的项目（路径没了 / 不是 git 仓库）不进面板：点进去也打不开。
@@ -115,7 +123,6 @@ export function collectCrossProjectTaskSwitcherEntriesInProjects(
 
 export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	isTaskSwitcherSectionModelActive = true,
-	allProjectsTaskSwitcherView = "task_focus",
 	projects,
 	notificationLogByWorkspaceId,
 	currentProjectId,
@@ -127,19 +134,24 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	currentProjectId: string | null;
 }): CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
 	const [nowMs, setNowMs] = useState(() => Date.now());
-	// 只保留本次视图内的展开态。模型常驻 App，过渡壳重挂载或切焦点不会重置；真正换视图立即折叠。
-	const [backlogSectionExpansion, setBacklogSectionExpansion] = useState({
-		view: allProjectsTaskSwitcherView,
-		isExpanded: false,
-	});
-	if (backlogSectionExpansion.view !== allProjectsTaskSwitcherView) {
-		setBacklogSectionExpansion({ view: allProjectsTaskSwitcherView, isExpanded: false });
-	}
-	const isBacklogSectionExpanded =
-		backlogSectionExpansion.view === allProjectsTaskSwitcherView && backlogSectionExpansion.isExpanded;
-	const setIsBacklogSectionExpanded = useCallback(
-		(isExpanded: boolean) => setBacklogSectionExpansion({ view: allProjectsTaskSwitcherView, isExpanded }),
-		[allProjectsTaskSwitcherView],
+	// 模型常驻 App，跨视图、任务切换与过渡壳重挂载保留；页面刷新恢复展开与 In progress / Review。
+	const [isRecentSectionExpanded, setIsRecentSectionExpanded] = useState(true);
+	const [isPromptCacheWarmSectionExpanded, setIsPromptCacheWarmSectionExpanded] = useState(true);
+	const [selectedRecentTaskStageFilters, setSelectedRecentTaskStageFilters] = useState<
+		readonly CrossProjectTaskSwitcherRecentTaskStageFilter[]
+	>(["in_progress_and_review"]);
+	const [selectedRecentProjectWorkspaceIds, setSelectedRecentProjectWorkspaceIds] = useState<readonly string[]>([]);
+	const recentProjectFilterOptions = useMemo(
+		() =>
+			projects
+				.filter((project) => project.availability.status !== "unavailable")
+				.map((project) => ({ workspaceId: project.id, projectName: project.name, projectPath: project.path }))
+				.sort(
+					(left, right) =>
+						left.projectName.localeCompare(right.projectName) ||
+						left.workspaceId.localeCompare(right.workspaceId),
+				),
+		[projects],
 	);
 
 	const [remainingSectionOrderingMode, setRemainingSectionOrderingMode] =
@@ -262,14 +274,16 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 				remainingSectionActivityHorizonMs:
 					entriesWithinExtendedActivityHorizon?.activityHorizonMs ??
 					CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
-				unreadHandoffEntryKeys,
+				selectedRecentTaskStageFilters,
+				selectedRecentProjectWorkspaceIds,
 			}),
 		[
 			entriesInProjects,
 			entriesWithinExtendedActivityHorizon,
 			nowMs,
 			remainingSectionOrderingMode,
-			unreadHandoffEntryKeys,
+			selectedRecentTaskStageFilters,
+			selectedRecentProjectWorkspaceIds,
 		],
 	);
 
@@ -281,8 +295,15 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		setRemainingSectionOrderingMode,
 		isRunningSectionExpanded,
 		setIsRunningSectionExpanded,
-		isBacklogSectionExpanded,
-		setIsBacklogSectionExpanded,
+		isRecentSectionExpanded,
+		setIsRecentSectionExpanded,
+		isPromptCacheWarmSectionExpanded,
+		setIsPromptCacheWarmSectionExpanded,
+		selectedRecentTaskStageFilters,
+		setSelectedRecentTaskStageFilters,
+		selectedRecentProjectWorkspaceIds,
+		setSelectedRecentProjectWorkspaceIds,
+		recentProjectFilterOptions,
 		extendedActivityHorizonLoadState,
 		requestEntriesWithinExtendedActivityHorizon,
 	};

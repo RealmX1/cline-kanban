@@ -2,18 +2,16 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeCrossProjectTaskSwitcherEntry } from "../../../src/core/api-contract";
 import {
 	assignCrossProjectTaskSwitcherSections,
-	buildCrossProjectTaskSwitcherEntryKey,
 	CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
-	CROSS_PROJECT_TASK_SWITCHER_RECENTLY_OPENED_BY_USER_SUBSECTION_MAXIMUM_ENTRY_COUNT,
 	type CrossProjectTaskSwitcherEntryInProject,
+	type CrossProjectTaskSwitcherRecentTaskStageFilter,
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 	estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 
 // 跨项目切换面板的区归属（docs/context-cross-project-recently-active-task-switcher.md）。核心不变量：
-// Running / 缓存倒计时 / 剩余三区互斥（Running 优先），Pinned 可与它们重复；区归属不读 board 列（例外：排除 Done；
-// Validation 不进缓存倒计时区）。
+// Running / 缓存倒计时 / 剩余三区互斥（Running 优先），Pinned 可与它们重复；Running 不按列归属；缓存区只收 In progress / Review，Recent 阶段筛选按列读取。
 
 const NOW_MS = 10_000_000_000;
 const MINUTE_MS = 60_000;
@@ -82,7 +80,9 @@ function assign(
 	entriesInProjects: CrossProjectTaskSwitcherEntryInProject[],
 	options: {
 		mode?: CrossProjectTaskSwitcherRemainingSectionOrderingMode;
-		unreadHandoffEntryKeys?: Set<string>;
+		selectedRecentTaskStageFilters?: readonly CrossProjectTaskSwitcherRecentTaskStageFilter[];
+		activityHorizonMs?: number;
+		selectedRecentProjectWorkspaceIds?: readonly string[];
 		nowMs?: number;
 	} = {},
 ) {
@@ -91,46 +91,114 @@ function assign(
 		nowMs: options.nowMs ?? NOW_MS,
 		remainingSectionOrderingMode:
 			options.mode ?? "most_recently_touched_by_conversation_progress_or_user_open_or_description_edit",
-		remainingSectionActivityHorizonMs: CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
-		unreadHandoffEntryKeys: options.unreadHandoffEntryKeys ?? new Set(),
+		remainingSectionActivityHorizonMs:
+			options.activityHorizonMs ?? CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
+		selectedRecentTaskStageFilters: options.selectedRecentTaskStageFilters,
+		selectedRecentProjectWorkspaceIds: options.selectedRecentProjectWorkspaceIds,
 	});
 }
 
 function remainingTaskIds(sections: ReturnType<typeof assign>): string[] {
 	const section = sections.remainingSection;
-	if (section.orderingMode === "unread_handoffs_then_recently_opened_by_user") {
-		return [...section.unreadHandoffEntries, ...section.recentlyOpenedByUserEntries].map(({ entry }) => entry.taskId);
-	}
 	return section.entries.map(({ entry }) => entry.taskId);
 }
 
-describe("跨项目完整 Backlog", () => {
-	it("按 Description 更新时间倒序、复合键稳定排序；置顶可重复，其他主分组互斥", () => {
-		const sections = assign([
-			inProject("ws-b", makeEntry("same-id", { columnId: "backlog", taskDescriptionLastUpdatedAt: 1 })),
-			inProject(
-				"ws-a",
-				makeEntry("same-id", { columnId: "backlog", taskDescriptionLastUpdatedAt: 1, pinnedToTaskPinboardAt: 2 }),
-			),
-			inProject(
-				"ws-a",
-				makeEntry("newer", {
-					columnId: "backlog",
-					taskDescriptionLastUpdatedAt: 2,
-					...AGENT_RUNNING,
-					lastOutputAt: NOW_MS,
-				}),
-			),
+describe("Recent 的阶段多选与统一活动范围", () => {
+	const stageEntries = [
+		inProject("ws-a", makeEntry("progress", { columnId: "in_progress", lastOpenedByUserAt: NOW_MS })),
+		inProject("ws-a", makeEntry("review", { columnId: "review", lastOpenedByUserAt: NOW_MS })),
+		inProject("ws-a", makeEntry("backlog", { columnId: "backlog", taskDescriptionLastUpdatedAt: NOW_MS })),
+		inProject("ws-a", makeEntry("validation", { columnId: "validation", lastOpenedByUserAt: NOW_MS })),
+		inProject("ws-a", makeEntry("done", { columnId: "trash", lastOpenedByUserAt: NOW_MS })),
+	];
+	const stageOptions = ["in_progress_and_review", "backlog", "validation", "done"] as const;
+	const expectedTaskIdsByOption = [["progress", "review"], ["backlog"], ["validation"], ["done"]];
+	it.each(Array.from({ length: 16 }, (_, selectionMask) => selectionMask))(
+		"阶段组合 %i 取并集，空选择为 All",
+		(selectionMask) => {
+			const selectedRecentTaskStageFilters = stageOptions.filter((_, index) => (selectionMask & (1 << index)) !== 0);
+			const expectedTaskIds =
+				selectionMask === 0
+					? ["progress", "review", "backlog", "validation", "done"]
+					: expectedTaskIdsByOption.flatMap((ids, index) => ((selectionMask & (1 << index)) !== 0 ? ids : []));
+			expect(remainingTaskIds(assign(stageEntries, { selectedRecentTaskStageFilters }))).toEqual(
+				expectedTaskIds.sort(),
+			);
+		},
+	);
+
+	it.each(["backlog", "in_progress", "review", "validation", "trash"] as const)(
+		"%s 同用 7 / 30 天窗口，边界包含，停止生成不刷新范围",
+		(columnId) => {
+			const entries = [
+				inProject("ws-a", makeEntry("boundary", { columnId, lastOpenedByUserAt: NOW_MS - 7 * DAY_MS })),
+				inProject("ws-a", makeEntry("older", { columnId, lastOpenedByUserAt: NOW_MS - 20 * DAY_MS })),
+				inProject(
+					"ws-a",
+					makeEntry("expired", {
+						columnId,
+						lastOpenedByUserAt: NOW_MS - 31 * DAY_MS,
+						agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					}),
+				),
+			];
+			expect(remainingTaskIds(assign(entries))).toEqual(["boundary"]);
+			expect(remainingTaskIds(assign(entries, { activityHorizonMs: 30 * DAY_MS }))).toEqual(["boundary", "older"]);
+		},
+	);
+
+	it("项目多选取并集，再与阶段筛选取交集；同号任务按 workspaceId 独立", () => {
+		const entries = [
+			inProject("ws-a", makeEntry("same", { columnId: "backlog", lastOpenedByUserAt: NOW_MS })),
+			inProject("ws-b", makeEntry("same", { columnId: "validation", lastOpenedByUserAt: NOW_MS })),
+			inProject("ws-c", makeEntry("same", { columnId: "backlog", lastOpenedByUserAt: NOW_MS })),
+		];
+		const selected = assign(entries, {
+			selectedRecentTaskStageFilters: ["backlog"],
+			selectedRecentProjectWorkspaceIds: ["ws-a", "ws-b"],
+		});
+		expect(selected.remainingSection.entries.map(({ workspaceId }) => workspaceId)).toEqual(["ws-a"]);
+		const allStages = assign(entries, { selectedRecentProjectWorkspaceIds: ["ws-a", "ws-b"] });
+		expect(allStages.remainingSection.entries.map(({ workspaceId }) => workspaceId)).toEqual(["ws-a", "ws-b"]);
+		expect(assign(entries, { selectedRecentProjectWorkspaceIds: [] }).remainingSection.entries).toHaveLength(3);
+	});
+
+	it("Running 和 Cache warm 优先于阶段筛选，置顶副本保留且跨项目同号独立", () => {
+		const sections = assign(
+			[
+				...stageEntries,
+				inProject(
+					"ws-b",
+					makeEntry("backlog", { columnId: "backlog", lastOpenedByUserAt: NOW_MS, pinnedToTaskPinboardAt: 1 }),
+				),
+				inProject(
+					"ws-a",
+					makeEntry("running-validation", { columnId: "validation", ...AGENT_RUNNING, lastOutputAt: NOW_MS }),
+				),
+				inProject(
+					"ws-a",
+					makeEntry("running-backlog", { columnId: "backlog", ...AGENT_RUNNING, lastOutputAt: NOW_MS }),
+				),
+				inProject(
+					"ws-a",
+					makeEntry("warm-review", {
+						...USER_REVIEW_EXITED,
+						lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
+					}),
+				),
+			],
+			{ selectedRecentTaskStageFilters: ["backlog"] },
+		);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId).sort()).toEqual([
+			"running-backlog",
+			"running-validation",
 		]);
-		expect(sections.backlogEntries.map(({ workspaceId, entry }) => [workspaceId, entry.taskId])).toEqual([
-			["ws-a", "newer"],
-			["ws-a", "same-id"],
-			["ws-b", "same-id"],
+		expect(sections.promptCacheWarmAwaitingUserEntries.map(({ entry }) => entry.taskId)).toEqual(["warm-review"]);
+		expect(sections.pinnedEntries.map(({ entry }) => entry.taskId)).toEqual(["backlog"]);
+		expect(sections.remainingSection.entries.map(({ workspaceId, entry }) => [workspaceId, entry.taskId])).toEqual([
+			["ws-a", "backlog"],
+			["ws-b", "backlog"],
 		]);
-		expect(sections.pinnedEntries.map(({ entry }) => entry.taskId)).toEqual(["same-id"]);
-		expect(sections.runningEntries).toEqual([]);
-		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
-		expect(remainingTaskIds(sections)).toEqual([]);
 	});
 });
 
@@ -437,7 +505,7 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 		expect(sections.promptCacheWarmAwaitingUserEntries.map(({ entry }) => entry.taskId)).toEqual(["lagging-column"]);
 	});
 
-	it("Done 列只进 Pinned，不进下面三区", () => {
+	it("Done 列的 agent 回合仍优先进入 Running，并保留 Pinned 副本", () => {
 		const sections = assign([
 			inProject(
 				"ws-1",
@@ -445,12 +513,12 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 			),
 		]);
 		expect(sections.pinnedEntries).toHaveLength(1);
-		expect(sections.runningEntries).toEqual([]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["done"]);
 		expect(remainingTaskIds(sections)).toEqual([]);
 	});
 
 	// 2026-10-04 用户反馈：移入 Validation / Done 的任务即使缓存仍热，也不该留在 Cache warm，而是下放到 Recent
-	// 由它的规则决定显不显示。Done 本来就在分区前排除（上一条用例）；这里钉 Validation。
+	// 由它的规则决定显不显示。Done 与 Validation 同样可进入 Recent；这里钉 Validation 的缓存资格。
 	describe("Validation 列不进缓存倒计时区，下放到剩余区", () => {
 		const warmAnchor = {
 			...USER_REVIEW_EXITED,
@@ -673,7 +741,7 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 		expect(remainingTaskIds(sections)).toEqual(["opened", "edited", "progressed"]);
 	});
 
-	it("剩余区模式 ③：只按对话推进排序，没有推进记录的不进", () => {
+	it("Conversation progress 只改变排序，没有推进记录的任务保留在末尾", () => {
 		const sections = assign(
 			[
 				inProject(
@@ -684,33 +752,7 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 			],
 			{ mode: "most_recent_conversation_progress_only" },
 		);
-		expect(remainingTaskIds(sections)).toEqual(["progressed"]);
-	});
-
-	it("剩余区模式 ②：未读交接在前、我最近打开在后且有条数上限，同一任务不重复", () => {
-		const opened = Array.from(
-			{ length: CROSS_PROJECT_TASK_SWITCHER_RECENTLY_OPENED_BY_USER_SUBSECTION_MAXIMUM_ENTRY_COUNT + 2 },
-			(_, index) =>
-				inProject("ws-1", makeEntry(`opened-${index}`, { lastOpenedByUserAt: NOW_MS - (index + 1) * MINUTE_MS })),
-		);
-		const sections = assign([...opened, inProject("ws-2", makeEntry("unread", { lastOpenedByUserAt: NOW_MS }))], {
-			mode: "unread_handoffs_then_recently_opened_by_user",
-			unreadHandoffEntryKeys: new Set([
-				buildCrossProjectTaskSwitcherEntryKey("ws-2", "unread"),
-				buildCrossProjectTaskSwitcherEntryKey("ws-1", "opened-0"),
-			]),
-		});
-		if (sections.remainingSection.orderingMode !== "unread_handoffs_then_recently_opened_by_user") {
-			throw new Error("unexpected mode");
-		}
-		expect(sections.remainingSection.unreadHandoffEntries.map(({ entry }) => entry.taskId)).toEqual([
-			"unread",
-			"opened-0",
-		]);
-		expect(sections.remainingSection.recentlyOpenedByUserEntries).toHaveLength(
-			CROSS_PROJECT_TASK_SWITCHER_RECENTLY_OPENED_BY_USER_SUBSECTION_MAXIMUM_ENTRY_COUNT,
-		);
-		expect(sections.remainingSection.recentlyOpenedByUserEntries[0]?.entry.taskId).toBe("opened-1");
+		expect(remainingTaskIds(sections)).toEqual(["progressed", "only-opened"]);
 	});
 
 	it("缓存到期后同一任务从倒计时区掉进剩余区（区归属随 now 现算）", () => {
