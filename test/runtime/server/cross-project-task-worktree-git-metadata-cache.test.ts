@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../../../src/deployment/task-commit-coverage-in-current-deployment", () => ({
+	attachTaskCommitCoverageInCurrentDeploymentToMetadata: async ({
+		taskMetadata,
+	}: {
+		taskMetadata: RuntimeTaskWorkspaceMetadata[];
+	}) => taskMetadata,
+}));
+
 const probeMocks = vi.hoisted(() => ({
 	loadTaskWorkspaceMetadata: vi.fn(),
 	createBaseRefTipResolver: vi.fn(),

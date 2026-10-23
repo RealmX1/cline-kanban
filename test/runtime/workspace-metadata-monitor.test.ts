@@ -5,6 +5,11 @@ const gitSyncMocks = vi.hoisted(() => ({
 	probeGitWorkspaceState: vi.fn(),
 }));
 
+const deploymentCoverageMocks = vi.hoisted(() => ({ attach: vi.fn() }));
+vi.mock("../../src/deployment/task-commit-coverage-in-current-deployment", () => ({
+	attachTaskCommitCoverageInCurrentDeploymentToMetadata: deploymentCoverageMocks.attach,
+}));
+
 const taskWorktreeMocks = vi.hoisted(() => ({
 	getTaskWorkspacePathInfo: vi.fn(),
 }));
@@ -50,7 +55,12 @@ const BASE_REF_TIP_COMMIT = "ba5e7100dec0de99";
 const DEFAULT_COMMITS_BEHIND_BASE_REF = 12;
 const DEFAULT_COMMITS_AHEAD_OF_BASE_REF = 3;
 
-import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskWorktreeMode } from "../../src/core/api-contract";
+import type {
+	RuntimeBoardCard,
+	RuntimeBoardData,
+	RuntimeTaskWorkspaceMetadata,
+	RuntimeTaskWorktreeMode,
+} from "../../src/core/api-contract";
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import {
 	createWorkspaceMetadataMonitor,
@@ -125,6 +135,8 @@ describe("createWorkspaceMetadataMonitor", () => {
 		gitUtilsMocks.runGit.mock.calls.filter((call) => (call[1] as string[])[0] === "rev-parse").length;
 
 	beforeEach(() => {
+		deploymentCoverageMocks.attach.mockReset();
+		deploymentCoverageMocks.attach.mockImplementation(async ({ taskMetadata }) => taskMetadata);
 		stubbedBaseRefTipCommit = BASE_REF_TIP_COMMIT;
 		onMetadataUpdated.mockReset();
 		gitSyncMocks.getGitSyncSummary.mockReset();
@@ -233,6 +245,42 @@ describe("createWorkspaceMetadataMonitor", () => {
 
 	afterEach(() => {
 		monitor.close();
+	});
+
+	it("只有部署变化也广播新覆盖，worktree 与 base 的缓存命中不冻结覆盖", async () => {
+		let coverageVersion = "deployment-before-rollback";
+		deploymentCoverageMocks.attach.mockImplementation(
+			async ({ taskMetadata }: { taskMetadata: RuntimeTaskWorkspaceMetadata[] }) =>
+				taskMetadata.map(
+					(metadata) =>
+						({
+							...metadata,
+							taskCommitCoverageInCurrentDeployment: {
+								coverageStatus: "unknown",
+								knownTaskCommitCount: 2,
+								matchedTaskCommitCountInCurrentDeployment: null,
+								currentDeploymentId: coverageVersion,
+								currentDeployedSourceCommit: null,
+								currentDeploymentRecordedAtIso: null,
+								unavailableReason: null,
+								coverageVersion,
+							},
+						}) satisfies RuntimeTaskWorkspaceMetadata,
+				),
+		);
+		const input = { workspaceId: "workspace-1", workspacePath: WORKSPACE_PATH, board: createBoard() };
+		await connectWorkspaceAsWholeProjectSubscriber(input);
+		const initialNotificationCount = onMetadataUpdated.mock.calls.length;
+		const initialProbeCount = gitSyncMocks.probeGitWorkspaceState.mock.calls.length;
+		coverageVersion = "rollback-deployment";
+		const updated = await monitor.updateWorkspaceState(input);
+		expect(updated.taskWorkspaces[0]?.taskCommitCoverageInCurrentDeployment?.currentDeploymentId).toBe(
+			"rollback-deployment",
+		);
+		expect(onMetadataUpdated).toHaveBeenCalledTimes(initialNotificationCount + 1);
+		expect(gitSyncMocks.probeGitWorkspaceState).toHaveBeenCalledTimes(initialProbeCount);
+		await monitor.updateWorkspaceState(input);
+		expect(onMetadataUpdated).toHaveBeenCalledTimes(initialNotificationCount + 1);
 	});
 
 	it("首帧只读缓存：冷缓存为空，不启动探针；热缓存按当前 board 与订阅并集裁剪", async () => {

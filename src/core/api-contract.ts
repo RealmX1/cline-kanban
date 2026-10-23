@@ -1907,6 +1907,28 @@ export type RuntimeTaskRetainedCommittedLineChangeHistory = z.infer<
 	typeof runtimeTaskRetainedCommittedLineChangeHistorySchema
 >;
 
+// 当前部署版本的提交覆盖是独立投影，不代表任务完成或部署后验证通过。
+export const runtimeTaskCommitCoverageInCurrentDeploymentSchema = z.object({
+	coverageStatus: z.enum([
+		"no_known_task_commits",
+		"no_known_task_commits_in_current_deployment",
+		"some_known_task_commits_in_current_deployment",
+		"all_known_task_commits_in_current_deployment",
+		"unknown",
+	]),
+	knownTaskCommitCount: z.number().int().nonnegative().nullable(),
+	matchedTaskCommitCountInCurrentDeployment: z.number().int().nonnegative().nullable(),
+	currentDeploymentId: z.string().nullable(),
+	currentDeployedSourceCommit: z.string().nullable(),
+	currentDeploymentRecordedAtIso: z.string().nullable(),
+	unavailableReason: z.string().nullable(),
+	// 内容寻址，轮询时间不参与，未变化的卡片无需重渲。
+	coverageVersion: z.string(),
+});
+export type RuntimeTaskCommitCoverageInCurrentDeployment = z.infer<
+	typeof runtimeTaskCommitCoverageInCurrentDeploymentSchema
+>;
+
 export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	taskId: z.string(),
 	path: z.string(),
@@ -1925,6 +1947,7 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	workspaceGitStatus: runtimeTaskWorkspaceGitStatusSchema,
 	// 可选仅为兼容旧 runtime；新探针始终给出完整统计或明确的未知原因。
 	taskRetainedCommittedLineChangeSummary: runtimeTaskRetainedCommittedLineChangeSummarySchema.optional(),
+	taskCommitCoverageInCurrentDeployment: runtimeTaskCommitCoverageInCurrentDeploymentSchema.optional(),
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),
