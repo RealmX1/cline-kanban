@@ -1007,15 +1007,13 @@ function formatShellSpawnFailure(binary: string, error: unknown): string {
 	return `Failed to launch "${binary}": ${message}`;
 }
 
-// Agent TUI 默认是 screen-oriented（alt-screen）app：终端主动清 scrollback 会抹掉 Kanban 想保留的
-// 历史，故默认抑制 CSI 3 J。唯一例外是「显式 --no-alt-screen 的 Codex」这一 inline transcript opt-in
-// 模式——它靠「CSI 3 J 清 scrollback + 整段重印」做原地刷新，此时必须放行 CSI 3 J，否则重印会叠加在
-// 旧历史下面（可见翻倍）。判据基于最终启动 args，而非 agentId，因为同一个 codex 既可跑默认 alt-screen、
-// 也可显式 opt-in inline。
+// Kimi regular TUI 与显式 --no-alt-screen 的 Codex 用清历史后重印来刷新。
+// 这两条路径必须放行 CSI 3 J，否则整段重印会堆叠旧历史；其余 agent 保持既有历史保护。
 export function shouldSuppressTerminalScrollbackErasureForAgentLaunch(
 	agentId: RuntimeAgentId,
 	commandArgs: readonly string[],
 ): boolean {
+	if (agentId === "kimi") return false;
 	if (agentId === "codex" && commandArgs.includes("--no-alt-screen")) {
 		return false;
 	}
@@ -3037,7 +3035,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const terminalProtocolFilterOptions = {
 			interceptOscColorQueries: true,
 			suppressScrollbackErasure:
-				adoptionRecord?.rederivationInputs.suppressScrollbackErasure ?? adoptsTaskAgentSession,
+				// 旧 runtime 留下的 Kimi 抑制策略也要纠正，追赶与实时输出共用此选项。
+				agentId === "kimi"
+					? false
+					: (adoptionRecord?.rederivationInputs.suppressScrollbackErasure ?? adoptsTaskAgentSession),
 			suppressDeviceAttributeQueries:
 				adoptionRecord?.rederivationInputs.suppressDeviceAttributeQueries ?? agentId === "droid",
 		};

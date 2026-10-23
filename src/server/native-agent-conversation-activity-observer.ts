@@ -200,7 +200,7 @@ export function createNativeAgentConversationActivityObserver(
 			disposed ||
 			!identity?.nativeSessionId ||
 			identity.sourceAgentId !== summary.agentId ||
-			!["claude", "omp", "codex"].includes(identity.sourceAgentId)
+			!["claude", "omp", "codex", "kimi"].includes(identity.sourceAgentId)
 		)
 			return null;
 		const key = `${workspaceId}::${summary.taskId}`;
@@ -208,6 +208,8 @@ export function createNativeAgentConversationActivityObserver(
 		const previous = states.get(key);
 		if (previous?.identityKey === identityKey) {
 			previous.getCurrentSummary = getCurrentSummary;
+			// Kimi 的首次接受可能先于 observer 建基线，回查须使用本代最新的提交候选。
+			if (summary.agentId === "kimi") previous.summary = { ...summary };
 			return previous;
 		}
 		if (previous) forgetState(previous);
