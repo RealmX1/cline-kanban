@@ -22,6 +22,7 @@ const {
 	mockUseAgentRaisedPendingUserDecision,
 	mockAgentRaisedPendingUserDecisionPanel,
 	mockUseConversationSessionTurnProjection,
+	mockReadOnlyTaskConversationHistoryPanel,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn(
 		(_props: {
@@ -31,6 +32,7 @@ const {
 		}): ReactNode => null,
 	),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
+	mockReadOnlyTaskConversationHistoryPanel: vi.fn((_props: unknown) => <div data-testid="read-only-task-history" />),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
 	mockClineSendText: vi.fn(async () => {}),
@@ -51,6 +53,9 @@ vi.mock("@/hooks/use-is-mobile", () => ({
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
 	AgentTerminalPanel: mockAgentTerminalPanel,
+}));
+vi.mock("@/components/detail-panels/read-only-task-conversation-history-panel", () => ({
+	ReadOnlyTaskConversationHistoryPanel: mockReadOnlyTaskConversationHistoryPanel,
 }));
 
 vi.mock("@/components/detail-panels/agent-raised-pending-user-decision-panel", () => ({
@@ -322,6 +327,118 @@ describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	it.each([false, true])("Done 打开完整工作台并展示只读历史，禁用执行入口（mobile=%s）", async (isMobile) => {
+		mockUseIsMobile.mockReturnValue(isMobile);
+		const selection = createSelection();
+		selection.column = { id: "trash", title: "Done", cards: [selection.card] };
+		await act(async () =>
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="codex"
+					sessionSummary={createSessionSummary(selection.card.id, {
+						agentId: "codex",
+						pid: null,
+						turnOwner: "user",
+						liveness: "exited",
+						userTurnKind: "review",
+					})}
+					taskSessions={{}}
+					exploratoryFindings={[]}
+					explorationThreadGraph={{ queryPhase: "idle", view: null, turnSourceUnavailableSessionIds: [] }}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			),
+		);
+		expect(container.querySelector('[data-testid="read-only-task-history"]')).not.toBeNull();
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
+		expect(mockClineAgentChatPanel).not.toHaveBeenCalled();
+		expect(container.textContent).toContain("Main session");
+		expect(container.textContent).toContain("Relations");
+		expect(container.textContent).toContain("Findings");
+		if (!isMobile) {
+			const maintenanceButton = Array.from(container.querySelectorAll("button")).find((button) =>
+				button.textContent?.includes("立即维护"),
+			);
+			expect(maintenanceButton?.disabled).toBe(true);
+		}
+		expect(container.querySelector("button[disabled]")?.textContent).toBeTruthy();
+		if (isMobile) {
+			await act(async () =>
+				Array.from(container.querySelectorAll("button"))
+					.find((button) => button.textContent === "Prompts")
+					?.click(),
+			);
+		}
+		expect(mockPromptLibraryPanel.mock.calls.at(-1)?.[0]).toEqual(
+			expect.objectContaining({
+				taskId: selection.card.id,
+				projectId: "workspace-1",
+				isTaskAgentExecutionDisabled: true,
+				onQueuePromptForAfterCurrentTurn: undefined,
+			}),
+		);
+	});
+
+	it("跨项目打开同号 Done 卡时回到新项目的主会话", async () => {
+		const selection = createSelectionInColumn("trash");
+		const sideSessionId = "side-session-from-old-project";
+		const sideSession = createSessionSummary(sideSessionId, {
+			taskConversationSessionMetadata: {
+				workspaceTaskId: selection.card.id,
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: selection.card.id,
+				mainSessionOriginTurnNumber: null,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: "旧项目侧会话",
+			},
+		});
+		const originalUrl = window.location.href;
+		const renderProject = async (projectId: string) =>
+			act(async () =>
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId={projectId}
+						sessionSummary={createSessionSummary(selection.card.id)}
+						taskSessions={projectId === "old-project" ? { [sideSessionId]: sideSession } : {}}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				),
+			);
+		try {
+			window.history.replaceState(null, "", `?conversationSession=${sideSessionId}`);
+			await renderProject("old-project");
+			expect(
+				getLastMockFirstArg<{ taskConversationSessionId: string }>(mockReadOnlyTaskConversationHistoryPanel)
+					.taskConversationSessionId,
+			).toBe(sideSessionId);
+			window.history.replaceState(null, "", window.location.pathname);
+			await renderProject("new-project");
+			expect(
+				getLastMockFirstArg<{ taskConversationSessionId: string }>(mockReadOnlyTaskConversationHistoryPanel)
+					.taskConversationSessionId,
+			).toBe(selection.card.id);
+		} finally {
+			window.history.replaceState(null, "", originalUrl);
+		}
+	});
 
 	it.each([false, true])(
 		"查卡替换中部与工作栏时保留原任务 Agent 节点，返回后继续使用（mobile=%s）",
@@ -377,6 +494,7 @@ describe("CardDetailView", () => {
 		root = createRootRenderingInsideTooltipProvider(container);
 		mockAgentTerminalPanel.mockClear();
 		mockAgentTerminalPanel.mockImplementation(() => null);
+		mockReadOnlyTaskConversationHistoryPanel.mockClear();
 		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();

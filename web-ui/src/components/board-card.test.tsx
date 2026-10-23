@@ -1963,20 +1963,14 @@ describe("BoardCard", () => {
 		expect(onSaveTitle).toHaveBeenCalledWith("task-1", "Renamed via enter");
 	});
 
-	it("delays single-click navigation and cancels it on double-click for navigating columns", async () => {
+	it.each(["in_progress", "trash"] as const)("%s 卡单击打开详情，双击只改标题", async (columnId) => {
 		vi.useFakeTimers();
 		try {
 			const onClick = vi.fn();
 
 			await act(async () => {
 				root.render(
-					<BoardCard
-						card={createCard()}
-						index={0}
-						columnId="in_progress"
-						onClick={onClick}
-						onSaveTitle={() => {}}
-					/>,
+					<BoardCard card={createCard()} index={0} columnId={columnId} onClick={onClick} onSaveTitle={() => {}} />,
 				);
 			});
 
