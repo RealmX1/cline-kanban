@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
+	RuntimeTaskCommitCoverageInCurrentDeployment,
 	RuntimeTaskCommitIntegrationTrackingStatus,
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
@@ -146,6 +147,7 @@ export interface ReviewTaskWorkspaceSnapshot {
 	// 新 runtime metadata 始终携带；optional 仅用于兼容旧 stream / 测试快照。
 	taskCommitsIntegratedIntoBaseRef?: number | null;
 	taskCommitIntegrationTrackingStatus?: RuntimeTaskCommitIntegrationTrackingStatus;
+	taskCommitCoverageInCurrentDeployment?: RuntimeTaskCommitCoverageInCurrentDeployment;
 	workspaceGitStatusObservationSource?: RuntimeTaskWorkspaceGitStatusObservationSource;
 	workspaceGitStatusObservedAt?: number | null;
 	taskRetainedCommittedLineChangeSummary?: RuntimeTaskRetainedCommittedLineChangeSummary;

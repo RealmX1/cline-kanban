@@ -395,8 +395,13 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		const taskCardActionButtonAriaLabels = Array.from(
 			container.querySelectorAll<HTMLButtonElement>(".kb-board-card-shell button[aria-label]"),
 		)
-			// 累计指标打开本地浮层，不路由卡片动作；下面单独验证它确实打开了明细。
-			.filter((button) => !button.closest("[data-task-retained-committed-line-change-indicator]"))
+			// 两种提交指标打开本地浮层，不路由卡片动作；下面分别验证浮层确实打开。
+			.filter(
+				(button) =>
+					!button.closest(
+						"[data-task-retained-committed-line-change-indicator], [data-task-commit-coverage-in-current-deployment]",
+					),
+			)
 			.map((button) => button.getAttribute("aria-label") ?? "")
 			.filter(
 				(ariaLabel) =>
@@ -432,6 +437,23 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		expect(indicator).not.toBeNull();
 		await act(async () => indicator?.click());
 		expect(document.querySelector('[role="dialog"][aria-label="任务已提交增删行明细"]')).not.toBeNull();
+		expect(onActivateTask).not.toHaveBeenCalled();
+	});
+
+	it("runtime 快照卡体的部署覆盖指标打开本地说明，不导航卡片", async () => {
+		const card = createCard("task-1", "查看当前部署覆盖");
+		const onActivateTask = vi.fn();
+		renderEntry({
+			task: createPostDeployVerificationTaskReadModelTestFixture({ taskId: "task-1" }),
+			board: boardWithCardInColumn(card, "trash"),
+			realTaskCardRenderingInputs: runtimeBoardSnapshotRenderingInputsFor(onActivateTask),
+		});
+		const indicator = container.querySelector<HTMLButtonElement>(
+			"[data-task-commit-coverage-in-current-deployment] button",
+		);
+		expect(indicator).not.toBeNull();
+		await act(async () => indicator?.click());
+		expect(document.querySelector('[role="dialog"][aria-label="当前部署的提交覆盖"]')).not.toBeNull();
 		expect(onActivateTask).not.toHaveBeenCalled();
 	});
 });

@@ -6,6 +6,7 @@ import type {
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
 } from "../core/api-contract";
 import { buildCrossProjectTaskSwitcherEntryKey } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import { attachTaskCommitCoverageInCurrentDeploymentToMetadata } from "../deployment/task-commit-coverage-in-current-deployment";
 import {
 	type CachedTaskWorkspaceMetadata,
 	createBaseRefTipResolver,
@@ -127,7 +128,7 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 		}
 		// 每次请求、每个项目一个解析器：同一 baseRef 的所有任务共用一次 rev-parse。
 		const resolveBaseRefTip = createBaseRefTipResolver(workspacePath);
-		return await Promise.all(
+		const results = await Promise.all(
 			taskIds.map(async (taskId): Promise<RuntimeCrossProjectTaskWorktreeGitMetadata> => {
 				const located = cardsByTaskId.get(taskId);
 				if (!located) {
@@ -167,6 +168,22 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 					return unavailable(taskId, "git_metadata_probe_failed");
 				}
 			}),
+		);
+		const enriched = await attachTaskCommitCoverageInCurrentDeploymentToMetadata({
+			workspaceId,
+			repositoryPath: workspacePath,
+			taskMetadata: results.flatMap((result) =>
+				result.availability === "available" ? [result.taskWorkspaceMetadata] : [],
+			),
+		});
+		const enrichedByTaskId = new Map(enriched.map((metadata) => [metadata.taskId, metadata]));
+		return results.map((result) =>
+			result.availability === "available"
+				? {
+						...result,
+						taskWorkspaceMetadata: enrichedByTaskId.get(result.taskId) ?? result.taskWorkspaceMetadata,
+					}
+				: result,
 		);
 	};
 

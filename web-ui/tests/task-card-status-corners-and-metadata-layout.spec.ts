@@ -37,6 +37,25 @@ for (const width of [1280, 360]) {
 		const runningDot = row.locator('[data-task-card-corner-status-indicator="running"]:visible');
 		const unreadDot = row.locator('[data-task-card-corner-status-indicator="unread_handoff"]:visible');
 		await expect(title).toBeVisible();
+		for (const host of [
+			allProjects,
+			page.locator('[data-layout-host="project-specific"]'),
+			page.locator('[data-layout-host="standard-board"]'),
+		]) {
+			await expect(host.getByRole("button", { name: "部署覆盖：2/5 个已知提交" })).toBeVisible();
+		}
+		const deploymentIndicator = page
+			.locator('[data-layout-host="project-specific"]')
+			.getByRole("button", { name: "部署覆盖：2/5 个已知提交" });
+		await deploymentIndicator.click();
+		const deploymentDetails = page.getByRole("dialog", { name: "当前部署的提交覆盖" });
+		await expect(deploymentDetails).toContainText("abcdef123456");
+		await expect(page.getByLabel("打开任务次数")).toHaveText("0");
+		const deploymentDetailsBox = await visibleBox(deploymentDetails);
+		expect(deploymentDetailsBox.x).toBeGreaterThanOrEqual(0);
+		expect(deploymentDetailsBox.x + deploymentDetailsBox.width).toBeLessThanOrEqual(width);
+		await page.keyboard.press("Escape");
+		await expect(deploymentDetails).toBeHidden();
 		await expect(runningDot).toHaveCount(1);
 		await expect(unreadDot).toHaveCount(1);
 		const initialTitle = await visibleBox(title);
@@ -117,6 +136,14 @@ for (const width of [1280, 360]) {
 		await expect(row).toHaveAttribute("data-cross-project-task-switcher-row-in-place-expansion-state", "compact_row");
 		await row.locator("button").first().click();
 		await expect(page.getByLabel("打开任务次数")).toHaveText("1");
+		await page.getByRole("button", { name: "模拟部署回滚", exact: true }).click();
+		for (const host of [
+			allProjects,
+			page.locator('[data-layout-host="project-specific"]'),
+			page.locator('[data-layout-host="standard-board"]'),
+		]) {
+			await expect(host.getByRole("button", { name: "部署覆盖：0/5 个已知提交" })).toBeVisible();
+		}
 		await page.screenshot({ path: test.info().outputPath(`task-card-layout-${width}.png`), fullPage: true });
 		expect(pageErrors).toEqual([]);
 	});

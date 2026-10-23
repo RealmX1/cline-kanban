@@ -60,6 +60,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
+import { TaskCommitCoverageInCurrentDeploymentIndicator } from "@/components/ui/task-commit-coverage-in-current-deployment-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import {
 	shouldDisplayTaskRetainedCommittedLineChangeSummary,
@@ -1074,6 +1075,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 							) : null}
 						</span>
 					</Tooltip>
+				) : null}
+				{!historicalContext && columnId !== "backlog" ? (
+					<span className="mx-1 inline-flex align-middle">
+						<TaskCommitCoverageInCurrentDeploymentIndicator
+							coverage={reviewWorkspaceSnapshot?.taskCommitCoverageInCurrentDeployment}
+						/>
+					</span>
 				) : null}
 			</span>
 			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (

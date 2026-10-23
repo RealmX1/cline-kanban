@@ -5,6 +5,7 @@ import type {
 	RuntimeWorkspaceMetadata,
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 } from "../core/api-contract";
+import { attachTaskCommitCoverageInCurrentDeploymentToMetadata } from "../deployment/task-commit-coverage-in-current-deployment";
 import { computeWorktreeGitChangeToken } from "../workspace/git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
 import {
@@ -166,6 +167,8 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.path === b.path &&
 		a.exists === b.exists &&
 		a.baseRef === b.baseRef &&
+		a.taskCommitCoverageInCurrentDeployment?.coverageVersion ===
+			b.taskCommitCoverageInCurrentDeployment?.coverageVersion &&
 		a.baseCommit === b.baseCommit &&
 		a.commitsAheadOfBaseRef === b.commitsAheadOfBaseRef &&
 		a.commitsBehindBaseRef === b.commitsBehindBaseRef &&
@@ -346,6 +349,15 @@ export function createWorkspaceMetadataMonitor(
 				}
 			}
 			entry.taskMetadataByTaskId = nextTaskMetadataByTaskId;
+			const enrichedMetadata = await attachTaskCommitCoverageInCurrentDeploymentToMetadata({
+				workspaceId,
+				repositoryPath: entry.workspacePath,
+				taskMetadata: nextTaskEntries.flatMap(([, next]) => (next ? [next.data] : [])),
+			});
+			for (const data of enrichedMetadata) {
+				const cached = entry.taskMetadataByTaskId.get(data.taskId);
+				if (cached) entry.taskMetadataByTaskId.set(data.taskId, { ...cached, data });
+			}
 
 			const nextSnapshot = buildWorkspaceMetadataSnapshot(entry);
 			entry.workspaceMetadataSnapshotAsOfLastRefresh = nextSnapshot;

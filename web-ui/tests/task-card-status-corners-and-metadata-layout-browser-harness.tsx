@@ -12,7 +12,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorktreeMode,
 } from "../src/runtime/types";
-import { setTaskWorkspaceSnapshot } from "../src/stores/workspace-metadata-store";
+import { getTaskWorkspaceSnapshot, setTaskWorkspaceSnapshot } from "../src/stores/workspace-metadata-store";
 import type { BoardCard, BoardData } from "../src/types";
 import "../src/styles/globals.css";
 
@@ -29,6 +29,18 @@ setTaskWorkspaceSnapshot({
 	deletions: 4,
 	commitsAheadOfBaseRef: 2,
 	commitsBehindBaseRef: 1,
+	taskCommitsIntegratedIntoBaseRef: 2,
+	taskCommitIntegrationTrackingStatus: "complete",
+	taskCommitCoverageInCurrentDeployment: {
+		coverageStatus: "some_known_task_commits_in_current_deployment",
+		knownTaskCommitCount: 5,
+		matchedTaskCommitCountInCurrentDeployment: 2,
+		currentDeploymentId: "initial-deployment",
+		currentDeployedSourceCommit: "abcdef1234567890",
+		currentDeploymentRecordedAtIso: "2026-10-23T09:00:00.000Z",
+		unavailableReason: null,
+		coverageVersion: "initial-coverage",
+	},
 });
 
 function Harness() {
@@ -160,6 +172,18 @@ function Harness() {
 							切换快照可用性
 						</button>
 						<output aria-label="打开任务次数">{openedCount}</output>
+						<button type="button" onClick={() => {
+							const previous = getTaskWorkspaceSnapshot("layout-task");
+							if (previous?.taskCommitCoverageInCurrentDeployment) setTaskWorkspaceSnapshot({
+								...previous, taskCommitCoverageInCurrentDeployment: {
+									...previous.taskCommitCoverageInCurrentDeployment,
+									coverageStatus: "no_known_task_commits_in_current_deployment",
+									matchedTaskCommitCountInCurrentDeployment: 0,
+									currentDeploymentId: "rollback-deployment",
+									coverageVersion: "rollback-coverage",
+								},
+							});
+						}}>模拟部署回滚</button>
 					</div>
 					<div className="flex flex-wrap items-start gap-8">
 						<section className="w-[280px]" data-layout-host="all-projects">
