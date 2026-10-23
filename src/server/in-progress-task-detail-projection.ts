@@ -1,3 +1,8 @@
+import {
+	resolveLastAgentConversationPromptCacheReferenceObservation,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "../core/agent-conversation-activity-observation";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentResponseGenerationStopped,
@@ -22,6 +27,11 @@ import { resolveMainTaskConversationSessionId } from "../core/task-main-conversa
 // 2.8 MB），每 150ms 一次的 projects_updated 广播不可能每次重新解析；workspace-registry 按文件 mtime 缓存，
 // 缓存里只留这几个字段（见 persisted-task-session-facts-cache-for-unloaded-projects.ts）。
 export interface TaskSessionFactsForCrossProjectTaskViews {
+	agentConversationPromptSubmissionAcceptance?: RuntimeTaskSessionSummary["agentConversationPromptSubmissionAcceptance"];
+	taskConversationSessionMetadata?: RuntimeTaskSessionSummary["taskConversationSessionMetadata"];
+	lastEffectiveAgentConversationActivityObservation?: RuntimeTaskSessionSummary["lastEffectiveAgentConversationActivityObservation"];
+	lastAgentConversationUserHandoffObservation?: RuntimeTaskSessionSummary["lastAgentConversationUserHandoffObservation"];
+	lastAgentConversationPromptCacheReferenceObservation?: RuntimeTaskSessionSummary["lastAgentConversationPromptCacheReferenceObservation"];
 	agentId: RuntimeAgentId | null;
 	lastOutputAt: number | null;
 	lastSubstantiveOutputAt: number | null;
@@ -29,7 +39,7 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	lastConversationProgressObservation: RuntimeLastConversationProgressObservation | null;
 	// 切换面板 Running 区的排序键（本轮 agent 回合的开始时刻）。
 	agentResponseGenerationTurnStarted: RuntimeAgentResponseGenerationTurnStarted | null;
-	// 只有跨项目切换面板的 Cache warm 估算要读这两个（in_progress 明细不投影它们）。
+	// 缓存估算读取新的专用参考；旧请求字段只为兼容读保留，进程起点用于缓存作用域检查。
 	lastMainAgentConversationModelRequestDispatchObservation: RuntimeLastMainAgentConversationModelRequestDispatchObservation | null;
 	agentProcessStartedAt: number | null;
 	turnOwner: RuntimeTaskSessionTurnOwner;
@@ -39,11 +49,9 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 }
 
 /**
- * 跨项目视图里 lastOutputAt 的取整粒度。这些视图只拿它判断「是否在 5 分钟活跃窗口内」
- * （RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS），15 秒的误差无关紧要；而原值随每个非空 PTY chunk 刷新（含 spinner 重绘），
- * 让整份约 115 KB 的 projects_updated 几乎每次构建都不同、按内容去重失效。按墙钟整桶向下取整后，同一桶内的输出
- * 不再改变 payload。只取整这一个字段：lastSubstantiveOutputAt 与 lastConversationProgressObservation 是真实进展，
- * 原样保留。
+ * 旧契约仍携带 I/O 时间，按 15 秒向下取整以减少广播内容抖动。
+ * Running、活动圆点和自动移列均已改读可信状态／活动，不再以它判定是否工作。
+ * 新活动、交棒和缓存投影保留精确观测时间，不参与此取整。
  */
 // EXPERIMENT_NODE: 跨项目视图 lastOutputAt 的取整粒度（15 秒）
 export const LAST_OUTPUT_AT_ROUNDING_GRANULARITY_FOR_CROSS_PROJECT_TASK_VIEWS_MS = 15_000;
@@ -64,6 +72,15 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 ): TaskSessionFactsForCrossProjectTaskViews {
 	const facets = resolveSessionFacets(summary);
 	return {
+		...(summary.taskConversationSessionMetadata
+			? { taskConversationSessionMetadata: summary.taskConversationSessionMetadata }
+			: {}),
+		lastEffectiveAgentConversationActivityObservation:
+			resolveLastEffectiveAgentConversationActivityObservation(summary),
+		lastAgentConversationUserHandoffObservation: resolveLastAgentConversationUserHandoffObservation(summary),
+		lastAgentConversationPromptCacheReferenceObservation:
+			resolveLastAgentConversationPromptCacheReferenceObservation(summary),
+		agentConversationPromptSubmissionAcceptance: summary.agentConversationPromptSubmissionAcceptance ?? null,
 		agentId: summary.agentId,
 		lastOutputAt: roundLastOutputAtDownForCrossProjectTaskViews(summary.lastOutputAt),
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
@@ -90,6 +107,33 @@ export function extractTaskSessionFactsByTaskIdForCrossProjectTaskViews(
 	return factsByTaskId;
 }
 
+/** 显式声明owner必须匹配；缺metadata仅兼容原card.id，不为新主绑定猜归属。 */
+export function doesTaskConversationSessionBelongToCardByDeclaredOwnership(
+	cardId: string,
+	conversationSessionId: string,
+	declaredWorkspaceTaskId: string | null | undefined,
+): boolean {
+	return declaredWorkspaceTaskId === undefined ? conversationSessionId === cardId : declaredWorkspaceTaskId === cardId;
+}
+
+/** 仅原卡历史会话允许缺归属；交接后的主会话必须明确属于这张卡。 */
+export function resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(
+	card: RuntimeBoardCard,
+	sessionFactsByConversationSessionId: ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>,
+): TaskSessionFactsForCrossProjectTaskViews | undefined {
+	const mainConversationSessionId = resolveMainTaskConversationSessionId(card);
+	const facts = sessionFactsByConversationSessionId.get(mainConversationSessionId);
+	if (!facts) return undefined;
+	const metadata = facts.taskConversationSessionMetadata;
+	return doesTaskConversationSessionBelongToCardByDeclaredOwnership(
+		card.id,
+		mainConversationSessionId,
+		metadata?.workspaceTaskId,
+	)
+		? facts
+		: undefined;
+}
+
 // 单张卡的活动明细。in_progress 明细与跨项目切换面板的条目都从这里出（后者是前者的超集），
 // 是同一份代码而不是两份实现。agentId 优先取运行时 session、回退卡片声明；无 session 的卡回退
 // turnOwner=null / liveness=none。
@@ -100,12 +144,30 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 	return {
 		taskId: card.id,
 		title: card.title,
+		...(sessionFacts?.lastEffectiveAgentConversationActivityObservation !== undefined
+			? {
+					lastEffectiveAgentConversationActivityObservation:
+						sessionFacts.lastEffectiveAgentConversationActivityObservation,
+				}
+			: {}),
+		...(sessionFacts?.lastAgentConversationUserHandoffObservation !== undefined
+			? { lastAgentConversationUserHandoffObservation: sessionFacts.lastAgentConversationUserHandoffObservation }
+			: {}),
+		...(sessionFacts?.lastAgentConversationPromptCacheReferenceObservation !== undefined
+			? {
+					lastAgentConversationPromptCacheReferenceObservation:
+						sessionFacts.lastAgentConversationPromptCacheReferenceObservation,
+				}
+			: {}),
+		...(sessionFacts?.agentConversationPromptSubmissionAcceptance !== undefined
+			? { agentConversationPromptSubmissionAcceptance: sessionFacts.agentConversationPromptSubmissionAcceptance }
+			: {}),
 		agentId: sessionFacts?.agentId ?? card.agentId ?? null,
 		createdAt: card.createdAt,
 		lastOutputAt: sessionFacts?.lastOutputAt ?? null,
 		lastSubstantiveOutputAt: sessionFacts?.lastSubstantiveOutputAt ?? null,
-		// 切换面板的行与主看板卡片头部显示同样的两颗时长药丸，故两个量都要投影过来。
-		// 只投影、不在此合并或推断——合并是 mergeSummaryWithFacets 里那个唯一 reducer 的事。
+		// 下列旧字段仅供兼容读取；新消费者优先读取上面的统一活动与历史交棒。
+		// 新字段显式 null 表示已清空，必须保留，不能通过省略字段重新启用旧值回退。
 		agentResponseGenerationStopped: sessionFacts?.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: sessionFacts?.lastConversationProgressObservation ?? null,
 		agentResponseGenerationTurnStarted: sessionFacts?.agentResponseGenerationTurnStarted ?? null,
@@ -130,7 +192,7 @@ export function collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts(
 	return inProgressColumn.cards.map((card) =>
 		buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 			card,
-			sessionFactsByTaskId.get(resolveMainTaskConversationSessionId(card)),
+			resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(card, sessionFactsByTaskId),
 		),
 	);
 }

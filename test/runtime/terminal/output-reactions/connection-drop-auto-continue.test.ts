@@ -24,7 +24,7 @@ function createMockActions(overrides?: Partial<OutputReactionActions>) {
 		isAtInteractivePrompt: vi.fn(() => true),
 		canInjectNow: vi.fn(() => true),
 		// 默认「已静默」：保持既有用例（agent 停产后注入续跑）的语义不变。
-		isAgentOutputQuiet: vi.fn(() => true),
+		isEffectiveAgentConversationActivityQuiet: vi.fn(() => true),
 		// 默认「活跃 agent 回合」：真实掉线发生在 agent 回合内，保持既有用例语义不变。
 		isAgentTurnActive: vi.fn(() => true),
 		log: vi.fn(),
@@ -85,8 +85,8 @@ describe("connection-drop-auto-continue reaction", () => {
 	it("ends the episode (no injection) on an automatic attempt when the agent output is still flowing", () => {
 		// 伪 episode：正常输出里含 timeout/5xx 等词起了重试，但 agent 仍在持续产出。
 		// 自动 attempt 时输出未静默 → 判定 agent 仍在工作/已恢复 → 结束 episode、绝不注入。
-		const isAgentOutputQuiet = vi.fn(() => false);
-		const { actions } = createMockActions({ isAgentOutputQuiet });
+		const isEffectiveAgentConversationActivityQuiet = vi.fn(() => false);
+		const { actions } = createMockActions({ isEffectiveAgentConversationActivityQuiet });
 		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
 		reaction.onAttempt(ctx(5_000), state, actions);
 		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
@@ -95,8 +95,8 @@ describe("connection-drop-auto-continue reaction", () => {
 	});
 
 	it("manual triggerNow injects even when output is still flowing (silence gate is auto-only)", () => {
-		const isAgentOutputQuiet = vi.fn(() => false);
-		const { actions } = createMockActions({ isAgentOutputQuiet });
+		const isEffectiveAgentConversationActivityQuiet = vi.fn(() => false);
+		const { actions } = createMockActions({ isEffectiveAgentConversationActivityQuiet });
 		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
 		reaction.triggerNow(ctx(2_000), state, actions);
 		expect(actions.submitContinuationReference).toHaveBeenCalledTimes(1);

@@ -500,7 +500,7 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(started.state).toBe("running");
 		expect(started.agentResponseGenerationTurnSequence).toBe(1);
 		// agent 回合期间球在 agent 手上，没有可谈的停止时刻，也不该凭空补一个空字段。
-		expect("agentResponseGenerationStopped" in started).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in started).toBe(false);
 
 		const sessionId = await waitForTaskSessionId(runtime, "task-1");
 		runtime.emitAgentEvent(sessionId, {
@@ -511,7 +511,7 @@ describe("InMemoryClineTaskSessionService", () => {
 
 		const stopped = service.getSummary("task-1");
 		expect(stopped?.state).toBe("awaiting_review");
-		expect(stopped?.agentResponseGenerationStopped).toEqual(
+		expect(stopped?.currentAgentProcessUserTurnIdleRetentionStarted).toEqual(
 			expect.objectContaining({
 				signalConfidence: "harness_turn_complete",
 				turnSequence: 1,
@@ -521,7 +521,7 @@ describe("InMemoryClineTaskSessionService", () => {
 		// 第二轮：用户再发一句 → 又是一次边沿，序号推到 2，且停止事件被清空（球回到 agent 手上）。
 		const resumed = await service.sendTaskSessionInput("task-1", "Keep going");
 		expect(resumed?.agentResponseGenerationTurnSequence).toBe(2);
-		expect(resumed?.agentResponseGenerationStopped ?? null).toBeNull();
+		expect(resumed?.currentAgentProcessUserTurnIdleRetentionStarted ?? null).toBeNull();
 	});
 
 	// 无 prompt 启动（只建会话、不投递首轮）不构成 agent 回合：序号必须保持缺失，绝不被构造点凭空播种。
@@ -582,7 +582,9 @@ describe("InMemoryClineTaskSessionService", () => {
 				text: "Looking into it",
 				accumulatedText: "Looking into it",
 			});
-			const substantiveAtAgentOutput = harness.service.getSummary("task-1")?.lastSubstantiveOutputAt ?? null;
+			const substantiveAtAgentOutput =
+				harness.service.getSummary("task-1")?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ??
+				null;
 			expect(substantiveAtAgentOutput).not.toBeNull();
 			expect(substantiveAtAgentOutput).toBeLessThan(USER_ACTION_AT);
 			vi.setSystemTime(USER_ACTION_AT);
@@ -608,7 +610,9 @@ describe("InMemoryClineTaskSessionService", () => {
 			await operate(service);
 
 			const summary = service.getSummary("task-1");
-			expect(summary?.lastSubstantiveOutputAt).toBe(substantiveAtAgentOutput);
+			expect(summary?.lastEffectiveAgentConversationActivityObservation?.observedAtMs).toBe(
+				substantiveAtAgentOutput,
+			);
 			// 对照断言：这次写确实发生了（存活度前进到当下）。若少了它，上面那条在「写点被整个删掉」时也会绿。
 			expect(summary?.lastOutputAt ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
 		});
@@ -619,7 +623,8 @@ describe("InMemoryClineTaskSessionService", () => {
 		// done 分支若无条件按实质产出记账，用户的中止动作照样把两个戳刷成中止那一刻。
 		it("用户中止后 SDK 补发的空正文 done(aborted) 不推进实质戳与对话推进观测", async () => {
 			const { service, runtime, substantiveAtAgentOutput } = await startSessionWithAgentOutputThenAdvanceClock();
-			const progressAtAgentOutput = service.getSummary("task-1")?.lastConversationProgressObservation ?? null;
+			const progressAtAgentOutput =
+				service.getSummary("task-1")?.lastEffectiveAgentConversationActivityObservation ?? null;
 			expect(progressAtAgentOutput).not.toBeNull();
 
 			// 真实时序：SDK 在 abort 落定的过程中回吐 done(aborted)，此时会话绑定尚未解除。
@@ -634,8 +639,10 @@ describe("InMemoryClineTaskSessionService", () => {
 			await service.abortTaskSession("task-1");
 
 			const summary = service.getSummary("task-1");
-			expect(summary?.lastSubstantiveOutputAt).toBe(substantiveAtAgentOutput);
-			expect(summary?.lastConversationProgressObservation).toEqual(progressAtAgentOutput);
+			expect(summary?.lastEffectiveAgentConversationActivityObservation?.observedAtMs).toBe(
+				substantiveAtAgentOutput,
+			);
+			expect(summary?.lastEffectiveAgentConversationActivityObservation).toEqual(progressAtAgentOutput);
 			// 对照断言：这次收尾确实被处理了（存活度前进、卡片进入中止态），否则上面两条在事件被整个丢掉时也会绿。
 			expect(summary?.lastOutputAt ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
 			expect(summary?.state).toBe("interrupted");
@@ -654,11 +661,15 @@ describe("InMemoryClineTaskSessionService", () => {
 			});
 
 			const summary = service.getSummary("task-1");
-			expect(summary?.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(substantiveAtAgentOutput);
-			expect(summary?.lastConversationProgressObservation).toEqual(
+			expect(summary?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? 0).toBeGreaterThan(
+				substantiveAtAgentOutput,
+			);
+			expect(summary?.lastEffectiveAgentConversationActivityObservation).toEqual(
 				expect.objectContaining({ evidenceKind: "structured_agent_session_event" }),
 			);
-			expect(summary?.lastConversationProgressObservation?.observedAtMs ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
+			expect(summary?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? 0).toBeGreaterThanOrEqual(
+				USER_ACTION_AT,
+			);
 		});
 
 		it("agent 的新产出仍然推进实质戳（反转的是默认，不是把这条路堵死）", async () => {
@@ -671,7 +682,8 @@ describe("InMemoryClineTaskSessionService", () => {
 				accumulatedText: "Looking into it — 有结论了",
 			});
 
-			const advanced = service.getSummary("task-1")?.lastSubstantiveOutputAt ?? 0;
+			const advanced =
+				service.getSummary("task-1")?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? 0;
 			expect(advanced).toBeGreaterThan(substantiveAtAgentOutput);
 			expect(advanced).toBeGreaterThanOrEqual(USER_ACTION_AT);
 		});

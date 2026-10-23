@@ -103,6 +103,7 @@ export function TaskPinboardSectionInFocusView({
 									card,
 									columnId,
 									sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
+									taskSessions,
 									selected: card.id === selectedCardId,
 									handlers,
 									onActivateCard,

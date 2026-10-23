@@ -1,9 +1,13 @@
+import { resolveLastEffectiveAgentConversationActivityObservation } from "../core/agent-conversation-activity-observation";
 import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeBoardData,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
+import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
+import type { WorkspaceAgentConversationProgressAndOwnershipSnapshot } from "../state/workspace-agent-conversation-progress-observed-at-reader";
+import { doesTaskConversationSessionBelongToCardByDeclaredOwnership } from "./in-progress-task-detail-projection";
 
 /** 每个注册项目的原始输入：projectId + 展示名 + 已加载的 board（加载失败为 null，将被跳过）+ 各任务的对话推进时刻。 */
 export interface AllProjectsTaskSearchIndexProjectInput {
@@ -12,6 +16,7 @@ export interface AllProjectsTaskSearchIndexProjectInput {
 	board: RuntimeBoardData | null;
 	/** taskId → 对话上次推进时刻（epoch ms）；没有条目的任务投影为 null。 */
 	agentConversationProgressObservedAtByTaskId: ReadonlyMap<string, number>;
+	workspaceTaskIdByConversationSessionId?: ReadonlyMap<string, string | null>;
 }
 
 /**
@@ -49,7 +54,8 @@ export function overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversation
 		) {
 			continue;
 		}
-		const liveObservedAtMs = liveRuntimeSessionSummary.lastConversationProgressObservation?.observedAtMs;
+		const liveObservedAtMs =
+			resolveLastEffectiveAgentConversationActivityObservation(liveRuntimeSessionSummary)?.observedAtMs;
 		if (liveObservedAtMs === undefined) {
 			overlaidAgentConversationProgressObservedAtByTaskId.delete(taskId);
 			continue;
@@ -57,6 +63,33 @@ export function overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversation
 		overlaidAgentConversationProgressObservedAtByTaskId.set(taskId, liveObservedAtMs);
 	}
 	return overlaidAgentConversationProgressObservedAtByTaskId;
+}
+
+/** 活动时间与归属必须来自同一版本的summary，避免live时间搭配旧磁盘owner。 */
+export function overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot(input: {
+	persistedSnapshot: WorkspaceAgentConversationProgressAndOwnershipSnapshot;
+	liveRuntimeSessionSummaries: ReadonlyArray<RuntimeTaskSessionSummary>;
+}): WorkspaceAgentConversationProgressAndOwnershipSnapshot {
+	const ownerBySessionId = new Map(input.persistedSnapshot.workspaceTaskIdByConversationSessionId);
+	for (const summary of input.liveRuntimeSessionSummaries) {
+		if (
+			isNeverStartedPlaceholderTaskSessionSummary(summary) &&
+			input.persistedSnapshot.agentConversationProgressObservedAtByTaskId.has(summary.taskId)
+		)
+			continue;
+		if (summary.taskConversationSessionMetadata !== undefined)
+			ownerBySessionId.set(summary.taskId, summary.taskConversationSessionMetadata.workspaceTaskId);
+		else ownerBySessionId.delete(summary.taskId);
+	}
+	return {
+		agentConversationProgressObservedAtByTaskId:
+			overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId({
+				persistedAgentConversationProgressObservedAtByTaskId:
+					input.persistedSnapshot.agentConversationProgressObservedAtByTaskId,
+				liveRuntimeSessionSummaries: input.liveRuntimeSessionSummaries,
+			}),
+		workspaceTaskIdByConversationSessionId: ownerBySessionId,
+	};
 }
 
 /**
@@ -90,8 +123,15 @@ export function projectAllProjectsTaskSearchIndex(
 					updatedAt: card.updatedAt,
 					agentId: card.agentId ?? null,
 					mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId ?? null,
-					agentConversationProgressObservedAt:
-						project.agentConversationProgressObservedAtByTaskId.get(card.id) ?? null,
+					agentConversationProgressObservedAt: doesTaskConversationSessionBelongToCardByDeclaredOwnership(
+						card.id,
+						resolveMainTaskConversationSessionId(card),
+						project.workspaceTaskIdByConversationSessionId?.get(resolveMainTaskConversationSessionId(card)),
+					)
+						? (project.agentConversationProgressObservedAtByTaskId.get(
+								resolveMainTaskConversationSessionId(card),
+							) ?? null)
+						: null,
 				});
 			}
 		}

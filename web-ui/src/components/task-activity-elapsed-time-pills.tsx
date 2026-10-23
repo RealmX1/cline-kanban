@@ -1,58 +1,78 @@
-import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
-import { Activity, Clock, MessagesSquare } from "lucide-react";
-import type { RuntimeInProgressTaskDetail } from "@/runtime/types";
+import {
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "@runtime-agent-conversation-activity-observation";
+import { Activity, Hourglass, MessagesSquare } from "lucide-react";
+import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
+import { Tooltip } from "@/components/ui/tooltip";
+import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "@/runtime/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 
-/**
- * 跨项目切换面板的行（Focus View 左栏与 All projects 首页）用的时长药丸，与主看板卡片头部逐字同源、同语义：
- *   Clock          = 自创建至今；
- *   Activity       = 本轮停止生成至今（agent 回合 / park 期间无值 ⇒ 不显）；
- *   MessagesSquare = 对话上次推进至今（低置信来源加 `~` 前缀）。
- * 后两颗刻意不合并成一颗：前者是 per-incarnation 的离散状态转移（会话重开时刷新是**对**的），
- * 后者是跨 incarnation 的历史事实（会话重开时**不该**动）。历史上用一个 lastSubstantiveOutputAt
- * 冒充两者，正是「重开旧会话后时间被刷成 now」的成因。
- * 绝对本地时间走原生 title——避免把 Radix Tooltip 嵌进行按钮产生嵌套交互元素。
- */
+/** 精简行与完整卡同源：历史交棒、主对话推进；独立会话只在可聚焦的详情提示中分列。 */
 export function TaskActivityElapsedTimePills({
 	task,
 	nowMs,
 }: {
 	task: Pick<
 		RuntimeInProgressTaskDetail,
-		"createdAt" | "agentResponseGenerationStopped" | "lastConversationProgressObservation"
-	>;
+		| "createdAt"
+		| "agentResponseGenerationStopped"
+		| "lastConversationProgressObservation"
+		| "lastEffectiveAgentConversationActivityObservation"
+		| "lastAgentConversationUserHandoffObservation"
+		| "agentConversationPromptSubmissionAcceptance"
+	> &
+		Partial<
+			Pick<
+				RuntimeCrossProjectTaskSwitcherEntry,
+				"turnOwner" | "isParkedAwaitingDispatchedBackgroundWork" | "taskConversationSessionActivityObservations"
+			>
+		>;
 	nowMs: number;
 }): React.ReactElement {
+	const handoff =
+		task.turnOwner !== "agent" && !task.isParkedAwaitingDispatchedBackgroundWork
+			? resolveLastAgentConversationUserHandoffObservation(task)
+			: null;
+	const activity = resolveLastEffectiveAgentConversationActivityObservation(task);
+	const description = task.taskConversationSessionActivityObservations
+		? describeTaskConversationSessionActivityObservations(task.taskConversationSessionActivityObservations, nowMs)
+		: activity
+			? `主对话推进 · ${new Date(activity.observedAtMs).toLocaleString()} · ${activity.activityKind} · 证据：${activity.evidenceKind}`
+			: "主对话尚无可信活动时间";
 	return (
 		<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
-			<span
-				className="inline-flex items-center gap-0.5"
-				title={`Created · ${new Date(task.createdAt).toLocaleString()}`}
-			>
-				<Clock size={10} className="shrink-0" />
-				{formatCompactElapsedSince(task.createdAt, nowMs)}
-			</span>
-			{task.agentResponseGenerationStopped != null ? (
+			{handoff ? (
 				<span
 					className="inline-flex items-center gap-0.5"
-					title={`Stopped generating · ${new Date(task.agentResponseGenerationStopped.stoppedAt).toLocaleString()}`}
+					title={`交回用户 · ${new Date(handoff.observedAtMs).toLocaleString()}`}
+					data-agent-response-generation-stopped-pill=""
 				>
 					<Activity size={10} className="shrink-0" />
-					{formatCompactElapsedSince(task.agentResponseGenerationStopped.stoppedAt, nowMs)}
+					{formatCompactElapsedSince(handoff.observedAtMs, nowMs)}
 				</span>
 			) : null}
-			{task.lastConversationProgressObservation != null ? (
+			<Tooltip content={<span className="whitespace-pre-line">{description}</span>}>
 				<span
-					className="inline-flex items-center gap-0.5"
-					title={`Conversation last advanced · ${new Date(
-						task.lastConversationProgressObservation.observedAtMs,
-					).toLocaleString()} · source: ${task.lastConversationProgressObservation.evidenceKind}`}
+					role="group"
+					tabIndex={0}
+					aria-label="各会话独立活动时间"
+					className="pointer-events-auto inline-flex items-center gap-0.5"
+					title={description}
+					data-task-conversation-session-activity-details=""
+					data-last-conversation-progress-pill={activity ? "" : undefined}
 				>
 					<MessagesSquare size={10} className="shrink-0" />
-					{isLowConfidenceLastConversationProgressEvidence(task.lastConversationProgressObservation.evidenceKind)
-						? "~"
-						: ""}
-					{formatCompactElapsedSince(task.lastConversationProgressObservation.observedAtMs, nowMs)}
+					{activity
+						? `${activity.evidenceKind === "terminal_output_heuristic_classification" ? "~" : ""}${formatCompactElapsedSince(activity.observedAtMs, nowMs)}`
+						: "活动未知"}
+				</span>
+			</Tooltip>
+			{task.agentConversationPromptSubmissionAcceptance?.status === "pending" ||
+			task.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
+				<span role="status" className="inline-flex items-center gap-0.5 text-status-gold">
+					<Hourglass size={10} />
+					{task.agentConversationPromptSubmissionAcceptance.status === "pending" ? "提交待确认" : "尚未确认接受"}
 				</span>
 			) : null}
 		</span>

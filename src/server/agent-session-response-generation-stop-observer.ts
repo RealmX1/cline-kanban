@@ -9,6 +9,7 @@
 // 本模块只做两件事：边沿检测（纯函数，可单测）+ 落库。不杀进程、不碰 UI、不发通知。
 
 import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
+import { resolveCurrentAgentProcessUserTurnIdleRetentionStarted } from "../core/agent-conversation-activity-observation";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS,
@@ -134,16 +135,18 @@ function buildRetentionDeadlineInput(
 	// 前者被 spinner 重绘推进，后者有节流窗口，二者都不表达「这一轮结束了」。
 	const gracePeriodMs =
 		options.gracePeriodMs ?? AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS;
+	const currentProcessIdleRetentionStarted = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary);
 	const stopEdgeOfCurrentTurn =
-		summary.agentResponseGenerationStopped?.turnSequence === (summary.agentResponseGenerationTurnSequence ?? 0)
-			? summary.agentResponseGenerationStopped
+		currentProcessIdleRetentionStarted?.turnSequence === (summary.agentResponseGenerationTurnSequence ?? 0)
+			? currentProcessIdleRetentionStarted
 			: null;
 	const retentionAnchorAt = Math.min(stopEdgeOfCurrentTurn?.stoppedAt ?? summary.updatedAt, options.nowMs);
 	return {
 		...shared,
 		retentionAnchorKind: "agent_response_generation_stopped",
 		retentionAnchorAt,
-		responseGenerationStopSignalConfidence: deriveAgentResponseGenerationStopSignalConfidence(summary),
+		responseGenerationStopSignalConfidence:
+			stopEdgeOfCurrentTurn?.signalConfidence ?? deriveAgentResponseGenerationStopSignalConfidence(summary),
 		reclamationEligibleAt: computeAgentSessionRuntimeReclamationEligibleAt(retentionAnchorAt, gracePeriodMs),
 	};
 }

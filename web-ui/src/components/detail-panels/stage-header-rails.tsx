@@ -144,6 +144,7 @@ function StageHeaderRailEntry({
 							card,
 							columnId,
 							sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
+							taskSessions,
 							selected: true,
 							handlers: taskCardActionHandlers,
 							workspacePath,

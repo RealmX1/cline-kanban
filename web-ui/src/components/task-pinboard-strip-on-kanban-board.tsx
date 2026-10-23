@@ -86,6 +86,7 @@ export function TaskPinboardStripOnKanbanBoard({
 									card,
 									columnId,
 									sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
+									taskSessions,
 									handlers,
 									onActivateCard,
 									workspacePath,

@@ -1,4 +1,6 @@
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import { resolveLastEffectiveAgentConversationActivityObservation } from "@runtime-agent-conversation-activity-observation";
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	type CardSessionActivity,
@@ -227,10 +229,14 @@ function buildParkedAwaitingDispatchedBackgroundWorkSessionActivity(
 }
 
 function buildTaskSessionOverlay(
+	board: BoardData,
 	taskSessionSummariesByTaskId: Record<string, RuntimeTaskSessionSummary>,
 ): Map<string, TaskSessionOverlayEntry> {
 	const overlayByTaskId = new Map<string, TaskSessionOverlayEntry>();
-	for (const [taskId, summary] of Object.entries(taskSessionSummariesByTaskId)) {
+	for (const card of board.columns.flatMap((column) => column.cards)) {
+		const taskId = card.id;
+		const summary = resolveMainTaskConversationSessionSummary(card, taskSessionSummariesByTaskId);
+		if (!summary) continue;
 		// 展示文案与过滤分类必须对 park 给出同一个判断：parked 的主 agent 在 facet 上就是个普通 running 三元组
 		// {turnOwner:"agent", liveness:"live", userTurnKind:null}，`deriveCardSessionActivity` 不读 park sidecar，
 		// 会把它画成「Thinking...」；而 `deriveTaskSessionActivityFilterCategory` 读 sidecar、判成 Parked。
@@ -244,7 +250,8 @@ function buildTaskSessionOverlay(
 					? buildParkedAwaitingDispatchedBackgroundWorkSessionActivity(summary)
 					: deriveCardSessionActivity(summary),
 			sessionActivityCategory,
-			agentConversationProgressAtEpochMs: summary.lastConversationProgressObservation?.observedAtMs ?? null,
+			agentConversationProgressAtEpochMs:
+				resolveLastEffectiveAgentConversationActivityObservation(summary)?.observedAtMs ?? null,
 		});
 	}
 	return overlayByTaskId;
@@ -417,14 +424,14 @@ export function useTaskSpotlightSearchController({
 		if (!isOpen) {
 			return EMPTY_TASK_SESSION_OVERLAY;
 		}
-		const nextOverlay = buildTaskSessionOverlay(taskSessionSummariesByTaskId);
+		const nextOverlay = buildTaskSessionOverlay(board, taskSessionSummariesByTaskId);
 		const nextSignature = buildTaskSessionOverlaySignature(nextOverlay);
 		if (nextSignature === stableTaskSessionOverlayCacheRef.current.signature) {
 			return stableTaskSessionOverlayCacheRef.current.overlayByTaskId;
 		}
 		stableTaskSessionOverlayCacheRef.current = { signature: nextSignature, overlayByTaskId: nextOverlay };
 		return nextOverlay;
-	}, [isOpen, taskSessionSummariesByTaskId]);
+	}, [isOpen, board, taskSessionSummariesByTaskId]);
 
 	/**
 	 * 取一篇文档对应的会话叠加项。**先比 projectId 再取 taskId**：taskId 只在单个 board 内唯一，

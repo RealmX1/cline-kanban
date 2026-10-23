@@ -91,7 +91,10 @@ describe("TerminalSessionManager auto-restart", () => {
 						.map((fragment) => fragment.split("\u001b[201~")[0])
 						.join("");
 					if (echoDelayMs !== null) {
-						setTimeout(() => session.triggerData(`› ${pendingPromptText}`), echoDelayMs);
+						setTimeout(
+							() => session.triggerData(`\u001b[2J\u001b[Hmodel: gpt-test\r\n› ${pendingPromptText}`),
+							echoDelayMs,
+						);
 					}
 				} else if (input === "\r" && pendingPromptText) {
 					if (Date.now() < nativeStartupEndsAt || remainingSwallowedCarriageReturns-- > 0) {

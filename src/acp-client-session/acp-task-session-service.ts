@@ -36,6 +36,7 @@ import type {
 	AcpCreateElicitationResponse,
 	AcpRequestPermissionRequest,
 	AcpRequestPermissionResponse,
+	AcpSessionNotification,
 } from "./acp-protocol-boundary";
 import {
 	type AcpTaskMessage,
@@ -111,7 +112,27 @@ const DENY_ALL_USER_DECISION_BROKER: AcpUserDecisionBroker = {
 	},
 };
 
+const ACP_PROMPT_ACCEPTANCE_CONFIRMATION_TIMEOUT_MS = 15_000;
+interface AcpPromptTurnAwaitingProtocolEvidence {
+	connection: AcpTaskConnection;
+	entry: AcpTaskSessionEntry;
+	runtimeSessionIncarnationId: string;
+	eventId: string;
+	attemptedAtMs: number;
+	originalSubmittedPromptText: string;
+	accepted: boolean;
+	cancellationRequested: boolean;
+	confirmationTimeout: ReturnType<typeof setTimeout> | null;
+	onPromptAcceptanceSettledCallbacks: ((accepted: boolean) => void)[];
+	acceptanceOutcomeReported: boolean;
+}
+
 export class AcpTaskSessionService {
+	private readonly inFlightPromptCancellationNotificationCountByConnection = new WeakMap<AcpTaskConnection, number>();
+	private readonly promptTurnAwaitingProtocolEvidenceByTaskId = new Map<
+		string,
+		AcpPromptTurnAwaitingProtocolEvidence
+	>();
 	private userPromptSubmittedListener: ((taskId: string, text: string) => void) | null = null;
 	setUserPromptSubmittedListener(listener: (taskId: string, text: string) => void): void {
 		this.userPromptSubmittedListener = listener;
@@ -196,13 +217,27 @@ export class AcpTaskSessionService {
 				if (!context) {
 					return;
 				}
+				if (
+					!context.isReplayingPersistedConversationHistory &&
+					isAcpProtocolUpdateEvidenceOfPromptProcessing(notification, context.entry)
+				) {
+					if (notification.sessionId === this.connectionRuntime.getConnection(taskId)?.sessionId)
+						this.confirmPromptAcceptedFromProtocolEvidence(taskId);
+				}
 				applyAcpSessionUpdate(context, notification);
 			},
-			onPermissionRequest: async (taskId, request) =>
-				await this.userDecisionBroker.requestToolPermission(taskId, request),
-			onElicitationRequest: async (taskId, request) =>
-				await this.userDecisionBroker.requestElicitation(taskId, request),
+			onPermissionRequest: async (taskId, request) => {
+				if (!this.connectionRuntime.isReplayingPersistedConversationHistory(taskId))
+					this.confirmPromptAcceptedFromProtocolEvidence(taskId);
+				return await this.userDecisionBroker.requestToolPermission(taskId, request);
+			},
+			onElicitationRequest: async (taskId, request) => {
+				if (!this.connectionRuntime.isReplayingPersistedConversationHistory(taskId))
+					this.confirmPromptAcceptedFromProtocolEvidence(taskId);
+				return await this.userDecisionBroker.requestElicitation(taskId, request);
+			},
 			onConnectionClosed: (taskId, detail) => {
+				this.finishTrackingPromptTurn(taskId);
 				this.userDecisionBroker.cancelPendingDecisions(taskId);
 				if (detail.closeIntent === "disposed_by_kanban") {
 					// stop / clear / 关服拆掉的连接：终态（interrupted，或 clear 后的全新空会话）已由
@@ -280,9 +315,7 @@ export class AcpTaskSessionService {
 			!shouldResumeWithoutResendingPrompt &&
 			Boolean(request.taskConversationSessionMainContextForkSourceNativeSessionId);
 
-		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
-		// 免得进程冷启动那几秒里卡片看起来毫无反应。
-		// 续跑重开不走这条：没有新的用户输入可落，卡片也不该被推成 running（会话很可能正停在 Review）。
+		// 乐观消息只表示发送尝试；在协议证明接受之前不将回合交给 Agent。
 		const promptText = shouldResumeWithoutResendingPrompt ? "" : request.prompt.trim();
 		if (
 			!isForkingMainContext &&
@@ -296,18 +329,9 @@ export class AcpTaskSessionService {
 				),
 			);
 		}
-		// 开局 facet 必须跟着同一个分支走，否则「不落乐观 user 消息」只做了一半：续跑重开在 session/load
-		// 期间**没有任何 agent 产出**，把卡片推成 running 等于让它假装进 In Progress，直到重播结束才翻回
-		// Review——一次没有任何 agent 产出的假 running。回合从开局起就归用户。
-		// 成因取 "hook"（agent 只是把回合交回来了，没有任何东西在等你拍板），与 PTY 侧同一场景的
-		// startWithoutPromptReviewReason 同款；换成 "attention" 会派生出 userTurnKind=needs_input，
-		// 落进 MODAL_USER_DECISION_TURN_KINDS，让后台程序化投递一直让位到超时。
-		// 连接还没起，pid 只能如实写 null（liveness 因此是 exited，而不是撒谎说有个活进程）。
-		// 失败路径不受影响：起不来时 catch 里的 recordTaskFailure 会用 failed/error 覆写，绝不会停在这里。
-		const sessionStateWhileConnectionIsBeingEstablished = shouldResumeWithoutResendingPrompt
-			? "awaiting_review"
-			: "running";
-		const reviewReasonWhileConnectionIsBeingEstablished = shouldResumeWithoutResendingPrompt ? "hook" : null;
+		// 新建、重开及 session/load 期间均等待真实接受证据，不能用进程就绪冒充开工。
+		const sessionStateWhileConnectionIsBeingEstablished = "awaiting_review";
+		const reviewReasonWhileConnectionIsBeingEstablished = "hook";
 		this.emitSummary(
 			updateAcpSummary(entry, {
 				...deriveAcpFacetPatch(
@@ -395,7 +419,13 @@ export class AcpTaskSessionService {
 
 			this.emitSummary(
 				updateAcpSummary(entry, {
-					...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: request.agentId }),
+					...deriveAcpFacetPatch("awaiting_review", "hook", { pid: connection.pid, agentId: request.agentId }),
+					reviewReason: "hook",
+					currentAgentProcessUserTurnIdleRetentionStarted: {
+						stoppedAt: now(),
+						signalConfidence: "session_ready_never_prompted",
+						turnSequence: entry.summary.agentResponseGenerationTurnSequence ?? 0,
+					},
 					pid: connection.pid,
 					// 新活体：ACP 侧的活体就是这个刚 spawn 出来的子进程 + 握手完成的连接。回收调度器据此
 					// 判断「已落盘的期限说的还是不是同一个活体」，重连出来的新会话不会被陈旧期限误杀。
@@ -466,25 +496,45 @@ export class AcpTaskSessionService {
 		taskId: string,
 		text: string,
 		images?: RuntimeTaskImage[],
+		onPromptAcceptanceSettled?: (accepted: boolean) => void,
+		programmaticPromptSubmissionIdempotencyKey?: string,
 	): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.registry.getEntry(taskId);
 		const connection = this.connectionRuntime.getConnection(taskId);
 		if (!entry || !connection) {
 			return null;
 		}
+		const previousAcceptance = entry.summary.agentConversationPromptSubmissionAcceptance;
+		if (
+			programmaticPromptSubmissionIdempotencyKey &&
+			previousAcceptance?.eventId === programmaticPromptSubmissionIdempotencyKey
+		) {
+			const existingRequest = this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId);
+			if (previousAcceptance.status === "pending" && existingRequest && !existingRequest.acceptanceOutcomeReported) {
+				if (onPromptAcceptanceSettled)
+					existingRequest.onPromptAcceptanceSettledCallbacks.push(onPromptAcceptanceSettled);
+			} else onPromptAcceptanceSettled?.(previousAcceptance.status === "accepted");
+			return cloneAcpSummary(entry.summary);
+		}
+		if (
+			this.promptTurnAwaitingProtocolEvidenceByTaskId.has(taskId) ||
+			this.inFlightPromptCancellationNotificationCountByConnection.has(connection)
+		) {
+			throw new Error("当前 ACP 请求正在处理，无法同时提交另一条输入。");
+		}
 		this.emitMessage(
 			taskId,
 			appendAcpMessage(entry, createAcpMessage(taskId, "user", text, { source: "acp" }, images)),
 		);
-		const summary = updateAcpSummary(entry, {
-			...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: connection.agentId }),
-			// 新 prompt 到达 = 编排方回来恢复（或用户亲自接手），等同 PTY 的 UserPromptSubmit 清 park。
-			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
-			reviewReason: null,
-		});
-		this.emitSummary(summary);
-		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images), text);
-		return summary;
+		void this.runPromptTurn(
+			taskId,
+			connection,
+			buildAcpPromptBlocks(text, images),
+			text,
+			onPromptAcceptanceSettled,
+			programmaticPromptSubmissionIdempotencyKey,
+		);
+		return cloneAcpSummary(entry.summary);
 	}
 
 	// dd2db 2x：与 TerminalSessionManager 同名同义的 park 三件套（见 acp-task-session-park-awaiting-dispatched-background-work.ts）。
@@ -553,6 +603,7 @@ export class AcpTaskSessionService {
 	}
 
 	async cancelTaskTurn(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+		this.markPromptTurnCancellationRequested(taskId);
 		const entry = this.registry.getEntry(taskId);
 		const connection = this.connectionRuntime.getConnection(taskId);
 		if (!entry || !connection) {
@@ -561,9 +612,21 @@ export class AcpTaskSessionService {
 		// 铁律（ACP 规范）：发出 session/cancel 后必须把所有 pending 的 requestPermission
 		// 用 cancelled outcome 回掉，否则 agent 侧会一直挂着等回复。
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
-		await connection.cancel().catch(() => null);
+		const incarnationId = entry.summary.runtimeSessionIncarnationId;
+		const releaseCancellationNotification = this.trackPromptCancellationNotificationInFlight(connection);
+		try {
+			await connection.cancel().catch(() => null);
+		} finally {
+			releaseCancellationNotification();
+		}
+		if (
+			this.registry.getEntry(taskId) !== entry ||
+			this.connectionRuntime.getConnection(taskId) !== connection ||
+			entry.summary.runtimeSessionIncarnationId !== incarnationId
+		)
+			return this.getSummary(taskId);
 		const summary = updateAcpSummary(entry, {
-			...deriveAcpFacetPatch("idle", null, { pid: connection.pid, agentId: connection.agentId }),
+			...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
 			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
@@ -572,13 +635,26 @@ export class AcpTaskSessionService {
 	}
 
 	async abortTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+		this.markPromptTurnCancellationRequested(taskId);
 		const entry = this.registry.getEntry(taskId);
 		const connection = this.connectionRuntime.getConnection(taskId);
 		if (!entry || !connection) {
 			return null;
 		}
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
-		await connection.cancel().catch(() => null);
+		const incarnationId = entry.summary.runtimeSessionIncarnationId;
+		const releaseCancellationNotification = this.trackPromptCancellationNotificationInFlight(connection);
+		try {
+			await connection.cancel().catch(() => null);
+		} finally {
+			releaseCancellationNotification();
+		}
+		if (
+			this.registry.getEntry(taskId) !== entry ||
+			this.connectionRuntime.getConnection(taskId) !== connection ||
+			entry.summary.runtimeSessionIncarnationId !== incarnationId
+		)
+			return this.getSummary(taskId);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
 			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
@@ -589,6 +665,7 @@ export class AcpTaskSessionService {
 	}
 
 	async stopTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+		this.finishTrackingPromptTurn(taskId);
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
 			return null;
@@ -616,24 +693,42 @@ export class AcpTaskSessionService {
 		taskId: string,
 		options: { gracefulTimeoutMs?: number; forcefulTimeoutMs?: number } = {},
 	): Promise<{ rootPid: number | null; rootProcessExitConfirmed: boolean; usedForcefulEscalation: boolean }> {
+		this.finishTrackingPromptTurn(taskId);
 		const entry = this.registry.getEntry(taskId);
-		this.userDecisionBroker.cancelPendingDecisions(taskId);
+		const incarnationId = entry?.summary.runtimeSessionIncarnationId;
 		const connection = this.connectionRuntime.getConnection(taskId);
-		if (connection) {
-			await connection.cancel().catch(() => null);
+		this.userDecisionBroker.cancelPendingDecisions(taskId);
+		const releaseCancellationNotification = connection
+			? this.trackPromptCancellationNotificationInFlight(connection)
+			: () => {};
+		try {
+			if (connection) await connection.cancel().catch(() => null);
+			if (
+				this.registry.getEntry(taskId) !== entry ||
+				this.connectionRuntime.getConnection(taskId) !== connection ||
+				entry?.summary.runtimeSessionIncarnationId !== incarnationId
+			) {
+				return { rootPid: connection?.pid ?? null, rootProcessExitConfirmed: false, usedForcefulEscalation: false };
+			}
+			const exitConfirmation = await this.connectionRuntime.stopTaskConnectionAndConfirmExit(taskId, options);
+			if (
+				entry &&
+				this.registry.getEntry(taskId) === entry &&
+				entry.summary.runtimeSessionIncarnationId === incarnationId
+			) {
+				this.emitSummary(
+					updateAcpSummary(entry, {
+						...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+						...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+						pid: null,
+						reviewReason: null,
+					}),
+				);
+			}
+			return exitConfirmation;
+		} finally {
+			releaseCancellationNotification();
 		}
-		const exitConfirmation = await this.connectionRuntime.stopTaskConnectionAndConfirmExit(taskId, options);
-		if (entry) {
-			this.emitSummary(
-				updateAcpSummary(entry, {
-					...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
-					...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
-					pid: null,
-					reviewReason: null,
-				}),
-			);
-		}
-		return exitConfirmation;
 	}
 
 	// 把一次会话回收的可审计结果写回 summary sidecar（与终端 / Cline 侧同名同义）。
@@ -651,6 +746,7 @@ export class AcpTaskSessionService {
 	}
 
 	async clearTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+		this.finishTrackingPromptTurn(taskId);
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
 			return null;
@@ -679,10 +775,31 @@ export class AcpTaskSessionService {
 	// clear 后这仍是一条 ACP 会话（重建空 entry），而切换之后它已经是一条 PTY 会话了，
 	// 账本里再留着条目就会让 chat 端点继续把它当 ACP 任务分派。
 	discardTaskSessionLedgerEntry(taskId: string): void {
+		this.finishTrackingPromptTurn(taskId);
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
 		this.connectionRuntime.disposeTaskConnection(taskId);
 		this.latestStartRequestByTaskId.delete(taskId);
 		this.registry.deleteEntry(taskId);
+	}
+
+	applyTaskConversationSessionMetadata(
+		taskId: string,
+		metadata: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) return null;
+		if (JSON.stringify(entry.summary.taskConversationSessionMetadata) === JSON.stringify(metadata))
+			return cloneAcpSummary(entry.summary);
+		const latestStartRequest = this.latestStartRequestByTaskId.get(taskId);
+		if (latestStartRequest)
+			this.latestStartRequestByTaskId.set(taskId, {
+				...latestStartRequest,
+				taskConversationSessionMetadata: metadata,
+				workspaceTaskId: metadata?.workspaceTaskId,
+			});
+		const summary = updateAcpSummary(entry, { taskConversationSessionMetadata: metadata });
+		this.emitSummary(summary);
+		return summary;
 	}
 
 	applyCurrentWorkPhaseGoal(
@@ -720,6 +837,8 @@ export class AcpTaskSessionService {
 	}
 
 	disposeAllTaskSessions(): void {
+		for (const taskId of this.promptTurnAwaitingProtocolEvidenceByTaskId.keys())
+			this.finishTrackingPromptTurn(taskId);
 		this.connectionRuntime.disposeAllTaskConnections();
 	}
 
@@ -728,30 +847,196 @@ export class AcpTaskSessionService {
 		connection: AcpTaskConnection,
 		promptBlocks: AcpContentBlock[],
 		originalSubmittedPromptText: string,
+		onPromptAcceptanceSettled?: (accepted: boolean) => void,
+		programmaticPromptSubmissionIdempotencyKey?: string,
 	): Promise<void> {
+		const entry = this.registry.getEntry(taskId);
+		const runtimeSessionIncarnationId = entry?.summary.runtimeSessionIncarnationId;
+		if (!entry || !runtimeSessionIncarnationId || this.promptTurnAwaitingProtocolEvidenceByTaskId.has(taskId)) return;
+		const pending: AcpPromptTurnAwaitingProtocolEvidence = {
+			connection,
+			entry,
+			runtimeSessionIncarnationId,
+			eventId: programmaticPromptSubmissionIdempotencyKey ?? `acp-prompt:${randomUUID()}`,
+			attemptedAtMs: now(),
+			originalSubmittedPromptText,
+			accepted: false,
+			cancellationRequested: false,
+			confirmationTimeout: null,
+			onPromptAcceptanceSettledCallbacks: onPromptAcceptanceSettled ? [onPromptAcceptanceSettled] : [],
+			acceptanceOutcomeReported: false,
+		};
+		this.promptTurnAwaitingProtocolEvidenceByTaskId.set(taskId, pending);
+		this.emitSummary(
+			updateAcpSummary(entry, {
+				agentConversationPromptSubmissionAcceptance: {
+					status: "pending",
+					attemptedAtMs: pending.attemptedAtMs,
+					eventId: pending.eventId,
+					nativeSessionId: connection.sessionId,
+					runtimeSessionIncarnationId,
+				},
+			}),
+		);
+		pending.confirmationTimeout = setTimeout(() => {
+			if (!pending.accepted && this.isPromptTurnStillCurrent(taskId, pending)) {
+				this.reportPromptAcceptanceOutcome(pending, false);
+				this.emitSummary(
+					updateAcpSummary(entry, {
+						agentConversationPromptSubmissionAcceptance: {
+							status: "unconfirmed",
+							attemptedAtMs: pending.attemptedAtMs,
+							eventId: pending.eventId,
+							nativeSessionId: connection.sessionId,
+							runtimeSessionIncarnationId,
+						},
+					}),
+				);
+			}
+		}, ACP_PROMPT_ACCEPTANCE_CONFIRMATION_TIMEOUT_MS);
+		pending.confirmationTimeout.unref();
 		try {
-			const promptTurn = connection.prompt(promptBlocks);
-			this.userPromptSubmittedListener?.(taskId, originalSubmittedPromptText);
-			const liveEntry = this.registry.getEntry(taskId);
-			if (liveEntry && this.connectionRuntime.getConnection(taskId) === connection) {
-				this.emitSummary(updateAcpSummary(liveEntry, { agentCurrentWorkPhaseGoalInvalidatedAt: now() }));
-			}
-			const response = await promptTurn;
-			// 上下文必须在 await 之后重新取：这段时间里会话可能已被 stop 掉或被 clear 换成新的，
-			// 那时旧回合的结果一律丢弃，否则会把 interrupted 改写回 awaiting_review，
-			// 或者把结果写到刚重建的空会话上。
+			const response = await connection.prompt(promptBlocks);
+			if (pending.cancellationRequested || !this.isPromptTurnStillCurrent(taskId, pending)) return;
+			this.confirmPromptAcceptedFromProtocolEvidence(taskId);
+			if (!this.isPromptTurnStillCurrent(taskId, pending)) return;
 			const context = this.buildUpdateContextForStillLiveConnection(taskId, connection);
-			if (!context) {
-				return;
-			}
-			this.emitSummary(applyAcpPromptTurnCompletion(context, response.stopReason));
+			if (context) this.emitSummary(applyAcpPromptTurnCompletion(context, response.stopReason));
 		} catch (error) {
-			// 同理：连接是被我们自己拆掉的话，这条 rejection 只是 stop / clear 的副产物，不是任务失败。
-			if (!this.buildUpdateContextForStillLiveConnection(taskId, connection)) {
-				return;
-			}
+			if (pending.cancellationRequested || !this.isPromptTurnStillCurrent(taskId, pending)) return;
+			if (!pending.accepted)
+				this.emitSummary(
+					updateAcpSummary(entry, {
+						agentConversationPromptSubmissionAcceptance: {
+							status: "unconfirmed",
+							attemptedAtMs: pending.attemptedAtMs,
+							eventId: pending.eventId,
+							nativeSessionId: connection.sessionId,
+							runtimeSessionIncarnationId,
+						},
+					}),
+				);
 			this.emitSummary(this.recordTaskFailure(taskId, connection.agentId, error));
+		} finally {
+			if (this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId) === pending)
+				this.finishTrackingPromptTurn(taskId);
 		}
+	}
+
+	private isPromptTurnStillCurrent(taskId: string, pending: AcpPromptTurnAwaitingProtocolEvidence): boolean {
+		return (
+			this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId) === pending &&
+			this.registry.getEntry(taskId) === pending.entry &&
+			pending.entry.summary.runtimeSessionIncarnationId === pending.runtimeSessionIncarnationId &&
+			this.connectionRuntime.getConnection(taskId) === pending.connection &&
+			pending.entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId === pending.connection.sessionId
+		);
+	}
+
+	private confirmPromptAcceptedFromProtocolEvidence(taskId: string): void {
+		const pending = this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId);
+		if (
+			!pending ||
+			pending.accepted ||
+			pending.cancellationRequested ||
+			!this.isPromptTurnStillCurrent(taskId, pending)
+		)
+			return;
+		pending.accepted = true;
+		if (pending.confirmationTimeout) clearTimeout(pending.confirmationTimeout);
+		pending.confirmationTimeout = null;
+		const confirmedAtMs = now();
+		this.emitSummary(
+			updateAcpSummary(pending.entry, {
+				...deriveAcpFacetPatch("running", null, {
+					pid: pending.connection.pid,
+					agentId: pending.connection.agentId,
+				}),
+				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+				reviewReason: null,
+				agentCurrentWorkPhaseGoalInvalidatedAt: confirmedAtMs,
+				agentConversationPromptSubmissionAcceptance: {
+					status: "accepted",
+					attemptedAtMs: pending.attemptedAtMs,
+					confirmedAtMs,
+					eventId: pending.eventId,
+					nativeSessionId: pending.connection.sessionId,
+					runtimeSessionIncarnationId: pending.runtimeSessionIncarnationId,
+				},
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: confirmedAtMs,
+					activityKind: "accepted_user_input",
+					evidenceKind: "native_user_prompt_acceptance",
+					eventId: pending.eventId,
+					nativeSessionId: pending.connection.sessionId,
+				},
+				lastAgentConversationPromptCacheReferenceObservation: {
+					observedAtMs: pending.attemptedAtMs,
+					evidenceKind: "main_agent_conversation_request_processing_cache_reference_estimate",
+				},
+			}),
+		);
+		this.reportPromptAcceptanceOutcome(pending, true);
+		this.userPromptSubmittedListener?.(taskId, pending.originalSubmittedPromptText);
+	}
+
+	private trackPromptCancellationNotificationInFlight(connection: AcpTaskConnection): () => void {
+		this.inFlightPromptCancellationNotificationCountByConnection.set(
+			connection,
+			(this.inFlightPromptCancellationNotificationCountByConnection.get(connection) ?? 0) + 1,
+		);
+		return () => {
+			const remainingNotifications =
+				(this.inFlightPromptCancellationNotificationCountByConnection.get(connection) ?? 1) - 1;
+			if (remainingNotifications === 0)
+				this.inFlightPromptCancellationNotificationCountByConnection.delete(connection);
+			else this.inFlightPromptCancellationNotificationCountByConnection.set(connection, remainingNotifications);
+		};
+	}
+
+	private markPromptTurnCancellationRequested(taskId: string): void {
+		const pending = this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId);
+		if (!pending) return;
+		// session/cancel 只是一条通知：保留旧 prompt 的唯一归属，直到请求结算或连接关闭。
+		// 取消后的输出和迟到成功响应也不能把已报未知的投递重新确认成已接受。
+		pending.cancellationRequested = true;
+		this.settleUnconfirmedPromptAcceptance(taskId, pending);
+	}
+
+	private finishTrackingPromptTurn(taskId: string): void {
+		const pending = this.promptTurnAwaitingProtocolEvidenceByTaskId.get(taskId);
+		this.promptTurnAwaitingProtocolEvidenceByTaskId.delete(taskId);
+		if (pending) this.settleUnconfirmedPromptAcceptance(taskId, pending);
+	}
+
+	private settleUnconfirmedPromptAcceptance(taskId: string, pending: AcpPromptTurnAwaitingProtocolEvidence): void {
+		if (pending.confirmationTimeout) clearTimeout(pending.confirmationTimeout);
+		pending.confirmationTimeout = null;
+		if (!pending.accepted) this.reportPromptAcceptanceOutcome(pending, false);
+		if (
+			!pending.accepted &&
+			this.registry.getEntry(taskId) === pending.entry &&
+			pending.entry.summary.runtimeSessionIncarnationId === pending.runtimeSessionIncarnationId &&
+			pending.entry.summary.agentConversationPromptSubmissionAcceptance?.status === "pending"
+		) {
+			this.emitSummary(
+				updateAcpSummary(pending.entry, {
+					agentConversationPromptSubmissionAcceptance: {
+						status: "unconfirmed",
+						attemptedAtMs: pending.attemptedAtMs,
+						eventId: pending.eventId,
+						nativeSessionId: pending.connection.sessionId,
+						runtimeSessionIncarnationId: pending.runtimeSessionIncarnationId,
+					},
+				}),
+			);
+		}
+	}
+
+	private reportPromptAcceptanceOutcome(pending: AcpPromptTurnAwaitingProtocolEvidence, accepted: boolean): void {
+		if (pending.acceptanceOutcomeReported) return;
+		pending.acceptanceOutcomeReported = true;
+		for (const listener of pending.onPromptAcceptanceSettledCallbacks) listener(accepted);
 	}
 
 	// 仅当账本里那条连接仍是发起本回合的同一条时才给出上下文。
@@ -860,3 +1145,21 @@ export function createAcpTaskSessionService(
 }
 
 export type { AcpTaskSessionEntry };
+
+// 只接受真正处理当前 prompt 的协议活动；模式、usage、plan 元数据及 user 历史回声均不构成证明。
+function isAcpProtocolUpdateEvidenceOfPromptProcessing(
+	notification: AcpSessionNotification,
+	entry: AcpTaskSessionEntry,
+): boolean {
+	const update = notification.update;
+	switch (update.sessionUpdate) {
+		case "agent_message_chunk":
+		case "agent_thought_chunk":
+			return update.content.type === "text" ? update.content.text.length > 0 : true;
+		case "tool_call":
+		case "tool_call_update":
+			return Boolean(update.toolCallId) && !entry.toolMessageIdByToolCallId.has(update.toolCallId);
+		default:
+			return false;
+	}
+}

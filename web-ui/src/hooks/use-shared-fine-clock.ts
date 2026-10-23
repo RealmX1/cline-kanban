@@ -3,14 +3,14 @@ import { useCallback, useSyncExternalStore } from "react";
 /**
  * 细粒度共享时钟（1s）。
  *
- * 存在理由：「computing 脉动」需要一个秒级 tick 让卡片在 agent 输出跨过静默边界后停止脉动
- * （deriveDisplayLiveness 的 computing/quiet 是随时间漂移的派生叠加，summary 静默期不再广播）。
+ * 存在理由：「近期活动脉动」需要一个秒级 tick 让卡片在可信活动跨过近期窗口后停止脉动
+ * （近期可信活动／quiet 是随时间漂移的展示派生，summary 静默期不再广播）。
  * 原先每张需要脉动的卡各开一个 1s `setInterval`，且**完全不分标签页可见性**——后台标签页照样
  * 每秒把这些卡重渲一遍。这里改成与 use-shared-coarse-clock 同款的进程内单例：一个定时器、
  * 一个 `visibilitychange` 监听，所有订阅者共享同一个时间戳。标签页不可见时定时器停摆，
  * 重新可见时立刻补发一次当前时间。
  *
- * 只适用于秒级读数（computing 派生）。分钟级读数（时长药丸）请用更省的
+ * 只适用于秒级读数（近期活动派生）。分钟级读数（时长药丸）请用更省的
  * `useSharedCoarseClockTimestampMs`，别用本时钟让整列卡每秒重渲。
  */
 const SHARED_FINE_CLOCK_TICK_INTERVAL_MS = 1_000;

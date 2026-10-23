@@ -334,7 +334,7 @@ describe("mergeSummaryWithFacets（Stage 4 写侧主真相源派发器）", () =
 		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
 	});
 
-	// 为什么这里不再是**整体**逐字一致：两个构造器在 agentResponseGenerationStopped 上有意不等价。
+	// 为什么这里不再是**整体**逐字一致：两个构造器在 currentAgentProcessUserTurnIdleRetentionStarted 上有意不等价。
 	// applySessionFacets 是**幂等重投影**——只从既有字段推 facet，压根不知道「这一次调用是不是一次状态
 	// 转移」，因此天然给不出「本轮何时停止生成」；对同一个 summary 反复 apply 必须得到同一结果，若它也写
 	// 停止时刻，每次重投影都会把时刻改写成当下，直接毁掉幂等性。mergeSummaryWithFacets 是**写侧漏斗**，
@@ -344,7 +344,7 @@ describe("mergeSummaryWithFacets（Stage 4 写侧主真相源派发器）", () =
 	it("state-only patch（无 facet）→ legacy 向，除停止事件外与今日 applySessionFacets 逐字一致", () => {
 		const base = runningBase("claude");
 		const next = mergeSummaryWithFacets(base, { state: "awaiting_review", reviewReason: "error", pid: null });
-		const { agentResponseGenerationStopped, ...nextWithoutStopEvent } = next;
+		const { currentAgentProcessUserTurnIdleRetentionStarted, ...nextWithoutStopEvent } = next;
 		expect(nextWithoutStopEvent).toEqual(
 			applySessionFacets({ ...base, state: "awaiting_review", reviewReason: "error", pid: null }),
 		);
@@ -352,7 +352,7 @@ describe("mergeSummaryWithFacets（Stage 4 写侧主真相源派发器）", () =
 		// signalConfidence 是 session_ready_never_prompted 而非 structured_user_turn，因为本用例的 base 是
 		// applySessionFacets 直接构造的（绕开了写侧漏斗），回合序号从未被 bump 过 ⇒ 仍是 0。这是测试构造的
 		// 产物，不是生产路径——生产里进入 agent 回合必经 mergeSummaryWithFacets，序号会被推到 1。
-		expect(agentResponseGenerationStopped).toEqual({
+		expect(currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: next.updatedAt,
 			signalConfidence: "session_ready_never_prompted",
 			turnSequence: 0,
@@ -418,11 +418,11 @@ describe("mergeSummaryWithFacets（Stage 4 写侧主真相源派发器）", () =
 });
 
 // ── 停止事件的边沿语义（本模块的核心不变量：无关写入绝不把时间戳刷成当下）────────────────────
-// `agentResponseGenerationStopped` 表达的是「**本次 incarnation** 何时进入非生成态」这一**离散状态
+// `currentAgentProcessUserTurnIdleRetentionStarted` 表达的是「**本次 incarnation** 何时进入非生成态」这一**离散状态
 // 转移**，不是一份「当前不在生成」的电平快照。二者的差别正是这颗药丸历史上反复复发的那一类缺陷：
 // 电平判据下，任何一次与状态转移无关的写（lastOutputAt bump / latestHookActivity 更新 /
 // connectionRetry 变化，全都流经 mergeSummaryWithFacets）都会把 stoppedAt 刷成「此刻」。
-describe("agentResponseGenerationStopped（边沿触发，不是电平触发）", () => {
+describe("currentAgentProcessUserTurnIdleRetentionStarted（边沿触发，不是电平触发）", () => {
 	const FIRST_INCARNATION = "incarnation-first";
 	const SECOND_INCARNATION = "incarnation-second";
 
@@ -458,33 +458,33 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 	// 补出一个 stoppedAt=此刻 的事件，随后被 incarnation+turnSequence 双键冻结住，卡片药丸显示「刚刚停止」。
 	it("历史 user 回合（字段缺失）+ 连续 metadata-only 写 ⇒ 字段始终保持缺失，绝不凭空补出「此刻」", () => {
 		const hydratedFromDisk = historicalUserTurnWithoutStopEvent();
-		expect("agentResponseGenerationStopped" in hydratedFromDisk).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in hydratedFromDisk).toBe(false);
 
 		const afterOutputBump = mergeSummaryWithFacets(hydratedFromDisk, { lastOutputAt: 9_000, updatedAt: 9_000 });
-		expect("agentResponseGenerationStopped" in afterOutputBump).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in afterOutputBump).toBe(false);
 
 		const afterHookActivityBump = mergeSummaryWithFacets(afterOutputBump, { lastHookAt: 10_000, updatedAt: 10_000 });
-		expect("agentResponseGenerationStopped" in afterHookActivityBump).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in afterHookActivityBump).toBe(false);
 
 		const afterConnectionRetryChange = mergeSummaryWithFacets(afterHookActivityBump, {
 			connectionRetry: null,
 			updatedAt: 11_000,
 		});
-		expect("agentResponseGenerationStopped" in afterConnectionRetryChange).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in afterConnectionRetryChange).toBe(false);
 	});
 
 	it("agent→user 边沿 ⇒ 落一次事件，stoppedAt 取本次写入的 updatedAt", () => {
 		const running = enteredAgentTurn();
 		expect(running.agentResponseGenerationTurnSequence).toBe(1);
 		// agent 回合期间没有可谈的停止时刻，且不该凭空补一个 null 字段。
-		expect("agentResponseGenerationStopped" in running).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in running).toBe(false);
 
 		const stopped = mergeSummaryWithFacets(running, {
 			state: "awaiting_review",
 			reviewReason: "hook",
 			updatedAt: 5_000,
 		});
-		expect(stopped.agentResponseGenerationStopped).toEqual({
+		expect(stopped.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 5_000,
 			signalConfidence: "harness_turn_complete",
 			turnSequence: 1,
@@ -497,11 +497,11 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			reviewReason: "hook",
 			updatedAt: 5_000,
 		});
-		const frozenEvent = stopped.agentResponseGenerationStopped;
+		const frozenEvent = stopped.currentAgentProcessUserTurnIdleRetentionStarted;
 
 		const afterOutputBump = mergeSummaryWithFacets(stopped, { lastOutputAt: 8_000, updatedAt: 8_000 });
 		// 同一对象引用：写回门整段跳过，连一次重建都没发生。
-		expect(afterOutputBump.agentResponseGenerationStopped).toBe(frozenEvent);
+		expect(afterOutputBump.currentAgentProcessUserTurnIdleRetentionStarted).toBe(frozenEvent);
 
 		// reviewReason 从 hook 变成 attention 若被重算，signalConfidence 会退化成 structured_user_turn，
 		// 「这一次停止是怎么看出来的」就失真了。
@@ -509,7 +509,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			reviewReason: "attention",
 			updatedAt: 9_000,
 		});
-		expect(afterReviewReasonChange.agentResponseGenerationStopped).toEqual({
+		expect(afterReviewReasonChange.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 5_000,
 			signalConfidence: "harness_turn_complete",
 			turnSequence: 1,
@@ -523,7 +523,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			updatedAt: 5_000,
 		});
 		const resumed = mergeSummaryWithFacets(stopped, { state: "running", reviewReason: null, updatedAt: 10_000 });
-		expect(resumed.agentResponseGenerationStopped).toBeNull();
+		expect(resumed.currentAgentProcessUserTurnIdleRetentionStarted).toBeNull();
 		expect(resumed.agentResponseGenerationTurnSequence).toBe(2);
 
 		// 下一次停止是一次新的边沿：时刻与序号都取新值，而不是沿用上一轮那个已冻结的事件。
@@ -532,7 +532,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			reviewReason: "completion",
 			updatedAt: 14_000,
 		});
-		expect(stoppedAgain.agentResponseGenerationStopped).toEqual({
+		expect(stoppedAgain.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 14_000,
 			signalConfidence: "harness_turn_complete",
 			turnSequence: 2,
@@ -548,7 +548,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			updatedAt: 3_000,
 		});
 		expect(failed.turnOwner).toBe("user");
-		expect(failed.agentResponseGenerationStopped).toEqual({
+		expect(failed.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 3_000,
 			signalConfidence: "session_ready_never_prompted",
 			turnSequence: 0,
@@ -567,7 +567,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			runtimeSessionIncarnationId: SECOND_INCARNATION,
 			updatedAt: 20_000,
 		});
-		expect(reincarnated.agentResponseGenerationStopped?.stoppedAt).toBe(20_000);
+		expect(reincarnated.currentAgentProcessUserTurnIdleRetentionStarted?.stoppedAt).toBe(20_000);
 	});
 
 	// 同一条路径下，历史会话（字段缺失）换活体也**不该**被补出事件之外的行为差异：它同样是一次边沿，
@@ -578,7 +578,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			runtimeSessionIncarnationId: SECOND_INCARNATION,
 			updatedAt: 25_000,
 		});
-		expect(reincarnated.agentResponseGenerationStopped).toEqual({
+		expect(reincarnated.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 25_000,
 			signalConfidence: "session_ready_never_prompted",
 			turnSequence: 0,
@@ -588,13 +588,13 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 	it("patch 显式携带停止事件（磁盘水合 / 回收流程）⇒ 按原值采信，绝不被本次 updatedAt 覆写", () => {
 		const hydrated = mergeSummaryWithFacets(historicalUserTurnWithoutStopEvent(), {
 			updatedAt: 30_000,
-			agentResponseGenerationStopped: {
+			currentAgentProcessUserTurnIdleRetentionStarted: {
 				stoppedAt: 111,
 				signalConfidence: "harness_turn_complete",
 				turnSequence: 4,
 			},
 		});
-		expect(hydrated.agentResponseGenerationStopped).toEqual({
+		expect(hydrated.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 111,
 			signalConfidence: "harness_turn_complete",
 			turnSequence: 4,
@@ -612,14 +612,14 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 		});
 		expect(parked.turnOwner).toBe("agent");
 		expect(isParkedAwaitingDispatchedBackgroundWork(parked)).toBe(true);
-		expect("agentResponseGenerationStopped" in parked).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in parked).toBe(false);
 
 		// unpark 回到普通 agent 回合同样无事件——整段 park 期间该字段从未被写过。
 		const unparked = mergeSummaryWithFacets(parked, {
 			awaitingDispatchedBackgroundWork: null,
 			updatedAt: 7_000,
 		});
-		expect("agentResponseGenerationStopped" in unparked).toBe(false);
+		expect("currentAgentProcessUserTurnIdleRetentionStarted" in unparked).toBe(false);
 	});
 
 	// 锚点必须是「这次状态转移发生的瞬间」，即本次写入的 updatedAt。刻意不取 lastOutputAt（被 spinner
@@ -633,7 +633,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			lastOutputAt: 4_321,
 			lastSubstantiveOutputAt: 1_234,
 		});
-		expect(stopped.agentResponseGenerationStopped?.stoppedAt).toBe(5_000);
+		expect(stopped.currentAgentProcessUserTurnIdleRetentionStarted?.stoppedAt).toBe(5_000);
 	});
 
 	// 四档 signalConfidence 的完整映射。它是**纯标签**（不改宽限期、不改回收行为），但卡片药丸据它决定
@@ -654,7 +654,7 @@ describe("agentResponseGenerationStopped（边沿触发，不是电平触发）"
 			reviewReason,
 			updatedAt: 5_000,
 		});
-		expect(stopped.agentResponseGenerationStopped).toEqual({
+		expect(stopped.currentAgentProcessUserTurnIdleRetentionStarted).toEqual({
 			stoppedAt: 5_000,
 			signalConfidence: expectedConfidence,
 			turnSequence: 1,
@@ -768,7 +768,7 @@ describe("lastConversationProgressObservation（写侧漏斗把「是否在 agen
 		);
 	}
 
-	it("agent 回合中：更旧的转录观测只被忽略，绝不把 TUI 猜测拉回去（药丸不再每个探测周期抖一次）", () => {
+	it("agent 回合中：旧 TUI 猜测不迁移，第一条可信转录成为活动基线", () => {
 		const inAgentTurn = sessionCarryingLowConfidenceGuess({ state: "running", pid: 7 });
 		const afterLaggingProbe = mergeSummaryWithFacets(inAgentTurn, {
 			updatedAt: PROBED_AT,
@@ -778,7 +778,12 @@ describe("lastConversationProgressObservation（写侧漏斗把「是否在 agen
 				evidenceKind: "persisted_agent_transcript",
 			},
 		});
-		expect(afterLaggingProbe.lastConversationProgressObservation).toEqual(replayInflatedGuess);
+		expect(afterLaggingProbe.lastEffectiveAgentConversationActivityObservation).toEqual({
+			observedAtMs: CLASSIFIED_AT - 20 * 60_000,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		});
+		expect(afterLaggingProbe.lastConversationProgressObservation).toBeUndefined();
 	});
 
 	it("回合已交回用户：转录仍能把被重播刷错的低置信值拉回真相（ce120 纠偏能力保留）", () => {
@@ -795,7 +800,11 @@ describe("lastConversationProgressObservation（写侧漏斗把「是否在 agen
 			updatedAt: PROBED_AT,
 			lastConversationProgressObservation: transcriptTruth,
 		});
-		expect(afterProbe.lastConversationProgressObservation).toEqual(transcriptTruth);
+		expect(afterProbe.lastEffectiveAgentConversationActivityObservation).toEqual({
+			...transcriptTruth,
+			activityKind: "agent_output",
+		});
+		expect(afterProbe.lastConversationProgressObservation).toBeUndefined();
 	});
 });
 
