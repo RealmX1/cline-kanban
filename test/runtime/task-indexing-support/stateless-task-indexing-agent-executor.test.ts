@@ -83,6 +83,7 @@ describe("共享索引执行器的 stdout 字节流边界", () => {
 				`${JSON.stringify({ type: "result", subtype: "success", structured_output: expectedStructuredChineseResult })}\n`,
 			),
 		]);
+		if (!stdin) throw new Error("测试进程缺少标准输入。");
 		let receivedInput = "";
 		stdin.on("data", (chunk) => {
 			receivedInput += chunk.toString();

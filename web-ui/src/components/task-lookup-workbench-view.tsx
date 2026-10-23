@@ -1,9 +1,9 @@
 import { ArrowLeft, ExternalLink, Plus, Search, Send, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
+import { TaskLookupTurnExecutionDetails } from "@/components/task-lookup-turn-execution-details";
 import { TaskLookupTurnQuestion } from "@/components/task-lookup-turn-question";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
-import { TaskLookupTurnExecutionDetails } from "@/components/task-lookup-turn-execution-details";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";

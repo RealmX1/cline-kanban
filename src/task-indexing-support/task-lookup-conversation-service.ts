@@ -23,6 +23,7 @@ import {
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { readPersistentAgentPromptImageAttachments } from "../state/persistent-agent-prompt-image-attachments";
 import {
+	getThisRuntimeProcessInstanceId,
 	readRuntimeProcessInstanceLiveness,
 } from "../state/runtime-process-instance-heartbeat-registry";
 import {
@@ -79,12 +80,12 @@ const inScope = (material: TaskIndexingMaterial, scope: TaskLookupScope) =>
 	(scope.columnIds.length === 0 || scope.columnIds.includes(material.columnId));
 
 export function createTaskLookupConversationService(deps: TaskLookupConversationDependencies) {
-	const runtimeProcessInstanceId = deps.runtimeProcessInstanceId ?? randomUUID();
+	const runtimeProcessInstanceId = deps.runtimeProcessInstanceId ?? getThisRuntimeProcessInstanceId();
 	const activeRuns = new Map<string, { controller: AbortController; promise: Promise<void> }>();
 	const pendingConversationWrites = new Set<Promise<unknown>>();
 	const recoveryConversationFileSnapshots = new Map<
 		string,
-		{ fileVersion: string; foreignExecutionOwnerRuntimeProcessInstanceIds: string[] }
+		{ fileVersion: string; runningExecutionOwnerRuntimeProcessInstanceIds: string[] }
 	>();
 	let recoveryTimer: ReturnType<typeof setInterval> | null = null;
 	let recoveryInFlight: Promise<unknown> | null = null;
@@ -98,7 +99,9 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 		return join(deps.storageDirectoryPath, `${conversationId}.json`);
 	};
 	const readConversation = async (id: string) => {
-		const conversation = taskLookupConversationSchema.parse(JSON.parse(await readFile(pathForConversation(id), "utf8")));
+		const conversation = taskLookupConversationSchema.parse(
+			JSON.parse(await readFile(pathForConversation(id), "utf8")),
+		);
 		// 两条分支曾使用不同字段；读取旧候选历史时统一到已落地的归属字段。
 		for (const turn of conversation.turns)
 			turn.owningRuntimeProcessInstanceId ??= turn.executionOwnerRuntimeProcessInstanceId ?? undefined;
@@ -111,10 +114,14 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 		const metadata = await stat(pathForConversation(conversation.conversationId), { bigint: true });
 		recoveryConversationFileSnapshots.set(conversation.conversationId, {
 			fileVersion: [metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs].join(":"),
-			foreignExecutionOwnerRuntimeProcessInstanceIds: [
-				...new Set(conversation.turns.flatMap((turn) =>
-					turn.status === "running" && turn.owningRuntimeProcessInstanceId && turn.owningRuntimeProcessInstanceId !== runtimeProcessInstanceId
-						? [turn.owningRuntimeProcessInstanceId] : [])),
+			runningExecutionOwnerRuntimeProcessInstanceIds: [
+				...new Set(
+					conversation.turns.flatMap((turn) =>
+						turn.status === "running" && turn.owningRuntimeProcessInstanceId
+							? [turn.owningRuntimeProcessInstanceId]
+							: [],
+					),
+				),
 			],
 		});
 		observedConversationRevisions.set(conversation.conversationId, conversation.revision);
@@ -136,7 +143,9 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 	// 创建服务或监听失败都不应改写别的实例；恢复由归属心跳驱动。
 	const initialized = mkdir(deps.storageDirectoryPath, { recursive: true });
 	const readRuntimeOwnerLiveness = async (owner: string) =>
-		await (deps.readRuntimeOwnerLiveness ?? readRuntimeProcessInstanceLiveness)(owner).catch(() => "unknown" as const);
+		await (deps.readRuntimeOwnerLiveness ?? readRuntimeProcessInstanceLiveness)(owner).catch(
+			() => "unknown" as const,
+		);
 	const recoverConversation = async (id: string) => {
 		await initialized;
 		if (activeRuns.has(id)) return await readConversation(id);
@@ -205,9 +214,9 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 								? "本轮由另一个仍在线的运行时执行。"
 								: undefined;
 					if (turn.executionOwnershipWarning !== warning) {
+						// 活性未知只影响本次读取的提示，不推进持久历史或 revision。
 						turn.executionOwnershipWarning = warning;
 						turn.executionRecoveryMessage = warning;
-						changed = true;
 					}
 				}
 			}
@@ -238,7 +247,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				const previous = recoveryConversationFileSnapshots.get(id);
 				if (previous?.fileVersion === fileVersion) {
 					let hasDeadExecutionOwner = false;
-					for (const owner of previous.foreignExecutionOwnerRuntimeProcessInstanceIds) {
+					for (const owner of previous.runningExecutionOwnerRuntimeProcessInstanceIds) {
 						if ((await readRuntimeOwnerLiveness(owner)) === "dead") {
 							hasDeadExecutionOwner = true;
 							break;
@@ -251,13 +260,11 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 				if (recoveryConversationFileSnapshots.get(id) !== previous) continue;
 				recoveryConversationFileSnapshots.set(id, {
 					fileVersion,
-					foreignExecutionOwnerRuntimeProcessInstanceIds: [
+					runningExecutionOwnerRuntimeProcessInstanceIds: [
 						...new Set(
 							conversation.turns.flatMap((turn) => {
 								const owner = turn.owningRuntimeProcessInstanceId;
-								return turn.status === "running" && owner && owner !== runtimeProcessInstanceId
-									? [owner]
-									: [];
+								return turn.status === "running" && owner ? [owner] : [];
 							}),
 						),
 					],

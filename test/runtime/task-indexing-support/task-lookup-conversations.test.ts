@@ -2,10 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
-import { StatelessTaskIndexingAgentExecutionError } from "../../../src/task-indexing-support/stateless-task-indexing-agent-execution-diagnostics";
 import type { TaskIndexingMaterial } from "../../../src/core/task-indexing-support-contract";
 import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
+import { StatelessTaskIndexingAgentExecutionError } from "../../../src/task-indexing-support/stateless-task-indexing-agent-execution-diagnostics";
 import { createTaskLookupConversationService } from "../../../src/task-indexing-support/task-lookup-conversation-service";
 
 const roots: string[] = [];
@@ -71,7 +70,6 @@ async function setup() {
 				usage: { resolvedModelId: null },
 				stablePromptPrefixSha256: "prefix",
 				elapsedMs: 1,
-				diagnosticWarnings: [],
 				diagnosticWarnings: [],
 			};
 		},
@@ -429,7 +427,6 @@ describe("持久多轮查卡服务", () => {
 				stablePromptPrefixSha256: "prefix",
 				elapsedMs: 1,
 				diagnosticWarnings: [],
-				diagnosticWarnings: [],
 			}),
 		});
 		const conversation = await emptyService.createConversation({
@@ -735,7 +732,8 @@ describe("持久多轮查卡服务", () => {
 			}),
 		).rejects.toThrow("不可用于不同查询");
 		await service.close();
-	});	it("轮次已被外部终止时，迟到模型结果既不覆盖终态，也不再启动下一次调用", async () => {
+	});
+	it("轮次已被外部终止时，迟到模型结果既不覆盖终态，也不再启动下一次调用", async () => {
 		const { service: initial, dependencies, requests } = await setup();
 		await initial.close();
 		const entered = createSynchronizationBarrier(),
@@ -1103,5 +1101,47 @@ describe("持久多轮查卡服务", () => {
 		});
 		expect(turn?.executionActivityTimeline?.some((activity) => activity.eventKind === "query_completed")).toBe(false);
 	});
-
+	it("旧候选字段的执行归属可读取，仍在线时不会当作无归属旧轮恢复", async () => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "legacy-owner-field",
+			questionText: "保留旧归属",
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		await service.close();
+		const turn = saved.turns[0];
+		if (!turn) throw new Error("缺少查询轮次。");
+		turn.executionOwnerRuntimeProcessInstanceId = turn.owningRuntimeProcessInstanceId;
+		delete turn.owningRuntimeProcessInstanceId;
+		turn.status = "running";
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		const observer = createTaskLookupConversationService({
+			...dependencies,
+			readRuntimeOwnerLiveness: async () => "live",
+		});
+		try {
+			expect((await observer.getConversation(conversation.conversationId)).turns[0]).toMatchObject({
+				status: "running",
+				owningRuntimeProcessInstanceId: turn.executionOwnerRuntimeProcessInstanceId,
+			});
+			await expect(
+				observer.submitTurn({
+					conversationId: conversation.conversationId,
+					requestId: "forbidden-legacy-recovery",
+					questionText: "不能结束活轮",
+					explicitlyRecoveredUnownedTurnId: turn.turnId,
+				}),
+			).rejects.toThrow("仍有执行归属");
+		} finally {
+			await observer.close();
+		}
+	});
 });

@@ -328,7 +328,10 @@ export function useTaskLookupWorkbench({
 		candidatePreview,
 		previewError,
 		errorMessage:
-			actionErrorMessage ?? conversationReadErrorMessage ?? historyReadErrorMessage ?? executorSettingsReadErrorMessage,
+			actionErrorMessage ??
+			conversationReadErrorMessage ??
+			historyReadErrorMessage ??
+			executorSettingsReadErrorMessage,
 		isPending,
 		isLoading,
 		executorSettings,
