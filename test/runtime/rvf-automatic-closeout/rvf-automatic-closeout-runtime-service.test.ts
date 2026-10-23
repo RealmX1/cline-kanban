@@ -307,6 +307,78 @@ async function setup(
 	};
 }
 describe("RVF 宿主自动收尾与持久投递链", () => {
+	it.each(["pending", "unconfirmed"] as const)(
+		"本代输入接受为 %s 时保留原生会话，确认接受后才继续恢复",
+		async (status) => {
+			const context = await setup();
+			await context.complete();
+			const summary = context.manager.getSummary();
+			summary.runtimeSessionIncarnationId = "current-incarnation";
+			summary.agentConversationPromptSubmissionAcceptance = {
+				status,
+				attemptedAtMs: Date.now(),
+				runtimeSessionIncarnationId: "current-incarnation",
+			};
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+			expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+			expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.waitingReasonCode).toBe(
+				"agent_turn_not_ready_for_closeout",
+			);
+			summary.agentConversationPromptSubmissionAcceptance = {
+				...summary.agentConversationPromptSubmissionAcceptance,
+				status: "accepted",
+				confirmedAtMs: Date.now(),
+				eventId: "accepted-current-input",
+				nativeSessionId: "native",
+			};
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		},
+	);
+	it("上一 incarnation 的待确认提交不阻断当前空闲会话的恢复", async () => {
+		const context = await setup();
+		await context.complete();
+		const summary = context.manager.getSummary();
+		summary.runtimeSessionIncarnationId = "current-incarnation";
+		summary.agentConversationPromptSubmissionAcceptance = {
+			status: "pending",
+			attemptedAtMs: Date.now(),
+			runtimeSessionIncarnationId: "previous-incarnation",
+		};
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	});
+	it("恢复期间出现待确认输入时不停止会话，接受确认后复用已创建的 fork", async () => {
+		const context = await setup();
+		await context.complete();
+		const summary = context.manager.getSummary();
+		summary.runtimeSessionIncarnationId = "current-incarnation";
+		const readOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+		if (!readOccupancy) throw new Error("缺少输入框观测实现");
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementationOnce(async (taskId) => {
+			const occupancy = await readOccupancy(taskId);
+			summary.agentConversationPromptSubmissionAcceptance = {
+				status: "pending",
+				attemptedAtMs: Date.now(),
+				runtimeSessionIncarnationId: "current-incarnation",
+			};
+			return occupancy;
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+		if (!summary.agentConversationPromptSubmissionAcceptance) throw new Error("缺少本代输入提交记录");
+		summary.agentConversationPromptSubmissionAcceptance = {
+			...summary.agentConversationPromptSubmissionAcceptance,
+			status: "accepted",
+			confirmedAtMs: Date.now(),
+		};
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	});
 	it("Codex 未建模输入框读屏且输入侧确认无草稿时继续恢复", async () => {
 		const context = await setup();
 		await context.complete();

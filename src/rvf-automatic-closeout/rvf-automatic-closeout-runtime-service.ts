@@ -232,10 +232,18 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		if (!identitySwitchAlreadyStarted && manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId))
 			throw new RvfAutomaticCloseoutPauseError("会话已停止或被暂停，自动收尾不再续跑。");
 		const facets = resolveSessionFacets(summary);
+		const inputSubmission = summary.agentConversationPromptSubmissionAcceptance;
+		// CR 已清空输入账本，但原生接受确认前 facet 仍可能是 review，不能据此停止进程。
+		const hasUnconfirmedInputSubmissionForCurrentLiveProcess =
+			facets.liveness === "live" &&
+			inputSubmission != null &&
+			inputSubmission.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
+			inputSubmission.status !== "accepted";
 		if (
 			!["live", "exited"].includes(facets.liveness) ||
 			facets.turnOwner !== "user" ||
 			facets.userTurnKind !== "review" ||
+			hasUnconfirmedInputSubmissionForCurrentLiveProcess ||
 			manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked
 		)
 			throw new RvfAutomaticCloseoutWaitError(
