@@ -146,6 +146,7 @@ function QueuedPromptSourceBadge({
 }
 
 function PendingQueuedPromptRow({
+	isTaskAgentExecutionDisabled,
 	projection,
 	position,
 	isFirstPending,
@@ -154,6 +155,7 @@ function PendingQueuedPromptRow({
 	isChainedToNext,
 	controller,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 	position: number;
 	isFirstPending: boolean;
@@ -225,6 +227,7 @@ function PendingQueuedPromptRow({
 						variant="ghost"
 						size="xs"
 						icon={<Check size={12} />}
+						disabled={isTaskAgentExecutionDisabled}
 						onClick={() =>
 							void controller.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart([projection.queueEntryId])
 						}
@@ -289,9 +292,11 @@ function MergeWithNextToggle({
 }
 
 function SettledQueuedPromptRow({
+	isTaskAgentExecutionDisabled,
 	projection,
 	controller,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
@@ -316,6 +321,7 @@ function SettledQueuedPromptRow({
 								variant="ghost"
 								size="xs"
 								icon={<RotateCcw size={12} />}
+								disabled={isTaskAgentExecutionDisabled}
 								onClick={() => void controller.retrySettledFailedQueuedPromptDelivery(projection.queueEntryId)}
 							>
 								Requeue
@@ -349,9 +355,11 @@ function SettledQueuedPromptRow({
 }
 
 export function QueuedTaskPromptDeliveryQueuePanel({
+	isTaskAgentExecutionDisabled = false,
 	controller,
 	headerContent,
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	controller: QueuedTaskPromptDeliveryQueueController;
 	headerContent?: ReactNode;
 }): React.ReactElement {
@@ -365,6 +373,11 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				)}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
+				{isTaskAgentExecutionDisabled ? (
+					<p className="px-1 py-2 text-xs text-text-secondary">
+						任务已完成，恢复任务后可继续投递。现有队列记录仍可查看和取消。
+					</p>
+				) : null}
 				{pending.length === 0 ? (
 					<p className="px-1 py-2 text-xs leading-5 text-text-tertiary">
 						Queue a prompt from the Prompts tab to send it after the agent finishes its current turn.
@@ -386,6 +399,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						return (
 							<div key={projection.queueEntryId} className="flex flex-col gap-1">
 								<PendingQueuedPromptRow
+									isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 									projection={projection}
 									position={index + 1}
 									isFirstPending={index === 0}
@@ -412,6 +426,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						</span>
 						{settled.map((projection) => (
 							<SettledQueuedPromptRow
+								isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 								key={projection.queueEntryId}
 								projection={projection}
 								controller={controller}
