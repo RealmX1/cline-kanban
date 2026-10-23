@@ -142,6 +142,31 @@ describe("useTerminalPanels", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	it("任务进入 Done 后不会自动恢复此前打开的 shell，点击终端也不会启动进程", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const selection = createSelection("task-done");
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			latestSnapshot = snapshot;
+		};
+		await act(async () => root.render(<HookHarness selectedCard={selection} onSnapshot={onSnapshot} />));
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleToggleDetailTerminal();
+			await flushPromises();
+		});
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(1);
+		startShellSessionMutateMock.mockClear();
+		const doneSelection: CardSelection = {
+			...selection,
+			column: { id: "trash", title: "Done", cards: [selection.card] },
+		};
+		await act(async () => root.render(<HookHarness selectedCard={doneSelection} onSnapshot={onSnapshot} />));
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleToggleDetailTerminal();
+			await flushPromises();
+		});
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(false);
+		expect(startShellSessionMutateMock).not.toHaveBeenCalled();
+	});
 
 	beforeEach(() => {
 		window.localStorage.clear();

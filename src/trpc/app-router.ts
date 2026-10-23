@@ -175,6 +175,8 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskConversationHistoryPageRequest,
+	RuntimeTaskConversationHistoryPageResponse,
 	RuntimeTaskEditDraftsMutateRequest,
 	RuntimeTaskEditDraftsReadRequest,
 	RuntimeTaskEditDraftsResponse,
@@ -397,6 +399,8 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskConversationHistoryPageRequestSchema,
+	runtimeTaskConversationHistoryPageResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -757,6 +761,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatMessagesRequest,
 		) => Promise<RuntimeTaskChatMessagesResponse>;
+		getTaskConversationHistoryPage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationHistoryPageRequest,
+		) => Promise<RuntimeTaskConversationHistoryPageResponse>;
 		getClineSlashCommands: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeSlashCommandsResponse>;
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1783,6 +1791,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatMessagesResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
+			}),
+		getTaskConversationHistoryPage: workspaceProcedure
+			.input(runtimeTaskConversationHistoryPageRequestSchema)
+			.output(runtimeTaskConversationHistoryPageResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 			}),
 		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeSlashCommandsResponseSchema)

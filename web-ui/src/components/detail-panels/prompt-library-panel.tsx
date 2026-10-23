@@ -246,6 +246,7 @@ function useAutosizedPromptTextarea({
 }
 
 function PromptRow({
+	isTaskAgentExecutionDisabled,
 	prompt,
 	onChangeText,
 	onToggleScope,
@@ -257,6 +258,7 @@ function PromptRow({
 	onSetUsed,
 	onConvertToCommand,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	prompt: StoredPrompt;
 	onChangeText: (id: string, text: string) => void;
 	onToggleScope: (id: string, scope: PromptScope) => void;
@@ -362,7 +364,7 @@ function PromptRow({
 						size="xs"
 						icon={<CornerDownLeft size={14} />}
 						aria-label="Fill prompt into input"
-						disabled={!canFill}
+						disabled={!canFill || isTaskAgentExecutionDisabled}
 						onClick={() => onFill(prompt.text)}
 					/>
 				</Tooltip>
@@ -455,6 +457,7 @@ function PromptRow({
  * 默认折叠：这是个低频回收入口，不该在每次打开面板时都占掉正常条目的视线。
  */
 function OrphanedPromptsSection({
+	isTaskAgentExecutionDisabled,
 	orphanedPrompts,
 	isExpanded,
 	onToggleExpanded,
@@ -463,6 +466,7 @@ function OrphanedPromptsSection({
 	onFill,
 	onQueue,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	orphanedPrompts: StoredPrompt[];
 	isExpanded: boolean;
 	onToggleExpanded: () => void;
@@ -507,7 +511,7 @@ function OrphanedPromptsSection({
 										size="xs"
 										icon={<CornerDownLeft size={14} />}
 										aria-label="Fill orphaned prompt into input"
-										disabled={prompt.text.trim().length === 0}
+										disabled={isTaskAgentExecutionDisabled || prompt.text.trim().length === 0}
 										onClick={() => onFill(prompt.text)}
 									/>
 								</Tooltip>
@@ -538,6 +542,7 @@ function OrphanedPromptsSection({
 }
 
 export function PromptLibraryPanel({
+	isTaskAgentExecutionDisabled = false,
 	taskId,
 	projectId,
 	onFillInput,
@@ -546,6 +551,7 @@ export function PromptLibraryPanel({
 	taskIdsOnBoard = null,
 	entryKind = "draft_prompt",
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	taskId: string;
 	projectId: string;
 	onFillInput: (text: string) => void;
@@ -611,6 +617,7 @@ export function PromptLibraryPanel({
 								</h3>
 							) : null}
 							<PromptRow
+								isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 								key={prompt.id}
 								prompt={prompt}
 								onChangeText={updatePromptText}
@@ -628,6 +635,7 @@ export function PromptLibraryPanel({
 				)}
 				{!showsCommands && orphanedPrompts.length > 0 ? (
 					<OrphanedPromptsSection
+						isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 						orphanedPrompts={orphanedPrompts}
 						isExpanded={isOrphanedSectionExpanded}
 						onToggleExpanded={() => setIsOrphanedSectionExpanded((current) => !current)}

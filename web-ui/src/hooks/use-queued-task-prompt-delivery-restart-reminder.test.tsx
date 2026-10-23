@@ -52,11 +52,13 @@ function setVisibility(next: DocumentVisibilityState): void {
 const captured: { announcement: string | null } = { announcement: null };
 
 function ReminderHarness(props: {
+	enabled?: boolean;
 	projections: RuntimeQueuedTaskPromptDeliveryProjection[];
 	reconfirm: (ids: readonly string[]) => Promise<boolean>;
 	spotlight: (anchorKey: string, options?: unknown) => boolean;
 }): null {
 	const { restartReminderAnnouncement } = useQueuedTaskPromptDeliveryRestartReminder({
+		enabled: props.enabled,
 		taskId: "task-1",
 		projections: props.projections,
 		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: props.reconfirm,
@@ -70,6 +72,17 @@ describe("useQueuedTaskPromptDeliveryRestartReminder", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	it("Done 浏览停用提醒和自动重确认，保留原有队列", () => {
+		const reconfirm = vi.fn(async () => true);
+		const spotlight = vi.fn(() => true);
+		render({ enabled: false, projections: [projection("done-entry")], reconfirm, spotlight });
+		act(() => {
+			vi.advanceTimersByTime(10_000);
+		});
+		expect(spotlight).not.toHaveBeenCalled();
+		expect(reconfirm).not.toHaveBeenCalled();
+		expect(captured.announcement).toBeNull();
+	});
 
 	beforeEach(() => {
 		vi.useFakeTimers();
