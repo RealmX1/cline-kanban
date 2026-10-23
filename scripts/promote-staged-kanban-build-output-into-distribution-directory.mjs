@@ -39,6 +39,7 @@ export const DISTRIBUTION_ENTRY_FILES_PROMOTED_LAST_IN_ORDER = [
 	"web-ui/sw.js",
 	"web-ui/index.html",
 	"index.js",
+	"kanban-agent-hook-cli.js",
 	"cli.js",
 ];
 

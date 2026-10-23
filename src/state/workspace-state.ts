@@ -1,10 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
-
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
 	type RuntimeBoardColumnId,
@@ -26,6 +25,7 @@ import {
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
+import { createParsedPersistedJsonFileReadCache } from "./parsed-persisted-json-file-read-cache";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
 import {
@@ -231,7 +231,7 @@ export function getWorkspaceDirectoryPath(workspaceId: string): string {
 	return join(getWorkspacesRootPath(), workspaceId);
 }
 
-function getWorkspaceBoardPath(workspaceId: string): string {
+export function getPersistedWorkspaceBoardFilePathById(workspaceId: string): string {
 	return join(getWorkspaceDirectoryPath(workspaceId), BOARD_FILENAME);
 }
 
@@ -443,7 +443,7 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 }
 
 async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
-	const boardPath = getWorkspaceBoardPath(workspaceId);
+	const boardPath = getPersistedWorkspaceBoardFilePathById(workspaceId);
 	const rawBoard = await readJsonFile(boardPath);
 	// 旧盘里已退役的 `dependencies` 键由 runtimeBoardDataSchema（非 strict）在解析时静默剥离。
 	return reconcileBoardColumns(
@@ -783,6 +783,26 @@ export async function loadWorkspaceContext(
 		statePath: getWorkspaceDirectoryPath(ensuredWorkspaceId),
 		git: detectGitRepositoryInfo(repoPath),
 	};
+}
+
+const registeredWorkspaceIndexReadCache = createParsedPersistedJsonFileReadCache<WorkspaceIndexFile>();
+
+// 请求路由只需要已登记身份与路径；分支和提交信息由真正的 Git 操作显式读取。
+// .git 可以是主仓目录或 worktree 指针文件；索引写入和持锁校验不使用缓存。
+export async function resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(
+	workspaceId: string,
+): Promise<RuntimeWorkspaceIndexEntry | null> {
+	const index = await registeredWorkspaceIndexReadCache.read(getWorkspaceIndexPath(), readWorkspaceIndex);
+	const entry = index.entries[workspaceId];
+	if (!entry) return null;
+	try {
+		const directory = await stat(entry.repoPath);
+		if (!directory.isDirectory()) return null;
+		await stat(join(entry.repoPath, ".git"));
+	} catch {
+		return null;
+	}
+	return { workspaceId: entry.workspaceId, repoPath: entry.repoPath };
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {
@@ -1175,7 +1195,7 @@ export async function mutateWorkspaceState<T>(
 
 async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<string | null> {
 	try {
-		return await readFile(getWorkspaceBoardPath(workspaceId), "utf8");
+		return await readFile(getPersistedWorkspaceBoardFilePathById(workspaceId), "utf8");
 	} catch (error) {
 		if (isNodeErrorWithCode(error, "ENOENT")) {
 			return null;
@@ -1240,9 +1260,13 @@ async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvent
 			})
 		: null;
 
-	await lockedFileSystem.writeTextFileAtomic(getWorkspaceBoardPath(context.workspaceId), serializedNextBoard, {
-		lock: null,
-	});
+	await lockedFileSystem.writeTextFileAtomic(
+		getPersistedWorkspaceBoardFilePathById(context.workspaceId),
+		serializedNextBoard,
+		{
+			lock: null,
+		},
+	);
 	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), input.nextSessions, {
 		lock: null,
 	});

@@ -25,7 +25,7 @@ import type {
 	RuntimeTaskHookActivity,
 } from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
-import { buildKanbanCommandParts } from "../core/kanban-command";
+import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
 import { buildWindowsCmdArgsArray, resolveWindowsComSpec, shouldUseWindowsCmdLaunch } from "../core/windows-cmd-launch";
 import {
@@ -917,7 +917,7 @@ export function serializeHarnessUserPromptProcessingDirective(
 
 function spawnBackgroundKanban(args: string[]): void {
 	try {
-		const commandParts = buildKanbanCommandParts(args);
+		const commandParts = buildKanbanAgentHookCommandParts(args[0] === "hooks" ? args.slice(1) : args);
 		const child = spawn(commandParts[0], commandParts.slice(1), {
 			detached: false,
 			stdio: "ignore",

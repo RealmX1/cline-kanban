@@ -17,7 +17,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "../core/api-contract";
-import { buildKanbanCommandParts } from "../core/kanban-command";
+import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
 import { resolveOmpApprovalModeFlagValue } from "../core/omp-approval-mode-flag";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
@@ -200,7 +200,7 @@ function buildHookCommand(event: RuntimeHookEvent, metadata?: HookCommandMetadat
 }
 
 function buildHooksCommandParts(args: string[]): string[] {
-	return buildKanbanCommandParts(["hooks", ...args]);
+	return buildKanbanAgentHookCommandParts(args);
 }
 
 function buildHooksCommand(args: string[]): string {
