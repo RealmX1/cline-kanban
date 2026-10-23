@@ -2,7 +2,8 @@
 //
 // 这套断言存在的理由是排队 prompt 的 restart-crossing 盖章：判活错一次的后果是「常驻实例正排着的队
 // 被另一个实例误标」或「一次真实重启被漏掉」。前者只是多让人确认一次，后者是重启后不提醒直接发。
-// 所以每一条读失败路径都必须落在**判死**（多盖章）那一侧，不能落在判活那一侧。
+// 所以 readLiveRuntimeProcessInstanceIds 的读失败必须落在**判死**（多盖章）那一侧。
+// 查卡使用独立的三态 API；无法观测时保留状态，不能把未知情况当作已重启。
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ const {
 	getRuntimeProcessInstanceHeartbeatsDirectoryPath,
 	getThisRuntimeProcessInstanceId,
 	readLiveRuntimeProcessInstanceIds,
+	readRuntimeProcessInstanceLiveness,
 	RUNTIME_PROCESS_INSTANCE_CONSIDERED_DEAD_AFTER_MS,
 	RUNTIME_PROCESS_INSTANCE_HEARTBEAT_INTERVAL_MS,
 	startRuntimeProcessInstanceHeartbeat,
@@ -63,6 +65,27 @@ describe("runtime-process-instance-heartbeat-registry — 判活", () => {
 
 	it("目录不存在时返回空集（还没有任何实例写过心跳）", async () => {
 		expect(await readLiveRuntimeProcessInstanceIds({ nowEpochMs: NOW })).toEqual(new Set());
+	});
+	it("查卡判活区分活跃、过期、缺失与无法读取，坏文件不证明实例退出", async () => {
+		const owner = "d4214230-8b5c-4445-b724-b7f652730cbc";
+		expect(await readRuntimeProcessInstanceLiveness(owner)).toBe("dead");
+		await writeHeartbeatFile(`${owner}.json`, "损坏的 JSON");
+		expect(await readRuntimeProcessInstanceLiveness(owner)).toBe("unknown");
+		await writeHeartbeatFile(`${owner}.json`, {
+			runtimeProcessInstanceId: owner,
+			pid: 123,
+			startedAtEpochMs: Date.now() - 200000,
+			lastHeartbeatAtEpochMs: Date.now(),
+		});
+		expect(await readRuntimeProcessInstanceLiveness(owner)).toBe("live");
+		await writeHeartbeatFile(`${owner}.json`, {
+			runtimeProcessInstanceId: owner,
+			pid: 123,
+			startedAtEpochMs: Date.now() - 200000,
+			lastHeartbeatAtEpochMs: Date.now() - RUNTIME_PROCESS_INSTANCE_CONSIDERED_DEAD_AFTER_MS - 1,
+		});
+		expect(await readRuntimeProcessInstanceLiveness(owner)).toBe("dead");
+		expect(await readRuntimeProcessInstanceLiveness("../../outside")).toBe("unknown");
 	});
 
 	it("宽限期内的心跳判活，宽限期外的判死", async () => {

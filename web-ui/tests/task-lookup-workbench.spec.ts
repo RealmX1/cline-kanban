@@ -38,7 +38,7 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	});
 	let conversation: Record<string, unknown> | null = null;
 	const submissions: Record<string, unknown>[] = [];
-	let answerMode: "candidates" | "empty" | "failure" = "candidates";
+	let answerMode: "candidates" | "empty" | "failure" | "running" = "candidates";
 	await page.route("**/api/trpc/**", async (route) => {
 		const url = new URL(route.request().url());
 		const procedures = url.pathname.split("/api/trpc/")[1]?.split(",") ?? [];
@@ -80,14 +80,18 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 							requestId: input.requestId,
 							questionText: input.questionText,
 							scope: input.scope,
-							status: answerMode === "failure" ? "failed" : "completed",
-							phase: "finished",
-							startedAt: 1,
-							finishedAt: 2,
+							status: answerMode === "running" ? "running" : answerMode === "failure" ? "failed" : "completed",
+							phase: answerMode === "running" ? "collecting_materials" : "finished",
+							startedAt: answerMode === "running" ? Date.now() - 65_000 : 1,
+							phaseStartedAt: Date.now() - 65_000,
+							lastExecutionActivityAt: Date.now() - 65_000,
+							finishedAt: answerMode === "running" ? null : 2,
+							executorSettings: { agentId: "codex", modelId: null },
+							owningRuntimeProcessInstanceId: "isolated-runtime",
 							errorMessage: answerMode === "failure" ? "模型认证已过期" : null,
 							executions: [],
 							result:
-								answerMode === "failure"
+								answerMode === "failure" || answerMode === "running"
 									? null
 									: {
 											answerText: "按当前要求找到以下候选",
@@ -97,6 +101,25 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 										},
 						},
 					],
+				};
+				response = conversation;
+			}
+			if (procedure === "support.cancelTaskLookupTurn") {
+				const turns = conversation?.turns as Record<string, unknown>[];
+				conversation = {
+					...conversation,
+					revision: Number(conversation?.revision) + 1,
+					turns: turns.map((turn, index) =>
+						index === turns.length - 1
+							? {
+									...turn,
+									status: "cancelled",
+									phase: "finished",
+									finishedAt: Date.now(),
+									errorMessage: "用户已取消本轮查询。",
+								}
+							: turn,
+					),
 				};
 				response = conversation;
 			}
@@ -176,8 +199,94 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	await page.getByRole("button", { name: "查询任务", exact: true }).click();
 	await expect(page.getByText("模型认证已过期")).toBeVisible();
 	await page.screenshot({ path: test.info().outputPath("task-lookup-mobile.png") });
+	answerMode = "running";
+	await page.getByRole("textbox", { name: "查卡问题" }).fill("查看实时进度与失败诊断");
+	await page.getByRole("button", { name: "查询任务", exact: true }).click();
+	await expect(page.getByText("读取任务材料…", { exact: true })).toBeVisible();
+	await expect(page.getByText("已超过 60 秒没有新的执行活动，仍在等待；可以取消本轮。")).toBeVisible();
+	const turns = conversation?.turns as Record<string, unknown>[];
+	conversation = {
+		...conversation,
+		revision: Number(conversation?.revision) + 1,
+		turns: turns.map((turn, index) =>
+			index === turns.length - 1
+				? {
+						...turn,
+						phase: "explaining_candidates",
+						phaseStartedAt: Date.now(),
+						lastExecutionActivityAt: Date.now(),
+						inputByteCount: 32000,
+						modelExecutionTimeoutMs: 180000,
+						executionActivityTimeline: [
+							{
+								occurredAtEpochMs: Date.now(),
+								phase: "explaining_candidates",
+								eventKind: "agent_response_received",
+								message: "收到 Agent 事件：turn.started",
+							},
+						],
+					}
+				: turn,
+		),
+	};
+	await page.getByRole("button", { name: "模拟推流", exact: true }).click();
+	await expect(page.getByText("解释候选任务…", { exact: true })).toBeVisible();
+	await page.getByRole("button", { name: "返回任务", exact: true }).click();
+	await page.getByRole("button", { name: "打开 AI 查卡", exact: true }).click();
+	await expect(page.getByText("解释候选任务…", { exact: true })).toBeVisible();
+	await page.screenshot({ path: test.info().outputPath("task-lookup-progress-mobile.png") });
+	const currentTurns = conversation?.turns as Record<string, unknown>[];
+	conversation = {
+		...conversation,
+		revision: Number(conversation?.revision) + 1,
+		turns: currentTurns.map((turn, index) =>
+			index === currentTurns.length - 1
+				? {
+						...turn,
+						status: "failed",
+						phase: "finished",
+						finishedAt: Date.now(),
+						errorMessage: "模型调用已超时",
+						executionFailureDiagnostic: {
+							reasonCode: "execution_timeout",
+							failedPhase: "explaining_candidates",
+							detail: "模型调用已超时",
+							exitCode: null,
+							signal: "SIGKILL",
+							stderrTail: null,
+						},
+					}
+				: turn,
+		),
+	};
+	await page.getByRole("button", { name: "模拟重连", exact: true }).click();
+	const latestArticle = page.getByRole("log").locator("article").last();
+	await expect(latestArticle.getByText("停止阶段：解释候选任务 · 原因：execution_timeout")).toBeVisible();
+	await latestArticle.getByText("检索记录与诊断", { exact: true }).click();
+	await expect(latestArticle.getByText("收到 Agent 事件：turn.started", { exact: false })).toBeVisible();
+	await page.evaluate(() => {
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+		document.addEventListener("copy", (event) => {
+			document.body.dataset.copiedDiagnostic = event.clipboardData?.getData("text/plain") ?? "";
+		});
+	});
+	await latestArticle.getByRole("button", { name: "复制诊断", exact: true }).click();
+	await expect(latestArticle.getByText("诊断已复制", { exact: true })).toBeVisible();
+	const copied = await page.locator("body").getAttribute("data-copied-diagnostic");
+	expect(copied).toContain("execution_timeout");
+	expect(copied).not.toContain("查看实时进度与失败诊断");
+	answerMode = "candidates";
+	await latestArticle.getByRole("button", { name: "重新查询", exact: true }).click();
+	await expect.poll(() => submissions.length).toBe(7);
+	expect(submissions[6]?.questionText).toBe(submissions[5]?.questionText);
+	expect(submissions[6]?.scope).toEqual(submissions[5]?.scope);
+	answerMode = "running";
+	await page.getByRole("textbox", { name: "查卡问题" }).fill("取消中的查询");
+	await page.getByRole("button", { name: "查询任务", exact: true }).click();
+	await page.getByRole("button", { name: "取消本轮", exact: true }).click();
+	await expect(page.getByText("用户已取消本轮查询。", { exact: true })).toBeVisible();
 	expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-	expect(submissions).toHaveLength(5);
+	expect(submissions).toHaveLength(8);
 	for (const submission of submissions) {
 		expect(submission.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 	}
