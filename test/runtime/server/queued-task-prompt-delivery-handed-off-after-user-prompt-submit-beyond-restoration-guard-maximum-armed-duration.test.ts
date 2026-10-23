@@ -15,13 +15,13 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type {
 	RuntimeHookIngestRequest,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
 } from "../../../src/core/api-contract";
 import type * as WorkspaceStateModule from "../../../src/state/workspace-state";
+import { confirmTestNativeUserInputAcceptance } from "../../utilities/confirm-test-native-user-input-acceptance";
 
 const testRuntimeHome = vi.hoisted(() => ({ path: "" }));
 vi.mock("../../../src/state/workspace-state", async (importOriginal) => {
@@ -222,6 +222,11 @@ describe("恢复启动后首个真人提交晚于守卫兜底时长：排队投�
 				event: "to_in_progress",
 				metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
 				submittedPromptText: "接着把 handoff 补完",
+			});
+			confirmTestNativeUserInputAcceptance({
+				manager: harness.manager,
+				taskId: TASK_ID,
+				promptText: "接着把 handoff 补完",
 			});
 			expect(harness.manager.getSummary(TASK_ID)?.restorationContinuationGuardState).toBe("inactive");
 

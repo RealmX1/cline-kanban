@@ -214,7 +214,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		);
 	});
 
-	it("恢复后的结构化答案实际写入 PTY 时解除续跑守卫", async () => {
+	it("恢复后的空白终端不能凭静默证明输入框就绪，守卫保持", async () => {
 		const manager = new TerminalSessionManager();
 		await startTaskSessionOn(manager, "task-reclaimed");
 		await manager.forceStopTaskSession("task-reclaimed", 50);
@@ -225,7 +225,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		expect(queuedDelivery).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(65_000);
 
-		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(false);
+		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(true);
 	});
 
 	it("答案排队后会话退出：完成回执为失败且不会迟到写入 PTY", async () => {

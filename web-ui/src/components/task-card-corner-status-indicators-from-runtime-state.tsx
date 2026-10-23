@@ -42,7 +42,7 @@ export function TaskCardCornerStatusIndicatorsFromRuntimeState({
 			? isCrossProjectTaskSwitcherEntryRunning(
 					{
 						turnOwner: facets?.turnOwner ?? null,
-						lastOutputAt: sessionSummary.lastOutputAt,
+						liveness: facets?.liveness ?? "none",
 						isParkedAwaitingDispatchedBackgroundWork: isParkedAwaitingDispatchedBackgroundWork(sessionSummary),
 					},
 					nowMs,

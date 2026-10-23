@@ -50,6 +50,7 @@
       "@runtime-cross-project-recently-active-task-switcher-section-assignment": [
         "../src/core/cross-project-recently-active-task-switcher-section-assignment.ts"
       ],
+      "@runtime-agent-conversation-activity-observation": ["../src/core/agent-conversation-activity-observation.ts"],
       "@runtime-session-activity": ["../src/core/session-activity.ts"],
       "@runtime-state-stream-workspace-metadata-probe-scope-declaration": ["../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts"],
       "@runtime-trpc": ["../src/trpc/app-router.ts"],

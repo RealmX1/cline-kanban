@@ -67,7 +67,7 @@ export function notificationSummaryProgressIdentity(summary: RuntimeTaskSessionS
 	return JSON.stringify([
 		summary.runtimeSessionIncarnationId,
 		summary.agentResponseGenerationTurnSequence,
-		summary.lastConversationProgressObservation?.observedAtMs,
+		summary.lastAgentConversationUserHandoffObservation?.observedAtMs,
 		resolveSessionFacets(summary).turnOwner,
 	]);
 }

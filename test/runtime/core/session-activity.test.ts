@@ -82,104 +82,77 @@ describe("isAgentOutputQuiet（后端自动续跑静默门控）", () => {
 	});
 });
 
-describe("isAgentActivelyProducingOutput（前端 Validation 停留判据，读 lastSubstantiveOutputAt）", () => {
-	it("running 且最近一次实质输出在 5s 阈值内 → true（仍在持续产出）", () => {
+describe("Validation 持续活动只读统一可信观测", () => {
+	it.each([
+		"accepted_user_input",
+		"agent_output",
+		"tool_activity",
+		"context_compaction",
+		"model_request_dispatch",
+	] as const)("agent 回合最近有 %s 时仍有效活动", (activityKind) => {
 		const summary = makeSummary({
-			state: "running",
-			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+			lastEffectiveAgentConversationActivityObservation: {
+				observedAtMs: NOW - 1_000,
+				evidenceKind: "structured_agent_session_event",
+				activityKind,
+			},
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
 	});
-
-	it("running 但最近一次实质输出超过阈值（空闲）→ false（允许停留 Validation）", () => {
-		const summary = makeSummary({
-			state: "running",
-			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
-		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	it("实质 TUI 戳和每秒 PTY 字节均不能证明有效活动", () => {
+		expect(
+			isAgentActivelyProducingOutput(makeSummary({ lastOutputAt: NOW, lastSubstantiveOutputAt: NOW }), NOW),
+		).toBe(false);
 	});
-
-	it("恰好等于阈值边界 → false（阈值是严格小于）", () => {
-		const summary = makeSummary({
-			state: "running",
-			lastSubstantiveOutputAt: NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
-		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	it("恰好 5 秒或更早的活动不打回 Validation", () => {
+		for (const delta of [VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS, 60_000]) {
+			expect(
+				isAgentActivelyProducingOutput(
+					makeSummary({
+						lastEffectiveAgentConversationActivityObservation: {
+							observedAtMs: NOW - delta,
+							evidenceKind: "persisted_agent_transcript",
+							activityKind: "agent_output",
+						},
+					}),
+					NOW,
+				),
+			).toBe(false);
+		}
 	});
-
-	it("running 但 lastSubstantiveOutputAt 为 null（从未实质产出 / 已死残留）→ false", () => {
-		const summary = makeSummary({ state: "running", lastSubstantiveOutputAt: null });
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	// ── 本 bug 的核心回归：spinner 空转把 lastOutputAt 刷得恒新鲜，但实质戳未盖 / 已陈旧 → 不打回 ──
-	it("【回归】running + lastOutputAt 极新鲜 但 lastSubstantiveOutputAt 为 undefined（旧盘 / 未盖实质戳）→ false", () => {
-		const summary = makeSummary({ state: "running", lastOutputAt: NOW, lastSubstantiveOutputAt: undefined });
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	it("【回归】running + lastOutputAt 极新鲜（spinner 重绘）但 lastSubstantiveOutputAt 已陈旧 → false（允许停留 Validation）", () => {
-		const summary = makeSummary({
-			state: "running",
-			lastOutputAt: NOW,
-			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
-		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	it("不回退 lastOutputAt：lastOutputAt 新鲜 + lastSubstantiveOutputAt 为 null → false（绝不复用 lastOutputAt）", () => {
-		const summary = makeSummary({ state: "running", lastOutputAt: NOW, lastSubstantiveOutputAt: null });
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	it("awaiting_review 即使最近有实质输出也 → false（只对 agent 回合生效）", () => {
-		const summary = makeSummary({ state: "awaiting_review", lastSubstantiveOutputAt: NOW });
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	it("idle → false", () => {
-		const summary = makeSummary({ state: "idle", lastSubstantiveOutputAt: NOW });
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
-	});
-
-	it("undefined summary → false（任务无会话）", () => {
-		expect(isAgentActivelyProducingOutput(undefined, NOW)).toBe(false);
-	});
-
-	// 双轴迁移（Stage 3 ④）：门控由 state==="running" 翻为 resolveSessionFacets().turnOwner==="agent"。
-	// 下面钉住「facet 权威」语义——既证明带 facet 时采信 facet（而非 legacy state），也证明 no-facet
-	// 时即时派生与旧 state 判据全表等价（上方各例已覆盖 no-facet 路径）。
-	it("显式 facet turnOwner==='agent' 被采信（即使 legacy state 背离为 awaiting_review）→ 仍按 agent 回合判活跃", () => {
-		const summary = makeSummary({
-			state: "awaiting_review",
-			turnOwner: "agent",
-			liveness: "live",
-			userTurnKind: null,
-			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
-		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
-	});
-
-	it("显式 facet turnOwner==='user' 被采信（即使 legacy state 背离为 running）→ 非 agent 回合，false", () => {
-		const summary = makeSummary({
-			state: "running",
+	it("facet 权威，用户回合和 park 均不打回 Validation", () => {
+		const activity = {
+			observedAtMs: NOW,
+			evidenceKind: "structured_agent_session_event" as const,
+			activityKind: "tool_activity" as const,
+		};
+		const user = makeSummary({
 			turnOwner: "user",
 			liveness: "live",
 			userTurnKind: "review",
-			lastSubstantiveOutputAt: NOW,
+			lastEffectiveAgentConversationActivityObservation: activity,
 		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+		expect(isAgentActivelyProducingOutput(user, NOW)).toBe(false);
+		const parked = makeSummary({
+			awaitingDispatchedBackgroundWork: { sinceMs: NOW },
+			lastEffectiveAgentConversationActivityObservation: activity,
+		});
+		expect(isAgentActivelyProducingOutput(parked, NOW)).toBe(false);
 	});
-
-	it("显式 facet turnOwner==='agent' 但已超活跃窗口 → false（facet 决定回合、窗口决定新鲜度，正交）", () => {
-		const summary = makeSummary({
-			state: "running",
-			turnOwner: "agent",
-			liveness: "live",
-			userTurnKind: null,
-			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
-		});
-		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	it("没有会话或只有低可信观测时不打回", () => {
+		expect(isAgentActivelyProducingOutput(undefined, NOW)).toBe(false);
+		expect(
+			isAgentActivelyProducingOutput(
+				makeSummary({
+					lastEffectiveAgentConversationActivityObservation: {
+						observedAtMs: NOW,
+						evidenceKind: "terminal_output_heuristic_classification",
+						activityKind: "agent_output",
+					},
+				}),
+				NOW,
+			),
+		).toBe(false);
 	});
 });
 

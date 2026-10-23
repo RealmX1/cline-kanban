@@ -3,6 +3,7 @@
 // `messageId` 给流式 chunk 分组（omp 全程在发），而不是 Cline 那套 activeAssistantMessageId。
 import type {
 	RuntimeAgentId,
+	RuntimeEffectiveAgentConversationActivityKind,
 	RuntimeTaskChatMessage,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -69,7 +70,6 @@ export function createDefaultAcpSummary(taskId: string, agentId: RuntimeAgentId)
 		startedAt: null,
 		updatedAt: now(),
 		lastOutputAt: null,
-		lastSubstantiveOutputAt: null,
 		reviewReason: null,
 		exitCode: null,
 		lastHookAt: null,
@@ -110,10 +110,7 @@ export function cloneAcpMessage(message: AcpTaskMessage): AcpTaskMessage {
 	};
 }
 
-// ACP 侧唯一 summary 写漏斗。与 Cline 侧同构：**不对 lastSubstantiveOutputAt 做任何隐式推断**，
-// 推进它只能靠调用方显式经 withAgentSubstantiveOutputTimestamp 声明。
-// 反转前这里默认把 lastSubstantiveOutputAt 镜像成 lastOutputAt、靠写点 opt-out，
-// 完整的代价与理由见 src/cline-sdk/cline-session-state.ts updateSummary 的注释（两侧同因同修）。
+// ACP 侧唯一 summary 写漏斗；只有显式语义活动才推进统一观测。
 export function updateAcpSummary(
 	entry: AcpTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
@@ -122,24 +119,23 @@ export function updateAcpSummary(
 	return cloneAcpSummary(entry.summary);
 }
 
-// 显式声明「这一次写带来了新的 agent 实质产出」——推进 lastSubstantiveOutputAt 的唯一方式。
-// ACP 侧真正符合的只有流式 SessionUpdate（agent_message_chunk / agent_thought_chunk / tool_call /
-// tool_call_update / plan），见 acp-session-update-adapter.ts 的 emitRunningSummary。
-// 回合完成的 stopReason（end_turn / refusal / cancelled）是**回合边界**，正文早已由上面那些流式事件
-// 打过戳，不再重复推进；连接关闭、进程失败、用户发消息、会话回收同理。
-// 同时记一条「对话上次推进」观测：ACP 的 SessionUpdate 是**结构化**协议事件（不是刮 TUI 猜出来的），
-// 故与 Cline 侧同取 structured_agent_session_event。合并规则由 mergeSummaryWithFacets 统一执行，
-// 此处只如实上报一次观测、不做裁决。
-export function withAgentSubstantiveOutputTimestamp(
+// 协议中的新正文、工具活动和真实回合边界使用同一采集入口，分别标明活动种类。
+export function withEffectiveAgentConversationActivity(
 	patch: Partial<RuntimeTaskSessionSummary>,
+	activityKind: RuntimeEffectiveAgentConversationActivityKind = "agent_output",
 ): Partial<RuntimeTaskSessionSummary> {
-	const observedAtMs = now();
 	return {
 		...patch,
-		lastSubstantiveOutputAt: observedAtMs,
-		lastConversationProgressObservation: { observedAtMs, evidenceKind: "structured_agent_session_event" },
+		lastEffectiveAgentConversationActivityObservation: {
+			observedAtMs: now(),
+			evidenceKind: "structured_agent_session_event",
+			activityKind,
+		},
 	};
 }
+
+// 保留旧入口名供存量调用方逐步迁移，实际只写统一字段。
+export const withAgentSubstantiveOutputTimestamp = withEffectiveAgentConversationActivity;
 
 export function createAcpMessage(
 	taskId: string,

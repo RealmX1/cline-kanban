@@ -84,23 +84,52 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 				deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
 				return { ok: true, summary: clearedSummary, message: null };
 			}
-			const acpSummary = await acpTaskSessionService.sendTaskSessionInput(body.taskId, body.text, body.images);
+			await deps.validateBeforeTerminalWrite?.();
+			const injectionIdempotencyKey = body.idempotencyKey ?? null;
+			const injectionLedgerPath = injectionIdempotencyKey
+				? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
+				: null;
+			const observesAcceptance =
+				injectionIdempotencyKey != null || deps.onProgrammaticTerminalDeliverySettled != null;
+			const acpSummary = await acpTaskSessionService.sendTaskSessionInput(
+				body.taskId,
+				body.text,
+				body.images,
+				observesAcceptance
+					? (accepted) => {
+							const outcome = accepted
+								? { status: "delivered_and_submit_confirmed" as const, reason: null }
+								: {
+										status: "delivery_failed" as const,
+										reason: "submit_confirmation_budget_exhausted" as const,
+									};
+							if (injectionLedgerPath && injectionIdempotencyKey) {
+								void recordTaskMessageTerminalDeliveryOutcome({
+									ledgerPath: injectionLedgerPath,
+									taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
+									idempotencyKey: injectionIdempotencyKey,
+									status: outcome.status,
+									...(outcome.reason ? { failureReason: outcome.reason } : {}),
+									nowIso: new Date().toISOString(),
+								}).catch(() => {});
+							}
+							deps.onProgrammaticTerminalDeliverySettled?.(outcome);
+						}
+					: undefined,
+				injectionIdempotencyKey ?? undefined,
+			);
 			if (acpSummary) {
 				return {
 					ok: true,
 					summary: acpSummary,
 					message: acpTaskSessionService.listMessages(body.taskId).at(-1) ?? null,
-					// ACP 通道摄入即确认：sendTaskSessionInput 只在「账本里有该会话且 stdio 连接还活着」时返回
-					// summary，返回前用户消息已进会话记录、session/prompt 已派发到那条连接上。没有 PTY 那种
-					// 「粘进输入框但 CR 被吞」的中间态可等，因此这里不能留 pending——ACP 分支不存在
-					// onDeliveryOutcome 这样的登记点，留下的 pending 没有任何人会来收敛，只会一直挂到下次
-					// runtime 启动清扫，违反账本自己的「唯一非终态必然有界收敛」不变量。
-					// 不报 queued_behind：那描述的是「写进 TUI 输入框时 agent 正占着回合」，ACP 侧压根没有
-					// 排队模型（并发投递就是并发 session/prompt），报「排在后面」等于编造不存在的语义。
-					...(body.idempotencyKey || deps.onProgrammaticTerminalDeliverySettled
+					...(observesAcceptance
 						? {
 								terminalDelivery: {
-									status: "delivered_and_submit_confirmed" as const,
+									status:
+										acpSummary.agentConversationPromptSubmissionAcceptance?.status === "accepted"
+											? ("delivered_and_submit_confirmed" as const)
+											: ("accepted_pending_submit_confirmation" as const),
 									reason: null,
 								},
 							}

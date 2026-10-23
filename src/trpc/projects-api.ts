@@ -27,13 +27,13 @@ import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-displa
 import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
 import {
 	type AllProjectsTaskSearchIndexProjectInput,
-	overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId,
+	overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot,
 	projectAllProjectsTaskSearchIndex,
 } from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
 import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { recordTaskLastOpenedByUser } from "../state/task-last-opened-by-user-record-store";
-import { loadWorkspaceAgentConversationProgressObservedAtByTaskId } from "../state/workspace-agent-conversation-progress-observed-at-reader";
+import { loadWorkspaceAgentConversationProgressAndOwnershipSnapshot } from "../state/workspace-agent-conversation-progress-observed-at-reader";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -382,43 +382,45 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 						// 停摆事件循环（参见 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT 的动机说明）。
 						workspaceBoardLoadConcurrencyLimiter(async () => {
 							const projectName = deriveProjectDisplayNameFromRepoPath(entry.repoPath);
-							const [boardLoadOutcome, persistedAgentConversationProgressObservedAtByTaskId] = await Promise.all(
-								[
-									loadWorkspaceBoardById(entry.workspaceId).then(
-										(board) => ({ board }),
-										(error: unknown) => {
-											// 单个项目读盘失败（盘损坏 / 迁移中等）不阻断整体索引：跳过该项目。
-											deps.warn(
-												`Failed to load board for cross-project task search index (workspace ${entry.workspaceId}): ${
-													error instanceof Error ? error.message : String(error)
-												}`,
-											);
-											return { board: null };
-										},
-									),
-									loadWorkspaceAgentConversationProgressObservedAtByTaskId(entry.workspaceId).catch(
-										(error: unknown) => {
-											// 推进时刻只影响排序与药丸：读不了就当这个项目没有推进记录，board 照常进索引。
-											deps.warn(
-												`Failed to read agent conversation progress for cross-project task search index (workspace ${entry.workspaceId}): ${
-													error instanceof Error ? error.message : String(error)
-												}`,
-											);
-											return new Map<string, number>();
-										},
-									),
-								],
-							);
+							const [boardLoadOutcome, persistedProgressAndOwnershipSnapshot] = await Promise.all([
+								loadWorkspaceBoardById(entry.workspaceId).then(
+									(board) => ({ board }),
+									(error: unknown) => {
+										// 单个项目读盘失败（盘损坏 / 迁移中等）不阻断整体索引：跳过该项目。
+										deps.warn(
+											`Failed to load board for cross-project task search index (workspace ${entry.workspaceId}): ${
+												error instanceof Error ? error.message : String(error)
+											}`,
+										);
+										return { board: null };
+									},
+								),
+								loadWorkspaceAgentConversationProgressAndOwnershipSnapshot(entry.workspaceId).catch(
+									(error: unknown) => {
+										// 推进时刻只影响排序与药丸：读不了就当这个项目没有推进记录，board 照常进索引。
+										deps.warn(
+											`Failed to read agent conversation progress for cross-project task search index (workspace ${entry.workspaceId}): ${
+												error instanceof Error ? error.message : String(error)
+											}`,
+										);
+										return {
+											agentConversationProgressObservedAtByTaskId: new Map<string, number>(),
+											workspaceTaskIdByConversationSessionId: new Map<string, string | null>(),
+										};
+									},
+								),
+							]);
 							return {
 								projectId: entry.workspaceId,
 								projectName,
 								board: boardLoadOutcome.board,
-								agentConversationProgressObservedAtByTaskId:
-									overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId({
-										persistedAgentConversationProgressObservedAtByTaskId,
+								...overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot(
+									{
+										persistedSnapshot: persistedProgressAndOwnershipSnapshot,
 										// 未加载的项目这里是空数组；已加载的项目以内存摘要为准（盘上可能滞后，也可能已被回纠）。
 										liveRuntimeSessionSummaries: deps.listProjectRuntimeSessionSummaries(entry.workspaceId),
-									}),
+									},
+								),
 							};
 						}),
 				),

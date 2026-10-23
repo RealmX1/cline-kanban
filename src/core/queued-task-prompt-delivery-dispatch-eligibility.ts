@@ -12,6 +12,7 @@
 //
 // 本仓铁律。三条 transport 的 summary 由同一个漏斗写出，facet 是它们唯一对等的语言。
 
+import { resolveLastAgentConversationUserHandoffObservation } from "./agent-conversation-activity-observation";
 import type {
 	QueuedTaskPromptDeliveryEntry,
 	QueuedTaskPromptDispatchBlockReason,
@@ -142,7 +143,7 @@ export function resolveQueuedPromptDispatchBlockReason(
 	// 排在最后：确认之后 agent 在干活 / 在问问题 / 在恢复时，那些更具体的原因更值得显示。
 	const humanReconfirmedAfterRuntimeRestartAtEpochMs = headEntry.humanReconfirmedAfterRuntimeRestartAtEpochMs;
 	if (headEntry.survivedRuntimeRestartAtEpochMs !== null && humanReconfirmedAfterRuntimeRestartAtEpochMs !== null) {
-		const stoppedAt = sessionSummary.agentResponseGenerationStopped?.stoppedAt ?? null;
+		const stoppedAt = resolveLastAgentConversationUserHandoffObservation(sessionSummary)?.observedAtMs ?? null;
 		if (stoppedAt === null || stoppedAt <= humanReconfirmedAfterRuntimeRestartAtEpochMs) {
 			return "awaiting_first_agent_turn_end_after_restart_reconfirmation";
 		}
@@ -151,22 +152,18 @@ export function resolveQueuedPromptDispatchBlockReason(
 	return null;
 }
 
-// 「agent 停止生成」**边沿**的身份：这一次停止事件本身是谁。
-//
-// 不能拿下面那个「轮次键」当边沿用：agentResponseGenerationTurnSequence 在回合**开始**那一刻递增，停止时
-// 序号不变——只看序号的话，边沿会发生在 agent 刚开工的时候，而那时门控 1 必然挡住，真正停下来时却什么都
-// 没变、没有人再来触发。停止事件对象（stoppedAt + turnSequence）由 session-activity.ts 的写侧漏斗在
-// 「球刚回到人这边」那一次转移上落定并**冻结**，换活体也算新边沿——它才是边沿本身。
-//
-// 返回 null = 此刻没有停止事件（agent 回合中 / park / idle），不构成出队时机。
+// 真实交棒的事件身份跨进程恢复保持不变；当前活体的待命期限不构成新的出队边沿。
 export function buildAgentResponseGenerationStopEventIdentity(
 	summary: RuntimeTaskSessionSummary | null | undefined,
 ): string | null {
-	const stopped = summary?.agentResponseGenerationStopped;
-	if (stopped == null) {
+	if (
+		!summary ||
+		resolveSessionFacets(summary).turnOwner !== "user" ||
+		isParkedAwaitingDispatchedBackgroundWork(summary)
+	)
 		return null;
-	}
-	return `${summary?.runtimeSessionIncarnationId ?? ""}:${stopped.turnSequence}:${stopped.stoppedAt}`;
+	const handoff = resolveLastAgentConversationUserHandoffObservation(summary);
+	return handoff ? `${handoff.turnSequence}:${handoff.observedAtMs}` : null;
 }
 
 // 「这一轮」的键。dispatcher 用它实现「一轮至多交出一次」：一次交付无论结果如何都记下当时的轮次键，

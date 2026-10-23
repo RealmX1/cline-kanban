@@ -50,14 +50,14 @@ export interface OutputReactionActions {
 	// agent 输出是否已「静默」：距最近一次输出已超过静默阈值，说明 agent 确实停在原地、
 	// 没有在持续产出。仅用于自动注入路径的二次空闲门控——若输出仍在流动（非静默），
 	// 说明 agent 仍在工作 / 已自行恢复，不应注入打断它。手动「立即续跑」豁免此门控。
-	isAgentOutputQuiet(): boolean;
+	isEffectiveAgentConversationActivityQuiet(): boolean;
 	// 当前是否处于「活跃的 agent 回合」（dual-axis facet 的 turnOwner==="agent"）。
 	//
 	// 这是 connection-drop 检测器的**主门控信号**，用来根治「agent 正在向用户提问
 	// （AskUserQuestion / ExitPlanMode / 权限确认）被误判为瞬时网络中断」：真实掉线时
 	// agent 仍在自己的回合（turnOwner 保持 agent，只是卡住 / 死了），而向用户提问会经 hook
 	// 把 turnOwner 翻成 user。`classifyConnectionError` 的正则在 agent 自产文本（问题/选项
-	// 文本、分析、测试日志）上无法区分真实错误行与内容，唯一兜底 isAgentOutputQuiet 又恰好
+	// 文本、分析、测试日志）上无法区分真实错误行与内容，唯一兜底 isEffectiveAgentConversationActivityQuiet 又恰好
 	// 对「提问态」失效（提问 = 静默 + 停在提示符，与掉线在输出文本上完全同形），故需用 facet
 	// 这个**带外信号**门控：仅在 agent 回合运作，一旦进入 user 回合立即 stand down。
 	isAgentTurnActive(): boolean;

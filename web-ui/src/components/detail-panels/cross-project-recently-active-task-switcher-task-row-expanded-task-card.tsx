@@ -168,7 +168,7 @@ function CurrentProjectExpandedTaskCard({
 			{...buildTaskCardBusinessProps({
 				card: selection.card,
 				columnId: selection.column.id,
-				sessionSummary: currentProjectTaskCards.currentProjectTaskSessions[entry.taskId],
+				taskSessions: currentProjectTaskCards.currentProjectTaskSessions,
 				handlers: currentProjectTaskCards.currentProjectTaskCardActionHandlers,
 				onActivateCard: rowContext.onActivateRow,
 				workspacePath: currentProjectTaskCards.currentProjectWorkspacePath,
@@ -233,6 +233,8 @@ function OtherProjectExpandedTaskCard({
 				<TaskCardBody
 					{...buildTaskCardBusinessProps({
 						card: taskCard,
+						taskConversationSessionActivityObservations:
+							entryInProject.entry.taskConversationSessionActivityObservations,
 						columnId: taskCardSnapshot.boardColumnIdContainingTaskCard,
 						sessionSummary:
 							taskCardSnapshot.taskSessionSummaryLiveInRuntimeProcessMemory ??

@@ -899,21 +899,8 @@ export const runtimeAgentResponseGenerationTurnStartedSchema = z.object({
 });
 export type RuntimeAgentResponseGenerationTurnStarted = z.infer<typeof runtimeAgentResponseGenerationTurnStartedSchema>;
 
-// ── 「对话上次推进」观测（加性 sidecar；卡片时长药丸 B 的唯一真相源）──────────────────────────
-// 回答的问题是：**这个任务的对话，上一次真正往前走，是什么时候？**
-//
-// 它与另外两个极易混淆的量刻意分开命名、互不推断（三者都必须存在，谁也替代不了谁）：
-//   ① lastSubstantiveOutputAt   ——「此刻 agent 有没有在吐东西」。刮 TUI 猜出来的新鲜度，秒级粒度，
-//      服务 Validation 列 5s 自动打回与 idle-stall 5min 自愈。**会话重开必然被重播刷新，这是正确的**。
-//   ② agentResponseGenerationStopped ——「本次 incarnation 何时进入非生成态」。会话重开时刷新同样正确
-//      （新活体新一轮），驱动 2h 回收与药丸 A。
-//   ③ 本字段                    ——「对话上次推进」。**跨 incarnation 的历史事实**：进程重启、会话
-//      重开、旧对话被重播进新 TUI，它都不该动。
-// 历史上卡片拿 ① 冒充 ③，于是「今天重开一个七天前的会话」会把卡片时间刷成 now——26% 的 claude 任务
-// 因此显示错误（偏差中位数 26.8 小时）。修法不是继续给 ① 打补丁，而是给 ③ 一个自己的真相源。
-//
-// evidenceKind 记录「这一次前进是靠什么看出来的」，用途有二：UI 对低置信来源加 `~` 前缀降级展示；
-// 合并 reducer 据此决定会话重开时能否 rebaseline（见 src/core/last-conversation-progress-observation.ts）。
+// 旧版「对话推进」字段只兼容读取；可信来源迁入统一活动，TUI 猜测不升级。
+// 新写入只使用 runtimeLastEffectiveAgentConversationActivityObservationSchema。
 export const runtimeLastConversationProgressEvidenceKindSchema = z.enum([
 	// 最高置信：agent 自己落盘的转录里最后一条 agent 产出（Claude/Codex/Cursor 的 JSONL、Cline 消息账本）。
 	// 唯一跨进程重启、跨会话重开仍成立的来源，故也是唯一被授权做 rebaseline 的证据。
@@ -940,18 +927,8 @@ export type RuntimeLastConversationProgressObservation = z.infer<
 	typeof runtimeLastConversationProgressObservationSchema
 >;
 
-// 「主对话最后一次向模型发出请求」观测——跨项目切换面板「Cache warm」倒计时的起点。
-//
-// 为什么不复用上面两个时间戳：prompt cache 的 TTL 由**每一次请求**刷新，起点应是最后一次请求的发出时刻。
-//   - agentResponseGenerationStopped 记的是「停止生成」边沿，会话恢复（换 incarnation）也算一次边沿，
-//     于是恢复时刻被当成了起点——2026-10-03 实测三个 Claude 任务显示「18 分钟前」，真实最后请求在
-//     11~21 小时前；runtime 重启后它又被清空，缓存其实还热的任务掉出倒计时区。
-//   - lastConversationProgressObservation 会被 Notification / 后台 SubagentStop 往后推，且 PostToolUse
-//     不推进它，与「请求发出」口径不同。
-// 写点只认「harness 紧接着就会向主对话模型发请求」的 hook 事件（见 evidenceKind），时间取 ingest 时刻；
-// 子代理内部的事件、以及用户回合期间的工具事件（主 agent 已 Stop、后台子代理还在跑）一律不写。
-// 判定在 src/core/main-agent-conversation-model-request-dispatch-hook-event-classification.ts，
-// 合并只经 src/core/last-main-agent-conversation-model-request-dispatch-observation.ts 的单调 reducer。
+// 旧请求代理证据枚举保留用于持久数据兼容和缓存专用投影。
+// 前置提交 hook 不证明 harness 已接受，也不升级为统一活动。
 export const runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema = z.enum([
 	// 用户（或 harness 的任务通知）提交了一轮输入且未被恢复守卫拦截——harness 随即发首个请求。
 	"user_prompt_submit_hook_event_accepted",
@@ -983,6 +960,91 @@ export const runtimeLastMainAgentConversationModelRequestDispatchObservationSche
 });
 export type RuntimeLastMainAgentConversationModelRequestDispatchObservation = z.infer<
 	typeof runtimeLastMainAgentConversationModelRequestDispatchObservationSchema
+>;
+
+// 有效活动记录的是原始事件发生时间与语义证据；进程重开和 PTY 重绘不能产生新活动。
+export const runtimeEffectiveAgentConversationActivityEvidenceKindSchema = z.enum([
+	"persisted_agent_transcript",
+	"agent_lifecycle_hook_event",
+	"structured_agent_session_event",
+	"terminal_output_heuristic_classification",
+	"native_user_prompt_acceptance",
+]);
+export type RuntimeEffectiveAgentConversationActivityEvidenceKind = z.infer<
+	typeof runtimeEffectiveAgentConversationActivityEvidenceKindSchema
+>;
+export const runtimeEffectiveAgentConversationActivityKindSchema = z.enum([
+	"accepted_user_input",
+	"agent_output",
+	"tool_activity",
+	"context_compaction",
+	"model_request_dispatch",
+	"agent_turn_boundary",
+]);
+export type RuntimeEffectiveAgentConversationActivityKind = z.infer<
+	typeof runtimeEffectiveAgentConversationActivityKindSchema
+>;
+export const runtimeLastEffectiveAgentConversationActivityObservationSchema = z.object({
+	observedAtMs: z.number(),
+	evidenceKind: runtimeEffectiveAgentConversationActivityEvidenceKindSchema,
+	activityKind: runtimeEffectiveAgentConversationActivityKindSchema,
+	eventId: z.string().min(1).optional(),
+	nativeSessionId: z.string().min(1).optional(),
+});
+export type RuntimeLastEffectiveAgentConversationActivityObservation = z.infer<
+	typeof runtimeLastEffectiveAgentConversationActivityObservationSchema
+>;
+
+// 历史交棒跨 incarnation 保留；启动就绪和恢复进程不是交棒。
+export const runtimeLastAgentConversationUserHandoffObservationSchema = z.object({
+	observedAtMs: z.number(),
+	signalConfidence: z.enum(["harness_turn_complete", "structured_user_turn", "prompt_ready_fallback"]),
+	turnSequence: z.number().int().nonnegative(),
+});
+export type RuntimeLastAgentConversationUserHandoffObservation = z.infer<
+	typeof runtimeLastAgentConversationUserHandoffObservationSchema
+>;
+
+// 当前进程的待命期限锚点沿用旧停止事件形状；它与用户看到的历史交棒完全独立。
+export const runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema = runtimeAgentResponseGenerationStoppedSchema;
+export type RuntimeCurrentAgentProcessUserTurnIdleRetentionStarted = z.infer<
+	typeof runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema
+>;
+export const runtimeLastAgentConversationPromptCacheReferenceObservationSchema =
+	runtimeLastMainAgentConversationModelRequestDispatchObservationSchema.extend({
+		evidenceKind: z.union([
+			runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema,
+			z.literal("cursor_agent_output_cache_reference_estimate"),
+			// 已有真实主 Agent 处理/响应，时间仍是请求的代理估计，不声称 provider 创建了缓存。
+			z.literal("main_agent_conversation_request_processing_cache_reference_estimate"),
+		]),
+	});
+export type RuntimeLastAgentConversationPromptCacheReferenceObservation = z.infer<
+	typeof runtimeLastAgentConversationPromptCacheReferenceObservationSchema
+>;
+
+// pending/unconfirmed 只表达投递核验进度，不能代替 harness 已接受这一事实。
+export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object({
+	status: z.enum(["pending", "unconfirmed", "accepted"]),
+	attemptedAtMs: z.number(),
+	confirmedAtMs: z.number().optional(),
+	eventId: z.string().min(1).optional(),
+	nativeSessionId: z.string().min(1).optional(),
+	runtimeSessionIncarnationId: z.string().min(1),
+});
+export type RuntimeAgentConversationPromptSubmissionAcceptance = z.infer<
+	typeof runtimeAgentConversationPromptSubmissionAcceptanceSchema
+>;
+
+export const runtimeTaskConversationSessionActivityObservationSchema = z.object({
+	sessionId: z.string(),
+	role: z.enum(["main", "task_collaborator", "by_the_way", "former_main"]),
+	agentId: runtimeAgentIdSchema.nullable(),
+	lastEffectiveAgentConversationActivityObservation:
+		runtimeLastEffectiveAgentConversationActivityObservationSchema.nullable(),
+});
+export type RuntimeTaskConversationSessionActivityObservation = z.infer<
+	typeof runtimeTaskConversationSessionActivityObservationSchema
 >;
 
 // 一次回收尝试的**可审计**结果。三种 transport 共用同一形状，故「回收到底做成了没有」在 UI /
@@ -1026,6 +1088,21 @@ export const runtimeSetCurrentWorkPhaseGoalRequestSchema = z
 export type RuntimeSetCurrentWorkPhaseGoalRequest = z.infer<typeof runtimeSetCurrentWorkPhaseGoalRequestSchema>;
 
 const runtimeTaskSessionSummaryObjectSchema = z.object({
+	lastEffectiveAgentConversationActivityObservation: runtimeLastEffectiveAgentConversationActivityObservationSchema
+		.nullable()
+		.optional(),
+	lastAgentConversationUserHandoffObservation: runtimeLastAgentConversationUserHandoffObservationSchema
+		.nullable()
+		.optional(),
+	currentAgentProcessUserTurnIdleRetentionStarted: runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema
+		.nullable()
+		.optional(),
+	lastAgentConversationPromptCacheReferenceObservation:
+		runtimeLastAgentConversationPromptCacheReferenceObservationSchema.nullable().optional(),
+	agentConversationPromptSubmissionAcceptance: runtimeAgentConversationPromptSubmissionAcceptanceSchema
+		.nullable()
+		.optional(),
+
 	taskId: z.string(),
 	// Stage 4 全写侧反转：`state` 降为派生投影 → 输入可选（facet-only 写不带 state）；末位 .transform
 	// 从 facet 投影回 state，使输出型 state 仍为 required（消费者类型不破，见下方 transform）。
@@ -1037,24 +1114,13 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	startedAt: z.number().nullable(),
 	updatedAt: z.number(),
 	lastOutputAt: z.number().nullable(),
-	// 「最近一次**实质**输出」时刻：仅当 agent 产出新的正文 / 工具内容时推进，过滤 TUI 装饰性重绘
-	// （spinner / footer / 计时器），与每段 PTY 字节都刷新的 lastOutputAt 区分。Validation 列自动打回
-	// 判据（isAgentActivelyProducingOutput）读它；其余 4 个 lastOutputAt 读点（自动续跑静默门控、卡顿
-	// 探针、卡片 computing 展示、终端面板基线）仍读 lastOutputAt（spinner 期应计为活动）。加性可选：
-	// 旧盘数据 / web-ui 手构造 summary 缺它 → undefined ⇒ 判据回退「不在产出」（见判据注释）。
+	// 旧字段只兼容读取；它们不能用来判定新的有效活动。
 	lastSubstantiveOutputAt: z.number().nullable().optional(),
-	// 「对话上次推进」观测（跨 incarnation 的历史事实，卡片药丸 B 读它）。语义、与上面两个时间戳的
-	// 分工、以及为什么必须是独立字段，见 runtimeLastConversationProgressObservationSchema 的注释。
-	// 合并只经 src/core/last-conversation-progress-observation.ts 的唯一 reducer（稳态单调前进、
-	// 仅持久转录在 incarnation 边界或「非 agent 回合 + 已存值低置信」时可 rebaseline）。加性可选：
-	// 旧盘数据 / 手构造 summary 缺它 ⇒
-	// 药丸 B 隐藏（而非退回读 lastSubstantiveOutputAt——那正是本 bug 的成因）。
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
 	agentCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
 	agentNativeCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
 	agentCurrentWorkPhaseGoalInvalidatedAt: z.number().optional(),
-	// 「主对话最后一次向模型发出请求」观测（Cache warm 倒计时起点），语义见其 schema 注释。跨重启保留；
-	// 加性可选：旧盘数据 / 无回合类 hook 的 agent 缺它 ⇒ 估算回落到其它锚点（见 section-assignment）。
+	// 旧请求代理仅兼容读；新缓存投影使用 lastAgentConversationPromptCacheReferenceObservation。
 	lastMainAgentConversationModelRequestDispatchObservation:
 		runtimeLastMainAgentConversationModelRequestDispatchObservationSchema.nullable().optional(),
 	reviewReason: runtimeTaskSessionReviewReasonSchema,
@@ -1080,7 +1146,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 每次用户提交 / 新 agent 回合单调 +1。与 incarnationId 正交：同一活体内多轮对话靠它区分，
 	// 于是「宽限期跑到一半用户又发了一句」也能被回收侧检出并放弃。
 	agentResponseGenerationTurnSequence: z.number().int().nonnegative().optional(),
-	// 当前这次「进入非生成态」的离散事件；agent 回合 / park 期间为 null。
+	// 旧停止字段只兼容读为进程待命锚点；不能直接升级为历史真实交棒。
 	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
 	// 最近一次「翻入 agent 回合」的边沿事件（与上一字段对偶，语义见其 schema 注释）。离开 agent 回合后
 	// 保留原值不清空；加性可选：旧盘数据 / 从未进过 agent 回合的会话缺它 ⇒ Running 排序回落到 startedAt。
@@ -1755,6 +1821,21 @@ export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabili
 // deriveLiveAgentTaskCount）；跨项目切换面板的条目是它的超集（下方 runtimeCrossProjectTaskSwitcherEntrySchema）。
 // 原消费者 Stage-First Overview 已退役（docs/context-board-scope-all-projects-and-single-project-scope.md）。
 export const runtimeInProgressTaskDetailSchema = z.object({
+	lastEffectiveAgentConversationActivityObservation: runtimeLastEffectiveAgentConversationActivityObservationSchema
+		.nullable()
+		.optional(),
+	lastAgentConversationUserHandoffObservation: runtimeLastAgentConversationUserHandoffObservationSchema
+		.nullable()
+		.optional(),
+	currentAgentProcessUserTurnIdleRetentionStarted: runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema
+		.nullable()
+		.optional(),
+	lastAgentConversationPromptCacheReferenceObservation:
+		runtimeLastAgentConversationPromptCacheReferenceObservationSchema.nullable().optional(),
+	agentConversationPromptSubmissionAcceptance: runtimeAgentConversationPromptSubmissionAcceptanceSchema
+		.nullable()
+		.optional(),
+
 	taskId: z.string(),
 	title: z.string(),
 	agentId: runtimeAgentIdSchema.nullable(),
@@ -1768,12 +1849,7 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	// 倒计时在没有模型请求派发观测时以它为锚（section-assignment 的 last_substantive_agent_terminal_output）；
 	// 不读 lastOutputAt，免得终端 agent 仅 spinner 重绘就把锚点推到「刚响应」。时长药丸不读它（见下）。
 	lastSubstantiveOutputAt: z.number().nullable(),
-	// 切换面板行的两颗时长药丸（与主看板卡片头部同源、同语义）：
-	//   Stopped   —— 本次 incarnation 何时进入非生成态；agent 回合 / park 期间为 null。
-	//   Progress  —— 这个任务的对话上次真正往前走到哪一刻（跨 incarnation 的历史事实）。
-	// 二者为什么必须分开、以及为什么都不能用 lastSubstantiveOutputAt 冒充，见
-	// runtimeLastConversationProgressObservationSchema 的注释。
-	// 加性 optional：旧 runtime payload 不带 ⇒ 该颗药丸隐藏，绝不回退读上面那个实质戳。
+	// 旧字段供旧持久数据读取；新卡片只读取历史交棒与统一活动。
 	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
 	// 本轮 agent 回合的开始时刻（见 runtimeAgentResponseGenerationTurnStartedSchema）。跨项目切换面板 Running 区
@@ -1792,6 +1868,9 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskConversationSessionActivityObservations: z
+		.array(runtimeTaskConversationSessionActivityObservationSchema)
+		.optional(),
 	// 卡片当前所在的 board 列。面板的区归属**不读**它（只用来排除 Done 与显示 stage 标签）——
 	// 列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
 	columnId: runtimeBoardColumnIdSchema,

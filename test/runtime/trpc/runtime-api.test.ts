@@ -1730,7 +1730,13 @@ describe("createRuntimeApi startTaskSession", () => {
 				}),
 			}),
 		);
-		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(persisted.taskId, "继续协作", undefined);
+		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(
+			persisted.taskId,
+			"继续协作",
+			undefined,
+			undefined,
+			undefined,
+		);
 		expect(clineService.startTaskSession).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
@@ -4319,18 +4325,21 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	// ACP（omp）通道的程序化投递必须当场落终态。这条链路上没有 onDeliveryOutcome 这样的登记点，
-	// 回执一旦停在 accepted_pending_submit_confirmation 就再没有任何人会改写它：
-	// `--wait-for-terminal-status` 必然空等到超时，账本要挂到下次 runtime 启动清扫才被判失败，
-	// 直接违反「唯一非终态必然在有界时间内收敛」这条不变量。
-	it("settles ACP programmatic delivery on the spot instead of leaving it pending forever", async () => {
+	// ACP 发出请求只代表受理；真实接受通过已登记回调在有界时间内结算。
+	it("ACP 程序化投递保留待确认回执并登记可靠接受回调", async () => {
 		// ACP 会话的 summary 恒由 createDefaultAcpSummary 盖上通道章。这里必须显式带上：
 		// 不带章的 omp summary 现在意味着一条 **TUI** 会话（omp 的 catalog 默认已是 pty_terminal），
 		// 聊天端点会正确地不把它当 ACP 任务分派。
 		const summary = createSummary({
 			agentId: "omp",
-			state: "running",
+			state: "awaiting_review",
 			sessionTransport: "acp_stdio_subprocess",
+			runtimeSessionIncarnationId: "acp-programmatic-incarnation",
+			agentConversationPromptSubmissionAcceptance: {
+				status: "pending",
+				attemptedAtMs: Date.now(),
+				runtimeSessionIncarnationId: "acp-programmatic-incarnation",
+			},
 		});
 		const latestMessage = {
 			id: "message-acp-1",
@@ -4374,9 +4383,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			"task-acp-1",
 			"please continue",
 			undefined,
+			expect.any(Function),
+			"rvf-acp-1",
 		);
 		expect(response.terminalDelivery).toEqual({
-			status: "delivered_and_submit_confirmed",
+			status: "accepted_pending_submit_confirmation",
 			reason: null,
 		});
 		expect(response.message).toEqual(latestMessage);

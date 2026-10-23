@@ -9,6 +9,7 @@ import {
 } from "../../../src/core/api-contract";
 import {
 	type AllProjectsTaskSearchIndexProjectInput,
+	overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot,
 	overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressObservedAtByTaskId,
 	projectAllProjectsTaskSearchIndex,
 } from "../../../src/server/all-projects-task-search-index-projection";
@@ -52,6 +53,53 @@ function makeBoard(columnToCards: Partial<Record<RuntimeBoardColumnId, RuntimeBo
 }
 
 describe("projectAllProjectsTaskSearchIndex", () => {
+	it.each([undefined, null, "other-card"])("损坏主绑定的owner为%s时，跨项目Direct不能采纳它的时间", (owner) => {
+		const response = projectAllProjectsTaskSearchIndex([
+			{
+				projectId: "project",
+				projectName: "项目",
+				board: makeBoard({ review: [makeCard({ id: "card", mainTaskConversationSessionId: "new-main" })] }),
+				agentConversationProgressObservedAtByTaskId: new Map([["new-main", 9999]]),
+				workspaceTaskIdByConversationSessionId: owner === undefined ? new Map() : new Map([["new-main", owner]]),
+			},
+		]);
+		expect(response.projects[0]?.tasks[0]?.agentConversationProgressObservedAt).toBeNull();
+	});
+
+	it("legacy card.id缺owner仍可读取自己的活动，显式错误owner不能借legacy通道通过", () => {
+		for (const owner of [undefined, "other-card", null]) {
+			const response = projectAllProjectsTaskSearchIndex([
+				{
+					projectId: "project",
+					projectName: "项目",
+					board: makeBoard({ review: [makeCard({ id: "card" })] }),
+					agentConversationProgressObservedAtByTaskId: new Map([["card", 100]]),
+					workspaceTaskIdByConversationSessionId: owner === undefined ? new Map() : new Map([["card", owner]]),
+				},
+			]);
+			expect(response.projects[0]?.tasks[0]?.agentConversationProgressObservedAt).toBe(
+				owner === undefined ? 100 : null,
+			);
+		}
+	});
+
+	it("卡片搜索活动只取交接后的当前主会话，不取卡片原会话或 peer", () => {
+		const response = projectAllProjectsTaskSearchIndex([
+			{
+				projectId: "project",
+				projectName: "项目",
+				workspaceTaskIdByConversationSessionId: new Map([["new-main", "card"]]),
+				board: makeBoard({ review: [makeCard({ id: "card", mainTaskConversationSessionId: "new-main" })] }),
+				agentConversationProgressObservedAtByTaskId: new Map([
+					["card", 300],
+					["new-main", 100],
+					["peer", 500],
+				]),
+			},
+		]);
+		expect(response.projects[0]?.tasks[0]?.agentConversationProgressObservedAt).toBe(100);
+	});
+
 	it("flattens tasks across projects, preserving project identity and column ownership", () => {
 		const response = projectWithoutAgentConversationProgress([
 			{
@@ -244,6 +292,26 @@ describe("overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgre
 			lastConversationProgressObservation: null,
 		} as unknown as RuntimeTaskSessionSummary;
 	}
+
+	it("live活动与owner一并覆盖磁盘；移除metadata不会沿用旧owner", () => {
+		const oldSnapshot = {
+			agentConversationProgressObservedAtByTaskId: new Map([["new-main", 100]]),
+			workspaceTaskIdByConversationSessionId: new Map([["new-main", "card"]]),
+		};
+		const changed = overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot({
+			persistedSnapshot: oldSnapshot,
+			liveRuntimeSessionSummaries: [startedLiveSummary("new-main", 200)],
+		});
+		expect(changed.agentConversationProgressObservedAtByTaskId.get("new-main")).toBe(200);
+		expect(changed.workspaceTaskIdByConversationSessionId.has("new-main")).toBe(false);
+		expect(oldSnapshot.workspaceTaskIdByConversationSessionId.get("new-main")).toBe("card");
+		const retainedPlaceholder =
+			overlayLiveRuntimeSessionSummariesOntoPersistedAgentConversationProgressAndOwnershipSnapshot({
+				persistedSnapshot: oldSnapshot,
+				liveRuntimeSessionSummaries: [neverStartedPlaceholderLiveSummary("new-main")],
+			});
+		expect(retainedPlaceholder.workspaceTaskIdByConversationSessionId.get("new-main")).toBe("card");
+	});
 
 	it("lets the live summary win over the persisted instant even when the live one is earlier", () => {
 		// 非 agent 回合里持久转录会把低置信 TUI 猜测往回纠；落盘前盘上仍是纠偏前的更晚值，取 max 会把它捡回来。

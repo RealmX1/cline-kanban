@@ -137,6 +137,7 @@ function ColumnSection({
 			card,
 			columnId: column.id,
 			sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
+			taskSessions,
 			selected: card.id === selectedCardId,
 			handlers: {
 				onStartTask,
