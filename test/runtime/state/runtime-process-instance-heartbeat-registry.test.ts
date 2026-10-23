@@ -66,6 +66,26 @@ describe("runtime-process-instance-heartbeat-registry — 判活", () => {
 	it("目录不存在时返回空集（还没有任何实例写过心跳）", async () => {
 		expect(await readLiveRuntimeProcessInstanceIds({ nowEpochMs: NOW })).toEqual(new Set());
 	});
+	it("查卡判活保留损坏心跳的未知态，只有缺失和过期才判死", async () => {
+		const ownerId = "b2572b72-6c2d-4d75-9363-57f2dab76f72";
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("dead");
+		await writeHeartbeatFile(`${ownerId}.json`, "incomplete-json");
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("unknown");
+		await writeHeartbeatFile(`${ownerId}.json`, {
+			runtimeProcessInstanceId: ownerId,
+			pid: 1,
+			startedAtEpochMs: Date.now(),
+			lastHeartbeatAtEpochMs: Date.now(),
+		});
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("live");
+		await writeHeartbeatFile(`${ownerId}.json`, {
+			runtimeProcessInstanceId: ownerId,
+			pid: 1,
+			startedAtEpochMs: NOW,
+			lastHeartbeatAtEpochMs: NOW,
+		});
+		expect(await readRuntimeProcessInstanceLiveness(ownerId)).toBe("dead");
+	});
 	it("查卡判活区分活跃、过期、缺失与无法读取，坏文件不证明实例退出", async () => {
 		const owner = "d4214230-8b5c-4445-b724-b7f652730cbc";
 		expect(await readRuntimeProcessInstanceLiveness(owner)).toBe("dead");

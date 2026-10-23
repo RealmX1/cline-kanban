@@ -87,6 +87,7 @@ import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
+	readRuntimeProcessInstanceLiveness,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
 import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } from "../state/workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
@@ -846,6 +847,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	const taskLookupConversationApi = createTaskLookupConversationService({
 		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
 		collectMaterials: (workspaceId) =>
 			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
 		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
@@ -1367,6 +1370,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
+	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskMainSessionHandoverApi.start();
 	rvfAutomaticCloseoutApi.start();

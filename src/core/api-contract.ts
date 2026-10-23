@@ -266,6 +266,18 @@ export const runtimeTaskImageSchema = z.object({
 	name: z.string().optional(),
 });
 export type RuntimeTaskImage = z.infer<typeof runtimeTaskImageSchema>;
+export const runtimeAgentPromptImageAttachmentReferenceSchema = z.object({
+	imageAttachmentId: z.string().regex(/^[a-f0-9]{64}$/u),
+	imageFilePath: z.string(),
+	imageMimeType: z.string(),
+	imageDisplayName: z.string(),
+});
+export const runtimeSaveAgentPromptImageAttachmentsRequestSchema = z.object({
+	images: z.array(runtimeTaskImageSchema),
+});
+export const runtimeReadAgentPromptImageAttachmentsRequestSchema = z.object({
+	imageAttachmentIds: z.array(z.string().regex(/^[a-f0-9]{64}$/u)),
+});
 export const runtimeTaskCommentEntrySchema = z.object({
 	taskCommentEntryId: z.string(),
 	commentText: z.string(),

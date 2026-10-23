@@ -22,6 +22,7 @@ export enum LocalStorageKey {
 	TaskWorkbenchModuleSlots = "kanban.task-workbench-module-slots.v1",
 	TaskLookupWorkbenchModuleSlots = "kanban.task-lookup-workbench-module-slots.v1",
 	TaskLookupConversationSelection = "kanban.task-lookup-conversation-selection.v1",
+	TaskLookupQuestionDrafts = "kanban.task-lookup-question-drafts-by-conversation.v1",
 	TaskLookupAgentPanelRatio = "kanban.task-lookup-agent-panel-ratio.v1",
 	TaskLookupWorkbenchSlotRatio = "kanban.task-lookup-workbench-slot-ratio.v1",
 	TaskWorkbenchSideBySideSlotWidthRatio = "kanban.task-workbench-side-by-side-slot-width-ratio.v1",
