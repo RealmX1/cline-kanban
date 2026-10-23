@@ -78,6 +78,25 @@ export function getRuntimeProcessInstanceHeartbeatsDirectoryPath(): string {
 	return join(getRuntimeHomePath(), RUNTIME_PROCESS_INSTANCE_HEARTBEATS_DIR);
 }
 
+/** 查卡恢复使用三态观测；排队投递仍使用下方 readLiveRuntimeProcessInstanceIds 的既有判据。 */
+export async function readRuntimeProcessInstanceLiveness(
+	runtimeProcessInstanceId: string,
+): Promise<"live" | "dead" | "unknown"> {
+	if (runtimeProcessInstanceId === THIS_RUNTIME_PROCESS_INSTANCE_ID) return "live";
+	if (!z.string().uuid().safeParse(runtimeProcessInstanceId).success) return "unknown";
+	try {
+		const heartbeat = runtimeProcessInstanceHeartbeatSchema.safeParse(
+			JSON.parse(await readFile(getRuntimeProcessInstanceHeartbeatPath(runtimeProcessInstanceId), "utf8")),
+		);
+		if (!heartbeat.success || heartbeat.data.runtimeProcessInstanceId !== runtimeProcessInstanceId) return "unknown";
+		return Date.now() - heartbeat.data.lastHeartbeatAtEpochMs < RUNTIME_PROCESS_INSTANCE_CONSIDERED_DEAD_AFTER_MS
+			? "live"
+			: "dead";
+	} catch (error) {
+		return error && typeof error === "object" && "code" in error && error.code === "ENOENT" ? "dead" : "unknown";
+	}
+}
+
 function getRuntimeProcessInstanceHeartbeatPath(runtimeProcessInstanceId: string): string {
 	return join(getRuntimeProcessInstanceHeartbeatsDirectoryPath(), `${runtimeProcessInstanceId}.json`);
 }

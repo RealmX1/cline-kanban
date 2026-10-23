@@ -1,3 +1,6 @@
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
+
 export interface RuntimeInvocationContext {
 	execPath: string;
 	argv: string[];
@@ -63,4 +66,34 @@ export function buildKanbanCommandParts(
 	},
 ): string[] {
 	return [...resolveKanbanCommandParts(context), ...args];
+}
+
+// 新会话优先使用同一安装的轻量入口；旧安装没有该产物时保留原命令。
+// 先解析软链接，避免 npm 全局 bin 路径把候选误定位到 bin 目录。
+export function buildKanbanAgentHookCommandParts(
+	args: string[],
+	context: RuntimeInvocationContext = {
+		execPath: process.execPath,
+		argv: process.argv,
+		execArgv: process.execArgv,
+	},
+): string[] {
+	const prefix = resolveKanbanCommandParts(context);
+	const entrypoint = prefix.at(-1);
+	if (entrypoint && prefix.length > 1) {
+		let canonicalEntrypoint = entrypoint;
+		try {
+			canonicalEntrypoint = realpathSync(entrypoint);
+		} catch {
+			/* 旧安装仍使用原入口。 */
+		}
+		if (/^(?:cli|kanban-agent-hook-cli)\.[cm]?[jt]s$/u.test(basename(canonicalEntrypoint))) {
+			const hookEntrypoint = join(
+				dirname(canonicalEntrypoint),
+				`kanban-agent-hook-cli${extname(canonicalEntrypoint)}`,
+			);
+			if (existsSync(hookEntrypoint)) prefix[prefix.length - 1] = hookEntrypoint;
+		}
+	}
+	return [...prefix, "hooks", ...args];
 }

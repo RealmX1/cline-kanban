@@ -4,18 +4,26 @@ import { cn } from "@/components/ui/cn";
 import { useTaskRetainedCommittedLineChangeHistory } from "@/hooks/use-task-retained-committed-line-change-history";
 import type { RuntimeTaskRetainedCommittedLineChangeSummary } from "@/runtime/types";
 
+export function shouldDisplayTaskRetainedCommittedLineChangeSummary(
+	summary?: RuntimeTaskRetainedCommittedLineChangeSummary,
+): boolean {
+	return summary?.status !== "complete" || summary.additions !== 0 || summary.deletions !== 0;
+}
+
 export function TaskRetainedCommittedLineChangeIndicator({
 	workspaceId,
 	taskId,
 	baseRef,
 	summary,
 	showCommittedChangeBackground = false,
+	allowLineWrapping = false,
 }: {
 	workspaceId: string | null;
 	taskId: string;
 	baseRef: string;
 	summary?: RuntimeTaskRetainedCommittedLineChangeSummary;
 	showCommittedChangeBackground?: boolean;
+	allowLineWrapping?: boolean;
 }): React.ReactElement {
 	const [isOpen, setIsOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
@@ -46,9 +54,18 @@ export function TaskRetainedCommittedLineChangeIndicator({
 	};
 	const isComplete = summary?.status === "complete";
 	const visibleSummary = isComplete ? `已提交 +${summary.additions} −${summary.deletions}` : "已提交 —";
+	const additionsTextColorClassName = showCommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-green)_30%,var(--color-text-primary))]"
+		: "text-status-green";
+	const deletionsTextColorClassName = showCommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-red)_30%,var(--color-text-primary))]"
+		: "text-status-red";
 	return (
 		<span
-			className="inline-flex align-baseline whitespace-nowrap font-mono"
+			className={cn(
+				"inline-flex align-baseline font-mono",
+				allowLineWrapping ? "min-w-0 max-w-full" : "whitespace-nowrap",
+			)}
 			data-task-retained-committed-line-change-indicator=""
 		>
 			<button
@@ -56,7 +73,9 @@ export function TaskRetainedCommittedLineChangeIndicator({
 				type="button"
 				className={cn(
 					"inline-flex cursor-pointer items-baseline gap-1 rounded-sm text-inherit focus-visible:outline-2 focus-visible:outline-accent",
-					showCommittedChangeBackground && "bg-status-blue/15 px-0.5 text-text-primary",
+					allowLineWrapping && "max-w-full flex-wrap [&>span]:whitespace-nowrap",
+					showCommittedChangeBackground &&
+						"bg-status-blue/30 px-0.5 text-text-primary ring-1 ring-inset ring-status-blue/70",
 				)}
 				aria-label={visibleSummary}
 				aria-haspopup="dialog"
@@ -96,8 +115,8 @@ export function TaskRetainedCommittedLineChangeIndicator({
 				<span>已提交</span>{" "}
 				{isComplete ? (
 					<>
-						<span className="text-status-green">+{summary.additions}</span>{" "}
-						<span className="text-status-red">−{summary.deletions}</span>
+						<span className={additionsTextColorClassName}>+{summary.additions}</span>{" "}
+						<span className={deletionsTextColorClassName}>−{summary.deletions}</span>
 					</>
 				) : (
 					<span>—</span>

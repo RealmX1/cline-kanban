@@ -89,6 +89,39 @@ afterEach(() => {
 });
 
 describe("续接预检在任何销毁动作之前", () => {
+	it.each(["start", "refresh"])("%s 对缺失原生身份的交接目标零 spawn，保留现场并指出恢复入口", async (operation) => {
+		const instance = manager();
+		hydrate(instance);
+		const hydratedSummary = instance.getSummary(request().taskId);
+		if (!hydratedSummary) throw new Error("缺少已恢复的交接目标");
+		instance.hydrateFromRecord({
+			[request().taskId]: {
+				...hydratedSummary,
+				agentNativeConversationSessionIdentity: undefined,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "handover-host-task",
+					taskConversationSessionRole: "main",
+					taskConversationSessionRoleAtCreation: "task_collaborator",
+					taskConversationSessionContextSource: "started_from_scratch",
+					taskAutomationSuspendedForMainSessionHandover: true,
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			},
+		});
+		const resumeRequest = { ...request(), resumePriorAgentConversationWithoutResendingPrompt: true };
+		await expect(
+			operation === "start" ? instance.startTaskSession(resumeRequest) : instance.refreshTaskTerminal(resumeRequest),
+		).rejects.toThrow("新建 Codex 并重新交接");
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		expect(prepareAgentLaunchMock).not.toHaveBeenCalled();
+		expect(instance.getSummary(request().taskId)?.taskConversationSessionMetadata?.workspaceTaskId).toBe(
+			"handover-host-task",
+		);
+	});
+
 	it.each(["start", "refresh"])("%s 使用 request.cwd 解析相对 CODEX_HOME 后续接指定会话", async (operation) => {
 		const instance = manager();
 		const resumeRequest = { ...request(), env: { CODEX_HOME: ".store" } };

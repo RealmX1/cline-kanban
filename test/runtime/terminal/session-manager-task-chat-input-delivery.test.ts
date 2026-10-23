@@ -852,6 +852,47 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		vi.useRealTimers();
 	});
 
+	it.each(["OpenAI Codex\nmodel: loading\n› ", "Do you trust the contents of this directory?\n› 1. Yes"])(
+		"交接首发只读当前启动视口，历史提示符不能越过加载门控：%s",
+		async (loadingViewport) => {
+			const manager = new TerminalSessionManager();
+			const screen = { mirrorSnapshot: loadingViewport, state: "running" };
+			const { write, entry } = installFakeClaudeEntry(manager, "codex-handover-startup", screen);
+			entry.summary.agentId = "codex";
+			Object.assign(entry.active, { outputReactionScanBuffer: "已结束的历史\n› " });
+			manager.submitTaskChatInputWhenReady("codex-handover-startup", "/plan 读取交接材料", {
+				requiresCodexStartupPromptReady: true,
+			});
+			await vi.advanceTimersByTimeAsync(20_000);
+			expect(write).not.toHaveBeenCalled();
+			screen.mirrorSnapshot = "model: gpt-test\n› ";
+			await vi.advanceTimersByTimeAsync(RECHECK_MS);
+			expect(write.mock.calls.filter(([text]) => text.includes("读取交接材料"))).toHaveLength(1);
+			(manager as unknown as { entries: Map<string, unknown> }).entries.clear();
+			manager.dispose();
+		},
+	);
+
+	it("交接初始化始终未就绪时零写入，并返回确定未投递的超时", async () => {
+		const manager = new TerminalSessionManager();
+		const { write, entry } = installFakeClaudeEntry(manager, "codex-handover-unready", {
+			mirrorSnapshot: "model: loading\n› ",
+			state: "awaiting_review",
+		});
+		entry.summary.agentId = "codex";
+		const outcomes: { status: string; reason: string | null }[] = [];
+		manager.submitTaskChatInputWhenReady("codex-handover-unready", "/plan 读取交接材料", {
+			requiresCodexStartupPromptReady: true,
+			idempotencyKey: "handover-unready",
+			onDeliveryOutcome: (outcome) => outcomes.push({ status: outcome.status, reason: outcome.reason }),
+		});
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" }]);
+		(manager as unknown as { entries: Map<string, unknown> }).entries.clear();
+		manager.dispose();
+	});
+
 	it("提示符就绪时：经沉降延时后向 PTY 投递一次（以原始文本委托编码）", async () => {
 		const getSession = spawnManagerWithSession(2001);
 		const manager = new TerminalSessionManager();

@@ -20,7 +20,17 @@
 
 `support` 新增 `createTaskLookupConversation`、`listTaskLookupConversations`、`getTaskLookupConversation`、`submitTaskLookupTurn`、`cancelTaskLookupTurn` 和 `readTaskLookupCandidatePreview`。契约在 `src/core/task-lookup-conversation-contract.ts`，查询服务在 `src/task-indexing-support/task-lookup-conversation-service.ts`。
 
-会话保存在 runtime home 的 `task-lookup-conversations/<conversationId>.json`；实际 L0–L4 输入另存于同名目录，避免可覆盖 Context 缓存破坏历史证据。文件原子写入，单会话写入加锁；requestId 防止重复模型调用，同一会话同时只运行一轮。轮次变化在写盘后经全局 `task_lookup_conversation_updated` 推送，浏览器重连后重新读取，无轮询。关闭面板不取消查询；runtime 关闭取消执行，重启将遗留 running 轮次标为 interrupted，不自动重跑。
+会话保存在 runtime home 的 `task-lookup-conversations/<conversationId>.json`；实际 L0–L4 输入另存于同名目录，避免可覆盖 Context 缓存破坏历史证据。文件原子写入，单会话写入加锁；requestId 防止重复模型调用，同一会话同时只运行一轮。轮次变化在写盘后经全局 `task_lookup_conversation_updated` 推送，浏览器重连后重新读取，无浏览器轮询。关闭面板不取消查询。
+
+新轮次持久保存 `owningRuntimeProcessInstanceId`。恢复仅中断所属实例已失活的轮次，沿用进程实例心跳的两分钟宽限期；新实例启动和读取历史不能中断仍存活的其他实例。缺少归属、心跳损坏或读取失败时保留运行状态并给出说明，不把未知状态称为重启。服务每 30 秒复核遗留轮次，同时转发共享历史的新 revision。runtime 关闭只取消本实例正在执行的轮次；取消也覆盖材料读取和 Context 准备。所有异步写回再次核对轮次状态与归属，重试只能由用户显式发起。
+
+## 进度与失败诊断
+
+运行阶段为读取材料、准备 Context、召回候选、解释候选、核验要求和保存结果。轮次保存阶段起点、最近真实活动、执行器设置、输入字节数与限长时间线；模型事件只提供活动摘要，不展示输入材料或推理正文。活动合并后每秒至多落盘一次，阶段切换与终态立即落盘；保留最近 200 条并计数说明省略量。超过 60 秒没有新活动只提示仍在等待，每次模型调用继续使用 180 秒时限。
+
+失败、取消与中断均保留停止阶段和原因码；执行器失败补充退出码、信号及脱敏限长的错误详情。所有状态都可展开检索记录和复制诊断，复制内容包含会话、轮次、请求与 runtime 身份，不含完整问题、任务材料或结果正文。请求模型与实际返回的模型身份分别展示，未返回的身份不能用请求别名补齐。旧历史缺少诊断时明确标为未记录。
+
+浏览器按会话与 revision 合并更新，进度推流只重读当前相关会话，不重复读取整份历史。迟到的提交、取消和读取响应不能覆盖更高 revision；提交错误和各读取入口的错误独立保留。
 
 执行器沿用 Context 项目共享设置，界面显示影响范围。模型用量单列用途 `task_lookup_conversation`；不宣称无状态进程能够命中缓存。Claude 认证状态与缓存验收沿用上游交接的未核实边界。
 

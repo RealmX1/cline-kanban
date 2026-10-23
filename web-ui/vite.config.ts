@@ -80,6 +80,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-agent-prompt-image-attachment-reference": resolve(
+				__dirname,
+				"../src/core/agent-prompt-image-attachment-reference.ts",
+			),
 			"@runtime-work-unit-relation-modeling-api-contract": resolve(
 				__dirname,
 				"../src/core/work-unit-relation-modeling-api-contract.ts",

@@ -35,6 +35,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 ```
 
 - `npm test` 是 `test:guarded`（`test:policy` AST 静态策略 + invoking-repository mutation canary），**不要直接 `npx vitest`**——那会绕过策略与 canary。两个 project：`precommit-safe`（`test/**/*.test.ts`）与 `runtime-integration`（`*.integration.test.ts`，串行单 worker）。单文件：`npm run test:guarded -- --project precommit-safe <file>`。web-ui 是另一套 vitest（jsdom、测试与源码同目录）：`npm run web:test`；e2e 用 Playwright：`npm --prefix web-ui run e2e`。桌面壳：`npm --prefix packages/desktop run typecheck|test`。
+- **验证构建前先检查 `dist` 与 `web-ui/dist` 的 realpath**：任务 worktree 可能把它们软链到主仓库共享产物。必须先隔离两处输出，并显式设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`；不能把更新共享产物当成普通验证构建。
 - 真实 git 测试只能经 `test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts` 操作仓库（细则见 `test/README.md`）。
 - 计时 / 资源阈值断言（等子进程退出、性能绊线、RSS 上限）按 `test/README.md`「负载敏感的墙钟 / 资源断言」分类：测试侧等待用两档（软档只告警、硬档才失败），并闭合用例与 hook 超时；**不要**用宿主 CPU 争用信号放过失败（实测不可靠）。
 - pre-commit（husky）顺序：`biome check --staged` → `npm run typecheck` → `npm run test:precommit`。
@@ -58,6 +59,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
+- **查卡恢复必须按执行归属判断**：其他实例启动不等于本轮查询经历重启；只收口归属已退出的轮次，心跳不可读时保留未知态。持久图片与文本协议适配见 `docs/architecture/task-lookup-query-execution-ownership-and-persistent-prompt-images.md`。
 - **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。
 - **后台启动终端的估算尺寸须匹配响应式布局**：手机终端使用整页宽度，不能扣掉桌面并排 diff 的宽度；否则 Codex 可能以 1–3 列启动，首条提示词一直等到打开详情后才投递。证据与验收见 `docs/post-mortems/codex-mobile-background-startup-terminal-width-2026-10-19.md`。
 - **Focus View 的 stage 卡头也有两份渲染**：行内卡头 + `StageHeaderRails` 钉住的孪生卡头（不透明 overlay，钉住时盖住行内卡头）。卡头上的状态与交互必须两边都接（孪生卡头曾写死「已展开」、折不动，两次被报）；跳到某 stage 不能用 `scrollIntoView({block:"start"})`（落点正在 rail 之下），rail 条目几何与滚动落点的单一真源是 `stage-header-rail-geometry.ts`。

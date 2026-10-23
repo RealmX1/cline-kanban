@@ -226,6 +226,7 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					}
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
+						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
 						idempotencyKey: injectionIdempotencyKey,
 						mayAutoStashAbsentHumanInputBox:

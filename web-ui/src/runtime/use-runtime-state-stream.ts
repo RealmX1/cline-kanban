@@ -756,7 +756,7 @@ export function useRuntimeStateStream(
 						return;
 					}
 					if (payload.type === "task_lookup_conversation_updated") {
-						observeTaskLookupConversationUpdated();
+						observeTaskLookupConversationUpdated(payload.conversationId, payload.revision);
 						return;
 					}
 					if (payload.type === "exploratory_findings_updated") {

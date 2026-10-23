@@ -1049,6 +1049,47 @@ export async function readObservedTaskCommitsAcrossIncarnationsByTaskId(
 	);
 }
 
+export interface RetainedTaskCommitCoverageInput {
+	knownTaskCommits: ObservedTaskCommit[] | null;
+	provenanceFloorCommits: string[];
+}
+
+// 与卡片的保留提交统计使用同一集合，不把被 amend/rebase 废弃的旧版本重新加回分母。
+// 此处只读持久事实；worktree 删除后仍可用，统计失败留下的旧明细不能冒充最新完整集合。
+export async function readRetainedTaskCommitCoverageInputsByTaskId(
+	workspaceId: string,
+): Promise<Map<string, RetainedTaskCommitCoverageInput>> {
+	const file = await readProvenanceFile(workspaceId);
+	return new Map(
+		Object.values(file.tasks).map((entry) => {
+			const history = entry.retainedCommittedLineChangeHistory;
+			const observedBySha = new Map(
+				deduplicateObservedTaskCommits(entry.incarnations).map((commit) => [commit.commitSha, commit]),
+			);
+			const retainedShas = new Set(history?.commits.map((commit) => commit.commitSha));
+			const reachable = entry.lastWorkspaceGitSnapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
+			const complete =
+				history?.summary.status === "complete" &&
+				history.commits.every((commit) => observedBySha.has(commit.commitSha)) &&
+				(reachable?.every((commit) => retainedShas.has(commit.commitSha)) ?? true);
+			return [
+				entry.taskId,
+				{
+					knownTaskCommits: complete
+						? history.commits.flatMap((commit) => {
+								const observed = observedBySha.get(commit.commitSha);
+								return observed ? [observed] : [];
+							})
+						: null,
+					provenanceFloorCommits: [
+						...new Set(entry.incarnations.map((incarnation) => incarnation.initialBaseCommit)),
+					],
+				},
+			];
+		}),
+	);
+}
+
 /** 明细只读持久缓存，不在 hover 请求里扫描 Git 历史或重算 diff。 */
 export async function readTaskRetainedCommittedLineChangeHistory(
 	workspaceId: string,

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { TRPCError } from "@trpc/server";
 import { collectClaudeMainSessionHandoverMaterial } from "../agent-session-history/claude-main-session-handover-material";
 import type { RuntimeConfigState } from "../config/runtime-config";
@@ -23,7 +24,14 @@ import type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
+	TaskMainSessionHandoverStatusResponse,
+} from "../core/task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema,
+	taskMainSessionHandoverRecoveryReceiptReferenceSchema,
+	taskMainSessionHandoverRecoveryReceiptSchema,
 } from "../core/task-main-session-handover-contract";
 import {
 	createPendingTaskMessageInjectionRecord,
@@ -31,6 +39,7 @@ import {
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
 	recordTaskMessageTerminalDeliveryOutcome,
+	type TaskMessageInjectionRecord,
 	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
@@ -95,6 +104,24 @@ const systemIntent = () =>
 	);
 const reportDeliveryKey = (record: TaskMainSessionHandoverRecord) =>
 	`${record.handoverId}:report:${record.reportDeliveryAttempt}`;
+
+function isReportDefinitelyUndelivered(
+	record: TaskMainSessionHandoverRecord,
+	delivery: TaskMessageInjectionRecord | null | undefined,
+): boolean {
+	if (!delivery) return record.reportDeliveryStartedAt === null;
+	return (
+		delivery.terminal_delivery_status === "delivery_failed" &&
+		[
+			"no_active_terminal_session",
+			"terminal_prompt_readiness_timeout",
+			"human_terminal_contention_timeout",
+			"terminal_input_box_contended_but_unstashable",
+			"agent_awaiting_user_decision_timeout",
+			"cancelled_before_delivery",
+		].includes(delivery.terminal_delivery_failure_reason ?? "")
+	);
+}
 
 export function renderTaskMainSessionHandoverReportPrompt(record: TaskMainSessionHandoverRecord): string {
 	return `/plan ${MAIN_SESSION_HANDOVER_REPORT_MARKER}${record.handoverId}
@@ -250,12 +277,18 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 		taskId: string,
 		handoverId: string,
 		change: (record: TaskMainSessionHandoverRecord) => TaskMainSessionHandoverRecord,
+		expectedReportDeliveryAttempt?: number,
 	) {
 		await mutateWorkspaceState(scope.workspacePath, systemIntent(), (state) => {
 			const card = state.board.columns
 				.flatMap((column) => column.cards)
 				.find((candidate) => candidate.id === taskId);
 			if (card?.taskMainSessionHandover?.handoverId !== handoverId)
+				return { board: state.board, value: null, save: false };
+			if (
+				expectedReportDeliveryAttempt !== undefined &&
+				card.taskMainSessionHandover.reportDeliveryAttempt !== expectedReportDeliveryAttempt
+			)
 				return { board: state.board, value: null, save: false };
 			if (
 				card.taskMainSessionHandover.status === "completed" ||
@@ -628,12 +661,18 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					try {
 						await progress(scope, card.id);
 					} catch (error) {
-						await setRecord(scope, card.id, card.taskMainSessionHandover?.handoverId ?? "", (record) => ({
-							...record,
-							status: "failed",
-							updatedAt: Date.now(),
-							errorMessage: error instanceof Error ? error.message : String(error),
-						}));
+						await setRecord(
+							scope,
+							card.id,
+							card.taskMainSessionHandover?.handoverId ?? "",
+							(record) => ({
+								...record,
+								status: "failed",
+								updatedAt: Date.now(),
+								errorMessage: error instanceof Error ? error.message : String(error),
+							}),
+							card.taskMainSessionHandover?.reportDeliveryAttempt,
+						);
 					}
 				}
 			}
@@ -643,13 +682,219 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 		await sweeping;
 	}
 
+	async function getStatus(
+		scope: RuntimeTrpcWorkspaceScope,
+		input: { taskId: string },
+	): Promise<TaskMainSessionHandoverStatusResponse> {
+		const state = await loadState(scope);
+		const card = findCard(state.board, input.taskId);
+		const record = card.taskMainSessionHandover ?? null;
+		const delivery = record
+			? findTaskMessageInjectionRecord(
+					await readTaskMessageInjectionLedger(getTaskMessageInjectionLedgerPath(state.statePath)),
+					record.targetTaskConversationSessionId,
+					reportDeliveryKey(record),
+				)
+			: undefined;
+		const target = record ? state.sessions[record.targetTaskConversationSessionId] : undefined;
+		const blockReason =
+			!record || record.status !== "failed"
+				? "当前没有失败的交接。"
+				: resolveMainTaskConversationSessionId(card) !== record.targetTaskConversationSessionId
+					? "主会话绑定已经改变。"
+					: isConversationSessionStillGenerating(target)
+						? "原 Codex 会话仍在生成，请等它停下后重试。"
+						: state.manager.hasPendingProgrammaticTaskChatInputDelivery?.(record.targetTaskConversationSessionId)
+							? "原交接投递仍在处理中，请等待回执。"
+							: !record.materialDirectoryPath
+								? "原交接材料缺失，无法重新交接。"
+								: null;
+		return {
+			record,
+			recoveryAvailability: {
+				canRetryUndeliveredReport: record?.status === "failed" && isReportDefinitelyUndelivered(record, delivery),
+				canRecreateCodexSession: blockReason === null,
+				terminalDeliveryFailureReason: delivery?.terminal_delivery_failure_reason ?? null,
+				blockReason,
+			},
+		};
+	}
+
+	async function recoverWithNewCodexSession(
+		scope: RuntimeTrpcWorkspaceScope,
+		input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+		evidence?: KanbanRequestOriginActorEvidence,
+	) {
+		// 协调器也是内部调用入口；在拼持久路径之前再次校验 UUID 与显式确认。
+		taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema.parse(input);
+		const intent = evidence
+			? await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+					taskMutationIntentKind: "runtime_recover_task_main_session_handover",
+					kanbanRequestOriginActorEvidence: evidence,
+				})
+			: systemIntent();
+		await deps.serializer.runTaskCardActionCommandSeriallyForTaskCards(
+			scope.workspaceId,
+			[input.taskId],
+			async () => {
+				const state = await loadState(scope);
+				const card = findCard(state.board, input.taskId);
+				const record = card.taskMainSessionHandover;
+				if (
+					record?.handoverId === input.expectedHandoverId &&
+					record.recoveryReceipts?.some(
+						(receipt) =>
+							receipt.requestId === input.requestId &&
+							receipt.previousReportDeliveryAttempt === input.expectedReportDeliveryAttempt,
+					)
+				)
+					return;
+				if (
+					!record ||
+					record.handoverId !== input.expectedHandoverId ||
+					record.reportDeliveryAttempt !== input.expectedReportDeliveryAttempt ||
+					record.status !== "failed"
+				) {
+					throw new TRPCError({ code: "CONFLICT", message: "交接状态已经变化，请重新检查后确认恢复。" });
+				}
+				const availability = (await getStatus(scope, input)).recoveryAvailability;
+				if (!availability?.canRecreateCodexSession) {
+					throw new TRPCError({ code: "CONFLICT", message: availability?.blockReason ?? "当前不能重新交接。" });
+				}
+				const directory = join(record.materialDirectoryPath as string, "recovery-attempts");
+				await readFile(join(record.materialDirectoryPath as string, "HANDOVER.md"), "utf8");
+				await mkdir(directory, { recursive: true, mode: 0o700 });
+				const receiptFilePath = join(directory, `${input.requestId}.json`);
+				const existingReceipt = await readFile(receiptFilePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+					if (error.code !== "ENOENT") throw error;
+					return null;
+				});
+				const receipt = taskMainSessionHandoverRecoveryReceiptSchema.parse(
+					existingReceipt
+						? JSON.parse(existingReceipt)
+						: {
+								taskId: input.taskId,
+								requestId: input.requestId,
+								replacedTargetTaskConversationSessionId: record.targetTaskConversationSessionId,
+								replacementTargetTaskConversationSessionId: `task-conversation-session-${randomUUID()}`,
+								previousReportDeliveryAttempt: record.reportDeliveryAttempt,
+								receiptFilePath,
+								createdAt: Date.now(),
+								previousHandoverRecord: record,
+							},
+				);
+				if (
+					receipt.taskId !== input.taskId ||
+					receipt.requestId !== input.requestId ||
+					receipt.receiptFilePath !== receiptFilePath ||
+					!isDeepStrictEqual(receipt.previousHandoverRecord, record)
+				) {
+					throw new TRPCError({ code: "CONFLICT", message: "恢复凭据与当前交接不符，保留现场并停止。" });
+				}
+				// 先固定失败现场和预留目标。此后崩溃可按同一 requestId 继续，不另选会话。
+				if (!existingReceipt)
+					await writeFile(receiptFilePath, JSON.stringify(receipt), { flag: "wx", mode: 0o600 });
+				const previousTarget = state.sessions[record.targetTaskConversationSessionId];
+				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(scope);
+				await mutateWorkspaceState(scope.workspacePath, intent, (latest) => {
+					const current = findCard(latest.board, input.taskId);
+					if (
+						current.taskMainSessionHandover?.handoverId !== record.handoverId ||
+						current.taskMainSessionHandover.status !== "failed" ||
+						current.taskMainSessionHandover.reportDeliveryAttempt !== record.reportDeliveryAttempt ||
+						resolveMainTaskConversationSessionId(current) !== record.targetTaskConversationSessionId ||
+						isConversationSessionStillGenerating(
+							state.manager.getSummary(record.targetTaskConversationSessionId),
+						) ||
+						state.manager.hasPendingProgrammaticTaskChatInputDelivery?.(record.targetTaskConversationSessionId)
+					) {
+						throw new TRPCError({ code: "CONFLICT", message: "交接状态已经变化，未创建新的接任会话。" });
+					}
+					const targetId = receipt.replacementTargetTaskConversationSessionId;
+					// 材料和配置读取期间仍可能收到旧会话的身份 hook；切主只改角色，不能回写早先快照。
+					const latestPreviousTarget =
+						state.manager.getSummary(record.targetTaskConversationSessionId) ??
+						latest.sessions[record.targetTaskConversationSessionId] ??
+						previousTarget;
+					if (latest.sessions[targetId] || state.manager.getSummary(targetId)) {
+						throw new TRPCError({ code: "CONFLICT", message: "预留接任会话 ID 已被占用，未覆盖任何会话。" });
+					}
+					const replacement = runtimeTaskSessionSummarySchema.parse({
+						taskId: targetId,
+						agentId: "codex",
+						workspacePath: latestPreviousTarget?.workspacePath ?? null,
+						pid: null,
+						startedAt: null,
+						updatedAt: Date.now(),
+						lastOutputAt: null,
+						reviewReason: null,
+						exitCode: null,
+						lastHookAt: null,
+						latestHookActivity: null,
+						turnOwner: null,
+						liveness: "none",
+						userTurnKind: null,
+						taskConversationSessionMetadata: {
+							workspaceTaskId: input.taskId,
+							taskConversationSessionRole: "main",
+							taskConversationSessionRoleAtCreation: "task_collaborator",
+							taskConversationSessionContextSource: "started_from_scratch",
+							taskAutomationSuspendedForMainSessionHandover: true,
+							parentTaskConversationSessionId: null,
+							mainSessionOriginTurnNumber: null,
+							mainSessionOriginUserMessagePreview: null,
+							latestUserMessagePreview: "重新读取交接材料并汇报现状",
+							taskConversationSessionLaunchSettings: latestPreviousTarget?.taskConversationSessionMetadata
+								?.taskConversationSessionLaunchSettings ?? {
+								taskAgentPermissionMode:
+									current.taskAgentPermissionMode ??
+									resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
+										scopedRuntimeConfig.agentAutonomousModeEnabled,
+									),
+								sessionTransport: "pty_terminal",
+							},
+						},
+					});
+					return {
+						board: replaceCard(latest.board, input.taskId, (entry) => ({
+							...entry,
+							agentId: "codex",
+							mainTaskConversationSessionId: targetId,
+							taskMainSessionHandover: {
+								...record,
+								targetTaskConversationSessionId: targetId,
+								destination: { kind: "new_codex_session" },
+								status: "report_delivery_pending",
+								reportDeliveryStartedAt: null,
+								reportDeliveryAttempt: record.reportDeliveryAttempt + 1,
+								errorMessage: null,
+								updatedAt: Date.now(),
+								recoveryReceipts: [
+									...(record.recoveryReceipts ?? []),
+									taskMainSessionHandoverRecoveryReceiptReferenceSchema.parse(receipt),
+								],
+							},
+						})),
+						sessions: {
+							...latest.sessions,
+							...(latestPreviousTarget ? { [latestPreviousTarget.taskId]: latestPreviousTarget } : {}),
+							[targetId]: replacement,
+						},
+						value: null,
+					};
+				});
+				await syncManager(scope);
+			},
+		);
+		pendingScopes.set(scope.workspaceId, scope);
+		void sweep().catch((error) => deps.warn(`主会话恢复调度失败：${String(error)}`));
+		return await getStatus(scope, input);
+	}
+
 	return {
 		prepare,
-		getStatus: async (scope: RuntimeTrpcWorkspaceScope, input: { taskId: string }) => ({
-			record:
-				findCard((await loadPersistedWorkspaceStateById(scope.workspaceId)).board, input.taskId)
-					.taskMainSessionHandover ?? null,
-		}),
+		getStatus,
+		recoverWithNewCodexSession,
 		request: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: TaskMainSessionHandoverRequest,
@@ -732,18 +977,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						record.targetTaskConversationSessionId,
 						reportDeliveryKey(record),
 					);
-					if (
-						previous &&
-						(previous.terminal_delivery_status !== "delivery_failed" ||
-							![
-								"no_active_terminal_session",
-								"terminal_prompt_readiness_timeout",
-								"human_terminal_contention_timeout",
-								"terminal_input_box_contended_but_unstashable",
-								"agent_awaiting_user_decision_timeout",
-								"cancelled_before_delivery",
-							].includes(previous.terminal_delivery_failure_reason ?? ""))
-					) {
+					if (!isReportDefinitelyUndelivered(record, previous)) {
 						throw new TRPCError({
 							code: "CONFLICT",
 							message: "上次投递可能已经发生，未重复发送。请打开 Codex 检查并直接发消息继续。",

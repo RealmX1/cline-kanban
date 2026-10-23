@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowBigUp, Command, Pause, SendHorizontal } from "lucide-react";
+import { AlertTriangle, ArrowBigUp, Command, Paperclip, Pause, SendHorizontal } from "lucide-react";
 import {
 	type ClipboardEvent,
 	type DragEvent,
@@ -23,12 +23,19 @@ import {
 import { ClineChatModelSelector } from "@/components/detail-panels/cline-chat-model-selector";
 import { type InlineCompletionItem, InlineCompletionPicker } from "@/components/inline-completion-picker";
 import type { SearchSelectOption } from "@/components/search-select-dropdown";
-import { collectImageFilesFromDataTransfer, extractImagesFromDataTransfer } from "@/components/task-image-input-utils";
+import {
+	ACCEPTED_TASK_IMAGE_INPUT_ACCEPT,
+	collectImageFilesFromDataTransfer,
+	extractImagesFromDataTransfer,
+	fileToTaskImage,
+} from "@/components/task-image-input-utils";
 import { TaskImageStrip } from "@/components/task-image-strip";
+import { TaskPromptPseudoHtmlBlockInsertControl } from "@/components/task-prompt-pseudo-html-block-insert-control";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useAgentPromptPseudoHtmlBlockInsertion } from "@/hooks/use-agent-prompt-pseudo-html-block-insertion";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeSlashCommand, RuntimeTaskSessionMode } from "@/runtime/types";
 import type { TaskImage } from "@/types";
@@ -112,6 +119,14 @@ export function ClineChatComposer({
 	workspaceId?: string | null;
 }): ReactElement {
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+	const latestImagesRef = useRef(images);
+	latestImagesRef.current = images;
+	const imageFileInputRef = useRef<HTMLInputElement | null>(null);
+	const blockInsertion = useAgentPromptPseudoHtmlBlockInsertion({
+		textareaRef,
+		value: draft,
+		onValueChange: onDraftChange,
+	});
 	const handledAgentEntryKeyboardFocusRequestKeyRef = useRef(agentEntryKeyboardFocusRequestKey);
 	const mentionSearchRequestIdRef = useRef(0);
 	const slashCommandsRequestIdRef = useRef(0);
@@ -229,16 +244,18 @@ export function ClineChatComposer({
 			if (!onImagesChange || newImages.length === 0) {
 				return;
 			}
-			onImagesChange([...images, ...newImages]);
+			latestImagesRef.current = [...latestImagesRef.current, ...newImages];
+			onImagesChange(latestImagesRef.current);
 		},
-		[images, onImagesChange],
+		[onImagesChange],
 	);
 
 	const handleRemoveImage = useCallback(
 		(imageId: string) => {
-			onImagesChange?.(images.filter((image) => image.id !== imageId));
+			latestImagesRef.current = latestImagesRef.current.filter((image) => image.id !== imageId);
+			onImagesChange?.(latestImagesRef.current);
 		},
-		[images, onImagesChange],
+		[onImagesChange],
 	);
 
 	const handlePaste = useCallback(
@@ -508,6 +525,7 @@ export function ClineChatComposer({
 			>
 				<textarea
 					ref={textareaRef}
+					onSelect={(event) => blockInsertion.rememberSelection(event.currentTarget)}
 					value={draft}
 					onChange={(event) => {
 						onDraftChange(event.target.value);
@@ -531,6 +549,41 @@ export function ClineChatComposer({
 			{images.length > 0 ? (
 				<TaskImageStrip images={images} onRemoveImage={handleRemoveImage} className="mt-2" />
 			) : null}
+			<div className="mt-1 flex flex-wrap items-center gap-1">
+				<TaskPromptPseudoHtmlBlockInsertControl
+					disabled={!canSend}
+					onInsertPseudoHtmlBlock={blockInsertion.insertBlock}
+					onPopoverCloseAutoFocus={blockInsertion.restoreFocusAfterPopover}
+				/>
+				{onImagesChange ? (
+					<>
+						<Button
+							variant="ghost"
+							size="sm"
+							disabled={!canSend}
+							icon={<Paperclip size={14} />}
+							onClick={() => imageFileInputRef.current?.click()}
+						>
+							Attach image
+						</Button>
+						<input
+							ref={imageFileInputRef}
+							type="file"
+							className="hidden"
+							multiple
+							accept={ACCEPTED_TASK_IMAGE_INPUT_ACCEPT}
+							onChange={(event) => {
+								const input = event.currentTarget;
+								const files = Array.from(input.files ?? []);
+								void Promise.all(files.map(fileToTaskImage)).then((selected) => {
+									appendImages(selected.filter((image): image is TaskImage => image !== null));
+									input.value = "";
+								});
+							}}
+						/>
+					</>
+				) : null}
+			</div>
 			<div className="mt-2 flex min-w-0 items-center gap-2">
 				{showClineProviderControls ? (
 					<div className="min-w-0 shrink overflow-hidden">

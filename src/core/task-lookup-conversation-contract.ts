@@ -1,5 +1,43 @@
 import { z } from "zod";
+import { runtimeTaskImageSchema } from "./api-contract";
 import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "./inter-work-unit-relation-ledger-event-contract";
+import { taskIndexingSupportExecutorSettingsSchema } from "./task-indexing-support-contract";
+
+export const taskLookupExecutionPhaseSchema = z.enum([
+	"collecting_materials",
+	"preparing_context",
+	"recalling_candidates",
+	"explaining_candidates",
+	"validating_candidates",
+	"saving_result",
+	"finished",
+]);
+export const taskLookupExecutionActivitySchema = z.object({
+	occurredAtEpochMs: z.number(),
+	phase: taskLookupExecutionPhaseSchema,
+	eventKind: z.enum([
+		"phase_started",
+		"agent_process_started",
+		"agent_response_received",
+		"agent_execution_completed",
+		"diagnostic_warning",
+		"query_completed",
+		"query_failed",
+		"query_cancelled",
+		"query_interrupted",
+	]),
+	message: z.string().max(1000),
+});
+export const taskLookupExecutionFailureDiagnosticSchema = z.object({
+	reasonCode: z.string(),
+	failedPhase: taskLookupExecutionPhaseSchema,
+	detail: z.string().max(4000),
+	exitCode: z.number().nullable(),
+	signal: z.string().nullable(),
+	stderrTail: z.string().max(4000).nullable(),
+});
+export type TaskLookupExecutionPhase = z.infer<typeof taskLookupExecutionPhaseSchema>;
+export type TaskLookupExecutionActivity = z.infer<typeof taskLookupExecutionActivitySchema>;
 
 export const taskLookupScopeSchema = z.object({
 	projectIds: z.array(z.string().min(1)).default([]),
@@ -30,9 +68,22 @@ export const taskLookupTurnSchema = z.object({
 	turnId: z.string(),
 	requestId: z.string(),
 	questionText: z.string(),
+	questionImages: z.array(runtimeTaskImageSchema).optional(),
+	executionOwnerRuntimeProcessInstanceId: z.string().uuid().nullable().optional(),
+	executionRecoveryMessage: z.string().optional(),
 	scope: taskLookupScopeSchema,
 	status: z.enum(["running", "completed", "failed", "cancelled", "interrupted"]),
-	phase: z.enum(["collecting_materials", "recalling_candidates", "explaining_candidates", "finished"]),
+	phase: taskLookupExecutionPhaseSchema,
+	owningRuntimeProcessInstanceId: z.string().optional(),
+	executionOwnershipWarning: z.string().optional(),
+	phaseStartedAt: z.number().optional(),
+	lastExecutionActivityAt: z.number().optional(),
+	executionActivityTimeline: z.array(taskLookupExecutionActivitySchema).max(200).optional(),
+	omittedExecutionActivityCount: z.number().int().nonnegative().optional(),
+	executorSettings: taskIndexingSupportExecutorSettingsSchema.optional(),
+	inputByteCount: z.number().optional(),
+	modelExecutionTimeoutMs: z.number().optional(),
+	executionFailureDiagnostic: taskLookupExecutionFailureDiagnosticSchema.optional(),
 	startedAt: z.number(),
 	finishedAt: z.number().nullable(),
 	result: taskLookupResultSchema.nullable(),
@@ -68,6 +119,8 @@ export const submitTaskLookupTurnRequestSchema = z.object({
 	conversationId: z.string().uuid(),
 	requestId: z.string().min(1).max(200),
 	questionText: z.string().trim().min(1).max(100000),
+	questionImages: z.array(runtimeTaskImageSchema).default([]),
+	explicitlyRecoveredUnownedTurnId: z.string().optional(),
 	scope: taskLookupScopeSchema.optional(),
 });
 export const taskLookupConversationIdentitySchema = z.object({ conversationId: z.string().uuid() });
@@ -85,4 +138,4 @@ export type TaskLookupConversation = z.infer<typeof taskLookupConversationSchema
 export type TaskLookupTurn = z.infer<typeof taskLookupTurnSchema>;
 export type TaskLookupCandidate = z.infer<typeof taskLookupResultSchema>["candidates"][number];
 export type TaskLookupScope = z.infer<typeof taskLookupScopeSchema>;
-export type SubmitTaskLookupTurnRequest = z.infer<typeof submitTaskLookupTurnRequestSchema>;
+export type SubmitTaskLookupTurnRequest = z.input<typeof submitTaskLookupTurnRequestSchema>;

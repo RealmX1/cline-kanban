@@ -459,6 +459,8 @@ interface TaskChatInputDeliveryAttemptPlan {
 	generation: number;
 	// 后台自动注入（RVF followup 等）遇 agent 模态待答时让位，见 Fix B 让位守卫。
 	deferWhileUserTurn: boolean;
+	// 首次交接必须等原生启动完成，不能把 loading 界面的提示符当作可提交输入框。
+	requiresCodexStartupPromptReady: boolean;
 	// 调用方的领域核验；每次实际粘贴或提交前重读，不缓存入队时结论。
 	validateBeforeTerminalWrite: (() => Promise<void>) | null;
 	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
@@ -1608,6 +1610,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		text: string,
 		options?: {
 			deferWhileUserTurn?: boolean;
+			requiresCodexStartupPromptReady?: boolean;
 			validateBeforeTerminalWrite?: () => Promise<void>;
 			idempotencyKey?: string | null;
 			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
@@ -1669,6 +1672,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
+			requiresCodexStartupPromptReady: options?.requiresCodexStartupPromptReady ?? false,
 			validateBeforeTerminalWrite: options?.validateBeforeTerminalWrite ?? null,
 			mayAutoStashAbsentHumanInputBox: options?.mayAutoStashAbsentHumanInputBox ?? false,
 			preemptivelyStashHumanInputBox: options?.preemptivelyStashHumanInputBox ?? null,
@@ -1751,7 +1755,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		active.taskChatInputDeliveryTimer = null;
-		const readiness = await this.resolveInteractivePromptReadiness(entry);
+		const readiness = await this.resolveInteractivePromptReadiness(entry, plan.requiresCodexStartupPromptReady);
 		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
 		const currentEntry = this.entries.get(taskId);
 		const currentActive = currentEntry?.active;
@@ -2661,10 +2665,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// isAtInteractivePromptForReaction（便宜、可测）；② 结构判定——读镜像 buffer 行判输入框形状；
 	// ③ 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，也已捕获 Stop 后的最终提示符渲染），
 	// 去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
-	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<TaskChatInputDeliveryReadiness> {
+	private async resolveInteractivePromptReadiness(
+		entry: SessionEntry,
+		requiresCodexStartupPromptReady = false,
+	): Promise<TaskChatInputDeliveryReadiness> {
 		const active = entry.active;
 		if (!active) {
 			return null;
+		}
+		if (requiresCodexStartupPromptReady && entry.summary.agentId === "codex") {
+			// 首次交接不能走历史缓冲或静默兜底；初始化未结束时它们都可能产生假就绪。
+			const screen = await entry.terminalStateMirror?.getScreenSnapshot();
+			return screen && hasCodexStartupPromptReady(screen.lines.map((line) => line.text).join("\n"))
+				? "prompt"
+				: null;
 		}
 		const predicate = resolveTuiInteractivePromptPredicate(entry.summary.agentId);
 		// 无 TUI 就绪预测的终端 agent（droid / kiro 等）：没有可门控的提示符信号，
@@ -3474,10 +3488,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const identity = entry.summary.agentNativeConversationSessionIdentity;
 		if (
 			request.agentId !== "codex" ||
-			identity?.sourceAgentId !== "codex" ||
 			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt)
 		)
 			return;
+		if (identity?.sourceAgentId !== "codex") {
+			if (entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) {
+				this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
+					entry,
+					request,
+					"交接目标尚未保存可续接的 Codex 原生身份。请在 Sessions 中选择「新建 Codex 并重新交接」；已在启动前停止，保留原会话和投递记录。",
+				);
+			}
+			return;
+		}
 		const inspection = await inspectCodexNativeConversationTranscriptBeforeResume({
 			nativeSessionId: identity.nativeSessionId,
 			transcriptPath: identity.transcriptPath,

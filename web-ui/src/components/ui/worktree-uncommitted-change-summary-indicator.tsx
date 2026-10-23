@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactElement } from "react";
+import { cn } from "@/components/ui/cn";
 
 // worktree 相对 HEAD 的未提交改动统计「(N files +A -D)」。This project 卡片目录行、顶栏分支按钮、跨项目切换面板
 // 的行共用这一份，括号与文件数的颜色由宿主决定（各自所在行的排版不同），增删行数恒为绿 / 红。
@@ -25,6 +26,7 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	parenthesesAndChangedFileCountClassName,
 	parenthesesAndChangedFileCountStyle,
 	showUncommittedChangeBackground = false,
+	allowLineWrapping = false,
 }: {
 	changedFiles: number;
 	additions: number;
@@ -32,24 +34,44 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	parenthesesAndChangedFileCountClassName?: string;
 	parenthesesAndChangedFileCountStyle?: CSSProperties;
 	showUncommittedChangeBackground?: boolean;
+	allowLineWrapping?: boolean;
 }): ReactElement {
-	const mutedProps = {
-		className: parenthesesAndChangedFileCountClassName,
-		style: parenthesesAndChangedFileCountStyle,
-	};
+	const mutedProps = showUncommittedChangeBackground
+		? {}
+		: {
+				className: parenthesesAndChangedFileCountClassName,
+				style: parenthesesAndChangedFileCountStyle,
+			};
+	const additionsTextColorClassName = showUncommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-green)_30%,var(--color-text-primary))]"
+		: "text-status-green";
+	const deletionsTextColorClassName = showUncommittedChangeBackground
+		? "text-[color-mix(in_oklab,var(--color-status-red)_30%,var(--color-text-primary))]"
+		: "text-status-red";
 	const changeSummary = (
 		<>
 			<span {...mutedProps}>(</span>
 			<span {...mutedProps}>
 				{changedFiles} {changedFiles === 1 ? "file" : "files"}
 			</span>
-			<span className="text-status-green"> +{additions}</span>
-			<span className="text-status-red"> -{deletions}</span>
+			<span className={cn(additionsTextColorClassName, allowLineWrapping && "whitespace-nowrap")}>
+				{" "}
+				+{additions}
+			</span>
+			<span className={cn(deletionsTextColorClassName, allowLineWrapping && "whitespace-nowrap")}>
+				{" "}
+				-{deletions}
+			</span>
 			<span {...mutedProps}>)</span>
 		</>
 	);
 	return showUncommittedChangeBackground ? (
-		<span className="inline-block rounded-sm bg-status-orange/15 px-0.5 align-baseline whitespace-nowrap">
+		<span
+			className={cn(
+				"inline-block rounded-sm bg-status-orange/30 px-0.5 align-baseline text-text-primary ring-1 ring-inset ring-status-orange/70",
+				allowLineWrapping ? "max-w-full whitespace-normal" : "whitespace-nowrap",
+			)}
+		>
 			{changeSummary}
 		</span>
 	) : (

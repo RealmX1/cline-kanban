@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
@@ -166,6 +167,7 @@ export function TaskConversationSessionsPanel({
 	);
 	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
 	const [isCreating, setIsCreating] = useState(false);
+	const [isPreparingQuestionImages, setIsPreparingQuestionImages] = useState(false);
 	const [creationError, setCreationError] = useState<string | null>(null);
 	const isByTheWaySessionCreationSupported = byTheWaySessionSupportedAgentIds.has(effectiveAgentId);
 	const isSessionCreationSupported =
@@ -522,14 +524,16 @@ export function TaskConversationSessionsPanel({
 						>
 							{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
 						</label>
-						<textarea
+						<TaskPromptComposer
 							id="task-conversation-initial-question"
-							className="min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary placeholder:text-text-secondary focus:border-border-focus focus:outline-none"
+							workspaceId={workspaceId}
+							minimumTextareaHeight={96}
 							placeholder={
 								sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
 							}
 							value={initialUserQuestion}
-							onChange={(event) => setInitialUserQuestion(event.target.value)}
+							onImagePreparationPendingChange={setIsPreparingQuestionImages}
+							onValueChange={setInitialUserQuestion}
 						/>
 						<p className="mt-1 text-[11px] text-text-tertiary">
 							{sessionRole === "task_collaborator"
@@ -546,7 +550,12 @@ export function TaskConversationSessionsPanel({
 							size="sm"
 							fill
 							className="mt-3"
-							disabled={!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating}
+							disabled={
+								!isSessionCreationSupported ||
+								!initialUserQuestion.trim() ||
+								isCreating ||
+								isPreparingQuestionImages
+							}
 							onClick={() => void createSession()}
 						>
 							{isCreating ? "Creating…" : "Create session"}

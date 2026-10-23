@@ -40,8 +40,8 @@ import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import {
-	loadWorkspaceContextById,
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
+	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
 import { readClaudeNativeTaskListCurrentWorkPhaseGoal } from "../terminal/claude-native-task-list-current-work-phase-goal-projection";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -266,7 +266,9 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 			}
 			const knownWorkspacePath = deps.getWorkspacePathById(workspaceId);
-			const workspaceContext = knownWorkspacePath ? null : await loadWorkspaceContextById(workspaceId);
+			const workspaceContext = knownWorkspacePath
+				? null
+				: await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(workspaceId);
 			const workspacePath = knownWorkspacePath ?? workspaceContext?.repoPath ?? null;
 			if (!workspacePath) {
 				await recordNotificationSignalDecision(notificationCandidateId, "workspace_not_found", {}, true);

@@ -331,8 +331,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				workspaceId,
 				workspaceMetadata,
 			};
+			const serializedPayload = JSON.stringify(payload);
 			for (const client of clients) {
-				sendRuntimeStateMessage(client, payload);
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
 			}
 		},
 	});
@@ -431,8 +432,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			type: "mcp_auth_updated",
 			statuses,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of runtimeStateClients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -445,8 +447,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			type: "cline_session_context_updated",
 			version: clineSessionContextVersion,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of runtimeStateClients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -464,8 +467,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				workspaceId,
 				summaries,
 			};
+			const serializedPayload = JSON.stringify(payload);
 			for (const client of runtimeClients) {
-				sendRuntimeStateMessage(client, payload);
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
 			}
 		}
 		scheduleProjectsBroadcastCoalescedAfterTaskSessionSummaryFlush();
@@ -639,8 +643,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			taskId,
 			message,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of runtimeClients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -654,8 +659,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			workspaceId,
 			taskId,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of runtimeClients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -748,8 +754,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				workspaceId,
 				workspaceState,
 			};
+			const serializedPayload = JSON.stringify(payload);
 			for (const client of clients) {
-				sendRuntimeStateMessage(client, payload);
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
 			}
 			await workspaceMetadataMonitor.updateWorkspaceState({
 				workspaceId,
@@ -775,8 +782,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				workspaceId,
 				entries: feed,
 			};
+			const serializedPayload = JSON.stringify(payload);
 			for (const client of runtimeStateClients) {
-				sendRuntimeStateMessage(client, payload);
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
 			}
 		} catch {
 			// 通知 feed 重建失败不影响主流程；下次变更会重发。
@@ -799,8 +807,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			workspaceId,
 			findings,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of clients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 	// exploration thread graph 变更推送（B.2）：单个 exploration 的整张图全量替换。与 findings 同款
@@ -821,8 +830,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			explorationId,
 			view,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of clients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -839,8 +849,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			workspaceId,
 			projectedEntriesByTaskId,
 		};
+		const serializedPayload = JSON.stringify(payload);
 		for (const client of clients) {
-			sendRuntimeStateMessage(client, payload);
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
