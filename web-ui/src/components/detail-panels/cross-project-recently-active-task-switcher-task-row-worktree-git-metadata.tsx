@@ -55,7 +55,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 		>
 			<span
 				data-task-card-base-branch-relation-group=""
-				className="inline-flex min-w-[13ch] max-w-full flex-wrap items-center gap-1"
+				className="inline-flex min-w-[20ch] max-w-full flex-wrap items-center gap-1"
 			>
 				<TaskWorkspaceModeIconWithTooltip worktreeMode={entry.worktreeMode} />
 				{gitStatusAgainstBaseRefDescription ? (

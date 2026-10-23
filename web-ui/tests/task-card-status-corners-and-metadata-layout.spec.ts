@@ -134,7 +134,9 @@ for (const width of [1280, 360]) {
 		await row.hover();
 		await row.getByRole("button", { name: "Collapse to compact row", exact: true }).click();
 		await expect(row).toHaveAttribute("data-cross-project-task-switcher-row-in-place-expansion-state", "compact_row");
-		await row.locator("button").first().click();
+		await row.getByRole("button", { name: "打开任务：统一布局的任务标题", exact: true }).click({
+			position: { x: 10, y: 10 },
+		});
 		await expect(page.getByLabel("打开任务次数")).toHaveText("1");
 		await page.getByRole("button", { name: "模拟部署回滚", exact: true }).click();
 		for (const host of [

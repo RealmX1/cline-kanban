@@ -1050,7 +1050,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			<span
 				data-task-card-base-branch-relation-group=""
 				className={cn(
-					"inline-flex min-w-[13ch] max-w-full flex-wrap items-center gap-1",
+					"inline-flex min-w-[20ch] max-w-full flex-wrap items-center gap-1",
 					isTrashCard && "line-through",
 				)}
 			>
@@ -1077,11 +1077,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</Tooltip>
 				) : null}
 				{!historicalContext && columnId !== "backlog" ? (
-					<span className="mx-1 inline-flex align-middle">
-						<TaskCommitCoverageInCurrentDeploymentIndicator
-							coverage={reviewWorkspaceSnapshot?.taskCommitCoverageInCurrentDeployment}
-						/>
-					</span>
+					<TaskCommitCoverageInCurrentDeploymentIndicator
+						coverage={reviewWorkspaceSnapshot?.taskCommitCoverageInCurrentDeployment}
+					/>
 				) : null}
 			</span>
 			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
