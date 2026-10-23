@@ -29,6 +29,7 @@ import {
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskWorktreeModeSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
 } from "../core/api-contract";
 import {
 	mergeAbortSignals,
@@ -81,6 +82,7 @@ import {
 import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
+import { reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending } from "./report-rvf-closeout-execution-result-while-delivery-confirmation-pending";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -2212,6 +2214,26 @@ export function registerTaskCommand(program: Command): void {
 					taskId: options.taskId,
 					decisionToken: options.decisionToken,
 				}),
+			);
+		});
+	task
+		.command("report-rvf-automatic-closeout-execution-result")
+		.description("登记自动收尾的 land 或本地 base 同步结果；成功须由服务端核对真实 Git 与 run 证据。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--result-file <path>", "包含 task/token/run/handoff 绑定及阶段结果的 JSON 文件。")
+		.action(async (options: { projectPath: string; resultFile: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			const result = rvfAutomaticCloseoutExecutionResultReportRequestSchema.parse(
+				JSON.parse(await readFile(options.resultFile, "utf8")),
+			);
+			printJson(
+				await reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending(() =>
+					createRuntimeTrpcClient(workspace.workspaceId).runtime.reportRvfAutomaticCloseoutExecutionResult.mutate(
+						result,
+					),
+				),
 			);
 		});
 	task

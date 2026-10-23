@@ -119,6 +119,9 @@ export interface TerminalInputBoxPasteLedgerEntry {
 export interface TerminalInputBoxOccupancyTrackerState {
 	// 输入侧字节跟踪给出的结论：当前组合里有没有尚未提交的内容。
 	hasUncommittedInputFromInputSideByteTracking: boolean;
+	// 是否从已知空框开始跟踪当前组合。接管既有 PTY 时为 false：空账本无法证明重启前没有草稿。
+	// 观察到提交 / 整框清空后重新建立起点，不能因接管后收到任意一个按键就把未知变成已知。
+	inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: boolean;
 	// 这条 PTY 一生中有没有从 writeInput 收到过哪怕一个人类字节。**不随提交 / 清空复位**——它衡量的
 	// 不是「框里有什么」，而是「输入侧这只眼睛到底接没接上人」。
 	//
@@ -173,9 +176,12 @@ export interface TerminalInputBoxOccupancyTrackerState {
 	utf8StreamDecoder: StringDecoder;
 }
 
-export function createTerminalInputBoxOccupancyTrackerState(): TerminalInputBoxOccupancyTrackerState {
+export function createTerminalInputBoxOccupancyTrackerState(
+	inputBoxContentAtTrackingStart: "known_empty" | "unknown" = "known_empty",
+): TerminalInputBoxOccupancyTrackerState {
 	return {
 		hasUncommittedInputFromInputSideByteTracking: false,
+		inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: inputBoxContentAtTrackingStart === "known_empty",
 		hasEverObservedHumanInputBytesFromWriteInput: false,
 		pasteLedger: [],
 		unrecoverablePasteCount: 0,
@@ -204,6 +210,7 @@ export function createTerminalInputBoxOccupancyTrackerState(): TerminalInputBoxO
 // 两条路都不经过 writeInput，跟踪器只能靠调用方通知。
 export function resetTerminalInputBoxOccupancyTrackerComposition(state: TerminalInputBoxOccupancyTrackerState): void {
 	state.hasUncommittedInputFromInputSideByteTracking = false;
+	state.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition = true;
 	state.pasteLedger = [];
 	state.unrecoverablePasteCount = 0;
 	state.insideBracketedPaste = false;
@@ -504,6 +511,8 @@ export interface TerminalInputBoxOccupancy {
 	// 输入侧字节跟踪这一路的结论。看不见经 tmux / 原生终端直连同一 PTY 的输入，也看不见
 	// runtime 重启前敲下的内容——这正是需要读屏那一路补位的地方。
 	inputSideByteTrackingSaysNonEmpty: boolean;
+	// false 表示接管前的组合没有被跟踪；此时输入侧报告非空仍可信，报告空却不能证明没有旧草稿。
+	inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: boolean;
 	// 读屏那一路的结论；null = 当前屏上定位不到输入框（TUI 尚未渲染或正被全屏输出覆盖）。
 	//
 	// ⚠️ 已知假阳性：Claude 偶发在空框里渲染占位提示（`Try "..."`），此时读屏会报「非空」。
@@ -524,6 +533,8 @@ export function resolveTerminalInputBoxOccupancy(args: {
 	return {
 		hasUncommittedInput: inputSideByteTrackingSaysNonEmpty || screenReadingSaysNonEmpty === true,
 		inputSideByteTrackingSaysNonEmpty,
+		inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition:
+			args.trackerState.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition,
 		screenReadingSaysNonEmpty,
 		unrecoverablePasteCount: args.trackerState.unrecoverablePasteCount,
 	};
