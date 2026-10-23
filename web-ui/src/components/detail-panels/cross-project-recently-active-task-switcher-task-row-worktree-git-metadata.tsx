@@ -1,6 +1,7 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import type { ReactElement } from "react";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
+import { TaskCommitCoverageInCurrentDeploymentIndicator } from "@/components/ui/task-commit-coverage-in-current-deployment-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
@@ -62,6 +63,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
 					) : null}
 				</>
 			) : null}
+			<TaskCommitCoverageInCurrentDeploymentIndicator coverage={snapshot.taskCommitCoverageInCurrentDeployment} />
 			{showsUncommittedChangeSummary && snapshot.changedFiles != null ? (
 				<span>
 					<WorktreeUncommittedChangeSummaryIndicator
