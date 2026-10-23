@@ -445,6 +445,8 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfAutomaticCloseoutExecutionResultReportResponseSchema,
 	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
@@ -593,6 +595,7 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -639,6 +642,10 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		reportExecutionResult?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutExecutionResultReportResponseSchema>>;
 		observeBoundary?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
@@ -1617,6 +1624,20 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.rvfAutomaticCloseoutApi)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
+			}),
+		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
+			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)
+			.output(rvfAutomaticCloseoutExecutionResultReportResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reportExecutionResult)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动收尾执行结果登记服务未启用。" });
+				try {
+					return await ctx.rvfAutomaticCloseoutApi.reportExecutionResult(ctx.workspaceScope, input);
+				} catch (error) {
+					if (error instanceof RvfAutomaticCloseoutExecutionResultDeliveryPendingError)
+						throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
+					throw error;
+				}
 			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure

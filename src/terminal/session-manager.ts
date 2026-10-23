@@ -3044,7 +3044,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			submitConfirmGeneration: 0,
 			ptyOutputChunkArrivalSequenceNumber: 0,
 			programmaticDeliveryReceipt: null,
-			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			// 接管前的输入字节没有重放进账本；必须保留未知态，直到观察到明确提交或清空。
+			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState("unknown"),
 			hasEverLocatedTerminalInputBoxOnScreen: carriedFields?.hasEverLocatedTerminalInputBoxOnScreen ?? false,
 			terminalSessionIncarnationToken: randomUUID(),
 			terminalSessionIncarnationSpawnedAtEpochMs: adoptionCandidate.spawnedAtEpochMs,
@@ -5994,9 +5995,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	publishRvfAutomaticCloseoutPaused(taskId: string, reason: string): void {
+		this.publishRvfAutomaticCloseoutWarning(taskId, `RVF 自动收尾已暂停：${reason}`);
+	}
+
+	publishRvfAutomaticCloseoutWaiting(taskId: string, reason: string): void {
+		this.publishRvfAutomaticCloseoutWarning(taskId, `RVF 自动收尾正在等待：${reason}`);
+	}
+
+	private publishRvfAutomaticCloseoutWarning(taskId: string, message: string): void {
 		const entry = this.entries.get(taskId);
 		if (!entry) return;
-		const message = `RVF 自动收尾已暂停：${reason}`;
 		const summary = updateSummary(entry, { warningMessage: message });
 		const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
 		entry.terminalStateMirror?.applyOutput(output);

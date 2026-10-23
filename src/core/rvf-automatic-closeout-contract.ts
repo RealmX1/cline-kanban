@@ -15,7 +15,7 @@ export const rvfIndependentUserTurnBoundaryReceiptSchema = z.object({
 	transcript_path: z.string(),
 	boundary_message_sha256: z.string(),
 	candidate_fingerprint: z.string(),
-	// 存量自动收尾记录缺此字段仍须可读；新捕获始终写入，RVF gate 对缺失记录拒绝开审。
+	// 原生自动回退凭据的文件身份签名；普通 RVF 使用独立的候选内容快照。
 	candidate_filesystem_state_sha256: z.string().optional(),
 	worktree_head_commit_sha: z.string(),
 	checkpoint_commit: z.string(),
@@ -37,6 +37,45 @@ export const rvfAutomaticCloseoutRunBindingActivationResponseSchema = z.object({
 	receipt: rvfIndependentUserTurnBoundaryReceiptSchema,
 	automaticCloseoutActivationStatus: z.enum(["skipped_no_completed_pre_review_conversation_prefix"]).optional(),
 });
+export const rvfAutomaticCloseoutWaitingReasonCodeSchema = z.enum([
+	"automatic_closeout_precondition_not_ready",
+	"main_conversation_session_summary_unavailable",
+	"main_conversation_workspace_unavailable",
+	"native_session_identity_not_yet_observed",
+	"main_session_handover_in_progress",
+	"agent_turn_not_ready_for_closeout",
+	"pending_user_decision",
+	"queued_programmatic_message",
+	"terminal_input_box_not_confirmed_empty",
+	"closeout_delivery_confirmation_pending",
+]);
+export type RvfAutomaticCloseoutWaitingReasonCode = z.infer<typeof rvfAutomaticCloseoutWaitingReasonCodeSchema>;
+export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
+	outcome: z.enum(["completed", "blocked", "failed"]),
+	commitSha: z
+		.string()
+		.regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u)
+		.optional(),
+	baseRef: z.string().min(1).optional(),
+	reason: z.string().trim().min(1).optional(),
+	reportedAt: z.number(),
+});
+export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewStartBoundaryRequestSchema
+	.extend({
+		runId: z.string().min(1),
+		handoffSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+		stage: z.enum(["land", "base_branch_sync"]),
+	})
+	.extend(rvfAutomaticCloseoutExecutionStageResultSchema.omit({ reportedAt: true }).shape)
+	.superRefine((value, context) => {
+		if (value.outcome === "completed" && (!value.commitSha || (value.stage === "base_branch_sync" && !value.baseRef)))
+			context.addIssue({ code: "custom", message: "完成结果必须提供真实提交；base 同步还须提供本地 base ref。" });
+		if (value.outcome !== "completed" && !value.reason)
+			context.addIssue({ code: "custom", message: "受阻或失败必须提供具体原因。" });
+	});
+export type RvfAutomaticCloseoutExecutionResultReportRequest = z.infer<
+	typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema
+>;
 export const rvfAutomaticCloseoutRecordSchema = z.object({
 	workspaceId: z.string(),
 	taskId: z.string(),
@@ -67,9 +106,18 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	nativeForkAttemptStartedAt: z.number().nullable(),
 	activeCoordinatorOperationClaimId: z.string().nullable().optional(),
 	pauseReason: z.string().nullable(),
+	waitingReasonCode: rvfAutomaticCloseoutWaitingReasonCodeSchema.nullable().optional(),
+	waitingReason: z.string().nullable().optional(),
+	waitingSince: z.number().nullable().optional(),
+	waitingNotificationSentAt: z.number().nullable().optional(),
+	landExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
+	baseBranchSyncExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
 	promptDeliveryIdempotencyKey: z.string(),
 });
 export type RvfAutomaticCloseoutRecord = z.infer<typeof rvfAutomaticCloseoutRecordSchema>;
+export const rvfAutomaticCloseoutExecutionResultReportResponseSchema = z.object({
+	record: rvfAutomaticCloseoutRecordSchema,
+});
 export const rvfAutomaticCloseoutStatusRequestSchema = z.object({ taskId: z.string().min(1) });
 export const rvfAutomaticCloseoutStatusResponseSchema = z.object({
 	records: z.array(rvfAutomaticCloseoutRecordSchema),

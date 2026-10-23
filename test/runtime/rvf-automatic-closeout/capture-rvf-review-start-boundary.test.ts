@@ -116,6 +116,21 @@ function runActualRvfBoundaryConsumerWithFixture(
 }
 
 describe("RVF 独立开审分界捕获", () => {
+	it.each(["0.164.0", "future-native-cli", undefined, null])(
+		"相同原生协议不因转录记录版本 %s 改变资格",
+		async (version) => {
+			const f = await createBoundaryFixture("/review-validate-fix");
+			const records = f.records.map((record) =>
+				record.type === "session_meta"
+					? { ...record, payload: { ...record.payload, cli_version: version } }
+					: record,
+			);
+			await writeFile(f.input.transcriptPath, records.map((record) => JSON.stringify(record)).join("\n"));
+			expect((await captureRvfReviewStartBoundary(f.input)).receipt.native_user_message_id).toBe(
+				"native-boundary-message",
+			);
+		},
+	);
 	it.each([
 		undefined,
 		"now $review-validate-fix:review-validate-fix your own work.",

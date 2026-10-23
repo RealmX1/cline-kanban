@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	getTaskMessageInjectionLedgerPath,
@@ -10,6 +10,11 @@ import {
 } from "../../../src/core/task-message-injection-ledger";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
+import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import {
+	createTerminalInputBoxOccupancyTrackerState,
+	resolveTerminalInputBoxOccupancy,
+} from "../../../src/terminal/terminal-input-box-occupancy";
 import { enqueueAgentIdleGatedProgrammaticTaskChatMessage } from "../../../src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
@@ -54,11 +59,24 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
-async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix = false) {
+async function setup(
+	mainConversationSessionId = "task",
+	withoutPreReviewPrefix = false,
+	physicalRunDirectoryName = "run",
+	commitTaskChangesBeforeReview = false,
+) {
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	const repo = fixture.createNonBareRepository({ repositoryDirectoryName: "rvf-runtime-closeout" });
 	await writeFile(join(repo.repositoryPath, "implementation.txt"), "实现\n");
 	repo.commitAllRepositoryFilesAtDate({ message: "实现", authorAndCommitterIsoDate: "2026-01-01T00:00:00Z" });
+	if (commitTaskChangesBeforeReview) {
+		repo.runGit(["switch", "--create", "task-with-committed-review-candidate"]);
+		await writeFile(join(repo.repositoryPath, "implementation.txt"), "开审前已提交的任务实现\n");
+		repo.commitAllRepositoryFilesAtDate({
+			message: "feat: 开审前已提交的任务实现",
+			authorAndCommitterIsoDate: "2026-01-02T00:00:00Z",
+		});
+	}
 	const rvfHome = join(fixture.fixtureRootDirectoryPath, "rvf-home");
 	vi.stubEnv("RVF_HOME", rvfHome);
 	mocked.directory = join(fixture.fixtureRootDirectoryPath, "workspace");
@@ -152,12 +170,15 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 		getSummary: () => summary,
 		isTaskSessionAutomaticContinuationSuppressed: () => false,
 		getAwaitingDispatchedBackgroundWork: () => ({ parked: false, label: null, sinceMs: null }),
-		resolveTaskTerminalInputBoxOccupancy: vi.fn(async () => ({
-			hasUncommittedInput: false,
-			inputSideByteTrackingSaysNonEmpty: false,
-			screenReadingSaysNonEmpty: false,
-			unrecoverablePasteCount: 0,
-		})),
+		resolveTaskTerminalInputBoxOccupancy: vi.fn<TerminalSessionManager["resolveTaskTerminalInputBoxOccupancy"]>(
+			async () => ({
+				hasUncommittedInput: false,
+				inputSideByteTrackingSaysNonEmpty: false,
+				inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+				screenReadingSaysNonEmpty: false as boolean | null,
+				unrecoverablePasteCount: 0,
+			}),
+		),
 		forceStopTaskSession: vi.fn(async () => {}),
 		applyAgentNativeConversationSessionIdentity: vi.fn(
 			(
@@ -169,6 +190,7 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 			},
 		),
 		publishRvfAutomaticCloseoutPaused: vi.fn(),
+		publishRvfAutomaticCloseoutWaiting: vi.fn(),
 	};
 	const runtimeApi = {
 		cancelTaskChatDelivery: vi.fn(async () => ({ ok: true, cancelResult: "no_pending_delivery" as const })),
@@ -204,7 +226,7 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 	const result = await service.capture(scope, { taskId: "task", decisionToken: token });
 	if (result.status !== "captured") throw new Error(JSON.stringify(result));
 	const captured = { receipt: result.receipt };
-	const run = join(fixture.fixtureRootDirectoryPath, "runs", "run");
+	const run = join(fixture.fixtureRootDirectoryPath, "runs", physicalRunDirectoryName);
 	const bindingPath = join(
 		rvfHome,
 		"review-start-independent-user-turn-boundary-receipts",
@@ -214,6 +236,11 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 	async function bindRun() {
 		await mkdir(dirname(runReceiptPath), { recursive: true });
 		await writeFile(runReceiptPath, JSON.stringify(captured.receipt));
+		await mkdir(join(run, "artifacts", "inputs"), { recursive: true });
+		await writeFile(
+			join(run, "artifacts", "inputs", "scope.contract.json"),
+			JSON.stringify({ run_id: "run", base_ref: "main" }),
+		);
 		const canonical = Object.fromEntries(
 			Object.entries(captured.receipt).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
 		);
@@ -261,6 +288,8 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 		);
 	}
 	return {
+		fixture,
+		repo,
 		service,
 		dependencies,
 		scope,
@@ -278,6 +307,337 @@ async function setup(mainConversationSessionId = "task", withoutPreReviewPrefix 
 	};
 }
 describe("RVF 宿主自动收尾与持久投递链", () => {
+	it("Codex 未建模输入框读屏且输入侧确认无草稿时继续恢复", async () => {
+		const context = await setup();
+		await context.complete();
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue({
+			hasUncommittedInput: false,
+			inputSideByteTrackingSaysNonEmpty: false,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+			screenReadingSaysNonEmpty: null,
+			unrecoverablePasteCount: 0,
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	});
+	it("Codex 读屏未建模但输入侧存在真实草稿时保留输入并等待", async () => {
+		const context = await setup();
+		await context.complete();
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue({
+			hasUncommittedInput: true,
+			inputSideByteTrackingSaysNonEmpty: true,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+			screenReadingSaysNonEmpty: null,
+			unrecoverablePasteCount: 0,
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.waitingReasonCode).toBe(
+			"terminal_input_box_not_confirmed_empty",
+		);
+	});
+	it("接管 hosted Codex PTY 后保留未知草稿，直到观察到用户明确提交才恢复", async () => {
+		const context = await setup();
+		await context.complete();
+		const adoptedTerminalManager = new TerminalSessionManager();
+		onTestFinished(() => adoptedTerminalManager.dispose());
+		adoptedTerminalManager.hydrateFromRecord({ task: context.manager.getSummary() }, new Set(["task"]));
+		const adoptedHandle = {
+			pid: 123,
+			write: vi.fn(),
+			resize: vi.fn(),
+			pause: vi.fn(),
+			resume: vi.fn(),
+			stop: vi.fn(),
+			hasExited: () => false,
+			wasInterrupted: () => false,
+		};
+		const adoptionOutcomes = await adoptedTerminalManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([
+			{
+				taskId: "task",
+				hostedSessionKind: "task_agent_session",
+				pid: 123,
+				spawnedAtEpochMs: 1,
+				cols: 100,
+				rows: 30,
+				exitedWhileRuntimeWasAbsent: false,
+				terminalSessionAdoptionRecord: null,
+				adoptHostedTerminalPtyProcess: async ({ onCatchUpOutput }) => {
+					onCatchUpOutput(Buffer.from("› 接管前留下的未提交草稿\r\n", "utf8"));
+					return adoptedHandle;
+				},
+				terminateHostedTerminalPtyProcessAfterRefusedAdoption: vi.fn(),
+			},
+		]);
+		expect(adoptionOutcomes[0]?.adoptionOutcome).toBe("adopted_running_session");
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(() =>
+			adoptedTerminalManager.resolveTaskTerminalInputBoxOccupancy("task"),
+		);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+		expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+		expect(adoptedHandle.write).not.toHaveBeenCalled();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.waitingReasonCode).toBe(
+			"terminal_input_box_not_confirmed_empty",
+		);
+		adoptedTerminalManager.writeInput("task", Buffer.from("\r"));
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	});
+	it("原生 fork 期间输入账本变成未知时，最终检查保留原会话且重试复用已创建的 fork", async () => {
+		const context = await setup();
+		await context.complete();
+		const knownEmptyOccupancy = resolveTerminalInputBoxOccupancy({
+			trackerState: createTerminalInputBoxOccupancyTrackerState(),
+			inputBoxReading: null,
+		});
+		const adoptedUnknownOccupancy = resolveTerminalInputBoxOccupancy({
+			trackerState: createTerminalInputBoxOccupancyTrackerState("unknown"),
+			inputBoxReading: null,
+		});
+		context.manager.resolveTaskTerminalInputBoxOccupancy
+			.mockResolvedValueOnce(knownEmptyOccupancy)
+			.mockResolvedValueOnce(adoptedUnknownOccupancy);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.waitingReasonCode).toBe(
+			"terminal_input_box_not_confirmed_empty",
+		);
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue(knownEmptyOccupancy);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	});
+	it("逻辑 run id 与物理目录名不同仍按真实绑定激活和识别完成", async () => {
+		const context = await setup("task", false, "independently-named-run-directory");
+		await context.complete();
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			runId: "run",
+			runDirectory: context.run,
+			status: "submitting_closeout_prompt",
+		});
+	});
+	it("只有实际 land 与 base 提交证据都成立时才完成，重复报告保持幂等", async () => {
+		const context = await setup();
+		await context.complete();
+		await context.service.sweepPendingCloseoutsOnce();
+		const record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+		if (!record?.handoffSha256) throw new Error("缺少交接绑定");
+		await expect(
+			context.service.reportExecutionResult(context.scope, {
+				taskId: "task",
+				decisionToken: context.token,
+				runId: "run",
+				handoffSha256: record.handoffSha256,
+				stage: "land",
+				outcome: "completed",
+				commitSha: context.captured.receipt.worktree_head_commit_sha,
+			}),
+		).rejects.toThrow("等待真实提交确认");
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath: getTaskMessageInjectionLedgerPath(mocked.directory),
+			taskId: "task",
+			idempotencyKey: record.promptDeliveryIdempotencyKey,
+			status: "delivered_and_submit_confirmed",
+			nowIso: new Date().toISOString(),
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		await writeFile(join(context.repo.repositoryPath, "implementation.txt"), "已经落地的修复\n");
+		const landCommitSha = context.repo.commitAllRepositoryFilesAtDate({
+			message: "fix: 隔离 land 提交",
+			authorAndCommitterIsoDate: "2026-01-02T00:00:00Z",
+		});
+		const binding = {
+			taskId: "task",
+			decisionToken: context.token,
+			runId: "run",
+			handoffSha256: record.handoffSha256,
+		};
+		const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+		const evidencePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+		const evidence = JSON.stringify({
+			subject: {
+				head_oid: landCommitSha,
+				worktree_realpath: context.repo.repositoryPath,
+				git_common_dir_realpath: gitDirectory,
+			},
+			review: { run_id: "run", protocol_valid: true },
+		});
+		const land = { ...binding, stage: "land" as const, outcome: "completed" as const, commitSha: landCommitSha };
+		await expect(
+			context.service.reportExecutionResult(context.scope, {
+				...binding,
+				stage: "base_branch_sync",
+				outcome: "completed",
+				commitSha: landCommitSha,
+				baseRef: "main",
+			}),
+		).rejects.toThrow("尚未确认 land");
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow();
+		await mkdir(dirname(evidencePath), { recursive: true });
+		await writeFile(evidencePath, evidence);
+		await writeFile(`${evidencePath}.sha256`, "错误摘要");
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow("摘要");
+		await writeFile(`${evidencePath}.sha256`, computeRvfTextSha256(evidence));
+		await expect(
+			context.service.reportExecutionResult(context.scope, {
+				...land,
+				commitSha: context.captured.receipt.worktree_head_commit_sha,
+			}),
+		).rejects.toThrow("绑定");
+		const first = await context.service.reportExecutionResult(context.scope, land);
+		expect(first.record.status).toBe("closeout_prompt_submitted");
+		expect((await context.service.reportExecutionResult(context.scope, land)).record).toEqual(first.record);
+		const completed = await context.service.reportExecutionResult(context.scope, {
+			...binding,
+			stage: "base_branch_sync",
+			outcome: "completed",
+			commitSha: landCommitSha,
+			baseRef: "refs/heads/main",
+		});
+		expect(completed.record.status).toBe("completed");
+		expect(completed.record.baseBranchSyncExecutionResult?.commitSha).toBe(landCommitSha);
+		await expect(
+			context.service.reportExecutionResult(context.scope, { ...land, handoffSha256: "f".repeat(64) }),
+		).rejects.toThrow("绑定");
+	});
+	it("开审前已有任务提交且工作区干净时，凭当前 run 证据复用同一 HEAD 完成 land 和 base 同步", async () => {
+		const context = await setup("task", false, "run", true);
+		await context.complete();
+		await context.service.sweepPendingCloseoutsOnce();
+		const record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+		if (!record?.handoffSha256) throw new Error("缺少交接绑定");
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath: getTaskMessageInjectionLedgerPath(mocked.directory),
+			taskId: "task",
+			idempotencyKey: record.promptDeliveryIdempotencyKey,
+			status: "delivered_and_submit_confirmed",
+			nowIso: new Date().toISOString(),
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		const reviewedCommitSha = context.captured.receipt.worktree_head_commit_sha;
+		const baseCommitSha = context.repo.runGit(["rev-parse", "main"]).stdout.trim();
+		expect(reviewedCommitSha).not.toBe(baseCommitSha);
+		expect(context.repo.runGit(["rev-list", "--count", "main..HEAD"]).stdout.trim()).toBe("1");
+		expect(context.repo.runGit(["status", "--porcelain"]).stdout).toBe("");
+		const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+		const evidencePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+		await mkdir(dirname(evidencePath), { recursive: true });
+		const evidence = {
+			subject: {
+				head_oid: reviewedCommitSha,
+				worktree_realpath: context.repo.repositoryPath,
+				git_common_dir_realpath: gitDirectory,
+			},
+			review: { run_id: "run", protocol_valid: true },
+		};
+		const land = {
+			taskId: "task",
+			decisionToken: context.token,
+			runId: "run",
+			handoffSha256: record.handoffSha256,
+			stage: "land" as const,
+			outcome: "completed" as const,
+			commitSha: reviewedCommitSha,
+		};
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow();
+		const evidenceText = JSON.stringify(evidence);
+		await writeFile(evidencePath, evidenceText);
+		await writeFile(`${evidencePath}.sha256`, "错误摘要");
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow("摘要");
+		const invalidEvidenceCandidates = [
+			{ ...evidence, review: { ...evidence.review, run_id: "other-run" } },
+			{ ...evidence, subject: { ...evidence.subject, head_oid: baseCommitSha } },
+			{ ...evidence, subject: { ...evidence.subject, worktree_realpath: context.rvfHome } },
+			{ ...evidence, subject: { ...evidence.subject, git_common_dir_realpath: context.rvfHome } },
+		];
+		for (const invalidEvidence of invalidEvidenceCandidates) {
+			const invalidEvidenceText = JSON.stringify(invalidEvidence);
+			await writeFile(evidencePath, invalidEvidenceText);
+			await writeFile(`${evidencePath}.sha256`, computeRvfTextSha256(invalidEvidenceText));
+			await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow("绑定");
+		}
+		await writeFile(evidencePath, evidenceText);
+		await writeFile(`${evidencePath}.sha256`, computeRvfTextSha256(evidenceText));
+		const landed = await context.service.reportExecutionResult(context.scope, land);
+		expect(landed.record.landExecutionResult).toMatchObject({ outcome: "completed", commitSha: reviewedCommitSha });
+		context.repo.runGit(["branch", "--force", "main", reviewedCommitSha]);
+		const completed = await context.service.reportExecutionResult(context.scope, {
+			...land,
+			stage: "base_branch_sync",
+			baseRef: "main",
+		});
+		expect(completed.record.status).toBe("completed");
+		expect(completed.record.baseBranchSyncExecutionResult?.commitSha).toBe(reviewedCommitSha);
+		expect(context.repo.runGit(["rev-parse", "HEAD"]).stdout.trim()).toBe(reviewedCommitSha);
+		expect(context.repo.runGit(["status", "--porcelain"]).stdout).toBe("");
+	});
+	it("主会话 summary 尚未水合时持久等待，恢复信息后继续而非永久暂停", async () => {
+		const context = await setup();
+		await context.complete();
+		const hydrated = context.manager.listSummaries;
+		const summaries = vi.spyOn(context.manager, "listSummaries");
+		summaries.mockReturnValue([]);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			status: "restoring_pre_review_conversation",
+			waitingReasonCode: "main_conversation_session_summary_unavailable",
+			waitingSince: expect.any(Number),
+			pauseReason: null,
+		});
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		summaries.mockImplementation(hydrated);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			status: "submitting_closeout_prompt",
+			waitingReasonCode: "closeout_delivery_confirmation_pending",
+		});
+	});
+	it("未确认自动注册的运行只进入人工交接，不执行原生恢复", async () => {
+		const context = await setup();
+		await context.complete();
+		await writeFile(
+			join(context.run, "artifacts", "automatic-closeout-registration.json"),
+			JSON.stringify({
+				run_id: "run",
+				decision_token: context.token,
+				status: "disabled",
+			}),
+		);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			status: "paused",
+			pauseReason: expect.stringContaining("人工收尾"),
+		});
+	});
+	it("同一等待原因超过 30 秒只通知一次，重启不重置等待时刻或重复通知", async () => {
+		const context = await setup();
+		await context.complete();
+		vi.spyOn(context.manager, "listSummaries").mockReturnValue([]);
+		const started = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(started);
+		try {
+			await context.service.sweepPendingCloseoutsOnce();
+			clock.mockReturnValue(started + 29_999);
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.publishRvfAutomaticCloseoutWaiting).not.toHaveBeenCalled();
+			clock.mockReturnValue(started + 30_000);
+			await context.service.sweepPendingCloseoutsOnce();
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(context.manager.publishRvfAutomaticCloseoutWaiting).toHaveBeenCalledOnce();
+			expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.waitingSince).toBe(
+				started,
+			);
+		} finally {
+			clock.mockRestore();
+		}
+	});
 	it("首条独立开审消息不因缺少可选自动恢复前缀而被阻断", async () => {
 		const context = await setup("task", true);
 		expect(
@@ -934,4 +1294,188 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		});
 		expect((await context.service.status(context.scope, { taskId: "task" })).records).toHaveLength(1);
 	});
+});
+
+function createExecutionResultInterleavingSignal() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
+async function setupExecutionResultInterleavingEvidence() {
+	const context = await setup();
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	const record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+	if (!record?.handoffSha256) throw new Error("缺少交接绑定");
+	await recordTaskMessageTerminalDeliveryOutcome({
+		ledgerPath: getTaskMessageInjectionLedgerPath(mocked.directory),
+		taskId: "task",
+		idempotencyKey: record.promptDeliveryIdempotencyKey,
+		status: "delivered_and_submit_confirmed",
+		nowIso: new Date().toISOString(),
+	});
+	await writeFile(join(context.repo.repositoryPath, "implementation.txt"), "已验证的并发收尾修复\n");
+	const commitSha = context.repo.commitAllRepositoryFilesAtDate({
+		message: "fix: 验证并发收尾的真实提交",
+		authorAndCommitterIsoDate: "2026-01-02T00:00:00Z",
+	});
+	const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+	const evidencePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+	const evidence = JSON.stringify({
+		subject: {
+			head_oid: commitSha,
+			worktree_realpath: context.repo.repositoryPath,
+			git_common_dir_realpath: gitDirectory,
+		},
+		review: { run_id: "run", protocol_valid: true },
+	});
+	await mkdir(dirname(evidencePath), { recursive: true });
+	await writeFile(evidencePath, evidence);
+	await writeFile(`${evidencePath}.sha256`, computeRvfTextSha256(evidence));
+	const binding = {
+		taskId: "task",
+		decisionToken: context.token,
+		runId: "run",
+		handoffSha256: record.handoffSha256,
+	};
+	const land = { ...binding, stage: "land" as const, outcome: "completed" as const, commitSha };
+	const baseBranchSync = {
+		...binding,
+		stage: "base_branch_sync" as const,
+		outcome: "completed" as const,
+		commitSha,
+		baseRef: "main",
+	};
+	return { ...context, binding, land, baseBranchSync };
+}
+
+describe("RVF 执行完成事实的跨 service 持久单调性", () => {
+	it.each([
+		{ stage: "land", outcome: "failed" },
+		{ stage: "land", outcome: "blocked" },
+		{ stage: "land", outcome: "completed" },
+		{ stage: "base_branch_sync", outcome: "failed" },
+		{ stage: "base_branch_sync", outcome: "blocked" },
+		{ stage: "base_branch_sync", outcome: "completed" },
+	] as const)("$stage 的迟到 $outcome 报告不能覆盖已完成结果", async ({ stage, outcome }) => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		if (stage === "base_branch_sync") await context.service.reportExecutionResult(context.scope, context.land);
+		const validationStarted = createExecutionResultInterleavingSignal();
+		const releaseValidation = createExecutionResultInterleavingSignal();
+		const delayedReporter = createRvfAutomaticCloseoutRuntimeService({
+			...context.dependencies,
+			getManager: async () => {
+				validationStarted.resolve();
+				await releaseValidation.promise;
+				return context.manager;
+			},
+		});
+		const completedReport = stage === "land" ? context.land : context.baseBranchSync;
+		const delayedReport =
+			outcome === "completed"
+				? completedReport
+				: { ...context.binding, stage, outcome, reason: "先开始验证、后到达写锁的失败报告" };
+		const delayedOutcome = delayedReporter.reportExecutionResult(context.scope, delayedReport).then(
+			(value) => ({ value, error: null }),
+			(error: unknown) => ({ value: null, error }),
+		);
+		await validationStarted.promise;
+		let now = Date.now();
+		const currentTime = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			if (stage === "land") await context.service.reportExecutionResult(context.scope, context.land);
+			const completed = await context.service.reportExecutionResult(context.scope, context.baseBranchSync);
+			now += 1;
+			releaseValidation.resolve();
+			const delayed = await delayedOutcome;
+			expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toEqual(completed.record);
+			if (outcome === "completed") {
+				expect(delayed.error).toBeNull();
+				expect(delayed.value?.record).toEqual(completed.record);
+			} else {
+				expect(delayed.error).toBeInstanceOf(Error);
+				expect(String(delayed.error)).toContain("已确认的执行结果");
+			}
+		} finally {
+			releaseValidation.resolve();
+			await delayedOutcome;
+			currentTime.mockRestore();
+		}
+	});
+
+	it("跨 service 的用户持久暂停仍阻止迟到执行报告", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		const validationStarted = createExecutionResultInterleavingSignal();
+		const releaseValidation = createExecutionResultInterleavingSignal();
+		const delayedReporter = createRvfAutomaticCloseoutRuntimeService({
+			...context.dependencies,
+			getManager: async () => {
+				validationStarted.resolve();
+				await releaseValidation.promise;
+				return context.manager;
+			},
+		});
+		const delayedOutcome = delayedReporter.reportExecutionResult(context.scope, context.land).then(
+			() => null,
+			(error: unknown) => error,
+		);
+		await validationStarted.promise;
+		try {
+			await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+		} finally {
+			releaseValidation.resolve();
+		}
+		expect(await delayedOutcome).toBeInstanceOf(Error);
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			status: "paused",
+			pauseReason: "用户明确停止会话，自动收尾已暂停。",
+		});
+		expect(
+			(await context.service.status(context.scope, { taskId: "task" })).records[0]?.landExecutionResult,
+		).toBeUndefined();
+	});
+
+	it.each(["submitted", "failed"] as const)(
+		"coordinator 的迟到 $0 写回保留另一 service 已确认的 completed",
+		async (enqueueOutcome) => {
+			const context = await setupExecutionResultInterleavingEvidence();
+			const enqueueStarted = createExecutionResultInterleavingSignal();
+			const releaseEnqueue = createExecutionResultInterleavingSignal();
+			context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mockImplementation(
+				async (_scope, input) => {
+					const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+						{},
+						context.scope.workspaceId,
+						input,
+					);
+					enqueueStarted.resolve();
+					await releaseEnqueue.promise;
+					return enqueueOutcome === "failed" ? { ok: false, error: "迟到的投递失败" } : response;
+				},
+			);
+			const coordinatorSweep = context.service.sweepPendingCloseoutsOnce();
+			await enqueueStarted.promise;
+			const executionReporter = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			try {
+				await executionReporter.reportExecutionResult(context.scope, context.land);
+				await executionReporter.reportExecutionResult(context.scope, context.baseBranchSync);
+				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			} finally {
+				releaseEnqueue.resolve();
+				await coordinatorSweep;
+			}
+			const completed = (await executionReporter.status(context.scope, { taskId: "task" })).records[0];
+			expect(completed).toMatchObject({
+				status: "completed",
+				landExecutionResult: { outcome: "completed", commitSha: context.land.commitSha },
+				baseBranchSyncExecutionResult: { outcome: "completed", commitSha: context.land.commitSha },
+				activeCoordinatorOperationClaimId: null,
+			});
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(2);
+			expect(context.manager.publishRvfAutomaticCloseoutPaused).not.toHaveBeenCalled();
+		},
+	);
 });
