@@ -1,6 +1,7 @@
 import { ArrowLeft, ExternalLink, Plus, Search, Send, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
+import { TaskLookupTurnExecutionDetails } from "@/components/task-lookup-turn-execution-details";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
@@ -24,12 +25,6 @@ const DEFAULT_SLOTS: readonly [TaskLookupWorkbenchModule, TaskLookupWorkbenchMod
 	"query_history",
 	"candidate_details",
 ];
-const PHASE_LABELS = {
-	collecting_materials: "正在读取任务材料",
-	recalling_candidates: "正在查找候选",
-	explaining_candidates: "正在核对候选要求",
-	finished: "已结束",
-};
 const STATUS_LABELS = {
 	running: "检索中",
 	completed: "已完成",
@@ -367,10 +362,13 @@ export function TaskLookupWorkbenchView({
 							{new Date(turn.startedAt).toLocaleString()} · {STATUS_LABELS[turn.status]} ·{" "}
 							{turn.scope.projectIds.length ? turn.scope.projectIds.join(", ") : "全部项目"}
 						</p>
-						{turn.status === "running" ? (
-							<p role="status" className="text-sm text-text-secondary">
-								{PHASE_LABELS[turn.phase]}…
-							</p>
+						{controller.conversation ? (
+							<TaskLookupTurnExecutionDetails
+								conversation={controller.conversation}
+								turn={turn}
+								onRetry={() => void controller.retryTurn(turn)}
+								isRetryDisabled={controller.isRunning || controller.isPending}
+							/>
 						) : null}
 						{turn.errorMessage ? (
 							<p role="alert" className="whitespace-pre-wrap break-words text-sm text-status-red">
@@ -412,17 +410,6 @@ export function TaskLookupWorkbenchView({
 										</p>
 									</details>
 								) : null}
-								<details className="text-xs text-text-secondary">
-									<summary>检索记录</summary>
-									<p className="mt-1">读取材料 → 召回候选 → 核对完整要求 → 保存结果</p>
-									{turn.executions.map((execution) => (
-										<p key={execution.phase}>
-											{execution.phase === "recall" ? "候选召回" : "候选解释"} · {execution.elapsedMs}ms ·
-											输入 {execution.inputTokens ?? "未知"} / 输出 {execution.outputTokens ?? "未知"} tokens
-											· 缓存读取 {execution.cacheReadTokens ?? "未知"}
-										</p>
-									))}
-								</details>
 							</>
 						) : null}
 					</article>
