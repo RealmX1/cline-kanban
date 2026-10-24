@@ -120,6 +120,7 @@ function readTaskConversationSessionReadReceipts(): Record<string, number> {
 }
 
 export function TaskConversationSessionsPanel({
+	isTaskAgentExecutionDisabled = false,
 	workspaceId,
 	taskCard,
 	workspaceTaskId,
@@ -133,6 +134,7 @@ export function TaskConversationSessionsPanel({
 	onSelectTaskConversationSession,
 	onCreateTaskConversationSession,
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	workspaceId?: string | null;
 	taskCard?: BoardCard;
 	workspaceTaskId: string;
@@ -248,7 +250,7 @@ export function TaskConversationSessionsPanel({
 	};
 
 	const createSession = async () => {
-		if (!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
+		if (isTaskAgentExecutionDisabled || !isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
 			return;
 		}
 		setCreationError(null);
@@ -284,7 +286,7 @@ export function TaskConversationSessionsPanel({
 					icon={<Plus size={14} />}
 					className="ml-auto h-6"
 					onClick={() => setCreationDialogOpen(true)}
-					disabled={isCreating}
+					disabled={isCreating || isTaskAgentExecutionDisabled}
 				>
 					新建会话
 				</Button>
@@ -302,7 +304,7 @@ export function TaskConversationSessionsPanel({
 							: ""}
 					</a>
 				)}
-				{workspaceId && taskCard && (
+				{workspaceId && taskCard && !isTaskAgentExecutionDisabled && (
 					<TaskMainSessionHandoverAction
 						workspaceId={workspaceId}
 						taskCard={taskCard}
@@ -407,20 +409,26 @@ export function TaskConversationSessionsPanel({
 								summary={summary}
 								taskConversationSessionId={summary.taskId}
 							/>
-							{workspaceId && metadata.taskConversationSessionRoleAtCreation !== "main" && (
-								<IndependentTaskCreationAction
-									workspaceId={workspaceId}
-									sourceTaskId={workspaceTaskId}
-									sourceSessionId={summary.taskId}
-								/>
-							)}
+							{workspaceId &&
+								!isTaskAgentExecutionDisabled &&
+								metadata.taskConversationSessionRoleAtCreation !== "main" && (
+									<IndependentTaskCreationAction
+										workspaceId={workspaceId}
+										sourceTaskId={workspaceTaskId}
+										sourceSessionId={summary.taskId}
+									/>
+								)}
 						</div>
 					);
 				})}
 				{sideConversationSessions.length === 0 ? (
 					<div className="flex flex-col items-center gap-2 px-4 py-6 text-center text-xs text-text-tertiary">
 						<MessageCircleQuestion size={24} />
-						<span>创建协作会话处理工作，或用 By the way 询问侧问。</span>
+						<span>
+							{isTaskAgentExecutionDisabled
+								? "此任务没有其他会话。"
+								: "创建协作会话处理工作，或用 By the way 询问侧问。"}
+						</span>
 					</div>
 				) : null}
 			</div>

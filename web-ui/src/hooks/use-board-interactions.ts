@@ -1255,7 +1255,7 @@ export function useBoardInteractions({
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
-			if (!selection || selection.column.id === "trash") {
+			if (!selection) {
 				return;
 			}
 			setSelectedTaskId(taskId);

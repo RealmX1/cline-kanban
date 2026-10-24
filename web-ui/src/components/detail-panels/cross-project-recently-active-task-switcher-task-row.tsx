@@ -144,6 +144,11 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							data-task-card-secondary-metadata-row=""
 							className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
 						>
+							{entry.turnOwner === "agent" && entry.liveness === "retrying" ? (
+								<span className="shrink-0 text-status-orange" title="正在自动重连，当前任务回合尚未结束">
+									重连中
+								</span>
+							) : null}
 							{showsProjectName ? (
 								<span className="inline-flex min-w-[min(14ch,100%)] max-w-full items-center gap-1">
 									<ProjectIcon workspaceId={workspaceId} projectName={projectName} size={14} />

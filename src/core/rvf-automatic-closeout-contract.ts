@@ -76,6 +76,66 @@ export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewS
 export type RvfAutomaticCloseoutExecutionResultReportRequest = z.infer<
 	typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema
 >;
+export const rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema = rvfReviewStartBoundaryRequestSchema.extend({
+	runId: z.string().min(1),
+	handoffSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+	dryRun: z.boolean().default(false),
+});
+export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema = z.object({
+	schema: z.literal("rvf-late-native-closeout-prompt-acceptance-recovery/v1"),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	conversationSessionId: z.string(),
+	decisionToken: z.string(),
+	runId: z.string(),
+	handoffSha256: z.string(),
+	promptDeliveryIdempotencyKey: z.string(),
+	nativeSessionId: z.string(),
+	nativeTurnId: z.string(),
+	nativeUserMessageId: z.string(),
+	nativeTurnStartedAt: z.string().datetime(),
+	nativeUserMessageRecordedAt: z.string().datetime(),
+	transcriptPath: z.string(),
+	transcriptSha256: z.string(),
+	transcriptByteLength: z.number().int().nonnegative(),
+	promptSha256: z.string(),
+	runtimeSessionIncarnationId: z.string(),
+	observedAt: z.number(),
+	previousPauseReason: z.string(),
+	previousPauseUpdatedAt: z.number(),
+	originalDeliveryFailure: z.object({
+		taskId: z.string(),
+		attemptId: z.string().optional(),
+		source: z.literal("rvf_automatic_closeout"),
+		idempotencyKey: z.string(),
+		promptSha256: z.string(),
+		messageId: z.string(),
+		status: z.literal("delivery_failed"),
+		failureReason: z.literal("submit_confirmation_budget_exhausted"),
+		createdAt: z.string().datetime(),
+		statusUpdatedAt: z.string().datetime(),
+	}),
+});
+export type RvfLateNativeCloseoutPromptAcceptanceRecoveryReceipt = z.infer<
+	typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema
+>;
+export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCodeSchema = z.enum([
+	"native_prompt_acceptance_verified",
+	"binding_mismatch",
+	"pause_reason_not_eligible",
+	"explicit_stop",
+	"session_binding_changed",
+	"completion_evidence_unavailable",
+	"delivery_failure_not_eligible",
+	"native_control_unavailable",
+	"native_prompt_acceptance_not_proven",
+	"native_message_not_on_active_branch",
+	"record_operation_busy",
+	"record_changed",
+]);
+export type RvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCode = z.infer<
+	typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCodeSchema
+>;
 export const rvfAutomaticCloseoutRecordSchema = z.object({
 	workspaceId: z.string(),
 	taskId: z.string(),
@@ -106,15 +166,36 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	nativeForkAttemptStartedAt: z.number().nullable(),
 	activeCoordinatorOperationClaimId: z.string().nullable().optional(),
 	pauseReason: z.string().nullable(),
+	explicitStopRequestedAt: z.number().optional(),
 	waitingReasonCode: rvfAutomaticCloseoutWaitingReasonCodeSchema.nullable().optional(),
 	waitingReason: z.string().nullable().optional(),
 	waitingSince: z.number().nullable().optional(),
 	waitingNotificationSentAt: z.number().nullable().optional(),
 	landExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
 	baseBranchSyncExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
+	executionResultReportHistory: z
+		.array(rvfAutomaticCloseoutExecutionStageResultSchema.extend({ stage: z.enum(["land", "base_branch_sync"]) }))
+		.optional(),
+	lateNativePromptAcceptanceRecoveryReceipt: rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema.optional(),
 	promptDeliveryIdempotencyKey: z.string(),
 });
 export type RvfAutomaticCloseoutRecord = z.infer<typeof rvfAutomaticCloseoutRecordSchema>;
+export const rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema = z.discriminatedUnion("status", [
+	z.object({
+		status: z.enum(["eligible", "recovered", "already_recovered"]),
+		reasonCode: z.literal("native_prompt_acceptance_verified"),
+		record: rvfAutomaticCloseoutRecordSchema,
+		receipt: rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema,
+	}),
+	z.object({
+		status: z.enum(["unknown", "blocked"]),
+		reasonCode: rvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCodeSchema,
+		reason: z.string(),
+	}),
+]);
+export type RvfLateNativeCloseoutPromptAcceptanceRecoveryResponse = z.infer<
+	typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema
+>;
 export const rvfAutomaticCloseoutExecutionResultReportResponseSchema = z.object({
 	record: rvfAutomaticCloseoutRecordSchema,
 });

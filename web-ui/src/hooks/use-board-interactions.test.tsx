@@ -1139,7 +1139,7 @@ describe("useBoardInteractions", () => {
 		expect(readPendingTaskCardCommandBoardOverlayEntries("project-1")).toEqual([]);
 	});
 
-	it("ignores card selection requests for trashed tasks", async () => {
+	it("选中 Done 任务时打开详情，不恢复会话或移列", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		useProgrammaticCardMovesMock.mockReturnValue({
@@ -1186,7 +1186,10 @@ describe("useBoardInteractions", () => {
 			latestSnapshot!.handleCardSelect("task-trash");
 		});
 
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(setSelectedTaskId).toHaveBeenCalledWith("task-trash");
+		expect(
+			taskCardActionQueryMocks.restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace,
+		).not.toHaveBeenCalled();
 	});
 
 	it("按 Cache warm 导航上下文接续，不选 Review 列中属于 Recent 的邻项", async () => {

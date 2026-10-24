@@ -336,6 +336,40 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
+	it("重连任务保留 Running 并显示重连说明，恢复后位置保持不变", () => {
+		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
+		const renderEntries = (liveness: "retrying" | "live") =>
+			act(() =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={makeHost({
+							projects: [
+								makeProject("project-a", [
+									makeEntry("retrying", {
+										turnOwner: "agent",
+										liveness,
+										agentResponseGenerationTurnStarted: { startedAt: NOW_MS - 2000, turnSequence: 1 },
+									}),
+									makeEntry("other", {
+										turnOwner: "agent",
+										liveness: "live",
+										agentResponseGenerationTurnStarted: { startedAt: NOW_MS - 1000, turnSequence: 1 },
+									}),
+								]),
+							],
+						})}
+					/>,
+				),
+			);
+		renderEntries("retrying");
+		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
+		expect(section("running").textContent).toContain("重连中");
+		expect(rowTaskIds(section("remaining"))).not.toContain("retrying");
+		renderEntries("live");
+		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
+		expect(section("running").textContent).not.toContain("重连中");
+	});
+
 	it("主 Agent 真实处理推导的缓存参考在药丸提示中保留明确的请求时间估计来源", () => {
 		act(() =>
 			root.render(
