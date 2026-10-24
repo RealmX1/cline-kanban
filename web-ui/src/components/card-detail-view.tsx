@@ -29,6 +29,7 @@ import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
@@ -98,6 +99,7 @@ import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
+import { shouldIgnoreAdjacentTaskCardNavigationHotkey } from "@/utils/adjacent-task-card-navigation-hotkey-event";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
@@ -119,16 +121,6 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
-}
-
-// 切换相邻卡片的热键绑定在 alt+↑/↓，而不是裸方向键。裸方向键此前挂在 document 上、
-// 在详情视图里把上下键变成了翻卡器，与「选中新卡后焦点自动落进 agent 输入入口」直接冲突：
-// 焦点一旦进了 composer 或终端，用户按上下键的意图就是移动光标/翻历史，而不是换任务。
-// 反过来，改绑之后热键必须能在输入框内也生效，否则焦点进了输入框就再也切不了卡，
-// 键盘导航能力名存实亡——故显式开启 enableOnFormTags / enableOnContentEditable。
-function shouldIgnoreAdjacentCardHotkey(event: KeyboardEvent): boolean {
-	// Windows 的 AltGr 会同时置位 ctrlKey 与 altKey，排除 ctrl/meta 以免误吞用户的组合键。
-	return event.defaultPrevented || event.ctrlKey || event.metaKey || isEventInsideDialog(event.target);
 }
 
 /** Shared factory for the three horizontal resize-drag handlers in the detail view. */
@@ -1124,6 +1116,9 @@ export function CardDetailView({
 		return runtimeFiles.map((file) => file.path);
 	}, [runtimeFiles]);
 
+	// 裸方向键留给 agent 输入入口；Option 组合在输入框里也生效。All Projects 的所有者常驻 App。
+	const isAllProjectsAdjacentTaskNavigationOwnedByApp =
+		useCrossProjectRecentlyActiveTaskSwitcherHostContext()?.isBoardScopeAllProjectsSelected === true;
 	const handleSelectAdjacentCard = useCallback(
 		(step: number) => {
 			const cards = selection.column.cards;
@@ -1146,9 +1141,10 @@ export function CardDetailView({
 			handleSelectAdjacentCard(-1);
 		},
 		{
+			enabled: !isAllProjectsAdjacentTaskNavigationOwnedByApp,
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
-			ignoreEventWhen: shouldIgnoreAdjacentCardHotkey,
+			ignoreEventWhen: shouldIgnoreAdjacentTaskCardNavigationHotkey,
 			preventDefault: true,
 		},
 		[handleSelectAdjacentCard],
@@ -1184,9 +1180,10 @@ export function CardDetailView({
 			handleSelectAdjacentCard(1);
 		},
 		{
+			enabled: !isAllProjectsAdjacentTaskNavigationOwnedByApp,
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
-			ignoreEventWhen: shouldIgnoreAdjacentCardHotkey,
+			ignoreEventWhen: shouldIgnoreAdjacentTaskCardNavigationHotkey,
 			preventDefault: true,
 		},
 		[handleSelectAdjacentCard],
