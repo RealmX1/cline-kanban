@@ -450,6 +450,11 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 							<NativeSelect
 								size="sm"
 								aria-label="Order recent tasks by"
+								title={
+									remainingSectionOrderingMode === "most_recent_conversation_progress_only"
+										? "按对话进展倒序；无对话记录的任务排在末尾，并按 Description 更新时间倒序。"
+										: "按对话进展、最近打开或 Description 更新时间中的最新时间倒序。"
+								}
 								containerClassName="min-w-0"
 								value={remainingSectionOrderingMode}
 								onChange={(event) =>
