@@ -27,10 +27,11 @@ const PROMPT_CACHE_WARMTH_ANCHOR_SOURCE_DESCRIPTION: Record<
 	CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource,
 	string
 > = {
-	main_agent_conversation_model_request_dispatch_observation: "last main-conversation model request",
-	manual_compaction_replaced_main_conversation_without_follow_up_request:
-		"manual /compact completed (conversation replaced by a summary)",
-	last_substantive_agent_terminal_output: "last substantive agent output (agent has no turn hooks)",
+	main_agent_conversation_model_request_dispatch_observation: "最后一次主对话请求的代理观测（估计）",
+	manual_compaction_replaced_main_conversation_without_follow_up_request: "手动 /compact 完成（主对话已被摘要替换）",
+	cursor_agent_output_cache_reference_estimate: "Cursor 新输出对应的请求时间估计",
+	main_agent_conversation_request_processing_cache_reference_estimate: "主 Agent 真实处理或响应推导的请求时间估计",
+	last_substantive_agent_terminal_output: "Cursor 新输出对应的请求时间估计",
 };
 
 function isPromptCacheWarmthAnchoredOnManualCompaction(
@@ -64,8 +65,8 @@ function describeManualCompactionReplacedMainConversation(
 
 function describePromptCacheWarmthEstimate(estimate: CrossProjectTaskSwitcherPromptCacheWarmthEstimate): string {
 	return [
-		`Prompt cache expected to expire · ${new Date(estimate.promptCacheExpectedExpiryAt).toLocaleString()}`,
-		`Countdown started · ${new Date(estimate.promptCacheWarmthAnchorAt).toLocaleString()} · ${
+		`缓存预计过期 · ${new Date(estimate.promptCacheExpectedExpiryAt).toLocaleString()}`,
+		`估计起点 · ${new Date(estimate.promptCacheWarmthAnchorAt).toLocaleString()} · ${
 			PROMPT_CACHE_WARMTH_ANCHOR_SOURCE_DESCRIPTION[estimate.promptCacheWarmthAnchorSource]
 		}`,
 	].join("\n");

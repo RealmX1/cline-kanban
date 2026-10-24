@@ -151,7 +151,7 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 
 		await act(async () => render({ isTaskSwitcherSectionModelActive: true }));
 		expect(model.nowMs).toBe(INITIAL_NOW_MS + 10 * MINUTE_MS);
-		expect(model.sections.runningEntries).toEqual([]);
+		expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).toHaveBeenCalledTimes(1);
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).toHaveBeenCalledWith("project-a");
 	});
@@ -225,7 +225,7 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 		expect(renderCount).toBe(inactiveRenderCount);
 		render({ isTaskSwitcherSectionModelActive: true });
 		expect(model.nowMs).toBe(INITIAL_NOW_MS + 30_000 + 10 * MINUTE_MS);
-		expect(model.sections.runningEntries).toEqual([]);
+		expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);
 		await advanceTime(30_000);
 		expect(model.nowMs).toBe(INITIAL_NOW_MS + MINUTE_MS + 10 * MINUTE_MS);
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).not.toHaveBeenCalled();

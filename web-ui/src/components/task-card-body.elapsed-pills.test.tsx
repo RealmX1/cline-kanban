@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BoardCard } from "@/components/board-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskConversationSessionActivityObservation, RuntimeTaskSessionSummary } from "@/runtime/types";
 
 // 卡片头部时长药丸的字段 → 渲染字符串端到端契约。这条链路此前**零测试**，而它正是这个 bug 反复
 // 复发四次的地方：一颗药丸冒充了三个不同的量。现在拆成两颗，各读各的真相源，故这里逐条钉死
@@ -82,9 +82,20 @@ let container: HTMLDivElement;
 let root: Root;
 let previousActEnvironment: boolean | undefined;
 
-function renderCard(sessionSummary?: RuntimeTaskSessionSummary): HTMLDivElement {
+function renderCard(
+	sessionSummary?: RuntimeTaskSessionSummary,
+	taskConversationSessionActivityObservations?: RuntimeTaskConversationSessionActivityObservation[],
+): HTMLDivElement {
 	act(() =>
-		root.render(<BoardCard card={createCard()} index={0} columnId="review" sessionSummary={sessionSummary} />),
+		root.render(
+			<BoardCard
+				card={createCard()}
+				index={0}
+				columnId="review"
+				sessionSummary={sessionSummary}
+				taskConversationSessionActivityObservations={taskConversationSessionActivityObservations}
+			/>,
+		),
 	);
 	return container;
 }
@@ -119,11 +130,92 @@ afterEach(() => {
 });
 
 describe("卡片头部时长药丸", () => {
+	it("主活动未知时仍可聚焦查看 peer、By the way 和前主的独立来源", () => {
+		const activity = {
+			observedAtMs: NOW - TWO_HOURS_MS,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "tool_activity",
+		} as const;
+		const host = renderCard(createSummary({ lastConversationProgressObservation: null }), [
+			{
+				sessionId: "main",
+				role: "main",
+				agentId: "claude",
+				lastEffectiveAgentConversationActivityObservation: null,
+			},
+			{
+				sessionId: "peer",
+				role: "task_collaborator",
+				agentId: "codex",
+				lastEffectiveAgentConversationActivityObservation: activity,
+			},
+			{
+				sessionId: "side",
+				role: "by_the_way",
+				agentId: "claude",
+				lastEffectiveAgentConversationActivityObservation: null,
+			},
+			{
+				sessionId: "previous",
+				role: "former_main",
+				agentId: "claude",
+				lastEffectiveAgentConversationActivityObservation: activity,
+			},
+		]);
+		const trigger = host.querySelector<HTMLElement>("[data-task-conversation-session-activity-details]");
+		expect(trigger?.tabIndex).toBe(0);
+		expect(trigger?.textContent).toContain("活动未知");
+		expect(trigger?.title).toContain("协作会话（peer）");
+		expect(trigger?.title).toContain("侧问会话（By the way）");
+		expect(trigger?.title).toContain("前主对话");
+		expect(trigger?.title).toContain("工具活动 · 证据：persisted_agent_transcript");
+		expect(progressPill(host)).toBeNull();
+	});
+
+	it("提交尚未获得原生接受证明时明确显示待确认", () => {
+		const host = renderCard(
+			createSummary({
+				agentConversationPromptSubmissionAcceptance: {
+					status: "pending",
+					attemptedAtMs: NOW,
+					runtimeSessionIncarnationId: "current-process",
+				},
+			}),
+		);
+		expect(host.querySelector('[role="status"]')?.textContent).toContain("提交待确认");
+	});
+
+	it("恢复后药丸读取历史交棒与统一活动，进程待命起点不能刷新它们", () => {
+		const host = renderCard(
+			createSummary({
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: NOW - TWO_HOURS_MS,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 1,
+				},
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: NOW - THREE_DAYS_MS,
+					evidenceKind: "persisted_agent_transcript",
+					activityKind: "agent_output",
+				},
+				agentResponseGenerationStopped: {
+					stoppedAt: NOW,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 2,
+				},
+				lastConversationProgressObservation: null,
+			}),
+		);
+		expect(stoppedPill(host)?.textContent).toContain("2h");
+		expect(progressPill(host)?.textContent).toContain("3d");
+		expect(host.textContent).not.toContain("1m");
+	});
+
 	it("两颗药丸各读各的字段：Stopped 读停止事件、Progress 读推进观测", () => {
 		const host = renderCard(
 			createSummary({
-				agentResponseGenerationStopped: {
-					stoppedAt: NOW - TWO_HOURS_MS,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: NOW - TWO_HOURS_MS,
 					signalConfidence: "harness_turn_complete",
 					turnSequence: 1,
 				},
@@ -146,8 +238,8 @@ describe("卡片头部时长药丸", () => {
 			createSummary({
 				lastOutputAt: NOW,
 				lastSubstantiveOutputAt: NOW,
-				agentResponseGenerationStopped: {
-					stoppedAt: NOW - TWO_HOURS_MS,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: NOW - TWO_HOURS_MS,
 					signalConfidence: "harness_turn_complete",
 					turnSequence: 1,
 				},
@@ -162,7 +254,7 @@ describe("卡片头部时长药丸", () => {
 		expect(progressPill(host)?.textContent).not.toContain("now");
 	});
 
-	it("低置信来源（TUI 刮取分类器）以 `~` 前缀降级展示", () => {
+	it("TUI 刮取分类器不再构成可信活动，保留可访问的未知入口", () => {
 		const host = renderCard(
 			createSummary({
 				lastConversationProgressObservation: {
@@ -172,7 +264,10 @@ describe("卡片头部时长药丸", () => {
 			}),
 		);
 
-		expect(progressPill(host)?.textContent).toContain("~2h");
+		expect(progressPill(host)).toBeNull();
+		expect(host.querySelector("[data-task-conversation-session-activity-details]")?.textContent).toContain(
+			"活动未知",
+		);
 	});
 
 	it.each([
@@ -197,7 +292,7 @@ describe("卡片头部时长药丸", () => {
 			createSummary({
 				state: "running",
 				reviewReason: null,
-				agentResponseGenerationStopped: null,
+				lastAgentConversationUserHandoffObservation: null,
 				lastConversationProgressObservation: {
 					observedAtMs: NOW - TWO_HOURS_MS,
 					evidenceKind: "persisted_agent_transcript",
@@ -213,8 +308,8 @@ describe("卡片头部时长药丸", () => {
 		const host = renderCard(
 			createSummary({
 				lastSubstantiveOutputAt: NOW - TWO_HOURS_MS,
-				agentResponseGenerationStopped: {
-					stoppedAt: NOW - TWO_HOURS_MS,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: NOW - TWO_HOURS_MS,
 					signalConfidence: "harness_turn_complete",
 					turnSequence: 1,
 				},

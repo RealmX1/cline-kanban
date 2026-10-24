@@ -154,7 +154,7 @@ describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
 		});
 	});
 
-	it("正常新会话仍保留开局的乐观 running（进程冷启动那几秒卡片要有反应）", async () => {
+	it("正常新会话在协议接受之前同样保持用户回合，乐观消息只表示尝试", async () => {
 		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
 		const { settleAsEstablished } = createPendingTaskConnection();
 
@@ -162,9 +162,9 @@ describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
 
 		expect(emittedSummaries).toHaveLength(1);
 		expect(emittedSummaries[0]).toMatchObject({
-			state: "running",
-			turnOwner: "agent",
-			reviewReason: null,
+			state: "awaiting_review",
+			turnOwner: "user",
+			reviewReason: "hook",
 		});
 		expect(service.listMessages(TASK_ID)).toHaveLength(1);
 
@@ -237,7 +237,10 @@ describe("ACP 原生身份恢复", () => {
 		const listener = vi.fn();
 		service.setUserPromptSubmittedListener(listener);
 		const connection = createIdentityTestConnection("native-prompt-usage");
-		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(connection);
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockImplementation(async () => {
+			acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValue(connection as never);
+			return connection;
+		});
 		await service.startTaskSession(buildStartRequest({ prompt: "首次用户正文" }));
 		expect(listener.mock.calls).toEqual([[TASK_ID, "首次用户正文"]]);
 		acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValueOnce(connection as never);

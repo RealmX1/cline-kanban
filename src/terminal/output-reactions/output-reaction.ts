@@ -14,7 +14,24 @@
 //   - PTY 机制（写入、定时器、提示符就绪判断、summary 更新）通过 `OutputReactionActions`
 //     由 session-manager 注入，reaction 只决定「何时 / 是否」动作。
 
-import type { RuntimeAgentId, RuntimeTaskConnectionRetry } from "../../core/api-contract";
+import type {
+	RuntimeAgentId,
+	RuntimeLastEffectiveAgentConversationActivityObservation,
+	RuntimeTaskConnectionRetry,
+} from "../../core/api-contract";
+
+export type ConnectionRetryContinuationFirstSubmitCarriageReturnState =
+	| "awaiting_first_submit"
+	| "carriage_return_written"
+	| "deferred_before_submit"
+	| "target_invalidated";
+
+export interface ConnectionRetryContinuationSubmissionResult {
+	outcome: "written_to_terminal" | "deferred_before_terminal_write" | "target_invalidated";
+	terminalWrittenAtMs?: number;
+	// paste 已写入不代表首个 Enter 已发出，更不代表原生接受；拒绝提交后仍须保留重试资格。
+	readFirstSubmitCarriageReturnState?: () => ConnectionRetryContinuationFirstSubmitCarriageReturnState;
+}
 
 // reaction 触发动作时拿到的上下文。
 export interface OutputReactionContext {
@@ -33,7 +50,9 @@ export type ConnectionRetryStatePatch = RuntimeTaskConnectionRetry;
 // session-manager 注入给 reaction 的副作用入口。
 export interface OutputReactionActions {
 	// 注入一条「引用续跑指令文件的简短续跑指令」（bracketed paste + 回车；Codex 追加回车）。
-	submitContinuationReference(): void;
+	submitContinuationReference():
+		| ConnectionRetryContinuationSubmissionResult
+		| Promise<ConnectionRetryContinuationSubmissionResult>;
 	// 安排一个一次性兜底定时器，delayMs 后回调引擎的 onAttempt。
 	// 每个 session 同时只保留一个待触发的 attempt 定时器（重复调用会覆盖）。
 	schedule(delayMs: number): void;
@@ -50,14 +69,14 @@ export interface OutputReactionActions {
 	// agent 输出是否已「静默」：距最近一次输出已超过静默阈值，说明 agent 确实停在原地、
 	// 没有在持续产出。仅用于自动注入路径的二次空闲门控——若输出仍在流动（非静默），
 	// 说明 agent 仍在工作 / 已自行恢复，不应注入打断它。手动「立即续跑」豁免此门控。
-	isAgentOutputQuiet(): boolean;
+	isEffectiveAgentConversationActivityQuiet(): boolean;
 	// 当前是否处于「活跃的 agent 回合」（dual-axis facet 的 turnOwner==="agent"）。
 	//
 	// 这是 connection-drop 检测器的**主门控信号**，用来根治「agent 正在向用户提问
 	// （AskUserQuestion / ExitPlanMode / 权限确认）被误判为瞬时网络中断」：真实掉线时
 	// agent 仍在自己的回合（turnOwner 保持 agent，只是卡住 / 死了），而向用户提问会经 hook
 	// 把 turnOwner 翻成 user。`classifyConnectionError` 的正则在 agent 自产文本（问题/选项
-	// 文本、分析、测试日志）上无法区分真实错误行与内容，唯一兜底 isAgentOutputQuiet 又恰好
+	// 文本、分析、测试日志）上无法区分真实错误行与内容，唯一兜底 isEffectiveAgentConversationActivityQuiet 又恰好
 	// 对「提问态」失效（提问 = 静默 + 停在提示符，与掉线在输出文本上完全同形），故需用 facet
 	// 这个**带外信号**门控：仅在 agent 回合运作，一旦进入 user 回合立即 stand down。
 	isAgentTurnActive(): boolean;
@@ -86,6 +105,12 @@ export interface OutputReaction {
 	// 显式输入边（turnOwner 翻成 user 即让位），用来兜住「PTY 输出先于 hook 落地、episode 已起」
 	// 的竞态、并消除「retrying 徽标闪现」。
 	standDown(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
+	onEffectiveAgentConversationActivity?(
+		ctx: OutputReactionContext,
+		state: unknown,
+		actions: OutputReactionActions,
+		observation: RuntimeLastEffectiveAgentConversationActivityObservation,
+	): void;
 }
 
 interface ActiveReaction {
@@ -98,6 +123,12 @@ export interface OutputReactionSessionState {
 }
 
 export interface OutputReactionEngine {
+	onEffectiveAgentConversationActivity(
+		ctx: OutputReactionContext,
+		session: OutputReactionSessionState,
+		actions: OutputReactionActions,
+		observation: RuntimeLastEffectiveAgentConversationActivityObservation,
+	): void;
 	// 是否有任一 reaction 适用于该 agent（决定 session-manager 要不要建 session 状态、解码输出）。
 	isActiveFor(agentId: RuntimeAgentId): boolean;
 	createSessionState(agentId: RuntimeAgentId): OutputReactionSessionState;
@@ -123,6 +154,11 @@ export interface OutputReactionEngine {
 
 export function createOutputReactionEngine(reactions: readonly OutputReaction[]): OutputReactionEngine {
 	return {
+		onEffectiveAgentConversationActivity(ctx, session, actions, observation) {
+			for (const active of session.reactions) {
+				active.reaction.onEffectiveAgentConversationActivity?.(ctx, active.state, actions, observation);
+			}
+		},
 		isActiveFor(agentId) {
 			return reactions.some((reaction) => reaction.appliesTo(agentId));
 		},

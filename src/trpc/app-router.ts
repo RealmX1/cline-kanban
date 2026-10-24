@@ -175,6 +175,8 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskConversationHistoryPageRequest,
+	RuntimeTaskConversationHistoryPageResponse,
 	RuntimeTaskEditDraftsMutateRequest,
 	RuntimeTaskEditDraftsReadRequest,
 	RuntimeTaskEditDraftsResponse,
@@ -228,6 +230,7 @@ import {
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
+	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
@@ -339,6 +342,7 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeReadAgentPromptImageAttachmentsRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
@@ -354,6 +358,7 @@ import {
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveAgentPromptImageAttachmentsRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
@@ -394,9 +399,12 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskConversationHistoryPageRequestSchema,
+	runtimeTaskConversationHistoryPageResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
+	runtimeTaskImageSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskNameSuggestionRequestSchema,
@@ -441,10 +449,14 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfAutomaticCloseoutExecutionResultReportResponseSchema,
 	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema,
 	rvfReviewStartBoundaryObservationRequestSchema,
 	rvfReviewStartBoundaryObservationResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
@@ -589,6 +601,11 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
+import {
+	readPersistentAgentPromptImageAttachments,
+	savePersistentAgentPromptImageAttachments,
+} from "../state/persistent-agent-prompt-image-attachments";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
@@ -631,6 +648,14 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		reconcileLateNativePromptAcceptance?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
+		) => Promise<z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema>>;
+		reportExecutionResult?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutExecutionResultReportResponseSchema>>;
 		observeBoundary?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
@@ -749,6 +774,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatMessagesRequest,
 		) => Promise<RuntimeTaskChatMessagesResponse>;
+		getTaskConversationHistoryPage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationHistoryPageRequest,
+		) => Promise<RuntimeTaskConversationHistoryPageResponse>;
 		getClineSlashCommands: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeSlashCommandsResponse>;
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1391,6 +1420,14 @@ export const runtimeAppRouter = t.router({
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
 	support: t.router({
+		saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
+			.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))
+			.mutation(({ input }) => savePersistentAgentPromptImageAttachments(input.images)),
+		readAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeReadAgentPromptImageAttachmentsRequestSchema)
+			.output(z.array(runtimeTaskImageSchema))
+			.query(({ input }) => readPersistentAgentPromptImageAttachments(input.imageAttachmentIds)),
 		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(createTaskLookupConversationRequestSchema)
 			.output(taskLookupConversationSchema)
@@ -1602,6 +1639,28 @@ export const runtimeAppRouter = t.router({
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
 			}),
+		reconcileRvfAutomaticCloseoutLateNativePromptAcceptance: workspaceProcedure
+			.input(rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema)
+			.output(rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
+			}),
+		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
+			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)
+			.output(rvfAutomaticCloseoutExecutionResultReportResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reportExecutionResult)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动收尾执行结果登记服务未启用。" });
+				try {
+					return await ctx.rvfAutomaticCloseoutApi.reportExecutionResult(ctx.workspaceScope, input);
+				} catch (error) {
+					if (error instanceof RvfAutomaticCloseoutExecutionResultDeliveryPendingError)
+						throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
+					throw error;
+				}
+			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
 			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
@@ -1767,6 +1826,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatMessagesResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
+			}),
+		getTaskConversationHistoryPage: workspaceProcedure
+			.input(runtimeTaskConversationHistoryPageRequestSchema)
+			.output(runtimeTaskConversationHistoryPageResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 			}),
 		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeSlashCommandsResponseSchema)

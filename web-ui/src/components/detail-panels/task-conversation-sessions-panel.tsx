@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
@@ -119,6 +120,7 @@ function readTaskConversationSessionReadReceipts(): Record<string, number> {
 }
 
 export function TaskConversationSessionsPanel({
+	isTaskAgentExecutionDisabled = false,
 	workspaceId,
 	taskCard,
 	workspaceTaskId,
@@ -132,6 +134,7 @@ export function TaskConversationSessionsPanel({
 	onSelectTaskConversationSession,
 	onCreateTaskConversationSession,
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	workspaceId?: string | null;
 	taskCard?: BoardCard;
 	workspaceTaskId: string;
@@ -166,6 +169,7 @@ export function TaskConversationSessionsPanel({
 	);
 	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
 	const [isCreating, setIsCreating] = useState(false);
+	const [isPreparingQuestionImages, setIsPreparingQuestionImages] = useState(false);
 	const [creationError, setCreationError] = useState<string | null>(null);
 	const isByTheWaySessionCreationSupported = byTheWaySessionSupportedAgentIds.has(effectiveAgentId);
 	const isSessionCreationSupported =
@@ -246,7 +250,7 @@ export function TaskConversationSessionsPanel({
 	};
 
 	const createSession = async () => {
-		if (!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
+		if (isTaskAgentExecutionDisabled || !isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
 			return;
 		}
 		setCreationError(null);
@@ -282,7 +286,7 @@ export function TaskConversationSessionsPanel({
 					icon={<Plus size={14} />}
 					className="ml-auto h-6"
 					onClick={() => setCreationDialogOpen(true)}
-					disabled={isCreating}
+					disabled={isCreating || isTaskAgentExecutionDisabled}
 				>
 					新建会话
 				</Button>
@@ -300,7 +304,7 @@ export function TaskConversationSessionsPanel({
 							: ""}
 					</a>
 				)}
-				{workspaceId && taskCard && (
+				{workspaceId && taskCard && !isTaskAgentExecutionDisabled && (
 					<TaskMainSessionHandoverAction
 						workspaceId={workspaceId}
 						taskCard={taskCard}
@@ -405,20 +409,26 @@ export function TaskConversationSessionsPanel({
 								summary={summary}
 								taskConversationSessionId={summary.taskId}
 							/>
-							{workspaceId && metadata.taskConversationSessionRoleAtCreation !== "main" && (
-								<IndependentTaskCreationAction
-									workspaceId={workspaceId}
-									sourceTaskId={workspaceTaskId}
-									sourceSessionId={summary.taskId}
-								/>
-							)}
+							{workspaceId &&
+								!isTaskAgentExecutionDisabled &&
+								metadata.taskConversationSessionRoleAtCreation !== "main" && (
+									<IndependentTaskCreationAction
+										workspaceId={workspaceId}
+										sourceTaskId={workspaceTaskId}
+										sourceSessionId={summary.taskId}
+									/>
+								)}
 						</div>
 					);
 				})}
 				{sideConversationSessions.length === 0 ? (
 					<div className="flex flex-col items-center gap-2 px-4 py-6 text-center text-xs text-text-tertiary">
 						<MessageCircleQuestion size={24} />
-						<span>创建协作会话处理工作，或用 By the way 询问侧问。</span>
+						<span>
+							{isTaskAgentExecutionDisabled
+								? "此任务没有其他会话。"
+								: "创建协作会话处理工作，或用 By the way 询问侧问。"}
+						</span>
 					</div>
 				) : null}
 			</div>
@@ -522,14 +532,16 @@ export function TaskConversationSessionsPanel({
 						>
 							{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
 						</label>
-						<textarea
+						<TaskPromptComposer
 							id="task-conversation-initial-question"
-							className="min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary placeholder:text-text-secondary focus:border-border-focus focus:outline-none"
+							workspaceId={workspaceId}
+							minimumTextareaHeight={96}
 							placeholder={
 								sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
 							}
 							value={initialUserQuestion}
-							onChange={(event) => setInitialUserQuestion(event.target.value)}
+							onImagePreparationPendingChange={setIsPreparingQuestionImages}
+							onValueChange={setInitialUserQuestion}
 						/>
 						<p className="mt-1 text-[11px] text-text-tertiary">
 							{sessionRole === "task_collaborator"
@@ -546,7 +558,12 @@ export function TaskConversationSessionsPanel({
 							size="sm"
 							fill
 							className="mt-3"
-							disabled={!isSessionCreationSupported || !initialUserQuestion.trim() || isCreating}
+							disabled={
+								!isSessionCreationSupported ||
+								!initialUserQuestion.trim() ||
+								isCreating ||
+								isPreparingQuestionImages
+							}
 							onClick={() => void createSession()}
 						>
 							{isCreating ? "Creating…" : "Create session"}

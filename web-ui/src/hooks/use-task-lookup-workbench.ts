@@ -14,6 +14,25 @@ import {
 } from "@/stores/task-lookup-conversation-update-store";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
+function readQuestionDrafts(): Record<string, string> {
+	try {
+		const parsed: unknown = JSON.parse(readLocalStorageItem(LocalStorageKey.TaskLookupQuestionDrafts) ?? "{}");
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		return Object.fromEntries(
+			Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+		);
+	} catch {
+		return {};
+	}
+}
+
+function saveQuestionDraft(key: string, text: string) {
+	const drafts = readQuestionDrafts();
+	if (text) drafts[key] = text;
+	else delete drafts[key];
+	writeLocalStorageItem(LocalStorageKey.TaskLookupQuestionDrafts, JSON.stringify(drafts));
+}
+
 export function useTaskLookupWorkbench({
 	workspaceId,
 	includeAllProjectsByDefault,
@@ -30,11 +49,27 @@ export function useTaskLookupWorkbench({
 	const [conversation, setConversation] = useState<TaskLookupConversation | null>(null);
 	const [conversations, setConversations] = useState<TaskLookupConversation[]>([]);
 	const [scope, setScope] = useState<TaskLookupScope>({ projectIds: [], columnIds: [] });
-	const [draftQuestion, setDraftQuestion] = useState("");
+	const draftKeyRef = useRef(conversationId ?? `new:${workspaceId ?? ""}`);
+	const [draftQuestion, setDraftQuestionState] = useState(() => readQuestionDrafts()[draftKeyRef.current] ?? "");
+	const draftQuestionRef = useRef(draftQuestion);
+	draftQuestionRef.current = draftQuestion;
+	const setDraftQuestion = useCallback((text: string) => {
+		draftQuestionRef.current = text;
+		setDraftQuestionState(text);
+		saveQuestionDraft(draftKeyRef.current, text);
+	}, []);
+	const setQuestionDraftForConversation = useCallback(
+		(draftConversationId: string | null, text: string) => {
+			const key = draftConversationId ?? `new:${workspaceId ?? ""}`;
+			if (key === draftKeyRef.current) setDraftQuestion(text);
+			else saveQuestionDraft(key, text);
+		},
+		[setDraftQuestion, workspaceId],
+	);
 	const [selectedCandidate, setSelectedCandidate] = useState<TaskLookupCandidate | null>(null);
 	const [candidatePreview, setCandidatePreview] = useState<TaskLookupCandidatePreview | null>(null);
 	const [previewError, setPreviewError] = useState<string | null>(null);
-	const [errorMessage, setErrorMessage] = useState<string | null>(null);
+	const [actionErrorMessage, setActionErrorMessage] = useState<string | null>(null);
 	const [conversationReadErrorMessage, setConversationReadErrorMessage] = useState<string | null>(null);
 	const [historyReadErrorMessage, setHistoryReadErrorMessage] = useState<string | null>(null);
 	const [executorSettingsReadErrorMessage, setExecutorSettingsReadErrorMessage] = useState<string | null>(null);
@@ -70,6 +105,7 @@ export function useTaskLookupWorkbench({
 	const adoptConversation = useCallback(
 		(next: TaskLookupConversation) => {
 			selectedConversationIdRef.current = next.conversationId;
+			draftKeyRef.current = next.conversationId;
 			scopeLoadedForConversationIdRef.current = next.conversationId;
 			setConversationId(next.conversationId);
 			mergeConversationSnapshot(next);
@@ -133,6 +169,7 @@ export function useTaskLookupWorkbench({
 		if (!isOpen || !contextWorkspaceId) return;
 		let abandoned = false;
 		setExecutorSettings(null);
+		setExecutorSettingsReadErrorMessage(null);
 		void taskLookupConversationQueries
 			.getSettings(contextWorkspaceId)
 			.then((settings) => {
@@ -157,6 +194,7 @@ export function useTaskLookupWorkbench({
 			if (!workspaceId) throw new Error("请先选择一个可用项目。");
 			const next = await taskLookupConversationQueries.create({ contextWorkspaceId: workspaceId, scope: nextScope });
 			adoptConversation(next);
+			if (draftQuestionRef.current) saveQuestionDraft(next.conversationId, draftQuestionRef.current);
 			setSelectedCandidate(null);
 			setCandidatePreview(null);
 			setPreviewError(null);
@@ -168,11 +206,11 @@ export function useTaskLookupWorkbench({
 		if (actionPendingRef.current) return;
 		actionPendingRef.current = true;
 		setIsPending(true);
-		setErrorMessage(null);
+		setActionErrorMessage(null);
 		try {
 			await action();
 		} catch (error) {
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setActionErrorMessage(error instanceof Error ? error.message : String(error));
 		} finally {
 			actionPendingRef.current = false;
 			setIsPending(false);
@@ -182,6 +220,7 @@ export function useTaskLookupWorkbench({
 	const submitQuestion = useCallback(async () => {
 		const questionText = draftQuestion.trim();
 		if (!questionText) return;
+		const submittedDraftKey = draftKeyRef.current;
 		await performAction(async () => {
 			const active = conversation ?? (await createConversation(scope));
 			const updated = await taskLookupConversationQueries.submit({
@@ -190,10 +229,32 @@ export function useTaskLookupWorkbench({
 				requestId: createRandomUuidV4WithInsecureContextFallback(),
 				scope,
 			});
-			mergeConversationSnapshot(updated);
-			setDraftQuestion("");
+			adoptConversation(updated);
+			if (draftQuestionRef.current === draftQuestion) setDraftQuestion("");
+			else saveQuestionDraft(updated.conversationId, draftQuestionRef.current);
+			if (submittedDraftKey !== updated.conversationId) saveQuestionDraft(submittedDraftKey, "");
 		});
-	}, [draftQuestion, scope, conversation, createConversation, performAction, mergeConversationSnapshot]);
+	}, [draftQuestion, scope, conversation, createConversation, performAction, adoptConversation, setDraftQuestion]);
+	const resubmitQuestion = useCallback(
+		async (turn: TaskLookupConversation["turns"][number]) => {
+			if (!conversation) return;
+			await performAction(async () => {
+				adoptConversation(
+					await taskLookupConversationQueries.submit({
+						conversationId: conversation.conversationId,
+						requestId: createRandomUuidV4WithInsecureContextFallback(),
+						questionText: turn.questionText,
+						questionImages: turn.questionImages ?? [],
+						scope: turn.scope,
+						...(turn.status === "running" && !turn.owningRuntimeProcessInstanceId
+							? { explicitlyRecoveredUnownedTurnId: turn.turnId }
+							: {}),
+					}),
+				);
+			});
+		},
+		[conversation, performAction, adoptConversation],
+	);
 	const open = useCallback(
 		(seed?: { questionText: string; scope: TaskLookupScope }) => {
 			setIsOpen(true);
@@ -201,10 +262,12 @@ export function useTaskLookupWorkbench({
 				if (!conversationId) setScope(defaultScope());
 				return;
 			}
-			setDraftQuestion(seed.questionText);
+			setDraftQuestionState(seed.questionText);
+			draftQuestionRef.current = seed.questionText;
 			setScope(seed.scope);
 			void performAction(async () => {
 				const next = await createConversation(seed.scope);
+				setDraftQuestion(seed.questionText);
 				if (!seed.questionText.trim()) return;
 				mergeConversationSnapshot(
 					await taskLookupConversationQueries.submit({
@@ -225,9 +288,9 @@ export function useTaskLookupWorkbench({
 			setSelectedCandidate(null);
 			setCandidatePreview(null);
 			setPreviewError(null);
-			setDraftQuestion("");
+			setDraftQuestion(readQuestionDrafts()[next.conversationId] ?? "");
 		},
-		[adoptConversation],
+		[adoptConversation, setDraftQuestion],
 	);
 	const selectCandidate = useCallback((candidate: TaskLookupCandidate) => {
 		setSelectedCandidate(candidate);
@@ -259,18 +322,23 @@ export function useTaskLookupWorkbench({
 		setScope,
 		draftQuestion,
 		setDraftQuestion,
+		setQuestionDraftForConversation,
 		selectedCandidate,
 		selectCandidate,
 		candidatePreview,
 		previewError,
 		errorMessage:
-			errorMessage ?? conversationReadErrorMessage ?? historyReadErrorMessage ?? executorSettingsReadErrorMessage,
+			actionErrorMessage ??
+			conversationReadErrorMessage ??
+			historyReadErrorMessage ??
+			executorSettingsReadErrorMessage,
 		isPending,
 		isLoading,
 		executorSettings,
 		contextWorkspaceId,
 		isRunning: conversation?.turns.some((turn) => turn.status === "running") ?? false,
 		submitQuestion,
+		resubmitQuestion,
 		selectConversation,
 		startNewConversation: () =>
 			performAction(async () => {
@@ -288,6 +356,7 @@ export function useTaskLookupWorkbench({
 					await taskLookupConversationQueries.submit({
 						conversationId,
 						questionText: turn.questionText,
+						questionImages: turn.questionImages ?? [],
 						scope: turn.scope,
 						requestId: createRandomUuidV4WithInsecureContextFallback(),
 					}),
@@ -298,7 +367,10 @@ export function useTaskLookupWorkbench({
 				if (contextWorkspaceId)
 					setExecutorSettings(await taskLookupConversationQueries.saveSettings(contextWorkspaceId, settings));
 			}),
-		refresh: () => setRefreshRequest((value) => value + 1),
+		refresh: () => {
+			setActionErrorMessage(null);
+			setRefreshRequest((value) => value + 1);
+		},
 	};
 }
 export type TaskLookupWorkbenchController = ReturnType<typeof useTaskLookupWorkbench>;

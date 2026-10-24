@@ -44,7 +44,8 @@ describe("mergeLastMainAgentConversationModelRequestDispatchObservation", () => 
 			updatedAt: NOW_MS,
 			lastMainAgentConversationModelRequestDispatchObservation: at(NOW_MS - 1_000),
 		});
-		expect(merged.lastMainAgentConversationModelRequestDispatchObservation).toEqual(at(NOW_MS - 10));
+		expect(merged.lastAgentConversationPromptCacheReferenceObservation).toEqual(at(NOW_MS - 10));
+		expect(merged.lastMainAgentConversationModelRequestDispatchObservation).toBeUndefined();
 	});
 });
 

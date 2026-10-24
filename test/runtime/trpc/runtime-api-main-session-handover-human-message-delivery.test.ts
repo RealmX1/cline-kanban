@@ -17,8 +17,10 @@ import { completeTaskMainSessionHandoverAfterUserMessage } from "../../../src/st
 import type { mutateWorkspaceState, RuntimeWorkspaceAtomicMutationResult } from "../../../src/state/workspace-state";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
+import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
 import { createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { confirmTestNativeUserInputAcceptance } from "../../utilities/confirm-test-native-user-input-acceptance";
 import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const workspaceStateMocks = vi.hoisted(() => ({
@@ -102,6 +104,13 @@ function createSession(taskId: string, agentId: "claude" | "codex"): RuntimeTask
 		pid: 123,
 		startedAt: 1,
 		updatedAt: 1,
+		runtimeSessionIncarnationId: "handover-human-delivery-incarnation",
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: agentId,
+			nativeSessionId: `native-${taskId}`,
+			transcriptPath: null,
+			observedAt: 1,
+		},
 		lastOutputAt: null,
 		reviewReason: "hook",
 		exitCode: null,
@@ -140,7 +149,7 @@ function installTerminalSession(manager: TerminalSessionManager, summary: Runtim
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
-			programmaticDeliveryReceipt: null,
+			programmaticDeliveryReceipt: null as PendingProgrammaticDeliveryReceipt | null,
 			awaitingCodexPromptAfterEnter: false,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 			ptyOutputChunkArrivalSequenceNumber: 0,
@@ -248,13 +257,50 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 	});
 
 	function createSendingApi(manager: TerminalSessionManager, acpSummary: RuntimeTaskSessionSummary | null = null) {
+		let currentAcpSummary = acpSummary;
+		let settleAcpAcceptance: ((accepted: boolean) => void) | undefined;
 		const acpService = {
-			getSummary: vi.fn((sessionId: string) => (sessionId === acpSummary?.taskId ? acpSummary : null)),
-			sendTaskSessionInput: vi.fn(async () => acpSummary),
+			getSummary: vi.fn((sessionId: string) => (sessionId === currentAcpSummary?.taskId ? currentAcpSummary : null)),
+			sendTaskSessionInput: vi.fn<AcpTaskSessionService["sendTaskSessionInput"]>(
+				async (_sessionId, _text, _images, onAcceptanceSettled) => {
+					settleAcpAcceptance = onAcceptanceSettled;
+					if (currentAcpSummary)
+						currentAcpSummary = {
+							...currentAcpSummary,
+							agentConversationPromptSubmissionAcceptance: {
+								status: "pending",
+								attemptedAtMs: Date.now(),
+								runtimeSessionIncarnationId: currentAcpSummary.runtimeSessionIncarnationId ?? "acp-incarnation",
+							},
+						};
+					return currentAcpSummary;
+				},
+			),
+			applyTaskConversationSessionMetadata: vi.fn<AcpTaskSessionService["applyTaskConversationSessionMetadata"]>(
+				(sessionId, metadata) => {
+					if (sessionId !== currentAcpSummary?.taskId) return null;
+					expect(currentCard().taskMainSessionHandover?.status).toBe("completed");
+					currentAcpSummary = { ...currentAcpSummary, taskConversationSessionMetadata: metadata };
+					return currentAcpSummary;
+				},
+			),
+
 			listMessages: vi.fn(() => [
 				{ id: "human-message", role: "user", content: humanPrompt, createdAt: Date.now() },
 			]),
 		};
+		const confirmAcpPromptAcceptance = (accepted: boolean) => {
+			if (currentAcpSummary?.agentConversationPromptSubmissionAcceptance)
+				currentAcpSummary = {
+					...currentAcpSummary,
+					agentConversationPromptSubmissionAcceptance: {
+						...currentAcpSummary.agentConversationPromptSubmissionAcceptance,
+						status: accepted ? "accepted" : "unconfirmed",
+					},
+				};
+			settleAcpAcceptance?.(accepted);
+		};
+
 		const api = createRuntimeApi({
 			getActiveWorkspaceId: () => scope.workspaceId,
 			loadScopedRuntimeConfig: async () => runtimeConfig,
@@ -271,7 +317,7 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 			getUpdateStatus: vi.fn(),
 			runUpdateNow: vi.fn(),
 		});
-		return { api, acpService };
+		return { api, acpService, confirmAcpPromptAcceptance };
 	}
 
 	async function sendHumanMessage(api: ReturnType<typeof createRuntimeApi>) {
@@ -323,7 +369,13 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 				),
 			).toMatchObject({ ok: true });
-			expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(sessionId, humanPrompt, undefined);
+			expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(
+				sessionId,
+				humanPrompt,
+				undefined,
+				undefined,
+				undefined,
+			);
 		},
 	);
 
@@ -483,7 +535,13 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 			expect(write).toHaveBeenCalledWith("\r");
 			expect(outcomes).toEqual([]);
 			expectHandoverHeld("awaiting_user_message");
-			entry.summary.lastOutputAt = Date.now() + 2_500;
+			if (entry.active?.programmaticDeliveryReceipt)
+				entry.active.programmaticDeliveryReceipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+					transport: "codex_control",
+					predecessorTurnId: "before-submit",
+					seenEventIds: [],
+				};
+			confirmTestNativeUserInputAcceptance({ manager, taskId: targetSessionId, promptText: humanPrompt });
 			await vi.advanceTimersByTimeAsync(2_500);
 			expect(outcomes).toEqual([
 				{
@@ -512,32 +570,74 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 
 	it("文字仍留在 Codex 输入框时，背景输出不能解除 hold", async () => {
 		const manager = new TerminalSessionManager();
-		const { entry, setScreenText } = installTerminalSession(manager, persistedState.sessions[targetSessionId]);
+		const { setScreenText } = installTerminalSession(manager, persistedState.sessions[targetSessionId]);
 		const outcomes = observeRealTerminalReceipts(manager);
 		await sendHumanMessage(createSendingApi(manager).api);
 		await vi.advanceTimersByTimeAsync(2_500);
 		setScreenText(`model: test\n› ${humanPrompt}`);
-		entry.summary.lastOutputAt = Date.now() + 2_500;
+		manager.recordEffectiveAgentConversationActivity(targetSessionId, {
+			observedAtMs: Date.now(),
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "tool_activity",
+			eventId: "unrelated-background-tool-update",
+		});
 		await vi.advanceTimersByTimeAsync(2_500);
 		expect(outcomes).toEqual([]);
 		expectHandoverHeld("awaiting_user_message");
 	});
 
-	it("ACP 摄入成功的同步确认也完成交接", async () => {
+	it("ACP 只在可靠协议接受之后完成交接，重复确认不改写完成时间", async () => {
 		const manager = new TerminalSessionManager();
 		const summary = {
 			...persistedState.sessions[targetSessionId],
 			agentId: "omp" as const,
 			sessionTransport: "acp_stdio_subprocess" as const,
 		};
-		const { api } = createSendingApi(manager, summary);
+		const { api, acpService, confirmAcpPromptAcceptance } = createSendingApi(manager, summary);
 		const response = await sendHumanMessage(api);
-		expect(response).toMatchObject({ ok: true, terminalDelivery: { status: "delivered_and_submit_confirmed" } });
+		expect(response).toMatchObject({
+			ok: true,
+			terminalDelivery: { status: "accepted_pending_submit_confirmation" },
+		});
+		expectHandoverHeld("awaiting_user_message");
+		confirmAcpPromptAcceptance(true);
+		await vi.advanceTimersByTimeAsync(0);
 		expect(currentCard().taskMainSessionHandover?.status).toBe("completed");
+		expect(savedCompletionCount).toBe(1);
+		expect(
+			acpService.getSummary(targetSessionId)?.taskConversationSessionMetadata
+				?.taskAutomationSuspendedForMainSessionHandover,
+		).toBe(false);
+		const completedAt = currentCard().taskMainSessionHandover?.updatedAt;
+		const revision = persistedState.revision;
+		confirmAcpPromptAcceptance(true);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(currentCard().taskMainSessionHandover?.updatedAt).toBe(completedAt);
+		expect(persistedState.revision).toBe(revision);
 		expect(savedCompletionCount).toBe(1);
 	});
 
-	it("原生 UserPromptSubmit 先完成后，迟到回执不重写完成时间或重复通知", async () => {
+	it("ACP 接受未知保持 hold，旧投递的迟到证明不能完成新交接", async () => {
+		const summary = {
+			...persistedState.sessions[targetSessionId],
+			agentId: "omp" as const,
+			sessionTransport: "acp_stdio_subprocess" as const,
+		};
+		const { api, confirmAcpPromptAcceptance } = createSendingApi(new TerminalSessionManager(), summary);
+		await sendHumanMessage(api);
+		confirmAcpPromptAcceptance(false);
+		await vi.advanceTimersByTimeAsync(0);
+		expectHandoverHeld("awaiting_user_message");
+		currentCard().taskMainSessionHandover = {
+			...createHandover("awaiting_user_message"),
+			handoverId: "newer-acp-handover",
+		};
+		confirmAcpPromptAcceptance(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expectHandoverHeld("awaiting_user_message");
+	});
+
+	it("前置提交不完成交接，原生接受后迟到重复证明不重写完成时间或重复通知", async () => {
 		const manager = new TerminalSessionManager();
 		const { entry } = installTerminalSession(manager, persistedState.sessions[targetSessionId]);
 		const appliedMetadata = vi.spyOn(manager, "applyTaskConversationSessionMetadata");
@@ -559,11 +659,27 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 				metadata: { source: "codex", hookEventName: "UserPromptSubmit" },
 			}),
 		).toMatchObject({ ok: true });
+		expect(savedCompletionCount).toBe(0);
+		if (entry.active?.programmaticDeliveryReceipt)
+			entry.active.programmaticDeliveryReceipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+				transport: "codex_control",
+				predecessorTurnId: "before-submit",
+				seenEventIds: [],
+			};
+		confirmTestNativeUserInputAcceptance({ manager, taskId: targetSessionId, promptText: humanPrompt });
+		await vi.advanceTimersByTimeAsync(0);
+
 		const completedAt = currentCard().taskMainSessionHandover?.updatedAt;
 		const revisionAfterHook = persistedState.revision;
 		const metadataApplicationsAfterHook = appliedMetadata.mock.calls.length;
 		expect(savedCompletionCount).toBe(1);
-		entry.summary.lastOutputAt = Date.now() + 2_500;
+		if (entry.active?.programmaticDeliveryReceipt)
+			entry.active.programmaticDeliveryReceipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+				transport: "codex_control",
+				predecessorTurnId: "before-submit",
+				seenEventIds: [],
+			};
+		confirmTestNativeUserInputAcceptance({ manager, taskId: targetSessionId, promptText: humanPrompt });
 		await vi.advanceTimersByTimeAsync(2_500);
 		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
 		expect(currentCard().taskMainSessionHandover?.updatedAt).toBe(completedAt);
@@ -600,7 +716,13 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 			...createHandover("awaiting_user_message"),
 			handoverId: "newer-handover",
 		};
-		entry.summary.lastOutputAt = Date.now() + 2_500;
+		if (entry.active?.programmaticDeliveryReceipt)
+			entry.active.programmaticDeliveryReceipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+				transport: "codex_control",
+				predecessorTurnId: "before-submit",
+				seenEventIds: [],
+			};
+		confirmTestNativeUserInputAcceptance({ manager, taskId: targetSessionId, promptText: humanPrompt });
 		await vi.advanceTimersByTimeAsync(2_500);
 		expectHandoverHeld("awaiting_user_message");
 	});

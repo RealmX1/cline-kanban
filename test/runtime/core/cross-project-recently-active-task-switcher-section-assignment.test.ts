@@ -203,6 +203,23 @@ describe("Recent 的阶段多选与统一活动范围", () => {
 });
 
 describe("isCrossProjectTaskSwitcherEntryRunning", () => {
+	it("自动重连仍属于当前 Agent 回合，保留 Running 且不刷新排序起点", () => {
+		const entry = makeEntry("retrying", {
+			...AGENT_RUNNING,
+			liveness: "retrying",
+			agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS),
+			lastOpenedByUserAt: NOW_MS,
+		});
+		expect(isCrossProjectTaskSwitcherEntryRunning(entry, NOW_MS)).toBe(true);
+		const sections = assign([inProject("ws-a", entry)]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["retrying"]);
+		expect(sections.remainingSection.entries).toEqual([]);
+		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		expect(sections.runningEntries[0]?.entry.agentResponseGenerationTurnStarted).toEqual(
+			turnStartedAt(NOW_MS - MINUTE_MS),
+		);
+	});
+
 	it("agent 回合 + 5 分钟内有输出 → Running", () => {
 		expect(
 			isCrossProjectTaskSwitcherEntryRunning(
@@ -212,13 +229,13 @@ describe("isCrossProjectTaskSwitcherEntryRunning", () => {
 		).toBe(true);
 	});
 
-	it("agent 回合但 5 分钟无输出、未 park → 不算 Running", () => {
+	it("已确认的存活 agent 回合即使长时间静默仍是 Running", () => {
 		expect(
 			isCrossProjectTaskSwitcherEntryRunning(
 				makeEntry("a", { ...AGENT_RUNNING, lastOutputAt: NOW_MS - 5 * MINUTE_MS }),
 				NOW_MS,
 			),
-		).toBe(false);
+		).toBe(true);
 	});
 
 	it("park 在等自己派发的后台工作 → 即使久无输出也算 Running", () => {
@@ -239,6 +256,24 @@ describe("isCrossProjectTaskSwitcherEntryRunning", () => {
 
 describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn", () => {
 	const estimate = estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn;
+
+	it("真实处理推导的请求时间保留专用估计来源，沿用 measured TTL 和同进程门", () => {
+		const reference = {
+			observedAtMs: NOW_MS - MINUTE_MS,
+			evidenceKind: "main_agent_conversation_request_processing_cache_reference_estimate" as const,
+		};
+		const entry = makeEntry("processed", {
+			...USER_REVIEW_LIVE,
+			lastAgentConversationPromptCacheReferenceObservation: reference,
+		});
+		expect(estimate(entry, NOW_MS)).toEqual({
+			promptCacheWarmthAnchorAt: NOW_MS - MINUTE_MS,
+			promptCacheWarmthAnchorSource: reference.evidenceKind,
+			promptCacheExpectedExpiryAt: NOW_MS + 54 * MINUTE_MS,
+		});
+		expect(estimate({ ...entry, agentId: "codex", agentProcessStartedAt: NOW_MS }, NOW_MS)).toBeNull();
+		expect(estimate({ ...entry, agentId: "codex", liveness: "exited" }, NOW_MS)).toBeNull();
+	});
 
 	it("Claude：主对话最后一次发请求 + 55 分钟内仍热，到点即掉出", () => {
 		const entry = makeEntry("a", {
@@ -403,16 +438,20 @@ describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn"
 		}
 	});
 
-	it("Cursor 没有回合类 hook：起点读最近一次实质输出", () => {
+	it("Cursor 新输出只通过缓存专用估计投影提供参考，不使用通用活动", () => {
 		const entry = makeEntry("a", {
 			...USER_REVIEW_LIVE,
 			agentId: "cursor",
-			lastSubstantiveOutputAt: NOW_MS - 5 * MINUTE_MS,
+			lastSubstantiveOutputAt: NOW_MS,
+			lastAgentConversationPromptCacheReferenceObservation: {
+				observedAtMs: NOW_MS - 5 * MINUTE_MS,
+				evidenceKind: "cursor_agent_output_cache_reference_estimate",
+			},
 			lastConversationProgressObservation: progressAt(NOW_MS - MINUTE_MS),
 		});
 		expect(estimate(entry, NOW_MS)).toEqual({
 			promptCacheWarmthAnchorAt: NOW_MS - 5 * MINUTE_MS,
-			promptCacheWarmthAnchorSource: "last_substantive_agent_terminal_output",
+			promptCacheWarmthAnchorSource: "cursor_agent_output_cache_reference_estimate",
 			promptCacheExpectedExpiryAt: NOW_MS + 15 * MINUTE_MS,
 		});
 	});
@@ -548,6 +587,12 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 						columnId: "validation",
 						lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - MINUTE_MS),
 						lastConversationProgressObservation: progressAt(NOW_MS - 8 * DAY_MS),
+						// 专用缓存参考可更新；通用活动明确保留旧值，不从兼容旧请求倒推新活动。
+						lastEffectiveAgentConversationActivityObservation: {
+							observedAtMs: NOW_MS - 8 * DAY_MS,
+							evidenceKind: "persisted_agent_transcript",
+							activityKind: "agent_output",
+						},
 					}),
 				),
 			]);

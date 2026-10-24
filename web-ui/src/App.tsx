@@ -61,6 +61,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
+import { useAllProjectsFocusViewAdjacentTaskKeyboardNavigation } from "@/hooks/use-all-projects-focus-view-adjacent-task-keyboard-navigation";
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
@@ -1569,6 +1570,13 @@ export default function App(): ReactElement {
 		onRequestPinCurrentProjectTaskToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
+	});
+	useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
+		host: crossProjectRecentlyActiveTaskSwitcherHost,
+		isFocusViewActive:
+			!isRuntimeDisconnected &&
+			!isKanbanAccessBlocked &&
+			(selectedTaskId !== null || pendingCrossProjectTaskOpen?.originatedFromFocusView === true),
 	});
 	// All projects 首页分区列看板里，当前项目的行展开成完整卡片时与主看板同数据、同动作。
 	const currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage =

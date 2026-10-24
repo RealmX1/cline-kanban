@@ -39,6 +39,7 @@ import {
 	type RuntimeShortcutIconOption,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
@@ -402,6 +403,7 @@ export function RuntimeSettingsDialog({
 	initialSection?: RuntimeSettingsSection | null;
 }): React.ReactElement {
 	const { config, isLoading, isSaving, save, refresh } = useRuntimeConfig(open, workspaceId, initialConfig);
+	const [isPreparingGitPromptImages, setIsPreparingGitPromptImages] = useState(false);
 	const { resetLayoutCustomizations } = useLayoutCustomizations();
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
@@ -1094,13 +1096,15 @@ export function RuntimeSettingsDialog({
 								Reset
 							</Button>
 						</div>
-						<textarea
-							rows={5}
+						<TaskPromptComposer
+							key={selectedPromptVariant}
+							workspaceId={workspaceId}
 							value={selectedPromptValue}
-							onChange={(event) => handleSelectedPromptChange(event.target.value)}
+							onImagePreparationPendingChange={setIsPreparingGitPromptImages}
+							onValueChange={handleSelectedPromptChange}
 							placeholder={selectedPromptPlaceholder}
 							disabled={controlsDisabled}
-							className="w-full rounded-md border border-border bg-surface-2 p-3 text-[13px] text-text-primary font-mono placeholder:text-text-tertiary focus:border-border-focus focus:outline-none resize-none disabled:opacity-40"
+							textareaClassName="font-mono disabled:opacity-40"
 						/>
 						<p className="text-text-secondary text-[13px] mt-2 mb-0">
 							Use{" "}
@@ -1458,7 +1462,7 @@ export function RuntimeSettingsDialog({
 				<Button
 					variant="primary"
 					onClick={() => void handleSave()}
-					disabled={controlsDisabled || (!hasUnsavedChanges && !saveError)}
+					disabled={controlsDisabled || isPreparingGitPromptImages || (!hasUnsavedChanges && !saveError)}
 				>
 					Save
 				</Button>

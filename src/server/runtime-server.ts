@@ -87,6 +87,7 @@ import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
+	readRuntimeProcessInstanceLiveness,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
 import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } from "../state/workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
@@ -276,6 +277,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
+	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
+		({ workspaceId, summary, submittedPromptText }) => {
+			promptDraftUsageService.notifyUserPromptSubmitted({
+				workspaceId,
+				taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId,
+				submittedAtEpochMs: summary.agentConversationPromptSubmissionAcceptance?.confirmedAtMs ?? Date.now(),
+				submittedPromptText,
+				currentIdentity: summary.agentNativeConversationSessionIdentity,
+				sourceAgentId: summary.agentId ?? undefined,
+			});
+		},
+	);
 
 	// exploration thread graph（B.2）。
 	//
@@ -846,6 +859,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	const taskLookupConversationApi = createTaskLookupConversationService({
 		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
 		collectMaterials: (workspaceId) =>
 			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
 		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
@@ -1367,6 +1382,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
+	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskMainSessionHandoverApi.start();
 	rvfAutomaticCloseoutApi.start();

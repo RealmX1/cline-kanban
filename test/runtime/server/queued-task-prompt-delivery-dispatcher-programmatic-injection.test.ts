@@ -90,8 +90,8 @@ function stoppedSummary(
 		userTurnKind: "review",
 		runtimeSessionIncarnationId: "incarnation-1",
 		agentResponseGenerationTurnSequence: turnSequence,
-		agentResponseGenerationStopped: {
-			stoppedAt: NOW + turnSequence,
+		lastAgentConversationUserHandoffObservation: {
+			observedAtMs: NOW + turnSequence,
 			signalConfidence: "harness_turn_complete",
 			turnSequence,
 		},
@@ -105,7 +105,7 @@ function generatingSummary(turnSequence: number): RuntimeTaskSessionSummary {
 		reviewReason: null,
 		turnOwner: "agent",
 		userTurnKind: null,
-		agentResponseGenerationStopped: null,
+		lastAgentConversationUserHandoffObservation: null,
 	});
 }
 

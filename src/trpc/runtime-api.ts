@@ -25,6 +25,7 @@ import {
 	probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
+import { loadTaskConversationHistoryPage } from "../agent-session-history/task-conversation-history-page";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
@@ -161,8 +162,10 @@ import {
 	restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
+import { removeTaskSessionSummariesOwnedByOtherWorkspaces } from "../state/task-session-summaries-owned-by-other-workspaces-removal";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
+	getTaskWorktreesHomePath,
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceBoardById,
@@ -2100,10 +2103,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						sessionTransport,
 						text,
 						originRuntimeSessionIncarnationId,
+						idempotencyKey,
 					}) => {
 						if (sessionTransport === "acp_stdio_subprocess") {
 							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-							return (await acpService.sendTaskSessionInput(taskId, text)) !== null;
+							// ACP 的同步 summary 只代表已发出；等待有界的协议接受回执，不等待整轮结束。
+							return await new Promise<boolean>((resolveAcceptance) => {
+								void acpService
+									.sendTaskSessionInput(taskId, text, undefined, resolveAcceptance, idempotencyKey)
+									.then((summary) => {
+										if (!summary || !summary.agentConversationPromptSubmissionAcceptance)
+											resolveAcceptance(false);
+										else if (summary.agentConversationPromptSubmissionAcceptance.status !== "pending") {
+											resolveAcceptance(
+												summary.agentConversationPromptSubmissionAcceptance.status === "accepted",
+											);
+										}
+									})
+									.catch(() => resolveAcceptance(false));
+							});
 						}
 						if (sessionTransport === "in_process_cline_sdk") {
 							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
@@ -2521,6 +2539,33 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
+		getTaskConversationHistoryPage: async (workspaceScope, input) => {
+			// 只读持久快照；不取 terminal manager，不创建占位会话，不启动 SDK host 或 ACP 进程。
+			const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+			const sessions = removeTaskSessionSummariesOwnedByOtherWorkspaces({
+				workspaceId: workspaceScope.workspaceId,
+				workspaceRepositoryPath: workspaceScope.workspacePath,
+				taskWorktreesHomePath: getTaskWorktreesHomePath(),
+				sessions: state.sessions,
+			}).sessionsWithoutSummariesOwnedByOtherWorkspaces;
+			const card = findWorkspaceBoardCard(state.board, input.workspaceTaskId);
+			const summary = sessions[input.taskConversationSessionId];
+			const retainedMessages =
+				card &&
+				summary &&
+				doesConversationSessionBelongToTask(summary, input.workspaceTaskId) &&
+				isRuntimeAgentSessionSummaryDrivenByAcpProtocol(summary)
+					? (await deps.getScopedAcpTaskSessionService(workspaceScope)).listMessages(
+							input.taskConversationSessionId,
+						)
+					: undefined;
+			return await loadTaskConversationHistoryPage({
+				request: input,
+				card,
+				sessions,
+				retainedMessages,
+			});
+		},
 		getTaskChatMessages: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatMessagesRequest(input);
@@ -2845,15 +2890,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const completeHandoverAfterConfirmedHumanMessage = async () => {
 				if (!humanMessageHandoverId) return;
 				try {
-					const manager = await deps.getScopedTerminalManager(workspaceScope);
+					const [manager, acpService] = await Promise.all([
+						deps.getScopedTerminalManager(workspaceScope),
+						deps.getScopedAcpTaskSessionService(workspaceScope),
+					]);
 					await completeTaskMainSessionHandoverAfterUserMessage({
 						workspaceId: workspaceScope.workspaceId,
 						workspacePath: workspaceScope.workspacePath,
 						taskConversationSessionId: resolvedSessionId,
 						promptText: input.text,
 						expectedHandoverId: humanMessageHandoverId,
-						onTaskConversationSessionMetadataChanged: (sessionId, metadata) =>
-							manager.applyTaskConversationSessionMetadata(sessionId, metadata),
+						onTaskConversationSessionMetadataChanged: (sessionId, metadata) => {
+							manager.applyTaskConversationSessionMetadata(sessionId, metadata);
+							if (acpService.getSummary(sessionId))
+								acpService.applyTaskConversationSessionMetadata(sessionId, metadata);
+						},
 					});
 				} catch (error) {
 					// 消息已经提交，落库失败不能把它报成投递失败；hold 保留，原生 hook 或后续真人消息可重试。

@@ -1,3 +1,4 @@
+import type { NativeAgentConversationActivityReadCursor } from "../agent-session-history/native-agent-conversation-activity-reader";
 import type { TerminalDeliveryFailureReason, TerminalDeliveryStatus } from "../core/api-contract";
 import type { AgentOutputSubstanceMemory } from "./agent-output-substance";
 import type { AgentOutputTransitionDetector, AgentOutputTransitionInspectionPredicate } from "./agent-session-adapters";
@@ -154,6 +155,10 @@ export interface ActiveProcessState {
 // 而不是像 2026-08-08 之前那样只有「写进去了」这一条路径有反馈、其余出口一律静默。
 export interface PendingProgrammaticDeliveryReceipt {
 	firstSubmitCarriageReturnAtEpochMs?: number;
+	// 与写前游标同一目标的完整身份指纹；首个 CR 固定后不可换绑，缺失时不能用接受记录确认送达。
+	nativeConversationIdentityImmediatelyBeforeFirstSubmitCarriageReturn?: string;
+	// 写CR前固定原生消息前驱；相同正文的历史接受不能冒领本次投递。
+	nativeConversationActivityCursorImmediatelyBeforeSubmit?: NativeAgentConversationActivityReadCursor | null;
 	// 取消要认的 key；用户发起的发送没有 key（不写账本），恒 null。
 	idempotencyKey: string | null;
 	// awaiting_readiness：还没写进 PTY，取消能真正拦下。

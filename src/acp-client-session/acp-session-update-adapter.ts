@@ -7,7 +7,11 @@ import { projectUniqueNativeInProgressWorkPhaseGoal } from "../core/agent-curren
 //     三元组，否则撞 api-contract 的 superRefine 共生护栏。
 //  2. 任何构造 entry 的地方都要过 applySessionFacets 重新 stamp，不能只 spread 默认 summary。
 //  3. 「只推进存活度」的事件必须显式带上当前实质戳，否则会把卡片的「agent 上次响应」刷成「刚刚」。
-import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../core/api-contract";
+import type {
+	RuntimeAgentId,
+	RuntimeEffectiveAgentConversationActivityKind,
+	RuntimeTaskSessionSummary,
+} from "../core/api-contract";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal } from "../diagnostics/task-agent-conversation-model-token-usage-journal-recorder";
 import type { AcpSessionNotification, AcpSessionUpdate, AcpStopReason } from "./acp-protocol-boundary";
@@ -23,7 +27,7 @@ import {
 	now,
 	replaceAcpMessage,
 	updateAcpSummary,
-	withAgentSubstantiveOutputTimestamp,
+	withEffectiveAgentConversationActivity,
 } from "./acp-session-state";
 import {
 	renderAcpContentBlockAsText,
@@ -140,7 +144,7 @@ function applyToolCall(
 		}));
 		if (updated) {
 			context.emitMessage(updated);
-			emitRunningSummary(context);
+			emitRunningSummary(context, "tool_activity");
 			return;
 		}
 	}
@@ -157,7 +161,7 @@ function applyToolCall(
 	);
 	context.entry.toolMessageIdByToolCallId.set(update.toolCallId, created.id);
 	context.emitMessage(created);
-	emitRunningSummary(context);
+	emitRunningSummary(context, "tool_activity");
 }
 
 function buildToolCallMessageContent(
@@ -250,19 +254,12 @@ function readCurrentModeId(update: Extract<AcpSessionUpdate, { sessionUpdate: "c
 	return "(unknown)";
 }
 
-// 流式更新推进存活度，但**绝不能无条件夺回回合**。两个真实场景会因此丢掉「等人拍板」状态：
-//  (a) broker 因 session/request_permission 或 plan elicitation 刚把卡片置成 awaiting_review +
-//      permission/plan_review，随后任一 tool_call_update / plan 更新就把它刷回 running——agent 实际
-//      阻塞等人，卡片却显示在跑，用户根本注意不到有待决策；
-//  (b) 迟到的 tool_call_update（clearAcpStreamingGrouping 的注释已自陈会发生）会把
-//      applyAcpPromptTurnCompletion 写好的 awaiting_review 永久改回 running。终端侧还有
-//      scanForStalls 兜底，ACP 侧没有，改回去就再也回不来。
-// 因此回合归属为「用户」时只推进 lastOutputAt，facet 三元组保持原样。
-//
-// 本函数是 ACP 侧**唯一**推进 lastSubstantiveOutputAt 的地方：它的调用方全是携带新内容的流式
-// SessionUpdate（agent_message_chunk / agent_thought_chunk / tool_call / tool_call_update / plan）。
-// 两条分支都要推进——「回合归属已是用户」只影响要不要夺回 facet，不改变「agent 确实刚吐了东西」这个事实。
-function emitRunningSummary(context: AcpSessionUpdateContext): void {
+// 活动与回合归属独立：可信新内容推进活动，但迟到工具更新不能夺回待答或已结束回合。
+// 提交接受的 agent 边沿由 service 在可靠协议证据到达时单独确认。
+function emitRunningSummary(
+	context: AcpSessionUpdateContext,
+	activityKind: RuntimeEffectiveAgentConversationActivityKind = "agent_output",
+): void {
 	// 重播守卫的**唯一**闸口：历史重播只往聊天流里补消息，绝不碰回合归属与产出时间戳。
 	// 放在这里而不是每个 apply* 分支里，是因为所有「有产出」的分支最终都汇到这一个函数。
 	if (context.isReplayingPersistedConversationHistory) {
@@ -271,18 +268,24 @@ function emitRunningSummary(context: AcpSessionUpdateContext): void {
 	const timestamp = now();
 	if (isAwaitingUserTurn(context.entry.summary)) {
 		context.emitSummary(
-			updateAcpSummary(context.entry, withAgentSubstantiveOutputTimestamp({ lastOutputAt: timestamp })),
+			updateAcpSummary(
+				context.entry,
+				withEffectiveAgentConversationActivity({ lastOutputAt: timestamp }, activityKind),
+			),
 		);
 		return;
 	}
 	context.emitSummary(
 		updateAcpSummary(
 			context.entry,
-			withAgentSubstantiveOutputTimestamp({
-				...deriveAcpFacetPatch("running", null, { pid: context.pid, agentId: context.agentId }),
-				reviewReason: null,
-				lastOutputAt: timestamp,
-			}),
+			withEffectiveAgentConversationActivity(
+				{
+					...deriveAcpFacetPatch("running", null, { pid: context.pid, agentId: context.agentId }),
+					reviewReason: null,
+					lastOutputAt: timestamp,
+				},
+				activityKind,
+			),
 		),
 	);
 }
@@ -303,45 +306,62 @@ export function applyAcpPromptTurnCompletion(
 	clearAcpStreamingGrouping(context.entry);
 	const timestamp = now();
 
-	// 三条分支都不推进实质产出戳：stopReason 是**回合边界**，本轮正文早已由流式 SessionUpdate 经
-	// emitRunningSummary 逐条打过戳，边界本身不带新内容。这与 Cline 侧 endedEvent 的处置同构。
-	// 反转前 refusal / end_turn 两条会经漏斗隐式镜像而误推进（cancelled 当时靠显式 opt-out 才躲过），
-	// 于是「续跑一个旧 ACP 会话、它立刻以 end_turn 收束」就会把卡片刷成「agent 刚刚响应」。
+	// 真实收束是回合边界活动，保持与正文、工具活动的种类区分。
 	if (stopReason === "cancelled") {
 		// 用户主动取消不是错误：也不落成 error 人轴。
-		return updateAcpSummary(context.entry, {
-			...deriveAcpFacetPatch("interrupted", null, { pid: context.pid, agentId: context.agentId }),
-			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
-			reviewReason: null,
-			lastOutputAt: timestamp,
-		});
+		return updateAcpSummary(
+			context.entry,
+			withEffectiveAgentConversationActivity(
+				{
+					...deriveAcpFacetPatch("interrupted", null, { pid: context.pid, agentId: context.agentId }),
+					...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+					reviewReason: null,
+					lastOutputAt: timestamp,
+				},
+				"agent_turn_boundary",
+			),
+		);
 	}
 
 	if (stopReason === "refusal") {
-		return updateAcpSummary(context.entry, {
-			...deriveAcpFacetPatch("awaiting_review", "error", { pid: context.pid, agentId: context.agentId }),
-			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
-			reviewReason: "error",
-			lastOutputAt: timestamp,
-		});
+		return updateAcpSummary(
+			context.entry,
+			withEffectiveAgentConversationActivity(
+				{
+					...deriveAcpFacetPatch("awaiting_review", "error", { pid: context.pid, agentId: context.agentId }),
+					...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+					reviewReason: "error",
+					lastOutputAt: timestamp,
+				},
+				"agent_turn_boundary",
+			),
+		);
 	}
 
 	// dd2db 2x：park 中正常收束 = 主 agent 结束本轮去等自己派发的后台工作，不是在等用户审查。facet 保持 agent 回合
 	// （与 PTY 上 hook 的 to_review 闸抑制同义），由编排方之后发来的 prompt 恢复并清 park。
 	if (isParkedAwaitingDispatchedBackgroundWork(context.entry.summary)) {
-		return updateAcpSummary(context.entry, { lastOutputAt: timestamp });
+		return updateAcpSummary(
+			context.entry,
+			withEffectiveAgentConversationActivity({ lastOutputAt: timestamp }, "agent_turn_boundary"),
+		);
 	}
 
 	// end_turn / max_tokens / max_turn_requests：回合正常收束，交回用户。
-	return updateAcpSummary(context.entry, {
-		...deriveAcpFacetPatch("awaiting_review", "completion", { pid: context.pid, agentId: context.agentId }),
-		reviewReason: "completion",
-		lastOutputAt: timestamp,
-	});
+	return updateAcpSummary(
+		context.entry,
+		withEffectiveAgentConversationActivity(
+			{
+				...deriveAcpFacetPatch("awaiting_review", "completion", { pid: context.pid, agentId: context.agentId }),
+				reviewReason: "completion",
+				lastOutputAt: timestamp,
+			},
+			"agent_turn_boundary",
+		),
+	);
 }
 
-// 会话进程消失。进程退出不是 agent 产出，故不经 withAgentSubstantiveOutputTimestamp——漏斗默认就不
-// 推进实质戳（反转前这里必须显式带当前实质戳来 opt-out，现在那道手续没必要了）。
+// 会话进程消失不是新正文；只记录终态，由共享漏斗判定真实交棒。
 export function applyAcpConnectionClosed(
 	context: AcpSessionUpdateContext,
 	detail: { exitCode: number | null; errorMessage: string | null },

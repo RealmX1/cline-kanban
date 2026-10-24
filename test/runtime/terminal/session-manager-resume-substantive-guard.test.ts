@@ -83,7 +83,45 @@ async function settleOutputAnalysisBatch(): Promise<void> {
 	await vi.advanceTimersByTimeAsync(OUTPUT_ANALYSIS_BATCH_WINDOW_MS);
 }
 
+function readEffectiveActivityTime(manager: TerminalSessionManager, taskId: string): number | null {
+	return manager.getSummary(taskId)?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? null;
+}
+function recordTrustedAgentOutput(manager: TerminalSessionManager, taskId: string): void {
+	manager.recordEffectiveAgentConversationActivity(taskId, {
+		observedAtMs: Date.now(),
+		evidenceKind: "persisted_agent_transcript",
+		activityKind: "agent_output",
+		eventId: `native-output:${Date.now()}`,
+	});
+}
+
 describe("TerminalSessionManager resume substantive guard", () => {
+	it.each(["question", "plan_review", "permission"] as const)(
+		"重启活体 %s 时保留 stop 之前的真实模态，不降级成 needs_input",
+		async (userTurnKind) => {
+			prepareAgentLaunchMock.mockResolvedValue({ args: [], env: {} });
+			const sessions: MockPtySession[] = [];
+			ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+				const session = createMockPtySession(100 + sessions.length, request);
+				sessions.push(session);
+				return session;
+			});
+			const manager = new TerminalSessionManager();
+			const request = {
+				taskId: "pending-modal-restart",
+				agentId: "claude" as const,
+				binary: "claude",
+				args: [],
+				cwd: "/isolated",
+				prompt: "",
+			};
+			await manager.startTaskSession(request);
+			manager.transitionToReview(request.taskId, "hook", userTurnKind);
+			wireStopToExit(sessions);
+			await manager.refreshTaskTerminal({ ...request, resumeFromTrash: true });
+			expect(manager.getSummary(request.taskId)?.userTurnKind).toBe(userTurnKind);
+		},
+	);
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		prepareAgentLaunchMock.mockReset();
@@ -109,7 +147,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		}
 	}
 
-	it("keeps lastSubstantiveOutputAt across refresh when Claude reprints ⏺/● transcript and auto-continues", async () => {
+	it("Claude 恢复回放保留可信历史活动时间", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -133,6 +171,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			prompt: "Implement the task",
 		});
 
+		recordTrustedAgentOutput(manager, "task-guard");
 		const firstSession = spawnedSessions[0];
 		expect(firstSession).toBeDefined();
 		firstSession?.triggerData("Claude Code\nHow can I help you today?\n");
@@ -140,7 +179,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		firstSession?.triggerData("⏺ Earlier real agent response before refresh.\n");
 		await settleOutputAnalysisBatch();
 
-		const substantiveBefore = manager.getSummary("task-guard")?.lastSubstantiveOutputAt;
+		const substantiveBefore = readEffectiveActivityTime(manager, "task-guard");
 		expect(substantiveBefore).not.toBeNull();
 
 		wireStopToExit(spawnedSessions);
@@ -170,10 +209,12 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		await settleOutputAnalysisBatch();
 
 		const afterResumeUi = manager.getSummary("task-guard");
-		expect(afterResumeUi?.lastSubstantiveOutputAt).toBe(substantiveBefore);
+		expect(afterResumeUi?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? null).toBe(
+			substantiveBefore,
+		);
 	});
 
-	it("advances lastSubstantiveOutputAt after user continues and agent produces real output", async () => {
+	it("用户继续及 TUI 内容不刷新活动，后续可信原生输出才推进", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -191,9 +232,10 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			prompt: "Implement the task",
 		});
 
+		recordTrustedAgentOutput(manager, "task-guard-2");
 		spawnedSessions[0]?.triggerData("⏺ Seed response.\n");
 		await settleOutputAnalysisBatch();
-		const substantiveBefore = manager.getSummary("task-guard-2")?.lastSubstantiveOutputAt;
+		const substantiveBefore = readEffectiveActivityTime(manager, "task-guard-2");
 		wireStopToExit(spawnedSessions);
 
 		await manager.refreshTaskTerminal({
@@ -214,11 +256,14 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		await settleOutputAnalysisBatch();
 
 		const afterContinue = manager.getSummary("task-guard-2");
-		expect(afterContinue?.lastSubstantiveOutputAt).not.toBe(substantiveBefore);
-		expect(afterContinue?.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(substantiveBefore ?? 0);
+		expect(afterContinue?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? null).toBe(
+			substantiveBefore,
+		);
+		recordTrustedAgentOutput(manager, "task-guard-2");
+		expect(readEffectiveActivityTime(manager, "task-guard-2")).toBeGreaterThan(substantiveBefore ?? 0);
 	});
 
-	it("clears resume guard on transitionToRunning (UserPromptSubmit hook path)", async () => {
+	it("显式继续后的 TUI 内容仍不能充当原生推进证据", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -239,17 +284,17 @@ describe("TerminalSessionManager resume substantive guard", () => {
 
 		spawnedSessions[0]?.triggerData(CLAUDE_RESUME_MENU);
 		await settleOutputAnalysisBatch();
-		const beforeHook = manager.getSummary("task-guard-3")?.lastSubstantiveOutputAt;
+		const beforeHook = readEffectiveActivityTime(manager, "task-guard-3");
 
 		manager.transitionToRunning("task-guard-3", { userInitiatedResume: true });
 		spawnedSessions[0]?.triggerData("⏺ Continued after hook.\n");
 		await settleOutputAnalysisBatch();
 
 		const afterHook = manager.getSummary("task-guard-3");
-		expect(afterHook?.lastSubstantiveOutputAt).not.toBe(beforeHook);
+		expect(afterHook?.lastEffectiveAgentConversationActivityObservation?.observedAtMs ?? null).toBe(beforeHook);
 	});
 
-	it("arms resume guard for non-Claude agents too and clears it on user terminal input", async () => {
+	it("Codex 回放及手动输入后的文字均不伪造可信推进", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -278,20 +323,20 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		manager.transitionToRunning("task-codex-resume");
 		spawnedSessions[0]?.triggerData("Applying the requested change to foo.ts\n");
 		await settleOutputAnalysisBatch();
-		expect(manager.getSummary("task-codex-resume")?.lastSubstantiveOutputAt).toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-codex-resume")).toBeNull();
 
 		// 用户手敲输入（writeInput）= agent 无关的真·继续信号 → 解除 guard；此后新输出才推进。
 		manager.writeInput("task-codex-resume", Buffer.from("continue\r", "utf8"));
 		spawnedSessions[0]?.triggerData("Edited foo.ts and reran the tests.\n");
 		await settleOutputAnalysisBatch();
-		expect(manager.getSummary("task-codex-resume")?.lastSubstantiveOutputAt).not.toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-codex-resume")).toBeNull();
 	});
 
 	// 本 bug 的核心回归：`--resume <sessionId>` / `--fork-session` 这类续跑启动会重播整段既有
 	// transcript，却不带 resumeFromTrash，历史上因此漏武装 guard，重播把卡片「agent 上次响应」
 	// 刷成「刚刚」。武装判据改读 PreparedAgentLaunch.resumesPriorAgentConversation 后被覆盖。
 	// （adapter 侧「什么时候置这个位」由 agent-session-adapters.test.ts 覆盖；此处只钉 manager 的接线。）
-	it("arms the resume guard when the launch resumes a prior conversation without resumeFromTrash", async () => {
+	it("未标记垃圾桶恢复的原生续跑也保留可信历史时间", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -317,9 +362,10 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			prompt: "Implement the task",
 		});
 
+		recordTrustedAgentOutput(manager, "task-resume-existing");
 		spawnedSessions[0]?.triggerData("⏺ Earlier real agent response before the resume.\n");
 		await settleOutputAnalysisBatch();
-		const substantiveBefore = manager.getSummary("task-resume-existing")?.lastSubstantiveOutputAt ?? null;
+		const substantiveBefore = readEffectiveActivityTime(manager, "task-resume-existing");
 		expect(substantiveBefore).not.toBeNull();
 
 		// 第二次启动续跑既有会话（resumeFromTrash 仍缺省 false）。
@@ -340,12 +386,12 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		spawnedSessions[1]?.triggerData("⏺ And a second reprinted line.\n");
 		await settleOutputAnalysisBatch();
 
-		expect(manager.getSummary("task-resume-existing")?.lastSubstantiveOutputAt).toBe(substantiveBefore);
+		expect(readEffectiveActivityTime(manager, "task-resume-existing")).toBe(substantiveBefore);
 	});
 
 	// 反向护栏：崩溃后的 auto-restart 用原始 prompt 全新重跑（args 里没有任何续跑旗标），
 	// 毫无重播——武装它只会把真实的新产出误冻住。故必须**不**武装。
-	it("does not arm the resume guard on a crash auto-restart that replays nothing", async () => {
+	it("崩溃新进程的原始输出不推进，可信原生输出仍可更新", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -370,9 +416,10 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			prompt: "Implement the task",
 		});
 
+		recordTrustedAgentOutput(manager, "task-auto-restart");
 		spawnedSessions[0]?.triggerData("⏺ Earlier real agent response before the crash.\n");
 		await settleOutputAnalysisBatch();
-		const substantiveBefore = manager.getSummary("task-auto-restart")?.lastSubstantiveOutputAt ?? null;
+		const substantiveBefore = readEffectiveActivityTime(manager, "task-auto-restart");
 		expect(substantiveBefore).not.toBeNull();
 
 		spawnedSessions[0]?.triggerExit(1);
@@ -384,13 +431,13 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		spawnedSessions[1]?.triggerData("⏺ Brand new output from the restarted run.\n");
 		await settleOutputAnalysisBatch();
 
-		expect(manager.getSummary("task-auto-restart")?.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(
-			substantiveBefore ?? 0,
-		);
+		expect(readEffectiveActivityTime(manager, "task-auto-restart")).toBe(substantiveBefore);
+		recordTrustedAgentOutput(manager, "task-auto-restart");
+		expect(readEffectiveActivityTime(manager, "task-auto-restart")).toBeGreaterThan(substantiveBefore ?? 0);
 	});
 
 	// 反向护栏：全新首次启动不带任何续跑旗标 → 必须不武装，否则卡片永远不显示响应时间。
-	it("does not arm the resume guard on a first-ever spawn", async () => {
+	it("首次 spawn 的 TUI 输出不制造可信活动", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -408,16 +455,16 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			prompt: "Implement the task",
 		});
 
-		expect(manager.getSummary("task-first-spawn")?.lastSubstantiveOutputAt ?? null).toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-first-spawn")).toBeNull();
 		spawnedSessions[0]?.triggerData("⏺ The very first real response.\n");
 		await settleOutputAnalysisBatch();
 
-		expect(manager.getSummary("task-first-spawn")?.lastSubstantiveOutputAt ?? null).not.toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-first-spawn")).toBeNull();
 	});
 
 	// task-chat / RVF 的程序化投递是一条「已提交用户轮」，与手敲等价 → 必须解除 guard，
 	// 否则 Gemini 之外那些经 paste 恢复的路径在 re-spawn 后会永久冻住实质戳。
-	it("clears the resume guard when a task-chat submission is delivered", async () => {
+	it("程序化写入未获接受证明时，TUI 内容不制造活动", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -445,7 +492,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		manager.transitionToRunning("task-chat-clears-guard");
 		spawnedSessions[0]?.triggerData("Replayed transcript from the previous session.\n");
 		await settleOutputAnalysisBatch();
-		expect(manager.getSummary("task-chat-clears-guard")?.lastSubstantiveOutputAt ?? null).toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-chat-clears-guard")).toBeNull();
 
 		manager.submitTaskChatInputWhenReady("task-chat-clears-guard", "Please continue with the next step.");
 		// 沉降 TASK_CHAT_INPUT_DELIVERY_SETTLE_MS 后投递落地并解除 guard。
@@ -453,10 +500,10 @@ describe("TerminalSessionManager resume substantive guard", () => {
 
 		spawnedSessions[0]?.triggerData("Working on the next step now.\n");
 		await settleOutputAnalysisBatch();
-		expect(manager.getSummary("task-chat-clears-guard")?.lastSubstantiveOutputAt ?? null).not.toBeNull();
+		expect(readEffectiveActivityTime(manager, "task-chat-clears-guard")).toBeNull();
 	});
 
-	it("does not clear resume guard on PostToolUse-driven to_in_progress (no UserPromptSubmit)", async () => {
+	it("PostToolUse 续跑及旧 TUI 重播不制造对话推进", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -477,14 +524,14 @@ describe("TerminalSessionManager resume substantive guard", () => {
 
 		spawnedSessions[0]?.triggerData("⏺ Old transcript reprinted on resume.\n");
 		await settleOutputAnalysisBatch();
-		const beforeAutoContinue = manager.getSummary("task-guard-posttool")?.lastSubstantiveOutputAt ?? null;
+		const beforeAutoContinue = readEffectiveActivityTime(manager, "task-guard-posttool");
 
 		// PostToolUse → to_in_progress：翻 running，但 userInitiatedResume 缺省(false) → 不解除 guard。
 		manager.transitionToRunning("task-guard-posttool");
 		spawnedSessions[0]?.triggerData("⏺ Auto-continued tool output from the old turn.\n");
 		await settleOutputAnalysisBatch();
 
-		expect(manager.getSummary("task-guard-posttool")?.lastSubstantiveOutputAt).toBe(beforeAutoContinue);
+		expect(readEffectiveActivityTime(manager, "task-guard-posttool")).toBe(beforeAutoContinue);
 	});
 
 	// 通道切换重开与「从垃圾桶拖回」都不投新 prompt，但**成因**不同，而成因决定 userTurnKind：

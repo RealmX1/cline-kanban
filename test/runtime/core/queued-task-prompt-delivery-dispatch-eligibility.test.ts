@@ -217,8 +217,8 @@ describe("门控 — 重启跨越后待人确认", () => {
 		expect(
 			resolve(
 				{
-					agentResponseGenerationStopped: {
-						stoppedAt: reconfirmedAt - 30_000,
+					lastAgentConversationUserHandoffObservation: {
+						observedAtMs: reconfirmedAt - 30_000,
 						signalConfidence: "harness_turn_complete",
 						turnSequence: 7,
 					},
@@ -233,8 +233,8 @@ describe("门控 — 重启跨越后待人确认", () => {
 		expect(
 			resolve(
 				{
-					agentResponseGenerationStopped: {
-						stoppedAt: reconfirmedAt + 500,
+					lastAgentConversationUserHandoffObservation: {
+						observedAtMs: reconfirmedAt + 500,
 						signalConfidence: "harness_turn_complete",
 						turnSequence: 8,
 					},
@@ -341,11 +341,65 @@ describe("边沿去重键", () => {
 });
 
 describe("停止事件身份（出队边沿）", () => {
-	const stopped = { stoppedAt: NOW - 500, signalConfidence: "harness_turn_complete" as const, turnSequence: 7 };
+	it("同一真实交棒在恢复新进程后身份不变，待命新锚点不能制造出队边沿", () => {
+		const handoff = { observedAtMs: NOW - 500, signalConfidence: "harness_turn_complete" as const, turnSequence: 7 };
+		const first = makeSummary({ lastAgentConversationUserHandoffObservation: handoff });
+		const restored = makeSummary({
+			lastAgentConversationUserHandoffObservation: handoff,
+			runtimeSessionIncarnationId: "new-incarnation",
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt: NOW,
+				signalConfidence: "session_ready_never_prompted",
+				turnSequence: 7,
+			},
+		});
+		expect(buildAgentResponseGenerationStopEventIdentity(first)).toBe(`7:${NOW - 500}`);
+		expect(buildAgentResponseGenerationStopEventIdentity(restored)).toBe(
+			buildAgentResponseGenerationStopEventIdentity(first),
+		);
+	});
+
+	it("确认后恢复出的进程待命和旧停止值不算新的真实交棒", () => {
+		expect(
+			resolve(
+				{
+					agentResponseGenerationStopped: {
+						stoppedAt: NOW,
+						signalConfidence: "harness_turn_complete",
+						turnSequence: 7,
+					},
+					currentAgentProcessUserTurnIdleRetentionStarted: {
+						stoppedAt: NOW,
+						signalConfidence: "structured_user_turn",
+						turnSequence: 7,
+					},
+				},
+				{
+					survivedRuntimeRestartAtEpochMs: NOW - 60_000,
+					humanReconfirmedAfterRuntimeRestartAtEpochMs: NOW - 1_000,
+				},
+			),
+		).toBe("awaiting_first_agent_turn_end_after_restart_reconfirmation");
+	});
+	const stopped = { observedAtMs: NOW - 500, signalConfidence: "harness_turn_complete" as const, turnSequence: 7 };
+	it("历史交棒仍在摘要中时，Agent 回合、park 和无回合状态均不触发出队", () => {
+		for (const override of [
+			{ turnOwner: "agent", liveness: "live", userTurnKind: null },
+			{ awaitingDispatchedBackgroundWork: { sinceMs: NOW } },
+			{ turnOwner: null, liveness: "none", userTurnKind: null },
+		] as const)
+			expect(
+				buildAgentResponseGenerationStopEventIdentity(
+					makeSummary({ lastAgentConversationUserHandoffObservation: stopped, ...override }),
+				),
+			).toBeNull();
+	});
 
 	it("没有停止事件（agent 回合中 / park / idle）时返回 null——此刻不构成出队时机", () => {
 		expect(
-			buildAgentResponseGenerationStopEventIdentity(makeSummary({ agentResponseGenerationStopped: null })),
+			buildAgentResponseGenerationStopEventIdentity(
+				makeSummary({ lastAgentConversationUserHandoffObservation: null }),
+			),
 		).toBeNull();
 		expect(buildAgentResponseGenerationStopEventIdentity(makeSummary())).toBeNull();
 		expect(buildAgentResponseGenerationStopEventIdentity(null)).toBeNull();
@@ -353,9 +407,9 @@ describe("停止事件身份（出队边沿）", () => {
 
 	// 本条是为什么不能拿「轮次键」当边沿：序号在回合**开始**时递增，停止那一刻序号不变。
 	// 只有停止事件对象本身的变化才是停止边沿。
-	it("同一轮次键下，停止事件换了（新的 stoppedAt）就是新边沿", () => {
-		const first = makeSummary({ agentResponseGenerationStopped: stopped });
-		const second = makeSummary({ agentResponseGenerationStopped: { ...stopped, stoppedAt: NOW } });
+	it("同一轮次键下，停止事件换了（新的 observedAtMs）就是新边沿", () => {
+		const first = makeSummary({ lastAgentConversationUserHandoffObservation: stopped });
+		const second = makeSummary({ lastAgentConversationUserHandoffObservation: { ...stopped, observedAtMs: NOW } });
 		expect(buildAgentResponseGenerationStopEdgeDedupeKey(first)).toBe(
 			buildAgentResponseGenerationStopEdgeDedupeKey(second),
 		);
@@ -364,13 +418,13 @@ describe("停止事件身份（出队边沿）", () => {
 		);
 	});
 
-	it("换活体也是新边沿", () => {
-		const first = makeSummary({ agentResponseGenerationStopped: stopped });
+	it("换活体不制造新的历史交棒边沿", () => {
+		const first = makeSummary({ lastAgentConversationUserHandoffObservation: stopped });
 		const second = makeSummary({
-			agentResponseGenerationStopped: stopped,
+			lastAgentConversationUserHandoffObservation: stopped,
 			runtimeSessionIncarnationId: "incarnation-2",
 		});
-		expect(buildAgentResponseGenerationStopEventIdentity(first)).not.toBe(
+		expect(buildAgentResponseGenerationStopEventIdentity(first)).toBe(
 			buildAgentResponseGenerationStopEventIdentity(second),
 		);
 	});
@@ -378,10 +432,16 @@ describe("停止事件身份（出队边沿）", () => {
 	// agent 回合期间 summary 以 50ms 攒批刷新，同一次停止之后的每一条 metadata 写都不该再触发一次。
 	it("同一次停止之后的后续写（事件被冻结）身份不变", () => {
 		expect(
-			buildAgentResponseGenerationStopEventIdentity(makeSummary({ agentResponseGenerationStopped: stopped })),
+			buildAgentResponseGenerationStopEventIdentity(
+				makeSummary({ lastAgentConversationUserHandoffObservation: stopped }),
+			),
 		).toBe(
 			buildAgentResponseGenerationStopEventIdentity(
-				makeSummary({ agentResponseGenerationStopped: stopped, updatedAt: NOW + 5_000, lastOutputAt: NOW + 4_000 }),
+				makeSummary({
+					lastAgentConversationUserHandoffObservation: stopped,
+					updatedAt: NOW + 5_000,
+					lastOutputAt: NOW + 4_000,
+				}),
 			),
 		);
 	});

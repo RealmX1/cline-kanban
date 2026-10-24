@@ -150,7 +150,6 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		startedAt: null,
 		updatedAt: now(),
 		lastOutputAt: null,
-		lastSubstantiveOutputAt: null,
 		reviewReason: null,
 		exitCode: null,
 		lastHookAt: null,
@@ -187,24 +186,18 @@ export function updateSummary(
 	return cloneSummary(entry.summary);
 }
 
-// 显式声明「这一次写带来了新的 agent 实质产出」——推进 lastSubstantiveOutputAt 的唯一方式。
-// 判据是「本次事件是否携带 agent 侧的新内容」，而不是「会话是否还活着」：assistant 文本 / reasoning /
-// 工具调用与结果算；回合边界（ended / 回合完成 stopReason）、存活心跳、用户操作、错误收束都不算——
-// 前者的正文早已由内容事件打过戳，后者压根不是 agent 产出。
-//
-// 同时记一条「对话上次推进」观测：Cline 是进程内 SDK，事件是**结构化**的（不是刮 TUI 猜出来的），
-// 故置信度取 structured_agent_session_event 而非 terminal_output_heuristic_classification。
-// 这两个戳有意分开写、不互相推断：前者秒级、服务 Validation 打回与卡顿自愈；后者是跨 incarnation 的
-// 历史事实、只服务卡片药丸。合并规则（单调前进 / 未来时刻拒收）由 mergeSummaryWithFacets 统一执行，
-// 此处只负责**如实上报一次观测**，不做任何裁决。
+// 存量 Cline 调用入口保留；仅将显式结构化产出写入统一活动，维持最低兼容。
 export function withAgentSubstantiveOutputTimestamp(
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): Partial<RuntimeTaskSessionSummary> {
 	const observedAtMs = now();
 	return {
 		...patch,
-		lastSubstantiveOutputAt: observedAtMs,
-		lastConversationProgressObservation: { observedAtMs, evidenceKind: "structured_agent_session_event" },
+		lastEffectiveAgentConversationActivityObservation: {
+			observedAtMs,
+			evidenceKind: "structured_agent_session_event",
+			activityKind: "agent_output",
+		},
 	};
 }
 

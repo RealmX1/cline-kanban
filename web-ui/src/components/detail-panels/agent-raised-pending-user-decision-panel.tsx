@@ -1,12 +1,12 @@
 import * as Checkbox from "@radix-ui/react-checkbox";
 import { Check, ChevronDown, ChevronUp, CircleHelp, RotateCw, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-
 import {
 	AgentRaisedUserDecisionOptionPreview,
 	AgentRaisedUserDecisionOptionText,
 	AgentRaisedUserDecisionQuestionPrompt,
 } from "@/components/detail-panels/agent-raised-user-decision-question-content";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import type { PendingUserDecisionQuestionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision";
 import { useAgentRaisedPendingUserDecisionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision-answer-draft";
@@ -41,6 +41,7 @@ export function AgentRaisedPendingUserDecisionPanel({
 	onDecisionNoLongerPending?: () => void;
 }) {
 	const [isExpanded, setIsExpanded] = useState(!isAgentStoppedOnThisQuestionSelectorInLiveTerminal);
+	const [questionsPreparingImages, setQuestionsPreparingImages] = useState<ReadonlySet<string>>(new Set());
 	const initialAgentResponseGenerationTurnSequenceRef = useRef(agentResponseGenerationTurnSequence);
 	const { questionAnswerDrafts, updateQuestionAnswerDraft, discardAnswerDraft, draftSaveStatusText } =
 		useAgentRaisedPendingUserDecisionAnswerDraft({ workspaceId, decision, onDecisionNoLongerPending });
@@ -229,17 +230,27 @@ export function AgentRaisedPendingUserDecisionPanel({
 											/>
 										) : null}
 										{question.allowsFreeformAnswer ? (
-											<textarea
+											<TaskPromptComposer
 												value={questionAnswerDraft?.freeformText ?? ""}
-												onChange={(event) =>
+												onImagePreparationPendingChange={(pending) =>
+													setQuestionsPreparingImages((current) => {
+														if (current.has(question.decisionQuestionId) === pending) return current;
+														const next = new Set(current);
+														if (pending) next.add(question.decisionQuestionId);
+														else next.delete(question.decisionQuestionId);
+														return next;
+													})
+												}
+												onValueChange={(value) =>
 													updateQuestionAnswerDraft(question.decisionQuestionId, {
-														freeformText: event.target.value,
+														freeformText: value,
 													})
 												}
 												placeholder={
 													questionIndex === 0 ? "其他回答或补充说明" : "此问题的其他回答或补充说明"
 												}
-												className="min-h-14 w-full resize-y rounded-md border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary outline-none focus:border-focus"
+												workspaceId={workspaceId}
+												minimumTextareaHeight={56}
 											/>
 										) : null}
 									</fieldset>
@@ -272,7 +283,7 @@ export function AgentRaisedPendingUserDecisionPanel({
 								<Button
 									variant="primary"
 									size="sm"
-									disabled={isSubmitting || requiresAnswerInCodexTerminal}
+									disabled={isSubmitting || requiresAnswerInCodexTerminal || questionsPreparingImages.size > 0}
 									onClick={async () => {
 										if (await onAnswer(answers)) {
 											discardAnswerDraft();

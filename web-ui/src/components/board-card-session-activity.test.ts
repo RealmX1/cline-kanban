@@ -197,7 +197,7 @@ describe("deriveCardSessionActivity", () => {
 					),
 				}),
 			);
-			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" });
 		});
 	});
 
@@ -333,12 +333,12 @@ describe("deriveCardSessionActivity", () => {
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review of the diff" });
 		});
 
-		it("collapses generic activity sentinels into a Thinking… placeholder", () => {
+		it("将泛化活动标记呈现为Agent回合进行中", () => {
 			for (const activityText of ["Agent active", "Working on task", "Resumed prior session"]) {
 				const result = deriveCardSessionActivity(
 					makeSummary("running", { latestHookActivity: makeHookActivity({ activityText }) }),
 				);
-				expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+				expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" });
 			}
 		});
 
@@ -371,9 +371,9 @@ describe("deriveCardSessionActivity", () => {
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" });
 		});
 
-		it("shows a Thinking… placeholder for a bare running session", () => {
+		it("仅有运行中回合时显示Agent回合进行中", () => {
 			const result = deriveCardSessionActivity(makeSummary("running"));
-			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" });
 		});
 	});
 
@@ -465,11 +465,11 @@ describe("facet 真相源（行为保持 + exited 折叠反证）", () => {
 		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" });
 	});
 
-	it("采信显式 facet：turnOwner=agent（即便 legacy state=idle）→ Thinking… 占位", () => {
+	it("采信显式 facet：turnOwner=agent（即便 legacy state=idle）→ Agent回合进行中占位", () => {
 		const result = deriveCardSessionActivity(
 			makeSummary("idle", { turnOwner: "agent", liveness: "live", userTurnKind: null }),
 		);
-		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Agent 回合进行中" });
 	});
 
 	it("采信显式 facet：turnOwner=user/liveness=failed（即便 legacy state=idle）→ 失败占位", () => {

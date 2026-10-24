@@ -1,4 +1,6 @@
+import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import type { TaskCardBusinessProps } from "@/components/task-card-body";
+import { collectStableTaskConversationSessionActivityPresentationObservations } from "@/components/task-conversation-session-activity-presentation-observation-cache";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { BoardCard, BoardColumnId } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
@@ -38,6 +40,8 @@ export interface BuildTaskCardBusinessPropsInput {
 	card: BoardCard;
 	columnId: BoardColumnId;
 	sessionSummary?: RuntimeTaskSessionSummary;
+	taskSessions?: Record<string, RuntimeTaskSessionSummary>;
+	taskConversationSessionActivityObservations?: TaskCardBusinessProps["taskConversationSessionActivityObservations"];
 	selected?: boolean;
 	handlers: TaskCardActionHandlerBundle;
 	/** 非 backlog 卡的单击行为（打开详情）。backlog 卡的单击固定走 `onEditTask`。 */
@@ -51,6 +55,8 @@ export function buildTaskCardBusinessProps({
 	card,
 	columnId,
 	sessionSummary,
+	taskSessions,
+	taskConversationSessionActivityObservations,
 	selected = false,
 	handlers,
 	onActivateCard,
@@ -69,7 +75,15 @@ export function buildTaskCardBusinessProps({
 	return {
 		card,
 		columnId,
-		sessionSummary,
+		sessionSummary: taskSessions
+			? (resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined)
+			: sessionSummary,
+		taskConversationSessionActivityObservations:
+			taskConversationSessionActivityObservations ??
+			collectStableTaskConversationSessionActivityPresentationObservations(
+				card,
+				taskSessions ? Object.values(taskSessions) : sessionSummary ? [sessionSummary] : [],
+			),
 		selected,
 		// backlog 与 in_progress 两列可启动；「in_progress 且已有活会话时不显示启动按钮」由卡体自己再判一层。
 		onStart: isBacklog || isInProgress ? handlers.onStartTask : undefined,

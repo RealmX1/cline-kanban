@@ -206,6 +206,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
 	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
 	getRuntimeHomePath: () => workspaceStateMocks.runtimeHomePath,
+	getTaskWorktreesHomePath: () => join(workspaceStateMocks.runtimeHomePath, "task-worktrees"),
 	getWorkspacesRootPath: () => "/tmp/kanban-workspaces",
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
@@ -1730,7 +1731,13 @@ describe("createRuntimeApi startTaskSession", () => {
 				}),
 			}),
 		);
-		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(persisted.taskId, "继续协作", undefined);
+		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(
+			persisted.taskId,
+			"继续协作",
+			undefined,
+			undefined,
+			undefined,
+		);
 		expect(clineService.startTaskSession).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
@@ -4041,6 +4048,133 @@ describe("createRuntimeApi startTaskSession", () => {
 		]);
 	});
 
+	it.each([
+		["本项目已删除工作树的终端历史仍可读取", "own_deleted_worktree", "pty_terminal", true],
+		["null 工作目录的终端历史仍可读取", "unknown_null", "pty_terminal", true],
+		["inplace 仓库目录的终端历史仍可读取", "inplace_repository", "pty_terminal", true],
+		["管理根之外的未知目录历史仍可读取", "unknown_external_directory", "pty_terminal", true],
+		["外项目 worktree 的终端历史被拒绝", "foreign_project_worktree", "pty_terminal", false],
+		["外项目 worktree 在读取 ACP 保留消息前被拒绝", "foreign_project_worktree", "acp_stdio_subprocess", false],
+		["本项目已删除工作树的 ACP 保留消息仍可读取", "own_deleted_worktree", "acp_stdio_subprocess", true],
+	] as const)("只读历史查询：%s", async (_caseLabel, workingDirectoryKind, sessionTransport, shouldReadHistory) => {
+		const directory = mkdtempSync(join(tmpdir(), "kanban-done-history-api-"));
+		try {
+			const workspaceRepositoryPath = join(directory, "history-project");
+			const taskWorkingDirectoryPaths = {
+				own_deleted_worktree: join(
+					workspaceStateMocks.runtimeHomePath,
+					"task-worktrees",
+					"task-1",
+					"history-project",
+				),
+				unknown_null: null,
+				inplace_repository: workspaceRepositoryPath,
+				unknown_external_directory: join(directory, "unclassified-workspace"),
+				foreign_project_worktree: join(
+					workspaceStateMocks.runtimeHomePath,
+					"task-worktrees",
+					"task-1",
+					"other-project",
+				),
+			};
+			const transcriptPath = join(directory, "native.jsonl");
+			writeFileSync(
+				transcriptPath,
+				`${JSON.stringify({ type: "session_meta", payload: { id: "native" } })}\n${JSON.stringify({
+					type: "response_item",
+					payload: {
+						type: "message",
+						role: "assistant",
+						content: [{ type: "output_text", text: "已完成的回答" }],
+					},
+				})}\n`,
+			);
+			const summary = createSummary({
+				agentId: sessionTransport === "acp_stdio_subprocess" ? "omp" : "codex",
+				sessionTransport,
+				workspacePath: taskWorkingDirectoryPaths[workingDirectoryKind],
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+				pid: null,
+				agentNativeConversationSessionIdentity:
+					sessionTransport === "pty_terminal"
+						? {
+								sourceAgentId: "codex",
+								nativeSessionId: "native",
+								transcriptPath,
+								observedAt: 1,
+							}
+						: undefined,
+			});
+			const persistedSessions = Object.freeze({ "task-1": summary });
+			const persistedSessionsBeforeRead = JSON.stringify(persistedSessions);
+			workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue(persistedSessions);
+			workspaceStateMocks.mutateWorkspaceState.mockClear();
+			workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [
+					{
+						id: "trash",
+						title: "Done",
+						cards: [
+							{
+								id: "task-1",
+								title: "完成任务",
+								prompt: "需求",
+								startInPlanMode: false,
+								baseRef: "main",
+								createdAt: 1,
+								updatedAt: 1,
+							},
+						],
+					},
+				],
+			});
+			const getScopedTerminalManager = vi.fn();
+			const getScopedClineTaskSessionService = vi.fn();
+			const listRetainedMessages = vi.fn(() => [
+				{ id: "retained", role: "assistant" as const, content: "已完成的回答", createdAt: 1 },
+			]);
+			const getScopedAcpTaskSessionService = vi.fn(async () => ({ listMessages: listRetainedMessages }) as never);
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: () => "workspace-1",
+				loadScopedRuntimeConfig: vi.fn(),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager,
+				getScopedClineTaskSessionService,
+				getScopedAcpTaskSessionService,
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			const response = await api.getTaskConversationHistoryPage(
+				{ workspaceId: "workspace-1", workspacePath: workspaceRepositoryPath },
+				{
+					workspaceTaskId: "task-1",
+					taskConversationSessionId: "task-1",
+				},
+			);
+			const expectedHistoryAvailability = shouldReadHistory
+				? sessionTransport === "acp_stdio_subprocess"
+					? "partially_available"
+					: "available"
+				: "unavailable";
+			expect(response.availability).toBe(expectedHistoryAvailability);
+			expect(response.messages.map((message) => message.content)).toEqual(shouldReadHistory ? ["已完成的回答"] : []);
+			expect(getScopedTerminalManager).not.toHaveBeenCalled();
+			expect(getScopedClineTaskSessionService).not.toHaveBeenCalled();
+			const expectedRetainedMessageReads = sessionTransport === "acp_stdio_subprocess" && shouldReadHistory ? 1 : 0;
+			expect(getScopedAcpTaskSessionService).toHaveBeenCalledTimes(expectedRetainedMessageReads);
+			expect(listRetainedMessages).toHaveBeenCalledTimes(expectedRetainedMessageReads);
+			expect(taskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+			expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+			expect(JSON.stringify(persistedSessions)).toBe(persistedSessionsBeforeRead);
+			expect(existsSync(taskWorkingDirectoryPaths.own_deleted_worktree)).toBe(false);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+			workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue({});
+		}
+	});
+
 	it("hydrates persisted cline chat messages when no live in-memory session is loaded", async () => {
 		const persistedMessage = {
 			id: "message-persisted-1",
@@ -4319,18 +4453,21 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	// ACP（omp）通道的程序化投递必须当场落终态。这条链路上没有 onDeliveryOutcome 这样的登记点，
-	// 回执一旦停在 accepted_pending_submit_confirmation 就再没有任何人会改写它：
-	// `--wait-for-terminal-status` 必然空等到超时，账本要挂到下次 runtime 启动清扫才被判失败，
-	// 直接违反「唯一非终态必然在有界时间内收敛」这条不变量。
-	it("settles ACP programmatic delivery on the spot instead of leaving it pending forever", async () => {
+	// ACP 发出请求只代表受理；真实接受通过已登记回调在有界时间内结算。
+	it("ACP 程序化投递保留待确认回执并登记可靠接受回调", async () => {
 		// ACP 会话的 summary 恒由 createDefaultAcpSummary 盖上通道章。这里必须显式带上：
 		// 不带章的 omp summary 现在意味着一条 **TUI** 会话（omp 的 catalog 默认已是 pty_terminal），
 		// 聊天端点会正确地不把它当 ACP 任务分派。
 		const summary = createSummary({
 			agentId: "omp",
-			state: "running",
+			state: "awaiting_review",
 			sessionTransport: "acp_stdio_subprocess",
+			runtimeSessionIncarnationId: "acp-programmatic-incarnation",
+			agentConversationPromptSubmissionAcceptance: {
+				status: "pending",
+				attemptedAtMs: Date.now(),
+				runtimeSessionIncarnationId: "acp-programmatic-incarnation",
+			},
 		});
 		const latestMessage = {
 			id: "message-acp-1",
@@ -4374,9 +4511,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			"task-acp-1",
 			"please continue",
 			undefined,
+			expect.any(Function),
+			"rvf-acp-1",
 		);
 		expect(response.terminalDelivery).toEqual({
-			status: "delivered_and_submit_confirmed",
+			status: "accepted_pending_submit_confirmation",
 			reason: null,
 		});
 		expect(response.message).toEqual(latestMessage);

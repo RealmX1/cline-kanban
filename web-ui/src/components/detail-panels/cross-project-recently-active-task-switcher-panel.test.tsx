@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel as ProductionCrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
+import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
@@ -335,6 +336,58 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
+	it("重连任务保留 Running 并显示重连说明，恢复后位置保持不变", () => {
+		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
+		const renderEntries = (liveness: "retrying" | "live") =>
+			act(() =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={makeHost({
+							projects: [
+								makeProject("project-a", [
+									makeEntry("retrying", {
+										turnOwner: "agent",
+										liveness,
+										agentResponseGenerationTurnStarted: { startedAt: NOW_MS - 2000, turnSequence: 1 },
+									}),
+									makeEntry("other", {
+										turnOwner: "agent",
+										liveness: "live",
+										agentResponseGenerationTurnStarted: { startedAt: NOW_MS - 1000, turnSequence: 1 },
+									}),
+								]),
+							],
+						})}
+					/>,
+				),
+			);
+		renderEntries("retrying");
+		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
+		expect(section("running").textContent).toContain("重连中");
+		expect(rowTaskIds(section("remaining"))).not.toContain("retrying");
+		renderEntries("live");
+		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
+		expect(section("running").textContent).not.toContain("重连中");
+	});
+
+	it("主 Agent 真实处理推导的缓存参考在药丸提示中保留明确的请求时间估计来源", () => {
+		act(() =>
+			root.render(
+				<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
+					nowMs={NOW_MS}
+					promptCacheWarmthEstimate={{
+						promptCacheWarmthAnchorAt: NOW_MS - 100,
+						promptCacheExpectedExpiryAt: NOW_MS + 54 * 60_000,
+						promptCacheWarmthAnchorSource: "main_agent_conversation_request_processing_cache_reference_estimate",
+					}}
+				/>,
+			),
+		);
+		expect(container.querySelector("span[title]")?.getAttribute("title")).toContain(
+			"主 Agent 真实处理或响应推导的请求时间估计",
+		);
+	});
+
 	it("统一 Recent 收录近期 Backlog / Validation / Done，并支持阶段并集和 All 重置", () => {
 		const host = makeHost({
 			projects: [
@@ -743,17 +796,16 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed)).toBe("true");
 	});
 
-	it("行内三颗时长药丸全部显示（含创建时长），倒计时 tooltip 写明起点与来源", () => {
+	it("行内只显示会话时间，创建时间留详情；缓存 tooltip 写明估计起点与来源", () => {
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
 		const warmRow = section("prompt-cache-warm").querySelector<HTMLElement>(
 			'[data-cross-project-task-switcher-task-id="warm"]',
 		);
-		expect(warmRow?.querySelector('[title^="Created ·"]')).not.toBeNull();
-		const countdownTitle = warmRow
-			?.querySelector('[title^="Prompt cache expected to expire"]')
-			?.getAttribute("title");
-		expect(countdownTitle).toContain("Countdown started");
-		expect(countdownTitle).toContain("last main-conversation model request");
+		expect(warmRow?.querySelector('[title^="Created ·"]')).toBeNull();
+		expect(warmRow?.querySelector("[data-task-conversation-session-activity-details]")).not.toBeNull();
+		const countdownTitle = warmRow?.querySelector('[title^="缓存预计过期"]')?.getAttribute("title");
+		expect(countdownTitle).toContain("估计起点");
+		expect(countdownTitle).toContain("最后一次主对话请求的代理观测（估计）");
 	});
 
 	// 用户拍板 B′（2026-10-05）：手动 /compact 后留在 Cache warm，但不显示倒计时，改显示「已压缩」。
@@ -797,7 +849,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const compactedPill = claudeRow?.querySelector('[title^="Compacted ·"]');
 		expect(compactedPill?.textContent).toBe("Compacted");
 		expect(compactedPill?.getAttribute("title")).toContain("rewrites the compacted context");
-		expect(claudeRow?.querySelector('[title^="Prompt cache expected to expire"]')).toBeNull();
+		expect(claudeRow?.querySelector('[title^="缓存预计过期"]')).toBeNull();
 
 		const kimiRow = section("prompt-cache-warm").querySelector<HTMLElement>(
 			'[data-cross-project-task-switcher-task-id="kimi-compacted"]',

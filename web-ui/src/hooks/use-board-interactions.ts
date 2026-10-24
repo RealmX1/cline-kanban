@@ -1,7 +1,7 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import {
-	isAgentActivelyProducingOutput,
+	isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow,
 	isAwaitingUserReviewTurn,
 	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -624,7 +624,7 @@ export function useBoardInteractions({
 				// B5 引用短路：summary 引用跨 tick 稳定（runtime-state-hub merge 只替换改动 key），
 				// 引用未变即内容未变；board 也未变时本帧处理结果与上一帧相同（纯 no-op），直接跳过，
 				// 省掉每 tick 对全部 N 条 summary 的 getTaskColumnId 全板扫描与 resolveSessionFacets。
-				// 唯一的时间依赖 isAgentActivelyProducingOutput 只在持续产出时为真，而持续产出 ⇒
+				// 唯一的时间依赖 isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow 只在持续产出时为真，而持续产出 ⇒
 				// summary 每 tick 换新引用，不会被本短路跳过。
 				if (!boardChangedSinceLastRun && previous === summary) {
 					continue;
@@ -644,6 +644,7 @@ export function useBoardInteractions({
 					continue;
 				}
 				let columnId = getTaskColumnId(nextBoard, taskId);
+				const taskCardUpdatedAtMs = findCardSelection(nextBoard, taskId)?.card.updatedAt;
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
@@ -677,7 +678,7 @@ export function useBoardInteractions({
 					continue;
 				}
 				// Review 列与 Validation 列对齐——同用活跃度 offset：仅当 agent 此刻仍在持续产出输出
-				// （isAgentActivelyProducingOutput，内含 turnOwner==="agent"）时才打回 In Progress；空闲 /
+				// （isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow，内含 turnOwner==="agent"）时才打回 In Progress；空闲 /
 				// 卡死 / 已退出却仍处 agent 回合的会话允许停留在 review（review 是等人审查回合的自动落位区，
 				// 也是「移至 Review」手动钉住空闲会话的落位区）。原 Review 分支只读裸 turnOwner==="agent"，
 				// 把空闲 / 卡死的 agent 回合会话也反复打回——这正是当年为绕开它而加 manual_review 永久锁的动因；
@@ -687,8 +688,17 @@ export function useBoardInteractions({
 				const shouldBounceRunningToInProgress =
 					(columnId === "review" &&
 						!isParkedAwaitingDispatchedBackgroundWork(summary) &&
-						isAgentActivelyProducingOutput(summary, nowMs)) ||
-					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
+						isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow(
+							summary,
+							nowMs,
+							taskCardUpdatedAtMs,
+						)) ||
+					(columnId === "validation" &&
+						isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow(
+							summary,
+							nowMs,
+							taskCardUpdatedAtMs,
+						));
 				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "in_progress", {
 						skipKickoff: true,
@@ -1245,7 +1255,7 @@ export function useBoardInteractions({
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
-			if (!selection || selection.column.id === "trash") {
+			if (!selection) {
 				return;
 			}
 			setSelectedTaskId(taskId);
@@ -1624,7 +1634,11 @@ export function useBoardInteractions({
 			const card = findCardSelection(board, taskId)?.card;
 			if (
 				card &&
-				isAgentActivelyProducingOutput(resolveMainTaskConversationSessionSummary(card, sessions), Date.now())
+				isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow(
+					resolveMainTaskConversationSessionSummary(card, sessions),
+					Date.now(),
+					card.updatedAt,
+				)
 			) {
 				showAppToast({
 					intent: "warning",

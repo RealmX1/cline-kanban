@@ -80,6 +80,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-agent-prompt-image-attachment-reference": resolve(
+				__dirname,
+				"../src/core/agent-prompt-image-attachment-reference.ts",
+			),
 			"@runtime-work-unit-relation-modeling-api-contract": resolve(
 				__dirname,
 				"../src/core/work-unit-relation-modeling-api-contract.ts",
@@ -130,6 +134,10 @@ export default defineConfig({
 			"@runtime-cross-project-recently-active-task-switcher-section-assignment": resolve(
 				__dirname,
 				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
+			),
+			"@runtime-agent-conversation-activity-observation": resolve(
+				__dirname,
+				"../src/core/agent-conversation-activity-observation.ts",
 			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-state-stream-workspace-metadata-probe-scope-declaration": resolve(

@@ -44,12 +44,14 @@ export function describeQueuedPromptRestartReminderAnnouncement(queueEntryCount:
 }
 
 export function useQueuedTaskPromptDeliveryRestartReminder(input: {
+	enabled?: boolean;
 	taskId: string;
 	projections: readonly RuntimeQueuedTaskPromptDeliveryProjection[];
 	reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: (queueEntryIds: readonly string[]) => Promise<boolean>;
 	spotlight?: (anchorKey: string, options?: SpotlightAnchorOptions) => boolean;
 }): { restartReminderAnnouncement: string | null } {
 	const { taskId, projections, reconfirmQueuedPromptDeliveriesAfterRuntimeRestart } = input;
+	const enabled = input.enabled ?? true;
 	const spotlight = input.spotlight ?? spotlightAnchor;
 	// 确认失败、条目被放回可重试时递增，让下面的 useMemo 重新算一遍待提醒集合。
 	const [reminderRetryGeneration, setReminderRetryGeneration] = useState(0);
@@ -76,7 +78,7 @@ export function useQueuedTaskPromptDeliveryRestartReminder(input: {
 	);
 
 	useEffect(() => {
-		if (unconfirmedQueueEntryIdsKey === "") {
+		if (!enabled || unconfirmedQueueEntryIdsKey === "") {
 			return;
 		}
 		const queueEntryIds = unconfirmedQueueEntryIdsKey.split("\n");
@@ -147,6 +149,7 @@ export function useQueuedTaskPromptDeliveryRestartReminder(input: {
 		unconfirmedQueueEntryIdsKey,
 		reminderRetryGeneration,
 		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
+		enabled,
 		spotlight,
 	]);
 

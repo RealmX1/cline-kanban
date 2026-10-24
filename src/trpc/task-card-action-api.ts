@@ -19,6 +19,7 @@ import type {
 import type { WebUiBoardMutationInitiator } from "../core/kanban-web-ui-page-load-request-origin-nonce";
 import { POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX } from "../core/post-deploy-verification-done-entry-closure-contract";
 import { resolveSessionFacets } from "../core/session-activity";
+import { projectTaskBoardAfterAcceptedMainConversationInput } from "../core/task-board-accepted-agent-conversation-input";
 import {
 	deleteTasksFromBoard,
 	moveTaskToColumn,
@@ -52,9 +53,11 @@ import type {
 } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
+import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceBoardById,
+	loadWorkspaceContextById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
@@ -109,6 +112,36 @@ export interface TaskCardActionPostDeployVerificationDoneEntryGate {
 interface TaskCardFoundWithBoardColumn {
 	taskCard: RuntimeBoardCard;
 	boardColumnId: RuntimeBoardColumnId;
+}
+
+// 原生输入接受后的自动移列仍走同一 board 持久化漏斗，不触发重复启动或发送。
+export async function moveTaskCardIntoInProgressAfterAcceptedMainConversationInput(input: {
+	workspaceId: string;
+	summary: RuntimeTaskSessionSummary;
+	getCurrentSummary: () => RuntimeTaskSessionSummary | null;
+}): Promise<{ saved: boolean; workspacePath: string | null }> {
+	const context = await loadWorkspaceContextById(input.workspaceId);
+	if (!context) return { saved: false, workspacePath: null };
+	const eventId = input.summary.agentConversationPromptSubmissionAcceptance?.eventId;
+	const result = await mutateWorkspaceState(
+		context.repoPath,
+		buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+			"accepted_main_conversation_input_moves_task_into_in_progress",
+			"agent-conversation-input-acceptance",
+		),
+		(state) => {
+			const current = input.getCurrentSummary();
+			if (
+				!current ||
+				current.runtimeSessionIncarnationId !== input.summary.runtimeSessionIncarnationId ||
+				current.agentConversationPromptSubmissionAcceptance?.eventId !== eventId
+			)
+				return { board: state.board, value: false, save: false };
+			const projected = projectTaskBoardAfterAcceptedMainConversationInput(state.board, current);
+			return { board: projected.board, value: projected.moved, save: projected.moved };
+		},
+	);
+	return { saved: result.saved, workspacePath: context.repoPath };
 }
 
 type AutoReviewSettingsOfTaskCard = Pick<RuntimeBoardCard, "autoReviewEnabled" | "autoReviewMode">;

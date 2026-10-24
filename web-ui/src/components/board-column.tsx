@@ -3,10 +3,10 @@ import { resolveMainTaskConversationSessionSummary } from "@runtime-session-acti
 import { FoldHorizontal, Play, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
-
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { collectStableTaskConversationSessionActivityPresentationObservations } from "@/components/task-conversation-session-activity-presentation-observation-cache";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
@@ -260,6 +260,10 @@ export const BoardColumn = memo(function BoardColumn({
 											card={card}
 											index={draggableIndex}
 											columnId={column.id}
+											taskConversationSessionActivityObservations={collectStableTaskConversationSessionActivityPresentationObservations(
+												card,
+												Object.values(taskSessions),
+											)}
 											sessionSummary={
 												resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined
 											}

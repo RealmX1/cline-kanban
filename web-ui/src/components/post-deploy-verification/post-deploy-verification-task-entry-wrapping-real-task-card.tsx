@@ -181,7 +181,7 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 					{...buildTaskCardBusinessProps({
 						card: selection.card,
 						columnId: selection.column.id,
-						sessionSummary: realTaskCardRenderingInputs.taskSessionsFromRuntimeBoardSnapshot[taskId],
+						taskSessions: realTaskCardRenderingInputs.taskSessionsFromRuntimeBoardSnapshot,
 						handlers: buildTaskCardActionHandlersForRuntimeBoardSnapshotTaskCardCopy({
 							card: selection.card,
 							workspaceIdOwningRuntimeBoardSnapshot:
@@ -208,7 +208,7 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 				{...buildTaskCardBusinessProps({
 					card: selection.card,
 					columnId: selection.column.id,
-					sessionSummary: realTaskCardRenderingInputs.currentProjectTaskSessions[taskId],
+					taskSessions: realTaskCardRenderingInputs.currentProjectTaskSessions,
 					handlers: realTaskCardRenderingInputs.currentProjectTaskCardActionHandlers,
 					onActivateCard: realTaskCardRenderingInputs.onActivateTaskCardOpeningTaskDetail,
 					workspacePath: realTaskCardRenderingInputs.currentProjectWorkspacePath,

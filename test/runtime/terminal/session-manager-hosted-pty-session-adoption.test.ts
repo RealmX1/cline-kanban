@@ -149,6 +149,49 @@ describe("TerminalSessionManager hosted PTY session adoption after runtime resta
 		vi.useRealTimers();
 	});
 
+	it("Kimi 接管覆盖旧 suppress=true，追赶与 live 重绘均不叠加历史", async () => {
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({
+			taskId: "kimi-adopt",
+			pid: 4343,
+			prompt: "",
+		});
+		const parsed = parseTerminalSessionAdoptionRecord(previousRuntime.readLatestPublishedAdoptionRecord());
+		if (parsed.kind !== "usable_adoption_record") throw new Error("缺少接管记录");
+		const oldRecord = {
+			...parsed.adoptionRecord,
+			summary: { ...parsed.adoptionRecord.summary, agentId: "kimi" },
+			rederivationInputs: { ...parsed.adoptionRecord.rederivationInputs, suppressScrollbackErasure: true },
+		};
+		const history = Array.from({ length: 65 }, (_, index) => `kimi-adopt-history-${index}`).join("\r\n");
+		const redraw = `\u001b[2J\u001b[H\u001b[3J${history}\r\ncomposer`;
+		const { candidate, emitLiveOutput, handle } = createFakeAdoptionCandidate({
+			taskId: "kimi-adopt",
+			pid: 4343,
+			terminalSessionAdoptionRecord: oldRecord,
+			catchUpOutputTexts: [redraw, redraw],
+		});
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({}, new Set(["kimi-adopt"]));
+		try {
+			await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+			expect((await manager.getRestoreSnapshot("kimi-adopt"))?.snapshot.split("kimi-adopt-history-0")).toHaveLength(
+				2,
+			);
+			emitLiveOutput(redraw);
+			emitLiveOutput(redraw);
+			expect((await manager.getRestoreSnapshot("kimi-adopt"))?.snapshot.split("kimi-adopt-history-0")).toHaveLength(
+				2,
+			);
+			expect(parseTerminalSessionAdoptionRecord(handle.publishedAdoptionRecords.at(-1))).toMatchObject({
+				kind: "usable_adoption_record",
+				adoptionRecord: { rederivationInputs: { suppressScrollbackErasure: false } },
+			});
+		} finally {
+			manager.dispose();
+			previousRuntime.previousRuntimeManager.dispose();
+		}
+	});
+
 	it("adopts from the adoption record without answering stale terminal queries or advancing lastSubstantiveOutputAt", async () => {
 		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({
 			taskId: "task-adopt",

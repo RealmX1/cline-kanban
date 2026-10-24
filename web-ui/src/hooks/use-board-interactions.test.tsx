@@ -1139,7 +1139,7 @@ describe("useBoardInteractions", () => {
 		expect(readPendingTaskCardCommandBoardOverlayEntries("project-1")).toEqual([]);
 	});
 
-	it("ignores card selection requests for trashed tasks", async () => {
+	it("选中 Done 任务时打开详情，不恢复会话或移列", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		useProgrammaticCardMovesMock.mockReturnValue({
@@ -1186,7 +1186,10 @@ describe("useBoardInteractions", () => {
 			latestSnapshot!.handleCardSelect("task-trash");
 		});
 
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(setSelectedTaskId).toHaveBeenCalledWith("task-trash");
+		expect(
+			taskCardActionQueryMocks.restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace,
+		).not.toHaveBeenCalled();
 	});
 
 	it("按 Cache warm 导航上下文接续，不选 Review 列中属于 Recent 的邻项", async () => {
@@ -1475,6 +1478,39 @@ describe("useBoardInteractions", () => {
 		expect(inProgressCards).toEqual([]);
 	});
 
+	it.each(["accepted_user_input", "agent_output"] as const)(
+		"用户手动移入Validation后，旧%s活动不重复弹回",
+		async (activityKind) => {
+			mockUnavailableProgrammaticCardMoves();
+			const nowMs = Date.now();
+			let currentBoard = createBoardWithValidationTask("manually-validated");
+			currentBoard.columns.find((column) => column.id === "validation")!.cards[0]!.updatedAt = nowMs;
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await act(async () =>
+				root.render(
+					<HookHarness
+						board={currentBoard}
+						setBoard={setBoard}
+						initialSessions={{
+							"manually-validated": createRunningSession("manually-validated", {
+								lastEffectiveAgentConversationActivityObservation: {
+									observedAtMs: nowMs - 100,
+									evidenceKind: "persisted_agent_transcript",
+									activityKind,
+								},
+							}),
+						}}
+					/>,
+				),
+			);
+			expect(
+				currentBoard.columns.find((column) => column.id === "validation")?.cards.map((card) => card.id),
+			).toEqual(["manually-validated"]);
+		},
+	);
+
 	it("bounces an actively-producing running task out of Validation back to In Progress", async () => {
 		let currentBoard = createBoardWithValidationTask("task-active");
 
@@ -1493,11 +1529,16 @@ describe("useBoardInteractions", () => {
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
 		});
-		// lastSubstantiveOutputAt within the 5s quiet threshold → actively producing substantive output.
+		// 五秒内的可信新输出推进持续自动流转；PTY 字节和旧实质输出戳不参与判定。
 		const activeSessions = {
 			"task-active": createRunningSession("task-active", {
 				lastOutputAt: Date.now() - 500,
 				lastSubstantiveOutputAt: Date.now() - 500,
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: Date.now() - 500,
+					evidenceKind: "persisted_agent_transcript",
+					activityKind: "agent_output",
+				},
 			}),
 		};
 
@@ -1584,11 +1625,16 @@ describe("useBoardInteractions", () => {
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
 		});
-		// lastSubstantiveOutputAt within the 5s quiet threshold → actively producing substantive output.
+		// 五秒内的可信新输出推进持续自动流转；PTY 字节和旧实质输出戳不参与判定。
 		const activeSessions = {
 			"task-active-review": createRunningSession("task-active-review", {
 				lastOutputAt: Date.now() - 500,
 				lastSubstantiveOutputAt: Date.now() - 500,
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: Date.now() - 500,
+					evidenceKind: "persisted_agent_transcript",
+					activityKind: "agent_output",
+				},
 			}),
 		};
 
@@ -1891,6 +1937,11 @@ describe("useBoardInteractions", () => {
 			const blockedSummary = createRunningSession("task-blocked", {
 				lastOutputAt: Date.now(),
 				lastSubstantiveOutputAt: Date.now(),
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: Date.now(),
+					evidenceKind: "persisted_agent_transcript",
+					activityKind: "agent_output",
+				},
 			});
 			await renderHarness(currentBoard, setBoard, { "task-blocked": blockedSummary }, (control) => {
 				sessionsControl = control;

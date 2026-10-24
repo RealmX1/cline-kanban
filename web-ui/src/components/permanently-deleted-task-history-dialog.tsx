@@ -6,6 +6,7 @@ import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dial
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { usePermanentlyDeletedTaskHistory } from "@/hooks/use-permanently-deleted-task-history";
 import { useTextInputValueCommittedAfterImeCompositionEnds } from "@/hooks/use-text-input-value-committed-after-ime-composition-ends";
 import { readPermanentlyDeletedTaskPromptVersions } from "@/runtime/permanently-deleted-task-history-query";
@@ -72,7 +73,7 @@ export function PermanentlyDeletedTaskHistoryDialog({
 		]),
 	];
 	return (
-		<>
+		<TooltipProvider>
 			<Dialog
 				open
 				onOpenChange={(open) => {
@@ -156,6 +157,6 @@ export function PermanentlyDeletedTaskHistoryDialog({
 					onClose={() => setSelectedEntry(null)}
 				/>
 			) : null}
-		</>
+		</TooltipProvider>
 	);
 }

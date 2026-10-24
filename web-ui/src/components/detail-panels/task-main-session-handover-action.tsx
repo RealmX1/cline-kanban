@@ -1,5 +1,6 @@
 import { ArrowRightLeft } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import {
@@ -40,6 +41,8 @@ export function TaskMainSessionHandoverAction({
 	const [preview, setPreview] = useState<TaskMainSessionHandoverPrepareResponse | null>(null);
 	const [target, setTarget] = useState("new_codex_session");
 	const [notes, setNotes] = useState("");
+	const notesInputId = useId();
+	const [isPreparingNoteImages, setIsPreparingNoteImages] = useState(false);
 	const [planPaths, setPlanPaths] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -374,13 +377,15 @@ export function TaskMainSessionHandoverAction({
 										onChange={(event) => setPlanPaths(event.target.value)}
 									/>
 								</label>
-								<label className="block space-y-1 text-sm">
+								<label className="block space-y-1 text-sm" htmlFor={notesInputId}>
 									<span>补充交接说明（可选）</span>
-									<textarea
+									<TaskPromptComposer
+										id={notesInputId}
 										aria-label="补充交接说明"
-										className="min-h-20 w-full rounded-md border border-border bg-surface-2 p-2 text-text-primary"
+										workspaceId={workspaceId}
 										value={notes}
-										onChange={(event) => setNotes(event.target.value)}
+										onImagePreparationPendingChange={setIsPreparingNoteImages}
+										onValueChange={setNotes}
 									/>
 								</label>
 								<p className="text-sm">Codex 会先汇报计划总览、已经实现和有待进行，然后等待你的消息。</p>
@@ -391,7 +396,11 @@ export function TaskMainSessionHandoverAction({
 					<Button variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
 						{showWaitChoice ? "暂不交接" : "取消"}
 					</Button>
-					<Button disabled={busy || !preview} autoFocus={showWaitChoice} onClick={() => void submit()}>
+					<Button
+						disabled={busy || !preview || isPreparingNoteImages}
+						autoFocus={showWaitChoice}
+						onClick={() => void submit()}
+					>
 						{showWaitChoice ? "等待两者都停下后自动交接" : "确认交接"}
 					</Button>
 				</DialogFooter>

@@ -1,3 +1,9 @@
+import {
+	mergeLastEffectiveAgentConversationActivityObservation,
+	resolveCurrentAgentProcessUserTurnIdleRetentionStarted,
+	resolveLastAgentConversationPromptCacheReferenceObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "./agent-conversation-activity-observation";
 import { mergeWorkPhaseGoalConversationOwnership } from "./agent-current-work-phase-goal";
 
 export { resolveAgentCurrentWorkPhaseGoalForDisplay } from "./agent-current-work-phase-goal";
@@ -8,21 +14,11 @@ export {
 } from "./task-main-conversation-session-binding";
 export { isTaskMainSessionHandoverSuspendingAutomaticActions } from "./task-main-session-handover-contract";
 
-// 会话「执行活性」派生的单一真相源（纯函数、零运行时依赖，可被 Node 后端 / 浏览器前端 /
-// 部署探针共享 import；唯一的类型 import 在编译期被擦除，故打进浏览器 bundle 不会带入任何
-// Node 依赖）。
-//
-// 背景：在双轴会话状态重构（turnOwner + liveness + userTurnKind）落地前，「agent 此刻是否
-// 仍在持续产出 PTY 输出」这份时间派生判定曾散落三处、阈值各异：
-//   - 前端 Validation 停留判据 isAgentActivelyProducingOutput（5s）
-//   - 后端自动续跑静默注入门控 isAgentOutputQuiet（2s）
-//   - （纯状态、无时间的 isActiveTaskSessionState 不属此类，归后续阶段改读 liveness 基值）
-// 本模块把前两者收敛为「单一新鲜度原语 + 参数化阈值」，保留 5s/2s 双阈值（语义相反、有意
-// 不跨边界，见下），消除「同一判定多份实现、阈值漂移」的隐患。
+// 会话 facet、语义活动新鲜度及进程生命周期的纯函数真相源。
+// PTY 新鲜度只服务 I/O 沉降；业务活动、回合归属和资源期限分别读取各自投影。
 
 import type {
 	RuntimeAgentId,
-	RuntimeAgentResponseGenerationStopped,
 	RuntimeAgentResponseGenerationStopSignalConfidence,
 	RuntimeTaskSessionLiveness,
 	RuntimeTaskSessionReviewReason,
@@ -31,8 +27,14 @@ import type {
 	RuntimeTaskSessionTurnOwner,
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
-import { mergeLastConversationProgressObservation } from "./last-conversation-progress-observation.js";
-import { mergeLastMainAgentConversationModelRequestDispatchObservation } from "./last-main-agent-conversation-model-request-dispatch-observation.js";
+
+export {
+	collectTaskConversationSessionActivityObservations,
+	resolveCurrentAgentProcessUserTurnIdleRetentionStarted,
+	resolveLastAgentConversationPromptCacheReferenceObservation,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+} from "./agent-conversation-activity-observation";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -132,22 +134,10 @@ export function resolveByTheWayMainSessionForkSelection(
 	return resolveTaskConversationSessionMainContextForkSelection({ ...input, sessionRole: "by_the_way" });
 }
 
-// 「近期活跃」窗口（毫秒）：跨项目切换面板的 Running 区（docs/context-cross-project-recently-active-task-switcher.md）
-// 据此判定 agent 回合里的任务是否还在跑（距最近 PTY 输出 lastOutputAt 在本窗口内）。
-// 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，
-// 宽窗口下 spinner 噪声无影响，故读 lastOutputAt（而非实质戳）即可。复用 isAgentOutputWithinActiveWindow。
+// 旧展示时间窗常量保留兼容；Running 成员现在由 facet 和进程存活判定。
 export const RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS = 5 * 60_000;
 
-// 距 agent 最近一次 PTY 输出是否仍落在 activeWindowMs 活跃窗口内（true = 仍在产出 / computing）。
-//
-// 语义细节（迁移前后必须逐字保持，两侧旧实现都依赖它）：
-//  - lastOutputAt 为 null/undefined（从未产出 / 进程已退残留）→ 一律 false（非新鲜）。
-//  - 严格小于：恰好等于窗口边界视为「已不新鲜」。
-//
-// 为什么用 lastOutputAt：会话的 `running` 只表示「会话还活着且不在显式 review 检查点」，并不
-// 跟踪 agent 是否真在生成回复——空闲存活会话、甚至进程已退却未更新的残留会话都可能占据
-// running。活跃思考时 spinner 持续刷新会推进 lastOutputAt，空闲时冻结，因此 lastOutputAt 叠加
-// 时间窗能干净区分「真在干活的 running」与「空闲 / 已死的 running」。
+// 原始 I/O 新鲜度原语；不能据此判断对话推进或模型正在计算。
 export function isAgentOutputWithinActiveWindow(
 	lastOutputAt: number | null | undefined,
 	nowMs: number,
@@ -166,41 +156,41 @@ export function isAgentOutputQuiet(
 	return !isAgentOutputWithinActiveWindow(lastOutputAt, nowMs, quietThresholdMs);
 }
 
-// 前端 Validation 列自动打回判据：仅当会话处于 agent 回合（turnOwner==="agent"）且仍在活跃产出
-// 窗口内 → true（打回 In Progress）；空闲 / 从未输出 / 已死残留 / 非 agent 回合一律 false（允许停留
-// Validation）。
-//
-// 双轴迁移（Stage 3 ④，行为保持）：门控已从一维 `state==="running"` 翻为 facet 权威
-// `resolveSessionFacets(summary).turnOwner==="agent"`——二者全表等价（no-facet summary 即时派生、
-// facet-present summary 采信权威，见 resolveSessionFacets）。
-//
-// 活跃窗口读 **lastSubstantiveOutputAt** 而非 lastOutputAt（本判据是唯一改读实质戳的读点）：
-// Claude/Codex TUI 的 spinner 状态行每秒重绘，会让 lastOutputAt 几乎恒新鲜——只要 turnOwner==="agent"，
-// 移入 Validation 的卡片就被持续打回。实质戳只在 agent 产出新正文 / 工具内容时推进（装饰性重绘被
-// agent-output-substance.ts 分类器滤除），故「spinner 在转但无新正文」≥5s 即可停留 Validation，而真在
-// 流式产出时仍按原语义打回。其余 4 个 lastOutputAt 读点（自动续跑静默门控、卡顿探针、卡片 computing
-// 展示、终端面板基线）有意继续读 lastOutputAt——spinner=在思考，对它们应计为活动，绝不能迁移。
-//   - null/undefined 回退 ⇒ false（不在产出）：isAgentOutputWithinActiveWindow 对 null/undefined 即返
-//     false。**不**回退到 lastOutputAt——那会原样重现本 bug（spinner 期正是实质戳未盖、lastOutputAt 恒
-//     新鲜的稳态）。代价仅为：流式 agent 在下一段实质 chunk 盖戳前（≈1s）暂判为非产出，可接受、自愈。
-// 活跃窗口是「真·时间型」新鲜度，按 freshness 分层规则**不读** computing/quiet 派生叠加，而由唯一调用点
-// （use-board-interactions 的 level-triggered effect）在 summary 流到达时重算（详见该处注释）。
-export function isAgentActivelyProducingOutput(
+// Validation 的持续活动判据与卡片近期活动共用可信观测；PTY 字节与实质 TUI 戳不参与。
+export function isAgentConversationRecentlyEffectivelyActive(
 	summary: RuntimeTaskSessionSummary | null | undefined,
 	nowMs: number,
 ): boolean {
-	if (summary == null) {
+	if (
+		summary == null ||
+		resolveSessionFacets(summary).turnOwner !== "agent" ||
+		isParkedAwaitingDispatchedBackgroundWork(summary)
+	)
 		return false;
-	}
-	return (
-		resolveSessionFacets(summary).turnOwner === "agent" &&
-		isAgentOutputWithinActiveWindow(
-			summary.lastSubstantiveOutputAt,
-			nowMs,
-			VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
-		)
+	return isAgentOutputWithinActiveWindow(
+		resolveLastEffectiveAgentConversationActivityObservation(summary)?.observedAtMs,
+		nowMs,
+		VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 	);
 }
+
+// 已接受输入由服务端一次性边沿移列；持续判据只处理卡片最近更新之后的新工作。
+export function isAgentConversationRecentlyEffectivelyActiveForContinuousColumnAutoflow(
+	summary: RuntimeTaskSessionSummary | null | undefined,
+	nowMs: number,
+	taskCardUpdatedAtMs?: number,
+): boolean {
+	if (!isAgentConversationRecentlyEffectivelyActive(summary, nowMs)) return false;
+	const activity = resolveLastEffectiveAgentConversationActivityObservation(summary);
+	return (
+		activity != null &&
+		activity.activityKind !== "accepted_user_input" &&
+		(taskCardUpdatedAtMs === undefined || activity.observedAtMs >= taskCardUpdatedAtMs)
+	);
+}
+
+// 兼容原消费者的入口名，判据只读取统一活动。
+export const isAgentActivelyProducingOutput = isAgentConversationRecentlyEffectivelyActive;
 
 // ── 双轴会话状态 facet 的派生真相源 ─────────────────────────────────────────────
 // 枚举/类型定义在 src/core/api-contract.ts（含 superRefine 组合护栏）；此处是其求值逻辑：
@@ -331,6 +321,29 @@ export interface SummaryWriteDomainEventTiming {
 	domainEventObservedAtEpochMs?: number;
 }
 
+// 原生接受核验可能落后于无工具回合的完成 hook。完成信号证明发生过工作，提交状态仍保持待确认。
+export function canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission(
+	summary: RuntimeTaskSessionSummary,
+	completedAtMs: number,
+): boolean {
+	const facets = resolveSessionFacets(summary);
+	const submission = summary.agentConversationPromptSubmissionAcceptance;
+	return (
+		facets.turnOwner === "user" &&
+		facets.liveness === "live" &&
+		facets.userTurnKind === "review" &&
+		!isParkedAwaitingDispatchedBackgroundWork(summary) &&
+		summary.runtimeSessionIncarnationId != null &&
+		submission != null &&
+		submission.status !== "accepted" &&
+		submission.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
+		Number.isFinite(completedAtMs) &&
+		submission.attemptedAtMs >= (summary.startedAt ?? 0) &&
+		completedAtMs >= submission.attemptedAtMs &&
+		(summary.lastAgentConversationUserHandoffObservation?.observedAtMs ?? 0) < submission.attemptedAtMs
+	);
+}
+
 // 晚于写入时刻的值按写入时刻截断：跑到未来的时钟不可信，边沿章也不该比记下它的那次写更晚。
 function resolveDomainEventObservedAtEpochMs(
 	summaryUpdatedAt: number,
@@ -417,174 +430,166 @@ export function mergeSummaryWithFacets(
 			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
 			mergedWithFacets;
 
-	const withProgressObservation = resolveLastMainAgentConversationModelRequestDispatchObservation(
+	const withActivity = mergeAgentConversationActivityProjections(prev, patch, withTurnSequence);
+	const withRetention = resolveCurrentProcessIdleRetentionPatch(
 		prev,
 		patch,
-		resolveLastConversationProgressObservation(prev, patch, withTurnSequence),
-	);
-
-	const stopped = resolveAgentResponseGenerationStopped(
-		prev,
-		patch,
-		withProgressObservation,
+		withActivity,
 		domainEventObservedAtEpochMs,
 	);
-	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
-	// 「没有可显示的停止时刻」，但若在此把 undefined 视作不等于 null，每一次 agent 回合期间的
-	// metadata-only 写都会给 summary 凭空补一个 `agentResponseGenerationStopped: null`——历史盘上
-	// 743×N 条 summary 集体多出一个空字段，且与上面回合序号「刻意不把缺失补成 0」的原则自相矛盾。
-	// 缺失就让它继续缺失；只有真需要落一个对象、或需要把已有对象清掉时才写。
-	if (stopped === (withProgressObservation.agentResponseGenerationStopped ?? null)) {
-		return withProgressObservation;
-	}
-	return { ...withProgressObservation, agentResponseGenerationStopped: stopped };
+	const withHandoff = resolveHistoricalUserHandoffPatch(prev, patch, withRetention, domainEventObservedAtEpochMs);
+	// 旧字段仅用于兼容读取；后续持久化只写新投影，防止多套时间重新分叉。
+	const result = { ...withHandoff };
+	delete result.lastSubstantiveOutputAt;
+	delete result.lastConversationProgressObservation;
+	delete result.lastMainAgentConversationModelRequestDispatchObservation;
+	delete result.agentResponseGenerationStopped;
+	return result;
 }
 
-// 「对话上次推进」观测的合并落点。放在这条三 transport 共用的写侧漏斗里，是为了让**单调性成为结构性
-// 保证**而不是各写点的自觉：任何一条通道、任何一个写点，只要在 patch 里带上一条观测，就必然经过
-// mergeLastConversationProgressObservation 这一个 reducer（稳态取 max、只有持久转录能在**非 agent 回合**
-// 里纠正低置信猜测、未来时刻拒收）。没有任何写点能绕过它把值往回改或往未来推。
-//
-// 不在 patch 里带观测的写（绝大多数）原样透传，字段缺失就继续缺失——同「不给历史 summary 平白加字段」
-// 的原则（见下方写回门注释）。
-function resolveLastConversationProgressObservation(
-	prev: RuntimeTaskSessionSummary,
-	patch: Partial<RuntimeTaskSessionSummary>,
-	mergedWithFacets: RuntimeTaskSessionSummary,
-): RuntimeTaskSessionSummary {
-	const incoming = patch.lastConversationProgressObservation;
-	if (incoming == null) {
-		// undefined = 这次写与观测无关；null = 调用方显式要求清空（例：清空会话重开一段新对话）。
-		// 两种情形 mergedWithFacets 里都已经是对的值（它由 {...prev, ...patch} 派生），原样返回即可——
-		// 刻意不重建对象，免得给没有这个字段的历史 summary 平白塞一个 undefined 键。
-		return mergedWithFacets;
-	}
-	const merged = mergeLastConversationProgressObservation(prev.lastConversationProgressObservation, incoming, {
-		nowMs: mergedWithFacets.updatedAt,
-		// 「此刻球在不在 agent 手上」只有这条漏斗知道，而 reducer 需要它来关掉「低置信已存值可被转录直接
-		// 纠偏」那条授权：TUI 分类器只在 agent 回合里写低置信值，转录恰在同一段时间里滞后，两者相遇就是
-		// 每个探测周期抖一次的来回拉扯（见 reducer 模块注释第 2 条）。用 mergedWithFacets 而非 prev——
-		// 判据要的是「本次写落定后」的回合归属，与下方停止事件判据取同一口径。
-		isAgentResponseGenerationTurnInProgress: resolveSessionFacets(mergedWithFacets).turnOwner === "agent",
-	});
-	if (merged === mergedWithFacets.lastConversationProgressObservation) {
-		return mergedWithFacets;
-	}
-	// merged 此刻装的是 patch 里那条**未经裁决**的原始观测，必须换成 reducer 的裁决结果。
-	return { ...mergedWithFacets, lastConversationProgressObservation: merged };
-}
-
-// 「主对话最后一次向模型发出请求」观测的合并落点，与上面那个观测同理放在共用漏斗里，让单调性成为结构性
-// 保证。「哪些事件该写」由写点判定（main-agent-conversation-model-request-dispatch-hook-event-classification.ts），
-// 这里只负责不倒退、不跑到未来。
-function resolveLastMainAgentConversationModelRequestDispatchObservation(
+function mergeAgentConversationActivityProjections(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
 	merged: RuntimeTaskSessionSummary,
 ): RuntimeTaskSessionSummary {
-	const incoming = patch.lastMainAgentConversationModelRequestDispatchObservation;
-	if (incoming == null) {
-		return merged;
+	let result = merged;
+	const previousActivity =
+		prev.lastEffectiveAgentConversationActivityObservation ??
+		resolveLastEffectiveAgentConversationActivityObservation(prev);
+	const incomingActivity =
+		patch.lastEffectiveAgentConversationActivityObservation ??
+		resolveLastEffectiveAgentConversationActivityObservation(patch);
+	const shouldClearActivity =
+		patch.lastEffectiveAgentConversationActivityObservation === null ||
+		(patch.lastEffectiveAgentConversationActivityObservation === undefined &&
+			patch.lastConversationProgressObservation === null);
+	const activity = shouldClearActivity
+		? null
+		: incomingActivity
+			? mergeLastEffectiveAgentConversationActivityObservation(previousActivity, incomingActivity, {
+					nowMs: merged.updatedAt,
+					allowCorrectionOfPreviousTerminalHeuristic: true,
+					isAgentResponseGenerationTurnInProgress: resolveSessionFacets(merged).turnOwner === "agent",
+				})
+			: previousActivity;
+	if (
+		activity != null ||
+		shouldClearActivity ||
+		prev.lastEffectiveAgentConversationActivityObservation !== undefined ||
+		patch.lastEffectiveAgentConversationActivityObservation !== undefined
+	) {
+		result = { ...result, lastEffectiveAgentConversationActivityObservation: activity };
 	}
-	const reduced = mergeLastMainAgentConversationModelRequestDispatchObservation(
-		prev.lastMainAgentConversationModelRequestDispatchObservation,
-		incoming,
-		{ nowMs: merged.updatedAt },
-	);
-	if (reduced === merged.lastMainAgentConversationModelRequestDispatchObservation) {
-		return merged;
+	const previousCacheReference = resolveLastAgentConversationPromptCacheReferenceObservation(prev);
+	const incomingCacheReference = resolveLastAgentConversationPromptCacheReferenceObservation(patch);
+	const shouldClearCache =
+		patch.lastAgentConversationPromptCacheReferenceObservation === null ||
+		(patch.lastAgentConversationPromptCacheReferenceObservation === undefined &&
+			patch.lastMainAgentConversationModelRequestDispatchObservation === null);
+	let cacheReference = previousCacheReference;
+	if (shouldClearCache) cacheReference = null;
+	else if (
+		incomingCacheReference &&
+		Number.isFinite(incomingCacheReference.observedAtMs) &&
+		incomingCacheReference.observedAtMs > 0 &&
+		incomingCacheReference.observedAtMs <= merged.updatedAt + 60_000
+	) {
+		const normalized =
+			incomingCacheReference.observedAtMs > merged.updatedAt
+				? { ...incomingCacheReference, observedAtMs: merged.updatedAt }
+				: incomingCacheReference;
+		if (!cacheReference || normalized.observedAtMs > cacheReference.observedAtMs) cacheReference = normalized;
 	}
-	return { ...merged, lastMainAgentConversationModelRequestDispatchObservation: reduced };
+	if (
+		cacheReference != null ||
+		shouldClearCache ||
+		prev.lastAgentConversationPromptCacheReferenceObservation !== undefined ||
+		patch.lastAgentConversationPromptCacheReferenceObservation !== undefined
+	) {
+		result = { ...result, lastAgentConversationPromptCacheReferenceObservation: cacheReference };
+	}
+	return result;
 }
 
-// 「本轮何时停止生成」离散事件的唯一写点（与回合序号同处这条三 transport 共用漏斗，故三侧自动一致）。
-//
-// 判据只看 turnOwner，不看 liveness / reviewReason：
-//   - turnOwner==="agent"（含 park——parked 主 agent 的真相就是普通 agent 回合）⇒ 球在 agent 手上，
-//     没有「停止」可言 ⇒ null。药丸此刻不显示时长，由既有 computing 脉动 / parked 徽标表达。
-//   - turnOwner===null（idle：压根没有会话）⇒ 同样没有可谈的停止时刻 ⇒ null。
-//   - turnOwner==="user" ⇒ 球回到人这边，这一刻就是本轮停止生成的时刻。
-// 这与回收侧 isAgentSessionRetentionDeadlineBearing 的第一条门（isAgentSessionCurrentlyGeneratingResponse）
-// 同源同概念：卡片显示的「停了多久」与回收计时的起算点谈的是同一件事，一处对处处对。两处**有意**的
-// 差异各有理由，改动前请先确认你要动的不是其中之一：
-//   1) 回收侧额外要求 liveness==="live" 才起算——回收对已退进程无事可做；展示侧不设这道门，进程已退
-//      但等人审查的会话照样该显示「停了多久」。
-//   2) park：回收侧把 parked 判为「已停止生成」（走 park 独立回收轨道）；展示侧仍判为 agent 回合 ⇒ null，
-//      因为卡片此刻已由 parked 徽标表达「在等后台工作」，再叠一颗「停了多久」只会让人误以为会话闲置。
-//
-// 停止事件一旦落定就**冻结**，直到进入新的边沿为止：绝不在后续每一次 metadata-only 写上重算。
-// 否则 reviewReason 的后续变化会悄悄改写 signalConfidence，让「这一次停止是怎么看出来的」失真。
-//
-// **边沿触发，不是电平触发**（这是本函数的命门，与上方 didEnterAgentTurn 严格对偶）：事件只在
-// didEnterUserTurnEndingAgentResponseGeneration 判定的那一次转移上落地；「当前处于 user 回合」这个
-// **电平**本身绝不构成落事件的理由。
-// 为什么这不是细节：本字段在契约里是 nullable+optional，而它落地之前 src/ 里从来没有任何写入点，
-// 因此历史盘上每一条已处于 awaiting_review（user 回合）的 summary 都**没有**这个字段。若判据写成
-// 「在 user 回合且字段为空就新建」，这些会话的下一次任意 metadata-only 写（lastOutputAt bump /
-// latestHookActivity 更新 / connectionRetry 变化——全都流经本漏斗）都会把 stoppedAt 写成「此刻」，
-// 随后被冻结住：一个几天前就停下的会话，卡片药丸显示「刚刚停止」。这正是本次把「一个字段冒充三个量」
-// 拆开所要根治的那一类缺陷（无关写入把时间戳刷成当下），绝不能在新字段上原样复现。
-function resolveAgentResponseGenerationStopped(
+function resolveCurrentProcessIdleRetentionPatch(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
-	mergedWithFacets: RuntimeTaskSessionSummary,
+	merged: RuntimeTaskSessionSummary,
 	domainEventObservedAtEpochMs: number,
-): RuntimeAgentResponseGenerationStopped | null {
+): RuntimeTaskSessionSummary {
+	if (patch.currentAgentProcessUserTurnIdleRetentionStarted !== undefined) return merged;
 	if (patch.agentResponseGenerationStopped !== undefined) {
-		// 显式覆写优先：磁盘水合、回收流程、测试构造按原值采信（已在 merged 里），不在此重新推算。
-		return mergedWithFacets.agentResponseGenerationStopped ?? null;
+		return { ...merged, currentAgentProcessUserTurnIdleRetentionStarted: patch.agentResponseGenerationStopped };
 	}
-	if (resolveSessionFacets(mergedWithFacets).turnOwner !== "user") {
-		return null;
+	const previous = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(prev);
+	if (resolveSessionFacets(merged).turnOwner !== "user") {
+		return previous == null ? merged : { ...merged, currentAgentProcessUserTurnIdleRetentionStarted: null };
 	}
-	if (!didEnterUserTurnEndingAgentResponseGeneration(prev, mergedWithFacets)) {
-		// user→user 稳态（同一活体同一轮的后续写）：既有事件原样透传、原样冻结。
-		// `?? null` 让「从未落过事件、字段仍缺失」这一态也走同一条路：返回 null 后，下方写回门比对
-		// `stopped === (withTurnSequence.agentResponseGenerationStopped ?? null)` 恒成立而整段跳过，
-		// 于是**字段继续缺失**、不会被补成 null。刻意不在此补 null——与回合序号「不把缺失补成 0」同一
-		// 原则：那会给历史盘上每一条 summary 平白加一个空字段（详见下方写回门注释）。
-		return prev.agentResponseGenerationStopped ?? null;
+	if (
+		resolveSessionFacets(prev).turnOwner !== "user" ||
+		prev.runtimeSessionIncarnationId !== merged.runtimeSessionIncarnationId
+	) {
+		return {
+			...merged,
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt: domainEventObservedAtEpochMs,
+				signalConfidence: deriveAgentResponseGenerationStopSignalConfidence(merged),
+				turnSequence: merged.agentResponseGenerationTurnSequence ?? 0,
+			},
+		};
 	}
-	return {
-		// 锚点取这次状态转移发生的瞬间：通常就是本次写入时刻；spool 晚送达的 Stop hook 取它的捕获时刻
-		// （见 resolveDomainEventObservedAtEpochMs）。刻意不取 lastOutputAt / lastSubstantiveOutputAt：
-		// 前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
-		stoppedAt: domainEventObservedAtEpochMs,
-		signalConfidence: deriveAgentResponseGenerationStopSignalConfidence(mergedWithFacets),
-		turnSequence: mergedWithFacets.agentResponseGenerationTurnSequence ?? 0,
-	};
+	return previous == null ? merged : { ...merged, currentAgentProcessUserTurnIdleRetentionStarted: previous };
 }
 
-// 停止事件的边沿判据：本次写是不是「球刚回到人这边、本活体这一轮刚刚停止生成」的那一刻。
-// 仅在 mergedWithFacets 已确认处于 user 回合时调用（agent 回合 / idle 在上游已直接返回 null）。
-//
-// 判据①「prev 不在 user 回合」取**宽**口径（非 user → user），而非更窄的「agent → user」，与
-// didEnterAgentTurn 的「非 agent → agent」严格对偶。两者在本仓库转移图上的唯一差别是 turnOwner===null
-// （idle，即 state==="idle"）这一侧：spawn 失败（idle → state:"failed"）、以及构造点直接落
-// interrupted / awaiting_review 的会话，都是从未经过任何 agent 回合的 idle→user。窄判据会让这些会话
-// 永远拿不到停止事件（药丸无从显示「停了多久」）；宽判据给它们一个 turnSequence===0 的事件，
-// signalConfidence 自然落到 session_ready_never_prompted——那条枚举正是为「就绪但从未被 prompt」而设。
-//
-// 判据②「换活体也算新边沿」：本字段的语义是「**本次 incarnation** 何时进入非生成态」，上一个活体留下的
-// 事件说的是上一个进程的事，代表不了新活体的这一轮（停止事件与 runtimeSessionIncarnationId 共同构成
-// 回收侧「陈旧定时器」防护的双键，跨活体沿用会直接毁掉这重防护）。跨活体的「对话上次推进」是另一个量
-// lastConversationProgressObservation 的职责，不该由本字段兼任。
-// 这不构成「无关写入刷时间戳」的口子：merged = {...prev, ...patch}，两者只有在 patch **显式携带**新 id
-// 时才不同，而写入点只有 src/terminal/session-manager.ts、src/cline-sdk/cline-task-session-service.ts、
-// src/acp-client-session/acp-task-session-service.ts 三处真实 spawn / SDK 会话创建 / ACP 连接的
-// randomUUID()——那正是货真价实的会话生命周期事件，不是元数据噪声。
-//
-// 刻意**不**再把回合序号并入判据：序号只由 didEnterAgentTurn 在「进入 agent 回合」时推进，而那一刻
-// turnOwner==="agent" 已在上游直接返回 null，故 user 稳态内序号根本不会自行变化。剩下唯一能改动它的是
-// 磁盘水合式的显式 patch——而那恰恰是最不该被当成「刚刚停止」的一类写（历史序号回填 ≠ 此刻停止）。
-function didEnterUserTurnEndingAgentResponseGeneration(
+function resolveHistoricalUserHandoffPatch(
 	prev: RuntimeTaskSessionSummary,
-	mergedWithFacets: RuntimeTaskSessionSummary,
-): boolean {
-	if (resolveSessionFacets(prev).turnOwner !== "user") {
-		return true;
+	patch: Partial<RuntimeTaskSessionSummary>,
+	merged: RuntimeTaskSessionSummary,
+	domainEventObservedAtEpochMs: number,
+): RuntimeTaskSessionSummary {
+	if (patch.lastAgentConversationUserHandoffObservation !== undefined) {
+		const incoming = patch.lastAgentConversationUserHandoffObservation;
+		const previous = prev.lastAgentConversationUserHandoffObservation;
+		if (
+			incoming &&
+			(!Number.isFinite(incoming.observedAtMs) ||
+				incoming.observedAtMs <= 0 ||
+				incoming.observedAtMs > merged.updatedAt + 60_000 ||
+				(previous && previous.observedAtMs > incoming.observedAtMs))
+		) {
+			return { ...merged, lastAgentConversationUserHandoffObservation: previous ?? null };
+		}
+		return merged;
 	}
-	return prev.runtimeSessionIncarnationId !== mergedWithFacets.runtimeSessionIncarnationId;
+	const previousFacets = resolveSessionFacets(prev);
+	const currentFacets = resolveSessionFacets(merged);
+	const isEndingCurrentProcess =
+		merged.runtimeSessionIncarnationId == null &&
+		prev.runtimeSessionIncarnationId != null &&
+		(currentFacets.liveness === "interrupted" || currentFacets.liveness === "exited");
+	if (
+		previousFacets.turnOwner !== "agent" ||
+		previousFacets.liveness === "starting" ||
+		resolveSessionFacets(merged).turnOwner !== "user" ||
+		resolveSessionFacets(merged).liveness === "failed" ||
+		(prev.runtimeSessionIncarnationId !== merged.runtimeSessionIncarnationId && !isEndingCurrentProcess) ||
+		isParkedAwaitingDispatchedBackgroundWork(merged) ||
+		merged.reviewReason === "manual_review" ||
+		(merged.agentResponseGenerationTurnSequence ?? 0) === 0
+	)
+		return merged;
+	const confidence = deriveAgentResponseGenerationStopSignalConfidence(merged);
+	if (confidence === "session_ready_never_prompted") return merged;
+	const previous = prev.lastAgentConversationUserHandoffObservation;
+	if (previous && previous.observedAtMs > domainEventObservedAtEpochMs) return merged;
+	return {
+		...merged,
+		lastAgentConversationUserHandoffObservation: {
+			observedAtMs: domainEventObservedAtEpochMs,
+			signalConfidence: confidence,
+			turnSequence: merged.agentResponseGenerationTurnSequence ?? 0,
+		},
+	};
 }
 
 // 「本轮何时开始生成」边沿事件的唯一写点：与回合序号 +1 同一分支，故三条 transport 自动一致，且只在
@@ -884,6 +889,9 @@ export function deriveAgentResponseGenerationStopSignalConfidence(
 		// 刻意不伪造一个 lastOutputAt 式的时间戳。
 		return "session_ready_never_prompted";
 	}
+	if (isAgentAwaitingModalUserDecision(resolveSessionFacets(summary))) {
+		return "structured_user_turn";
+	}
 	if (summary.reviewReason === "idle_stall") {
 		// scanForStalls 的自愈兜底：harness 没给回合结束信号，靠「停在交互提示符 + 实质静默 5 分钟」推断。
 		return "prompt_ready_fallback";
@@ -936,6 +944,7 @@ export function isReclamationDeadlineStillCurrentForSession(
 // agent 回合有意义」由消费者自行收窄（user 回合的 live=终端 agent 在 prompt 待命，不应被当作在算）。
 export type SessionDisplayLiveness = Exclude<RuntimeTaskSessionLiveness, "live"> | "computing" | "quiet";
 
+// 旧接口保留兼容；产品展示应使用 deriveSessionRecentEffectiveActivityDisplayLiveness。
 export function deriveDisplayLiveness(
 	facets: SessionFacets,
 	lastOutputAt: number | null | undefined,
@@ -947,4 +956,27 @@ export function deriveDisplayLiveness(
 	}
 	const activeWindowMs = options.activeWindowMs ?? VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS;
 	return isAgentOutputWithinActiveWindow(lastOutputAt, nowMs, activeWindowMs) ? "computing" : "quiet";
+}
+
+// 展示的是可信活动的新鲜度，不能将其解释成模型此刻正在计算。
+export type SessionRecentEffectiveActivityDisplayLiveness =
+	| Exclude<RuntimeTaskSessionLiveness, "live">
+	| "recent_effective_activity"
+	| "quiet";
+
+export function deriveSessionRecentEffectiveActivityDisplayLiveness(
+	summary: RuntimeTaskSessionSummary,
+	nowMs: number,
+	options: { activeWindowMs?: number } = {},
+): SessionRecentEffectiveActivityDisplayLiveness {
+	const facets = resolveSessionFacets(summary);
+	if (facets.liveness !== "live") return facets.liveness;
+	return facets.turnOwner === "agent" &&
+		isAgentOutputWithinActiveWindow(
+			resolveLastEffectiveAgentConversationActivityObservation(summary)?.observedAtMs,
+			nowMs,
+			options.activeWindowMs ?? VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
+		)
+		? "recent_effective_activity"
+		: "quiet";
 }

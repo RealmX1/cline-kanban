@@ -11,9 +11,10 @@ vi.mock("../../../src/state/workspace-state", () => ({
 		join(testRuntimeHome.path, "workspaces", workspaceId, "sessions.json"),
 }));
 
-const { loadWorkspaceAgentConversationProgressObservedAtByTaskId } = await import(
-	"../../../src/state/workspace-agent-conversation-progress-observed-at-reader"
-);
+const {
+	loadWorkspaceAgentConversationProgressObservedAtByTaskId,
+	loadWorkspaceAgentConversationProgressAndOwnershipSnapshot,
+} = await import("../../../src/state/workspace-agent-conversation-progress-observed-at-reader");
 
 // 读取器按 workspaceId 做模块级缓存：每个用例用自己的 id，免得上一个用例的缓存串进来。
 let WORKSPACE_ID = "";
@@ -37,6 +38,82 @@ describe("loadWorkspaceAgentConversationProgressObservedAtByTaskId", () => {
 
 	afterEach(async () => {
 		await rm(testRuntimeHome.path, { recursive: true, force: true });
+	});
+
+	it("同次读取缓存最小owner事实，区分legacy缺失与损坏metadata", async () => {
+		const observation = {
+			observedAtMs: 100,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		};
+		await writeSessionsFile(
+			JSON.stringify({
+				legacy: { lastEffectiveAgentConversationActivityObservation: observation },
+				owned: {
+					lastEffectiveAgentConversationActivityObservation: observation,
+					taskConversationSessionMetadata: { workspaceTaskId: "card" },
+				},
+				invalid: {
+					lastEffectiveAgentConversationActivityObservation: observation,
+					taskConversationSessionMetadata: {},
+				},
+			}),
+		);
+		const snapshot = await loadWorkspaceAgentConversationProgressAndOwnershipSnapshot(WORKSPACE_ID);
+		expect(snapshot.workspaceTaskIdByConversationSessionId).toEqual(
+			new Map([
+				["owned", "card"],
+				["invalid", null],
+			]),
+		);
+		expect(snapshot.agentConversationProgressObservedAtByTaskId).toEqual(
+			new Map([
+				["legacy", 100],
+				["owned", 100],
+				["invalid", 100],
+			]),
+		);
+		expect(await loadWorkspaceAgentConversationProgressAndOwnershipSnapshot(WORKSPACE_ID)).toBe(snapshot);
+		expect(await loadWorkspaceAgentConversationProgressObservedAtByTaskId(WORKSPACE_ID)).toBe(
+			snapshot.agentConversationProgressObservedAtByTaskId,
+		);
+	});
+
+	it("明确清空的新投影与旧TUI猜测都不回落到历史旧值", async () => {
+		await writeSessionsFile(
+			JSON.stringify({
+				explicitlyCleared: {
+					lastEffectiveAgentConversationActivityObservation: null,
+					lastConversationProgressObservation: { observedAtMs: 100, evidenceKind: "persisted_agent_transcript" },
+				},
+				heuristicOnly: {
+					lastConversationProgressObservation: {
+						observedAtMs: 200,
+						evidenceKind: "terminal_output_heuristic_classification",
+					},
+				},
+			}),
+		);
+		await expect(loadWorkspaceAgentConversationProgressObservedAtByTaskId(WORKSPACE_ID)).resolves.toEqual(new Map());
+	});
+
+	it("未加载项目优先读取统一有效活动，旧输出与旧推进不能覆盖它", async () => {
+		await writeSessionsFile(
+			JSON.stringify({
+				main: {
+					lastEffectiveAgentConversationActivityObservation: {
+						observedAtMs: 200,
+						evidenceKind: "persisted_agent_transcript",
+						activityKind: "accepted_user_input",
+					},
+					lastConversationProgressObservation: { observedAtMs: 100, evidenceKind: "persisted_agent_transcript" },
+					lastSubstantiveOutputAt: 900,
+				},
+			}),
+		);
+		await expect(loadWorkspaceAgentConversationProgressObservedAtByTaskId(WORKSPACE_ID)).resolves.toEqual(
+			new Map([["main", 200]]),
+		);
 	});
 
 	it("returns an empty map when the workspace never wrote a sessions file", async () => {
@@ -71,7 +148,9 @@ describe("loadWorkspaceAgentConversationProgressObservedAtByTaskId", () => {
 		// 这是纯排序 / 展示用的量：一条形状不对的历史摘要不该连累同项目其它任务的推进时刻。
 		await writeSessionsFile(
 			JSON.stringify({
-				"task-good": { lastConversationProgressObservation: { observedAtMs: 42, evidenceKind: "x" } },
+				"task-good": {
+					lastConversationProgressObservation: { observedAtMs: 42, evidenceKind: "persisted_agent_transcript" },
+				},
 				"task-bad-instant": { lastConversationProgressObservation: { observedAtMs: "yesterday" } },
 				"task-not-an-object": 7,
 			}),
@@ -97,10 +176,14 @@ describe("loadWorkspaceAgentConversationProgressObservedAtByTaskId", () => {
 	it("reuses the previous parse while the file's mtime and size are unchanged, and re-reads once either moves", async () => {
 		// 缓存命中的直证：内容换了、字节数与 mtime 却被刻意钉成原样 → 仍返回旧解析结果（没有重新读盘）。
 		const firstContents = JSON.stringify({
-			"task-a": { lastConversationProgressObservation: { observedAtMs: 111 } },
+			"task-a": {
+				lastConversationProgressObservation: { observedAtMs: 111, evidenceKind: "persisted_agent_transcript" },
+			},
 		});
 		const sameSizeContents = JSON.stringify({
-			"task-a": { lastConversationProgressObservation: { observedAtMs: 999 } },
+			"task-a": {
+				lastConversationProgressObservation: { observedAtMs: 999, evidenceKind: "persisted_agent_transcript" },
+			},
 		});
 		expect(sameSizeContents.length).toBe(firstContents.length);
 		await writeSessionsFile(firstContents);
