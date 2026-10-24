@@ -72,13 +72,13 @@ import {
 	type CodexNativeDirectInputReadinessObservation,
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
 } from "../core/codex-native-direct-input-readiness";
-import { resolveKanbanCommandParts } from "../core/kanban-command";
 import {
 	applyCodexAutomaticCompactionPhaseObservation,
 	type CodexRvfCloseoutCompactionAwareConfirmation,
 	createCodexRvfCloseoutCompactionAwareConfirmation,
 	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
 } from "../core/codex-rvf-closeout-compaction-aware-confirmation";
+import { resolveKanbanCommandParts } from "../core/kanban-command";
 import {
 	applySessionFacets,
 	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
