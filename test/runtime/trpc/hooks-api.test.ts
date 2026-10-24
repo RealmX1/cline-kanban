@@ -1380,6 +1380,72 @@ describe("createHooksApi", () => {
 		);
 	});
 
+	it("PreCompact 只关联阶段，不写身份、不产生接受或 Stop；重复 hook 幂等", async () => {
+		const identity = {
+			sourceAgentId: "codex" as const,
+			nativeSessionId: "native-1",
+			transcriptPath: "/isolated/native.jsonl",
+			observedAt: 1,
+		};
+		const current = createSummary({ agentId: "codex", agentNativeConversationSessionIdentity: identity });
+		const applied = new Set<string>();
+		const observe = vi.fn(async () => {});
+		const persist = vi.fn();
+		const transition = vi.fn();
+		const manager = {
+			getSummary: () => current,
+			observeRvfCloseoutNativeCompactionPhase: observe,
+			applyAgentNativeConversationSessionIdentity: persist,
+			transitionToRunning: transition,
+			transitionToReview: transition,
+			hasAppliedHookEventDeliveryIdempotencyKey: (_task: string, key: string) => applied.has(key),
+			rememberAppliedHookEventDeliveryIdempotencyKey: (_task: string, key: string) => applied.add(key),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/isolated/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		const input = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_started" as const,
+			metadata: { source: "codex", hookEventName: "PreCompact" },
+			agentNativeConversationSessionIdentity: identity,
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction" as const,
+			mainAgentConversationContextCompactionNativeTurnId: "turn-1",
+			hookRuntimeSessionIncarnationId: "e96aa879-02a4-480e-bbd6-97b7e5e83843",
+			hookEventCapturedAtEpochMs: 1000,
+			hookEventDeliveryIdempotencyKey: "unique-precompact",
+		};
+		expect(await api.ingest(input)).toEqual({ ok: true });
+		expect(await api.ingest(input)).toEqual({ ok: true });
+		expect(observe).toHaveBeenCalledOnce();
+		expect(observe).toHaveBeenCalledWith(
+			"task-1",
+			expect.objectContaining({ phase: "started", nativeSessionId: "native-1", nativeTurnId: "turn-1" }),
+		);
+		expect(persist).not.toHaveBeenCalled();
+		expect(transition).not.toHaveBeenCalled();
+		await api.ingest({
+			...input,
+			hookEventDeliveryIdempotencyKey: "old-identity",
+			agentNativeConversationSessionIdentity: { ...identity, transcriptPath: "/old/other.jsonl" },
+		});
+		await api.ingest({
+			...input,
+			hookEventDeliveryIdempotencyKey: "subagent",
+			hookEventFiredInsideSubagentContext: true,
+		});
+		await api.ingest({
+			...input,
+			hookEventDeliveryIdempotencyKey: "manual",
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "manual_compact_command",
+		});
+		expect(observe).toHaveBeenCalledOnce();
+	});
+
 	// 压缩完成（PostCompact）只推进 Cache warm 起点：不推进对话推进、不刷新活动行、不转移回合、不产生通知。
 	it("Cache warm 起点：用户回合里的手动压缩记一次替换类观测（带 harness 报的上下文大小），其余一概不碰", async () => {
 		const manager = {

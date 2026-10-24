@@ -22,6 +22,7 @@ import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
 } from "../core/task-message-injection-ledger";
+import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import type { TaskChatInputDeliveryOutcomeObserver, TerminalSessionManager } from "../terminal/session-manager";
 import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../terminal/stash-task-terminal-input-box-into-prompt-library";
@@ -224,7 +225,21 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 							terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
 						};
 					}
+					const targetTerminalSummary =
+						body.source === "rvf_automatic_closeout" ? terminalManager.getSummary(body.taskId) : null;
+					const rvfCloseoutCompactionConfirmationPersistence =
+						body.source === "rvf_automatic_closeout" && injectionIdempotencyKey && targetTerminalSummary
+							? await resolveRvfCloseoutCompactionConfirmationPersistence({
+									workspaceId: workspaceScope.workspaceId,
+									summary: targetTerminalSummary,
+									idempotencyKey: injectionIdempotencyKey,
+									promptText: body.text,
+								})
+							: null;
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
+						...(rvfCloseoutCompactionConfirmationPersistence
+							? { rvfCloseoutCompactionConfirmationPersistence }
+							: {}),
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,

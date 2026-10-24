@@ -4,6 +4,7 @@ import type {
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
 } from "../core/api-contract";
+import type { CodexRvfCloseoutCompactionAwareConfirmation } from "../core/codex-rvf-closeout-compaction-aware-confirmation";
 import type { AgentOutputSubstanceMemory } from "./agent-output-substance";
 import type { AgentOutputTransitionDetector, AgentOutputTransitionInspectionPredicate } from "./agent-session-adapters";
 import type { KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch } from "./cursor-agent-chat-launch-identity-orchestration";
@@ -20,6 +21,10 @@ import type { TerminalPtyProcessHandle } from "./terminal-pty-process-handle";
 // session-manager 里会继续加重这个已近 6000 行的文件，放在别处又会与它循环导入。
 
 export interface ActiveProcessState {
+	// 启动时实际配置成功才为 true；旧会话不会因 runtime 升级自动获得新 hook。
+	codexAutomaticCompactionPhaseHooksConfigured: boolean;
+	// 只含绑定与有界计时，不保存 callback 或额外正文；账本是跨进程 CAS 的主存储。
+	nativeCompactionAwareConfirmation: CodexRvfCloseoutCompactionAwareConfirmation | null;
 	session: TerminalPtyProcessHandle;
 	workspaceTrustBuffer: string | null;
 	cols: number;

@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import {
@@ -71,6 +72,12 @@ import {
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
 } from "../core/codex-native-direct-input-readiness";
 import {
+	applyCodexAutomaticCompactionPhaseObservation,
+	type CodexRvfCloseoutCompactionAwareConfirmation,
+	createCodexRvfCloseoutCompactionAwareConfirmation,
+	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
+} from "../core/codex-rvf-closeout-compaction-aware-confirmation";
+import {
 	applySessionFacets,
 	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
 	deriveSessionFacetsFromLegacyState,
@@ -88,15 +95,26 @@ import {
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
 import {
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+	recordTaskMessageTerminalDeliveryOutcome,
+} from "../core/task-message-injection-ledger";
+import {
 	recordTaskSessionAutoRestartDecision,
 	recordTaskSessionStartRequestFoldedIntoRunningSession,
 	type TaskSessionStartOrigin,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
+import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
 import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import {
+	type RvfCloseoutCompactionConfirmationPersistence,
+	resolveRvfCloseoutCompactionConfirmationPersistence,
+} from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import {
 	createAgentOutputSubstanceMemory,
 	detectFreshSubstantiveAgentOutputFromStripped,
@@ -331,7 +349,7 @@ const SUBMIT_CONFIRM_MAX_RESENDS = 3;
 // 跨仓契约里「人类打字让路」那一档），且 > 补发预算 SUBMIT_CONFIRM_DELAY_MS × (MAX_RESENDS + 1) = 10s，
 // 故纯静默路径的收尾时机不变，本上界只对被让位拖长的链生效。
 const SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS = 15_000;
-// EXPERIMENT_NODE: 取得本代且可关联 turn 的原生压缩开始/结束证据后，评估独立有限压缩等待预算；task_started 不能替代正文接受。
+// 普通确认预算不变；绑定的 Codex RVF 收尾仅在可信自动压缩期间使用独立的累计 300 秒预算。
 // 形态 2（粘贴进框但回车被吞）的**根治**：bracketed paste 的框架与提交用的 CR 分两次写，第二次以
 // 「TUI 已摄入这段 paste」为门。旧实现把 `ESC[200~…ESC[201~CR` 拼在同一次 write 里，TUI 在重绘中途
 // 一次性收到整串时会把末尾 CR 连同 `ESC[201~` 一起吞掉。补发裸 CR 的确认链自此退居真正的 backstop：
@@ -1193,6 +1211,11 @@ export interface TerminalSessionManagerOptions {
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
+	private readonly compactionConfirmationPersistenceByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		RvfCloseoutCompactionConfirmationPersistence
+	>();
+	private readonly compactionConfirmationMutationByActiveProcess = new WeakMap<ActiveProcessState, Promise<void>>();
 	private readonly connectionRetryEpisodeGenerationByActiveProcess = new WeakMap<ActiveProcessState, number>();
 	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {}
 
@@ -1739,6 +1762,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		text: string,
 		options?: {
+			// 仅绑定的 RVF 自动收尾出口提供；不是公开请求中的任意超时参数。
+			rvfCloseoutCompactionConfirmationPersistence?: RvfCloseoutCompactionConfirmationPersistence | null;
 			deferWhileUserTurn?: boolean;
 			requiresCodexStartupPromptReady?: boolean;
 			validateBeforeTerminalWrite?: () => Promise<void>;
@@ -1755,6 +1780,28 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry || !active) {
 			return null;
 		}
+		const compactionPersistence = options?.rvfCloseoutCompactionConfirmationPersistence;
+		if (
+			compactionPersistence &&
+			(compactionPersistence.promptText !== text ||
+				compactionPersistence.binding.conversationSessionId !== taskId ||
+				compactionPersistence.binding.nativeSessionId !==
+					entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ||
+				compactionPersistence.binding.runtimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId ||
+				compactionPersistence.binding.controlHostSocketPath !==
+					entry.summary.codexNativeSessionControlEndpoint?.socketPath)
+		) {
+			options.onDeliveryOutcome?.({ status: "delivery_failed", reason: "session_ended_before_delivery" });
+			return cloneSummary(entry.summary);
+		}
+		active.nativeCompactionAwareConfirmation = null;
+		this.compactionConfirmationPersistenceByActiveProcess.delete(active);
+		this.compactionConfirmationMutationByActiveProcess.delete(active);
+		if (active.codexAutomaticCompactionPhaseHooksConfigured && options?.rvfCloseoutCompactionConfirmationPersistence)
+			this.compactionConfirmationPersistenceByActiveProcess.set(
+				active,
+				options.rvfCloseoutCompactionConfirmationPersistence,
+			);
 		const deferWhileUserTurn = options?.deferWhileUserTurn ?? false;
 		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（RVF followup）——一个 parked 会话收到投递就是被恢复，
 		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
@@ -2074,6 +2121,119 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	// Codex 优先通过本代原生控制面提交独立消息，composer 与用户配置的外部编辑器均不参与投递。
+	private async mutateCompactionConfirmationSnapshot(
+		taskId: string,
+		active: ActiveProcessState,
+		mutate: (
+			current: CodexRvfCloseoutCompactionAwareConfirmation | null,
+		) =>
+			| CodexRvfCloseoutCompactionAwareConfirmation
+			| null
+			| Promise<CodexRvfCloseoutCompactionAwareConfirmation | null>,
+	): Promise<void> {
+		const scheduledReceipt = active.programmaticDeliveryReceipt;
+		const scheduledContext = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+		const previousMutation = this.compactionConfirmationMutationByActiveProcess.get(active) ?? Promise.resolve();
+		const mutation = previousMutation.then(async () => {
+			const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+			if (
+				this.entries.get(taskId)?.active !== active ||
+				!context ||
+				context !== scheduledContext ||
+				active.programmaticDeliveryReceipt !== scheduledReceipt ||
+				!active.programmaticDeliveryReceipt ||
+				active.programmaticDeliveryReceipt.settled
+			)
+				return;
+			const previous = active.nativeCompactionAwareConfirmation;
+			const next = await mutate(previous);
+			if (!next || next === previous) return;
+			if (!(await context.persistSnapshot(next, previous?.revision ?? null)))
+				throw new Error("压缩确认快照未持久保存，未延长确认预算。");
+			if (
+				this.entries.get(taskId)?.active !== active ||
+				active.nativeCompactionAwareConfirmation !== previous ||
+				active.programmaticDeliveryReceipt !== scheduledReceipt ||
+				this.compactionConfirmationPersistenceByActiveProcess.get(active) !== scheduledContext
+			)
+				return;
+			active.nativeCompactionAwareConfirmation = next;
+			this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
+			logTuiFreezeWarning(
+				`[rvf-compaction-confirmation] session=${taskId} revision=${next.revision} phase=${next.phase} ` +
+					`ordinaryRemainingMs=${next.ordinaryConfirmationBudgetRemainingMs} compactionUsedMs=${next.accumulatedCompactionWaitMs} ` +
+					`deadline=${resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(next)}`,
+			);
+		});
+		// 不吞失败：确认链读取此 Promise 后会保守结算，hook 则返回失败让 spool 可以重验。
+		this.compactionConfirmationMutationByActiveProcess.set(active, mutation);
+		await mutation;
+	}
+
+	async observeRvfCloseoutNativeCompactionPhase(
+		taskId: string,
+		observation: {
+			workspaceId: string;
+			nativeSessionId: string;
+			nativeTurnId: string;
+			runtimeSessionIncarnationId: string;
+			phase: "started" | "completed";
+			capturedAtEpochMs: number;
+			receivedAtEpochMs: number;
+			hookDeliveryId: string;
+		},
+	): Promise<void> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		const state = active?.nativeCompactionAwareConfirmation;
+		const context = active && this.compactionConfirmationPersistenceByActiveProcess.get(active);
+		if (
+			!entry ||
+			!active ||
+			!state ||
+			!context ||
+			!active.codexAutomaticCompactionPhaseHooksConfigured ||
+			state.binding.workspaceId !== observation.workspaceId ||
+			state.binding.nativeSessionId !== observation.nativeSessionId ||
+			state.binding.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId ||
+			entry.summary.codexNativeSessionControlEndpoint?.socketPath !== state.binding.controlHostSocketPath ||
+			entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== observation.nativeSessionId ||
+			entry.summary.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId ||
+			observation.capturedAtEpochMs < state.firstSubmissionAtEpochMs
+		)
+			return;
+		await this.mutateCompactionConfirmationSnapshot(taskId, active, async (current) => {
+			if (!current || !(await context.validateStillAuthorized())) return current;
+			// task_started 只用于确认阶段归属；成功仍由原生 userMessage 的精确正文核验决定。
+			const belongsToSubmittedTurn = await withRunningCodexAppServerControlSocketConnection(
+				async (port) => {
+					const page = z.object({ data: z.array(z.object({ id: z.string(), status: z.string() })) }).parse(
+						await port.request("thread/turns/list", {
+							threadId: observation.nativeSessionId,
+							cursor: null,
+							limit: 2,
+							sortDirection: "desc",
+							itemsView: "full",
+						}),
+					);
+					return (
+						page.data[0]?.id === observation.nativeTurnId &&
+						(observation.phase === "completed" || page.data[0].status === "inProgress") &&
+						observation.nativeTurnId !== state.predecessorNativeTurnId &&
+						(state.nativeTurnId === null || state.nativeTurnId === observation.nativeTurnId)
+					);
+				},
+				{
+					socketPath: state.binding.controlHostSocketPath,
+					clientName: "kanban_rvf_compaction_phase",
+					requestTimeoutMs: 1_500,
+				},
+			);
+			if (!belongsToSubmittedTurn || this.entries.get(taskId)?.active !== active) return current;
+			return applyCodexAutomaticCompactionPhaseObservation(current, observation);
+		});
+	}
+
 	private async tryDeliverCodexNativePromptPreservingComposer(
 		plan: TaskChatInputDeliveryAttemptPlan,
 		entry: SessionEntry,
@@ -2133,13 +2293,57 @@ export class TerminalSessionManager implements TerminalSessionService {
 					return false;
 				return bindingStillMatches() && active.lastUserInputAt === capturedHumanInputAt;
 			},
-			onRequestAttempted: () => {
+			onRequestAttempted: async (observation) => {
+				const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+				if (context) {
+					if (!(await context.validateStillAuthorized())) throw new Error("自动收尾已暂停，未发送原生请求。");
+					await this.mutateCompactionConfirmationSnapshot(plan.taskId, active, () =>
+						createCodexRvfCloseoutCompactionAwareConfirmation({
+							binding: {
+								...context.binding,
+								terminalSessionSpawnedAtEpochMs: active.terminalSessionIncarnationSpawnedAtEpochMs,
+							},
+							firstSubmissionAtEpochMs: now(),
+							submissionTransport: "codex_native_request",
+							clientUserMessageId: plan.codexNativeClientUserMessageId,
+							predecessorNativeTurnId: observation?.predecessorNativeTurnId ?? null,
+							lastHumanInputAtSubmission: active.lastUserInputAt,
+						}),
+					);
+				}
 				if (receipt) {
 					receipt.phase = "awaiting_codex_native_acceptance_confirmation";
 					receipt.firstSubmitCarriageReturnAtEpochMs = now();
 				}
 				this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
 			},
+			...(this.compactionConfirmationPersistenceByActiveProcess.has(active)
+				? {
+						confirmationDeadlineAtEpochMs: async () => {
+							try {
+								await this.compactionConfirmationMutationByActiveProcess.get(active);
+							} catch {
+								return 0;
+							}
+							const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+							if (!context || !(await context.validateStillAuthorized())) return 0;
+							const state = active.nativeCompactionAwareConfirmation;
+							return state ? resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(state) : 0;
+						},
+						onNativeTurnStarted: async (nativeTurnId: string) => {
+							await this.mutateCompactionConfirmationSnapshot(plan.taskId, active, (current) =>
+								current && current.nativeTurnIdReturnedBySubmissionRequest === undefined
+									? {
+											...current,
+											nativeTurnId,
+											nativeTurnIdReturnedBySubmissionRequest: nativeTurnId,
+											revision: current.revision + 1,
+										}
+									: current,
+							);
+						},
+					}
+				: {}),
 		});
 		if (!isCurrent() || active.programmaticDeliveryReceipt !== receipt) return true;
 		if (!bindingStillMatches()) {
@@ -2159,7 +2363,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return true;
 		}
 		if (result.status === "unconfirmed") {
-			settleActiveProgrammaticDelivery(active, "delivery_failed", "codex_native_prompt_delivery_unconfirmed");
+			settleActiveProgrammaticDelivery(
+				active,
+				"delivery_failed",
+				active.nativeCompactionAwareConfirmation
+					? "submit_confirmation_budget_exhausted"
+					: "codex_native_prompt_delivery_unconfirmed",
+			);
 			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
 			return true;
 		}
@@ -2662,6 +2872,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		if (active.programmaticDeliveryReceipt?.phase === "awaiting_submit_confirmation") {
+			const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+			if (context && !active.nativeCompactionAwareConfirmation) {
+				const cursor = active.programmaticDeliveryReceipt.nativeConversationActivityCursorImmediatelyBeforeSubmit;
+				await this.mutateCompactionConfirmationSnapshot(taskId, active, () =>
+					createCodexRvfCloseoutCompactionAwareConfirmation({
+						binding: {
+							...context.binding,
+							terminalSessionSpawnedAtEpochMs: active.terminalSessionIncarnationSpawnedAtEpochMs,
+						},
+						firstSubmissionAtEpochMs: now(),
+						submissionTransport: "pty_submission",
+						clientUserMessageId: null,
+						predecessorNativeTurnId: cursor?.transport === "codex_control" ? cursor.predecessorTurnId : null,
+						lastHumanInputAtSubmission: active.lastUserInputAt,
+					}),
+				);
+				if (!isOriginalSubmitTargetStillCurrent()) return;
+			}
 			active.programmaticDeliveryReceipt.nativeConversationIdentityImmediatelyBeforeFirstSubmitCarriageReturn ??=
 				nativeIdentityBeforeSubmit;
 			active.programmaticDeliveryReceipt.firstSubmitCarriageReturnAtEpochMs ??= now();
@@ -2763,6 +2991,38 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.summary,
 		);
 		const confirmationReceipt = active.programmaticDeliveryReceipt;
+		await this.compactionConfirmationMutationByActiveProcess.get(active);
+		const compactionConfirmation = active.nativeCompactionAwareConfirmation;
+		if (compactionConfirmation) {
+			const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
+			if (!context || !(await context.validateStillAuthorized())) {
+				if (active.programmaticDeliveryReceipt === confirmationReceipt)
+					settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+						active,
+						"delivery_failed",
+						"cancelled_before_delivery",
+					);
+				return;
+			}
+			if (this.entries.get(taskId)?.active !== active || active.programmaticDeliveryReceipt !== confirmationReceipt)
+				return;
+			convergenceDeadlineAt = resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(compactionConfirmation);
+			if (
+				compactionConfirmation.phase === "waiting_for_automatic_context_compaction" &&
+				now() < convergenceDeadlineAt
+			) {
+				this.scheduleSubmitConfirmTick(
+					taskId,
+					active,
+					generation,
+					resendsLeft,
+					convergenceDeadlineAt,
+					promptText,
+					validateBeforeTerminalWrite,
+				);
+				return;
+			}
+		}
 		const isOriginalConfirmationTargetStillCurrent = () => {
 			const current = this.entries.get(taskId);
 			return (
@@ -3415,6 +3675,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const outputTransitionDetection =
 			adoptsTaskAgentSession && agentId !== null ? resolveAgentOutputTransitionDetectionForAgentId(agentId) : {};
 		const active: ActiveProcessState = {
+			codexAutomaticCompactionPhaseHooksConfigured:
+				carriedFields?.codexAutomaticCompactionPhaseHooksConfigured === true,
+			nativeCompactionAwareConfirmation: carriedFields?.nativeCompactionAwareConfirmation ?? null,
 			session: adoptedHandle,
 			workspaceTrustBuffer: carriedFields?.workspaceTrustBuffer ?? null,
 			cols: adoptionCandidate.cols,
@@ -3487,10 +3750,183 @@ export class TerminalSessionManager implements TerminalSessionService {
 			};
 		}
 		if (adoptsTaskAgentSession) {
+			// 独占接管和原宿主验证完成后才恢复观测；绝不走 submitTaskChatInputWhenReady 重发。
+			this.resumeRvfCloseoutConfirmationAfterAdoptionWithBoundedRetries(taskId, active);
 			this.nudgeAdoptedTerminalUserInterfaceToRedrawFullScreen(taskId, active);
 			this.reevaluateScreenDependentEdgesAfterHostedSessionAdoption(taskId, active, screenTextAfterCatchUp);
 		}
 		return { taskId, adoptionOutcome: "adopted_running_session", summarySource: summaryChoice.summarySource };
+	}
+
+	private resumeRvfCloseoutConfirmationAfterAdoptionWithBoundedRetries(
+		taskId: string,
+		active: ActiveProcessState,
+		retriesRemaining = 2,
+	): void {
+		void this.resumePersistedRvfCloseoutConfirmationAfterHostedSessionAdoption(taskId, active).catch(
+			(error: unknown) => {
+				logTuiFreezeError(
+					`[rvf-compaction-confirmation] adoption-observation-blocked session=${taskId} retriesRemaining=${retriesRemaining}`,
+					error,
+				);
+				if (
+					retriesRemaining <= 0 ||
+					this.entries.get(taskId)?.active !== active ||
+					active.programmaticDeliveryReceipt
+				)
+					return;
+				const retryTimer = setTimeout(() => {
+					if (this.entries.get(taskId)?.active !== active || active.programmaticDeliveryReceipt) return;
+					active.submitConfirmTimer = null;
+					this.resumeRvfCloseoutConfirmationAfterAdoptionWithBoundedRetries(taskId, active, retriesRemaining - 1);
+				}, 500);
+				retryTimer.unref?.();
+				active.submitConfirmTimer = retryTimer;
+			},
+		);
+	}
+
+	private async resumePersistedRvfCloseoutConfirmationAfterHostedSessionAdoption(
+		taskId: string,
+		active: ActiveProcessState,
+	): Promise<void> {
+		const entry = this.entries.get(taskId);
+		const capturedSummary = entry && cloneSummary(entry.summary);
+		const endpoint = capturedSummary?.codexNativeSessionControlEndpoint;
+		if (
+			!entry ||
+			!capturedSummary ||
+			entry.active !== active ||
+			!endpoint ||
+			!active.codexAutomaticCompactionPhaseHooksConfigured
+		)
+			return;
+		const capturedNativeIdentity =
+			buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(capturedSummary);
+		const capturedTerminalSessionSpawnedAtEpochMs = active.terminalSessionIncarnationSpawnedAtEpochMs;
+		const bindingStillMatches = () => {
+			const currentEntry = this.entries.get(taskId);
+			return (
+				currentEntry?.active === active &&
+				active.terminalSessionIncarnationSpawnedAtEpochMs === capturedTerminalSessionSpawnedAtEpochMs &&
+				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(currentEntry.summary) ===
+					capturedNativeIdentity
+			);
+		};
+		const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(endpoint.workspaceId));
+		const ledger = await readTaskMessageInjectionLedger(ledgerPath);
+		if (!bindingStillMatches() || active.programmaticDeliveryReceipt) return;
+		const matching = ledger.filter((record) => {
+			const state = record.nativeCompactionAwareConfirmation;
+			return (
+				record.terminal_delivery_status === "accepted_pending_submit_confirmation" &&
+				state &&
+				state.binding.conversationSessionId === taskId &&
+				state.binding.controlHostSocketPath === endpoint.socketPath &&
+				state.binding.runtimeSessionIncarnationId === capturedSummary.runtimeSessionIncarnationId &&
+				state.binding.nativeSessionId === capturedSummary.agentNativeConversationSessionIdentity?.nativeSessionId &&
+				state.binding.terminalSessionSpawnedAtEpochMs === active.terminalSessionIncarnationSpawnedAtEpochMs
+			);
+		});
+		if (matching.length !== 1) return;
+		const record = matching[0];
+		const persistedState = record?.nativeCompactionAwareConfirmation;
+		if (!record || !persistedState) return;
+		let state = persistedState;
+		const context = await resolveRvfCloseoutCompactionConfirmationPersistence({
+			workspaceId: endpoint.workspaceId,
+			summary: capturedSummary,
+			idempotencyKey: state.binding.idempotencyKey,
+			resumeExistingSubmissionOnly: true,
+		});
+		if (
+			!context ||
+			Object.entries(context.binding).some(
+				([key, value]) => state.binding[key as keyof typeof state.binding] !== value,
+			) ||
+			!bindingStillMatches() ||
+			active.programmaticDeliveryReceipt
+		)
+			return;
+		state = {
+			...state,
+			revision: state.revision + 1,
+			verifiedRuntimeAdoptionCount: (state.verifiedRuntimeAdoptionCount ?? 0) + 1,
+			lastVerifiedRuntimeAdoptionAtEpochMs: now(),
+		};
+		if (
+			!(await context.persistSnapshot(state, persistedState.revision)) ||
+			!bindingStillMatches() ||
+			active.programmaticDeliveryReceipt
+		)
+			return;
+		active.nativeCompactionAwareConfirmation = state;
+		this.compactionConfirmationPersistenceByActiveProcess.set(active, context);
+		const receipt: PendingProgrammaticDeliveryReceipt = {
+			idempotencyKey: state.binding.idempotencyKey,
+			promptText: context.promptText,
+			phase: "awaiting_codex_native_acceptance_confirmation",
+			firstSubmitCarriageReturnAtEpochMs: state.firstSubmissionAtEpochMs,
+			outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
+			queuedBehindActiveAgentTurn: false,
+			settled: false,
+			observer: (outcome) => {
+				void recordTaskMessageTerminalDeliveryOutcome({
+					ledgerPath,
+					taskId: record.task_id,
+					idempotencyKey: state.binding.idempotencyKey,
+					status: outcome.status,
+					...(outcome.reason ? { failureReason: outcome.reason } : {}),
+					...(outcome.codexNativePromptDeliveryEvidence
+						? { codexNativePromptDeliveryEvidence: outcome.codexNativePromptDeliveryEvidence }
+						: {}),
+					nowIso: new Date(now()).toISOString(),
+				}).catch((error: unknown) =>
+					logTuiFreezeError(
+						`[rvf-compaction-confirmation] adoption-result-persistence-failed session=${taskId}`,
+						error,
+					),
+				);
+			},
+		};
+		active.programmaticDeliveryReceipt = receipt;
+		const isCurrent = () => bindingStillMatches() && active.programmaticDeliveryReceipt === receipt;
+		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
+		const sender =
+			this.terminalSessionManagerOptions.deliverCodexNativePromptWithoutChangingComposer ??
+			deliverCodexNativePromptWithoutChangingComposer;
+		const result = await sender({
+			summary: capturedSummary,
+			workspaceId: endpoint.workspaceId,
+			text: context.promptText,
+			clientUserMessageId: state.clientUserMessageId ?? `observation-only:${state.binding.idempotencyKey}`,
+			previouslySubmitted: {
+				predecessorNativeTurnId: state.predecessorNativeTurnId,
+				// 旧快照或 PTY 阶段 turn 没有提交响应证据，不能冒领停机期间的人工或其他自动消息。
+				nativeTurnId: state.nativeTurnIdReturnedBySubmissionRequest ?? null,
+			},
+			isCurrent,
+			beforeSubmit: async () => false,
+			onRequestAttempted: () => {
+				throw new Error("接管后的确认不得再次发送原生请求。");
+			},
+			confirmationDeadlineAtEpochMs: async () => {
+				if (!isCurrent()) return 0;
+				try {
+					await this.compactionConfirmationMutationByActiveProcess.get(active);
+				} catch {
+					return 0;
+				}
+				if (!isCurrent() || !(await context.validateStillAuthorized()) || !isCurrent()) return 0;
+				return resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(
+					active.nativeCompactionAwareConfirmation ?? state,
+				);
+			},
+		});
+		if (!isCurrent()) return;
+		if (result.status === "confirmed")
+			settleActiveProgrammaticDelivery(active, "delivered_and_submit_confirmed", null, result.evidence);
+		else settleActiveProgrammaticDelivery(active, "delivery_failed", "submit_confirmation_budget_exhausted");
 	}
 
 	// 崩溃路径从环形缓冲起点重放，缓冲可能缺了开头，mirror 里的屏幕不完整；让 TUI 自己整屏重绘一次。
@@ -4546,6 +4982,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		const env = buildTerminalEnvironment({ forceColor: true }, request.env, launch.env, taskContextEnv);
 		const runtimeSessionIncarnationId = randomUUID();
+		env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID = runtimeSessionIncarnationId;
 		let codexControlHost: Awaited<ReturnType<typeof prepareCodexNativeSessionControlHostLaunch>> = null;
 		try {
 			if (request.agentId === "codex" && request.workspaceId) {
@@ -4726,6 +5163,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		const active: ActiveProcessState = {
+			codexAutomaticCompactionPhaseHooksConfigured: launch.codexAutomaticCompactionPhaseHooksConfigured === true,
+			nativeCompactionAwareConfirmation: null,
 			session,
 			workspaceTrustBuffer:
 				shouldAutoConfirmClaudeWorkspaceTrust(request.agentId, request.cwd) ||
@@ -4788,7 +5227,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
-			terminalSessionIncarnationSpawnedAtEpochMs: now(),
+			terminalSessionIncarnationSpawnedAtEpochMs: session.hostedTerminalPtySessionSpawnedAtEpochMs ?? now(),
 			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch:
 				kanbanAssignedAgentNativeConversationSessionIdForFreshStart === undefined
 					? null
@@ -5379,6 +5818,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		const active: ActiveProcessState = {
+			codexAutomaticCompactionPhaseHooksConfigured: false,
+			nativeCompactionAwareConfirmation: null,
 			session,
 			workspaceTrustBuffer: null,
 			cols,
@@ -5417,7 +5858,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
-			terminalSessionIncarnationSpawnedAtEpochMs: now(),
+			terminalSessionIncarnationSpawnedAtEpochMs: session.hostedTerminalPtySessionSpawnedAtEpochMs ?? now(),
 			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: null,
 			recentlyAppliedHookEventDeliveryIdempotencyKeys: [],
 		};

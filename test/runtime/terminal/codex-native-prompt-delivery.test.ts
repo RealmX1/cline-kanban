@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import {
+	applyCodexAutomaticCompactionPhaseObservation,
+	createCodexRvfCloseoutCompactionAwareConfirmation,
+	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
+} from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
+import {
 	type CodexNativePromptDeliveryInput,
 	deliverCodexNativePromptWithoutChangingComposer,
 } from "../../../src/terminal/codex-native-prompt-delivery";
@@ -252,5 +257,102 @@ describe("Codex 原生投递保留 composer", () => {
 		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unavailable");
 		expect(pageCount).toBeLessThanOrEqual(4);
 		expect(input.onRequestAttempted).not.toHaveBeenCalled();
+	});
+	it.each([117_160, 129_828, 120_347])(
+		"同一正文在 %i ms 自动压缩后确认，原生请求只发送一次",
+		async (compactionDurationMs) => {
+			let clock = 0;
+			let attempted = false;
+			let state = createCodexRvfCloseoutCompactionAwareConfirmation({
+				binding: {
+					workspaceId: "workspace-1",
+					taskId: "task-1",
+					conversationSessionId: "conversation-1",
+					decisionToken: "token",
+					runId: "run",
+					handoffSha256: "a".repeat(64),
+					idempotencyKey: "key",
+					promptSha256: "b".repeat(64),
+					nativeSessionId: "thread-1",
+					runtimeSessionIncarnationId: INCARNATION_ID,
+					controlHostSocketPath: "/isolated/control.sock",
+					terminalSessionSpawnedAtEpochMs: 0,
+				},
+				firstSubmissionAtEpochMs: 0,
+				submissionTransport: "codex_native_request",
+				clientUserMessageId: CLIENT_MESSAGE_ID,
+				predecessorNativeTurnId: "prior-turn",
+				lastHumanInputAtSubmission: null,
+			});
+			mocks.request.mockImplementation(async (method: string) => {
+				if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+				if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+				if (method === "turn/start") {
+					attempted = true;
+					return { turn: { id: "native-turn-2" } };
+				}
+				return {
+					data: [
+						{
+							id: attempted ? "native-turn-2" : "prior-turn",
+							status: "inProgress",
+							items:
+								attempted && clock >= 3000 + compactionDurationMs
+									? [{ id: "native-user-2", type: "userMessage", content: [{ type: "text", text: PROMPT }] }]
+									: [],
+						},
+					],
+					nextCursor: null,
+				};
+			});
+			// 首次 preflight 需要已结束的前驱；其后只改变事件调度，不改变 payload 或绑定。
+			const request = mocks.request.getMockImplementation();
+			mocks.request.mockImplementation(async (method: string) => {
+				const response = await request?.(method);
+				if (!attempted && method === "thread/turns/list")
+					return { data: [{ id: "prior-turn", status: "completed", items: [] }], nextCursor: null };
+				return response;
+			});
+			const input = createInput({
+				now: () => clock,
+				confirmationDeadlineAtEpochMs: async () => resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(state),
+				waitMilliseconds: async (milliseconds) => {
+					clock += milliseconds;
+					if (clock === 3000 || clock === 3000 + Math.ceil(compactionDurationMs / 250) * 250)
+						state = applyCodexAutomaticCompactionPhaseObservation(state, {
+							phase: clock === 3000 ? "started" : "completed",
+							nativeTurnId: "native-turn-2",
+							capturedAtEpochMs: clock,
+							receivedAtEpochMs: clock,
+							hookDeliveryId: String(clock),
+						});
+				},
+			});
+			expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("confirmed");
+			expect(clock).toBeGreaterThan(15_000);
+			expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+		},
+	);
+
+	it("热接管截止后先只读核对接受事实，无法证明时有界返回，不重发", async () => {
+		installNativeResponses({ neverAccepted: true });
+		const input = createInput({
+			previouslySubmitted: { predecessorNativeTurnId: "prior-turn", nativeTurnId: "native-turn-2" },
+			confirmationDeadlineAtEpochMs: async () => 0,
+		});
+		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unconfirmed");
+		expect(mocks.request.mock.calls.filter(([method]) => method === "thread/turns/list")).toHaveLength(1);
+		expect(mocks.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+		expect(input.onRequestAttempted).not.toHaveBeenCalled();
+	});
+
+	it("接管时控制宿主不可达也不会超过截止无限重试", async () => {
+		mocks.connect.mockRejectedValue(new Error("隔离控制宿主不可达"));
+		const input = createInput({
+			previouslySubmitted: { predecessorNativeTurnId: "prior-turn", nativeTurnId: "native-turn-2" },
+			confirmationDeadlineAtEpochMs: async () => 0,
+		});
+		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unconfirmed");
+		expect(mocks.connect).toHaveBeenCalledOnce();
 	});
 });

@@ -63,7 +63,11 @@ export interface CodexNativePromptDeliveryInput {
 	clientUserMessageId: string;
 	isCurrent: () => boolean;
 	beforeSubmit: () => Promise<boolean>;
-	onRequestAttempted: () => void;
+	onRequestAttempted: (observation?: { predecessorNativeTurnId: string | null }) => void | Promise<void>;
+	// 只改变等待策略；真实 userMessage 核验与“不重复 turn/start”仍由本模块负责。
+	confirmationDeadlineAtEpochMs?: () => Promise<number>;
+	onNativeTurnStarted?: (nativeTurnId: string) => Promise<void>;
+	previouslySubmitted?: { predecessorNativeTurnId: string | null; nativeTurnId: string | null };
 	now?: () => number;
 	waitMilliseconds?: (milliseconds: number) => Promise<void>;
 }
@@ -90,10 +94,12 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 	const now = input.now ?? Date.now;
 	const waitMilliseconds =
 		input.waitMilliseconds ?? ((milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)));
-	let requestAttempted = false;
-	let returnedTurnId: string | null = null;
-	let previousTurnId: string | null = null;
+	let requestAttempted = input.previouslySubmitted !== undefined;
+	let returnedTurnId: string | null = input.previouslySubmitted?.nativeTurnId ?? null;
+	let previousTurnId: string | null = input.previouslySubmitted?.predecessorNativeTurnId ?? null;
 	const deadline = now() + CONFIRMATION_BUDGET_MS;
+	const currentDeadline = async () =>
+		requestAttempted && input.confirmationDeadlineAtEpochMs ? await input.confirmationDeadlineAtEpochMs() : deadline;
 	const readRecentTurns = async (port: CodexAppServerRequestPort) =>
 		nativeTurnsPageSchema.parse(
 			await port.request("thread/turns/list", {
@@ -127,12 +133,22 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 		}
 		return null;
 	};
-	while (now() < deadline) {
+	// 热重启先核对一次当前接受事实，即使停机已跨过截止；没有证据时立即收口，不重新发请求。
+	let needsRestartAcceptanceObservation = input.previouslySubmitted !== undefined;
+	while (needsRestartAcceptanceObservation || now() < (await currentDeadline())) {
 		if (!input.isCurrent()) return { status: requestAttempted ? "unconfirmed" : "cancelled" };
+		let needsOneAcceptanceRead = needsRestartAcceptanceObservation;
+		needsRestartAcceptanceObservation = false;
 		try {
 			return await withRunningCodexAppServerControlSocketConnection<CodexNativePromptDeliveryResult>(
 				async (port) => {
-					if (!(await isThreadAlreadyLoaded(port, nativeSessionId, () => now() < deadline && input.isCurrent())))
+					if (
+						!(await isThreadAlreadyLoaded(
+							port,
+							nativeSessionId,
+							() => input.isCurrent() && (requestAttempted || now() < deadline),
+						))
+					)
 						return { status: requestAttempted ? "unconfirmed" : "unavailable" };
 					const thread = threadIdentitySchema.parse(
 						await port.request("thread/read", { threadId: nativeSessionId, includeTurns: false }),
@@ -153,7 +169,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 							return { status: "cancelled" };
 						// 一旦开始调用，超时、断线、协议错误都只能读回核对。绝不重发，也不切回 PTY。
 						requestAttempted = true;
-						input.onRequestAttempted();
+						await input.onRequestAttempted({ predecessorNativeTurnId: previousTurnId });
 						try {
 							returnedTurnId = submittedTurnSchema.parse(
 								await port.request("turn/start", {
@@ -164,11 +180,13 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 									input: [{ type: "text", text: input.text, text_elements: [] }],
 								}),
 							).turn.id;
+							await input.onNativeTurnStarted?.(returnedTurnId);
 						} catch {
 							// 原生调用可能已经提交；下方只查语义接受记录。
 						}
 					}
-					while (now() < deadline && input.isCurrent()) {
+					while ((needsOneAcceptanceRead || now() < (await currentDeadline())) && input.isCurrent()) {
+						needsOneAcceptanceRead = false;
 						const evidence = findAcceptance(await readRecentTurns(port));
 						if (evidence && input.isCurrent()) return { status: "confirmed", evidence };
 						await waitMilliseconds(CONFIRMATION_RECHECK_MS);
