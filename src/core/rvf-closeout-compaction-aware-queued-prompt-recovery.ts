@@ -58,6 +58,9 @@ export function resolveRvfCloseoutCompactionAwareQueuedPromptRecovery(input: {
 		settledAtEpochMs: Date.parse(record.terminal_delivery_status_updated_at) || input.nowEpochMs,
 		receipt: {
 			status: record.terminal_delivery_status,
+			...(record.terminal_delivery_status === "delivery_failed" && record.terminal_delivery_failure_detail
+				? { failureNote: record.terminal_delivery_failure_detail }
+				: {}),
 			reason:
 				record.terminal_delivery_status === "delivery_failed"
 					? (record.terminal_delivery_failure_reason ?? "submit_confirmation_budget_exhausted")
@@ -79,7 +82,7 @@ export function settleQueuedRvfCloseoutFromExistingSubmission(
 		...entry,
 		deliveryState: recovery.receipt.status === "delivery_failed" ? "settled_failed" : "settled_delivered",
 		settledAt: recovery.settledAtEpochMs,
-		lastDeliveryFailureNote: recovery.receipt.reason,
+		lastDeliveryFailureNote: recovery.receipt.failureNote ?? recovery.receipt.reason,
 		programmaticInjectionLedgerReceiptLink: { ...link, settledTerminalDeliveryReceipt: recovery.receipt },
 	};
 }

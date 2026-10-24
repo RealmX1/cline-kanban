@@ -8,6 +8,11 @@ import {
 	runtimeTaskSessionSummarySchema,
 	type WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../../../src/core/api-contract";
+import {
+	applyCodexAutomaticCompactionPhaseObservation,
+	createCodexRvfCloseoutCompactionAwareConfirmation,
+	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
+} from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
 import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { createNativeIndependentUserTurnBeforeSubmissionValidator } from "../../../src/server/native-independent-user-turn-before-submission-validator";
@@ -16,11 +21,6 @@ import {
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	updateWorkspaceQueuedTaskPromptDeliveriesUnderLock,
 } from "../../../src/state/queued-task-prompt-delivery-store";
-import {
-	applyCodexAutomaticCompactionPhaseObservation,
-	createCodexRvfCloseoutCompactionAwareConfirmation,
-	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
-} from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
 import {
 	type CodexNativePromptDeliveryInput,
 	deliverCodexNativePromptWithoutChangingComposer,

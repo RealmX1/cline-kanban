@@ -325,6 +325,27 @@ describe("重启队列不能覆盖压缩确认的合法在途状态", () => {
 			"delivered_and_submit_confirmed",
 		);
 	});
+	it("补读账本失败终态时保留 base 新增的具体诊断", async () => {
+		const fixture = await prepare();
+		const failureDetail = "原生提交前二次查询超时，保留精确诊断。";
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath: fixture.ledgerPath,
+			taskId: "card",
+			idempotencyKey: fixture.record.promptDeliveryIdempotencyKey,
+			status: "delivery_failed",
+			failureReason: "codex_native_prompt_delivery_unconfirmed",
+			failureDetail,
+			nowIso: new Date(350_000).toISOString(),
+		});
+		await fixture.sweep(350_000);
+		expect(await fixture.currentEntry()).toMatchObject({
+			deliveryState: "settled_failed",
+			lastDeliveryFailureNote: failureDetail,
+			programmaticInjectionLedgerReceiptLink: {
+				settledTerminalDeliveryReceipt: { failureNote: failureDetail },
+			},
+		});
+	});
 	it("固定截止后无接受证据才结算失败，条目永远不回队首重投", async () => {
 		const fixture = await prepare();
 		await fixture.sweep(408_001);
@@ -410,5 +431,47 @@ describe("重启队列不能覆盖压缩确认的合法在途状态", () => {
 		await vi.advanceTimersByTimeAsync(300_000);
 		await vi.waitFor(async () => expect((await fixture.currentEntry())?.deliveryState).toBe("settled_failed"));
 		expect(listWorkspaceIds).toHaveBeenCalledTimes(3);
+	});
+	it("尚未写入的查询等待保留更晚的原 TTL，不能被压缩复扫上界截断", async () => {
+		const fixture = await prepare(false);
+		await writeFile(
+			getWorkspaceQueuedTaskPromptDeliveriesPath(fixture.workspaceId),
+			JSON.stringify({
+				entriesByTaskId: {
+					conversation: [
+						{
+							...fixture.entry,
+							programmaticInjectionLedgerReceiptLink: {
+								injectionLedgerIdempotencyKey: "isolated-before-submission-query-key",
+								injectionSource: "isolated-before-submission-query",
+								settledTerminalDeliveryReceipt: null,
+							},
+							custodianRuntimeProcessInstanceId: "new-runtime",
+							expiresAt: 700_000,
+							requiredNativeIndependentUserTurnSessionId: "native-session",
+							requiredNativeIndependentUserTurnSessionIncarnationId: "original-runtime",
+							nativeIndependentUserTurnSubmissionProgress: {
+								predecessorNativeTurnId: "prior-turn",
+								submissionMayHaveStartedAtEpochMs: null,
+							},
+						},
+					],
+				},
+			}),
+		);
+		vi.useFakeTimers();
+		vi.setSystemTime(110_000);
+		const listWorkspaceIds = vi.fn(async () => [fixture.workspaceId]);
+		const initialSweep = await scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart({
+			runtimeProcessStartedAtEpochMs: 110_000,
+			sweepingRuntimeProcessInstanceId: "new-runtime",
+			listWorkspaceIds,
+			readLiveRuntimeProcessInstanceIds: async () => new Set(["new-runtime"]),
+		});
+		expect(initialSweep.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs).toBe(700_000);
+		await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0));
+		await vi.advanceTimersByTimeAsync(600_000);
+		await vi.waitFor(async () => expect((await fixture.currentEntry())?.deliveryState).toBe("expired"));
+		expect(listWorkspaceIds).toHaveBeenCalledTimes(2);
 	});
 });

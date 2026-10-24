@@ -99,7 +99,9 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 	let previousTurnId: string | null = input.previouslySubmitted?.predecessorNativeTurnId ?? null;
 	let currentDeliveryPhaseDeadlineEpochMs = now() + CONFIRMATION_BUDGET_MS;
 	const currentDeadline = async () =>
-		requestAttempted && input.confirmationDeadlineAtEpochMs ? await input.confirmationDeadlineAtEpochMs() : currentDeliveryPhaseDeadlineEpochMs;
+		requestAttempted && input.confirmationDeadlineAtEpochMs
+			? await input.confirmationDeadlineAtEpochMs()
+			: currentDeliveryPhaseDeadlineEpochMs;
 	const readRecentTurns = async (port: CodexAppServerRequestPort) =>
 		nativeTurnsPageSchema.parse(
 			await port.request("thread/turns/list", {
