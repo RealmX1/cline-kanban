@@ -44,6 +44,20 @@ const baseInput = {
 };
 
 describe("queued-task-prompt-delivery-projection — 正文不上广播链路", () => {
+	it("透传最近一次开始投递的真实时间，未尝试时保持 null", () => {
+		expect(buildRuntimeQueuedTaskPromptDeliveryProjection(makeEntry(), baseInput)).toHaveProperty(
+			"lastAttemptedAt",
+			null,
+		);
+		const lastAttemptedAt = NOW - 500;
+		expect(
+			buildRuntimeQueuedTaskPromptDeliveryProjection(
+				makeEntry({ deliveryAttemptCount: 2, lastAttemptedAt }),
+				baseInput,
+			),
+		).toHaveProperty("lastAttemptedAt", lastAttemptedAt);
+	});
+
 	it("长正文只给截断预览 + 真实长度，投影里没有 text 字段", () => {
 		const longText = "字".repeat(QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH + 500);
 		const projected = buildRuntimeQueuedTaskPromptDeliveryProjection(makeEntry({ text: longText }), baseInput);

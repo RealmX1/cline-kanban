@@ -463,6 +463,12 @@ import {
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
 import {
+	type RuntimeCodexConversationStorageOperationRequest,
+	type RuntimeCodexConversationStorageOperationResponse,
+	runtimeCodexConversationStorageOperationRequestSchema,
+	runtimeCodexConversationStorageOperationResponseSchema,
+} from "../core/codex-conversation-storage-api-contract";
+import {
 	independentTaskCreationDraftEditSchema,
 	independentTaskCreationDraftRequestSchema,
 	independentTaskCreationDraftSchema,
@@ -678,6 +684,10 @@ export interface RuntimeTrpcContext {
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
 	kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence;
 	runtimeApi: {
+		operateCodexConversationStorage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeCodexConversationStorageOperationRequest,
+		) => Promise<RuntimeCodexConversationStorageOperationResponse>;
 		loadConfig: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeConfigResponse>;
 		saveConfig: (
 			scope: RuntimeTrpcWorkspaceScope | null,
@@ -2004,6 +2014,13 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeAvailableAgentSessionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
+			}),
+		operateCodexConversationStorage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeCodexConversationStorageOperationRequestSchema)
+			.output(runtimeCodexConversationStorageOperationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
+				return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeClineMcpAuthStatusResponseSchema)

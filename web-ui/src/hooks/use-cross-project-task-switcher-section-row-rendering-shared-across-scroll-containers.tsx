@@ -261,12 +261,28 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 				: undefined,
 		[onOpenBacklogTaskEditorInProject],
 	);
-	const { buildTaskCardActionHandlerBundleForOtherProjectTaskCard, otherProjectTaskCardActionConfirmationDialogs } =
+	const localOtherProjectTaskCardActionHandlers =
 		useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
 			onRequestPinTaskCardInOtherProjectToTaskPinboard: requestPinTaskCardInOtherProjectFromExpandedTaskCard,
 			onUnpinTaskCardInOtherProjectFromTaskPinboard: unpinTaskCardInOtherProjectFromTaskPinboard,
 			onRequestEditBacklogTaskCardInOtherProject: requestEditBacklogTaskCardInOtherProjectFromExpandedTaskCard,
+			onOpenTaskInProject: host.onOpenTaskInProject,
 		});
+	const otherProjectTaskCardActionConfirmationDialogs = host.otherProjectTaskCardActionHandlers
+		? null
+		: localOtherProjectTaskCardActionHandlers.otherProjectTaskCardActionConfirmationDialogs;
+	const buildTaskCardActionHandlerBundleForOtherProjectTaskCard: typeof localOtherProjectTaskCardActionHandlers.buildTaskCardActionHandlerBundleForOtherProjectTaskCard =
+		(input) => {
+			const localHandlers =
+				localOtherProjectTaskCardActionHandlers.buildTaskCardActionHandlerBundleForOtherProjectTaskCard(input);
+			if (!host.otherProjectTaskCardActionHandlers) return localHandlers;
+			return {
+				...host.otherProjectTaskCardActionHandlers.buildTaskCardActionHandlerBundleForOtherProjectTaskCard(input),
+				onEditTask: localHandlers.onEditTask,
+				onRequestPinToTaskPinboard: localHandlers.onRequestPinToTaskPinboard,
+				onUnpinFromTaskPinboard: localHandlers.onUnpinFromTaskPinboard,
+			};
+		};
 	const projectPathByWorkspaceId = useMemo(
 		() => new Map(host.projects.map((project) => [project.id, project.path])),
 		[host.projects],

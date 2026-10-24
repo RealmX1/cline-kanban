@@ -13,10 +13,14 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodexUserQuestionPendingAndHistoryFileChangeCache } from "../../../src/agent-session-history/codex-user-question-pending-and-history-file-change-cache";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../../../src/agent-session-history/codex-user-question-transcript-recovery";
+import {
+	getCodexConversationMigrationRecordPath,
+	prepareManagedCodexConversationStorageHome,
+} from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const original = await importOriginal<typeof filesystemPromises>();
@@ -68,6 +72,7 @@ async function createIsolatedTranscript() {
 beforeEach(() => vi.clearAllMocks());
 afterEach(async () => {
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
 	await Promise.all(isolatedCodexHomes.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -287,5 +292,46 @@ describe("Codex pending/history 转录查询的文件变化缓存", () => {
 		expect((await recoverForQuery({ ...input, transcriptPath: otherTranscriptPath })).exchanges[0]?.callId).toBe(
 			"call-new",
 		);
+	});
+	it("正式迁移改变问答恢复和缓存目录，旧转录提示不遮住新分片，回退后重新读取原目录", async () => {
+		const input = await createIsolatedTranscript();
+		vi.stubEnv("HOME", input.homeDirectoryPath);
+		const recoverForQuery = createCodexUserQuestionPendingAndHistoryFileChangeCache();
+		expect((await recoverForQuery(input)).exchanges[0]?.callId).toBe("call-old");
+		const managedHome = await prepareManagedCodexConversationStorageHome(input.homeDirectoryPath);
+		await mkdir(join(managedHome, "sessions"), { recursive: true });
+		const copiedTranscriptPath = join(managedHome, "sessions", `rollout-parent-${sessionId}.jsonl`);
+		await writeFile(copiedTranscriptPath, originalTranscript);
+		const currentTranscriptPath = join(
+			managedHome,
+			"sessions",
+			`rollout-current-${sessionId}_01a14bca-21c9-7f62-acab-1bd026daa1ee.jsonl`,
+		);
+		await writeFile(currentTranscriptPath, `${metadata("2026-10-17T04:00:00.000Z")}\n${question("call-migrated")}\n`);
+		const migrationRecordPath = getCodexConversationMigrationRecordPath(input.homeDirectoryPath, sessionId);
+		await mkdir(dirname(migrationRecordPath), { recursive: true });
+		const migrationRecord = {
+			nativeSessionId: sessionId,
+			sourceHomeDirectoryPath: input.homeDirectoryPath,
+			targetHomeDirectoryPath: managedHome,
+			stage: "source_archived",
+		};
+		await writeFile(migrationRecordPath, JSON.stringify(migrationRecord));
+		const migrated = await recoverForQuery(input);
+		expect(migrated.coverage).toBe("complete");
+		expect(migrated.exchanges.map((exchange) => exchange.callId)).toEqual(["call-migrated"]);
+		expect((await recoverCodexUserQuestionsFromKnownConversation(input)).exchanges[0]?.callId).toBe("call-migrated");
+		expect((await recoverForQuery({ sessionId, homeDirectoryPath: managedHome })).exchanges[0]?.callId).toBe(
+			"call-migrated",
+		);
+		await appendFile(currentTranscriptPath, `${answer.replace("call-old", "call-migrated")}\n`);
+		expect((await recoverForQuery(input)).exchanges[0]?.resolution?.resolutionKind).toBe(
+			"answered_in_agent_terminal",
+		);
+		expect(
+			(await recoverCodexUserQuestionsFromKnownConversation(input)).exchanges[0]?.resolution?.resolutionKind,
+		).toBe("answered_in_agent_terminal");
+		await writeFile(migrationRecordPath, JSON.stringify({ ...migrationRecord, stage: "rolled_back" }));
+		expect((await recoverForQuery(input)).exchanges[0]?.callId).toBe("call-old");
 	});
 });

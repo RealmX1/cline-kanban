@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import type { TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
 import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
 
 /**
@@ -12,6 +13,7 @@ import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runt
 export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	// 只消费跨项目打开能力的宿主可省略；渲染切换面板时必须提供，与动作导航共享同一份模型。
 	crossProjectTaskSwitcherSectionsModel?: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
+	otherProjectTaskCardActionHandlers?: TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher;
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;

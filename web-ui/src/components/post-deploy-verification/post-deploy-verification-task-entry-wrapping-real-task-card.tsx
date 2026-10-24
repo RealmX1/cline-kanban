@@ -71,9 +71,15 @@ export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
 	onRemoveCustomChecklistItem: (itemId: string) => void;
 	onRunVerificationItem: (itemId: string) => void;
 	onRequestComplete: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
+	onRequestMoveIntoDoneFromTaskCard?: (options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1]) => void;
+	completionActionRendering?: "post_deploy_verification_panel" | "review_before_move_into_done";
+	onRequestGuidedManualVerification?: (
+		item: RuntimePostDeployVerificationChecklistItem,
+		locate: () => void | Promise<void>,
+	) => void;
 	onSelectTask: () => void;
 	// 「定位并核对」中 anchor.view==="board" 时导航回看板。
-	onNavigateToBoard: () => void;
+	onNavigateToBoard: () => void | Promise<void>;
 	onCreateFollowUpTaskFromSelectedChecklistItems?: (selectedChecklistItemIds: string[]) => void;
 }
 
@@ -227,6 +233,9 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 	onRemoveCustomChecklistItem,
 	onRunVerificationItem,
 	onRequestComplete,
+	onRequestMoveIntoDoneFromTaskCard,
+	completionActionRendering,
+	onRequestGuidedManualVerification,
 	onSelectTask,
 	onNavigateToBoard,
 	onCreateFollowUpTaskFromSelectedChecklistItems,
@@ -235,12 +244,12 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 
 	// 「定位并核对」：按 anchor.view 导航（task_detail=本任务详情 / board=看板），随后 spotlight 目标元素。
 	// 降级：无 anchor 时把面板内本条目滚入视野并高亮（至少让用户知道核对哪个任务）。
-	const locateChecklistItem = (item: RuntimePostDeployVerificationChecklistItem): void => {
+	const locateChecklistItem = async (item: RuntimePostDeployVerificationChecklistItem): Promise<void> => {
 		const anchor = item.guidance?.anchor ?? null;
 		if (anchor?.view === "task_detail") {
 			onSelectTask();
 		} else if (anchor?.view === "board") {
-			onNavigateToBoard();
+			await onNavigateToBoard();
 		}
 		const anchorKey = anchor?.anchorKey ?? verificationPanelTaskAnchorKey(task.taskId);
 		window.setTimeout(() => spotlightAnchor(anchorKey), SPOTLIGHT_AFTER_NAVIGATION_DELAY_MS);
@@ -258,7 +267,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				realTaskCardRenderingInputs={realTaskCardRenderingInputs}
 				interactive={interactive}
 				isCompleting={isCompleting}
-				onRequestComplete={onRequestComplete}
+				onRequestComplete={onRequestMoveIntoDoneFromTaskCard ?? onRequestComplete}
 				onSelectTask={onSelectTask}
 			/>
 			<PostDeployVerificationTaskEntryChecklistAndClosureSection
@@ -273,6 +282,8 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
 				onRunVerificationItem={onRunVerificationItem}
 				onRequestComplete={() => onRequestComplete()}
+				completionActionRendering={completionActionRendering}
+				onRequestGuidedManualVerification={onRequestGuidedManualVerification}
 				onLocateChecklistItem={locateChecklistItem}
 				onCreateFollowUpTaskFromSelectedChecklistItems={onCreateFollowUpTaskFromSelectedChecklistItems}
 			/>
