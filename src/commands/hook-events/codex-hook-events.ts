@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { RuntimeHookEvent, RuntimeTaskHookActivity } from "../../core/api-contract";
+import { isCodexNativeConversationRewindSignal } from "../../core/codex-native-direct-input-readiness";
 
 const CODEX_LOG_POLL_INTERVAL_MS = 200;
 const CODEX_ROLLOUT_POLL_INTERVAL_MS = 1000;
@@ -375,6 +376,19 @@ function mapCodexRolloutActivityLine(line: string): { mapped: CodexMappedHookEve
 			return null;
 		}
 		const normalizedType = payloadType.toLowerCase();
+		if (isCodexNativeConversationRewindSignal({ source: "codex", hookEventName: normalizedType })) {
+			return {
+				fingerprint: `rollout:rewind:${readStringField(parsedLine, "timestamp") ?? ""}:${JSON.stringify(payload)}`,
+				mapped: {
+					event: "activity",
+					metadata: {
+						source: "codex",
+						hookEventName: normalizedType,
+						activityText: "Codex 对话已回退，等待原生状态核验",
+					},
+				},
+			};
+		}
 		if (normalizedType === "agent_message") {
 			const phase = readStringField(payload, "phase");
 			const message = readStringField(payload, "message");
@@ -647,6 +661,16 @@ export function parseCodexEventLine(line: string, state: CodexWatcherState): Cod
 			state.currentSessionScope = "unknown";
 		}
 		return null;
+	}
+	if (isCodexNativeConversationRewindSignal({ source: "codex", hookEventName: normalizedType })) {
+		return {
+			event: "activity",
+			metadata: {
+				source: "codex",
+				hookEventName: normalizedType,
+				activityText: "Codex 对话已回退，等待原生状态核验",
+			},
+		};
 	}
 	const command = extractCodexCommandSnippet(message, line);
 	const messageText = typeof message.message === "string" ? normalizeWhitespace(message.message) : "";

@@ -15,7 +15,7 @@ export type NativeAgentConversationTranscriptActivityObservation =
 	RuntimeLastEffectiveAgentConversationActivityObservation & {
 		// 仅供接受边沿消费，不持久化进 session summary。
 		submittedPromptText?: string;
-		// Codex 原生回合状态只用于判断接受事实能否重新开启 Agent 回合，不持久化。
+		// 原生回合状态只用于判断接受事实能否重新开启 Agent 回合，不持久化。
 		acceptedNativeAgentTurnIsInProgress?: boolean;
 		// 原生回合中的首条输入已有真实模型响应；排队输入不能借用此前的响应。
 		acceptedNativeAgentTurnHasModelResponse?: boolean;

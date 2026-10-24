@@ -30,6 +30,9 @@ export interface UsePostDeployVerificationResult {
 	// 未加载或无部署记录时为 null；只有历史记录时为 0，保留顶栏唯一入口。
 	pendingVerificationTaskCount: number | null;
 	refresh: () => void;
+	// 结案前等待权威快照；有在途写入或项目已变化时拒绝，不能把过期快照当成通过。
+	refreshAndReadActiveGroup: () => Promise<RuntimePostDeployVerificationDeploymentGroup | null>;
+	isVerificationWriteInFlight: boolean;
 	// 「保持最前」偏好（默认 true，见 plan 面板行为表）。
 	stayInFront: boolean;
 	setStayInFront: Dispatch<SetStateAction<boolean>>;
@@ -137,7 +140,16 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
 	return error instanceof Error && error.message ? error.message : fallback;
 }
 
-export function usePostDeployVerification(workspaceId: string | null): UsePostDeployVerificationResult {
+export function usePostDeployVerification(
+	workspaceId: string | null,
+	{
+		pollingEnabled = true,
+		showDeploymentNotifications = true,
+	}: {
+		pollingEnabled?: boolean;
+		showDeploymentNotifications?: boolean;
+	} = {},
+): UsePostDeployVerificationResult {
 	const isDocumentVisible = useDocumentVisibility();
 	const [deploymentGroups, setDeploymentGroups] = useState<RuntimePostDeployVerificationDeploymentGroup[]>([]);
 	const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
@@ -164,6 +176,7 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 	// 验证状态无 WebSocket 推送，refresh() 每拍做整表覆盖 setDeploymentGroups(...)；
 	// 若某次轮询的服务端快照在用户点击前算出、却在乐观写入之后才返回，就会用点击前数据覆盖掉乐观值（勾选「弹回」）。
 	// 以下两个 ref 界定每次本地验证写入的「在飞窗口」，供 refresh() 判定轮询快照是否可能早于本地写入而应丢弃。
+	const [isVerificationWriteInFlight, setIsVerificationWriteInFlight] = useState(false);
 	const inFlightVerificationWriteCountRef = useRef(0); // 当前在飞的验证写入 mutation 数。
 	const verificationWriteCompletionSeqRef = useRef(0); // 每当一个验证写入 settle（成功/失败/回滚）自增，作为单调完成序号。
 	// 写入追踪的 workspace 代际（generation）：把上面两个「在飞写入」ref 按 workspace 隔离。
@@ -190,17 +203,71 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 			// 也不能推进 seq —— 后者会误使新 workspace 那次以切换后 seq 为基线发起的 refresh 命中「seq 已变」而丢弃其合法首帧快照。
 			const writeWorkspaceGenerationAtLaunch = verificationWriteWorkspaceGenerationRef.current;
 			inFlightVerificationWriteCountRef.current += 1;
+			setIsVerificationWriteInFlight(true);
 			try {
 				return await runMutation();
 			} finally {
 				if (verificationWriteWorkspaceGenerationRef.current === writeWorkspaceGenerationAtLaunch) {
 					inFlightVerificationWriteCountRef.current -= 1;
 					verificationWriteCompletionSeqRef.current += 1;
+					if (isMountedRef.current) setIsVerificationWriteInFlight(inFlightVerificationWriteCountRef.current > 0);
 				}
 			}
 		},
 		[],
 	);
+
+	const refreshAndReadActiveGroup = useCallback(async () => {
+		if (!workspaceId) throw new Error("未选择核对项目");
+		const requestWorkspaceId = workspaceId;
+		const writeCompletionSeqAtRefreshLaunch = verificationWriteCompletionSeqRef.current;
+		try {
+			if (inFlightVerificationWriteCountRef.current > 0) throw new Error("核对结果仍在保存或运行，请稍后继续");
+			const response = await getRuntimeTrpcClient(
+				requestWorkspaceId,
+			).deployment.getPostDeployVerificationState.query({});
+			if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
+				throw new Error("核对项目已变化，请重新操作");
+			}
+			if (
+				inFlightVerificationWriteCountRef.current > 0 ||
+				verificationWriteCompletionSeqRef.current !== writeCompletionSeqAtRefreshLaunch
+			) {
+				throw new Error("核对状态正在更新，请稍后继续");
+			}
+			setDeploymentGroups(response.deploymentGroups);
+			setActiveDeploymentId(response.activeDeploymentId);
+			setLoadError(null);
+			setHasLoadedOnce(true);
+			const previousActiveDeploymentId = previousActiveDeploymentIdRef.current;
+			previousActiveDeploymentIdRef.current = response.activeDeploymentId;
+			if (
+				showDeploymentNotifications &&
+				previousActiveDeploymentId !== undefined &&
+				response.activeDeploymentId !== null &&
+				response.activeDeploymentId !== previousActiveDeploymentId
+			) {
+				showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Post-Deploy Verification" });
+				setCollapsed(false);
+			}
+			return (
+				response.deploymentGroups.find(
+					(group) =>
+						group.deploymentId === response.activeDeploymentId && group.workspaceId === requestWorkspaceId,
+				) ?? null
+			);
+		} catch (error) {
+			if (
+				isMountedRef.current &&
+				requestWorkspaceIdRef.current === requestWorkspaceId &&
+				inFlightVerificationWriteCountRef.current === 0 &&
+				verificationWriteCompletionSeqRef.current === writeCompletionSeqAtRefreshLaunch
+			) {
+				setLoadError(resolveErrorMessage(error, "加载 Post-Deploy Verification 状态失败"));
+			}
+			throw error;
+		}
+	}, [workspaceId, setCollapsed, showDeploymentNotifications]);
 
 	const refresh = useCallback(() => {
 		if (!workspaceId) {
@@ -208,47 +275,8 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 			setActiveDeploymentId(null);
 			return;
 		}
-		const requestWorkspaceId = workspaceId;
-		// 同步捕获基线：本次轮询发起时的写入完成序号。响应返回后若序号已变，说明有本地写入在此轮询窗口内完成。
-		const writeCompletionSeqAtRefreshLaunch = verificationWriteCompletionSeqRef.current;
-		void (async () => {
-			try {
-				const client = getRuntimeTrpcClient(requestWorkspaceId);
-				const response = await client.deployment.getPostDeployVerificationState.query({});
-				if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
-					return;
-				}
-				if (
-					inFlightVerificationWriteCountRef.current > 0 ||
-					verificationWriteCompletionSeqRef.current !== writeCompletionSeqAtRefreshLaunch
-				) {
-					// 本次轮询在飞期间有本地写入在飞/已完成，服务端快照可能早于该写入；丢弃以免回退乐观状态。
-					// 被影响项的乐观 + mutation 响应本地已是正确值，下一次轮询（≤30s）再做全量对账。
-					return;
-				}
-				setDeploymentGroups(response.deploymentGroups);
-				setActiveDeploymentId(response.activeDeploymentId);
-				setLoadError(null);
-				setHasLoadedOnce(true);
-				const previousActiveDeploymentId = previousActiveDeploymentIdRef.current;
-				previousActiveDeploymentIdRef.current = response.activeDeploymentId;
-				// 首帧（undefined）不提醒；此后 active 组 id 变为新的非空值 = 一次新 deploy。
-				if (
-					previousActiveDeploymentId !== undefined &&
-					response.activeDeploymentId !== null &&
-					response.activeDeploymentId !== previousActiveDeploymentId
-				) {
-					showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Post-Deploy Verification" });
-					setCollapsed(false);
-				}
-			} catch (error) {
-				if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
-					return;
-				}
-				setLoadError(resolveErrorMessage(error, "加载 Post-Deploy Verification 状态失败"));
-			}
-		})();
-	}, [workspaceId, setCollapsed]);
+		void refreshAndReadActiveGroup().catch(() => {});
+	}, [workspaceId, refreshAndReadActiveGroup]);
 
 	// workspace 切换：重置检测基线与数据，立即拉取新 workspace 状态。
 	useEffect(() => {
@@ -257,6 +285,7 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 		// （旧写入的 settle 会因代际不符而在 trackVerificationWrite 的 finally 里被跳过，不再回收 count / 推进 seq）。
 		verificationWriteWorkspaceGenerationRef.current += 1;
 		inFlightVerificationWriteCountRef.current = 0;
+		setIsVerificationWriteInFlight(false);
 		previousActiveDeploymentIdRef.current = undefined;
 		setHasLoadedOnce(false);
 		setDeploymentGroups([]);
@@ -273,16 +302,16 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 			}
 			refresh();
 		},
-		workspaceId && isDocumentVisible ? POST_DEPLOY_VERIFICATION_POLL_INTERVAL_MS : null,
+		pollingEnabled && workspaceId && isDocumentVisible ? POST_DEPLOY_VERIFICATION_POLL_INTERVAL_MS : null,
 	);
 
 	// tab 由隐藏转可见的边沿：立即刷新一次（focus immediate，见 plan 数据流）。
 	useEffect(() => {
-		if (isDocumentVisible && !wasDocumentVisibleRef.current && workspaceId) {
+		if (pollingEnabled && isDocumentVisible && !wasDocumentVisibleRef.current && workspaceId) {
 			refresh();
 		}
 		wasDocumentVisibleRef.current = isDocumentVisible;
-	}, [isDocumentVisible, workspaceId, refresh]);
+	}, [isDocumentVisible, workspaceId, refresh, pollingEnabled]);
 
 	const activeGroup = useMemo(
 		() => deploymentGroups.find((group) => group.deploymentId === activeDeploymentId) ?? null,
@@ -506,6 +535,8 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 		hasLoadedOnce,
 		pendingVerificationTaskCount,
 		refresh,
+		refreshAndReadActiveGroup,
+		isVerificationWriteInFlight,
 		stayInFront,
 		setStayInFront,
 		collapsed,

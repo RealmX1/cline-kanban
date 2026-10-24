@@ -25,7 +25,11 @@ export interface PostDeployVerificationChecklistItemProps {
 	onRun: () => void;
 	onRemoveCustom: () => void;
 	// 引导人工型「定位并核对」：导航到 anchor.view + spotlight 高亮目标元素（由 task-card 绑定 taskId 后提供）。
-	onLocate: () => void;
+	onLocate: () => void | Promise<void>;
+	onRequestGuidedManualVerification?: (
+		item: RuntimePostDeployVerificationChecklistItem,
+		locate: () => void | Promise<void>,
+	) => void;
 }
 
 // per-verification 清理提示（plan Stage 5）：automatic 项显示自动清理状态；manual 项展开人工清理步骤；retain 项标注保留。
@@ -190,13 +194,18 @@ function GuidedManualItem({
 	onToggle,
 	onRemoveCustom,
 	onLocate,
+	onRequestGuidedManualVerification,
 }: {
 	item: RuntimePostDeployVerificationChecklistItem;
 	interactive: boolean;
 	isCompleting: boolean;
 	onToggle: (checked: boolean) => void;
 	onRemoveCustom: () => void;
-	onLocate: () => void;
+	onLocate: () => void | Promise<void>;
+	onRequestGuidedManualVerification?: (
+		item: RuntimePostDeployVerificationChecklistItem,
+		locate: () => void | Promise<void>,
+	) => void;
 }): ReactElement {
 	const [overlayOpen, setOverlayOpen] = useState(false);
 	const guidance = item.guidance;
@@ -230,8 +239,12 @@ function GuidedManualItem({
 						icon={<Crosshair size={12} />}
 						disabled={isCompleting}
 						onClick={() => {
-							onLocate();
-							setOverlayOpen(true);
+							if (onRequestGuidedManualVerification) {
+								onRequestGuidedManualVerification(item, onLocate);
+							} else {
+								onLocate();
+								setOverlayOpen(true);
+							}
 						}}
 						aria-label="定位并核对"
 						className="shrink-0"
@@ -276,6 +289,7 @@ export function PostDeployVerificationChecklistItem({
 	onRun,
 	onRemoveCustom,
 	onLocate,
+	onRequestGuidedManualVerification,
 }: PostDeployVerificationChecklistItemProps): ReactElement {
 	const kindItem =
 		item.kind === "automated_script" ? (
@@ -288,6 +302,7 @@ export function PostDeployVerificationChecklistItem({
 				onToggle={onToggle}
 				onRemoveCustom={onRemoveCustom}
 				onLocate={onLocate}
+				onRequestGuidedManualVerification={onRequestGuidedManualVerification}
 			/>
 		);
 	return (

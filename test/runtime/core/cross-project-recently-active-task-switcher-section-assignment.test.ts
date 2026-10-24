@@ -203,6 +203,23 @@ describe("Recent 的阶段多选与统一活动范围", () => {
 });
 
 describe("isCrossProjectTaskSwitcherEntryRunning", () => {
+	it("自动重连仍属于当前 Agent 回合，保留 Running 且不刷新排序起点", () => {
+		const entry = makeEntry("retrying", {
+			...AGENT_RUNNING,
+			liveness: "retrying",
+			agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS),
+			lastOpenedByUserAt: NOW_MS,
+		});
+		expect(isCrossProjectTaskSwitcherEntryRunning(entry, NOW_MS)).toBe(true);
+		const sections = assign([inProject("ws-a", entry)]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["retrying"]);
+		expect(sections.remainingSection.entries).toEqual([]);
+		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		expect(sections.runningEntries[0]?.entry.agentResponseGenerationTurnStarted).toEqual(
+			turnStartedAt(NOW_MS - MINUTE_MS),
+		);
+	});
+
 	it("agent 回合 + 5 分钟内有输出 → Running", () => {
 		expect(
 			isCrossProjectTaskSwitcherEntryRunning(

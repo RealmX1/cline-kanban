@@ -55,9 +55,11 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
+- **RVF 收尾确认超时后的迟到接受须显式补证**：保留原失败账本，以精确正文与本代活动分支核验恢复资格；`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
+- **Done 卡复用完整工作台但禁止执行**：历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
 - **查卡恢复必须按执行归属判断**：其他实例启动不等于本轮查询经历重启；只收口归属已退出的轮次，心跳不可读时保留未知态。持久图片与文本协议适配见 `docs/architecture/task-lookup-query-execution-ownership-and-persistent-prompt-images.md`。
 - **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。

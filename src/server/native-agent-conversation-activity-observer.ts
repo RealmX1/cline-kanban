@@ -10,6 +10,11 @@ import type {
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import {
+	type CodexNativeDirectInputReadinessObservation,
+	isCodexNativeConversationRewindSignal,
+	isCodexNeedsInputNativeReconciliationCandidate,
+} from "../core/codex-native-direct-input-readiness";
 
 export interface NativeAgentConversationActivityObservationContext {
 	workspaceId: string;
@@ -26,6 +31,10 @@ export type NativeAgentConversationAcceptedUserPromptObservation = NativeAgentCo
 	};
 export interface CreateNativeAgentConversationActivityObserverOptions {
 	onAccepted: (observation: NativeAgentConversationAcceptedUserPromptObservation) => Promise<void> | void;
+	onCodexNativeDirectInputReadiness?: (
+		observation: NativeAgentConversationActivityObservationContext & CodexNativeDirectInputReadinessObservation,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+	) => Promise<void> | void;
 	onActivity?: (
 		observation: NativeAgentConversationActivityObservationContext &
 			NativeAgentConversationTranscriptActivityObservation,
@@ -62,6 +71,8 @@ interface NativeConversationObservationState {
 	inFlight: Promise<void> | null;
 	lastReadStartedAtMs: number;
 	candidateExpiresAtMs: number | null;
+	wasCodexNeedsInputNativeReconciliationCandidate: boolean;
+	lastCodexNativeConversationRewindSignalKey: string | null;
 	retryTimer: ReturnType<typeof setTimeout> | null;
 	abortController: AbortController;
 }
@@ -128,30 +139,39 @@ export function createNativeAgentConversationActivityObserver(
 			return;
 		state.retryTimer = setTimeout(() => {
 			state.retryTimer = null;
+			if (state.candidateExpiresAtMs === null || nowMs() >= state.candidateExpiresAtMs) return;
 			void scheduleRead(state, true);
 		}, 250);
 		state.retryTimer.unref();
 	}
 	function scheduleRead(state: NativeConversationObservationState, force = false): Promise<void> {
 		if (state.inFlight) return state.inFlight;
-		if (!force && nowMs() - state.lastReadStartedAtMs < (options.cooldownMs ?? 250)) return Promise.resolve();
+		if (!force && nowMs() - state.lastReadStartedAtMs < (options.cooldownMs ?? 250)) {
+			// 新触发即使落在冷却期，也必须在自己的固定窗口内得到补读。
+			scheduleCandidateRetry(state);
+			return Promise.resolve();
+		}
 		let resolveScheduledRead: () => void = () => {};
 		state.inFlight = new Promise<void>((resolve) => {
 			resolveScheduledRead = resolve;
 		});
 		queuedReads.push(() => {
-			if (!isCurrent(state)) {
+			if (
+				!isCurrent(state) ||
+				(force && (state.candidateExpiresAtMs === null || nowMs() >= state.candidateExpiresAtMs))
+			) {
 				state.inFlight = null;
 				resolveScheduledRead();
 				return;
 			}
 			concurrentReadCount += 1;
 			state.lastReadStartedAtMs = nowMs();
+			const summaryBeforeRead = state.getCurrentSummary() ?? state.summary;
 			void Promise.resolve()
 				.then(() =>
 					readNativeActivity({
 						workspaceId: state.workspaceId,
-						summary: state.summary,
+						summary: summaryBeforeRead,
 						cursor: state.cursor,
 						observedAtMs: state.lastReadStartedAtMs,
 						signal: state.abortController.signal,
@@ -159,6 +179,13 @@ export function createNativeAgentConversationActivityObserver(
 				)
 				.then(async (result) => {
 					if (!result || !isCurrent(state)) return;
+					// 首次基线与 rewind 后没有新增消息时，也必须消费独立的状态证明。
+					if (result.codexNativeDirectInputReadiness) {
+						await options.onCodexNativeDirectInputReadiness?.(
+							{ ...context(state), ...result.codexNativeDirectInputReadiness },
+							summaryBeforeRead,
+						);
+					}
 					for (const event of result.events) {
 						if (!isCurrent(state)) return;
 						const observation = { ...context(state), ...event };
@@ -200,7 +227,7 @@ export function createNativeAgentConversationActivityObserver(
 			disposed ||
 			!identity?.nativeSessionId ||
 			identity.sourceAgentId !== summary.agentId ||
-			!["claude", "omp", "codex"].includes(identity.sourceAgentId)
+			!["claude", "omp", "codex", "kimi"].includes(identity.sourceAgentId)
 		)
 			return null;
 		const key = `${workspaceId}::${summary.taskId}`;
@@ -208,6 +235,8 @@ export function createNativeAgentConversationActivityObserver(
 		const previous = states.get(key);
 		if (previous?.identityKey === identityKey) {
 			previous.getCurrentSummary = getCurrentSummary;
+			// Kimi 的首次接受可能先于 observer 建基线，回查须使用本代最新的提交候选。
+			if (summary.agentId === "kimi") previous.summary = { ...summary };
 			return previous;
 		}
 		if (previous) forgetState(previous);
@@ -227,6 +256,8 @@ export function createNativeAgentConversationActivityObserver(
 			inFlight: null,
 			lastReadStartedAtMs: Number.NEGATIVE_INFINITY,
 			candidateExpiresAtMs: null,
+			wasCodexNeedsInputNativeReconciliationCandidate: false,
+			lastCodexNativeConversationRewindSignalKey: null,
 			retryTimer: null,
 			abortController: new AbortController(),
 		};
@@ -236,6 +267,21 @@ export function createNativeAgentConversationActivityObserver(
 	return {
 		observeTaskSessionSummary(workspaceId, summary, getCurrentSummary) {
 			const state = stateFor(workspaceId, summary, getCurrentSummary);
+			if (state) {
+				const isCandidate = isCodexNeedsInputNativeReconciliationCandidate(summary);
+				const rewindSignalKey = isCodexNativeConversationRewindSignal(summary.latestHookActivity ?? undefined)
+					? JSON.stringify([summary.lastHookAt, summary.latestHookActivity?.hookEventName])
+					: null;
+				// 只认待输入进入边沿或新的 rewind；重绘、重复摘要与补读不能续期。
+				if (
+					isCandidate &&
+					(!state.wasCodexNeedsInputNativeReconciliationCandidate ||
+						(rewindSignalKey !== null && rewindSignalKey !== state.lastCodexNativeConversationRewindSignalKey))
+				)
+					state.candidateExpiresAtMs = nowMs() + 5_000;
+				state.wasCodexNeedsInputNativeReconciliationCandidate = isCandidate;
+				if (rewindSignalKey !== null) state.lastCodexNativeConversationRewindSignalKey = rewindSignalKey;
+			}
 			return state ? scheduleRead(state) : Promise.resolve();
 		},
 		wakeForPotentialUserPromptSubmission(workspaceId, summary, getCurrentSummary) {
