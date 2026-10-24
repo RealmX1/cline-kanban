@@ -246,6 +246,7 @@ function useAutosizedPromptTextarea({
 }
 
 function PromptRow({
+	isTaskAgentExecutionDisabled,
 	prompt,
 	onChangeText,
 	onToggleScope,
@@ -257,6 +258,7 @@ function PromptRow({
 	onSetUsed,
 	onConvertToCommand,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	prompt: StoredPrompt;
 	onChangeText: (id: string, text: string) => void;
 	onToggleScope: (id: string, scope: PromptScope) => void;
@@ -271,6 +273,7 @@ function PromptRow({
 	const [hasCollapsibleContent, setHasCollapsibleContent] = useState(false);
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [isFocusedWithin, setIsFocusedWithin] = useState(false);
+	const [isPointerHoveringPromptRow, setIsPointerHoveringPromptRow] = useState(false);
 	const [isCommandScopeChoiceOpen, setIsCommandScopeChoiceOpen] = useState(false);
 	const [isPreparingPromptImages, setIsPreparingPromptImages] = useState(false);
 	const rowRef = useRef<HTMLDivElement>(null);
@@ -307,6 +310,8 @@ function PromptRow({
 			ref={rowRef}
 			data-prompt-library-entry-id={prompt.id}
 			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
+			onPointerEnter={() => setIsPointerHoveringPromptRow(true)}
+			onPointerLeave={() => setIsPointerHoveringPromptRow(false)}
 			onFocus={() => setIsFocusedWithin(true)}
 			onBlur={(event) => {
 				const nextFocusedElement = event.relatedTarget instanceof Node ? event.relatedTarget : null;
@@ -340,7 +345,14 @@ function PromptRow({
 					/>
 				</Tooltip>
 			) : null}
-			<div className="pointer-events-none absolute right-2 bottom-0 z-20 -mb-3 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+			<div
+				className={cn(
+					"absolute right-2 bottom-0 z-20 -mb-3 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 shadow-sm transition-opacity",
+					isPointerHoveringPromptRow || isFocusedWithin
+						? "pointer-events-auto opacity-100"
+						: "pointer-events-none opacity-0",
+				)}
+			>
 				<Tooltip content={`${scopeMeta.tooltip} · click for next scope`}>
 					<Button
 						variant="ghost"
@@ -362,7 +374,9 @@ function PromptRow({
 						size="xs"
 						icon={<CornerDownLeft size={14} />}
 						aria-label="Fill prompt into input"
-						disabled={!canFill}
+						disabled={!canFill || isTaskAgentExecutionDisabled}
+						// 避免来源条目因按钮先获得焦点而改变高度，让本次点击直接交接给 agent 输入框。
+						onMouseDown={(event) => event.preventDefault()}
 						onClick={() => onFill(prompt.text)}
 					/>
 				</Tooltip>
@@ -455,6 +469,7 @@ function PromptRow({
  * 默认折叠：这是个低频回收入口，不该在每次打开面板时都占掉正常条目的视线。
  */
 function OrphanedPromptsSection({
+	isTaskAgentExecutionDisabled,
 	orphanedPrompts,
 	isExpanded,
 	onToggleExpanded,
@@ -463,6 +478,7 @@ function OrphanedPromptsSection({
 	onFill,
 	onQueue,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	orphanedPrompts: StoredPrompt[];
 	isExpanded: boolean;
 	onToggleExpanded: () => void;
@@ -507,7 +523,7 @@ function OrphanedPromptsSection({
 										size="xs"
 										icon={<CornerDownLeft size={14} />}
 										aria-label="Fill orphaned prompt into input"
-										disabled={prompt.text.trim().length === 0}
+										disabled={isTaskAgentExecutionDisabled || prompt.text.trim().length === 0}
 										onClick={() => onFill(prompt.text)}
 									/>
 								</Tooltip>
@@ -538,6 +554,7 @@ function OrphanedPromptsSection({
 }
 
 export function PromptLibraryPanel({
+	isTaskAgentExecutionDisabled = false,
 	taskId,
 	projectId,
 	onFillInput,
@@ -546,6 +563,7 @@ export function PromptLibraryPanel({
 	taskIdsOnBoard = null,
 	entryKind = "draft_prompt",
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	taskId: string;
 	projectId: string;
 	onFillInput: (text: string) => void;
@@ -611,6 +629,7 @@ export function PromptLibraryPanel({
 								</h3>
 							) : null}
 							<PromptRow
+								isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 								key={prompt.id}
 								prompt={prompt}
 								onChangeText={updatePromptText}
@@ -628,6 +647,7 @@ export function PromptLibraryPanel({
 				)}
 				{!showsCommands && orphanedPrompts.length > 0 ? (
 					<OrphanedPromptsSection
+						isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 						orphanedPrompts={orphanedPrompts}
 						isExpanded={isOrphanedSectionExpanded}
 						onToggleExpanded={() => setIsOrphanedSectionExpanded((current) => !current)}

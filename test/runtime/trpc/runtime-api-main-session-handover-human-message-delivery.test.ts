@@ -17,6 +17,7 @@ import { completeTaskMainSessionHandoverAfterUserMessage } from "../../../src/st
 import type { mutateWorkspaceState, RuntimeWorkspaceAtomicMutationResult } from "../../../src/state/workspace-state";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
+import type { TerminalScreenSnapshot } from "../../../src/terminal/terminal-input-box-reader";
 import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
 import { createRuntimeApi } from "../../../src/trpc/runtime-api";
@@ -133,10 +134,19 @@ function createSession(taskId: string, agentId: "claude" | "codex"): RuntimeTask
 function installTerminalSession(manager: TerminalSessionManager, summary: RuntimeTaskSessionSummary) {
 	const write = vi.fn();
 	let screenText = "model: test\n› ";
-	const screenSnapshot = () => ({
-		lines: screenText.split("\n").map((text) => ({ text, isWrapped: false })),
-		columnCount: 80,
-	});
+	const screenSnapshot = (): TerminalScreenSnapshot => {
+		const lines: TerminalScreenSnapshot["lines"] = screenText.split("\n").map((text) => ({ text, isWrapped: false }));
+		const composerRow = lines.findIndex((line) => line.text.startsWith("› "));
+		if (composerRow >= 0 && lines[composerRow].text === "› ") {
+			// 空框 fixture 提供当前 Codex 的真实占位样式与光标证据；真人正文仍保持普通文本。
+			lines[composerRow] = {
+				text: "› Ask Codex to do anything",
+				isWrapped: false,
+				dimmedTextColumnRanges: [[2, 26]],
+			};
+		}
+		return { lines, columnCount: 80, ...(composerRow >= 0 ? { cursorRow: composerRow, cursorColumn: 2 } : {}) };
+	};
 	const entry = {
 		summary,
 		active: {

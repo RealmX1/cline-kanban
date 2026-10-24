@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BoardCard } from "@/components/board-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskConversationSessionActivityObservation, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 
 // 卡片头部时长药丸的字段 → 渲染字符串端到端契约。这条链路此前**零测试**，而它正是这个 bug 反复
 // 复发四次的地方：一颗药丸冒充了三个不同的量。现在拆成两颗，各读各的真相源，故这里逐条钉死
@@ -40,7 +41,7 @@ const NOW = Date.now();
 const TWO_HOURS_MS = 2 * 60 * 60_000;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60_000;
 
-function createCard() {
+function createCard(overrides: Partial<BoardCardModel> = {}) {
 	return {
 		id: "task-1",
 		title: "Review API changes",
@@ -52,6 +53,7 @@ function createCard() {
 		// 创建至今固定 1 分钟 ⇒ Clock 段恒为 "1m"，不会与下面两颗的读数撞车。
 		createdAt: NOW - 60_000,
 		updatedAt: NOW,
+		...overrides,
 	};
 }
 
@@ -127,6 +129,57 @@ afterEach(() => {
 	container.remove();
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 		previousActEnvironment;
+});
+
+describe("卡片创建时间药丸", () => {
+	const createdAt = NOW - THREE_DAYS_MS;
+	const creationTimeTooltip = `创建于 · ${new Date(createdAt).toLocaleString()}`;
+
+	function renderCreationTimeCard(columnId: BoardColumnId, sessionSummary?: RuntimeTaskSessionSummary) {
+		act(() =>
+			root.render(
+				<BoardCard
+					card={createCard({ createdAt, updatedAt: NOW, taskDescriptionLastUpdatedAt: NOW - TWO_HOURS_MS })}
+					index={0}
+					columnId={columnId}
+					sessionSummary={sessionSummary}
+				/>,
+			),
+		);
+		return container.querySelector<HTMLElement>("[data-task-created-at-pill]");
+	}
+
+	it.each<BoardColumnId>(["backlog", "in_progress", "review", "validation", "trash"])(
+		"%s 列无会话时仍显示原始创建时间，与任务及 Description 更新时间区分",
+		(columnId) => {
+			const creationTimePill = renderCreationTimeCard(columnId);
+			expect(creationTimePill?.textContent).toBe("3d");
+			expect(creationTimePill?.title).toBe(creationTimeTooltip);
+			expect(creationTimePill?.querySelector(".lucide-clock")).not.toBeNull();
+		},
+	);
+
+	it("切换任务状态和重启会话不会把创建时间刷新为会话时间", () => {
+		const summaries = [
+			undefined,
+			createSummary({
+				state: "running",
+				turnOwner: "agent",
+				liveness: "live",
+				userTurnKind: null,
+				startedAt: NOW,
+			}),
+			createSummary({ startedAt: NOW, lastConversationProgressObservation: null }),
+		];
+		for (const summary of summaries) {
+			const creationTimePill = renderCreationTimeCard(
+				summary?.turnOwner === "agent" ? "in_progress" : "review",
+				summary,
+			);
+			expect(creationTimePill?.textContent).toBe("3d");
+			expect(creationTimePill?.title).toBe(creationTimeTooltip);
+		}
+	});
 });
 
 describe("卡片头部时长药丸", () => {
@@ -206,9 +259,9 @@ describe("卡片头部时长药丸", () => {
 				lastConversationProgressObservation: null,
 			}),
 		);
-		expect(stoppedPill(host)?.textContent).toContain("2h");
-		expect(progressPill(host)?.textContent).toContain("3d");
-		expect(host.textContent).not.toContain("1m");
+		expect(stoppedPill(host)?.textContent).toBe("2h");
+		expect(progressPill(host)?.textContent).toBe("3d");
+		expect(host.querySelector("[data-task-created-at-pill]")?.textContent).toBe("1m");
 	});
 
 	it("两颗药丸各读各的字段：Stopped 读停止事件、Progress 读推进观测", () => {

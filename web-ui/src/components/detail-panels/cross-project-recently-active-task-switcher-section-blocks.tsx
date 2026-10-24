@@ -3,15 +3,13 @@ import type {
 	CrossProjectTaskSwitcherRecentTaskStageFilter,
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Activity, ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin, UnfoldHorizontal } from "lucide-react";
-import {
-	type MutableRefObject,
-	type ReactElement,
-	type ReactNode,
-	type PointerEvent as ReactPointerEvent,
-	type UIEvent as ReactUIEvent,
-	useState,
+import type {
+	MutableRefObject,
+	ReactElement,
+	ReactNode,
+	PointerEvent as ReactPointerEvent,
+	UIEvent as ReactUIEvent,
 } from "react";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import { CrossProjectTaskSwitcherRecentProjectMultiSelectFilter } from "@/components/detail-panels/cross-project-task-switcher-recent-project-multi-select-filter";
@@ -19,12 +17,7 @@ import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
-import { LocalStorageKey } from "@/storage/local-storage-store";
-import {
-	readCrossProjectTaskSwitcherPanelViewContinuity,
-	writeCrossProjectTaskSwitcherPanelViewContinuity,
-} from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
-import { useBooleanLocalStorageValue } from "@/utils/react-use";
+import { collectVisibleCrossProjectTaskSwitcherSectionEntries } from "@/state/cross-project-task-switcher-focus-view-visible-task-rows";
 
 /**
  * 同一组分区（docs/context-cross-project-recently-active-task-switcher.md）的两种呈现：
@@ -37,9 +30,6 @@ import { useBooleanLocalStorageValue } from "@/utils/react-use";
 export type CrossProjectTaskSwitcherSectionBlockPresentation =
 	| "stacked_section_in_focus_view_left_column_panel"
 	| "section_column_on_board_scope_all_projects_home_page";
-
-/** Pinned 区（堆叠呈现）默认露出的条数；超出部分由区底的按钮展开（同 Focus View 置顶板分段）。 */
-const DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER = 5;
 
 const REMAINING_SECTION_ORDERING_MODE_LABELS: Record<CrossProjectTaskSwitcherRemainingSectionOrderingMode, string> = {
 	most_recently_touched_by_conversation_progress_or_user_open_or_description_edit: "Recently touched",
@@ -197,18 +187,6 @@ function CrossProjectTaskSwitcherSectionExpansionButton({
 	);
 }
 
-function isEntryFocusedTaskRowToKeepMounted(
-	entryInProject: CrossProjectTaskSwitcherEntryInProject,
-	section: CrossProjectTaskSwitcherTaskRowSection,
-	focusedTaskRowToKeepMounted: CrossProjectTaskSwitcherSectionBlockProps["focusedTaskRowToKeepMounted"],
-): boolean {
-	return (
-		focusedTaskRowToKeepMounted?.section === section &&
-		buildCrossProjectTaskSwitcherEntryKey(entryInProject.workspaceId, entryInProject.entry.taskId) ===
-			focusedTaskRowToKeepMounted.entryKey
-	);
-}
-
 /** Pinned 区（可与下面重复）。没有置顶时整区不渲染。 */
 export function CrossProjectTaskSwitcherPinnedSectionBlock({
 	sectionBlockPresentation,
@@ -217,19 +195,13 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 	sectionColumnScrollContainerBinding,
 	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
-	const { sections } = sectionsModel;
-	// 「展开全部置顶」跨重挂载保留（Focus View 左栏 ↔ 过渡外壳），见 cross-project-task-switcher-panel-view-continuity-store。
-	const [showsAllPinnedEntries, setShowsAllPinnedEntriesState] = useState(
-		() => readCrossProjectTaskSwitcherPanelViewContinuity().showsAllPinnedEntries,
-	);
-	const setShowsAllPinnedEntries = (nextShowsAllPinnedEntries: boolean) => {
-		writeCrossProjectTaskSwitcherPanelViewContinuity({ showsAllPinnedEntries: nextShowsAllPinnedEntries });
-		setShowsAllPinnedEntriesState(nextShowsAllPinnedEntries);
-	};
-	const [isPinnedSectionCollapsed, setIsPinnedSectionCollapsed] = useBooleanLocalStorageValue(
-		LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed,
-		false,
-	);
+	const {
+		sections,
+		showsAllPinnedEntries,
+		setShowsAllPinnedEntries,
+		isPinnedSectionCollapsed,
+		setIsPinnedSectionCollapsed,
+	} = sectionsModel;
 	if (sections.pinnedEntries.length === 0) {
 		return null;
 	}
@@ -253,15 +225,12 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 			</CrossProjectTaskSwitcherSectionFrame>
 		);
 	}
-	const isFocusedPinnedEntry = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
-		focusedTaskRowToKeepMounted?.section === "pinned" &&
-		buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskRowToKeepMounted.entryKey;
-	const visiblePinnedEntries = sections.pinnedEntries.filter((entry, index) =>
-		isPinnedSectionCollapsed
-			? isFocusedPinnedEntry(entry)
-			: showsAllPinnedEntries ||
-				index < DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER ||
-				isFocusedPinnedEntry(entry),
+	const visiblePinnedEntries = collectVisibleCrossProjectTaskSwitcherSectionEntries(
+		sections.pinnedEntries,
+		"pinned",
+		sectionsModel,
+		focusedTaskRowToKeepMounted,
+		true,
 	);
 	const hiddenPinnedEntryCount = sections.pinnedEntries.length - visiblePinnedEntries.length;
 	return (
@@ -271,7 +240,7 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 			header={
 				<button
 					type="button"
-					onClick={() => setIsPinnedSectionCollapsed((previous) => !previous)}
+					onClick={() => setIsPinnedSectionCollapsed(!isPinnedSectionCollapsed)}
 					aria-expanded={!isPinnedSectionCollapsed}
 					className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md border-none bg-transparent text-left text-inherit"
 				>
@@ -359,15 +328,13 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 				</button>
 			}
 		>
-			{sections.runningEntries
-				.filter(
-					({ workspaceId, entry }) =>
-						isRunningSectionExpanded ||
-						(focusedTaskRowToKeepMounted?.section === "running" &&
-							buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) ===
-								focusedTaskRowToKeepMounted.entryKey),
-				)
-				.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "running"))}
+			{collectVisibleCrossProjectTaskSwitcherSectionEntries(
+				sections.runningEntries,
+				"running",
+				sectionsModel,
+				focusedTaskRowToKeepMounted,
+				true,
+			).map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "running"))}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }
@@ -408,18 +375,13 @@ export function CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock(
 			{isPromptCacheWarmSectionExpanded && sections.promptCacheWarmAwaitingUserEntries.length === 0 ? (
 				<div className="px-2 py-1.5 text-xs text-text-tertiary">No warm prompt caches waiting on you.</div>
 			) : (
-				sections.promptCacheWarmAwaitingUserEntries
-					.filter(
-						(entryInProject) =>
-							isPromptCacheWarmSectionExpanded ||
-							(!isSectionColumnCollapsed &&
-								isEntryFocusedTaskRowToKeepMounted(
-									entryInProject,
-									"prompt_cache_warm",
-									focusedTaskRowToKeepMounted,
-								)),
-					)
-					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "prompt_cache_warm"))
+				collectVisibleCrossProjectTaskSwitcherSectionEntries(
+					sections.promptCacheWarmAwaitingUserEntries,
+					"prompt_cache_warm",
+					sectionsModel,
+					focusedTaskRowToKeepMounted,
+					sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel",
+				).map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "prompt_cache_warm"))
 			)}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
@@ -553,14 +515,13 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 			{isRecentSectionExpanded && entries.length === 0 ? (
 				<div className="px-2 py-1.5 text-xs text-text-tertiary">No recent tasks match these filters.</div>
 			) : (
-				entries
-					.filter(
-						(entryInProject) =>
-							isRecentSectionExpanded ||
-							(!isSectionColumnCollapsed &&
-								isEntryFocusedTaskRowToKeepMounted(entryInProject, "remaining", focusedTaskRowToKeepMounted)),
-					)
-					.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "remaining"))
+				collectVisibleCrossProjectTaskSwitcherSectionEntries(
+					entries,
+					"remaining",
+					sectionsModel,
+					focusedTaskRowToKeepMounted,
+					sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel",
+				).map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "remaining"))
 			)}
 			{!isRecentSectionExpanded || extendedActivityHorizonLoadState === "loaded" ? null : (
 				<button

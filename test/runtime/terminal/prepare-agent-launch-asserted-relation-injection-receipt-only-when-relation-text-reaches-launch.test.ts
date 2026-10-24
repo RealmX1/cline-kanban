@@ -11,6 +11,11 @@ vi.mock("../../../src/prompts/inter-work-unit-relation-neighborhood-append-syste
 		resolveInterWorkUnitRelationNeighborhoodSessionStartInjectionMock,
 }));
 
+// 关系注入回执的单元测试只验证启动文本与回调，不依赖真实 Kimi CLI、登录态或模型目录。
+vi.mock("../../../src/terminal/kimi-latest-managed-stable-model-selection", () => ({
+	resolveKimiLaunchDefaultModelId: vi.fn(async () => "kimi-code/k99-pro"),
+}));
+
 import type { RuntimeAgentId } from "../../../src/core/api-contract";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 

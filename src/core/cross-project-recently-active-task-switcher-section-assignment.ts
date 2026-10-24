@@ -116,7 +116,7 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 		return false;
 	}
 	// 静默、转圈和重绘均不能证明回合结束。存活性由运行时负责，明确 park 仍由 agent 持有回合。
-	return entry.liveness === "live" || entry.isParkedAwaitingDispatchedBackgroundWork;
+	return entry.liveness === "live" || entry.liveness === "retrying" || entry.isParkedAwaitingDispatchedBackgroundWork;
 }
 
 // Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或

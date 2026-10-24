@@ -9,6 +9,7 @@ async function visibleBox(locator: Locator) {
 for (const width of [1280, 360]) {
 	test(`${width}px：两种视图图标提示一致，展开和状态变化不推动标题及元信息横移`, async ({ page }) => {
 		await page.setViewportSize({ width, height: 1100 });
+		await page.clock.setFixedTime(new Date("2026-10-24T12:00:00.000Z"));
 		const pageErrors: string[] = [];
 		page.on("pageerror", (error) => pageErrors.push(error.message));
 		// 所有请求都与真实运行时隔离；快照不可用场景也只验证真实兜底 UI。
@@ -36,6 +37,9 @@ for (const width of [1280, 360]) {
 		const metadata = row.locator("[data-task-card-secondary-metadata-row]:visible");
 		const runningDot = row.locator('[data-task-card-corner-status-indicator="running"]:visible');
 		const unreadDot = row.locator('[data-task-card-corner-status-indicator="unread_handoff"]:visible');
+		const taskCreatedAtTooltipContent = await page.evaluate(
+			() => `创建于 · ${new Date(Date.now() - 60_000).toLocaleString()}`,
+		);
 		await expect(title).toBeVisible();
 		for (const host of [
 			allProjects,
@@ -43,7 +47,15 @@ for (const width of [1280, 360]) {
 			page.locator('[data-layout-host="standard-board"]'),
 		]) {
 			await expect(host.getByRole("button", { name: "部署覆盖：2/5 个已知提交" })).toBeVisible();
+			const creationTimePill = host.locator("[data-task-created-at-pill]:visible");
+			await expect(creationTimePill).toHaveText("1m");
+			await expect(creationTimePill).toHaveAttribute("title", taskCreatedAtTooltipContent);
+			const creationTimeBox = await visibleBox(creationTimePill);
+			expect(creationTimeBox.x).toBeGreaterThanOrEqual(0);
+			expect(creationTimeBox.x + creationTimeBox.width).toBeLessThanOrEqual(width);
 		}
+		// 精简行的元信息宿主不接指针事件，创建时间自身仍需能触发原生 title 提示。
+		await expect(row.locator("[data-task-created-at-pill]:visible")).toHaveCSS("pointer-events", "auto");
 		const deploymentIndicator = page
 			.locator('[data-layout-host="project-specific"]')
 			.getByRole("button", { name: "部署覆盖：2/5 个已知提交" });
@@ -90,6 +102,19 @@ for (const width of [1280, 360]) {
 			"data-cross-project-task-switcher-row-in-place-expansion-state",
 			"kept_expanded_in_list",
 		);
+		for (const host of [
+			allProjects,
+			page.locator('[data-layout-host="project-specific"]'),
+			page.locator('[data-layout-host="standard-board"]'),
+		]) {
+			await page.mouse.move(width - 5, 5, { steps: 5 });
+			// 卡片先进入 hover，按既有性能门控挂载 Tooltip，再移动到创建时间。
+			await host.locator("[data-task-card-title]:visible").hover();
+			const creationTimePill = host.locator("[data-task-created-at-pill]:visible");
+			await expect(creationTimePill).toHaveAttribute("data-state", "closed");
+			await creationTimePill.hover();
+			await expect(page.getByRole("tooltip")).toHaveText(taskCreatedAtTooltipContent);
+		}
 
 		await page.screenshot({ path: test.info().outputPath(`task-card-layout-expanded-${width}.png`), fullPage: true });
 		for (const mode of ["worktree", "inplace"]) {
@@ -118,6 +143,11 @@ for (const width of [1280, 360]) {
 		await page.getByRole("button", { name: "切换运行状态", exact: true }).click();
 		await expect(runningDot).toHaveCount(0);
 		await expect(unreadDot).toHaveCount(1);
+		await expect(row.locator("[data-task-created-at-pill]:visible")).toHaveText("1m");
+		await expect(row.locator("[data-task-created-at-pill]:visible")).toHaveAttribute(
+			"title",
+			taskCreatedAtTooltipContent,
+		);
 		expect(Math.abs((await visibleBox(title)).x - initialTitle.x)).toBeLessThan(1);
 		await page.getByRole("button", { name: "切换未读状态", exact: true }).click();
 		await expect(page.locator("[data-task-card-corner-status-indicator]:visible")).toHaveCount(0);
@@ -134,6 +164,7 @@ for (const width of [1280, 360]) {
 		await row.hover();
 		await row.getByRole("button", { name: "Collapse to compact row", exact: true }).click();
 		await expect(row).toHaveAttribute("data-cross-project-task-switcher-row-in-place-expansion-state", "compact_row");
+		await expect(row.locator("[data-task-created-at-pill]:visible")).toHaveText("1m");
 		await row.getByRole("button", { name: "打开任务：统一布局的任务标题", exact: true }).click({
 			position: { x: 10, y: 10 },
 		});
@@ -147,6 +178,7 @@ for (const width of [1280, 360]) {
 			await expect(host.getByRole("button", { name: "部署覆盖：0/5 个已知提交" })).toBeVisible();
 		}
 		await page.screenshot({ path: test.info().outputPath(`task-card-layout-${width}.png`), fullPage: true });
+		expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
 		expect(pageErrors).toEqual([]);
 	});
 }

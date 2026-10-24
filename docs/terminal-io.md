@@ -108,3 +108,30 @@ Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux
 任务 `6377d` 的隔离原生 Codex 探针复现了损坏报告向 composer 插入 `-`，也发现合成的 DCS 状态应答能插入 `1$r0m`。后者仅证明另一种污染机制可能存在，尚未在真实静置现场捕获，不作为本次新增协议过滤的依据。短时静置未复现不能证明间歇性问题已解决；真实部署后的自然使用观察仍需保留。
 
 本次原生 `0.162.1` 探针还发现，隔离 `CODEX_HOME` 中的 `packages/app-server-daemon/releases/…/bin/codex` 后台进程可在主 TUI 退出后继续持有 SQLite 维护锁、重建已删目录。删除测试 HOME 前需按专属目录与可执行文件身份核对并回收这些后台进程；主 TUI 的退出事件不足以证明探针已完全清理。
+
+## 6. Codex 程序化投递保留当前草稿
+
+`session-manager` 对已启动的 Codex 普通文字优先调用 `codex-native-prompt-delivery.ts`，通过当前 TUI 独享的
+控制端点执行 `turn/start`。投递不读写 composer 正文，也不更改 `VISUAL`、`EDITOR` 或 Ctrl+G：用户手动打开的
+外部编辑器仍由 Codex 调用。草稿原地保留，不进入 Prompt Library。本路线不扩展附件存储；启动交接与 slash
+命令仍走既有终端路线。
+
+提交前检查 workspace、conversation session、本代 incarnation、原生 thread 与 cwd；只使用已经加载且没有
+`inProgress` 回合的 thread，不 resume、不自动 steer。模态待答与真人正在输入时继续让路，并在原生提交前再次
+执行既有 RVF 独立用户回合门禁和代际检查。调用只含正文与客户端消息 ID，模型、推理档位、权限及 Plan 模式均
+继承当前会话。
+
+API 回应本身不是送达：必须读回实际 `userMessage`，正文精确匹配，且消息 ID 对得上客户端 ID，或位于 API
+返回的新 turn 中，才给确认回执。Codex `0.164.0` 的客户端消息 ID 与实际用户消息 ID 可以不同。确认后四个 ID
+以 `codexNativePromptDeliveryEvidence` 经过回执与队列持久化，并在注入账本 / CLI `message-status` 中以
+`codex_native_prompt_delivery_evidence` 返回；这些信息不替代 RVF 的 checkpoint、nonce 与独立回合核验。
+
+一旦尝试 `turn/start`，超时、断线或响应无效后只重连查询，不重发，不切回 PTY。无法确认时落
+`codex_native_prompt_delivery_unconfirmed`，队列禁止自动重投。原生能力在提交前不可用时，PTY 后备必须确证
+当前输入框为空；只看历史 `›` 或“没见过手输字节”不足以判空。`codex-terminal-composer-occupancy.ts` 使用
+当前光标位置与 dim 占位文本判空；读不全保持未知，不从自动折行的屏幕拼出“无损草稿”，也不借用 Claude 的
+Ctrl+S 暂存语义。连续可信空框读数可以解除删除至空后残留的输入侧争用闩。
+
+真实隔离回归见 `test/integration/codex-native-prompt-delivery-preserves-composer.integration.test.ts`：本地模拟
+模型、受管 Codex、长草稿、手动 Ctrl+G、Plan 模式、`UserPromptSubmit`、用户提问与权限确认在同一次闭环中验证。
+原生 CLI 实验通过 `KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY` 显式启用。

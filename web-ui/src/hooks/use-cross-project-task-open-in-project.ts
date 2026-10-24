@@ -59,6 +59,7 @@ export function useCrossProjectTaskOpenInProject({
 }): {
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	handleOpenTaskInProject: (repoId: string, taskId: string) => void;
+	handleNavigateToProjectBoard: (repoId: string) => Promise<void>;
 	// 外壳上的 Cancel：回到发起时打开着的任务（必要时反向再切一次项目）。
 	cancelPendingCrossProjectTaskOpenReturningToOriginTask: () => void;
 	// 只丢掉在途态、不改导航（顶栏「返回看板」用：导航照常落到目标项目，落地后显示它的看板）。
@@ -66,6 +67,64 @@ export function useCrossProjectTaskOpenInProject({
 } {
 	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<PendingCrossProjectTaskOpen | null>(
 		null,
+	);
+	const [pendingProjectBoardNavigation, setPendingProjectBoardNavigation] = useState<{
+		repoId: string;
+		resolve: () => void;
+		reject: (error: Error) => void;
+	} | null>(null);
+	const pendingProjectBoardNavigationRef = useRef(pendingProjectBoardNavigation);
+	const handleNavigateToProjectBoard = useCallback(
+		(repoId: string): Promise<void> => {
+			pendingProjectBoardNavigationRef.current?.reject(new Error("看板导航已被新的导航取代"));
+			setPendingCrossProjectTaskOpen(null);
+			setSelectedTaskId(null);
+			return new Promise<void>((resolve, reject) => {
+				const request = { repoId, resolve, reject };
+				pendingProjectBoardNavigationRef.current = request;
+				setPendingProjectBoardNavigation(request);
+				handleSelectProject(repoId);
+			});
+		},
+		[handleSelectProject, setSelectedTaskId],
+	);
+	useEffect(() => {
+		if (!pendingProjectBoardNavigation || !isCurrentProjectBoardSettled) return;
+		if (
+			currentProjectId !== pendingProjectBoardNavigation.repoId ||
+			projectIdOwningHydratedBoard !== pendingProjectBoardNavigation.repoId
+		)
+			return;
+		if (selectedTaskId !== null) {
+			setSelectedTaskId(null);
+			return;
+		}
+		pendingProjectBoardNavigation.resolve();
+		pendingProjectBoardNavigationRef.current = null;
+		setPendingProjectBoardNavigation(null);
+	}, [
+		currentProjectId,
+		projectIdOwningHydratedBoard,
+		isCurrentProjectBoardSettled,
+		pendingProjectBoardNavigation,
+		selectedTaskId,
+		setSelectedTaskId,
+	]);
+	useEffect(() => {
+		if (!pendingProjectBoardNavigation) return;
+		const navigationTimeout = window.setTimeout(() => {
+			if (pendingProjectBoardNavigationRef.current !== pendingProjectBoardNavigation) return;
+			pendingProjectBoardNavigation.reject(new Error("所属项目看板尚未加载完成，请重试"));
+			pendingProjectBoardNavigationRef.current = null;
+			setPendingProjectBoardNavigation(null);
+		}, 30_000);
+		return () => window.clearTimeout(navigationTimeout);
+	}, [pendingProjectBoardNavigation]);
+	useEffect(
+		() => () => {
+			pendingProjectBoardNavigationRef.current?.reject(new Error("看板导航宿主已关闭"));
+		},
+		[],
 	);
 	const isDetailViewOpenRef = useRef(isDetailViewOpen);
 	isDetailViewOpenRef.current = isDetailViewOpen;
@@ -200,6 +259,7 @@ export function useCrossProjectTaskOpenInProject({
 	return {
 		pendingCrossProjectTaskOpen,
 		handleOpenTaskInProject,
+		handleNavigateToProjectBoard,
 		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
 		dismissPendingCrossProjectTaskOpen,
 	};

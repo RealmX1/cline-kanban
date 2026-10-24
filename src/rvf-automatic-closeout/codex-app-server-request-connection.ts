@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import {
+	buildCodexConversationStorageEnvironment,
+	resolveMigratedCodexConversationHome,
+	withCodexConversationStorageOperationLock,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 import { createCodexAppServerLfDelimitedUtf8ResponseDecoder } from "./codex-app-server-lf-delimited-utf8-response-decoder";
 import type { CodexAppServerRequestPort } from "./codex-native-conversation-prefix";
 
@@ -15,13 +20,37 @@ export async function withCodexAppServerRequestConnection<T>(
 		binary?: string;
 		environment?: NodeJS.ProcessEnv;
 		argumentsBeforeSubcommand?: string[];
+		codexConversationStorageHomeDirectoryPath?: string;
+		codexConversationStorageNativeSessionId?: string;
+		experimentalApi?: boolean;
 	},
 	operation: (connection: CodexAppServerRequestPort) => Promise<T>,
 ): Promise<T> {
+	const home = input.codexConversationStorageHomeDirectoryPath;
+	const nativeSessionId = input.codexConversationStorageNativeSessionId;
+	if (home && nativeSessionId)
+		return withCodexConversationStorageOperationLock(home, nativeSessionId, async () =>
+			withCodexAppServerRequestConnection(
+				{
+					...input,
+					codexConversationStorageHomeDirectoryPath: await resolveMigratedCodexConversationHome(
+						home,
+						nativeSessionId,
+					),
+					codexConversationStorageNativeSessionId: undefined,
+				},
+				operation,
+			),
+		);
 	// 这是本次操作自己的 stdio 子进程，不连接或停止共享 daemon。它只读取/分支原生历史，绝不 turn/start。
 	const child = spawn(input.binary ?? "codex", [...(input.argumentsBeforeSubcommand ?? []), "app-server", "--stdio"], {
 		cwd: input.workingDirectory,
-		env: input.environment ?? process.env,
+		env: {
+			...(input.environment ?? process.env),
+			...(input.codexConversationStorageHomeDirectoryPath
+				? buildCodexConversationStorageEnvironment(input.codexConversationStorageHomeDirectoryPath)
+				: {}),
+		},
 		stdio: ["pipe", "pipe", "pipe"],
 		windowsHide: true,
 	});
@@ -111,7 +140,10 @@ export async function withCodexAppServerRequestConnection<T>(
 			}),
 	};
 	try {
-		await connection.request("initialize", { clientInfo: { name: "kanban_rvf_automatic_closeout", version: "1" } });
+		await connection.request("initialize", {
+			clientInfo: { name: "kanban_rvf_automatic_closeout", version: "1" },
+			...(input.experimentalApi ? { capabilities: { experimentalApi: true } } : {}),
+		});
 		child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
 		return await operation(connection);
 	} finally {

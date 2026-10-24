@@ -740,6 +740,9 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 						terminalDeliveryReceiptForInjectionLedger: {
 							status: settledOutcome.status,
 							reason: settledOutcome.reason,
+							...(settledOutcome.codexNativePromptDeliveryEvidence
+								? { codexNativePromptDeliveryEvidence: settledOutcome.codexNativePromptDeliveryEvidence }
+								: {}),
 						},
 					},
 		);

@@ -289,6 +289,30 @@ describe("出队引擎 × 程序化排队投递", () => {
 		expect(subject.sends).toHaveLength(1);
 	});
 
+	it("原生异步回执的消息身份经队列落盘后完整镜像进注入账本", async () => {
+		const subject = harness({ sendBehavior: acceptedPendingPtyConfirmation });
+		subject.observe(stoppedSummary(1));
+		await subject.enqueueProgrammatic(10 * 60 * 1000, false);
+		await vi.waitFor(() => expect(subject.sends).toHaveLength(1));
+		const evidence = {
+			clientUserMessageId: "client-message-1",
+			nativeSessionId: "thread-1",
+			nativeTurnId: "turn-2",
+			nativeUserMessageId: "user-2",
+		};
+		subject.sends[0]?.settlePtyDelivery({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+			codexNativePromptDeliveryEvidence: evidence,
+		});
+		await subject.dispatcher.whenIdle();
+		expect((await readLedgerRecord())?.codex_native_prompt_delivery_evidence).toEqual(evidence);
+		const entry = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0];
+		expect(entry?.programmaticInjectionLedgerReceiptLink?.settledTerminalDeliveryReceipt).toMatchObject({
+			codexNativePromptDeliveryEvidence: evidence,
+		});
+	});
+
 	it("② parked 等后台工作 ⇒ 停止边沿到了也不交，账本仍 pending、仍卡在空闲门", async () => {
 		const subject = harness();
 		subject.observe(

@@ -262,6 +262,12 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 												idempotencyKey: injectionIdempotencyKey,
 												status: outcome.status,
 												...(outcome.reason ? { failureReason: outcome.reason } : {}),
+												...(outcome.codexNativePromptDeliveryEvidence
+													? {
+															codexNativePromptDeliveryEvidence:
+																outcome.codexNativePromptDeliveryEvidence,
+														}
+													: {}),
 												nowIso: new Date().toISOString(),
 											}).catch(() => {
 												// 账本写失败不影响会话本身；仍 pending 的记录由 runtime 启动清扫兜底判失败。

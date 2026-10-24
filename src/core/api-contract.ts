@@ -205,6 +205,7 @@ export const runtimeTaskAgentSessionInitializationSchema = z
 		sourceSessionId: z.string().trim().uuid(),
 		sourceSessionReuseMode: runtimeTaskAgentSessionInitializationReuseModeSchema,
 		sourceSessionWorkingDirectoryPath: z.string().trim().min(1).optional(),
+		codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	})
 	.superRefine((initialization, ctx) => {
 		if (
@@ -1162,6 +1163,8 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
+	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
 	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
@@ -2446,6 +2449,7 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
 	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
@@ -2460,9 +2464,18 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 ]);
 export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
 
+export const codexNativePromptDeliveryEvidenceSchema = z.object({
+	clientUserMessageId: z.string(),
+	nativeSessionId: z.string(),
+	nativeTurnId: z.string(),
+	nativeUserMessageId: z.string(),
+});
+export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePromptDeliveryEvidenceSchema>;
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2483,6 +2496,7 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 
@@ -2713,6 +2727,8 @@ export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
 	// 前端靠它决定要不要播 5s 高亮、要不要发确认 mutation。
 	awaitsHumanReconfirmationAfterRuntimeRestart: z.boolean(),
 	deliveryAttemptCount: z.number().int().nonnegative(),
+	// 真正交给 transport 时的开始时间；旧 runtime 投影缺省时保留未知，不冒充结束时间。
+	lastAttemptedAt: z.number().nullable().optional(),
 	lastDeliveryFailureNote: z.string().nullable(),
 	sourcePromptLibraryEntryId: z.string().nullable(),
 	// true = 库里那条的正文在入队之后被改过；null = 没有来源条目，或来源条目已被删。
@@ -2745,6 +2761,16 @@ export const runtimeTaskPromptDeliveryQueueResponseSchema = z.object({
 	ok: z.boolean(),
 	queue: workspaceQueuedTaskPromptDeliverySnapshotSchema.nullable(),
 	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema.nullable(),
+	// 按需读取时提供真实实例路径；旧 runtime 缺省时前端仍可复制已知标识。
+	queuedTaskPromptDeliveryDebugReferenceContext: z
+		.object({
+			workspaceId: z.string(),
+			workspaceProjectPath: z.string(),
+			queuedTaskPromptDeliveriesFilePath: z.string(),
+			taskMessageInjectionLedgerFilePath: z.string(),
+		})
+		.nullable()
+		.optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskPromptDeliveryQueueResponse = z.infer<typeof runtimeTaskPromptDeliveryQueueResponseSchema>;
@@ -3920,6 +3946,7 @@ export type RuntimeAvailableAgentSessionPreviewTurn = z.infer<typeof runtimeAvai
 export const runtimeAvailableAgentSessionSummarySchema = z.object({
 	sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	sourceSessionId: z.string().uuid(),
+	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	sessionTitle: z.string(),
 	sessionWorkingDirectoryPath: z.string().nullable(),
 	gitBranchName: z.string().nullable(),
@@ -3928,6 +3955,14 @@ export const runtimeAvailableAgentSessionSummarySchema = z.object({
 	previewConversationTurns: z.array(runtimeAvailableAgentSessionPreviewTurnSchema).max(3),
 });
 export type RuntimeAvailableAgentSessionSummary = z.infer<typeof runtimeAvailableAgentSessionSummarySchema>;
+export type {
+	RuntimeCodexConversationStorageOperationRequest,
+	RuntimeCodexConversationStorageOperationResponse,
+} from "./codex-conversation-storage-api-contract";
+export {
+	runtimeCodexConversationStorageOperationRequestSchema,
+	runtimeCodexConversationStorageOperationResponseSchema,
+} from "./codex-conversation-storage-api-contract";
 
 export const runtimeAvailableAgentSessionsRequestSchema = z.object({
 	agentId: runtimeResumableAgentSessionSourceAgentIdSchema,
@@ -4242,6 +4277,23 @@ export const runtimeTaskChatMessagesResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMessagesResponseSchema>;
+
+// 任务工作台的只读历史，与会启动或恢复 agent 的聊天操作分开。
+export const runtimeTaskConversationHistoryPageRequestSchema = z.object({
+	workspaceTaskId: z.string().min(1),
+	taskConversationSessionId: z.string().min(1),
+	cursor: z.string().max(4096).nullish(),
+});
+export type RuntimeTaskConversationHistoryPageRequest = z.infer<typeof runtimeTaskConversationHistoryPageRequestSchema>;
+export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
+	availability: z.enum(["available", "partially_available", "unavailable"]),
+	messages: z.array(runtimeTaskChatMessageSchema),
+	nextCursor: z.string().nullable(),
+	notice: z.string().nullable(),
+});
+export type RuntimeTaskConversationHistoryPageResponse = z.infer<
+	typeof runtimeTaskConversationHistoryPageResponseSchema
+>;
 
 export const runtimeTaskChatSendRequestSchema = z.object({
 	taskId: z.string(),

@@ -1,13 +1,18 @@
-// 「现在该不该把键盘焦点抢给 agent entry（agent 输入入口）」这一判断的单一真源。
+// 切卡或挂载时「现在该不该自动把键盘焦点交给 agent entry（agent 输入入口）」的单一真源。
 //
 // 详情视图切换 focus task card 后，键盘焦点要自动落到该卡的 agent 输入入口上，
 // 否则裸方向键会落回 document 级热键、把详情视图变成翻卡器。但抢焦点是有代价的：
 // `element.focus()` 会 collapse 文档选区，用户正在卡片上拖选的文字会瞬间消失。
 //
-// 于是三条抢焦点路径（conversation composer 的 taskId 变更、composer 的显式聚焦请求、
-// PTY 终端的 mount autoFocus 与显式聚焦请求）共用这一个守卫，而不是各写各的条件。
+// conversation composer 的 taskId 变更与切卡聚焦请求、PTY 终端的 mount autoFocus 与切卡聚焦请求
+// 共用这一个守卫。用户显式填入快捷内容则经下面的 handle 立即交接，不使用自动聚焦判据。
 
 import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
+
+/** 显式填入快捷内容后立即交接焦点；入口不可用时返回 false，不保留延迟请求。 */
+export interface AgentInputShortcutInsertionFocusHandle {
+	focusAgentInputAfterShortcutInsertion: () => boolean;
+}
 
 function isEditableElement(element: Element | null): boolean {
 	if (!(element instanceof HTMLElement)) {

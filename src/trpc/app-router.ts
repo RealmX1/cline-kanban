@@ -175,6 +175,8 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskConversationHistoryPageRequest,
+	RuntimeTaskConversationHistoryPageResponse,
 	RuntimeTaskEditDraftsMutateRequest,
 	RuntimeTaskEditDraftsReadRequest,
 	RuntimeTaskEditDraftsResponse,
@@ -397,6 +399,8 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskConversationHistoryPageRequestSchema,
+	runtimeTaskConversationHistoryPageResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -445,15 +449,25 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfAutomaticCloseoutExecutionResultReportResponseSchema,
 	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema,
 	rvfReviewStartBoundaryObservationRequestSchema,
 	rvfReviewStartBoundaryObservationResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
+import {
+	type RuntimeCodexConversationStorageOperationRequest,
+	type RuntimeCodexConversationStorageOperationResponse,
+	runtimeCodexConversationStorageOperationRequestSchema,
+	runtimeCodexConversationStorageOperationResponseSchema,
+} from "../core/codex-conversation-storage-api-contract";
 import {
 	independentTaskCreationDraftEditSchema,
 	independentTaskCreationDraftRequestSchema,
@@ -593,6 +607,7 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -639,6 +654,14 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		reconcileLateNativePromptAcceptance?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
+		) => Promise<z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema>>;
+		reportExecutionResult?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutExecutionResultReportResponseSchema>>;
 		observeBoundary?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
@@ -661,6 +684,10 @@ export interface RuntimeTrpcContext {
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
 	kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence;
 	runtimeApi: {
+		operateCodexConversationStorage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeCodexConversationStorageOperationRequest,
+		) => Promise<RuntimeCodexConversationStorageOperationResponse>;
 		loadConfig: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeConfigResponse>;
 		saveConfig: (
 			scope: RuntimeTrpcWorkspaceScope | null,
@@ -757,6 +784,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatMessagesRequest,
 		) => Promise<RuntimeTaskChatMessagesResponse>;
+		getTaskConversationHistoryPage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationHistoryPageRequest,
+		) => Promise<RuntimeTaskConversationHistoryPageResponse>;
 		getClineSlashCommands: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeSlashCommandsResponse>;
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1618,6 +1649,28 @@ export const runtimeAppRouter = t.router({
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
 			}),
+		reconcileRvfAutomaticCloseoutLateNativePromptAcceptance: workspaceProcedure
+			.input(rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema)
+			.output(rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
+			}),
+		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
+			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)
+			.output(rvfAutomaticCloseoutExecutionResultReportResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reportExecutionResult)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动收尾执行结果登记服务未启用。" });
+				try {
+					return await ctx.rvfAutomaticCloseoutApi.reportExecutionResult(ctx.workspaceScope, input);
+				} catch (error) {
+					if (error instanceof RvfAutomaticCloseoutExecutionResultDeliveryPendingError)
+						throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
+					throw error;
+				}
+			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
 			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
@@ -1783,6 +1836,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatMessagesResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
+			}),
+		getTaskConversationHistoryPage: workspaceProcedure
+			.input(runtimeTaskConversationHistoryPageRequestSchema)
+			.output(runtimeTaskConversationHistoryPageResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 			}),
 		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeSlashCommandsResponseSchema)
@@ -1955,6 +2014,13 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeAvailableAgentSessionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
+			}),
+		operateCodexConversationStorage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeCodexConversationStorageOperationRequestSchema)
+			.output(runtimeCodexConversationStorageOperationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
+				return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeClineMcpAuthStatusResponseSchema)

@@ -18,18 +18,20 @@ import {
 	Check,
 	ChevronDown,
 	ChevronUp,
+	Copy,
 	FileText,
 	Link2,
 	Link2Off,
 	RotateCcw,
 	X,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { QueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
+import type { QueuedTaskPromptDeliveryDebugReference } from "@/runtime/queued-task-prompt-delivery-debug-reference";
 import {
 	describeQueuedTaskPromptDeliveryStatusChip,
 	describeQueuedTaskPromptDispatchBlockReason,
@@ -38,6 +40,7 @@ import {
 	type QueuedTaskPromptDeliveryStatusChipTone,
 } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeQueuedTaskPromptDeliveryProjection } from "@/runtime/types";
+import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 const STATUS_CHIP_TONE_CLASS: Record<QueuedTaskPromptDeliveryStatusChipTone, string> = {
 	neutral: "border-border-bright bg-surface-3 text-text-secondary",
@@ -63,6 +66,77 @@ function QueuedPromptStatusChip({
 		>
 			{chip.label}
 		</span>
+	);
+}
+
+function QueuedPromptDeliveryTimestamp({ timestamp }: { timestamp: number | null | undefined }): React.ReactElement {
+	const date = typeof timestamp === "number" ? new Date(timestamp) : null;
+	if (date === null || !Number.isFinite(date.getTime())) {
+		return <span>时间未知</span>;
+	}
+	return (
+		<time dateTime={date.toISOString()} title={date.toISOString()}>
+			{date.toLocaleString(undefined, {
+				year: "numeric",
+				month: "2-digit",
+				day: "2-digit",
+				hour: "2-digit",
+				minute: "2-digit",
+				second: "2-digit",
+				hour12: false,
+				timeZoneName: "short",
+			})}
+		</time>
+	);
+}
+
+function QueuedPromptDeliveryMetadata({
+	projection,
+}: {
+	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+}): React.ReactElement {
+	const resultTimeLabel = {
+		settled_delivered: "送达时间",
+		settled_failed: "失败时间",
+		cancelled: "取消时间",
+		expired: "过期时间",
+		queued: "到期时间",
+		claimed_for_dispatch: "到期时间",
+		handed_to_transport: "到期时间",
+	}[projection.deliveryState];
+	const resultTimestamp =
+		projection.deliveryState === "expired" || !isQueuedTaskPromptDeliveryTerminal(projection)
+			? projection.expiresAt
+			: projection.settledAt;
+	return (
+		<dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] leading-4 text-text-secondary">
+			<div className="min-w-0 break-words">
+				<dt className="inline">入队时间：</dt>
+				<dd className="inline tabular-nums">
+					<QueuedPromptDeliveryTimestamp timestamp={projection.enqueuedAt} />
+				</dd>
+			</div>
+			<div>
+				<dt className="inline">尝试次数：</dt>
+				<dd className="inline tabular-nums">{projection.deliveryAttemptCount}</dd>
+			</div>
+			<div className="min-w-0 break-words">
+				<dt className="inline">最近投递开始：</dt>
+				<dd className="inline tabular-nums">
+					{projection.deliveryAttemptCount === 0 ? (
+						"尚未尝试"
+					) : (
+						<QueuedPromptDeliveryTimestamp timestamp={projection.lastAttemptedAt} />
+					)}
+				</dd>
+			</div>
+			<div className="min-w-0 break-words">
+				<dt className="inline">{resultTimeLabel}：</dt>
+				<dd className="inline tabular-nums">
+					<QueuedPromptDeliveryTimestamp timestamp={resultTimestamp} />
+				</dd>
+			</div>
+		</dl>
 	);
 }
 
@@ -110,6 +184,118 @@ function QueuedPromptTextPreview({
 	);
 }
 
+function QueuedPromptDebugReferenceDisclosure({
+	projection,
+	fetchDebugReference,
+}: {
+	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+	fetchDebugReference: QueuedTaskPromptDeliveryQueueController["fetchDebugReference"];
+}): React.ReactElement {
+	const disclosureId = useId();
+	const [isExpanded, setIsExpanded] = useState(false);
+	const [isLoading, setIsLoading] = useState(false);
+	const [reference, setReference] = useState<QueuedTaskPromptDeliveryDebugReference | null>(null);
+	const [feedback, setFeedback] = useState("");
+	const requestGeneration = useRef(0);
+	useEffect(() => {
+		setIsExpanded(false);
+		setIsLoading(false);
+		setReference(null);
+		setFeedback("");
+		return () => {
+			requestGeneration.current += 1;
+		};
+	}, [fetchDebugReference, projection.queueEntryId]);
+	const loadReference = async () => {
+		const generation = ++requestGeneration.current;
+		setIsLoading(true);
+		setReference(null);
+		setFeedback("");
+		try {
+			const preparedReference = await fetchDebugReference(projection);
+			if (generation === requestGeneration.current) setReference(preparedReference);
+		} catch {
+			if (generation === requestGeneration.current) setFeedback("无法准备调试引用，请重新读取。");
+		} finally {
+			if (generation === requestGeneration.current) setIsLoading(false);
+		}
+	};
+	const toggleDisclosure = () => {
+		setIsExpanded(!isExpanded);
+		if (isExpanded) {
+			requestGeneration.current += 1;
+			setIsLoading(false);
+		} else {
+			void loadReference();
+		}
+	};
+	const copyReference = async () => {
+		if (!reference) return;
+		const generation = requestGeneration.current;
+		try {
+			// 用户点击后立即调用，确保缺少 Clipboard API 时的同步复制降级仍在手势调用栈内。
+			await writeTextToSystemClipboardWithInsecureContextFallback(reference.text);
+			if (generation === requestGeneration.current) setFeedback("已复制引用与检索指导。");
+		} catch {
+			if (generation === requestGeneration.current) setFeedback("复制失败，请在文本框中选择引用并手动复制。");
+		}
+	};
+	return (
+		<div className="mt-1 min-w-0">
+			<Button
+				variant="ghost"
+				size="xs"
+				aria-expanded={isExpanded}
+				aria-controls={disclosureId}
+				onClick={toggleDisclosure}
+			>
+				{isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}调试引用
+			</Button>
+			{isExpanded ? (
+				<div id={disclosureId} className="mt-1 flex min-w-0 flex-col gap-1.5">
+					{isLoading ? (
+						<p role="status" className="text-[11px] text-text-secondary">
+							正在读取调试快照…
+						</p>
+					) : null}
+					{reference?.notice ? (
+						<p className="text-[11px] leading-4 text-text-secondary">{reference.notice}</p>
+					) : null}
+					{reference ? (
+						<textarea
+							aria-label="Prompt Queue 调试引用"
+							readOnly
+							rows={8}
+							value={reference.text}
+							wrap="off"
+							className="w-full min-w-0 resize-y rounded border border-border bg-surface-1 p-2 font-mono text-[11px] leading-4 text-text-primary focus-visible:outline focus-visible:outline-border-focus"
+						/>
+					) : null}
+					<div className="flex flex-wrap items-center gap-2">
+						<Button
+							variant="ghost"
+							size="xs"
+							icon={<Copy size={12} />}
+							disabled={!reference || isLoading}
+							onClick={() => void copyReference()}
+						>
+							复制引用与检索指导
+						</Button>
+						<Button variant="ghost" size="xs" disabled={isLoading} onClick={() => void loadReference()}>
+							重新读取
+						</Button>
+					</div>
+					{feedback ? (
+						<p role="status" className="text-[11px] leading-4 text-text-secondary">
+							{feedback}
+						</p>
+					) : null}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
 function isProgrammaticInjectionProjection(projection: RuntimeQueuedTaskPromptDeliveryProjection): boolean {
 	return projection.programmaticInjectionSource != null;
 }
@@ -146,6 +332,7 @@ function QueuedPromptSourceBadge({
 }
 
 function PendingQueuedPromptRow({
+	isTaskAgentExecutionDisabled,
 	projection,
 	position,
 	isFirstPending,
@@ -154,6 +341,7 @@ function PendingQueuedPromptRow({
 	isChainedToNext,
 	controller,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 	position: number;
 	isFirstPending: boolean;
@@ -217,6 +405,11 @@ function PendingQueuedPromptRow({
 				</div>
 			</div>
 			<QueuedPromptTextPreview projection={projection} fetchFullText={controller.fetchFullText} />
+			<QueuedPromptDeliveryMetadata projection={projection} />
+			<QueuedPromptDebugReferenceDisclosure
+				projection={projection}
+				fetchDebugReference={controller.fetchDebugReference}
+			/>
 			{projection.awaitsHumanReconfirmationAfterRuntimeRestart ? (
 				<div className="mt-1 flex items-center gap-1.5 text-[11px] leading-4 text-status-orange">
 					<AlertTriangle size={12} className="shrink-0" />
@@ -225,6 +418,7 @@ function PendingQueuedPromptRow({
 						variant="ghost"
 						size="xs"
 						icon={<Check size={12} />}
+						disabled={isTaskAgentExecutionDisabled}
 						onClick={() =>
 							void controller.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart([projection.queueEntryId])
 						}
@@ -289,9 +483,11 @@ function MergeWithNextToggle({
 }
 
 function SettledQueuedPromptRow({
+	isTaskAgentExecutionDisabled,
 	projection,
 	controller,
 }: {
+	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
@@ -316,6 +512,7 @@ function SettledQueuedPromptRow({
 								variant="ghost"
 								size="xs"
 								icon={<RotateCcw size={12} />}
+								disabled={isTaskAgentExecutionDisabled}
 								onClick={() => void controller.retrySettledFailedQueuedPromptDelivery(projection.queueEntryId)}
 							>
 								Requeue
@@ -336,6 +533,11 @@ function SettledQueuedPromptRow({
 			<p className="line-clamp-2 whitespace-pre-wrap break-words text-xs leading-5 text-text-secondary">
 				{projection.textPreview}
 			</p>
+			<QueuedPromptDeliveryMetadata projection={projection} />
+			<QueuedPromptDebugReferenceDisclosure
+				projection={projection}
+				fetchDebugReference={controller.fetchDebugReference}
+			/>
 			{projection.deliveryState === "settled_failed" && projection.lastDeliveryFailureNote ? (
 				<p className="mt-1 text-[11px] leading-4 text-status-red">{projection.lastDeliveryFailureNote}</p>
 			) : null}
@@ -349,9 +551,11 @@ function SettledQueuedPromptRow({
 }
 
 export function QueuedTaskPromptDeliveryQueuePanel({
+	isTaskAgentExecutionDisabled = false,
 	controller,
 	headerContent,
 }: {
+	isTaskAgentExecutionDisabled?: boolean;
 	controller: QueuedTaskPromptDeliveryQueueController;
 	headerContent?: ReactNode;
 }): React.ReactElement {
@@ -365,6 +569,11 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				)}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
+				{isTaskAgentExecutionDisabled ? (
+					<p className="px-1 py-2 text-xs text-text-secondary">
+						任务已完成，恢复任务后可继续投递。现有队列记录仍可查看和取消。
+					</p>
+				) : null}
 				{pending.length === 0 ? (
 					<p className="px-1 py-2 text-xs leading-5 text-text-tertiary">
 						Queue a prompt from the Prompts tab to send it after the agent finishes its current turn.
@@ -386,6 +595,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						return (
 							<div key={projection.queueEntryId} className="flex flex-col gap-1">
 								<PendingQueuedPromptRow
+									isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 									projection={projection}
 									position={index + 1}
 									isFirstPending={index === 0}
@@ -412,6 +622,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						</span>
 						{settled.map((projection) => (
 							<SettledQueuedPromptRow
+								isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 								key={projection.queueEntryId}
 								projection={projection}
 								controller={controller}

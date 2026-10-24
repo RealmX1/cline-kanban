@@ -79,6 +79,7 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 		awaitsHumanReconfirmationAfterRuntimeRestart:
 			isQueuedTaskPromptDeliveryAwaitingHumanReconfirmationAfterRuntimeRestart(entry),
 		deliveryAttemptCount: entry.deliveryAttemptCount,
+		lastAttemptedAt: entry.lastAttemptedAt,
 		lastDeliveryFailureNote: entry.lastDeliveryFailureNote,
 		sourcePromptLibraryEntryId: entry.sourcePromptLibraryEntryId,
 		sourcePromptLibraryEntryTextChangedSinceEnqueue: resolveSourcePromptLibraryEntryTextChangedSinceEnqueue(

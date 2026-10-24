@@ -94,6 +94,7 @@ function renderWithDensity(
 function collectInformationItemsShown(host: HTMLElement): string[] {
 	const shown: string[] = [];
 	if (host.querySelector("[data-agent-badge]")) shown.push("agent");
+	if (host.querySelector("[data-task-created-at-pill]")) shown.push("created-at-pill");
 	if (host.querySelector("[data-agent-response-generation-stopped-pill]")) shown.push("stopped-pill");
 	if (host.querySelector("[data-last-conversation-progress-pill]")) shown.push("progress-pill");
 	if (host.querySelector("[data-task-pinboard-pinned-marker]")) shown.push("pinned-marker");
@@ -184,6 +185,7 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(standardItems).toEqual([
 			"agent",
 			"cancel-automatic-action",
+			"created-at-pill",
 			"directory",
 			"pinned-marker",
 			"progress-pill",
@@ -198,6 +200,7 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(host.querySelector(".-left-2")).toBeNull();
 		expect(host.querySelector(".border-border-bright.bg-surface-2")).toBeNull();
 		const metadataRow = host.querySelector("[data-task-card-compact-metadata-row]");
+		expect(metadataRow?.querySelector("[data-task-created-at-pill]")?.textContent).toBe("3d");
 		expect(metadataRow?.querySelector("[data-agent-response-generation-stopped-pill]")).not.toBeNull();
 		expect(metadataRow?.querySelector("[data-task-pinboard-pinned-marker]")).not.toBeNull();
 		expect(metadataRow?.querySelector("[data-task-directory]")).not.toBeNull();
