@@ -175,7 +175,8 @@ try {
 		taskId,
 		agentId: "kimi",
 		binary,
-		args: ["--skills-dir", emptySkills],
+		// 探针固定本地模拟模型，跳过生产默认模型目录刷新。
+		args: ["--model", "isolated-mock", "--skills-dir", emptySkills],
 		cwd,
 		prompt: "",
 		cols: 90,

@@ -1,12 +1,18 @@
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTaskConversationHistoryPage } from "../../../src/agent-session-history/task-conversation-history-page";
+import {
+	getCodexConversationMigrationRecordPath,
+	prepareManagedCodexConversationStorageHome,
+} from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 
 const directories: string[] = [];
 afterEach(async () => {
+	vi.unstubAllEnvs();
 	for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
 });
 const card: RuntimeBoardCard = {
@@ -66,6 +72,82 @@ function claudeMessage(uuid: string, parentUuid: string | null, role: "user" | "
 }
 
 describe("Done 任务只读会话历史", () => {
+	it.each(["source_archived", "rolled_back"] as const)(
+		"%s：正式目录绑定改变后读取当前原生路径，不启动会话或读取旧副本",
+		async (migrationStage) => {
+			const nativeSessionId = "01a15120-4476-78b0-8c56-5a7321338e0b";
+			const { input, path, summary } = await fixture("codex", []);
+			const isolatedHomeDirectoryPath = dirname(path);
+			vi.stubEnv("HOME", isolatedHomeDirectoryPath);
+			const originalCodexHomeDirectoryPath = join(isolatedHomeDirectoryPath, ".codex");
+			await mkdir(join(originalCodexHomeDirectoryPath, "sessions"), { recursive: true });
+			const managedCodexHomeDirectoryPath =
+				await prepareManagedCodexConversationStorageHome(originalCodexHomeDirectoryPath);
+			const boundCodexHomeDirectoryPath =
+				migrationStage === "source_archived" ? managedCodexHomeDirectoryPath : originalCodexHomeDirectoryPath;
+			const staleCodexHomeDirectoryPath =
+				migrationStage === "source_archived" ? originalCodexHomeDirectoryPath : managedCodexHomeDirectoryPath;
+			const currentBoundTranscriptPath = join(
+				boundCodexHomeDirectoryPath,
+				"sessions",
+				`rollout-${nativeSessionId}.jsonl`,
+			);
+			await mkdir(dirname(currentBoundTranscriptPath), { recursive: true });
+			await writeFile(
+				currentBoundTranscriptPath,
+				`${[
+					{ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } },
+					{ type: "event_msg", payload: { type: "user_message", message: "当前绑定的完整历史" } },
+				]
+					.map((record) => JSON.stringify(record))
+					.join("\n")}\n`,
+			);
+			const nativeCodexStateDatabase = new Database(join(boundCodexHomeDirectoryPath, "state_5.sqlite"));
+			nativeCodexStateDatabase.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)");
+			nativeCodexStateDatabase
+				.prepare("INSERT INTO threads VALUES (?, ?)")
+				.run(nativeSessionId, currentBoundTranscriptPath);
+			nativeCodexStateDatabase.close();
+			const migrationRecordPath = getCodexConversationMigrationRecordPath(
+				originalCodexHomeDirectoryPath,
+				nativeSessionId,
+			);
+			await mkdir(dirname(migrationRecordPath), { recursive: true });
+			await writeFile(
+				migrationRecordPath,
+				JSON.stringify({
+					nativeSessionId,
+					sourceHomeDirectoryPath: originalCodexHomeDirectoryPath,
+					targetHomeDirectoryPath: managedCodexHomeDirectoryPath,
+					stage: migrationStage,
+				}),
+			);
+			const staleRecordedTranscriptPath = join(
+				staleCodexHomeDirectoryPath,
+				"sessions",
+				`rollout-${nativeSessionId}.jsonl`,
+			);
+			summary.agentNativeConversationSessionIdentity = {
+				sourceAgentId: "codex",
+				nativeSessionId,
+				transcriptPath: staleRecordedTranscriptPath,
+				observedAt: 1,
+			};
+			summary.codexConversationStorageHomeDirectoryPath = staleCodexHomeDirectoryPath;
+			if (migrationStage === "rolled_back") {
+				const stalePrivateTranscriptPath = staleRecordedTranscriptPath;
+				await mkdir(dirname(stalePrivateTranscriptPath), { recursive: true });
+				await writeFile(
+					stalePrivateTranscriptPath,
+					`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "过期的私有副本" } })}\n`,
+				);
+			}
+			const page = await loadTaskConversationHistoryPage(input);
+			expect(page.availability).toBe("available");
+			expect(page.messages.map((message) => message.content)).toEqual(["当前绑定的完整历史"]);
+			expect(summary.codexConversationStorageHomeDirectoryPath).toBe(staleCodexHomeDirectoryPath);
+		},
+	);
 	it("工作树已删除且 agent 已退出，仍能读取用户、回答和工具原文", async () => {
 		const { input } = await fixture("claude", [
 			claudeMessage("u", null, "user", "原文\u2028仍在同一条消息"),

@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskChatSendRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../core/kanban-cli-invocation-environment-actor-claims";
 import {
@@ -309,8 +310,16 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			throw new RvfAutomaticCloseoutPauseError("原生主会话身份已改变。");
 		// 已切换身份但尚未投递时可等待恢复启动；不能把 app-server 只创建了 fork 误当成已切换。
 		if (currentId === record.restoredNativeSessionId && resolveSessionFacets(summary).liveness === "live") {
-			await withCodexAppServerRequestConnection({ workingDirectory: record.receipt.worktree }, (port) =>
-				verifyRestoredCodexConversationPrefix(port, currentId, record.preReviewTurnIds),
+			await withCodexAppServerRequestConnection(
+				{
+					workingDirectory: record.receipt.worktree,
+					codexConversationStorageNativeSessionId: currentId,
+					codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
+						...summary,
+						transcriptPath: summary.agentNativeConversationSessionIdentity?.transcriptPath,
+					}),
+				},
+				(port) => verifyRestoredCodexConversationPrefix(port, currentId, record.preReviewTurnIds),
 			);
 			return;
 		}
@@ -332,66 +341,84 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		if (record.restoreWorkspaceStateSha256 && record.restoreWorkspaceStateSha256 !== before)
 			throw new RvfAutomaticCloseoutPauseError("恢复期间工作区或暂存内容发生变化。");
 		await save({ restoreWorkspaceStateSha256: before });
-		await withCodexAppServerRequestConnection({ workingDirectory: record.receipt.worktree }, async (port) => {
-			const original = await readCodexConversationTurns(port, record.receipt.session_id);
-			const boundaryIndex = original.findIndex((turn) => turn.id === record.receipt.native_turn_id);
-			if (
-				boundaryIndex !== record.preReviewTurnIds.length ||
-				original.slice(0, boundaryIndex).some((turn, index) => turn.id !== record.preReviewTurnIds[index])
-			)
-				throw new RvfAutomaticCloseoutPauseError("原始开审前缀已经改变。");
-			const ledger = await readTaskMessageInjectionLedger(
-				getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId)),
-			);
-			// 账本保留调用方的寻址 ID：交接后宿主 Task 与当前主会话都可接收 RVF 投递。
-			const machineHashes = new Set(
-				ledger
-					.filter(
-						(entry) =>
-							(entry.task_id === record.taskId || entry.task_id === record.conversationSessionId) &&
-							(entry.source === "review-validate-fix" || entry.source.startsWith("rvf")) &&
-							(entry.terminal_delivery_status === "delivered_and_submit_confirmed" ||
-								entry.terminal_delivery_status === "delivered_queued_behind_active_agent_turn"),
-					)
-					.map((entry) => entry.prompt_sha256),
-			);
-			for (const turn of original.slice(boundaryIndex + 1))
-				for (const item of turn.items.filter((item) => item.type === "userMessage")) {
-					const text = item.content?.map((part) => part.text ?? "").join("") ?? "";
-					if (!machineHashes.has(computeRvfTextSha256(text)) && !text.startsWith("<task-notification>"))
-						throw new RvfAutomaticCloseoutPauseError("RVF 开审后出现未登记的用户消息，保留当前会话供人工处理。");
-				}
-			if (record.restoredNativeSessionId)
-				await verifyRestoredCodexConversationPrefix(port, record.restoredNativeSessionId, record.preReviewTurnIds);
-			else {
-				if (record.nativeForkAttemptStartedAt !== null)
-					throw new RvfAutomaticCloseoutPauseError("上次原生 fork 结果未确认，保留现场，不能盲目创建第二个分支。");
-				await save({ nativeForkAttemptStartedAt: Date.now() });
-				try {
-					await forkCodexConversationBeforeReviewTurn(
+		await withCodexAppServerRequestConnection(
+			{
+				workingDirectory: record.receipt.worktree,
+				codexConversationStorageNativeSessionId: record.receipt.session_id,
+				codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
+					...summary,
+					transcriptPath: summary.agentNativeConversationSessionIdentity?.transcriptPath,
+				}),
+			},
+			async (port) => {
+				const original = await readCodexConversationTurns(port, record.receipt.session_id);
+				const boundaryIndex = original.findIndex((turn) => turn.id === record.receipt.native_turn_id);
+				if (
+					boundaryIndex !== record.preReviewTurnIds.length ||
+					original.slice(0, boundaryIndex).some((turn, index) => turn.id !== record.preReviewTurnIds[index])
+				)
+					throw new RvfAutomaticCloseoutPauseError("原始开审前缀已经改变。");
+				const ledger = await readTaskMessageInjectionLedger(
+					getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId)),
+				);
+				// 账本保留调用方的寻址 ID：交接后宿主 Task 与当前主会话都可接收 RVF 投递。
+				const machineHashes = new Set(
+					ledger
+						.filter(
+							(entry) =>
+								(entry.task_id === record.taskId || entry.task_id === record.conversationSessionId) &&
+								(entry.source === "review-validate-fix" || entry.source.startsWith("rvf")) &&
+								(entry.terminal_delivery_status === "delivered_and_submit_confirmed" ||
+									entry.terminal_delivery_status === "delivered_queued_behind_active_agent_turn"),
+						)
+						.map((entry) => entry.prompt_sha256),
+				);
+				for (const turn of original.slice(boundaryIndex + 1))
+					for (const item of turn.items.filter((item) => item.type === "userMessage")) {
+						const text = item.content?.map((part) => part.text ?? "").join("") ?? "";
+						if (!machineHashes.has(computeRvfTextSha256(text)) && !text.startsWith("<task-notification>"))
+							throw new RvfAutomaticCloseoutPauseError(
+								"RVF 开审后出现未登记的用户消息，保留当前会话供人工处理。",
+							);
+					}
+				if (record.restoredNativeSessionId)
+					await verifyRestoredCodexConversationPrefix(
 						port,
-						{
-							sourceThreadId: record.receipt.session_id,
-							boundaryTurnId: record.receipt.native_turn_id,
-							lastPreReviewTurnId: record.preReviewTurnIds.at(-1) ?? "",
-							workingDirectory: record.receipt.worktree,
-						},
-						async (identity) => {
-							record.restoredNativeSessionId = identity.nativeSessionId;
-							record.restoredTranscriptPath = identity.transcriptPath;
-							await save({
-								restoredNativeSessionId: identity.nativeSessionId,
-								restoredTranscriptPath: identity.transcriptPath,
-							});
-						},
+						record.restoredNativeSessionId,
+						record.preReviewTurnIds,
 					);
-				} catch (error) {
-					throw new RvfAutomaticCloseoutPauseError(
-						`原生 fork 未确认：${error instanceof Error ? error.message : String(error)}`,
-					);
+				else {
+					if (record.nativeForkAttemptStartedAt !== null)
+						throw new RvfAutomaticCloseoutPauseError(
+							"上次原生 fork 结果未确认，保留现场，不能盲目创建第二个分支。",
+						);
+					await save({ nativeForkAttemptStartedAt: Date.now() });
+					try {
+						await forkCodexConversationBeforeReviewTurn(
+							port,
+							{
+								sourceThreadId: record.receipt.session_id,
+								boundaryTurnId: record.receipt.native_turn_id,
+								lastPreReviewTurnId: record.preReviewTurnIds.at(-1) ?? "",
+								workingDirectory: record.receipt.worktree,
+							},
+							async (identity) => {
+								record.restoredNativeSessionId = identity.nativeSessionId;
+								record.restoredTranscriptPath = identity.transcriptPath;
+								await save({
+									restoredNativeSessionId: identity.nativeSessionId,
+									restoredTranscriptPath: identity.transcriptPath,
+								});
+							},
+						);
+					} catch (error) {
+						throw new RvfAutomaticCloseoutPauseError(
+							`原生 fork 未确认：${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 				}
-			}
-		});
+			},
+		);
 		if ((await readRvfCloseoutWorkspaceStateDigest(record.receipt.worktree)) !== before)
 			throw new RvfAutomaticCloseoutPauseError("原生恢复意外改变工作区或暂存内容，未投递收尾。");
 		const latest = manager.getSummary(summary.taskId);
@@ -689,7 +716,14 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							"repair_host_capability",
 						);
 					const captured = await withCodexAppServerRequestConnection(
-						{ workingDirectory: summary.workspacePath ?? "" },
+						{
+							workingDirectory: summary.workspacePath ?? "",
+							codexConversationStorageNativeSessionId: identity.nativeSessionId,
+							codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
+								...summary,
+								transcriptPath: identity.transcriptPath,
+							}),
+						},
 						(port) =>
 							captureRvfReviewStartBoundary({
 								taskId: input.taskId,

@@ -1,9 +1,10 @@
 import { readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import {
 	type RecoveredCodexUserQuestions,
 	recoverCodexUserQuestionsFromKnownConversation,
+	resolveCodexUserQuestionTranscriptRecoveryStorageBinding,
 } from "./codex-user-question-transcript-recovery";
 
 const MAXIMUM_TRACKED_FILESYSTEM_PATHS_PER_CACHED_CONVERSATION = 4096;
@@ -118,22 +119,28 @@ export function createCodexUserQuestionPendingAndHistoryFileChangeCache(
 		cachedRecoveries.delete(key);
 	};
 	return (input: CodexUserQuestionTranscriptRecoveryInput): Promise<RecoveredCodexUserQuestions> => {
-		const codexHomeDirectoryPath = resolve(
-			input.homeDirectoryPath ?? process.env.CODEX_HOME?.trim() ?? join(homedir(), ".codex"),
-		);
-		const codexSessionsRootDirectoryPath = join(codexHomeDirectoryPath, "sessions");
-		const cacheKey = JSON.stringify([
-			codexHomeDirectoryPath,
+		const recoveryRequestKey = JSON.stringify([
+			resolve(input.homeDirectoryPath ?? resolveRecordedCodexConversationHome(input)),
 			input.sessionId,
 			input.transcriptPath ? resolve(input.transcriptPath) : null,
 			input.maximumTranscriptBytesToRead ?? 32 * 1024 * 1024,
 		]);
-		const inFlightRecovery = inFlightRecoveries.get(cacheKey);
+		const inFlightRecovery = inFlightRecoveries.get(recoveryRequestKey);
 		if (inFlightRecovery) return inFlightRecovery;
 		// 高并发的额外会话直接走即时读取，避免单飞索引本身无限增长。
 		if (inFlightRecoveries.size >= maximumCachedConversations)
 			return recoverCodexUserQuestionsFromKnownConversation(input);
 		const pendingRecovery = (async () => {
+			// 每次查询先读取正式绑定；目录未变的旧缓存不能遮住迁移或回退。
+			const resolvedInput = await resolveCodexUserQuestionTranscriptRecoveryStorageBinding(input);
+			const codexHomeDirectoryPath = resolve(resolvedInput.homeDirectoryPath);
+			const codexSessionsRootDirectoryPath = join(codexHomeDirectoryPath, "sessions");
+			const cacheKey = JSON.stringify([
+				codexHomeDirectoryPath,
+				resolvedInput.sessionId,
+				resolvedInput.transcriptPath ? resolve(resolvedInput.transcriptPath) : null,
+				resolvedInput.maximumTranscriptBytesToRead ?? 32 * 1024 * 1024,
+			]);
 			const cachedRecovery = cachedRecoveries.get(cacheKey);
 			if (
 				cachedRecovery &&
@@ -147,9 +154,9 @@ export function createCodexUserQuestionPendingAndHistoryFileChangeCache(
 			for (let stableSnapshotAttempt = 0; stableSnapshotAttempt < 2; stableSnapshotAttempt += 1) {
 				const filesystemSnapshot = await captureKnownCodexTranscriptFilesystemSnapshot(
 					codexSessionsRootDirectoryPath,
-					input,
+					resolvedInput,
 				);
-				const recovered = await recoverCodexUserQuestionsFromKnownConversation(input);
+				const recovered = await recoverCodexUserQuestionsFromKnownConversation(resolvedInput);
 				if (!filesystemSnapshot.discoveryWasComplete) return recovered;
 				if (!(await codexTranscriptFilesystemSnapshotIsUnchanged(filesystemSnapshot))) continue;
 				const recoveredResultByteLength = Buffer.byteLength(JSON.stringify(recovered));
@@ -173,8 +180,8 @@ export function createCodexUserQuestionPendingAndHistoryFileChangeCache(
 			}
 			// 正在持续写入的转录不应把旧问题重新生成为可投递状态。
 			return { exchanges: [], coverage: "incomplete" as const };
-		})().finally(() => inFlightRecoveries.delete(cacheKey));
-		inFlightRecoveries.set(cacheKey, pendingRecovery);
+		})().finally(() => inFlightRecoveries.delete(recoveryRequestKey));
+		inFlightRecoveries.set(recoveryRequestKey, pendingRecovery);
 		return pendingRecovery;
 	};
 }

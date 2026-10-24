@@ -74,6 +74,160 @@ function claudeUser(uuid: string) {
 }
 
 describe("有界原生活动增量读取", () => {
+	it("Codex 首次超预算的独立就绪结果不初始化活动基线，rewind 后只建立基线", async () => {
+		const target = {
+			...summary("codex", "/isolated/native.jsonl"),
+			turnOwner: "user" as const,
+			userTurnKind: "needs_input" as const,
+		};
+		const historicalTurn = {
+			id: "historical",
+			status: "completed",
+			items: [
+				{ id: "old-input", type: "userMessage" },
+				{ id: "old-response", type: "agentMessage", text: "旧回答" },
+			],
+		};
+		let turns = [
+			{
+				id: "rewound-turn",
+				status: "completed",
+				items: Array.from({ length: 512 }, (_, index) => ({ id: String(index), type: "userMessage" })),
+			},
+			historicalTurn,
+		];
+		request.mockImplementation(async (method) =>
+			method === "thread/loaded/list"
+				? { data: ["native"] }
+				: method === "thread/read"
+					? { thread: { id: "native", status: { type: "idle" }, canAcceptDirectInput: true } }
+					: { data: turns, nextCursor: null },
+		);
+		const overBudget = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: null,
+			observedAtMs: baselineAtMs,
+		});
+		expect(overBudget?.events).toEqual([]);
+		expect(overBudget?.codexNativeDirectInputReadiness).toBeDefined();
+		turns = [historicalTurn];
+		const afterRewind = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: overBudget?.cursor ?? null,
+			observedAtMs: baselineAtMs + 1,
+		});
+		expect(afterRewind?.events).toEqual([]);
+		expect(afterRewind?.codexNativeDirectInputReadiness).toBeDefined();
+		turns = [
+			{ id: "new-turn", status: "inProgress", items: [{ id: "new-input", type: "userMessage" }] },
+			historicalTurn,
+		];
+		const newInput = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: afterRewind?.cursor ?? null,
+			observedAtMs: baselineAtMs + 2,
+		});
+		expect(newInput?.events).toMatchObject([
+			{ activityKind: "accepted_user_input", eventId: "codex:native:new-turn:new-input" },
+		]);
+	});
+	it("活动游标超预算时仍可独立核验空闲，但不推进游标或重放接受", async () => {
+		const target = {
+			...summary("codex", "/isolated/native.jsonl"),
+			turnOwner: "user" as const,
+			userTurnKind: "needs_input" as const,
+		};
+		const cursor = { transport: "codex_control" as const, predecessorTurnId: "current", seenEventIds: [] };
+		request.mockImplementation(async (method) =>
+			method === "thread/loaded/list"
+				? { data: ["native"] }
+				: method === "thread/read"
+					? { thread: { id: "native", status: { type: "idle" }, canAcceptDirectInput: true } }
+					: {
+							data: [
+								{
+									id: "current",
+									status: "completed",
+									items: Array.from({ length: 513 }, (_, index) => ({
+										id: String(index),
+										type: "userMessage",
+									})),
+								},
+							],
+							nextCursor: null,
+						},
+		);
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor,
+			observedAtMs: baselineAtMs,
+		});
+		expect(result?.events).toEqual([]);
+		expect(result?.cursor).toEqual(cursor);
+		expect(result?.codexNativeDirectInputReadiness).toBeDefined();
+	});
+	it.each([null, "rewound-predecessor", "current"])(
+		"普通 Codex rewind 的前驱为 %s 时，即使没有新消息仍独立报告输入就绪",
+		async (predecessorTurnId) => {
+			const target = {
+				...summary("codex", "/isolated/native.jsonl"),
+				turnOwner: "user" as const,
+				userTurnKind: "needs_input" as const,
+				reviewReason: null,
+			};
+			request.mockImplementation(async (method) => {
+				if (method === "thread/loaded/list") return { data: ["native"] };
+				if (method === "thread/read")
+					return { thread: { id: "native", status: { type: "idle" }, canAcceptDirectInput: true } };
+				return { data: [{ id: "current", status: "completed", items: [] }], nextCursor: null };
+			});
+			const result = await readNativeAgentConversationActivity({
+				workspaceId: "workspace",
+				summary: target,
+				cursor:
+					predecessorTurnId === null ? null : { transport: "codex_control", predecessorTurnId, seenEventIds: [] },
+				observedAtMs: baselineAtMs,
+			});
+			expect(result?.events).toEqual([]);
+			expect(result?.codexNativeDirectInputReadiness).toEqual({
+				nativeSessionId: "native",
+				observedAtMs: baselineAtMs,
+			});
+		},
+	);
+
+	it.each([
+		{ id: "native", status: { type: "active", activeFlags: ["waitingOnUserInput"] }, canAcceptDirectInput: true },
+		{ id: "native", status: { type: "active", activeFlags: ["waitingOnApproval"] }, canAcceptDirectInput: false },
+		{ id: "native", status: { type: "idle" }, canAcceptDirectInput: false },
+		{ id: "native", status: { type: "idle" } },
+		{ id: "other", status: { type: "idle" }, canAcceptDirectInput: true },
+		{ id: "native", status: { type: "unknown" }, canAcceptDirectInput: true },
+	])("原生等待、身份不符或字段未知时不证明就绪：%j", async (thread) => {
+		const target = {
+			...summary("codex", "/isolated/native.jsonl"),
+			turnOwner: "user" as const,
+			userTurnKind: "needs_input" as const,
+		};
+		request.mockImplementation(async (method) =>
+			method === "thread/loaded/list"
+				? { data: ["native"] }
+				: method === "thread/read"
+					? { thread }
+					: { data: [], nextCursor: null },
+		);
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: null,
+			observedAtMs: baselineAtMs,
+		});
+		expect(result?.codexNativeDirectInputReadiness).toBeUndefined();
+	});
 	it.each(["claude", "omp"] as const)("%s 仅附件的真人输入也可确认，正文保持缺省", async (agentId) => {
 		const { path, target } = await fixture(agentId);
 		const initial = await readNativeAgentConversationActivity({

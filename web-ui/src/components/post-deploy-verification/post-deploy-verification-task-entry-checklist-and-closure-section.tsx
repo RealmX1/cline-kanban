@@ -56,7 +56,12 @@ export interface PostDeployVerificationTaskEntryChecklistAndClosureSectionProps 
 	onRemoveCustomChecklistItem: (itemId: string) => void;
 	onRunVerificationItem: (itemId: string) => void;
 	onRequestComplete: () => void;
-	onLocateChecklistItem: (item: RuntimePostDeployVerificationChecklistItem) => void;
+	completionActionRendering?: "post_deploy_verification_panel" | "review_before_move_into_done";
+	onRequestGuidedManualVerification?: (
+		item: RuntimePostDeployVerificationChecklistItem,
+		locate: () => void | Promise<void>,
+	) => void;
+	onLocateChecklistItem: (item: RuntimePostDeployVerificationChecklistItem) => void | Promise<void>;
 	onCreateFollowUpTaskFromSelectedChecklistItems?: (selectedChecklistItemIds: string[]) => void;
 }
 
@@ -139,6 +144,8 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	onRemoveCustomChecklistItem,
 	onRunVerificationItem,
 	onRequestComplete,
+	completionActionRendering = "post_deploy_verification_panel",
+	onRequestGuidedManualVerification,
 	onLocateChecklistItem,
 	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryChecklistAndClosureSectionProps): ReactElement {
@@ -356,6 +363,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 								onRun={() => onRunVerificationItem(item.id)}
 								onRemoveCustom={() => onRemoveCustomChecklistItem(item.id)}
 								onLocate={() => onLocateChecklistItem(item)}
+								onRequestGuidedManualVerification={onRequestGuidedManualVerification}
 							/>
 						),
 					)}
@@ -422,7 +430,11 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 						}
 						onClick={onRequestComplete}
 					>
-						{areAllChecklistItemsChecked ? "完成核对并移入 Done" : "带原因移入 Done"}
+						{areAllChecklistItemsChecked
+							? "完成核对并移入 Done"
+							: completionActionRendering === "review_before_move_into_done"
+								? "继续填写未完成原因"
+								: "带原因移入 Done"}
 					</Button>
 					<p className="m-0 mt-1 text-center text-[11px] text-text-tertiary">
 						{areAllChecklistItemsChecked

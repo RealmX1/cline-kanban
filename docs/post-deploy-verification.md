@@ -79,9 +79,19 @@
 
 **受门禁**：任务在该 workspace 的活跃部署组里，且仍在等核对，即未结案、未移除、不是只读展示、没被延续走。
 
+### 浏览器人工结案：先核对，再填写剩余原因
+
+主看板、Focus View（包括 Validation 阶段）、详情底栏、拖拽和跨项目卡片上的普通 Done 动作，遇到未完成的 PDV 时先打开「移入 Done 前核对」。弹窗复用 PDV 面板的真实任务卡和默认展开的完整清单，可直接勾选人工项、运行脚本、查看运行结果和维护自定义项。脚本项的通过状态仍由运行结果决定。
+
+保存或运行进行中不能继续结案。点击继续时重新读取服务端状态：全勾后按现有确认规则移入 Done；仍有未勾项才打开「带原因移入 Done」。原因表单可以返回核对，已填写的原因在本次流程中保留；取消只结束本次结案，已保存的核对结果保留，卡片留在原列。来源列或部署变化时重新核对，不沿用旧确认。
+
+「定位并核对」期间暂时收起模态弹窗，将操作空间让给真实界面和引导浮层，观察结束后恢复核对。核对弹窗里的任务卡 Done 按钮继续当前流程，不递归打开弹窗。其他项目的读写绑定任务所属 workspace，不改变顶栏 PDV 面板的项目绑定。
+
+PDV 面板里显式的「带原因移入 Done」和批量带原因结案仍直接进入原因表单。自动流转遇到未完成项只提示，不自动打开交互弹窗。无待核对 PDV 或已全勾的任务继续沿用原完成流程。
+
 **主路径**：`taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree`。看板按钮、拖拽、Focus View、详情底栏、PDV 面板、跨项目切换面板、`kanban task done`、`kanban deployment verification-*` 都走这条路，执行顺序如下：
 
-1. **授权**：全勾，或请求的 `postDeployVerificationDoneEntryClosure` 覆盖全部未勾项，就放行并写下在途授权。否则抛 `PRECONDITION_FAILED`，message 以 `POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS:` 开头，客户端据此打开原因对话框。任务此刻带着 CLI 在途完成记录（`kanban deployment verification-*` 移列前写下）时，授权的完成路径记为 `kanban_cli_post_deploy_verification_completion_verb`、`--force` 标记取自该记录，由服务端推导，不靠客户端自报。
+1. **授权**：全勾，或请求的 `postDeployVerificationDoneEntryClosure` 覆盖全部未勾项，就放行并写下在途授权。否则抛 `PRECONDITION_FAILED`，message 以 `POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS:` 开头；浏览器普通 Done 入口据此刷新并进入核对阶段，已有结案流程由其调用方处理拒绝。任务此刻带着 CLI 在途完成记录（`kanban deployment verification-*` 移列前写下）时，授权的完成路径记为 `kanban_cli_post_deploy_verification_completion_verb`、`--force` 标记取自该记录，由服务端推导，不靠客户端自报。
 2. **移列**。失败则撤销授权。
 3. **结案**：写结案记录、记账本、写待观察记录、清理资产。结案写盘失败不回滚移列，runtime 对账在 30 秒宽限后按在途授权补完。
 

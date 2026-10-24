@@ -12,6 +12,24 @@ const turn = (id: string, text: string, status = "completed") => ({
 });
 
 describe("Codex RVF 原生前缀恢复", () => {
+	it("legacy 明确拒绝分页时，才使用原生完整历史读取", async () => {
+		const request = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("list_turns is not supported yet"))
+			.mockResolvedValueOnce({ thread: { turns: [turn("legacy-turn", "旧格式历史")] } });
+		expect(await readCodexConversationTurns({ request }, "legacy-thread")).toHaveLength(1);
+		expect(request).toHaveBeenLastCalledWith("thread/read", { threadId: "legacy-thread", includeTurns: true });
+	});
+	it("网络失败或中途分页拒绝均不回退，防止把不完整历史当成完整", async () => {
+		for (const failure of [new Error("timeout"), new Error("list_turns is not supported yet")]) {
+			const request = vi.fn();
+			if (failure.message !== "timeout")
+				request.mockResolvedValueOnce({ data: [turn("first", "第一页")], nextCursor: "next" });
+			request.mockRejectedValueOnce(failure);
+			await expect(readCodexConversationTurns({ request }, "source")).rejects.toThrow(failure.message);
+			expect(request.mock.calls.every(([method]) => method === "thread/turns/list")).toBe(true);
+		}
+	});
 	it("逐页读取回合，不能只使用当前可见的最近一页", async () => {
 		const request = vi
 			.fn()

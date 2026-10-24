@@ -189,6 +189,15 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		| null = null;
 	const nativeActivityObserver = createNativeAgentConversationActivityObserver({
 		cooldownMs: 1_000,
+		onCodexNativeDirectInputReadiness: (observation, summaryBeforeRead) => {
+			terminalManagersByWorkspaceId
+				.get(observation.workspaceId)
+				?.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+					observation.conversationSessionId,
+					summaryBeforeRead,
+					observation,
+				);
+		},
 		onActivity: (observation) => {
 			if (observation.activityKind === "accepted_user_input") return;
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
