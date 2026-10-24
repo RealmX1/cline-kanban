@@ -2,13 +2,14 @@ import {
 	resolveLastAgentConversationUserHandoffObservation,
 	resolveLastEffectiveAgentConversationActivityObservation,
 } from "@runtime-agent-conversation-activity-observation";
-import { Activity, Hourglass, MessagesSquare } from "lucide-react";
+import { Activity, Clock, Hourglass, MessagesSquare } from "lucide-react";
+import { useMemo } from "react";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "@/runtime/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 
-/** 精简行与完整卡同源：历史交棒、主对话推进；独立会话只在可聚焦的详情提示中分列。 */
+/** 精简行与完整卡同源：创建时间、历史交棒、主对话推进；独立会话只在可聚焦的详情提示中分列。 */
 export function TaskActivityElapsedTimePills({
 	task,
 	nowMs,
@@ -30,6 +31,10 @@ export function TaskActivityElapsedTimePills({
 		>;
 	nowMs: number;
 }): React.ReactElement {
+	const taskCreatedAtTooltipContent = useMemo(
+		() => `创建于 · ${new Date(task.createdAt).toLocaleString()}`,
+		[task.createdAt],
+	);
 	const handoff =
 		task.turnOwner !== "agent" && !task.isParkedAwaitingDispatchedBackgroundWork
 			? resolveLastAgentConversationUserHandoffObservation(task)
@@ -42,6 +47,14 @@ export function TaskActivityElapsedTimePills({
 			: "主对话尚无可信活动时间";
 	return (
 		<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
+			<span
+				data-task-created-at-pill=""
+				title={taskCreatedAtTooltipContent}
+				className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap"
+			>
+				<Clock size={10} className="shrink-0" />
+				{formatCompactElapsedSince(task.createdAt, nowMs)}
+			</span>
 			{handoff ? (
 				<span
 					className="inline-flex items-center gap-0.5"
