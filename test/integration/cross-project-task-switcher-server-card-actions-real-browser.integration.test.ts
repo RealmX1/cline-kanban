@@ -349,6 +349,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const recentFixtureBacklog = recentFixtureState.board.columns.find((column) => column.id === "backlog");
 				if (!recentFixtureBacklog) throw new Error("缺少隔离待办列");
 				for (const [taskId, ageDays] of [
+					[singleStartId, 1],
 					[olderBacklogTaskId, 20],
 					[expiredBacklogTaskId, 60],
 				] as const) {
@@ -369,6 +370,19 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 					board: recentFixtureState.board,
 					sessions: recentFixtureState.sessions,
 					expectedRevision: recentFixtureState.revision,
+				});
+				const betaRecentFixtureClient = runtimeClient(betaWorkspaceId);
+				const betaRecentFixtureState = await betaRecentFixtureClient.workspace.getState.query();
+				const betaRecentFixtureCard = betaRecentFixtureState.board.columns
+					.find((column) => column.id === "backlog")
+					?.cards.find((card) => card.id === betaBacklogTaskId);
+				if (!betaRecentFixtureCard) throw new Error("缺少跨项目排序测试卡片");
+				betaRecentFixtureCard.updatedAt = betaRecentFixtureCard.taskDescriptionLastUpdatedAt =
+					Date.now() - 2 * 24 * 60 * 60_000;
+				await betaRecentFixtureClient.workspace.saveState.mutate({
+					board: betaRecentFixtureState.board,
+					sessions: betaRecentFixtureState.sessions,
+					expectedRevision: betaRecentFixtureState.revision,
 				});
 				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
 					taskId: singleStartId,

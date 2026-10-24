@@ -92,7 +92,7 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 **Remaining Section（剩余区，UI 名 Recent）**：
 不在 Running、也不在缓存倒计时区的所有阶段条目，Backlog 不再单列。排序与阶段筛选独立：
 - `Recently touched`（默认，`most_recently_touched_by_conversation_progress_or_user_open_or_description_edit`）：max(对话推进, 我最后打开, Description 编辑)。刻意不用 `card.updatedAt`，列流转不会把旧卡顶上来。
-- `Conversation progress`（`most_recent_conversation_progress_only`）：按对话推进倒序，没有推进记录的任务仍保留并排末尾；同值按 `(workspaceId, taskId)` 稳定排序。
+- `Conversation progress`（`most_recent_conversation_progress_only`）：按对话推进倒序，没有推进记录的任务仍保留并排末尾，并在这些任务之间按 Description 最后更新时间倒序（包括 Backlog 单选、阶段混选和 All，最近打开或创建时间不参与兜底）；对话推进时间相同或无记录且 Description 更新时间相同时，按 `(workspaceId, taskId)` 稳定排序。
 - 阶段筛选为可组合的 `In progress / Review`、`Backlog`、`Validation`、`Done`，选项间取并集；默认启用 `In progress / Review`；全部未选时即 `All`，点击 `All` 清空选择。`Done` 对应内部列 ID `trash`。
 - Project 筛选支持按 workspaceId 多选项目，默认所有项目；可搜索项目名或路径。项目间取并集，与阶段筛选取交集，只影响 Recent。
 - 候选统一按最近触达时间截取默认 7 天；排序切换不改变候选范围。「Show older」按需扩展至 30 天（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不扩大广播窗口）。
