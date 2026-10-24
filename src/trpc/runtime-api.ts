@@ -1,4 +1,6 @@
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
+import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
+import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
@@ -1525,6 +1527,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						parentSessionId: body.parentSessionId,
 						taskAgentSessionInitialization: body.taskAgentSessionInitialization,
 						taskConversationSessionMainContextForkSourceNativeSessionId,
+						taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath: mainContextForkSourceSummary
+							? resolveRecordedCodexConversationHome({
+									...mainContextForkSourceSummary,
+									transcriptPath:
+										mainContextForkSourceSummary.agentNativeConversationSessionIdentity?.transcriptPath,
+								})
+							: undefined,
 						revalidateTaskConversationSessionMainContextForkSource: revalidateMainContextForkSourceBeforeLaunch,
 						terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
 					},
@@ -2167,6 +2176,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 											const recovered = await recoverCodexUserQuestionsFromKnownConversation({
 												sessionId: identity.nativeSessionId,
 												transcriptPath: identity.transcriptPath,
+												homeDirectoryPath:
+													currentTerminalSummary?.codexConversationStorageHomeDirectoryPath,
 											});
 											if (recovered.coverage !== "complete")
 												throw new Error("旧问答记录尚未完整读取，答案已保存；请稍后重试投递。");
@@ -2733,6 +2744,32 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				});
 			}
 			return await listAvailableAgentSessions(workspaceScope.workspacePath, input);
+		},
+		operateCodexConversationStorage: async (workspaceScope, input) => {
+			const manager = await deps.getScopedTerminalManager(workspaceScope);
+			return operateCodexConversationStorage(input, {
+				listKnownSummaries: async () => {
+					const persisted = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+					const summaries = new Map(Object.values(persisted.sessions).map((summary) => [summary.taskId, summary]));
+					for (const summary of manager.listSummaries()) summaries.set(summary.taskId, summary);
+					return [...summaries.values()];
+				},
+				resolveMigrationOwnership: async (summary) => {
+					const persisted = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+					const card = findWorkspaceBoardCard(
+						persisted.board,
+						summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId,
+					);
+					if (!card) return { rejectionReason: "没有可核验的宿主 Task，保留可能共享的来源会话。" };
+					const source = card.taskAgentSessionInitialization;
+					if (
+						source?.sourceSessionReuseMode === "resume_existing_session" &&
+						source.sourceSessionId === summary.agentNativeConversationSessionIdentity?.nativeSessionId
+					)
+						return { rejectionReason: "该 Task 显式复用了既有来源会话；保留来源，不自动迁移或归档。" };
+					return { rejectionReason: null, taskCardCreatedAtMs: card.createdAt };
+				},
+			});
 		},
 		getClineMcpAuthStatuses: async (_workspaceScope) => {
 			const statuses = await clineMcpRuntimeService.getAuthStatuses();

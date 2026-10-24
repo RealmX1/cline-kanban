@@ -4,6 +4,15 @@
 import { randomUUID } from "node:crypto";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
+import {
+	buildCodexConversationStorageEnvironment,
+	getManagedCodexConversationStorageHomeDirectoryPath,
+	prepareManagedCodexConversationStorageHome,
+	resolveMigratedCodexConversationHome,
+	resolveRecordedCodexConversationHome,
+	resolveUserCodexHomeDirectoryPath,
+	withCodexConversationStorageOperationLock,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 import type {
 	prepareCodexNativeSessionControlHostLaunch,
 	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
@@ -625,6 +634,7 @@ export interface StartTaskSessionRequest {
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
@@ -1158,6 +1168,8 @@ function takeLastLines(text: string, lineCount: number): string {
 }
 
 export interface TerminalSessionManagerOptions {
+	// 真实运行时由 workspace registry 启用；裸 manager 可继续作为不访问用户配置的进程编排器使用。
+	enableManagedCodexConversationStorageForNewSessions?: boolean;
 	// 由 runtime composition 注入；受控宿主与 TUI 一起交给既有 PTY host，跨 runtime 重启继续存活。
 	prepareCodexNativeSessionControlHostLaunch?: typeof prepareCodexNativeSessionControlHostLaunch;
 	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart?: typeof restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart;
@@ -3947,7 +3959,126 @@ export class TerminalSessionManager implements TerminalSessionService {
 		});
 	}
 
+	private async runTaskSessionOperationHoldingCodexConversationStorageExclusivity<OperationResult>(
+		request: StartTaskSessionRequest,
+		runTaskSessionOperation: () => Promise<OperationResult>,
+	): Promise<OperationResult> {
+		const entry = this.ensureEntry(request.taskId);
+		const resumesExistingConversation = Boolean(
+			request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+		);
+		const sourceNativeConversationSessionId = resumesExistingConversation
+			? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
+			: (request.taskAgentSessionInitialization?.sourceSessionId ??
+				request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+				request.parentSessionId);
+		if (
+			!this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions ||
+			request.agentId !== "codex" ||
+			!request.workspaceId ||
+			!sourceNativeConversationSessionId
+		)
+			return runTaskSessionOperation();
+		const recordedCodexConversationStorageHomeDirectoryPath = resolveRecordedCodexConversationHome({
+			codexConversationStorageHomeDirectoryPath: resumesExistingConversation
+				? entry.summary.codexConversationStorageHomeDirectoryPath
+				: (request.taskAgentSessionInitialization?.codexConversationStorageHomeDirectoryPath ??
+					request.taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath),
+			transcriptPath: resumesExistingConversation
+				? entry.summary.agentNativeConversationSessionIdentity?.transcriptPath
+				: undefined,
+			environment: { ...process.env, ...request.env },
+			workingDirectoryPath: request.cwd,
+		});
+		return withCodexConversationStorageOperationLock(
+			recordedCodexConversationStorageHomeDirectoryPath,
+			sourceNativeConversationSessionId,
+			runTaskSessionOperation,
+		);
+	}
+
 	private async startTaskSessionHoldingPerTaskStartExclusivity(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin,
+		arrival: TaskSessionStartRequestArrival,
+	): Promise<RuntimeTaskSessionSummary> {
+		const run = () =>
+			this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(request, taskSessionStartOrigin, arrival);
+		if (this.entries.get(request.taskId)?.active) return run();
+		return this.runTaskSessionOperationHoldingCodexConversationStorageExclusivity(request, run);
+	}
+
+	private async resolveTaskSessionRequestWithCodexConversationStorageHome(
+		request: StartTaskSessionRequest,
+		entry: SessionEntry,
+	): Promise<StartTaskSessionRequest> {
+		if (
+			this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions &&
+			request.agentId === "codex" &&
+			request.workspaceId
+		) {
+			const resumesExistingConversation = Boolean(
+				request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+			);
+			const sourceId = resumesExistingConversation
+				? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
+				: (request.taskAgentSessionInitialization?.sourceSessionId ??
+					request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+					request.parentSessionId);
+			const environment = { ...process.env, ...request.env };
+			let storageHome =
+				sourceId || resumesExistingConversation || request.taskAgentSessionInitialization || request.parentSessionId
+					? resolveRecordedCodexConversationHome({
+							codexConversationStorageHomeDirectoryPath: resumesExistingConversation
+								? entry.summary.codexConversationStorageHomeDirectoryPath
+								: (request.taskAgentSessionInitialization?.codexConversationStorageHomeDirectoryPath ??
+									request.taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath),
+							transcriptPath:
+								resumesExistingConversation &&
+								!(entry.active && entry.summary.codexConversationStorageHomeDirectoryPath)
+									? entry.summary.agentNativeConversationSessionIdentity?.transcriptPath
+									: undefined,
+							environment,
+							workingDirectoryPath: request.cwd,
+						})
+					: await prepareManagedCodexConversationStorageHome(
+							resolveUserCodexHomeDirectoryPath(environment, request.cwd),
+						);
+			// 已运行的宿主继续持有它原来的目录；迁移不会调用本启动入口或强停活体。
+			if (
+				sourceId &&
+				!resumesExistingConversation &&
+				!request.taskAgentSessionInitialization?.codexConversationStorageHomeDirectoryPath &&
+				!request.taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath
+			) {
+				const candidates = [...new Set([storageHome, getManagedCodexConversationStorageHomeDirectoryPath()])];
+				const found = await Promise.all(
+					candidates.map(async (home) => ({
+						home,
+						inspection: await inspectCodexNativeConversationTranscriptBeforeResume({
+							nativeSessionId: sourceId,
+							transcriptPath: undefined,
+							agentExecutionWorkingDirectoryPath: request.cwd,
+							environmentOverrides: { ...environment, CODEX_HOME: home },
+						}),
+					})),
+				);
+				const matching = found.filter((candidate) => candidate.inspection.persistedTranscriptPath);
+				if (matching.length === 1) storageHome = matching[0].home;
+				else if (matching.length > 1) {
+					const migrated = await resolveMigratedCodexConversationHome(storageHome, sourceId);
+					if (migrated === storageHome)
+						throw new Error("两个 Codex 目录存在同一原生 ID，请在历史选择器中明确选择会话来源。");
+					storageHome = migrated;
+				} else throw new Error("未在用户目录或看板专用目录找到指定 Codex 会话，未改接其它对话。");
+			}
+			if (sourceId && !entry.active) storageHome = await resolveMigratedCodexConversationHome(storageHome, sourceId);
+			request = { ...request, env: { ...request.env, ...buildCodexConversationStorageEnvironment(storageHome) } };
+		}
+		return request;
+	}
+
+	private async startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
@@ -4007,6 +4138,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// （会话正活着且在回合中），此时谈寻址没有意义。
 		//
 		// Cursor 续跑预检排在寻址解析之前：它可能把桶里唯一那段已建立的对话钉成身份，解析器随后就按 id 续跑。
+		request = await this.resolveTaskSessionRequestWithCodexConversationStorageHome(request, entry);
 		await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(entry, request);
 		await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(entry, request);
 		// Claude 后台会话预检同样排在寻址解析之前：它可能沿 `continued-in` 链改钉身份。
@@ -4101,6 +4233,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					request.resumePriorAgentConversationWithoutResendingPrompt,
 				taskConversationMode: request.taskConversationMode,
 				env: request.env,
+				codexConversationStorageHomeDirectoryPath:
+					request.agentId === "codex" ? request.env?.CODEX_HOME : undefined,
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
@@ -4501,6 +4635,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			runtimeSessionIncarnationId,
 			codexNativeSessionControlEndpoint: codexControlHost?.endpoint ?? null,
 			agentConversationPromptSubmissionAcceptance: null,
+			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath: request.env?.CODEX_HOME } : {}),
 			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
 			// 或换模型后整体替换」。未接入的 agent 返回 null——必须显式写 null 而不是省略，否则同一任务
 			// 从 claude 换成别的 agent 后，旧快照会留在 summary 里被误当成当前会话的启动参数。
@@ -6593,11 +6728,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		arrival: TaskSessionStartRequestArrival,
 		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: boolean,
 	): Promise<RuntimeTaskSessionSummary> {
+		// 目录迁移与「预检、停旧、启动」共用同一把锁，避免预检通过后绑定再次变化。
+		return this.runTaskSessionOperationHoldingCodexConversationStorageExclusivity(request, () =>
+			this.refreshTaskTerminalHoldingPerTaskStartAndCodexStorageExclusivity(
+				request,
+				taskSessionStartOrigin,
+				arrival,
+				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+			),
+		);
+	}
+
+	private async refreshTaskTerminalHoldingPerTaskStartAndCodexStorageExclusivity(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin,
+		arrival: TaskSessionStartRequestArrival,
+		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: boolean,
+	): Promise<RuntimeTaskSessionSummary> {
 		// 预检必须在 forceStopTaskSession **之前**：本方法是「停掉再起一条」，而拒绝的语义是「这次不动它」。
 		// 先停再让下游拒绝，等于用户点一次重启就把一条还活着的会话杀掉、还什么都没续上。
 		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
 		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
 		if (entryBeforeDestructiveRestart) {
+			request = await this.resolveTaskSessionRequestWithCodexConversationStorageHome(
+				request,
+				entryBeforeDestructiveRestart,
+			);
 			await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,
@@ -6627,7 +6783,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		}
 		await this.forceStopTaskSession(request.taskId, 2_000);
-		const summary = await this.startTaskSessionHoldingPerTaskStartExclusivity(
+		const summary = await this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 			request,
 			taskSessionStartOrigin,
 			arrival,

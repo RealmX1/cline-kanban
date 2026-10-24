@@ -24,15 +24,33 @@ export async function readCodexConversationTurns(port: CodexAppServerRequestPort
 	const seenCursors = new Set<string>();
 	let cursor: string | null = null;
 	do {
-		const page = turnPageSchema.parse(
-			await port.request("thread/turns/list", {
+		let rawPage: unknown;
+		try {
+			rawPage = await port.request("thread/turns/list", {
 				threadId,
 				cursor,
 				limit: 100,
 				sortDirection: "asc",
 				itemsView: "full",
-			}),
-		);
+			});
+		} catch (error) {
+			// 0.164 的 legacy 历史明确不支持分页；只在第一页的这一能力拒绝上走原生完整读取。
+			// 网络失败、分页中断及其它协议错误仍须原样失败，不能把未知当成完整历史。
+			if (
+				cursor !== null ||
+				turns.length ||
+				!(error instanceof Error) ||
+				!error.message.includes("list_turns is not supported yet")
+			)
+				throw error;
+			const legacyTurns = z
+				.object({ thread: z.object({ turns: z.array(nativeTurnSchema) }) })
+				.parse(await port.request("thread/read", { threadId, includeTurns: true })).thread.turns;
+			if (new Set(legacyTurns.map((turn) => turn.id)).size !== legacyTurns.length)
+				throw new Error("Codex 完整读取重复返回回合。");
+			return legacyTurns;
+		}
+		const page = turnPageSchema.parse(rawPage);
 		turns.push(...page.data);
 		cursor = page.nextCursor;
 		if (cursor !== null) {
