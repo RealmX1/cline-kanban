@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
+import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import {
@@ -66,6 +67,14 @@ import type {
 	TerminalInputBoxStashOutcome,
 } from "../core/api-contract";
 import { runtimeTaskSessionSummarySchema } from "../core/api-contract";
+import {
+	buildCodexNativeAgentTurnExecutionIdentity,
+	buildCodexNativeAgentTurnExecutionSemanticGuard,
+	type CodexNativeAgentTurnExecutionObservation,
+	canCorrectCodexIdleStallForSameNativeTurn,
+	isCodexIdleStallNativeReconciliationCandidate,
+	isCurrentCodexNativeAgentTurnExecutionObservation,
+} from "../core/codex-native-agent-turn-execution-observation";
 import {
 	type CodexNativeDirectInputReadinessObservation,
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
@@ -1214,6 +1223,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
 	private readonly stallThresholdMs = readStallThresholdMs();
 	private stallScanInterval: NodeJS.Timeout | null = null;
+	private stallScanInFlight: Promise<void> | null = null;
+	private readonly nativeExecutionReadAbortController = new AbortController();
+	private readonly nativeExecutionReadRetriesByConversationSessionId = new Map<
+		string,
+		{
+			identity: string;
+			consecutiveUnknownReadCount: number;
+			nextReadAtMs: number;
+		}
+	>();
 	// 进程级的 fast-exit 自动重启时刻窗（滚动一小时）。刻意是 manager 级而不是 per-task：
 	// 「每轮换一个新 taskId」的成环形态（journal 里 task-conversation-session-<uuid> 这类会话 id
 	// 每次都是新 UUID）会让任何 per-task 计数器恒为 0——每一轮都是全新 SessionEntry、计数从头开始，
@@ -6034,6 +6053,99 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
+	reconcileCodexIdleStallWithNativeAgentTurnExecution(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		observation: CodexNativeAgentTurnExecutionObservation,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry?.active ||
+			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) ||
+			!canCorrectCodexIdleStallForSameNativeTurn(entry.summary, observation)
+		)
+			return entry ? cloneSummary(entry.summary) : null;
+		const previous = entry.summary;
+		const retention = previous.currentAgentProcessUserTurnIdleRetentionStarted;
+		const handoff = previous.lastAgentConversationUserHandoffObservation;
+		const isMatchingFalseHandoff =
+			retention != null &&
+			handoff?.signalConfidence === "prompt_ready_fallback" &&
+			handoff.turnSequence === retention?.turnSequence &&
+			handoff.observedAtMs === retention.stoppedAt;
+		const summary = updateSummary(entry, {
+			...buildTerminalFacetPatch(previous, "running", { reviewReason: null, pid: previous.pid, agentId: "codex" }),
+			reviewReason: null,
+			// 这是撤销误判，不是新回合；显式保留序号让共用漏斗不制造新的开始边沿。
+			agentResponseGenerationTurnSequence: previous.agentResponseGenerationTurnSequence ?? 0,
+			...(previous.agentResponseGenerationTurnStarted
+				? { agentResponseGenerationTurnStarted: previous.agentResponseGenerationTurnStarted }
+				: {}),
+			currentAgentProcessUserTurnIdleRetentionStarted: null,
+			...(isMatchingFalseHandoff ? { lastAgentConversationUserHandoffObservation: null } : {}),
+		});
+		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+		this.emitSummary(summary);
+		logTuiFreezeWarning(
+			`[tui-freeze] codex-idle-stall-corrected taskId=${taskId} nativeTurnId=${observation.nativeTurnId} turnSequence=${summary.agentResponseGenerationTurnSequence}`,
+		);
+		return cloneSummary(summary);
+	}
+
+	private async readCurrentCodexNativeTurnExecution(entry: SessionEntry): Promise<{
+		summaryBeforeRead: RuntimeTaskSessionSummary;
+		observation: CodexNativeAgentTurnExecutionObservation;
+	} | null> {
+		const summaryBeforeRead = cloneSummary(entry.summary);
+		const identity = buildCodexNativeAgentTurnExecutionIdentity(summaryBeforeRead);
+		const previous = this.nativeExecutionReadRetriesByConversationSessionId.get(summaryBeforeRead.taskId);
+		if (previous?.identity === identity && now() < previous.nextReadAtMs) return null;
+		let observation: CodexNativeAgentTurnExecutionObservation | null = null;
+		try {
+			observation = await readCodexNativeAgentTurnExecution({
+				workspaceId: summaryBeforeRead.codexNativeSessionControlEndpoint?.workspaceId ?? "",
+				summary: summaryBeforeRead,
+				observedAtMs: now(),
+				signal: this.nativeExecutionReadAbortController.signal,
+			});
+		} catch (error) {
+			logTuiFreezeWarning(
+				`[tui-freeze] codex-native-execution-unverified taskId=${summaryBeforeRead.taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (!observation || observation.executionStatus === "unknown") {
+			const consecutiveUnknownReadCount =
+				(previous?.identity === identity ? previous.consecutiveUnknownReadCount : 0) + 1;
+			this.nativeExecutionReadRetriesByConversationSessionId.set(summaryBeforeRead.taskId, {
+				identity,
+				consecutiveUnknownReadCount,
+				nextReadAtMs: now() + Math.min(15_000 * 2 ** (consecutiveUnknownReadCount - 1), 60_000),
+			});
+			return null;
+		}
+		this.nativeExecutionReadRetriesByConversationSessionId.delete(summaryBeforeRead.taskId);
+		if (
+			!entry.active ||
+			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation)
+		)
+			return null;
+		return { summaryBeforeRead, observation };
+	}
+
+	async inspectCodexNativeTurnBeforeIdleStallSessionReclamation(
+		taskId: string,
+	): Promise<"allow_reclamation" | "defer_reclamation"> {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active || !isCodexIdleStallNativeReconciliationCandidate(entry.summary)) return "allow_reclamation";
+		const result = await this.readCurrentCodexNativeTurnExecution(entry);
+		if (!result) return "defer_reclamation";
+		if (result.observation.executionStatus === "running") {
+			this.reconcileCodexIdleStallWithNativeAgentTurnExecution(taskId, result.summaryBeforeRead, result.observation);
+			return "defer_reclamation";
+		}
+		return "allow_reclamation";
+	}
+
 	reconcileCodexNeedsInputWithNativeDirectInputReadiness(
 		taskId: string,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
@@ -7306,9 +7418,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.stallScanInterval = interval;
 	}
 
-	private async scanForStalls(): Promise<void> {
+	private scanForStalls(): Promise<void> {
+		if (this.stallScanInFlight) return this.stallScanInFlight;
+		const scan = this.scanEntriesForStalls().finally(() => {
+			this.stallScanInFlight = null;
+		});
+		this.stallScanInFlight = scan;
+		return scan;
+	}
+
+	private async scanEntriesForStalls(): Promise<void> {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
+			if (entry.active && isCodexIdleStallNativeReconciliationCandidate(entry.summary)) {
+				await this.inspectCodexNativeTurnBeforeIdleStallSessionReclamation(taskId);
+			}
 			// 首轮落盘看门狗与回合无关（卡在信任对话框时 turnOwner 仍是 agent，但也可能已被翻成 user），
 			// 所以排在下面的回合门控之前。
 			if (entry.active?.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch) {
@@ -7355,17 +7479,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
-	// idle-live 自愈判定 + 动作。前置条件（agent 回合 / 非 parked / 有 agentId / active）已由 scanForStalls 保证。
-	// 命中两条独立门控才翻转：
-	//  ① 距最近「实质产出」超阈值——用 lastSubstantiveOutputAt 而非 lastOutputAt（光标重绘一直刷新后者、会永久压住
-	//     计时器，正是本 bug 的病灶）；lastSubstantiveOutputAt 缺失时回退 startedAt。这是次要防抖。
-	//  ② 当前确实停在交互提示符——走 resolveInteractivePromptReadiness 的 "prompt" 分支，它经「永远在线的全屏镜像
-	//     快照」判定，与 connection-drop 反应引擎是否挂载解耦（isAtInteractivePromptForReaction 依赖的扫描缓冲仅在
-	//     autoContinueOnConnectionDropEnabled 开启时在线，用它作主护栏会把自愈错误耦合到那个无关开关）。只接受
-	//     "prompt"——"immediate"（无提示符预测的 droid/kiro）/"quiet"（其门控要求 turnOwner≠agent，本路径永不触发）
-	//     太宽，保守跳过。这是防「安静但在干活（mid-tool / 长构建，此时渲染的是 spinner 而非输入框）」误报的主信号。
-	// 翻转后 turnOwner=user，下轮 scanForStalls 的 isSummaryInActiveTurn 转 false 不再命中——自限、不重复搬列。
-	// 返回是否已翻转（true → 调用方跳过本 entry 后续 log 逻辑）。
+	// 空闲自愈要求有效活动静默超阈值及当前提示符就绪；Codex 还必须有同代原生回合已经结束的证明。
+	// 输入框可用不证明回合结束，历史缓冲中的提示符也不能压过原生 inProgress。
+	// 查询未知只推迟本次自动交棒，下一轮有界补证；真实 Stop、退出和模态待答仍走各自的领域事件。
+	// 返回是否已翻转，翻转后的 user 回合由下方 owner 守卫阻止重复动作。
 	private async attemptIdleStallAutoReview(
 		taskId: string,
 		entry: SessionEntry,
@@ -7384,6 +7501,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!substantiveBaseline || currentTime - substantiveBaseline <= IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS) {
 			return false;
 		}
+		const summaryBeforeRead = cloneSummary(entry.summary);
+		if (entry.summary.agentId === "codex") {
+			const result = await this.readCurrentCodexNativeTurnExecution(entry);
+			// 原生输入框在执行中也可使用。只有明确结束的当前原生回合才允许提示符兜底交棒。
+			if (!result || result.observation.executionStatus !== "finished") return false;
+		}
 		let readiness: TaskChatInputDeliveryReadiness;
 		try {
 			readiness = await this.resolveInteractivePromptReadiness(entry);
@@ -7396,7 +7519,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// await 期间会话可能已结束 / 已被别的路径翻出 agent 回合：翻转前复查仍是活跃 agent 回合，避免误翻。
 		const current = this.entries.get(taskId);
-		if (!current || !current.active || resolveSessionFacets(current.summary).turnOwner !== "agent") {
+		if (
+			!current ||
+			current !== entry ||
+			!current.active ||
+			resolveSessionFacets(current.summary).turnOwner !== "agent" ||
+			buildCodexNativeAgentTurnExecutionSemanticGuard(current.summary) !==
+				buildCodexNativeAgentTurnExecutionSemanticGuard(summaryBeforeRead) ||
+			(resolveLastEffectiveAgentConversationActivityObservation(current.summary)?.observedAtMs ??
+				current.summary.startedAt) !== substantiveBaseline
+		) {
 			return false;
 		}
 		const idleMs = currentTime - substantiveBaseline;
@@ -7408,6 +7540,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	dispose(): void {
+		this.nativeExecutionReadAbortController.abort();
+		this.nativeExecutionReadRetriesByConversationSessionId.clear();
 		if (this.stallScanInterval !== null) {
 			clearInterval(this.stallScanInterval);
 			this.stallScanInterval = null;

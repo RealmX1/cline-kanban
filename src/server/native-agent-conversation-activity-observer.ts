@@ -1,4 +1,6 @@
 // summary 更新和提交候选仅唤醒原生核验，不构成输入接受证据。
+
+import type { CodexCurrentNativeTurnToolActivityReadCursor } from "../agent-session-history/codex-current-native-turn-tool-activity-reader";
 import type {
 	NativeAgentConversationActivityReadCursor,
 	NativeAgentConversationActivityReadResult,
@@ -10,6 +12,10 @@ import type {
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import {
+	type CodexNativeAgentTurnExecutionObservation,
+	shouldContinuouslyObserveCodexNativeTurnExecution,
+} from "../core/codex-native-agent-turn-execution-observation";
 import {
 	type CodexNativeDirectInputReadinessObservation,
 	isCodexNativeConversationRewindSignal,
@@ -31,6 +37,10 @@ export type NativeAgentConversationAcceptedUserPromptObservation = NativeAgentCo
 	};
 export interface CreateNativeAgentConversationActivityObserverOptions {
 	onAccepted: (observation: NativeAgentConversationAcceptedUserPromptObservation) => Promise<void> | void;
+	onCodexNativeAgentTurnExecution?: (
+		observation: CodexNativeAgentTurnExecutionObservation,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+	) => Promise<void> | void;
 	onCodexNativeDirectInputReadiness?: (
 		observation: NativeAgentConversationActivityObservationContext & CodexNativeDirectInputReadinessObservation,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
@@ -68,12 +78,17 @@ interface NativeConversationObservationState {
 	summary: RuntimeTaskSessionSummary;
 	getCurrentSummary: () => RuntimeTaskSessionSummary | null;
 	cursor: NativeAgentConversationActivityReadCursor | null;
+	codexToolTranscriptCursor: CodexCurrentNativeTurnToolActivityReadCursor | null;
 	inFlight: Promise<void> | null;
 	lastReadStartedAtMs: number;
+	consecutiveUnknownNativeExecutionReadCount: number;
+	nextNativeExecutionReadAtMs: number;
 	candidateExpiresAtMs: number | null;
 	wasCodexNeedsInputNativeReconciliationCandidate: boolean;
 	lastCodexNativeConversationRewindSignalKey: string | null;
 	retryTimer: ReturnType<typeof setTimeout> | null;
+	transcriptBacklogRetryTimer: ReturnType<typeof setTimeout> | null;
+	transcriptBacklogReadWindowExpiresAtMs: number | null;
 	abortController: AbortController;
 }
 function observationIdentityKey(summary: RuntimeTaskSessionSummary): string {
@@ -99,10 +114,30 @@ export function createNativeAgentConversationActivityObserver(
 	const queuedReads: Array<() => void> = [];
 	let concurrentReadCount = 0;
 	let disposed = false;
+	let nativeExecutionSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+	function ensureNativeExecutionSweepRunning(): void {
+		if (nativeExecutionSweepTimer !== null) return;
+		nativeExecutionSweepTimer = setInterval(() => {
+			for (const state of states.values()) {
+				const summary = state.getCurrentSummary();
+				if (
+					isCurrent(state) &&
+					summary &&
+					shouldContinuouslyObserveCodexNativeTurnExecution(summary) &&
+					summary.codexNativeSessionControlEndpoint &&
+					nowMs() >= state.nextNativeExecutionReadAtMs
+				)
+					void scheduleRead(state);
+			}
+		}, 15_000);
+		nativeExecutionSweepTimer.unref();
+	}
 
 	function forgetState(state: NativeConversationObservationState): void {
 		state.abortController.abort();
 		if (state.retryTimer) clearTimeout(state.retryTimer);
+		if (state.transcriptBacklogRetryTimer) clearTimeout(state.transcriptBacklogRetryTimer);
 		state.retryTimer = null;
 	}
 	function isCurrent(state: NativeConversationObservationState): boolean {
@@ -127,6 +162,13 @@ export function createNativeAgentConversationActivityObserver(
 			const dispatch = queuedReads.shift();
 			if (!dispatch) return;
 			dispatch();
+		}
+	}
+	function reportReadFailure(error: unknown, state: NativeConversationObservationState): void {
+		try {
+			options.onReadFailed?.(error, context(state));
+		} catch {
+			// 诊断出口故障也不能占住读取槽或阻断其他会话继续补证。
 		}
 	}
 	function scheduleCandidateRetry(state: NativeConversationObservationState): void {
@@ -167,18 +209,46 @@ export function createNativeAgentConversationActivityObserver(
 			concurrentReadCount += 1;
 			state.lastReadStartedAtMs = nowMs();
 			const summaryBeforeRead = state.getCurrentSummary() ?? state.summary;
+			// 状态未知只退避独立执行查询；消息活动和接受证据仍按自身冷却期读取。
+			const shouldReadCodexNativeAgentTurnExecution =
+				force ||
+				state.consecutiveUnknownNativeExecutionReadCount === 0 ||
+				!shouldContinuouslyObserveCodexNativeTurnExecution(summaryBeforeRead) ||
+				nowMs() >= state.nextNativeExecutionReadAtMs;
+			const rewindSignalBeforeRead = state.lastCodexNativeConversationRewindSignalKey;
+			const isReadStillCurrent = () =>
+				isCurrent(state) && state.lastCodexNativeConversationRewindSignalKey === rewindSignalBeforeRead;
+			let hasKnownNativeExecution = false;
+			let readFailureWasReported = false;
+			let shouldReadMoreTranscriptBacklog = false;
 			void Promise.resolve()
 				.then(() =>
 					readNativeActivity({
 						workspaceId: state.workspaceId,
 						summary: summaryBeforeRead,
+						shouldReadCodexNativeAgentTurnExecution,
 						cursor: state.cursor,
+						codexToolTranscriptCursor: state.codexToolTranscriptCursor,
 						observedAtMs: state.lastReadStartedAtMs,
 						signal: state.abortController.signal,
 					}),
 				)
 				.then(async (result) => {
-					if (!result || !isCurrent(state)) return;
+					if (!result || !isReadStillCurrent()) return;
+					if (result.codexNativeAgentTurnExecution) {
+						hasKnownNativeExecution = result.codexNativeAgentTurnExecution.executionStatus !== "unknown";
+						await options.onCodexNativeAgentTurnExecution?.(
+							result.codexNativeAgentTurnExecution,
+							summaryBeforeRead,
+						);
+						if (!isReadStillCurrent()) return;
+					}
+					const readFailure =
+						result.codexNativeAgentTurnExecutionReadFailure ?? result.nativeActivityProjectionReadFailure;
+					if (readFailure) {
+						readFailureWasReported = true;
+						reportReadFailure(new Error(readFailure), state);
+					}
 					// 首次基线与 rewind 后没有新增消息时，也必须消费独立的状态证明。
 					if (result.codexNativeDirectInputReadiness) {
 						await options.onCodexNativeDirectInputReadiness?.(
@@ -187,29 +257,76 @@ export function createNativeAgentConversationActivityObserver(
 						);
 					}
 					for (const event of result.events) {
-						if (!isCurrent(state)) return;
+						if (!isReadStillCurrent()) return;
 						const observation = { ...context(state), ...event };
 						await options.onActivity?.(observation);
 						if (
 							event.activityKind === "accepted_user_input" &&
 							event.evidenceKind === "native_user_prompt_acceptance"
 						) {
-							if (!isCurrent(state)) return;
+							if (!isReadStillCurrent()) return;
 							await options.onAccepted({ ...observation, evidenceKind: "native_user_prompt_acceptance" });
 							state.candidateExpiresAtMs = null;
 						}
 					}
 					// 下游写入成功后才提交读取游标；失败可按同一事件身份重试，不丢接受边沿。
 					state.cursor = result.cursor;
+					if (result.codexToolTranscriptCursor) state.codexToolTranscriptCursor = result.codexToolTranscriptCursor;
+					shouldReadMoreTranscriptBacklog = result.moreAppendedTranscriptBytesRemain === true;
+					if (!shouldReadMoreTranscriptBacklog) state.transcriptBacklogReadWindowExpiresAtMs = null;
+					else if (state.transcriptBacklogReadWindowExpiresAtMs === null)
+						state.transcriptBacklogReadWindowExpiresAtMs = nowMs() + 5_000;
 				})
 				.catch((error: unknown) => {
-					if (isCurrent(state)) options.onReadFailed?.(error, context(state));
+					readFailureWasReported = true;
+					if (isCurrent(state)) reportReadFailure(error, state);
 				})
 				.finally(() => {
+					// 未尝试状态查询的活动补读不能累计未知次数，也不能推迟静默补证。
+					if (
+						shouldReadCodexNativeAgentTurnExecution &&
+						shouldContinuouslyObserveCodexNativeTurnExecution(summaryBeforeRead)
+					) {
+						state.consecutiveUnknownNativeExecutionReadCount = hasKnownNativeExecution
+							? 0
+							: state.consecutiveUnknownNativeExecutionReadCount + 1;
+						state.nextNativeExecutionReadAtMs =
+							nowMs() +
+							Math.min(15_000 * 2 ** Math.max(0, state.consecutiveUnknownNativeExecutionReadCount - 1), 60_000);
+						if (
+							!hasKnownNativeExecution &&
+							!readFailureWasReported &&
+							isReadStillCurrent() &&
+							summaryBeforeRead.codexNativeSessionControlEndpoint
+						) {
+							reportReadFailure(
+								new Error(
+									`原生执行状态未知，已保留待核验；连续未知次数=${state.consecutiveUnknownNativeExecutionReadCount} nextReadAtMs=${state.nextNativeExecutionReadAtMs}`,
+								),
+								state,
+							);
+						}
+					}
 					concurrentReadCount -= 1;
 					state.inFlight = null;
 					resolveScheduledRead();
 					scheduleCandidateRetry(state);
+					if (
+						shouldReadMoreTranscriptBacklog &&
+						isReadStillCurrent() &&
+						!state.transcriptBacklogRetryTimer &&
+						state.transcriptBacklogReadWindowExpiresAtMs !== null &&
+						nowMs() < state.transcriptBacklogReadWindowExpiresAtMs
+					) {
+						state.transcriptBacklogRetryTimer = setTimeout(
+							() => {
+								state.transcriptBacklogRetryTimer = null;
+								if (isReadStillCurrent()) void scheduleRead(state);
+							},
+							Math.max(options.cooldownMs ?? 250, 250),
+						);
+						state.transcriptBacklogRetryTimer.unref();
+					}
 					dispatchReads();
 				});
 		});
@@ -253,15 +370,21 @@ export function createNativeAgentConversationActivityObserver(
 			},
 			getCurrentSummary,
 			cursor: null,
+			codexToolTranscriptCursor: null,
 			inFlight: null,
 			lastReadStartedAtMs: Number.NEGATIVE_INFINITY,
+			consecutiveUnknownNativeExecutionReadCount: 0,
+			nextNativeExecutionReadAtMs: 0,
 			candidateExpiresAtMs: null,
 			wasCodexNeedsInputNativeReconciliationCandidate: false,
 			lastCodexNativeConversationRewindSignalKey: null,
 			retryTimer: null,
+			transcriptBacklogRetryTimer: null,
+			transcriptBacklogReadWindowExpiresAtMs: null,
 			abortController: new AbortController(),
 		};
 		states.set(key, state);
+		if (summary.agentId === "codex") ensureNativeExecutionSweepRunning();
 		return state;
 	}
 	return {
@@ -299,6 +422,8 @@ export function createNativeAgentConversationActivityObserver(
 		},
 		dispose() {
 			disposed = true;
+			if (nativeExecutionSweepTimer !== null) clearInterval(nativeExecutionSweepTimer);
+			nativeExecutionSweepTimer = null;
 			for (const state of states.values()) forgetState(state);
 			states.clear();
 			// 排队任务自检后只结算 promise，不发起新的 IO。

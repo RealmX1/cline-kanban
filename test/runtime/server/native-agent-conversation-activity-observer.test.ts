@@ -179,11 +179,11 @@ describe("Codex 原生待输入核验的有界重试", () => {
 		});
 		await Promise.all([pending, concurrent]);
 		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsBeforeConcurrentSummary);
-		expect(target.onNativeReadiness).toHaveBeenCalledTimes(1);
+		expect(target.onNativeReadiness).toHaveBeenCalledTimes(change === "rewind" ? 0 : 1);
 		expect(target.state.summary.userTurnKind).toBe("needs_input");
 		target.state.nativeReadinessAvailable = true;
 		await vi.advanceTimersByTimeAsync(250);
-		expect(target.onNativeReadiness).toHaveBeenCalledTimes(2);
+		expect(target.onNativeReadiness).toHaveBeenCalledTimes(change === "rewind" ? 1 : 2);
 		expect(target.state.summary.userTurnKind).toBe("review");
 	});
 
