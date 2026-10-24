@@ -9,6 +9,7 @@ import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runt
  * 并给出「跨项目跳转在途、要不要渲染 Focus View 过渡外壳」及外壳上显示的目标。
  */
 export function useCrossProjectRecentlyActiveTaskSwitcherHost({
+	otherProjectTaskCardActionHandlers,
 	crossProjectTaskSwitcherSectionsModel,
 	projects,
 	notificationLogByWorkspaceId,
@@ -23,6 +24,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	onUnpinCurrentProjectTaskFromTaskPinboard,
 	onEditCurrentProjectTaskPinboardPinReason,
 }: {
+	otherProjectTaskCardActionHandlers?: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["otherProjectTaskCardActionHandlers"];
 	crossProjectTaskSwitcherSectionsModel: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
@@ -43,6 +45,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 } {
 	const crossProjectRecentlyActiveTaskSwitcherHost = useMemo<CrossProjectRecentlyActiveTaskSwitcherHostContextValue>(
 		() => ({
+			otherProjectTaskCardActionHandlers,
 			crossProjectTaskSwitcherSectionsModel,
 			projects,
 			notificationLogByWorkspaceId,
@@ -61,6 +64,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			onEditCurrentProjectTaskPinboardPinReason,
 		}),
 		[
+			otherProjectTaskCardActionHandlers,
 			crossProjectTaskSwitcherSectionsModel,
 			currentProjectId,
 			isBoardScopeAllProjectsSelected,

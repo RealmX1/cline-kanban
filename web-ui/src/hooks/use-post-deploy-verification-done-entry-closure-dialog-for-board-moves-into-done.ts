@@ -10,7 +10,7 @@ import type { RuntimePostDeployVerificationDeploymentGroup } from "@/runtime/typ
 import type { BoardData } from "@/types";
 import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
-// 看板入口（卡片按钮 / 详情底栏 / 拖拽进 Done / 服务端拒绝兜底）的「带原因移入 Done」对话框状态。
+// 看板入口（卡片按钮 / 详情底栏 / 拖拽进 Done / 服务端拒绝兜底）的核对与原因结案请求。
 // 移列本身由 use-board-interactions 执行；这里只持有「哪张卡在等原因」与对话框条目（由读模型 + 看板现算），
 // 以及「浏览器端自动化撞上门禁只提示一次」的去重。PDV 面板自己的完成流另有一份对话框（在 controller 里）。
 
@@ -21,6 +21,7 @@ export interface PostDeployVerificationDoneEntryClosureDialogRequestForBoardMove
 	insertAtIndexWithinDoneBoardColumn: number | undefined;
 	// 服务端已以 PRECONDITION_FAILED 拒绝过一次（客户端预检数据过期）。
 	runtimeRejectedMoveIntoDoneForMissingClosureReasons: boolean;
+	runtimeRejectionRevision?: number;
 }
 
 export interface PostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone {
@@ -75,7 +76,11 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 	const markClosureDialogTaskRejectedByRuntimeForMissingClosureReasons = useCallback((taskId: string) => {
 		setDialogRequest((current) =>
 			current && current.taskId === taskId
-				? { ...current, runtimeRejectedMoveIntoDoneForMissingClosureReasons: true }
+				? {
+						...current,
+						runtimeRejectedMoveIntoDoneForMissingClosureReasons: true,
+						runtimeRejectionRevision: (current.runtimeRejectionRevision ?? 0) + 1,
+					}
 				: current,
 		);
 	}, []);
@@ -94,7 +99,7 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 		showAppToast({
 			intent: "warning",
 			icon: "warning-sign",
-			message: `「${resolveTaskTitleForPostDeployVerificationPanel(latestBoardForNoticeTaskTitleRef.current, taskId)}」的 Post-Deploy Verification 还有未勾项，没有自动移入 Done：请在 PDV 面板或看板上带原因移入 Done。`,
+			message: `「${resolveTaskTitleForPostDeployVerificationPanel(latestBoardForNoticeTaskTitleRef.current, taskId)}」的 Post-Deploy Verification 还有未勾项，没有自动移入 Done：请先核对 PDV 验证项，再移入 Done。`,
 			timeout: 7000,
 		});
 	}, []);
