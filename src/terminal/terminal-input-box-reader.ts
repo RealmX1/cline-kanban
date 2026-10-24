@@ -175,11 +175,15 @@ export interface TerminalScreenLineSnapshot {
 	// xterm 的软折行标记。实测 Claude 恒为 false（见文件头 1），保留字段是为了让
 	// 真正依赖终端软折行的 agent 能直接复用本模块。
 	isWrapped: boolean;
+	// 可选的 dim 单元格列区间，用于区分 TUI 占位提示和真实输入。
+	dimmedTextColumnRanges?: [number, number][];
 }
 
 export interface TerminalScreenSnapshot {
 	lines: TerminalScreenLineSnapshot[];
 	columnCount: number;
+	cursorRow?: number;
+	cursorColumn?: number;
 }
 
 export interface TerminalInputBoxGrammar {

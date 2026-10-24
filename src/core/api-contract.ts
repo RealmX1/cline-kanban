@@ -2446,6 +2446,7 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
 	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
@@ -2460,9 +2461,18 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 ]);
 export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
 
+export const codexNativePromptDeliveryEvidenceSchema = z.object({
+	clientUserMessageId: z.string(),
+	nativeSessionId: z.string(),
+	nativeTurnId: z.string(),
+	nativeUserMessageId: z.string(),
+});
+export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePromptDeliveryEvidenceSchema>;
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2483,6 +2493,7 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 
