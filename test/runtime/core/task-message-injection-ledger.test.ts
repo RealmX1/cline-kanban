@@ -128,6 +128,40 @@ describe("task-message-injection-ledger", () => {
 		expect(record?.status).toBe("failed");
 	});
 
+	it("原生投递证据跨写盘读回，并且晚到的回执不能覆盖原生消息身份", async () => {
+		await seedPendingRecord("task-native", "key-native");
+		const evidence = {
+			clientUserMessageId: "client-message-1",
+			nativeSessionId: "thread-1",
+			nativeTurnId: "turn-2",
+			nativeUserMessageId: "user-2",
+		};
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId: "task-native",
+			idempotencyKey: "key-native",
+			status: "delivered_and_submit_confirmed",
+			codexNativePromptDeliveryEvidence: evidence,
+			nowIso: "2026-08-12T00:00:03.000Z",
+		});
+		const late = await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId: "task-native",
+			idempotencyKey: "key-native",
+			status: "delivery_failed",
+			failureReason: "codex_native_prompt_delivery_unconfirmed",
+			nowIso: "2026-08-12T00:00:04.000Z",
+		});
+		expect(late.outcome).toBe("already_settled");
+		const record = findTaskMessageInjectionRecord(
+			await readTaskMessageInjectionLedger(ledgerPath),
+			"task-native",
+			"key-native",
+		);
+		expect(record?.codex_native_prompt_delivery_evidence).toEqual(evidence);
+		expect(record?.terminal_delivery_status).toBe("delivered_and_submit_confirmed");
+	});
+
 	it("未知 key 上报终态 → unknown_idempotency_key，不凭空造记录", async () => {
 		const result = await recordTaskMessageTerminalDeliveryOutcome({
 			ledgerPath,

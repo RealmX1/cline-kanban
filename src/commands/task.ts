@@ -1286,6 +1286,7 @@ interface TaskMessageCommandResult extends JsonRecord {
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
 	terminal_delivery_status_updated_at: string;
+	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
 	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
@@ -1313,6 +1314,9 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.codex_native_prompt_delivery_evidence
+			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
 		...(record.required_native_independent_user_turn_session_id
 			? {
 					required_native_independent_user_turn_session_id:
@@ -1551,6 +1555,9 @@ async function sendTaskMessageCommand(input: {
 			idempotencyKey,
 			status: immediateStatus,
 			...(chatResponse.terminalDelivery?.reason ? { failureReason: chatResponse.terminalDelivery.reason } : {}),
+			...(chatResponse.terminalDelivery?.codexNativePromptDeliveryEvidence
+				? { codexNativePromptDeliveryEvidence: chatResponse.terminalDelivery.codexNativePromptDeliveryEvidence }
+				: {}),
 			...(checkpoint ? { turnId: String(checkpoint.turn), checkpointId: checkpoint.ref } : {}),
 			nowIso: new Date().toISOString(),
 		});

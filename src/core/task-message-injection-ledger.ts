@@ -20,13 +20,14 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import type { CodexNativePromptDeliveryEvidence } from "./api-contract";
 
 export const TASK_MESSAGE_INJECTION_LEDGER_FILENAME = "task-message-injections.json";
 
 // 四种语义不可合并。特别是 accepted_pending_submit_confirmation **不表示成功**——把它当成功
 // 正是 2026-08-08 那 49 分钟事故的成因。
 export const TASK_MESSAGE_TERMINAL_DELIVERY_STATUSES = [
-	// 文本已写入 PTY，且提交已确认（agent 已收到并开始处理）。
+	// 文本经 PTY 或原生通道提交，且已确认实际用户消息（agent 已收到并开始处理）。
 	"delivered_and_submit_confirmed",
 	// 已写入且提交已确认，但写入时 agent 正在自己的回合中，这条消息排在其后。
 	"delivered_queued_behind_active_agent_turn",
@@ -41,6 +42,8 @@ export const TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS = [
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	// 原生请求可能已被接受；不得自动重发或退回 PTY。
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 输入框被占着、而**人不在场**：机器判定框里有未提交内容，却又拿不下来（读屏读不出正文无从暂存 /
 	// 写库失败 / 清框时会话已换代）。与 human_terminal_contention_timeout 的关键差别是「人在不在」——
@@ -84,6 +87,7 @@ export interface TaskMessageInjectionRecord {
 	message_id: string;
 	turn_id?: string;
 	checkpoint_id?: string;
+	codex_native_prompt_delivery_evidence?: CodexNativePromptDeliveryEvidence;
 	// 遗留镜像，由 terminal_delivery_status 派生，不作判据。
 	status?: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
@@ -148,6 +152,9 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		message_id: String(record.message_id),
 		...(typeof record.turn_id === "string" ? { turn_id: record.turn_id } : {}),
 		...(typeof record.checkpoint_id === "string" ? { checkpoint_id: record.checkpoint_id } : {}),
+		...(isCodexNativePromptDeliveryEvidence(record.codex_native_prompt_delivery_evidence)
+			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
 		status: legacyStatus ?? LEGACY_STATUS_MIRROR[terminalStatus],
 		terminal_delivery_status: terminalStatus,
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
@@ -172,6 +179,13 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 			? { agent_idle_gated_queue_entry_id: record.agent_idle_gated_queue_entry_id }
 			: {}),
 	};
+}
+
+function isCodexNativePromptDeliveryEvidence(value: unknown): value is CodexNativePromptDeliveryEvidence {
+	if (typeof value !== "object" || value === null) return false;
+	return ["clientUserMessageId", "nativeSessionId", "nativeTurnId", "nativeUserMessageId"].every(
+		(field) => field in value && typeof Reflect.get(value, field) === "string",
+	);
 }
 
 function hasRequiredRecordFields(value: unknown): value is Record<string, unknown> {
@@ -303,6 +317,7 @@ export function applyTerminalDeliveryOutcomeToRecord(
 		nowIso: string;
 		turnId?: string;
 		checkpointId?: string;
+		codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 	},
 ): TaskMessageInjectionRecord {
 	const { terminal_delivery_failure_reason: _discardedPreviousReason, ...rest } = record;
@@ -310,6 +325,9 @@ export function applyTerminalDeliveryOutcomeToRecord(
 		...rest,
 		...(outcome.turnId ? { turn_id: outcome.turnId } : {}),
 		...(outcome.checkpointId ? { checkpoint_id: outcome.checkpointId } : {}),
+		...(outcome.codexNativePromptDeliveryEvidence
+			? { codex_native_prompt_delivery_evidence: outcome.codexNativePromptDeliveryEvidence }
+			: {}),
 		status: LEGACY_STATUS_MIRROR[outcome.status],
 		terminal_delivery_status: outcome.status,
 		...(outcome.failureReason ? { terminal_delivery_failure_reason: outcome.failureReason } : {}),
@@ -333,6 +351,7 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 	failureReason?: TaskMessageTerminalDeliveryFailureReason;
 	turnId?: string;
 	checkpointId?: string;
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 	nowIso: string;
 }): Promise<RecordTerminalDeliveryOutcomeResult> {
 	return await withTaskMessageInjectionLedgerLock<RecordTerminalDeliveryOutcomeResult>(
@@ -350,6 +369,9 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 				...(input.failureReason ? { failureReason: input.failureReason } : {}),
 				...(input.turnId ? { turnId: input.turnId } : {}),
 				...(input.checkpointId ? { checkpointId: input.checkpointId } : {}),
+				...(input.codexNativePromptDeliveryEvidence
+					? { codexNativePromptDeliveryEvidence: input.codexNativePromptDeliveryEvidence }
+					: {}),
 				nowIso: input.nowIso,
 			});
 			return {

@@ -367,6 +367,12 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 				task_id: taskId,
 				attempt_id: sessionId,
 				terminal_delivery_status: "delivered_and_submit_confirmed",
+				codex_native_prompt_delivery_evidence: {
+					clientUserMessageId: expect.any(String),
+					nativeSessionId: nativeId,
+					nativeTurnId: expect.any(String),
+					nativeUserMessageId: expect.any(String),
+				},
 			});
 			const nativeUserMessages = () =>
 				readFileSync(transcript, "utf8")
@@ -423,6 +429,7 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 				attempt_id: sessionId,
 				terminal_delivery_status: "delivered_and_submit_confirmed",
 			});
+			expect(duplicate.codex_native_prompt_delivery_evidence).toEqual(receipt.codex_native_prompt_delivery_evidence);
 			expect(
 				nativeUserMessages().filter((entry) => JSON.stringify(entry).includes(`RVF_DECISION_TOKEN=${token}`)),
 			).toHaveLength(1);

@@ -5,6 +5,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerTaskCommand } from "../../../src/commands/task";
 import {
+	type CodexNativePromptDeliveryEvidence,
 	type RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
 	type RuntimeTaskChatSendRequest,
 	type RuntimeWorkspaceStateResponse,
@@ -19,6 +20,7 @@ const harness = vi.hoisted(() => ({
 	state: null as RuntimeWorkspaceStateResponse | null,
 	immediateRequests: [] as RuntimeTaskChatSendRequest[],
 	queuedRequests: [] as RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest[],
+	nativeEvidence: null as CodexNativePromptDeliveryEvidence | null,
 }));
 
 vi.mock("../../../src/state/workspace-state", () => ({
@@ -49,7 +51,11 @@ vi.mock("@trpc/client", () => ({
 						ok: true,
 						summary: harness.state?.sessions[input.targetTaskConversationSessionId ?? input.taskId],
 						message: { id: "confirmed-message" },
-						terminalDelivery: { status: "delivered_and_submit_confirmed", reason: null },
+						terminalDelivery: {
+							status: "delivered_and_submit_confirmed",
+							reason: null,
+							...(harness.nativeEvidence ? { codexNativePromptDeliveryEvidence: harness.nativeEvidence } : {}),
+						},
 					};
 				},
 			},
@@ -146,6 +152,7 @@ beforeEach(async () => {
 	await mkdir(harness.workspaceDirectory);
 	harness.immediateRequests.length = 0;
 	harness.queuedRequests.length = 0;
+	harness.nativeEvidence = null;
 	harness.state = {
 		repoPath: "/isolated/repo",
 		statePath: harness.workspaceDirectory,
@@ -187,6 +194,16 @@ afterEach(async () => {
 });
 
 describe("task message 的卡片与会话精确绑定", () => {
+	it("即时原生回执的消息身份写入账本并随 CLI 结果返回", async () => {
+		harness.nativeEvidence = {
+			clientUserMessageId: "client-message-1",
+			nativeSessionId: "thread-1",
+			nativeTurnId: "turn-2",
+			nativeUserMessageId: "user-2",
+		};
+		expect(await runMessage()).toMatchObject({ codex_native_prompt_delivery_evidence: harness.nativeEvidence });
+		expect(await ledger()).toMatchObject([{ codex_native_prompt_delivery_evidence: harness.nativeEvidence }]);
+	});
 	it.each([undefined, "independent-main", "peer", "task-1"])(
 		"即时投递目标 %s，移除 ID 相等限制并透传选定会话",
 		async (attemptId) => {

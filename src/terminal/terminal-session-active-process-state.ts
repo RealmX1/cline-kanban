@@ -1,5 +1,9 @@
 import type { NativeAgentConversationActivityReadCursor } from "../agent-session-history/native-agent-conversation-activity-reader";
-import type { TerminalDeliveryFailureReason, TerminalDeliveryStatus } from "../core/api-contract";
+import type {
+	CodexNativePromptDeliveryEvidence,
+	TerminalDeliveryFailureReason,
+	TerminalDeliveryStatus,
+} from "../core/api-contract";
 import type { AgentOutputSubstanceMemory } from "./agent-output-substance";
 import type { AgentOutputTransitionDetector, AgentOutputTransitionInspectionPredicate } from "./agent-session-adapters";
 import type { KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch } from "./cursor-agent-chat-launch-identity-orchestration";
@@ -161,9 +165,11 @@ export interface PendingProgrammaticDeliveryReceipt {
 	nativeConversationActivityCursorImmediatelyBeforeSubmit?: NativeAgentConversationActivityReadCursor | null;
 	// 取消要认的 key；用户发起的发送没有 key（不写账本），恒 null。
 	idempotencyKey: string | null;
-	// awaiting_readiness：还没写进 PTY，取消能真正拦下。
-	// awaiting_submit_confirmation：已写入、正在等提交确认，取消已经晚了。
-	phase: "awaiting_readiness" | "awaiting_submit_confirmation";
+	// awaiting_readiness：还没交给执行通道，取消能真正拦下。
+	// awaiting_submit_confirmation：已写进 PTY，等待提交确认；人工接管或模态会停止补回车并结算。
+	// awaiting_codex_native_acceptance_confirmation：原生请求已发出，只读确认不受草稿编辑或模态中断。
+	// 后两种状态取消均已晚；原生回执只能由原生确认链或会话失效/被取代结算，不能借用 PTY 确认结果。
+	phase: "awaiting_readiness" | "awaiting_submit_confirmation" | "awaiting_codex_native_acceptance_confirmation";
 	promptText: string;
 	// null 表示只粘贴、还没写提交 CR；计数器区分 CR 前的回显与提交后的新输出。
 	outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: number | null;
@@ -179,6 +185,7 @@ export interface PendingProgrammaticDeliveryReceipt {
 export interface TaskChatInputDeliveryOutcome {
 	status: TerminalDeliveryStatus;
 	reason: TerminalDeliveryFailureReason | null;
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 }
 
 export type TaskChatInputDeliveryOutcomeObserver = (outcome: TaskChatInputDeliveryOutcome) => void;
