@@ -9,13 +9,14 @@ import {
 	type CrossProjectTaskSwitcherSections,
 	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon } from "@/runtime/cross-project-recently-active-task-switcher-query";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 } from "@/runtime/types";
+import type { CrossProjectTaskSwitcherFocusViewSectionVisibility } from "@/state/cross-project-task-switcher-focus-view-visible-task-rows";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import {
 	readCrossProjectTaskSwitcherPanelViewContinuity,
@@ -34,12 +35,17 @@ export type CrossProjectTaskSwitcherExtendedActivityHorizonLoadState =
 	| "loaded"
 	| "failed";
 
-export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
+export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel
+	extends CrossProjectTaskSwitcherFocusViewSectionVisibility {
 	sections: CrossProjectTaskSwitcherSections;
 	nowMs: number;
 	unreadHandoffEntryKeys: ReadonlySet<string>;
 	remainingSectionOrderingMode: CrossProjectTaskSwitcherRemainingSectionOrderingMode;
 	setRemainingSectionOrderingMode: (mode: CrossProjectTaskSwitcherRemainingSectionOrderingMode) => void;
+	setIsPinnedSectionCollapsed: (collapsed: boolean) => void;
+	setShowsAllPinnedEntries: (showsAll: boolean) => void;
+	beginRecentSectionKeyboardNavigationOrderLock: () => void;
+	endRecentSectionKeyboardNavigationOrderLock: () => void;
 	isRunningSectionExpanded: boolean;
 	setIsRunningSectionExpanded: (expanded: boolean) => void;
 	isRecentSectionExpanded: boolean;
@@ -53,6 +59,11 @@ export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
 	recentProjectFilterOptions: readonly { workspaceId: string; projectName: string; projectPath: string }[];
 	extendedActivityHorizonLoadState: CrossProjectTaskSwitcherExtendedActivityHorizonLoadState;
 	requestEntriesWithinExtendedActivityHorizon: () => void;
+}
+
+interface RecentSectionKeyboardNavigationOrderLock {
+	configurationKey: string;
+	entryKeysInDisplayOrder: readonly string[];
 }
 
 function normalizeRemainingSectionOrderingMode(
@@ -137,6 +148,19 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	// 模型常驻 App，跨视图、任务切换与过渡壳重挂载保留；页面刷新恢复展开与 In progress / Review。
 	const [isRecentSectionExpanded, setIsRecentSectionExpanded] = useState(true);
 	const [isPromptCacheWarmSectionExpanded, setIsPromptCacheWarmSectionExpanded] = useState(true);
+	const [isPinnedSectionCollapsed, setIsPinnedSectionCollapsed] = useBooleanLocalStorageValue(
+		LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed,
+		false,
+	);
+	const [showsAllPinnedEntries, setShowsAllPinnedEntriesState] = useState(
+		() => readCrossProjectTaskSwitcherPanelViewContinuity().showsAllPinnedEntries,
+	);
+	const setShowsAllPinnedEntries = useCallback((showsAll: boolean) => {
+		writeCrossProjectTaskSwitcherPanelViewContinuity({ showsAllPinnedEntries: showsAll });
+		setShowsAllPinnedEntriesState(showsAll);
+	}, []);
+	const [recentSectionKeyboardNavigationOrderLock, setRecentSectionKeyboardNavigationOrderLock] =
+		useState<RecentSectionKeyboardNavigationOrderLock | null>(null);
 	const [selectedRecentTaskStageFilters, setSelectedRecentTaskStageFilters] = useState<
 		readonly CrossProjectTaskSwitcherRecentTaskStageFilter[]
 	>(["in_progress_and_review"]);
@@ -265,7 +289,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 			collectCrossProjectTaskSwitcherEntriesInProjects(projects, entriesWithinExtendedActivityHorizon, Date.now()),
 		[projects, entriesWithinExtendedActivityHorizon],
 	);
-	const sections = useMemo(
+	const liveSections = useMemo(
 		() =>
 			assignCrossProjectTaskSwitcherSections({
 				entriesInProjects,
@@ -286,6 +310,63 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 			selectedRecentProjectWorkspaceIds,
 		],
 	);
+	const recentSectionOrderingConfigurationKey = JSON.stringify([
+		remainingSectionOrderingMode,
+		selectedRecentTaskStageFilters,
+		selectedRecentProjectWorkspaceIds,
+	]);
+	const sections = useMemo(() => {
+		if (recentSectionKeyboardNavigationOrderLock?.configurationKey !== recentSectionOrderingConfigurationKey) {
+			return liveSections;
+		}
+		const rankByEntryKey = new Map(
+			recentSectionKeyboardNavigationOrderLock.entryKeysInDisplayOrder.map((key, index) => [key, index]),
+		);
+		const rank = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
+			rankByEntryKey.get(buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId)) ?? rankByEntryKey.size;
+		return {
+			...liveSections,
+			remainingSection: {
+				...liveSections.remainingSection,
+				entries: [...liveSections.remainingSection.entries].sort((left, right) => rank(left) - rank(right)),
+			},
+		};
+	}, [liveSections, recentSectionKeyboardNavigationOrderLock, recentSectionOrderingConfigurationKey]);
+	const latestSectionsRef = useRef(sections);
+	latestSectionsRef.current = sections;
+	const beginRecentSectionKeyboardNavigationOrderLock = useCallback(() => {
+		setRecentSectionKeyboardNavigationOrderLock((previous) =>
+			previous?.configurationKey === recentSectionOrderingConfigurationKey
+				? previous
+				: {
+						configurationKey: recentSectionOrderingConfigurationKey,
+						entryKeysInDisplayOrder: latestSectionsRef.current.remainingSection.entries.map(
+							({ workspaceId, entry }) => buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId),
+						),
+					},
+		);
+	}, [recentSectionOrderingConfigurationKey]);
+	const endRecentSectionKeyboardNavigationOrderLock = useCallback(() => {
+		setRecentSectionKeyboardNavigationOrderLock(null);
+	}, []);
+	useLayoutEffect(() => {
+		if (!recentSectionKeyboardNavigationOrderLock) return;
+		if (recentSectionKeyboardNavigationOrderLock.configurationKey !== recentSectionOrderingConfigurationKey) {
+			setRecentSectionKeyboardNavigationOrderLock(null);
+			return;
+		}
+		// 新任务追加后也获得固定位置；删除、移组和不可用项目仍立即采用实时投影。
+		const knownKeys = new Set(recentSectionKeyboardNavigationOrderLock.entryKeysInDisplayOrder);
+		const additionalKeys = sections.remainingSection.entries
+			.map(({ workspaceId, entry }) => buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId))
+			.filter((key) => !knownKeys.has(key));
+		if (additionalKeys.length > 0) {
+			setRecentSectionKeyboardNavigationOrderLock({
+				...recentSectionKeyboardNavigationOrderLock,
+				entryKeysInDisplayOrder: [...knownKeys, ...additionalKeys],
+			});
+		}
+	}, [recentSectionKeyboardNavigationOrderLock, recentSectionOrderingConfigurationKey, sections]);
 
 	return {
 		sections,
@@ -293,6 +374,12 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		unreadHandoffEntryKeys,
 		remainingSectionOrderingMode,
 		setRemainingSectionOrderingMode,
+		isPinnedSectionCollapsed,
+		setIsPinnedSectionCollapsed,
+		showsAllPinnedEntries,
+		setShowsAllPinnedEntries,
+		beginRecentSectionKeyboardNavigationOrderLock,
+		endRecentSectionKeyboardNavigationOrderLock,
 		isRunningSectionExpanded,
 		setIsRunningSectionExpanded,
 		isRecentSectionExpanded,

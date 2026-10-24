@@ -4,13 +4,13 @@ Kimi Code 是 Moonshot 的原生终端 agent：`agentId === "kimi"`，二进制 
 
 ## 1. 形态模板是 codex，不是 droid/kiro
 
-kimi 是**全屏 TUI，且交互模式没有位置 prompt 槽**：`kimi -p/--prompt` 只是单发 print 模式，跑完即退，不产生持久交互会话，不能用于托管会话。因此任务 prompt 一律走 `PreparedAgentLaunch.deferredStartupPromptText`（原始任务文本），在 TUI 就绪后由 `session-manager.ts` 经共享确认链先写 bracketed paste、再单独写提交回车——与 codex 同一机制。实现：`agent-session-adapters.ts:1913-1967`（`kimiAdapter`，模块注释明确写了这个形态判断）；resumeFromTrash 时不注入（:1957，避免把 prompt 重打进续跑会话）。
+kimi 是**交互式 TUI，且交互模式没有位置 prompt 槽**（2.3.1 默认 `regular`，并非 alt-screen；清历史边界见第 6 节）：`kimi -p/--prompt` 只是单发 print 模式，跑完即退，不产生持久交互会话，不能用于托管会话。因此任务 prompt 一律走 `PreparedAgentLaunch.deferredStartupPromptText`（原始任务文本），在 TUI 就绪后由 `session-manager.ts` 经共享确认链先写 bracketed paste、再单独写提交回车——与 codex 同一机制。实现：`kimiAdapter`；resumeFromTrash 时不注入，避免把 prompt 重打进续跑会话。
 
 **就绪信号**（`src/terminal/kimi-readiness.ts`）：
 
 - 启动横幅 `Welcome to Kimi Code!` → `hasKimiStartupUiRendered`（:17-20）；
 - 输入框字形 `│ >`（box 左边框 U+2502 后跟 `>`）→ `hasKimiInteractivePrompt`（:11-14）。正则匹配的是「边框 + `>` + 空白」，刻意避开正文里裸露的 `>`（diff / 引用）。
-- 实测**不弹 workspace-trust** 确认，故无需 claude/codex 那样的 auto-confirm 分支。
+- 早期接入时未观察到 workspace-trust；2.3.1 在隔离 HOME 的新目录会显示 `Trust this folder?`。原生验证探针只批准自身创建的空目录，不修改产品的 trust 策略。
 
 **启动旗标**（adapter :1927-1940）：`-y/--yolo`（bypass 权限档）、`--plan`（plan 起步——与 `--yolo` 是独立旗标，互不吃掉对方）、`-c/--continue`（resumeFromTrash）、`-m/--model`（仅在有显式 override 时经 `setModelCliOption` 注入，:1920-1921；无 override 则不传，交回 config.toml 的 `default_model`——与 claude/codex adapter 一致）。另设 `KIMI_CLI_NO_AUTO_UPDATE=1`（:1923-1924）：tui.toml `[upgrade] auto_install` 默认开，会话中途自升级会打断托管会话。
 
@@ -53,3 +53,25 @@ kimi 的 hook 声明在 config.toml 的 `[[hooks]]` 数组表，事件名是 Cla
 - `src/terminal/agent-session-adapters.ts`：`kimiAdapter` + 输出转移检测器（`kimiPromptDetector` / `shouldInspectKimiOutputForTransition`，:1885-1911——与 claude 同为 Stop hook 驱动 to_review，门控口径刻意一致：仅 `reviewReason === "attention"` 时才解码输出探测 prompt-ready，`"hook"` → running 由 UserPromptSubmit hook 驱动、不走输出探测）；
 - `src/terminal/session-manager.ts`：上文第 2 节的三处分支；
 - 新增 `src/terminal/kimi-readiness.ts`（就绪信号）与 `src/terminal/kimi-hook-config.ts`（seeded home）。
+
+## 6. 输入接受确认与历史重打印（2.3.1 / wire 1.5）
+
+卡片的「提交待确认 / 尚未确认接受」表示提交候选尚缺可靠接受证据；15 秒后变为「尚未确认接受」不代表失败，也不会因此重投。Codex 在 compaction 期间延迟取得证据、随后清除标签，符合该语义。本次 Kimi 适配不改变 Codex 判据。
+
+Kimi 的 `UserPromptSubmit` 是前置 hook，不能证明输入已进入主会话上下文。hook 提供的 `session_id` 是身份来源；`kimi-native-conversation-activity-reader.ts` 用它在托管 `KIMI_CODE_HOME/session_index.jsonl` 中精确匹配 `sessionId` 与 `workDir`，再核实 `state.json` 的版本、id、cwd，读取 `agents/main/wire.jsonl`。派生路径不写回 summary，避免后续不带 `transcript_path` 的 hook 把 observer 游标反复重置。
+
+当前只接受协议头 `metadata.protocol_version === "1.5"`、`context.append_message`、`agentId === "main"`、`message.role === "user"`、`message.origin.kind === "user"` 的真实消息，并按原生 `message.id` 去重。`turn.prompt`、排队事件、压缩摘要、注入、系统触发、hook 结果和子代理均不构成接受证据。内容排除 `meta.source === "user prompt submit hook"` 的附加块；纯附件仅识别 `image_url/imageUrl.url`、`audio_url/audioUrl.url`、`video_url/videoUrl.url`，URL 必须为非空字符串，确认时不伪造正文（[2.3.1 的 ContentPart 定义](https://github.com/MoonshotAI/kimi-code/blob/684bae9ea6a437f3bae98bba1dcb797a917d500b/packages/agent-core-v2/src/human/llm/message.ts#L32-L47)）。程序化投递仍需正文、写前游标和当前会话身份共同匹配。
+
+通常首次读取只建立基线。同代仍有 pending/unconfirmed 候选时，允许有界回查 `attemptedAtMs` 之后的真实消息，覆盖「首次消息触发 SessionStart，记录先于 observer 基线」以及压缩后迟到核验。半行按 LF 等待完整记录，U+2028/U+2029 不拆帧。原生已结束回合或缺少回合关联时只确认接受事实，不重新开启回合。未知协议、错误身份、记录不在读取预算内时保留未确认。每次 wire 增量/回查上限 256 KiB，session index 尾部和 state 各上限 1 MiB。
+
+历史重复的原因独立于输入核验：Kimi regular TUI 在尺寸变化或历史区域更新时，会发出 `CSI 2J`、`CSI H`、`CSI 3J` 再重印完整历史。抑制 `CSI 3J` 会保留旧 scrollback，使新打印堆叠。Kimi 启动、实时输出和热重启追赶统一放行该指令；接管时即使旧记录写着 `suppressScrollbackErasure=true` 也覆盖为 false。浏览器保持既有终端选项和 reset 后恢复快照的流程。已有重复由下一次原生完整重绘清理，无需重发 prompt。
+
+依据：[数据布局](https://moonshotai.github.io/kimi-code/en/configuration/data-locations)、[TUI 配置](https://moonshotai.github.io/kimi-code/en/configuration/config-files)、[2.3.1 的主屏重绘实现](https://github.com/MoonshotAI/kimi-code/blob/684bae9ea6a437f3bae98bba1dcb797a917d500b/packages/pi-tui/src/tui-main-screen.ts)、[持久化协议](https://github.com/MoonshotAI/kimi-code/blob/684bae9ea6a437f3bae98bba1dcb797a917d500b/packages/agent-core-v2/src/human/persist/v2/wire.ts)。这些协议版本来自已验收基线，未来不兼容格式须重新适配。
+
+## 7. 原生自动化探针
+
+`scripts/verify-kimi-native-input-acceptance-and-terminal-redraw.ts` 使用真实 Kimi、隔离 HOME、空 skills 和仅监听 loopback 的模拟 OpenAI 服务，执行两次人工输入、一条程序化投递及其关联回执、长输出、三次 resize、携带旧抑制设置的 PTY 接管；保存原始字节、原生 hook、接受摘要和终端快照。它不读取真实凭据、不调用付费模型、不创建真实 Kanban 卡片或关系事件。该探针不进入默认测试集；需要本机 Kimi 二进制时按需执行。
+
+执行 `node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <kimi绝对路径>`。启动器按运行时同样的 ESM/CJS shim 打包探针，设置隔离 HOME 并清空继承环境，只传入必要 PATH、SHELL、TERM 和探针参数。探针拒绝继承真实 `KANBAN_HOOK_TASK_ID` / `KANBAN_HOOK_WORKSPACE_ID`；退出时停止 PTY 和模拟服务，保留证据文件。
+
+浏览器回归：`KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY=<证据目录> npm --prefix web-ui run e2e -- tests/kimi-terminal-history-redraw-and-acceptance.spec.ts`。设置目录时还会把真实运行快照恢复到浏览器 xterm，检查重复恢复不叠历史，以及真实 accepted 摘要清除确认标签；不设置目录时运行固定重绘协议回归。

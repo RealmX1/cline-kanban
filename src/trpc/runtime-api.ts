@@ -27,6 +27,7 @@ import {
 	probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
+import { loadTaskConversationHistoryPage } from "../agent-session-history/task-conversation-history-page";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
@@ -163,8 +164,10 @@ import {
 	restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
+import { removeTaskSessionSummariesOwnedByOtherWorkspaces } from "../state/task-session-summaries-owned-by-other-workspaces-removal";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
+	getTaskWorktreesHomePath,
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceBoardById,
@@ -2546,6 +2549,33 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					error: message,
 				};
 			}
+		},
+		getTaskConversationHistoryPage: async (workspaceScope, input) => {
+			// 只读持久快照；不取 terminal manager，不创建占位会话，不启动 SDK host 或 ACP 进程。
+			const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+			const sessions = removeTaskSessionSummariesOwnedByOtherWorkspaces({
+				workspaceId: workspaceScope.workspaceId,
+				workspaceRepositoryPath: workspaceScope.workspacePath,
+				taskWorktreesHomePath: getTaskWorktreesHomePath(),
+				sessions: state.sessions,
+			}).sessionsWithoutSummariesOwnedByOtherWorkspaces;
+			const card = findWorkspaceBoardCard(state.board, input.workspaceTaskId);
+			const summary = sessions[input.taskConversationSessionId];
+			const retainedMessages =
+				card &&
+				summary &&
+				doesConversationSessionBelongToTask(summary, input.workspaceTaskId) &&
+				isRuntimeAgentSessionSummaryDrivenByAcpProtocol(summary)
+					? (await deps.getScopedAcpTaskSessionService(workspaceScope)).listMessages(
+							input.taskConversationSessionId,
+						)
+					: undefined;
+			return await loadTaskConversationHistoryPage({
+				request: input,
+				card,
+				sessions,
+				retainedMessages,
+			});
 		},
 		getTaskChatMessages: async (workspaceScope, input) => {
 			try {

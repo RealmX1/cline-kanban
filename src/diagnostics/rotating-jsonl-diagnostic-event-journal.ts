@@ -34,6 +34,7 @@ const DIAGNOSTIC_EVENT_JOURNAL_DEFAULT_RETAINED_ROTATED_FILE_COUNT = 4;
 // 通道名同时是文件名，故一律用这里声明的 kebab-case 字面量联合（而非任意字符串），
 // 既是单一声明点，也从类型上杜绝路径注入。
 export type DiagnosticEventJournalChannel =
+	| "rvf-late-native-closeout-prompt-acceptance-automatic-recovery"
 	| "event-loop-delay-window-sample"
 	| "codex-native-control-socket-request-diagnostic"
 	| "git-command-failure"

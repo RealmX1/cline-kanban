@@ -269,6 +269,104 @@ describe("session-manager · 原生提交接受与前置 hook 的时序", () => 
 		vi.clearAllTimers();
 		vi.useRealTimers();
 	});
+	it.each([
+		{
+			sample: "38fd3 预算内确认",
+			messageAfterCrMs: 1964,
+			observationDelayMs: 1091,
+			startupDelayMs: 0,
+			confirmed: true,
+		},
+		{
+			sample: "c4c82 压缩后正文",
+			messageAfterCrMs: 119_074,
+			observationDelayMs: 0,
+			startupDelayMs: 0,
+			confirmed: false,
+		},
+		{
+			sample: "1c6e4 压缩后正文",
+			messageAfterCrMs: 132_869,
+			observationDelayMs: 0,
+			startupDelayMs: 0,
+			confirmed: false,
+		},
+		{
+			sample: "46d51 压缩后正文",
+			messageAfterCrMs: 123_755,
+			observationDelayMs: 0,
+			startupDelayMs: 0,
+			confirmed: false,
+		},
+		{
+			sample: "同正文及接受时间，观察被延迟",
+			messageAfterCrMs: 1964,
+			observationDelayMs: 20_000,
+			startupDelayMs: 0,
+			confirmed: false,
+		},
+		{
+			sample: "启动就绪较晚，确认预算仍从 CR 算起",
+			messageAfterCrMs: 1964,
+			observationDelayMs: 1091,
+			startupDelayMs: 8000,
+			confirmed: true,
+		},
+	])("收尾确认时序对照：$sample", async (scenario) => {
+		const manager = new TerminalSessionManager();
+		const taskId = "rvf-native-confirmation-timing-control";
+		const screen = {
+			mirrorSnapshot: scenario.startupDelayMs ? "Connecting to model..." : "model: test\n› ",
+			state: scenario.startupDelayMs ? "running" : "awaiting_review",
+			reviewReason: null,
+		};
+		const { entry, write } = installFakeClaudeEntry(manager, taskId, screen);
+		entry.summary.agentId = "codex";
+		if (entry.summary.agentNativeConversationSessionIdentity)
+			entry.summary.agentNativeConversationSessionIdentity.sourceAgentId = "codex";
+		const outcomes: { status: string; reason: string | null }[] = [];
+		manager.submitTaskChatInputWhenReady(taskId, "精确的 RVF 收尾正文", {
+			onDeliveryOutcome: (outcome) => {
+				outcomes.push({ status: outcome.status, reason: outcome.reason });
+			},
+		});
+		if (scenario.startupDelayMs) {
+			await vi.advanceTimersByTimeAsync(scenario.startupDelayMs);
+			expect(write.mock.calls.some(([bytes]) => bytes === "\r")).toBe(false);
+			screen.mirrorSnapshot = "model: test\n› ";
+			Object.assign(
+				entry.summary,
+				applySessionFacets({ ...entry.summary, turnOwner: "user", liveness: "live", userTurnKind: "review" }),
+			);
+		}
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS + PASTE_INGESTION_MAX_WAIT_MS);
+		const receipt = entry.active.programmaticDeliveryReceipt;
+		if (!receipt?.firstSubmitCarriageReturnAtEpochMs) throw new Error("缺少真实 CR 时点");
+		const nativeRecordedAt = receipt.firstSubmitCarriageReturnAtEpochMs + scenario.messageAfterCrMs;
+		// task_started、压缩进度或 PTY 重绘均不替代精确 UserMessage 的观察。
+		await vi.advanceTimersByTimeAsync(Math.max(0, nativeRecordedAt + scenario.observationDelayMs - Date.now()));
+		confirmCorrespondingNativeInput(
+			manager,
+			taskId,
+			"精确的 RVF 收尾正文",
+			"rvf-closeout-exact-native-message",
+			nativeRecordedAt,
+		);
+		expect(outcomes).toEqual([
+			{
+				status: scenario.confirmed
+					? scenario.startupDelayMs
+						? "delivered_queued_behind_active_agent_turn"
+						: "delivered_and_submit_confirmed"
+					: "delivery_failed",
+				reason: scenario.confirmed ? null : "submit_confirmation_budget_exhausted",
+			},
+		]);
+		const writesAfterSettlement = write.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(outcomes).toHaveLength(1);
+		expect(write).toHaveBeenCalledTimes(writesAfterSettlement);
+	});
 
 	it.each([
 		"processed",

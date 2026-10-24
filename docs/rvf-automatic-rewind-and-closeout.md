@@ -1,5 +1,15 @@
 # RVF 默认自动恢复与收尾投递
 
+## 普通审查与可选自动收尾
+
+普通 RVF 以真实决策 token 和独立候选快照冻结输入。Harness 发行版本、原生回退 receipt、当前控制端点或完整历史前缀缺失时，review/fix/handoff 仍可继续，随后人工 land/base 同步。下文的独立原生分界与实时 nonce 只服务自动恢复，不是普通审查准入条件。
+
+原生 reader 识别受支持的 TUI 事件格式，不按 `cli_version` 白名单放行。转录记录版本可能来自旧会话，不能当作当前进程版本或能力证明。自动注册的 pending/disabled 状态不会触发恢复；即使激活响应丢失，消费者也核对 run 内的 `automatic-closeout-registration.json`，防止迟到激活与人工收尾同时执行。
+
+自动收尾因 summary、工作目录或原生身份尚未恢复而等待时，保存 `waitingReasonCode`、`waitingReason`、`waitingSince`；条件恢复后继续。相同原因持续 30 秒只通知一次，重启不重复通知。用户明确停止、身份确实改变及 fork 结果未知继续保留暂停保护，历史暂停记录不批量复活。
+
+自动指令送达后，收尾 Agent 逐阶段通过 `kanban task report-rvf-automatic-closeout-execution-result --project-path <main checkout> --result-file <JSON>` 上报 `land` 和 `base_branch_sync`。报告绑定 task/token/run/handoff；成功必须提供实际提交，base 同步还需本地 base ref。服务端核对恢复会话、真实投递账本、land evidence 摘要及 Git 祖先关系。只有两阶段都完成才写 `completed`，`closeout_prompt_submitted` 仍只表示指令已提交。受阻或失败保存具体原因，不能用自然语言自述替代成功证据。
+
 Codex 主会话通过独立的 RVF 决策回合开审时，Kanban 先持久捕获非活跃分界；具备完整开审前会话前缀时，生产方成功绑定真实 run 后再显式激活默认自动收尾，不需要任务开关或用户点击。已激活的 RVF 完成时，宿主创建开审前原生历史的分支，保留原 RVF 历史，切换当前主会话的原生身份，再自动投递 `$rvf-land` 与 `$base-branch-sync`。不部署、不移入 Done；原任务明确的不提交、不回 base、停止要求继续生效。
 
 ## 身份与完成证据
@@ -54,7 +64,7 @@ Codex 0.163.0 拒绝 remote resume/fork 的权限旗标及权限配置覆盖，�
 
 既有 agent session PTY host 启用时，监督进程也由它持有。runtime 热重连/崩溃接管保留进程、summary incarnation 和控制端点，不通过重启 Codex 来补能力；真实停止后重开才换代。监督进程并行停止子进程，并在等待退出前撤销本代 socket 与启动目录；runtime 接管从匹配端点的持久启动描述重建带 dev/ino 校验的 cleanup，确保监督进程来不及执行 finally、被强杀时仍可清理本代资源。未启用 PTY host 时沿用原有 runtime 与会话同寿的边界。
 
-显式 `--remote`、`--no-daemon`、`-p/--profile`、不支持 Unix 控制面的原生版本及 Windows 保持原生启动选择；没有本代控制端点时独立开审门禁诚实等待。Codex 0.163.0 的 app-server 拒绝 `--profile`，`-c profile=…` 也会触发已退休的旧版配置错误；把 profile 文件转成普通 `-c` 则会改变它与项目配置的优先级。因此 profile 启动保留完整原生 argv 与原配置目录，不登记控制端点、不声称具备实时分支证明；真实隔离 TUI 测试验证了 profile 中 provider、model 与指令的消费。存量安装会话不会因升级被自动打断，它们须在合适的真实重启后获得新能力；只看到默认 daemon 中有同名 thread 不足以给旧 TUI 授权。
+显式 `--remote`、`--no-daemon`、`-p/--profile`、不支持 Unix 控制面的原生版本及 Windows 保持原生启动选择；没有本代控制端点时自动回退资格保持未验证，普通 RVF 仍可使用候选快照继续。Codex 0.163.0 的 app-server 拒绝 `--profile`，`-c profile=…` 也会触发已退休的旧版配置错误；把 profile 文件转成普通 `-c` 则会改变它与项目配置的优先级。因此 profile 启动保留完整原生 argv 与原配置目录，不登记控制端点、不声称具备实时分支证明；真实隔离 TUI 测试验证了 profile 中 provider、model 与指令的消费。存量安装会话不会因升级被自动打断，它们须在合适的真实重启后获得新能力；只看到默认 daemon 中有同名 thread 不足以给旧 TUI 授权。
 
 验证入口包括 `codex-remote-conversation-real-cli.integration.test.ts`（真实 Codex + 回环模型的恢复对话、工具执行、只读 fork 拒写及 Hook 身份）、`codex-native-session-control-host-lifecycle.integration.test.ts`（进程/环境隔离与失败清理）、`codex-native-control-host-packaged-runtime-adoption.integration.test.ts`（真实打包 API/PTY host 接管）、原生 rewind 夹具的受控自动与原样命名空间手动模式。实际 e9e12 活动分支 consumer 在隔离传输中先生成自己的 nonce，再驱动当前原生宿主实时查询，分别验证当前分界可接受与回退后拒绝；没有把旧观测改写 nonce 来凑兼容。
 
@@ -63,6 +73,8 @@ Codex 0.163.0 拒绝 remote resume/fork 的权限旗标及权限配置覆盖，�
 成功 finalize 后，RVF 写 `$RVF_HOME/automatic-closeout-completion-notifications/<token>.json`。通知同时绑定 run、原会话、worktree、handoff SHA256。宿主复核激活时绑定的 run、finalization 和 handoff；不使用 latest run、不枚举旧 handoff。因此升级不会追溯执行历史审查。
 
 ## 持久编排
+
+确认预算耗尽后才取得精确原生接受证据时，可使用[迟到接受补证 runbook](runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md)中的显式命令。它保留原失败账本，追加恢复凭据；普通 confirmed/completed 不走此入口。正确绑定的 paused 记录亦可如实登记 blocked/failed，完成结果继续经过真实提交、evidence 与祖先门禁。本入口不改变首次确认预算或压缩阶段的等待策略。
 
 每个 workspace 保存 `rvf-automatic-rewind-and-closeout-records.json`，通过现有跨进程文件锁和原子写入更新：
 
@@ -73,12 +85,15 @@ Codex 0.163.0 拒绝 remote resume/fork 的权限旗标及权限配置覆盖，�
 5. `submitting_closeout_prompt`：用固定幂等键交给现有持久队列，等待提交确认。
 6. `closeout_prompt_submitted`：终端确认提交 Prompt；不代表 land 或 base 同步已完成，实际动作由 skill 执行并汇报。
 7. `paused`：门禁原因留在记录和终端 warning 中；不会偷偷生成新 key 绕过失败。
+8. `completed`：服务端已分别确认 land 和本地 base 同步的真实执行结果；投递状态本身不能进入此阶段。
 
 原生 fork 发出前也记录尝试。若崩溃时连新分支身份都无法确认，暂停，避免盲目再建分支。已确认身份的恢复会复验并复用它。持久投递沿用既有账本：明确失败或跨重启未确认不能视为送达，也不自动重排。
 
 同一条记录的恢复与入队通过独立跨进程操作锁互斥；取锁后重读记录，并用持久认领 ID 校验每次推进。锁失效或其他运行时接管后，旧持有者不能覆盖恢复身份和用户暂停状态。原生身份切换与入队前也复核认领。
 
 恢复前后核对 HEAD、已暂存/未暂存补丁和未跟踪文件。人工插话、用户已排队指令、待答问题、输入框占用、park、当前主会话改变或明确停止均会让位或暂停。主会话通过 `task-main-conversation-session-binding` 的 canonical 绑定解析，交接和自动恢复共用卡片级串行入口；保留交接后主会话自己的启动权限和模型配置。外层 Kanban 会话绑定保持不变，仅切换其 Codex 原生身份。
+
+Codex 尚未建模输入框读屏语法，其读屏结果恒为 null。自动恢复与既有程序化投递一样使用输入侧字节账本保护未提交草稿，不能把结构性缺少读屏当成永远等待的条件；恢复前和切换身份前都重查输入。具有真实草稿的会话继续等待，不会清框或覆盖输入。
 
 开审后的 RVF 续跑消息按已确认提交的投递账本识别：接受宿主 Task 或当前主会话寻址，兼容生产方的 `review-validate-fix` source。其他任务、人工来源、失败或未确认投递的同文消息不能据此放行。用户明确停止时，宿主持久暂停记录并取消固定幂等键的排队投递；晚于停止入队的条目补撤，终端受理和实际写入前还会复核暂停。已确认提交的事实继续保留。
 

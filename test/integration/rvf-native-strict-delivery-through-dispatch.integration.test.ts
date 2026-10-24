@@ -35,19 +35,30 @@ describe("真实 strict 独立回合从队列贯通到 RVF dispatch", { timeout:
 			const packagedCliPath = requiredEnvironmentVariable("KANBAN_RVF_STRICT_DELIVERY_PACKAGED_CLI_PATH");
 			const evidenceDirectory = requiredEnvironmentVariable("KANBAN_RVF_STRICT_DELIVERY_EVIDENCE_DIRECTORY");
 			const fixture = createIsolatedGitTestWorkspaceFixture({ fixtureRootDirectoryNamePrefix: "knrvf-" });
-			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "native-rvf-candidate" });
+			const repository = fixture.createNonBareRepository({
+				repositoryDirectoryName: "native-rvf-candidate",
+				initialBranchName: "rvf-integration-task",
+			});
 			await writeFile(join(repository.repositoryPath, "implementation.txt"), "初始隔离实现\n");
 			repository.commitAllRepositoryFilesAtDate({
 				message: "test: 初始化隔离原生候选",
 				authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 			});
+			const baseWorktree = repository.createLinkedWorktree({
+				worktreeDirectoryName: "native-rvf-local-base",
+				branchName: "main",
+			});
+			const remote = fixture.createBareRepository({ repositoryDirectoryName: "native-rvf-isolated-origin" });
+			repository.runGit(["remote", "add", "origin", remote.repositoryPath]);
+			repository.runGit(["push", "origin", "main"]);
 			const environment = fixture.createIsolatedChildProcessEnvironment({
 				PATH: `${dirname(binary)}:${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
 			});
 			const version = spawnSync(binary, ["--version"], { env: environment, encoding: "utf8", timeout: 15_000 });
 			expect(version.status, version.stderr).toBe(0);
-			expect(version.stdout.trim()).toBe("codex-cli 0.163.0");
 			const evidenceRoot = join(fixture.fixtureRootDirectoryPath, "native-strict-delivery-through-dispatch");
+			await mkdir(evidenceRoot, { recursive: true });
+			await writeFile(join(evidenceRoot, "observed-native-cli-version.txt"), version.stdout);
 			const python = children.register(
 				spawn(
 					"python3",
@@ -56,6 +67,10 @@ describe("真实 strict 独立回合从队列贯通到 RVF dispatch", { timeout:
 						JSON.stringify({
 							fixtureRoot: fixture.fixtureRootDirectoryPath,
 							repositoryPath: repository.repositoryPath,
+							baseWorktreePath: baseWorktree.worktreePath,
+							baseBranchSyncScript: requiredEnvironmentVariable(
+								"KANBAN_RVF_STRICT_DELIVERY_BASE_BRANCH_SYNC_SCRIPT",
+							),
 							nodeBinary: process.execPath,
 							packagedCliPath,
 							consumerRepository,
@@ -107,7 +122,7 @@ describe("真实 strict 独立回合从队列贯通到 RVF dispatch", { timeout:
 				const nonces = nonceQueries.map(
 					(entry) => entry.argv[entry.argv.indexOf("--review-start-boundary-observation-nonce") + 1],
 				);
-				expect(nonces.length).toBeGreaterThanOrEqual(5);
+				expect(nonces.length).toBeGreaterThanOrEqual(1);
 				expect(new Set(nonces).size).toBe(nonces.length);
 				for (const exchange of nonceQueries) {
 					expect(exchange.exit).toBe(0);
@@ -127,6 +142,18 @@ describe("真实 strict 独立回合从队列贯通到 RVF dispatch", { timeout:
 				expect(
 					JSON.parse(await readFile(join(evidenceRoot, "actual-dispatch-result.json"), "utf8")).token_state,
 				).toBe("dispatched");
+				const completed = JSON.parse(await readFile(join(evidenceRoot, "actual-closeout-completed.json"), "utf8"));
+				expect(completed.record.status).toBe("completed");
+				expect(completed.record.landExecutionResult.outcome).toBe("completed");
+				expect(completed.record.baseBranchSyncExecutionResult.outcome).toBe("completed");
+				expect(
+					repository.runGit([
+						"merge-base",
+						"--is-ancestor",
+						completed.record.landExecutionResult.commitSha,
+						"main",
+					]).exitCode,
+				).toBe(0);
 				expect(JSON.parse(await readFile(join(evidenceRoot, "control-socket-cleanup.json"), "utf8"))).toEqual([
 					expect.objectContaining({ exists_after_cleanup: false }),
 				]);

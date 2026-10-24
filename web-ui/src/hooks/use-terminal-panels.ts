@@ -137,7 +137,7 @@ export function useTerminalPanels({
 	const currentDetailTerminalPanelState = detailTerminalTaskId
 		? (detailTerminalPanelStateByTaskId[detailTerminalTaskId] ?? DEFAULT_DETAIL_TERMINAL_PANEL_STATE)
 		: DEFAULT_DETAIL_TERMINAL_PANEL_STATE;
-	const isDetailTerminalOpen = currentDetailTerminalPanelState.isOpen;
+	const isDetailTerminalOpen = currentDetailTerminalPanelState.isOpen && selectedCard?.column.id !== "trash";
 	const isDetailTerminalExpanded = currentDetailTerminalPanelState.isExpanded;
 	const homeTerminalPaneHeight = isHomeTerminalExpanded ? EXPANDED_TERMINAL_PANE_HEIGHT : lastBottomTerminalPaneHeight;
 	const detailTerminalPaneHeight = isDetailTerminalExpanded
@@ -327,7 +327,7 @@ export function useTerminalPanels({
 	);
 
 	const handleToggleDetailTerminal = useCallback(() => {
-		if (!selectedCard) {
+		if (!selectedCard || selectedCard.column.id === "trash") {
 			return;
 		}
 		const targetTaskId = getDetailTerminalTaskId(selectedCard.card.id);
@@ -402,6 +402,7 @@ export function useTerminalPanels({
 
 	const prepareTerminalForShortcut = useCallback(
 		async ({ prepareWaitForTerminalConnectionReady }: PrepareTerminalForShortcutInput) => {
+			if (selectedCard?.column.id === "trash") return { ok: false, message: "请先恢复任务，再打开任务终端。" };
 			let targetTaskId = HOME_TERMINAL_TASK_ID;
 			let hadExistingOpenTerminal = false;
 			let shouldWaitForConnection = false;

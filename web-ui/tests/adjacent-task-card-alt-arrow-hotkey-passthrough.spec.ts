@@ -29,7 +29,7 @@ import {
  * （CardDetailView，注册了 alt+↑/↓）、首页底部 shell 终端（App.tsx）、首页侧栏 agent 终端
  * （use-home-sidebar-agent-panel.tsx）。后两处没有任何接管者，放行在那里等于把按键吞掉。
  *
- * 信号边界（别过度期待）：详情视图侧守卫 shouldIgnoreAdjacentCardHotkey 的 ctrl/meta 排除**不在**本
+ * 信号边界（别过度期待）：共享守卫 shouldIgnoreAdjacentTaskCardNavigationHotkey 的 ctrl/meta 排除**不在**本
  * 文件的信号范围内。终端侧一旦正确吞下按键，事件根本到不了 document，守卫改不改都测不出来；那一侧
  * 由 src/components/card-detail-view.test.tsx 的 jsdom 用例覆盖。因此这里的每条「不切卡」用例都必须
  * 额外断言终端的出站字节，否则就退化成两条失效路径都满足的空转。
@@ -42,6 +42,10 @@ const terminalManagerSource = readFileSync(
 	"utf-8",
 );
 const cardDetailViewSource = readFileSync(resolve(currentDir, "../src/components/card-detail-view.tsx"), "utf-8");
+const adjacentTaskNavigationHotkeyEventSource = readFileSync(
+	resolve(currentDir, "../src/utils/adjacent-task-card-navigation-hotkey-event.ts"),
+	"utf-8",
+);
 
 const productionKeyboardPredicates = [
 	stripTypeAnnotations(extractFunctionSource(terminalManagerSource, "isAdjacentTaskCardNavigationShortcut")),
@@ -51,8 +55,9 @@ const productionKeyboardPredicates = [
 			"shouldReleaseAdjacentTaskCardNavigationShortcutToDocumentHotkeyOwner",
 		),
 	),
-	stripTypeAnnotations(extractFunctionSource(cardDetailViewSource, "isEventInsideDialog")),
-	stripTypeAnnotations(extractFunctionSource(cardDetailViewSource, "shouldIgnoreAdjacentCardHotkey")),
+	stripTypeAnnotations(
+		extractFunctionSource(adjacentTaskNavigationHotkeyEventSource, "shouldIgnoreAdjacentTaskCardNavigationHotkey"),
+	),
 ].join("\n\n");
 
 // 生产究竟把切卡绑在了哪两个热键上——逐字取自 card-detail-view 的两处 useHotkeys 调用。
@@ -153,7 +158,7 @@ document.addEventListener("keydown", (event) => {
 		// 首页终端上下文：CardDetailView 没挂载，document 上根本不存在切卡热键，按键无人接管。
 		return;
 	}
-	if (shouldIgnoreAdjacentCardHotkey(event)) {
+	if (shouldIgnoreAdjacentTaskCardNavigationHotkey(event)) {
 		return;
 	}
 	const matchedDeclaration = adjacentCardHotkeyDeclarations.find((declaration) =>

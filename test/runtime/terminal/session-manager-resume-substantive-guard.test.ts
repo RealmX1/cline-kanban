@@ -96,6 +96,32 @@ function recordTrustedAgentOutput(manager: TerminalSessionManager, taskId: strin
 }
 
 describe("TerminalSessionManager resume substantive guard", () => {
+	it.each(["question", "plan_review", "permission"] as const)(
+		"重启活体 %s 时保留 stop 之前的真实模态，不降级成 needs_input",
+		async (userTurnKind) => {
+			prepareAgentLaunchMock.mockResolvedValue({ args: [], env: {} });
+			const sessions: MockPtySession[] = [];
+			ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+				const session = createMockPtySession(100 + sessions.length, request);
+				sessions.push(session);
+				return session;
+			});
+			const manager = new TerminalSessionManager();
+			const request = {
+				taskId: "pending-modal-restart",
+				agentId: "claude" as const,
+				binary: "claude",
+				args: [],
+				cwd: "/isolated",
+				prompt: "",
+			};
+			await manager.startTaskSession(request);
+			manager.transitionToReview(request.taskId, "hook", userTurnKind);
+			wireStopToExit(sessions);
+			await manager.refreshTaskTerminal({ ...request, resumeFromTrash: true });
+			expect(manager.getSummary(request.taskId)?.userTurnKind).toBe(userTurnKind);
+		},
+	);
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		prepareAgentLaunchMock.mockReset();

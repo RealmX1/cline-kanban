@@ -4,6 +4,7 @@ from pathlib import Path
 base=Path(__file__).resolve().parent
 options=json.loads(sys.argv[1])
 root=Path(options['fixtureRoot'])/'native-strict-delivery-through-dispatch'; root.mkdir(parents=True,exist_ok=True)
+(root/'isolated-chain-options.json').write_text(json.dumps(options,ensure_ascii=False,indent=2))
 node=options['nodeBinary']
 cli=Path(options['packagedCliPath']); repo=Path(options['repositoryPath']); home=Path(os.environ['HOME']); cfg=root/'isolated-codex-home'
 cfg.mkdir(parents=True,exist_ok=True)
@@ -34,11 +35,16 @@ class Provider(http.server.BaseHTTPRequestHandler):
             user_texts=[''.join(part.get('text','') for part in item.get('content',[])) for item in messages]
             is_title=any('Generate a concise, single-line task title' in text for text in user_texts)
             is_boundary=any(text.startswith('RVF 发起决策点 · ') for text in user_texts)
+            is_closeout=any('RVF_AUTOMATIC_CLOSEOUT_TOKEN=' in text for text in user_texts)
             has_tool_result=any(i.get('type')=='function_call_output' for i in body.get('input',[]))
-            if not is_title and not is_boundary and not has_tool_result:
+            execute_closeout=is_closeout and not (root/'actual-closeout-driver-started.json').exists()
+            if execute_closeout or (not is_title and not is_boundary and not has_tool_result):
                 available=[t.get('name') for t in body.get('tools',[])]; log('原生工具 '+str(available))
                 if 'exec_command' not in available: raise RuntimeError('原生exec_command不可用')
                 arguments=json.dumps({'cmd':"printf 'native reviewed implementation\\n' > implementation.txt",'yield_time_ms':1000,'max_output_tokens':1000})
+                if execute_closeout:
+                    (root/'actual-closeout-driver-started.json').write_text(json.dumps({'request':n,'at':time.time()}))
+                    arguments=json.dumps({'cmd':shlex.join([sys.executable,str(base/'rvf-native-controlled-review-and-closeout.py'),'closeout']),'yield_time_ms':1000,'max_output_tokens':2000})
                 item={'id':'fc_e2e','type':'function_call','call_id':'call_e2e','name':'exec_command','arguments':arguments,'status':'completed'}
                 event('response.output_item.added',output_index=0,item={**item,'arguments':'','status':'in_progress'})
                 event('response.function_call_arguments.delta',item_id=item['id'],output_index=0,delta=arguments)
@@ -155,6 +161,18 @@ try:
     log('真实独立UserMessage与前回合完成已证实')
     consumer=command([sys.executable,str(base/'rvf-native-strict-delivery-actual-consumer.py')],'actual-rvf-consumer',timeout=180,check=False)
     if consumer.returncode: raise RuntimeError('RVF consumer失败 '+consumer.stdout[-3000:]+' '+consumer.stderr[-3000:])
+    command([sys.executable,str(base/'rvf-native-controlled-review-and-closeout.py'),'review'],'actual-controlled-review-and-finalize',timeout=90)
+    release_boundary.set()
+    wait(lambda:(root/'actual-closeout-completed.json').exists(),180,'原生恢复、唯一投递与 land/base 结果闭环')
+    closeout=json.loads((root/'actual-closeout-completed.json').read_text())
+    assert closeout['record']['status']=='completed',closeout
+    restored_state=rpc('workspace.getState')
+    restored_identity=restored_state['sessions'][task]['agentNativeConversationSessionIdentity']
+    assert restored_identity['nativeSessionId']==closeout['record']['restoredNativeSessionId']
+    restored_records=[json.loads(line) for line in Path(restored_identity['transcriptPath']).read_text().splitlines()]
+    closeout_messages=[entry for entry in restored_records if entry.get('type')=='event_msg' and (entry.get('payload',{}).get('item') or {}).get('type')=='UserMessage' and 'RVF_AUTOMATIC_CLOSEOUT_TOKEN='+expected in json.dumps(entry,ensure_ascii=False)]
+    assert len(closeout_messages)==1,closeout_messages
+    (root/'unique-restored-closeout-user-message.json').write_text(json.dumps(closeout_messages,ensure_ascii=False,indent=2))
     (root/'complete-chain-verification.json').write_text(json.dumps({'status':'passed','task':task,'workspace':workspace,'native_session_id':identity['nativeSessionId'],'boundary_turn_id':boundary,'marker_user_message_count':len(users),'controlled_reviewer_only':True,'runtime_pid':runtime.pid},ensure_ascii=False,indent=2))
     log('真实runtime→strict queue→checkpoint/nonce→start/prepare→dispatch通过')
 except BaseException:

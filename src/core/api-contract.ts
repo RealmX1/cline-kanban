@@ -4255,6 +4255,23 @@ export const runtimeTaskChatMessagesResponseSchema = z.object({
 });
 export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMessagesResponseSchema>;
 
+// 任务工作台的只读历史，与会启动或恢复 agent 的聊天操作分开。
+export const runtimeTaskConversationHistoryPageRequestSchema = z.object({
+	workspaceTaskId: z.string().min(1),
+	taskConversationSessionId: z.string().min(1),
+	cursor: z.string().max(4096).nullish(),
+});
+export type RuntimeTaskConversationHistoryPageRequest = z.infer<typeof runtimeTaskConversationHistoryPageRequestSchema>;
+export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
+	availability: z.enum(["available", "partially_available", "unavailable"]),
+	messages: z.array(runtimeTaskChatMessageSchema),
+	nextCursor: z.string().nullable(),
+	notice: z.string().nullable(),
+});
+export type RuntimeTaskConversationHistoryPageResponse = z.infer<
+	typeof runtimeTaskConversationHistoryPageResponseSchema
+>;
+
 export const runtimeTaskChatSendRequestSchema = z.object({
 	taskId: z.string(),
 	// 显式会话选择（含前主会话）；省略且 taskId 是卡片 ID 时投给当前主会话。

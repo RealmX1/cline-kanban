@@ -214,7 +214,7 @@ export type TaskCardBodyRenderRole =
 	// Post-Deploy Verification 面板里一个任务条目的上半部分（下半部分的核对清单由条目 wrapper 自己渲染）。
 	// 不可拖；`data-task-id` 与 verification 锚点留在 wrapper 上（wrapper 挂 `verification-panel-task:<taskId>`），
 	// 卡体副本一律不输出。其余交互与置顶板分身一致、即与本体一致：单击进详情（会跳转的列延迟单击留出双击窗口）、
-	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡不可点开。
+	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡也可点开。
 	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
 	| "task_card_copy_in_post_deploy_verification_panel_entry"
 	| "permanently_deleted_task_history_card";
@@ -409,14 +409,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 		renderRole === "focused_task_card_copy_in_cross_project_task_switcher";
 	const isMobileDetailHeaderCopy = renderRole === "focused_task_card_copy_in_mobile_detail_header";
 	// 置顶板分身专属的 stage 标签 / 原因行只认这一个角色；PDV 面板条目副本（task_card_copy_in_post_deploy_verification_panel_entry）
-	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击、Done 卡不可点开。
+	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
 		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
 		: null;
-	const isCardInteractive = (!isTrashCard || isCrossProjectTaskSwitcherRowCopy) && !isPassiveFocusedTaskCardCopy;
+	const isCardInteractive = !isPassiveFocusedTaskCardCopy;
 	// 切换面板的行副本：「点卡体 = 打开任务」只挂在卡壳的 onClick 上，键盘够不到（精简行有主按钮，展开后没有）。
 	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
 	// 嵌套，也不改标题几何。其他角色不变。
@@ -429,7 +429,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 		openedQuickActionMenu !== null ||
 		crossProjectTaskSwitcherRowElements?.isPresentedAsHoveredFromFirstFrame === true;
 	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
-	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
+	const isNavigatingColumn =
+		columnId === "in_progress" || columnId === "review" || columnId === "validation" || isTrashCard;
 	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑；
 	// 切换面板的行副本也不接（单击要立即生效，改标题走铅笔）。
 	const isInlineTitleEditEnabled =
@@ -1167,7 +1168,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								}, CLICK_ACTIVATION_DELAY_MS);
 								return;
 							}
-							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return（切换面板的行副本除外）。
+							// backlog 立即开编辑弹窗；其他列（含 Done）打开完整任务工作台。
 							onClick(card);
 						}
 			}
