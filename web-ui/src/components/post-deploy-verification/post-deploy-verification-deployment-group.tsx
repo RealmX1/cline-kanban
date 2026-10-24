@@ -37,6 +37,11 @@ export interface PostDeployVerificationDeploymentGroupTaskEntryActions {
 		taskId: string,
 		options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1],
 	) => void;
+	onRequestMoveIntoDoneFromTaskCard?: (
+		deploymentId: string,
+		taskId: string,
+		options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1],
+	) => void;
 	onSelectTask: (taskId: string) => void;
 	onNavigateToBoard: () => void;
 	onCreateFollowUpTaskFromChecklistItems?: (
@@ -83,6 +88,12 @@ function renderTaskEntry(
 				taskEntryActions.onRunVerificationItem(group.deploymentId, task.taskId, itemId)
 			}
 			onRequestComplete={(options) => taskEntryActions.onRequestComplete(group.deploymentId, task.taskId, options)}
+			onRequestMoveIntoDoneFromTaskCard={
+				taskEntryActions.onRequestMoveIntoDoneFromTaskCard
+					? (options) =>
+							taskEntryActions.onRequestMoveIntoDoneFromTaskCard?.(group.deploymentId, task.taskId, options)
+					: undefined
+			}
 			onSelectTask={() => taskEntryActions.onSelectTask(task.taskId)}
 			onNavigateToBoard={taskEntryActions.onNavigateToBoard}
 			onCreateFollowUpTaskFromSelectedChecklistItems={

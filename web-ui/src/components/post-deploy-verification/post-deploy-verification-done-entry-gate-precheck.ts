@@ -12,7 +12,7 @@ import type {
 } from "@/runtime/types";
 
 // 「移入 Done」门禁的**客户端预检**。唯一判据在服务端（taskCardAction.moveIntoDone 缺原因时抛 PRECONDITION_FAILED）；
-// 这里只用 PDV 读模型提前判断，好在发请求前就打开原因对话框，而不是让用户先看到一次失败。读模型最多滞后 30s，
+// 这里只用 PDV 读模型提前判断，好在发请求前就进入核对与结案流程，而不是让用户先看到一次失败。读模型最多滞后 30s，
 // 预检说「不受门禁」而服务端拒绝时，由调用方按下方的拒绝处理策略兜底。
 
 export interface PostDeployVerificationUncheckedChecklistItemRequiringClosureReason {
@@ -147,7 +147,7 @@ export function isWebUiBoardMutationInitiatorClientAutomation(
 //       或调用方是 PDV 面板自己的完成流：失败原样抛给它，由它提示 / 重开自己的对话框，不再另弹一层；
 //   show_one_time_notice_because_move_was_automation_initiated = 浏览器端自动化（自动 review 完成、会话中断流转）
 //       发起的移入：没人在场填原因，只提示一次，不弹框、不重试；
-//   open_board_level_closure_reason_dialog_for_user_gesture = 用户手势（按钮 / 拖拽）：打开看板级原因对话框。
+//   open_board_level_closure_reason_dialog_for_user_gesture = 用户手势（按钮 / 拖拽）：打开看板级核对与原因结案流程。
 export type PostDeployVerificationDoneEntryGateRejectionHandlingForMoveIntoDone =
 	| "rethrow_to_awaiting_caller_that_supplied_closure_or_owns_completion_flow"
 	| "show_one_time_notice_because_move_was_automation_initiated"
