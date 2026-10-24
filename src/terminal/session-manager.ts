@@ -4120,7 +4120,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		pendingUserDecisionKindBeforeProcessRestart?: RuntimeTaskSessionUserTurnKind | null,
 	): Promise<RuntimeTaskSessionSummary> {
 		const run = () =>
-			this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(request, taskSessionStartOrigin, arrival);
+			this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
+				request,
+				taskSessionStartOrigin,
+				arrival,
+				pendingUserDecisionKindBeforeProcessRestart,
+			);
 		if (this.entries.get(request.taskId)?.active) return run();
 		return this.runTaskSessionOperationHoldingCodexConversationStorageExclusivity(request, run);
 	}
@@ -4199,6 +4204,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
+		pendingUserDecisionKindBeforeProcessRestart?: RuntimeTaskSessionUserTurnKind | null,
 	): Promise<RuntimeTaskSessionSummary> {
 		const { taskSessionStartRequestId, taskSessionStartRequestStartedAtIso } = arrival;
 		// 拿到闸门的时刻。与「请求到达时刻」分开记是有意的，见 PtySessionSpawnAttribution 上的注释：
