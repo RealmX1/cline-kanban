@@ -6,7 +6,7 @@
 
 旧模型里全局 `agentAutonomousModeEnabled` 一个开关同时回答两个问题，于是「勾 plan 起步」曾被实现成「降权」。拆轴后：per-task `taskAgentPermissionMode` 接管会话启动的放权决策，旧全局开关只保留「新任务的默认档位」这一语义；`startInPlanMode` 收窄为纯开局行为。各 adapter 不得再用 `startInPlanMode` 去覆盖权限档。
 
-正交性有实证：`applyClaudePermissionAndPlanModeArgs`（`src/terminal/agent-session-adapters.ts:801`）在 plan 起步时剔掉 `--dangerously-skip-permissions`、但补上 `--allow-dangerously-skip-permissions` 预授权后续升档——Claude Code 的两条轴落在同一个 `--permission-mode` 旗标上，所以必须在这一处统一决策，分两处推会产生互相打架的重复旗标。`cursor-agent --plan --force`、kimi 的 `--plan`/`--yolo` 实测均可并存。
+正交性有实证：`applyClaudePermissionAndPlanModeArgs`（`src/terminal/agent-session-adapters.ts:801`）在 plan 起步时剔掉 `--dangerously-skip-permissions`、但补上 `--allow-dangerously-skip-permissions` 预授权后续升档——Claude Code 的两条轴落在同一个 `--permission-mode` 旗标上，所以必须在这一处统一决策，分两处推会产生互相打架的重复旗标。`cursor-agent --plan --force`、kimi 的 `--plan`/`--auto` 均可并存。Kimi 的 Bypass 对应 Never Ask（`--auto`），不是仍会询问敏感操作的 Ask When Needed（`--yolo`）；Never Ask 保留 Plan 起步，但按原生语义自动批准退出 Plan。
 
 ## 两个刻意的例外（UI 必须明示，不得静默）
 
