@@ -4,8 +4,10 @@ import {
 	type DragEvent,
 	type KeyboardEvent,
 	type ReactElement,
+	type Ref,
 	useCallback,
 	useEffect,
+	useImperativeHandle,
 	useLayoutEffect,
 	useMemo,
 	useRef,
@@ -40,7 +42,10 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeSlashCommand, RuntimeTaskSessionMode } from "@/runtime/types";
 import type { TaskImage } from "@/types";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
-import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
+import {
+	type AgentInputShortcutInsertionFocusHandle,
+	shouldHandOffKeyboardFocusToAgentEntryNow,
+} from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { isMacPlatform } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
 
@@ -52,6 +57,7 @@ const CLINE_CHAT_COMPOSER_COMMAND_LIMIT = 8;
 export function ClineChatComposer({
 	taskId,
 	agentEntryKeyboardFocusRequestKey,
+	shortcutInputFocusHandleRef,
 	draft,
 	onDraftChange,
 	images = [],
@@ -86,6 +92,7 @@ export function ClineChatComposer({
 	// 递增即表示「请把键盘焦点接过去」。key 不变就不重跑，所以不会重复抢焦；
 	// 请求到达时输入框可能还禁用着（`canSend` 尚未翻 true），此时请求保持挂起、待其可用再兑现。
 	agentEntryKeyboardFocusRequestKey?: number;
+	shortcutInputFocusHandleRef?: Ref<AgentInputShortcutInsertionFocusHandle>;
 	draft: string;
 	onDraftChange: (draft: string) => void;
 	images?: TaskImage[];
@@ -140,6 +147,22 @@ export function ClineChatComposer({
 	const [isMentionSearchLoading, setIsMentionSearchLoading] = useState(false);
 	const [isSlashSearchLoading, setIsSlashSearchLoading] = useState(false);
 	const canSubmit = canSend && !isModelSaving && (draft.trim().length > 0 || images.length > 0);
+	useImperativeHandle(
+		shortcutInputFocusHandleRef,
+		() => ({
+			focusAgentInputAfterShortcutInsertion: () => {
+				const textarea = textareaRef.current;
+				if (!canSend || !textarea?.isConnected || textarea.disabled) return false;
+				// 用户已明确选择填入，手机端也在点击调用栈内聚焦，以保留唤起软键盘的机会。
+				textarea.focus();
+				textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+				setCursorIndex(textarea.value.length);
+				blockInsertion.rememberSelection(textarea);
+				return textarea.ownerDocument.activeElement === textarea;
+			},
+		}),
+		[canSend, blockInsertion.rememberSelection],
+	);
 
 	const activeToken = useMemo(() => {
 		const detectedToken = detectActiveClineComposerToken(draft, cursorIndex);

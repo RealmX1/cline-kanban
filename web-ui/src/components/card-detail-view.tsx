@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { showAppToast } from "@/components/app-toaster";
@@ -100,7 +101,10 @@ import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { shouldIgnoreAdjacentTaskCardNavigationHotkey } from "@/utils/adjacent-task-card-navigation-hotkey-event";
-import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
+import {
+	type AgentInputShortcutInsertionFocusHandle,
+	shouldHandOffKeyboardFocusToAgentEntryNow,
+} from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
@@ -922,6 +926,7 @@ export function CardDetailView({
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
 	const detailDiffRowRef = useRef<HTMLDivElement | null>(null);
 	const clineAgentChatPanelRef = useRef<ClineAgentChatPanelHandle | null>(null);
+	const terminalShortcutInputFocusHandleRef = useRef<AgentInputShortcutInsertionFocusHandle>(null);
 
 	const handleSeparatorMouseDown = useResizeHandler(
 		detailLayoutRef,
@@ -1248,14 +1253,23 @@ export function CardDetailView({
 	const handleFillPromptIntoActiveInput = useCallback(
 		(text: string) => {
 			if (isDoneTaskReadOnly) return;
-			if (showClineAgentChatPanel) {
-				clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+			// 先同步显示目标并提交草稿，再在本次用户点击内聚焦；不经异步 effect 或计时器交接。
+			flushSync(() => {
 				setIsDiffExpanded(false);
-				return;
+				if (isMobile) setMobileTab("chat");
+				if (showClineAgentChatPanel) {
+					clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+				} else {
+					injectTextIntoActiveInput(text);
+				}
+			});
+			if (showClineAgentChatPanel) {
+				clineAgentChatPanelRef.current?.focusAgentInputAfterShortcutInsertion();
+			} else {
+				terminalShortcutInputFocusHandleRef.current?.focusAgentInputAfterShortcutInsertion();
 			}
-			injectTextIntoActiveInput(text);
 		},
-		[injectTextIntoActiveInput, showClineAgentChatPanel, isDoneTaskReadOnly],
+		[injectTextIntoActiveInput, showClineAgentChatPanel, isDoneTaskReadOnly, isMobile],
 	);
 
 	const handleSendDiffComments = useCallback(
@@ -1542,6 +1556,7 @@ export function CardDetailView({
 	) : (
 		<AgentTerminalPanel
 			taskId={selectedTaskConversationSessionId}
+			shortcutInputFocusHandleRef={terminalShortcutInputFocusHandleRef}
 			workspaceId={currentProjectId}
 			terminalEnabled={isTaskTerminalEnabled}
 			isMouseWheelScrollInteractionEnabled={!taskLookupWorkbenchContent && (!isMobile || mobileTab === "chat")}

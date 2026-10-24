@@ -64,6 +64,7 @@ export interface UsePersistentTerminalSessionResult {
 	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	scrollTerminalToLatest: () => void;
+	focusTerminalInputAfterShortcutInsertion: () => boolean;
 	stopTerminal: () => Promise<void>;
 }
 
@@ -298,6 +299,13 @@ export function usePersistentTerminalSession({
 	const scrollTerminalToLatest = useCallback(() => {
 		terminalRef.current?.scrollToLatest();
 	}, []);
+	const focusTerminalInputAfterShortcutInsertion = useCallback(() => {
+		const terminal = terminalRef.current;
+		const container = containerRef.current;
+		if (!enabled || !isVisible || !terminal || !container?.isConnected) return false;
+		terminal.focus();
+		return container.contains(container.ownerDocument.activeElement);
+	}, [enabled, isVisible]);
 
 	const stopTerminal = useCallback(async () => {
 		const terminal = terminalRef.current;
@@ -424,6 +432,7 @@ export function usePersistentTerminalSession({
 		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
 		scrollTerminalToLatest,
+		focusTerminalInputAfterShortcutInsertion,
 		stopTerminal,
 	};
 }

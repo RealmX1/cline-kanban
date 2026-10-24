@@ -19,7 +19,7 @@ import { expect, type Page, test } from "@playwright/test";
  * 真实 runtime。
  */
 
-const PROBE_PAGE_URL = "http://127.0.0.1:4173/__rapid-card-switch-keyboard-focus-probe";
+const PROBE_PAGE_URL = "/__rapid-card-switch-keyboard-focus-probe";
 
 interface ActiveElementDescription {
 	tagName: string | null;
