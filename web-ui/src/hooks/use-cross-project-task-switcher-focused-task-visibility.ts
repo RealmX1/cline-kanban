@@ -1,36 +1,18 @@
 import {
 	buildCrossProjectTaskSwitcherEntryKey,
-	type CrossProjectTaskSwitcherEntryInProject,
 	type CrossProjectTaskSwitcherSections,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { type RefObject, useLayoutEffect } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
-import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import { findCardSelection } from "@/state/board-state";
+import { findCrossProjectTaskSwitcherFocusedTaskSourceSection } from "@/state/cross-project-task-switcher-focus-view-visible-task-rows";
 import {
 	readCrossProjectTaskSwitcherPanelViewContinuity,
 	writeCrossProjectTaskSwitcherPanelViewContinuity,
 } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
-
-function findFocusedTaskSourceSection(
-	sections: CrossProjectTaskSwitcherSections,
-	focusedTaskEntryKey: string | null,
-): CrossProjectTaskSwitcherTaskRowSection | null {
-	if (!focusedTaskEntryKey) return null;
-	const matchesFocusedTask = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
-		buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskEntryKey;
-	// 主分组优先于 Pinned 副本，同一任务只有一个几何测量源。
-	if (sections.runningEntries.some(matchesFocusedTask)) return "running";
-	if (sections.promptCacheWarmAwaitingUserEntries.some(matchesFocusedTask)) return "prompt_cache_warm";
-	const remaining = sections.remainingSection;
-	const remainingEntries = remaining.entries;
-	if (remainingEntries.some(matchesFocusedTask)) return "remaining";
-	if (sections.pinnedEntries.some(matchesFocusedTask)) return "pinned";
-	return null;
-}
 
 /** 焦点卡的数据、唯一定位源、导航连续性与 Sticky 共用同一份 workspace/task 身份。 */
 export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
@@ -53,7 +35,7 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 		focusedTaskInProject?.workspaceId === host.currentProjectId && currentProjectTaskCards
 			? findCardSelection(currentProjectTaskCards.currentProjectDisplayedBoard, focusedTaskInProject.taskId)
 			: null;
-	const focusedTaskSourceSection = findFocusedTaskSourceSection(sections, focusedTaskEntryKey);
+	const focusedTaskSourceSection = findCrossProjectTaskSwitcherFocusedTaskSourceSection(sections, focusedTaskEntryKey);
 	const focusedTaskScrollAnchorSelector = `[data-cross-project-focused-task-scroll-anchor="${escapeCssAttributeSelectorValue(focusedTaskEntryKey ?? "")}"]`;
 	const focusedTaskPinState = useSelectedCardPinState({
 		selectedTaskId: focusedTaskInProject?.taskId ?? "",

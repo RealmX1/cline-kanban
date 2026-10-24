@@ -74,6 +74,8 @@ Codex 0.163.0 拒绝 remote resume/fork 的权限旗标及权限配置覆盖，�
 
 ## 持久编排
 
+确认预算耗尽后才取得精确原生接受证据时，可使用[迟到接受补证 runbook](runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md)中的显式命令。它保留原失败账本，追加恢复凭据；普通 confirmed/completed 不走此入口。正确绑定的 paused 记录亦可如实登记 blocked/failed，完成结果继续经过真实提交、evidence 与祖先门禁。本入口不改变首次确认预算或压缩阶段的等待策略。
+
 每个 workspace 保存 `rvf-automatic-rewind-and-closeout-records.json`，通过现有跨进程文件锁和原子写入更新：
 
 1. `captured_review_start_boundary`：持久保存开审前分界，尚未激活；runtime 和独立 coordinator 均跳过。

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnectionDropAutoContinueReaction } from "../../../../src/terminal/output-reactions/connection-drop-auto-continue";
 import type {
+	ConnectionRetryContinuationSubmissionResult,
 	ConnectionRetryStatePatch,
 	OutputReactionActions,
 	OutputReactionContext,
@@ -12,7 +13,7 @@ function createMockActions(overrides?: Partial<OutputReactionActions>) {
 	const scheduleDelays: number[] = [];
 	const retryPatches: ConnectionRetryStatePatch[] = [];
 	const actions: OutputReactionActions = {
-		submitContinuationReference: vi.fn(),
+		submitContinuationReference: vi.fn(() => ({ outcome: "written_to_terminal" as const })),
 		schedule: vi.fn((delayMs: number) => {
 			scheduleDelays.push(delayMs);
 		}),
@@ -62,6 +63,86 @@ describe("connection-drop-auto-continue reaction", () => {
 		expect(retryPatches[0]).toMatchObject({ status: "retrying", retryCount: 0 });
 	});
 
+	it("真实网络错误码跨 PTY chunk 分割时仍能匹配，Python 错误名跨 chunk 不匹配", () => {
+		const { actions } = createMockActions();
+		reaction.onOutput(ctx(1_000, "ModuleNotFo"), state, actions);
+		reaction.onOutput(ctx(1_001, "undError: No module named 'yaml'\n"), state, actions);
+		expect(actions.setConnectionRetryState).not.toHaveBeenCalled();
+		reaction.onOutput(ctx(2_000, "Error: read ECONN"), state, actions);
+		reaction.onOutput(ctx(2_001, "RESET\n"), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledOnce();
+	});
+
+	it("旧错误之后的普通重绘不阻挡稍后送达的可信恢复活动", () => {
+		const { actions } = createMockActions();
+		reaction.onOutput(ctx(1_000, "ECONNRESET\n"), state, actions);
+		reaction.onOutput(ctx(1_002, "\rWorking…\n"), state, actions);
+		reaction.onEffectiveAgentConversationActivity?.(ctx(1_003), state, actions, {
+			observedAtMs: 1_001,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		});
+		expect(actions.clearScheduledAttempts).toHaveBeenCalledOnce();
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledOnce();
+		expect(state).toMatchObject({ splitCarryover: "" });
+		reaction.onAttempt(ctx(5_000), state, actions);
+		reaction.onOutput(ctx(5_001, "\rStill working…\n"), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledOnce();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("续跑后的普通重绘不能把桥接缓存中的旧错误当成再次失败", () => {
+		const { actions } = createMockActions();
+		reaction.onOutput(ctx(1_000, "ECONNRESET\n"), state, actions);
+		reaction.onAttempt(ctx(5_000), state, actions);
+		reaction.onOutput(ctx(6_000, "\rWorking…\n"), state, actions);
+		reaction.onAttempt(ctx(20_000), state, actions);
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledOnce();
+		expect(actions.clearScheduledAttempts).toHaveBeenCalledOnce();
+		expect(actions.submitContinuationReference).toHaveBeenCalledOnce();
+	});
+
+	it.each(["\rECONNRESET\n", "RESET\n"])("新字节 %s 完成的真实错误仍阻挡更早的恢复活动", (newChunk) => {
+		const { actions } = createMockActions();
+		const firstChunk = newChunk === "RESET\n" ? "ECONNRESET\nError: read ECONN" : "ECONNRESET\n";
+		reaction.onOutput(ctx(1_000, firstChunk), state, actions);
+		reaction.onOutput(ctx(1_002, newChunk), state, actions);
+		reaction.onEffectiveAgentConversationActivity?.(ctx(1_003), state, actions, {
+			observedAtMs: 1_001,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		});
+		expect(actions.clearConnectionRetryState).not.toHaveBeenCalled();
+		reaction.onAttempt(ctx(5_000), state, actions);
+		expect(actions.submitContinuationReference).toHaveBeenCalledOnce();
+	});
+
+	it("跨四个 chunk 的真实错误在最后一段完成时起重试，普通错误名保持词边界", () => {
+		const { actions } = createMockActions();
+		for (const [index, chunk] of ["ModuleNot", "Found", "Error: No module named 'yaml'\n"].entries()) {
+			reaction.onOutput(ctx(900 + index, chunk), state, actions);
+		}
+		for (const [index, chunk] of ["Error: read E", "CON", "NRE"].entries()) {
+			reaction.onOutput(ctx(1_000 + index, chunk), state, actions);
+		}
+		expect(actions.setConnectionRetryState).not.toHaveBeenCalled();
+		reaction.onOutput(ctx(1_003, "SET\n"), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledOnce();
+		reaction.onEffectiveAgentConversationActivity?.(ctx(1_005), state, actions, {
+			observedAtMs: 1_002,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		});
+		expect(actions.clearConnectionRetryState).not.toHaveBeenCalled();
+		reaction.onEffectiveAgentConversationActivity?.(ctx(1_006), state, actions, {
+			observedAtMs: 1_004,
+			evidenceKind: "persisted_agent_transcript",
+			activityKind: "agent_output",
+		});
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledOnce();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
 	it("waits for the interactive prompt before injecting", () => {
 		const isAtInteractivePrompt = vi.fn(() => false);
 		const { actions } = createMockActions({ isAtInteractivePrompt });
@@ -72,6 +153,34 @@ describe("connection-drop-auto-continue reaction", () => {
 		isAtInteractivePrompt.mockReturnValue(true);
 		reaction.onAttempt(ctx(8_000), state, actions);
 		expect(actions.submitContinuationReference).toHaveBeenCalledTimes(1);
+	});
+
+	it("原生写前检查延期时不增加重试计数", () => {
+		const { actions, retryPatches } = createMockActions({
+			submitContinuationReference: vi.fn(() => ({ outcome: "deferred_before_terminal_write" as const })),
+		});
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		reaction.onAttempt(ctx(5_000), state, actions);
+		expect(retryPatches.at(-1)?.retryCount).toBe(0);
+		expect(actions.schedule).toHaveBeenLastCalledWith(2_000);
+	});
+
+	it("写前核验在途时只发起一次，episode 已结束后迟到结果不能复活它", async () => {
+		let complete!: (outcome: ConnectionRetryContinuationSubmissionResult) => void;
+		const submission = new Promise<ConnectionRetryContinuationSubmissionResult>((resolve) => {
+			complete = resolve;
+		});
+		const { actions, retryPatches } = createMockActions({ submitContinuationReference: vi.fn(() => submission) });
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		reaction.onAttempt(ctx(5_000), state, actions);
+		reaction.onAttempt(ctx(6_000), state, actions);
+		expect(actions.submitContinuationReference).toHaveBeenCalledOnce();
+		expect(retryPatches.at(-1)?.retryCount).toBe(0);
+		reaction.dismiss(ctx(6_001), state, actions);
+		const countAfterDismiss = retryPatches.length;
+		complete({ outcome: "written_to_terminal" });
+		await submission;
+		expect(retryPatches).toHaveLength(countAfterDismiss);
 	});
 
 	it("suppresses injection while the user is recently typing (canInjectNow=false)", () => {
@@ -92,6 +201,18 @@ describe("connection-drop-auto-continue reaction", () => {
 		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
 		expect(actions.clearConnectionRetryState).toHaveBeenCalledTimes(1);
 		expect(actions.clearScheduledAttempts).toHaveBeenCalled();
+	});
+
+	it.each(["prompt_not_ready", "human_typing"])("已经恢复工作时，即使 %s 也立即清理旧 episode", (gate) => {
+		const { actions } = createMockActions({
+			isAtInteractivePrompt: vi.fn(() => gate !== "prompt_not_ready"),
+			canInjectNow: vi.fn(() => gate !== "human_typing"),
+			isEffectiveAgentConversationActivityQuiet: vi.fn(() => false),
+		});
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		reaction.onAttempt(ctx(5_000), state, actions);
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledOnce();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
 	});
 
 	it("manual triggerNow injects even when output is still flowing (silence gate is auto-only)", () => {
