@@ -2716,6 +2716,8 @@ export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
 	// 前端靠它决定要不要播 5s 高亮、要不要发确认 mutation。
 	awaitsHumanReconfirmationAfterRuntimeRestart: z.boolean(),
 	deliveryAttemptCount: z.number().int().nonnegative(),
+	// 真正交给 transport 时的开始时间；旧 runtime 投影缺省时保留未知，不冒充结束时间。
+	lastAttemptedAt: z.number().nullable().optional(),
 	lastDeliveryFailureNote: z.string().nullable(),
 	sourcePromptLibraryEntryId: z.string().nullable(),
 	// true = 库里那条的正文在入队之后被改过；null = 没有来源条目，或来源条目已被删。
@@ -2748,6 +2750,16 @@ export const runtimeTaskPromptDeliveryQueueResponseSchema = z.object({
 	ok: z.boolean(),
 	queue: workspaceQueuedTaskPromptDeliverySnapshotSchema.nullable(),
 	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema.nullable(),
+	// 按需读取时提供真实实例路径；旧 runtime 缺省时前端仍可复制已知标识。
+	queuedTaskPromptDeliveryDebugReferenceContext: z
+		.object({
+			workspaceId: z.string(),
+			workspaceProjectPath: z.string(),
+			queuedTaskPromptDeliveriesFilePath: z.string(),
+			taskMessageInjectionLedgerFilePath: z.string(),
+		})
+		.nullable()
+		.optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskPromptDeliveryQueueResponse = z.infer<typeof runtimeTaskPromptDeliveryQueueResponseSchema>;
