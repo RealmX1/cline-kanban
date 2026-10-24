@@ -42,6 +42,29 @@ function setup(overrides: Partial<RuntimeTaskSessionSummary> = {}) {
 }
 
 describe("hook 有效会话活动的证据边界", () => {
+	it.each(["user", "agent"] as const)(
+		"%s 回合收到 rewind 信号只唤醒核验，不刷新活动或宣称提交接受",
+		async (turnOwner) => {
+			const { api, manager } = setup({
+				agentId: "codex",
+				turnOwner,
+				userTurnKind: turnOwner === "user" ? "needs_input" : null,
+			});
+			const result = await api.ingest({
+				workspaceId: "isolated",
+				taskId: "main-session",
+				event: "activity",
+				metadata: { source: "codex", hookEventName: "thread_rolled_back" },
+			});
+			expect(result.ok).toBe(true);
+			expect(manager.applyHookActivity).toHaveBeenCalledOnce();
+			expect(manager.transitionToRunning).not.toHaveBeenCalled();
+			expect(manager.transitionToReview).not.toHaveBeenCalled();
+			expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+			expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+			expect(manager.markAgentConversationPromptSubmissionPending).not.toHaveBeenCalled();
+		},
+	);
 	it("前置提交 hook 只登记待确认，不把放行当作 harness 接受", async () => {
 		const { api, manager } = setup();
 		const result = await api.ingest({

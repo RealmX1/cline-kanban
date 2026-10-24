@@ -172,7 +172,7 @@ describe("Kimi 主会话的可靠输入接受核验", () => {
 		const remainingBatch = await read(firstBatch?.cursor);
 		expect(remainingBatch?.events).toEqual([]);
 		expect(remainingBatch?.moreAppendedTranscriptBytesRemain).toBe(false);
-		if (remainingBatch?.cursor.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
+		if (remainingBatch?.cursor?.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
 		expect(remainingBatch.cursor.endedTurnIds).toContain(7);
 		expect((await read(remainingBatch.cursor))?.events).toEqual([]);
 	});
@@ -199,7 +199,7 @@ describe("Kimi 主会话的可靠输入接受核验", () => {
 		await appendFile(path, `${endedTurnLine.slice(-3)}\n`);
 		const complete = await read(partial?.cursor);
 		expect(complete?.events).toEqual([]);
-		if (complete?.cursor.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
+		if (complete?.cursor?.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
 		expect(complete.cursor.endedTurnIds).toContain(8);
 	});
 	it("大转录只回查有界尾部；尾部之外的旧接受证据不会被猜成已确认", async () => {
@@ -225,7 +225,7 @@ describe("Kimi 主会话的可靠输入接受核验", () => {
 	it("新 pending 回查不会跳过超预算增量，尾部半行完成后仅按原生 ID 确认一次", async () => {
 		const { path, read, summary } = await fixture();
 		const baseline = await read();
-		if (baseline?.cursor.transport !== "kimi_wire") throw new Error("缺少 Kimi 基线游标");
+		if (baseline?.cursor?.transport !== "kimi_wire") throw new Error("缺少 Kimi 基线游标");
 		markPending(summary);
 		const assistantRecord = {
 			type: "context.append_message",
@@ -249,7 +249,7 @@ describe("Kimi 主会话的可靠输入接受核验", () => {
 		const cursorByteAdvancements: number[] = [];
 		for (let readAttempt = 0; readAttempt < 6; readAttempt += 1) {
 			const result = await read(cursor);
-			if (result?.cursor.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
+			if (result?.cursor?.transport !== "kimi_wire") throw new Error("缺少 Kimi 增量游标");
 			if (readAttempt === 0) expect(result.moreAppendedTranscriptBytesRemain).toBe(true);
 			observedEventIds.push(...result.events.map((event) => event.eventId));
 			cursorByteAdvancements.push(result.cursor.nextByteOffset - previousByteOffset);

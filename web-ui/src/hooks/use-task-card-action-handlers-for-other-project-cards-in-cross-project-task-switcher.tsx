@@ -1,16 +1,23 @@
-import { type ReactElement, useCallback, useState } from "react";
+import { type ReactElement, useCallback, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import {
-	describePostDeployVerificationDoneEntryGateRejectionForHumans,
+	doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask,
 	isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate,
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
+import { PostDeployVerificationReviewBeforeMoveIntoDoneWithWorkspaceReadModel } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
 import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
 import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
-import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+import type {
+	RuntimePostDeployVerificationDoneEntryClosureRequest,
+	RuntimeWorkspaceStateResponse,
+} from "@/runtime/types";
+import { fetchTaskWorkspaceInfoForWorkspace, fetchWorkspaceState } from "@/runtime/workspace-state-query";
+import { findCardSelection, normalizeBoardData } from "@/state/board-state";
 import type { TaskCardActionCommandExecutionResult } from "@/state/task-card-action-command-execution";
 import {
 	moveTaskCardBetweenNonTrashColumnsThroughRuntime,
@@ -43,7 +50,14 @@ function reportTaskCardActionCommandFailure(
 	}
 }
 
+interface OtherProjectMoveIntoDoneFlowIdentity {
+	workspaceId: string;
+	taskId: string;
+	flowGeneration: number;
+}
+
 interface PendingOtherProjectTaskCardConfirmation {
+	doneEntryFlowIdentity?: OtherProjectMoveIntoDoneFlowIdentity;
 	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	workspaceId: string;
 	taskCard: BoardCard;
@@ -63,10 +77,14 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 	onRequestPinTaskCardInOtherProjectToTaskPinboard,
 	onUnpinTaskCardInOtherProjectFromTaskPinboard,
 	onRequestEditBacklogTaskCardInOtherProject,
+	onOpenTaskInProject,
+	onNavigateToProjectBoard,
 }: {
-	onRequestPinTaskCardInOtherProjectToTaskPinboard: (workspaceId: string, taskCard: BoardCard) => void;
-	onUnpinTaskCardInOtherProjectFromTaskPinboard: (workspaceId: string, taskId: string) => void;
+	onRequestPinTaskCardInOtherProjectToTaskPinboard?: (workspaceId: string, taskCard: BoardCard) => void;
+	onUnpinTaskCardInOtherProjectFromTaskPinboard?: (workspaceId: string, taskId: string) => void;
 	onRequestEditBacklogTaskCardInOtherProject?: (workspaceId: string, taskCard: BoardCard) => void;
+	onOpenTaskInProject?: (workspaceId: string, taskId: string) => void;
+	onNavigateToProjectBoard?: (workspaceId: string) => Promise<void>;
 }): TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher {
 	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
 	const {
@@ -82,62 +100,168 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 	const [pendingSkipValidationConfirmation, setPendingSkipValidationConfirmation] =
 		useState<PendingOtherProjectTaskCardConfirmation | null>(null);
 
+	const doneEntryFlowGenerationRef = useRef(0);
+	const activeDoneEntryFlowIdentityRef = useRef<OtherProjectMoveIntoDoneFlowIdentity | null>(null);
+	const [pendingVerificationReview, setPendingVerificationReview] = useState<{
+		doneEntryFlowIdentity: OtherProjectMoveIntoDoneFlowIdentity;
+		workspaceId: string;
+		taskId: string;
+		workspaceState: RuntimeWorkspaceStateResponse;
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+		runtimeRejectionRevision: number;
+	} | null>(null);
+	const [isVerificationClosureSubmitting, setIsVerificationClosureSubmitting] = useState(false);
+	const reviewPrecheckInFlightRef = useRef(false);
+	const openVerificationReview = useCallback(
+		async (
+			doneEntryFlowIdentity: OtherProjectMoveIntoDoneFlowIdentity,
+			comment?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
+			const { workspaceId, taskId } = doneEntryFlowIdentity;
+			if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+			const workspaceState = await fetchWorkspaceState(workspaceId);
+			if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+			const board = normalizeBoardData(workspaceState.board);
+			const selection = board ? findCardSelection(board, taskId) : null;
+			if (!selection || selection.column.id === "trash") throw new Error("任务已不在待结案的看板列，请刷新后重试");
+			if (comment) suspendTaskComment(taskId, comment.taskCommentEntryId);
+			setPendingVerificationReview((previous) => ({
+				doneEntryFlowIdentity,
+				workspaceId,
+				taskId,
+				workspaceState,
+				taskCommentToAppendWhenMovingIntoDone: comment,
+				runtimeRejectionRevision:
+					(previous?.workspaceId === workspaceId && previous.taskId === taskId
+						? previous.runtimeRejectionRevision
+						: 0) + 1,
+			}));
+		},
+		[suspendTaskComment],
+	);
+
 	const moveTaskCardInOtherProjectIntoDone = useCallback(
 		(
-			workspaceId: string,
-			taskId: string,
+			doneEntryFlowIdentity: OtherProjectMoveIntoDoneFlowIdentity,
 			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
+			postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest,
 		) => {
+			const { workspaceId, taskId } = doneEntryFlowIdentity;
+			if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
 			void moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
 				workspaceId,
 				taskId,
 				taskCommentToAppendWhenMovingIntoDone,
-			}).then((result) => {
-				// 其他项目的 PDV 读模型不在这个页面里，没法在这里列出未勾项问原因：受门禁时给一句可读提示，
-				// 让用户切到那个项目里带原因移入 Done（当前项目的卡走 use-board-interactions，会直接打开原因对话框）。
-				if (
-					result.taskCardActionCommandExecutionOutcome === "command_failed" &&
-					isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(result.commandFailureMessage)
-				) {
+				postDeployVerificationDoneEntryClosure,
+			})
+				.then(async (result) => {
+					if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+					if (
+						result.taskCardActionCommandExecutionOutcome === "command_failed" &&
+						isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(
+							result.commandFailureMessage,
+						)
+					) {
+						await openVerificationReview(doneEntryFlowIdentity, taskCommentToAppendWhenMovingIntoDone);
+						return;
+					}
+					reportTaskCardActionCommandFailure("move the task to Done", result);
+					if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
+						if (taskCommentToAppendWhenMovingIntoDone)
+							setPendingVerificationReview((current) =>
+								current?.doneEntryFlowIdentity === doneEntryFlowIdentity ? null : current,
+							);
+						if (taskCommentToAppendWhenMovingIntoDone)
+							returnToEditingTaskComment(
+								taskId,
+								result.taskCardActionCommandExecutionOutcome === "command_failed"
+									? result.commandFailureMessage
+									: "任务另有操作正在进行，请稍后重试。",
+							);
+						return;
+					}
 					if (taskCommentToAppendWhenMovingIntoDone)
-						returnToEditingTaskComment(
-							taskId,
-							`${describePostDeployVerificationDoneEntryGateRejectionForHumans(result.commandFailureMessage)}——请在该项目里带原因移入 Done。`,
-						);
-					showAppToast({
-						intent: "warning",
-						icon: "warning-sign",
-						message: `${describePostDeployVerificationDoneEntryGateRejectionForHumans(result.commandFailureMessage)}——请在该项目里带原因移入 Done。`,
-						timeout: 8000,
-					});
-					return;
-				}
-				reportTaskCardActionCommandFailure("move the task to Done", result);
-				if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
+						completeTaskComment(taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
+					setPendingVerificationReview((current) =>
+						current?.doneEntryFlowIdentity === doneEntryFlowIdentity ? null : current,
+					);
+					const worktreeDeletionErrorMessage =
+						result.response.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? null;
+					if (worktreeDeletionErrorMessage) {
+						showAppToast({
+							intent: "warning",
+							icon: "warning-sign",
+							message: `Moved to Done, but the task worktree could not be removed: ${worktreeDeletionErrorMessage}`,
+							timeout: 7000,
+						});
+					}
+				})
+				.catch((error: unknown) => {
+					if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+					const message = error instanceof Error ? error.message : String(error);
+					showAppToast({ intent: "danger", message });
 					if (taskCommentToAppendWhenMovingIntoDone)
-						returnToEditingTaskComment(
-							taskId,
-							result.taskCardActionCommandExecutionOutcome === "command_failed"
-								? result.commandFailureMessage
-								: "任务另有操作正在进行，请稍后重试。",
+						setPendingVerificationReview((current) =>
+							current?.doneEntryFlowIdentity === doneEntryFlowIdentity ? null : current,
 						);
-					return;
-				}
-				if (taskCommentToAppendWhenMovingIntoDone)
-					completeTaskComment(taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
-				const worktreeDeletionErrorMessage =
-					result.response.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? null;
-				if (worktreeDeletionErrorMessage) {
-					showAppToast({
-						intent: "warning",
-						icon: "warning-sign",
-						message: `Moved to Done, but the task worktree could not be removed: ${worktreeDeletionErrorMessage}`,
-						timeout: 7000,
-					});
-				}
-			});
+					if (taskCommentToAppendWhenMovingIntoDone)
+						returnToEditingTaskComment(taskId, message, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
+				})
+				.finally(() => {
+					if (activeDoneEntryFlowIdentityRef.current === doneEntryFlowIdentity)
+						setIsVerificationClosureSubmitting(false);
+				});
 		},
-		[completeTaskComment, returnToEditingTaskComment],
+		[completeTaskComment, returnToEditingTaskComment, openVerificationReview],
+	);
+
+	const requestOtherProjectDoneWithVerificationPrecheck = useCallback(
+		async (
+			workspaceId: string,
+			taskCard: BoardCard,
+			columnId: BoardColumnId,
+			comment?: TaskCommentToAppendWhenMovingIntoDone,
+		) => {
+			if (reviewPrecheckInFlightRef.current) return;
+			reviewPrecheckInFlightRef.current = true;
+			const doneEntryFlowIdentity: OtherProjectMoveIntoDoneFlowIdentity = {
+				workspaceId,
+				taskId: taskCard.id,
+				flowGeneration: ++doneEntryFlowGenerationRef.current,
+			};
+			activeDoneEntryFlowIdentityRef.current = doneEntryFlowIdentity;
+			setPendingVerificationReview(null);
+			setIsVerificationClosureSubmitting(false);
+			try {
+				const state = await getRuntimeTrpcClient(workspaceId).deployment.getPostDeployVerificationState.query({});
+				if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+				const activeGroup =
+					state.deploymentGroups.find(
+						(group) => group.workspaceId === workspaceId && group.deploymentId === state.activeDeploymentId,
+					) ?? null;
+				if (doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask(activeGroup, taskCard.id)) {
+					await openVerificationReview(doneEntryFlowIdentity, comment);
+				} else if (columnId === "review" || columnId === "in_progress") {
+					if (comment) suspendTaskComment(taskCard.id, comment.taskCommentEntryId);
+					setPendingSkipValidationConfirmation({
+						doneEntryFlowIdentity,
+						workspaceId,
+						taskCard,
+						taskCommentToAppendWhenMovingIntoDone: comment,
+					});
+				} else {
+					moveTaskCardInOtherProjectIntoDone(doneEntryFlowIdentity, comment);
+				}
+			} catch (error) {
+				if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
+				const message = error instanceof Error ? error.message : "加载核对状态失败，请重试";
+				showAppToast({ intent: "danger", message });
+				if (comment) returnToEditingTaskComment(taskCard.id, message, comment.taskCommentEntryId);
+			} finally {
+				reviewPrecheckInFlightRef.current = false;
+			}
+		},
+		[moveTaskCardInOtherProjectIntoDone, openVerificationReview, returnToEditingTaskComment, suspendTaskComment],
 	);
 
 	const buildTaskCardActionHandlerBundleForOtherProjectTaskCard = useCallback(
@@ -167,16 +291,16 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
 				}).then((result) => reportTaskCardActionCommandFailure("start the task", result));
 			},
-			onMoveToTrashTask: (taskId, options) => {
+			onMoveToTrashTask: (_taskId, options) => {
 				if (options?.requestTaskCommentBeforeMovingIntoDone) {
 					openTaskComment(workspaceId, taskCard);
 					return;
 				}
-				if (boardColumnIdContainingTaskCard === "review" || boardColumnIdContainingTaskCard === "in_progress") {
-					setPendingSkipValidationConfirmation({ workspaceId, taskCard });
-					return;
-				}
-				moveTaskCardInOtherProjectIntoDone(workspaceId, taskId);
+				void requestOtherProjectDoneWithVerificationPrecheck(
+					workspaceId,
+					taskCard,
+					boardColumnIdContainingTaskCard,
+				);
 			},
 			onMoveToValidationTask: (taskId) => {
 				void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
@@ -215,8 +339,8 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			onEditTask: onRequestEditBacklogTaskCardInOtherProject
 				? (card) => onRequestEditBacklogTaskCardInOtherProject(workspaceId, card)
 				: undefined,
-			onRequestPinToTaskPinboard: () => onRequestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard),
-			onUnpinFromTaskPinboard: (taskId) => onUnpinTaskCardInOtherProjectFromTaskPinboard(workspaceId, taskId),
+			onRequestPinToTaskPinboard: () => onRequestPinTaskCardInOtherProjectToTaskPinboard?.(workspaceId, taskCard),
+			onUnpinFromTaskPinboard: (taskId) => onUnpinTaskCardInOtherProjectFromTaskPinboard?.(workspaceId, taskId),
 			moveToTrashLoadingById: {
 				[taskCard.id]:
 					taskCardActionCommandKindInFlight === "move_task_card_into_done_stopping_sessions_and_deleting_worktree",
@@ -233,6 +357,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 		[
 			openTaskComment,
 			moveTaskCardInOtherProjectIntoDone,
+			requestOtherProjectDoneWithVerificationPrecheck,
 			onRequestEditBacklogTaskCardInOtherProject,
 			onRequestPinTaskCardInOtherProjectToTaskPinboard,
 			onUnpinTaskCardInOtherProjectFromTaskPinboard,
@@ -272,25 +397,89 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 									);
 								return;
 							}
-							if (
-								snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard === "review" ||
-								snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard === "in_progress"
-							) {
-								suspendTaskComment(request.taskId);
-								setPendingSkipValidationConfirmation({
-									workspaceId: request.workspaceId,
-									taskCard: snapshot.taskCardSnapshot.taskCard,
-									taskCommentToAppendWhenMovingIntoDone: comment,
-								});
-								return;
-							}
-							moveTaskCardInOtherProjectIntoDone(request.workspaceId, request.taskId, comment);
+							void requestOtherProjectDoneWithVerificationPrecheck(
+								request.workspaceId,
+								snapshot.taskCardSnapshot.taskCard,
+								snapshot.taskCardSnapshot.boardColumnIdContainingTaskCard,
+								comment,
+							);
 						})
 						.catch((error: unknown) =>
 							returnToEditingTaskComment(request.taskId, error instanceof Error ? error.message : String(error)),
 						);
 				}}
 			/>
+			{pendingVerificationReview && normalizeBoardData(pendingVerificationReview.workspaceState.board) ? (
+				<PostDeployVerificationReviewBeforeMoveIntoDoneWithWorkspaceReadModel
+					key={`${pendingVerificationReview.workspaceId}:${pendingVerificationReview.taskId}:${pendingVerificationReview.doneEntryFlowIdentity.flowGeneration}`}
+					workspaceId={pendingVerificationReview.workspaceId}
+					taskId={pendingVerificationReview.taskId}
+					board={normalizeBoardData(pendingVerificationReview.workspaceState.board)!}
+					runtimeRejectionRevision={pendingVerificationReview.runtimeRejectionRevision}
+					refreshAndReadBoardBeforeCompletion={async () => {
+						const workspaceState = await fetchWorkspaceState(pendingVerificationReview.workspaceId);
+						const board = normalizeBoardData(workspaceState.board);
+						if (!board) throw new Error("读取所属项目看板失败，请重新核对");
+						setPendingVerificationReview((current) =>
+							current === pendingVerificationReview ? { ...current, workspaceState } : current,
+						);
+						return board;
+					}}
+					realTaskCardRenderingInputs={{
+						realTaskCardRenderingInputsBoardSourceKind:
+							"runtime_board_snapshot_of_workspace_not_hydrated_in_browser",
+						workspaceIdOwningRuntimeBoardSnapshot: pendingVerificationReview.workspaceId,
+						taskSessionsFromRuntimeBoardSnapshot: pendingVerificationReview.workspaceState.sessions,
+						workspacePathOwningRuntimeBoardSnapshot: pendingVerificationReview.workspaceState.repoPath,
+						onActivateTaskCardOpeningTaskInItsProject: (card) =>
+							onOpenTaskInProject?.(pendingVerificationReview.workspaceId, card.id),
+						defaultAgentId: null,
+						defaultClineModelId: null,
+					}}
+					isSubmittingClosure={isVerificationClosureSubmitting}
+					onCancel={() => {
+						if (activeDoneEntryFlowIdentityRef.current === pendingVerificationReview.doneEntryFlowIdentity)
+							activeDoneEntryFlowIdentityRef.current = null;
+						if (pendingVerificationReview.taskCommentToAppendWhenMovingIntoDone)
+							returnToEditingTaskComment(pendingVerificationReview.taskId);
+						setPendingVerificationReview(null);
+					}}
+					onConfirmClosureRequestsBySelectedTaskId={(requests) => {
+						const closure = requests[pendingVerificationReview.taskId];
+						if (!closure || isVerificationClosureSubmitting) return;
+						setIsVerificationClosureSubmitting(true);
+						moveTaskCardInOtherProjectIntoDone(
+							pendingVerificationReview.doneEntryFlowIdentity,
+							pendingVerificationReview.taskCommentToAppendWhenMovingIntoDone,
+							closure,
+						);
+					}}
+					onRequestTaskCommentBeforeMovingIntoDone={() => {
+						if (activeDoneEntryFlowIdentityRef.current === pendingVerificationReview.doneEntryFlowIdentity)
+							activeDoneEntryFlowIdentityRef.current = null;
+						const selection = findCardSelection(
+							normalizeBoardData(pendingVerificationReview.workspaceState.board)!,
+							pendingVerificationReview.taskId,
+						);
+						const comment = pendingVerificationReview.taskCommentToAppendWhenMovingIntoDone;
+						if (
+							comment &&
+							taskCommentBeforeMoveIntoDone.request?.workspaceId === pendingVerificationReview.workspaceId
+						)
+							returnToEditingTaskComment(pendingVerificationReview.taskId, null, comment.taskCommentEntryId);
+						else if (selection) openTaskComment(pendingVerificationReview.workspaceId, selection.card);
+						setPendingVerificationReview(null);
+					}}
+					onNavigateToBoard={async () => {
+						if (!onNavigateToProjectBoard) throw new Error("当前宿主无法导航到所属项目看板，请从项目看板重试");
+						await onNavigateToProjectBoard(pendingVerificationReview.workspaceId);
+					}}
+					onSelectTask={() =>
+						onOpenTaskInProject?.(pendingVerificationReview.workspaceId, pendingVerificationReview.taskId)
+					}
+				/>
+			) : null}
+
 			<DeleteTaskDialog
 				task={pendingDeleteConfirmation?.taskCard ?? null}
 				onCancel={() => setPendingDeleteConfirmation(null)}
@@ -320,10 +509,9 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				onConfirm={() => {
 					const confirmation = pendingSkipValidationConfirmation;
 					setPendingSkipValidationConfirmation(null);
-					if (confirmation) {
+					if (confirmation?.doneEntryFlowIdentity) {
 						moveTaskCardInOtherProjectIntoDone(
-							confirmation.workspaceId,
-							confirmation.taskCard.id,
+							confirmation.doneEntryFlowIdentity,
 							confirmation.taskCommentToAppendWhenMovingIntoDone,
 						);
 					}

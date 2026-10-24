@@ -44,6 +44,8 @@ export type PostDeployVerificationDoneEntryClosureDialogTaskEntrySelectionMode =
 
 export interface PostDeployVerificationUncheckedItemsClosureReasonDialogProps {
 	dialogTitle: string;
+	open?: boolean;
+	onReturnToVerification?: () => void;
 	taskEntries: PostDeployVerificationDoneEntryClosureDialogTaskEntry[];
 	taskEntrySelectionMode: PostDeployVerificationDoneEntryClosureDialogTaskEntrySelectionMode;
 	isSubmittingClosure: boolean;
@@ -283,6 +285,8 @@ function ClosureDialogNoticeBox({
 
 export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 	dialogTitle,
+	open = true,
+	onReturnToVerification,
 	taskEntries,
 	taskEntrySelectionMode,
 	isSubmittingClosure,
@@ -332,7 +336,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 
 	return (
 		<Dialog
-			open
+			open={open}
 			onOpenChange={(open) => {
 				// 提交进行中忽略关闭，避免半途中断逐个移列。
 				if (!open && !isSubmittingClosure) {
@@ -476,6 +480,11 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 				) : null}
 			</DialogBody>
 			<DialogFooter>
+				{onReturnToVerification ? (
+					<Button variant="default" disabled={isSubmittingClosure} onClick={onReturnToVerification}>
+						返回核对
+					</Button>
+				) : null}
 				<Button variant="default" disabled={isSubmittingClosure} onClick={onCancel}>
 					取消
 				</Button>

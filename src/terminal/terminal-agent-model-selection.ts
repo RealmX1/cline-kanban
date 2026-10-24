@@ -10,6 +10,10 @@ import type {
 } from "../core/api-contract";
 import { type AgentCliCapabilityProbeContract, runAgentCliCapabilityProbe } from "./agent-cli-capability-probe-runner";
 import { filterTerminalAgentModelOptionsToLatestProductLineGeneration } from "./agent-model-product-line-latest-generation-filter";
+import {
+	loadRefreshedKimiManagedModelCatalog,
+	selectLatestKimiManagedStableModel,
+} from "./kimi-latest-managed-stable-model-selection";
 
 function deduplicateModelOptions(
 	options: RuntimeTerminalAgentModelSelectionOption[],
@@ -232,24 +236,6 @@ export function parseCursorModelList(stdout: string): RuntimeTerminalAgentModelS
 	return deduplicateModelOptions(options);
 }
 
-// `kimi provider list --json` 是这几个 CLI 里唯一结构化的模型目录：`.models` 以 alias 为键，
-// 值里的 `displayName` 才带版本号（`kimi-code/k3` → "K3"）。
-// 注意只能用 `list --json`：同族的 `kimi provider catalog` 会**写**配置文件，绝不能进探测路径。
-export function parseKimiProviderModelCatalog(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
-	const parsed = JSON.parse(stdout) as { models?: Record<string, { displayName?: unknown }> };
-	const models = parsed.models && typeof parsed.models === "object" ? parsed.models : {};
-	return deduplicateModelOptions(
-		Object.entries(models).flatMap(([modelAlias, model]): RuntimeTerminalAgentModelSelectionOption[] => {
-			const modelId = modelAlias.trim();
-			if (!modelId) {
-				return [];
-			}
-			const displayName = typeof model?.displayName === "string" ? model.displayName.trim() : "";
-			return [{ modelId, label: displayName || modelId }];
-		}),
-	);
-}
-
 type TerminalAgentModelCatalogProbeContract = AgentCliCapabilityProbeContract<
 	RuntimeTerminalAgentModelSelectionOption[]
 >;
@@ -258,7 +244,7 @@ type TerminalAgentModelCatalogProbeContract = AgentCliCapabilityProbeContract<
 // 是必须写代码的那一半——把两者放进同一张表，就不必为「加一个 agent」再复制一遍执行、超时与降级逻辑。
 // 表与解析器同文件，是因为表要引用解析器；执行器（driver）与产品线过滤器各自独立成文件。
 const TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS: Record<
-	RuntimeTerminalAgentModelSelectionAgentId,
+	Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi">,
 	TerminalAgentModelCatalogProbeContract
 > = {
 	claude: {
@@ -286,14 +272,6 @@ const TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS: Record<
 		stripAnsiStyleEscapeSequencesFromStdout: true,
 		parseStdout: parseCursorModelList,
 	},
-	kimi: {
-		probeId: "kimi-code-model-catalog",
-		binary: "kimi",
-		args: ["provider", "list", "--json"],
-		timeoutMs: 15_000,
-		maxBufferBytes: 1024 * 1024,
-		parseStdout: parseKimiProviderModelCatalog,
-	},
 };
 
 /**
@@ -318,7 +296,7 @@ export function selectCursorLaunchDefaultModelIdFromCatalog(
 }
 
 async function loadLatestGenerationTerminalAgentModelOptions(
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
+	agentId: Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi">,
 ): Promise<{ options: RuntimeTerminalAgentModelSelectionOption[]; warning?: string }> {
 	const outcome = await runAgentCliCapabilityProbe(TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS[agentId]);
 	if (!outcome.ok) {
@@ -373,6 +351,27 @@ function buildFallbackResponse(
 export async function getTerminalAgentModelSelectionOptions(
 	agentId: RuntimeTerminalAgentModelSelectionAgentId,
 ): Promise<RuntimeTerminalAgentModelSelectionOptionsResponse> {
+	if (agentId === "kimi") {
+		try {
+			const catalog = await loadRefreshedKimiManagedModelCatalog();
+			const selected = selectLatestKimiManagedStableModel(catalog);
+			return {
+				agentId,
+				defaultModelId: selected.model,
+				defaultLabel: `默认 · ${selected.display_name || selected.model}`,
+				// 默认策略与版本选择分开：完整目录保留显式钉版本与非标准变体的选择能力。
+				options: deduplicateModelOptions(
+					catalog.map((item) => ({
+						modelId: item.model,
+						label: item.display_name || item.model,
+						modelSelectionGroup: "pinned_version",
+					})),
+				),
+			};
+		} catch (error) {
+			return buildFallbackResponse(agentId, error instanceof Error ? error.message : "Kimi 默认模型选择失败。");
+		}
+	}
 	const { options, warning } = await loadLatestGenerationTerminalAgentModelOptions(agentId);
 	if (warning !== undefined) {
 		return buildFallbackResponse(agentId, warning);

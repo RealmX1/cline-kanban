@@ -105,10 +105,12 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 	let listener: ((summary: RuntimeTaskSessionSummary) => void) | null = null;
 	const hub = createRuntimeStateHub({ workspaceRegistry });
 	const recordEffectiveActivity = vi.fn();
+	const reconcileNativeDirectInputReadiness = vi.fn();
 	const manager = {
 		listSummaries: () => [...currentByTaskId.values()],
 		getSummary: (taskId: string) => currentByTaskId.get(taskId) ?? null,
 		recordEffectiveAgentConversationActivity: recordEffectiveActivity,
+		reconcileCodexNeedsInputWithNativeDirectInputReadiness: reconcileNativeDirectInputReadiness,
 		onSummary: (onSummary: (summary: RuntimeTaskSessionSummary) => void) => {
 			listener = onSummary;
 			return () => {
@@ -121,6 +123,7 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 		hub,
 		workspaceRegistry,
 		recordEffectiveActivity,
+		reconcileNativeDirectInputReadiness,
 		emit(summary: RuntimeTaskSessionSummary) {
 			currentByTaskId.set(summary.taskId, summary);
 			if (!listener) throw new Error("没有存活的 summary 订阅");
@@ -168,6 +171,22 @@ describe("runtime-state-hub 服务端输入接受边沿", () => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
 		temporaryHome.cleanup();
+	});
+
+	it("原生输入就绪只路由给本工作区的状态校正出口，不冒充接受或活动", async () => {
+		const snapshot = makeSummary("pending");
+		const tracked = trackedHub([snapshot]);
+		const observation = {
+			workspaceId: WORKSPACE_ID,
+			conversationSessionId: TASK_ID,
+			nativeSessionId: "native",
+			runtimeSessionIncarnationId: "first-process",
+			observedAtMs: NOW_MS,
+		};
+		await mockedDependencies.observerOptions?.onCodexNativeDirectInputReadiness?.(observation, snapshot);
+		expect(tracked.reconcileNativeDirectInputReadiness).toHaveBeenCalledWith(TASK_ID, snapshot, observation);
+		expect(tracked.recordEffectiveActivity).not.toHaveBeenCalled();
+		expect(mockedDependencies.moveAcceptedInput).not.toHaveBeenCalled();
 	});
 
 	it("只将本代原生响应携带的专用缓存证据传给活动写点，换代及普通接受不能冒领", () => {

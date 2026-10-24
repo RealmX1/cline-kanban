@@ -147,7 +147,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		);
 	});
 
-	it.each(["question", "permission"] as const)(
+	it.each(["question", "plan_review", "permission"] as const)(
 		"水合出的 %s 待答会话恢复成功后仍以原语义进入持久化载荷",
 		async (userTurnKind) => {
 			const taskId = `task-persisted-${userTurnKind}`;

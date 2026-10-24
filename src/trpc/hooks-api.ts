@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
+import { isCodexNativeConversationRewindSignal } from "../core/codex-native-direct-input-readiness";
 import {
 	formatDeferredHarnessGeneratedPromptsAsAdditionalContext,
 	isClaudeHarnessGeneratedTaskNotificationPrompt,
@@ -351,6 +352,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			// 身份确认不代表对话继续，不触碰恢复守卫、活动时间或通知。
 			if (event === "agent_conversation_session_identity_observed")
 				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
+
+			// 回退只是核验候选：更新 hook 元数据会唤醒原生观察器，不能当作主对话产出或新的用户回合。
+			if (event === "activity" && isCodexNativeConversationRewindSignal(body.metadata)) {
+				manager.applyHookActivity(taskId, body.metadata ?? {});
+				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
+			}
 
 			// 压缩完成（PostCompact）只推进 Cache warm 起点：不触碰恢复守卫、对话推进、通知或回合转移。
 			if (event === "main_agent_conversation_context_compaction_completed") {

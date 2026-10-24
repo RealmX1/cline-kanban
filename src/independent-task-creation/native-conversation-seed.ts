@@ -2,6 +2,10 @@ import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { forkSession } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import {
+	inferCodexHomeDirectoryPathFromTranscriptPath,
+	resolveRecordedCodexConversationHome,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { withCodexAppServerRequestConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import {
@@ -20,35 +24,51 @@ export async function freezeIndependentTaskConversationSeed(summary: RuntimeTask
 	if (!identity || !summary.workspacePath)
 		return { seed: null, unavailableReason: "缺少可靠原生会话身份或工作目录，无法完整继承。" };
 	if (identity.sourceAgentId === "codex") {
-		return await withCodexAppServerRequestConnection({ workingDirectory: summary.workspacePath }, async (port) => {
-			const turns = await readCodexConversationTurns(port, identity.nativeSessionId);
-			const last = turns.at(-1);
-			if (!last || last.status !== "completed")
-				return { seed: null, unavailableReason: "最后一个原生回合尚未完整结束，暂不能完整继承。" };
-			const result = z.object({ thread: z.object({ id: z.string(), path: z.string() }) }).parse(
-				await port.request("thread/fork", {
-					threadId: identity.nativeSessionId,
-					lastTurnId: last.id,
-					cwd: summary.workspacePath,
-					excludeTurns: true,
+		return await withCodexAppServerRequestConnection(
+			{
+				workingDirectory: summary.workspacePath,
+				codexConversationStorageNativeSessionId: identity.nativeSessionId,
+				codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
+					...summary,
+					transcriptPath: identity.transcriptPath,
 				}),
-			);
-			if (result.thread.id === identity.nativeSessionId) throw new Error("原生分支没有取得独立身份。");
-			await verifyRestoredCodexConversationPrefix(
-				port,
-				result.thread.id,
-				turns.map((turn) => turn.id),
-			);
-			return {
-				seed: {
-					sourceAgentId: "codex",
-					sourceSessionId: result.thread.id,
-					sourceSessionReuseMode: "fork_existing_session",
-					sourceSessionWorkingDirectoryPath: summary.workspacePath ?? undefined,
-				},
-				unavailableReason: null,
-			};
-		});
+			},
+			async (port) => {
+				const turns = await readCodexConversationTurns(port, identity.nativeSessionId);
+				const last = turns.at(-1);
+				if (!last || last.status !== "completed")
+					return { seed: null, unavailableReason: "最后一个原生回合尚未完整结束，暂不能完整继承。" };
+				const result = z.object({ thread: z.object({ id: z.string(), path: z.string() }) }).parse(
+					await port.request("thread/fork", {
+						threadId: identity.nativeSessionId,
+						lastTurnId: last.id,
+						cwd: summary.workspacePath,
+						excludeTurns: true,
+					}),
+				);
+				if (result.thread.id === identity.nativeSessionId) throw new Error("原生分支没有取得独立身份。");
+				await verifyRestoredCodexConversationPrefix(
+					port,
+					result.thread.id,
+					turns.map((turn) => turn.id),
+				);
+				return {
+					seed: {
+						sourceAgentId: "codex",
+						sourceSessionId: result.thread.id,
+						sourceSessionReuseMode: "fork_existing_session",
+						sourceSessionWorkingDirectoryPath: summary.workspacePath ?? undefined,
+						codexConversationStorageHomeDirectoryPath:
+							inferCodexHomeDirectoryPathFromTranscriptPath(result.thread.path) ??
+							resolveRecordedCodexConversationHome({
+								...summary,
+								transcriptPath: identity.transcriptPath,
+							}),
+					},
+					unavailableReason: null,
+				};
+			},
+		);
 	}
 	if (identity.sourceAgentId === "claude" && identity.transcriptPath) {
 		const forked = await forkSession(identity.nativeSessionId, {

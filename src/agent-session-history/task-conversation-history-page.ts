@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
-import { type FileHandle, open, stat } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { type FileHandle, open, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import Database from "better-sqlite3";
 import { z } from "zod";
+import {
+	inferCodexHomeDirectoryPathFromTranscriptPath,
+	resolveMigratedCodexConversationHome,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 import type {
 	RuntimeBoardCard,
 	RuntimeTaskChatMessage,
@@ -9,6 +14,7 @@ import type {
 	RuntimeTaskConversationHistoryPageResponse,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import { resolveSessionFacets } from "../core/session-activity";
 import { doesConversationSessionBelongToTask } from "../core/task-main-conversation-session-binding";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
@@ -279,11 +285,64 @@ export interface LoadTaskConversationHistoryPageInput {
 	retainedMessages?: readonly RuntimeTaskChatMessage[];
 }
 
+async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summary: RuntimeTaskSessionSummary) {
+	const nativeConversationIdentity = summary.agentNativeConversationSessionIdentity;
+	if (nativeConversationIdentity?.sourceAgentId !== "codex" || resolveSessionFacets(summary).liveness === "live")
+		return summary;
+	const recordedCodexConversationStorageHomeDirectoryPath =
+		inferCodexHomeDirectoryPathFromTranscriptPath(nativeConversationIdentity.transcriptPath) ??
+		summary.codexConversationStorageHomeDirectoryPath;
+	if (!recordedCodexConversationStorageHomeDirectoryPath) return summary;
+	const authoritativeCodexConversationStorageHomeDirectoryPath = await resolveMigratedCodexConversationHome(
+		recordedCodexConversationStorageHomeDirectoryPath,
+		nativeConversationIdentity.nativeSessionId,
+	);
+	if (
+		resolve(authoritativeCodexConversationStorageHomeDirectoryPath) ===
+		resolve(recordedCodexConversationStorageHomeDirectoryPath)
+	)
+		return summary;
+	// 正式迁移或回退后，旧 summary 的路径可以已归档或过期；只读原生当前指针，不启动 agent 或猜选分片。
+	const nativeCodexStateDatabase = new Database(
+		join(authoritativeCodexConversationStorageHomeDirectoryPath, "state_5.sqlite"),
+		{ readonly: true, fileMustExist: true },
+	);
+	let authoritativeTranscriptPath: string;
+	try {
+		authoritativeTranscriptPath = z
+			.object({ rollout_path: z.string() })
+			.parse(
+				nativeCodexStateDatabase
+					.prepare("SELECT rollout_path FROM threads WHERE id = ?")
+					.get(nativeConversationIdentity.nativeSessionId),
+			).rollout_path;
+	} finally {
+		nativeCodexStateDatabase.close();
+	}
+	const transcriptPathRelativeToAuthoritativeHome = relative(
+		await realpath(authoritativeCodexConversationStorageHomeDirectoryPath),
+		await realpath(authoritativeTranscriptPath),
+	);
+	if (
+		isAbsolute(transcriptPathRelativeToAuthoritativeHome) ||
+		transcriptPathRelativeToAuthoritativeHome === ".." ||
+		transcriptPathRelativeToAuthoritativeHome.startsWith(`..${sep}`)
+	)
+		throw new Error("原生历史指针超出已绑定存储目录，未读取其他来源。");
+	return {
+		...summary,
+		agentNativeConversationSessionIdentity: {
+			...nativeConversationIdentity,
+			transcriptPath: authoritativeTranscriptPath,
+		},
+	};
+}
+
 export async function loadTaskConversationHistoryPage(
 	input: LoadTaskConversationHistoryPageInput,
 ): Promise<RuntimeTaskConversationHistoryPageResponse> {
 	const { request, card, sessions } = input;
-	const summary = sessions[request.taskConversationSessionId];
+	let summary = sessions[request.taskConversationSessionId];
 	if (
 		!card ||
 		card.id !== request.workspaceTaskId ||
@@ -319,6 +378,9 @@ export async function loadTaskConversationHistoryPage(
 	}
 	let handle: FileHandle | null = null;
 	try {
+		summary = await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
+		const identity = summary.agentNativeConversationSessionIdentity;
+		if (!identity?.transcriptPath) return buildUnavailableTaskConversationHistoryPage("缺少当前绑定的会话记录。");
 		try {
 			handle = await open(identity.transcriptPath, "r");
 		} catch (error) {
