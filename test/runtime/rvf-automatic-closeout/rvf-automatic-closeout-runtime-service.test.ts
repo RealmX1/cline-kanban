@@ -9,6 +9,7 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
+import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { buildRvfAutomaticCloseoutPrompt } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
@@ -1442,6 +1443,8 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 			duplicate?: boolean;
 			metadataSessionId?: string;
 			nativeMessageRecordedAtMs?: number;
+			skillAttachment?: { name: string; path: string; body: string };
+			skillExpansionMetadata?: unknown;
 		} = {},
 	) {
 		const nativeMessage = {
@@ -1453,7 +1456,12 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 				item: {
 					type: "UserMessage",
 					id: "closeout-native-user-message",
-					content: [{ type: "text", text: options.text ?? text }],
+					content: [
+						{ type: "text", text: options.text ?? text },
+						...(options.skillAttachment
+							? [{ type: "skill", name: options.skillAttachment.name, path: options.skillAttachment.path }]
+							: []),
+					],
 				},
 			},
 		};
@@ -1489,12 +1497,38 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 				},
 			},
 			...(options.includeMessage === false ? [] : [nativeMessage]),
+			...(options.skillAttachment
+				? [
+						{
+							type: "response_item",
+							timestamp: iso((options.nativeMessageRecordedAtMs ?? 121_575) + 2),
+							payload: {
+								type: "message",
+								role: "user",
+								content: [
+									{
+										type: "input_text",
+										text: `<skill>\n<name>${options.skillAttachment.name}</name>\n<path>${options.skillAttachment.path}</path>\n${options.skillAttachment.body}\n</skill>`,
+									},
+								],
+								internal_chat_message_metadata_passthrough:
+									options.skillExpansionMetadata === undefined
+										? {
+												turn_id: "closeout-user-turn",
+												content_item_kinds: ["skills.selected_skill_instructions"],
+												content_item_metadata: [{ provenance: { type: "skills" } }],
+											}
+										: options.skillExpansionMetadata,
+							},
+						},
+					]
+				: []),
 			...(options.duplicate ? [nativeMessage] : []),
 		];
 		await writeFile(transcriptPath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 	}
 	await writeNativeEvidence();
-	const activeTurns = [
+	const activeTurns: CodexNativeConversationTurn[] = [
 		{ id: "implementation", status: "completed", items: [] },
 		{
 			id: "closeout-user-turn",
@@ -1517,7 +1551,150 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 	return { ...context, record, request, ledgerPath, transcriptPath, activeTurns, writeNativeEvidence };
 }
 
+async function setupLateNativeCloseoutWithSkillAttachment() {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	const skillDirectory = join(context.fixture.fixtureRootDirectoryPath, "installed-closeout-skill");
+	await mkdir(skillDirectory);
+	const skill = {
+		name: "base-branch-sync",
+		path: join(skillDirectory, "SKILL.md"),
+		body: "核对本地 base 的隔离手册。\n",
+	};
+	await writeFile(skill.path, skill.body);
+	await context.writeNativeEvidence({ skillAttachment: skill });
+	const reference = { type: "skill", name: skill.name, path: skill.path };
+	const message = context.activeTurns[1]?.items[0];
+	if (!message?.content) throw new Error("缺少隔离的原生消息");
+	message.content.push(reference);
+	const catalogEntry = {
+		cwd: context.repo.repositoryPath,
+		skills: [{ name: skill.name, path: skill.path, enabled: true }],
+		errors: [],
+	};
+	const previousRequest = mocked.request.getMockImplementation();
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) =>
+		method === "skills/list" ? { data: [catalogEntry] } : previousRequest?.(method, parameters),
+	);
+	return { ...context, skill, message, reference, catalogEntry };
+}
+
 describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
+	it("合法 Skill 附件可自动补证，dry-run 与重建幂等且原失败、正文和投递次数不变", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		const ledgerBefore = await readFile(context.ledgerPath);
+		const transcriptBefore = await readFile(context.transcriptPath);
+		const storeBefore = await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId));
+		const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		expect(
+			await context.service.reconcileLateNativePromptAcceptance(context.scope, { ...context.request, dryRun: true }),
+		).toMatchObject({ status: "eligible" });
+		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(storeBefore);
+		await context.service.sweepPendingCloseoutsOnce();
+		const recovered = await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		expect(recovered).toMatchObject({
+			status: "already_recovered",
+			receipt: { originalDeliveryFailure: { status: "delivery_failed" } },
+		});
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toEqual(recovered);
+		expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+		expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(enqueueCount);
+	});
+	it.each(["错回合", "普通用户来源", "无可信归属"])(
+		"Skill 展开为 %s 时保持 unknown，暂停和原失败账本不变",
+		async (scenario) => {
+			const context = await setupLateNativeCloseoutWithSkillAttachment();
+			await context.writeNativeEvidence({
+				skillAttachment: context.skill,
+				skillExpansionMetadata:
+					scenario === "无可信归属"
+						? null
+						: {
+								turn_id: scenario === "错回合" ? "another-user-turn" : "closeout-user-turn",
+								content_item_kinds: [
+									scenario === "普通用户来源" ? "user.text" : "skills.selected_skill_instructions",
+								],
+								content_item_metadata: [
+									{ provenance: { type: scenario === "普通用户来源" ? "user" : "skills" } },
+								],
+							},
+			});
+			const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+			const storeBefore = await readFile(storePath);
+			const ledgerBefore = await readFile(context.ledgerPath);
+			mocked.request.mockClear();
+			expect(
+				await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+			).toMatchObject({
+				status: "unknown",
+				reasonCode: "native_prompt_acceptance_not_proven",
+			});
+			expect(await readFile(storePath)).toEqual(storeBefore);
+			expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+			expect(mocked.request).not.toHaveBeenCalled();
+		},
+	);
+	it.each([
+		"attachment_removed",
+		"attachment_changed",
+		"unknown_attachment",
+		"duplicate_with_unknown_attachment",
+	] as const)("活动分支 %s 时拒绝恢复，不能只修转录 reader", async (scenario) => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		if (!context.message.content) throw new Error("缺少消息正文");
+		if (scenario === "attachment_removed") context.message.content.pop();
+		if (scenario === "attachment_changed") context.reference.path = "/unrelated/SKILL.md";
+		if (scenario === "unknown_attachment") context.message.content.push({ type: "unknown_future_attachment" });
+		if (scenario === "duplicate_with_unknown_attachment")
+			context.activeTurns.push({
+				id: "another-turn",
+				status: "completed",
+				items: [
+					{ ...context.message, id: "another-message", content: [...context.message.content, { type: "image" }] },
+				],
+			});
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "native_message_not_on_active_branch",
+		});
+	});
+	it.each(["stop", "identity_changed", "installation_changed"] as const)(
+		"Skill 核验中 %s 仍阻止旧回调写入恢复凭据",
+		async (scenario) => {
+			const context = await setupLateNativeCloseoutWithSkillAttachment();
+			const independentStopper = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			const originalRequest = mocked.request.getMockImplementation();
+			mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+				if (method === "thread/turns/list") {
+					if (scenario === "stop")
+						await independentStopper.pauseForExplicitStop(context.scope.workspaceId, "task");
+					if (scenario === "identity_changed")
+						context.manager.getSummary().runtimeSessionIncarnationId = "another-incarnation";
+					if (scenario === "installation_changed") await writeFile(context.skill.path, "变更后的手册");
+				}
+				return originalRequest?.(method, parameters);
+			});
+			expect(
+				await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+			).toMatchObject({
+				status: scenario === "installation_changed" ? "unknown" : "blocked",
+				reasonCode:
+					scenario === "stop"
+						? "record_changed"
+						: scenario === "identity_changed"
+							? "session_binding_changed"
+							: "native_prompt_acceptance_not_proven",
+			});
+			if (scenario === "stop") {
+				const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+				expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+					status: "blocked",
+					reasonCode: "explicit_stop",
+				});
+			}
+		},
+	);
 	it("自动补证对未知证据退避并限次，新转录证据到达后重新核验", async () => {
 		const context = await setupLateNativeCloseoutPromptAcceptance();
 		const originalRequest = mocked.request.getMockImplementation();

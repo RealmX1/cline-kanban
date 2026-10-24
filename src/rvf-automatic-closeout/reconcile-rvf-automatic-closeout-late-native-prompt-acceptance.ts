@@ -18,6 +18,10 @@ import {
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
+import {
+	parseCodexNativeCloseoutUserMessageContent,
+	readCodexNativeCloseoutCandidateText,
+} from "./codex-native-closeout-user-message-content";
 import { readCodexConversationTurns } from "./codex-native-conversation-prefix";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { readCodexNativeCloseoutPromptAcceptanceEvidence } from "./read-codex-native-closeout-prompt-acceptance-evidence";
@@ -27,6 +31,7 @@ import {
 	updateRvfAutomaticCloseoutRecords,
 	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
+import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "./verify-codex-native-closeout-skill-attachment-evidence";
 
 const eligiblePauseReason = "收尾投递失败：submit_confirmation_budget_exhausted";
 class LateNativePromptAcceptanceRecoveryError extends Error {
@@ -227,19 +232,34 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 					if (cursor) seenCursors.add(cursor);
 				} while (cursor);
 				if (!loaded) throw new Error("恢复会话并未由当前 TUI 宿主持有。");
+				let revalidateSkillInstallation: (() => Promise<void>) | undefined;
+				if (evidence.skillReferences.length) {
+					try {
+						revalidateSkillInstallation = await verifyCodexNativeCloseoutSkillAttachmentEvidence({
+							port,
+							worktree: record.receipt.worktree,
+							text: evidence.text,
+							skillReferences: evidence.skillReferences,
+							nativeSkillExpansionTexts: evidence.nativeSkillExpansionTexts,
+						});
+					} catch {
+						throw new LateNativePromptAcceptanceRecoveryError(
+							"unknown",
+							"native_prompt_acceptance_not_proven",
+							"不能唯一核对 Skill 附件的当前 catalog、路径与原生展开正文。",
+						);
+					}
+				}
 				const turns = await readCodexConversationTurns(port, record.restoredNativeSessionId ?? "");
 				const matches = turns.flatMap((turn) =>
 					turn.items
 						.filter((item) => item.type === "userMessage")
 						.filter(
 							(item) =>
-								item.content?.length &&
-								item.content.every(
-									(part) => ["text", "input_text"].includes(part.type) && typeof part.text === "string",
-								) &&
-								computeRvfTextSha256(item.content.map((part) => part.text).join("")) === delivery.prompt_sha256,
+								computeRvfTextSha256(readCodexNativeCloseoutCandidateText(item.content ?? [])) ===
+								delivery.prompt_sha256,
 						)
-						.map((item) => ({ turnId: turn.id, messageId: item.id })),
+						.map((item) => ({ turnId: turn.id, messageId: item.id, content: item.content ?? [] })),
 				);
 				if (
 					matches.length !== 1 ||
@@ -251,6 +271,26 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 						"native_message_not_on_active_branch",
 						"精确原生正文不在当前活动分支，或存在重复正文，不能恢复。",
 					);
+				try {
+					const content = parseCodexNativeCloseoutUserMessageContent(matches[0]?.content ?? []);
+					if (JSON.stringify(content.skillReferences) !== JSON.stringify(evidence.skillReferences))
+						throw new Error("原生附件已改变。");
+				} catch {
+					throw new LateNativePromptAcceptanceRecoveryError(
+						"blocked",
+						"native_message_not_on_active_branch",
+						"当前活动分支的精确消息附件与原生转录不符或不受支持。",
+					);
+				}
+				try {
+					await revalidateSkillInstallation?.();
+				} catch {
+					throw new LateNativePromptAcceptanceRecoveryError(
+						"unknown",
+						"native_prompt_acceptance_not_proven",
+						"核验期间 Skill 安装内容或归属改变。",
+					);
+				}
 			},
 			{ socketPath: endpoint.socketPath },
 		);
