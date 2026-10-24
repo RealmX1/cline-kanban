@@ -9,7 +9,12 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
+import { buildRvfAutomaticCloseoutPrompt } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
+import {
+	getRvfAutomaticCloseoutStorePath,
+	updateRvfAutomaticCloseoutRecords,
+} from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -1375,6 +1380,416 @@ function createExecutionResultInterleavingSignal() {
 	});
 	return { promise, resolve };
 }
+
+async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId = "task") {
+	const context = await setup(mainConversationSessionId);
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	let record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+	if (!record?.handoffSha256) throw new Error("缺少收尾绑定");
+	const ledgerPath = getTaskMessageInjectionLedgerPath(mocked.directory);
+	const epoch = Date.now() - 180_000;
+	const iso = (offset: number) => new Date(epoch + offset).toISOString();
+	await recordTaskMessageTerminalDeliveryOutcome({
+		ledgerPath,
+		taskId: mainConversationSessionId,
+		idempotencyKey: record.promptDeliveryIdempotencyKey,
+		status: "delivery_failed",
+		failureReason: "submit_confirmation_budget_exhausted",
+		nowIso: iso(16_419),
+	});
+	await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+		records: records.map((entry) =>
+			entry.idempotency_key === record?.promptDeliveryIdempotencyKey
+				? {
+						...entry,
+						created_at: iso(0),
+						agent_idle_gate_passed_at: iso(31),
+					}
+				: entry,
+		),
+		result: undefined,
+	}));
+	await context.service.sweepPendingCloseoutsOnce();
+	const transcriptPath = join(context.fixture.fixtureRootDirectoryPath, "restored-closeout-native-evidence.jsonl");
+	await updateRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), (records) => ({
+		records: records.map((entry) => ({ ...entry, restoredTranscriptPath: transcriptPath })),
+		value: undefined,
+	}));
+	record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+	if (!record?.handoffSha256) throw new Error("缺少暂停绑定");
+	const summary = context.manager.getSummary();
+	Object.assign(summary, {
+		runtimeSessionIncarnationId: "restored-incarnation",
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex",
+			nativeSessionId: "restored",
+			transcriptPath,
+			observedAt: Date.now(),
+		},
+		codexNativeSessionControlEndpoint: {
+			workspaceId: context.scope.workspaceId,
+			conversationSessionId: mainConversationSessionId,
+			runtimeSessionIncarnationId: "restored-incarnation",
+			socketPath: "/isolated-restored-native-control",
+		},
+	});
+	const text = buildRvfAutomaticCloseoutPrompt(record);
+	async function writeNativeEvidence(
+		options: {
+			text?: string;
+			includeMessage?: boolean;
+			duplicate?: boolean;
+			metadataSessionId?: string;
+			nativeMessageRecordedAtMs?: number;
+		} = {},
+	) {
+		const nativeMessage = {
+			type: "event_msg",
+			timestamp: iso(options.nativeMessageRecordedAtMs ?? 121_575),
+			payload: {
+				type: "item_completed",
+				turn_id: "closeout-user-turn",
+				item: {
+					type: "UserMessage",
+					id: "closeout-native-user-message",
+					content: [{ type: "text", text: options.text ?? text }],
+				},
+			},
+		};
+		const lines = [
+			{
+				type: "session_meta",
+				timestamp: iso(-1000),
+				payload: {
+					id: options.metadataSessionId ?? "restored",
+					originator: "codex-tui",
+					source: "vscode",
+					cli_version: "0.164.0",
+					cwd: context.repo.repositoryPath,
+				},
+			},
+			{
+				type: "event_msg",
+				timestamp: iso(1366),
+				payload: {
+					type: "task_started",
+					turn_id: "closeout-user-turn",
+					turn_attribution: { turn_trigger: "user" },
+				},
+			},
+			{ type: "compacted", timestamp: iso(120_800), payload: { message: "隔离的压缩摘要" } },
+			{
+				type: "event_msg",
+				timestamp: iso(120_813),
+				payload: {
+					type: "item_completed",
+					turn_id: "closeout-user-turn",
+					item: { type: "ContextCompaction", id: "compaction" },
+				},
+			},
+			...(options.includeMessage === false ? [] : [nativeMessage]),
+			...(options.duplicate ? [nativeMessage] : []),
+		];
+		await writeFile(transcriptPath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+	}
+	await writeNativeEvidence();
+	const activeTurns = [
+		{ id: "implementation", status: "completed", items: [] },
+		{
+			id: "closeout-user-turn",
+			status: "completed",
+			items: [{ id: "closeout-native-user-message", type: "userMessage", content: [{ type: "text", text }] }],
+		},
+	];
+	mocked.request.mockImplementation(async (method: string) =>
+		method === "thread/loaded/list"
+			? { data: ["restored"], nextCursor: null }
+			: { data: activeTurns, nextCursor: null },
+	);
+	const request = {
+		taskId: "task",
+		decisionToken: context.token,
+		runId: "run",
+		handoffSha256: record.handoffSha256,
+		dryRun: false,
+	};
+	return { ...context, record, request, ledgerPath, transcriptPath, activeTurns, writeNativeEvidence };
+}
+
+describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
+	it("跨 service 单飞；恢复后停止的持久标记不能被服务重建或旧凭据绕过", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const anotherService = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		const originalRequest = mocked.request.getMockImplementation();
+		let checkedBusy = false;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/loaded/list" && !checkedBusy) {
+				checkedBusy = true;
+				expect(
+					await anotherService.reconcileLateNativePromptAcceptance(context.scope, context.request),
+				).toMatchObject({
+					status: "unknown",
+					reasonCode: "record_operation_busy",
+				});
+			}
+			return originalRequest?.(method, parameters);
+		});
+		expect((await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).status).toBe(
+			"recovered",
+		);
+		await anotherService.pauseForExplicitStop(context.scope.workspaceId, "task");
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "explicit_stop",
+		});
+	});
+	it("核验期间原地修改原生身份也会拒绝，不能被共享 summary 对象掩盖", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const originalRequest = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/turns/list") {
+				const identity = context.manager.getSummary().agentNativeConversationSessionIdentity;
+				if (identity) identity.nativeSessionId = "different-native";
+			}
+			return originalRequest?.(method, parameters);
+		});
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "session_binding_changed",
+		});
+	});
+	it("公开诊断不摘录损坏 JSON 中的私密正文；旧补证在活动分支撤回后不能登记 completed", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const bytes = await readFile(context.transcriptPath, "utf8");
+		await writeFile(context.transcriptPath, `${bytes}{"secret":"PRIVATE_TRANSCRIPT_SENTINEL`);
+		const invalid = await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		expect(invalid.status).toBe("unknown");
+		expect(JSON.stringify(invalid)).not.toContain("PRIVATE_TRANSCRIPT_SENTINEL");
+		await writeFile(context.transcriptPath, bytes);
+		expect((await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).status).toBe(
+			"recovered",
+		);
+		context.activeTurns.splice(1);
+		await expect(
+			context.service.reportExecutionResult(context.scope, {
+				...context.request,
+				stage: "land",
+				outcome: "completed",
+				commitSha: context.captured.receipt.worktree_head_commit_sha,
+			}),
+		).rejects.toThrow("活动分支");
+	});
+	it("先开回合、超时、压缩后正文落盘：只追加补证，原失败与 Git/WIP 不变，重启重试幂等", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance("independent-main");
+		const ledgerBefore = await readFile(context.ledgerPath);
+		const sourceBefore = await readFile(context.transcriptPath);
+		const statusBefore = context.repo.runGit(["status", "--porcelain=v2"]).stdout;
+		const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+		const recordBefore = await readFile(storePath);
+		const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		const forkCount = mocked.request.mock.calls.filter((call) => call[0] === "thread/fork").length;
+		const dry = await context.service.reconcileLateNativePromptAcceptance(context.scope, {
+			...context.request,
+			dryRun: true,
+		});
+		expect(dry.status).toBe("eligible");
+		expect(await readFile(storePath)).toEqual(recordBefore);
+		const recovered = await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		expect(recovered.status).toBe("recovered");
+		if (recovered.status !== "recovered") throw new Error(JSON.stringify(recovered));
+		expect(recovered.record.status).toBe("closeout_prompt_submitted");
+		expect(recovered.receipt.previousPauseReason).toBe(context.record.pauseReason);
+		expect(Date.parse(recovered.receipt.nativeTurnStartedAt)).toBeLessThan(
+			Date.parse(recovered.receipt.originalDeliveryFailure.statusUpdatedAt),
+		);
+		expect(Date.parse(recovered.receipt.nativeUserMessageRecordedAt)).toBeGreaterThan(
+			Date.parse(recovered.receipt.originalDeliveryFailure.statusUpdatedAt),
+		);
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		const again = await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		expect(again).toMatchObject({
+			status: "already_recovered",
+			receipt: recovered.receipt,
+			record: recovered.record,
+		});
+		await restarted.sweepPendingCloseoutsOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(enqueueCount);
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(forkCount);
+		expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+		expect(await readFile(context.transcriptPath)).toEqual(sourceBefore);
+		expect(context.repo.runGit(["status", "--porcelain=v2"]).stdout).toBe(statusBefore);
+	});
+	it.each(["land", "base_branch_sync"] as const)(
+		"paused 可保存 %s 受阻事实，失败历史保留，既不解除暂停也不要求投递成功",
+		async (stage) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			const report = { ...context.request, stage, outcome: "blocked" as const, reason: "确认预算耗尽，尚未执行" };
+			const first = await context.service.reportExecutionResult(context.scope, report);
+			expect(first.record.status).toBe("paused");
+			expect(first.record.pauseReason).toBe(context.record.pauseReason);
+			expect(first.record.executionResultReportHistory).toHaveLength(1);
+			expect((await context.service.reportExecutionResult(context.scope, report)).record).toEqual(first.record);
+			const failed = await context.service.reportExecutionResult(context.scope, {
+				...report,
+				outcome: "failed",
+				reason: "实际检查失败",
+			});
+			expect(failed.record.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual([
+				"blocked",
+				"failed",
+			]);
+			expect((await context.service.reportExecutionResult(context.scope, report)).record).toEqual(failed.record);
+			await expect(
+				context.service.reportExecutionResult(context.scope, { ...report, handoffSha256: "f".repeat(64) }),
+			).rejects.toThrow("绑定");
+			await expect(
+				context.service.reportExecutionResult(context.scope, {
+					...report,
+					outcome: "completed",
+					commitSha: context.captured.receipt.worktree_head_commit_sha,
+					...(stage === "base_branch_sync" ? { baseRef: "main" } : {}),
+				}),
+			).rejects.toThrow("暂停");
+		},
+	);
+	it.each([
+		{ name: "只有 task_started 与 compaction", options: { includeMessage: false } },
+		{ name: "正文不符", options: { text: "其他用户消息" } },
+		{ name: "重复正文", options: { duplicate: true } },
+		{ name: "原生元数据身份不符", options: { metadataSessionId: "different" } },
+	])("$name 保持 unknown，不产生补证或重投", async ({ options }) => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence(options);
+		const before = await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId));
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "unknown",
+			reasonCode: "native_prompt_acceptance_not_proven",
+		});
+		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(before);
+	});
+	it("实时分支已回退、无控制面或缺页均不复活历史记录", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		context.activeTurns.splice(1);
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "native_message_not_on_active_branch",
+		});
+		context.manager.getSummary().codexNativeSessionControlEndpoint = undefined;
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "unknown",
+			reasonCode: "native_control_unavailable",
+		});
+	});
+	it("核验中与核验后的显式停止均持久生效，新 service 不能凭旧补证恢复", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const independentStopper = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		const originalRequest = mocked.request.getMockImplementation();
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/loaded/list")
+				await independentStopper.pauseForExplicitStop(context.scope.workspaceId, "task");
+			return originalRequest?.(method, parameters);
+		});
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+		});
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "explicit_stop",
+		});
+	});
+	it("恢复后 completed 仍逐项校验真实 evidence 与本地 base 祖先，保存早先 blocked 历史", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.service.reportExecutionResult(context.scope, {
+			...context.request,
+			stage: "land",
+			outcome: "blocked",
+			reason: "等待补证",
+		});
+		expect((await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).status).toBe(
+			"recovered",
+		);
+		const commitSha = context.captured.receipt.worktree_head_commit_sha;
+		const land = { ...context.request, stage: "land" as const, outcome: "completed" as const, commitSha };
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow();
+		const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+		const evidencePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+		const evidence = JSON.stringify({
+			subject: {
+				head_oid: commitSha,
+				worktree_realpath: context.repo.repositoryPath,
+				git_common_dir_realpath: gitDirectory,
+			},
+			review: { run_id: "run", protocol_valid: true },
+		});
+		await mkdir(dirname(evidencePath), { recursive: true });
+		await writeFile(evidencePath, evidence);
+		await writeFile(`${evidencePath}.sha256`, "错误摘要");
+		await expect(context.service.reportExecutionResult(context.scope, land)).rejects.toThrow("摘要");
+		await writeFile(`${evidencePath}.sha256`, computeRvfTextSha256(evidence));
+		await context.service.reportExecutionResult(context.scope, land);
+		const base = { ...land, stage: "base_branch_sync" as const, baseRef: "main" };
+		await expect(context.service.reportExecutionResult(context.scope, { ...base, baseRef: "other" })).rejects.toThrow(
+			"base ref",
+		);
+		const completed = await context.service.reportExecutionResult(context.scope, base);
+		expect(completed.record.status).toBe("completed");
+		expect(completed.record.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual([
+			"blocked",
+			"completed",
+			"completed",
+		]);
+		expect((await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).status).toBe(
+			"already_recovered",
+		);
+	});
+	it("核验分页循环、端点换代、绑定错误和 handoff 改字节都保持拒绝", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		expect(
+			await context.service.reconcileLateNativePromptAcceptance(context.scope, {
+				...context.request,
+				runId: "wrong",
+			}),
+		).toMatchObject({ status: "blocked", reasonCode: "binding_mismatch" });
+		mocked.request.mockResolvedValue({ data: ["restored"], nextCursor: "same-cursor" });
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "unknown",
+			reasonCode: "native_control_unavailable",
+		});
+		await writeFile(context.record.handoffPath ?? "", "已经改变的 handoff");
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "unknown",
+			reasonCode: "completion_evidence_unavailable",
+		});
+	});
+	it("38fd3 正常确认对照：confirmed 与 completed 不进入补证，重复扫描不再 fork 或投递", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		const request = { ...context.binding, dryRun: false };
+		const recordsBefore = await context.service.status(context.scope, { taskId: "task" });
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "pause_reason_not_eligible",
+		});
+		expect(await context.service.status(context.scope, { taskId: "task" })).toEqual(recordsBefore);
+		await context.service.reportExecutionResult(context.scope, context.land);
+		const completed = await context.service.reportExecutionResult(context.scope, context.baseBranchSync);
+		const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		const forkCount = mocked.request.mock.calls.filter((call) => call[0] === "thread/fork").length;
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await restarted.sweepPendingCloseoutsOnce();
+		await restarted.sweepPendingCloseoutsOnce();
+		expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "pause_reason_not_eligible",
+		});
+		expect(completed.record.lateNativePromptAcceptanceRecoveryReceipt).toBeUndefined();
+		expect((await restarted.status(context.scope, { taskId: "task" })).records[0]).toEqual(completed.record);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(enqueueCount);
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(forkCount);
+	});
+});
 
 async function setupExecutionResultInterleavingEvidence() {
 	const context = await setup();
