@@ -15,6 +15,12 @@ import type {
 } from "./api-contract";
 
 export interface QueuedTaskPromptDeliverySettlement {
+	// 同 key 的零写入等待可跨 runtime 接管；旧尝试不得结算新托管者的队列条目。
+	expectedHandedToTransportAttemptOwnership?: {
+		dispatchIdempotencyKey: string;
+		custodianRuntimeProcessInstanceId: string | null | undefined;
+		claimedForSessionIncarnationId: string | null;
+	};
 	// delivered = 落终态；retryable_failure = 回队首等下一次机会；terminal_failure = 落 settled_failed 并保留可见；
 	// cancelled = 用户在它已经交给 transport 之后取消、且 transport 确认拦下了（cancelled_before_delivery）。
 	// 最后这一档必须与失败分开：那是用户自己要的结果，显示成「发送失败 · 重新排队？」是在反问他。
@@ -74,6 +80,7 @@ const DELIVERED_TERMINAL_DELIVERY_STATUSES: ReadonlySet<TerminalDeliveryStatus> 
 export function routeQueuedTaskPromptDeliveryTerminalOutcome(receipt: {
 	status: TerminalDeliveryStatus;
 	reason: TerminalDeliveryFailureReason | null;
+	failureNote?: string;
 }): QueuedTaskPromptDeliverySettlement {
 	if (DELIVERED_TERMINAL_DELIVERY_STATUSES.has(receipt.status)) {
 		return { outcome: "delivered", failureNote: null };
@@ -92,17 +99,19 @@ export function routeQueuedTaskPromptDeliveryTerminalOutcome(receipt: {
 	if (reason !== null) {
 		const retryableNote = RETRYABLE_QUEUED_PROMPT_TERMINAL_DELIVERY_FAILURE_NOTES[reason];
 		if (retryableNote !== undefined) {
-			return { outcome: "retryable_failure", failureNote: retryableNote };
+			return { outcome: "retryable_failure", failureNote: receipt.failureNote ?? retryableNote };
 		}
 		const terminalNote = TERMINAL_QUEUED_PROMPT_TERMINAL_DELIVERY_FAILURE_NOTES[reason];
 		if (terminalNote !== undefined) {
-			return { outcome: "terminal_failure", failureNote: terminalNote };
+			return { outcome: "terminal_failure", failureNote: receipt.failureNote ?? terminalNote };
 		}
 	}
 	// delivery_failed 却不带原因、或将来契约新增了一个这里还不认识的原因：不知道有没有送到 ⇒ 交给人。
 	return {
 		outcome: "terminal_failure",
-		failureNote: `The delivery failed${reason === null ? "" : ` (${reason})`} and it is unclear whether the prompt reached the agent.`,
+		failureNote:
+			receipt.failureNote ??
+			`The delivery failed${reason === null ? "" : ` (${reason})`} and it is unclear whether the prompt reached the agent.`,
 	};
 }
 

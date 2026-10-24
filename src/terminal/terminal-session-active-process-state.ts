@@ -185,6 +185,7 @@ export interface PendingProgrammaticDeliveryReceipt {
 export interface TaskChatInputDeliveryOutcome {
 	status: TerminalDeliveryStatus;
 	reason: TerminalDeliveryFailureReason | null;
+	failureNote?: string;
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 }
 
