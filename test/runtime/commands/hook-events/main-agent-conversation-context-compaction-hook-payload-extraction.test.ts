@@ -42,4 +42,12 @@ describe("extractMainAgentConversationContextCompactionFactsFromHookPayload", ()
 		expect(extract("activity", { trigger: "manual", estimatedTokenCount: 1 })).toEqual({});
 		expect(extract(COMPACTION, null)).toEqual({});
 	});
+	it("PreCompact 只提供自动阶段和原生 turn 绑定，不推导正文接受", () => {
+		expect(
+			extract("main_agent_conversation_context_compaction_started", { trigger: "auto", turn_id: "turn-1" }),
+		).toEqual({
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction",
+			mainAgentConversationContextCompactionNativeTurnId: "turn-1",
+		});
+	});
 });

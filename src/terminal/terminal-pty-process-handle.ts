@@ -14,6 +14,8 @@ export interface TerminalPtyProcessExitEvent {
 
 export interface TerminalPtyProcessHandle {
 	readonly pid: number;
+	// hosted 会话的真实创建时间来自 host；旧句柄与进程内 PTY 缺省时由调用方沿用本地时间。
+	readonly hostedTerminalPtySessionSpawnedAtEpochMs?: number;
 	write(data: string | Buffer): void;
 	resize(cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): void;
 	// 流控：暂停 / 恢复读取 PTY 输出（背压一路传到 agent 的写阻塞）。

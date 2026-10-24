@@ -1,3 +1,4 @@
+import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
 // `kanban task message --deliver-when-agent-idle` 在 runtime 侧的两个入口：程序化入队、以及排队期间的取消。
 //
 // 跨仓契约：~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md
@@ -264,7 +265,12 @@ export async function cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
 					entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey === idempotencyKey,
 			) ?? null;
 	const before = findEntry(await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId));
-	if (before === null || (before.deliveryState !== "queued" && before.deliveryState !== "claimed_for_dispatch")) {
+	if (
+		before === null ||
+		(before.deliveryState !== "queued" &&
+			before.deliveryState !== "claimed_for_dispatch" &&
+			!isNativeIndependentUserTurnSubmissionKnownNotStarted(before))
+	) {
 		return null;
 	}
 	const snapshot = await mutateWorkspaceQueuedTaskPromptDeliveries(

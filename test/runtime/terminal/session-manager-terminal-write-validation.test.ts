@@ -234,12 +234,20 @@ describe("程序化终端投递的实际写入前核验", () => {
 					terminalWriteValidationPhase === "resend_submit" ? 1 : 0,
 				);
 				expect(terminalDeliveryOutcomes).toEqual([
-					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+					{
+						status: "delivery_failed",
+						reason: nativeIndependentUserTurnDeliveryFailureReason,
+						failureNote: "测试原生独立回合门禁拒绝写入",
+					},
 				]);
 				await vi.advanceTimersByTimeAsync(10_000);
 				expect(writeToIsolatedTerminal).toHaveBeenCalledTimes(expectedTerminalWriteCount);
 				expect(terminalDeliveryOutcomes).toEqual([
-					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+					{
+						status: "delivery_failed",
+						reason: nativeIndependentUserTurnDeliveryFailureReason,
+						failureNote: "测试原生独立回合门禁拒绝写入",
+					},
 				]);
 			},
 		);

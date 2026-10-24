@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
+import { delimiter, isAbsolute, join } from "node:path";
+import { promisify } from "node:util";
 
 import type { RuntimeHookEvent } from "../core/api-contract";
 import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
@@ -13,6 +17,7 @@ const CODEX_HOOK_TIMEOUT_SECONDS = 8;
 type CodexHookConfigEvent =
 	| "SessionStart"
 	| "PermissionRequest"
+	| "PreCompact"
 	| "PostCompact"
 	| "PostToolUse"
 	| "PreToolUse"
@@ -132,6 +137,8 @@ function codexHookEventKeyLabel(eventName: CodexHookConfigEvent): string {
 		// 信任哈希就对不上，Codex 会弹 hooks 审批对话框并吞掉终端输入。
 		case "PostCompact":
 			return "post_compact";
+		case "PreCompact":
+			return "pre_compact";
 		case "PostToolUse":
 			return "post_tool_use";
 		case "PreToolUse":
@@ -195,7 +202,49 @@ function buildCodexHookTrustStateConfigValue(entries: CodexHookTrustEntry[]): st
 	return `{${states.join(",")}}`;
 }
 
-export function configureCodexHooks(args: string[]): void {
+const readCodexVersion = promisify(execFile);
+const verifiedCompactionHookCapabilityByBinary = new Map<string, Promise<boolean>>();
+
+// 仅对真实隔离探针验收过的版本配置开始 hook。未知/旧版本保留原启动与 15 秒策略。
+// EXPERIMENT_NODE: 新版本须先重跑原生压缩探针，再扩展已验收版本集合，不能仅按版本号大小猜测。
+export async function supportsVerifiedCodexAutomaticCompactionPhaseHooks(
+	binary: string,
+	environment: NodeJS.ProcessEnv,
+): Promise<boolean> {
+	let executableIdentity: string | null = null;
+	for (const candidate of isAbsolute(binary)
+		? [binary]
+		: (environment.PATH ?? "").split(delimiter).map((directory) => join(directory, binary))) {
+		try {
+			const path = await realpath(candidate);
+			const metadata = await stat(path);
+			executableIdentity = JSON.stringify([path, metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs]);
+			break;
+		} catch {
+			/* 不支持或不可定位的二进制不配置新事件。 */
+		}
+	}
+	if (!executableIdentity) return false;
+	const key = executableIdentity;
+	let probe = verifiedCompactionHookCapabilityByBinary.get(key);
+	if (!probe) {
+		probe = readCodexVersion(binary, ["--version"], { env: environment, timeout: 3_000, maxBuffer: 4_096 })
+			.then(({ stdout }) => stdout.trim() === "codex-cli 0.164.0")
+			.catch(() => false);
+		verifiedCompactionHookCapabilityByBinary.set(key, probe);
+		void probe.then((supported) => {
+			if (!supported) verifiedCompactionHookCapabilityByBinary.delete(key);
+		});
+	}
+	return probe;
+}
+
+export function configureCodexHooks(args: string[], enableVerifiedAutomaticCompactionPhaseHooks = false): boolean {
+	const enablesCompactionPhaseHooks =
+		enableVerifiedAutomaticCompactionPhaseHooks &&
+		!hasCodexConfigOverride(args, "hooks.state") &&
+		!hasCodexConfigOverride(args, "hooks.PreCompact") &&
+		!hasCodexConfigOverride(args, "hooks.PostCompact");
 	const inProgressHook: CodexHookConfig = {
 		eventName: "UserPromptSubmit",
 		command: buildCodexHookCommand("to_in_progress"),
@@ -229,6 +278,10 @@ export function configureCodexHooks(args: string[]): void {
 		eventName: "PostCompact",
 		command: buildCodexHookCommand("main_agent_conversation_context_compaction_completed"),
 	};
+	const preCompactHook: CodexHookConfig = {
+		eventName: "PreCompact",
+		command: buildCodexHookCommand("main_agent_conversation_context_compaction_started"),
+	};
 	const trustStateConfigValue = buildCodexHookTrustStateConfigValue(
 		[
 			sessionStartHook,
@@ -238,6 +291,7 @@ export function configureCodexHooks(args: string[]): void {
 			preToolUseActivityHook,
 			postToolUseActivityHook,
 			postCompactHook,
+			...(enablesCompactionPhaseHooks ? [preCompactHook] : []),
 		].map(buildCodexHookTrustEntry),
 	);
 
@@ -274,4 +328,11 @@ export function configureCodexHooks(args: string[]): void {
 		"hooks.PostCompact",
 		buildCodexHookConfigValue(postCompactHook.command),
 	);
+	if (enablesCompactionPhaseHooks)
+		addCodexConfigOverrideBeforeSubcommand(
+			args,
+			"hooks.PreCompact",
+			buildCodexHookConfigValue(preCompactHook.command),
+		);
+	return enablesCompactionPhaseHooks;
 }

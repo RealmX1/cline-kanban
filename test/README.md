@@ -105,6 +105,8 @@ npm run test:guarded -- --project runtime-integration test/integration/rvf-decis
 
 CLI 构建目录不能指向在线实例的共享 `dist` 软链接。测试结束或失败时都会回收自身启动的子进程，并把指定目录中的证据持久保留。
 
+额外设置 `KANBAN_RVF_SESSION_DELIVERY_INJECT_PRE_SUBMISSION_QUERY_TIMEOUT=1` 可在同一隔离链路中丢弃一次二次完整回合查询响应，验证真实超时后的恢复、唯一原生提交以及先于提交持久化的边界；不向常驻实例注入故障。
+
 - `npm run test:policy`：只运行 Git 测试安全策略。
 - `npm run test:guarded -- <vitest args>`：在 policy 与宿主仓 canary 下运行指定 Vitest 参数。
 - `npm run test:precommit`：运行 `precommit-safe`。
