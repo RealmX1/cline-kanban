@@ -26,6 +26,7 @@ import {
 	Archive,
 	Check,
 	ClipboardCheck,
+	Clock,
 	Copy,
 	Eye,
 	FileText,
@@ -495,6 +496,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 		: null;
 	const isConversationProgressApproximate =
 		lastEffectiveAgentConversationActivityObservation?.evidenceKind === "terminal_output_heuristic_classification";
+	const taskCreatedAtTooltipContent = useMemo(
+		() => `创建于 · ${new Date(card.createdAt).toLocaleString()}`,
+		[card.createdAt],
+	);
 	const lastAgentConversationUserHandoffTooltipContent = useMemo(
 		() =>
 			lastAgentConversationUserHandoffAtMs != null
@@ -838,6 +843,19 @@ export const TaskCardBody = memo(function TaskCardBody(
 	) : null;
 	const elapsedTimePills = (
 		<>
+			<Tooltip content={revealHoverActionTooltip(taskCreatedAtTooltipContent)}>
+				<span
+					data-task-created-at-pill=""
+					title={taskCreatedAtTooltipContent}
+					className={cn(
+						"inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[10px] leading-none",
+						isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+					)}
+				>
+					<Clock size={8} className="shrink-0" />
+					{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
+				</span>
+			</Tooltip>
 			{columnId === "backlog" ? (
 				<BacklogTaskDescriptionLastUpdatedPill
 					card={card}
