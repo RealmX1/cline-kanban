@@ -19,6 +19,16 @@ function createCodexOpLine(payload: Record<string, unknown>): string {
 }
 
 describe("parseCodexEventLine", () => {
+	it("普通 Codex rewind 只产生核验候选，不伪装成新一轮提交或完成", () => {
+		const event = parseCodexEventLine(
+			createCodexLogLine({ type: "thread_rolled_back", num_turns: 1 }),
+			createCodexWatcherState(),
+		);
+		expect(event).toMatchObject({
+			event: "activity",
+			metadata: { source: "codex", hookEventName: "thread_rolled_back" },
+		});
+	});
 	it("keeps full codex activity text for long agent and final messages", () => {
 		const state = createCodexWatcherState();
 		const longAgentMessage =

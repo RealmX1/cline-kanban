@@ -57,6 +57,10 @@ import type {
 } from "../core/api-contract";
 import { runtimeTaskSessionSummarySchema } from "../core/api-contract";
 import {
+	type CodexNativeDirectInputReadinessObservation,
+	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
+} from "../core/codex-native-direct-input-readiness";
+import {
 	applySessionFacets,
 	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
 	deriveSessionFacetsFromLegacyState,
@@ -3953,6 +3957,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
+		pendingUserDecisionKindBeforeProcessRestart?: RuntimeTaskSessionUserTurnKind | null,
 	): Promise<RuntimeTaskSessionSummary> {
 		const { taskSessionStartRequestId, taskSessionStartRequestStartedAtIso } = arrival;
 		// 拿到闸门的时刻。与「请求到达时刻」分开记是有意的，见 PtySessionSpawnAttribution 上的注释：
@@ -4478,12 +4483,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			: "hook";
 		const startedAt = now();
 		// 恢复已有对话只重建运行时，不能改变仍待用户处理的决策种类。reviewReason="attention" 是
-		// 恢复期的通用运行时成因，不足以反推出 question / permission；若让 facet 构造器自行派生，
-		// 两者都会降级成 needs_input，下一次服务重启的空快照便失去安全自动恢复资格。
-		const userTurnKindBeforeAgentConversationRestoration = resolveSessionFacets(entry.summary).userTurnKind;
+		// 恢复期的通用运行时成因不足以反推真实模态；进程重启还须保留 stop 改写 facet 之前的快照。
+		const userTurnKindBeforeAgentConversationRestoration =
+			pendingUserDecisionKindBeforeProcessRestart ?? resolveSessionFacets(entry.summary).userTurnKind;
 		const pendingUserDecisionKindPreservedAcrossRestoration =
-			request.resumeFromTrash === true &&
+			startsWithoutSendingNewPrompt &&
 			(userTurnKindBeforeAgentConversationRestoration === "question" ||
+				userTurnKindBeforeAgentConversationRestoration === "plan_review" ||
 				userTurnKindBeforeAgentConversationRestoration === "permission")
 				? userTurnKindBeforeAgentConversationRestoration
 				: undefined;
@@ -5626,6 +5632,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
+	reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		observation: CodexNativeDirectInputReadinessObservation,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry?.active ||
+			!canReconcileCodexNeedsInputWithNativeDirectInputReadiness(summaryBeforeRead, entry.summary, observation)
+		) {
+			return entry ? cloneSummary(entry.summary) : null;
+		}
+		const summary = updateSummary(entry, {
+			...buildTerminalFacetPatch(entry.summary, "awaiting_review", {
+				reviewReason: "hook",
+				pid: entry.summary.pid,
+				agentId: entry.summary.agentId,
+			}),
+			reviewReason: "hook",
+		});
+		// user→user 的分类修正不制造回合或接受证据；历史、回收锚点及恢复守卫由原漏斗保留。
+		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	transitionToReview(
 		taskId: string,
 		reason: RuntimeTaskSessionReviewReason,
@@ -6635,11 +6667,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 				);
 			}
 		}
+		const summaryBeforeProcessStop = this.entries.get(request.taskId)?.summary;
+		const pendingUserDecisionKindBeforeProcessRestart = summaryBeforeProcessStop
+			? resolveSessionFacets(summaryBeforeProcessStop).userTurnKind
+			: undefined;
 		await this.forceStopTaskSession(request.taskId, 2_000);
 		const summary = await this.startTaskSessionHoldingPerTaskStartExclusivity(
 			request,
 			taskSessionStartOrigin,
 			arrival,
+			pendingUserDecisionKindBeforeProcessRestart,
 		);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach

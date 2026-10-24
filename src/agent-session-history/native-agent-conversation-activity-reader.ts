@@ -6,6 +6,10 @@ import type {
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import {
+	type CodexNativeDirectInputReadinessObservation,
+	isCodexNeedsInputNativeReconciliationCandidate,
+} from "../core/codex-native-direct-input-readiness";
 import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import { parseTranscriptJsonRecord, readBoundedJsonLines } from "./bounded-agent-transcript-reader";
 import {
@@ -39,8 +43,9 @@ export type NativeAgentConversationActivityReadCursor =
 	  };
 export interface NativeAgentConversationActivityReadResult {
 	events: NativeAgentConversationTranscriptActivityObservation[];
-	cursor: NativeAgentConversationActivityReadCursor;
+	cursor: NativeAgentConversationActivityReadCursor | null;
 	moreAppendedTranscriptBytesRemain?: boolean;
+	codexNativeDirectInputReadiness?: CodexNativeDirectInputReadinessObservation;
 }
 export interface ReadNativeAgentConversationActivityInput {
 	workspaceId: string;
@@ -172,6 +177,28 @@ async function readCurrentCodexNativeActivity(
 				.object({ data: z.array(z.string()), nextCursor: z.string().nullable().optional() })
 				.parse(await port.request("thread/loaded/list", { cursor: null, limit: 100 }));
 			if (!loaded.data.includes(identity.nativeSessionId)) return null;
+			const readDirectInputReadiness = async (): Promise<CodexNativeDirectInputReadinessObservation | undefined> => {
+				if (!isCodexNeedsInputNativeReconciliationCandidate(summary)) return undefined;
+				const result = z
+					.object({
+						thread: z.object({
+							id: z.string(),
+							status: z.object({ type: z.string() }),
+							canAcceptDirectInput: z.boolean().optional(),
+						}),
+					})
+					.safeParse(
+						await port.request("thread/read", { threadId: identity.nativeSessionId, includeTurns: false }),
+					);
+				if (
+					!result.success ||
+					result.data.thread.id !== identity.nativeSessionId ||
+					result.data.thread.status.type !== "idle" ||
+					result.data.thread.canAcceptDirectInput !== true
+				)
+					return undefined;
+				return { nativeSessionId: identity.nativeSessionId, observedAtMs: input.observedAtMs };
+			};
 			const page = nativeTurnPageSchema.parse(
 				await port.request("thread/turns/list", {
 					threadId: identity.nativeSessionId,
@@ -193,8 +220,17 @@ async function readCurrentCodexNativeActivity(
 			if (
 				eligibleTurns.reduce((count, turn) => count + turn.items.length, 0) >
 				MAX_REMEMBERED_NATIVE_ACTIVITY_EVENT_IDS
-			)
-				return null;
+			) {
+				const readiness = await readDirectInputReadiness();
+				// 独立证明输入就绪不初始化活动基线；超预算时保留原游标，首次读取仍为 null。
+				return readiness
+					? {
+							events: [],
+							cursor,
+							codexNativeDirectInputReadiness: readiness,
+						}
+					: null;
+			}
 			const events: NativeAgentConversationTranscriptActivityObservation[] = [];
 			for (const turn of eligibleTurns) {
 				const firstUserInputIndex = turn.items.findIndex((item) => item.type === "userMessage");
@@ -278,6 +314,7 @@ async function readCurrentCodexNativeActivity(
 			}
 			return {
 				events,
+				codexNativeDirectInputReadiness: await readDirectInputReadiness(),
 				cursor: {
 					transport: "codex_control",
 					predecessorTurnId: turns.at(-1)?.id ?? null,
