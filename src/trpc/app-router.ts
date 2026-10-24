@@ -455,6 +455,8 @@ import {
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema,
 	rvfReviewStartBoundaryObservationRequestSchema,
 	rvfReviewStartBoundaryObservationResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
@@ -646,6 +648,10 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		reconcileLateNativePromptAcceptance?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
+		) => Promise<z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema>>;
 		reportExecutionResult?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
@@ -1632,6 +1638,14 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.rvfAutomaticCloseoutApi)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
+			}),
+		reconcileRvfAutomaticCloseoutLateNativePromptAcceptance: workspaceProcedure
+			.input(rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema)
+			.output(rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
 			}),
 		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
 			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)

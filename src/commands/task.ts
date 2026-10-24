@@ -30,6 +30,7 @@ import {
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskWorktreeModeSchema,
 	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
 } from "../core/api-contract";
 import {
 	mergeAbortSignals,
@@ -2216,6 +2217,41 @@ export function registerTaskCommand(program: Command): void {
 				}),
 			);
 		});
+	task
+		.command("reconcile-rvf-automatic-closeout-late-native-prompt-acceptance")
+		.description("核验迟到的原生收尾正文，保留失败回执并恢复本轮收尾资格；不重投或回退会话。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "本轮 RVF 决策 token。")
+		.requiredOption("--run-id <id>", "已登记的 RVF run ID。")
+		.requiredOption("--handoff-sha256 <sha256>", "已登记的 handoff SHA256。")
+		.option("--dry-run", "仅核验资格，不写入补证或改变收尾状态。")
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				decisionToken: string;
+				runId: string;
+				handoffSha256: string;
+				dryRun?: boolean;
+			}) => {
+				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+					autoCreateIfMissing: false,
+				});
+				const request = rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema.parse({
+					taskId: options.taskId,
+					decisionToken: options.decisionToken,
+					runId: options.runId,
+					handoffSha256: options.handoffSha256,
+					dryRun: options.dryRun ?? false,
+				});
+				const result = await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.reconcileRvfAutomaticCloseoutLateNativePromptAcceptance.mutate(request);
+				printJson(result);
+				if (result.status === "unknown" || result.status === "blocked") process.exitCode = 12;
+			},
+		);
 	task
 		.command("report-rvf-automatic-closeout-execution-result")
 		.description("登记自动收尾的 land 或本地 base 同步结果；成功须由服务端核对真实 Git 与 run 证据。")
