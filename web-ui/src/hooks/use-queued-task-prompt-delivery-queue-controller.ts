@@ -10,7 +10,12 @@ import { useCallback } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
 import {
+	buildQueuedTaskPromptDeliveryDebugReference,
+	type QueuedTaskPromptDeliveryDebugReference,
+} from "@/runtime/queued-task-prompt-delivery-debug-reference";
+import {
 	fetchQueuedTaskPromptDeliveryFullText,
+	fetchTaskPromptDeliveryQueue,
 	mutateTaskPromptDeliveryQueue,
 } from "@/runtime/queued-task-prompt-delivery-query";
 import {
@@ -46,6 +51,9 @@ export interface QueuedTaskPromptDeliveryQueueController {
 	// 返回服务端是否确认落盘：重启提醒只在它为 true 时才把条目记为「已提醒」（失败要能重试）。
 	reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: (queueEntryIds: readonly string[]) => Promise<boolean>;
 	fetchFullText: (queueEntryId: string) => Promise<string | null>;
+	fetchDebugReference: (
+		projection: RuntimeQueuedTaskPromptDeliveryProjection,
+	) => Promise<QueuedTaskPromptDeliveryDebugReference>;
 }
 
 function createQueueEntryId(): string {
@@ -227,6 +235,27 @@ export function useQueuedTaskPromptDeliveryQueueController(
 		[workspaceId, taskId],
 	);
 
+	const fetchDebugReference = useCallback(
+		async (projection: RuntimeQueuedTaskPromptDeliveryProjection) => {
+			let queueReadResponse: Awaited<ReturnType<typeof fetchTaskPromptDeliveryQueue>> | null = null;
+			if (workspaceId && projection.taskId === taskId) {
+				try {
+					queueReadResponse = await fetchTaskPromptDeliveryQueue(workspaceId, AbortSignal.timeout(5_000));
+				} catch {
+					// 读失败不阻止复制已知引用；构造器会标明缺口，展开时可重新读取。
+				}
+			}
+			return buildQueuedTaskPromptDeliveryDebugReference({
+				workspaceId,
+				workspaceTaskId,
+				projection,
+				queueReadResponse,
+				capturedAtEpochMs: Date.now(),
+			});
+		},
+		[workspaceId, workspaceTaskId, taskId],
+	);
+
 	return {
 		projections,
 		enqueuePromptForDeliveryAfterCurrentTurn,
@@ -237,5 +266,6 @@ export function useQueuedTaskPromptDeliveryQueueController(
 		retrySettledFailedQueuedPromptDelivery,
 		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
 		fetchFullText,
+		fetchDebugReference,
 	};
 }

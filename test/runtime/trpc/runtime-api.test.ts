@@ -7082,6 +7082,14 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 		const read = await api.getTaskPromptDeliveryQueue(scope as never, {});
 		expect(read.queue?.entriesByTaskId["task-1"]?.map((entry) => entry.text)).toEqual(["跑测试"]);
 		expect(read.projectedEntriesByTaskId).toEqual({});
+		expect(read).toMatchObject({
+			queuedTaskPromptDeliveryDebugReferenceContext: {
+				workspaceId: scope.workspaceId,
+				workspaceProjectPath: scope.workspacePath,
+				queuedTaskPromptDeliveriesFilePath: `/tmp/kanban-workspaces/${scope.workspaceId}/queued-task-prompt-deliveries.json`,
+				taskMessageInjectionLedgerFilePath: `/tmp/kanban-workspaces/${scope.workspaceId}/task-message-injections.json`,
+			},
+		});
 	});
 
 	it("空正文拒绝入队", async () => {

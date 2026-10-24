@@ -35,6 +35,7 @@ import {
 	type TaskConversationSessionSharingExecutionWorkingDirectory,
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
+	CodexNativePromptDeliveryEvidence,
 	RuntimeAgentCurrentWorkPhaseGoal,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationHeldByHarnessBackgroundSessionObservation,
@@ -136,11 +137,13 @@ import {
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
 import { inspectCodexNativeConnectionRetryContinuationReadiness } from "./codex-native-connection-retry-continuation-readiness";
+import { deliverCodexNativePromptWithoutChangingComposer } from "./codex-native-prompt-delivery";
 import {
 	hasCodexInteractivePrompt,
 	hasCodexStartupPromptReady,
 	hasCodexUnsubmittedProgrammaticPrompt,
 } from "./codex-readiness";
+import { readCodexTerminalComposerOccupancy } from "./codex-terminal-composer-occupancy";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
 import {
 	assignCursorAgentChatIdBeforeLaunch,
@@ -471,6 +474,7 @@ interface ProgrammaticDeliveryInputBoxContentionReading {
 interface TaskChatInputDeliveryAttemptPlan {
 	taskId: string;
 	text: string;
+	codexNativeClientUserMessageId: string;
 	// 等 TUI 就绪的绝对截止时刻；两条让路预算都以它为起点再加各自的上限。
 	deadlineAt: number;
 	// 调度时捕获的投递代际；写入 / 重排前复查，被更晚的投递取代者直接放弃。
@@ -538,12 +542,17 @@ function settleProgrammaticDeliveryReceipt(
 	receipt: PendingProgrammaticDeliveryReceipt | null,
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
 ): void {
 	if (!receipt || receipt.settled) {
 		return;
 	}
 	receipt.settled = true;
-	receipt.observer({ status, reason });
+	receipt.observer({
+		status,
+		reason,
+		...(codexNativePromptDeliveryEvidence ? { codexNativePromptDeliveryEvidence } : {}),
+	});
 }
 
 // 会话已经不在了 / 这条投递再也不会去争那个框了：挂起可见性必须跟着消失，否则卡片与终端上方会一直
@@ -563,8 +572,14 @@ function settleActiveProgrammaticDelivery(
 	active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null },
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
 ): void {
-	settleProgrammaticDeliveryReceipt(active.programmaticDeliveryReceipt, status, reason);
+	settleProgrammaticDeliveryReceipt(
+		active.programmaticDeliveryReceipt,
+		status,
+		reason,
+		codexNativePromptDeliveryEvidence,
+	);
 	active.programmaticDeliveryReceipt = null;
 }
 
@@ -573,6 +588,7 @@ function settleActiveProgrammaticDelivery(
 // 确认通道），那条链的成败与这条尚未写入的投递毫无关系——替它落定就是撒谎，而且是双向的：
 // 判成功则「回执说送达、文本从没写过」，判失败则「回执说失败、文本随后照样送达并被重复投递」。
 // 这条投递此刻还活着（定时器与代际都没动），它自己的出口稍后会给出真正的结论。
+// Codex 原生接受确认也不属于 PTY 确认链，不能在这里提前结算或丢掉其原生证据。
 function settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
 	active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null },
 	status: TerminalDeliveryStatus,
@@ -1153,6 +1169,7 @@ function takeLastLines(text: string, lineCount: number): string {
 }
 
 export interface TerminalSessionManagerOptions {
+	deliverCodexNativePromptWithoutChangingComposer?: typeof deliverCodexNativePromptWithoutChangingComposer;
 	// 真实运行时由 workspace registry 启用；裸 manager 可继续作为不访问用户配置的进程编排器使用。
 	enableManagedCodexConversationStorageForNewSessions?: boolean;
 	// 由 runtime composition 注入；受控宿主与 TUI 一起交给既有 PTY host，跨 runtime 重启继续存活。
@@ -1782,6 +1799,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const plan: TaskChatInputDeliveryAttemptPlan = {
 			taskId,
 			text,
+			codexNativeClientUserMessageId: randomUUID(),
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
@@ -1822,7 +1840,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!active || !receipt || receipt.idempotencyKey !== idempotencyKey) {
 			return "no_pending_delivery";
 		}
-		if (receipt.phase === "awaiting_submit_confirmation") {
+		if (receipt.phase !== "awaiting_readiness") {
 			return "already_delivered";
 		}
 		clearTaskChatInputDeliveryTimer(active);
@@ -1842,8 +1860,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 它可以等下一个 turn 边沿，而 RVF 的收敛承诺等不了。所以由排队侧读这个访问器主动避让，而不是
 	// 反过来把单飞槽改成 FIFO（那要动代际语义、确认链提升时机与全部 teardown 点）。
 	//
-	// 两个 phase 都算「在途」：awaiting_readiness 还没写进 PTY，awaiting_submit_confirmation 已经写了、
-	// 正在等提交确认——后者更不能插队，此刻框里躺着别人的文本。
+	// 三个 phase 都算「在途」：awaiting_readiness 尚未交给执行通道，另两个分别等待 PTY 提交确认
+	// 或 Codex 原生接受确认；单飞槽在确认完成前均不能被排队 prompt 抢走。
 	hasPendingProgrammaticTaskChatInputDelivery(taskId: string): boolean {
 		const receipt = this.entries.get(taskId)?.active?.programmaticDeliveryReceipt ?? null;
 		return receipt !== null && !receipt.settled;
@@ -1913,6 +1931,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
 			return;
 		}
+		if (
+			currentEntry.summary.agentId === "codex" &&
+			!plan.requiresCodexStartupPromptReady &&
+			currentActive.deferredStartupPromptText === null &&
+			!text.trimStart().startsWith("/") &&
+			(await this.tryDeliverCodexNativePromptPreservingComposer(plan, currentEntry, currentActive))
+		)
+			return;
 		// deferred-startup 仍待发 ⇒ 这条会话连启动 prompt 都还没送出去，绝不能插到它前面：与「尚未就绪」
 		// 同等对待（旧实现把它混在 A1 让路里，语义上一直是「还不能写」而不是「在给人让路」）。
 		const readyToWriteIntoInputBox = readiness !== null && currentActive.deferredStartupPromptText === null;
@@ -1956,6 +1982,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		if (activeAfterContentionRead.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		if (
+			entryAfterContentionRead.summary.agentId === "codex" &&
+			contention?.verdict !== "input_box_clear_for_programmatic_delivery"
+		) {
+			// Codex 没有 Claude 的 Ctrl+S 暂存语义；回退只能等确证空框，不能自动抢占草稿。
+			await this.holdOrPreemptContendedTerminalInputBox(
+				{ ...plan, mayAutoStashAbsentHumanInputBox: false },
+				entryAfterContentionRead,
+				currentActive,
+				contention ?? {
+					verdict: "input_box_unreadable_while_input_side_tracking_is_blind",
+					unrecoverablePasteCount: 0,
+				},
+			);
 			return;
 		}
 		if (contention !== null && contention.verdict !== "input_box_clear_for_programmatic_delivery") {
@@ -2031,24 +2073,107 @@ export class TerminalSessionManager implements TerminalSessionService {
 		active.taskChatInputDeliveryTimer = timer;
 	}
 
-	// 争用分层：框非空时决定「挂起可见」还是「自动暂存抢占」，并在预算耗尽时诚实收尾。
-	//
-	// | 开关 | 人在场 | 人不在场 |
-	// | auto（默认） | 挂起可见，机器不动框 | 自动暂存抢占：无损存进 Prompt Library → 清框 → 下一拍投递 |
-	// | never_preempt | 挂起可见 | 挂起可见（恒定不抢占） |
-	//
-	// 四条额外的降级（任一成立即退回挂起，绝不抢占）：
-	//   - 框里有还原不了的粘贴（unrecoverablePasteCount > 0）：抢占的前提是「无损」，赌不起。
-	//   - 屏上有字但击键跟踪佐证不了：那可能是 agent 自绘的 UI 文案，存进库就是把 agent 的话冒充成用户资产。
-	//   - 这一帧读不出框、输入侧又从未见过人类字节（input_box_unreadable_…）：对框里有什么一无所知，
-	//     既不能写（可能插进人类的行）也不能抢占（不知道要存什么进库）。
-	//   - 抢占执行者没给 / 执行失败：没存成就照写，等于用「写不丢」换掉了人类那半句话。
-	//
-	// 两条收尾路径（都落终态，不存在只挂不结的分支）：
-	//   - 让路预算耗尽（deadline + MAX_HUMAN_CONTENTION_YIELD_MS）：按人在不在场二选一报
-	//     human_terminal_contention_timeout / terminal_input_box_contended_but_unstashable。
-	//   - 抢占被**连续同一 outcome** 拒绝 MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING
-	//     次：撞的是同一堵墙，当场报 terminal_input_box_contended_but_unstashable，不再耗满预算。
+	// Codex 优先通过本代原生控制面提交独立消息，composer 与用户配置的外部编辑器均不参与投递。
+	private async tryDeliverCodexNativePromptPreservingComposer(
+		plan: TaskChatInputDeliveryAttemptPlan,
+		entry: SessionEntry,
+		active: ActiveProcessState,
+	): Promise<boolean> {
+		const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(plan.taskId);
+		const isCurrent = () =>
+			this.entries.get(plan.taskId)?.active === active && active.taskChatInputDeliveryGeneration === plan.generation;
+		if (!isCurrent()) return true;
+		const humanIsPresent =
+			active.lastUserInputAt !== null && now() - active.lastUserInputAt < HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS;
+		if (humanIsPresent && occupancy?.screenReadingSaysNonEmpty !== false && occupancy?.hasUncommittedInput) {
+			await this.holdOrPreemptContendedTerminalInputBox(
+				{ ...plan, mayAutoStashAbsentHumanInputBox: false },
+				entry,
+				active,
+				{ verdict: "human_uncommitted_input_present", unrecoverablePasteCount: occupancy.unrecoverablePasteCount },
+			);
+			return true;
+		}
+		const workspaceId = entry.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : null;
+		if (!workspaceId) return false;
+		const capturedSummary = cloneSummary(entry.summary);
+		const capturedNativeIdentity =
+			buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(capturedSummary);
+		const bindingStillMatches = () => {
+			const currentEntry = this.entries.get(plan.taskId);
+			return (
+				isCurrent() &&
+				currentEntry !== undefined &&
+				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(currentEntry.summary) ===
+					capturedNativeIdentity
+			);
+		};
+		const capturedHumanInputAt = active.lastUserInputAt;
+		const receipt = active.programmaticDeliveryReceipt;
+		const sender =
+			this.terminalSessionManagerOptions.deliverCodexNativePromptWithoutChangingComposer ??
+			deliverCodexNativePromptWithoutChangingComposer;
+		const result = await sender({
+			summary: capturedSummary,
+			workspaceId,
+			text: plan.text,
+			clientUserMessageId: plan.codexNativeClientUserMessageId,
+			isCurrent: bindingStillMatches,
+			beforeSubmit: async () => {
+				if (!bindingStillMatches() || active.lastUserInputAt !== capturedHumanInputAt) return false;
+				if (
+					plan.validateBeforeTerminalWrite &&
+					!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+						plan.taskId,
+						active,
+						plan.validateBeforeTerminalWrite,
+						bindingStillMatches,
+					))
+				)
+					return false;
+				return bindingStillMatches() && active.lastUserInputAt === capturedHumanInputAt;
+			},
+			onRequestAttempted: () => {
+				if (receipt) {
+					receipt.phase = "awaiting_codex_native_acceptance_confirmation";
+					receipt.firstSubmitCarriageReturnAtEpochMs = now();
+				}
+				this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			},
+		});
+		if (!isCurrent() || active.programmaticDeliveryReceipt !== receipt) return true;
+		if (!bindingStillMatches()) {
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "codex_native_prompt_delivery_unconfirmed");
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			return true;
+		}
+		if (result.status === "unavailable") return false;
+		if (result.status === "confirmed") {
+			clearResumeSubstantiveGuard(active);
+			this.disarmRestorationContinuationGuard(plan.taskId);
+			settleActiveProgrammaticDelivery(active, "delivered_and_submit_confirmed", null, result.evidence);
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			logTuiFreezeWarning(
+				`[tui-freeze] codex-native-prompt-delivered taskId=${plan.taskId} nativeTurnId=${result.evidence.nativeTurnId}`,
+			);
+			return true;
+		}
+		if (result.status === "unconfirmed") {
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "codex_native_prompt_delivery_unconfirmed");
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			return true;
+		}
+		if (now() >= plan.deadlineAt) {
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "terminal_prompt_readiness_timeout");
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+		} else this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+		return true;
+	}
+
+	// 争用分层：框非空时决定挂起或无损暂存，预算耗尽后落失败终态。Codex 调用方恒禁自动暂存。
+	// 人在场、正文读不全、无法佐证正文属于人类或缺少暂存执行者时，都只挂起，不修改输入框。
+	// 预算耗尽按人在不在场分别报 human_terminal_contention_timeout / terminal_input_box_contended_but_unstashable；
+	// 连续遇到同一确定性暂存失败时提前收尾，避免重复撞同一堵墙。
 	private async holdOrPreemptContendedTerminalInputBox(
 		plan: TaskChatInputDeliveryAttemptPlan,
 		entry: SessionEntry,
@@ -2222,12 +2347,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const inputSideByteTrackingHasEverObservedHumanBytes =
 			active.inputBoxOccupancyTracker.hasEverObservedHumanInputBytesFromWriteInput;
+		if (
+			this.entries.get(taskId)?.summary.agentId === "codex" &&
+			!occupancy.inputSideByteTrackingSaysNonEmpty &&
+			occupancy.screenReadingSaysNonEmpty !== false
+		) {
+			return {
+				verdict:
+					occupancy.screenReadingSaysNonEmpty === true
+						? "screen_text_uncorroborated_while_input_side_tracking_is_blind"
+						: "input_box_unreadable_while_input_side_tracking_is_blind",
+				unrecoverablePasteCount: occupancy.unrecoverablePasteCount,
+			};
+		}
 		// 两只眼睛此刻**同时**闭着的那一格：读屏这一帧给不出结论（screenReadingSaysNonEmpty === null），
 		// 而输入侧从未在这条 PTY 上见过人类字节 ⇒ 我们对这个框一无所知，「空」只是默认值而不是观测。
 		// 若此刻放行，经 tmux / 原生终端直连同一 PTY 打进去的半行就会被 paste 接在后面。
 		//
 		// 收紧只敢用在**曾经读得出框**的会话上（hasEverLocatedTerminalInputBoxOnScreen）。这一格必须
-		// 与「该 agent 根本没建模输入框语法」严格分开：codex / kimi / droid 的读屏恒为 null，把它们一并
+		// 与「该 agent 根本没建模输入框语法」严格分开：kimi / droid 的读屏恒为 null，把它们一并
 		// 判成争用，等于让它们的每一条程序化投递都挂到预算耗尽、100% 以
 		// human_terminal_contention_timeout 收场——比本轮修复前更差。对它们，输入侧字节跟踪本就是判空
 		// 的唯一且有效的主力，照旧放行。
@@ -5366,7 +5504,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	// 人类接管和模态出现都永久停止自动回车；可靠匹配接受已即时结算，仍待确认的原回执必须诚实失败。
+	// 人类接管和模态出现都永久停止 PTY 自动回车，其未确认回执诚实失败；原生请求继续独立只读核对。
 	private stopAutomaticSubmissionAndSettleInterruptedDelivery(
 		entry: SessionEntry,
 		_modalDecisionObserved: boolean,
@@ -5469,8 +5607,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
 		const mirror = entry.terminalStateMirror;
-		const inputBoxReading =
-			mirror && boxGrammar ? readTerminalInputBox(await mirror.getScreenSnapshot(), boxGrammar) : null;
+		const screen =
+			mirror && (boxGrammar || entry.summary.agentId === "codex")
+				? await mirror.getScreenSnapshot({ includeDimmedTextColumnRanges: entry.summary.agentId === "codex" })
+				: null;
+		const inputBoxReading = screen && boxGrammar ? readTerminalInputBox(screen, boxGrammar) : null;
+		const codexOccupancy =
+			screen && entry.summary.agentId === "codex" ? readCodexTerminalComposerOccupancy(screen) : "unreadable";
 		// 读屏要排进镜像的 operationQueue，这段 await 会跨越宏任务边界：期间 PTY 可能退出（exit handler
 		// 把 entry.active 置 null）、或被用户 refresh 换成新 incarnation（startTaskSession 把 active 与
 		// terminalStateMirror 一起换新）。所以在 await 前捕获 active，await 后复查它仍是当前这条命——
@@ -5494,13 +5637,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			now() - active.lastUserInputAt >= HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS;
 		if (
 			reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading(active.inputBoxOccupancyTracker, {
-				screenReadingLocatedInputBox: inputBoxReading !== null,
+				screenReadingLocatedInputBox: inputBoxReading !== null || codexOccupancy !== "unreadable",
 				// 判据是**一个字符都没有**，不是 trim 之后为空。读屏侧已经剥掉行尾空白、并丢掉尾部空逻辑行，
 				// 所以再 trim 一次等于把「用户只敲了空格 / 只按了几下 Shift+Enter」也认成空框——而那两种
 				// 情况下输入侧闩是对的（框里确实有他未提交的组合），复位之后程序化投递会把 paste 接在
 				// 那段空白后面一并提交掉。真正空的框读回来就是空串（terminal-input-box-reader 的
 				// 「空框读成空文本」用例钉着这一点，真机探针也复核过 textLength=0）。
-				screenReadingSaysInputBoxIsEmpty: inputBoxReading !== null && inputBoxReading.text.length === 0,
+				screenReadingSaysInputBoxIsEmpty:
+					(inputBoxReading !== null && inputBoxReading.text.length === 0) || codexOccupancy === "empty",
 				humanIsAbsentFromThisTerminal,
 			})
 		) {
@@ -5510,10 +5654,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 					`agentId=${entry.summary.agentId} reason=screen_reading_confirmed_empty_input_box`,
 			);
 		}
-		return resolveTerminalInputBoxOccupancy({
+		const occupancy = resolveTerminalInputBoxOccupancy({
 			trackerState: active.inputBoxOccupancyTracker,
 			inputBoxReading,
 		});
+		if (entry.summary.agentId !== "codex") return occupancy;
+		const screenReadingSaysNonEmpty = codexOccupancy === "unreadable" ? null : codexOccupancy === "nonempty";
+		return {
+			...occupancy,
+			screenReadingSaysNonEmpty,
+			hasUncommittedInput: occupancy.inputSideByteTrackingSaysNonEmpty || screenReadingSaysNonEmpty === true,
+		};
 	}
 
 	// 等终端字节短暂静默，好让最后几次 TUI 重绘落进镜像再读框。等不到就返回，调用方照常读——

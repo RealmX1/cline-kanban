@@ -51,6 +51,8 @@ const RETRYABLE_QUEUED_PROMPT_TERMINAL_DELIVERY_FAILURE_NOTES: Partial<Record<Te
 
 // 「可能已经送到了」的那几种：落 settled_failed、保留可见，重排由人决定。
 const TERMINAL_QUEUED_PROMPT_TERMINAL_DELIVERY_FAILURE_NOTES: Partial<Record<TerminalDeliveryFailureReason, string>> = {
+	codex_native_prompt_delivery_unconfirmed:
+		"Codex 原生投递尚未得到用户消息接受证明，可能已经送达；检查会话后再决定是否重新排队。",
 	// 契约明说文本可能还躺在输入框里；自动重投 = 把同一段话送两次。
 	submit_confirmation_budget_exhausted:
 		"The prompt was pasted but its submission was never confirmed. It may still be sitting in the input box — check before requeueing.",
