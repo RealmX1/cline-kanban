@@ -254,7 +254,8 @@ export function useTaskAgentModelPicker({
 			};
 			const explicitOptions = response.options
 				.filter((option) => option.modelId.trim().length > 0)
-				.filter((option) => option.modelId !== response.defaultModelId)
+				// Kimi 的空值表示自动跟随；同名的具体版本仍须可独立固定。
+				.filter((option) => effectiveAgentId === "kimi" || option.modelId !== response.defaultModelId)
 				.map<TaskAgentPickerTerminalModelOption>((option) => ({
 					value: option.modelId,
 					label: option.label || option.modelId,
@@ -702,7 +703,7 @@ export function TaskAgentModelPicker({
 	const selectedTerminalAgentModelId =
 		isTerminalAgentModelSelectionAgentId(effectiveAgentId) &&
 		terminalAgentModelOverrideSettings?.agentId === effectiveAgentId &&
-		terminalAgentModelOverrideSettings.modelId !== terminalAgentDefaultModelId
+		(effectiveAgentId === "kimi" || terminalAgentModelOverrideSettings.modelId !== terminalAgentDefaultModelId)
 			? terminalAgentModelOverrideSettings.modelId
 			: "";
 

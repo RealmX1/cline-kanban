@@ -9,7 +9,6 @@ import {
 	parseClaudeHelpModelAliases,
 	parseCodexModelCatalog,
 	parseCursorModelList,
-	parseKimiProviderModelCatalog,
 	resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity,
 	selectCursorLaunchDefaultModelIdFromCatalog,
 } from "../../../src/terminal/terminal-agent-model-selection";
@@ -196,42 +195,6 @@ describe("selectCursorLaunchDefaultModelIdFromCatalog", () => {
 
 	it("returns null when the catalog lists no grok at all, leaving the probe-failure fallback to the caller", () => {
 		expect(selectCursorLaunchDefaultModelIdFromCatalog(buildCatalogOptions(["auto", "composer-2.5"]))).toBeNull();
-	});
-});
-
-// 逐字取自 `kimi provider list --json`（截断到本模块实际读取的字段）。
-const KIMI_PROVIDER_LIST_JSON_STDOUT = JSON.stringify({
-	providers: { "managed:kimi-code": { type: "kimi", apiKey: "", baseUrl: "https://api.kimi.com/coding/v1" } },
-	models: {
-		"kimi-code/kimi-for-coding": {
-			provider: "managed:kimi-code",
-			model: "kimi-for-coding",
-			displayName: "K2.7 Coding",
-		},
-		"kimi-code/k3": { provider: "managed:kimi-code", model: "k3", displayName: "K3" },
-		"kimi-code/k3-256k": { provider: "managed:kimi-code", model: "k3-256k", displayName: "K3-256k" },
-	},
-});
-
-describe("parseKimiProviderModelCatalog", () => {
-	it("uses the alias as the model id and the display name as the label", () => {
-		expect(parseKimiProviderModelCatalog(KIMI_PROVIDER_LIST_JSON_STDOUT)).toEqual([
-			{ modelId: "kimi-code/kimi-for-coding", label: "K2.7 Coding", modelSelectionGroup: "latest_tracking_alias" },
-			{ modelId: "kimi-code/k3", label: "K3", modelSelectionGroup: "latest_tracking_alias" },
-			{ modelId: "kimi-code/k3-256k", label: "K3-256k", modelSelectionGroup: "latest_tracking_alias" },
-		]);
-	});
-
-	it("falls back to the alias when a model carries no display name", () => {
-		const options = parseKimiProviderModelCatalog(JSON.stringify({ models: { "kimi-code/k9": {} } }));
-
-		expect(options).toEqual([
-			{ modelId: "kimi-code/k9", label: "kimi-code/k9", modelSelectionGroup: "latest_tracking_alias" },
-		]);
-	});
-
-	it("returns nothing when the payload carries no models map", () => {
-		expect(parseKimiProviderModelCatalog(JSON.stringify({ providers: {} }))).toEqual([]);
 	});
 });
 

@@ -12,7 +12,7 @@ kimi 是**交互式 TUI，且交互模式没有位置 prompt 槽**（2.3.1 默�
 - 输入框字形 `│ >`（box 左边框 U+2502 后跟 `>`）→ `hasKimiInteractivePrompt`（:11-14）。正则匹配的是「边框 + `>` + 空白」，刻意避开正文里裸露的 `>`（diff / 引用）。
 - 早期接入时未观察到 workspace-trust；2.3.1 在隔离 HOME 的新目录会显示 `Trust this folder?`。原生验证探针只批准自身创建的空目录，不修改产品的 trust 策略。
 
-**启动旗标**（adapter :1927-1940）：`-y/--yolo`（bypass 权限档）、`--plan`（plan 起步——与 `--yolo` 是独立旗标，互不吃掉对方）、`-c/--continue`（resumeFromTrash）、`-m/--model`（仅在有显式 override 时经 `setModelCliOption` 注入，:1920-1921；无 override 则不传，交回 config.toml 的 `default_model`——与 claude/codex adapter 一致）。另设 `KIMI_CLI_NO_AUTO_UPDATE=1`（:1923-1924）：tui.toml `[upgrade] auto_install` 默认开，会话中途自升级会打断托管会话。
+**启动旗标**：`-y/--yolo` 与 `--plan` 沿用权限、Plan 两条独立轴；`-c/--continue` 用于恢复。未指定模型的新会话会按第 8 节解析最新稳定模型并传入 `--model`，显式模型参数与原生恢复保留原选择。另设 `KIMI_CLI_NO_AUTO_UPDATE=1`：会话中途自升级会打断托管会话。
 
 ## 2. session-manager 的三处 kimi 分支
 
@@ -75,3 +75,17 @@ Kimi 的 `UserPromptSubmit` 是前置 hook，不能证明输入已进入主会�
 执行 `node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <kimi绝对路径>`。启动器按运行时同样的 ESM/CJS shim 打包探针，设置隔离 HOME 并清空继承环境，只传入必要 PATH、SHELL、TERM 和探针参数。探针拒绝继承真实 `KANBAN_HOOK_TASK_ID` / `KANBAN_HOOK_WORKSPACE_ID`；退出时停止 PTY 和模拟服务，保留证据文件。
 
 浏览器回归：`KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY=<证据目录> npm --prefix web-ui run e2e -- tests/kimi-terminal-history-redraw-and-acceptance.spec.ts`。设置目录时还会把真实运行快照恢复到浏览器 xterm，检查重复恢复不叠历史，以及真实 accepted 摘要清除确认标签；不设置目录时运行固定重绘协议回归。
+
+## 8. 新会话自动跟随最新稳定标准模型
+
+`src/terminal/kimi-latest-managed-stable-model-selection.ts` 使用独立 cwd 启动短生命周期的 `kimi web --host 127.0.0.1 --port 0 --no-open`，按原始 chunk 读取带 ANSI 的多行 banner。token 只从当前 `KIMI_CODE_HOME/server.token` 读入内存，不把服务输出或认证信息带进错误诊断。
+
+同一 home 的刷新在 `.kanban-kimi-model-catalog-refresh.lock` 下跨进程串行，直到子服务完全退出才释放，避免多个服务相互覆盖 `server.token`；不同 home 使用不同锁。45 秒默认预算从等待锁前开始，等锁超时不会启动服务；锁重试的完成通知最多再等待一次封顶 250ms 的重试与文件系统调度，已有服务另有 1 秒 SIGKILL 回收兜底。
+
+先调用 `POST /api/v1/providers:refresh_oauth`，确认 HTTP、成功信封、空 `failed` 和 `managed:kimi-code` 的刷新记录，再读取 `GET /api/v1/models`。在官方 provider 的稳定标准/Pro 模型中按数字版本、Pro 档、上下文窗口依次排序；Highspeed、Preview 与第三方同名模型不参与默认选择。目录刷新失败、格式非法或无合格模型时明确失败，不继承旧默认值。每次默认新开局只解析一次，固定到本次启动参数；目录刷新先于 seeded home 复制，确保新 alias 已在启动配置中。
+
+模型响应的 `defaultModelId` 是本次真实选择，UI 的空值仍表示自动跟随；具体版本归入固定版本组选项，即使它恰好等于当前默认，也可独立选择。显式 `--model`/`-m`、任务覆盖、`--session`/`--continue` 及绑定身份恢复不触发自动选模。此路径不调用全局 `set_default`。
+
+参数识别也覆盖 `--resume`/`-r` 隐藏恢复别名及 `-yc`、`-ym` 等合并短选项，并按选项值边界区分真正旗标与字面量。宿主注入的选项须放在真正的 `--` 终止符之前；绑定身份恢复仍保留原有的歧义保护。
+
+协议来源：[Kimi Server API](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html)。真实模型验证读取原生会话 `agents/main/wire.jsonl` 中的 `type=llm.request`、`model` 与 `modelAlias`；stdout 的 `session.resume_hint` 只用于定位，不是模型身份凭据。
