@@ -167,7 +167,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		label: "Kimi Code",
 		binary: "kimi",
 		baseArgs: [],
-		autonomousArgs: ["--yolo"],
+		autonomousArgs: ["--auto"],
 		installUrl: "https://github.com/MoonshotAI/kimi-code",
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",

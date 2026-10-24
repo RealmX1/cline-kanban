@@ -158,6 +158,8 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 							returnedTurnId = submittedTurnSchema.parse(
 								await port.request("turn/start", {
 									threadId: nativeSessionId,
+									// 声明由独立 UserMessage 开启；token 与账本仍保留程序化来源。
+									turnTrigger: "user",
 									clientUserMessageId: input.clientUserMessageId,
 									input: [{ type: "text", text: input.text, text_elements: [] }],
 								}),

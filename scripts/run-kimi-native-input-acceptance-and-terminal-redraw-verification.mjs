@@ -6,10 +6,13 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-const [requestedOutputDirectory, requestedKimiBinary, requestedProbeKind = "acceptance-and-redraw"] = process.argv.slice(2);
+const [requestedOutputDirectory, requestedKimiBinary, ...requestedProbeArguments] = process.argv.slice(2);
+const requestedProbeKinds = requestedProbeArguments.filter((argument) => argument !== "--start-in-plan-mode");
+assert(requestedProbeKinds.length <= 1, "只能指定一种 Kimi 原生验证种类");
+const requestedProbeKind = requestedProbeKinds[0] ?? "acceptance-and-redraw";
 assert(
 	requestedOutputDirectory && requestedKimiBinary,
-	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 二进制绝对路径> [initial-prompt]",
+	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 二进制绝对路径> [initial-prompt] [--start-in-plan-mode]",
 );
 assert(["acceptance-and-redraw", "initial-prompt"].includes(requestedProbeKind), "未知的 Kimi 原生验证种类");
 const outputRootDirectory = resolve(requestedOutputDirectory);
@@ -63,6 +66,7 @@ const child = spawn(process.execPath, [entrypoint], {
 		TERM: "xterm-256color",
 		KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY: outputDirectory,
 		KANBAN_KIMI_NATIVE_E2E_BINARY: resolve(requestedKimiBinary),
+		KANBAN_KIMI_NATIVE_E2E_START_IN_PLAN_MODE: process.argv.slice(4).includes("--start-in-plan-mode") ? "1" : "0",
 	},
 });
 const code = await new Promise((resolveExit, reject) => {
