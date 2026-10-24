@@ -7,6 +7,7 @@ import { Command, Option } from "commander";
 import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
 import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
+import { registerCodexConversationStorageCommand } from "./commands/codex-conversation-storage";
 import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
@@ -801,6 +802,7 @@ function createProgram(invocationArgs: string[]): Command {
 	registerDeploymentCommand(program);
 	registerVerificationCommand(program);
 	registerDiagnosticsCommand(program);
+	registerCodexConversationStorageCommand(program);
 
 	program
 		.command("mcp")

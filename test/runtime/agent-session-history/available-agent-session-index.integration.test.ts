@@ -9,6 +9,10 @@ import {
 	listAvailableAgentSessions,
 	resetAvailableAgentSessionIndexStateForTests,
 } from "../../../src/agent-session-history/available-agent-session-index";
+import {
+	getCodexConversationMigrationRecordPath,
+	prepareManagedCodexConversationStorageHome,
+} from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const originalHome = process.env.HOME;
@@ -49,6 +53,68 @@ afterEach(() => {
 });
 
 describe("listAvailableAgentSessions", () => {
+	it("复制未提交时只列原副本，绑定提交后只列专用目录，回退后恢复原副本", async () => {
+		const root = createTemporaryRoot();
+		const sourceHome = join(root, ".codex");
+		mkdirSync(sourceHome);
+		const targetHome = await prepareManagedCodexConversationStorageHome(sourceHome);
+		const sessionId = "21111111-2222-7333-8444-555555555555";
+		for (const home of [sourceHome, targetHome])
+			writeJsonLines(join(home, "sessions", `rollout-${sessionId}.jsonl`), [
+				{ type: "session_meta", payload: { id: sessionId, cwd: root, thread_source: "user" } },
+				{ type: "event_msg", payload: { type: "user_message", message: "检查权威副本" } },
+			]);
+		const recordPath = getCodexConversationMigrationRecordPath(sourceHome, sessionId);
+		mkdirSync(dirname(recordPath), { recursive: true });
+		for (const [stage, expectedHome] of [
+			["copy_started", sourceHome],
+			["copied", sourceHome],
+			["source_archived", targetHome],
+			["rolled_back", sourceHome],
+		]) {
+			writeFileSync(
+				recordPath,
+				JSON.stringify({
+					nativeSessionId: sessionId,
+					sourceHomeDirectoryPath: sourceHome,
+					targetHomeDirectoryPath: targetHome,
+					stage,
+				}),
+			);
+			const result = await listAvailableAgentSessions(root, {
+				agentId: "codex",
+				searchScope: "all_local_sessions",
+				query: "",
+				pageCursor: 0,
+				pageSize: 50,
+				forceRefresh: true,
+			});
+			expect(result.sessions).toHaveLength(1);
+			expect(result.sessions[0]?.codexConversationStorageHomeDirectoryPath).toBe(expectedHome);
+		}
+	});
+	it("两个目录存在同 ID 且没有迁移记录时，拒绝猜测来源", async () => {
+		const root = createTemporaryRoot();
+		const sourceHome = join(root, ".codex");
+		mkdirSync(sourceHome);
+		const targetHome = await prepareManagedCodexConversationStorageHome(sourceHome);
+		const sessionId = "21111111-2222-7333-8444-555555555555";
+		for (const home of [sourceHome, targetHome])
+			writeJsonLines(join(home, "sessions", `rollout-${sessionId}.jsonl`), [
+				{ type: "session_meta", payload: { id: sessionId, cwd: root, thread_source: "user" } },
+				{ type: "event_msg", payload: { type: "user_message", message: "重复来源" } },
+			]);
+		const result = await listAvailableAgentSessions(root, {
+			agentId: "codex",
+			searchScope: "all_local_sessions",
+			query: "",
+			pageCursor: 0,
+			pageSize: 50,
+			forceRefresh: true,
+		});
+		expect(result.sessions).toHaveLength(0);
+		expect(result.scanWarnings.join(" ")).toContain("无明确绑定");
+	});
 	it("indexes Claude sessions and keeps repository scope inside the current Git repository", async () => {
 		const root = createTemporaryRoot();
 		const gitFixture = createIsolatedGitTestWorkspaceFixture();

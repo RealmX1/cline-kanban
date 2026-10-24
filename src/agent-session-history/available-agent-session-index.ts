@@ -2,6 +2,11 @@ import type { Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import {
+	getManagedCodexConversationStorageHomeDirectoryPath,
+	inferCodexHomeDirectoryPathFromTranscriptPath,
+	resolveMigratedCodexConversationHome,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 
 import type {
 	RuntimeAvailableAgentSessionPreviewTurn,
@@ -35,6 +40,7 @@ interface IndexedAvailableAgentSession {
 	lastUpdatedAt: string;
 	previewConversationTurns: RuntimeAvailableAgentSessionPreviewTurn[];
 	sourceFilePath: string;
+	codexConversationStorageHomeDirectoryPath?: string;
 }
 
 interface CachedParsedSession {
@@ -201,7 +207,10 @@ async function discoverSessionFiles(
 	}
 	if (agentId === "codex") {
 		const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
-		return collectSessionFiles(join(codexHome, "sessions"), agentId, () => true);
+		const roots = new Set([resolve(codexHome), getManagedCodexConversationStorageHomeDirectoryPath()]);
+		return (
+			await Promise.all([...roots].map((root) => collectSessionFiles(join(root, "sessions"), agentId, () => true)))
+		).flat();
 	}
 	return collectSessionFiles(join(homedir(), ".cursor", "projects"), agentId, (filePath) =>
 		filePath.split(/[\\/]/u).includes("agent-transcripts"),
@@ -331,6 +340,13 @@ async function parseAvailableAgentSession(
 	const session: IndexedAvailableAgentSession = {
 		sourceAgentId: candidate.agentId,
 		sourceSessionId,
+		...(candidate.agentId === "codex"
+			? {
+					codexConversationStorageHomeDirectoryPath: inferCodexHomeDirectoryPathFromTranscriptPath(
+						candidate.filePath,
+					),
+				}
+			: {}),
 		sessionTitle: sessionTitle.slice(0, 240),
 		sessionWorkingDirectoryPath,
 		gitBranchName,
@@ -507,14 +523,40 @@ export async function listAvailableAgentSessions(
 	const parsedWithKnownCursorWorkspacePaths = parsed.map((session) =>
 		addCurrentWorkspacePathToMatchingCursorSession(session, workspacePath),
 	);
-	const uniqueParsedSessions = [
-		...new Map(
-			parsedWithKnownCursorWorkspacePaths.map((session) => [
-				`${session.sourceAgentId}:${session.sourceSessionId}`,
-				session,
-			]),
-		).values(),
-	];
+	const authoritativeSessions = await Promise.all(
+		parsedWithKnownCursorWorkspacePaths.map(async (session) => {
+			const home = session.codexConversationStorageHomeDirectoryPath;
+			if (session.sourceAgentId !== "codex" || !home) return session;
+			try {
+				return (await resolveMigratedCodexConversationHome(home, session.sourceSessionId)) === home
+					? session
+					: null;
+			} catch {
+				warnings.push(`Codex ${session.sourceSessionId} 的存储绑定无法核验，暂不列出该副本。`);
+				return null;
+			}
+		}),
+	);
+	const uniqueByIdentity = new Map<string, IndexedAvailableAgentSession>();
+	const ambiguousIdentities = new Set<string>();
+	for (const session of authoritativeSessions) {
+		if (!session) continue;
+		const key = `${session.sourceAgentId}:${session.sourceSessionId}`;
+		const previous = uniqueByIdentity.get(key);
+		if (
+			previous &&
+			session.sourceAgentId === "codex" &&
+			previous.codexConversationStorageHomeDirectoryPath !== session.codexConversationStorageHomeDirectoryPath
+		) {
+			ambiguousIdentities.add(key);
+			warnings.push(`Codex ${session.sourceSessionId} 在两个目录均无明确绑定，暂不列出以免接错副本。`);
+		}
+		// 候选按更新时间降序到达，同目录的重复项保留较新者。
+		if (!previous) uniqueByIdentity.set(key, session);
+	}
+	const uniqueParsedSessions = [...uniqueByIdentity.entries()]
+		.filter(([key]) => !ambiguousIdentities.has(key))
+		.map(([, session]) => session);
 	const workspaceGitCommonDirectory = await resolveGitCommonDirectory(workspacePath);
 	const scoped =
 		request.searchScope === "all_local_sessions"

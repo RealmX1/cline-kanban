@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
+import { isManagedCodexConversationStorageHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
@@ -111,6 +112,7 @@ export interface AgentAdapterLaunchInput {
 	forkLatestWorkingDirectorySession?: boolean;
 	// 仅首次侧会话 fork 使用；与历史播种及子会话自身的重启寻址分开。
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	codexConversationStorageHomeDirectoryPath?: string;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -1610,6 +1612,12 @@ const codexAdapter: AgentSessionAdapter = {
 		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
+		if (
+			input.codexConversationStorageHomeDirectoryPath &&
+			isManagedCodexConversationStorageHome(input.codexConversationStorageHomeDirectoryPath)
+		) {
+			codexArgs.push("-c", `sqlite_home=${JSON.stringify(input.codexConversationStorageHomeDirectoryPath)}`);
+		}
 		let deferredStartupPromptText: string | undefined;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
