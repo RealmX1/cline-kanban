@@ -359,7 +359,7 @@ const NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS = {
 		"--version",
 		"-v",
 	]),
-	kimi: new Set(["--version", "-V", "--yolo", "-y", "--auto", "--help", "-h"]),
+	kimi: new Set(["--version", "-V", "--yolo", "-y", "--yes", "--auto-approve", "--auto", "--help", "-h"]),
 	omp: new Set([
 		"--prewalk",
 		"--no-prewalk",
@@ -2679,13 +2679,18 @@ const kimiAdapter: AgentSessionAdapter = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && processEnv.KIMI_CODE_TRUST_WORKSPACE === undefined) {
+			// Kanban 创建的任务工作树沿用源仓库信任；只作用于该进程，不改用户永久信任记录。
+			env.KIMI_CODE_TRUST_WORKSPACE = "1";
+		}
 
-		// kimi 的 --plan 与 --yolo 是独立旗标，plan 起步不影响放权档。
+		// --auto 对应 Never Ask；--yolo 仍是 Ask When Needed，且与 --auto 原生互斥。
+		// 显式原生权限参数优先于任务档位；--plan 仍按独立的起步选项处理。
 		if (
 			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
-			!hasKimiCommandLineOption("--yolo", "-y")
+			!hasKimiCommandLineOption("--auto", "--yolo", "-y", "--yes", "--auto-approve")
 		) {
-			injectedKimiOptionArguments.push("--yolo");
+			injectedKimiOptionArguments.push("--auto");
 		}
 		if (!resumesPriorAgentConversation && input.startInPlanMode && !hasKimiCommandLineOption("--plan")) {
 			injectedKimiOptionArguments.push("--plan");

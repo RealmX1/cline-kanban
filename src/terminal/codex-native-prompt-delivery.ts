@@ -97,9 +97,9 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 	let requestAttempted = input.previouslySubmitted !== undefined;
 	let returnedTurnId: string | null = input.previouslySubmitted?.nativeTurnId ?? null;
 	let previousTurnId: string | null = input.previouslySubmitted?.predecessorNativeTurnId ?? null;
-	const deadline = now() + CONFIRMATION_BUDGET_MS;
+	let currentDeliveryPhaseDeadlineEpochMs = now() + CONFIRMATION_BUDGET_MS;
 	const currentDeadline = async () =>
-		requestAttempted && input.confirmationDeadlineAtEpochMs ? await input.confirmationDeadlineAtEpochMs() : deadline;
+		requestAttempted && input.confirmationDeadlineAtEpochMs ? await input.confirmationDeadlineAtEpochMs() : currentDeliveryPhaseDeadlineEpochMs;
 	const readRecentTurns = async (port: CodexAppServerRequestPort) =>
 		nativeTurnsPageSchema.parse(
 			await port.request("thread/turns/list", {
@@ -146,7 +146,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						!(await isThreadAlreadyLoaded(
 							port,
 							nativeSessionId,
-							() => input.isCurrent() && (requestAttempted || now() < deadline),
+							() => input.isCurrent() && (requestAttempted || now() < currentDeliveryPhaseDeadlineEpochMs),
 						))
 					)
 						return { status: requestAttempted ? "unconfirmed" : "unavailable" };
@@ -167,6 +167,8 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						previousTurnId = turns[0]?.id ?? null;
 						if (!input.isCurrent() || !(await input.beforeSubmit()) || !input.isCurrent())
 							return { status: "cancelled" };
+						// 提交前的持久查询等待由原意图 TTL 约束，不占用实际提交后的确认预算。
+						currentDeliveryPhaseDeadlineEpochMs = now() + CONFIRMATION_BUDGET_MS;
 						// 一旦开始调用，超时、断线、协议错误都只能读回核对。绝不重发，也不切回 PTY。
 						requestAttempted = true;
 						await input.onRequestAttempted({ predecessorNativeTurnId: previousTurnId });

@@ -99,6 +99,7 @@ export interface TaskMessageInjectionRecord {
 	status?: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
 	created_at: string;
 	// ↓ 仅 agent 空闲门控的排队投递（--deliver-when-agent-idle）才有。
@@ -165,6 +166,9 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		status: legacyStatus ?? LEGACY_STATUS_MIRROR[terminalStatus],
 		terminal_delivery_status: terminalStatus,
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
+		...(typeof record.terminal_delivery_failure_detail === "string"
+			? { terminal_delivery_failure_detail: record.terminal_delivery_failure_detail }
+			: {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
 		...(codexRvfCloseoutCompactionAwareConfirmationSchema.safeParse(record.nativeCompactionAwareConfirmation).success
@@ -332,13 +336,18 @@ export function applyTerminalDeliveryOutcomeToRecord(
 	outcome: {
 		status: TaskMessageTerminalDeliveryStatus;
 		failureReason?: TaskMessageTerminalDeliveryFailureReason;
+		failureDetail?: string;
 		nowIso: string;
 		turnId?: string;
 		checkpointId?: string;
 		codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 	},
 ): TaskMessageInjectionRecord {
-	const { terminal_delivery_failure_reason: _discardedPreviousReason, ...rest } = record;
+	const {
+		terminal_delivery_failure_reason: _discardedPreviousReason,
+		terminal_delivery_failure_detail: _discardedPreviousDetail,
+		...rest
+	} = record;
 	return {
 		...rest,
 		...(outcome.turnId ? { turn_id: outcome.turnId } : {}),
@@ -349,6 +358,7 @@ export function applyTerminalDeliveryOutcomeToRecord(
 		status: LEGACY_STATUS_MIRROR[outcome.status],
 		terminal_delivery_status: outcome.status,
 		...(outcome.failureReason ? { terminal_delivery_failure_reason: outcome.failureReason } : {}),
+		...(outcome.failureDetail ? { terminal_delivery_failure_detail: outcome.failureDetail } : {}),
 		terminal_delivery_status_updated_at: outcome.nowIso,
 	};
 }
@@ -367,6 +377,7 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 	idempotencyKey: string;
 	status: TaskMessageTerminalDeliveryStatus;
 	failureReason?: TaskMessageTerminalDeliveryFailureReason;
+	failureDetail?: string;
 	turnId?: string;
 	checkpointId?: string;
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
@@ -385,6 +396,7 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 			const nextRecord = applyTerminalDeliveryOutcomeToRecord(existing, {
 				status: input.status,
 				...(input.failureReason ? { failureReason: input.failureReason } : {}),
+				...(input.failureDetail ? { failureDetail: input.failureDetail } : {}),
 				...(input.turnId ? { turnId: input.turnId } : {}),
 				...(input.checkpointId ? { checkpointId: input.checkpointId } : {}),
 				...(input.codexNativePromptDeliveryEvidence

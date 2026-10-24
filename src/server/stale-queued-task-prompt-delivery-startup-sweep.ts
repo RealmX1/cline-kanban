@@ -170,7 +170,7 @@ export function scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart(
 		stampEntriesThatSurvivedRuntimeRestart: true,
 	});
 	const nowEpochMs = input.nowEpochMs ?? (() => Date.now());
-	const startupFollowUpDeadlineAtEpochMs =
+	let startupFollowUpDeadlineAtEpochMs =
 		nowEpochMs() +
 		Math.max(
 			input.inFlightSettlementBudgetMs ?? TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
@@ -198,6 +198,15 @@ export function scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart(
 			}).then(scheduleFollowUp);
 		}, followUpDelayMs).unref();
 	};
-	void startupSweep.then(scheduleFollowUp);
+	void startupSweep.then((initialResult) => {
+		// 保留首次清扫已经观察到的原意图 TTL；后续复扫不能重新发放调度预算。
+		if (initialResult.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs !== null)
+			startupFollowUpDeadlineAtEpochMs = Math.max(
+				startupFollowUpDeadlineAtEpochMs,
+				initialResult.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs +
+					2 * STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS,
+			);
+		scheduleFollowUp(initialResult);
+	});
 	return startupSweep;
 }

@@ -21,6 +21,11 @@ export class NativeIndependentUserTurnDeliveryError extends Error {
 // 此结果只表示该条正文已进入新原生回合，不替代 capture 的唯一消息/checkpoint/nonce 门禁。
 export class NativeIndependentUserTurnMessageAlreadyAccepted extends Error {}
 
+// 仅终止本 runtime 的只读等待；原队列和回执由新托管者或截止收敛继续负责。
+export class NativeIndependentUserTurnSubmissionRecoverySuspended extends Error {}
+
+export class NativeIndependentUserTurnDeliveryCancelledBeforeSubmission extends Error {}
+
 export async function readCurrentTuiNativeConversationTurns(input: {
 	workspaceId: string;
 	entry: QueuedTaskPromptDeliveryEntry;
