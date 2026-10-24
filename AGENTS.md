@@ -113,6 +113,7 @@ web-ui：
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/post-mortems/codex-memory-consolidation-hook-overwrites-resume-identity-2026-10-20.md` | Codex 后台记忆整理 hook 的整事件隔离、原生转录续接预检与坏身份现场恢复 |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
+| `docs/prompt-library-agent-input-focus-handoff.md` | Prompt / Command 显式填入的同步聚焦、手机页签交接与来源条目点击稳定性 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` / `docs/agent-harness-cursor.md` | Kimi、oh-my-pi(ACP) 与 Cursor 接入坑（Cursor：chat store 布局、trust、启动前分配 id、续跑预检） |
 | `docs/post-mortems/native-session-identity-rewind-resume-2026-09-24.md` | Rewind 原生 ID 追踪、Codex 配置层丢 hook、Kimi/OMP 恢复与跨重启验证 |
 | `docs/post-mortems/codex-request-user-input-recovery-and-history-2026-10-17.md` | Codex 原生问答 envelope、分页恢复链、真实答案与 aborted 区分、恢复答题与历史去重 |
