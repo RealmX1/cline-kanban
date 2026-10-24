@@ -17,6 +17,8 @@ RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
 
 RVF-PRE-REVIEW-BASE-SYNC-SKILL: sync-local-base-into-task-worktree-only
 
+- 查询本 Task 近期 RVF、完整完成事实与当前候选覆盖，使用 `kanban task rvf-history`（默认环境身份；显式指定时用 main checkout 的 `--project-path`）。结果语义与生产方契约见 `docs/task-rvf-history-query.md`；证据不足是 `unknown`，不能据此断言没有 RVF。
+
 - kanban 任务收尾 / 宣告完成 / 进入 review 前，**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：把只有部署后真实实例才验得到的断言注册成验证；fix 改变了可观察行为则以 **reconcile 模式**幂等重注册，不堆叠重复。
 - 上面两行是 **repo-通用机器可发现约定**。`RVF-PRE-REVIEW-BASE-SYNC-SKILL:` 从 local base 的 AGENTS.md 读取：旧 task worktree 先做严格单向同步再准备 RVF，不得反向写回 base。
 

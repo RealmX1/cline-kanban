@@ -333,6 +333,10 @@ Always point \`--project-path\` at the main repository, never at a task worktree
 
 To look up a *different* task instead: Kanban lays task worktrees out as \`.cline/worktrees/<task_id>/<repo_folder>\`, so when you are handed a task worktree path under \`.cline/worktrees/\` (for example \`~/.cline/worktrees/ab12c/my-repo\`), the directory name immediately under \`worktrees/\` **is** that task's Kanban task ID — \`ab12c\` here, no lookup table, no truncation — and \`task get\` takes it the same way. That reading holds only for paths under \`.cline/worktrees/\`.
 
+# 查询本 Task 的 RVF 历史与当前覆盖
+
+需要确认是否做过 RVF 或寻找精确 run/handoff 时，使用 \`${kanbanCommand} task rvf-history\`；默认身份来自 KANBAN_TASK_ID / KANBAN_PROJECT_PATH，显式查询用 \`--task-id ${quotedTaskId} --project-path <main repository path>\`。该命令只读，聚合本 Task 历次会话的 RVF。hasVerifiedCompletedRvf 为 true/false/null；当前覆盖 covered/not_covered/unknown 与历史完成、land/base 同步分别返回。证据不足不能推断为没做过 RVF；后续执行仍绑定精确 run，不使用 latest。
+
 # Recording How This Task Relates To Other Tasks
 
 When this task studies or diagnoses another task, verifies its claims, reuses its outputs, takes its requirements from it, or is its counterpart in another repository, record that once with \`${kanbanCommand} work-unit assert-reference-relation\` (this task is always the subject; see \`--help\` for the counterpart flags). Read what is already recorded with \`${kanbanCommand} work-unit get-relation-neighborhood-summary\`.`;
