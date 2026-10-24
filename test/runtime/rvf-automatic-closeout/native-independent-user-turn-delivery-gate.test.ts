@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { QueuedTaskPromptDeliveryEntry, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { CodexAppServerControlSocketRequestError } from "../../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
 import {
 	assertIndependentUserTurnImmediatelyBeforeTerminalWrite,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
@@ -38,6 +39,20 @@ function targetEntry() {
 }
 
 describe("当前 TUI 独立原生回合门", () => {
+	it.each(["request_timeout", "connection_closed"] as const)("%s 保留为可恢复的查询失败", async (outcome) => {
+		request.mockImplementation(async (method) => {
+			if (method === "thread/loaded/list") return { data: ["native"], nextCursor: null };
+			throw new CodexAppServerControlSocketRequestError(outcome, "原生查询暂时不可用");
+		});
+		await expect(
+			readCurrentTuiNativeConversationTurns({
+				workspaceId: "workspace",
+				entry: targetEntry(),
+				getSummary: targetSummary,
+			}),
+		).rejects.toMatchObject({ recovery: { retryableQueryFailure: true } });
+		request.mockClear();
+	});
 	it("只查询当前 TUI 已加载会话，不 resume 磁盘历史", async () => {
 		request.mockImplementation(async (method) =>
 			method === "thread/loaded/list"

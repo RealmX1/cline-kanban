@@ -11,7 +11,7 @@ const nativeRecordSchema = z.object({
 		turn_id: z.string().optional(),
 		originator: z.string().optional(),
 		source: z.unknown().optional(),
-		turn_attribution: z.object({ turn_trigger: z.string().optional() }).optional(),
+		turn_attribution: z.object({ turn_trigger: z.string().nullish() }).optional(),
 		item: z
 			.object({
 				id: z.string().optional(),
