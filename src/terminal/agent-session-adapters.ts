@@ -2669,6 +2669,10 @@ const kimiAdapter: AgentSessionAdapter = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && processEnv.KIMI_CODE_TRUST_WORKSPACE === undefined) {
+			// Kanban 创建的任务工作树沿用源仓库信任；只作用于该进程，不改用户永久信任记录。
+			env.KIMI_CODE_TRUST_WORKSPACE = "1";
+		}
 
 		// kimi 的 --plan 与 --yolo 是独立旗标，plan 起步不影响放权档。
 		if (
