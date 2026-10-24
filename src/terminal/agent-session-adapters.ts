@@ -40,6 +40,7 @@ import {
 	configureCodexHooks,
 	hasCodexConfigOverride,
 	normalizeCodexConfigOverridesBeforeSubcommand,
+	supportsVerifiedCodexAutomaticCompactionPhaseHooks,
 } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
@@ -124,6 +125,7 @@ export type AgentOutputTransitionDetector = (
 export type AgentOutputTransitionInspectionPredicate = (summary: RuntimeTaskSessionSummary) => boolean;
 
 export interface PreparedAgentLaunch {
+	codexAutomaticCompactionPhaseHooksConfigured?: boolean;
 	binary?: string;
 	args: string[];
 	env: Record<string, string | undefined>;
@@ -1722,8 +1724,15 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
+		let codexAutomaticCompactionPhaseHooksConfigured = false;
 		if (hooks) {
-			configureCodexHooks(codexArgs);
+			codexAutomaticCompactionPhaseHooksConfigured = configureCodexHooks(
+				codexArgs,
+				await supportsVerifiedCodexAutomaticCompactionPhaseHooks(binary ?? "codex", {
+					...process.env,
+					...input.env,
+				}),
+			);
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -1765,6 +1774,7 @@ const codexAdapter: AgentSessionAdapter = {
 			binary,
 			args: codexArgs,
 			env,
+			codexAutomaticCompactionPhaseHooksConfigured,
 			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,

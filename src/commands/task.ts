@@ -1318,6 +1318,9 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.nativeCompactionAwareConfirmation
+			? { nativeCompactionAwareConfirmation: record.nativeCompactionAwareConfirmation }
+			: {}),
 		...(record.codex_native_prompt_delivery_evidence
 			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
 			: {}),

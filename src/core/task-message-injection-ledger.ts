@@ -19,8 +19,14 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { lockedFileSystem } from "../fs/locked-file-system";
+import { type FileLockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import type { CodexNativePromptDeliveryEvidence } from "./api-contract";
+import {
+	CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS,
+	type CodexRvfCloseoutCompactionAwareConfirmation,
+	codexRvfCloseoutCompactionAwareConfirmationSchema,
+	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
+} from "./codex-rvf-closeout-compaction-aware-confirmation";
 
 export const TASK_MESSAGE_INJECTION_LEDGER_FILENAME = "task-message-injections.json";
 
@@ -78,6 +84,7 @@ const LEGACY_STATUS_MIRROR: Record<TaskMessageTerminalDeliveryStatus, string> = 
 };
 
 export interface TaskMessageInjectionRecord {
+	nativeCompactionAwareConfirmation?: CodexRvfCloseoutCompactionAwareConfirmation;
 	task_id: string;
 	// 新请求总是记录受理时解析的真实目标会话；旧记录缺省时保持原样，不推断历史主会话。
 	attempt_id?: string;
@@ -164,6 +171,13 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 			: {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
+		...(codexRvfCloseoutCompactionAwareConfirmationSchema.safeParse(record.nativeCompactionAwareConfirmation).success
+			? {
+					nativeCompactionAwareConfirmation: codexRvfCloseoutCompactionAwareConfirmationSchema.parse(
+						record.nativeCompactionAwareConfirmation,
+					),
+				}
+			: {}),
 		...(typeof record.required_native_independent_user_turn_session_id === "string"
 			? { required_native_independent_user_turn_session_id: record.required_native_independent_user_turn_session_id }
 			: {}),
@@ -236,15 +250,19 @@ async function writeTaskMessageInjectionLedger(
 export async function withTaskMessageInjectionLedgerLock<T>(
 	ledgerPath: string,
 	operation: (records: TaskMessageInjectionRecord[]) => Promise<{ records?: TaskMessageInjectionRecord[]; result: T }>,
+	lockAcquisitionRetries?: FileLockRequest["retries"],
 ): Promise<T> {
-	return await lockedFileSystem.withLock({ path: ledgerPath, type: "file" }, async () => {
-		const records = await readTaskMessageInjectionLedger(ledgerPath);
-		const outcome = await operation(records);
-		if (outcome.records) {
-			await writeTaskMessageInjectionLedger(ledgerPath, outcome.records);
-		}
-		return outcome.result;
-	});
+	return await lockedFileSystem.withLock(
+		{ path: ledgerPath, type: "file", retries: lockAcquisitionRetries },
+		async () => {
+			const records = await readTaskMessageInjectionLedger(ledgerPath);
+			const outcome = await operation(records);
+			if (outcome.records) {
+				await writeTaskMessageInjectionLedger(ledgerPath, outcome.records);
+			}
+			return outcome.result;
+		},
+	);
 }
 
 export function findTaskMessageInjectionRecord(
@@ -426,6 +444,53 @@ export interface StalePendingTaskMessageInjectionSweepResult {
 	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
 }
 
+// 先把有界截止写入与清扫器共用的账本，再允许内存延长等待；终态与旧 revision 均不可覆盖。
+export async function persistTaskMessageNativeCompactionAwareConfirmation(input: {
+	ledgerPath: string;
+	ledgerTaskId: string;
+	snapshot: CodexRvfCloseoutCompactionAwareConfirmation;
+	expectedRevision: number | null;
+}): Promise<boolean> {
+	const snapshot = codexRvfCloseoutCompactionAwareConfirmationSchema.parse(input.snapshot);
+	return withTaskMessageInjectionLedgerLock(
+		input.ledgerPath,
+		async (records) => {
+			const record = findTaskMessageInjectionRecord(records, input.ledgerTaskId, snapshot.binding.idempotencyKey);
+			if (
+				!record ||
+				record.terminal_delivery_status !== "accepted_pending_submit_confirmation" ||
+				record.source !== "rvf_automatic_closeout" ||
+				record.prompt_sha256 !== snapshot.binding.promptSha256 ||
+				(record.attempt_id !== undefined && record.attempt_id !== snapshot.binding.conversationSessionId)
+			)
+				return { result: false };
+			const previous = record.nativeCompactionAwareConfirmation;
+			if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return { result: true };
+			if (
+				(previous?.revision ?? null) !== input.expectedRevision ||
+				snapshot.revision !== (previous ? previous.revision + 1 : 0) ||
+				(previous &&
+					(JSON.stringify(previous.binding) !== JSON.stringify(snapshot.binding) ||
+						previous.firstSubmissionAtEpochMs !== snapshot.firstSubmissionAtEpochMs ||
+						previous.absoluteConfirmationDeadlineAtEpochMs !== snapshot.absoluteConfirmationDeadlineAtEpochMs ||
+						previous.clientUserMessageId !== snapshot.clientUserMessageId ||
+						previous.submissionTransport !== snapshot.submissionTransport ||
+						previous.predecessorNativeTurnId !== snapshot.predecessorNativeTurnId ||
+						(previous.nativeTurnIdReturnedBySubmissionRequest !== undefined &&
+							previous.nativeTurnIdReturnedBySubmissionRequest !==
+								snapshot.nativeTurnIdReturnedBySubmissionRequest) ||
+						previous.accumulatedCompactionWaitMs > snapshot.accumulatedCompactionWaitMs ||
+						previous.ordinaryConfirmationBudgetRemainingMs < snapshot.ordinaryConfirmationBudgetRemainingMs ||
+						previous.phaseStartedAtEpochMs > snapshot.phaseStartedAtEpochMs))
+			)
+				return { result: false };
+			const updated = { ...record, nativeCompactionAwareConfirmation: snapshot };
+			return { records: records.map((entry) => (entry === record ? updated : entry)), result: true };
+		},
+		{ retries: 3, factor: 1, minTimeout: 25, maxTimeout: 25 },
+	);
+}
+
 // 账本时间戳读不出来（手改坏 / 更旧的格式）时返回 null，调用方按「已超期」处理：
 // 判失败是安全的那一侧，留着才会变成永远没人收敛的 pending。
 //
@@ -437,6 +502,12 @@ export function resolvePendingRecordBecomesStaleAtEpochMs(
 	record: TaskMessageInjectionRecord,
 	stalePendingThresholdMs: number,
 ): number | null {
+	if (record.nativeCompactionAwareConfirmation) {
+		return (
+			resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(record.nativeCompactionAwareConfirmation) +
+			CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS
+		);
+	}
 	const statusUpdatedAtMs = Date.parse(record.terminal_delivery_status_updated_at);
 	if (Number.isNaN(statusUpdatedAtMs)) {
 		return null;

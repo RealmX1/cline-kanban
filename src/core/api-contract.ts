@@ -5020,6 +5020,7 @@ export const runtimeHookEventSchema = z.enum([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	"main_agent_conversation_context_compaction_started",
 	// harness 的 PostCompact（Claude / Codex / Kimi）：主对话上下文压缩已完成。专用事件、不复用 activity：
 	// 它只推进 Cache warm 起点，不该顺带推进「对话推进」药丸、刷新活动行或进入通知捕获。
 	"main_agent_conversation_context_compaction_completed",
@@ -5196,6 +5197,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// `trigger` 派生）。缺失时服务端按当时的回合归属判定。
 	mainAgentConversationContextCompactionTriggerReportedByHarness:
 		runtimeMainAgentConversationContextCompactionTriggerSchema.optional(),
+	// Codex 压缩阶段的原生回合与启动代际；仅用于关联待确认投递，不能作为接受证明。
+	mainAgentConversationContextCompactionNativeTurnId: z.string().min(1).max(200).optional(),
+	hookRuntimeSessionIncarnationId: z.string().uuid().optional(),
 	// 仅压缩完成事件、且 harness 报了压缩后上下文大小时携带（Kimi 的 estimatedTokenCount）。
 	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: z.number().int().nonnegative().optional(),
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，

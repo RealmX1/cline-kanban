@@ -17,6 +17,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		readonly pid: number,
 		private readonly onData: (chunk: Buffer) => void,
 		private readonly onExit: (event: TerminalPtyProcessExitEvent) => void,
+		readonly hostedTerminalPtySessionSpawnedAtEpochMs?: number,
 	) {}
 
 	get outputByteOffsetAfterLastDeliveredChunk(): number {
