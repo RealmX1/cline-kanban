@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -32,6 +33,11 @@ import {
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import type { TaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
+import {
+	type AutomaticLateNativePromptAcceptanceRecoveryTrigger,
+	createAutomaticLateNativeCloseoutPromptAcceptanceRecovery,
+	isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery,
+} from "./automatic-late-native-closeout-prompt-acceptance-recovery";
 import { captureRvfReviewStartBoundary, computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import {
 	withCodexAppServerRequestConnection,
@@ -92,11 +98,15 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	const explicitlyStoppedTasks = new Map<string, number>();
 	let explicitStopSequence = 0;
 	const operations = new Map<string, Promise<unknown>>();
+	const ownedWorkspaceOperation = new AsyncLocalStorage<string>();
+	const automaticallyRecoverLateAcceptance = createAutomaticLateNativeCloseoutPromptAcceptanceRecovery();
 	let timer: NodeJS.Timeout | null = null;
 	let sweepInFlight: Promise<void> | null = null;
 	let stopping = false;
 	function serialize<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
-		const pending = (operations.get(workspaceId) ?? Promise.resolve()).catch(() => {}).then(operation);
+		const pending = (operations.get(workspaceId) ?? Promise.resolve())
+			.catch(() => {})
+			.then(() => ownedWorkspaceOperation.run(workspaceId, operation));
 		operations.set(workspaceId, pending);
 		void pending
 			.finally(() => {
@@ -521,10 +531,54 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 				explicitlyStoppedTasks.has(`${scope.workspaceId}:${conversationSessionId}`),
 		};
 	}
+	// 调用方只持 workspace 串行队列；主会话队列与记录锁各进入一次，避免补证入口重入死锁。
+	async function recoverEligiblePausedCloseouts(
+		scope: RuntimeTrpcWorkspaceScope,
+		records: RvfAutomaticCloseoutRecord[],
+		trigger: AutomaticLateNativePromptAcceptanceRecoveryTrigger,
+	) {
+		for (const record of records) {
+			if (!isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery(record)) continue;
+			if (
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`) ||
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`)
+			)
+				continue;
+			try {
+				const { summary, manager } = await mainSummary(scope, record.taskId);
+				if (manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId)) continue;
+				await automaticallyRecoverLateAcceptance({
+					record,
+					summary,
+					trigger,
+					recover: () =>
+						serializeMainConversationOperation(scope, record.taskId, () =>
+							reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
+								lateNativePromptAcceptanceVerificationDependencies(scope, record),
+								{
+									taskId: record.taskId,
+									decisionToken: record.receipt.decision_token,
+									runId: record.runId ?? "",
+									handoffSha256: record.handoffSha256 ?? "",
+									dryRun: false,
+								},
+							),
+						),
+				});
+			} catch {
+				// 缺少当前主绑定时保留暂停；不启动会话、不绕过停止或身份守卫。
+			}
+		}
+	}
 	async function sweep() {
 		for (const scope of await deps.listWorkspaces())
 			await serialize(scope.workspaceId, async () => {
 				const storePath = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
+				await recoverEligiblePausedCloseouts(
+					scope,
+					await readRvfAutomaticCloseoutRecords(storePath),
+					"background_sweep",
+				);
 				if (
 					!(await readRvfAutomaticCloseoutRecords(storePath)).some(
 						(record) =>
@@ -773,8 +827,21 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
 		) =>
-			serialize(scope.workspaceId, () =>
-				serializeMainConversationOperation(scope, input.taskId, async () => {
+			serialize(scope.workspaceId, async () => {
+				if (input.outcome === "completed") {
+					const records = await readRvfAutomaticCloseoutRecords(
+						getRvfAutomaticCloseoutStorePath(scope.workspaceId),
+					);
+					await recoverEligiblePausedCloseouts(
+						scope,
+						records.filter(
+							(record) =>
+								record.taskId === input.taskId && record.receipt.decision_token === input.decisionToken,
+						),
+						"execution_report",
+					);
+				}
+				return serializeMainConversationOperation(scope, input.taskId, async () => {
 					const report = rvfAutomaticCloseoutExecutionResultReportRequestSchema.parse(input);
 					const storePath = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
 					const record = (await readRvfAutomaticCloseoutRecords(storePath)).find(
@@ -888,8 +955,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 						return { records: records.map((entry) => (entry === current ? updated : entry)), value: updated };
 					});
 					return { record: saved };
-				}),
-			),
+				});
+			}),
 		observeBoundary: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string; idempotencyKey: string; requestNonce: string },
@@ -1014,11 +1081,28 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 				};
 			}
 		},
-		status: async (scope: RuntimeTrpcWorkspaceScope, input: { taskId: string }) => ({
-			records: (await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))).filter(
-				(record) => record.taskId === input.taskId,
-			),
-		}),
+		status: async (scope: RuntimeTrpcWorkspaceScope, input: { taskId: string }) => {
+			const snapshot = async () => ({
+				records: (
+					await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
+				).filter((record) => record.taskId === input.taskId),
+			});
+			// 内部核验/投递可以读取当前快照，不能等待自己持有的 workspace 队列。
+			if (ownedWorkspaceOperation.getStore() === scope.workspaceId) return snapshot();
+			return serialize(scope.workspaceId, async () => {
+				const path = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
+				await recoverEligiblePausedCloseouts(
+					scope,
+					(await readRvfAutomaticCloseoutRecords(path)).filter((record) => record.taskId === input.taskId),
+					"status_query",
+				);
+				return {
+					records: (await readRvfAutomaticCloseoutRecords(path)).filter(
+						(record) => record.taskId === input.taskId,
+					),
+				};
+			});
+		},
 		sweepPendingCloseoutsOnce: sweep,
 		start: () => {
 			stopping = false;

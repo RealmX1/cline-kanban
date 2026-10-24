@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 const ensureInstructionsFileMock = vi.hoisted(() => vi.fn(async () => "/tmp/network-interruption-resume.md"));
+const inspectCodexNativeRetryReadinessMock = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/terminal/codex-native-connection-retry-continuation-readiness", () => ({
+	inspectCodexNativeConnectionRetryContinuationReadiness: inspectCodexNativeRetryReadinessMock,
+}));
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
@@ -79,8 +83,324 @@ function spawnManagerWithSession(pid: number) {
 	return () => spawnedSession;
 }
 
+async function startCodexRetryPausedBeforeFirstSubmit() {
+	const taskId = "codex-first-submit-validation";
+	const getSession = spawnManagerWithSession(1203);
+	const manager = new TerminalSessionManager();
+	await manager.startTaskSession({
+		taskId,
+		agentId: "codex",
+		binary: "codex",
+		args: [],
+		cwd: `/isolated/${taskId}`,
+		prompt: "验证粘贴后的原生核验拒绝",
+	});
+	const readyForTerminalWrite = { outcome: "ready_for_terminal_write", nativeTurnId: "failed-turn" };
+	let finishFirstSubmitReadinessCheck: (result: { outcome: string; nativeTurnId?: string }) => void = () => {};
+	inspectCodexNativeRetryReadinessMock
+		.mockResolvedValue(readyForTerminalWrite)
+		.mockResolvedValueOnce(readyForTerminalWrite)
+		.mockResolvedValueOnce(readyForTerminalWrite)
+		.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishFirstSubmitReadinessCheck = resolve;
+				}),
+		);
+	vi.spyOn(manager, "resolveTaskTerminalInputBoxOccupancy").mockResolvedValue({
+		hasUncommittedInput: false,
+		inputSideByteTrackingSaysNonEmpty: false,
+		inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+		screenReadingSaysNonEmpty: false,
+		unrecoverablePasteCount: 0,
+	});
+	const session = getSession();
+	if (!session) throw new Error("缺少隔离 PTY");
+	let composerText = "";
+	const submittedPrompts: string[] = [];
+	session.write.mockImplementation((bytes: string | Buffer) => {
+		const text = String(bytes);
+		if (text.startsWith("\u001b[200~")) composerText += text.slice(6, -6);
+		else if (text === "\u0015") composerText = "";
+		else if (text === "\r") {
+			submittedPrompts.push(composerText);
+			composerText = "";
+		} else composerText += text;
+	});
+	session.triggerData("Error: read ECONNRESET\n› ");
+	await settleOutputAnalysisBatch();
+	await vi.advanceTimersByTimeAsync(4_000);
+	expect(session.write).toHaveBeenCalledTimes(1);
+	await vi.advanceTimersByTimeAsync(1_600);
+	expect(inspectCodexNativeRetryReadinessMock).toHaveBeenCalledTimes(3);
+	return {
+		manager,
+		taskId,
+		session,
+		finishFirstSubmitReadinessCheck,
+		getComposerText: () => composerText,
+		submittedPrompts,
+	};
+}
+
 describe("session-manager · connection-drop auto-continue", () => {
+	it.each(["inProgress", "unknown", "native_turn_replaced"] as const)(
+		"续跑 paste 后首个 Enter 核验为 %s，仅撤回本次正文且不声明原生接受",
+		async (nativeState) => {
+			const { manager, taskId, session, finishFirstSubmitReadinessCheck, getComposerText, submittedPrompts } =
+				await startCodexRetryPausedBeforeFirstSubmit();
+			expect(getComposerText()).toContain("network-interruption-resume.md");
+			expect(manager.getSummary(taskId)?.connectionRetry?.retryCount).toBe(1);
+			finishFirstSubmitReadinessCheck({
+				outcome: nativeState === "native_turn_replaced" ? "target_invalidated" : "deferred_before_terminal_write",
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			expect(getComposerText()).toBe("");
+			expect(session.write.mock.calls.filter(([text]) => text === "\u0015")).toHaveLength(1);
+			expect(submittedPrompts).toEqual([]);
+			expect(manager.getSummary(taskId)?.agentConversationPromptSubmissionAcceptance?.status).not.toBe("accepted");
+			await vi.advanceTimersByTimeAsync(nativeState === "native_turn_replaced" ? 20_000 : 10_000);
+			expect(session.write.mock.calls.filter(([text]) => String(text).includes("[200~"))).toHaveLength(1);
+			expect(submittedPrompts).toEqual([]);
+			if (nativeState === "native_turn_replaced") expect(manager.getSummary(taskId)?.connectionRetry).toBeNull();
+			manager.stopTaskSession(taskId);
+		},
+	);
+
+	it("unknown 拒绝首个 Enter 后重新读到 failed，继续退避重试而不把撤回的 paste 当成恢复", async () => {
+		const { manager, taskId, session, finishFirstSubmitReadinessCheck, getComposerText, submittedPrompts } =
+			await startCodexRetryPausedBeforeFirstSubmit();
+		finishFirstSubmitReadinessCheck({ outcome: "deferred_before_terminal_write" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(getComposerText()).toBe("");
+		await vi.advanceTimersByTimeAsync(14_000);
+		expect(session.write.mock.calls.filter(([text]) => String(text).includes("[200~"))).toHaveLength(2);
+		expect(manager.getSummary(taskId)?.connectionRetry?.retryCount).toBe(2);
+		expect(submittedPrompts).toEqual([]);
+		await vi.advanceTimersByTimeAsync(1_600);
+		expect(submittedPrompts).toHaveLength(1);
+		expect(submittedPrompts[0]).toContain("network-interruption-resume.md");
+		expect(session.write.mock.calls.filter(([text]) => text === "\u0015")).toHaveLength(1);
+		expect(manager.getSummary(taskId)?.agentConversationPromptSubmissionAcceptance?.status).not.toBe("accepted");
+		manager.stopTaskSession(taskId);
+	});
+
+	it("首个 Enter 的原生核验跨过退避窗口仍未返回，保持重试且不重 paste 或提前判恢复", async () => {
+		const { manager, taskId, session, finishFirstSubmitReadinessCheck, submittedPrompts } =
+			await startCodexRetryPausedBeforeFirstSubmit();
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(manager.getSummary(taskId)?.connectionRetry?.retryCount).toBe(1);
+		expect(session.write.mock.calls.filter(([text]) => String(text).includes("[200~"))).toHaveLength(1);
+		expect(submittedPrompts).toEqual([]);
+		finishFirstSubmitReadinessCheck({ outcome: "deferred_before_terminal_write" });
+		await vi.advanceTimersByTimeAsync(0);
+		manager.stopTaskSession(taskId);
+	});
+
+	it("首个 Enter 已写入后，后续原生核验失效只停补发，不再撤回 composer", async () => {
+		const { manager, taskId, session, finishFirstSubmitReadinessCheck, submittedPrompts } =
+			await startCodexRetryPausedBeforeFirstSubmit();
+		finishFirstSubmitReadinessCheck({ outcome: "ready_for_terminal_write", nativeTurnId: "failed-turn" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(submittedPrompts).toHaveLength(1);
+		inspectCodexNativeRetryReadinessMock.mockResolvedValue({ outcome: "target_invalidated" });
+		await vi.advanceTimersByTimeAsync(3_000);
+		expect(session.write.mock.calls.filter(([text]) => text === "\u0015")).toHaveLength(0);
+		expect(submittedPrompts).toHaveLength(1);
+		manager.stopTaskSession(taskId);
+	});
+
+	it.each(["question", "plan_review", "permission", "needs_input", "park"] as const)(
+		"首个 Enter 核验等待期间真实进入 %s，旧续跑不再向终端写任何自动按键",
+		async (targetInteractionState) => {
+			const { manager, taskId, session, finishFirstSubmitReadinessCheck, getComposerText, submittedPrompts } =
+				await startCodexRetryPausedBeforeFirstSubmit();
+			const originalComposerText = getComposerText();
+			if (targetInteractionState === "park") {
+				const parkResult = manager.parkTaskSessionAwaitingDispatchedBackgroundWork(taskId, {
+					label: "等待独立后台作业",
+				});
+				expect(parkResult.ok).toBe(true);
+				expect(manager.getSummary(taskId)?.awaitingDispatchedBackgroundWork?.label).toBe("等待独立后台作业");
+			} else {
+				const modalSummary = manager.transitionToReview(taskId, "hook", targetInteractionState);
+				expect(modalSummary?.turnOwner).toBe("user");
+				expect(modalSummary?.userTurnKind).toBe(targetInteractionState);
+			}
+			expect(manager.getSummary(taskId)?.connectionRetry).toBeNull();
+			finishFirstSubmitReadinessCheck({ outcome: "ready_for_terminal_write", nativeTurnId: "failed-turn" });
+			await vi.advanceTimersByTimeAsync(20_000);
+			expect(session.write).toHaveBeenCalledTimes(1);
+			expect(getComposerText()).toBe(originalComposerText);
+			expect(submittedPrompts).toEqual([]);
+			manager.stopTaskSession(taskId);
+		},
+	);
+
+	it.each(["human_input", "programmatic_delivery", "native_identity", "session_ended"] as const)(
+		"首个 Enter 核验等待期间 %s，旧续跑既不清框也不提交新所有者的正文",
+		async (ownershipChange) => {
+			const { manager, taskId, session, finishFirstSubmitReadinessCheck, getComposerText, submittedPrompts } =
+				await startCodexRetryPausedBeforeFirstSubmit();
+			if (ownershipChange === "human_input") manager.writeInput(taskId, Buffer.from("人的新输入"));
+			else if (ownershipChange === "programmatic_delivery") {
+				manager.submitTaskChatInputWhenReady(taskId, "更新的程序化投递", {
+					onDeliveryOutcome: () => {},
+				});
+				await vi.advanceTimersByTimeAsync(1_000);
+				expect(getComposerText()).toContain("更新的程序化投递");
+				expect(manager.hasPendingProgrammaticTaskChatInputDelivery(taskId)).toBe(true);
+			} else if (ownershipChange === "native_identity")
+				manager.applyAgentNativeConversationSessionIdentity(taskId, {
+					sourceAgentId: "codex",
+					nativeSessionId: "rebound-native-session",
+					transcriptPath: "/isolated/rebound-native-session.jsonl",
+					observedAt: Date.now(),
+				});
+			else manager.stopTaskSession(taskId);
+			const composerTextAfterOwnershipChange = getComposerText();
+			// 人已停手超过抑制窗，旧核验仍不能借这个时间窗夺回清框权。
+			if (ownershipChange === "human_input") await vi.advanceTimersByTimeAsync(9_000);
+			finishFirstSubmitReadinessCheck({ outcome: "deferred_before_terminal_write" });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(getComposerText()).toBe(composerTextAfterOwnershipChange);
+			expect(session.write.mock.calls.filter(([text]) => text === "\u0015")).toHaveLength(0);
+			expect(submittedPrompts).toEqual([]);
+			if (ownershipChange === "programmatic_delivery")
+				expect(manager.hasPendingProgrammaticTaskChatInputDelivery(taskId)).toBe(true);
+			manager.stopTaskSession(taskId);
+		},
+	);
+
+	it("原生核验期间人工输入，即使抑制窗已经过去也不得写入旧续跑正文", async () => {
+		const getSession = spawnManagerWithSession(1202);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "codex-human-input-race",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/isolated/codex-human-input-race",
+			prompt: "验证异步写入让位",
+		});
+		let completeReadinessCheck: (result: { outcome: string; nativeTurnId: string }) => void = () => {};
+		inspectCodexNativeRetryReadinessMock.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					completeReadinessCheck = resolve;
+				}),
+		);
+		const session = getSession();
+		if (!session) throw new Error("缺少隔离 PTY");
+		session.triggerData("Error: read ECONNRESET\n› ");
+		await settleOutputAnalysisBatch();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(inspectCodexNativeRetryReadinessMock).toHaveBeenCalledOnce();
+		manager.writeInput("codex-human-input-race", Buffer.from("尚未提交的人类草稿"));
+		await vi.advanceTimersByTimeAsync(9_000);
+		completeReadinessCheck({ outcome: "ready_for_terminal_write", nativeTurnId: "failed-turn" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(session.write.mock.calls.filter(([text]) => String(text).includes("[200~"))).toHaveLength(0);
+		manager.stopTaskSession("codex-human-input-race");
+	});
+
+	it.each([
+		["deferred_before_terminal_write", false],
+		["target_invalidated", false],
+		["ready_for_terminal_write", true],
+	] as const)("Codex 原生核验 %s 时，实际 PTY 写入与重试计数一致", async (outcome, writes) => {
+		const getSession = spawnManagerWithSession(1201);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "codex-native-guard",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/isolated/codex-native-guard",
+			prompt: "验证写前保护",
+		});
+		inspectCodexNativeRetryReadinessMock.mockResolvedValue({ outcome, nativeTurnId: "failed-turn" });
+		vi.spyOn(manager, "resolveTaskTerminalInputBoxOccupancy").mockResolvedValue({
+			hasUncommittedInput: false,
+			inputSideByteTrackingSaysNonEmpty: false,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+			screenReadingSaysNonEmpty: false,
+			unrecoverablePasteCount: 0,
+		});
+		const session = getSession();
+		if (!session) throw new Error("缺少隔离 PTY");
+		session.triggerData("Error: read ECONNRESET\n› ");
+		await settleOutputAnalysisBatch();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(inspectCodexNativeRetryReadinessMock).toHaveBeenCalled();
+		expect(session.write.mock.calls.filter(([text]) => String(text).includes("[200~"))).toHaveLength(writes ? 1 : 0);
+		expect(manager.getSummary("codex-native-guard")?.connectionRetry?.retryCount ?? 0).toBe(writes ? 1 : 0);
+		manager.stopTaskSession("codex-native-guard");
+	});
+
+	it.each(["tool_activity", "agent_output", "context_compaction"] as const)(
+		"错误之后的可信 %s 清理重连状态，即使终端没有空闲提示符",
+		async (activityKind) => {
+			const getSession = spawnManagerWithSession(1101);
+			const manager = new TerminalSessionManager();
+			await manager.startTaskSession({
+				taskId: "semantic-recovery",
+				agentId: "claude",
+				binary: "claude",
+				args: [],
+				cwd: "/isolated/semantic-recovery",
+				prompt: "验证恢复",
+			});
+			const session = getSession();
+			if (!session) throw new Error("缺少隔离 PTY");
+			session.triggerData("Error: read ECONNRESET\n");
+			await settleOutputAnalysisBatch();
+			const errorAt = manager.getSummary("semantic-recovery")?.connectionRetry?.firstErrorAt;
+			if (!errorAt) throw new Error("缺少重试 episode");
+			manager.recordEffectiveAgentConversationActivity("semantic-recovery", {
+				observedAtMs: errorAt - 1,
+				evidenceKind: "agent_lifecycle_hook_event",
+				activityKind,
+			});
+			expect(manager.getSummary("semantic-recovery")?.liveness).toBe("retrying");
+			manager.recordEffectiveAgentConversationActivity(
+				"semantic-recovery",
+				{
+					observedAtMs: errorAt + 60_001,
+					evidenceKind: "agent_lifecycle_hook_event",
+					activityKind,
+				},
+				{
+					nativeAgentResponsePromptCacheReferenceObservation: {
+						observedAtMs: errorAt,
+						evidenceKind: "post_tool_use_hook_event",
+					},
+				},
+			);
+			expect(manager.getSummary("semantic-recovery")?.liveness).toBe("retrying");
+			await vi.advanceTimersByTimeAsync(1);
+			manager.recordEffectiveAgentConversationActivity("semantic-recovery", {
+				observedAtMs: errorAt + 1,
+				evidenceKind: "native_user_prompt_acceptance",
+				activityKind: "accepted_user_input",
+			});
+			expect(manager.getSummary("semantic-recovery")?.liveness).toBe("retrying");
+			await vi.advanceTimersByTimeAsync(1);
+			manager.recordEffectiveAgentConversationActivity("semantic-recovery", {
+				observedAtMs: errorAt + 2,
+				evidenceKind: "agent_lifecycle_hook_event",
+				activityKind,
+			});
+			expect(manager.getSummary("semantic-recovery")?.connectionRetry).toBeNull();
+			expect(manager.getSummary("semantic-recovery")?.liveness).toBe("live");
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(session.write).not.toHaveBeenCalled();
+			manager.stopTaskSession("semantic-recovery");
+		},
+	);
+
 	beforeEach(() => {
+		inspectCodexNativeRetryReadinessMock.mockReset();
 		prepareAgentLaunchMock.mockReset();
 		ptySessionSpawnMock.mockReset();
 		ensureInstructionsFileMock.mockClear();

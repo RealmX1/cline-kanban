@@ -27,11 +27,11 @@ export interface ConnectionErrorMatch {
 
 // 鉴权 / 配额 / 请求非法 / 上下文超限：永远不自动续跑。
 const PERMANENT_ERROR_PATTERNS: readonly RegExp[] = [
-	/invalid api key|invalid x-api-key|authentication_error|authentication failed|unauthorized|401|403 forbidden|permission denied|oauth token has expired|please run \/login/u,
-	/quota|insufficient_quota|billing|payment required|402/u,
+	/invalid api key|invalid x-api-key|authentication_error|authentication failed|unauthorized|\b401\b|\b403\b forbidden|permission denied|oauth token has expired|please run \/login/u,
+	/quota|insufficient_quota|billing|payment required|\b402\b/u,
 	/usage limit reached|reached your usage limit|usage limit/u,
-	/rate limit|rate_limit|429/u,
-	/400 bad request|invalid_request_error|invalid request error/u,
+	/rate limit|rate_limit|\b429\b/u,
+	/\b400\b bad request|invalid_request_error|invalid request error/u,
 	/context length|context window|maximum context|context_length_exceeded|prompt is too long|input is too long|too many tokens|exceeds the maximum/u,
 ];
 
@@ -39,7 +39,8 @@ const PERMANENT_ERROR_PATTERNS: readonly RegExp[] = [
 const CONNECTION_ERROR_PATTERNS: readonly RegExp[] = [
 	/connection closed mid-response|the response above may be incomplete/u,
 	/connection (?:closed|error|reset|refused|aborted|timed out)/u,
-	/econnreset|econnrefused|etimedout|eai_again|enetunreach|ehostunreach|enotfound|epipe/u,
+	// 错误码必须完整，避免 ModuleNotFoundError 等普通错误名被当成 DNS 故障。
+	/\b(?:econnreset|econnrefused|etimedout|eai_again|enetunreach|ehostunreach|enotfound|epipe)\b/u,
 	/fetch failed|socket hang up|network ?error|stream (?:disconnected|error|closed)|premature close/u,
 	// 只匹配明确的「超时」短语，不再裸匹配 `timeout` / `timed out`（正常输出常含
 	// setTimeout / timeout=30 / 测试输出里的 timeout 等，会误起伪 episode）。
@@ -51,23 +52,38 @@ const CONNECTION_ERROR_PATTERNS: readonly RegExp[] = [
 	/getaddrinfo|tunneling socket could not be established|proxy connection/u,
 ];
 
-function firstMatchSignature(text: string, patterns: readonly RegExp[]): string | null {
+function firstMatchSignature(
+	text: string,
+	patterns: readonly RegExp[],
+	newlyObservedTextStartIndex: number,
+): string | null {
 	for (const pattern of patterns) {
-		const match = pattern.exec(text);
-		if (match) {
-			return match[0].slice(0, 80);
+		for (const match of text.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))) {
+			// 纯桥接缓存里的旧匹配不能刷新错误时间；继续寻找同一正则下的新匹配。
+			if (match.index + match[0].length > newlyObservedTextStartIndex) {
+				return match[0].slice(0, 80);
+			}
 		}
 	}
 	return null;
 }
 
-// 对一段**已归一化**的文本分类。先判 permanent（命中即短路），再判 transient。
-export function classifyConnectionError(normalizedText: string): ConnectionErrorMatch {
-	const permanentSignature = firstMatchSignature(normalizedText, PERMANENT_ERROR_PATTERNS);
+// 对一段**已归一化**的文本分类。只接受延伸到新文本区域的匹配，保留跨 chunk 的词边界。
+// 先判 permanent（命中即短路），再判 transient；不传边界时整段都是新文本。
+export function classifyConnectionError(normalizedText: string, newlyObservedTextStartIndex = 0): ConnectionErrorMatch {
+	const permanentSignature = firstMatchSignature(
+		normalizedText,
+		PERMANENT_ERROR_PATTERNS,
+		newlyObservedTextStartIndex,
+	);
 	if (permanentSignature !== null) {
 		return { classification: "permanent", signature: permanentSignature };
 	}
-	const transientSignature = firstMatchSignature(normalizedText, CONNECTION_ERROR_PATTERNS);
+	const transientSignature = firstMatchSignature(
+		normalizedText,
+		CONNECTION_ERROR_PATTERNS,
+		newlyObservedTextStartIndex,
+	);
 	if (transientSignature !== null) {
 		return { classification: "transient", signature: transientSignature };
 	}

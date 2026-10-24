@@ -6,6 +6,24 @@ function classifyRaw(rawTerminalText: string) {
 	return classifyConnectionError(normalizeDecodedTerminalOutput(rawTerminalText));
 }
 
+describe("classifyConnectionError — 新文本匹配边界", () => {
+	it.each([
+		["ECONNRESET\n", "\rWorking…\n", null],
+		["ECONNRESET\n", "\rECONNRESET\n", "transient"],
+		["ECONNRESET\nError: read ECONN", "RESET\n", "transient"],
+		["Error: read ECONN", "RESET\n", "transient"],
+		["401 Unauthorized\n", "ECONNRESET\n", "transient"],
+		["ECONNRESET\n", "401 Unauthorized\n", "permanent"],
+		["401 Unauthorized\n", "401 Unauthorized\n", "permanent"],
+		["ModuleNotFo", "undError: No module named 'yaml'\n", null],
+		["const myECONNRESET", "Counter = 1\n", null],
+	])("缓存 %j 与新文本 %j 只产生本次完成的匹配", (carryover, newChunk, classification) => {
+		const normalizedCarryover = normalizeDecodedTerminalOutput(carryover);
+		const detectionText = normalizeDecodedTerminalOutput(`${carryover}${newChunk}`);
+		expect(classifyConnectionError(detectionText, normalizedCarryover.length).classification).toBe(classification);
+	});
+});
+
 describe("classifyConnectionError — transient connection errors", () => {
 	it("matches the real Claude Code 'Connection closed mid-response' line with ANSI + carriage-return redraw", () => {
 		// 真实 Claude 错误行：带 `⏺` 前缀、ANSI 颜色、并用 `\r` 原地重绘。
@@ -55,6 +73,15 @@ describe("classifyConnectionError — permanent errors (never auto-continue)", (
 });
 
 describe("classifyConnectionError — non-errors", () => {
+	it.each([
+		"ModuleNotFoundError: No module named 'yaml'",
+		"src/ModuleNotFoundError.ts",
+		"const myECONNRESETCounter = 1",
+		"operation id 140123 and sample 142912",
+	])("错误名、标识符和数字中的子串不构成连接错误：%s", (text) => {
+		expect(classifyRaw(text)).toEqual({ classification: null, signature: null });
+	});
+
 	it("returns null for ordinary agent output", () => {
 		for (const token of ["Reading file src/index.ts", "Running tests…", "✓ 42 passed", "Editing component"]) {
 			expect(classifyRaw(token).classification).toBeNull();

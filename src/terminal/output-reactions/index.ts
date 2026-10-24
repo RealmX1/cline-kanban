@@ -23,6 +23,8 @@ export function getDefaultOutputReactionEngine(): OutputReactionEngine {
 }
 
 export type {
+	ConnectionRetryContinuationFirstSubmitCarriageReturnState,
+	ConnectionRetryContinuationSubmissionResult,
 	OutputReactionActions,
 	OutputReactionContext,
 	OutputReactionEngine,

@@ -1518,6 +1518,202 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 }
 
 describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
+	it("自动补证对未知证据退避并限次，新转录证据到达后重新核验", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const originalRequest = mocked.request.getMockImplementation();
+		mocked.request.mockRejectedValue(new Error("原生控制面暂不可读"));
+		mocked.request.mockClear();
+		const ledgerBefore = await readFile(context.ledgerPath);
+		const observedAt = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(observedAt);
+		try {
+			await context.service.status(context.scope, { taskId: "task" });
+			const callsPerAttempt = mocked.request.mock.calls.length;
+			expect(callsPerAttempt).toBeGreaterThan(0);
+			await context.service.status(context.scope, { taskId: "task" });
+			expect(mocked.request).toHaveBeenCalledTimes(callsPerAttempt);
+			for (const offset of [16_000, 32_000, 48_000]) {
+				clock.mockReturnValue(observedAt + offset);
+				await context.service.status(context.scope, { taskId: "task" });
+			}
+			expect(mocked.request).toHaveBeenCalledTimes(callsPerAttempt * 3);
+			if (!originalRequest) throw new Error("缺少原生控制面测试适配器。");
+			mocked.request.mockImplementation(originalRequest);
+			await context.writeNativeEvidence({ nativeMessageRecordedAtMs: 121_576 });
+			const state = await context.service.status(context.scope, { taskId: "task" });
+			expect(state.records[0]?.status).toBe("closeout_prompt_submitted");
+			expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it.each(["liveness", "prompt_acceptance", "control_endpoint", "record_updated_at"] as const)(
+		"%s 的无关变化不重置同转录的十五秒退避与三次预算",
+		async (changedObservation) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			mocked.request.mockRejectedValue(new Error("原生控制面暂不可读"));
+			mocked.request.mockClear();
+			const ledgerBefore = await readFile(context.ledgerPath);
+			const transcriptBefore = await readFile(context.transcriptPath);
+			const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+			const observedAt = Date.now();
+			const clock = vi.spyOn(Date, "now").mockReturnValue(observedAt);
+			try {
+				await context.service.status(context.scope, { taskId: "task" });
+				const callsPerAttempt = mocked.request.mock.calls.length;
+				expect(callsPerAttempt).toBeGreaterThan(0);
+				let observationSequence = 0;
+				for (const [offset, maximumAttempts] of [
+					[1, 1],
+					[14_999, 1],
+					[15_000, 2],
+					[29_999, 2],
+					[30_000, 3],
+					[45_000, 3],
+					[60_000, 3],
+				]) {
+					clock.mockReturnValue(observedAt + offset);
+					observationSequence += 1;
+					const summary = context.manager.getSummary();
+					if (changedObservation === "liveness") {
+						Object.assign(summary, { turnOwner: "user", liveness: "retrying", userTurnKind: "review" });
+						await context.service.status(context.scope, { taskId: "task" });
+						Object.assign(summary, { turnOwner: "user", liveness: "live", userTurnKind: "review" });
+					} else if (changedObservation === "prompt_acceptance") {
+						summary.agentConversationPromptSubmissionAcceptance = {
+							status: observationSequence % 2 ? "pending" : "accepted",
+							attemptedAtMs: observedAt + observationSequence,
+							runtimeSessionIncarnationId: "restored-incarnation",
+						};
+					} else if (changedObservation === "control_endpoint") {
+						const endpoint = summary.codexNativeSessionControlEndpoint;
+						if (!endpoint) throw new Error("缺少本代原生控制端点。");
+						summary.codexNativeSessionControlEndpoint = {
+							...endpoint,
+							socketPath: `/isolated-restored-native-control-${observationSequence}`,
+						};
+					} else {
+						await updateRvfAutomaticCloseoutRecords(
+							getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+							(records) => ({
+								records: records.map((entry) => ({ ...entry, updatedAt: observedAt + observationSequence })),
+								value: undefined,
+							}),
+						);
+					}
+					const state = await context.service.status(context.scope, { taskId: "task" });
+					expect(state.records[0]?.status).toBe("paused");
+					expect(mocked.request.mock.calls.length).toBeLessThanOrEqual(callsPerAttempt * maximumAttempts);
+				}
+				expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+				expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+				expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(
+					enqueueCount,
+				);
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+
+	it.each(["runtime_incarnation", "process_start", "service_restart"] as const)(
+		"%s 在相同转录已耗尽自动补证预算后仍可恢复",
+		async (changedGeneration) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			const originalRequest = mocked.request.getMockImplementation();
+			mocked.request.mockRejectedValue(new Error("原生控制面暂不可读"));
+			mocked.request.mockClear();
+			const ledgerBefore = await readFile(context.ledgerPath);
+			const transcriptBefore = await readFile(context.transcriptPath);
+			const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+			const observedAt = Date.now();
+			const clock = vi.spyOn(Date, "now").mockReturnValue(observedAt);
+			try {
+				await context.service.status(context.scope, { taskId: "task" });
+				const callsPerAttempt = mocked.request.mock.calls.length;
+				expect(callsPerAttempt).toBeGreaterThan(0);
+				for (const offset of [15_000, 30_000, 45_000]) {
+					clock.mockReturnValue(observedAt + offset);
+					await context.service.status(context.scope, { taskId: "task" });
+				}
+				expect(mocked.request).toHaveBeenCalledTimes(callsPerAttempt * 3);
+				if (!originalRequest) throw new Error("缺少原生控制面测试适配器。");
+				mocked.request.mockImplementation(originalRequest);
+				const summary = context.manager.getSummary();
+				if (changedGeneration === "runtime_incarnation") {
+					const endpoint = summary.codexNativeSessionControlEndpoint;
+					if (!endpoint) throw new Error("缺少本代原生控制端点。");
+					summary.runtimeSessionIncarnationId = "replacement-incarnation";
+					summary.codexNativeSessionControlEndpoint = {
+						...endpoint,
+						runtimeSessionIncarnationId: "replacement-incarnation",
+					};
+				} else if (changedGeneration === "process_start") {
+					summary.startedAt = (summary.startedAt ?? 0) + 1;
+				}
+				const service =
+					changedGeneration === "service_restart"
+						? createRvfAutomaticCloseoutRuntimeService(context.dependencies)
+						: context.service;
+				const state = await service.status(context.scope, { taskId: "task" });
+				expect(state.records[0]?.status).toBe("closeout_prompt_submitted");
+				expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+				expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+				expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(
+					enqueueCount,
+				);
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+
+	it("补证期间的内部状态查询读取快照，不重入自己持有的 workspace 队列", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const originalRequest = mocked.request.getMockImplementation();
+		let readDuringVerification = false;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/loaded/list" && !readDuringVerification) {
+				readDuringVerification = true;
+				expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe("paused");
+			}
+			return originalRequest?.(method, parameters);
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(readDuringVerification).toBe(true);
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]?.status).toBe(
+			"closeout_prompt_submitted",
+		);
+	});
+
+	it.each(["background_sweep", "status_query", "service_restart"] as const)(
+		"%s 自动补证真实迟到接受，保留失败账本且不重新投递",
+		async (trigger) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			const ledgerBefore = await readFile(context.ledgerPath);
+			const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+			const service =
+				trigger === "service_restart"
+					? createRvfAutomaticCloseoutRuntimeService(context.dependencies)
+					: context.service;
+			if (trigger === "status_query") await service.status(context.scope, { taskId: "task" });
+			else await service.sweepPendingCloseoutsOnce();
+			const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+			const records = Array.isArray(saved) ? saved : saved.records;
+			expect(records[0]).toMatchObject({
+				status: "closeout_prompt_submitted",
+				lateNativePromptAcceptanceRecoveryReceipt: {
+					originalDeliveryFailure: { status: "delivery_failed" },
+				},
+			});
+			expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(
+				enqueueCount,
+			);
+		},
+	);
+
 	it("跨 service 单飞；恢复后停止的持久标记不能被服务重建或旧凭据绕过", async () => {
 		const context = await setupLateNativeCloseoutPromptAcceptance();
 		const anotherService = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
@@ -1622,7 +1818,7 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 		expect(context.repo.runGit(["status", "--porcelain=v2"]).stdout).toBe(statusBefore);
 	});
 	it.each(["land", "base_branch_sync"] as const)(
-		"paused 可保存 %s 受阻事实，失败历史保留，既不解除暂停也不要求投递成功",
+		"paused 保存 %s 受阻历史；completed 请求自动补证后仍须真实阶段证据",
 		async (stage) => {
 			const context = await setupLateNativeCloseoutPromptAcceptance();
 			const report = { ...context.request, stage, outcome: "blocked" as const, reason: "确认预算耗尽，尚未执行" };
@@ -1651,7 +1847,10 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 					commitSha: context.captured.receipt.worktree_head_commit_sha,
 					...(stage === "base_branch_sync" ? { baseRef: "main" } : {}),
 				}),
-			).rejects.toThrow("暂停");
+			).rejects.toThrow(stage === "land" ? "reviewed-task-candidate-evidence.json" : "尚未确认 land 成功");
+			const after = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+			expect(after?.status).toBe("closeout_prompt_submitted");
+			expect(after?.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual(["blocked", "failed"]);
 		},
 	);
 	it.each([
@@ -1667,6 +1866,8 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 			status: "unknown",
 			reasonCode: "native_prompt_acceptance_not_proven",
 		});
+		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(before);
+		await context.service.sweepPendingCloseoutsOnce();
 		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(before);
 	});
 	it("实时分支已回退、无控制面或缺页均不复活历史记录", async () => {
