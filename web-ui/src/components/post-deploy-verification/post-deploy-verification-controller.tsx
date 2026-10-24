@@ -9,6 +9,7 @@ import {
 	listUncheckedChecklistItemsRequiringClosureReason,
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
 import { PostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-panel";
+import { PostDeployVerificationReviewBeforeMoveIntoDoneDialog } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
@@ -100,6 +101,12 @@ export function PostDeployVerificationController({
 	latestBoardRef.current = board;
 
 	// 正在跑完成流的 taskId（发放 token / 弹窗 / 移列 / confirm 全程；批量时是正在处理的那一个），用于条目 spinner 与禁用重入。
+	const [taskAwaitingDoneEntryReview, setTaskAwaitingDoneEntryReview] = useState<{
+		taskId: string;
+		runtimeRejectionRevision: number;
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+	} | null>(null);
+	const commentRequiresDoneEntryReviewRef = useRef(false);
 	const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
 	const [singleTaskCompletionAwaitingClosureDialog, setSingleTaskCompletionAwaitingClosureDialog] =
 		useState<PostDeployVerificationSingleTaskCompletionAwaitingClosureDialog | null>(null);
@@ -345,6 +352,23 @@ export function PostDeployVerificationController({
 		],
 	);
 
+	const handleRequestMoveIntoDoneFromTaskCard = (
+		deploymentId: string,
+		taskId: string,
+		options?: Parameters<TaskCardMoveIntoDoneRequestHandler>[1],
+	) => {
+		if (completingTaskId || taskAwaitingDoneEntryReview || batchClosureAwaitingClosureDialog) return;
+		const task = verification.activeGroup?.tasks.find((entry) => entry.taskId === taskId);
+		if (options?.requestTaskCommentBeforeMovingIntoDone) {
+			commentRequiresDoneEntryReviewRef.current = !!task?.checklist.some((item) => !item.checked);
+			handleRequestComplete(deploymentId, taskId, options);
+		} else if (task?.checklist.some((item) => !item.checked)) {
+			setTaskAwaitingDoneEntryReview({ taskId, runtimeRejectionRevision: 0 });
+		} else {
+			handleRequestComplete(deploymentId, taskId, options);
+		}
+	};
+
 	const submitTaskCommentBeforeCompletion = (commentText: string) => {
 		const request = taskCommentBeforeMoveIntoDone.request;
 		const deploymentId = deploymentIdForTaskCommentCompletionRef.current;
@@ -379,7 +403,16 @@ export function PostDeployVerificationController({
 				);
 			return;
 		}
-		void requestSingleTaskCompletion(deploymentId, request.taskId, taskCommentToAppendWhenMovingIntoDone);
+		if (commentRequiresDoneEntryReviewRef.current) {
+			suspendTaskCommentForConfirmation(request.taskId, taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId);
+			setTaskAwaitingDoneEntryReview({
+				taskId: request.taskId,
+				runtimeRejectionRevision: 0,
+				taskCommentToAppendWhenMovingIntoDone,
+			});
+		} else {
+			void requestSingleTaskCompletion(deploymentId, request.taskId, taskCommentToAppendWhenMovingIntoDone);
+		}
 	};
 
 	const handleRequestBatchClosureWithReasonsOfZoneTasks = useCallback(
@@ -521,6 +554,71 @@ export function PostDeployVerificationController({
 
 	return (
 		<>
+			{taskAwaitingDoneEntryReview && verification.activeGroup ? (
+				<PostDeployVerificationReviewBeforeMoveIntoDoneDialog
+					workspaceId={verification.activeGroup.workspaceId}
+					taskId={taskAwaitingDoneEntryReview.taskId}
+					board={board}
+					verification={verification}
+					realTaskCardRenderingInputs={realTaskCardRenderingInputsForPostDeployVerificationPanelEntries}
+					isSubmittingClosure={isSubmittingClosure}
+					runtimeRejectionRevision={taskAwaitingDoneEntryReview.runtimeRejectionRevision}
+					onSelectTask={() => onSelectTask(taskAwaitingDoneEntryReview.taskId)}
+					onNavigateToBoard={onNavigateToBoard}
+					onRequestTaskCommentBeforeMovingIntoDone={() => {
+						const taskId = taskAwaitingDoneEntryReview.taskId;
+						setTaskAwaitingDoneEntryReview(null);
+						commentRequiresDoneEntryReviewRef.current = true;
+						if (taskCommentBeforeMoveIntoDone.request) returnTaskCommentToEditing(taskId);
+						else
+							handleRequestComplete(verification.activeGroup!.deploymentId, taskId, {
+								requestTaskCommentBeforeMovingIntoDone: true,
+							});
+					}}
+					onCancel={() => {
+						if (taskAwaitingDoneEntryReview.taskCommentToAppendWhenMovingIntoDone)
+							returnTaskCommentToEditing(taskAwaitingDoneEntryReview.taskId);
+						setTaskAwaitingDoneEntryReview(null);
+					}}
+					onConfirmClosureRequestsBySelectedTaskId={(requests) => {
+						const pending = taskAwaitingDoneEntryReview;
+						const column = getTaskColumnId(latestBoardRef.current, pending.taskId);
+						const closure = requests[pending.taskId];
+						if (!column || column === "trash" || !closure || isSubmittingClosure) return;
+						setIsSubmittingClosure(true);
+						void completePostDeployVerificationMoveToDone(
+							pending.taskId,
+							column,
+							closure,
+							pending.taskCommentToAppendWhenMovingIntoDone,
+						)
+							.then((result) => {
+								if (result.ok) {
+									setTaskAwaitingDoneEntryReview(null);
+									commentRequiresDoneEntryReviewRef.current = false;
+									if (pending.taskCommentToAppendWhenMovingIntoDone)
+										completeTaskComment(
+											pending.taskId,
+											pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+										);
+								} else {
+									setTaskAwaitingDoneEntryReview((current) =>
+										current
+											? { ...current, runtimeRejectionRevision: current.runtimeRejectionRevision + 1 }
+											: null,
+									);
+									showAppToast({
+										intent: "danger",
+										message: result.moveIntoDoneFailureMessage ?? "移入 Done 失败，请重试",
+									});
+								}
+								refresh();
+							})
+							.finally(() => setIsSubmittingClosure(false));
+					}}
+				/>
+			) : null}
+
 			<PostDeployVerificationPanel
 				activeGroup={verification.activeGroup}
 				historyGroups={verification.historyGroups}
@@ -536,7 +634,8 @@ export function PostDeployVerificationController({
 				loweredForDialog={
 					isClosureDialogOpen ||
 					taskCommentBeforeMoveIntoDone.request !== null ||
-					isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel
+					isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel ||
+					taskAwaitingDoneEntryReview !== null
 				}
 				completingTaskId={completingTaskId}
 				isBatchClosureWithReasonsInFlight={batchClosureAwaitingClosureDialog !== null}
@@ -547,6 +646,7 @@ export function PostDeployVerificationController({
 				onRemoveCustomChecklistItem={verification.removeCustomChecklistItem}
 				onRunVerificationItem={verification.runVerificationItem}
 				onRequestComplete={handleRequestComplete}
+				onRequestMoveIntoDoneFromTaskCard={handleRequestMoveIntoDoneFromTaskCard}
 				onRequestBatchClosureWithReasonsOfZoneTasks={handleRequestBatchClosureWithReasonsOfZoneTasks}
 				onSelectTask={onSelectTask}
 				onNavigateToBoard={onNavigateToBoard}

@@ -82,6 +82,8 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 		hasLoadedOnce: true,
 		pendingVerificationTaskCount: 1,
 		refresh: vi.fn(),
+		refreshAndReadActiveGroup: vi.fn(),
+		isVerificationWriteInFlight: false,
 		stayInFront: true,
 		setStayInFront: vi.fn(),
 		collapsed: false,
@@ -122,6 +124,7 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 				</TooltipProvider>,
 			),
 		);
+	verification.refreshAndReadActiveGroup = vi.fn(async () => verification.activeGroup);
 	await rerender();
 	await act(async () =>
 		document
@@ -200,19 +203,21 @@ it("Validation 清单已核对：确认评论后经过原 token 完成流，并�
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
 });
 
-it("有未勾项时评论继续经过原原因门禁：取消保留草稿，确认后同一命令同时携带原因与评论", async () => {
+it("有未勾项时评论先经过核对再填写原因：取消保留草稿，确认后同一命令携带原因与评论", async () => {
 	const { verification, completePostDeployVerificationMoveToDone } =
 		await renderUnhydratedWorkspacePostDeployVerificationCard(true);
 	await selectCommentBeforeCompletion();
 	await enterTaskComment("保留在门禁里的评论");
 	await act(async () => buttonWithText("提交评论并移入 Done").click());
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
-	expect(buttonWithText("确认移入 Done").disabled).toBe(true);
+	expect(document.body.textContent).toContain("移入 Done 前核对");
+	expect(document.querySelector("select")).toBeNull();
 	expect(completePostDeployVerificationMoveToDone).not.toHaveBeenCalled();
 	await act(async () => buttonWithText("取消").click());
 	expect(document.querySelector<HTMLTextAreaElement>('[aria-label="任务评论"]')?.value).toBe("保留在门禁里的评论");
 	expect(completePostDeployVerificationMoveToDone).not.toHaveBeenCalled();
 	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("继续填写未完成原因").click());
 	const reasonSelect = document.querySelector<HTMLSelectElement>('[aria-label="检查真实行为：原因"]')!;
 	await act(async () => {
 		reasonSelect.value = "custom_reason_described_in_reason_text";
@@ -240,7 +245,7 @@ it("有未勾项时评论继续经过原原因门禁：取消保留草稿，确�
 		},
 		{ taskCommentEntryId: expect.any(String), commentText: "保留在门禁里的评论" },
 	);
-	expect(verification.confirmComplete).toHaveBeenCalledOnce();
+	expect(verification.confirmComplete).not.toHaveBeenCalled();
 });
 
 it("未水合宿主的直接完成保留原行为，不打开评论弹窗", async () => {

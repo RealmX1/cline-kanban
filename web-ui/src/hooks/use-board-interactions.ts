@@ -1036,8 +1036,8 @@ export function useBoardInteractions({
 			const boardMutationInitiatorForCommand = boardMutationInitiatorForThisDrop ?? undefined;
 			switch (columnTransitionClassification) {
 				case "board_column_transition_into_done_stopping_sessions_and_deleting_worktree": {
-					// Post-Deploy Verification 门禁预检：有未勾项的卡先问原因。board 没被改过（只有命令才叠 overlay），
-					// 卡片自然弹回原列；用户手势打开原因对话框（记住落点），浏览器端自动化只提示一次。
+					// Post-Deploy Verification 门禁预检：有未勾项的卡先核对，再决定是否填写原因。board 没被改过（只有命令才叠 overlay），
+					// 卡片自然弹回原列；用户手势打开核对与结案流程（记住落点），浏览器端自动化只提示一次。
 					if (
 						doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask(
 							latestBoardInteractionStateRef.current
@@ -1459,7 +1459,7 @@ export function useBoardInteractions({
 	// Single entry point for every "Move to Done" trigger (board card, detail sidebar card, agent
 	// TUI bottom button). Moving straight to Done from Review / In Progress skips the manual
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
-	// 受 Post-Deploy Verification 门禁（有未勾项）的卡改开原因对话框：跳过 Validation 的确认是它的条件段落，不叠两层。
+	// 受 Post-Deploy Verification 门禁（有未勾项）的卡先进入核对阶段：跳过 Validation 的确认是它的条件段落，不叠两层。
 	const requestMoveToTrash = useCallback(
 		(
 			taskId: string,
