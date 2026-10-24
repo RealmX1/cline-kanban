@@ -88,6 +88,7 @@ import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskVisualizationCommand } from "./task-visualization";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
 	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
@@ -275,8 +276,11 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 	throw new Error(`${commandName} requires either --task-id or --column.`);
 }
 
-export function createRuntimeTrpcClient(workspaceId: string | null) {
-	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
+export function createRuntimeTrpcClient(
+	workspaceId: string | null,
+	clientOptions: { retryWhileKanbanRuntimeRestarts?: boolean; requestTimeoutMs?: number } = {},
+) {
+	const trpcTimeoutMs = clientOptions.requestTimeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -294,12 +298,16 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 						),
 				}),
 				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
-				fetch: (url, options) =>
-					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+				fetch: (url, options) => {
+					const send = async () => {
 						const runtimeFetch = await getRuntimeFetch();
 						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
 						return runtimeFetch(url, { ...options, signal });
-					}),
+					};
+					return clientOptions.retryWhileKanbanRuntimeRestarts === false
+						? send()
+						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(send);
+				},
 			}),
 		],
 	});
@@ -1854,6 +1862,7 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
+	registerTaskVisualizationCommand(task);
 
 	task
 		.command("list")

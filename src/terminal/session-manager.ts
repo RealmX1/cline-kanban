@@ -70,6 +70,7 @@ import {
 	type CodexNativeDirectInputReadinessObservation,
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
 } from "../core/codex-native-direct-input-readiness";
+import { resolveKanbanCommandParts } from "../core/kanban-command";
 import {
 	applySessionFacets,
 	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
@@ -4536,6 +4537,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		const taskContextEnv = {
+			KANBAN_VISUALIZATION_PUBLISH_COMMAND_JSON: JSON.stringify(resolveKanbanCommandParts()),
 			KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			KANBAN_ATTEMPT_ID: request.taskId,
 			CLINE_KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
