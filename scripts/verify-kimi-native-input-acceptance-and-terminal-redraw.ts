@@ -8,18 +8,21 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { stripVTControlCharacters } from "node:util";
+import { z } from "zod";
 import { createNativeAgentConversationActivityObserver } from "../src/server/native-agent-conversation-activity-observer";
 import { getKanbanManagedKimiCodeHome } from "../src/terminal/kimi-hook-config";
-import { TerminalSessionManager } from "../src/terminal/session-manager";
-import { parseTerminalSessionAdoptionRecord } from "../src/terminal/terminal-session-adoption-record-for-runtime-restart";
 import { PtySession } from "../src/terminal/pty-session";
+import { TerminalSessionManager } from "../src/terminal/session-manager";
 import type {
 	HostedTerminalPtyProcessSpawnRequest,
 	TerminalPtyProcessHandle,
 } from "../src/terminal/terminal-pty-process-handle";
+import { parseTerminalSessionAdoptionRecord } from "../src/terminal/terminal-session-adoption-record-for-runtime-restart";
 
 const outputDirectory = process.env.KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY;
 const binary = process.env.KANBAN_KIMI_NATIVE_E2E_BINARY;
+const startInPlanMode = process.env.KANBAN_KIMI_NATIVE_E2E_START_IN_PLAN_MODE === "1";
 assert(outputDirectory && binary, "必须显式提供持久证据目录和 Kimi 二进制路径");
 assert(resolve(homedir()).startsWith(`${resolve(outputDirectory)}/`), "HOME 必须隔离在证据目录内部");
 assert(!process.env.KANBAN_HOOK_TASK_ID && !process.env.KANBAN_HOOK_WORKSPACE_ID, "探针不得继承真实任务 hook 身份");
@@ -32,6 +35,9 @@ await Promise.all([
 	mkdir(emptySkills, { recursive: true }),
 	mkdir(home, { recursive: true }),
 ]);
+const permissionProbeFixturePath = join(cwd, "permission-probe-fixture.txt");
+const permissionProbeFixtureSentinel = "isolated-permission-probe-tool-output-sentinel";
+await writeFile(permissionProbeFixturePath, `${permissionProbeFixtureSentinel}\n`);
 const hookEventsPath = join(outputDirectory, "native-hook-events.jsonl");
 await writeFile(hookEventsPath, "");
 const hookScript = join(outputDirectory, "capture-native-hook.mjs");
@@ -40,23 +46,59 @@ await writeFile(
 	`import {appendFileSync} from 'node:fs'; let body=''; process.stdin.setEncoding('utf8'); process.stdin.on('data',s=>body+=s); process.stdin.on('end',()=>{appendFileSync(${JSON.stringify(hookEventsPath)},JSON.stringify({event:process.argv[2],time:Date.now(),payload:JSON.parse(body)})+'\\n');});`,
 );
 let modelRequests = 0;
+let permissionProbeToolCallRequested = false;
+let permissionProbeToolCallCompleted = false;
+const mockModelRequestSchema = z.object({
+	messages: z.array(
+		z.object({ role: z.string(), tool_call_id: z.string().optional(), content: z.unknown().optional() }),
+	),
+});
 const modelServer = createServer(async (request, response) => {
-	for await (const _chunk of request) {
-		/* 消费请求，不保存模型上下文。 */
-	}
+	const modelRequestBodyChunks: Buffer[] = [];
+	for await (const chunk of request) modelRequestBodyChunks.push(Buffer.from(chunk));
 	if (request.url !== "/v1/chat/completions") {
 		response.writeHead(404).end();
 		return;
 	}
 	modelRequests += 1;
+	const requestBody = Buffer.concat(modelRequestBodyChunks).toString();
+	const requestPermissionProbeToolCall =
+		!permissionProbeToolCallRequested && requestBody.includes("isolated-bypass-permission-verification");
+	if (requestPermissionProbeToolCall) permissionProbeToolCallRequested = true;
+	const modelRequest = mockModelRequestSchema.parse(JSON.parse(requestBody));
+	const permissionProbeToolResult = modelRequest.messages.find(
+		(message) => message.role === "tool" && message.tool_call_id === "isolated-permission-probe-tool-call",
+	);
+	if (JSON.stringify(permissionProbeToolResult?.content)?.includes(permissionProbeFixtureSentinel)) {
+		permissionProbeToolCallCompleted = true;
+	}
 	const content = Array.from(
 		{ length: 75 },
 		(_, index) => `kimi-real-response-${modelRequests}-line-${String(index).padStart(3, "0")}`,
 	).join("\n");
 	response.writeHead(200, { "Content-Type": "text/event-stream" });
-	for (const delta of [{ role: "assistant", content }, {}]) {
+	const messageDelta = requestPermissionProbeToolCall
+		? {
+				role: "assistant",
+				tool_calls: [
+					{
+						index: 0,
+						id: "isolated-permission-probe-tool-call",
+						type: "function",
+						function: {
+							name: "Bash",
+							arguments: JSON.stringify({ command: "cat permission-probe-fixture.txt", cwd }),
+						},
+					},
+				],
+			}
+		: { role: "assistant", content };
+	for (const [delta, finishReason] of [
+		[messageDelta, null],
+		[{}, requestPermissionProbeToolCall ? "tool_calls" : "stop"],
+	] as const) {
 		response.write(
-			`data: ${JSON.stringify({ id: `mock-${modelRequests}`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "isolated-mock", choices: [{ index: 0, delta, finish_reason: delta.content ? null : "stop" }] })}\n\n`,
+			`data: ${JSON.stringify({ id: `mock-${modelRequests}`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "isolated-mock", choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`,
 		);
 	}
 	response.end("data: [DONE]\n\n");
@@ -133,7 +175,7 @@ const observer = createNativeAgentConversationActivityObserver({
 let hookEventCount = 0;
 let trustedOwnedFixtureDirectory = false;
 async function pollNativeEvidence() {
-	// 仅批准本探针刚创建的空工作目录，不改变产品中的 trust 策略。
+	// 仅批准本探针刚创建的夹具目录，不改变产品中的 trust 策略。
 	if (!trustedOwnedFixtureDirectory && Buffer.concat(rawOutput).toString().includes("Trust this folder?")) {
 		trustedOwnedFixtureDirectory = true;
 		handle.write("\r");
@@ -179,11 +221,22 @@ try {
 		args: ["--model", "isolated-mock", "--skills-dir", emptySkills],
 		cwd,
 		prompt: "",
+		startInPlanMode,
+		taskAgentPermissionMode: "bypass_all_permission_prompts",
 		cols: 90,
 		rows: 14,
 		env: { KIMI_CODE_HOME: home },
 	});
 	await waitFor("原生输入框就绪", () => Buffer.concat(rawOutput).toString().includes("No session yet"));
+	await waitFor("Bypass 的原生状态栏显示 Never Ask", async () => {
+		const snapshot = await manager.getRestoreSnapshot(taskId);
+		return stripVTControlCharacters(snapshot?.snapshot ?? "").includes("Never Ask");
+	});
+	const startupSnapshot = await manager.getRestoreSnapshot(taskId);
+	if (startInPlanMode) {
+		assert(stripVTControlCharacters(startupSnapshot!.snapshot).includes("Never Ask plan"), "原生 Plan 起步必须保留");
+	}
+	await writeFile(join(outputDirectory, "native-permission-startup-snapshot.ansi"), startupSnapshot!.snapshot);
 	await delay(500);
 	for (let turn = 1; turn <= 2; turn += 1) {
 		const prompt = `原生核验输入 ${turn}，请回复固定测试文本。`;
@@ -211,6 +264,15 @@ try {
 	await waitFor(
 		"程序化输入的模型响应与 Stop",
 		async () => modelRequests === 3 && (await readFile(hookEventsPath, "utf8")).split('"event":"Stop"').length === 4,
+	);
+	// 只读取本探针的普通夹具文件；Never Ask 不代表解除 harness 的静态拒绝规则。
+	manager.submitTaskChatInputWhenReady(taskId, "isolated-bypass-permission-verification");
+	await waitFor(
+		"夹具工具在 Never Ask 下免人工授权完成回合",
+		async () =>
+			permissionProbeToolCallCompleted &&
+			modelRequests === 5 &&
+			(await readFile(hookEventsPath, "utf8")).split('"event":"Stop"').length === 5,
 	);
 	for (const [cols, rows] of [
 		[84, 12],
@@ -273,6 +335,9 @@ try {
 		nodeVersion: process.version,
 		kimiVersion: execFileSync(binary, ["--version"], { encoding: "utf8" }).trim(),
 		modelRequests,
+		nativePermissionMode: "Never Ask",
+		startInPlanMode,
+		permissionProbeToolCallCompletedWithoutHumanApproval: permissionProbeToolCallCompleted,
 		deliveryOutcomes,
 		acceptanceStatus: readCurrentSummary()?.agentConversationPromptSubmissionAcceptance?.status,
 		resizeResults,

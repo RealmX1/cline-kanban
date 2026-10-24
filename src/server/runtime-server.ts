@@ -481,11 +481,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 					onProgrammaticTerminalDeliverySettled,
+					programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
 					validateBeforeTerminalWrite:
 						request.source === "rvf_automatic_closeout" || validateBeforeTerminalWrite
-							? async () => {
-									await validateBeforeTerminalWrite?.();
+							? async (phase) => {
+									await validateBeforeTerminalWrite?.(phase);
 									if (request.source === "rvf_automatic_closeout") {
 										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
 											throw new Error("自动收尾投递门尚未就绪。");

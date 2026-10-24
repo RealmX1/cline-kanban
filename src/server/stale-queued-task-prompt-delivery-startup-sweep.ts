@@ -2,7 +2,8 @@
 //
 //   1. **收敛被重启撂在半路的在途投递**。claimed_for_dispatch（一个字节都没写出去）释放回 queued；
 //      handed_to_transport（可能已经发出去了）落 settled_failed 并保留可见，由人决定要不要重排——
-//      绝不自动重投。没有这一步，一次崩溃就能把某个 task 的队列永久卡死：认领门会被僵尸条目挡住。
+//      绝不自动重投。已持久提交的压缩感知自动收尾按单条截止只读续等，并从真实账本终态收敛。
+//      没有这一步，一次崩溃就能把某个 task 的队列永久卡死：认领门会被僵尸条目挡住。
 //   2. **给跨过了这次重启的条目盖 restart-crossing 章**。门控 0 据此硬阻塞，直到人在重启后看见过它
 //      （聚焦任务时的 5 秒高亮 + reconfirm mutation）。这是用户明确要的行为：kanban 重启之后，队列还在，
 //      但先提醒我确认它还需不需要，再在下一次 stop hook 注入。
@@ -21,6 +22,10 @@
 //     store 的 stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart）。
 
 import type { WorkspaceQueuedTaskPromptDeliverySnapshot } from "../core/api-contract";
+import {
+	CODEX_RVF_CLOSEOUT_CUMULATIVE_COMPACTION_WAIT_BUDGET_MS,
+	CODEX_RVF_CLOSEOUT_ORDINARY_CONFIRMATION_BUDGET_MS,
+} from "../core/codex-rvf-closeout-compaction-aware-confirmation";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart,
@@ -58,26 +63,8 @@ export interface QueuedTaskPromptDeliveryRuntimeRestartSweepResult {
 	stampedCount: number;
 	// 这一趟里仍在途、且还没超期的条目里，最早会跨过预算的时刻。null = 没有这样的条目，不必复扫。
 	earliestYoungInFlightDeliveryBecomesStaleAtEpochMs: number | null;
-	// 托管实例已死的程序化条目（--deliver-when-agent-idle）不盖章，直接落 settled_failed；账本镜像由 store 完成。
+	// 程序化条目不盖人工章；其中可核验的已提交自动收尾从账本收敛，其余按旧重启规则结算。
 	settledProgrammaticInjectionCount: number;
-}
-
-function findEarliestYoungInFlightDeliveryBecomesStaleAtEpochMs(
-	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
-	inFlightSettlementBudgetMs: number,
-): number | null {
-	let earliest: number | null = null;
-	for (const entries of Object.values(snapshot.entriesByTaskId)) {
-		for (const entry of entries) {
-			if (entry.deliveryState !== "claimed_for_dispatch" && entry.deliveryState !== "handed_to_transport") {
-				continue;
-			}
-			// 与 store 的收敛判据同一个年龄口径（lastAttemptedAt ?? enqueuedAt）。
-			const becomesStaleAt = (entry.lastAttemptedAt ?? entry.enqueuedAt) + inFlightSettlementBudgetMs;
-			earliest = earliest === null ? becomesStaleAt : Math.min(earliest, becomesStaleAt);
-		}
-	}
-	return earliest;
 }
 
 export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWorkspaces(
@@ -126,6 +113,7 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 			});
 			result.releasedClaimCount += stranded.releasedClaimCount;
 			result.failedStrandedDeliveryCount += stranded.failedStrandedDeliveryCount;
+			result.settledProgrammaticInjectionCount += stranded.reconciledProgrammaticInjectionCount;
 			let snapshot = stranded.snapshot;
 			let stampedCountForWorkspace = 0;
 			let settledProgrammaticInjectionCountForWorkspace = 0;
@@ -143,7 +131,7 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 				result.settledProgrammaticInjectionCount += stamped.settledProgrammaticInjectionCount;
 				snapshot = stamped.snapshot;
 			}
-			const youngest = findEarliestYoungInFlightDeliveryBecomesStaleAtEpochMs(snapshot, inFlightSettlementBudgetMs);
+			const youngest = stranded.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs;
 			if (youngest !== null) {
 				result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs =
 					result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs === null
@@ -153,13 +141,14 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 			if (
 				stranded.releasedClaimCount > 0 ||
 				stranded.failedStrandedDeliveryCount > 0 ||
+				stranded.reconciledProgrammaticInjectionCount > 0 ||
 				stampedCountForWorkspace > 0 ||
 				settledProgrammaticInjectionCountForWorkspace > 0
 			) {
 				logTuiFreezeWarning(
 					`[tui-freeze] queued-prompt-restart-swept workspaceId=${workspaceId} released=${stranded.releasedClaimCount} ` +
 						`failed=${stranded.failedStrandedDeliveryCount} stamped=${stampedCountForWorkspace} ` +
-						`programmatic-settled=${settledProgrammaticInjectionCountForWorkspace}`,
+						`programmatic-settled=${settledProgrammaticInjectionCountForWorkspace + stranded.reconciledProgrammaticInjectionCount}`,
 				);
 				input.onWorkspaceQueueRewritten?.(workspaceId, snapshot);
 			}
@@ -172,8 +161,7 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 }
 
 // 启动入口：先扫一趟（收敛超期在途 + 盖章），再给「本轮还年轻」的在途投递排一次复扫。
-// 只排一趟：复扫时刻之后才开始的在途投递，其发起者按定义是当时还活着的某个 runtime 实例，
-// 归它自己的内存登记收敛，不该由我们代判。
+// 阶段变化可能延后第一次快照的截止；在固定上限内接续复扫，不重新发放任何投递预算。
 export function scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart(
 	input: Omit<QueuedTaskPromptDeliveryRuntimeRestartSweepInput, "stampEntriesThatSurvivedRuntimeRestart">,
 ): Promise<QueuedTaskPromptDeliveryRuntimeRestartSweepResult> {
@@ -181,21 +169,44 @@ export function scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart(
 		...input,
 		stampEntriesThatSurvivedRuntimeRestart: true,
 	});
-	void startupSweep.then((result) => {
+	const nowEpochMs = input.nowEpochMs ?? (() => Date.now());
+	let startupFollowUpDeadlineAtEpochMs =
+		nowEpochMs() +
+		Math.max(
+			input.inFlightSettlementBudgetMs ?? TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
+			CODEX_RVF_CLOSEOUT_ORDINARY_CONFIRMATION_BUDGET_MS + CODEX_RVF_CLOSEOUT_CUMULATIVE_COMPACTION_WAIT_BUDGET_MS,
+		) +
+		2 * STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS;
+	const scheduleFollowUp = (result: QueuedTaskPromptDeliveryRuntimeRestartSweepResult): void => {
 		if (result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs === null) {
 			return;
 		}
-		const nowEpochMs = input.nowEpochMs ?? (() => Date.now());
-		const followUpDelayMs =
-			Math.max(0, result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs - nowEpochMs()) +
-			STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS;
+		if (nowEpochMs() >= startupFollowUpDeadlineAtEpochMs) return;
+		const followUpDelayMs = Math.max(
+			0,
+			Math.min(
+				startupFollowUpDeadlineAtEpochMs,
+				result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs +
+					STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS,
+			) - nowEpochMs(),
+		);
 		// unref：复扫是纠偏动作，不该把一个本该退出的进程按在事件循环里。
 		setTimeout(() => {
 			void sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWorkspaces({
 				...input,
 				stampEntriesThatSurvivedRuntimeRestart: false,
-			});
+			}).then(scheduleFollowUp);
 		}, followUpDelayMs).unref();
+	};
+	void startupSweep.then((initialResult) => {
+		// 保留首次清扫已经观察到的原意图 TTL；后续复扫不能重新发放调度预算。
+		if (initialResult.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs !== null)
+			startupFollowUpDeadlineAtEpochMs = Math.max(
+				startupFollowUpDeadlineAtEpochMs,
+				initialResult.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs +
+					2 * STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS,
+			);
+		scheduleFollowUp(initialResult);
 	});
 	return startupSweep;
 }
