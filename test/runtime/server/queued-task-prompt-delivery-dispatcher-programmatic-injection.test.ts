@@ -22,13 +22,18 @@ import type {
 } from "../../../src/core/api-contract";
 import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import type { QueuedTaskPromptDeliveryDispatcherDependencies } from "../../../src/server/queued-task-prompt-delivery-dispatcher";
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 
 const testRuntimeHome = {
 	path: "",
 	mainTaskConversationSessionId: "",
 	sessions: {} as Record<string, RuntimeTaskSessionSummary>,
+	runtimeProcessInstanceId: "isolated-runtime",
 };
+vi.mock("../../../src/state/runtime-process-instance-heartbeat-registry", () => ({
+	getThisRuntimeProcessInstanceId: () => testRuntimeHome.runtimeProcessInstanceId,
+}));
 function workspaceBoard() {
 	return {
 		columns: [
@@ -67,6 +72,32 @@ const WORKSPACE_ID = "workspace-alpha";
 const TASK_ID = "task-1";
 const KEY = "rvf-decision-point-1";
 const NOW = Date.now();
+
+function nativeStoppedSummary() {
+	return stoppedSummary(1, {
+		agentId: "codex",
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex",
+			nativeSessionId: "native",
+			observedAt: NOW,
+			transcriptPath: "/isolated/transcript",
+		},
+		codexNativeSessionControlEndpoint: {
+			socketPath: "/isolated/socket",
+			workspaceId: WORKSPACE_ID,
+			conversationSessionId: TASK_ID,
+			runtimeSessionIncarnationId: "incarnation-1",
+		},
+	});
+}
+
+function temporaryNativeQueryFailure() {
+	return new NativeIndependentUserTurnDeliveryError(
+		"native_independent_user_turn_capability_unavailable",
+		"原生实时查询超时：thread/turns/list",
+		{ retryableQueryFailure: true },
+	);
+}
 
 function stoppedSummary(
 	turnSequence: number,
@@ -127,8 +158,11 @@ function createHarness(
 	options: {
 		sendBehavior?: SendBehavior;
 		readNativeConversationTurns?: () => Promise<CodexNativeConversationTurn[]>;
+		runtimeProcessInstanceCustody?: QueuedTaskPromptDeliveryDispatcherDependencies["runtimeProcessInstanceCustody"];
 	} = {},
 ) {
+	testRuntimeHome.runtimeProcessInstanceId =
+		options.runtimeProcessInstanceCustody?.thisRuntimeProcessInstanceId ?? "isolated-runtime";
 	let currentSummary: RuntimeTaskSessionSummary | null = null;
 	// 入队与出队共用一只可推进的时钟：截止时刻相关的断言不依赖真实时间流逝。
 	let injectedClockOffsetMs = 0;
@@ -142,6 +176,7 @@ function createHarness(
 	const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === currentSummary?.taskId ? currentSummary : null),
 		readNativeConversationTurns: options.readNativeConversationTurns,
+		runtimeProcessInstanceCustody: options.runtimeProcessInstanceCustody,
 		hasPendingProgrammaticTaskChatInputDelivery: () => false,
 		resolveWorkspaceScope: (workspaceId) => ({ workspaceId, workspacePath: "/repo" }),
 		sendThroughTaskChatTransports: async (
@@ -619,6 +654,284 @@ it("当前 TUI 缺少控制能力时明确失败，绝不退回普通投递", as
 		terminal_delivery_failure_reason: "native_independent_user_turn_capability_unavailable",
 	});
 	harness.dispatcher.stop();
+});
+
+it("投递前查询超时持久等待；恢复后同 key 只发送一次且不延长 TTL", async () => {
+	const readNative = vi
+		.fn()
+		.mockRejectedValueOnce(temporaryNativeQueryFailure())
+		.mockResolvedValue([{ id: "implementation", status: "completed", items: [] }]);
+	const subject = harness({ readNativeConversationTurns: readNative });
+	subject.observe(nativeStoppedSummary());
+	await subject.enqueueProgrammatic(60_000, true, KEY, "native");
+	const before = await readWorkspaceQueuedTaskDeliveryEntry();
+	expect(before).toMatchObject({
+		deliveryState: "queued",
+		deliveryAttemptCount: 0,
+		nativeIndependentUserTurnPreflightQueryRecovery: {
+			consecutiveQueryFailureCount: 1,
+			lastQueryFailureReason: "原生实时查询超时：thread/turns/list",
+			recoveredAtEpochMs: null,
+		},
+	});
+	expect(subject.sends).toHaveLength(0);
+	expect((await readLedgerRecord())?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
+	const projected = await subject.dispatcher.buildProjectedEntriesByTaskId(WORKSPACE_ID);
+	expect(projected[TASK_ID]?.[0].dispatchBlockReason).toBe("awaiting_native_independent_user_turn_query_retry");
+	subject.advanceInjectedClockBy(1_001);
+	await subject.dispatcher.runFallbackSweep();
+	await subject.dispatcher.whenIdle();
+	const after = await readWorkspaceQueuedTaskDeliveryEntry();
+	expect(after).toMatchObject({
+		deliveryState: "settled_delivered",
+		deliveryAttemptCount: 1,
+		expiresAt: before?.expiresAt,
+		nativeIndependentUserTurnPreflightQueryRecovery: { recoveredAtEpochMs: expect.any(Number) },
+	});
+	await subject.dispatcher.runFallbackSweep();
+	await subject.dispatcher.whenIdle();
+	expect(subject.sends).toHaveLength(1);
+});
+
+it("投递前查询一直超时仍受原 TTL 约束，并保留真实能力查询失败原因", async () => {
+	const subject = harness({
+		readNativeConversationTurns: async () => {
+			throw temporaryNativeQueryFailure();
+		},
+	});
+	subject.observe(nativeStoppedSummary());
+	await subject.enqueueProgrammatic(60_000, true, KEY, "native");
+	subject.advanceInjectedClockBy(60_001);
+	await subject.dispatcher.runFallbackSweep();
+	await subject.dispatcher.whenIdle();
+	expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+		deliveryState: "expired",
+		deliveryAttemptCount: 0,
+	});
+	expect(await readLedgerRecord()).toMatchObject({
+		terminal_delivery_status: "delivery_failed",
+		terminal_delivery_failure_reason: "native_independent_user_turn_capability_unavailable",
+	});
+	expect(subject.sends).toHaveLength(0);
+});
+
+it("runtime 重启后同一活体 incarnation 的零投递查询等待可以自动接续", async () => {
+	const previous = harness({
+		readNativeConversationTurns: async () => {
+			throw temporaryNativeQueryFailure();
+		},
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: "previous-runtime",
+			runtimeProcessStartedAtEpochMs: NOW - 1_000,
+			readLiveRuntimeProcessInstanceIds: async () => new Set(["previous-runtime"]),
+		},
+	});
+	previous.observe(nativeStoppedSummary());
+	await previous.enqueueProgrammatic(60_000, true, KEY, "native");
+	previous.dispatcher.stop();
+	const before = await readWorkspaceQueuedTaskDeliveryEntry();
+	const current = harness({
+		readNativeConversationTurns: async () => [{ id: "implementation", status: "completed", items: [] }],
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: "current-runtime",
+			runtimeProcessStartedAtEpochMs: NOW,
+			readLiveRuntimeProcessInstanceIds: async () => new Set(["current-runtime"]),
+		},
+	});
+	current.advanceInjectedClockBy(2_000);
+	current.observe(nativeStoppedSummary());
+	await current.dispatcher.runFallbackSweep();
+	await current.dispatcher.whenIdle();
+	expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+		deliveryState: "settled_delivered",
+		expiresAt: before?.expiresAt,
+		custodianRuntimeProcessInstanceId: "current-runtime",
+	});
+	expect(current.sends).toHaveLength(1);
+	expect(previous.sends).toHaveLength(0);
+});
+
+it.each([
+	{ identityDescription: "null", missingNativeIdentity: null, heartbeatInitiallyReadable: true },
+	{ identityDescription: "undefined", missingNativeIdentity: undefined, heartbeatInitiallyReadable: true },
+	{ identityDescription: "null", missingNativeIdentity: null, heartbeatInitiallyReadable: false },
+	{ identityDescription: "undefined", missingNativeIdentity: undefined, heartbeatInitiallyReadable: false },
+])(
+	"重启后原生身份暂为 $identityDescription、心跳可读为 $heartbeatInitiallyReadable 时保留等待，补证后仅接续一次",
+	async ({ missingNativeIdentity, heartbeatInitiallyReadable }) => {
+		const previous = harness({
+			readNativeConversationTurns: async () => {
+				throw temporaryNativeQueryFailure();
+			},
+			runtimeProcessInstanceCustody: {
+				thisRuntimeProcessInstanceId: "previous-runtime",
+				runtimeProcessStartedAtEpochMs: NOW - 1_000,
+				readLiveRuntimeProcessInstanceIds: async () => new Set(["previous-runtime"]),
+			},
+		});
+		previous.observe(nativeStoppedSummary());
+		await previous.enqueueProgrammatic(60_000, true, KEY, "native");
+		previous.dispatcher.stop();
+		const before = await readWorkspaceQueuedTaskDeliveryEntry();
+		let heartbeatReadable = heartbeatInitiallyReadable;
+		const readNative = vi.fn(async () => [{ id: "implementation", status: "completed", items: [] }]);
+		const current = harness({
+			readNativeConversationTurns: readNative,
+			runtimeProcessInstanceCustody: {
+				thisRuntimeProcessInstanceId: "current-runtime",
+				runtimeProcessStartedAtEpochMs: NOW,
+				readLiveRuntimeProcessInstanceIds: async () => {
+					if (!heartbeatReadable) throw new Error("心跳暂不可读");
+					return new Set(["current-runtime"]);
+				},
+			},
+		});
+		current.advanceInjectedClockBy(2_000);
+		current.observe({
+			...nativeStoppedSummary(),
+			agentNativeConversationSessionIdentity: missingNativeIdentity,
+		});
+		await current.dispatcher.runFallbackSweep();
+		await current.dispatcher.whenIdle();
+		expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+			deliveryState: "queued",
+			deliveryAttemptCount: 0,
+			claimedForSessionIncarnationId: null,
+			dispatchIdempotencyKey: null,
+			expiresAt: before?.expiresAt,
+			custodianRuntimeProcessInstanceId: "previous-runtime",
+			nativeIndependentUserTurnPreflightQueryRecovery: before?.nativeIndependentUserTurnPreflightQueryRecovery,
+		});
+		expect((await readLedgerRecord())?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
+		expect(readNative).not.toHaveBeenCalled();
+		expect(current.sends).toHaveLength(0);
+		current.observe(nativeStoppedSummary());
+		if (!heartbeatReadable) {
+			// 原生身份补齐仍不足以证明旧托管者退出：心跳未知期间不接管、不投递。
+			await current.dispatcher.runFallbackSweep();
+			await current.dispatcher.whenIdle();
+			expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+				deliveryState: "queued",
+				deliveryAttemptCount: 0,
+				expiresAt: before?.expiresAt,
+				custodianRuntimeProcessInstanceId: "previous-runtime",
+			});
+			expect(readNative).not.toHaveBeenCalled();
+			heartbeatReadable = true;
+		}
+		await current.dispatcher.runFallbackSweep();
+		await current.dispatcher.whenIdle();
+		expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+			deliveryState: "settled_delivered",
+			deliveryAttemptCount: 1,
+			expiresAt: before?.expiresAt,
+			custodianRuntimeProcessInstanceId: "current-runtime",
+		});
+		expect(await readLedgerRecord()).toMatchObject({ terminal_delivery_status: "delivered_and_submit_confirmed" });
+		await current.dispatcher.runFallbackSweep();
+		await current.dispatcher.whenIdle();
+		expect(readNative).toHaveBeenCalledTimes(1);
+		expect(current.sends).toHaveLength(1);
+		expect(previous.sends).toHaveLength(0);
+	},
+);
+
+async function readWorkspaceQueuedTaskDeliveryEntry() {
+	return (await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0];
+}
+
+it("查询失败无需新 summary 边沿即可按定时器恢复，取消后不再发送", async () => {
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+	let healthy = false;
+	const subject = harness({
+		readNativeConversationTurns: async () => {
+			if (!healthy) throw temporaryNativeQueryFailure();
+			return [{ id: "implementation", status: "completed", items: [] }];
+		},
+	});
+	subject.observe(nativeStoppedSummary());
+	await subject.enqueueProgrammatic(60_000, true, KEY, "native");
+	healthy = true;
+	await subject.advanceInjectedClockAndFakeTimersTogetherBy(1_100);
+	await subject.dispatcher.whenIdle();
+	expect(subject.sends).toHaveLength(1);
+});
+
+it("查询等待被取消后不重试或写入终端", async () => {
+	const subject = harness({
+		readNativeConversationTurns: async () => {
+			throw temporaryNativeQueryFailure();
+		},
+	});
+	subject.observe(nativeStoppedSummary());
+	await subject.enqueueProgrammatic(60_000, true, KEY, "native");
+	const waiting = await readWorkspaceQueuedTaskDeliveryEntry();
+	if (!waiting) throw new Error("缺少查询等待条目");
+	await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, {
+		kind: "cancel_queued_prompt_delivery",
+		taskId: TASK_ID,
+		queueEntryId: waiting.queueEntryId,
+	});
+	subject.advanceInjectedClockBy(10_000);
+	await subject.dispatcher.runFallbackSweep();
+	await subject.dispatcher.whenIdle();
+	expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+		deliveryState: "cancelled",
+		deliveryAttemptCount: 0,
+	});
+	expect(subject.sends).toHaveLength(0);
+});
+
+it.each(["代次", "原生身份"])("重启接管等待会话证据，%s 明确改变时保留失败且不认领", async (changedEvidence) => {
+	const previous = harness({
+		readNativeConversationTurns: async () => {
+			throw temporaryNativeQueryFailure();
+		},
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: "previous-runtime",
+			runtimeProcessStartedAtEpochMs: NOW - 1_000,
+			readLiveRuntimeProcessInstanceIds: async () => new Set(["previous-runtime"]),
+		},
+	});
+	previous.observe(nativeStoppedSummary());
+	await previous.enqueueProgrammatic(60_000, true, KEY, "native");
+	previous.dispatcher.stop();
+	const readNative = vi.fn(async () => [{ id: "implementation", status: "completed", items: [] }]);
+	const current = harness({
+		readNativeConversationTurns: readNative,
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: "current-runtime",
+			runtimeProcessStartedAtEpochMs: NOW,
+			readLiveRuntimeProcessInstanceIds: async () => new Set(["current-runtime"]),
+		},
+	});
+	await current.dispatcher.buildProjectedEntriesByTaskId(WORKSPACE_ID);
+	await current.dispatcher.runFallbackSweep();
+	await current.dispatcher.whenIdle();
+	expect(await readWorkspaceQueuedTaskDeliveryEntry()).toMatchObject({
+		deliveryState: "queued",
+		custodianRuntimeProcessInstanceId: "previous-runtime",
+	});
+	current.observe({
+		...nativeStoppedSummary(),
+		...(changedEvidence === "代次"
+			? { runtimeSessionIncarnationId: "replacement-incarnation", agentNativeConversationSessionIdentity: null }
+			: {
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "codex",
+						nativeSessionId: "replacement-native-session",
+						observedAt: NOW,
+						transcriptPath: "/isolated/replacement-transcript",
+					},
+				}),
+	});
+	await current.dispatcher.runFallbackSweep();
+	await current.dispatcher.whenIdle();
+	expect(await readLedgerRecord()).toMatchObject({
+		terminal_delivery_failure_reason: "native_independent_user_turn_session_replaced",
+	});
+	expect(current.sends).toHaveLength(0);
+	expect(readNative).not.toHaveBeenCalled();
 });
 
 it("原生查询期间取消后不认领，不消耗投递次数", async () => {

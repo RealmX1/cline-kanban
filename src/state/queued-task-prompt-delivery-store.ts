@@ -47,6 +47,7 @@ import {
 	type QueuedTaskPromptDeliveryEntry,
 	type QueuedTaskPromptDeliveryMutation,
 	queuedTaskPromptDeliveryEntrySchema,
+	type RuntimeTaskSessionSummary,
 	type WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import {
@@ -55,6 +56,7 @@ import {
 } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
 import { collectQueuedTaskPromptDeliveryChainFromHead } from "../core/queued-task-prompt-delivery-merge";
 import type { QueuedTaskPromptDeliverySettlement } from "../core/queued-task-prompt-delivery-outcome-routing";
+import { resolveNativeIndependentUserTurnPreflightRestartRecovery } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger } from "./mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import { getThisRuntimeProcessInstanceId } from "./runtime-process-instance-heartbeat-registry";
@@ -268,6 +270,22 @@ export function isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(
 	);
 }
 
+function settleExpiredQueuedTaskPromptDeliveryEntry(
+	entry: QueuedTaskPromptDeliveryEntry,
+	nowEpochMs: number,
+): QueuedTaskPromptDeliveryEntry {
+	return {
+		...entry,
+		deliveryState: "expired",
+		settledAt: nowEpochMs,
+		...(entry.nativeIndependentUserTurnPreflightQueryRecovery?.recoveredAtEpochMs === null
+			? {
+					lastDeliveryFailureNote: `原生回合查询在原截止时间内仍未恢复，尚未发送：${entry.nativeIndependentUserTurnPreflightQueryRecovery.lastQueryFailureReason}`,
+				}
+			: {}),
+	};
+}
+
 // 把已过保质期、却还标着 queued 的条目就地收敛成 expired。没有任何条目过期时**原样返回同一个对象**——
 // 调用方靠引用相等判断「这次有没有改动、要不要写盘」。
 //
@@ -284,7 +302,7 @@ export function withExpiredQueuedEntriesSettled(
 		entriesByTaskId[taskId] = entries.map((entry) => {
 			if (entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt) {
 				changed = true;
-				return { ...entry, deliveryState: "expired" as const, settledAt: nowEpochMs };
+				return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
 			}
 			return entry;
 		});
@@ -971,11 +989,14 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 	// 此刻还活着的 runtime 进程实例 id。由调用方（启动清扫）从心跳注册表读来传入而不是这里自己读：
 	// 存储层不该在一次读-改-写的锁内做另一组文件 IO，且传入让它可被表格化单测。
 	liveRuntimeProcessInstanceIds: ReadonlySet<string>;
+	custodianLivenessObservationAvailable?: boolean;
+	currentTaskSessionSummariesByTaskId?: ReadonlyMap<string, RuntimeTaskSessionSummary | null>;
 	nowEpochMs?: number;
 }): Promise<{
 	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot;
 	stampedCount: number;
 	settledProgrammaticInjectionCount: number;
+	recoveredPreflightQueryCustodyCount: number;
 }> {
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
 	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
@@ -983,6 +1004,7 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 		(current) => {
 			let stampedCount = 0;
 			let settledProgrammaticInjectionCount = 0;
+			let recoveredPreflightQueryCustodyCount = 0;
 			const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 			for (const [taskId, entries] of Object.entries(current.entriesByTaskId)) {
 				entriesByTaskId[taskId] = entries.map((entry) => {
@@ -1006,12 +1028,44 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 						return entry;
 					}
 					if (isQueuedTaskPromptDeliveryProgrammaticInjection(entry)) {
+						// 原截止时间先于重启恢复判据收口，避免把查询失败改写成通用重启失败。
+						if (entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt) {
+							settledProgrammaticInjectionCount += 1;
+							return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
+						}
+						const recovery = resolveNativeIndependentUserTurnPreflightRestartRecovery({
+							entry,
+							summary: input.currentTaskSessionSummariesByTaskId?.get(taskId),
+							workspaceId: input.workspaceId,
+							nowEpochMs,
+						});
+						if (
+							recovery === "awaiting_session_evidence" ||
+							(recovery === "same_session_verified" && input.custodianLivenessObservationAvailable === false)
+						)
+							return entry;
+						if (recovery === "same_session_verified") {
+							recoveredPreflightQueryCustodyCount += 1;
+							return { ...entry, custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId };
+						}
 						settledProgrammaticInjectionCount += 1;
 						return {
 							...entry,
 							deliveryState: "settled_failed" as const,
 							settledAt: nowEpochMs,
 							lastDeliveryFailureNote: PROGRAMMATIC_INJECTION_SETTLED_BY_RUNTIME_RESTART_FAILURE_NOTE,
+							...(recovery === "session_replaced" && entry.programmaticInjectionLedgerReceiptLink
+								? {
+										lastDeliveryFailureNote: "runtime 重启后所需原生会话或代次已改变，未投递。",
+										programmaticInjectionLedgerReceiptLink: {
+											...entry.programmaticInjectionLedgerReceiptLink,
+											settledTerminalDeliveryReceipt: {
+												status: "delivery_failed" as const,
+												reason: "native_independent_user_turn_session_replaced" as const,
+											},
+										},
+									}
+								: {}),
 							custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId,
 						};
 					}
@@ -1027,10 +1081,11 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 					};
 				});
 			}
-			const changed = stampedCount > 0 || settledProgrammaticInjectionCount > 0;
+			const changed =
+				stampedCount > 0 || settledProgrammaticInjectionCount > 0 || recoveredPreflightQueryCustodyCount > 0;
 			return {
 				next: changed ? { entriesByTaskId } : current,
-				result: { stampedCount, settledProgrammaticInjectionCount },
+				result: { stampedCount, settledProgrammaticInjectionCount, recoveredPreflightQueryCustodyCount },
 			};
 		},
 		nowEpochMs,

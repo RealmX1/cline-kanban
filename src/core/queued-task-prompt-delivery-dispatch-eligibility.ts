@@ -137,6 +137,11 @@ export function resolveQueuedPromptDispatchBlockReason(
 		return "another_programmatic_delivery_in_flight";
 	}
 
+	// 查询退避不消耗投递次数，也不能被重复的 summary 广播绕过。
+	if ((headEntry.nativeIndependentUserTurnPreflightQueryRecovery?.nextQueryRetryAtEpochMs ?? 0) > input.nowEpochMs) {
+		return "awaiting_native_independent_user_turn_query_retry";
+	}
+
 	// 7. 跨过重启、人已确认，但确认之后 agent 还没停下过一次。用户要的是「提醒我确认，然后在**下一次** stop
 	// hook 注入」。确认那一刻 agent 往往已经闲着（Cline SDK / ACP 没有恢复守卫，停止事件是重启前留下的），
 	// 不设这道门，确认一落地队列就会在那个旧停止事件上立刻发出——5 秒高亮还没播完，prompt 已经发了。
