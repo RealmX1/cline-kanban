@@ -9,7 +9,7 @@ import { build } from "esbuild";
 const [requestedOutputDirectory, requestedKimiBinary] = process.argv.slice(2);
 assert(
 	requestedOutputDirectory && requestedKimiBinary,
-	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 二进制绝对路径>",
+	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 二进制绝对路径> [--start-in-plan-mode]",
 );
 const outputDirectory = resolve(requestedOutputDirectory);
 const repositoryDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,6 +44,7 @@ const child = spawn(process.execPath, [entrypoint], {
 		TERM: "xterm-256color",
 		KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY: outputDirectory,
 		KANBAN_KIMI_NATIVE_E2E_BINARY: resolve(requestedKimiBinary),
+		KANBAN_KIMI_NATIVE_E2E_START_IN_PLAN_MODE: process.argv.slice(4).includes("--start-in-plan-mode") ? "1" : "0",
 	},
 });
 const code = await new Promise((resolveExit, reject) => {

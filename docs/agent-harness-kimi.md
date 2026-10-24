@@ -10,9 +10,9 @@ kimi 是**交互式 TUI，且交互模式没有位置 prompt 槽**（2.3.1 默�
 
 - 启动横幅 `Welcome to Kimi Code!` → `hasKimiStartupUiRendered`（:17-20）；
 - 输入框字形 `│ >`（box 左边框 U+2502 后跟 `>`）→ `hasKimiInteractivePrompt`（:11-14）。正则匹配的是「边框 + `>` + 空白」，刻意避开正文里裸露的 `>`（diff / 引用）。
-- 早期接入时未观察到 workspace-trust；2.3.1 在隔离 HOME 的新目录会显示 `Trust this folder?`。原生验证探针只批准自身创建的空目录，不修改产品的 trust 策略。
+- 早期接入时未观察到 workspace-trust；2.3.1 在隔离 HOME 的新目录会显示 `Trust this folder?`。原生验证探针只批准自身创建的夹具目录，不修改产品的 trust 策略。
 
-**启动旗标**：`-y/--yolo` 与 `--plan` 沿用权限、Plan 两条独立轴；`-c/--continue` 用于恢复。未指定模型的新会话会按第 8 节解析最新稳定模型并传入 `--model`，显式模型参数与原生恢复保留原选择。另设 `KIMI_CLI_NO_AUTO_UPDATE=1`：会话中途自升级会打断托管会话。
+**启动旗标**：Bypass 使用 `--auto`（Never Ask）；`-y/--yolo` 是 Ask When Needed，仍会询问敏感操作、问题及退出 Plan，与 `--auto` 原生互斥。显式 `--auto`、`--yolo`、`-y`、`--yes`、`--auto-approve` 保持优先，宿主不追加另一权限档。权限与 `--plan` 保持两条独立轴；Never Ask 会自动处理问题及批准退出 Plan。`-c/--continue` 用于恢复。未指定模型的新会话会按第 8 节解析最新稳定模型并传入 `--model`，显式模型参数与原生恢复保留原选择。另设 `KIMI_CLI_NO_AUTO_UPDATE=1`：会话中途自升级会打断托管会话。权限语义与互斥规则见[官方 CLI 参考](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html)。
 
 ## 2. session-manager 的三处 kimi 分支
 
@@ -73,6 +73,8 @@ Kimi 的 `UserPromptSubmit` 是前置 hook，不能证明输入已进入主会�
 `scripts/verify-kimi-native-input-acceptance-and-terminal-redraw.ts` 使用真实 Kimi、隔离 HOME、空 skills 和仅监听 loopback 的模拟 OpenAI 服务，执行两次人工输入、一条程序化投递及其关联回执、长输出、三次 resize、携带旧抑制设置的 PTY 接管；保存原始字节、原生 hook、接受摘要和终端快照。它不读取真实凭据、不调用付费模型、不创建真实 Kanban 卡片或关系事件。该探针不进入默认测试集；需要本机 Kimi 二进制时按需执行。
 
 执行 `node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <kimi绝对路径>`。启动器按运行时同样的 ESM/CJS shim 打包探针，设置隔离 HOME 并清空继承环境，只传入必要 PATH、SHELL、TERM 和探针参数。探针拒绝继承真实 `KANBAN_HOOK_TASK_ID` / `KANBAN_HOOK_WORKSPACE_ID`；退出时停止 PTY 和模拟服务，保留证据文件。
+
+探针还会核对 Bypass 的原生状态栏为 Never Ask，并让本地模拟模型经 Bash 读取隔离目录中的普通哨兵文件，确认无需人工授权即可完成。Never Ask 不代表解除 harness 的静态拒绝规则；本机 2.3.1 的 `.env` 读取即使在该模式下仍被静态拒绝。追加 `--start-in-plan-mode` 可复核 `--auto --plan` 的组合启动。状态栏快照保存在 `native-permission-startup-snapshot.ansi`，工具完成结果写入 `result.json`。
 
 浏览器回归：`KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY=<证据目录> npm --prefix web-ui run e2e -- tests/kimi-terminal-history-redraw-and-acceptance.spec.ts`。设置目录时还会把真实运行快照恢复到浏览器 xterm，检查重复恢复不叠历史，以及真实 accepted 摘要清除确认标签；不设置目录时运行固定重绘协议回归。
 
