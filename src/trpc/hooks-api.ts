@@ -320,6 +320,45 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				hookEventObservedAtEpochMs !== null
 					? { domainEventObservedAtEpochMs: hookEventObservedAtEpochMs }
 					: undefined;
+			const isCompactionPhaseEvent =
+				event === "main_agent_conversation_context_compaction_started" ||
+				event === "main_agent_conversation_context_compaction_completed";
+			// 阶段 hook 不能把旧会话或子代理的身份写进当前主会话。接受事实仍走独立的原生核验链。
+			if (
+				isCompactionPhaseEvent &&
+				body.agentNativeConversationSessionIdentity &&
+				(summary.agentNativeConversationSessionIdentity?.nativeSessionId !==
+					body.agentNativeConversationSessionIdentity.nativeSessionId ||
+					summary.agentNativeConversationSessionIdentity?.sourceAgentId !==
+						body.agentNativeConversationSessionIdentity.sourceAgentId ||
+					summary.agentNativeConversationSessionIdentity?.transcriptPath !==
+						body.agentNativeConversationSessionIdentity.transcriptPath)
+			)
+				return respondAfterRememberingAppliedHookDelivery({ ok: true });
+			if (
+				isCompactionPhaseEvent &&
+				body.metadata?.source === "codex" &&
+				body.mainAgentConversationContextCompactionTriggerReportedByHarness ===
+					"automatic_context_window_compaction" &&
+				body.agentNativeConversationSessionIdentity?.sourceAgentId === "codex" &&
+				body.mainAgentConversationContextCompactionNativeTurnId &&
+				body.hookRuntimeSessionIncarnationId &&
+				hookEventObservedAtEpochMs !== null &&
+				hookEventDeliveryIdempotencyKey
+			) {
+				await manager.observeRvfCloseoutNativeCompactionPhase?.(taskId, {
+					workspaceId,
+					nativeSessionId: body.agentNativeConversationSessionIdentity.nativeSessionId,
+					nativeTurnId: body.mainAgentConversationContextCompactionNativeTurnId,
+					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+					phase: event === "main_agent_conversation_context_compaction_started" ? "started" : "completed",
+					capturedAtEpochMs: hookEventObservedAtEpochMs,
+					receivedAtEpochMs: hookIngestReceivedAtEpochMs,
+					hookDeliveryId: hookEventDeliveryIdempotencyKey,
+				});
+			}
+			if (event === "main_agent_conversation_context_compaction_started")
+				return respondAfterRememberingAppliedHookDelivery({ ok: true });
 
 			// 身份先落盘再确认 hook；内存已更新但保存失败时，下次仍须比较磁盘并重试。
 			let nativeIdentityPersistenceError: Error | null = null;

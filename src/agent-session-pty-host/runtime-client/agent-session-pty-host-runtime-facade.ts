@@ -287,6 +287,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 			outcome.pid,
 			request.onData,
 			request.onExit,
+			outcome.spawnedAtEpochMs,
 		);
 		// 新会话只进当前 build 的 host，它一定支持 spool。登记即请求一次读（不靠 0 计数跳过）。
 		this.registerHookSpoolDrainTargetHostedSession(link, hostedSessionKey, workspaceId, request.taskId);
@@ -379,6 +380,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 						listing.pid,
 						callbacks.onData,
 						callbacks.onExit,
+						listing.spawnedAtEpochMs,
 					);
 					// 先于句柄登记：登记时交付的退出（接管期间进程退出）也要等 spool 排空。
 					// 登记即请求一次读（应用函数绑定后发出），不信 listing 里较早的计数：listing 之后存进来的条目也要取走。

@@ -60,7 +60,17 @@ export function resolveInjectionLedgerReceiptForSettledProgrammaticInjection(
 	}
 	switch (entry.deliveryState) {
 		case "expired":
-			return { status: "delivery_failed", reason: "agent_never_became_idle_before_queued_delivery_deadline" };
+			return {
+				...(entry.lastDeliveryFailureNote ? { failureNote: entry.lastDeliveryFailureNote } : {}),
+				status: "delivery_failed",
+				reason:
+					(
+						entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery ??
+						entry.nativeIndependentUserTurnPreflightQueryRecovery
+					)?.recoveredAtEpochMs === null
+						? "native_independent_user_turn_capability_unavailable"
+						: "agent_never_became_idle_before_queued_delivery_deadline",
+			};
 		case "cancelled":
 			return { status: "delivery_failed", reason: "cancelled_before_delivery" };
 		case "settled_failed":

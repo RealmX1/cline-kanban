@@ -84,10 +84,12 @@ const VALID_EVENTS = new Set<RuntimeHookEvent>([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	"main_agent_conversation_context_compaction_started",
 	"main_agent_conversation_context_compaction_completed",
 ]);
 
 interface HooksIngestArgs {
+	mainAgentConversationContextCompactionNativeTurnId?: string;
 	notificationCandidateId?: string;
 	event: RuntimeHookEvent;
 	taskId: string;
@@ -754,6 +756,15 @@ function buildHookIngestRequest(
 			? {
 					mainAgentConversationContextCompactionTriggerReportedByHarness:
 						args.mainAgentConversationContextCompactionTriggerReportedByHarness,
+				}
+			: {}),
+		...(args.mainAgentConversationContextCompactionNativeTurnId
+			? {
+					mainAgentConversationContextCompactionNativeTurnId:
+						args.mainAgentConversationContextCompactionNativeTurnId,
+					...(process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID
+						? { hookRuntimeSessionIncarnationId: process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID }
+						: {}),
 				}
 			: {}),
 		...(args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined

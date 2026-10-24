@@ -894,6 +894,10 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 						...(report.commitSha ? { commitSha: report.commitSha } : {}),
 						...(report.baseRef ? { baseRef: report.baseRef } : {}),
 						...(report.reason ? { reason: report.reason } : {}),
+						...(report.blockedReasonKind ? { blockedReasonKind: report.blockedReasonKind } : {}),
+						...(report.baseBranchSyncReassessmentCondition
+							? { baseBranchSyncReassessmentCondition: report.baseBranchSyncReassessmentCondition }
+							: {}),
 					};
 					const matchesPreviouslyReportedExecutionStageResult = (current: RvfAutomaticCloseoutRecord) => {
 						const prior = current[resultKey];
