@@ -92,6 +92,7 @@ import {
 	settleQueuedTaskPromptDelivery,
 	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
 } from "../state/queued-task-prompt-delivery-store";
+import { updateQueuedTaskPromptNativeIndependentUserTurnQueryRecovery } from "../state/queued-task-prompt-native-independent-user-turn-query-recovery";
 import {
 	TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
 	type TaskChatInputDeliveryOutcome,
@@ -323,6 +324,29 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		knownWorkspaceIds.add(workspaceId);
 		cachedSnapshotByWorkspaceId.set(workspaceId, snapshot);
 		armProgrammaticInjectionDeadlineTimer(workspaceId, snapshot);
+		if (stopped) return;
+		for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
+			const head = entries.find((entry) => isQueuedTaskPromptDeliveryAwaitingDispatch(entry, now()));
+			const retryAt = head?.nativeIndependentUserTurnPreflightQueryRecovery?.nextQueryRetryAtEpochMs;
+			if (
+				retryAt == null ||
+				head?.deliveryState !== "queued" ||
+				(custody && head.custodianRuntimeProcessInstanceId !== custody.thisRuntimeProcessInstanceId)
+			)
+				continue;
+			const key = buildTaskKey(workspaceId, taskId);
+			const priorTimer = nativeTurnPollTimerByTaskKey.get(key);
+			if (priorTimer) clearTimeout(priorTimer);
+			const timer = setTimeout(
+				() => {
+					nativeTurnPollTimerByTaskKey.delete(key);
+					requestDispatchAttempt(workspaceId, taskId);
+				},
+				Math.max(1, retryAt - now()),
+			);
+			timer.unref?.();
+			nativeTurnPollTimerByTaskKey.set(key, timer);
+		}
 	};
 
 	// 单飞读取：一次 runtime 启动会水合几百个会话，每个都会喂一条 summary 进来；缓存没建好之前
@@ -421,11 +445,13 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 		let liveRuntimeProcessInstanceIds: ReadonlySet<string>;
+		let custodianLivenessObservationAvailable = true;
 		try {
 			liveRuntimeProcessInstanceIds = await custody.readLiveRuntimeProcessInstanceIds();
 		} catch {
 			// 读不到心跳按「谁都不活」：多盖章 = 多让人确认一次（安全），漏盖 = 重启后不提醒直接发（事故）。
 			liveRuntimeProcessInstanceIds = new Set();
+			custodianLivenessObservationAvailable = false;
 		}
 		const stamped = await stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart({
 			workspaceId,
@@ -436,8 +462,19 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				custody.thisRuntimeProcessInstanceId,
 			]),
 			nowEpochMs: now(),
+			custodianLivenessObservationAvailable,
+			currentTaskSessionSummariesByTaskId: new Map(
+				Object.keys((await loadSnapshot(workspaceId)).entriesByTaskId).map((taskId) => [
+					taskId,
+					deps.getTaskSessionSummary(workspaceId, taskId),
+				]),
+			),
 		});
-		if (stamped.stampedCount > 0 || stamped.settledProgrammaticInjectionCount > 0) {
+		if (
+			stamped.stampedCount > 0 ||
+			stamped.settledProgrammaticInjectionCount > 0 ||
+			stamped.recoveredPreflightQueryCustodyCount > 0
+		) {
 			await commitSnapshotAndBroadcast(workspaceId, stamped.snapshot);
 		}
 	};
@@ -532,9 +569,20 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 					getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
 				});
 				// 查询跨 await；取消、到期或队首变化后绝不可继续认领。
-				const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+				let fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
 				rememberSnapshot(workspaceId, fresh);
 				if (listAwaitingDispatchEntries(fresh, taskId, now())[0]?.queueEntryId !== headEntry.queueEntryId) return;
+				if (headEntry.nativeIndependentUserTurnPreflightQueryRecovery?.recoveredAtEpochMs === null) {
+					fresh = await updateQueuedTaskPromptNativeIndependentUserTurnQueryRecovery({
+						workspaceId,
+						expectedEntry: headEntry,
+						failureReason: null,
+						nowEpochMs: now(),
+					});
+					await commitSnapshotAndBroadcast(workspaceId, fresh);
+					if (listAwaitingDispatchEntries(fresh, taskId, now())[0]?.queueEntryId !== headEntry.queueEntryId)
+						return;
+				}
 				if (turns.at(-1)?.status !== "completed") {
 					if (!stopped && !nativeTurnPollTimerByTaskKey.has(taskKey)) {
 						const timer = setTimeout(
@@ -552,6 +600,16 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				nativePredecessorTurnId = turns.at(-1)?.id ?? null;
 			} catch (error) {
 				if (!(error instanceof NativeIndependentUserTurnDeliveryError)) throw error;
+				if (error.recovery.retryableQueryFailure) {
+					const waiting = await updateQueuedTaskPromptNativeIndependentUserTurnQueryRecovery({
+						workspaceId,
+						expectedEntry: headEntry,
+						failureReason: error.message,
+						nowEpochMs: now(),
+					});
+					await commitSnapshotAndBroadcast(workspaceId, waiting);
+					return;
+				}
 				await settleHandedOffRun(workspaceId, taskId, [headEntry.queueEntryId], {
 					outcome: "terminal_failure",
 					failureNote: error.message,
@@ -893,6 +951,12 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				projectionRebroadcastTimerByWorkspaceId.delete(workspaceId);
 			}
 			const prefix = `${workspaceId}::`;
+			for (const [key, nativeTimer] of nativeTurnPollTimerByTaskKey) {
+				if (key.startsWith(prefix)) {
+					clearTimeout(nativeTimer);
+					nativeTurnPollTimerByTaskKey.delete(key);
+				}
+			}
 			for (const map of [previousStopEventIdentityByTaskKey, lastObservedHeadBlockReasonByTaskKey]) {
 				for (const key of map.keys()) {
 					if (key.startsWith(prefix)) {

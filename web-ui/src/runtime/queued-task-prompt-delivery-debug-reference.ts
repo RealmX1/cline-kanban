@@ -78,6 +78,12 @@ export function buildQueuedTaskPromptDeliveryDebugReference(input: {
 		settledAt: describeDebugReferenceTimestamp(metadata.settledAt),
 		expiresAt: describeDebugReferenceTimestamp(metadata.expiresAt),
 		lastDeliveryFailureNote: metadata.lastDeliveryFailureNote,
+		...(metadata.nativeIndependentUserTurnPreflightQueryRecovery
+			? {
+					nativeIndependentUserTurnPreflightQueryRecovery:
+						metadata.nativeIndependentUserTurnPreflightQueryRecovery,
+				}
+			: {}),
 		sourcePromptLibraryEntryId: metadata.sourcePromptLibraryEntryId,
 		...(candidate?.dispatchIdempotencyKey ? { dispatchIdempotencyKey: candidate.dispatchIdempotencyKey } : {}),
 		...(link

@@ -9,6 +9,14 @@ import type {
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../../../src/core/api-contract";
 import { QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS } from "../../../src/core/queued-task-prompt-delivery-dispatch-eligibility";
+import {
+	createPendingTaskMessageInjectionRecord,
+	findTaskMessageInjectionRecord,
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+	withTaskMessageInjectionLedgerLock,
+} from "../../../src/core/task-message-injection-ledger";
+import { createQueuedTaskPromptDeliveryDispatcher } from "../../../src/server/queued-task-prompt-delivery-dispatcher";
 import { getThisRuntimeProcessInstanceId } from "../../../src/state/runtime-process-instance-heartbeat-registry";
 
 // 队列文件落在 ~/.cline/kanban/workspaces/<id>/ 之下，路径由 workspace-state 解析。测试把这两个解析点
@@ -36,6 +44,7 @@ const {
 	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	releaseQueuedTaskPromptDeliveryClaim,
+	settleExpiredQueuedTaskPromptDeliveries,
 	settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart,
 	settleQueuedTaskPromptDelivery,
 	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
@@ -835,6 +844,127 @@ describe("queued-task-prompt-delivery-store — restart-crossing 盖章", () => 
 	afterEach(async () => {
 		await rm(testRuntimeHome.path, { recursive: true, force: true });
 	});
+
+	it.each(["正常 TTL", "startup sweep", "fallback sweep"])(
+		"过期查询等待经 %s 收口保留相同终态、失败原因与零投递账本",
+		async (settlementPath) => {
+			const deadlineAtEpochMs = NOW + 60_000;
+			const idempotencyKey = "expired-native-query";
+			const queueEntryId = `agent-idle-gated-programmatic-injection:${idempotencyKey}`;
+			const ledgerPath = getTaskMessageInjectionLedgerPath(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID));
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({
+				records: [
+					createPendingTaskMessageInjectionRecord({
+						taskId: TASK_ID,
+						source: "rvf",
+						idempotencyKey,
+						promptSha256: "sha",
+						nowIso: new Date(NOW).toISOString(),
+						agentIdleGate: { waitDeadlineAtIso: new Date(deadlineAtEpochMs).toISOString(), queueEntryId },
+					}),
+				],
+				result: null,
+			}));
+			const entry: QueuedTaskPromptDeliveryEntry = {
+				...taskEntries(seedSnapshot([{ queueEntryId, text: "等待原生查询恢复" }]))[0],
+				expiresAt: deadlineAtEpochMs,
+				custodianRuntimeProcessInstanceId: "previous-runtime",
+				requiredNativeIndependentUserTurnSessionId: "native-session",
+				requiredNativeIndependentUserTurnSessionIncarnationId: "incarnation-1",
+				nativeIndependentUserTurnPreflightQueryRecovery: {
+					consecutiveQueryFailureCount: 2,
+					waitingStartedAtEpochMs: NOW + 1_000,
+					lastQueryFailureAtEpochMs: NOW + 2_000,
+					lastQueryFailureReason: "原生实时查询超时：thread/turns/list",
+					nextQueryRetryAtEpochMs: NOW + 4_000,
+					recoveredAtEpochMs: null,
+				},
+				programmaticInjectionLedgerReceiptLink: {
+					injectionLedgerIdempotencyKey: idempotencyKey,
+					injectionSource: "rvf",
+					settledTerminalDeliveryReceipt: null,
+				},
+			};
+			await writeFile(
+				getWorkspaceQueuedTaskPromptDeliveriesPath(WORKSPACE_ID),
+				JSON.stringify({ entriesByTaskId: { [TASK_ID]: [entry] } }),
+				"utf8",
+			);
+			let nowEpochMs = NOW + 2_000;
+			const sendThroughTaskChatTransports = vi.fn(async () => ({
+				ok: true as const,
+				summary: null,
+				terminalDelivery: { status: "delivered_and_submit_confirmed" as const, reason: null },
+			}));
+			const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
+				getTaskSessionSummary: () => null,
+				hasPendingProgrammaticTaskChatInputDelivery: () => false,
+				resolveWorkspaceScope: () => null,
+				sendThroughTaskChatTransports,
+				cancelProgrammaticTerminalDelivery: async () => "cancelled_before_delivery",
+				readPromptLibraryEntryTextSha256ByEntryId: async () => new Map(),
+				onProjectedQueueChanged: () => {},
+				runtimeProcessInstanceCustody: {
+					thisRuntimeProcessInstanceId: "current-runtime",
+					runtimeProcessStartedAtEpochMs: NOW + 1_000,
+					readLiveRuntimeProcessInstanceIds: async () => new Set(["current-runtime"]),
+				},
+				now: () => nowEpochMs,
+			});
+			try {
+				if (settlementPath === "fallback sweep") await dispatcher.buildProjectedEntriesByTaskId(WORKSPACE_ID);
+				nowEpochMs = deadlineAtEpochMs + 1;
+				if (settlementPath === "正常 TTL") {
+					await settleExpiredQueuedTaskPromptDeliveries({ workspaceId: WORKSPACE_ID, nowEpochMs });
+				} else if (settlementPath === "startup sweep") {
+					await stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart({
+						workspaceId: WORKSPACE_ID,
+						runtimeProcessStartedAtEpochMs: NOW + 1_000,
+						sweepingRuntimeProcessInstanceId: "current-runtime",
+						liveRuntimeProcessInstanceIds: NO_LIVE_RUNTIME_PROCESS_INSTANCES,
+						nowEpochMs,
+					});
+					await settleExpiredQueuedTaskPromptDeliveries({ workspaceId: WORKSPACE_ID, nowEpochMs });
+				} else {
+					await dispatcher.runFallbackSweep();
+					await dispatcher.whenIdle();
+				}
+				const settled = taskEntries(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID))[0];
+				expect(settled).toMatchObject({
+					deliveryState: "expired",
+					settledAt: nowEpochMs,
+					expiresAt: deadlineAtEpochMs,
+					deliveryAttemptCount: 0,
+					claimedForSessionIncarnationId: null,
+					dispatchIdempotencyKey: null,
+					lastDeliveryFailureNote:
+						"原生回合查询在原截止时间内仍未恢复，尚未发送：原生实时查询超时：thread/turns/list",
+				});
+				expect(
+					findTaskMessageInjectionRecord(
+						await readTaskMessageInjectionLedger(ledgerPath),
+						TASK_ID,
+						idempotencyKey,
+					),
+				).toMatchObject({
+					terminal_delivery_status: "delivery_failed",
+					terminal_delivery_failure_reason: "native_independent_user_turn_capability_unavailable",
+				});
+				expect(sendThroughTaskChatTransports).not.toHaveBeenCalled();
+				expect(
+					await claimNextQueuedTaskPromptDeliveryRunForDispatch({
+						workspaceId: WORKSPACE_ID,
+						taskId: TASK_ID,
+						sessionIncarnationId: "incarnation-1",
+						turnSequence: 1,
+						nowEpochMs,
+					}),
+				).toBeNull();
+			} finally {
+				dispatcher.stop();
+			}
+		},
+	);
 
 	it("给本进程启动之前入队的非终态条目盖章", async () => {
 		await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, enqueue("q1", "A"), NOW);

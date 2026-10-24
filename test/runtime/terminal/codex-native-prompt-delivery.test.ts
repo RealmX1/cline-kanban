@@ -122,6 +122,7 @@ describe("Codex 原生投递保留 composer", () => {
 				"turn/start",
 				{
 					threadId: "thread-1",
+					turnTrigger: "user",
 					clientUserMessageId: CLIENT_MESSAGE_ID,
 					input: [{ type: "text", text: PROMPT, text_elements: [] }],
 				},

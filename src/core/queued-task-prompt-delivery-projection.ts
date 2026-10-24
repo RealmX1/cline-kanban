@@ -69,6 +69,11 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 	// 于是 UI 永远不会显示一条「排队中」、而运行时其实已经不会再发它的条目。
 	const deliveryState = entry.deliveryState === "queued" && !awaitingDispatch ? "expired" : entry.deliveryState;
 	return {
+		...(entry.nativeIndependentUserTurnPreflightQueryRecovery
+			? {
+					nativeIndependentUserTurnPreflightQueryRecovery: entry.nativeIndependentUserTurnPreflightQueryRecovery,
+				}
+			: {}),
 		queueEntryId: entry.queueEntryId,
 		taskId: entry.taskId,
 		deliveryState,

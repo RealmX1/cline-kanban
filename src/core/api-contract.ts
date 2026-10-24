@@ -2534,6 +2534,7 @@ export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliv
 // 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
 // PTY 单飞槽），前端复算必然漂移。
 export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	"awaiting_native_independent_user_turn_query_retry",
 	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
 	"awaiting_human_reconfirmation_after_runtime_restart",
 	"agent_still_generating",
@@ -2560,6 +2561,17 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	// 只恢复尚未认领、未写入 transport 的查询；可选字段保证旧队列继续可读。
+	nativeIndependentUserTurnPreflightQueryRecovery: z
+		.object({
+			consecutiveQueryFailureCount: z.number().int().positive(),
+			waitingStartedAtEpochMs: z.number(),
+			lastQueryFailureAtEpochMs: z.number(),
+			lastQueryFailureReason: z.string(),
+			nextQueryRetryAtEpochMs: z.number().nullable(),
+			recoveredAtEpochMs: z.number().nullable(),
+		})
+		.optional(),
 	// 取消 / 重排 / 合并的唯一句柄。由构造 mutation 的一侧生成（randomUUID），于是同一条意图重发天然幂等。
 	queueEntryId: z.string(),
 	// **会话 id**，不是看板卡片 id：by-the-way 子会话有自己独立的队列。
@@ -2716,6 +2728,8 @@ export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDe
 export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
 
 export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	nativeIndependentUserTurnPreflightQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnPreflightQueryRecovery,
 	queueEntryId: z.string(),
 	taskId: z.string(),
 	deliveryState: queuedTaskPromptDeliveryStateSchema,
