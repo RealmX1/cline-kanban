@@ -122,6 +122,45 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的视觉密度", () => {
+	it.each(["standard_card_with_floating_capsule", "compact_row_in_focus_view_left_column"] as const)(
+		"%s：Kimi 活体中断显示可继续输入，保持实心存活状态点",
+		(visualDensity) => {
+			const summary: RuntimeTaskSessionSummary = {
+				...createSummary(),
+				agentId: "kimi",
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "interrupted",
+				reviewReason: "interrupted",
+				latestHookActivity: {
+					activityText: "Resumed after user input",
+					toolName: null,
+					toolInputSummary: null,
+					finalMessage: null,
+					hookEventName: "UserPromptSubmit",
+					notificationType: null,
+					source: "kimi",
+				},
+			};
+			act(() => {
+				root.render(
+					<TaskCardBodyVisualDensityProvider value={visualDensity}>
+						<TaskCardBody card={createCard({ agentId: "kimi" })} columnId="review" sessionSummary={summary} />
+					</TaskCardBodyVisualDensityProvider>,
+				);
+			});
+
+			expect(container.textContent).toContain("已中断，可继续输入");
+			expect(container.textContent).not.toContain("Agent 回合进行中");
+			expect(container.textContent).not.toContain("Waiting for review");
+			const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+			expect(dot).not.toBeNull();
+			expect(dot?.style.backgroundColor).not.toBe("transparent");
+			expect(dot?.style.border).toBe("");
+			expect(dot?.getAttribute("title")).toBeNull();
+		},
+	);
+
 	it.each([
 		{ dirty: false, committed: false },
 		{ dirty: true, committed: false },

@@ -18,3 +18,11 @@ export function hasKimiStartupUiRendered(text: string): boolean {
 	const stripped = stripAnsi(text).toLowerCase();
 	return stripped.includes("welcome to kimi code");
 }
+
+// 2.3.1 的信任模态仍渲染底下的输入框；用户确认后才打印启动横幅。
+// 保留两者的先后关系，可覆盖提示滚出短屏幕、PTY 分块与运行时接管。
+export function hasKimiWorkspaceTrustAwaitingConfirmation(startupOutputText: string): boolean {
+	const normalized = stripAnsi(startupOutputText).replace(/\s+/gu, " ").toLowerCase();
+	const trustPromptIndex = normalized.lastIndexOf("trust this folder?");
+	return trustPromptIndex >= 0 && trustPromptIndex > normalized.lastIndexOf("welcome to kimi code");
+}

@@ -164,7 +164,11 @@ import {
 	type HarnessBackgroundSessionReclaimWatchState,
 } from "./harness-background-session-reclaim-watch-after-unsafe-resume-refusal";
 import { buildTerminalEnvironment } from "./kanban-pty-child-process-terminal-environment";
-import { hasKimiInteractivePrompt, hasKimiStartupUiRendered } from "./kimi-readiness";
+import {
+	hasKimiInteractivePrompt,
+	hasKimiStartupUiRendered,
+	hasKimiWorkspaceTrustAwaitingConfirmation,
+} from "./kimi-readiness";
 import {
 	type ConnectionRetryContinuationFirstSubmitCarriageReturnState,
 	type ConnectionRetryContinuationSubmissionResult,
@@ -1250,6 +1254,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 				!hasCodexStartupPromptReady(snapshot.lines.map((line) => line.text).join("\n")) ||
 				this.entries.get(taskId)?.active !== active ||
 				active.deferredStartupPromptText === null
+			) {
+				return false;
+			}
+		}
+		if (entry.summary.agentId === "kimi") {
+			const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+			const screenText = snapshot?.lines.map((line) => line.text).join("\n") ?? "";
+			if (
+				this.entries.get(taskId)?.active !== active ||
+				active.deferredStartupPromptText === null ||
+				!hasKimiInteractivePrompt(screenText) ||
+				hasKimiWorkspaceTrustAwaitingConfirmation(screenText) ||
+				hasKimiWorkspaceTrustAwaitingConfirmation(active.workspaceTrustBuffer ?? "")
 			) {
 				return false;
 			}
@@ -3322,6 +3339,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		let exitEventArrivedBeforeInstall: PtyExitEvent | null = null;
 		let adoptedSessionInstalled = false;
 		let adoptedHandle: TerminalPtyProcessHandle | null = null;
+		let kimiStartupCatchUpOutputText = "";
 		const handleAdoptedLiveOutput = (chunk: Buffer): void => {
 			if (!adoptedSessionInstalled) {
 				liveOutputChunksArrivedBeforeInstall.push(chunk);
@@ -3362,6 +3380,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 					const filteredCatchUpBytes = filterTerminalProtocolOutput(catchUpTerminalProtocolFilter, bytes, {});
 					if (filteredCatchUpBytes.byteLength > 0) {
 						terminalStateMirror.applyOutput(filteredCatchUpBytes);
+						if (agentId === "kimi") {
+							kimiStartupCatchUpOutputText =
+								`${kimiStartupCatchUpOutputText}${filteredCatchUpBytes.toString("utf8")}`.slice(
+									-MAX_WORKSPACE_TRUST_BUFFER_CHARS,
+								);
+						}
 					}
 				},
 				onData: handleAdoptedLiveOutput,
@@ -3416,7 +3440,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			adoptsTaskAgentSession && agentId !== null ? resolveAgentOutputTransitionDetectionForAgentId(agentId) : {};
 		const active: ActiveProcessState = {
 			session: adoptedHandle,
-			workspaceTrustBuffer: carriedFields?.workspaceTrustBuffer ?? null,
+			workspaceTrustBuffer:
+				agentId === "kimi"
+					? `${carriedFields?.workspaceTrustBuffer ?? ""}${kimiStartupCatchUpOutputText}`.slice(
+							-MAX_WORKSPACE_TRUST_BUFFER_CHARS,
+						)
+					: (carriedFields?.workspaceTrustBuffer ?? null),
 			cols: adoptionCandidate.cols,
 			rows: adoptionCandidate.rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState(terminalProtocolFilterOptions),
@@ -4730,7 +4759,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspaceTrustBuffer:
 				shouldAutoConfirmClaudeWorkspaceTrust(request.agentId, request.cwd) ||
 				shouldAutoConfirmCodexWorkspaceTrust(request.agentId, request.cwd) ||
-				hasCodexLaunchSignature
+				hasCodexLaunchSignature ||
+				request.agentId === "kimi"
 					? ""
 					: null,
 			cols,
@@ -4837,7 +4867,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 独立的 wall-clock 兜底：claude / kimi 可能在一个 chunk 里渲染完启动 UI，而 readiness
 		// predicate 漏识别（例如 TUI 文案改写、边框 / 输入框被切分到两块 chunk 里），此后不会
 		// 再有 output 触发 handleTaskOutput 里的 deadline 检查。注册一次性 timer 强制
-		// 在 timeout 时调用 trySubmitDeferredStartupPrompt，避免 prompt 永远注不进去。
+		// 在 timeout 时重新核验；Kimi 仍须满足当前输入框与信任模态门禁，超时不能代替用户信任。
 		if (AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupPromptText) {
 			active.startupReadinessTimer = setTimeout(() => {
 				const entryAtTimeout = this.entries.get(request.taskId);
@@ -4972,6 +5002,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (active.workspaceTrustBuffer.length > MAX_WORKSPACE_TRUST_BUFFER_CHARS) {
 			active.workspaceTrustBuffer = active.workspaceTrustBuffer.slice(-MAX_WORKSPACE_TRUST_BUFFER_CHARS);
 		}
+		// Kimi 任意目录只观察信任边界；任务工作树已通过原生进程环境声明信任。
+		if (this.entries.get(taskId)?.summary.agentId === "kimi") return;
 		if (active.autoConfirmedWorkspaceTrust || active.workspaceTrustConfirmTimer !== null) {
 			return;
 		}
@@ -5054,9 +5086,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// Startup input is deferred until the TUI is alive so the task prompt creates a
 		// persisted interactive session instead of a short-lived argv prompt run.
 		//
-		// claude / kimi 路径在 readiness predicate 命中之前保持等待；超过
-		// startupReadinessDeadlineAt 后回退到"任意 output 即触发"，
-		// 兜底 predicate 漏识别的极端 TUI 渲染，避免回归到 prompt 永远注不进去。
+		// claude / kimi 在信号命中或 deadline 后重试首发；最终门禁在 trySubmitDeferredStartupPrompt。
+		// Kimi 必须另有当前输入框与无信任模态的证据，不能仅凭任意 output 注入。
 		if (entry.active.deferredStartupPromptText !== null && data.length > 0) {
 			const claudeBuffer = entry.active.workspaceTrustBuffer ?? "";
 			const codexReady = entry.summary.agentId === "codex";
@@ -5068,11 +5099,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					hasClaudeStartupUiRendered(claudeBuffer));
 			// Kimi 与 codex 同为信号驱动就绪（启动横幅 / 输入提示符重现）。
 			const kimiReady =
-				entry.summary.agentId === "kimi" && (hasKimiInteractivePrompt(data) || hasKimiStartupUiRendered(data));
+				entry.summary.agentId === "kimi" &&
+				(hasKimiInteractivePrompt(data) ||
+					hasKimiStartupUiRendered(data) ||
+					hasKimiStartupUiRendered(entry.active.workspaceTrustBuffer ?? ""));
 			// wall-clock 兜底：deadline 仅对 claude/kimi 非 null（见启动处 gating），故这里无需
 			// 再按 agentId 判定——deadline 是否存在本身即把兜底钳定在 claude+kimi，codex 不受影响。
 			// kimi 启动横幅 / Unicode 输入框 `│ >` 可能被 chunk 边界拆分，signal-only 判定漏识别时，
-			// 该兜底保证 deferred prompt 仍会在 timeout 后强制注入。
+			// 该兜底在 timeout 后重新查验完整终端镜像，避免仅靠单 chunk 永久漏识别。
 			const readyByDeadline =
 				entry.active.startupReadinessDeadlineAt !== null && now() >= entry.active.startupReadinessDeadlineAt;
 			if (codexReady || claudeReadyBySignal || kimiReady || readyByDeadline) {
@@ -5536,6 +5570,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 				data.toString("latin1"),
 			);
 		if (data.length === 0 || isTerminalProtocolResponseOnly) {
+			entry.active.session.write(data);
+			return cloneSummary(entry.summary);
+		}
+		// Kimi 启动信任模态中的单次 Enter 只确认目录，不提交用户正文。
+		// 其他按键（包括拒绝、选择项导航和混入草稿的回车）仍按人工接管取消自动首发。
+		const isKimiStartupWorkspaceTrustConfirmationInput =
+			entry.summary.agentId === "kimi" &&
+			entry.active.deferredStartupPromptText !== null &&
+			data.length === 1 &&
+			data[0] === 13 &&
+			hasKimiWorkspaceTrustAwaitingConfirmation(entry.active.workspaceTrustBuffer ?? "");
+		if (isKimiStartupWorkspaceTrustConfirmationInput) {
+			entry.active.lastUserInputAt = now();
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
 		}
@@ -6078,6 +6125,30 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
+		const beforeFacets = resolveSessionFacets(before);
+		if (before.agentId === "kimi" && reason === "hook" && beforeFacets.turnOwner === "user") {
+			const userTurnKind = userTurnKindOverride ?? "review";
+			// 存活终端的原生中断与 agent 回合一样使用 hook 成因；中断语义由 userTurnKind 保留，
+			// 避免套用进程中断退出后不能通过真实工作 hook 恢复的 interrupted 成因。
+			const reviewReason = userTurnKind === "error" ? "error" : "hook";
+			if (beforeFacets.userTurnKind === userTurnKind && before.reviewReason === reviewReason)
+				return cloneSummary(before);
+			const summary = updateSummary(
+				entry,
+				{
+					turnOwner: "user",
+					liveness: beforeFacets.liveness,
+					userTurnKind,
+					reviewReason,
+				},
+				undefined,
+				domainEventTiming,
+			);
+			// 用户回合内只校正模态，不虚构新回合、输入接受或新的历史交棒。
+			for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+			this.emitSummary(summary);
+			return cloneSummary(summary);
+		}
 		if (
 			entry.active &&
 			reason === "hook" &&

@@ -2669,13 +2669,18 @@ const kimiAdapter: AgentSessionAdapter = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && processEnv.KIMI_CODE_TRUST_WORKSPACE === undefined) {
+			// 原生按进程信任，不改用户的永久信任记录；任意目录和显式禁用保留原生提示。
+			env.KIMI_CODE_TRUST_WORKSPACE = "1";
+		}
 
-		// kimi 的 --plan 与 --yolo 是独立旗标，plan 起步不影响放权档。
+		// --auto 才是 Never Ask；--yolo 仍会询问风险操作、问题和计划，且两档原生互斥。
+		// 显式原生权限参数优先于任务默认档；Plan 起步仍独立处理。
 		if (
 			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
-			!hasKimiCommandLineOption("--yolo", "-y")
+			!hasKimiCommandLineOption("--auto", "--yolo", "-y", "--yes", "--auto-approve")
 		) {
-			injectedKimiOptionArguments.push("--yolo");
+			injectedKimiOptionArguments.push("--auto");
 		}
 		if (!resumesPriorAgentConversation && input.startInPlanMode && !hasKimiCommandLineOption("--plan")) {
 			injectedKimiOptionArguments.push("--plan");

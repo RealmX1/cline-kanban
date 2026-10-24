@@ -376,6 +376,48 @@ describe("AgentTerminalPanel", () => {
 		expect(container.textContent).not.toContain("Terminal stream closed");
 	});
 
+	it("Kimi 活体中断显示已中断，终端保持存活且可以继续输入", () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const summary: RuntimeTaskSessionSummary = {
+			...createSummary("kimi"),
+			state: "awaiting_review",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "interrupted",
+			reviewReason: "interrupted",
+			latestHookActivity: {
+				activityText: "Resumed after user input",
+				toolName: null,
+				toolInputSummary: null,
+				finalMessage: null,
+				hookEventName: "UserPromptSubmit",
+				notificationType: null,
+				source: "kimi",
+			},
+		};
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel taskId="task-1" workspaceId="workspace-1" summary={summary} showSessionToolbar />
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("已中断");
+		expect(container.textContent).not.toContain("Ready for review");
+		expect(container.textContent).not.toContain("Running");
+		expect(container.textContent).not.toContain("Terminal stream closed");
+		expect(getStateTagStyle(summary)).toBe("danger");
+		const arrowUpButton = container.querySelector<HTMLButtonElement>('[aria-label="Arrow up"]');
+		expect(arrowUpButton).not.toBeNull();
+		expect(arrowUpButton?.disabled).toBe(false);
+		act(() => {
+			arrowUpButton?.click();
+		});
+		expect(mockTerminalInput).toHaveBeenCalledWith("\u001b[A");
+		expect(summary).toMatchObject({ liveness: "live", pid: 123 });
+	});
+
 	// ②-prep × ②-visible 合成反证：Cline SDK 在进程内运行、awaiting 恒 live，即便 pid null 也绝不误报 stream closed。
 	it("Cline awaiting（pid null 但 in-process）→ 不显示 stream closed（harness-aware 恒 live）", () => {
 		act(() => {

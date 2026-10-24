@@ -26,6 +26,10 @@ import type {
 } from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
 import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
+import {
+	normalizeKimiNativeHookToolCallIdentity,
+	resolveKimiPrimaryConversationHookEvent,
+} from "../core/kimi-primary-conversation-hook-lifecycle";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
 import { buildWindowsCmdArgsArray, resolveWindowsComSpec, shouldUseWindowsCmdLaunch } from "../core/windows-cmd-launch";
 import {
@@ -440,7 +444,11 @@ function parseHooksIngestArgs(
 	const payloadFromBase64 = parseMetadataFromBase64(options.metadataBase64);
 	const payloadFromStdin = parseJsonObject(stdinPayload.trim());
 	const payloadFromArg = payloadArg ? parseJsonObject(payloadArg) : null;
-	const payload = payloadFromBase64 ?? payloadFromStdin ?? payloadFromArg;
+	const originalPayload = payloadFromBase64 ?? payloadFromStdin ?? payloadFromArg;
+	const payload =
+		(flagMetadata.source ?? inferHookSourceFromPayload(originalPayload))?.trim().toLowerCase() === "kimi"
+			? normalizeKimiNativeHookToolCallIdentity(originalPayload)
+			: originalPayload;
 	const metadata = normalizeHookMetadata(event, payload, flagMetadata);
 	const agentNativeConversationSessionIdentity = extractAgentNativeConversationSessionIdentityFromHookPayload({
 		payload,
@@ -452,7 +460,11 @@ function parseHooksIngestArgs(
 		toolName: metadata?.toolName,
 	});
 	return {
-		event: resolveCodexUserQuestionHookEvent(event, metadata),
+		event: resolveKimiPrimaryConversationHookEvent(
+			resolveCodexUserQuestionHookEvent(event, metadata),
+			metadata,
+			payload,
+		),
 		...(agentNativeConversationSessionIdentity?.sourceAgentId === "claude" &&
 		/^task(create|update|list|get)$/iu.test(metadata?.toolName ?? "") &&
 		metadata?.hookEventName?.toLowerCase() === "posttooluse"
@@ -472,7 +484,11 @@ function parseHooksIngestArgs(
 		...(["userpromptsubmit", "beforeagent"].includes(metadata?.hookEventName?.trim().toLowerCase() ?? "") && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
 			: {}),
-		...(payload && readStringField(payload, "agent_id") ? { hookEventFiredInsideSubagentContext: true } : {}),
+		...(payload &&
+		readStringField(payload, "agent_id") &&
+		!(metadata?.source === "kimi" && readStringField(payload, "agent_id") === "main")
+			? { hookEventFiredInsideSubagentContext: true }
+			: {}),
 		...extractMainAgentConversationContextCompactionFactsFromHookPayload(event, payload),
 	};
 }
@@ -517,6 +533,10 @@ export function buildAgentRaisedDecisionPayloads(
 	const toolName = metadata?.toolName ?? null;
 	const normalizedToolName = toolName?.trim().toLowerCase() ?? null;
 	const hookEventName = metadata?.hookEventName?.trim().toLowerCase() ?? null;
+	// Kimi 本次只补原生终端的交互状态；它的选择器尚无安全的面板答案投递，不登记可作答表单。
+	if (metadata?.source?.trim().toLowerCase() === "kimi") {
+		return {};
+	}
 	if (metadata?.source === "codex" && toolName === "request_user_input" && toolUseId) {
 		const question = extractCodexUserQuestionPayload({
 			callId: toolUseId,

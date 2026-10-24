@@ -149,7 +149,7 @@ export interface AgentTerminalPanelProps {
 
 // 读 facet 真相源（turnOwner/liveness），不再读 legacy `state`；标签文案与旧 state 映射逐项等价
 // （agent⟺running、user+interrupted⟺interrupted、user+failed⟺failed、user 其余⟺awaiting_review、null⟺idle）。
-// awaiting_review 的 live/exited 都落入 user 其余分支，故进程是否已退不改变此处展示（保持旧行为）。
+// 活体中断按 userTurnKind 单独展示；其余 awaiting_review 的 live/exited 沿用同一待审标签。
 export function describeState(summary: RuntimeTaskSessionSummary | null): string {
 	if (!summary) {
 		return "No session yet";
@@ -159,6 +159,10 @@ export function describeState(summary: RuntimeTaskSessionSummary | null): string
 		return "Running";
 	}
 	if (facets.turnOwner === "user") {
+		// 本轮已中断与 PTY 是否退出是两个事实；活体中断仍可继续输入。
+		if (facets.liveness === "live" && facets.userTurnKind === "interrupted") {
+			return "已中断";
+		}
 		if (facets.liveness === "interrupted") {
 			return "Interrupted";
 		}
@@ -172,7 +176,7 @@ export function describeState(summary: RuntimeTaskSessionSummary | null): string
 
 type StatusTagStyle = "neutral" | "success" | "warning" | "danger";
 
-// 同 describeState：读 facet 真相源，样式与旧 state 映射逐项等价（agent→success、user+{interrupted,failed}→danger、user 其余→warning、null→neutral）。
+// 同 describeState：读 facet 真相源；活体中断沿用中断标签的 danger 样式，其余映射保持原样。
 export function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): StatusTagStyle {
 	if (!summary) {
 		return "neutral";
@@ -182,6 +186,9 @@ export function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): Sta
 		return "success";
 	}
 	if (facets.turnOwner === "user") {
+		if (facets.liveness === "live" && facets.userTurnKind === "interrupted") {
+			return "danger";
+		}
 		return facets.liveness === "interrupted" || facets.liveness === "failed" ? "danger" : "warning";
 	}
 	return "neutral";
