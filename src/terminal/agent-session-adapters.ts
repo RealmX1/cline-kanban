@@ -40,6 +40,7 @@ import {
 	configureCodexHooks,
 	hasCodexConfigOverride,
 	normalizeCodexConfigOverridesBeforeSubcommand,
+	supportsVerifiedCodexAutomaticCompactionPhaseHooks,
 } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
@@ -124,6 +125,7 @@ export type AgentOutputTransitionDetector = (
 export type AgentOutputTransitionInspectionPredicate = (summary: RuntimeTaskSessionSummary) => boolean;
 
 export interface PreparedAgentLaunch {
+	codexAutomaticCompactionPhaseHooksConfigured?: boolean;
 	binary?: string;
 	args: string[];
 	env: Record<string, string | undefined>;
@@ -1722,8 +1724,15 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
+		let codexAutomaticCompactionPhaseHooksConfigured = false;
 		if (hooks) {
-			configureCodexHooks(codexArgs);
+			codexAutomaticCompactionPhaseHooksConfigured = configureCodexHooks(
+				codexArgs,
+				await supportsVerifiedCodexAutomaticCompactionPhaseHooks(binary ?? "codex", {
+					...process.env,
+					...input.env,
+				}),
+			);
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -1765,6 +1774,7 @@ const codexAdapter: AgentSessionAdapter = {
 			binary,
 			args: codexArgs,
 			env,
+			codexAutomaticCompactionPhaseHooksConfigured,
 			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
@@ -2669,6 +2679,10 @@ const kimiAdapter: AgentSessionAdapter = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && processEnv.KIMI_CODE_TRUST_WORKSPACE === undefined) {
+			// Kanban 创建的任务工作树沿用源仓库信任；只作用于该进程，不改用户永久信任记录。
+			env.KIMI_CODE_TRUST_WORKSPACE = "1";
+		}
 
 		// --auto 对应 Never Ask；--yolo 仍是 Ask When Needed，且与 --auto 原生互斥。
 		// 显式原生权限参数优先于任务档位；--plan 仍按独立的起步选项处理。
