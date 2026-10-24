@@ -56,7 +56,10 @@ import {
 } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
 import { collectQueuedTaskPromptDeliveryChainFromHead } from "../core/queued-task-prompt-delivery-merge";
 import type { QueuedTaskPromptDeliverySettlement } from "../core/queued-task-prompt-delivery-outcome-routing";
-import { resolveNativeIndependentUserTurnPreflightRestartRecovery } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import {
+	isNativeIndependentUserTurnSubmissionKnownNotStarted,
+	resolveNativeIndependentUserTurnPreflightRestartRecovery,
+} from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger } from "./mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import { getThisRuntimeProcessInstanceId } from "./runtime-process-instance-heartbeat-registry";
@@ -274,13 +277,16 @@ function settleExpiredQueuedTaskPromptDeliveryEntry(
 	entry: QueuedTaskPromptDeliveryEntry,
 	nowEpochMs: number,
 ): QueuedTaskPromptDeliveryEntry {
+	const queryRecovery =
+		entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery ??
+		entry.nativeIndependentUserTurnPreflightQueryRecovery;
 	return {
 		...entry,
 		deliveryState: "expired",
 		settledAt: nowEpochMs,
-		...(entry.nativeIndependentUserTurnPreflightQueryRecovery?.recoveredAtEpochMs === null
+		...(queryRecovery?.recoveredAtEpochMs === null
 			? {
-					lastDeliveryFailureNote: `原生回合查询在原截止时间内仍未恢复，尚未发送：${entry.nativeIndependentUserTurnPreflightQueryRecovery.lastQueryFailureReason}`,
+					lastDeliveryFailureNote: `原生回合查询在原截止时间内仍未恢复，尚未发送：${queryRecovery.lastQueryFailureReason}`,
 				}
 			: {}),
 	};
@@ -300,7 +306,10 @@ export function withExpiredQueuedEntriesSettled(
 	const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 	for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
 		entriesByTaskId[taskId] = entries.map((entry) => {
-			if (entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt) {
+			if (
+				(entry.deliveryState === "queued" || isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)) &&
+				nowEpochMs >= entry.expiresAt
+			) {
 				changed = true;
 				return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
 			}
@@ -478,7 +487,9 @@ export function applyQueuedTaskPromptDeliveryMutation(
 			mutation.taskId,
 			entries.map((entry) =>
 				entry.queueEntryId === mutation.queueEntryId &&
-				(entry.deliveryState === "queued" || entry.deliveryState === "claimed_for_dispatch")
+				(entry.deliveryState === "queued" ||
+					entry.deliveryState === "claimed_for_dispatch" ||
+					isNativeIndependentUserTurnSubmissionKnownNotStarted(entry))
 					? { ...entry, deliveryState: "cancelled" as const, settledAt: nowEpochMs }
 					: entry,
 			),
@@ -557,6 +568,9 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		// 保留原条目（已 settled）供用户对照「上次为什么失败」。
 		const requeued: QueuedTaskPromptDeliveryEntry = {
 			...failedEntry,
+			// 新的人类意图不能继承旧自动投递的零写入证明或二次查询等待。
+			nativeIndependentUserTurnSubmissionProgress: undefined,
+			nativeIndependentUserTurnBeforeSubmissionQueryRecovery: undefined,
 			queueEntryId: mutation.replacementQueueEntryId,
 			deliveryState: "queued",
 			deliveryAttemptCount: 0,
@@ -644,6 +658,7 @@ export async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult
 		return { before: currentRead.snapshot, after: next, result };
 	});
 	// 程序化条目的落定镜像进注入账本——挂在这个唯一的写盘咽喉上，任何落定路径都逃不掉。锁释放之后做。
+	// 只镜像锁内已核验并落盘的终态；后续接管不能改写该历史结算，未获结算资格的 transport 回执不会进入镜像。
 	await mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger({ workspaceId, before, after, nowEpochMs });
 	return { snapshot: after, result };
 }
@@ -764,6 +779,7 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 // 认领 → 即将 send。这一步的写盘**必须发生在 send 之前**：崩溃后 claimed_for_dispatch 与
 // handed_to_transport 的区别正是「一个字节都没写出去（安全释放）」与「语义暧昧（绝不自动重投）」。
 export async function markQueuedTaskPromptDeliveryHandedToTransport(input: {
+	predecessorNativeTurnId?: string;
 	workspaceId: string;
 	taskId: string;
 	queueEntryIds: readonly string[];
@@ -786,6 +802,15 @@ export async function markQueuedTaskPromptDeliveryHandedToTransport(input: {
 								dispatchIdempotencyKey: input.dispatchIdempotencyKey,
 								deliveryAttemptCount: entry.deliveryAttemptCount + 1,
 								lastAttemptedAt: nowEpochMs,
+								...(input.predecessorNativeTurnId && entry.requiredNativeIndependentUserTurnSessionId
+									? {
+											nativeIndependentUserTurnSubmissionProgress:
+												entry.nativeIndependentUserTurnSubmissionProgress ?? {
+													predecessorNativeTurnId: input.predecessorNativeTurnId,
+													submissionMayHaveStartedAtEpochMs: null,
+												},
+										}
+									: {}),
 							}
 						: entry,
 				),
@@ -842,6 +867,8 @@ export async function settleQueuedTaskPromptDelivery(input: {
 	taskId: string;
 	queueEntryIds: readonly string[];
 	settlement: QueuedTaskPromptDeliverySettlement;
+	// 取锁可能等待；运行时在等待期间停止后，本代尝试不得再结算。与持久托管身份一起在锁内检查。
+	isCurrentTransportAttemptActive?: () => boolean;
 	nowEpochMs?: number;
 }): Promise<WorkspaceQueuedTaskPromptDeliverySnapshot> {
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
@@ -853,6 +880,16 @@ export async function settleQueuedTaskPromptDelivery(input: {
 				current,
 				input.taskId,
 				getTaskEntries(current, input.taskId).map((entry) => {
+					if (input.isCurrentTransportAttemptActive?.() === false) return entry;
+					const expectedOwnership = input.settlement.expectedHandedToTransportAttemptOwnership;
+					if (
+						expectedOwnership &&
+						(entry.deliveryState !== "handed_to_transport" ||
+							entry.dispatchIdempotencyKey !== expectedOwnership.dispatchIdempotencyKey ||
+							entry.custodianRuntimeProcessInstanceId !== expectedOwnership.custodianRuntimeProcessInstanceId ||
+							entry.claimedForSessionIncarnationId !== expectedOwnership.claimedForSessionIncarnationId)
+					)
+						return entry;
 					if (
 						!targetQueueEntryIds.has(entry.queueEntryId) ||
 						!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
@@ -1029,7 +1066,11 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 					}
 					if (isQueuedTaskPromptDeliveryProgrammaticInjection(entry)) {
 						// 原截止时间先于重启恢复判据收口，避免把查询失败改写成通用重启失败。
-						if (entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt) {
+						if (
+							(entry.deliveryState === "queued" ||
+								isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)) &&
+							nowEpochMs >= entry.expiresAt
+						) {
 							settledProgrammaticInjectionCount += 1;
 							return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
 						}
@@ -1046,7 +1087,18 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 							return entry;
 						if (recovery === "same_session_verified") {
 							recoveredPreflightQueryCustodyCount += 1;
-							return { ...entry, custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId };
+							return {
+								...entry,
+								...(isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)
+									? {
+											deliveryState: "queued" as const,
+											dispatchIdempotencyKey: null,
+											claimedForSessionIncarnationId: null,
+											claimedAtTurnSequence: null,
+										}
+									: {}),
+								custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId,
+							};
 						}
 						settledProgrammaticInjectionCount += 1;
 						return {
@@ -1131,7 +1183,15 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 				entriesByTaskId[taskId] = entries.map((entry) => {
 					// 认领没有时间戳（认领刻意不写任何时间字段），所以拿 lastAttemptedAt 兜不住它；
 					// 用 enqueuedAt 作为它的年龄下界——一条认领了却超过预算还没交付的条目必然已被撂下。
-					const inFlightSinceEpochMs = entry.lastAttemptedAt ?? entry.enqueuedAt;
+					if (isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)) {
+						if (nowEpochMs < entry.expiresAt) return entry;
+						failedStrandedDeliveryCount += 1;
+						return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
+					}
+					const inFlightSinceEpochMs =
+						entry.nativeIndependentUserTurnSubmissionProgress?.submissionMayHaveStartedAtEpochMs ??
+						entry.lastAttemptedAt ??
+						entry.enqueuedAt;
 					if (nowEpochMs - inFlightSinceEpochMs < input.inFlightSettlementBudgetMs) {
 						return entry;
 					}

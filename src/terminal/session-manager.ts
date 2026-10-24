@@ -87,6 +87,7 @@ import {
 	type SummaryWriteDomainEventTiming,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
+import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 import {
 	recordTaskSessionAutoRestartDecision,
 	recordTaskSessionStartRequestFoldedIntoRunningSession,
@@ -96,6 +97,7 @@ import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freez
 import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
+	NativeIndependentUserTurnSubmissionRecoverySuspended,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import {
 	createAgentOutputSubstanceMemory,
@@ -484,7 +486,7 @@ interface TaskChatInputDeliveryAttemptPlan {
 	// 首次交接必须等原生启动完成，不能把 loading 界面的提示符当作可提交输入框。
 	requiresCodexStartupPromptReady: boolean;
 	// 调用方的领域核验；每次实际粘贴或提交前重读，不缓存入队时结论。
-	validateBeforeTerminalWrite: (() => Promise<void>) | null;
+	validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
 	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
 	// 在受理时捕获而不是每次重探重读配置：一条投递最多活 ~196s，用同一份策略走完全程，
 	// 好过让它在半途因为用户改了设置而换一套语义。
@@ -543,6 +545,7 @@ function settleProgrammaticDeliveryReceipt(
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
+	failureNote?: string,
 ): void {
 	if (!receipt || receipt.settled) {
 		return;
@@ -551,6 +554,7 @@ function settleProgrammaticDeliveryReceipt(
 	receipt.observer({
 		status,
 		reason,
+		...(failureNote ? { failureNote } : {}),
 		...(codexNativePromptDeliveryEvidence ? { codexNativePromptDeliveryEvidence } : {}),
 	});
 }
@@ -573,12 +577,14 @@ function settleActiveProgrammaticDelivery(
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
+	failureNote?: string,
 ): void {
 	settleProgrammaticDeliveryReceipt(
 		active.programmaticDeliveryReceipt,
 		status,
 		reason,
 		codexNativePromptDeliveryEvidence,
+		failureNote,
 	);
 	active.programmaticDeliveryReceipt = null;
 }
@@ -1741,7 +1747,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		options?: {
 			deferWhileUserTurn?: boolean;
 			requiresCodexStartupPromptReady?: boolean;
-			validateBeforeTerminalWrite?: () => Promise<void>;
+			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator;
 			idempotencyKey?: string | null;
 			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
 			// 争用策略与抢占执行者，见 TaskChatInputDeliveryAttemptPlan。默认不抢占：
@@ -2424,7 +2430,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private async validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
 		taskId: string,
 		active: ActiveProcessState,
-		validateBeforeTerminalWrite: () => Promise<void>,
+		validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator,
 		isCurrentGeneration: () => boolean,
 	): Promise<boolean> {
 		const originalEntry = this.entries.get(taskId);
@@ -2450,19 +2456,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		};
 		try {
-			await validateBeforeTerminalWrite();
+			await validateBeforeTerminalWrite(
+				originalReceipt?.phase === "awaiting_readiness" ? "before_first_transport_write" : "after_transport_write",
+			);
 		} catch (error) {
+			if (error instanceof NativeIndependentUserTurnSubmissionRecoverySuspended) return false;
 			if (!hasSameNativeIdentity()) {
 				settleOriginalReceiptAfterNativeIdentityChanged();
 				return false;
 			}
 			if (error instanceof NativeIndependentUserTurnMessageAlreadyAccepted) {
 				if (this.entries.get(taskId)?.active === active && isCurrentGeneration())
-					settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
-						active,
-						"delivered_and_submit_confirmed",
-						null,
-					);
+					settleActiveProgrammaticDelivery(active, "delivered_and_submit_confirmed", null);
 				return false;
 			}
 			// 核验期间可能已被另一条投递取代；只结算仍属于本次的回执与可见性。
@@ -2475,6 +2480,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					: active.programmaticDeliveryReceipt?.phase === "awaiting_readiness"
 						? "cancelled_before_delivery"
 						: "submit_confirmation_budget_exhausted",
+				undefined,
+				error instanceof NativeIndependentUserTurnDeliveryError ? error.message : undefined,
 			);
 			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 			logTuiFreezeWarning(`[tui-freeze] terminal-write-validation-rejected taskId=${taskId} error=${String(error)}`);
@@ -2510,7 +2517,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		options?: {
 			retainsProgrammaticDeliveryReceipt?: boolean;
 			waitsForStartupCompletion?: boolean;
-			validateBeforeTerminalWrite?: (() => Promise<void>) | null;
+			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten?: () => void;
 		},
 	): void {
@@ -2558,7 +2565,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		generation: number,
 		ingestionWatch: {
 			promptText: string;
-			validateBeforeTerminalWrite: (() => Promise<void>) | null;
+			validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten: (() => void) | null;
 			confirmationBudgetMs: number;
 			outputChunkArrivalSequenceNumberAtPasteWrite: number;
@@ -2578,7 +2585,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		generation: number,
 		ingestionWatch: {
 			promptText: string;
-			validateBeforeTerminalWrite: (() => Promise<void>) | null;
+			validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten: (() => void) | null;
 			confirmationBudgetMs: number;
 			outputChunkArrivalSequenceNumberAtPasteWrite: number;
@@ -2712,7 +2719,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
 		promptText: string,
-		validateBeforeTerminalWrite: (() => Promise<void>) | null = null,
+		validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null = null,
 	): void {
 		const timer = setTimeout(() => {
 			void this.runSubmitConfirmAttempt(
@@ -2746,7 +2753,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
 		promptText: string,
-		validateBeforeTerminalWrite: (() => Promise<void>) | null = null,
+		validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null = null,
 	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;

@@ -1,13 +1,44 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	type QueuedTaskPromptDeliveryEntry,
+	queuedTaskPromptDeliveryEntrySchema,
+	runtimeTaskSessionSummarySchema,
+	type WorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../../../src/core/api-contract";
+import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import { createNativeIndependentUserTurnBeforeSubmissionValidator } from "../../../src/server/native-independent-user-turn-before-submission-validator";
+import {
+	mutateWorkspaceQueuedTaskPromptDeliveries,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+	updateWorkspaceQueuedTaskPromptDeliveriesUnderLock,
+} from "../../../src/state/queued-task-prompt-delivery-store";
 import {
 	type CodexNativePromptDeliveryInput,
 	deliverCodexNativePromptWithoutChangingComposer,
 } from "../../../src/terminal/codex-native-prompt-delivery";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), connect: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+	request: vi.fn(),
+	connect: vi.fn(),
+	isolatedRuntimeHomePath: "",
+	queryRecoveryClockEpochMs: 0,
+}));
 vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection", () => ({
 	withRunningCodexAppServerControlSocketConnection: mocks.connect,
+}));
+vi.mock("../../../src/state/workspace-state", () => ({
+	getRuntimeHomePath: () => mocks.isolatedRuntimeHomePath,
+	getWorkspaceDirectoryPath: (workspaceId: string) => join(mocks.isolatedRuntimeHomePath, "workspaces", workspaceId),
+	getWorkspacesRootPath: () => join(mocks.isolatedRuntimeHomePath, "workspaces"),
+}));
+vi.mock("node:timers/promises", () => ({
+	setTimeout: async (milliseconds: number) => {
+		mocks.queryRecoveryClockEpochMs += milliseconds;
+	},
 }));
 
 const CLIENT_MESSAGE_ID = "97fe98c3-7480-4689-884a-22c83a584f20";
@@ -252,5 +283,188 @@ describe("Codex 原生投递保留 composer", () => {
 		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unavailable");
 		expect(pageCount).toBeLessThanOrEqual(4);
 		expect(input.onRequestAttempted).not.toHaveBeenCalled();
+	});
+
+	describe("真实提交前 validator 与原生 sender 的确认预算", () => {
+		let queuedEntry: QueuedTaskPromptDeliveryEntry;
+		beforeEach(async () => {
+			mocks.isolatedRuntimeHomePath = await mkdtemp(join(tmpdir(), "kanban-native-confirmation-budget-"));
+			mocks.queryRecoveryClockEpochMs = 1_800_000_000_000;
+			queuedEntry = queuedTaskPromptDeliveryEntrySchema.parse({
+				queueEntryId: "independent-message-entry",
+				taskId: "conversation-1",
+				text: PROMPT,
+				deliverTogetherWithNextQueuedEntry: false,
+				sourcePromptLibraryEntryId: null,
+				sourcePromptLibraryEntryTextSha256: null,
+				deliveryState: "handed_to_transport",
+				deliveryAttemptCount: 1,
+				lastAttemptedAt: mocks.queryRecoveryClockEpochMs,
+				settledAt: null,
+				dispatchIdempotencyKey: "independent-message-key",
+				claimedForSessionIncarnationId: INCARNATION_ID,
+				claimedAtTurnSequence: 1,
+				enqueuedAt: mocks.queryRecoveryClockEpochMs,
+				expiresAt: mocks.queryRecoveryClockEpochMs + 60_000,
+				lastDeliveryFailureNote: null,
+				survivedRuntimeRestartAtEpochMs: null,
+				humanReconfirmedAfterRuntimeRestartAtEpochMs: null,
+				custodianRuntimeProcessInstanceId: "isolated-native-delivery-runtime",
+				requiredNativeIndependentUserTurnSessionId: "thread-1",
+				requiredNativeIndependentUserTurnSessionIncarnationId: INCARNATION_ID,
+				nativeIndependentUserTurnSubmissionProgress: {
+					predecessorNativeTurnId: "prior-turn",
+					submissionMayHaveStartedAtEpochMs: null,
+				},
+				programmaticInjectionLedgerReceiptLink: {
+					injectionLedgerIdempotencyKey: "independent-message-key",
+					injectionSource: "isolated-native-delivery-test",
+					settledTerminalDeliveryReceipt: null,
+				},
+			});
+			await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
+				"workspace-1",
+				() => ({ next: { entriesByTaskId: { "conversation-1": [queuedEntry] } }, result: null }),
+				mocks.queryRecoveryClockEpochMs,
+				"isolated-confirmation-budget-fixture",
+			);
+		});
+
+		afterEach(async () => {
+			await rm(mocks.isolatedRuntimeHomePath, { recursive: true, force: true });
+		});
+
+		async function readPersistedEntry() {
+			const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace-1");
+			return snapshot.entriesByTaskId["conversation-1"][0];
+		}
+
+		function createRecoveringDelivery(
+			options: {
+				onRecoveredQuery?: () => void;
+				onSnapshotChanged?: (snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot) => Promise<void>;
+				isCurrent?: () => boolean;
+			} = {},
+		) {
+			const readNativeConversationTurns = vi.fn(async (): Promise<CodexNativeConversationTurn[]> => {
+				if (readNativeConversationTurns.mock.calls.length <= 4) {
+					mocks.queryRecoveryClockEpochMs += 2_000;
+					throw new NativeIndependentUserTurnDeliveryError(
+						"native_independent_user_turn_capability_unavailable",
+						"原生实时查询超时：thread/turns/list",
+						{ retryableQueryFailure: true },
+					);
+				}
+				options.onRecoveredQuery?.();
+				return [{ id: "prior-turn", status: "completed", items: [] }];
+			});
+			const validator = createNativeIndependentUserTurnBeforeSubmissionValidator({
+				workspaceId: "workspace-1",
+				entry: queuedEntry,
+				predecessorNativeTurnId: "prior-turn",
+				text: PROMPT,
+				now: () => mocks.queryRecoveryClockEpochMs,
+				isStopped: () => false,
+				whenStopped: new Promise<void>(() => {}),
+				readNativeConversationTurns,
+				onSnapshotChanged: options.onSnapshotChanged ?? (async () => {}),
+			});
+			const input = createInput({
+				now: () => mocks.queryRecoveryClockEpochMs,
+				waitMilliseconds: async (milliseconds) => {
+					mocks.queryRecoveryClockEpochMs += milliseconds;
+				},
+				isCurrent: options.isCurrent ?? (() => true),
+				beforeSubmit: async () => {
+					await validator("before_first_transport_write");
+					return true;
+				},
+			});
+			return { input, readNativeConversationTurns };
+		}
+
+		it.each([0, 14_750, null])(
+			"四次查询超时及持久退避后，接受延迟 %s 仍获得完整有界确认机会且只提交一次",
+			async (acceptanceDelayMs) => {
+				const startedAtEpochMs = mocks.queryRecoveryClockEpochMs;
+				let submittedAtEpochMs: number | null = null;
+				let confirmationQueryCount = 0;
+				const originalRequest = mocks.request.getMockImplementation();
+				mocks.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+					if (method === "turn/start") {
+						submittedAtEpochMs = mocks.queryRecoveryClockEpochMs;
+						expect((await readPersistedEntry()).nativeIndependentUserTurnSubmissionProgress).toMatchObject({
+							submissionMayHaveStartedAtEpochMs: submittedAtEpochMs,
+						});
+					}
+					if (method === "thread/turns/list" && submittedAtEpochMs !== null) {
+						confirmationQueryCount += 1;
+						if (
+							acceptanceDelayMs === null ||
+							mocks.queryRecoveryClockEpochMs - submittedAtEpochMs < acceptanceDelayMs
+						)
+							return { data: [{ id: "prior-turn", status: "completed", items: [] }], nextCursor: null };
+					}
+					return originalRequest?.(method, parameters);
+				});
+				const { input, readNativeConversationTurns } = createRecoveringDelivery();
+				const result = await deliverCodexNativePromptWithoutChangingComposer(input);
+				expect(submittedAtEpochMs).toBe(startedAtEpochMs + 23_000);
+				expect(readNativeConversationTurns).toHaveBeenCalledTimes(5);
+				expect(input.onRequestAttempted).toHaveBeenCalledOnce();
+				expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+				expect(confirmationQueryCount).toBeGreaterThan(0);
+				expect(result.status).toBe(acceptanceDelayMs === null ? "unconfirmed" : "confirmed");
+				if (result.status === "confirmed") expect(result.evidence.nativeUserMessageId).toBe("native-user-2");
+				expect(mocks.queryRecoveryClockEpochMs - (submittedAtEpochMs ?? 0)).toBe(acceptanceDelayMs ?? 15_000);
+				expect((await readPersistedEntry()).nativeIndependentUserTurnBeforeSubmissionQueryRecovery).toMatchObject({
+					consecutiveQueryFailureCount: 4,
+					recoveredAtEpochMs: submittedAtEpochMs,
+				});
+				expect((await readPersistedEntry()).expiresAt).toBe(queuedEntry.expiresAt);
+			},
+		);
+
+		it.each(["cancelled", "expired", "session_replaced"] as const)(
+			"长时间提交前恢复期间 %s 仍阻止原生提交，并保留原截止时间",
+			async (interruption) => {
+				let isCurrent = true;
+				const { input } = createRecoveringDelivery({
+					isCurrent: () => isCurrent,
+					onRecoveredQuery: () => {
+						if (interruption === "session_replaced") isCurrent = false;
+					},
+					onSnapshotChanged: async (snapshot) => {
+						const entry = snapshot.entriesByTaskId["conversation-1"][0];
+						if (entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery?.consecutiveQueryFailureCount !== 4)
+							return;
+						if (interruption === "cancelled")
+							await mutateWorkspaceQueuedTaskPromptDeliveries(
+								"workspace-1",
+								{
+									kind: "cancel_queued_prompt_delivery",
+									taskId: entry.taskId,
+									queueEntryId: entry.queueEntryId,
+								},
+								mocks.queryRecoveryClockEpochMs,
+							);
+						if (interruption === "expired") mocks.queryRecoveryClockEpochMs = queuedEntry.expiresAt;
+					},
+				});
+				expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe(
+					interruption === "session_replaced" ? "cancelled" : "unavailable",
+				);
+				expect(input.onRequestAttempted).not.toHaveBeenCalled();
+				expect(mocks.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+				const persistedEntry = await readPersistedEntry();
+				expect(persistedEntry.expiresAt).toBe(queuedEntry.expiresAt);
+				if (interruption !== "session_replaced") {
+					expect(persistedEntry.deliveryState).toBe(interruption);
+					expect(
+						persistedEntry.nativeIndependentUserTurnSubmissionProgress?.submissionMayHaveStartedAtEpochMs,
+					).toBeNull();
+				}
+			},
+		);
 	});
 });

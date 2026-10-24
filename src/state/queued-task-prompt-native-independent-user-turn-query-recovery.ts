@@ -1,6 +1,10 @@
 import type { QueuedTaskPromptDeliveryEntry } from "../core/api-contract";
 import { isQueuedTaskPromptDeliveryAwaitingDispatch } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
 import {
+	buildNativeIndependentUserTurnQueryRecovery,
+	isNativeIndependentUserTurnSubmissionKnownNotStarted,
+} from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import {
 	updateWorkspaceQueuedTaskPromptDeliveriesUnderLock,
 	withTaskEntries,
 } from "./queued-task-prompt-delivery-store";
@@ -20,7 +24,7 @@ export async function updateQueuedTaskPromptNativeIndependentUserTurnQueryRecove
 				!head ||
 				head.queueEntryId !== input.expectedEntry.queueEntryId ||
 				head.deliveryState !== "queued" ||
-				head.deliveryAttemptCount !== 0 ||
+				(head.deliveryAttemptCount !== 0 && !isNativeIndependentUserTurnSubmissionKnownNotStarted(head)) ||
 				!head.requiredNativeIndependentUserTurnSessionId ||
 				head.custodianRuntimeProcessInstanceId !== input.expectedEntry.custodianRuntimeProcessInstanceId ||
 				head.requiredNativeIndependentUserTurnSessionIncarnationId !==
@@ -33,26 +37,12 @@ export async function updateQueuedTaskPromptNativeIndependentUserTurnQueryRecove
 			const previous = head.nativeIndependentUserTurnPreflightQueryRecovery;
 			if (input.failureReason === null && (!previous || previous.recoveredAtEpochMs !== null))
 				return { next: current, result: null };
-			const count = previous?.recoveredAtEpochMs === null ? previous.consecutiveQueryFailureCount + 1 : 1;
-			const recovery =
-				input.failureReason === null && previous
-					? {
-							...previous,
-							recoveredAtEpochMs: input.nowEpochMs,
-							nextQueryRetryAtEpochMs: null,
-						}
-					: {
-							consecutiveQueryFailureCount: count,
-							waitingStartedAtEpochMs:
-								previous?.recoveredAtEpochMs === null ? previous.waitingStartedAtEpochMs : input.nowEpochMs,
-							lastQueryFailureAtEpochMs: input.nowEpochMs,
-							lastQueryFailureReason: input.failureReason ?? "",
-							nextQueryRetryAtEpochMs: Math.min(
-								head.expiresAt,
-								input.nowEpochMs + Math.min(15_000, 1_000 * 2 ** Math.min(count - 1, 4)),
-							),
-							recoveredAtEpochMs: null,
-						};
+			const recovery = buildNativeIndependentUserTurnQueryRecovery({
+				previous,
+				failureReason: input.failureReason,
+				nowEpochMs: input.nowEpochMs,
+				expiresAtEpochMs: head.expiresAt,
+			});
 			return {
 				next: withTaskEntries(
 					current,

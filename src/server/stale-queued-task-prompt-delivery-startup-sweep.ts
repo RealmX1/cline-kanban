@@ -1,3 +1,4 @@
+import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
 // runtime 启动清扫（排队 prompt 版）。两件事，顺序固定：
 //
 //   1. **收敛被重启撂在半路的在途投递**。claimed_for_dispatch（一个字节都没写出去）释放回 queued；
@@ -73,7 +74,11 @@ function findEarliestYoungInFlightDeliveryBecomesStaleAtEpochMs(
 				continue;
 			}
 			// 与 store 的收敛判据同一个年龄口径（lastAttemptedAt ?? enqueuedAt）。
-			const becomesStaleAt = (entry.lastAttemptedAt ?? entry.enqueuedAt) + inFlightSettlementBudgetMs;
+			const becomesStaleAt = isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)
+				? entry.expiresAt
+				: (entry.nativeIndependentUserTurnSubmissionProgress?.submissionMayHaveStartedAtEpochMs ??
+						entry.lastAttemptedAt ??
+						entry.enqueuedAt) + inFlightSettlementBudgetMs;
 			earliest = earliest === null ? becomesStaleAt : Math.min(earliest, becomesStaleAt);
 		}
 	}

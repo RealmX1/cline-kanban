@@ -2475,6 +2475,7 @@ export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePrompt
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
@@ -2496,6 +2497,7 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
@@ -2560,18 +2562,26 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 ]);
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
+const nativeIndependentUserTurnQueryRecoverySchema = z.object({
+	consecutiveQueryFailureCount: z.number().int().positive(),
+	waitingStartedAtEpochMs: z.number(),
+	lastQueryFailureAtEpochMs: z.number(),
+	lastQueryFailureReason: z.string(),
+	nextQueryRetryAtEpochMs: z.number().nullable(),
+	recoveredAtEpochMs: z.number().nullable(),
+});
+
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
-	// 只恢复尚未认领、未写入 transport 的查询；可选字段保证旧队列继续可读。
-	nativeIndependentUserTurnPreflightQueryRecovery: z
+	// 新字段可选；旧 handed_to_transport 条目缺少零写入证明时，仍按未知处理。
+	nativeIndependentUserTurnSubmissionProgress: z
 		.object({
-			consecutiveQueryFailureCount: z.number().int().positive(),
-			waitingStartedAtEpochMs: z.number(),
-			lastQueryFailureAtEpochMs: z.number(),
-			lastQueryFailureReason: z.string(),
-			nextQueryRetryAtEpochMs: z.number().nullable(),
-			recoveredAtEpochMs: z.number().nullable(),
+			predecessorNativeTurnId: z.string().min(1),
+			submissionMayHaveStartedAtEpochMs: z.number().nullable(),
 		})
 		.optional(),
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
+	// 只恢复尚未认领、未写入 transport 的查询；可选字段保证旧队列继续可读。
+	nativeIndependentUserTurnPreflightQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
 	// 取消 / 重排 / 合并的唯一句柄。由构造 mutation 的一侧生成（randomUUID），于是同一条意图重发天然幂等。
 	queueEntryId: z.string(),
 	// **会话 id**，不是看板卡片 id：by-the-way 子会话有自己独立的队列。
@@ -2728,6 +2738,10 @@ export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDe
 export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
 
 export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	nativeIndependentUserTurnSubmissionProgress:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnSubmissionProgress,
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnBeforeSubmissionQueryRecovery,
 	nativeIndependentUserTurnPreflightQueryRecovery:
 		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnPreflightQueryRecovery,
 	queueEntryId: z.string(),

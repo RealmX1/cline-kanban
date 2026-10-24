@@ -1285,6 +1285,7 @@ interface TaskMessageCommandResult extends JsonRecord {
 	message_id: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
 	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
 	attempt_id?: string;
@@ -1310,6 +1311,9 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 		idempotency_key: record.idempotency_key,
 		message_id: record.message_id,
 		terminal_delivery_status: record.terminal_delivery_status,
+		...(record.terminal_delivery_failure_detail
+			? { terminal_delivery_failure_detail: record.terminal_delivery_failure_detail }
+			: {}),
 		...(record.terminal_delivery_failure_reason
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
@@ -1507,13 +1511,14 @@ async function sendTaskMessageCommand(input: {
 
 	// 第二段（锁外）：真正投递。锁外是必须的——投递要等 runtime 往返，占着账本锁会把 runtime
 	// 自己的终态回写堵死（runtime settle 时要拿同一把锁），直接死锁。
-	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason) => {
+	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason, failureDetail?: string) => {
 		await recordTaskMessageTerminalDeliveryOutcome({
 			ledgerPath,
 			taskId,
 			idempotencyKey,
 			status: "delivery_failed",
 			failureReason: reason,
+			...(failureDetail ? { failureDetail } : {}),
 			nowIso: new Date().toISOString(),
 		});
 	};
@@ -1539,7 +1544,10 @@ async function sendTaskMessageCommand(input: {
 	const messageId = chatResponse.message?.id ?? null;
 	const summary = chatResponse.summary ?? null;
 	if (!chatResponse.ok || !messageId || !summary) {
-		await settleFailure(chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session");
+		await settleFailure(
+			chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session",
+			chatResponse.terminalDelivery?.failureNote ?? chatResponse.error,
+		);
 		const failureResult = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
 		return toTaskMessageCommandResult(failureResult);
 	}
@@ -1555,6 +1563,9 @@ async function sendTaskMessageCommand(input: {
 			idempotencyKey,
 			status: immediateStatus,
 			...(chatResponse.terminalDelivery?.reason ? { failureReason: chatResponse.terminalDelivery.reason } : {}),
+			...(chatResponse.terminalDelivery?.failureNote
+				? { failureDetail: chatResponse.terminalDelivery.failureNote }
+				: {}),
 			...(chatResponse.terminalDelivery?.codexNativePromptDeliveryEvidence
 				? { codexNativePromptDeliveryEvidence: chatResponse.terminalDelivery.codexNativePromptDeliveryEvidence }
 				: {}),

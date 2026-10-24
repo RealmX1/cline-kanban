@@ -93,7 +93,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 	let requestAttempted = false;
 	let returnedTurnId: string | null = null;
 	let previousTurnId: string | null = null;
-	const deadline = now() + CONFIRMATION_BUDGET_MS;
+	let currentDeliveryPhaseDeadlineEpochMs = now() + CONFIRMATION_BUDGET_MS;
 	const readRecentTurns = async (port: CodexAppServerRequestPort) =>
 		nativeTurnsPageSchema.parse(
 			await port.request("thread/turns/list", {
@@ -127,12 +127,18 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 		}
 		return null;
 	};
-	while (now() < deadline) {
+	while (now() < currentDeliveryPhaseDeadlineEpochMs) {
 		if (!input.isCurrent()) return { status: requestAttempted ? "unconfirmed" : "cancelled" };
 		try {
 			return await withRunningCodexAppServerControlSocketConnection<CodexNativePromptDeliveryResult>(
 				async (port) => {
-					if (!(await isThreadAlreadyLoaded(port, nativeSessionId, () => now() < deadline && input.isCurrent())))
+					if (
+						!(await isThreadAlreadyLoaded(
+							port,
+							nativeSessionId,
+							() => now() < currentDeliveryPhaseDeadlineEpochMs && input.isCurrent(),
+						))
+					)
 						return { status: requestAttempted ? "unconfirmed" : "unavailable" };
 					const thread = threadIdentitySchema.parse(
 						await port.request("thread/read", { threadId: nativeSessionId, includeTurns: false }),
@@ -151,6 +157,8 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						previousTurnId = turns[0]?.id ?? null;
 						if (!input.isCurrent() || !(await input.beforeSubmit()) || !input.isCurrent())
 							return { status: "cancelled" };
+						// 提交前的持久查询等待由原意图 TTL 约束，不占用实际提交后的确认预算。
+						currentDeliveryPhaseDeadlineEpochMs = now() + CONFIRMATION_BUDGET_MS;
 						// 一旦开始调用，超时、断线、协议错误都只能读回核对。绝不重发，也不切回 PTY。
 						requestAttempted = true;
 						input.onRequestAttempted();
@@ -168,7 +176,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 							// 原生调用可能已经提交；下方只查语义接受记录。
 						}
 					}
-					while (now() < deadline && input.isCurrent()) {
+					while (now() < currentDeliveryPhaseDeadlineEpochMs && input.isCurrent()) {
 						const evidence = findAcceptance(await readRecentTurns(port));
 						if (evidence && input.isCurrent()) return { status: "confirmed", evidence };
 						await waitMilliseconds(CONFIRMATION_RECHECK_MS);

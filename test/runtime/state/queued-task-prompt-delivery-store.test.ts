@@ -742,6 +742,27 @@ describe("queued-task-prompt-delivery-store — 持久化与并发", () => {
 		}
 	}
 
+	it("旧 transport 尝试的迟到结算不能覆盖新托管者", async () => {
+		await seedHandedEntry();
+		const unchanged = await settleQueuedTaskPromptDelivery({
+			workspaceId: WORKSPACE_ID,
+			taskId: TASK_ID,
+			queueEntryIds: ["q1"],
+			nowEpochMs: NOW + 40,
+			settlement: {
+				outcome: "terminal_failure",
+				failureNote: "旧尝试超时",
+				expectedHandedToTransportAttemptOwnership: {
+					dispatchIdempotencyKey: "idem-0",
+					custodianRuntimeProcessInstanceId: "previous-runtime",
+					claimedForSessionIncarnationId: "incarnation-1",
+				},
+			},
+		});
+		expect(taskEntries(unchanged)[0].deliveryState).toBe("handed_to_transport");
+		expect(taskEntries(unchanged)[0].lastDeliveryFailureNote).toBeNull();
+	});
+
 	it("成功落 settled_delivered 并清掉失败说明", async () => {
 		await seedHandedEntry();
 		const settled = await settleQueuedTaskPromptDelivery({
