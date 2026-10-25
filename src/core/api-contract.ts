@@ -1526,6 +1526,7 @@ export const runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema = z
 // 供浏览器在**非当前项目**上打开编辑器、看原始 prompt、展开跨项目行。
 export const runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 });
 export type RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest = z.infer<
 	typeof runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema
@@ -1552,6 +1553,7 @@ export type RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse = z.infer<
 // 「backlog 单向」：启动失败后卡留在 in_progress，让会话状态与错误保持可见）。会话已在 agent 回合时不重复启动。
 export const runtimeTaskCardActionStartAgentSessionRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
 	// 拖放进 in_progress 的落点；缺省 = 列顶。卡片本来就在 in_progress 时忽略。
@@ -1589,6 +1591,7 @@ export type RuntimeTaskCardActionStartAgentSessionResponse = z.infer<
 // 跨项目时没有浏览器在跑列自动流转（Rule A），不能指望它把卡挪过去。翻回合失败则不移列。
 export const runtimeTaskCardActionMoveIntoReviewRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 });
 export type RuntimeTaskCardActionMoveIntoReviewRequest = z.infer<
@@ -1615,6 +1618,7 @@ export type RuntimeTaskCardActionMoveIntoReviewResponse = z.infer<
 // src/core/task-card-action-board-column-transitions.ts；有会话副作用的移列必须走各自的 procedure。
 export const runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	targetBoardColumnId: runtimeBoardColumnIdSchema,
 	// 拖放落点（目标列里插入后的下标）；缺省 = 列顶。同列重排时必填，否则视为原位不动。
 	insertAtIndexWithinTargetBoardColumn: z.number().int().nonnegative().optional(),
@@ -1638,6 +1642,7 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 // 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	// 评论与移列在同一次保存里生效；稳定 ID 供网络重试去重，时间由服务端填写。
 	taskCommentToAppendWhenMovingIntoDone: z
 		.object({
@@ -1671,6 +1676,7 @@ export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTa
 // 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
 export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
 	// 从 Done 拖回 review 的落点；缺省 = 列顶。恢复失败移回 Done 时不用它（回到 Done 列顶）。
@@ -1716,6 +1722,7 @@ export type RuntimePermanentlyDeletedTaskCardSelection = z.infer<
 // 收尾链顺序固定：board 删卡 → 清编辑草稿 → 清排队 prompt（并通知出队引擎重读）→ 停会话 → 删 worktree →
 // **最后**批删 turn checkpoint ref。按 task id 选中而有一张不在 board 上时整批 NOT_FOUND、什么都不删。
 export const runtimeTaskCardActionPermanentlyDeleteRequestSchema = z.object({
+	expectedTaskIncarnationCreatedAtEpochMsByTaskId: z.record(z.string(), z.number().finite()).optional(),
 	permanentlyDeletedTaskCardSelection: runtimePermanentlyDeletedTaskCardSelectionSchema,
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 });
@@ -1806,6 +1813,7 @@ export type RuntimeTaskCardFieldUpdate = z.infer<typeof runtimeTaskCardFieldUpda
 export const runtimeTaskCardActionUpdateFieldValuesRequestSchema = z.object({
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().optional(),
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	taskCardFieldUpdate: runtimeTaskCardFieldUpdateSchema,
 	// 异步 AI 回填锁内检查，防止顶掉并发名称或描述编辑。
 	expectedTaskTitleAndPromptForAiNameBackfill: z.object({ title: z.string(), prompt: z.string() }).optional(),
@@ -3277,12 +3285,14 @@ export const runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema = z.discr
 	z.object({
 		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
 		taskId: z.string().min(1),
+		expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		taskPinboardPinReason: z.string().nullable(),
 		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
 	}),
 	z.object({
 		taskPinboardPinAction: z.literal("unpin_task_card"),
 		taskId: z.string().min(1),
+		expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
 	}),
 ]);

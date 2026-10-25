@@ -478,6 +478,7 @@ export function useBoardInteractions({
 				const result = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId: currentProjectId,
 					taskId: task.id,
+					expectedTaskIncarnationCreatedAtEpochMs: task.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(task.id),
 					currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
 					...(options?.insertAtIndexWithinInProgressBoardColumn !== undefined

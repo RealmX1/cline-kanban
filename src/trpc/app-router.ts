@@ -602,10 +602,14 @@ import {
 	relationModelingPreviewResponseSchema,
 } from "../core/work-unit-relation-modeling-api-contract";
 import {
+	type GetDirectlyRelatedTaskPreviewPageRequest,
+	type GetDirectlyRelatedTaskPreviewPageResponse,
 	type GetRelationNeighborhoodSummaryRequest,
 	type GetRelationNeighborhoodSummaryResponse,
 	type GetWorkUnitContextRequest,
 	type GetWorkUnitContextResponse,
+	getDirectlyRelatedTaskPreviewPageRequestSchema,
+	getDirectlyRelatedTaskPreviewPageResponseSchema,
 	getRelationNeighborhoodSummaryRequestSchema,
 	getRelationNeighborhoodSummaryResponseSchema,
 	getWorkUnitContextRequestSchema,
@@ -1215,6 +1219,9 @@ export interface RuntimeTrpcContext {
 		resolveKanbanBoardCardIdentityByBareTaskId: (
 			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
 		) => Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse>;
+		getDirectlyRelatedTaskPreviewPage: (
+			input: GetDirectlyRelatedTaskPreviewPageRequest,
+		) => Promise<GetDirectlyRelatedTaskPreviewPageResponse>;
 		getRelationNeighborhoodSummary: (
 			input: GetRelationNeighborhoodSummaryRequest,
 		) => Promise<GetRelationNeighborhoodSummaryResponse>;
@@ -2660,6 +2667,10 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx, input }) => {
 				return await ctx.workUnitRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId(input);
 			}),
+		getDirectlyRelatedTaskPreviewPage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(getDirectlyRelatedTaskPreviewPageRequestSchema)
+			.output(getDirectlyRelatedTaskPreviewPageResponseSchema)
+			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getDirectlyRelatedTaskPreviewPage(input)),
 		getRelationNeighborhoodSummary: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(getRelationNeighborhoodSummaryRequestSchema)
 			.output(getRelationNeighborhoodSummaryResponseSchema)

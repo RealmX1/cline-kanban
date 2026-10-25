@@ -242,7 +242,7 @@ interface UseTaskEditorInput {
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	newTaskAgentPermissionModeByDefault: RuntimeTaskAgentPermissionMode;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
-	queueTaskStartAfterEdit?: (taskId: string) => void;
+	queueTaskStartAfterEdit?: (taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
 	// Board Scope 往其他项目建卡后（不切项目）：由宿主提示「建到了哪个项目」。
 	onTaskCardsCreatedInOtherProject?: (workspaceId: string, createdTaskCardCount: number) => void;
 	// 「建卡、启动并打开」的目标在其他项目时，启动成功后跨项目打开它。
@@ -1255,6 +1255,7 @@ export function useTaskEditor({
 			options?: TaskEditorSubmitOptions,
 		): {
 			savedTaskId: string;
+			expectedTaskIncarnationCreatedAtEpochMs: number | undefined;
 			// 非 null = 卡在其他项目（Save & Start 直接对那个项目发启动命令，不走当前项目的启动队列）。
 			savedTaskCardOtherProjectWorkspaceId: string | null;
 			editedTaskCardFieldsSavedByRuntime: Promise<boolean>;
@@ -1367,6 +1368,7 @@ export function useTaskEditor({
 					workspaceId,
 					expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 					taskId: savedTaskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 					taskCardFieldValuePatch,
 					...(isEditedTaskCardInOtherProject
 						? {}
@@ -1454,6 +1456,7 @@ export function useTaskEditor({
 			}
 			return {
 				savedTaskId,
+				expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 				savedTaskCardOtherProjectWorkspaceId: targetWorkspaceId !== currentProjectId ? targetWorkspaceId : null,
 				editedTaskCardFieldsSavedByRuntime,
 			};
@@ -1502,12 +1505,13 @@ export function useTaskEditor({
 					return;
 				}
 				if (saved.savedTaskCardOtherProjectWorkspaceId === null) {
-					queueTaskStartAfterEdit?.(saved.savedTaskId);
+					queueTaskStartAfterEdit?.(saved.savedTaskId, saved.expectedTaskIncarnationCreatedAtEpochMs);
 					return;
 				}
 				void startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId: saved.savedTaskCardOtherProjectWorkspaceId,
 					taskId: saved.savedTaskId,
+					expectedTaskIncarnationCreatedAtEpochMs: saved.expectedTaskIncarnationCreatedAtEpochMs,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(
 						saved.savedTaskId,
 					),

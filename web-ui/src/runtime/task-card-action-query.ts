@@ -30,8 +30,15 @@ import type {
 export async function readTaskCardWithBoardColumnInWorkspace(
 	workspaceId: string,
 	taskId: string,
+	expectedTaskIncarnationCreatedAtEpochMs?: number,
+	signal?: AbortSignal,
 ): Promise<RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse> {
-	return await getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskCardWithBoardColumn.query({ taskId });
+	const request = {
+		taskId,
+		...(expectedTaskIncarnationCreatedAtEpochMs !== undefined ? { expectedTaskIncarnationCreatedAtEpochMs } : {}),
+	};
+	const query = getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskCardWithBoardColumn;
+	return signal ? await query.query(request, { signal }) : await query.query(request);
 }
 
 export async function startTaskCardAgentSessionMovingItIntoInProgressInWorkspace(

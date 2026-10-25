@@ -1251,6 +1251,7 @@ describe("useTaskEditor", () => {
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-1", {
 			expectedTaskIncarnationCreatedAtEpochMs: 1,
 			taskId: "task-1",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Updated prompt" }),
@@ -1990,7 +1991,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			resolveSaveCommand();
 		});
-		expect(queueTaskStartAfterEdit).toHaveBeenCalledWith("task-1");
+		expect(queueTaskStartAfterEdit).toHaveBeenCalledWith("task-1", 1);
 	});
 
 	it("编辑其他项目的 backlog 卡：草稿、分支、保存、保存并启动都作用于那个项目，不叠当前项目的 overlay", async () => {
@@ -2037,6 +2038,7 @@ describe("useTaskEditor", () => {
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
 			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskId: "task-1",
+			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Edited in place from All projects" }),
@@ -2105,6 +2107,7 @@ describe("useTaskEditor", () => {
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
 			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskId: "task-only-in-project-b",
+			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Edited in place from All projects" }),

@@ -40,9 +40,15 @@ export function deriveTaskTitleFromPrompt(prompt: string, maxChars = DEFAULT_TAS
 	// 标签就是空串，老写法会直接返回 ""，而 web-ui 的 normalizeCard 遇到空标题会把**整份 prompt** 当标题，
 	// 于是卡片标题变成一大坨正文。首行剥完非空的输入走到第一轮就返回，与老实现逐字节一致。
 	let normalizedLine = "";
+	let hasEncounteredNonEmptyPromptLine = false;
 	for (const rawLine of prompt.split(/\r?\n/u)) {
 		const trimmedLine = rawLine.trim();
 		if (trimmedLine.length === 0) {
+			continue;
+		}
+		const isLeadingTldrHeading = !hasEncounteredNonEmptyPromptLine && trimmedLine === "## TLDR";
+		hasEncounteredNonEmptyPromptLine = true;
+		if (isLeadingTldrHeading) {
 			continue;
 		}
 		const strippedLine = stripOuterMarkupTagsFromLine(trimmedLine);

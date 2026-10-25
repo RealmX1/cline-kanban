@@ -401,11 +401,15 @@ describe("BoardCard", () => {
 	// channel B（distinction ②）：exited（进程已退）的 awaiting 卡片状态点渲染为「空心环」
 	// （transparent 底 + 同色描边），与实心 live 点区分；点色仍随 channel C。下面四例钉住这条接线，
 	// 含「显式 facet」与「经 ②-prep 派生」两路径，及 Cline 恒 live 不误标的反证。
-	it("无 worktree 的 Backlog、验证与 Done 卡及各副本仍提供 PDV 定位入口", () => {
+	it("无 worktree 的 Backlog、验证与 Done 卡及各副本同时保留 PDV 定位与关联预览入口", () => {
 		for (const columnId of ["backlog", "validation", "trash"] as const) {
 			for (const renderRole of [
 				"canonical_card_in_its_stage_list",
 				"focused_card_copy_under_sticky_stage_header",
+				"focused_task_card_copy_in_mobile_detail_header",
+				"focused_task_card_copy_in_cross_project_task_switcher",
+				"expanded_card_copy_in_cross_project_task_switcher_row",
+				"pinned_card_copy_in_task_pinboard",
 				"task_card_copy_in_post_deploy_verification_panel_entry",
 			] as const) {
 				act(() =>
@@ -422,12 +426,14 @@ describe("BoardCard", () => {
 								columnId={columnId}
 								renderRole={renderRole}
 								workspacePath={null}
+								taskCardOwnedByOtherProjectWorkspaceId="project"
 							/>
 						</PostDeployVerificationEntryNavigationHostProvider>,
 					),
 				);
 				expect(container.querySelector("[data-task-directory]")).toBeNull();
 				expect(container.querySelectorAll('[aria-label="定位部署后验证"]')).toHaveLength(1);
+				expect(container.querySelectorAll("[data-related-tasks-preview-trigger]")).toHaveLength(1);
 			}
 		}
 	});

@@ -169,15 +169,29 @@ function createTaskCardNotFoundOnWorkspaceBoardError(taskId: string, workspacePa
 	});
 }
 
+function assertTaskCardIncarnationMatchesExpected(
+	taskCard: RuntimeBoardCard,
+	expectedCreatedAt: number | undefined,
+): void {
+	if (expectedCreatedAt !== undefined && taskCard.createdAt !== expectedCreatedAt) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: "这张任务卡已被删除并重建；原关联引用不能操作新的同 ID 任务，请刷新后重试。",
+		});
+	}
+}
+
 function findTaskCardWithBoardColumnOrThrowNotFound(
 	board: RuntimeBoardData,
 	taskId: string,
 	workspacePath: string,
+	expectedCreatedAt?: number,
 ): TaskCardFoundWithBoardColumn {
 	const found = findTaskCardWithBoardColumn(board, taskId);
 	if (!found) {
 		throw createTaskCardNotFoundOnWorkspaceBoardError(taskId, workspacePath);
 	}
+	assertTaskCardIncarnationMatchesExpected(found.taskCard, expectedCreatedAt);
 	return found;
 }
 
@@ -270,6 +284,7 @@ export function createTaskCardActionApi(
 	const readTaskCardWithPersistedSessionSummaryOutsideBoardLock = async (
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskId: string,
+		expectedCreatedAt?: number,
 	): Promise<
 		TaskCardFoundWithBoardColumn & {
 			taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
@@ -280,6 +295,7 @@ export function createTaskCardActionApi(
 			persistedWorkspaceState.board,
 			taskId,
 			workspaceScope.workspacePath,
+			expectedCreatedAt,
 		);
 		return {
 			...found,
@@ -467,7 +483,13 @@ export function createTaskCardActionApi(
 			return false;
 		}
 		const persistedBoard = (await loadPersistedWorkspaceStateById(workspaceScope.workspaceId)).board;
-		const boardColumnIdBeforeMove = findTaskCardWithBoardColumn(persistedBoard, input.taskId)?.boardColumnId;
+		const foundBeforeAuthorization = findTaskCardWithBoardColumn(persistedBoard, input.taskId);
+		if (foundBeforeAuthorization)
+			assertTaskCardIncarnationMatchesExpected(
+				foundBeforeAuthorization.taskCard,
+				input.expectedTaskIncarnationCreatedAtEpochMs,
+			);
+		const boardColumnIdBeforeMove = foundBeforeAuthorization?.boardColumnId;
 		if (boardColumnIdBeforeMove === undefined) {
 			// 卡不在看板：交给移列本身报 NOT_FOUND。
 			return false;
@@ -533,6 +555,7 @@ export function createTaskCardActionApi(
 					state.board,
 					input.taskId,
 					workspaceScope.workspacePath,
+					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
 				const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 					resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
@@ -618,6 +641,7 @@ export function createTaskCardActionApi(
 			if (!found) {
 				return { taskCardLookupOutcome: "task_card_not_found_on_workspace_board", lookedUpTaskId: input.taskId };
 			}
+			assertTaskCardIncarnationMatchesExpected(found.taskCard, input.expectedTaskIncarnationCreatedAtEpochMs);
 			return {
 				taskCardLookupOutcome: "task_card_found_on_workspace_board",
 				taskCardSnapshot: buildTaskCardSnapshot(
@@ -669,6 +693,7 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					if (found.boardColumnId !== "backlog" && found.boardColumnId !== "in_progress") {
 						throw createTaskCardInBoardColumnNotAllowingActionError(
@@ -798,6 +823,7 @@ export function createTaskCardActionApi(
 				const foundBeforeHandoff = await readTaskCardWithPersistedSessionSummaryOutsideBoardLock(
 					workspaceScope,
 					input.taskId,
+					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
 				if (foundBeforeHandoff.boardColumnId !== "in_progress") {
 					throw createTaskCardInBoardColumnNotAllowingActionError(
@@ -838,6 +864,7 @@ export function createTaskCardActionApi(
 							state.board,
 							input.taskId,
 							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
 						);
 						const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
@@ -902,6 +929,7 @@ export function createTaskCardActionApi(
 							state.board,
 							input.taskId,
 							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
 						);
 						if (
 							!isTaskCardBoardPlacementChangeAllowedWithoutSessionSideEffects(
@@ -1080,6 +1108,7 @@ export function createTaskCardActionApi(
 								state.board,
 								input.taskId,
 								workspaceScope.workspacePath,
+								input.expectedTaskIncarnationCreatedAtEpochMs,
 							);
 							if (found.boardColumnId !== "trash") {
 								throw createTaskCardInBoardColumnNotAllowingActionError(
@@ -1247,6 +1276,7 @@ export function createTaskCardActionApi(
 												state.board,
 												taskId,
 												workspaceScope.workspacePath,
+												input.expectedTaskIncarnationCreatedAtEpochMsByTaskId?.[taskId],
 											),
 										)
 									: (
@@ -1439,6 +1469,7 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					if (
 						input.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
@@ -1505,6 +1536,7 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
