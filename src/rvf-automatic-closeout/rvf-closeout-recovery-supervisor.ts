@@ -14,6 +14,11 @@ import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
 import { readCodexNativeCloseoutCandidateText } from "./codex-native-closeout-user-message-content";
 import { readCodexConversationTurns } from "./codex-native-conversation-prefix";
+import {
+	normalRvfCloseoutReconciliationContext,
+	recordIndependentBackupRouteSuppressionObservation,
+	withNormalRvfCloseoutMutation,
+} from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import {
 	getRvfAutomaticCloseoutStorePath,
@@ -66,6 +71,24 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 		["captured_review_start_boundary", "awaiting_rvf_completion", "completed"].includes(original.status)
 	)
 		return;
+	return withNormalRvfCloseoutMutation(
+		original.receipt.worktree,
+		original.runDirectory,
+		() => advanceNormalRvfCloseoutAutomaticRecovery(deps, original),
+		(reason, controlDirectory) =>
+			recordIndependentBackupRouteSuppressionObservation(
+				getRvfAutomaticCloseoutStorePath(deps.workspaceId),
+				original,
+				reason,
+				controlDirectory,
+			),
+		normalRvfCloseoutReconciliationContext(getRvfAutomaticCloseoutStorePath(deps.workspaceId), original),
+	);
+}
+async function advanceNormalRvfCloseoutAutomaticRecovery(
+	deps: RecoverySupervisorDependencies,
+	original: RvfAutomaticCloseoutRecord,
+) {
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
 	await withRvfAutomaticCloseoutRecordOperationLock(
 		storePath,
