@@ -1283,6 +1283,11 @@ export interface TerminalSessionManagerOptions {
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
+	private humanTerminalInputMutationSequenceNumber = 0;
+	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		number
+	>();
 	private readonly compactionConfirmationPersistenceByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		RvfCloseoutCompactionConfirmationPersistence
@@ -6342,6 +6347,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, false);
+		// 单调序号覆盖同毫秒内的输入与清空，不能靠 lastUserInputAt 的墙钟区分竞争输入。
+		this.humanTerminalInputMutationSequenceNumbersByActiveProcess.set(
+			entry.active,
+			++this.humanTerminalInputMutationSequenceNumber,
+		);
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
 		if (data.includes(0x0d) || data.includes(0x0a)) {
@@ -6392,6 +6402,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.emitSummary(summary);
 		}
 		return cloneSummary(entry.summary);
+	}
+
+	// 原生动作前同步重验本代输入，不读屏、不清草稿、不刷新 summary；空值表示本代已无活体 tracker。
+	getTaskTerminalInputSideMutationSnapshot(taskId: string) {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) return null;
+		return {
+			runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId ?? null,
+			humanTerminalInputMutationSequenceNumber:
+				this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(active) ?? 0,
+			hasUncommittedInput: active.inputBoxOccupancyTracker.hasUncommittedInputFromInputSideByteTracking,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition:
+				active.inputBoxOccupancyTracker.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition,
+		};
 	}
 
 	// 「这个终端的输入框此刻被人类占着吗」——输入侧字节跟踪与读屏两路的保守并集。
