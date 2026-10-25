@@ -47,11 +47,13 @@ export function ExplorationThreadGraphPanel({
 	explorationId,
 	data,
 	initiallyExpanded = false,
+	isTaskAgentExecutionDisabled = false,
 }: {
 	workspaceId: string;
 	explorationId: string;
 	data: ExplorationThreadGraphData;
 	initiallyExpanded?: boolean;
+	isTaskAgentExecutionDisabled?: boolean;
 }): ReactElement {
 	const [open, setOpen] = useState(initiallyExpanded);
 	const [expandedTurnRowIds, setExpandedTurnRowIds] = useState<ReadonlySet<string>>(new Set());
@@ -82,6 +84,7 @@ export function ExplorationThreadGraphPanel({
 	};
 
 	const runMaintenanceNow = async () => {
+		if (isTaskAgentExecutionDisabled) return;
 		setIsMaintenancePending(true);
 		try {
 			const response = await requestExplorationThreadGraphMaintenance(workspaceId, explorationId);
@@ -154,7 +157,7 @@ export function ExplorationThreadGraphPanel({
 							size="sm"
 							variant="ghost"
 							className="ml-auto h-6 gap-1 px-1.5 text-[11px]"
-							disabled={isMaintenancePending}
+							disabled={isMaintenancePending || isTaskAgentExecutionDisabled}
 							onClick={() => void runMaintenanceNow()}
 							// 代价写在按钮上：这一下会 fork 一个分身，长会话上是真金白银。
 							title="立即判定新轮次的归属。这会从主会话 fork 一个分身，长会话上单次开销可达数美元。"

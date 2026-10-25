@@ -8,6 +8,10 @@ import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../..
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
 
 const readNativeActivityMock = vi.hoisted(() => vi.fn());
+const confirmedEmptyInputBox = {
+	verdict: "input_box_clear_for_programmatic_delivery",
+	unrecoverablePasteCount: 0,
+} as const;
 vi.mock("../../../src/agent-session-history/native-agent-conversation-activity-reader", () => ({
 	readNativeAgentConversationActivity: readNativeActivityMock,
 }));
@@ -61,13 +65,16 @@ function installIsolatedFakeTerminal(manager: TerminalSessionManager) {
 	const internals = manager as unknown as {
 		entries: Map<string, typeof entry>;
 		resolveInteractivePromptReadiness: () => Promise<"prompt">;
-		resolveProgrammaticDeliveryInputBoxContentionForTask: () => Promise<null>;
+		resolveProgrammaticDeliveryInputBoxContentionForTask: () => Promise<typeof confirmedEmptyInputBox>;
 		invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt: () => void;
 	};
 	internals.entries.set("guarded-answer", entry);
 	vi.spyOn(internals, "resolveInteractivePromptReadiness").mockResolvedValue("prompt");
 	vi.spyOn(internals, "invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt").mockImplementation(() => undefined);
-	vi.spyOn(internals, "resolveProgrammaticDeliveryInputBoxContentionForTask").mockResolvedValue(null);
+	// 这些用例单独验证写入前的领域门禁；PTY 后备所需的可信空框证据由测试显式提供。
+	vi.spyOn(internals, "resolveProgrammaticDeliveryInputBoxContentionForTask").mockResolvedValue(
+		confirmedEmptyInputBox,
+	);
 	return { write, entry, internals };
 }
 
@@ -125,9 +132,9 @@ describe("程序化终端投递的实际写入前核验", () => {
 	it("争用检查挂起期间出现新问题时，不粘贴旧答案", async () => {
 		const manager = new TerminalSessionManager();
 		const { write, internals } = installIsolatedFakeTerminal(manager);
-		let releaseContention: (value: null) => void = () => undefined;
+		let releaseContention: (value: typeof confirmedEmptyInputBox) => void = () => undefined;
 		vi.mocked(internals.resolveProgrammaticDeliveryInputBoxContentionForTask).mockReturnValue(
-			new Promise<null>((resolve) => {
+			new Promise<typeof confirmedEmptyInputBox>((resolve) => {
 				releaseContention = resolve;
 			}),
 		);
@@ -139,7 +146,7 @@ describe("程序化终端投递的实际写入前核验", () => {
 		});
 		await vi.advanceTimersByTimeAsync(1000);
 		hasSuccessorQuestion = true;
-		releaseContention(null);
+		releaseContention(confirmedEmptyInputBox);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(write).not.toHaveBeenCalled();
 	});
@@ -227,12 +234,20 @@ describe("程序化终端投递的实际写入前核验", () => {
 					terminalWriteValidationPhase === "resend_submit" ? 1 : 0,
 				);
 				expect(terminalDeliveryOutcomes).toEqual([
-					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+					{
+						status: "delivery_failed",
+						reason: nativeIndependentUserTurnDeliveryFailureReason,
+						failureNote: "测试原生独立回合门禁拒绝写入",
+					},
 				]);
 				await vi.advanceTimersByTimeAsync(10_000);
 				expect(writeToIsolatedTerminal).toHaveBeenCalledTimes(expectedTerminalWriteCount);
 				expect(terminalDeliveryOutcomes).toEqual([
-					{ status: "delivery_failed", reason: nativeIndependentUserTurnDeliveryFailureReason },
+					{
+						status: "delivery_failed",
+						reason: nativeIndependentUserTurnDeliveryFailureReason,
+						failureNote: "测试原生独立回合门禁拒绝写入",
+					},
 				]);
 			},
 		);

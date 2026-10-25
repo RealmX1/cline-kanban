@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { RvfIndependentUserTurnBoundaryReceipt } from "../../../src/core/rvf-automatic-closeout-contract";
 import { captureRvfReviewStartBoundary } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import { computeRvfCandidateFilesystemIdentitySha256 } from "../../../src/rvf-automatic-closeout/rvf-candidate-filesystem-identity";
@@ -116,6 +117,21 @@ function runActualRvfBoundaryConsumerWithFixture(
 }
 
 describe("RVF 独立开审分界捕获", () => {
+	it.each(["0.164.0", "future-native-cli", undefined, null])(
+		"相同原生协议不因转录记录版本 %s 改变资格",
+		async (version) => {
+			const f = await createBoundaryFixture("/review-validate-fix");
+			const records = f.records.map((record) =>
+				record.type === "session_meta"
+					? { ...record, payload: { ...record.payload, cli_version: version } }
+					: record,
+			);
+			await writeFile(f.input.transcriptPath, records.map((record) => JSON.stringify(record)).join("\n"));
+			expect((await captureRvfReviewStartBoundary(f.input)).receipt.native_user_message_id).toBe(
+				"native-boundary-message",
+			);
+		},
+	);
 	it.each([
 		undefined,
 		"now $review-validate-fix:review-validate-fix your own work.",
@@ -237,7 +253,7 @@ describe("RVF 独立开审分界捕获", () => {
 		},
 	);
 	it.skipIf(!process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY).each(["candidate", "head", "base"] as const)(
-		"实际 consumer 拒绝分界后的 %s 改变",
+		"实际 consumer 核验分界后的 %s 改变；本地 base 前进保持冻结 commit",
 		async (mutation) => {
 			const f = await createBoundaryFixture();
 			f.repo.runGit(["update-ref", "refs/heads/comparison-base", f.head]);
@@ -256,8 +272,67 @@ describe("RVF 独立开审分界捕获", () => {
 				]);
 			}
 			const result = runActualRvfBoundaryConsumerWithFixture(f, receipt);
+			if (mutation === "base") {
+				// RVF 2eef029 已固定候选输入；移动 ref 不改变 checkpoint 中的 base commit。
+				expect(receipt.comparison_base_ref_tip).toBe(f.head);
+				expect(f.repo.runGit(["rev-parse", "comparison-base"]).stdout.trim()).not.toBe(f.head);
+				expect(result.status, result.stderr).toBe(0);
+				return;
+			}
 			expect(result.status).not.toBe(0);
 			expect(result.stderr).toContain("review_start_boundary_invalidated");
+		},
+	);
+	it.skipIf(!process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY)(
+		"实际 RVF 手动 token 替代后，Kanban 捕获与实际 consumer 均认可新手动来源",
+		async () => {
+			const f = await createBoundaryFixture("$review-validate-fix:review-validate-fix");
+			const prepared = spawnSync(
+				"python3",
+				[
+					"-c",
+					`import json,sys
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1])/'plugins/review-validate-fix/skills/review-validate-fix/scripts'))
+import rvf_decision_token_store as tokens
+p=json.load(sys.stdin)
+Path(tokens.decision_token_path(p['token'])).unlink()
+arguments=dict(worktree=p['worktree'],session_id=p['session_id'],candidate_fingerprint=p['candidate_fingerprint'],candidate_summary=p['candidate_summary'])
+automatic=tokens.mint_decision_token(**arguments)
+tokens.record_out_of_band_delivery_status(automatic.token,status='delivery_failed')
+manual=tokens.replace_unstarted_automatic_decision_token_for_manual_review_start(**arguments,cancel_automatic_delivery=lambda _:None)
+assert manual is not None
+tokens.mark_injected(manual.token)
+old=tokens.read_decision_token(automatic.token)
+print(json.dumps(dict(token=manual.token,oldToken=automatic.token,oldState=old.state,oldOrigin=old.payload['initiated_by_explicit_user_request'],oldFailure=old.payload['out_of_band_delivery_status'])))`,
+					process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY ?? "",
+				],
+				{
+					input: JSON.stringify(f.payload),
+					encoding: "utf8",
+					env: f.fixture.createIsolatedChildProcessEnvironment({
+						RVF_HOME: f.input.rvfHome,
+						PYTHONDONTWRITEBYTECODE: "1",
+					}),
+				},
+			);
+			expect(prepared.status, prepared.stderr).toBe(0);
+			const successor = z
+				.object({
+					token: z.string(),
+					oldToken: z.string(),
+					oldState: z.literal("withdrawn"),
+					oldOrigin: z.literal(false),
+					oldFailure: z.literal("delivery_failed"),
+				})
+				.parse(JSON.parse(prepared.stdout));
+			f.payload.token = successor.token;
+			f.input.decisionToken = successor.token;
+			const { receipt } = await captureRvfReviewStartBoundary(f.input);
+			expect(receipt.source).toBe("explicit_user_command");
+			expect(receipt.decision_token).not.toBe(successor.oldToken);
+			const verified = runActualRvfBoundaryConsumerWithFixture(f, receipt);
+			expect(verified.status, verified.stderr).toBe(0);
 		},
 	);
 	it.skipIf(!process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY)(

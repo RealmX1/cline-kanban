@@ -6,6 +6,11 @@
 
 ## Language
 
+**Adjacent Task Keyboard Navigation（相邻任务快捷键）**：
+Focus View 的 `Option/Alt + ↑/↓` 在 All projects 下按左栏 Pinned → Running → Cache warm → Recent 的显示顺序跨项目循环切换；折叠、筛选及「显示更多」隐藏的行不参与，滚出视口的行仍参与。Backlog 打开的是编辑器，不参与详情切换。任务身份同时包含 workspaceId 和 taskId；置顶副本不额外占位，优先采用可见主分组行的位置。当前任务因折叠而保留的定位行仍可作为导航起点，分组外顶部焦点区向下进首项、向上进末项。
+
+按住 Option 连续切换期间，Recent 的显示与导航顺序一起锁定，内容和打开时间照常更新；新项追加到末尾，失效项立即移除。松开 Option、失焦、页面隐藏、退出 Focus View、切换范围或改变排序/筛选后恢复实时排序。导航所有者常驻 App，跨项目加载期间以在途目标为当前位置，不依赖详情组件是否挂载。单项目范围保留当前阶段列内的原有循环顺序。
+
 **Selected Board Or Single Project Scope（范围）**：
 顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮后面接一个「› 项目名」按钮）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、点「› 项目名」、`⌘⇧E` 或顶栏 Layers 按钮（与 `⌘⇧E` 同一个处理器）。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
 - **每个标签页各存一份**（2026-10-05）：实际范围存 sessionStorage（重载、Chrome 丢弃后恢复都保留），localStorage 同名键只是新开标签页的默认值。共用 localStorage 时，重载会让每个标签页继承「最后写入者」的范围，多标签页下表现为「没操作就跳了」。
@@ -21,10 +26,10 @@ _Avoid_: card（它不是 board 卡片，没有 prompt / 动作按钮）
 各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面三区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。置顶 / 取消置顶 / 改原因一律走 `taskCardAction.setTaskPinboardPinStateOfTaskCard`：当前项目的卡由宿主弹原因对话框、带 overlay；其他项目的卡由面板弹同一个对话框、不带 overlay（结果随广播回来）。
 
 **Running（运行区）**：
-`turnOwner === "agent"` 且（近 5 分钟有 PTY 输出，或已 park 在等自己派发的后台工作）。默认收起成一行「Running N」：在跑的任务暂时不需要人。
-输出窗口判据是 `RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS`（`src/core/session-activity.ts`），**不按列取**：review 列里被误放、其实还在跑的任务也算 Running。
+`turnOwner === "agent"` 且（`liveness` 为 `live` / `retrying`，或已 park 在等自己派发的后台工作）。默认收起成一行「Running N」：当前回合尚未结束的任务暂时不需要人。真实重连继续留在区内，精简行显示「重连中」。
+判据不读取 PTY 输出新鲜度，也不按列取：Review / Validation 中实际仍由 Agent 持有的存活回合同样进入 Running。
 排序：按**本轮 agent 回合开始时刻升序**（先进入的在前、后进入的在后；summary sidecar `agentResponseGenerationTurnStarted`，在 `mergeSummaryWithFacets` 的「非 agent → agent」边沿上盖章，与 `agentResponseGenerationStopped` 对偶）。缺字段时回落到 agent 进程启动时刻，再缺排到末尾；同一时刻按 (workspaceId, taskId) 兜底。比较器 `compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey`（由 `createComparatorByCurrentAgentTurnStartAscendingThenStableKey` 工厂产出）。**绝不按 `lastOutputAt` 排**：spinner 每次重绘都推进它，2026-10-04 在 3484 上实测成员不变的相邻样本 30/38 次顺序变了（用户报为闪烁）。
-- 离开 Running 再回来的位置：交出回合（Stop、权限 / 提问 / 计划审批、idle_stall）后再进入 agent 回合是新边沿，排到**末尾**（`EXPERIMENT_NODE`：模态决策往返后是否保留原位）；同一 agent 回合内 5 分钟无输出掉出、输出恢复后回来，没有新边沿，回到原相对位置；park 期间仍在 Running，位置不变。
+- 离开 Running 再回来的位置：交出回合（Stop、权限 / 提问 / 计划审批、idle_stall）后再进入 Agent 回合是新边沿，排到**末尾**（`EXPERIMENT_NODE`：模态决策往返后是否保留原位）；同一回合内的静默、`live ↔ retrying` 和 park 均保留原相对位置。
 _Avoid_: In Progress（那是 board 列名，列里允许停着已中断的任务）, active task
 
 **Prompt Cache Warm Awaiting User（缓存倒计时区，UI 名 Cache warm · your turn）**：
@@ -92,7 +97,7 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 **Remaining Section（剩余区，UI 名 Recent）**：
 不在 Running、也不在缓存倒计时区的所有阶段条目，Backlog 不再单列。排序与阶段筛选独立：
 - `Recently touched`（默认，`most_recently_touched_by_conversation_progress_or_user_open_or_description_edit`）：max(对话推进, 我最后打开, Description 编辑)。刻意不用 `card.updatedAt`，列流转不会把旧卡顶上来。
-- `Conversation progress`（`most_recent_conversation_progress_only`）：按对话推进倒序，没有推进记录的任务仍保留并排末尾；同值按 `(workspaceId, taskId)` 稳定排序。
+- `Conversation progress`（`most_recent_conversation_progress_only`）：按对话推进倒序，没有推进记录的任务仍保留并排末尾，并在这些任务之间按 Description 最后更新时间倒序（包括 Backlog 单选、阶段混选和 All，最近打开或创建时间不参与兜底）；对话推进时间相同或无记录且 Description 更新时间相同时，按 `(workspaceId, taskId)` 稳定排序。
 - 阶段筛选为可组合的 `In progress / Review`、`Backlog`、`Validation`、`Done`，选项间取并集；默认启用 `In progress / Review`；全部未选时即 `All`，点击 `All` 清空选择。`Done` 对应内部列 ID `trash`。
 - Project 筛选支持按 workspaceId 多选项目，默认所有项目；可搜索项目名或路径。项目间取并集，与阶段筛选取交集，只影响 Recent。
 - 候选统一按最近触达时间截取默认 7 天；排序切换不改变候选范围。「Show older」按需扩展至 30 天（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不扩大广播窗口）。

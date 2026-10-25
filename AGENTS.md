@@ -17,6 +17,8 @@ RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
 
 RVF-PRE-REVIEW-BASE-SYNC-SKILL: sync-local-base-into-task-worktree-only
 
+- 查询本 Task 近期 RVF、完整完成事实与当前候选覆盖，使用 `kanban task rvf-history`（默认环境身份；显式指定时用 main checkout 的 `--project-path`）。结果语义与生产方契约见 `docs/task-rvf-history-query.md`；证据不足是 `unknown`，不能据此断言没有 RVF。
+
 - kanban 任务收尾 / 宣告完成 / 进入 review 前，**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：把只有部署后真实实例才验得到的断言注册成验证；fix 改变了可观察行为则以 **reconcile 模式**幂等重注册，不堆叠重复。
 - 上面两行是 **repo-通用机器可发现约定**。`RVF-PRE-REVIEW-BASE-SYNC-SKILL:` 从 local base 的 AGENTS.md 读取：旧 task worktree 先做严格单向同步再准备 RVF，不得反向写回 base。
 
@@ -46,6 +48,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **三种 session transport** 由 `src/core/agent-catalog.ts` 的 `sessionTransport` 声明各 agent 的默认通道（agent 名单以该文件为准）：`pty_terminal` → `src/terminal/`；`in_process_cline_sdk`（Cline）→ `src/cline-sdk/`；`acp_stdio_subprocess`（oh-my-pi）→ `src/acp-client-session/`。omp 的 catalog 默认通道仍是 PTY TUI，ACP 只是它运行时可切换的第二通道（未带 transport 的 omp summary 按 `pty_terminal` 解析），切换集合与启动通道解析见 `src/core/agent-session-transport-selection.ts`。分支判定一律用能力谓词（`isRuntimeAgentSessionRenderedAsConversationPanel` / `isRuntimeAgentSessionDrivenByAcpProtocol`），**不要新写 `agentId === "cline"` 硬编码**——历史上这种硬编码散落多处，新增非 PTY agent 时必漏改其一。
 - **Cline agent 已停止维护**（2026-10-03 用户声明：用户不使用 Cline）：范围是 `agentId: "cline"` 的 `in_process_cline_sdk` 通道、`src/cline-sdk/`，以及只服务 Cline 的设置与账号（`use-runtime-settings-cline-*` 等）。现有功能和未来新功能**都不需要**再适配 Cline，Cline 专属缺陷也不修；将来会考虑连同其适配代码一并移除。在移除之前，编译与现有测试仍须通过，只做让它们继续通过的最小改动。名字带 cline、但 ACP（omp）也在用的会话面板与能力谓词（`ClineAgentChatPanel`、`cline-chat-*` 组件、`isRuntimeAgentSessionRenderedAsConversationPanel`）**不在此列**，照常维护。
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
+- **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
 - **lint 强制的边界**（biome + `grit/*.grit`，各条 includes 作用域外仍只是约定）：`@clinebot/*` 直引限制（override 排除 `src/cline-sdk/**` 且只拦 `@clinebot/core`——目录内靠自觉，已有直引反例）；`createWorkspaceTrpcClient` 仅限 `web-ui/src/runtime/*-query.ts`；`src/`（除 `cli.ts`）禁 `console.*` 与 `process.exit`；禁解构 `process.env`；`src/commands/**` 禁直写 board/sessions（`mutateWorkspaceState` 等）、禁 import 关系账本模块、禁写 PDV `verifiedAt`——CLI 写动词一律走 runtime procedure，否则关系账本记不到行动者（dd2db 1a）。格式：tab 缩进、indentWidth 3、lineWidth 120。
 
@@ -55,9 +58,13 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
+- **RVF 收尾的阶段等待与迟到补证分开**：可信自动压缩可有界暂停普通确认计时，仍须精确正文证明接受；旧失败只追加补证，不重发或覆盖历史。首次策略见 `docs/runbooks/codex-rvf-closeout-compaction-aware-confirmation.md`，恢复入口及历史样本见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
+- **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/rvf-native-independent-user-turn-before-submission-query-recovery.md`。
+- **RVF 收尾恢复区分历史接受、执行资格与真实结果**：保留原失败账本，以事件时证据自动补证，或独立核验规范执行结果；机器缺证走有界恢复和受控续验，Stop 与身份门禁不放宽。`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
+- **Done 卡复用完整工作台但禁止执行**：历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
 - **查卡恢复必须按执行归属判断**：其他实例启动不等于本轮查询经历重启；只收口归属已退出的轮次，心跳不可读时保留未知态。持久图片与文本协议适配见 `docs/architecture/task-lookup-query-execution-ownership-and-persistent-prompt-images.md`。
 - **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。
@@ -104,6 +111,7 @@ web-ui：
 | `DEVELOPMENT.md` | dev/dogfood 工作流、tmux 长驻约定、hook 事件→状态迁移映射 |
 | `test/README.md` | 测试执行形态与 git 安全契约 |
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
+| `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |
@@ -111,6 +119,7 @@ web-ui：
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/post-mortems/codex-memory-consolidation-hook-overwrites-resume-identity-2026-10-20.md` | Codex 后台记忆整理 hook 的整事件隔离、原生转录续接预检与坏身份现场恢复 |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
+| `docs/prompt-library-agent-input-focus-handoff.md` | Prompt / Command 显式填入的同步聚焦、手机页签交接与来源条目点击稳定性 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` / `docs/agent-harness-cursor.md` | Kimi、oh-my-pi(ACP) 与 Cursor 接入坑（Cursor：chat store 布局、trust、启动前分配 id、续跑预检） |
 | `docs/post-mortems/native-session-identity-rewind-resume-2026-09-24.md` | Rewind 原生 ID 追踪、Codex 配置层丢 hook、Kimi/OMP 恢复与跨重启验证 |
 | `docs/post-mortems/codex-request-user-input-recovery-and-history-2026-10-17.md` | Codex 原生问答 envelope、分页恢复链、真实答案与 aborted 区分、恢复答题与历史去重 |

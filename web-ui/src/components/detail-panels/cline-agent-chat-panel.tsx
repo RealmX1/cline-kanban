@@ -59,6 +59,7 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "@/runtime/types";
 import type { TaskImage } from "@/types";
+import type { AgentInputShortcutInsertionFocusHandle } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 
 const BOTTOM_LOCK_THRESHOLD_PX = 24;
 const CLINE_BUY_CREDITS_URL = "https://app.cline.bot/";
@@ -79,7 +80,7 @@ const ClineCreditLimitNotice = React.memo(function ClineCreditLimitNotice() {
 	);
 });
 
-export interface ClineAgentChatPanelHandle {
+export interface ClineAgentChatPanelHandle extends AgentInputShortcutInsertionFocusHandle {
 	appendToDraft: (text: string, options?: { preserveInsertedTextBoundaryWhitespace?: boolean }) => void;
 	sendText: (text: string) => Promise<void>;
 }
@@ -185,6 +186,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 		},
 		ref,
 	): ReactElement {
+		const composerShortcutInputFocusHandleRef = useRef<AgentInputShortcutInsertionFocusHandle>(null);
 		const {
 			draft,
 			setDraft,
@@ -537,6 +539,8 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			() => ({
 				appendToDraft: handleAppendToDraft,
 				sendText: handleSendComposerText,
+				focusAgentInputAfterShortcutInsertion: () =>
+					composerShortcutInputFocusHandleRef.current?.focusAgentInputAfterShortcutInsertion() ?? false,
 			}),
 			[handleAppendToDraft, handleSendComposerText],
 		);
@@ -647,6 +651,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 				<div className="px-2 py-3">
 					<ClineChatComposer
 						taskId={taskId}
+						shortcutInputFocusHandleRef={composerShortcutInputFocusHandleRef}
 						agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 						draft={draft}
 						onDraftChange={setDraft}

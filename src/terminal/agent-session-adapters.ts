@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
+import { isManagedCodexConversationStorageHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
@@ -39,10 +40,12 @@ import {
 	configureCodexHooks,
 	hasCodexConfigOverride,
 	normalizeCodexConfigOverridesBeforeSubcommand,
+	supportsVerifiedCodexAutomaticCompactionPhaseHooks,
 } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
+import { resolveKimiLaunchDefaultModelId } from "./kimi-latest-managed-stable-model-selection";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
 import { writeOmpNativeConversationSessionIdentityAndPromptSubmissionExtension } from "./omp-native-conversation-session-identity-and-prompt-submission-extension";
 import { writeOmpTaskCollaboratorForkInitialPlanModeExtension } from "./omp-task-collaborator-fork-initial-plan-mode-extension";
@@ -110,6 +113,7 @@ export interface AgentAdapterLaunchInput {
 	forkLatestWorkingDirectorySession?: boolean;
 	// 仅首次侧会话 fork 使用；与历史播种及子会话自身的重启寻址分开。
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	codexConversationStorageHomeDirectoryPath?: string;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -121,6 +125,7 @@ export type AgentOutputTransitionDetector = (
 export type AgentOutputTransitionInspectionPredicate = (summary: RuntimeTaskSessionSummary) => boolean;
 
 export interface PreparedAgentLaunch {
+	codexAutomaticCompactionPhaseHooksConfigured?: boolean;
 	binary?: string;
 	args: string[];
 	env: Record<string, string | undefined>;
@@ -354,7 +359,7 @@ const NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS = {
 		"--version",
 		"-v",
 	]),
-	kimi: new Set(["--version", "-V", "--yolo", "-y", "--auto", "--help", "-h"]),
+	kimi: new Set(["--version", "-V", "--yolo", "-y", "--yes", "--auto-approve", "--auto", "--help", "-h"]),
 	omp: new Set([
 		"--prewalk",
 		"--no-prewalk",
@@ -1609,6 +1614,12 @@ const codexAdapter: AgentSessionAdapter = {
 		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
+		if (
+			input.codexConversationStorageHomeDirectoryPath &&
+			isManagedCodexConversationStorageHome(input.codexConversationStorageHomeDirectoryPath)
+		) {
+			codexArgs.push("-c", `sqlite_home=${JSON.stringify(input.codexConversationStorageHomeDirectoryPath)}`);
+		}
 		let deferredStartupPromptText: string | undefined;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
@@ -1713,8 +1724,15 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
+		let codexAutomaticCompactionPhaseHooksConfigured = false;
 		if (hooks) {
-			configureCodexHooks(codexArgs);
+			codexAutomaticCompactionPhaseHooksConfigured = configureCodexHooks(
+				codexArgs,
+				await supportsVerifiedCodexAutomaticCompactionPhaseHooks(binary ?? "codex", {
+					...process.env,
+					...input.env,
+				}),
+			);
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -1756,6 +1774,7 @@ const codexAdapter: AgentSessionAdapter = {
 			binary,
 			args: codexArgs,
 			env,
+			codexAutomaticCompactionPhaseHooksConfigured,
 			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
@@ -2566,50 +2585,141 @@ function shouldInspectKimiOutputForTransition(summary: RuntimeTaskSessionSummary
 	return isAwaitingUserReviewTurn(resolveSessionFacets(summary)) && summary.reviewReason === "attention";
 }
 
+const KIMI_CLI_SESSION_ID_OPTIONS: readonly string[] = ["--session", "-S", "--resume", "-r"];
+const KIMI_CLI_REQUIRED_VALUE_OPTIONS = new Set([...NATIVE_SESSION_RESUME_VALUE_OPTIONS.kimi, "--prompt", "-p"]);
+
+// Commander 的 opts() 不保留 argv 归属；这里按本家语法保留选项和值的边界，供检测与覆盖共用。
+// 只拆已知短选项；必填值即便长得像旗标也整体保留，恢复 ID 则与原生 CLI 一样为可选值。
+function parseKimiCommandLineArgumentGroups(
+	args: readonly string[],
+): Array<{ optionName: string | null; argumentTokens: string[] }> {
+	const normalizedArguments = [...args];
+	const argumentGroups: Array<{ optionName: string | null; argumentTokens: string[] }> = [];
+	for (let index = 0; index < normalizedArguments.length; index += 1) {
+		let argument = normalizedArguments[index];
+		if (argument === "--") {
+			argumentGroups.push({ optionName: null, argumentTokens: normalizedArguments.slice(index) });
+			break;
+		}
+		if (argument.startsWith("-") && !argument.startsWith("--") && argument.length > 2) {
+			const shortOptionName = argument.slice(0, 2);
+			const shortOptionTakesValue =
+				KIMI_CLI_REQUIRED_VALUE_OPTIONS.has(shortOptionName) ||
+				KIMI_CLI_SESSION_ID_OPTIONS.includes(shortOptionName);
+			if (
+				shortOptionTakesValue ||
+				shortOptionName === "-c" ||
+				NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS.kimi.has(shortOptionName)
+			) {
+				const remainingShortArguments = argument.slice(2);
+				normalizedArguments.splice(
+					index,
+					1,
+					shortOptionName,
+					shortOptionTakesValue ? remainingShortArguments : `-${remainingShortArguments}`,
+				);
+				argument = shortOptionName;
+			}
+		}
+		const optionName = argument.startsWith("-") && argument !== "-" ? argument.split("=", 1)[0] : null;
+		const argumentTokens = [argument];
+		if (optionName && !argument.includes("=")) {
+			const followingArgument = normalizedArguments[index + 1];
+			if (
+				followingArgument !== undefined &&
+				(KIMI_CLI_REQUIRED_VALUE_OPTIONS.has(optionName) ||
+					(KIMI_CLI_SESSION_ID_OPTIONS.includes(optionName) && !followingArgument.startsWith("-")))
+			) {
+				argumentTokens.push(followingArgument);
+				index += 1;
+			}
+		}
+		argumentGroups.push({ optionName, argumentTokens });
+	}
+	return argumentGroups;
+}
+
 // Kimi Code CLI（Moonshot 的原生终端 agent）。与 codexAdapter 同为「全屏 TUI + 无位置
 // prompt」形态，故任务 prompt 一律经 deferredStartupPromptText 在 TUI 就绪后 bracketed-paste 注入
 //（`kimi -p` 是单发模式，虽然会保存会话，但不提供托管所需的持续交互终端）。
 const kimiAdapter: AgentSessionAdapter = {
 	async prepare(input) {
-		// 仅在有显式 override 时才注入 `-m/--model`（setModelCliOption 正好清理这两个写法）；
-		// 无 override 时不传，交回 kimi config.toml 的 default_model——与 claude / codex adapter 一致。
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		const parsedArgumentGroups = parseKimiCommandLineArgumentGroups(input.args);
+		const hasKimiCommandLineOption = (...optionNames: string[]) =>
+			parsedArgumentGroups.some(({ optionName }) => optionName !== null && optionNames.includes(optionName));
+		const hasNativeSessionSelectionArgument = hasKimiCommandLineOption(
+			...KIMI_CLI_SESSION_ID_OPTIONS,
+			"--continue",
+			"-c",
+		);
 		const resumesPriorAgentConversation = Boolean(
 			observedNativeSessionResumeAddressing ||
 				input.resumeFromTrash ||
-				input.resumePriorAgentConversationWithoutResendingPrompt,
+				input.resumePriorAgentConversationWithoutResendingPrompt ||
+				hasNativeSessionSelectionArgument,
 		);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "kimi");
-		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
+		const hasExplicitModelArgument = hasKimiCommandLineOption("--model", "-m");
+		const processEnv = { ...process.env, ...input.env };
+		// 恢复与显式选择不触发刷新；仅全新默认开局从官方目录解析一次，并固定到本次 argv。
+		const launchModelId =
+			explicitModelId ??
+			(!resumesPriorAgentConversation && !hasExplicitModelArgument
+				? await resolveKimiLaunchDefaultModelId({ binary: input.binary, env: processEnv })
+				: null);
+		const args = launchModelId
+			? parsedArgumentGroups.flatMap(({ optionName, argumentTokens }) =>
+					optionName === "--model" || optionName === "-m" ? [] : argumentTokens,
+				)
+			: [...input.args];
+		const injectedKimiOptionArguments = launchModelId ? ["--model", launchModelId] : [];
 		const env: Record<string, string | undefined> = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && processEnv.KIMI_CODE_TRUST_WORKSPACE === undefined) {
+			// Kanban 创建的任务工作树沿用源仓库信任；只作用于该进程，不改用户永久信任记录。
+			env.KIMI_CODE_TRUST_WORKSPACE = "1";
+		}
 
-		// kimi 的 --plan 与 --yolo 是独立旗标，plan 起步不影响放权档。
+		// --auto 对应 Never Ask；--yolo 仍是 Ask When Needed，且与 --auto 原生互斥。
+		// 显式原生权限参数优先于任务档位；--plan 仍按独立的起步选项处理。
 		if (
 			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
-			!hasCliOption(args, "--yolo") &&
-			!hasCliOption(args, "-y")
+			!hasKimiCommandLineOption("--auto", "--yolo", "-y", "--yes", "--auto-approve")
 		) {
-			args.push("--yolo");
+			injectedKimiOptionArguments.push("--auto");
 		}
-		if (!resumesPriorAgentConversation && input.startInPlanMode && !hasCliOption(args, "--plan")) {
-			args.push("--plan");
+		if (!resumesPriorAgentConversation && input.startInPlanMode && !hasKimiCommandLineOption("--plan")) {
+			injectedKimiOptionArguments.push("--plan");
 		}
 		if (observedNativeSessionResumeAddressing) {
-			const resumeArgs = removeNativeSessionSelectionArguments(args, "kimi", ["--session", "-S"]);
-			args.splice(0, args.length, ...resumeArgs, "--session", observedNativeSessionResumeAddressing.sourceSessionId);
-		} else if (resumesPriorAgentConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
-			args.push("--continue");
+			const resumeArgs = removeNativeSessionSelectionArguments(
+				parseKimiCommandLineArgumentGroups(args).flatMap(({ argumentTokens }) => argumentTokens),
+				"kimi",
+				KIMI_CLI_SESSION_ID_OPTIONS,
+			);
+			args.splice(0, args.length, ...resumeArgs);
+			injectedKimiOptionArguments.push("--session", observedNativeSessionResumeAddressing.sourceSessionId);
+		} else if (resumesPriorAgentConversation && !hasNativeSessionSelectionArgument) {
+			injectedKimiOptionArguments.push("--continue");
 		}
+		// 真正终止符之后保留原始尾部；必填选项值里的 -- 已归入该选项，不会命中这里。
+		const argumentTerminatorGroup = parsedArgumentGroups.find(
+			({ optionName, argumentTokens }) => optionName === null && argumentTokens[0] === "--",
+		);
+		const injectedOptionInsertionIndex = argumentTerminatorGroup
+			? args.length - argumentTerminatorGroup.argumentTokens.length
+			: args.length;
+		args.splice(injectedOptionInsertionIndex, 0, ...injectedKimiOptionArguments);
 
 		// hook 只能声明在 kimi 已解析 home 的 config.toml；派生一个 Kanban 托管的 seeded
 		// KIMI_CODE_HOME（软链登录态 + 注入 Kanban hooks），不改动用户全局 ~/.kimi-code。
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			env.KIMI_CODE_HOME = await seedKanbanManagedKimiCodeHome(process.env);
+			env.KIMI_CODE_HOME = await seedKanbanManagedKimiCodeHome(processEnv);
 			Object.assign(
 				env,
 				createHookRuntimeEnv({

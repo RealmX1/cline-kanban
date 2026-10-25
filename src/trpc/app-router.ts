@@ -11,6 +11,8 @@ import type {
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
 	RuntimeAgentSessionTransportSwitchRequest,
 	RuntimeAgentSessionTransportSwitchResponse,
+	RuntimeAllProjectsTaskGroupQueryRequest,
+	RuntimeAllProjectsTaskGroupQuerySnapshot,
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
@@ -175,6 +177,8 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskConversationHistoryPageRequest,
+	RuntimeTaskConversationHistoryPageResponse,
 	RuntimeTaskEditDraftsMutateRequest,
 	RuntimeTaskEditDraftsReadRequest,
 	RuntimeTaskEditDraftsResponse,
@@ -231,6 +235,8 @@ import {
 	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
+	runtimeAllProjectsTaskGroupQueryRequestSchema,
+	runtimeAllProjectsTaskGroupQuerySnapshotSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
@@ -401,6 +407,8 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskConversationHistoryPageRequestSchema,
+	runtimeTaskConversationHistoryPageResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -449,15 +457,25 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfAutomaticCloseoutExecutionResultReportResponseSchema,
 	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
 	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
 	rvfAutomaticCloseoutStatusRequestSchema,
 	rvfAutomaticCloseoutStatusResponseSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema,
 	rvfReviewStartBoundaryObservationRequestSchema,
 	rvfReviewStartBoundaryObservationResponseSchema,
 	rvfReviewStartBoundaryRequestSchema,
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
+import {
+	type RuntimeCodexConversationStorageOperationRequest,
+	type RuntimeCodexConversationStorageOperationResponse,
+	runtimeCodexConversationStorageOperationRequestSchema,
+	runtimeCodexConversationStorageOperationResponseSchema,
+} from "../core/codex-conversation-storage-api-contract";
 import {
 	independentTaskCreationDraftEditSchema,
 	independentTaskCreationDraftRequestSchema,
@@ -500,6 +518,10 @@ import {
 	setProjectVisualIdentityRequestSchema,
 } from "../core/project-visual-identity";
 import {
+	rvfCloseoutStageClaimRequestSchema,
+	rvfCloseoutStageClaimResponseSchema,
+} from "../core/rvf-automatic-closeout-recovery-contract";
+import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
 	IncomingWorkItemTriageOperationError,
@@ -530,6 +552,16 @@ import {
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
 } from "../core/task-main-session-handover-contract";
+import { taskRvfHistoryRequestSchema, taskRvfHistoryResponseSchema } from "../core/task-rvf-history-contract";
+import {
+	taskVisualizationListRequestSchema,
+	taskVisualizationListResponseSchema,
+	taskVisualizationPreparePreviewResponseSchema,
+	taskVisualizationPublishRequestSchema,
+	taskVisualizationPublishResponseSchema,
+	taskVisualizationRequestPreviewResponseSchema,
+	taskVisualizationSelectArtifactRequestSchema,
+} from "../core/task-visualization-artifact-contract";
 import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
@@ -598,6 +630,8 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
+import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -605,6 +639,7 @@ import {
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
+import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -613,6 +648,7 @@ export interface RuntimeTrpcWorkspaceScope {
 
 export interface RuntimeTrpcContext {
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
+	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
 	taskLookupConversationApi?: TaskLookupConversationService;
 	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
 	independentTaskCreationApi?: IndependentTaskCreationService;
@@ -645,6 +681,18 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		claimExecutionStage?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
+		) => Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>>;
+		reconcileLateNativePromptAcceptance?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
+		) => Promise<z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema>>;
+		reportExecutionResult?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
+		) => Promise<z.infer<typeof rvfAutomaticCloseoutExecutionResultReportResponseSchema>>;
 		observeBoundary?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
@@ -667,6 +715,10 @@ export interface RuntimeTrpcContext {
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
 	kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence;
 	runtimeApi: {
+		operateCodexConversationStorage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeCodexConversationStorageOperationRequest,
+		) => Promise<RuntimeCodexConversationStorageOperationResponse>;
 		loadConfig: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeConfigResponse>;
 		saveConfig: (
 			scope: RuntimeTrpcWorkspaceScope | null,
@@ -763,6 +815,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatMessagesRequest,
 		) => Promise<RuntimeTaskChatMessagesResponse>;
+		getTaskConversationHistoryPage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationHistoryPageRequest,
+		) => Promise<RuntimeTaskConversationHistoryPageResponse>;
 		getClineSlashCommands: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeSlashCommandsResponse>;
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1044,6 +1100,9 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse>;
 	};
 	projectsApi: {
+		getAllProjectsTaskGroupQuerySnapshot: (
+			input: RuntimeAllProjectsTaskGroupQueryRequest,
+		) => Promise<RuntimeAllProjectsTaskGroupQuerySnapshot>;
 		setProjectVisualIdentity: (input: SetProjectVisualIdentityRequest) => Promise<ProjectVisualIdentity>;
 		resetProjectVisualIdentityToDefault: (input: { workspaceId: string }) => Promise<ProjectVisualIdentity>;
 		readProjectIconImage: (input: {
@@ -1610,6 +1669,10 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		getTaskRvfHistory: workspaceProcedure
+			.input(taskRvfHistoryRequestSchema)
+			.output(taskRvfHistoryResponseSchema)
+			.query(({ ctx, input }) => getTaskRvfHistory(ctx.workspaceScope, input)),
 		observeRvfReviewStartBoundary: workspaceProcedure
 			.input(rvfReviewStartBoundaryObservationRequestSchema)
 			.output(rvfReviewStartBoundaryObservationResponseSchema)
@@ -1641,6 +1704,35 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.rvfAutomaticCloseoutApi)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
+			}),
+		reconcileRvfAutomaticCloseoutLateNativePromptAcceptance: workspaceProcedure
+			.input(rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema)
+			.output(rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
+				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
+			}),
+		claimRvfAutomaticCloseoutExecutionStage: workspaceProcedure
+			.input(rvfCloseoutStageClaimRequestSchema)
+			.output(rvfCloseoutStageClaimResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.claimExecutionStage) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.rvfAutomaticCloseoutApi.claimExecutionStage(ctx.workspaceScope, input);
+			}),
+		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
+			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)
+			.output(rvfAutomaticCloseoutExecutionResultReportResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.reportExecutionResult)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动收尾执行结果登记服务未启用。" });
+				try {
+					return await ctx.rvfAutomaticCloseoutApi.reportExecutionResult(ctx.workspaceScope, input);
+				} catch (error) {
+					if (error instanceof RvfAutomaticCloseoutExecutionResultDeliveryPendingError)
+						throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
+					throw error;
+				}
 			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
@@ -1807,6 +1899,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatMessagesResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
+			}),
+		getTaskConversationHistoryPage: workspaceProcedure
+			.input(runtimeTaskConversationHistoryPageRequestSchema)
+			.output(runtimeTaskConversationHistoryPageResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 			}),
 		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeSlashCommandsResponseSchema)
@@ -1979,6 +2077,13 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeAvailableAgentSessionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
+			}),
+		operateCodexConversationStorage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeCodexConversationStorageOperationRequestSchema)
+			.output(runtimeCodexConversationStorageOperationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
+				return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeClineMcpAuthStatusResponseSchema)
@@ -2352,6 +2457,10 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx }) => {
 				return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
 			}),
+		getAllProjectsTaskGroupQuerySnapshot: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeAllProjectsTaskGroupQueryRequestSchema)
+			.output(runtimeAllProjectsTaskGroupQuerySnapshotSchema)
+			.query(({ ctx, input }) => ctx.projectsApi.getAllProjectsTaskGroupQuerySnapshot(input)),
 		add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeProjectAddRequestSchema)
 			.output(runtimeProjectAddResponseSchema)
@@ -2589,6 +2698,40 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConversationSessionTurnProjectionResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+			}),
+	}),
+	taskVisualizationArtifacts: t.router({
+		publish: workspaceProcedure
+			.input(taskVisualizationPublishRequestSchema)
+			.output(taskVisualizationPublishResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.publish(ctx.workspaceScope, input);
+			}),
+		list: workspaceProcedure
+			.input(taskVisualizationListRequestSchema)
+			.output(taskVisualizationListResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.list(ctx.workspaceScope, input);
+			}),
+		preparePreview: workspaceProcedure
+			.input(taskVisualizationSelectArtifactRequestSchema)
+			.output(taskVisualizationPreparePreviewResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.preparePreview(ctx.workspaceScope, input);
+			}),
+		requestPreview: workspaceProcedure
+			.input(taskVisualizationSelectArtifactRequestSchema)
+			.output(taskVisualizationRequestPreviewResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.requestPreview(ctx.workspaceScope, input);
 			}),
 	}),
 	exploratory: t.router({

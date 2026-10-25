@@ -19,14 +19,25 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { lockedFileSystem } from "../fs/locked-file-system";
+import { type FileLockRequest, lockedFileSystem } from "../fs/locked-file-system";
+import {
+	type CodexNativePromptDeliveryEvidence,
+	type CodexNativePromptDeliveryOperation,
+	codexNativePromptDeliveryOperationSchema,
+} from "./api-contract";
+import {
+	CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS,
+	type CodexRvfCloseoutCompactionAwareConfirmation,
+	codexRvfCloseoutCompactionAwareConfirmationSchema,
+	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
+} from "./codex-rvf-closeout-compaction-aware-confirmation";
 
 export const TASK_MESSAGE_INJECTION_LEDGER_FILENAME = "task-message-injections.json";
 
 // 四种语义不可合并。特别是 accepted_pending_submit_confirmation **不表示成功**——把它当成功
 // 正是 2026-08-08 那 49 分钟事故的成因。
 export const TASK_MESSAGE_TERMINAL_DELIVERY_STATUSES = [
-	// 文本已写入 PTY，且提交已确认（agent 已收到并开始处理）。
+	// 文本经 PTY 或原生通道提交，且已确认实际用户消息（agent 已收到并开始处理）。
 	"delivered_and_submit_confirmed",
 	// 已写入且提交已确认，但写入时 agent 正在自己的回合中，这条消息排在其后。
 	"delivered_queued_behind_active_agent_turn",
@@ -41,6 +52,8 @@ export const TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS = [
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	// 原生请求可能已被接受；不得自动重发或退回 PTY。
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 输入框被占着、而**人不在场**：机器判定框里有未提交内容，却又拿不下来（读屏读不出正文无从暂存 /
 	// 写库失败 / 清框时会话已换代）。与 human_terminal_contention_timeout 的关键差别是「人在不在」——
@@ -75,6 +88,7 @@ const LEGACY_STATUS_MIRROR: Record<TaskMessageTerminalDeliveryStatus, string> = 
 };
 
 export interface TaskMessageInjectionRecord {
+	nativeCompactionAwareConfirmation?: CodexRvfCloseoutCompactionAwareConfirmation;
 	task_id: string;
 	// 新请求总是记录受理时解析的真实目标会话；旧记录缺省时保持原样，不推断历史主会话。
 	attempt_id?: string;
@@ -84,10 +98,14 @@ export interface TaskMessageInjectionRecord {
 	message_id: string;
 	turn_id?: string;
 	checkpoint_id?: string;
+	codex_native_prompt_delivery_evidence?: CodexNativePromptDeliveryEvidence;
+	// 发送意图与历史接受独立于不可改写的终端失败回执；重启只补证，不抹去原失败。
+	codex_native_prompt_delivery_operation?: CodexNativePromptDeliveryOperation;
 	// 遗留镜像，由 terminal_delivery_status 派生，不作判据。
 	status?: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
 	created_at: string;
 	// ↓ 仅 agent 空闲门控的排队投递（--deliver-when-agent-idle）才有。
@@ -148,11 +166,31 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		message_id: String(record.message_id),
 		...(typeof record.turn_id === "string" ? { turn_id: record.turn_id } : {}),
 		...(typeof record.checkpoint_id === "string" ? { checkpoint_id: record.checkpoint_id } : {}),
+		...(isCodexNativePromptDeliveryEvidence(record.codex_native_prompt_delivery_evidence)
+			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
+		...(record.codex_native_prompt_delivery_operation === undefined
+			? {}
+			: {
+					codex_native_prompt_delivery_operation: codexNativePromptDeliveryOperationSchema.parse(
+						record.codex_native_prompt_delivery_operation,
+					),
+				}),
 		status: legacyStatus ?? LEGACY_STATUS_MIRROR[terminalStatus],
 		terminal_delivery_status: terminalStatus,
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
+		...(typeof record.terminal_delivery_failure_detail === "string"
+			? { terminal_delivery_failure_detail: record.terminal_delivery_failure_detail }
+			: {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
+		...(codexRvfCloseoutCompactionAwareConfirmationSchema.safeParse(record.nativeCompactionAwareConfirmation).success
+			? {
+					nativeCompactionAwareConfirmation: codexRvfCloseoutCompactionAwareConfirmationSchema.parse(
+						record.nativeCompactionAwareConfirmation,
+					),
+				}
+			: {}),
 		...(typeof record.required_native_independent_user_turn_session_id === "string"
 			? { required_native_independent_user_turn_session_id: record.required_native_independent_user_turn_session_id }
 			: {}),
@@ -172,6 +210,13 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 			? { agent_idle_gated_queue_entry_id: record.agent_idle_gated_queue_entry_id }
 			: {}),
 	};
+}
+
+function isCodexNativePromptDeliveryEvidence(value: unknown): value is CodexNativePromptDeliveryEvidence {
+	if (typeof value !== "object" || value === null) return false;
+	return ["clientUserMessageId", "nativeSessionId", "nativeTurnId", "nativeUserMessageId"].every(
+		(field) => field in value && typeof Reflect.get(value, field) === "string",
+	);
 }
 
 function hasRequiredRecordFields(value: unknown): value is Record<string, unknown> {
@@ -211,22 +256,26 @@ async function writeTaskMessageInjectionLedger(
 	records: readonly TaskMessageInjectionRecord[],
 ): Promise<void> {
 	// lock: null —— 调用方已持有 withTaskMessageInjectionLedgerLock 取的那把锁，这里再取会自锁。
-	await lockedFileSystem.writeJsonFileAtomic(ledgerPath, records, { lock: null });
+	await lockedFileSystem.writeJsonFileAtomic(ledgerPath, records, { lock: null, durable: true });
 }
 
 // 全部读改写都必须经这里：跨进程锁（CLI 与 runtime 是两个进程）。
 export async function withTaskMessageInjectionLedgerLock<T>(
 	ledgerPath: string,
 	operation: (records: TaskMessageInjectionRecord[]) => Promise<{ records?: TaskMessageInjectionRecord[]; result: T }>,
+	lockAcquisitionRetries?: FileLockRequest["retries"],
 ): Promise<T> {
-	return await lockedFileSystem.withLock({ path: ledgerPath, type: "file" }, async () => {
-		const records = await readTaskMessageInjectionLedger(ledgerPath);
-		const outcome = await operation(records);
-		if (outcome.records) {
-			await writeTaskMessageInjectionLedger(ledgerPath, outcome.records);
-		}
-		return outcome.result;
-	});
+	return await lockedFileSystem.withLock(
+		{ path: ledgerPath, type: "file", retries: lockAcquisitionRetries },
+		async () => {
+			const records = await readTaskMessageInjectionLedger(ledgerPath);
+			const outcome = await operation(records);
+			if (outcome.records) {
+				await writeTaskMessageInjectionLedger(ledgerPath, outcome.records);
+			}
+			return outcome.result;
+		},
+	);
 }
 
 export function findTaskMessageInjectionRecord(
@@ -300,19 +349,29 @@ export function applyTerminalDeliveryOutcomeToRecord(
 	outcome: {
 		status: TaskMessageTerminalDeliveryStatus;
 		failureReason?: TaskMessageTerminalDeliveryFailureReason;
+		failureDetail?: string;
 		nowIso: string;
 		turnId?: string;
 		checkpointId?: string;
+		codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 	},
 ): TaskMessageInjectionRecord {
-	const { terminal_delivery_failure_reason: _discardedPreviousReason, ...rest } = record;
+	const {
+		terminal_delivery_failure_reason: _discardedPreviousReason,
+		terminal_delivery_failure_detail: _discardedPreviousDetail,
+		...rest
+	} = record;
 	return {
 		...rest,
 		...(outcome.turnId ? { turn_id: outcome.turnId } : {}),
 		...(outcome.checkpointId ? { checkpoint_id: outcome.checkpointId } : {}),
+		...(outcome.codexNativePromptDeliveryEvidence
+			? { codex_native_prompt_delivery_evidence: outcome.codexNativePromptDeliveryEvidence }
+			: {}),
 		status: LEGACY_STATUS_MIRROR[outcome.status],
 		terminal_delivery_status: outcome.status,
 		...(outcome.failureReason ? { terminal_delivery_failure_reason: outcome.failureReason } : {}),
+		...(outcome.failureDetail ? { terminal_delivery_failure_detail: outcome.failureDetail } : {}),
 		terminal_delivery_status_updated_at: outcome.nowIso,
 	};
 }
@@ -331,8 +390,10 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 	idempotencyKey: string;
 	status: TaskMessageTerminalDeliveryStatus;
 	failureReason?: TaskMessageTerminalDeliveryFailureReason;
+	failureDetail?: string;
 	turnId?: string;
 	checkpointId?: string;
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence;
 	nowIso: string;
 }): Promise<RecordTerminalDeliveryOutcomeResult> {
 	return await withTaskMessageInjectionLedgerLock<RecordTerminalDeliveryOutcomeResult>(
@@ -348,8 +409,12 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 			const nextRecord = applyTerminalDeliveryOutcomeToRecord(existing, {
 				status: input.status,
 				...(input.failureReason ? { failureReason: input.failureReason } : {}),
+				...(input.failureDetail ? { failureDetail: input.failureDetail } : {}),
 				...(input.turnId ? { turnId: input.turnId } : {}),
 				...(input.checkpointId ? { checkpointId: input.checkpointId } : {}),
+				...(input.codexNativePromptDeliveryEvidence
+					? { codexNativePromptDeliveryEvidence: input.codexNativePromptDeliveryEvidence }
+					: {}),
 				nowIso: input.nowIso,
 			});
 			return {
@@ -392,6 +457,53 @@ export interface StalePendingTaskMessageInjectionSweepResult {
 	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
 }
 
+// 先把有界截止写入与清扫器共用的账本，再允许内存延长等待；终态与旧 revision 均不可覆盖。
+export async function persistTaskMessageNativeCompactionAwareConfirmation(input: {
+	ledgerPath: string;
+	ledgerTaskId: string;
+	snapshot: CodexRvfCloseoutCompactionAwareConfirmation;
+	expectedRevision: number | null;
+}): Promise<boolean> {
+	const snapshot = codexRvfCloseoutCompactionAwareConfirmationSchema.parse(input.snapshot);
+	return withTaskMessageInjectionLedgerLock(
+		input.ledgerPath,
+		async (records) => {
+			const record = findTaskMessageInjectionRecord(records, input.ledgerTaskId, snapshot.binding.idempotencyKey);
+			if (
+				!record ||
+				record.terminal_delivery_status !== "accepted_pending_submit_confirmation" ||
+				record.source !== "rvf_automatic_closeout" ||
+				record.prompt_sha256 !== snapshot.binding.promptSha256 ||
+				(record.attempt_id !== undefined && record.attempt_id !== snapshot.binding.conversationSessionId)
+			)
+				return { result: false };
+			const previous = record.nativeCompactionAwareConfirmation;
+			if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return { result: true };
+			if (
+				(previous?.revision ?? null) !== input.expectedRevision ||
+				snapshot.revision !== (previous ? previous.revision + 1 : 0) ||
+				(previous &&
+					(JSON.stringify(previous.binding) !== JSON.stringify(snapshot.binding) ||
+						previous.firstSubmissionAtEpochMs !== snapshot.firstSubmissionAtEpochMs ||
+						previous.absoluteConfirmationDeadlineAtEpochMs !== snapshot.absoluteConfirmationDeadlineAtEpochMs ||
+						previous.clientUserMessageId !== snapshot.clientUserMessageId ||
+						previous.submissionTransport !== snapshot.submissionTransport ||
+						previous.predecessorNativeTurnId !== snapshot.predecessorNativeTurnId ||
+						(previous.nativeTurnIdReturnedBySubmissionRequest !== undefined &&
+							previous.nativeTurnIdReturnedBySubmissionRequest !==
+								snapshot.nativeTurnIdReturnedBySubmissionRequest) ||
+						previous.accumulatedCompactionWaitMs > snapshot.accumulatedCompactionWaitMs ||
+						previous.ordinaryConfirmationBudgetRemainingMs < snapshot.ordinaryConfirmationBudgetRemainingMs ||
+						previous.phaseStartedAtEpochMs > snapshot.phaseStartedAtEpochMs))
+			)
+				return { result: false };
+			const updated = { ...record, nativeCompactionAwareConfirmation: snapshot };
+			return { records: records.map((entry) => (entry === record ? updated : entry)), result: true };
+		},
+		{ retries: 3, factor: 1, minTimeout: 25, maxTimeout: 25 },
+	);
+}
+
 // 账本时间戳读不出来（手改坏 / 更旧的格式）时返回 null，调用方按「已超期」处理：
 // 判失败是安全的那一侧，留着才会变成永远没人收敛的 pending。
 //
@@ -403,6 +515,12 @@ export function resolvePendingRecordBecomesStaleAtEpochMs(
 	record: TaskMessageInjectionRecord,
 	stalePendingThresholdMs: number,
 ): number | null {
+	if (record.nativeCompactionAwareConfirmation) {
+		return (
+			resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(record.nativeCompactionAwareConfirmation) +
+			CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS
+		);
+	}
 	const statusUpdatedAtMs = Date.parse(record.terminal_delivery_status_updated_at);
 	if (Number.isNaN(statusUpdatedAtMs)) {
 		return null;

@@ -262,15 +262,21 @@ function isNodeErrorWithCode(error: unknown, code: string): boolean {
 	return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === code;
 }
 
-async function readJsonFile(path: string): Promise<unknown | null> {
+async function readJsonFile(path: string, options: { requireCompleteRead?: boolean } = {}): Promise<unknown | null> {
 	try {
 		const raw = await readFile(path, "utf8");
+		let parsed: unknown;
 		try {
-			return JSON.parse(raw) as unknown;
+			parsed = JSON.parse(raw) as unknown;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(`Malformed JSON in ${path}. ${message}`);
 		}
+		// 严格查询必须区分已存在的 null 正文与尚未建立的文件；宽松读取保留旧版空值兼容。
+		if (options.requireCompleteRead && parsed === null) {
+			throw new Error(`JSON 文件 ${path} 的正文不能为 null。`);
+		}
+		return parsed;
 	} catch (error) {
 		if (isNodeErrorWithCode(error, "ENOENT")) {
 			return null;
@@ -442,17 +448,23 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	return reconciledSessions;
 }
 
-async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
+async function readWorkspaceBoard(
+	workspaceId: string,
+	options: { requireCompleteRead?: boolean } = {},
+): Promise<RuntimeBoardData> {
 	const boardPath = getPersistedWorkspaceBoardFilePathById(workspaceId);
-	const rawBoard = await readJsonFile(boardPath);
+	const rawBoard = await readJsonFile(boardPath, options);
 	// 旧盘里已退役的 `dependencies` 键由 runtimeBoardDataSchema（非 strict）在解析时静默剥离。
 	return reconcileBoardColumns(
 		parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
 	);
 }
 
-export async function loadWorkspaceBoardById(workspaceId: string): Promise<RuntimeBoardData> {
-	return await readWorkspaceBoard(workspaceId);
+export async function loadWorkspaceBoardById(
+	workspaceId: string,
+	options: { requireCompleteRead?: boolean } = {},
+): Promise<RuntimeBoardData> {
+	return await readWorkspaceBoard(workspaceId, options);
 }
 
 // Stage 2 读时回填：对「三 facet 全缺」的旧盘 per-session 即时经 applySessionFacets 从 legacy
@@ -478,9 +490,12 @@ function backfillSessionFacets(
 	return changed ? next : sessions;
 }
 
-async function readWorkspaceSessions(workspaceId: string): Promise<Record<string, RuntimeTaskSessionSummary>> {
+async function readWorkspaceSessions(
+	workspaceId: string,
+	options: { requireCompleteRead?: boolean } = {},
+): Promise<Record<string, RuntimeTaskSessionSummary>> {
 	const sessionsPath = getWorkspaceSessionsPath(workspaceId);
-	const rawSessions = await readJsonFile(sessionsPath);
+	const rawSessions = await readJsonFile(sessionsPath, options);
 	const parsed = parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, rawSessions, workspaceSessionsSchema, {});
 	return backfillSessionFacets(parsed);
 }
@@ -494,8 +509,8 @@ async function readWorkspaceMeta(workspaceId: string): Promise<WorkspaceStateMet
 	});
 }
 
-async function readWorkspaceIndex(): Promise<WorkspaceIndexFile> {
-	const raw = await readJsonFile(getWorkspaceIndexPath());
+async function readWorkspaceIndex(options: { requireCompleteRead?: boolean } = {}): Promise<WorkspaceIndexFile> {
+	const raw = await readJsonFile(getWorkspaceIndexPath(), options);
 	return parseWorkspaceIndex(raw);
 }
 
@@ -818,8 +833,10 @@ export async function loadWorkspaceContextById(workspaceId: string): Promise<Run
 	}
 }
 
-export async function listWorkspaceIndexEntries(): Promise<RuntimeWorkspaceIndexEntry[]> {
-	const index = await readWorkspaceIndex();
+export async function listWorkspaceIndexEntries(
+	options: { requireCompleteRead?: boolean } = {},
+): Promise<RuntimeWorkspaceIndexEntry[]> {
+	const index = await readWorkspaceIndex(options);
 	return Object.values(index.entries)
 		.map((entry) => ({
 			workspaceId: entry.workspaceId,
@@ -879,8 +896,9 @@ export function getPersistedWorkspaceSessionsFilePathById(workspaceId: string): 
 
 export async function loadPersistedWorkspaceSessionsById(
 	workspaceId: string,
+	options: { requireCompleteRead?: boolean } = {},
 ): Promise<Record<string, RuntimeTaskSessionSummary>> {
-	return await readWorkspaceSessions(workspaceId);
+	return await readWorkspaceSessions(workspaceId, options);
 }
 
 export async function savePersistedWorkspaceSessionsById(

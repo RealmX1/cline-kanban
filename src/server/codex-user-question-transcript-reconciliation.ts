@@ -15,7 +15,10 @@ export async function reconcileCodexUserQuestionTranscriptForTask(input: {
 	transcriptPath?: string | null;
 	summary: RuntimeTaskSessionSummary | null;
 }) {
-	const recovered = await recoverCodexUserQuestionsForPendingAndHistoryWithFileChangeCache(input);
+	const recovered = await recoverCodexUserQuestionsForPendingAndHistoryWithFileChangeCache({
+		...input,
+		homeDirectoryPath: input.summary?.codexConversationStorageHomeDirectoryPath,
+	});
 	const latest = recovered.exchanges.at(-1);
 	const existing = await readAgentRaisedPendingUserDecisions(input.workspaceId);
 	const sourceIdForExchange = (exchange: (typeof recovered.exchanges)[number]): string =>

@@ -80,6 +80,10 @@ export interface CreateAgentSessionInactivityReclamationSchedulerOptions {
 	// （服务重启、项目被移除、会话已被清理）⇒ 没有可回收的运行时，记录置 superseded。
 	getTaskSessionSummary: (workspaceId: string, taskId: string) => RuntimeTaskSessionSummary | null;
 	reclaimAgentSession: AgentSessionReclamationExecutor;
+	inspectNativeTurnExecutionBeforeIdleStallReclamation?: (
+		workspaceId: string,
+		taskId: string,
+	) => Promise<"allow_reclamation" | "defer_reclamation">;
 	now?: () => number;
 	sweepIntervalMs?: number;
 	readAllDeadlineRecords?: typeof readAllAgentSessionReclamationDeadlineRecords;
@@ -271,7 +275,38 @@ export function createAgentSessionInactivityReclamationScheduler(
 					continue;
 				}
 
-				await reclaimOneRecord(workspaceId, record, currentSummary, result, nowMs);
+				// 重启后的首轮 sweep 也必须补证，不能抢在原生观察器纠偏之前把后台等待中的进程杀掉。
+				if (options.inspectNativeTurnExecutionBeforeIdleStallReclamation) {
+					let eligibility: "allow_reclamation" | "defer_reclamation";
+					try {
+						eligibility = await options.inspectNativeTurnExecutionBeforeIdleStallReclamation(
+							workspaceId,
+							record.taskId,
+						);
+					} catch (error) {
+						logAgentSessionRetentionWarning(
+							`native-turn-recheck-failed workspaceId=${workspaceId} taskId=${record.taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+						);
+						continue;
+					}
+					const refreshed = options.getTaskSessionSummary(workspaceId, record.taskId);
+					if (
+						!isReclamationDeadlineStillCurrentForSession(record, refreshed) ||
+						!refreshed ||
+						!isAgentSessionRetentionDeadlineBearing(refreshed)
+					) {
+						result.supersededStaleCount += 1;
+						await supersedeStaleRecord(workspaceId, record, "native-turn-recheck-invalidated-deadline", now());
+						continue;
+					}
+					if (eligibility === "defer_reclamation") {
+						logAgentSessionRetentionInfo(
+							`native-turn-recheck-deferred workspaceId=${workspaceId} taskId=${record.taskId} recordId=${record.recordId}`,
+						);
+						continue;
+					}
+					await reclaimOneRecord(workspaceId, record, refreshed, result, now());
+				} else await reclaimOneRecord(workspaceId, record, currentSummary, result, nowMs);
 			}
 		}
 		return result;

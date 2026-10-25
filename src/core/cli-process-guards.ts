@@ -2,6 +2,7 @@ const DEFAULT_CLI_HARD_TIMEOUT_MS = 35_000;
 const DEFAULT_CLI_TRPC_TIMEOUT_MS = 28_000;
 /** Subcommand shutdown flush budget — must fit inside HARD − TRPC margin. */
 export const DEFAULT_CLI_TELEMETRY_FLUSH_MS = 500;
+export const CLI_TASK_GROUP_WATCH_INTERRUPTED_SHUTDOWN_TIMEOUT_MS = 2_000;
 
 let fatalHandlersInstalled = false;
 let handlingFatalError = false;
@@ -83,15 +84,19 @@ export function safeErrorMessage(error: unknown): string {
 
 export function safeStringify(value: unknown, space?: number | string): string {
 	try {
-		const seen = new WeakSet<object>();
+		const currentAncestorObjects: object[] = [];
 		return JSON.stringify(
 			value,
-			(_key, nested) => {
+			function (this: object, _key, nested: unknown) {
 				if (typeof nested === "object" && nested !== null) {
-					if (seen.has(nested)) {
+					// 只检测当前祖先链上的回指；兄弟分组共享对象不构成循环。
+					while (currentAncestorObjects.length > 0 && currentAncestorObjects.at(-1) !== this) {
+						currentAncestorObjects.pop();
+					}
+					if (currentAncestorObjects.includes(nested)) {
 						return "[Circular]";
 					}
-					seen.add(nested);
+					currentAncestorObjects.push(nested);
 				}
 				return nested;
 			},
@@ -140,8 +145,44 @@ export function installCliFatalErrorHandlers(): void {
 	});
 }
 
+function isTaskGroupWatchInvocation(argv: readonly string[]): boolean {
+	const taskCommandIndex = argv.findIndex((argument) => argument === "task" || argument === "tasks");
+	return taskCommandIndex >= 0 && argv[taskCommandIndex + 1] === "watch";
+}
+
+export function installCliTaskGroupWatchInterruptionGuard(
+	argv: readonly string[],
+): { signal: AbortSignal; dispose: () => void } | undefined {
+	if (!isTaskGroupWatchInvocation(argv)) return undefined;
+	const controller = new AbortController();
+	let interruptedShutdownTimeout: ReturnType<typeof setTimeout> | undefined;
+	const interrupt = (signalName: "SIGINT" | "SIGTERM") => {
+		if (controller.signal.aborted) return;
+		const exitCode = signalName === "SIGTERM" ? 143 : 130;
+		process.exitCode = exitCode;
+		// watch 没有整命令硬超时；首次中断后，连同遥测和最终 pipe 排空一起限时退出。
+		interruptedShutdownTimeout = setTimeout(
+			() => exitCliProcess(exitCode),
+			CLI_TASK_GROUP_WATCH_INTERRUPTED_SHUTDOWN_TIMEOUT_MS,
+		);
+		controller.abort(signalName);
+	};
+	const onSigint = () => interrupt("SIGINT");
+	const onSigterm = () => interrupt("SIGTERM");
+	process.on("SIGINT", onSigint);
+	process.on("SIGTERM", onSigterm);
+	return {
+		signal: controller.signal,
+		dispose: () => {
+			clearTimeout(interruptedShutdownTimeout);
+			process.removeListener("SIGINT", onSigint);
+			process.removeListener("SIGTERM", onSigterm);
+		},
+	};
+}
+
 export function installCliHardTimeoutIfNeeded(argv: string[], isServerStyleInvocation: boolean): () => void {
-	if (isServerStyleInvocation) {
+	if (isServerStyleInvocation || isTaskGroupWatchInvocation(argv)) {
 		return () => {};
 	}
 	const timeoutMs = resolveCliHardTimeoutMs(argv);

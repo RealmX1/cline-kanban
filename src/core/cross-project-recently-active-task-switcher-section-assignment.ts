@@ -25,7 +25,7 @@ export const CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HOR
 export type CrossProjectTaskSwitcherRemainingSectionOrderingMode =
 	// ① 统一「最后被碰」：max(对话推进, 我最后打开, Description 编辑)。
 	| "most_recently_touched_by_conversation_progress_or_user_open_or_description_edit"
-	// ② 只按对话推进（与 Spotlight「Agent activity」同源）。
+	// ② 按对话推进（与 Spotlight「Agent activity」同源）；无记录的任务置后，按 Description 更新时间倒序。
 	| "most_recent_conversation_progress_only";
 
 export const CROSS_PROJECT_TASK_SWITCHER_REMAINING_SECTION_ORDERING_MODES: readonly CrossProjectTaskSwitcherRemainingSectionOrderingMode[] =
@@ -116,7 +116,7 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 		return false;
 	}
 	// 静默、转圈和重绘均不能证明回合结束。存活性由运行时负责，明确 park 仍由 agent 持有回合。
-	return entry.liveness === "live" || entry.isParkedAwaitingDispatchedBackgroundWork;
+	return entry.liveness === "live" || entry.liveness === "retrying" || entry.isParkedAwaitingDispatchedBackgroundWork;
 }
 
 // Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或
@@ -323,12 +323,21 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	return resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(entry) >= activityHorizonStartAt;
 }
 
-function compareByOrderingKeyDescendingThenStableKey(
+function compareRecentEntriesByOrderingTimestampDescendingWithDescriptionFallbackThenStableKey(
 	left: CrossProjectTaskSwitcherRemainingEntryInProject,
 	right: CrossProjectTaskSwitcherRemainingEntryInProject,
 ): number {
 	if (right.remainingSectionOrderingKeyAt !== left.remainingSectionOrderingKeyAt) {
 		return right.remainingSectionOrderingKeyAt - left.remainingSectionOrderingKeyAt;
+	}
+	// 只有 Conversation progress 的无记录条目使用 -∞。保留它们落在有记录任务之后的语义，
+	// 再按 Description 更新时间排序；最近打开和创建时间均不参与兜底。
+	if (left.remainingSectionOrderingKeyAt === Number.NEGATIVE_INFINITY) {
+		const descriptionLastUpdatedAtDifference =
+			right.entry.taskDescriptionLastUpdatedAt - left.entry.taskDescriptionLastUpdatedAt;
+		if (descriptionLastUpdatedAtDifference !== 0) {
+			return descriptionLastUpdatedAtDifference;
+		}
 	}
 	return buildCrossProjectTaskSwitcherEntryKey(left.workspaceId, left.entry.taskId).localeCompare(
 		buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
@@ -370,7 +379,7 @@ function assignRemainingSection(
 						Number.NEGATIVE_INFINITY)
 					: resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(entryInProject.entry),
 		}))
-		.sort(compareByOrderingKeyDescendingThenStableKey);
+		.sort(compareRecentEntriesByOrderingTimestampDescendingWithDescriptionFallbackThenStableKey);
 	return { orderingMode: input.remainingSectionOrderingMode, entries };
 }
 

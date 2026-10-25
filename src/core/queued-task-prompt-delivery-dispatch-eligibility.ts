@@ -18,6 +18,8 @@ import type {
 	QueuedTaskPromptDispatchBlockReason,
 	RuntimeTaskSessionSummary,
 } from "./api-contract";
+import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "./managed-task-prompt-delivery";
+import { resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs } from "./queued-task-prompt-native-independent-user-turn-query-recovery";
 import {
 	hasReclaimableAgentSessionRuntime,
 	isAgentAwaitingModalUserDecision,
@@ -40,7 +42,11 @@ export function isQueuedTaskPromptDeliveryAwaitingDispatch(
 	entry: QueuedTaskPromptDeliveryEntry,
 	nowEpochMs: number,
 ): boolean {
-	return entry.deliveryState === "queued" && nowEpochMs < entry.expiresAt;
+	return (
+		isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+		entry.deliveryState === "queued" &&
+		nowEpochMs < entry.expiresAt
+	);
 }
 
 export interface QueuedTaskPromptDispatchEligibilityInput {
@@ -135,6 +141,12 @@ export function resolveQueuedPromptDispatchBlockReason(
 	// superseded_by_later_delivery 被归入**可重试**——两个方向都不静默丢消息。
 	if (hasPendingProgrammaticTaskChatInputDelivery) {
 		return "another_programmatic_delivery_in_flight";
+	}
+
+	// 查询退避不消耗投递次数，也不能被重复的 summary 广播绕过。
+	const queryRetryNotBeforeEpochMs = resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs(headEntry);
+	if (queryRetryNotBeforeEpochMs !== null && queryRetryNotBeforeEpochMs > input.nowEpochMs) {
+		return "awaiting_native_independent_user_turn_query_retry";
 	}
 
 	// 7. 跨过重启、人已确认，但确认之后 agent 还没停下过一次。用户要的是「提醒我确认，然后在**下一次** stop

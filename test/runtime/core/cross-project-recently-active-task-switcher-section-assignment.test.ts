@@ -203,6 +203,23 @@ describe("Recent 的阶段多选与统一活动范围", () => {
 });
 
 describe("isCrossProjectTaskSwitcherEntryRunning", () => {
+	it("自动重连仍属于当前 Agent 回合，保留 Running 且不刷新排序起点", () => {
+		const entry = makeEntry("retrying", {
+			...AGENT_RUNNING,
+			liveness: "retrying",
+			agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS),
+			lastOpenedByUserAt: NOW_MS,
+		});
+		expect(isCrossProjectTaskSwitcherEntryRunning(entry, NOW_MS)).toBe(true);
+		const sections = assign([inProject("ws-a", entry)]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["retrying"]);
+		expect(sections.remainingSection.entries).toEqual([]);
+		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		expect(sections.runningEntries[0]?.entry.agentResponseGenerationTurnStarted).toEqual(
+			turnStartedAt(NOW_MS - MINUTE_MS),
+		);
+	});
+
 	it("agent 回合 + 5 分钟内有输出 → Running", () => {
 		expect(
 			isCrossProjectTaskSwitcherEntryRunning(
@@ -781,6 +798,89 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 			{ mode: "most_recent_conversation_progress_only" },
 		);
 		expect(remainingTaskIds(sections)).toEqual(["progressed", "only-opened"]);
+	});
+
+	it.each([
+		["Backlog 单选", ["backlog"]],
+		["阶段混选", ["backlog", "validation"]],
+		["All", []],
+	] as const)("%s 的无对话记录任务按 Description 更新时间倒序，不按项目或任务 ID", (_, stageFilters) => {
+		const entries = [
+			inProject(
+				"ws-a",
+				makeEntry("a-older", {
+					columnId: "backlog",
+					createdAt: NOW_MS,
+					lastOpenedByUserAt: NOW_MS,
+					taskDescriptionLastUpdatedAt: NOW_MS - 2 * DAY_MS,
+				}),
+			),
+			inProject(
+				"ws-z",
+				makeEntry("z-newer", { columnId: "backlog", taskDescriptionLastUpdatedAt: NOW_MS - MINUTE_MS }),
+			),
+			inProject(
+				"ws-a",
+				makeEntry("validation", { columnId: "validation", taskDescriptionLastUpdatedAt: NOW_MS - DAY_MS }),
+			),
+		];
+		const sections = assign(entries, {
+			mode: "most_recent_conversation_progress_only",
+			selectedRecentTaskStageFilters: stageFilters,
+		});
+		expect(remainingTaskIds(sections)).toEqual(
+			stageFilters.length === 1 ? ["z-newer", "a-older"] : ["z-newer", "validation", "a-older"],
+		);
+	});
+
+	it("Description 兜底不越过有对话记录的任务，也不改变相同对话时间的稳定顺序", () => {
+		const sections = assign(
+			[
+				inProject("ws-a", makeEntry("no-progress", { taskDescriptionLastUpdatedAt: NOW_MS })),
+				inProject(
+					"ws-z",
+					makeEntry("same-progress-newer-description", {
+						lastConversationProgressObservation: progressAt(NOW_MS - DAY_MS),
+						taskDescriptionLastUpdatedAt: NOW_MS,
+					}),
+				),
+				inProject(
+					"ws-a",
+					makeEntry("same-progress-older-description", {
+						lastConversationProgressObservation: progressAt(NOW_MS - DAY_MS),
+						taskDescriptionLastUpdatedAt: NOW_MS - 2 * DAY_MS,
+					}),
+				),
+				inProject(
+					"ws-z",
+					makeEntry("newest-progress", {
+						lastConversationProgressObservation: progressAt(NOW_MS - MINUTE_MS),
+					}),
+				),
+			],
+			{ mode: "most_recent_conversation_progress_only" },
+		);
+		expect(remainingTaskIds(sections)).toEqual([
+			"newest-progress",
+			"same-progress-older-description",
+			"same-progress-newer-description",
+			"no-progress",
+		]);
+	});
+
+	it("无对话记录且 Description 同时更新时，按 workspaceId 和 taskId 稳定排序", () => {
+		const sameDescriptionTimestamp = { columnId: "backlog", taskDescriptionLastUpdatedAt: NOW_MS } as const;
+		const sections = assign(
+			[
+				inProject("ws-z", makeEntry("a", sameDescriptionTimestamp)),
+				inProject("ws-a", makeEntry("z", sameDescriptionTimestamp)),
+				inProject("ws-a", makeEntry("a", sameDescriptionTimestamp)),
+			],
+			{ mode: "most_recent_conversation_progress_only", selectedRecentTaskStageFilters: ["backlog"] },
+		);
+		expect(
+			sections.remainingSection.entries.map(({ workspaceId, entry }) => `${workspaceId}:${entry.taskId}`),
+		).toEqual(["ws-a:a", "ws-a:z", "ws-z:a"]);
 	});
 
 	it("缓存到期后同一任务从倒计时区掉进剩余区（区归属随 now 现算）", () => {

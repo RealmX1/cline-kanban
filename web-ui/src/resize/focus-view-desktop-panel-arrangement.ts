@@ -2,13 +2,19 @@ import { LocalStorageKey, readLocalStorageItem } from "@/storage/local-storage-s
 
 export type FocusViewDesktopPanelArrangement = "agent_left_workbench_right" | "agent_above_workbench_below";
 export type FocusViewDesktopPanelArrangementPreference = "automatic" | FocusViewDesktopPanelArrangement;
-export type TaskWorkbenchModule = "task_sessions" | "cross_task_relations" | "exploration_map" | "prompt_tools";
+export type TaskWorkbenchModule =
+	| "task_sessions"
+	| "cross_task_relations"
+	| "exploration_map"
+	| "prompt_tools"
+	| "task_visualizations";
 export type TaskWorkbenchModuleSlots = readonly [TaskWorkbenchModule, TaskWorkbenchModule];
 export const TASK_WORKBENCH_MODULE_LABELS: Record<TaskWorkbenchModule, string> = {
 	task_sessions: "Sessions",
 	cross_task_relations: "Relations",
 	exploration_map: "探索地图",
 	prompt_tools: "Prompts",
+	task_visualizations: "可视化",
 };
 
 export function loadFocusViewDesktopPanelArrangementPreference(): FocusViewDesktopPanelArrangementPreference {

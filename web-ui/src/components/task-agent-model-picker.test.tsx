@@ -2,7 +2,7 @@ import { act, type ReactElement, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { UseTaskAgentModelPickerResult } from "@/components/task-agent-model-picker";
+import { TaskAgentModelPicker, type UseTaskAgentModelPickerResult } from "@/components/task-agent-model-picker";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
 	RuntimeAgentId,
@@ -1094,6 +1094,44 @@ describe("useTaskAgentModelPicker – terminal agent model cache staleness", () 
 			"Cursor Grok 4.6 Fast",
 		]);
 		expect(snapshot.terminalAgentDefaultModelId).toBe("cursor-grok-4.6-high");
+	});
+
+	it("Kimi 默认自动跟随与固定当前版本保留为两个独立选择", async () => {
+		fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue({
+			agentId: "kimi",
+			defaultModelId: "kimi-code/k3.1-pro",
+			defaultLabel: "默认 · K3.1 Pro",
+			options: [{ modelId: "kimi-code/k3.1-pro", label: "K3.1 Pro", modelSelectionGroup: "pinned_version" }],
+		});
+		const snapshot = await renderTerminalAgentHarness("kimi");
+		expect(snapshot.terminalAgentModelOptions.map((option) => option.value)).toEqual(["", "kimi-code/k3.1-pro"]);
+		expect(snapshot.terminalAgentDefaultModelId).toBe("kimi-code/k3.1-pro");
+	});
+});
+
+describe("Kimi 固定当前默认版本的展示", () => {
+	it("已有固定版本不被显示成自动跟随，固定版本组自动展开", async () => {
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId="kimi"
+					onAgentIdChange={() => {}}
+					terminalAgentModelOverrideSettings={{ agentId: "kimi", modelId: "kimi-code/k3.1-pro" }}
+					terminalAgentDefaultModelId="kimi-code/k3.1-pro"
+					terminalAgentModelOptions={[
+						{ value: "", label: "默认 · K3.1 Pro", modelSelectionGroup: "latest_tracking_alias" },
+						{ value: "kimi-code/k3.1-pro", label: "K3.1 Pro", modelSelectionGroup: "pinned_version" },
+					]}
+					agentOptions={[]}
+					clineProviderOptions={[]}
+					clineModelOptions={[]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+				/>,
+			),
+		);
+		expect(findButtonByAriaLabel("K3.1 Pro")?.getAttribute("aria-pressed")).toBe("true");
+		expect(findButtonByAriaLabel("默认 · K3.1 Pro")?.getAttribute("aria-pressed")).toBe("false");
 	});
 });
 

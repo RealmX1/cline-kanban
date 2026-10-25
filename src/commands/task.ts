@@ -29,6 +29,8 @@ import {
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskWorktreeModeSchema,
+	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
+	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
 } from "../core/api-contract";
 import {
 	mergeAbortSignals,
@@ -42,6 +44,7 @@ import {
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
+import { rvfCloseoutStageClaimRequestSchema } from "../core/rvf-automatic-closeout-recovery-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
@@ -81,10 +84,14 @@ import {
 import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
+import { reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending } from "./report-rvf-closeout-execution-result-while-delivery-confirmation-pending";
+import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
+import { registerTaskVisualizationCommand } from "./task-visualization";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
 	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
@@ -272,8 +279,11 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 	throw new Error(`${commandName} requires either --task-id or --column.`);
 }
 
-export function createRuntimeTrpcClient(workspaceId: string | null) {
-	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
+export function createRuntimeTrpcClient(
+	workspaceId: string | null,
+	clientOptions: { retryWhileKanbanRuntimeRestarts?: boolean; requestTimeoutMs?: number } = {},
+) {
+	const trpcTimeoutMs = clientOptions.requestTimeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -291,12 +301,16 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 						),
 				}),
 				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
-				fetch: (url, options) =>
-					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+				fetch: (url, options) => {
+					const send = async () => {
 						const runtimeFetch = await getRuntimeFetch();
 						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
 						return runtimeFetch(url, { ...options, signal });
-					}),
+					};
+					return clientOptions.retryWhileKanbanRuntimeRestarts === false
+						? send()
+						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(send);
+				},
 			}),
 		],
 	});
@@ -431,6 +445,10 @@ function formatTaskRecordWithSessionSummary(
 						liveness: sessionFacets.liveness,
 						userTurnKind: sessionFacets.userTurnKind,
 						agentId: session.agentId,
+						conversationSessionId: session.taskId,
+						runtimeSessionIncarnationId: session.runtimeSessionIncarnationId,
+						agentNativeConversationSessionIdentity: session.agentNativeConversationSessionIdentity,
+						codexNativeSessionControlEndpoint: session.codexNativeSessionControlEndpoint,
 						pid: session.pid,
 						startedAt: session.startedAt,
 						updatedAt: session.updatedAt,
@@ -1282,7 +1300,10 @@ interface TaskMessageCommandResult extends JsonRecord {
 	message_id: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
+	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
+	codex_native_prompt_delivery_operation?: TaskMessageInjectionRecord["codex_native_prompt_delivery_operation"];
 	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
@@ -1306,10 +1327,22 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 		idempotency_key: record.idempotency_key,
 		message_id: record.message_id,
 		terminal_delivery_status: record.terminal_delivery_status,
+		...(record.terminal_delivery_failure_detail
+			? { terminal_delivery_failure_detail: record.terminal_delivery_failure_detail }
+			: {}),
 		...(record.terminal_delivery_failure_reason
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.nativeCompactionAwareConfirmation
+			? { nativeCompactionAwareConfirmation: record.nativeCompactionAwareConfirmation }
+			: {}),
+		...(record.codex_native_prompt_delivery_evidence
+			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
+		...(record.codex_native_prompt_delivery_operation
+			? { codex_native_prompt_delivery_operation: record.codex_native_prompt_delivery_operation }
+			: {}),
 		...(record.required_native_independent_user_turn_session_id
 			? {
 					required_native_independent_user_turn_session_id:
@@ -1500,13 +1533,14 @@ async function sendTaskMessageCommand(input: {
 
 	// 第二段（锁外）：真正投递。锁外是必须的——投递要等 runtime 往返，占着账本锁会把 runtime
 	// 自己的终态回写堵死（runtime settle 时要拿同一把锁），直接死锁。
-	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason) => {
+	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason, failureDetail?: string) => {
 		await recordTaskMessageTerminalDeliveryOutcome({
 			ledgerPath,
 			taskId,
 			idempotencyKey,
 			status: "delivery_failed",
 			failureReason: reason,
+			...(failureDetail ? { failureDetail } : {}),
 			nowIso: new Date().toISOString(),
 		});
 	};
@@ -1532,7 +1566,10 @@ async function sendTaskMessageCommand(input: {
 	const messageId = chatResponse.message?.id ?? null;
 	const summary = chatResponse.summary ?? null;
 	if (!chatResponse.ok || !messageId || !summary) {
-		await settleFailure(chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session");
+		await settleFailure(
+			chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session",
+			chatResponse.terminalDelivery?.failureNote ?? chatResponse.error,
+		);
 		const failureResult = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
 		return toTaskMessageCommandResult(failureResult);
 	}
@@ -1548,6 +1585,12 @@ async function sendTaskMessageCommand(input: {
 			idempotencyKey,
 			status: immediateStatus,
 			...(chatResponse.terminalDelivery?.reason ? { failureReason: chatResponse.terminalDelivery.reason } : {}),
+			...(chatResponse.terminalDelivery?.failureNote
+				? { failureDetail: chatResponse.terminalDelivery.failureNote }
+				: {}),
+			...(chatResponse.terminalDelivery?.codexNativePromptDeliveryEvidence
+				? { codexNativePromptDeliveryEvidence: chatResponse.terminalDelivery.codexNativePromptDeliveryEvidence }
+				: {}),
 			...(checkpoint ? { turnId: String(checkpoint.turn), checkpointId: checkpoint.ref } : {}),
 			nowIso: new Date().toISOString(),
 		});
@@ -1844,26 +1887,16 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
+	registerTaskVisualizationCommand(task);
 
-	task
-		.command("list")
-		.description("List Kanban tasks for a workspace.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.option(
-			"--column <column>",
-			"Filter column: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
-		.action(async (options: { projectPath?: string; column?: ListTaskColumn }) => {
-			await runTaskCommand(
-				async () =>
-					await listTasks({
-						cwd: process.cwd(),
-						projectPath: options.projectPath,
-						column: options.column,
-					}),
-			);
-		});
+	registerAllProjectsTaskGroupQueryCommands(task, {
+		querySnapshot: (input, signal) =>
+			createRuntimeTrpcClient(null, {
+				retryWhileKanbanRuntimeRestarts: false,
+			}).projects.getAllProjectsTaskGroupQuerySnapshot.query(input, { signal }),
+		listSingleProjectTasks: (options) => listTasks({ cwd: process.cwd(), ...options }),
+		runTaskCommand,
+	});
 
 	task
 		.command("get")
@@ -2214,6 +2247,100 @@ export function registerTaskCommand(program: Command): void {
 				}),
 			);
 		});
+	task
+		.command("reconcile-rvf-automatic-closeout-late-native-prompt-acceptance")
+		.description("核验迟到的原生收尾正文，保留失败回执并恢复本轮收尾资格；不重投或回退会话。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "本轮 RVF 决策 token。")
+		.requiredOption("--run-id <id>", "已登记的 RVF run ID。")
+		.requiredOption("--handoff-sha256 <sha256>", "已登记的 handoff SHA256。")
+		.option("--dry-run", "仅核验资格，不写入补证或改变收尾状态。")
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				decisionToken: string;
+				runId: string;
+				handoffSha256: string;
+				dryRun?: boolean;
+			}) => {
+				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+					autoCreateIfMissing: false,
+				});
+				const request = rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema.parse({
+					taskId: options.taskId,
+					decisionToken: options.decisionToken,
+					runId: options.runId,
+					handoffSha256: options.handoffSha256,
+					dryRun: options.dryRun ?? false,
+				});
+				const result = await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.reconcileRvfAutomaticCloseoutLateNativePromptAcceptance.mutate(request);
+				printJson(result);
+				if (result.status === "unknown" || result.status === "blocked") process.exitCode = 12;
+			},
+		);
+	task
+		.command("claim-rvf-automatic-closeout-execution-stage")
+		.description("认领精确 run 的收尾阶段；已有结果直接复用，不能凭超时接管。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "本轮 token。")
+		.requiredOption("--run-id <id>", "已绑定 run。")
+		.requiredOption("--handoff-sha256 <sha256>", "已绑定 handoff 摘要。")
+		.requiredOption("--stage <stage>", "land 或 base_branch_sync。")
+		.option("--delivery-attempt-id <id>", "当前投递尝试 ID。")
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				decisionToken: string;
+				runId: string;
+				handoffSha256: string;
+				stage: string;
+				deliveryAttemptId?: string;
+			}) => {
+				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+					autoCreateIfMissing: false,
+				});
+				const result = await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.claimRvfAutomaticCloseoutExecutionStage.mutate(rvfCloseoutStageClaimRequestSchema.parse(options));
+				printJson(result);
+				if (result.status === "waiting" || result.status === "blocked") process.exitCode = 12;
+			},
+		);
+	task
+		.command("report-rvf-automatic-closeout-execution-result")
+		.description("登记自动收尾的 land 或本地 base 同步结果；成功须由服务端核对真实 Git 与 run 证据。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--result-file <path>", "包含 task/token/run/handoff 绑定及阶段结果的 JSON 文件。")
+		.action(async (options: { projectPath: string; resultFile: string }) => {
+			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+				autoCreateIfMissing: false,
+			});
+			const result = rvfAutomaticCloseoutExecutionResultReportRequestSchema.parse(
+				JSON.parse(await readFile(options.resultFile, "utf8")),
+			);
+			printJson(
+				await reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending(() =>
+					createRuntimeTrpcClient(workspace.workspaceId).runtime.reportRvfAutomaticCloseoutExecutionResult.mutate(
+						result,
+					),
+				),
+			);
+		});
+	registerTaskRvfHistoryCommand(task, {
+		queryRuntime: (workspaceId, input, timeoutMs) =>
+			createRuntimeTrpcClient(workspaceId, {
+				requestTimeoutMs: timeoutMs,
+				retryWhileKanbanRuntimeRestarts: false,
+			}).runtime.getTaskRvfHistory.query(input),
+		runTaskCommand,
+	});
+
 	task
 		.command("rvf-automatic-closeout-status")
 		.description("查询 RVF 自动恢复与收尾投递的持久状态。")

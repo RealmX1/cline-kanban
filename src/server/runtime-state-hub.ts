@@ -66,6 +66,7 @@ import { buildNotificationFeedEntries } from "../state/notification-feed-builder
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
 import { subscribeToPromptLibraryChanges } from "../state/prompt-library-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
+import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { moveTaskCardIntoInProgressAfterAcceptedMainConversationInput } from "../trpc/task-card-action-api";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
@@ -94,6 +95,8 @@ export interface CreateRuntimeStateHubDependencies {
 
 export interface RuntimeStateHub {
 	broadcastDailyWorkProgressStatisticsUpdated?: (revision: number) => void;
+	attachTaskVisualizationArtifactService?: (service: TaskVisualizationArtifactService) => void;
+	broadcastTaskVisualizationArtifactsUpdated?: (workspaceId: string, taskId: string) => void;
 	registerAgentConversationInputAcceptedListener?: (
 		listener: (input: {
 			workspaceId: string;
@@ -179,6 +182,7 @@ export interface QueuedTaskPromptDeliveryDispatchObserver {
 }
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
+	let taskVisualizationArtifactService: TaskVisualizationArtifactService | null = null;
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const acceptedEdgeBySession = new Map<string, string | null>();
 	const pendingAttemptBySession = new Map<string, string>();
@@ -190,6 +194,24 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		| null = null;
 	const nativeActivityObserver = createNativeAgentConversationActivityObserver({
 		cooldownMs: 1_000,
+		onCodexNativeAgentTurnExecution: (observation, summaryBeforeRead) => {
+			terminalManagersByWorkspaceId
+				.get(observation.workspaceId)
+				?.reconcileCodexIdleStallWithNativeAgentTurnExecution(
+					observation.conversationSessionId,
+					summaryBeforeRead,
+					observation,
+				);
+		},
+		onCodexNativeDirectInputReadiness: (observation, summaryBeforeRead) => {
+			terminalManagersByWorkspaceId
+				.get(observation.workspaceId)
+				?.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+					observation.conversationSessionId,
+					summaryBeforeRead,
+					observation,
+				);
+		},
 		onActivity: (observation) => {
 			if (observation.activityKind === "accepted_user_input") return;
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
@@ -958,6 +980,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
 		client.on("close", () => {
+			taskVisualizationArtifactService?.forgetBrowserClient(client);
 			cleanupRuntimeStateClient(client);
 		});
 		// 浏览器 → 服务端只有一种消息：改 git 元数据探测范围。解析不了的一律忽略（不断连）。
@@ -973,6 +996,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			const clientMessage = runtimeStateStreamClientMessageSchema.safeParse(parsedMessage);
 			if (!clientMessage.success) {
+				return;
+			}
+			if (clientMessage.data.type !== "declare_workspace_metadata_probe_scope") {
+				const workspaceId = runtimeStateWorkspaceIdByClient.get(client);
+				if (!workspaceId || !taskVisualizationArtifactService) return;
+				const handling =
+					clientMessage.data.type === "declare_task_visualization_browser_context"
+						? taskVisualizationArtifactService.observeBrowserContext(
+								client,
+								workspaceId,
+								clientMessage.data,
+								(message) => sendSerializedRuntimeStateMessage(client, JSON.stringify(message)),
+							)
+						: taskVisualizationArtifactService.acknowledgePreview(client, workspaceId, clientMessage.data);
+				void handling.catch((error: unknown) =>
+					taskVisualizationArtifactService?.reportBrowserRoutingFailure(error),
+				);
 				return;
 			}
 			const { workspaceMetadataProbeScope } = clientMessage.data;
@@ -1182,6 +1222,14 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			return () => {
 				if (acceptedInputListener === listener) acceptedInputListener = null;
 			};
+		},
+		attachTaskVisualizationArtifactService: (service) => {
+			taskVisualizationArtifactService = service;
+		},
+		broadcastTaskVisualizationArtifactsUpdated: (workspaceId, taskId) => {
+			const payload = JSON.stringify({ type: "task_visualization_artifacts_updated", workspaceId, taskId });
+			for (const client of runtimeStateClientsByWorkspaceId.get(workspaceId) ?? [])
+				sendSerializedRuntimeStateMessage(client, payload);
 		},
 		trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => {
 			if (terminalSummaryUnsubscribeByWorkspaceId.has(workspaceId)) {

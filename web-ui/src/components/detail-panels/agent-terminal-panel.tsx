@@ -28,8 +28,9 @@ import {
 	Unplug,
 	X,
 } from "lucide-react";
-import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement, Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
 import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-panels/terminal-scrollback-transcript-reader-panel";
@@ -62,6 +63,7 @@ import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/s
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
+import type { AgentInputShortcutInsertionFocusHandle } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { isMacPlatform } from "@/utils/platform";
 import type { TaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
@@ -88,6 +90,7 @@ interface AgentTerminalSessionControls {
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
 	scrollTerminalToLatest: () => void;
+	focusTerminalInputAfterShortcutInsertion: () => boolean;
 }
 
 export interface AgentTerminalPanelProps {
@@ -114,6 +117,7 @@ export interface AgentTerminalPanelProps {
 	autoFocus?: boolean;
 	// 由详情视图递增的「把键盘焦点接过去」请求信号，透传给终端会话；key 不变就不重复抢焦。
 	agentEntryKeyboardFocusRequestKey?: number;
+	shortcutInputFocusHandleRef?: Ref<AgentInputShortcutInsertionFocusHandle>;
 	// 渲染本面板的视图是不是「相邻卡片导航热键（alt+↑/↓）的接管者」。只有详情视图注册了那两条
 	// useHotkeys，所以也只有它该传 true；首页底部 shell 终端与首页侧栏 agent 终端不传，alt+↑/↓
 	// 在那里照常发给 agent，而不是被吞进两不管地带。
@@ -145,7 +149,7 @@ export interface AgentTerminalPanelProps {
 
 // 读 facet 真相源（turnOwner/liveness），不再读 legacy `state`；标签文案与旧 state 映射逐项等价
 // （agent⟺running、user+interrupted⟺interrupted、user+failed⟺failed、user 其余⟺awaiting_review、null⟺idle）。
-// awaiting_review 的 live/exited 都落入 user 其余分支，故进程是否已退不改变此处展示（保持旧行为）。
+// 活体中断按 userTurnKind 单独展示；其余 awaiting_review 的 live/exited 沿用同一待审标签。
 export function describeState(summary: RuntimeTaskSessionSummary | null): string {
 	if (!summary) {
 		return "No session yet";
@@ -155,6 +159,10 @@ export function describeState(summary: RuntimeTaskSessionSummary | null): string
 		return "Running";
 	}
 	if (facets.turnOwner === "user") {
+		// 本轮已中断与 PTY 是否退出是两个事实；活体中断仍可继续输入。
+		if (facets.liveness === "live" && facets.userTurnKind === "interrupted") {
+			return "已中断";
+		}
 		if (facets.liveness === "interrupted") {
 			return "Interrupted";
 		}
@@ -168,7 +176,7 @@ export function describeState(summary: RuntimeTaskSessionSummary | null): string
 
 type StatusTagStyle = "neutral" | "success" | "warning" | "danger";
 
-// 同 describeState：读 facet 真相源，样式与旧 state 映射逐项等价（agent→success、user+{interrupted,failed}→danger、user 其余→warning、null→neutral）。
+// 同 describeState：读 facet 真相源；活体中断沿用中断标签的 danger 样式，其余映射保持原样。
 export function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): StatusTagStyle {
 	if (!summary) {
 		return "neutral";
@@ -178,6 +186,9 @@ export function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): Sta
 		return "success";
 	}
 	if (facets.turnOwner === "user") {
+		if (facets.liveness === "live" && facets.userTurnKind === "interrupted") {
+			return "danger";
+		}
 		return facets.liveness === "interrupted" || facets.liveness === "failed" ? "danger" : "warning";
 	}
 	return "neutral";
@@ -782,6 +793,7 @@ function AgentTerminalPanelLayout({
 	onClose,
 	autoFocus: _autoFocus = false,
 	agentEntryKeyboardFocusRequestKey: _agentEntryKeyboardFocusRequestKey,
+	shortcutInputFocusHandleRef,
 	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView:
 		_isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false,
 	minimalHeaderTitle = "Terminal",
@@ -823,6 +835,7 @@ function AgentTerminalPanelLayout({
 		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
 		scrollTerminalToLatest,
+		focusTerminalInputAfterShortcutInsertion,
 		stopTerminal,
 		isScrolledAwayFromLatest,
 	} = sessionControls;
@@ -859,6 +872,16 @@ function AgentTerminalPanelLayout({
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
+	useImperativeHandle(
+		shortcutInputFocusHandleRef,
+		() => ({
+			focusAgentInputAfterShortcutInsertion: () => {
+				flushSync(() => setIsTranscriptReaderOpen(false));
+				return focusTerminalInputAfterShortcutInsertion();
+			},
+		}),
+		[focusTerminalInputAfterShortcutInsertion],
+	);
 	const showVirtualKeyInputBar = isMobile && !isSyntheticShellSession;
 	const mobileControls = useSharedMobileFocusViewCollapsibleControls();
 	const upperToolsExpanded = !mobileControls?.isEnabled || mobileControls.upperNavigationAndToolsExpanded;

@@ -10,9 +10,8 @@ const nativeRecordSchema = z.object({
 		type: z.string().optional(),
 		turn_id: z.string().optional(),
 		originator: z.string().optional(),
-		cli_version: z.string().optional(),
 		source: z.unknown().optional(),
-		turn_attribution: z.object({ turn_trigger: z.string().optional() }).optional(),
+		turn_attribution: z.object({ turn_trigger: z.string().nullish() }).optional(),
 		item: z
 			.object({
 				id: z.string().optional(),
@@ -38,11 +37,10 @@ export async function readCodexNativeReviewStartMessageEvidence(input: {
 	if (
 		metadata?.id !== input.nativeSessionId ||
 		metadata.originator !== "codex-tui" ||
-		metadata.cli_version !== "0.163.0" ||
 		!["cli", "vscode"].includes(String(metadata.source))
 	)
 		throw boundaryCaptureError(
-			"此原生会话或 Codex 版本的独立回退能力尚未取证。",
+			"原生会话身份不符，或转录不符合受支持的 Codex TUI 独立消息事件格式。",
 			"native_independent_user_turn_capability_unverified",
 			"pending",
 			"repair_host_capability",

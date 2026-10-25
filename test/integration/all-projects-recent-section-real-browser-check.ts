@@ -33,6 +33,17 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 			.evaluateAll((elements) =>
 				elements.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")).sort(),
 			);
+	// 保留真实 DOM 顺序；上面的集合断言会 sort，无法发现排序退化成项目 / Task ID。
+	const backlogOrderingFixtureTaskIdsInDisplayOrder = async () =>
+		(
+			await recent
+				.locator("[data-cross-project-task-switcher-task-id]")
+				.evaluateAll((elements) =>
+					elements.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")),
+				)
+		).filter((taskId) =>
+			[input.alphaBacklogTaskId, input.betaBacklogTaskId, input.olderBacklogTaskId].some((id) => id === taskId),
+		);
 	const assertOrder = async (targetPage: Page) => {
 		expect(
 			await targetPage
@@ -72,6 +83,12 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 	await recentRow(input.betaBacklogTaskId).waitFor();
 	expect(await recentRow(input.validationTaskId).count()).toBe(0);
 	expect(await recentRow(input.doneTaskId).count()).toBe(0);
+	await recent.getByLabel("Order recent tasks by").selectOption("most_recent_conversation_progress_only");
+	expect(await backlogOrderingFixtureTaskIdsInDisplayOrder()).toEqual([
+		input.alphaBacklogTaskId,
+		input.betaBacklogTaskId,
+	]);
+	expect(await recent.getByLabel("Order recent tasks by").getAttribute("title")).toContain("Description 更新时间倒序");
 	await filter("Done").click();
 	await recentRow(input.doneTaskId).waitFor();
 	expect(await filter("Backlog").getAttribute("aria-pressed")).toBe("true");
@@ -114,6 +131,11 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 	await recent.getByRole("button", { name: "Show older (last 30 days)", exact: true }).click();
 	await recentRow(input.olderBacklogTaskId).waitFor();
 	expect(await recentRow(input.expiredBacklogTaskId).count()).toBe(0);
+	expect(await backlogOrderingFixtureTaskIdsInDisplayOrder()).toEqual([
+		input.alphaBacklogTaskId,
+		input.betaBacklogTaskId,
+		input.olderBacklogTaskId,
+	]);
 	for (const [suffix, title] of [
 		["remaining", "Recent"],
 		["prompt-cache-warm", "Cache warm · your turn"],
@@ -133,10 +155,20 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 	checks.push("统一 7 / 30 天窗口；Recent 与 Cache warm 可收为 40px 窄列，键盘切换保留焦点");
 
 	const initialUrl = page.url();
+	await filter("Backlog").click();
 	await recentRow(input.betaBacklogTaskId).locator("button").first().click();
 	const editor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
 	await editor.waitFor();
 	expect(page.url()).toBe(initialUrl);
+	await editor.getByRole("button", { name: "Close", exact: true }).click();
+	await editor.waitFor({ state: "detached" });
+	expect(await backlogOrderingFixtureTaskIdsInDisplayOrder()).toEqual([
+		input.alphaBacklogTaskId,
+		input.betaBacklogTaskId,
+		input.olderBacklogTaskId,
+	]);
+	await recentRow(input.betaBacklogTaskId).locator("button").first().click();
+	await editor.waitFor();
 	await editor.getByPlaceholder("Describe the task...").fill("跨项目 Backlog 原地编辑已保存");
 	await editor.getByRole("button", { name: "Save changes", exact: true }).click();
 	await editor.waitFor({ state: "detached" });
@@ -145,11 +177,34 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 		"跨项目编辑保存",
 	);
 	expect(page.url()).toBe(initialUrl);
-	checks.push("Recent 内跨项目 Backlog 原地编辑保存，不切项目");
+	const backlogTaskIdsAfterDescriptionEdit = [
+		input.betaBacklogTaskId,
+		input.alphaBacklogTaskId,
+		input.olderBacklogTaskId,
+	];
+	await observeUntil(
+		async () =>
+			JSON.stringify(await backlogOrderingFixtureTaskIdsInDisplayOrder()) ===
+			JSON.stringify(backlogTaskIdsAfterDescriptionEdit),
+		"跨项目 Description 编辑后实时更新排序",
+	);
+	await page.screenshot({ path: join(evidenceOutputDirectory, "recent-board-backlog-description-order.png") });
+	checks.push(
+		"Backlog 的 Conversation progress 按 Description 兜底；只打开不重排，编辑保存后实时重排，Show older 沿用顺序",
+	);
 
-	await recentRow(input.alphaFocusTaskId).locator("button").first().click();
+	await filter("All").click();
+	// 点首行标题区域，避开元数据行中独立可交互的工具提示。
+	await recentRow(input.alphaFocusTaskId)
+		.locator("button")
+		.first()
+		.click({ position: { x: 12, y: 12 } });
 	await page.getByRole("button", { name: "Back to board", exact: true }).waitFor();
 	await assertOrder(page);
+	await filter("Backlog").click();
+	expect(await backlogOrderingFixtureTaskIdsInDisplayOrder()).toEqual(backlogTaskIdsAfterDescriptionEdit);
+	await page.screenshot({ path: join(evidenceOutputDirectory, "recent-focus-backlog-description-order.png") });
+	await filter("All").click();
 	await filter("Done").click();
 	await recentRow(input.doneTaskId).waitFor();
 	await page.locator("[data-cross-project-focused-task-outside-sections]").waitFor();
@@ -162,7 +217,10 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 	await recent.getByRole("button", { name: "Expand Recent", exact: true }).click();
 	expect(await filter("Done").getAttribute("aria-pressed")).toBe("true");
 	await filter("All").click();
-	await recentRow(input.betaFocusTaskId).locator("button").first().click();
+	await recentRow(input.betaFocusTaskId)
+		.locator("button")
+		.first()
+		.click({ position: { x: 12, y: 12 } });
 	await observeUntil(
 		async () => page.url().includes(`/${betaWorkspaceId}?task=${input.betaFocusTaskId}`),
 		"跨项目 Focus 导航",
@@ -176,6 +234,14 @@ export async function runAllProjectsRecentSectionRealBrowserCheck(input: {
 	await section("prompt-cache-warm")
 		.getByRole("button", { name: "Collapse Cache warm · your turn", exact: true })
 		.waitFor();
+	expect(await recent.getByLabel("Order recent tasks by").inputValue()).toBe("most_recent_conversation_progress_only");
+	await filter("All").click();
+	await filter("Backlog").click();
+	await recentRow(input.betaBacklogTaskId).waitFor();
+	await recentRow(input.alphaBacklogTaskId).waitFor();
+	expect(await backlogOrderingFixtureTaskIdsInDisplayOrder()).toEqual(backlogTaskIdsAfterDescriptionEdit.slice(0, 2));
+	await filter("All").click();
+	await filter("In progress / Review").click();
 	checks.push("Focus 筛选外任务保留独立焦点卡；跨视图与跨项目保留筛选和折叠，刷新恢复默认");
 
 	const browser = page.context().browser();

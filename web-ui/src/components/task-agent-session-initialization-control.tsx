@@ -124,13 +124,18 @@ export function TaskAgentSessionInitializationControl({
 		return null;
 	}
 
-	const commitSessionId = (sourceSessionId: string, sourceSessionWorkingDirectoryPath?: string): void => {
+	const commitSessionId = (
+		sourceSessionId: string,
+		sourceSessionWorkingDirectoryPath?: string,
+		codexConversationStorageHomeDirectoryPath?: string,
+	): void => {
 		onAgentIdChange(initializableAgentId);
 		onChange({
 			sourceAgentId: initializableAgentId,
 			sourceSessionId,
 			sourceSessionReuseMode: value?.sourceSessionReuseMode ?? "resume_existing_session",
 			...(sourceSessionWorkingDirectoryPath ? { sourceSessionWorkingDirectoryPath } : {}),
+			...(codexConversationStorageHomeDirectoryPath ? { codexConversationStorageHomeDirectoryPath } : {}),
 		});
 		setShowValidationError(false);
 	};
@@ -254,6 +259,7 @@ export function TaskAgentSessionInitializationControl({
 														commitSessionId(
 															session.sourceSessionId,
 															session.sessionWorkingDirectoryPath ?? undefined,
+															session.codexConversationStorageHomeDirectoryPath,
 														);
 														setIsSessionBrowserOpen(false);
 													}}

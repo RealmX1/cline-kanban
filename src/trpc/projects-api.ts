@@ -2,6 +2,8 @@ import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import pLimit from "p-limit";
 import type {
+	RuntimeAllProjectsTaskGroupQueryRequest,
+	RuntimeAllProjectsTaskGroupQuerySnapshot,
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
 	RuntimeCrossProjectTaskSwitcherEntry,
@@ -46,6 +48,9 @@ import { isPathWithinRoot } from "../workspace/path-sandbox";
 import type { RuntimeTrpcContext } from "./app-router";
 
 export interface CreateProjectsApiDependencies {
+	getAllProjectsTaskGroupQuerySnapshot: (
+		input: RuntimeAllProjectsTaskGroupQueryRequest,
+	) => Promise<RuntimeAllProjectsTaskGroupQuerySnapshot>;
 	getActiveWorkspacePath: () => string | null;
 	getActiveWorkspaceId: () => string | null;
 	rememberWorkspace: (workspaceId: string, repoPath: string) => void;
@@ -120,6 +125,7 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 	});
 
 	return {
+		getAllProjectsTaskGroupQuerySnapshot: (input) => deps.getAllProjectsTaskGroupQuerySnapshot(input),
 		setProjectVisualIdentity: async (input) => {
 			const identity = await projectVisualIdentityStore.save(input);
 			await deps.broadcastRuntimeProjectsUpdated(null);

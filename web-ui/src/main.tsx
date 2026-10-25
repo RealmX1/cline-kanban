@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import App from "@/App";
 import { AppErrorBoundary } from "@/components/app-error-boundary";
 import { PasscodeGateProvider } from "@/components/passcode-gate";
+import { TaskVisualizationPreviewPage } from "@/components/task-visualization-preview-page";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UserInterfacePreferenceMigrationConflictNotice } from "@/components/user-interface-preference-migration-conflict-notice";
 import { isThemeId } from "@/hooks/use-theme";
@@ -41,7 +42,7 @@ ReactDOM.createRoot(root).render(
 		<TelemetryProvider>
 			<AppErrorBoundary>
 				<TooltipProvider>
-					<App />
+					{window.location.pathname === "/task-visualization-preview" ? <TaskVisualizationPreviewPage /> : <App />}
 					<UserInterfacePreferenceMigrationConflictNotice />
 					<Toaster
 						theme="dark"

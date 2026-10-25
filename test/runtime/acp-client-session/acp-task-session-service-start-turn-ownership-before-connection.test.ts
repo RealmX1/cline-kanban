@@ -108,16 +108,20 @@ describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
 			}),
 		);
 		const connection = createIdentityTestConnection("collaboration-native-id");
+		acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValue(connection as never);
 		settleAsEstablished(connection);
 		await started;
 		expect(service.getSummary(TASK_ID)?.taskConversationSessionMetadata).toEqual(metadata);
-		expect(connection.prompt).toHaveBeenCalledWith(
-			expect.arrayContaining([
-				expect.objectContaining({
-					type: "text",
-					text: expect.stringContaining("协作会话的责任边界"),
-				}),
-			]),
+		// 首发先持久登记再调用协议；连接活体和最终正文都须保持原宿主归属。
+		await vi.waitFor(() =>
+			expect(connection.prompt).toHaveBeenCalledWith(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: "text",
+						text: expect.stringContaining("协作会话的责任边界"),
+					}),
+				]),
+			),
 		);
 	});
 

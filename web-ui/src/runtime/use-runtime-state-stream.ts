@@ -39,6 +39,12 @@ import {
 	resetTaskResourceUsageSnapshotStore,
 } from "@/stores/task-resource-usage-snapshot-store";
 import {
+	attachTaskVisualizationRuntimeStreamSender,
+	deliverTaskVisualizationStreamMessage,
+	notifyTaskVisualizationStreamDisconnected,
+	notifyTaskVisualizationStreamReconnected,
+} from "@/stores/task-visualization-browser-bridge";
+import {
 	readWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
 	subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
 } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
@@ -570,7 +576,11 @@ export function useRuntimeStateStream(
 				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged,
 			);
 
+		let detachTaskVisualizationStreamSender: (() => void) | null = null;
 		const cleanupSocket = () => {
+			notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+			detachTaskVisualizationStreamSender?.();
+			detachTaskVisualizationStreamSender = null;
 			if (socket) {
 				socket.onopen = null;
 				socket.onmessage = null;
@@ -611,6 +621,7 @@ export function useRuntimeStateStream(
 				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection, workspaceMetadataProbeScope));
 				workspaceMetadataProbeScopeJsonDeclaredOnSocket = JSON.stringify(workspaceMetadataProbeScope);
 			} catch (error) {
+				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 				dispatch({
 					type: "stream_disconnected",
 					message: error instanceof Error ? error.message : String(error),
@@ -619,6 +630,12 @@ export function useRuntimeStateStream(
 				return;
 			}
 			socket.onopen = () => {
+				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
+					requestedWorkspaceForConnection,
+					(message) => {
+						if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+					},
+				);
 				// dd2db Y-EVENT-9：每次连上 / 重连都向 runtime 重新签发页面加载 nonce（runtime 重启后旧 nonce 全部失效）。
 				// 签发失败不打断推流；之后带旧 nonce 被拒的请求会由 trpc-client 的重试 link 再重取一次。
 				void reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime().catch(() => {});
@@ -639,12 +656,27 @@ export function useRuntimeStateStream(
 						observeDailyWorkProgressStatisticsUpdated();
 						return;
 					}
+					if (
+						payload.type === "task_visualization_artifacts_updated" ||
+						payload.type === "task_visualization_preview_requested"
+					) {
+						deliverTaskVisualizationStreamMessage(payload);
+						return;
+					}
 					if (payload.type === "prompt_library_updated") {
 						notifyPromptLibraryInvalidated(payload.workspaceId);
 						return;
 					}
 					if (payload.type === "snapshot") {
 						observeDailyWorkProgressStatisticsUpdated(true);
+						detachTaskVisualizationStreamSender?.();
+						detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
+							payload.currentProjectId,
+							(message) => {
+								if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+							},
+						);
+						notifyTaskVisualizationStreamReconnected(payload.currentProjectId);
 						notifyPromptLibraryInvalidated(payload.currentProjectId);
 						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
 						dispatch({ type: "snapshot", payload });
@@ -803,6 +835,7 @@ export function useRuntimeStateStream(
 				if (cancelled) {
 					return;
 				}
+				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 				dispatch({
 					type: "stream_disconnected",
 					message: "Runtime stream disconnected.",
@@ -816,6 +849,7 @@ export function useRuntimeStateStream(
 				if (cancelled) {
 					return;
 				}
+				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 				dispatch({
 					type: "stream_disconnected",
 					message: "Runtime stream connection failed.",

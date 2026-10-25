@@ -28,6 +28,18 @@ describe("queued-task-prompt-delivery-outcome-routing — 送达", () => {
 });
 
 describe("queued-task-prompt-delivery-outcome-routing — 失败原因分档", () => {
+	it.each([
+		{ reason: "terminal_prompt_readiness_timeout", expectedOutcome: "retryable_failure" },
+		{ reason: "native_independent_user_turn_capability_unavailable", expectedOutcome: "terminal_failure" },
+	] as const)("诊断正文不改变 $reason 的原有恢复分档", ({ reason, expectedOutcome }) => {
+		expect(
+			routeQueuedTaskPromptDeliveryTerminalOutcome({
+				status: "delivery_failed",
+				reason,
+				failureNote: "原始诊断正文",
+			}),
+		).toEqual({ outcome: expectedOutcome, failureNote: "原始诊断正文" });
+	});
 	// 「确定一个字节都没进 agent」：回队首等下一轮。
 	it.each([
 		"no_active_terminal_session",
@@ -48,6 +60,7 @@ describe("queued-task-prompt-delivery-outcome-routing — 失败原因分档", (
 	// 「可能已经送到了」：落终态、由人决定。自动重投 = 同一段话送两次。
 	it.each([
 		"submit_confirmation_budget_exhausted",
+		"codex_native_prompt_delivery_unconfirmed",
 		"runtime_restarted_before_confirmation",
 		// 原生门禁在提交前复检失败时，输入框可能已粘贴正文；不能自动重试。
 		"native_independent_user_turn_capability_unavailable",

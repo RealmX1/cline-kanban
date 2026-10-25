@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
+} from "./task-visualization-artifact-contract";
+
+export * from "./task-visualization-artifact-contract";
+
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
@@ -45,6 +54,7 @@ export * from "./permanently-deleted-task-history-contract.js";
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
 export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
+export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
@@ -54,6 +64,7 @@ export type {
 	TaskMainSessionHandoverStatusResponse,
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+export * from "./task-rvf-history-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -205,6 +216,7 @@ export const runtimeTaskAgentSessionInitializationSchema = z
 		sourceSessionId: z.string().trim().uuid(),
 		sourceSessionReuseMode: runtimeTaskAgentSessionInitializationReuseModeSchema,
 		sourceSessionWorkingDirectoryPath: z.string().trim().min(1).optional(),
+		codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	})
 	.superRefine((initialization, ctx) => {
 		if (
@@ -1162,6 +1174,8 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
+	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
 	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
@@ -1898,6 +1912,37 @@ export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskD
 });
 export type RuntimeCrossProjectTaskSwitcherEntry = z.infer<typeof runtimeCrossProjectTaskSwitcherEntrySchema>;
 
+export const runtimeAllProjectsTaskGroupQueryRequestSchema = z.object({
+	recentDays: z.union([z.literal(7), z.literal(30)]).default(7),
+});
+export type RuntimeAllProjectsTaskGroupQueryRequest = z.infer<typeof runtimeAllProjectsTaskGroupQueryRequestSchema>;
+
+const allProjectsTaskGroupQueryProjectIdentitySchema = z.object({
+	workspaceId: z.string(),
+	projectName: z.string(),
+	projectPath: z.string(),
+});
+
+// 监控的空结果必须带完整读取证明；旧服务或失败回退不得默认成 complete。
+export const runtimeAllProjectsTaskGroupQuerySnapshotSchema = z.object({
+	observedAtMs: z.number(),
+	recentDays: z.union([z.literal(7), z.literal(30)]),
+	projects: z.array(
+		z.discriminatedUnion("taskEntriesReadStatus", [
+			allProjectsTaskGroupQueryProjectIdentitySchema.extend({
+				taskEntriesReadStatus: z.literal("complete"),
+				crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema),
+			}),
+			allProjectsTaskGroupQueryProjectIdentitySchema.extend({
+				taskEntriesReadStatus: z.literal("unavailable"),
+				unavailableReason: z.string().min(1),
+				crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema).max(0),
+			}),
+		]),
+	),
+});
+export type RuntimeAllProjectsTaskGroupQuerySnapshot = z.infer<typeof runtimeAllProjectsTaskGroupQuerySnapshotSchema>;
+
 export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
@@ -2446,6 +2491,7 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
 	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
@@ -2460,9 +2506,56 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 ]);
 export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
 
+export const codexNativePromptDeliveryEvidenceSchema = z.object({
+	clientUserMessageId: z.string(),
+	nativeSessionId: z.string(),
+	nativeTurnId: z.string(),
+	nativeUserMessageId: z.string(),
+});
+export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePromptDeliveryEvidenceSchema>;
+
+export const codexNativePromptAcceptanceHistoryQueryProgressSchema = z.object({
+	nextCursor: z.string().nullable(),
+	queriedCursorSha256s: z.array(z.string().length(64)),
+	lastQueryStatus: z.enum(["pending", "history_exhausted", "cursor_read_failed", "cursor_cycle_detected"]),
+});
+export type CodexNativePromptAcceptanceHistoryQueryProgress = z.infer<
+	typeof codexNativePromptAcceptanceHistoryQueryProgressSchema
+>;
+
+export const codexNativePromptDeliveryOperationSchema = z.object({
+	requestOriginRuntimeProcessInstanceId: z.string().optional(),
+	lastAcceptanceReconciliationRuntimeProcessInstanceId: z.string().optional(),
+	clientUserMessageId: z.string().min(1),
+	workspaceId: z.string().min(1),
+	conversationSessionId: z.string().min(1),
+	nativeSessionId: z.string().min(1),
+	workingDirectoryPath: z.string().min(1),
+	promptSha256: z.string().min(1),
+	sendPhase: z.enum(["registered", "request_intent_persisted", "request_invoked", "native_accepted"]),
+	actualSendAttemptCount: z.number().int().nonnegative().max(3),
+	previousTurnId: z.string().nullable(),
+	returnedTurnId: z.string().nullable(),
+	acceptanceHistoryQueryProgress: codexNativePromptAcceptanceHistoryQueryProgressSchema.optional(),
+	historicalAcceptanceEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	lastAcceptanceReconciliationAtIso: z.string().optional(),
+	lastAcceptanceReconciliationStatus: z.enum(["confirmed", "unknown"]).optional(),
+	currentExecutionQualification: z
+		.enum([
+			"current_native_conversation_matches",
+			"current_native_conversation_changed",
+			"current_native_control_unavailable",
+		])
+		.optional(),
+	updatedAtIso: z.string(),
+});
+export type CodexNativePromptDeliveryOperation = z.infer<typeof codexNativePromptDeliveryOperationSchema>;
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2483,6 +2576,8 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 
@@ -2520,6 +2615,7 @@ export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliv
 // 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
 // PTY 单飞槽），前端复算必然漂移。
 export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	"awaiting_native_independent_user_turn_query_retry",
 	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
 	"awaiting_human_reconfirmation_after_runtime_restart",
 	"agent_still_generating",
@@ -2545,7 +2641,67 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 ]);
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
+export const managedTaskPromptDeliveryMessageTypeSchema = z.enum([
+	"human_message",
+	"prompt_library",
+	"programmatic_injection",
+	"task_action",
+	"session_startup",
+	"user_decision_answer",
+	"system_continuation",
+]);
+export type ManagedTaskPromptDeliveryMessageType = z.infer<typeof managedTaskPromptDeliveryMessageTypeSchema>;
+
+// 显示来源与 source 的后台让位语义独立，人工消息的标签不改变投递权限。
+export const managedTaskPromptDeliveryOriginSchema = z.object({
+	messageType: managedTaskPromptDeliveryMessageTypeSchema,
+	sourceLabel: z.string().optional(),
+});
+export type ManagedTaskPromptDeliveryOrigin = z.infer<typeof managedTaskPromptDeliveryOriginSchema>;
+
+export const managedTaskPromptDeliveryMetadataSchema = z.object({
+	messageType: managedTaskPromptDeliveryMessageTypeSchema,
+	deliveryStrategy: z.enum(["immediate", "after_agent_turn", "session_startup"]),
+	sourceLabel: z.string().nullable(),
+	imageAttachmentCount: z.number().int().nonnegative(),
+	// 仅保存按附件顺序计算的内容摘要；旧记录缺省，缺失时不能宣称有图请求相同。
+	imageAttachmentContentsSha256: z
+		.string()
+		.regex(/^[a-f0-9]{64}$/u)
+		.optional(),
+	cancellationSupported: z.boolean().optional(),
+	terminalDeliveryReceipt: injectionLedgerTerminalDeliveryReceiptSchema.nullable(),
+	targetRuntimeSessionIncarnationId: z.string().nullable().optional(),
+	targetNativeSessionId: z.string().nullable().optional(),
+	injectionLedgerReference: z.object({ taskId: z.string(), idempotencyKey: z.string() }).optional(),
+	recoveredTerminalReceiptAtEpochMs: z.number().optional(),
+	previousUnconfirmedTerminalDeliveryReceipt: injectionLedgerTerminalDeliveryReceiptSchema.nullable().optional(),
+	previousUnconfirmedDeliveryFailureNote: z.string().nullable().optional(),
+});
+export type ManagedTaskPromptDeliveryMetadata = z.infer<typeof managedTaskPromptDeliveryMetadataSchema>;
+
+const nativeIndependentUserTurnQueryRecoverySchema = z.object({
+	consecutiveQueryFailureCount: z.number().int().positive(),
+	waitingStartedAtEpochMs: z.number(),
+	lastQueryFailureAtEpochMs: z.number(),
+	lastQueryFailureReason: z.string(),
+	nextQueryRetryAtEpochMs: z.number().nullable(),
+	recoveredAtEpochMs: z.number().nullable(),
+});
+
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	// 旧条目缺省是等待队列，即时及启动消息不进入 idle 调度。
+	managedDelivery: managedTaskPromptDeliveryMetadataSchema.optional(),
+	// 新字段可选；旧 handed_to_transport 条目缺少零写入证明时，仍按未知处理。
+	nativeIndependentUserTurnSubmissionProgress: z
+		.object({
+			predecessorNativeTurnId: z.string().min(1),
+			submissionMayHaveStartedAtEpochMs: z.number().nullable(),
+		})
+		.optional(),
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
+	// 只恢复尚未认领、未写入 transport 的查询；可选字段保证旧队列继续可读。
+	nativeIndependentUserTurnPreflightQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
 	// 取消 / 重排 / 合并的唯一句柄。由构造 mutation 的一侧生成（randomUUID），于是同一条意图重发天然幂等。
 	queueEntryId: z.string(),
 	// **会话 id**，不是看板卡片 id：by-the-way 子会话有自己独立的队列。
@@ -2702,6 +2858,14 @@ export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDe
 export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
 
 export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	deliveryId: z.string().optional(),
+	managedDelivery: managedTaskPromptDeliveryMetadataSchema.optional(),
+	nativeIndependentUserTurnSubmissionProgress:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnSubmissionProgress,
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnBeforeSubmissionQueryRecovery,
+	nativeIndependentUserTurnPreflightQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnPreflightQueryRecovery,
 	queueEntryId: z.string(),
 	taskId: z.string(),
 	deliveryState: queuedTaskPromptDeliveryStateSchema,
@@ -2713,6 +2877,8 @@ export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
 	// 前端靠它决定要不要播 5s 高亮、要不要发确认 mutation。
 	awaitsHumanReconfirmationAfterRuntimeRestart: z.boolean(),
 	deliveryAttemptCount: z.number().int().nonnegative(),
+	// 真正交给 transport 时的开始时间；旧 runtime 投影缺省时保留未知，不冒充结束时间。
+	lastAttemptedAt: z.number().nullable().optional(),
 	lastDeliveryFailureNote: z.string().nullable(),
 	sourcePromptLibraryEntryId: z.string().nullable(),
 	// true = 库里那条的正文在入队之后被改过；null = 没有来源条目，或来源条目已被删。
@@ -2745,6 +2911,16 @@ export const runtimeTaskPromptDeliveryQueueResponseSchema = z.object({
 	ok: z.boolean(),
 	queue: workspaceQueuedTaskPromptDeliverySnapshotSchema.nullable(),
 	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema.nullable(),
+	// 按需读取时提供真实实例路径；旧 runtime 缺省时前端仍可复制已知标识。
+	queuedTaskPromptDeliveryDebugReferenceContext: z
+		.object({
+			workspaceId: z.string(),
+			workspaceProjectPath: z.string(),
+			queuedTaskPromptDeliveriesFilePath: z.string(),
+			taskMessageInjectionLedgerFilePath: z.string(),
+		})
+		.nullable()
+		.optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskPromptDeliveryQueueResponse = z.infer<typeof runtimeTaskPromptDeliveryQueueResponseSchema>;
@@ -2886,6 +3062,8 @@ export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema =
 });
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
 	z.object({
 		type: z.literal("task_lookup_conversation_updated"),
 		conversationId: z.string().uuid(),
@@ -2937,6 +3115,8 @@ export const runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSc
 });
 // 浏览器 → 服务端的状态流消息（其余消息都是服务端 → 浏览器）。
 export const runtimeStateStreamClientMessageSchema = z.discriminatedUnion("type", [
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
 	runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema,
 ]);
 export type RuntimeStateStreamClientMessage = z.infer<typeof runtimeStateStreamClientMessageSchema>;
@@ -3925,6 +4105,7 @@ export type RuntimeAvailableAgentSessionPreviewTurn = z.infer<typeof runtimeAvai
 export const runtimeAvailableAgentSessionSummarySchema = z.object({
 	sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	sourceSessionId: z.string().uuid(),
+	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	sessionTitle: z.string(),
 	sessionWorkingDirectoryPath: z.string().nullable(),
 	gitBranchName: z.string().nullable(),
@@ -3933,6 +4114,14 @@ export const runtimeAvailableAgentSessionSummarySchema = z.object({
 	previewConversationTurns: z.array(runtimeAvailableAgentSessionPreviewTurnSchema).max(3),
 });
 export type RuntimeAvailableAgentSessionSummary = z.infer<typeof runtimeAvailableAgentSessionSummarySchema>;
+export type {
+	RuntimeCodexConversationStorageOperationRequest,
+	RuntimeCodexConversationStorageOperationResponse,
+} from "./codex-conversation-storage-api-contract";
+export {
+	runtimeCodexConversationStorageOperationRequestSchema,
+	runtimeCodexConversationStorageOperationResponseSchema,
+} from "./codex-conversation-storage-api-contract";
 
 export const runtimeAvailableAgentSessionsRequestSchema = z.object({
 	agentId: runtimeResumableAgentSessionSourceAgentIdSchema,
@@ -4248,7 +4437,26 @@ export const runtimeTaskChatMessagesResponseSchema = z.object({
 });
 export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMessagesResponseSchema>;
 
+// 任务工作台的只读历史，与会启动或恢复 agent 的聊天操作分开。
+export const runtimeTaskConversationHistoryPageRequestSchema = z.object({
+	workspaceTaskId: z.string().min(1),
+	taskConversationSessionId: z.string().min(1),
+	cursor: z.string().max(4096).nullish(),
+});
+export type RuntimeTaskConversationHistoryPageRequest = z.infer<typeof runtimeTaskConversationHistoryPageRequestSchema>;
+export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
+	availability: z.enum(["available", "partially_available", "unavailable"]),
+	messages: z.array(runtimeTaskChatMessageSchema),
+	nextCursor: z.string().nullable(),
+	notice: z.string().nullable(),
+});
+export type RuntimeTaskConversationHistoryPageResponse = z.infer<
+	typeof runtimeTaskConversationHistoryPageResponseSchema
+>;
+
 export const runtimeTaskChatSendRequestSchema = z.object({
+	deliveryRequestId: z.string().min(1).optional(),
+	deliveryOrigin: managedTaskPromptDeliveryOriginSchema.optional(),
 	taskId: z.string(),
 	// 显式会话选择（含前主会话）；省略且 taskId 是卡片 ID 时投给当前主会话。
 	targetTaskConversationSessionId: z.string().optional(),
@@ -4300,6 +4508,7 @@ export type RuntimeReleaseDeferredRestorationHarnessNotificationsResponse = z.in
 >;
 
 export const runtimeTaskChatSendResponseSchema = z.object({
+	deliveryId: z.string().optional(),
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	message: runtimeTaskChatMessageSchema.nullable().optional(),
@@ -4945,6 +5154,7 @@ export const runtimeHookEventSchema = z.enum([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	"main_agent_conversation_context_compaction_started",
 	// harness 的 PostCompact（Claude / Codex / Kimi）：主对话上下文压缩已完成。专用事件、不复用 activity：
 	// 它只推进 Cache warm 起点，不该顺带推进「对话推进」药丸、刷新活动行或进入通知捕获。
 	"main_agent_conversation_context_compaction_completed",
@@ -5121,6 +5331,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// `trigger` 派生）。缺失时服务端按当时的回合归属判定。
 	mainAgentConversationContextCompactionTriggerReportedByHarness:
 		runtimeMainAgentConversationContextCompactionTriggerSchema.optional(),
+	// Codex 压缩阶段的原生回合与启动代际；仅用于关联待确认投递，不能作为接受证明。
+	mainAgentConversationContextCompactionNativeTurnId: z.string().min(1).max(200).optional(),
+	hookRuntimeSessionIncarnationId: z.string().uuid().optional(),
 	// 仅压缩完成事件、且 harness 报了压缩后上下文大小时携带（Kimi 的 estimatedTokenCount）。
 	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: z.number().int().nonnegative().optional(),
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，

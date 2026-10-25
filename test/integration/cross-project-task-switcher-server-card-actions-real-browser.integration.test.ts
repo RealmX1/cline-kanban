@@ -18,6 +18,7 @@ import {
 	waitForChildProcessExit,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 import { runTaskRetainedCommittedLineChangeRealBrowserCheck } from "./task-retained-committed-line-change-real-browser-check";
+import { runTaskSessionConnectionRetryGroupingRealBrowserCheck } from "./task-session-connection-retry-grouping-real-browser-check";
 
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
 const runRelationModelingBrowserCheck =
@@ -25,7 +26,10 @@ const runRelationModelingBrowserCheck =
 const runPostDeployVerificationFollowUpBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_POST_DEPLOY_VERIFICATION_FOLLOW_UP_BROWSER_CHECK === "1";
 const runAllProjectsRecentBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PROJECTS_RECENT_BROWSER_CHECK === "1";
+const runConnectionRetryGroupingBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_CONNECTION_RETRY_GROUPING_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
+	runConnectionRetryGroupingBrowserCheck ||
 	runAllProjectsRecentBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
 	runRelationModelingBrowserCheck ||
@@ -77,16 +81,40 @@ it.skipIf(!runRealBrowserCheck)(
 		const isolatedExecutableDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-stub-executables");
 		mkdirSync(isolatedExecutableDirectory);
 		const agentLaunchEvidencePath = join(fixture.fixtureRootDirectoryPath, "isolated-agent-launch-evidence.jsonl");
+		const retryActivationPath = join(fixture.fixtureRootDirectoryPath, "activate-connection-retry-output");
+		const retryRecoveryPath = join(fixture.fixtureRootDirectoryPath, "stop-connection-retry-output");
 		writeFileSync(
 			join(isolatedExecutableDirectory, "claude"),
 			`#!/usr/bin/env node
 const fs = require('node:fs');
 if (process.argv.includes('--version') || process.argv.includes('--help')) { console.log('2.1.288 (Claude Code)'); process.exit(0); }
-fs.appendFileSync(process.env.ISOLATED_AGENT_LAUNCH_EVIDENCE_PATH, JSON.stringify({ pid: process.pid, cwd: process.cwd(), resumePriorConversation: process.argv.includes('--continue') || process.argv.includes('--resume') }) + '\\n');
-process.stdout.write('Claude Code v2.1.288\\n> ');
+const lineBreak = String.fromCharCode(10);
+fs.appendFileSync(process.env.ISOLATED_AGENT_LAUNCH_EVIDENCE_PATH, JSON.stringify({ pid: process.pid, cwd: process.cwd(), resumePriorConversation: process.argv.includes('--continue') || process.argv.includes('--resume') }) + lineBreak);
+process.stdout.write('Claude Code v2.1.288' + lineBreak + '> ');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.resume();
-process.stdin.on('data', bytes => { if (bytes.includes(3)) process.exit(0); });
+let connectionRetryFixtureStarted = false;
+let connectionRetryOutputStopped = false;
+function startConnectionRetryFixture(prompt) {
+ if (connectionRetryFixtureStarted || !prompt.includes('NETWORK_RETRY_GROUPING_BROWSER_FIXTURE')) return;
+ connectionRetryFixtureStarted = true;
+ process.stdout.write("ModuleNotFoundError: No module named 'yaml'" + lineBreak + '> ');
+ fs.appendFileSync(process.env.ISOLATED_AGENT_LAUNCH_EVIDENCE_PATH, JSON.stringify({ event: 'python_error_fixture_emitted' }) + lineBreak);
+}
+startConnectionRetryFixture(process.argv.join(' '));
+process.stdin.on('data', bytes => {
+ if (bytes.includes(3)) process.exit(0);
+ startConnectionRetryFixture(bytes.toString());
+});
+setInterval(() => {
+ if (!connectionRetryFixtureStarted || connectionRetryOutputStopped) return;
+ if (fs.existsSync(process.env.ISOLATED_AGENT_CONNECTION_RETRY_RECOVERY_MARKER_PATH)) {
+  connectionRetryOutputStopped = true;
+  fs.appendFileSync(process.env.ISOLATED_AGENT_LAUNCH_EVIDENCE_PATH, JSON.stringify({ event: 'connection_retry_output_stopped' }) + lineBreak);
+ } else if (fs.existsSync(process.env.ISOLATED_AGENT_CONNECTION_RETRY_ACTIVATION_MARKER_PATH)) {
+  process.stdout.write(lineBreak + 'API Error: Connection closed mid-response. The response above may be incomplete.' + lineBreak + '> ');
+ }
+}, 500);
 setInterval(() => {}, 1000);
 `,
 			{ mode: 0o755 },
@@ -101,6 +129,8 @@ setInterval(() => {}, 1000);
 			NODE_ENV: "development",
 			KANBAN_RUNTIME_PORT: String(runtimePort),
 			ISOLATED_AGENT_LAUNCH_EVIDENCE_PATH: agentLaunchEvidencePath,
+			ISOLATED_AGENT_CONNECTION_RETRY_ACTIVATION_MARKER_PATH: retryActivationPath,
+			ISOLATED_AGENT_CONNECTION_RETRY_RECOVERY_MARKER_PATH: retryRecoveryPath,
 		});
 		const nodeCliArguments = [
 			"--require",
@@ -338,6 +368,47 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				expect(pageErrors).toEqual([]);
 				return;
 			}
+			if (runConnectionRetryGroupingBrowserCheck) {
+				const taskId = await createTask(firstProject.repositoryPath, "NETWORK_RETRY_GROUPING_BROWSER_FIXTURE");
+				await runtimeClient(alphaWorkspaceId).taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress.mutate(
+					{ taskId },
+				);
+				await observeUntil(
+					async () =>
+						existsSync(agentLaunchEvidencePath) &&
+						readFileSync(agentLaunchEvidencePath, "utf8").includes("python_error_fixture_emitted"),
+					"隔离 Agent 已输出 Python 错误",
+				);
+				await runTaskSessionConnectionRetryGroupingRealBrowserCheck({
+					page,
+					webUiOrigin,
+					workspaceId: alphaWorkspaceId,
+					taskId,
+					evidenceOutputDirectory,
+					observeUntil,
+					readSession: async () =>
+						(await runtimeClient(alphaWorkspaceId).workspace.getState.query()).sessions[taskId],
+					activateErrorOutput: () => writeFileSync(retryActivationPath, "1"),
+					stopErrorOutput: async () => {
+						writeFileSync(retryRecoveryPath, "1");
+						await observeUntil(
+							async () =>
+								readFileSync(agentLaunchEvidencePath, "utf8").includes("connection_retry_output_stopped"),
+							"隔离 Agent 停止输出连接错误",
+						);
+					},
+					recordTrustedRecovery: async () => {
+						await runtimeClient(alphaWorkspaceId).hooks.ingest.mutate({
+							workspaceId: alphaWorkspaceId,
+							taskId,
+							event: "activity",
+							metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Bash" },
+						});
+					},
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
 			if (runAllProjectsRecentBrowserCheck) {
 				const betaBacklogTaskId = await createTask(secondProject.repositoryPath, "跨项目近期待办");
 				const olderBacklogTaskId = await createTask(firstProject.repositoryPath, "二十天前的待办");
@@ -349,6 +420,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const recentFixtureBacklog = recentFixtureState.board.columns.find((column) => column.id === "backlog");
 				if (!recentFixtureBacklog) throw new Error("缺少隔离待办列");
 				for (const [taskId, ageDays] of [
+					[singleStartId, 1],
 					[olderBacklogTaskId, 20],
 					[expiredBacklogTaskId, 60],
 				] as const) {
@@ -369,6 +441,19 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 					board: recentFixtureState.board,
 					sessions: recentFixtureState.sessions,
 					expectedRevision: recentFixtureState.revision,
+				});
+				const betaRecentFixtureClient = runtimeClient(betaWorkspaceId);
+				const betaRecentFixtureState = await betaRecentFixtureClient.workspace.getState.query();
+				const betaRecentFixtureCard = betaRecentFixtureState.board.columns
+					.find((column) => column.id === "backlog")
+					?.cards.find((card) => card.id === betaBacklogTaskId);
+				if (!betaRecentFixtureCard) throw new Error("缺少跨项目排序测试卡片");
+				betaRecentFixtureCard.updatedAt = betaRecentFixtureCard.taskDescriptionLastUpdatedAt =
+					Date.now() - 2 * 24 * 60 * 60_000;
+				await betaRecentFixtureClient.workspace.saveState.mutate({
+					board: betaRecentFixtureState.board,
+					sessions: betaRecentFixtureState.sessions,
+					expectedRevision: betaRecentFixtureState.revision,
 				});
 				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
 					taskId: singleStartId,

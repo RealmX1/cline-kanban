@@ -13,6 +13,7 @@ import type {
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "./api-contract";
+import { resolveManagedTaskPromptDeliveryMetadata } from "./managed-task-prompt-delivery";
 import { isQueuedTaskPromptDeliveryAwaitingDispatch } from "./queued-task-prompt-delivery-dispatch-eligibility";
 import { buildQueuedTaskPromptDeliveryTextPreview } from "./queued-task-prompt-delivery-merge";
 
@@ -69,16 +70,39 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 	// 于是 UI 永远不会显示一条「排队中」、而运行时其实已经不会再发它的条目。
 	const deliveryState = entry.deliveryState === "queued" && !awaitingDispatch ? "expired" : entry.deliveryState;
 	return {
+		...(entry.nativeIndependentUserTurnSubmissionProgress
+			? { nativeIndependentUserTurnSubmissionProgress: entry.nativeIndependentUserTurnSubmissionProgress }
+			: {}),
+		...(entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery
+			? {
+					nativeIndependentUserTurnBeforeSubmissionQueryRecovery:
+						entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery,
+				}
+			: {}),
+		...(entry.nativeIndependentUserTurnPreflightQueryRecovery
+			? {
+					nativeIndependentUserTurnPreflightQueryRecovery: entry.nativeIndependentUserTurnPreflightQueryRecovery,
+				}
+			: {}),
+		deliveryId: entry.queueEntryId,
+		managedDelivery: resolveManagedTaskPromptDeliveryMetadata(entry),
 		queueEntryId: entry.queueEntryId,
 		taskId: entry.taskId,
 		deliveryState,
 		textPreview: buildQueuedTaskPromptDeliveryTextPreview(entry.text),
 		textLength: entry.text.length,
 		deliverTogetherWithNextQueuedEntry: entry.deliverTogetherWithNextQueuedEntry,
-		dispatchBlockReason: awaitingDispatch ? input.resolveDispatchBlockReasonForQueuedEntry(entry) : null,
+		dispatchBlockReason:
+			entry.deliveryState === "handed_to_transport" &&
+			entry.nativeIndependentUserTurnBeforeSubmissionQueryRecovery?.recoveredAtEpochMs === null
+				? "awaiting_native_independent_user_turn_query_retry"
+				: awaitingDispatch
+					? input.resolveDispatchBlockReasonForQueuedEntry(entry)
+					: null,
 		awaitsHumanReconfirmationAfterRuntimeRestart:
 			isQueuedTaskPromptDeliveryAwaitingHumanReconfirmationAfterRuntimeRestart(entry),
 		deliveryAttemptCount: entry.deliveryAttemptCount,
+		lastAttemptedAt: entry.lastAttemptedAt,
 		lastDeliveryFailureNote: entry.lastDeliveryFailureNote,
 		sourcePromptLibraryEntryId: entry.sourcePromptLibraryEntryId,
 		sourcePromptLibraryEntryTextChangedSinceEnqueue: resolveSourcePromptLibraryEntryTextChangedSinceEnqueue(

@@ -1,3 +1,4 @@
+import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 // 三条 session transport 的统一发送出口：ACP（stdio 子进程）/ Cline SDK（进程内）/ 终端 PTY。
 //
 // 从 `runtime-api.ts` 的 handler 里原样提出来，**不改任何行为**。抽取的唯一理由是调用方多了一类：
@@ -16,33 +17,52 @@ import type {
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
 } from "../core/api-contract";
+import { terminalDeliveryReceiptSchema } from "../core/api-contract";
 import { parseTaskChatSendRequest } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
 } from "../core/task-message-injection-ledger";
+import {
+	NativeIndependentUserTurnDeliveryError,
+	NativeIndependentUserTurnMessageAlreadyAccepted,
+	NativeIndependentUserTurnSubmissionRecoverySuspended,
+} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import {
+	beginManagedTaskPromptDelivery,
+	buildManagedTaskPromptDeliveryOrigin,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
+} from "../state/managed-task-prompt-delivery-coordinator";
+import { getThisRuntimeProcessInstanceId } from "../state/runtime-process-instance-heartbeat-registry";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import type { TaskChatInputDeliveryOutcomeObserver, TerminalSessionManager } from "../terminal/session-manager";
 import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../terminal/stash-task-terminal-input-box-into-prompt-library";
 import type { RuntimeTrpcWorkspaceScope } from "./app-router";
 
 export interface SendTaskChatMessageAcrossSessionTransportsDependencies {
+	// 真实 runtime 启用；裸 transport 单测不读写用户的持久工作区。
+	recordManagedTaskPromptDeliveries?: boolean;
+	managedTerminalDeliveryCancellationKey?: string;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
 	loadScopedRuntimeConfig: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeConfigState>;
 	resolveClineTaskSessionLaunchConfig: () => Promise<ResolvedClineLaunchConfig>;
 	broadcastTaskChatCleared?: (workspaceId: string, taskId: string) => void;
-	// 进程内并联回执，与账本登记**并联**而非取代它：PTY 分支同步只返回
+	// 进程内回执：PTY 分支同步只返回
 	// accepted_pending_submit_confirmation，真实终态只经这个 observer 回来。排队投递 dispatcher 靠它
 	// 把一条队列条目从 handed_to_transport 结算掉。它是函数级依赖，**不进**请求 schema——
 	// 跨进程调用方（CLI）没有也不该有这个能力。
 	onProgrammaticTerminalDeliverySettled?: TaskChatInputDeliveryOutcomeObserver;
+	// 即时投递默认由出口回写账本；排队投递必须先在队列锁内核验当前尝试，再由存储层镜像有效终态。
+	// 不能用锁外查询托管者代替此归属：查完后旧 transport 仍可能失去托管权。
+	programmaticTerminalDeliveryReceiptPersistenceOwner?: "task_chat_transport" | "queued_task_prompt_delivery_store";
 	// 任务级 CLI 回执仍按宿主卡寻址；实际投递可以是交接后的独立主会话。
 	programmaticInjectionLedgerTaskId?: string;
 	// 领域级投递授权在受理前与每次实际终端写入前重读，覆盖持久队列已交给 transport 的停止竞争。
-	validateBeforeTerminalWrite?: () => Promise<void>;
+	validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator;
 }
 
 function buildTerminalTaskChatDeliveryMessage(input: {
@@ -74,8 +94,79 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 	workspaceScope: RuntimeTrpcWorkspaceScope,
 	input: RuntimeTaskChatSendRequest,
 ): Promise<RuntimeTaskChatSendResponse> {
+	if (!deps.recordManagedTaskPromptDeliveries || isClineClearSlashCommand(input.text))
+		return sendTaskChatMessageThroughSelectedTransport(deps, workspaceScope, input);
+	try {
+		parseTaskChatSendRequest(input);
+		const acp = await deps.getScopedAcpTaskSessionService(workspaceScope);
+		const terminal = await deps.getScopedTerminalManager(workspaceScope);
+		const summary = acp.getSummary(input.taskId) ?? terminal.getSummary(input.taskId);
+		const registration = await beginManagedTaskPromptDelivery({
+			workspaceId: workspaceScope.workspaceId,
+			taskId: input.taskId,
+			workspaceTaskId: summary?.taskConversationSessionMetadata?.workspaceTaskId,
+			text: input.text,
+			origin: buildManagedTaskPromptDeliveryOrigin(input),
+			deliveryRequestId: input.deliveryRequestId,
+			idempotencyKey: input.idempotencyKey,
+			injectionLedgerTaskId: deps.programmaticInjectionLedgerTaskId,
+			imageAttachments: input.images,
+			summary,
+			cancellationSupported:
+				summary != null &&
+				!isRuntimeAgentSessionSummaryDrivenByAcpProtocol(summary) &&
+				summary.sessionTransport !== "in_process_cline_sdk",
+		});
+		const { handle, entry } = registration;
+		if (!registration.newlyRegistered)
+			return {
+				ok: entry.deliveryState !== "settled_failed" && entry.deliveryState !== "cancelled",
+				deliveryId: handle.deliveryId,
+				summary: summary ?? null,
+				message: buildTerminalTaskChatDeliveryMessage(input),
+				terminalDelivery: terminalDeliveryReceiptSchema.parse(
+					entry.managedDelivery?.terminalDeliveryReceipt ?? {
+						status: "accepted_pending_submit_confirmation",
+						reason: null,
+					},
+				),
+			};
+		const response = await sendTaskChatMessageThroughSelectedTransport(
+			{
+				...deps,
+				managedTerminalDeliveryCancellationKey: input.idempotencyKey ?? handle.deliveryId,
+				onProgrammaticTerminalDeliverySettled: (outcome) => {
+					try {
+						deps.onProgrammaticTerminalDeliverySettled?.(outcome);
+					} finally {
+						settleManagedTaskPromptDeliveryWithoutBlocking(handle, outcome);
+					}
+				},
+			},
+			workspaceScope,
+			input,
+		);
+		if (response.terminalDelivery && response.terminalDelivery.status !== "accepted_pending_submit_confirmation")
+			await handle.settle(response.terminalDelivery).catch(() => undefined);
+		else if (!response.ok)
+			await handle
+				.settle({ status: "delivery_failed", reason: "no_active_terminal_session" }, response.error)
+				.catch(() => undefined);
+		return { ...response, deliveryId: handle.deliveryId };
+	} catch (error) {
+		return { ok: false, summary: null, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function sendTaskChatMessageThroughSelectedTransport(
+	deps: SendTaskChatMessageAcrossSessionTransportsDependencies,
+	workspaceScope: RuntimeTrpcWorkspaceScope,
+	input: RuntimeTaskChatSendRequest,
+): Promise<RuntimeTaskChatSendResponse> {
 	try {
 		const body = parseTaskChatSendRequest(input);
+		const transportPersistsProgrammaticTerminalDeliveryReceipt =
+			deps.programmaticTerminalDeliveryReceiptPersistenceOwner !== "queued_task_prompt_delivery_store";
 		const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 		// 同 getTaskChatMessages：按活会话盖的通道章分派，而不是「账本里有没有 entry」。
 		if (isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acpTaskSessionService.getSummary(body.taskId))) {
@@ -86,9 +177,10 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 			}
 			await deps.validateBeforeTerminalWrite?.();
 			const injectionIdempotencyKey = body.idempotencyKey ?? null;
-			const injectionLedgerPath = injectionIdempotencyKey
-				? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
-				: null;
+			const injectionLedgerPath =
+				injectionIdempotencyKey && transportPersistsProgrammaticTerminalDeliveryReceipt
+					? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
+					: null;
 			const observesAcceptance =
 				injectionIdempotencyKey != null || deps.onProgrammaticTerminalDeliverySettled != null;
 			const acpSummary = await acpTaskSessionService.sendTaskSessionInput(
@@ -202,11 +294,12 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					// runtime 在投递落定（或失败）后就地改写同一条记录——CLI 早已退出，这是唯一能把
 					// 「pending → 终态」补上的地方。写账本失败不阻断会话：启动清扫会兜底判失败。
 					const injectionIdempotencyKey = body.idempotencyKey ?? null;
+					// 原生 journal 定位独立于终态回执托管权；排队投递同样须在原生发送前持久化意图。
 					const injectionLedgerPath = injectionIdempotencyKey
 						? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
 						: null;
 					const observesProgrammaticDeliveryOutcome =
-						(injectionLedgerPath != null && injectionIdempotencyKey != null) ||
+						(transportPersistsProgrammaticTerminalDeliveryReceipt && injectionLedgerPath != null) ||
 						deps.onProgrammaticTerminalDeliverySettled != null;
 					// 争用策略在受理这一刻读一次（一条投递最多活 ~196s，全程用同一份策略）。
 					// 抢占执行者就是 Ctrl+S 那条链路本身，只是 origin 标成「被程序化投递抢占」，
@@ -217,18 +310,63 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					try {
 						await deps.validateBeforeTerminalWrite?.();
 					} catch (error) {
+						if (error instanceof NativeIndependentUserTurnSubmissionRecoverySuspended)
+							return {
+								ok: true,
+								summary: null,
+								terminalDelivery: { status: "accepted_pending_submit_confirmation", reason: null },
+							};
+						if (error instanceof NativeIndependentUserTurnMessageAlreadyAccepted)
+							return {
+								ok: true,
+								summary: terminalManager.getSummary(body.taskId),
+								message: buildTerminalTaskChatDeliveryMessage(body),
+								terminalDelivery: { status: "delivered_and_submit_confirmed", reason: null },
+							};
+						const failureNote = error instanceof Error ? error.message : String(error);
 						return {
 							ok: false,
 							summary: null,
-							error: error instanceof Error ? error.message : String(error),
-							terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+							error: failureNote,
+							terminalDelivery: {
+								status: "delivery_failed",
+								reason:
+									error instanceof NativeIndependentUserTurnDeliveryError
+										? error.reason
+										: "cancelled_before_delivery",
+								failureNote,
+							},
 						};
 					}
+					const targetTerminalSummary =
+						body.source === "rvf_automatic_closeout" ? terminalManager.getSummary(body.taskId) : null;
+					const rvfCloseoutCompactionConfirmationPersistence =
+						body.source === "rvf_automatic_closeout" && injectionIdempotencyKey && targetTerminalSummary
+							? await resolveRvfCloseoutCompactionConfirmationPersistence({
+									workspaceId: workspaceScope.workspaceId,
+									summary: targetTerminalSummary,
+									idempotencyKey: injectionIdempotencyKey,
+									promptText: body.text,
+								})
+							: null;
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
+						...(rvfCloseoutCompactionConfirmationPersistence
+							? { rvfCloseoutCompactionConfirmationPersistence }
+							: {}),
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
-						idempotencyKey: injectionIdempotencyKey,
+						idempotencyKey: injectionIdempotencyKey ?? deps.managedTerminalDeliveryCancellationKey,
+						...(injectionLedgerPath && injectionIdempotencyKey
+							? {
+									codexNativeDeliveryLedgerBinding: {
+										requestOriginRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
+										ledgerPath: injectionLedgerPath,
+										ledgerTaskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
+										idempotencyKey: injectionIdempotencyKey,
+									},
+								}
+							: {}),
 						mayAutoStashAbsentHumanInputBox:
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 						preemptivelyStashHumanInputBox: async (taskId) => {
@@ -249,19 +387,29 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 							// 与「确定性失败再等也是同一句话」的区分，以及日志里的真实判据。
 							return stash.outcome;
 						},
-						// 账本登记与进程内回执**并联**，不是二选一：账本是跨进程契约（CLI 早已退出，runtime 是唯一
-						// 能把 pending 补成终态的地方），进程内 observer 则是排队投递 dispatcher 结算队列条目的唯一
-						// 途径。两者都缺席时才整个省掉这个字段——抽取前的行为与此逐字等价。
+						// 即时投递并联回写账本与进程内回执；排队投递只通知 dispatcher，由它在队列锁内核验当前
+						// 托管尝试后落定，再镜像账本。旧 transport 迟到回执不能抢先写入不可覆盖的账本终态。
 						...(observesProgrammaticDeliveryOutcome
 							? {
 									onDeliveryOutcome: (outcome) => {
-										if (injectionLedgerPath && injectionIdempotencyKey) {
+										if (
+											transportPersistsProgrammaticTerminalDeliveryReceipt &&
+											injectionLedgerPath &&
+											injectionIdempotencyKey
+										) {
 											void recordTaskMessageTerminalDeliveryOutcome({
 												ledgerPath: injectionLedgerPath,
 												taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
 												idempotencyKey: injectionIdempotencyKey,
 												status: outcome.status,
 												...(outcome.reason ? { failureReason: outcome.reason } : {}),
+												...(outcome.failureNote ? { failureDetail: outcome.failureNote } : {}),
+												...(outcome.codexNativePromptDeliveryEvidence
+													? {
+															codexNativePromptDeliveryEvidence:
+																outcome.codexNativePromptDeliveryEvidence,
+														}
+													: {}),
 												nowIso: new Date().toISOString(),
 											}).catch(() => {
 												// 账本写失败不影响会话本身；仍 pending 的记录由 runtime 启动清扫兜底判失败。

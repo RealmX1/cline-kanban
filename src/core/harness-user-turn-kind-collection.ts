@@ -22,13 +22,20 @@ import type { RuntimeTaskHookActivity } from "./api-contract.js";
 // signal 脆弱（Claude 改工具名即静默退化）由调用点 expected-but-absent 日志兜底（hooks-api.ts）。
 export function classifyHookUserTurnKind(
 	metadata: Partial<RuntimeTaskHookActivity> | null | undefined,
-): "permission" | "question" | "plan_review" | null {
+): "permission" | "question" | "plan_review" | "interrupted" | "error" | null {
 	if (!metadata) {
 		return null;
 	}
 	if (metadata.source === "codex" && metadata.toolName === "request_user_input") return "question";
-	if (metadata.source?.trim().toLowerCase() !== "claude") {
+	const source = metadata.source?.trim().toLowerCase();
+	if (source !== "claude" && source !== "kimi") {
 		return null;
+	}
+	const hookEventName = metadata.hookEventName?.trim().toLowerCase() ?? null;
+	if (source === "kimi") {
+		if (hookEventName === "interrupt") return "interrupted";
+		if (hookEventName === "stopfailure") return "error";
+		if (hookEventName !== "pretooluse" && hookEventName !== "permissionrequest") return null;
 	}
 	const toolName = metadata.toolName?.trim().toLowerCase() ?? null;
 	if (toolName === "exitplanmode" || toolName === "exit_plan_mode") {
@@ -37,7 +44,6 @@ export function classifyHookUserTurnKind(
 	if (toolName === "askuserquestion" || toolName === "ask_user_question") {
 		return "question";
 	}
-	const hookEventName = metadata.hookEventName?.trim().toLowerCase() ?? null;
 	const notificationType = metadata.notificationType?.trim().toLowerCase() ?? null;
 	if (hookEventName === "permissionrequest" || notificationType === "permission_prompt") {
 		return "permission";

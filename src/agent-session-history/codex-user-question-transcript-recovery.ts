@@ -1,6 +1,10 @@
 import { open, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import {
+	inferCodexHomeDirectoryPathFromTranscriptPath,
+	resolveMigratedCodexConversationHome,
+	resolveRecordedCodexConversationHome,
+} from "../codex-conversation-storage/codex-conversation-storage-home";
 import {
 	extractCodexUserQuestionPayload,
 	extractCodexUserQuestionResolution,
@@ -182,16 +186,34 @@ export interface RecoveredCodexUserQuestions {
 	coverage: "complete" | "incomplete" | "unavailable";
 }
 
-export async function recoverCodexUserQuestionsFromKnownConversation(input: {
+export interface CodexUserQuestionTranscriptRecoveryInput {
 	sessionId: string;
 	transcriptPath?: string | null;
 	homeDirectoryPath?: string;
 	maximumTranscriptBytesToRead?: number;
-}): Promise<RecoveredCodexUserQuestions> {
-	const root = join(
-		input.homeDirectoryPath ?? process.env.CODEX_HOME?.trim() ?? join(homedir(), ".codex"),
-		"sessions",
-	);
+}
+
+export async function resolveCodexUserQuestionTranscriptRecoveryStorageBinding(
+	input: CodexUserQuestionTranscriptRecoveryInput,
+) {
+	const recordedHomeDirectoryPath = resolve(input.homeDirectoryPath ?? resolveRecordedCodexConversationHome(input));
+	const homeDirectoryPath = await resolveMigratedCodexConversationHome(recordedHomeDirectoryPath, input.sessionId);
+	const transcriptHomeDirectoryPath = inferCodexHomeDirectoryPathFromTranscriptPath(input.transcriptPath);
+	// 正式绑定改变后，旧目录的分片提示不再代表当前分片，也不能重新读入已经归档的旧副本。
+	const transcriptPath =
+		resolve(homeDirectoryPath) !== recordedHomeDirectoryPath ||
+		(transcriptHomeDirectoryPath && resolve(transcriptHomeDirectoryPath) !== resolve(homeDirectoryPath))
+			? undefined
+			: input.transcriptPath;
+	return { ...input, homeDirectoryPath, transcriptPath };
+}
+
+export async function recoverCodexUserQuestionsFromKnownConversation(
+	input: CodexUserQuestionTranscriptRecoveryInput,
+): Promise<RecoveredCodexUserQuestions> {
+	const storageBinding = await resolveCodexUserQuestionTranscriptRecoveryStorageBinding(input);
+	input = storageBinding;
+	const root = join(storageBinding.homeDirectoryPath, "sessions");
 	const paths = new Set(
 		(await listKnownCodexTranscriptSegmentPaths(root, input.sessionId)).map((path) => resolve(path)),
 	);

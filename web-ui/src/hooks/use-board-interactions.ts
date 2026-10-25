@@ -118,6 +118,7 @@ interface UseBoardInteractionsInput {
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 	sendTaskSessionInput: UseTaskSessionsResult["sendTaskSessionInput"];
+	sendTaskChatMessage: UseTaskSessionsResult["sendTaskChatMessage"];
 	readyForReviewNotificationsEnabled: boolean;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
@@ -206,6 +207,7 @@ export function useBoardInteractions({
 	setIsGitHistoryOpen,
 	fetchTaskWorkspaceInfo,
 	sendTaskSessionInput,
+	sendTaskChatMessage,
 	readyForReviewNotificationsEnabled,
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
@@ -412,30 +414,18 @@ export function useBoardInteractions({
 
 	const handleSendReviewComments = useCallback(
 		async (taskId: string, text: string) => {
-			const typed = await sendTaskSessionInput(taskId, text, { appendNewline: false, mode: "paste" });
-			if (!typed.ok) {
-				showAppToast({
-					intent: "danger",
-					icon: "warning-sign",
-					message: typed.message ?? "Could not send review comments to the task session.",
-					timeout: 7000,
-				});
-				return;
-			}
-			await new Promise<void>((resolve) => {
-				setTimeout(resolve, 200);
+			const sent = await sendTaskChatMessage(taskId, text, {
+				deliveryOrigin: { messageType: "human_message", sourceLabel: "评审意见" },
 			});
-			const submitted = await sendTaskSessionInput(taskId, "\r", { appendNewline: false });
-			if (!submitted.ok) {
+			if (!sent.ok)
 				showAppToast({
 					intent: "danger",
 					icon: "warning-sign",
-					message: submitted.message ?? "Could not submit review comments to the task session.",
+					message: sent.message ?? "无法发送评审意见。",
 					timeout: 7000,
 				});
-			}
 		},
-		[sendTaskSessionInput],
+		[sendTaskChatMessage],
 	);
 
 	const trashTaskIds = useMemo(() => {
@@ -1046,8 +1036,8 @@ export function useBoardInteractions({
 			const boardMutationInitiatorForCommand = boardMutationInitiatorForThisDrop ?? undefined;
 			switch (columnTransitionClassification) {
 				case "board_column_transition_into_done_stopping_sessions_and_deleting_worktree": {
-					// Post-Deploy Verification 门禁预检：有未勾项的卡先问原因。board 没被改过（只有命令才叠 overlay），
-					// 卡片自然弹回原列；用户手势打开原因对话框（记住落点），浏览器端自动化只提示一次。
+					// Post-Deploy Verification 门禁预检：有未勾项的卡先核对，再决定是否填写原因。board 没被改过（只有命令才叠 overlay），
+					// 卡片自然弹回原列；用户手势打开核对与结案流程（记住落点），浏览器端自动化只提示一次。
 					if (
 						doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask(
 							latestBoardInteractionStateRef.current
@@ -1255,7 +1245,7 @@ export function useBoardInteractions({
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
-			if (!selection || selection.column.id === "trash") {
+			if (!selection) {
 				return;
 			}
 			setSelectedTaskId(taskId);
@@ -1469,7 +1459,7 @@ export function useBoardInteractions({
 	// Single entry point for every "Move to Done" trigger (board card, detail sidebar card, agent
 	// TUI bottom button). Moving straight to Done from Review / In Progress skips the manual
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
-	// 受 Post-Deploy Verification 门禁（有未勾项）的卡改开原因对话框：跳过 Validation 的确认是它的条件段落，不叠两层。
+	// 受 Post-Deploy Verification 门禁（有未勾项）的卡先进入核对阶段：跳过 Validation 的确认是它的条件段落，不叠两层。
 	const requestMoveToTrash = useCallback(
 		(
 			taskId: string,

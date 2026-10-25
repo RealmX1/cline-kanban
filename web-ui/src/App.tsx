@@ -33,7 +33,7 @@ import {
 	buildPostDeployVerificationFollowUpTaskCreationDraftSeed,
 	type PostDeployVerificationFollowUpTaskCreationDraftSeed,
 } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
-import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
+import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
@@ -65,6 +65,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
+import { useAllProjectsFocusViewAdjacentTaskKeyboardNavigation } from "@/hooks/use-all-projects-focus-view-adjacent-task-keyboard-navigation";
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
@@ -100,6 +101,7 @@ import { useSelectedBoardOrSingleProjectScope } from "@/hooks/use-selected-board
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
+import { useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import { useTaskLookupWorkbench } from "@/hooks/use-task-lookup-workbench";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
@@ -499,6 +501,7 @@ export default function App(): ReactElement {
 	const {
 		pendingCrossProjectTaskOpen,
 		handleOpenTaskInProject,
+		handleNavigateToProjectBoard,
 		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
 		dismissPendingCrossProjectTaskOpen,
 	} = useCrossProjectTaskOpenInProject({
@@ -1201,6 +1204,7 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen,
 		fetchTaskWorkspaceInfo,
 		sendTaskSessionInput,
+		sendTaskChatMessage,
 		readyForReviewNotificationsEnabled,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
@@ -1541,12 +1545,25 @@ export default function App(): ReactElement {
 		openTaskEditorForTaskCardInOtherProject: handleOpenEditTaskCardInOtherProject,
 		openTaskInProject: handleOpenTaskInProject,
 	});
+	// 动作控制器跨首页、Focus View 与单项目看板存活，导航不会丢掉核对流程。
+	const navigateToProjectBoardForVerification = useCallback(
+		async (workspaceId: string) => {
+			setSelectedBoardOrSingleProjectScope("single_project_scope");
+			await handleNavigateToProjectBoard(workspaceId);
+		},
+		[handleNavigateToProjectBoard, setSelectedBoardOrSingleProjectScope],
+	);
+	const otherProjectTaskCardActionHandlers = useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
+		onOpenTaskInProject: handleOpenTaskInProject,
+		onNavigateToProjectBoard: navigateToProjectBoardForVerification,
+	});
 	// 跨项目「最近活跃任务」切换面板（Focus View 左栏的 All projects 模式）的宿主数据与动作。
 	const {
 		crossProjectRecentlyActiveTaskSwitcherHost,
 		isFocusViewCrossProjectTaskOpenInTransit,
 		crossProjectTaskOpenInTransitTarget,
 	} = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		otherProjectTaskCardActionHandlers,
 		crossProjectTaskSwitcherSectionsModel,
 		projects,
 		notificationLogByWorkspaceId,
@@ -1560,6 +1577,13 @@ export default function App(): ReactElement {
 		onRequestPinCurrentProjectTaskToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
+	});
+	useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
+		host: crossProjectRecentlyActiveTaskSwitcherHost,
+		isFocusViewActive:
+			!isRuntimeDisconnected &&
+			!isKanbanAccessBlocked &&
+			(selectedTaskId !== null || pendingCrossProjectTaskOpen?.originatedFromFocusView === true),
 	});
 	// All projects 首页分区列看板里，当前项目的行展开成完整卡片时与主看板同数据、同动作。
 	const currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage =
@@ -2323,12 +2347,49 @@ export default function App(): ReactElement {
 						onCancel={cancelMoveToDone}
 						onConfirm={confirmMoveToDone}
 					/>
-					{postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone ? (
-						<PostDeployVerificationUncheckedItemsClosureReasonDialog
+					{currentProjectId && postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone ? (
+						<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace
 							key={`board-move-into-done:${postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}`}
-							dialogTitle="带原因移入 Done"
-							taskEntries={postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.taskEntries}
-							taskEntrySelectionMode="single_task_entry_always_included"
+							workspaceId={currentProjectId}
+							taskId={postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}
+							board={displayedBoard}
+							verification={
+								postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ===
+								currentProjectId
+									? postDeployVerification
+									: undefined
+							}
+							runtimeRejectionRevision={
+								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest
+									.runtimeRejectionRevision
+							}
+							realTaskCardRenderingInputs={{
+								realTaskCardRenderingInputsBoardSourceKind: "current_project_board_hydrated_in_browser",
+								currentProjectTaskSessions: sessions,
+								currentProjectWorkspacePath: workspacePath ?? null,
+								currentProjectTaskCardActionHandlers: {
+									onMoveToTrashTask: handleMoveReviewCardToTrash,
+									onStartTask: handleStartTaskFromBoard,
+									onMoveToValidationTask: handleMoveCardToValidation,
+									onMoveToReviewTask: handleMoveCardToReview,
+									onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+								},
+								onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
+								defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+								defaultClineModelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
+							}}
+							onSelectTask={() =>
+								setSelectedTaskId(
+									postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId,
+								)
+							}
+							onNavigateToBoard={() => setSelectedTaskId(null)}
+							onRequestTaskCommentBeforeMovingIntoDone={() => {
+								const taskId =
+									postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId;
+								cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone();
+								handleMoveReviewCardToTrash(taskId, { requestTaskCommentBeforeMovingIntoDone: true });
+							}}
 							isSubmittingClosure={isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting}
 							onCancel={cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone}
 							onConfirmClosureRequestsBySelectedTaskId={
@@ -2337,6 +2398,7 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 
+					{otherProjectTaskCardActionHandlers.otherProjectTaskCardActionConfirmationDialogs}
 					<TaskSpotlightSearchDialog
 						controller={taskSpotlightSearch}
 						onAskTaskLookupAgent={(questionText) => {

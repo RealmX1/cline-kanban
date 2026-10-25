@@ -114,12 +114,17 @@ function createScheduler(
 		nowMs?: number;
 		reclaim?: (request: AgentSessionReclamationRequest) => Promise<RuntimeAgentSessionReclamationOutcome>;
 		markPendingUserDecisionsReclaimed?: (workspaceId: string, taskId: string, reclaimedAt: number) => Promise<number>;
+		inspectNativeTurnExecutionBeforeIdleStallReclamation?: Parameters<
+			typeof createAgentSessionInactivityReclamationScheduler
+		>[0]["inspectNativeTurnExecutionBeforeIdleStallReclamation"];
 	} = {},
 ) {
 	const nowMs = options.nowMs ?? NOW;
 	return createAgentSessionInactivityReclamationScheduler({
 		now: () => nowMs,
 		getTaskSessionSummary: (_workspaceId, taskId) => harness.summaryByTaskId.get(taskId) ?? null,
+		inspectNativeTurnExecutionBeforeIdleStallReclamation:
+			options.inspectNativeTurnExecutionBeforeIdleStallReclamation,
 		reclaimAgentSession: async (request) => {
 			harness.reclaimRequests.push(request);
 			harness.reclamationStepOrder.push("reclaim-agent-session");
@@ -160,6 +165,89 @@ function createScheduler(
 		},
 	});
 }
+
+describe("原生回合补证先于重启恢复回收", () => {
+	it.each(["grace_running", "reclaiming", "reclaim_failed"] as const)(
+		"%s 的补证未知时不标记、不回收，恢复后可继续",
+		async (reclamationState) => {
+			const harness = createHarness();
+			harness.records.push(
+				makeRecord({
+					agentId: "codex",
+					reclamationState,
+					responseGenerationStopSignalConfidence: "prompt_ready_fallback",
+				}),
+			);
+			harness.summaryByTaskId.set(
+				"task-a",
+				makeDeadlineBearingSummary({ agentId: "codex", reviewReason: "idle_stall" }),
+			);
+			let ready = false;
+			const scheduler = createScheduler(harness, {
+				inspectNativeTurnExecutionBeforeIdleStallReclamation: async () =>
+					ready ? "allow_reclamation" : "defer_reclamation",
+			});
+			await scheduler.runSweepNow();
+			expect(harness.reclaimRequests).toEqual([]);
+			expect(harness.pendingUserDecisionReclaimMarkings).toEqual([]);
+			expect(harness.progressUpdates).toEqual([]);
+			ready = true;
+			await scheduler.runSweepNow();
+			expect(harness.reclaimRequests).toHaveLength(1);
+		},
+	);
+	it("同回合纠偏后作废旧期限，不靠虚增序号挡回收", async () => {
+		const harness = createHarness();
+		harness.records.push(makeRecord());
+		const summary = makeDeadlineBearingSummary({ agentId: "codex", reviewReason: "idle_stall" });
+		harness.summaryByTaskId.set("task-a", summary);
+		const scheduler = createScheduler(harness, {
+			inspectNativeTurnExecutionBeforeIdleStallReclamation: async () => {
+				harness.summaryByTaskId.set("task-a", {
+					...summary,
+					state: "running",
+					turnOwner: "agent",
+					userTurnKind: null,
+					reviewReason: null,
+				});
+				return "defer_reclamation";
+			},
+		});
+		const result = await scheduler.runSweepNow();
+		expect(result.supersededStaleCount).toBe(1);
+		expect(harness.supersededTaskIds).toEqual(["task-a"]);
+		expect(harness.reclaimRequests).toEqual([]);
+	});
+	it("补证期间切换 incarnation，晚到放行也不能终止新会话", async () => {
+		const harness = createHarness();
+		harness.records.push(makeRecord());
+		const summary = makeDeadlineBearingSummary();
+		harness.summaryByTaskId.set("task-a", summary);
+		const scheduler = createScheduler(harness, {
+			inspectNativeTurnExecutionBeforeIdleStallReclamation: async () => {
+				harness.summaryByTaskId.set("task-a", { ...summary, runtimeSessionIncarnationId: "new-incarnation" });
+				return "allow_reclamation";
+			},
+		});
+		await scheduler.runSweepNow();
+		expect(harness.reclaimRequests).toEqual([]);
+		expect(harness.supersededTaskIds).toEqual(["task-a"]);
+	});
+	it("单个核验故障只推迟对应会话，其他到期任务继续处理", async () => {
+		const harness = createHarness();
+		harness.records.push(makeRecord(), makeRecord({ taskId: "task-b", recordId: "task-b:incarnation-1:1" }));
+		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+		harness.summaryByTaskId.set("task-b", makeDeadlineBearingSummary({ taskId: "task-b" }));
+		const scheduler = createScheduler(harness, {
+			inspectNativeTurnExecutionBeforeIdleStallReclamation: async (_workspaceId, taskId) => {
+				if (taskId === "task-a") throw new Error("原生端点暂缺");
+				return "allow_reclamation";
+			},
+		});
+		await scheduler.runSweepNow();
+		expect(harness.reclaimRequests.map((request) => request.record.taskId)).toEqual(["task-b"]);
+	});
+});
 
 describe("computeReclaimRetryBackoffMs（指数退避 + 封顶）", () => {
 	it("首次 4 秒、逐次翻倍、30 分钟封顶", () => {

@@ -7,6 +7,7 @@ import { Command, Option } from "commander";
 import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
 import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
+import { registerCodexConversationStorageCommand } from "./commands/codex-conversation-storage";
 import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
@@ -21,6 +22,7 @@ import {
 	DEFAULT_CLI_TELEMETRY_FLUSH_MS,
 	installCliFatalErrorHandlers,
 	installCliHardTimeoutIfNeeded,
+	installCliTaskGroupWatchInterruptionGuard,
 	registerCliFatalErrorReporter,
 	registerCliProcessExit,
 	safeErrorMessage,
@@ -801,6 +803,7 @@ function createProgram(invocationArgs: string[]): Command {
 	registerDeploymentCommand(program);
 	registerVerificationCommand(program);
 	registerDiagnosticsCommand(program);
+	registerCodexConversationStorageCommand(program);
 
 	program
 		.command("mcp")
@@ -843,6 +846,7 @@ async function run(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const isServerStyleInvocation = shouldAutoOpenBrowserTabForInvocation(argv);
 	const cancelCliHardTimeout = installCliHardTimeoutIfNeeded(argv, isServerStyleInvocation);
+	const watchInterruptionGuard = installCliTaskGroupWatchInterruptionGuard(argv);
 	let invocationFailed = false;
 	try {
 		const program = createProgram(argv);
@@ -867,8 +871,14 @@ async function run(): Promise<void> {
 						}),
 				),
 			);
+			const exitCode = watchInterruptionGuard?.signal.aborted
+				? watchInterruptionGuard.signal.reason === "SIGTERM"
+					? 143
+					: 130
+				: (process.exitCode ?? 0);
+			watchInterruptionGuard?.dispose();
 			cancelCliHardTimeout();
-			process.exit(process.exitCode ?? 0);
+			process.exit(exitCode);
 		}
 	}
 }

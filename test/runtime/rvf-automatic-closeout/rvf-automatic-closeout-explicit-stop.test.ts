@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ import {
 	updateRvfAutomaticCloseoutRecords,
 } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import { createQueuedTaskPromptDeliveryDispatcher } from "../../../src/server/queued-task-prompt-delivery-dispatcher";
+import { recordProgrammaticReviewExplicitUserStopObservations } from "../../../src/state/programmatic-review-explicit-user-stop-observations";
 import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../../src/state/queued-task-prompt-delivery-store";
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 import { createRuntimeApi } from "../../../src/trpc/runtime-api";
@@ -215,7 +216,14 @@ async function setup() {
 		getUpdateStatus: vi.fn(),
 		runUpdateNow: vi.fn(),
 		queuedTaskPromptDeliveryDispatcher: dispatcher,
-		onTaskSessionStopRequested: (workspaceId, taskId) => service.pauseForExplicitStop(workspaceId, taskId),
+		onTaskSessionStopRequested: async (workspaceId, taskId) => {
+			await recordProgrammaticReviewExplicitUserStopObservations({
+				workspaceId,
+				workspaceTaskId: taskId,
+				summaries: terminalManager.listSummaries(),
+			});
+			await service.pauseForExplicitStop(workspaceId, taskId);
+		},
 	});
 	createdDispatchers.push(dispatcher);
 	const dependencies = {
@@ -258,6 +266,25 @@ async function setup() {
 }
 
 describe("RVF 自动收尾的用户停止与持久投递竞争", () => {
+	it("只有显式停止入口保存可跨重启核验的原生身份取消证据", async () => {
+		const context = await setup();
+		const path = join(workspace.directory, "programmatic-review-explicit-user-stop-observations.json");
+		await context.terminalManager.forceStopTaskSession();
+		await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+		const stopped = await context.runtimeApi.stopTaskSession(context.scope, { taskId: "task" });
+		expect(stopped.ok).toBe(true);
+		expect(JSON.parse(await readFile(path, "utf8"))).toEqual([
+			expect.objectContaining({
+				source: "explicit_task_session_stop_request",
+				workspaceId: context.scope.workspaceId,
+				workspaceTaskId: "task",
+				conversationSessionId: "main-session",
+				nativeSessionId: "restored",
+				observedAtEpochMs: expect.any(Number),
+				eventId: expect.any(String),
+			}),
+		]);
+	});
 	it("入队前停止时不调用入队 API，重启仍拒绝旧投递", async () => {
 		const context = await setup();
 		await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");

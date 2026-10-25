@@ -1,9 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
 	AcpConnectionRuntimeHandlers,
 	AcpTaskConnection,
 } from "../../../src/acp-client-session/acp-client-connection-runtime";
 import type { AcpPromptResponse, AcpSessionNotification } from "../../../src/acp-client-session/acp-protocol-boundary";
+import * as managedTaskPromptDeliveryCoordinator from "../../../src/state/managed-task-prompt-delivery-coordinator";
+import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../../src/state/queued-task-prompt-delivery-store";
+
+const isolatedManagedDeliveryRuntimeHome = vi.hoisted(() => ({ path: "" }));
+vi.mock("../../../src/state/workspace-state", () => ({
+	getRuntimeHomePath: () => isolatedManagedDeliveryRuntimeHome.path,
+	getWorkspaceDirectoryPath: (workspaceId: string) =>
+		join(isolatedManagedDeliveryRuntimeHome.path, "workspaces", workspaceId),
+	getWorkspacesRootPath: () => join(isolatedManagedDeliveryRuntimeHome.path, "workspaces"),
+}));
 
 const runtime = vi.hoisted(() => {
 	const state = {
@@ -42,6 +55,7 @@ vi.mock("../../../src/acp-client-session/acp-client-connection-runtime", () => (
 import { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 
 const TASK_ID = "task-acceptance";
+const MANAGED_DELIVERY_WORKSPACE_ID = "workspace-prompt-acceptance";
 function deferredPrompt() {
 	let resolve!: (value: AcpPromptResponse) => void;
 	let reject!: (error: unknown) => void;
@@ -51,7 +65,9 @@ function deferredPrompt() {
 	});
 	return { promise, resolve, reject };
 }
-async function startAwaitingUserSession() {
+async function startAwaitingUserSession(
+	options: { managedDeliveryWorkspaceId?: string; initialPromptText?: string } = {},
+) {
 	const turn = deferredPrompt();
 	const connection: AcpTaskConnection = {
 		taskId: TASK_ID,
@@ -67,14 +83,18 @@ async function startAwaitingUserSession() {
 	// 启动前 getConnection 必须为空；startTaskConnection 才正式注册连接。
 	runtime.state.connection = null;
 	runtime.state.connectionForStart = connection;
-	const service = new AcpTaskSessionService();
+	const service = new AcpTaskSessionService(
+		options.managedDeliveryWorkspaceId
+			? { workspaceId: options.managedDeliveryWorkspaceId, workspaceRepositoryPath: "/workspace/task" }
+			: null,
+	);
 	const start = service.startTaskSession({
 		taskId: TASK_ID,
 		agentId: "omp",
 		cwd: "/workspace/task",
-		prompt: "",
+		prompt: options.initialPromptText ?? "",
 		permissionMode: "ask_for_every_tool_use",
-		resumePriorAgentConversationWithoutResendingPrompt: true,
+		resumePriorAgentConversationWithoutResendingPrompt: options.initialPromptText === undefined,
 	});
 	await start;
 	const listener = vi.fn();
@@ -85,13 +105,175 @@ function notify(update: AcpSessionNotification["update"]) {
 	runtime.state.handlers?.onSessionUpdate(TASK_ID, { sessionId: "native-session", update });
 }
 
-afterEach(() => {
+function pauseManagedInitialPromptRegistration() {
+	let releaseRegistration!: () => void;
+	let confirmRegistrationPaused!: () => void;
+	const registrationReleased = new Promise<void>((resolve) => {
+		releaseRegistration = resolve;
+	});
+	const registrationPaused = new Promise<void>((resolve) => {
+		confirmRegistrationPaused = resolve;
+	});
+	const stopObserving = managedTaskPromptDeliveryCoordinator.observeManagedTaskPromptDeliveryChanges(async () => {
+		confirmRegistrationPaused();
+		await registrationReleased;
+	});
+	return { registrationPaused, releaseRegistration, stopObserving };
+}
+
+async function readManagedInitialPromptEntry() {
+	return (await readWorkspaceQueuedTaskPromptDeliverySnapshot(MANAGED_DELIVERY_WORKSPACE_ID)).entriesByTaskId[
+		TASK_ID
+	]?.[0];
+}
+
+beforeEach(async () => {
+	isolatedManagedDeliveryRuntimeHome.path = await mkdtemp(join(tmpdir(), "acp-prompt-acceptance-runtime-home-"));
+});
+
+afterEach(async () => {
 	runtime.state.connection = null;
 	runtime.state.replaying = false;
+	vi.restoreAllMocks();
 	vi.useRealTimers();
+	await rm(isolatedManagedDeliveryRuntimeHome.path, { recursive: true, force: true });
 });
 
 describe("ACP 提交只在可靠协议活动后确认接受", () => {
+	it.each(["cancelTaskTurn", "abortTaskSession"] as const)(
+		"首发登记等待期间 %s 后不发协议请求，且仅持久化一次明确取消",
+		async (cancelMethod) => {
+			const registration = pauseManagedInitialPromptRegistration();
+			const settlement = vi.spyOn(
+				managedTaskPromptDeliveryCoordinator,
+				"settleManagedTaskPromptDeliveryWithoutBlocking",
+			);
+			const { service, connection } = await startAwaitingUserSession({
+				managedDeliveryWorkspaceId: MANAGED_DELIVERY_WORKSPACE_ID,
+				initialPromptText: "在登记返回前取消的首发",
+			});
+			try {
+				await registration.registrationPaused;
+				await service[cancelMethod](TASK_ID);
+				registration.releaseRegistration();
+				await vi.waitFor(() =>
+					expect(settlement.mock.calls.length + vi.mocked(connection.prompt).mock.calls.length).toBeGreaterThan(0),
+				);
+				expect(connection.prompt).not.toHaveBeenCalled();
+				expect(settlement).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+					status: "delivery_failed",
+					reason: "cancelled_before_delivery",
+				});
+				await vi.waitFor(async () =>
+					expect(await readManagedInitialPromptEntry()).toMatchObject({
+						deliveryState: "cancelled",
+						managedDelivery: { terminalDeliveryReceipt: { reason: "cancelled_before_delivery" } },
+					}),
+				);
+			} finally {
+				registration.releaseRegistration();
+				registration.stopObserving();
+				service.disposeAllTaskSessions();
+			}
+		},
+	);
+
+	it.each(["connection_replaced", "stopTaskSession"] as const)(
+		"首发登记等待期间 %s 使回合失效，finally 不追加预算失败回执",
+		async (invalidationMethod) => {
+			const registration = pauseManagedInitialPromptRegistration();
+			const settlement = vi.spyOn(
+				managedTaskPromptDeliveryCoordinator,
+				"settleManagedTaskPromptDeliveryWithoutBlocking",
+			);
+			const { service, connection } = await startAwaitingUserSession({
+				managedDeliveryWorkspaceId: MANAGED_DELIVERY_WORKSPACE_ID,
+				initialPromptText: "登记期间回合失效的首发",
+			});
+			try {
+				await registration.registrationPaused;
+				if (invalidationMethod === "connection_replaced") runtime.state.connection = { ...connection };
+				else await service.stopTaskSession(TASK_ID);
+				registration.releaseRegistration();
+				await vi.waitFor(() => expect(settlement).toHaveBeenCalled());
+				expect(connection.prompt).not.toHaveBeenCalled();
+				expect(settlement).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+					status: "delivery_failed",
+					reason: "cancelled_before_delivery",
+				});
+				await vi.waitFor(async () =>
+					expect(await readManagedInitialPromptEntry()).toMatchObject({
+						deliveryState: "cancelled",
+						managedDelivery: { terminalDeliveryReceipt: { reason: "cancelled_before_delivery" } },
+					}),
+				);
+			} finally {
+				registration.releaseRegistration();
+				registration.stopObserving();
+				service.disposeAllTaskSessions();
+			}
+		},
+	);
+
+	it("正常首发只登记一条，可靠协议接受与 finally 仅结算一次成功", async () => {
+		const settlement = vi.spyOn(
+			managedTaskPromptDeliveryCoordinator,
+			"settleManagedTaskPromptDeliveryWithoutBlocking",
+		);
+		const { service, connection, turn } = await startAwaitingUserSession({
+			managedDeliveryWorkspaceId: MANAGED_DELIVERY_WORKSPACE_ID,
+			initialPromptText: "正常首发",
+		});
+		try {
+			await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledOnce());
+			expect(await readManagedInitialPromptEntry()).toMatchObject({ deliveryState: "handed_to_transport" });
+			notify({ sessionUpdate: "tool_call", toolCallId: "managed-startup-tool", title: "处理首发" });
+			turn.resolve({ stopReason: "end_turn" });
+			await vi.waitFor(async () =>
+				expect(await readManagedInitialPromptEntry()).toMatchObject({
+					deliveryState: "settled_delivered",
+					managedDelivery: { terminalDeliveryReceipt: { status: "delivered_and_submit_confirmed", reason: null } },
+				}),
+			);
+			expect(settlement).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+				status: "delivered_and_submit_confirmed",
+				reason: null,
+			});
+			expect(
+				(await readWorkspaceQueuedTaskPromptDeliverySnapshot(MANAGED_DELIVERY_WORKSPACE_ID)).entriesByTaskId[
+					TASK_ID
+				],
+			).toHaveLength(1);
+		} finally {
+			service.disposeAllTaskSessions();
+		}
+	});
+
+	it.each(["external_observer", "programmatic_idempotency_key"] as const)(
+		"已有 %s 的消息保留外部登记归属，不额外登记首发",
+		async (externalRegistrationOwner) => {
+			const { service, connection } = await startAwaitingUserSession({
+				managedDeliveryWorkspaceId: MANAGED_DELIVERY_WORKSPACE_ID,
+			});
+			try {
+				const onAcceptance = externalRegistrationOwner === "external_observer" ? vi.fn() : undefined;
+				await service.sendTaskSessionInput(
+					TASK_ID,
+					"外部已登记的消息",
+					undefined,
+					onAcceptance,
+					externalRegistrationOwner === "programmatic_idempotency_key" ? "external-registration-key" : undefined,
+				);
+				expect(connection.prompt).toHaveBeenCalledOnce();
+				notify({ sessionUpdate: "tool_call", toolCallId: "external-registration-tool", title: "处理外部消息" });
+				if (onAcceptance) expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(true);
+				expect(await readManagedInitialPromptEntry()).toBeUndefined();
+			} finally {
+				service.disposeAllTaskSessions();
+			}
+		},
+	);
+
 	it("持久交接 hold 解除后，活会话重发同一接受事实而不刷新活动时间", async () => {
 		const { service } = await startAwaitingUserSession();
 		const metadata = {
