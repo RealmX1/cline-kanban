@@ -55,7 +55,10 @@ import {
 	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
 } from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
-import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverExistingTargetBindingSchema,
+	taskMainSessionHandoverRecordSchema,
+} from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
 export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
@@ -4067,6 +4070,7 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
+		expectedExistingMainSessionHandoverTargetBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),

@@ -1,7 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
+import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -1255,6 +1257,41 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 					body.taskConversationSessionMetadata = taskConversationSessionMetadata;
 				}
+				const revalidateExistingMainSessionHandoverTargetBeforeLaunch =
+					body.expectedExistingMainSessionHandoverTargetBinding
+						? async () => {
+								const latest = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+								const card = findWorkspaceBoardCard(latest.board, workspaceTaskId);
+								const binding = body.expectedExistingMainSessionHandoverTargetBinding;
+								if (
+									!card ||
+									!binding ||
+									card.taskMainSessionHandover?.status !== "report_delivery_pending" ||
+									card.taskMainSessionHandover.automaticRecovery?.classification === "execution_prohibited" ||
+									resolveMainTaskConversationSessionId(card) !== body.taskId ||
+									binding.taskConversationSessionId !== body.taskId ||
+									!isDeepStrictEqual(card.taskMainSessionHandover.existingTargetSessionBinding, binding) ||
+									resolve(taskCwd) !== binding.workingDirectoryPath ||
+									effectiveAgentId !== binding.agentId ||
+									resolvedAgentSessionTransport.effectiveSessionTransport !== binding.sessionTransport ||
+									(binding.taskConversationMode !== undefined &&
+										(body.taskConversationMode ?? "operational") !== binding.taskConversationMode) ||
+									!isResumingExistingConversation
+								)
+									throw new Error("既有接任会话的固定身份、主绑定或执行资格已改变，未启动。");
+								const acp = await deps.getScopedAcpTaskSessionService(workspaceScope);
+								assertTaskMainSessionHandoverExistingTargetBinding({
+									workspaceId: workspaceScope.workspaceId,
+									card,
+									binding,
+									target:
+										acp.getSummary(body.taskId) ??
+										terminalManager.getSummary(body.taskId) ??
+										latest.sessions[body.taskId],
+								});
+							}
+						: undefined;
+				await revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 				// ACP 会话（omp 切到 ACP 时）既不是 PTY 终端 agent 也不是 Cline SDK，走自己的服务。
 				if (resolvedAgentSessionTransport.effectiveSessionTransport === "acp_stdio_subprocess") {
 					startFailurePhase = "start_acp_runtime_session";
@@ -1303,6 +1340,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						),
 						taskConversationSessionMainContextForkSourceNativeSessionId,
 						revalidateTaskConversationSessionMainContextForkSource: revalidateMainContextForkSourceBeforeLaunch,
+						revalidateExistingMainSessionHandoverTargetBeforeLaunch,
 						observedAgentNativeConversationSessionIdentity: previousNativeIdentity,
 						taskConversationSessionsSharingExecutionWorkingDirectory: sharedDirectorySessions,
 						taskConversationMode: body.taskConversationMode,
@@ -1551,6 +1589,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								})
 							: undefined,
 						revalidateTaskConversationSessionMainContextForkSource: revalidateMainContextForkSourceBeforeLaunch,
+						revalidateExistingMainSessionHandoverTargetBeforeLaunch,
 						terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
 					},
 					// 客户端未声明即按「外部入口」记账，与本字段引入前的行为一致。

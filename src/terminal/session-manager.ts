@@ -752,6 +752,7 @@ export interface StartTaskSessionRequest {
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
+	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -4299,6 +4300,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return entry ? cloneSummary(entry.summary) : null;
 	}
 
+	hasLiveTaskSession(taskId: string): boolean {
+		const active = this.entries.get(taskId)?.active;
+		return Boolean(active && !active.session.hasExited());
+	}
+
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
 	}
@@ -5100,7 +5106,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		entry.restartRequest = {
 			kind: "task",
-			request: cloneStartTaskSessionRequest(request),
+			request: {
+				...cloneStartTaskSessionRequest(request),
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch: undefined,
+			},
 		};
 		if (entry.active && isSummaryInActiveTurn(entry.summary)) {
 			// 这次启动被折叠进了已经在跑的那条会话。它不产生 pty，此前在归因通道里没有任何痕迹——
@@ -5251,6 +5260,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
+			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 			if (
 				!request.resumeFromTrash &&
 				!request.resumePriorAgentConversationWithoutResendingPrompt &&

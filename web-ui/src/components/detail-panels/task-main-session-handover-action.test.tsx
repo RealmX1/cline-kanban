@@ -203,6 +203,48 @@ describe("主会话交接入口", () => {
 		expect(requests.request).toHaveBeenCalledTimes(1);
 	});
 
+	it.each(["claude", "codex", "cursor", "kimi", "omp"] as const)(
+		"选择既有 %s 使用真实 Agent 与精确 ID，隐藏新建设置",
+		async (agentId) => {
+			requests.prepare.mockResolvedValueOnce({
+				...preview,
+				existingPeerCandidates: [
+					{
+						agentId,
+						taskConversationSessionId: "selected-peer",
+						displayName: "我的工作线",
+						available: true,
+						unavailableReason: null,
+					},
+					{
+						agentId,
+						taskConversationSessionId: "missing-identity",
+						displayName: "待确认工作线",
+						available: false,
+						unavailableReason: "等待可靠的原生会话身份。",
+					},
+				],
+			});
+			await click("交接主会话");
+			const select = document.querySelector('select[aria-label="接收会话"]') as HTMLSelectElement;
+			expect(Array.from(select.options).find((option) => option.value === "missing-identity")?.disabled).toBe(true);
+			expect(select.textContent).toContain("等待可靠的原生会话身份");
+			await act(async () => {
+				select.value = "selected-peer";
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+			expect(document.querySelector('select[aria-label="目标 Agent"]')).toBeNull();
+			expect(document.querySelector('select[aria-label="上下文方式"]')).toBeNull();
+			expect(document.body.textContent).toContain("保留所选会话的历史、模型、权限与通道");
+			await click("确认交接");
+			expect(requests.request.mock.calls[0]?.[1].destination).toEqual({
+				kind: "existing_agent_session",
+				agentId,
+				taskConversationSessionId: "selected-peer",
+			});
+		},
+	);
+
 	it("选择已有 peer 时投递精确 session ID", async () => {
 		await click("交接主会话");
 		const select = document.querySelector('select[aria-label="接收会话"]') as HTMLSelectElement;
