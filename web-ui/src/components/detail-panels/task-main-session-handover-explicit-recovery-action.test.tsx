@@ -7,6 +7,7 @@ import type { BoardCard } from "@/types";
 
 const queries = vi.hoisted(() => ({
 	getTaskMainSessionHandoverStatus: vi.fn(),
+	recoverTaskMainSessionHandoverWithNewAgentSession: vi.fn(),
 	recoverTaskMainSessionHandoverWithNewCodexSession: vi.fn(),
 	retryTaskMainSessionHandover: vi.fn(),
 	cancelTaskMainSessionHandover: vi.fn(),
@@ -81,6 +82,7 @@ describe("交接失败的显式恢复入口", () => {
 		vi.resetAllMocks();
 		setRecoverableHandoverRecord();
 		queries.recoverTaskMainSessionHandoverWithNewCodexSession.mockResolvedValue({ record: null });
+		queries.recoverTaskMainSessionHandoverWithNewAgentSession.mockResolvedValue({ record: null });
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		root = createRoot(container);
@@ -108,7 +110,7 @@ describe("交接失败的显式恢复入口", () => {
 		expect(container.textContent).not.toContain("重试交接");
 		await click("新建 Codex 并重新交接");
 		expect(document.body.textContent).toContain("可能重复汇报");
-		expect(document.body.textContent).toContain("原会话、旧 Codex、交接材料和失败记录都会保留");
+		expect(document.body.textContent).toContain("原会话、旧接任会话、交接材料和失败记录都会保留");
 		expect(queries.recoverTaskMainSessionHandoverWithNewCodexSession).not.toHaveBeenCalled();
 		await click("取消恢复");
 		expect(queries.recoverTaskMainSessionHandoverWithNewCodexSession).not.toHaveBeenCalled();
@@ -121,6 +123,35 @@ describe("交接失败的显式恢复入口", () => {
 			requestId: expect.any(String),
 			acknowledgePossibleDuplicateReport: true,
 		});
+	});
+
+	it("非 Codex 目标使用通用恢复入口并保留原 Agent", async () => {
+		const genericRecord = {
+			...record,
+			destination: { kind: "new_agent_session" as const, agentId: "kimi" as const },
+		};
+		queries.getTaskMainSessionHandoverStatus.mockResolvedValue({
+			record: genericRecord,
+			recoveryAvailability: {
+				canRetryUndeliveredReport: false,
+				canRecreateCodexSession: false,
+				canRecreateAgentSession: true,
+				terminalDeliveryFailureReason: "submit_confirmation_budget_exhausted",
+				blockReason: null,
+			},
+		} satisfies TaskMainSessionHandoverStatusResponse);
+		await render({ ...taskCard, taskMainSessionHandover: genericRecord });
+		await click("新建 Kimi Code 并重新交接");
+		await click("确认新建并重新交接");
+		expect(queries.recoverTaskMainSessionHandoverWithNewAgentSession).toHaveBeenCalledExactlyOnceWith(
+			"isolated",
+			expect.objectContaining({
+				taskId: "task-1",
+				expectedHandoverId: record.handoverId,
+				acknowledgePossibleDuplicateReport: true,
+			}),
+		);
+		expect(queries.recoverTaskMainSessionHandoverWithNewCodexSession).not.toHaveBeenCalled();
 	});
 
 	it("同一投递轮次在网络结果不明后重试，仍复用原恢复请求", async () => {

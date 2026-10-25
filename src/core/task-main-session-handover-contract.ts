@@ -1,6 +1,26 @@
 import { z } from "zod";
 
+export const taskMainSessionHandoverAgentIdSchema = z.enum([
+	"claude",
+	"codex",
+	"cursor",
+	"droid",
+	"kiro",
+	"kimi",
+	"omp",
+]);
+export type TaskMainSessionHandoverAgentId = z.infer<typeof taskMainSessionHandoverAgentIdSchema>;
+const contextInheritanceModeSchema = z.enum([
+	"fresh_context_with_handover_material",
+	"fork_complete_native_conversation",
+]);
+
 export const taskMainSessionHandoverDestinationSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("new_agent_session"),
+		agentId: taskMainSessionHandoverAgentIdSchema,
+		contextInheritanceMode: contextInheritanceModeSchema.optional(),
+	}),
 	z.object({
 		kind: z.literal("new_codex_session"),
 		contextInheritanceMode: z
@@ -9,6 +29,19 @@ export const taskMainSessionHandoverDestinationSchema = z.discriminatedUnion("ki
 	}),
 	z.object({ kind: z.literal("existing_codex_session"), taskConversationSessionId: z.string().min(1) }),
 ]);
+
+export type TaskMainSessionHandoverDestination = z.infer<typeof taskMainSessionHandoverDestinationSchema>;
+export function resolveTaskMainSessionHandoverTargetAgentId(
+	destination: TaskMainSessionHandoverDestination,
+): TaskMainSessionHandoverAgentId {
+	return destination.kind === "new_agent_session" ? destination.agentId : "codex";
+}
+export function isTaskMainSessionHandoverNativeForkRequested(destination: TaskMainSessionHandoverDestination): boolean {
+	return (
+		destination.kind !== "existing_codex_session" &&
+		destination.contextInheritanceMode === "fork_complete_native_conversation"
+	);
+}
 
 export const taskMainSessionHandoverMaterialSchema = z.object({
 	taskTitle: z.string(),
@@ -40,6 +73,28 @@ export const taskMainSessionHandoverMaterialSchema = z.object({
 	workspaceHeadCommit: z.string().nullable(),
 	missingMaterialDescriptions: z.array(z.string()),
 	userContextNotes: z.string(),
+	userIntentContext: z
+		.object({
+			providerName: z.string(),
+			providerAvailability: z.enum(["available", "unavailable"]),
+			asOf: z.number(),
+			workUnitReference: z.object({
+				workspaceId: z.string(),
+				taskId: z.string(),
+				taskIncarnationCreatedAtEpochMs: z.number(),
+			}),
+			conversationSessionReferences: z.array(
+				z.object({
+					taskConversationSessionId: z.string(),
+					agentId: z.string().nullable(),
+					nativeConversationSessionId: z.string().nullable(),
+				}),
+			),
+			userIntentContextText: z.string().nullable(),
+			sourceReferences: z.array(z.string()),
+			missingContextParts: z.array(z.string()),
+		})
+		.optional(),
 });
 export type TaskMainSessionHandoverMaterial = z.infer<typeof taskMainSessionHandoverMaterialSchema>;
 
@@ -53,10 +108,11 @@ export const taskMainSessionHandoverRecoveryReceiptReferenceSchema = z.object({
 });
 
 export const taskMainSessionHandoverReportAcceptanceProbeSchema = z.object({
+	targetAgentId: taskMainSessionHandoverAgentIdSchema.optional(),
 	nativeSessionId: z.string(),
 	workingDirectoryPath: z.string(),
 	transcriptPath: z.string().nullable(),
-	codexConversationStorageHomeDirectoryPath: z.string(),
+	codexConversationStorageHomeDirectoryPath: z.string().optional(),
 	nativeHistoryCursor: z.string().nullable(),
 	transcriptHistoryCursor: z.string().nullable(),
 	seenNativeHistoryCursors: z.array(z.string()),
@@ -80,6 +136,8 @@ export const taskMainSessionHandoverAutomaticRecoverySchema = z.object({
 	lastAttemptAt: z.number(),
 	nextAttemptAt: z.number().nullable(),
 	recheckCondition: z.string(),
+	reportAcceptanceScanPendingContinuation: z.boolean().optional(),
+	reportAcceptanceScanVisitedCursorPairs: z.array(z.string()).optional(),
 });
 
 // 正文写持久交接目录；卡片只保存小型控制记录，以免热路径反复广播整份 transcript。
@@ -110,11 +168,30 @@ export const taskMainSessionHandoverRecordSchema = z.object({
 	nativeForkPreparationReceiptPath: z.string().optional(),
 	automaticRecovery: taskMainSessionHandoverAutomaticRecoverySchema.optional(),
 	reportAcceptanceProbe: taskMainSessionHandoverReportAcceptanceProbeSchema.optional(),
+	inputAwaitingCorrelatedProcessingHook: z
+		.object({
+			promptSha256: z.string(),
+			inputKind: z.enum(["handover_report", "human_followup"]),
+			runtimeSessionIncarnationId: z.string(),
+			submittedAt: z.number(),
+			submittedHookEventId: z.string(),
+		})
+		.optional(),
+	reportCorrelatedProcessingAcceptanceEvidence: z
+		.object({
+			promptSha256: z.string(),
+			runtimeSessionIncarnationId: z.string(),
+			submittedHookEventId: z.string(),
+			processingHookEventId: z.string(),
+			observedAt: z.number(),
+		})
+		.optional(),
 	reportNativeIdentityCaptureBinding: z
 		.object({
+			targetAgentId: taskMainSessionHandoverAgentIdSchema.optional(),
 			runtimeSessionIncarnationId: z.string(),
 			workingDirectoryPath: z.string(),
-			codexConversationStorageHomeDirectoryPath: z.string(),
+			codexConversationStorageHomeDirectoryPath: z.string().optional(),
 			preparedAt: z.number(),
 		})
 		.optional(),
@@ -133,16 +210,20 @@ export const taskMainSessionHandoverRequestSchema = z.object({
 });
 export type TaskMainSessionHandoverRequest = z.infer<typeof taskMainSessionHandoverRequestSchema>;
 
-export const taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema = z.object({
+export const taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema = z.object({
 	taskId: z.string().min(1),
 	expectedHandoverId: z.string().min(1),
 	expectedReportDeliveryAttempt: z.number().int().nonnegative(),
 	requestId: z.string().uuid(),
 	acknowledgePossibleDuplicateReport: z.literal(true),
 });
-export type TaskMainSessionHandoverRecoverWithNewCodexSessionRequest = z.infer<
-	typeof taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema
+export type TaskMainSessionHandoverRecoverWithNewAgentSessionRequest = z.infer<
+	typeof taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema
 >;
+export const taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema =
+	taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema;
+export type TaskMainSessionHandoverRecoverWithNewCodexSessionRequest =
+	TaskMainSessionHandoverRecoverWithNewAgentSessionRequest;
 
 export const taskMainSessionHandoverRecoveryReceiptSchema =
 	taskMainSessionHandoverRecoveryReceiptReferenceSchema.extend({
@@ -155,6 +236,19 @@ export const taskMainSessionHandoverPrepareResponseSchema = z.object({
 	mainTaskConversationSessionId: z.string(),
 	codexPeerTaskConversationSessionIds: z.array(z.string()),
 	busyTaskConversationSessionIds: z.array(z.string()),
+	targetAgentCapabilities: z
+		.array(
+			z.object({
+				agentId: taskMainSessionHandoverAgentIdSchema,
+				label: z.string(),
+				installationStatus: z.enum(["installed", "not_installed", "unknown"]),
+				completeNativeConversationForkAvailability: z.object({
+					available: z.boolean(),
+					unavailableReason: z.string().nullable(),
+				}),
+			}),
+		)
+		.optional(),
 	completeNativeConversationForkAvailability: z
 		.object({
 			available: z.boolean(),
@@ -170,6 +264,7 @@ export const taskMainSessionHandoverStatusResponseSchema = z.object({
 		.object({
 			canRetryUndeliveredReport: z.boolean(),
 			canRecreateCodexSession: z.boolean(),
+			canRecreateAgentSession: z.boolean().optional(),
 			terminalDeliveryFailureReason: z.string().nullable(),
 			blockReason: z.string().nullable(),
 		})

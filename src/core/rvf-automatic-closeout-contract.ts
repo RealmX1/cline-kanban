@@ -199,6 +199,14 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	nativeIdentitySwitchStartedAt: z.number().nullable(),
 	nativeForkAttemptStartedAt: z.number().nullable(),
 	activeCoordinatorOperationClaimId: z.string().nullable().optional(),
+	independentBackupRouteSuppressionObservation: z
+		.object({
+			observedAt: z.number(),
+			originalRunDirectory: z.string().nullable(),
+			controlDirectory: z.string(),
+			reason: z.enum(["active_backup_route_ownership", "original_run_consumed_by_backup_route"]),
+		})
+		.optional(),
 	pauseReason: z.string().nullable(),
 	explicitStopRequestedAt: z.number().optional(),
 	waitingReasonCode: rvfAutomaticCloseoutWaitingReasonCodeSchema.nullable().optional(),

@@ -37,6 +37,7 @@ import {
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
 import { captureTaskMainSessionHandoverReportNativeIdentity } from "../state/capture-task-main-session-handover-report-native-identity";
+import { confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks } from "../state/confirm-task-main-session-handover-input-after-correlated-processing-hooks";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -437,6 +438,18 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
 			}
 
+			const processedHandoverInput = await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+				workspacePath,
+				summary: manager.getSummary(taskId) ?? summary,
+				hook: body,
+			});
+			if (processedHandoverInput?.metadata)
+				manager.applyTaskConversationSessionMetadata(taskId, processedHandoverInput.metadata);
+			if (processedHandoverInput?.acceptedPromptSha256 && body.hookRuntimeSessionIncarnationId)
+				manager.confirmHandoverInputAcceptedFromCorrelatedProcessingHooks?.(taskId, {
+					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+					promptSha256: processedHandoverInput.acceptedPromptSha256,
+				});
 			const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 			const isClaudeUserPromptSubmit =
 				event === "to_in_progress" &&
