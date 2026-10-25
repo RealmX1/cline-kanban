@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	isTaskMainSessionHandoverNativeForkRequested,
+	resolveTaskMainSessionHandoverTargetAgentId,
 	taskMainSessionHandoverDestinationSchema,
 	taskMainSessionHandoverRecordSchema,
 } from "../../../src/core/task-main-session-handover-contract";
@@ -8,6 +10,30 @@ import { renderTaskMainSessionHandoverReportPrompt } from "../../../src/server/t
 const maintainedAgentIds = ["claude", "codex", "cursor", "droid", "kiro", "kimi", "omp"] as const;
 
 describe("跨 harness 主会话交接契约", () => {
+	it.each(["claude", "codex", "cursor", "kimi", "omp"] as const)(
+		"既有 %s peer 保留目标 Agent，忽略新建上下文选项",
+		(agentId) => {
+			const destination = taskMainSessionHandoverDestinationSchema.parse({
+				kind: "existing_agent_session",
+				agentId,
+				taskConversationSessionId: "peer",
+				contextInheritanceMode: "fork_complete_native_conversation",
+			});
+			expect(destination).toEqual({ kind: "existing_agent_session", agentId, taskConversationSessionId: "peer" });
+			expect(resolveTaskMainSessionHandoverTargetAgentId(destination)).toBe(agentId);
+			expect(isTaskMainSessionHandoverNativeForkRequested(destination)).toBe(false);
+		},
+	);
+
+	it.each(["droid", "kiro", "shell", "cline"])("本轮不扩展既有 %s peer", (agentId) => {
+		expect(
+			taskMainSessionHandoverDestinationSchema.safeParse({
+				kind: "existing_agent_session",
+				agentId,
+				taskConversationSessionId: "peer",
+			}).success,
+		).toBe(false);
+	});
 	it.each(maintainedAgentIds)("允许新建 %s 接任，并保留显式目标身份", (agentId) => {
 		const destination = { kind: "new_agent_session", agentId };
 		expect(taskMainSessionHandoverDestinationSchema.parse(destination)).toEqual(destination);
