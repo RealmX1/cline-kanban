@@ -100,7 +100,7 @@ function resolveToolCallLabel(
 // error（运行错，区别于 spawn failed liveness）=运行出错(红)。Stage 4 采集增强后新增三类「阻塞等你」
 // （均金 CTA，区别于被动 review 绿）：question（ask_followup_question）=待你回答；plan_review
 // （plan_mode_respond）=计划待批；permission（Claude PermissionRequest）=权限请求。interrupted 不经此
-// （liveness=interrupted 非等人审回合）。占位文案沿用同族英文风格。
+// （进程中断态非等人审回合；live/interrupted 在活动文案前单独处理）。占位文案沿用同族英文风格。
 function resolveAwaitingUserTurnPresentation(userTurnKind: RuntimeTaskSessionUserTurnKind | null): {
 	dotColor: string;
 	placeholder: string;
@@ -172,6 +172,10 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 					? "对话未建立：终端在等你信任工作区"
 					: "对话未建立：首个 prompt 还没提交",
 		};
+	}
+	// Kimi 中断本轮生成后 PTY 仍存活；当前人轴优先于上一轮留下的活动或完成文案。
+	if (facets.turnOwner === "user" && facets.liveness === "live" && facets.userTurnKind === "interrupted") {
+		return { dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "已中断，可继续输入" };
 	}
 	const hookActivity = summary.latestHookActivity;
 	const activityText = hookActivity?.activityText?.trim();

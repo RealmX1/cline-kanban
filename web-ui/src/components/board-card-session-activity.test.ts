@@ -98,6 +98,39 @@ describe("deriveCardSessionActivity", () => {
 		expect(deriveCardSessionActivity(makeSummary("interrupted"))).toBeNull();
 	});
 
+	it.each([
+		["旧续跑活动", makeHookActivity({ activityText: "Resumed after user input", source: "kimi" })],
+		[
+			"旧工具活动",
+			makeHookActivity({ activityText: "Using Read", toolName: "Read", toolInputSummary: "src/index.ts" }),
+		],
+		[
+			"旧完成消息",
+			makeHookActivity({
+				activityText: "Final: 本轮已完成",
+				finalMessage: "本轮已完成",
+				hookEventName: "agent_end",
+			}),
+		],
+		["没有活动", null],
+	])("Kimi 活体中断优先于%s，显示可继续输入", (_description, latestHookActivity) => {
+		const summary = makeSummary("awaiting_review", {
+			agentId: "kimi",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "interrupted",
+			pid: 123,
+			reviewReason: "interrupted",
+			latestHookActivity,
+		});
+
+		expect(deriveCardSessionActivity(summary)).toEqual({
+			dotColor: SESSION_ACTIVITY_COLOR.waiting,
+			text: "已中断，可继续输入",
+		});
+		expect(summary).toMatchObject({ turnOwner: "user", liveness: "live", userTurnKind: "interrupted", pid: 123 });
+	});
+
 	describe("credit limit (highest priority)", () => {
 		it("shows the out-of-credits warning", () => {
 			const result = deriveCardSessionActivity(

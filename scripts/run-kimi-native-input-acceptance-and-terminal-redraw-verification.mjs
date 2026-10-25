@@ -7,23 +7,33 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const [requestedOutputDirectory, requestedKimiBinary, ...requestedProbeArguments] = process.argv.slice(2);
-const requestedProbeKinds = requestedProbeArguments.filter((argument) => argument !== "--start-in-plan-mode");
-assert(requestedProbeKinds.length <= 1, "只能指定一种 Kimi 原生验证种类");
-const requestedProbeKind = requestedProbeKinds[0] ?? "acceptance-and-redraw";
+const verifiesTerminalWorkflow = requestedProbeArguments[0] === "--terminal-workflow";
+const requestedPackagedCli = verifiesTerminalWorkflow ? requestedProbeArguments[1] : undefined;
+const remainingProbeArguments = verifiesTerminalWorkflow ? requestedProbeArguments.slice(2) : requestedProbeArguments;
+const requestedProbeKinds = remainingProbeArguments.filter((argument) => argument !== "--start-in-plan-mode");
+assert(requestedProbeKinds.length <= (verifiesTerminalWorkflow ? 0 : 1), "只能指定一种 Kimi 原生验证种类");
+const requestedProbeKind = verifiesTerminalWorkflow
+	? "terminal-workflow"
+	: (requestedProbeKinds[0] ?? "acceptance-and-redraw");
 assert(
 	requestedOutputDirectory && requestedKimiBinary,
-	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 二进制绝对路径> [initial-prompt] [--start-in-plan-mode]",
+	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 绝对路径> [initial-prompt | --terminal-workflow <打包 CLI 绝对路径>] [--start-in-plan-mode]",
 );
-assert(["acceptance-and-redraw", "initial-prompt"].includes(requestedProbeKind), "未知的 Kimi 原生验证种类");
+assert(
+	["acceptance-and-redraw", "initial-prompt", "terminal-workflow"].includes(requestedProbeKind),
+	"未知的 Kimi 原生验证种类",
+);
+assert(!verifiesTerminalWorkflow || requestedPackagedCli, "终端工作流核验需要打包后的 CLI 绝对路径");
 const outputRootDirectory = resolve(requestedOutputDirectory);
 const repositoryDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 await mkdir(outputRootDirectory, { recursive: true });
 const verifiesInitialPrompt = requestedProbeKind === "initial-prompt";
 // 每轮保留独立 HOME、工作目录和证据，避免重跑时沿用已批准的工作区信任。
-const outputDirectory = verifiesInitialPrompt
-	? await mkdtemp(join(outputRootDirectory, "initial-prompt-execution-"))
+const usesFreshExecutionDirectory = verifiesInitialPrompt || verifiesTerminalWorkflow;
+const outputDirectory = usesFreshExecutionDirectory
+	? await mkdtemp(join(outputRootDirectory, `${requestedProbeKind}-execution-`))
 	: outputRootDirectory;
-if (verifiesInitialPrompt) {
+if (usesFreshExecutionDirectory) {
 	await writeFile(
 		join(outputRootDirectory, "result.json"),
 		JSON.stringify({ status: "running", executionDirectory: outputDirectory }, null, 2),
@@ -36,14 +46,19 @@ try {
 	if (error.code !== "EEXIST") throw error;
 }
 assert.equal(await realpath(join(outputDirectory, "node_modules")), await realpath(dependenciesDirectory));
-const entrypoint = join(outputDirectory, verifiesInitialPrompt ? "native-kimi-initial-prompt-probe.mjs" : "native-kimi-probe.mjs");
+const entrypoint = join(
+	outputDirectory,
+	verifiesInitialPrompt ? "native-kimi-initial-prompt-probe.mjs" : "native-kimi-probe.mjs",
+);
 await build({
 	entryPoints: [
 		join(
 			repositoryDirectory,
 			verifiesInitialPrompt
 				? "scripts/verify-kimi-native-initial-prompt-delivery.ts"
-				: "scripts/verify-kimi-native-input-acceptance-and-terminal-redraw.ts",
+				: verifiesTerminalWorkflow
+					? "scripts/verify-kimi-native-terminal-startup-and-hook-workflow.ts"
+					: "scripts/verify-kimi-native-input-acceptance-and-terminal-redraw.ts",
 		),
 	],
 	outfile: entrypoint,
@@ -66,6 +81,7 @@ const child = spawn(process.execPath, [entrypoint], {
 		TERM: "xterm-256color",
 		KANBAN_KIMI_NATIVE_E2E_OUTPUT_DIRECTORY: outputDirectory,
 		KANBAN_KIMI_NATIVE_E2E_BINARY: resolve(requestedKimiBinary),
+		...(requestedPackagedCli ? { KANBAN_KIMI_NATIVE_E2E_PACKAGED_CLI: resolve(requestedPackagedCli) } : {}),
 		KANBAN_KIMI_NATIVE_E2E_START_IN_PLAN_MODE: process.argv.slice(4).includes("--start-in-plan-mode") ? "1" : "0",
 	},
 });
@@ -73,7 +89,7 @@ const code = await new Promise((resolveExit, reject) => {
 	child.once("error", reject);
 	child.once("exit", (exitCode) => resolveExit(exitCode ?? 1));
 });
-if (verifiesInitialPrompt) {
+if (usesFreshExecutionDirectory) {
 	const probeResult =
 		code === 0 ? JSON.parse(await readFile(join(outputDirectory, "result.json"), "utf8")) : { status: "failed" };
 	await writeFile(
