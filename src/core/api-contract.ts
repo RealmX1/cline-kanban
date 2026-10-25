@@ -63,6 +63,7 @@ export type {
 	TaskMainSessionHandoverStatusResponse,
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+export * from "./task-rvf-history-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",

@@ -88,6 +88,7 @@ import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
 import { registerTaskVisualizationCommand } from "./task-visualization";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
@@ -2302,6 +2303,15 @@ export function registerTaskCommand(program: Command): void {
 				),
 			);
 		});
+	registerTaskRvfHistoryCommand(task, {
+		queryRuntime: (workspaceId, input, timeoutMs) =>
+			createRuntimeTrpcClient(workspaceId, {
+				requestTimeoutMs: timeoutMs,
+				retryWhileKanbanRuntimeRestarts: false,
+			}).runtime.getTaskRvfHistory.query(input),
+		runTaskCommand,
+	});
+
 	task
 		.command("rvf-automatic-closeout-status")
 		.description("查询 RVF 自动恢复与收尾投递的持久状态。")

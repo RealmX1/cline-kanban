@@ -540,6 +540,7 @@ import {
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
 } from "../core/task-main-session-handover-contract";
+import { taskRvfHistoryRequestSchema, taskRvfHistoryResponseSchema } from "../core/task-rvf-history-contract";
 import {
 	taskVisualizationListRequestSchema,
 	taskVisualizationListResponseSchema,
@@ -617,6 +618,7 @@ import {
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
 import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
+import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -1628,6 +1630,10 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		getTaskRvfHistory: workspaceProcedure
+			.input(taskRvfHistoryRequestSchema)
+			.output(taskRvfHistoryResponseSchema)
+			.query(({ ctx, input }) => getTaskRvfHistory(ctx.workspaceScope, input)),
 		observeRvfReviewStartBoundary: workspaceProcedure
 			.input(rvfReviewStartBoundaryObservationRequestSchema)
 			.output(rvfReviewStartBoundaryObservationResponseSchema)
