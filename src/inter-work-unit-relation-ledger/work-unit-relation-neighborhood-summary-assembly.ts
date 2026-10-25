@@ -54,10 +54,22 @@ export async function buildKanbanBoardCardIdentityResolutionCandidates(
 		return typeof fieldValue === "string" ? fieldValue : null;
 	};
 	return projections.map((projection) => {
-		const card = projection.kanbanBoardCard;
+		const card = {
+			...projection.kanbanBoardCard,
+			workspaceId: projection.currentWorkspaceId ?? projection.kanbanBoardCard.workspaceId,
+		};
 		const prompt = readTextField(projection.currentFieldValueSha256ByFieldName.prompt);
 		return {
 			kanbanBoardCard: card,
+			canonicalKanbanBoardCard: projection.kanbanBoardCard,
+			previousWorkspaceRepositoryPaths: (projection.workspaceIdsUsedByCard ?? []).flatMap((workspaceId) => {
+				const path =
+					getWorkspacePathById(workspaceId) ??
+					reader.projectionState.kanbanBoardCardIdentityProjectionState.workspaceRepositoryPathByWorkspaceIdObservedAtBaseline.get(
+						workspaceId,
+					);
+				return path ? [path] : [];
+			}),
 			workspaceRepositoryPath:
 				getWorkspacePathById(card.workspaceId) ??
 				reader.projectionState.kanbanBoardCardIdentityProjectionState.workspaceRepositoryPathByWorkspaceIdObservedAtBaseline.get(
@@ -91,7 +103,7 @@ function buildWorkUnitDisplayLabel(
 			: kanbanBoardCardIdentity?.lastKnownBoardColumnId === "trash"
 				? " (in Done/trash)"
 				: "";
-	return `task ${workUnit.taskId}${title} [${workUnit.workspaceId}]${statusSuffix}`;
+	return `task ${workUnit.taskId}${title} [${kanbanBoardCardIdentity?.kanbanBoardCard.workspaceId ?? workUnit.workspaceId}]${statusSuffix}`;
 }
 
 export async function buildWorkUnitDisplayEntries(
@@ -109,7 +121,10 @@ export async function buildWorkUnitDisplayEntries(
 		.filter((projection): projection is KanbanBoardCardIdentityProjection => projection !== undefined);
 	const identityByWorkUnitKey = new Map(
 		(await buildKanbanBoardCardIdentityResolutionCandidates(reader, cardProjections, getWorkspacePathById)).map(
-			(candidate) => [buildInterWorkUnitRelationWorkUnitKey(candidate.kanbanBoardCard), candidate],
+			(candidate) => [
+				buildInterWorkUnitRelationWorkUnitKey(candidate.canonicalKanbanBoardCard ?? candidate.kanbanBoardCard),
+				candidate,
+			],
 		),
 	);
 	return workUnits.map((workUnit) => {

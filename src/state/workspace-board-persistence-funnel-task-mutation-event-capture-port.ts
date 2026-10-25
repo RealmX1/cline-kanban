@@ -20,6 +20,14 @@ import type { WebUiBoardMutationInitiatorAnnotationForTaskMutationEventCapture }
 // 漏斗的必填参数（Y-EVENT-2）：每个写 board 的调用点都必须声明意图与已解析的行动者，
 // runtime 内不存在「不知道是谁写的」board 写入。
 export interface TaskMutationIntentWithResolvedActor {
+	backlogTaskProjectTransfer?: {
+		operationId: string;
+		sourceWorkspaceId: string;
+		targetWorkspaceId: string;
+		taskId: string;
+		taskIncarnationCreatedAtEpochMs: number;
+		writeSide: "source" | "target";
+	};
 	taskMutationIntentKind: string;
 	resolvedKanbanActor: KanbanActor;
 	actorNativeConversationSessionIdentity?: AgentConversationSessionIdentityKey | null;

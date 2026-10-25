@@ -1490,6 +1490,7 @@ export type RuntimeAgentTerminalGeometryForTaskSessionSpawn = z.infer<
 // 两份摘要分开给：盘上那份是 board 锁内读到的 sessions.json（CLI 的 JSON 输出一直用它）；活的那份是 runtime 内存里
 // 三种 transport 合并后的当前摘要（未加载过该项目的终端管理器时为 null）。浏览器取「活的 ?? 盘上的」。
 export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema = z.object({
+	workspaceId: z.string().optional(),
 	taskCard: runtimeBoardCardSchema,
 	boardColumnIdContainingTaskCard: runtimeBoardColumnIdSchema,
 	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
@@ -1507,6 +1508,19 @@ export const runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema = z.object(
 export type RuntimeTaskWorktreeDeletionResultOfTaskCardAction = z.infer<
 	typeof runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema
 >;
+
+export const runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema = z.object({
+	operationId: z.string().uuid(),
+	taskId: z.string().min(1),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	targetWorkspaceId: z.string().regex(/^[a-zA-Z0-9_-]+$/u),
+	targetBaseRef: z.string().min(1),
+});
+export const runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema = z.object({
+	operationId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+});
 
 // --- readTaskCardWithBoardColumn（query，只读）---
 // 供浏览器在**非当前项目**上打开编辑器、看原始 prompt、展开跨项目行。
@@ -3893,6 +3907,10 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
+	taskEditorSettingPresentationBySettingKey: z
+		.record(z.string().max(100), z.enum(["expanded", "collapsed_in_group", "hidden"]))
+		.optional(),
 	newTaskAutoReviewEnabled: z.boolean().nullable(),
 	newTaskAutoReviewMode: runtimeTaskAutoReviewModeSchema.nullable(),
 	taskCreateDialogPrimaryStartAction: runtimeTaskCreateDialogPrimaryStartActionSchema.nullable(),
@@ -4769,6 +4787,7 @@ export const runtimeTaskEditDraftSchema = z.object({
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),
+	taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 	startInPlanMode: z.boolean(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 	autoReviewEnabled: z.boolean(),

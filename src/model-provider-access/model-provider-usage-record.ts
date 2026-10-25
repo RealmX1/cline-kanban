@@ -22,6 +22,7 @@ export type ModelUsagePurpose =
 	| "task_name_suggestion"
 	| "notification_assessment"
 	| "task_indexing_support_relation_analysis"
+	| "task_project_assignment_analysis"
 	| "task_lookup_conversation"
 	| "independent_task_creation_draft_generation";
 

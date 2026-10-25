@@ -93,6 +93,16 @@ export function ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(
 	}
 }
 
+/** 分析采纳了一个尚未预取的项目时，直接等待一次分配，不用计时轮询。 */
+export async function ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission(workspaceId: string): Promise<void> {
+	const pool = getOrCreateRuntimeAllocatedTaskIdPrefetchPool(workspaceId);
+	if (pool.runtimeAllocatedTaskIdsReadyForNewTaskCards.length > 0) return;
+	pool.inFlightRuntimeTaskIdAllocationRequestCount++;
+	await requestOneRuntimeAllocatedTaskIdIntoPool(workspaceId, pool);
+	if (!pool.runtimeAllocatedTaskIdsReadyForNewTaskCards.length)
+		throw new Error("运行时尚未分配任务 ID，草稿已保留，请重试。");
+}
+
 // 一次取走 count 个；不够就一个都不取（批量建卡要么全用 runtime id、要么整批不建），并按需求量补池。
 export function takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards(
 	workspaceId: string,

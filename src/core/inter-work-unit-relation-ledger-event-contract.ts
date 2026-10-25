@@ -244,6 +244,7 @@ export type TaskMutationEventKindDerivedFromBoardDiff =
 
 // 族 1 中 board diff 看不见、由专门 procedure 在 runtime 内产出的 eventKind。
 export const TASK_MUTATION_EVENT_KINDS_PRODUCED_BY_DEDICATED_RUNTIME_PROCEDURES = [
+	"task_card_project_transfer_completed",
 	"task_message_delivery_requested_into_task_conversation_session",
 ] as const;
 export type TaskMutationEventKindProducedByDedicatedRuntimeProcedure =

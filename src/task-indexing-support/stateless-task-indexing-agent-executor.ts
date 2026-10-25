@@ -17,6 +17,7 @@ import {
 	StatelessTaskIndexingAgentExecutionError,
 	sanitizeStatelessAgentFailureDetail,
 } from "./stateless-task-indexing-agent-execution-diagnostics";
+import { TASK_ANALYSIS_SHARED_INSTRUCTIONS } from "./task-analysis-shared-prompt-prefix";
 
 export interface StatelessTaskIndexingAgentExecutionActivity {
 	eventKind: "agent_process_started" | "agent_response_received" | "agent_execution_completed" | "diagnostic_warning";
@@ -57,8 +58,8 @@ export function assembleStatelessTaskIndexingAgentPrompt(
 	request: Pick<StatelessTaskIndexingAgentRequest<unknown>, "instructionText" | "context" | "queryText">,
 ) {
 	return {
-		stablePrefix: `${request.instructionText}\n\nL1 看板任务目录（仅供查找候选）：\n${request.context.levelOneBoardTaskIndexText}\n\nL2 本项目任务 recap（不是完成证明）：\n${request.context.levelTwoProjectTaskRecapsText}`,
-		query: `L3 快照后追加变化（覆盖旧快照对应字段）：\n${request.context.levelThreeAppendedChangesText}\n\nL4 本次查询：\n${request.queryText}`,
+		stablePrefix: `${TASK_ANALYSIS_SHARED_INSTRUCTIONS}\n\nL1 看板任务目录（仅供查找候选）：\n${request.context.levelOneBoardTaskIndexText}\n\nL2 本项目任务 recap（不是完成证明）：\n${request.context.levelTwoProjectTaskRecapsText}`,
+		query: `L3 快照后追加变化（覆盖旧快照对应字段）：\n${request.context.levelThreeAppendedChangesText}\n\n本次分析指令：\n${request.instructionText}\n\nL4 本次查询：\n${request.queryText}`,
 	};
 }
 
