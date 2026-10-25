@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -10,8 +10,10 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
 import * as diagnosticEventJournal from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { collectPreReviewConversationRestoreIdleGateBlockers } from "../../../src/rvf-automatic-closeout/pre-review-conversation-restore-idle-gate-recovery";
 import { RvfAutomaticCloseoutPauseError } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-coordinator";
 import { buildRvfAutomaticCloseoutPrompt } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
@@ -38,6 +40,7 @@ import {
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../../../src/state/queued-task-prompt-delivery-store";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { reduceSessionTransition } from "../../../src/terminal/session-state-machine";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
 	resolveTerminalInputBoxOccupancy,
@@ -124,6 +127,8 @@ async function setup(
 			? { thread: { id: "restored", path: "/restored.jsonl", cwd: repo.repositoryPath } }
 			: { data: parameters.threadId === "restored" ? source.slice(0, 1) : source, nextCursor: null },
 	);
+	const initialNativeTranscriptPath = join(fixture.fixtureRootDirectoryPath, "initial-native-transcript.jsonl");
+	await writeFile(initialNativeTranscriptPath, "");
 	let summary: RuntimeTaskSessionSummary = {
 		taskId: mainConversationSessionId,
 		taskConversationSessionMetadata:
@@ -159,7 +164,7 @@ async function setup(
 		agentNativeConversationSessionIdentity: {
 			sourceAgentId: "codex",
 			nativeSessionId: "native",
-			transcriptPath: "/native.jsonl",
+			transcriptPath: initialNativeTranscriptPath,
 			observedAt: 1,
 		},
 	};
@@ -182,6 +187,14 @@ async function setup(
 		],
 	});
 	const manager = {
+		getTaskTerminalInputSideMutationSnapshot: (): ReturnType<
+			TerminalSessionManager["getTaskTerminalInputSideMutationSnapshot"]
+		> => ({
+			runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+			humanTerminalInputMutationSequenceNumber: 0,
+			hasUncommittedInput: false,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+		}),
 		hasPendingProgrammaticTaskChatInputDelivery: vi.fn(() => false),
 		listSummaries: () =>
 			mainConversationSessionId === "task"
@@ -436,7 +449,7 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		await context.service.sweepPendingCloseoutsOnce();
 		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
 	});
-	it("恢复期间出现待确认输入时不停止会话，接受确认后复用已创建的 fork", async () => {
+	it("fork 前出现待确认输入时不创建分支，接受确认后仅创建一次", async () => {
 		const context = await setup();
 		await context.complete();
 		const summary = context.manager.getSummary();
@@ -455,7 +468,7 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		await context.service.sweepPendingCloseoutsOnce();
 		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
 		expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
-		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
 		if (!summary.agentConversationPromptSubmissionAcceptance) throw new Error("缺少本代输入提交记录");
 		summary.agentConversationPromptSubmissionAcceptance = {
 			...summary.agentConversationPromptSubmissionAcceptance,
@@ -1108,7 +1121,7 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 				agentNativeConversationSessionIdentity: {
 					...identity,
 					nativeSessionId: changed === "原生身份" ? "replacement" : "native",
-					transcriptPath: changed === "transcript" ? "/replacement.jsonl" : "/native.jsonl",
+					transcriptPath: changed === "transcript" ? "/replacement.jsonl" : identity.transcriptPath,
 				},
 			},
 		]);
@@ -3912,4 +3925,1072 @@ it.each(["active", "consumed"])("完整恢复闭环在备用 %s 状态不恢复�
 		originalRunDirectory: context.run,
 		reason: kind === "active" ? "active_backup_route_ownership" : "original_run_consumed_by_backup_route",
 	});
+});
+
+async function setupIdleGateRecoveryNativeEvidence() {
+	const context = await setup();
+	const summary = context.manager.getSummary();
+	const transcriptPath = join(context.fixture.fixtureRootDirectoryPath, "idle-gate-native.jsonl");
+	context.captured.receipt.transcript_path = transcriptPath;
+	summary.runtimeSessionIncarnationId = "idle-gate-incarnation";
+	summary.agentNativeConversationSessionIdentity = {
+		sourceAgentId: "codex",
+		nativeSessionId: "native",
+		transcriptPath,
+		observedAt: 1,
+	};
+	summary.codexNativeSessionControlEndpoint = {
+		workspaceId: context.scope.workspaceId,
+		conversationSessionId: summary.taskId,
+		runtimeSessionIncarnationId: "idle-gate-incarnation",
+		socketPath: "/isolated-idle-gate-control",
+	};
+	summary.turnOwner = "agent";
+	summary.userTurnKind = null;
+	summary.agentConversationPromptSubmissionAcceptance = {
+		status: "unconfirmed",
+		attemptedAtMs: Date.now() - 1000,
+		runtimeSessionIncarnationId: "idle-gate-incarnation",
+	};
+	const recordedAt = new Date().toISOString();
+	const text = context.source[1]?.items[0]?.content[0]?.text ?? "";
+	const nativeRecords = [
+		{
+			type: "session_meta",
+			payload: { id: "native", originator: "codex-tui", source: "cli", cwd: context.repo.repositoryPath },
+		},
+		{
+			type: "event_msg",
+			timestamp: recordedAt,
+			payload: { type: "task_started", turn_id: "boundary", turn_attribution: { turn_trigger: "user" } },
+		},
+		{
+			type: "event_msg",
+			timestamp: recordedAt,
+			payload: {
+				type: "item_completed",
+				turn_id: "boundary",
+				item: { id: "boundary-message", type: "UserMessage", content: [{ type: "text", text }] },
+			},
+		},
+	];
+	const writeTranscript = () =>
+		writeFile(transcriptPath, `${nativeRecords.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+	await writeTranscript();
+	await updateRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), (records) => ({
+		records: records.map((entry) => ({ ...entry, receipt: context.captured.receipt })),
+		value: null,
+	}));
+	const ledgerPath = getTaskMessageInjectionLedgerPath(mocked.directory);
+	const boundaryLedger: TaskMessageInjectionRecord = {
+		task_id: "task",
+		source: "review-validate-fix",
+		idempotency_key: context.captured.receipt.idempotency_key,
+		prompt_sha256: computeRvfTextSha256(text),
+		message_id: "ledger-message",
+		created_at: new Date(Date.now() - 1500).toISOString(),
+		terminal_delivery_status: "delivery_failed",
+		terminal_delivery_failure_reason: "codex_native_prompt_delivery_unconfirmed",
+		terminal_delivery_status_updated_at: recordedAt,
+		codex_native_prompt_delivery_evidence: {
+			clientUserMessageId: "client-message",
+			nativeSessionId: "native",
+			nativeTurnId: "boundary",
+			nativeUserMessageId: "boundary-message",
+		},
+	};
+	await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({ records: [boundaryLedger], result: null }));
+	const fallback = mocked.request.getMockImplementation();
+	let nativeAvailable = true;
+	let turnStatus = "completed";
+	let activeFlags: string[] = [];
+	let canAcceptDirectInput = true;
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+		if ((method === "thread/read" || method === "thread/loaded/list") && !nativeAvailable)
+			throw new Error("隔离的暂时断线");
+		if (method === "thread/loaded/list") return { data: ["native"], nextCursor: null };
+		if (method === "thread/read")
+			return { thread: { id: "native", status: { type: "idle", activeFlags }, canAcceptDirectInput } };
+		if (method === "thread/turns/list" && parameters.sortDirection === "desc")
+			return {
+				data: turnStatus === "empty" ? [] : [{ ...context.source.at(-1), status: turnStatus }],
+				nextCursor: null,
+			};
+		return fallback?.(method, parameters);
+	});
+	await context.complete();
+	const state = async () => (await context.service.status(context.scope, { taskId: "task" })).records[0];
+	return {
+		...context,
+		summary,
+		nativeRecords,
+		writeTranscript,
+		transcriptPath,
+		ledgerPath,
+		boundaryLedger,
+		state,
+		setNativeAvailable: (available: boolean) => {
+			nativeAvailable = available;
+		},
+		setNativeTurnStatus: (status: string) => {
+			turnStatus = status;
+		},
+		setActiveFlags: (flags: string[]) => {
+			activeFlags = flags;
+		},
+		setCanAcceptDirectInput: (canAccept: boolean) => {
+			canAcceptDirectInput = canAccept;
+		},
+	};
+}
+
+describe("RVF 完成后空闲门禁的原生补证与自动接续", () => {
+	it("接受漏报与陈旧 agent 投影只补恢复资格，跨重启仅 fork、切换及投递一次", async () => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		const ledgerBefore = (await readTaskMessageInjectionLedger(context.ledgerPath))[0];
+		const acceptanceBefore = structuredClone(context.summary.agentConversationPromptSubmissionAcceptance);
+		const activityBefore = context.summary.lastEffectiveAgentConversationActivityObservation;
+		await context.service.sweepPendingCloseoutsOnce();
+		const recovery = (await context.state())?.preReviewConversationRestoreIdleGateRecovery;
+		expect(recovery).toMatchObject({
+			status: "qualified",
+			attemptCount: 1,
+			blockingConditions: [
+				"turn_owner_not_user",
+				"user_turn_kind_not_review",
+				"current_process_prompt_acceptance_unconfirmed",
+			],
+			qualification: { acceptedNativeUserMessageId: "boundary-message", nativeCompletedTurnId: "boundary" },
+		});
+		expect((await readTaskMessageInjectionLedger(context.ledgerPath))[0]).toEqual(ledgerBefore);
+		expect(context.summary.agentConversationPromptSubmissionAcceptance).toEqual(acceptanceBefore);
+		expect(context.summary.lastEffectiveAgentConversationActivityObservation).toEqual(activityBefore);
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.startTaskSession).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+	});
+	it.each(["failed", "interrupted", "inProgress", "empty"])("最新回合 %s 不作为完成证明", async (status) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		context.setNativeTurnStatus(status);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.lastFailureCode).toBe(
+			"native_completed_idle_input_ready_not_proven",
+		);
+	});
+	it.each(["waitingOnApproval", "waitingOnUserInput", "input_unavailable"])(
+		"原生 %s 继续阻止恢复",
+		async (condition) => {
+			const context = await setupIdleGateRecoveryNativeEvidence();
+			if (condition === "input_unavailable") context.setCanAcceptDirectInput(false);
+			else context.setActiveFlags([condition]);
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		},
+	);
+	it("完整补证三次预算与 60 秒健康探测跨重启保留，端点恢复后自动接续", async () => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		context.setNativeAvailable(false);
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		onTestFinished(() => clock.mockRestore());
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.attemptCount).toBe(attempt);
+			now += 15_000;
+		}
+		const countBeforeHealthProbe = mocked.controlEndpoint.mock.calls.length;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(mocked.controlEndpoint).toHaveBeenCalledTimes(countBeforeHealthProbe);
+		context.setNativeAvailable(true);
+		now += 60_000;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	});
+	it.each(["question", "plan_review", "permission", "needs_input"] as const)(
+		"真实 %s 待答不启动补证",
+		async (kind) => {
+			const context = await setupIdleGateRecoveryNativeEvidence();
+			context.summary.turnOwner = "user";
+			context.summary.userTurnKind = kind;
+			mocked.controlEndpoint.mockClear();
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(mocked.controlEndpoint).not.toHaveBeenCalled();
+			expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.blockingConditions).toContain(
+				"user_turn_kind_not_review",
+			);
+		},
+	);
+	it.each(["park", "in_flight", "starting", "draft"])("%s 条件不能由原生完成证据覆盖", async (condition) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		if (condition === "park")
+			context.manager.getAwaitingDispatchedBackgroundWork = () => ({ parked: true, label: null, sinceMs: null });
+		if (condition === "in_flight") context.manager.hasPendingProgrammaticTaskChatInputDelivery.mockReturnValue(true);
+		if (condition === "starting") context.summary.liveness = "starting";
+		if (condition === "draft") {
+			const occupancy = await context.manager.resolveTaskTerminalInputBoxOccupancy("task");
+			if (!occupancy) throw new Error("缺少输入框观测");
+			context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue({
+				...occupancy,
+				hasUncommittedInput: true,
+			});
+		}
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
+	});
+	it.each(["message_id", "digest", "timestamp", "duplicate", "human_input"])(
+		"拒绝 %s 歧义或不属于本次提交的接受证据",
+		async (condition) => {
+			const context = await setupIdleGateRecoveryNativeEvidence();
+			if (condition === "human_input")
+				context.summary.agentConversationPromptSubmissionAcceptance = {
+					status: "unconfirmed",
+					attemptedAtMs: Date.now() + 2000,
+					runtimeSessionIncarnationId: "idle-gate-incarnation",
+				};
+			else
+				await withTaskMessageInjectionLedgerLock(context.ledgerPath, async (records) => ({
+					records: records.flatMap((entry) => {
+						if (condition === "message_id")
+							return [
+								{
+									...entry,
+									codex_native_prompt_delivery_evidence: {
+										clientUserMessageId: "client-message",
+										nativeSessionId: "native",
+										nativeTurnId: "boundary",
+										nativeUserMessageId: "other-message",
+									},
+								},
+							];
+						if (condition === "digest") return [{ ...entry, prompt_sha256: "wrong-digest" }];
+						if (condition === "timestamp")
+							return [{ ...entry, created_at: new Date(Date.now() + 60_000).toISOString() }];
+						return [entry, { ...entry }];
+					}),
+					result: null,
+				}));
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		},
+	);
+	it.each(["submission", "identity", "new_turn", "park", "stop", "new_run"])(
+		"原生查询期间出现 %s 使旧资格失效，fork 前保留现场",
+		async (condition) => {
+			const context = await setupIdleGateRecoveryNativeEvidence();
+			const original = mocked.request.getMockImplementation();
+			let changed = false;
+			mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+				const result = await original?.(method, parameters);
+				if (method === "thread/read" && !changed) {
+					changed = true;
+					if (condition === "submission")
+						context.summary.agentConversationPromptSubmissionAcceptance = {
+							status: "pending",
+							attemptedAtMs: Date.now() + 1000,
+							runtimeSessionIncarnationId: "idle-gate-incarnation",
+						};
+					if (condition === "identity") context.summary.runtimeSessionIncarnationId = "replacement-incarnation";
+					if (condition === "new_turn") context.summary.agentResponseGenerationTurnSequence = 999;
+					if (condition === "park")
+						context.manager.getAwaitingDispatchedBackgroundWork = () => ({
+							parked: true,
+							label: null,
+							sinceMs: null,
+						});
+					if (condition === "stop") await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+					if (condition === "new_run") {
+						const contextState = await context.state();
+						if (!contextState) throw new Error("缺少原恢复记录");
+						await updateRvfAutomaticCloseoutRecords(
+							getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+							(records) => ({
+								records: [
+									...records,
+									{
+										...contextState,
+										receipt: { ...contextState.receipt, decision_token: "fedcba9876543210" },
+										createdAt: Date.now() + 1,
+										status: "captured_review_start_boundary",
+									},
+								],
+								value: null,
+							}),
+						);
+					}
+				}
+				return result;
+			});
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+			expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
+		},
+	);
+	it("独立记录进程、回合、待答、本代提交、停放和在途投递的组合阻塞", async () => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		context.summary.liveness = "starting";
+		expect(
+			collectPreReviewConversationRestoreIdleGateBlockers({
+				summary: context.summary,
+				backgroundWorkParked: true,
+				programmaticDeliveryInFlight: true,
+			}),
+		).toEqual([
+			"process_liveness_not_ready",
+			"turn_owner_not_user",
+			"user_turn_kind_not_review",
+			"background_work_parked",
+			"programmatic_delivery_in_flight",
+		]);
+	});
+});
+
+it("空闲资格已确认但停止前出现人工输入时保留已创建的唯一 fork，后续不复用旧接受证明", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const originalRequest = mocked.request.getMockImplementation();
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+		const result = await originalRequest?.(method, parameters);
+		if (method === "thread/fork")
+			context.summary.agentConversationPromptSubmissionAcceptance = {
+				status: "pending",
+				attemptedAtMs: Date.now() + 1000,
+				runtimeSessionIncarnationId: "idle-gate-incarnation",
+			};
+		return result;
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect((await context.state())?.restoredNativeSessionId).toBe("restored");
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+});
+it("同一健康状态下完整消息查询中断，能力恢复后有界重试并自动继续", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const originalRequest = mocked.request.getMockImplementation();
+	let completeQueryAvailable = false;
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+		if (method === "thread/turns/list" && parameters.itemsView === "full" && !completeQueryAvailable)
+			throw new Error("隔离的完整消息查询断线");
+		return originalRequest?.(method, parameters);
+	});
+	let now = Date.now();
+	const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+	onTestFinished(() => clock.mockRestore());
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await context.service.sweepPendingCloseoutsOnce();
+		now += 15_000;
+	}
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.attemptCount).toBe(3);
+	completeQueryAvailable = true;
+	now += 60_000;
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+});
+
+it.each(["request_failure", "incomplete_response"])(
+	"后续历史分页 %s 时只探测失败 cursor，跨重启恢复后同端点自动取得完整资格",
+	async (failureMode) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		const originalRequest = mocked.request.getMockImplementation();
+		let secondPageAvailable = false;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/turns/list" && parameters.threadId === "native" && parameters.sortDirection === "asc") {
+				if (parameters.cursor === null)
+					return { data: context.source.slice(0, 1), nextCursor: "second-history-page" };
+				if (parameters.cursor === "second-history-page") {
+					if (!secondPageAvailable) {
+						if (failureMode === "request_failure") throw new Error("隔离的后续历史分页断线");
+						return { data: [{ id: "boundary", status: "completed" }], nextCursor: null };
+					}
+					return { data: context.source.slice(1), nextCursor: null };
+				}
+			}
+			return originalRequest?.(method, parameters);
+		});
+		mocked.request.mockClear();
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		onTestFinished(() => clock.mockRestore());
+		for (let attempt = 0; attempt < 3; attempt++) {
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			now += 15_000;
+		}
+		const firstPageReads = () =>
+			mocked.request.mock.calls.filter(
+				([method, parameters]) =>
+					method === "thread/turns/list" && parameters.sortDirection === "asc" && parameters.cursor === null,
+			).length;
+		expect(firstPageReads()).toBe(3);
+		const evidenceBeforeRecovery = (await context.state())?.preReviewConversationRestoreIdleGateRecovery
+			?.evidenceFingerprint;
+		for (let probe = 0; probe < 2; probe++) {
+			now += 60_000;
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(firstPageReads()).toBe(3);
+			expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery).toMatchObject({
+				attemptCount: 3,
+				failedNativeConversationTurnHistoryPageRead: {
+					cursor: "second-history-page",
+					lastCapabilityProbeAtMs: now,
+					lastCapabilityProbeStatus: "unavailable",
+				},
+			});
+			expect(
+				mocked.request.mock.calls.filter(([, parameters]) => parameters.cursor === "second-history-page"),
+			).toHaveLength(4 + probe);
+		}
+		secondPageAvailable = true;
+		now += 60_000;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery).toMatchObject({
+			status: "qualified",
+			evidenceFingerprint: evidenceBeforeRecovery,
+			failedNativeConversationTurnHistoryPageRead: null,
+			qualification: { acceptedNativeUserMessageId: "boundary-message", nativeCompletedTurnId: "boundary" },
+		});
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	},
+);
+
+it.each(["draft", "park", "in_flight"])(
+	"运行时条件等待 %s 不消耗补证预算，解除后同端点自动重新取证",
+	async (condition) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		const originalRequest = mocked.request.getMockImplementation();
+		const originalOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+		let runtimeConditionActive = false;
+		let introduceConditionDuringNativeQuery = true;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			const result = await originalRequest?.(method, parameters);
+			if (method === "thread/read" && introduceConditionDuringNativeQuery) runtimeConditionActive = true;
+			return result;
+		});
+		context.manager.getAwaitingDispatchedBackgroundWork = () => ({
+			parked: condition === "park" && runtimeConditionActive,
+			label: null,
+			sinceMs: null,
+		});
+		context.manager.hasPendingProgrammaticTaskChatInputDelivery.mockImplementation(
+			() => condition === "in_flight" && runtimeConditionActive,
+		);
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(async (taskId) => {
+			const occupancy = await originalOccupancy?.(taskId);
+			if (!occupancy) return null;
+			return { ...occupancy, hasUncommittedInput: condition === "draft" && runtimeConditionActive };
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		onTestFinished(() => clock.mockRestore());
+		for (let attempt = 0; attempt < 3; attempt++) {
+			runtimeConditionActive = false;
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery).toMatchObject({
+				status: "waiting_for_runtime_conditions",
+				attemptCount: 0,
+				lastFailureCode: null,
+				resumeCondition: "runtime_guards_clear",
+			});
+			now += 15_000;
+		}
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		introduceConditionDuringNativeQuery = false;
+		runtimeConditionActive = false;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	},
+);
+
+it("运行时条件等待中的持续草稿不查询原生证据，清空后无需更换证据指纹便继续", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const originalOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+	let draftPresent = true;
+	context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(async (taskId) => {
+		const occupancy = await originalOccupancy?.(taskId);
+		return occupancy ? { ...occupancy, hasUncommittedInput: draftPresent } : null;
+	});
+	mocked.controlEndpoint.mockClear();
+	for (let attempt = 0; attempt < 4; attempt++)
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(mocked.controlEndpoint).not.toHaveBeenCalled();
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.attemptCount).toBe(0);
+	const fingerprintWhileWaiting = (await context.state())?.preReviewConversationRestoreIdleGateRecovery
+		?.evidenceFingerprint;
+	draftPresent = false;
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.evidenceFingerprint).toBe(
+		fingerprintWhileWaiting,
+	);
+	expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+});
+
+it("运行时条件等待解除可恢复历史上已耗尽且健康指纹未变的补证预算", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const originalOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+	let draftPresent = true;
+	context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(async (taskId) => {
+		const occupancy = await originalOccupancy?.(taskId);
+		return occupancy ? { ...occupancy, hasUncommittedInput: draftPresent } : null;
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	const recoveryWhileWaiting = (await context.state())?.preReviewConversationRestoreIdleGateRecovery;
+	if (!recoveryWhileWaiting) throw new Error("缺少运行时等待补证记录");
+	await updateRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), (records) => ({
+		records: records.map((record) => ({
+			...record,
+			preReviewConversationRestoreIdleGateRecovery: {
+				...recoveryWhileWaiting,
+				status: "waiting_for_evidence_change",
+				attemptCount: 3,
+				lastFailureCode: "native_evidence_query_unavailable",
+				lastNativeHealthFingerprint: JSON.stringify([
+					JSON.stringify(["boundary", "completed", "idle", [], true]),
+					"ready",
+				]),
+				nextProbeAtMs: Date.now() + 60_000,
+			},
+		})),
+		value: null,
+	}));
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.status).toBe(
+		"waiting_for_runtime_conditions",
+	);
+	draftPresent = false;
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+});
+
+it("原生补证预算耗尽后的内部等待保留原失败原因，不再被 catch 分类为查询失败", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	context.setNativeTurnStatus("failed");
+	let now = Date.now();
+	const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+	onTestFinished(() => clock.mockRestore());
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await context.service.sweepPendingCloseoutsOnce();
+		now += 15_000;
+	}
+	const nativeFailureCode = (await context.state())?.preReviewConversationRestoreIdleGateRecovery?.lastFailureCode;
+	expect(nativeFailureCode).toBe("native_completed_idle_input_ready_not_proven");
+	for (let probe = 0; probe < 2; probe++) {
+		now += 60_000;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery).toMatchObject({
+			status: "waiting_for_evidence_change",
+			attemptCount: 3,
+			lastFailureCode: nativeFailureCode,
+		});
+	}
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+});
+it("本 run 明确绑定的程序化续跑凭原生消息 ID、摘要与时间完成接受补证", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const text = `RVF_DECISION_TOKEN=${context.token}\nrun_id=run\n继续本轮审查`;
+	context.source.push({
+		id: "continuation",
+		status: "completed",
+		items: [{ id: "continuation-message", type: "userMessage", content: [{ type: "text", text }] }],
+	});
+	const time = new Date().toISOString();
+	context.nativeRecords.push(
+		{
+			type: "event_msg",
+			timestamp: time,
+			payload: { type: "task_started", turn_id: "continuation", turn_attribution: { turn_trigger: "user" } },
+		},
+		{
+			type: "event_msg",
+			timestamp: time,
+			payload: {
+				type: "item_completed",
+				turn_id: "continuation",
+				item: { id: "continuation-message", type: "UserMessage", content: [{ type: "text", text }] },
+			},
+		},
+	);
+	await context.writeTranscript();
+	await withTaskMessageInjectionLedgerLock(context.ledgerPath, async (records) => ({
+		records: [
+			...records,
+			{
+				...context.boundaryLedger,
+				idempotency_key: `rvf-continuation-${context.token}`,
+				prompt_sha256: computeRvfTextSha256(text),
+				terminal_delivery_status: "delivered_and_submit_confirmed",
+				terminal_delivery_failure_reason: undefined,
+				codex_native_prompt_delivery_evidence: {
+					clientUserMessageId: "continuation-client",
+					nativeSessionId: "native",
+					nativeTurnId: "continuation",
+					nativeUserMessageId: "continuation-message",
+				},
+			},
+		],
+		result: null,
+	}));
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(
+		(await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification?.acceptedNativeUserMessageId,
+	).toBe("continuation-message");
+	expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+});
+
+async function appendCompletedNativeRunContinuationWithFailedDelivery(
+	context: Awaited<ReturnType<typeof setupIdleGateRecoveryNativeEvidence>>,
+	continuationSequence: number,
+	text = `RVF_DECISION_TOKEN=${context.token}\nrun_id=run\n继续本轮审查 ${continuationSequence}`,
+) {
+	const nativeTurnId = `failed-ledger-continuation-${continuationSequence}`;
+	const nativeUserMessageId = `${nativeTurnId}-message`;
+	const recordedAt = new Date().toISOString();
+	context.source.push({
+		id: nativeTurnId,
+		status: "completed",
+		items: [{ id: nativeUserMessageId, type: "userMessage", content: [{ type: "text", text }] }],
+	});
+	context.nativeRecords.push(
+		{
+			type: "event_msg",
+			timestamp: recordedAt,
+			payload: { type: "task_started", turn_id: nativeTurnId, turn_attribution: { turn_trigger: "user" } },
+		},
+		{
+			type: "event_msg",
+			timestamp: recordedAt,
+			payload: {
+				type: "item_completed",
+				turn_id: nativeTurnId,
+				item: { id: nativeUserMessageId, type: "UserMessage", content: [{ type: "text", text }] },
+			},
+		},
+	);
+	await withTaskMessageInjectionLedgerLock(context.ledgerPath, async (records) => ({
+		records: [
+			...records,
+			{
+				...context.boundaryLedger,
+				idempotency_key: `${nativeTurnId}-${context.token}`,
+				prompt_sha256: computeRvfTextSha256(text),
+				codex_native_prompt_delivery_evidence: {
+					clientUserMessageId: `${nativeTurnId}-client`,
+					nativeSessionId: "native",
+					nativeTurnId,
+					nativeUserMessageId,
+				},
+			},
+		],
+		result: null,
+	}));
+	await context.writeTranscript();
+	return nativeUserMessageId;
+}
+
+it.each([1, 2])(
+	"本 run 的 %s 条失败账本续跑经精确补证后通过后续分支门禁，失败历史保持原样",
+	async (continuationCount) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		let lastNativeUserMessageId = "";
+		for (let index = 1; index <= continuationCount; index++)
+			lastNativeUserMessageId = await appendCompletedNativeRunContinuationWithFailedDelivery(context, index);
+		const failedLedgerBefore = await readTaskMessageInjectionLedger(context.ledgerPath);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(
+			(await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification
+				?.acceptedNativeUserMessageId,
+		).toBe(lastNativeUserMessageId);
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(
+			(await readTaskMessageInjectionLedger(context.ledgerPath)).filter((entry) =>
+				failedLedgerBefore.some((before) => before.idempotency_key === entry.idempotency_key),
+			),
+		).toEqual(failedLedgerBefore);
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+	},
+);
+
+it.each(["wrong_message_id", "other_run", "human_input"])(
+	"失败账本续跑中的 %s 不能借独立资格通过分支门禁",
+	async (condition) => {
+		const context = await setupIdleGateRecoveryNativeEvidence();
+		const text =
+			condition === "other_run"
+				? `RVF_DECISION_TOKEN=${context.token}\nrun_id=other-run\n继续审查`
+				: condition === "human_input"
+					? "人工插话，请执行另一件事"
+					: undefined;
+		await appendCompletedNativeRunContinuationWithFailedDelivery(context, 1, text);
+		if (condition === "wrong_message_id")
+			await withTaskMessageInjectionLedgerLock(context.ledgerPath, async (records) => ({
+				records: records.map((entry) =>
+					entry.idempotency_key === context.boundaryLedger.idempotency_key
+						? entry
+						: {
+								...entry,
+								codex_native_prompt_delivery_evidence: {
+									clientUserMessageId: "wrong-client",
+									nativeSessionId: "native",
+									nativeTurnId: "failed-ledger-continuation-1",
+									nativeUserMessageId: "wrong-message",
+								},
+							},
+				),
+				result: null,
+			}));
+		const failedLedgerBefore = await readTaskMessageInjectionLedger(context.ledgerPath);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
+		expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toEqual(failedLedgerBefore);
+	},
+);
+
+it("失败账本续跑补证后活动分支返回同正文的其他消息 ID，后续门禁仍拒绝恢复", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const acceptedMessageId = await appendCompletedNativeRunContinuationWithFailedDelivery(context, 1);
+	const originalRequest = mocked.request.getMockImplementation();
+	let replacedActiveBranchMessage = false;
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+		if (
+			method === "thread/turns/list" &&
+			parameters.threadId === "native" &&
+			parameters.sortDirection === "asc" &&
+			(await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification
+		) {
+			replacedActiveBranchMessage = true;
+			return {
+				data: context.source.map((turn) => ({
+					...turn,
+					items: turn.items.map((item) =>
+						item.id === acceptedMessageId ? { ...item, id: "other-branch-message" } : item,
+					),
+				})),
+				nextCursor: null,
+			};
+		}
+		return originalRequest?.(method, parameters);
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(replacedActiveBranchMessage).toBe(true);
+	expect(
+		(await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification?.acceptedNativeUserMessageId,
+	).toBe(acceptedMessageId);
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
+});
+
+async function installActualTerminalInputTrackerForRestore(
+	context: Awaited<ReturnType<typeof setupIdleGateRecoveryNativeEvidence>>,
+) {
+	const inputManager = new TerminalSessionManager();
+	onTestFinished(() => inputManager.dispose());
+	inputManager.hydrateFromRecord(
+		{
+			task: {
+				...context.summary,
+				turnOwner: "user",
+				userTurnKind: "review",
+				codexNativeSessionControlEndpoint: null,
+				agentConversationPromptSubmissionAcceptance: undefined,
+			},
+		},
+		new Set(["task"]),
+	);
+	const adoptionOutcomes = await inputManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([
+		{
+			taskId: "task",
+			hostedSessionKind: "task_agent_session",
+			pid: 123,
+			spawnedAtEpochMs: 1,
+			cols: 100,
+			rows: 30,
+			exitedWhileRuntimeWasAbsent: false,
+			terminalSessionAdoptionRecord: null,
+			adoptHostedTerminalPtyProcess: async () => ({
+				pid: 123,
+				write: vi.fn(),
+				resize: vi.fn(),
+				pause: vi.fn(),
+				resume: vi.fn(),
+				stop: vi.fn(),
+				hasExited: () => false,
+				wasInterrupted: () => false,
+			}),
+			terminateHostedTerminalPtyProcessAfterRefusedAdoption: vi.fn(),
+		},
+	]);
+	expect(adoptionOutcomes[0]?.adoptionOutcome).toBe("adopted_running_session");
+	inputManager.writeInput("task", Buffer.from("\r"));
+	const incarnation = inputManager.getSummary("task")?.runtimeSessionIncarnationId;
+	context.summary.runtimeSessionIncarnationId = incarnation;
+	if (incarnation && context.summary.codexNativeSessionControlEndpoint)
+		context.summary.codexNativeSessionControlEndpoint.runtimeSessionIncarnationId = incarnation;
+	if (incarnation && context.summary.agentConversationPromptSubmissionAcceptance)
+		context.summary.agentConversationPromptSubmissionAcceptance.runtimeSessionIncarnationId = incarnation;
+	context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(() =>
+		inputManager.resolveTaskTerminalInputBoxOccupancy("task"),
+	);
+	context.manager.getTaskTerminalInputSideMutationSnapshot = () =>
+		inputManager.getTaskTerminalInputSideMutationSnapshot("task");
+	return inputManager;
+}
+
+it("真实输入管理器在同毫秒输入并清空后仍推进版本，summary 与空框状态保持原值", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const inputManager = await installActualTerminalInputTrackerForRestore(context);
+	const summaryBeforeInput = inputManager.getSummary("task");
+	const mutationBeforeInput = inputManager.getTaskTerminalInputSideMutationSnapshot("task");
+	const fixedTimestamp = Date.now();
+	const clock = vi.spyOn(Date, "now").mockReturnValue(fixedTimestamp);
+	onTestFinished(() => clock.mockRestore());
+	inputManager.writeInput("task", Buffer.from("同毫秒输入"));
+	inputManager.writeInput("task", Buffer.from("\u0003"));
+	const mutationAfterClear = inputManager.getTaskTerminalInputSideMutationSnapshot("task");
+	expect(mutationAfterClear?.humanTerminalInputMutationSequenceNumber).toBeGreaterThan(
+		mutationBeforeInput?.humanTerminalInputMutationSequenceNumber ?? 0,
+	);
+	expect(mutationAfterClear?.hasUncommittedInput).toBe(false);
+	expect(inputManager.getSummary("task")).toEqual(summaryBeforeInput);
+});
+
+it("真实 tracker 持续空白时仍只创建一个 fork 并投递一次收尾", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	await installActualTerminalInputTrackerForRestore(context);
+	await context.service.sweepPendingCloseoutsOnce();
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+});
+
+it.each([
+	{ stage: "fork", change: "draft" },
+	{ stage: "stop", change: "draft" },
+	{ stage: "fork", change: "native_message" },
+	{ stage: "stop", change: "native_message" },
+])("最终保存期间 $stage 前出现 $change 且 summary 未变时保留输入并拒绝副作用", async ({ stage, change }) => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const inputManager = await installActualTerminalInputTrackerForRestore(context);
+	const originalOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+	let finalOccupancyReadFinished = false;
+	let injected = false;
+	context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(async (taskId) => {
+		const occupancy = await originalOccupancy?.(taskId);
+		const record = await context.state();
+		if (
+			record?.nativeForkAttemptStartedAt != null &&
+			(stage === "stop"
+				? record.nativeIdentitySwitchStartedAt != null
+				: record.nativeIdentitySwitchStartedAt === null)
+		)
+			finalOccupancyReadFinished = true;
+		return occupancy ?? null;
+	});
+	const originalWrite = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
+	const writeSpy = vi
+		.spyOn(lockedFileSystem, "writeJsonFileAtomic")
+		.mockImplementation(async (path, payload, options) => {
+			await originalWrite(path, payload, options);
+			if (
+				path !== getRvfAutomaticCloseoutStorePath(context.scope.workspaceId) ||
+				!finalOccupancyReadFinished ||
+				injected
+			)
+				return;
+			injected = true;
+			const summaryBeforeInput = structuredClone(inputManager.getSummary("task"));
+			if (change === "draft") inputManager.writeInput("task", Buffer.from("\u001b[200~请保留未提交草稿\u001b[201~"));
+			else
+				await appendFile(
+					context.transcriptPath,
+					`${JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "最后出现的人工消息" }] } })}\n`,
+				);
+			expect(inputManager.getSummary("task")).toEqual(summaryBeforeInput);
+		});
+	onTestFinished(() => writeSpy.mockRestore());
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(injected).toBe(true);
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(stage === "fork" ? 0 : 1);
+	if (change === "draft")
+		expect((await inputManager.resolveTaskTerminalInputBoxOccupancy("task"))?.inputSideByteTrackingSaysNonEmpty).toBe(
+			true,
+		);
+});
+
+it("另一运行时在停止旧进程前的最终原生查询期间持久 Stop，当前运行时立即让位", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const originalRequest = mocked.request.getMockImplementation();
+	const independentStopper = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+	let stopped = false;
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+		const result = await originalRequest?.(method, parameters);
+		if (method === "thread/read" && !stopped) {
+			const record = (
+				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))
+			)[0];
+			if (record?.nativeIdentitySwitchStartedAt != null) {
+				stopped = true;
+				await independentStopper.pauseForExplicitStop(context.scope.workspaceId, "task");
+			}
+		}
+		return result;
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(stopped).toBe(true);
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect((await context.state())?.explicitStopRequestedAt).toBeDefined();
+	expect((await context.state())?.status).toBe("paused");
+});
+
+it("持久 Stop 在最终输入框查询返回时到达，停止前的 claim 检查仍阻止执行", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	const independentStopper = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+	const originalOccupancy = context.manager.resolveTaskTerminalInputBoxOccupancy.getMockImplementation();
+	let stopped = false;
+	context.manager.resolveTaskTerminalInputBoxOccupancy.mockImplementation(async (taskId) => {
+		const occupancy = await originalOccupancy?.(taskId);
+		const record = (
+			await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))
+		)[0];
+		if (record?.nativeIdentitySwitchStartedAt != null && !stopped) {
+			stopped = true;
+			await independentStopper.pauseForExplicitStop(context.scope.workspaceId, "task");
+		}
+		return occupancy ?? null;
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(stopped).toBe(true);
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect((await context.state())?.status).toBe("paused");
+});
+
+async function setupQualifiedRestoreInterruptedAfterOldProcessExit(exitCode: number) {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	context.manager.forceStopTaskSession.mockImplementationOnce(async () => {
+		Object.assign(
+			context.summary,
+			reduceSessionTransition(context.summary, { type: "process.exit", exitCode, interrupted: false }).patch,
+		);
+		throw new Error("模拟旧进程已停止、运行时尚未切换身份时中断");
+	});
+	await context.service.sweepPendingCloseoutsOnce();
+	expect(context.summary).toMatchObject({ turnOwner: "user", liveness: "exited", userTurnKind: "error", pid: null });
+	const firstRecord = await context.state();
+	expect(firstRecord?.nativeIdentitySwitchStartedAt).not.toBeNull();
+	expect(firstRecord?.restoredNativeSessionId).toBe("restored");
+	expect(firstRecord?.preReviewConversationRestoreIdleGateRecovery?.qualification).not.toBeNull();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	context.manager.isTaskSessionAutomaticContinuationSuppressed = () => true;
+	return { ...context, firstRecord };
+}
+
+it.each([129, 143])("已补证且旧进程以 %s 退出后运行时中断，重启复用原资格和 fork 完成身份切换", async (exitCode) => {
+	const context = await setupQualifiedRestoreInterruptedAfterOldProcessExit(exitCode);
+	const ledgerBeforeRestart = await readTaskMessageInjectionLedger(context.ledgerPath);
+	context.runtimeApi.startTaskSession.mockImplementation(async () => {
+		const summary = context.manager.getSummary();
+		summary.liveness = "live";
+		return { ok: true, summary };
+	});
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+	expect(context.runtimeApi.startTaskSession).toHaveBeenCalledOnce();
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification).toEqual(
+		context.firstRecord?.preReviewConversationRestoreIdleGateRecovery?.qualification,
+	);
+	expect(
+		(await readTaskMessageInjectionLedger(context.ledgerPath)).filter(
+			(entry) => entry.idempotency_key === context.boundaryLedger.idempotency_key,
+		),
+	).toEqual(ledgerBeforeRestart);
+});
+
+it("原始 error 退出且从未补证时不能创建 fork 或自动切换身份", async () => {
+	const context = await setupIdleGateRecoveryNativeEvidence();
+	Object.assign(
+		context.summary,
+		reduceSessionTransition(context.summary, { type: "process.exit", exitCode: 129, interrupted: false }).patch,
+	);
+	await context.service.sweepPendingCloseoutsOnce();
+	expect((await context.state())?.preReviewConversationRestoreIdleGateRecovery?.qualification).toBeNull();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(0);
+	expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+});
+
+it.each([
+	{ condition: "missing_qualification", description: "缺少恢复资格" },
+	{ condition: "missing_fork_identity", description: "缺少持久 fork 身份" },
+	{ condition: "missing_fork_stage", description: "缺少持久 fork 阶段" },
+	{ condition: "missing_identity_switch_stage", description: "缺少持久身份切换阶段" },
+	{ condition: "replacement_incarnation", description: "incarnation 已替换" },
+	{ condition: "replacement_native_identity", description: "原生身份已替换" },
+	{ condition: "replacement_control_endpoint", description: "控制端点已替换" },
+	{ condition: "explicit_stop", description: "存在明确 Stop" },
+	{ condition: "user_interrupted_exit", description: "退出由用户中断" },
+])("旧进程退出后 $description 不能复用恢复资格", async ({ condition }) => {
+	const context = await setupQualifiedRestoreInterruptedAfterOldProcessExit(129);
+	const ledgerBeforeRestart = await readTaskMessageInjectionLedger(context.ledgerPath);
+	await updateRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), (records) => ({
+		records: records.map((record) => ({
+			...record,
+			...(condition === "missing_qualification" && record.preReviewConversationRestoreIdleGateRecovery
+				? {
+						preReviewConversationRestoreIdleGateRecovery: {
+							...record.preReviewConversationRestoreIdleGateRecovery,
+							qualification: null,
+						},
+					}
+				: {}),
+			...(condition === "missing_fork_identity"
+				? { restoredNativeSessionId: null, restoredTranscriptPath: null }
+				: {}),
+			...(condition === "missing_fork_stage" ? { nativeForkAttemptStartedAt: null } : {}),
+			...(condition === "missing_identity_switch_stage" ? { nativeIdentitySwitchStartedAt: null } : {}),
+		})),
+		value: null,
+	}));
+	if (condition === "replacement_incarnation") context.summary.runtimeSessionIncarnationId = "replacement-incarnation";
+	if (condition === "replacement_native_identity" && context.summary.agentNativeConversationSessionIdentity)
+		context.summary.agentNativeConversationSessionIdentity.nativeSessionId = "replacement-native-thread";
+	if (condition === "replacement_control_endpoint" && context.summary.codexNativeSessionControlEndpoint)
+		context.summary.codexNativeSessionControlEndpoint.socketPath = "/replacement-control-endpoint";
+	if (condition === "explicit_stop") await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+	if (condition === "user_interrupted_exit")
+		Object.assign(
+			context.summary,
+			reduceSessionTransition(context.summary, { type: "process.exit", exitCode: 129, interrupted: true }).patch,
+		);
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+	expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+	expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/fork")).toHaveLength(1);
+	expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toEqual(ledgerBeforeRestart);
 });

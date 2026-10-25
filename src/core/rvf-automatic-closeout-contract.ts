@@ -8,6 +8,7 @@ import {
 	rvfCloseoutSkillInstallationVersionReferenceSchema,
 	rvfCloseoutStageExecutionClaimSchema,
 } from "./rvf-automatic-closeout-recovery-contract";
+import { rvfPreReviewConversationRestoreIdleGateRecoverySchema } from "./rvf-pre-review-conversation-restore-idle-gate-recovery-contract";
 
 export const rvfReviewStartBoundaryRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -198,6 +199,7 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	restoreWorkspaceStateSha256: z.string().nullable(),
 	nativeIdentitySwitchStartedAt: z.number().nullable(),
 	nativeForkAttemptStartedAt: z.number().nullable(),
+	preReviewConversationRestoreIdleGateRecovery: rvfPreReviewConversationRestoreIdleGateRecoverySchema.optional(),
 	activeCoordinatorOperationClaimId: z.string().nullable().optional(),
 	independentBackupRouteSuppressionObservation: z
 		.object({

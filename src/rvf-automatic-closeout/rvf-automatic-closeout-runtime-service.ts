@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { statSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -6,6 +7,7 @@ import { z } from "zod";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskChatSendRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { buildCodexNativeAgentTurnExecutionSemanticGuard } from "../core/codex-native-agent-turn-execution-observation";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../core/kanban-cli-invocation-environment-actor-claims";
 import {
 	type RvfAutomaticCloseoutRecord,
@@ -63,6 +65,11 @@ import {
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { observeRvfReviewStartActiveBranch } from "./observe-rvf-review-start-active-branch";
 import {
+	collectPreReviewConversationRestoreIdleGateBlockers,
+	requirePreReviewConversationRestoreIdleGate,
+} from "./pre-review-conversation-restore-idle-gate-recovery";
+import { readPreReviewRestoreNativeMessageOwnership } from "./read-pre-review-restore-native-message-ownership";
+import {
 	reconcileRvfAutomaticCloseoutLateNativePromptAcceptance,
 	verifyRvfAutomaticCloseoutLateNativePromptAcceptance,
 } from "./reconcile-rvf-automatic-closeout-late-native-prompt-acceptance";
@@ -98,6 +105,7 @@ type RvfAutomaticCloseoutTerminalManager = Pick<
 	| "isTaskSessionAutomaticContinuationSuppressed"
 	| "getAwaitingDispatchedBackgroundWork"
 	| "resolveTaskTerminalInputBoxOccupancy"
+	| "getTaskTerminalInputSideMutationSnapshot"
 	| "forceStopTaskSession"
 	| "applyAgentNativeConversationSessionIdentity"
 	| "publishRvfAutomaticCloseoutPaused"
@@ -286,32 +294,86 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			throw new RvfAutomaticCloseoutPauseError("首版自动收尾需要已确认原生身份的 Codex 主会话。");
 		return { manager, summary, card };
 	}
-	function requireIdle(
+	async function requireIdle(
+		scope: RuntimeTrpcWorkspaceScope,
 		manager: RvfAutomaticCloseoutTerminalManager,
 		summary: RuntimeTaskSessionSummary,
-		identitySwitchAlreadyStarted = false,
+		record: RvfAutomaticCloseoutRecord,
+		save: (patch: Partial<RvfAutomaticCloseoutRecord>) => Promise<void>,
 	) {
-		if (!identitySwitchAlreadyStarted && manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId))
-			throw new RvfAutomaticCloseoutPauseError("会话已停止或被暂停，自动收尾不再续跑。");
-		const facets = resolveSessionFacets(summary);
-		const inputSubmission = summary.agentConversationPromptSubmissionAcceptance;
-		// CR 已清空输入账本，但原生接受确认前 facet 仍可能是 review，不能据此停止进程。
-		const hasUnconfirmedInputSubmissionForCurrentLiveProcess =
-			facets.liveness === "live" &&
-			inputSubmission != null &&
-			inputSubmission.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
-			inputSubmission.status !== "accepted";
-		if (
-			!["live", "exited"].includes(facets.liveness) ||
-			facets.turnOwner !== "user" ||
-			facets.userTurnKind !== "review" ||
-			hasUnconfirmedInputSubmissionForCurrentLiveProcess ||
-			manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked
-		)
-			throw new RvfAutomaticCloseoutWaitError(
-				"agent_turn_not_ready_for_closeout",
-				"等待 Agent 完成本轮并让出控制权。",
+		const assertCurrentGuards = async () => {
+			const { summary: latest } = await mainSummary(scope, record.taskId);
+			if (
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`) ||
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`) ||
+				record.explicitStopRequestedAt != null ||
+				(record.nativeIdentitySwitchStartedAt === null &&
+					manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId))
+			)
+				throw new RvfAutomaticCloseoutPauseError("会话已停止或被暂停，自动收尾不再续跑。");
+			if (
+				latest.taskId !== record.conversationSessionId ||
+				latest.workspacePath !== summary.workspacePath ||
+				latest.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id
+			)
+				throw new RvfAutomaticCloseoutPauseError("主会话绑定或原生身份已经改变。");
+			const records = await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId));
+			const persistedCurrent = records.find(
+				(entry) => entry.receipt.decision_token === record.receipt.decision_token,
 			);
+			if (
+				!persistedCurrent ||
+				persistedCurrent.status === "paused" ||
+				persistedCurrent.status === "completed" ||
+				persistedCurrent.explicitStopRequestedAt != null
+			)
+				throw new RvfAutomaticCloseoutPauseError("持久停止或终态已生效，不能继续原生恢复。");
+			if (
+				records.some(
+					(entry) =>
+						entry.taskId === record.taskId &&
+						entry.receipt.decision_token !== record.receipt.decision_token &&
+						entry.createdAt >= record.createdAt,
+				)
+			)
+				throw new RvfAutomaticCloseoutPauseError("已有后继 RVF 开审分界，旧恢复让位。");
+			await requireNoPendingUserInput(scope, record);
+			return latest;
+		};
+		await assertCurrentGuards();
+		await requirePreReviewConversationRestoreIdleGate({
+			record,
+			summary,
+			save,
+			blockingConditions: collectPreReviewConversationRestoreIdleGateBlockers({
+				summary,
+				backgroundWorkParked: manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked,
+				programmaticDeliveryInFlight:
+					manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId) ?? false,
+			}),
+			readLedger: async () =>
+				(
+					await readTaskMessageInjectionLedger(
+						getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId)),
+					)
+				).filter((entry) => entry.task_id === record.taskId || entry.task_id === record.conversationSessionId),
+			assertCurrentGuards: async () => {
+				const latest = await assertCurrentGuards();
+				const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
+				if (
+					!occupancy ||
+					occupancy.hasUncommittedInput ||
+					!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition ||
+					manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked ||
+					manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId)
+				)
+					throw new RvfAutomaticCloseoutWaitError(
+						"agent_turn_not_ready_for_closeout",
+						"等待草稿、后台停放或在途投递解除。",
+					);
+				return manager.getSummary(latest.taskId) ?? latest;
+			},
+		});
 	}
 	async function requireNoPendingUserInput(scope: RuntimeTrpcWorkspaceScope, record: RvfAutomaticCloseoutRecord) {
 		const decisions = await readAgentRaisedPendingUserDecisions(scope.workspaceId);
@@ -342,6 +404,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	) {
 		if (record.runDirectory) await assertRvfCurrentCandidateNativeCloseoutQualification(record.runDirectory);
 		const { manager, summary, card } = await mainSummary(scope, record.taskId);
+		const restoreSemanticGuard = buildCodexNativeAgentTurnExecutionSemanticGuard(summary);
 		const launchSettings = summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 		if (
 			summary.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation === "task_collaborator" &&
@@ -355,6 +418,66 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			throw new RvfAutomaticCloseoutPauseError("主会话绑定或工作目录已经改变。");
 		await requireNoPendingUserInput(scope, record);
 		const currentId = summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+		const readNativeTranscriptMutationVersion = () => {
+			try {
+				const metadata = statSync(record.receipt.transcript_path, { bigint: true });
+				return [metadata.dev, metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs].join(":");
+			} catch {
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"原生转录版本暂不可读，等待重新补证。",
+				);
+			}
+		};
+		const initialTerminalInputMutationSnapshot = manager.getTaskTerminalInputSideMutationSnapshot(summary.taskId);
+		const assertImmediatelyBeforeNativeMutation = () => {
+			const current = manager.getSummary(summary.taskId);
+			const input = manager.getTaskTerminalInputSideMutationSnapshot(summary.taskId);
+			if (
+				!current ||
+				buildCodexNativeAgentTurnExecutionSemanticGuard(current) !== restoreSemanticGuard ||
+				JSON.stringify(input) !== JSON.stringify(initialTerminalInputMutationSnapshot) ||
+				(input !== null && input.runtimeSessionIncarnationId !== (current.runtimeSessionIncarnationId ?? null)) ||
+				input?.hasUncommittedInput ||
+				(resolveSessionFacets(current).liveness === "live" &&
+					!input?.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition) ||
+				readNativeTranscriptMutationVersion() !== initialNativeTranscriptMutationVersion ||
+				manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked ||
+				manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId)
+			)
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"原生动作前输入、转录或会话已变化，保留草稿并等待重新补证。",
+				);
+			if (
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`) ||
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`)
+			)
+				throw new RvfAutomaticCloseoutPauseError("用户已停止会话。");
+		};
+		const revalidateBeforeNativeMutation = async () => {
+			const latest = manager.getSummary(summary.taskId);
+			if (!latest || buildCodexNativeAgentTurnExecutionSemanticGuard(latest) !== restoreSemanticGuard)
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"恢复期间回合、输入或身份发生变化，等待重新补证。",
+				);
+			if (currentId === record.receipt.session_id) await requireIdle(scope, manager, latest, record, save);
+			const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
+			if (
+				occupancy
+					? occupancy.hasUncommittedInput ||
+						!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition
+					: resolveSessionFacets(latest).liveness === "live"
+			)
+				throw new RvfAutomaticCloseoutWaitError(
+					"terminal_input_box_not_confirmed_empty",
+					"恢复前输入框尚未确认空白。",
+				);
+			await requireNoPendingUserInput(scope, record);
+			// 最后一次异步读之后核对持久 claim/Stop；保存完成后只做同步检查并立即发出原生动作。
+			await save({});
+		};
 		if (currentId !== record.receipt.session_id && currentId !== record.restoredNativeSessionId)
 			throw new RvfAutomaticCloseoutPauseError("原生主会话身份已改变。");
 		// 已切换身份但尚未投递时可等待恢复启动；不能把 app-server 只创建了 fork 误当成已切换。
@@ -372,8 +495,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			);
 			return;
 		}
-		if (currentId === record.receipt.session_id)
-			requireIdle(manager, summary, record.nativeIdentitySwitchStartedAt !== null);
+		const initialNativeTranscriptMutationVersion = readNativeTranscriptMutationVersion();
+		if (currentId === record.receipt.session_id) await requireIdle(scope, manager, summary, record, save);
 		const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
 		// Codex 尚无输入框读屏语法。连续跟踪的空账本可以判空，接管后重建的空账本则仍可能漏着旧草稿。
 		if (
@@ -422,10 +545,48 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 						)
 						.map((entry) => entry.prompt_sha256),
 				);
+				const independentlyVerifiedNativeMessageIdentities = new Set<string>();
+				const qualification = record.preReviewConversationRestoreIdleGateRecovery?.qualification;
+				if (qualification) {
+					// 独立资格绑定完整转录；逐条复验活动分支上的 ID 与正文，覆盖所有本 run 续跑而不改失败账本。
+					const ownership = await readPreReviewRestoreNativeMessageOwnership({
+						record,
+						summary,
+						turns: original,
+						ledger,
+					}).catch(() => {
+						throw new RvfAutomaticCloseoutWaitError(
+							"agent_turn_not_ready_for_closeout",
+							"活动分支消息归属暂未通过复验，等待重新补证。",
+						);
+					});
+					if (
+						ownership.transcriptSha256 !== qualification.transcriptSha256 ||
+						ownership.nativeUserMessageId !== qualification.acceptedNativeUserMessageId ||
+						ownership.nativeTurnId !== qualification.acceptedNativeTurnId ||
+						ownership.promptSha256 !== qualification.acceptedPromptSha256 ||
+						ownership.recordedAtMs !== qualification.acceptedMessageRecordedAtMs
+					)
+						throw new RvfAutomaticCloseoutWaitError(
+							"agent_turn_not_ready_for_closeout",
+							"原生接受补证快照已变化，等待重新取证。",
+						);
+					for (const message of ownership.verifiedNativeUserMessagesOnActiveBranch)
+						independentlyVerifiedNativeMessageIdentities.add(
+							JSON.stringify([message.nativeTurnId, message.nativeUserMessageId, message.promptSha256]),
+						);
+				}
 				for (const turn of original.slice(boundaryIndex + 1))
 					for (const item of turn.items.filter((item) => item.type === "userMessage")) {
 						const text = item.content?.map((part) => part.text ?? "").join("") ?? "";
-						if (!machineHashes.has(computeRvfTextSha256(text)) && !text.startsWith("<task-notification>"))
+						const promptSha256 = computeRvfTextSha256(text);
+						if (
+							!machineHashes.has(promptSha256) &&
+							!independentlyVerifiedNativeMessageIdentities.has(
+								JSON.stringify([turn.id, item.id, promptSha256]),
+							) &&
+							!text.startsWith("<task-notification>")
+						)
 							throw new RvfAutomaticCloseoutPauseError(
 								"RVF 开审后出现未登记的用户消息，保留当前会话供人工处理。",
 							);
@@ -459,8 +620,14 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 									restoredTranscriptPath: identity.transcriptPath,
 								});
 							},
+							revalidateBeforeNativeMutation,
+							assertImmediatelyBeforeNativeMutation,
 						);
 					} catch (error) {
+						if (error instanceof RvfAutomaticCloseoutWaitError) {
+							await save({ nativeForkAttemptStartedAt: null });
+							throw error;
+						}
 						throw new RvfAutomaticCloseoutPauseError(
 							`原生 fork 未确认：${error instanceof Error ? error.message : String(error)}`,
 						);
@@ -478,8 +645,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			latest.agentNativeConversationSessionIdentity?.nativeSessionId !== currentId
 		)
 			throw new RvfAutomaticCloseoutPauseError("恢复过程中会话被替换。");
-		if (currentId === record.receipt.session_id)
-			requireIdle(manager, latest, record.nativeIdentitySwitchStartedAt !== null);
+		if (currentId === record.receipt.session_id) await requireIdle(scope, manager, latest, record, save);
 		const finalOccupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
 		if (
 			finalOccupancy
@@ -495,6 +661,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		if (explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`))
 			throw new RvfAutomaticCloseoutPauseError("用户已停止会话。");
 		await save({ nativeIdentitySwitchStartedAt: record.nativeIdentitySwitchStartedAt ?? Date.now() });
+		await revalidateBeforeNativeMutation();
+		assertImmediatelyBeforeNativeMutation();
 		await manager.forceStopTaskSession(summary.taskId);
 		await save({});
 		if (explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`))
