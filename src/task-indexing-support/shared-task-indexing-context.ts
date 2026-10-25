@@ -52,6 +52,7 @@ export function normalizeTaskIndexingStablePrefixText(text: string): string {
 
 export function extractTaskRequirementsFirstParagraph(prompt: string): string {
 	const text = prompt
+		.replace(/^\s*## TLDR[\t ]*(?:\r?\n|$)/u, "")
 		.replace(/<[^>]+>/gu, "\n")
 		.replace(/^KANBAN_[A-Z_]+=.*$/gmu, "")
 		.trim();

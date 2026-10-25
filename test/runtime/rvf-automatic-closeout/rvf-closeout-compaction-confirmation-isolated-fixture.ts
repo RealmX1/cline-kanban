@@ -17,7 +17,9 @@ import {
 import { getWorkspaceDirectoryPath } from "../../../src/state/workspace-state";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
-export async function createRvfCloseoutCompactionConfirmationIsolatedFixture() {
+export async function createRvfCloseoutCompactionConfirmationIsolatedFixture(
+	options: { frozenPromptText?: string } = {},
+) {
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 	const workspaceId = "isolated-compaction";
@@ -69,7 +71,7 @@ export async function createRvfCloseoutCompactionConfirmationIsolatedFixture() {
 	});
 	const storePath = getRvfAutomaticCloseoutStorePath(workspaceId);
 	await updateRvfAutomaticCloseoutRecords(storePath, () => ({ records: [record], value: null }));
-	const promptText = buildRvfAutomaticCloseoutPrompt(record);
+	const promptText = options.frozenPromptText ?? buildRvfAutomaticCloseoutPrompt(record);
 	const ledgerPath = getTaskMessageInjectionLedgerPath(workspaceDirectory);
 	await writeFile(
 		ledgerPath,

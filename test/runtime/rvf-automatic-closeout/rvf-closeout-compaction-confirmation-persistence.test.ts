@@ -1,11 +1,66 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { persistTaskMessageNativeCompactionAwareConfirmation } from "../../../src/core/task-message-injection-ledger";
 import { updateRvfAutomaticCloseoutRecords } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../../../src/rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import {
+	applyQueuedTaskPromptDeliveryMutation,
+	getWorkspaceQueuedTaskPromptDeliveriesPath,
+} from "../../../src/state/queued-task-prompt-delivery-store";
 import { createRvfCloseoutCompactionConfirmationIsolatedFixture } from "./rvf-closeout-compaction-confirmation-isolated-fixture";
 
 afterEach(() => vi.unstubAllEnvs());
 describe("压缩等待只对精确绑定的自动收尾启用", () => {
+	it("模板升级后只复用已冻结且哈希匹配的历史正文，不重发新版正文或接受被改写的快照", async () => {
+		const frozenPromptText = "这是合成的旧版本收尾正文，首次提交后保持字节不变。";
+		const fixture = await createRvfCloseoutCompactionConfirmationIsolatedFixture({ frozenPromptText });
+		expect(
+			await persistTaskMessageNativeCompactionAwareConfirmation({
+				ledgerPath: fixture.ledgerPath,
+				ledgerTaskId: fixture.record.taskId,
+				snapshot: fixture.initialSnapshot,
+				expectedRevision: null,
+			}),
+		).toBe(true);
+		const snapshot = applyQueuedTaskPromptDeliveryMutation(
+			{ entriesByTaskId: {} },
+			{
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: fixture.summary.taskId,
+				queueEntryId: "historical-closeout",
+				text: frozenPromptText,
+			},
+			100_000,
+		);
+		const entries = snapshot.entriesByTaskId[fixture.summary.taskId] ?? [];
+		for (const entry of entries) {
+			entry.dispatchIdempotencyKey = fixture.record.promptDeliveryIdempotencyKey;
+			entry.programmaticInjectionLedgerReceiptLink = {
+				injectionSource: "rvf_automatic_closeout",
+				injectionLedgerIdempotencyKey: fixture.record.promptDeliveryIdempotencyKey,
+				injectionLedgerTaskId: fixture.record.taskId,
+				settledTerminalDeliveryReceipt: null,
+			};
+		}
+		const queuePath = getWorkspaceQueuedTaskPromptDeliveriesPath(fixture.workspaceId);
+		await writeFile(queuePath, JSON.stringify(snapshot));
+		const input = {
+			workspaceId: fixture.workspaceId,
+			summary: fixture.summary,
+			idempotencyKey: fixture.record.promptDeliveryIdempotencyKey,
+		};
+		const resumed = await resolveRvfCloseoutCompactionConfirmationPersistence({
+			...input,
+			resumeExistingSubmissionOnly: true,
+		});
+		expect(resumed?.promptText).toBe(frozenPromptText);
+		expect(await resolveRvfCloseoutCompactionConfirmationPersistence(input)).toBeNull();
+		for (const entry of entries) entry.text = "被改写的快照";
+		await writeFile(queuePath, JSON.stringify(snapshot));
+		expect(
+			await resolveRvfCloseoutCompactionConfirmationPersistence({ ...input, resumeExistingSubmissionOnly: true }),
+		).toBeNull();
+	});
 	it("绑定 task/token/run/handoff/原生代际和正文；恢复可以从原绑定重建正文", async () => {
 		const fixture = await createRvfCloseoutCompactionConfirmationIsolatedFixture();
 		const input = {

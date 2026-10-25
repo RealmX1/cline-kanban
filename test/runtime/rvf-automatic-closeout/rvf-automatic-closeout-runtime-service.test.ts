@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
 	recordTaskMessageTerminalDeliveryOutcome,
 	type TaskMessageInjectionRecord,
 	withTaskMessageInjectionLedgerLock,
@@ -11,10 +12,12 @@ import {
 import * as diagnosticEventJournal from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
 import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { RvfAutomaticCloseoutPauseError } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-coordinator";
 import { buildRvfAutomaticCloseoutPrompt } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	getRvfAutomaticCloseoutStorePath,
+	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
 } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import {
@@ -27,8 +30,13 @@ import {
 	captureRvfCloseoutAcceptedSkillSnapshot,
 	captureRvfCloseoutExpectedSkillSnapshot,
 	readRvfCloseoutSkillSnapshots,
+	writeRvfCloseoutSkillSnapshot,
 } from "../../../src/rvf-automatic-closeout/rvf-closeout-skill-attachment-snapshot-store";
 import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "../../../src/rvf-automatic-closeout/verify-codex-native-closeout-skill-attachment-evidence";
+import {
+	getWorkspaceQueuedTaskPromptDeliveriesPath,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../../../src/state/queued-task-prompt-delivery-store";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -325,6 +333,65 @@ async function setup(
 		rvfHome,
 	};
 }
+async function setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt() {
+	const context = await setup("codex-closeout-conversation");
+	vi.stubEnv("HOME", context.fixture.isolatedHomeDirectoryPath);
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	const firstSubmission = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls[0]?.[1];
+	if (!firstSubmission) throw new Error("缺少首次收尾投递请求");
+	const frozenPromptText = `${firstSubmission.text}\n首次投递时的旧版本模板说明。`;
+	const ledgerPath = getTaskMessageInjectionLedgerPath(mocked.directory);
+	await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+		records: records.map((entry) => ({ ...entry, prompt_sha256: computeRvfTextSha256(frozenPromptText) })),
+		result: null,
+	}));
+	const queuePath = getWorkspaceQueuedTaskPromptDeliveriesPath(context.scope.workspaceId);
+	const queueSnapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(context.scope.workspaceId);
+	for (const entry of queueSnapshot.entriesByTaskId[firstSubmission.taskId] ?? []) entry.text = frozenPromptText;
+	await writeFile(queuePath, JSON.stringify(queueSnapshot));
+	const frozenLedger = await readFile(ledgerPath, "utf8");
+	const frozenQueue = await readFile(queuePath, "utf8");
+	return {
+		...context,
+		firstSubmission,
+		frozenPromptText,
+		ledgerPath,
+		queuePath,
+		queueSnapshot,
+		frozenLedger,
+		frozenQueue,
+		storePath: getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+	};
+}
+
+async function persistBoundHistoricalCloseoutPromptDigest(
+	context: Awaited<ReturnType<typeof setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt>>,
+) {
+	const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+	if (!record?.runId || !record.handoffSha256) throw new Error("缺少收尾 run 与 handoff 绑定");
+	const reference = await writeRvfCloseoutSkillSnapshot({
+		schema: "rvf-closeout-skill-attachment-snapshot/v1",
+		workspaceId: record.workspaceId,
+		taskId: record.taskId,
+		decisionToken: record.receipt.decision_token,
+		runId: record.runId,
+		handoffSha256: record.handoffSha256,
+		promptDeliveryIdempotencyKey: record.promptDeliveryIdempotencyKey,
+		promptSha256: computeRvfTextSha256(context.frozenPromptText),
+		phase: "expected_installation",
+		capturedAt: record.createdAt,
+		skills: [],
+	});
+	await updateRvfAutomaticCloseoutRecords(context.storePath, (records) => ({
+		records: records.map((entry) => ({
+			...entry,
+			skillAttachmentEvidenceHistory: [...(entry.skillAttachmentEvidenceHistory ?? []), reference],
+		})),
+		value: null,
+	}));
+}
+
 describe("RVF 宿主自动收尾与持久投递链", () => {
 	it.each(["pending", "unconfirmed"] as const)(
 		"本代输入接受为 %s 时保留原生会话，确认接受后才继续恢复",
@@ -1135,6 +1202,163 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		expect(records).toHaveLength(1);
 		expect(records[0]?.status).toBe("paused");
 	});
+	it("模板升级后重启复用首次投递回执与冻结正文，等待真实确认且不重复入队", async () => {
+		const context = await setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt();
+		const { firstSubmission, frozenPromptText, ledgerPath, queuePath, frozenLedger, frozenQueue } = context;
+		expect(
+			await enqueueAgentIdleGatedProgrammaticTaskChatMessage({}, context.scope.workspaceId, {
+				...firstSubmission,
+				text: frozenPromptText,
+				promptSha256: computeRvfTextSha256(frozenPromptText),
+			}),
+		).toMatchObject({ ok: true, injectionLedgerRecordDisposition: "already_existed" });
+		expect(
+			await enqueueAgentIdleGatedProgrammaticTaskChatMessage({}, context.scope.workspaceId, firstSubmission),
+		).toMatchObject({ ok: false, idempotencyConflict: true });
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await restarted.sweepPendingCloseoutsOnce();
+		await restarted.sweepPendingCloseoutsOnce();
+		const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+		expect((await readRvfAutomaticCloseoutRecords(storePath))[0]).toMatchObject({
+			status: "submitting_closeout_prompt",
+			waitingReasonCode: "closeout_delivery_confirmation_pending",
+			pauseReason: null,
+		});
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(await readFile(ledgerPath, "utf8")).toBe(frozenLedger);
+		expect(await readFile(queuePath, "utf8")).toBe(frozenQueue);
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId: firstSubmission.taskId,
+			idempotencyKey: firstSubmission.idempotencyKey,
+			status: "delivered_and_submit_confirmed",
+			nowIso: new Date().toISOString(),
+		});
+		await restarted.sweepPendingCloseoutsOnce();
+		expect((await readRvfAutomaticCloseoutRecords(storePath))[0]?.status).toBe("closeout_prompt_submitted");
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(await readTaskMessageInjectionLedger(ledgerPath)).toMatchObject([
+			{
+				prompt_sha256: computeRvfTextSha256(frozenPromptText),
+				terminal_delivery_status: "delivered_and_submit_confirmed",
+			},
+		]);
+		expect(await readFile(queuePath, "utf8")).toBe(frozenQueue);
+	});
+	it.each(["来源冲突", "会话冲突", "重复回执", "原失败", "显式停止", "原生身份变化"] as const)(
+		"模板升级后的回执复用仍拒绝%s，不覆盖旧账本或重新入队",
+		async (scenario) => {
+			const context = await setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt();
+			await recordTaskMessageTerminalDeliveryOutcome({
+				ledgerPath: context.ledgerPath,
+				taskId: context.firstSubmission.taskId,
+				idempotencyKey: context.firstSubmission.idempotencyKey,
+				status: scenario === "原失败" ? "delivery_failed" : "delivered_and_submit_confirmed",
+				...(scenario === "原失败" ? { failureReason: "cancelled_before_delivery" as const } : {}),
+				nowIso: new Date().toISOString(),
+			});
+			await withTaskMessageInjectionLedgerLock(context.ledgerPath, async (records) => ({
+				records:
+					scenario === "重复回执"
+						? [...records, ...records]
+						: records.map((entry) => ({
+								...entry,
+								...(scenario === "来源冲突" ? { source: "other_source" } : {}),
+								...(scenario === "会话冲突" ? { attempt_id: "other_conversation" } : {}),
+							})),
+				result: null,
+			}));
+			if (scenario === "显式停止")
+				await context.service.pauseForExplicitStop(context.scope.workspaceId, context.firstSubmission.taskId);
+			if (scenario === "原生身份变化")
+				context.manager.applyAgentNativeConversationSessionIdentity(context.firstSubmission.taskId, {
+					sourceAgentId: "codex",
+					nativeSessionId: "other_native_session",
+					transcriptPath: "/other-native.jsonl",
+					observedAt: Date.now(),
+				});
+			const ledgerBeforeRestart = await readFile(context.ledgerPath, "utf8");
+			const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			await restarted.sweepPendingCloseoutsOnce();
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.status).toBe("paused");
+			if (scenario === "原失败")
+				expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.pauseReason).toContain(
+					"cancelled_before_delivery",
+				);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+			expect(await readFile(context.ledgerPath, "utf8")).toBe(ledgerBeforeRestart);
+		},
+	);
+	it("旧队列缺账本时先等待正文摘要，确认未发送后复用冻结正文恢复，不重排或延长队列截止", async () => {
+		const context = await setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt();
+		await withTaskMessageInjectionLedgerLock(context.ledgerPath, async () => ({ records: [], result: null }));
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await restarted.sweepPendingCloseoutsOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.status).toBe("submitting_closeout_prompt");
+		await persistBoundHistoricalCloseoutPromptDigest(context);
+		for (const entry of context.queueSnapshot.entriesByTaskId[context.firstSubmission.taskId] ?? [])
+			entry.text = "被改写且不匹配首次不可变摘要的正文";
+		await writeFile(context.queuePath, JSON.stringify(context.queueSnapshot));
+		await restarted.sweepPendingCloseoutsOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+		expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toEqual([]);
+		await writeFile(context.queuePath, context.frozenQueue);
+		await restarted.sweepPendingCloseoutsOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(2);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls[1]?.[1]).toMatchObject({
+			text: context.frozenPromptText,
+			promptSha256: computeRvfTextSha256(context.frozenPromptText),
+			idempotencyKey: context.firstSubmission.idempotencyKey,
+		});
+		expect(await readWorkspaceQueuedTaskPromptDeliverySnapshot(context.scope.workspaceId)).toEqual(
+			JSON.parse(context.frozenQueue),
+		);
+		expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toMatchObject([
+			{
+				prompt_sha256: computeRvfTextSha256(context.frozenPromptText),
+				terminal_delivery_status: "accepted_pending_submit_confirmation",
+			},
+		]);
+		expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.status).toBe("submitting_closeout_prompt");
+	});
+	it.each(["delivered_and_submit_confirmed", "delivery_failed"] as const)(
+		"旧队列可能已发送且缺账本时只等原回执 %s，证据恢复后自动接续并保留原结果",
+		async (status) => {
+			const context = await setupPreviouslyEnqueuedCloseoutWithFrozenHistoricalPrompt();
+			await persistBoundHistoricalCloseoutPromptDigest(context);
+			await withTaskMessageInjectionLedgerLock(context.ledgerPath, async () => ({ records: [], result: null }));
+			const entry = context.queueSnapshot.entriesByTaskId[context.firstSubmission.taskId]?.[0];
+			if (!entry?.programmaticInjectionLedgerReceiptLink) throw new Error("缺少绑定收尾的队列条目");
+			entry.deliveryState = "handed_to_transport";
+			entry.deliveryAttemptCount = 1;
+			entry.lastAttemptedAt = Date.now();
+			await writeFile(context.queuePath, JSON.stringify(context.queueSnapshot));
+			const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			await restarted.sweepPendingCloseoutsOnce();
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.status).toBe(
+				"submitting_closeout_prompt",
+			);
+			await writeFile(context.queuePath, JSON.stringify({ entriesByTaskId: {} }));
+			await restarted.sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+			entry.deliveryState = status === "delivery_failed" ? "settled_failed" : "settled_delivered";
+			entry.settledAt = Date.now();
+			entry.programmaticInjectionLedgerReceiptLink.settledTerminalDeliveryReceipt = {
+				status,
+				reason: status === "delivery_failed" ? "runtime_restarted_before_confirmation" : null,
+			};
+			await writeFile(context.queuePath, JSON.stringify(context.queueSnapshot));
+			const settledQueue = await readFile(context.queuePath, "utf8");
+			await restarted.sweepPendingCloseoutsOnce();
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]?.status).toBe(
+				status === "delivery_failed" ? "paused" : "closeout_prompt_submitted",
+			);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+			expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toEqual([]);
+			expect(await readFile(context.queuePath, "utf8")).toBe(settledQueue);
+		},
+	);
 	it("无人点击时自动恢复并入队，确认提交后终结投递阶段；重启复用同一记录与队列", async () => {
 		const context = await setup();
 		await context.complete();
@@ -2385,29 +2609,31 @@ describe("RVF 执行完成事实的跨 service 持久单调性", () => {
 		"coordinator 的迟到 $0 写回保留另一 service 已确认的 completed",
 		async (enqueueOutcome) => {
 			const context = await setupExecutionResultInterleavingEvidence();
-			const enqueueStarted = createExecutionResultInterleavingSignal();
-			const releaseEnqueue = createExecutionResultInterleavingSignal();
-			context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mockImplementation(
-				async (_scope, input) => {
-					const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-						{},
-						context.scope.workspaceId,
-						input,
-					);
-					enqueueStarted.resolve();
-					await releaseEnqueue.promise;
-					return enqueueOutcome === "failed" ? { ok: false, error: "迟到的投递失败" } : response;
+			const closeoutValidationStarted = createExecutionResultInterleavingSignal();
+			const releaseCloseoutValidation = createExecutionResultInterleavingSignal();
+			const delayedCoordinator = createRvfAutomaticCloseoutRuntimeService({
+				...context.dependencies,
+				getManager: async () => {
+					const record = (
+						await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))
+					)[0];
+					// 已有回执不再重入队；在 coordinator 持久认领后的核验阶段注入同一迟到写回竞态。
+					if (!record?.activeCoordinatorOperationClaimId) return context.manager;
+					closeoutValidationStarted.resolve();
+					await releaseCloseoutValidation.promise;
+					if (enqueueOutcome === "failed") throw new RvfAutomaticCloseoutPauseError("迟到的投递失败");
+					return context.manager;
 				},
-			);
-			const coordinatorSweep = context.service.sweepPendingCloseoutsOnce();
-			await enqueueStarted.promise;
+			});
+			const coordinatorSweep = delayedCoordinator.sweepPendingCloseoutsOnce();
+			await closeoutValidationStarted.promise;
 			const executionReporter = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
 			try {
 				await executionReporter.reportExecutionResult(context.scope, context.land);
 				await executionReporter.reportExecutionResult(context.scope, context.baseBranchSync);
 				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
 			} finally {
-				releaseEnqueue.resolve();
+				releaseCloseoutValidation.resolve();
 				await coordinatorSweep;
 			}
 			const completed = (await executionReporter.status(context.scope, { taskId: "task" })).records[0];
@@ -2417,7 +2643,7 @@ describe("RVF 执行完成事实的跨 service 持久单调性", () => {
 				baseBranchSyncExecutionResult: { outcome: "completed", commitSha: context.land.commitSha },
 				activeCoordinatorOperationClaimId: null,
 			});
-			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(2);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
 			expect(context.manager.publishRvfAutomaticCloseoutPaused).not.toHaveBeenCalled();
 		},
 	);
