@@ -66,6 +66,48 @@ export const workUnitDisplayEntrySchema = z.object({
 });
 export type WorkUnitDisplayEntry = z.infer<typeof workUnitDisplayEntrySchema>;
 
+// 卡片悬停只读标题与关系摘要；不把 prompt、证据正文或完整多跳图带入列表请求。
+export const directlyRelatedTaskRelationSummarySchema = z.object({
+	relationId: z.string(),
+	relationKind: z.string(),
+	relationClass: z.enum(["recorded", "asserted"]),
+	directionFromPreviewSubject: z.enum(["outgoing", "incoming", "symmetric"]),
+	mutedInPresentation: z.boolean(),
+	assertionActorKind: z.string().nullable(),
+	assertionAsserterWorkUnitRef: interWorkUnitRelationWorkUnitReferenceSchema.nullable().optional(),
+	assertionDecisionSources: z.array(z.string()),
+});
+export type DirectlyRelatedTaskRelationSummary = z.infer<typeof directlyRelatedTaskRelationSummarySchema>;
+
+export const directlyRelatedTaskPreviewEntrySchema = z.object({
+	task: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	title: z.string().nullable(),
+	workspaceRepositoryPath: z.string().nullable(),
+	lastKnownBoardColumnId: z.string().nullable(),
+	permanentlyRemovedFromBoardAt: z.number().nullable(),
+	identityKnownToLedger: z.boolean(),
+	mutedOnly: z.boolean(),
+	relations: z.array(directlyRelatedTaskRelationSummarySchema),
+});
+export type DirectlyRelatedTaskPreviewEntry = z.infer<typeof directlyRelatedTaskPreviewEntrySchema>;
+
+export const getDirectlyRelatedTaskPreviewPageRequestSchema = z.object({
+	task: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	pageSize: z.number().int().min(1).max(50).optional(),
+	cursor: z.string().min(1).max(4096).optional(),
+});
+export type GetDirectlyRelatedTaskPreviewPageRequest = z.infer<typeof getDirectlyRelatedTaskPreviewPageRequestSchema>;
+export const getDirectlyRelatedTaskPreviewPageResponseSchema = z.object({
+	subjectTask: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	entries: z.array(directlyRelatedTaskPreviewEntrySchema),
+	totalTaskCount: z.number().int().nonnegative(),
+	mutedOnlyTaskCount: z.number().int().nonnegative(),
+	standaloneSessionCount: z.number().int().nonnegative(),
+	neighborhoodRevision: z.string(),
+	nextCursor: z.string().nullable(),
+});
+export type GetDirectlyRelatedTaskPreviewPageResponse = z.infer<typeof getDirectlyRelatedTaskPreviewPageResponseSchema>;
+
 export const conversationSessionOwnershipConflictDiagnosticForReadSchema = z.object({
 	conversationSessionIdentityKey: agentConversationSessionIdentityKeySchema,
 	currentOwningWorkUnit: interWorkUnitRelationWorkUnitReferenceSchema,

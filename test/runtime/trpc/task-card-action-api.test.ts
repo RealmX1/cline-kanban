@@ -1333,6 +1333,16 @@ describe("taskCardAction.setTaskPinboardPinStateOfTaskCard", () => {
 });
 
 describe("taskCardAction.readTaskCardWithBoardColumn", () => {
+	it("限定旧一世的快照请求不会返回同 ID 新卡", async () => {
+		seedWorkspace(createBoard({ validation: [createCard("reused", { createdAt: 2 })] }));
+		const { api } = createApiForTest();
+		await expect(
+			api.readTaskCardWithBoardColumn(WORKSPACE_SCOPE, {
+				taskId: "reused",
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+	});
 	it("找到时回传卡片、所在列与两份会话摘要；找不到时回传明确的「不存在」而不是抛错", async () => {
 		seedWorkspace(createBoard({ validation: [createCard("task-v")] }), { "task-v": createSummary("task-v") });
 		const { api, liveTaskSessionSummaryByTaskId } = createApiForTest();
@@ -1354,6 +1364,117 @@ describe("taskCardAction.readTaskCardWithBoardColumn", () => {
 			taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
 			lookedUpTaskId: "nope1",
 		});
+	});
+});
+
+describe("关联预览动作的一世身份门禁", () => {
+	it("评论保存前读到旧卡后才同 ID 重建，最终写入在 board 锁内拒绝修改新卡", async () => {
+		seedWorkspace(createBoard({ review: [createCard("reused")] }));
+		const { api } = createApiForTest();
+		const beforeCommentSave = await api.readTaskCardWithBoardColumn(WORKSPACE_SCOPE, {
+			taskId: "reused",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+		});
+		if (beforeCommentSave.taskCardLookupOutcome !== "task_card_found_on_workspace_board")
+			throw new Error("测试中的旧卡应存在。");
+		const recreatedTaskCard = createCard("reused", {
+			createdAt: 2,
+			taskCommentEntries: [
+				{ taskCommentEntryId: "new-task-comment", commentText: "新卡评论", createdAt: 2, updatedAt: 2 },
+			],
+		});
+		seedWorkspace(createBoard({ review: [recreatedTaskCard] }));
+		await expect(
+			api.updateTaskCardFieldValues(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "reused",
+					expectedTaskIncarnationCreatedAtEpochMs: beforeCommentSave.taskCardSnapshot.taskCard.createdAt,
+					taskCardFieldUpdate: {
+						taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+						taskCardFieldValuePatch: {
+							taskCommentEntries: [
+								{ taskCommentEntryId: "old-task-comment", commentText: "旧卡评论", createdAt: 1, updatedAt: 1 },
+							],
+						},
+					},
+					boardMutationInitiator: "web_ui_user_gesture",
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(readBoard().columns.find((column) => column.id === "review")?.cards).toEqual([recreatedTaskCard]);
+		expect(harness.callOrder).toEqual([]);
+	});
+
+	it("旧卡的改名、启动、移列和删除都拒绝影响同 ID 新卡", async () => {
+		seedWorkspace(createBoard({ backlog: [createCard("reused", { createdAt: 2 })] }));
+		const { api, runtimeApi, workspaceApi } = createApiForTest();
+		const request = {
+			taskId: "reused",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+			boardMutationInitiator: "web_ui_user_gesture" as const,
+		};
+		for (const operation of [
+			() =>
+				api.updateTaskCardFieldValues(
+					WORKSPACE_SCOPE,
+					{
+						...request,
+						taskCardFieldUpdate: {
+							taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+							taskCardFieldValuePatch: { title: "不应写入" },
+						},
+					},
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+				),
+			() =>
+				api.startTaskCardAgentSessionMovingItIntoInProgress(
+					WORKSPACE_SCOPE,
+					request,
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+				),
+			() =>
+				api.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects(
+					WORKSPACE_SCOPE,
+					{ ...request, targetBoardColumnId: "validation" },
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+				),
+			() =>
+				api.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					WORKSPACE_SCOPE,
+					{
+						permanentlyDeletedTaskCardSelection: {
+							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+							selectedTaskIds: ["reused"],
+						},
+						expectedTaskIncarnationCreatedAtEpochMsByTaskId: { reused: 1 },
+						boardMutationInitiator: "web_ui_user_gesture",
+					},
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+				),
+		])
+			await expect(operation()).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(readBoard().columns[0]?.cards[0]?.title).toBe("title of reused");
+		expect(runtimeApi.startTaskSession).not.toHaveBeenCalled();
+		expect(workspaceApi.ensureWorktree).not.toHaveBeenCalled();
+		expect(harness.callOrder).toEqual([]);
+	});
+	it("旧卡的交棒请求在会话副作用之前就被拒绝", async () => {
+		seedWorkspace(createBoard({ in_progress: [createCard("reused", { createdAt: 2 })] }));
+		const { api, runtimeApi } = createApiForTest();
+		await expect(
+			api.moveTaskCardIntoReviewByHandingTurnToUser(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "reused",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					boardMutationInitiator: "web_ui_user_gesture",
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(runtimeApi.transitionTaskToReview).not.toHaveBeenCalled();
 	});
 });
 

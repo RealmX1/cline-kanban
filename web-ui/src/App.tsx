@@ -157,7 +157,10 @@ export default function App(): ReactElement {
 	// 开启时置换 home 主视图，非 overlay；与 git history / All projects 首页互斥。
 	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
-	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
+	const [pendingEditedTaskCardAgentSessionStart, setPendingEditedTaskCardAgentSessionStart] = useState<{
+		taskId: string;
+		expectedTaskIncarnationCreatedAtEpochMs?: number;
+	} | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
 	// useWorkspacePersistence 在本组件更下方才调用；切项目入口经这个 ref 先把旧项目防抖中的整板保存立刻发出。
 	const flushPendingWorkspaceStatePersistImmediatelyRef = useRef<() => void>(() => {});
@@ -167,7 +170,7 @@ export default function App(): ReactElement {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
-		setPendingTaskStartAfterEditId(null);
+		setPendingEditedTaskCardAgentSessionStart(null);
 		taskEditorResetRef.current();
 	}, []);
 	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
@@ -656,8 +659,8 @@ export default function App(): ReactElement {
 		workspaceGit,
 		rememberedTaskCreateBaseRefForCurrentProject,
 	});
-	const queueTaskStartAfterEdit = useCallback((taskId: string) => {
-		setPendingTaskStartAfterEditId(taskId);
+	const queueTaskStartAfterEdit = useCallback((taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => {
+		setPendingEditedTaskCardAgentSessionStart({ taskId, expectedTaskIncarnationCreatedAtEpochMs });
 	}, []);
 	// Board Scope 往其他项目建卡不切项目：提示建到了哪里，新卡随 projects 广播出现在 All projects 面板。
 	const handleTaskCardsCreatedInOtherProject = useCallback(
@@ -1407,16 +1410,24 @@ export default function App(): ReactElement {
 	});
 
 	useEffect(() => {
-		if (!pendingTaskStartAfterEditId) {
+		if (!pendingEditedTaskCardAgentSessionStart) {
 			return;
 		}
-		const selection = findCardSelection(board, pendingTaskStartAfterEditId);
+		const selection = findCardSelection(board, pendingEditedTaskCardAgentSessionStart.taskId);
 		if (!selection || selection.column.id !== "backlog") {
 			return;
 		}
-		handleStartTaskFromBoard(pendingTaskStartAfterEditId);
-		setPendingTaskStartAfterEditId(null);
-	}, [board, handleStartTaskFromBoard, pendingTaskStartAfterEditId]);
+		if (
+			pendingEditedTaskCardAgentSessionStart.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+			selection.card.createdAt !== pendingEditedTaskCardAgentSessionStart.expectedTaskIncarnationCreatedAtEpochMs
+		) {
+			setPendingEditedTaskCardAgentSessionStart(null);
+			showAppToast({ intent: "warning", message: "编辑的任务已被删除并重建，未启动同 ID 的新任务。" });
+			return;
+		}
+		handleStartTaskFromBoard(pendingEditedTaskCardAgentSessionStart.taskId);
+		setPendingEditedTaskCardAgentSessionStart(null);
+	}, [board, handleStartTaskFromBoard, pendingEditedTaskCardAgentSessionStart]);
 
 	const detailSession = selectedCard
 		? (resolveMainTaskConversationSessionSummary(selectedCard.card, sessions) ??
@@ -1545,6 +1556,7 @@ export default function App(): ReactElement {
 		[handleNavigateToProjectBoard, setSelectedBoardOrSingleProjectScope],
 	);
 	const otherProjectTaskCardActionHandlers = useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
+		onRequestEditBacklogTaskCardInOtherProject: handleOpenEditTaskCardInOtherProject,
 		onOpenTaskInProject: handleOpenTaskInProject,
 		onNavigateToProjectBoard: navigateToProjectBoardForVerification,
 	});
@@ -1554,6 +1566,7 @@ export default function App(): ReactElement {
 		isFocusViewCrossProjectTaskOpenInTransit,
 		crossProjectTaskOpenInTransitTarget,
 	} = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		otherProjectTaskCardActionHandlers,
 		crossProjectTaskSwitcherSectionsModel,
 		projects,
