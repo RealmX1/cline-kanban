@@ -320,6 +320,45 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				hookEventObservedAtEpochMs !== null
 					? { domainEventObservedAtEpochMs: hookEventObservedAtEpochMs }
 					: undefined;
+			const isCompactionPhaseEvent =
+				event === "main_agent_conversation_context_compaction_started" ||
+				event === "main_agent_conversation_context_compaction_completed";
+			// 阶段 hook 不能把旧会话或子代理的身份写进当前主会话。接受事实仍走独立的原生核验链。
+			if (
+				isCompactionPhaseEvent &&
+				body.agentNativeConversationSessionIdentity &&
+				(summary.agentNativeConversationSessionIdentity?.nativeSessionId !==
+					body.agentNativeConversationSessionIdentity.nativeSessionId ||
+					summary.agentNativeConversationSessionIdentity?.sourceAgentId !==
+						body.agentNativeConversationSessionIdentity.sourceAgentId ||
+					summary.agentNativeConversationSessionIdentity?.transcriptPath !==
+						body.agentNativeConversationSessionIdentity.transcriptPath)
+			)
+				return respondAfterRememberingAppliedHookDelivery({ ok: true });
+			if (
+				isCompactionPhaseEvent &&
+				body.metadata?.source === "codex" &&
+				body.mainAgentConversationContextCompactionTriggerReportedByHarness ===
+					"automatic_context_window_compaction" &&
+				body.agentNativeConversationSessionIdentity?.sourceAgentId === "codex" &&
+				body.mainAgentConversationContextCompactionNativeTurnId &&
+				body.hookRuntimeSessionIncarnationId &&
+				hookEventObservedAtEpochMs !== null &&
+				hookEventDeliveryIdempotencyKey
+			) {
+				await manager.observeRvfCloseoutNativeCompactionPhase?.(taskId, {
+					workspaceId,
+					nativeSessionId: body.agentNativeConversationSessionIdentity.nativeSessionId,
+					nativeTurnId: body.mainAgentConversationContextCompactionNativeTurnId,
+					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+					phase: event === "main_agent_conversation_context_compaction_started" ? "started" : "completed",
+					capturedAtEpochMs: hookEventObservedAtEpochMs,
+					receivedAtEpochMs: hookIngestReceivedAtEpochMs,
+					hookDeliveryId: hookEventDeliveryIdempotencyKey,
+				});
+			}
+			if (event === "main_agent_conversation_context_compaction_started")
+				return respondAfterRememberingAppliedHookDelivery({ ok: true });
 
 			// 身份先落盘再确认 hook；内存已更新但保存失败时，下次仍须比较磁盘并重试。
 			let nativeIdentityPersistenceError: Error | null = null;
@@ -517,7 +556,11 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			let userTurnKindOverride: RuntimeTaskSessionUserTurnKind | null = null;
 			if (event === "to_review") {
 				userTurnKindOverride = classifyHookUserTurnKind(body.metadata);
-				if (userTurnKindOverride !== null) {
+				if (
+					userTurnKindOverride === "question" ||
+					userTurnKindOverride === "plan_review" ||
+					userTurnKindOverride === "permission"
+				) {
 					logUserTurnKindCapture({
 						taskId,
 						agentId: summary.agentId,
@@ -658,16 +701,30 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 			// 缺接受ACK的harness仍可凭本代主工具执行证明已在工作，但不会宣称具体输入已被接受。
 			const pendingSubmission = summary.agentConversationPromptSubmissionAcceptance;
+			const isKimiForegroundModalToolUse =
+				summary.agentId === "kimi" &&
+				body.metadata?.source?.trim().toLowerCase() === "kimi" &&
+				event === "to_review" &&
+				normalizedHookEventName === "pretooluse" &&
+				(userTurnKindOverride === "question" || userTurnKindOverride === "plan_review");
+			let summaryForHookTransition = summary;
 			if (
-				event === "activity" &&
+				(event === "activity" || isKimiForegroundModalToolUse) &&
 				/^(pretooluse|posttooluse|posttoolusefailure|beforetool|aftertool)$/u.test(normalizedHookEventName) &&
 				resolveSessionFacets(summary).turnOwner === "user" &&
 				pendingSubmission &&
 				pendingSubmission.status !== "accepted" &&
 				pendingSubmission?.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
-				(hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs) >= pendingSubmission.attemptedAtMs
+				(hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs) >= pendingSubmission.attemptedAtMs &&
+				// Kimi 已经交回用户的本轮不能被后台问题或其他工具用同一 pending 再次打开。
+				(summary.agentId !== "kimi" ||
+					(summary.lastAgentConversationUserHandoffObservation?.observedAtMs ?? 0) <
+						pendingSubmission.attemptedAtMs)
 			) {
-				manager.transitionToRunning(taskId, { domainEventTiming: hookEventDomainEventTiming });
+				// 前台提问也证明本轮已工作；先走真实工作边沿，再让 gate/reducer 记录模态交棒。
+				// 交棒使用 hook 捕获时刻，迟到接受可据此保留当前模态，而非伪造接受或历史。
+				summaryForHookTransition =
+					manager.transitionToRunning(taskId, { domainEventTiming: hookEventDomainEventTiming }) ?? summary;
 			}
 			// 无工具回合可能先完成、后被原生读取确认接受。只放行明确主回合完成信号，泛 to_review、
 			// question/permission 和旧 Stop 不会据此创造回合；重复完成也由已有交棒锚点排除。
@@ -736,13 +793,13 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			}
 
 			if (
-				!canTransitionTaskForHookEvent(summary, event, userTurnKindOverride) &&
+				!canTransitionTaskForHookEvent(summaryForHookTransition, event, userTurnKindOverride, body.metadata) &&
 				!completedCurrentUnacceptedPromptSubmission
 			) {
 				await recordNotificationSignalDecision(
 					notificationCandidateId,
 					"hook_transition_gate_excluded",
-					{ summary, event, userTurnKindOverride },
+					{ summary: summaryForHookTransition, event, userTurnKindOverride },
 					true,
 				);
 				if (body.metadata) {

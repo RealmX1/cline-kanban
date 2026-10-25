@@ -120,6 +120,7 @@ import {
 	resolveMainTaskConversationSessionId,
 	resolveTaskChatMessageTargetConversationSessionSummary,
 } from "../core/task-main-conversation-session-binding";
+import { getTaskMessageInjectionLedgerPath } from "../core/task-message-injection-ledger";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -152,6 +153,7 @@ import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../sta
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import {
+	getWorkspaceQueuedTaskPromptDeliveriesPath,
 	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
 	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
 	mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries,
@@ -168,6 +170,7 @@ import { removeTaskSessionSummariesOwnedByOtherWorkspaces } from "../state/task-
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	getTaskWorktreesHomePath,
+	getWorkspaceDirectoryPath,
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceBoardById,
@@ -3209,6 +3212,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: true,
 					queue,
+					queuedTaskPromptDeliveryDebugReferenceContext: {
+						workspaceId: workspaceScope.workspaceId,
+						workspaceProjectPath: workspaceScope.workspacePath,
+						queuedTaskPromptDeliveriesFilePath: getWorkspaceQueuedTaskPromptDeliveriesPath(
+							workspaceScope.workspaceId,
+						),
+						taskMessageInjectionLedgerFilePath: getTaskMessageInjectionLedgerPath(
+							getWorkspaceDirectoryPath(workspaceScope.workspaceId),
+						),
+					},
 					projectedEntriesByTaskId:
 						(await deps.queuedTaskPromptDeliveryDispatcher?.buildProjectedEntriesByTaskId(
 							workspaceScope.workspaceId,

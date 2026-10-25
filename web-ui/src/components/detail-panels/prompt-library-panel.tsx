@@ -273,6 +273,7 @@ function PromptRow({
 	const [hasCollapsibleContent, setHasCollapsibleContent] = useState(false);
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [isFocusedWithin, setIsFocusedWithin] = useState(false);
+	const [isPointerHoveringPromptRow, setIsPointerHoveringPromptRow] = useState(false);
 	const [isCommandScopeChoiceOpen, setIsCommandScopeChoiceOpen] = useState(false);
 	const [isPreparingPromptImages, setIsPreparingPromptImages] = useState(false);
 	const rowRef = useRef<HTMLDivElement>(null);
@@ -309,6 +310,8 @@ function PromptRow({
 			ref={rowRef}
 			data-prompt-library-entry-id={prompt.id}
 			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
+			onPointerEnter={() => setIsPointerHoveringPromptRow(true)}
+			onPointerLeave={() => setIsPointerHoveringPromptRow(false)}
 			onFocus={() => setIsFocusedWithin(true)}
 			onBlur={(event) => {
 				const nextFocusedElement = event.relatedTarget instanceof Node ? event.relatedTarget : null;
@@ -342,7 +345,14 @@ function PromptRow({
 					/>
 				</Tooltip>
 			) : null}
-			<div className="pointer-events-none absolute right-2 bottom-0 z-20 -mb-3 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+			<div
+				className={cn(
+					"absolute right-2 bottom-0 z-20 -mb-3 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 shadow-sm transition-opacity",
+					isPointerHoveringPromptRow || isFocusedWithin
+						? "pointer-events-auto opacity-100"
+						: "pointer-events-none opacity-0",
+				)}
+			>
 				<Tooltip content={`${scopeMeta.tooltip} · click for next scope`}>
 					<Button
 						variant="ghost"
@@ -365,6 +375,8 @@ function PromptRow({
 						icon={<CornerDownLeft size={14} />}
 						aria-label="Fill prompt into input"
 						disabled={!canFill || isTaskAgentExecutionDisabled}
+						// 避免来源条目因按钮先获得焦点而改变高度，让本次点击直接交接给 agent 输入框。
+						onMouseDown={(event) => event.preventDefault()}
 						onClick={() => onFill(prompt.text)}
 					/>
 				</Tooltip>

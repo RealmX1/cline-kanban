@@ -12,9 +12,10 @@ import type {
 
 export async function fetchTaskPromptDeliveryQueue(
 	workspaceId: string,
+	signal?: AbortSignal,
 ): Promise<RuntimeTaskPromptDeliveryQueueResponse> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
-	return await trpcClient.runtime.getTaskPromptDeliveryQueue.query({});
+	return await trpcClient.runtime.getTaskPromptDeliveryQueue.query({}, { signal });
 }
 
 export async function mutateTaskPromptDeliveryQueue(

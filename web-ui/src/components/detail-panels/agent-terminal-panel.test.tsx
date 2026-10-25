@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -8,6 +8,7 @@ import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types"
 import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
+import type { AgentInputShortcutInsertionFocusHandle } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 
 // 返回类型直接绑定生产类型（而不是就地写一个窄结构），这样 transcript 逻辑行的形状再变时
 // `tsc` 会在这里报错，而不是靠运行期是否恰好走到渲染路径来暴露漂移。
@@ -19,6 +20,7 @@ const {
 	mockReadScrollbackTranscript,
 	mockHasRenderedAnyTerminalContent,
 	mockAutomaticStaleSessionResumePhase,
+	mockFocusTerminalInputAfterShortcutInsertion,
 } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockResyncTerminalView: vi.fn(async () => {}),
@@ -27,6 +29,7 @@ const {
 	mockReadScrollbackTranscript: vi.fn((): TerminalScrollbackTranscriptLogicalLine[] => []),
 	mockHasRenderedAnyTerminalContent: vi.fn(() => true),
 	mockAutomaticStaleSessionResumePhase: vi.fn((): StaleAgentTerminalSessionAutomaticResumePhase | null => null),
+	mockFocusTerminalInputAfterShortcutInsertion: vi.fn(() => true),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
@@ -50,6 +53,7 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		refreshTerminal: mockRefreshTerminal,
 		resyncTerminalView: mockResyncTerminalView,
 		scrollTerminalToLatest: vi.fn(),
+		focusTerminalInputAfterShortcutInsertion: mockFocusTerminalInputAfterShortcutInsertion,
 		stopTerminal: vi.fn(async () => {}),
 	}),
 }));
@@ -128,6 +132,7 @@ describe("AgentTerminalPanel", () => {
 		document.body.appendChild(container);
 		root = createRoot(container);
 		mockRefreshTerminal.mockClear();
+		mockFocusTerminalInputAfterShortcutInsertion.mockClear();
 		mockResyncTerminalView.mockClear();
 		mockTerminalInput.mockClear();
 		mockReadScrollbackTranscript.mockClear();
@@ -216,6 +221,35 @@ describe("AgentTerminalPanel", () => {
 			backToTerminal?.click();
 		});
 		expect(container.querySelector('[aria-label="Filter transcript lines"]')).toBeNull();
+	});
+
+	it("快捷输入聚焦先关闭阅读覆盖层，再交给当前终端输入入口", () => {
+		const shortcutInputFocusHandleRef = createRef<AgentInputShortcutInsertionFocusHandle>();
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						shortcutInputFocusHandleRef={shortcutInputFocusHandleRef}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		act(() => {
+			container.querySelector<HTMLButtonElement>('[aria-label="Read the transcript as a document"]')?.click();
+		});
+		expect(container.querySelector('[aria-label="Filter transcript lines"]')).not.toBeNull();
+		mockFocusTerminalInputAfterShortcutInsertion.mockImplementationOnce(() => {
+			expect(container.querySelector('[aria-label="Filter transcript lines"]')).toBeNull();
+			return true;
+		});
+		act(() => {
+			expect(shortcutInputFocusHandleRef.current?.focusAgentInputAfterShortcutInsertion()).toBe(true);
+		});
+		expect(mockFocusTerminalInputAfterShortcutInsertion).toHaveBeenCalledOnce();
+		expect(mockTerminalInput).not.toHaveBeenCalled();
 	});
 
 	it("shows the virtual key bar only on mobile and sends the exact control sequences", () => {
@@ -340,6 +374,48 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	it("Kimi 活体中断显示已中断，终端保持存活且可以继续输入", () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const summary: RuntimeTaskSessionSummary = {
+			...createSummary("kimi"),
+			state: "awaiting_review",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "interrupted",
+			reviewReason: "interrupted",
+			latestHookActivity: {
+				activityText: "Resumed after user input",
+				toolName: null,
+				toolInputSummary: null,
+				finalMessage: null,
+				hookEventName: "UserPromptSubmit",
+				notificationType: null,
+				source: "kimi",
+			},
+		};
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel taskId="task-1" workspaceId="workspace-1" summary={summary} showSessionToolbar />
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("已中断");
+		expect(container.textContent).not.toContain("Ready for review");
+		expect(container.textContent).not.toContain("Running");
+		expect(container.textContent).not.toContain("Terminal stream closed");
+		expect(getStateTagStyle(summary)).toBe("danger");
+		const arrowUpButton = container.querySelector<HTMLButtonElement>('[aria-label="Arrow up"]');
+		expect(arrowUpButton).not.toBeNull();
+		expect(arrowUpButton?.disabled).toBe(false);
+		act(() => {
+			arrowUpButton?.click();
+		});
+		expect(mockTerminalInput).toHaveBeenCalledWith("\u001b[A");
+		expect(summary).toMatchObject({ liveness: "live", pid: 123 });
 	});
 
 	// ②-prep × ②-visible 合成反证：Cline SDK 在进程内运行、awaiting 恒 live，即便 pid null 也绝不误报 stream closed。

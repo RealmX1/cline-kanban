@@ -525,7 +525,16 @@ describe("有界原生活动增量读取", () => {
 				acceptedNativeAgentTurnIsInProgress: true,
 			},
 		]);
-		expect(request.mock.calls.filter(([method]) => method === "thread/turns/list")).toHaveLength(2);
+		expect(
+			request.mock.calls.filter(
+				([method, parameters]) => method === "thread/turns/list" && parameters.itemsView === "full",
+			),
+		).toHaveLength(2);
+		expect(
+			request.mock.calls.filter(
+				([method, parameters]) => method === "thread/turns/list" && parameters.itemsView === "summary",
+			),
+		).toHaveLength(2);
 		expect(request).toHaveBeenCalledWith("thread/turns/list", {
 			threadId: "native",
 			cursor: null,
@@ -575,6 +584,44 @@ describe("有界原生活动增量读取", () => {
 			]);
 		},
 	);
+	it.each([true, false])("跳过执行状态查询仍核验加载身份并读取消息接受：已加载=%s", async (isLoaded) => {
+		const target = summary("codex", "/isolated/native.jsonl");
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: isLoaded ? ["native"] : [] };
+			if (method === "thread/turns/list" && parameters.itemsView === "full")
+				return {
+					data: [
+						{
+							id: "current",
+							status: "inProgress",
+							items: [
+								{ id: "accepted", type: "userMessage" },
+								{ id: "tool-result", type: "commandExecution", status: "completed" },
+							],
+						},
+					],
+				};
+			throw new Error(`不应执行的状态查询：${method}`);
+		});
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: { transport: "codex_control", predecessorTurnId: "current", seenEventIds: [] },
+			observedAtMs: baselineAtMs,
+			shouldReadCodexNativeAgentTurnExecution: false,
+		});
+		if (isLoaded) {
+			expect(result?.events).toMatchObject([
+				{ activityKind: "accepted_user_input", eventId: "codex:native:current:accepted" },
+				{ activityKind: "tool_activity" },
+			]);
+			expect(result?.codexNativeAgentTurnExecution).toBeUndefined();
+			expect(result?.codexNativeDirectInputReadiness).toBeUndefined();
+		} else expect(result).toBeNull();
+		expect(request.mock.calls.map(([method]) => method)).toEqual(
+			isLoaded ? ["thread/loaded/list", "thread/turns/list"] : ["thread/loaded/list"],
+		);
+	});
 	it("Codex 首次确认的正文提取接受 text+skill，不把手册正文拼进投递正文", async () => {
 		const target = summary("codex", "/isolated/native.jsonl");
 		request.mockImplementation(async (method) =>
@@ -636,9 +683,11 @@ describe("有界原生活动增量读取", () => {
 			observedAtMs: baselineAtMs,
 		});
 		expect(result?.events).toEqual([]);
-		expect(request.mock.calls.every(([method]) => ["thread/loaded/list", "thread/turns/list"].includes(method))).toBe(
-			true,
-		);
+		expect(
+			request.mock.calls.every(([method]) =>
+				["thread/loaded/list", "thread/turns/list", "thread/read"].includes(method),
+			),
+		).toBe(true);
 	});
 	it("Codex 只计主调用与返回，子代理状态和工具计时刷新不冒充推进，plan 属于真实输出", async () => {
 		const target = summary("codex", "/isolated/native.jsonl");

@@ -57,6 +57,10 @@ export async function mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLe
 				idempotencyKey: update.injectionLedgerIdempotencyKey,
 				status: update.receipt.status,
 				...(update.receipt.reason === null ? {} : { failureReason: update.receipt.reason }),
+				...(update.receipt.failureNote ? { failureDetail: update.receipt.failureNote } : {}),
+				...(update.receipt.codexNativePromptDeliveryEvidence
+					? { codexNativePromptDeliveryEvidence: update.receipt.codexNativePromptDeliveryEvidence }
+					: {}),
 				nowIso: new Date().toISOString(),
 			});
 		} catch {
@@ -106,6 +110,10 @@ export async function reconcileInjectionLedgerWithSettledProgrammaticInjections(
 			idempotencyKey: candidate.idempotencyKey,
 			status: receipt.status,
 			...(receipt.reason === null ? {} : { failureReason: receipt.reason }),
+			...(receipt.failureNote ? { failureDetail: receipt.failureNote } : {}),
+			...(receipt.codexNativePromptDeliveryEvidence
+				? { codexNativePromptDeliveryEvidence: receipt.codexNativePromptDeliveryEvidence }
+				: {}),
 			nowIso: new Date().toISOString(),
 		});
 		if (outcome.outcome === "settled") {

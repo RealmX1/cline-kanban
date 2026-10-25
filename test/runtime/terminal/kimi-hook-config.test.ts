@@ -4,6 +4,9 @@ import { buildKanbanManagedKimiHooksToml } from "../../../src/terminal/kimi-hook
 // Kanban 托管的 kimi `[[hooks]]` 片段：事件名必须是 kimi-code 自己的 Claude 风格名，kanban 事件经 CLI 参数传。
 
 describe("buildKanbanManagedKimiHooksToml", () => {
+	it.each(["Interrupt", "PermissionResult"])("注册 %s，避免中断与授权结束丢失", (event) => {
+		expect(buildKanbanManagedKimiHooksToml()).toContain(`event = "${event}"`);
+	});
 	it("注册 PostCompact → 压缩完成事件（推进 Cache warm 起点）", () => {
 		const toml = buildKanbanManagedKimiHooksToml();
 		const postCompactTable = toml.split("[[hooks]]").find((table) => table.includes('event = "PostCompact"'));

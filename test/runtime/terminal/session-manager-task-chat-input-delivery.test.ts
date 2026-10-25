@@ -87,9 +87,27 @@ const CLAUDE_READY_PROMPT = "╭────────────────
 // fake 按同一契约从视口文本派生行快照。注意本套件的提示符 fixture 用的是**旧版** `╭` / `>` 画法，
 // 结构判定对它不命中 → 判定继续落到下面的正则通道，既有用例语义原样保持。
 function toScreenSnapshot(viewportText: string, columnCount = 80) {
+	const lines = viewportText.split("\n").map((text) => ({
+		text,
+		isWrapped: false,
+		dimmedTextColumnRanges: [] as [number, number][],
+	}));
+	let cursorRow = -1;
+	for (let index = 0; index < lines.length; index += 1) {
+		if (/^›\s*$/u.test(lines[index]?.text ?? "")) cursorRow = index;
+	}
+	if (cursorRow >= 0) {
+		// 旧用例的裸提示符补成当前 Codex 的空框证据：dim 占位文案及位于内容起点的光标。
+		lines[cursorRow] = {
+			text: "› Ask Codex to do anything",
+			isWrapped: false,
+			dimmedTextColumnRanges: [[2, 26]],
+		};
+	}
 	return {
-		lines: viewportText.split("\n").map((text) => ({ text, isWrapped: false })),
+		lines,
 		columnCount,
+		...(cursorRow >= 0 ? { cursorRow, cursorColumn: 2 } : {}),
 	};
 }
 
@@ -1119,8 +1137,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				}
 			).entries.get("task-deliver-codex")?.active?.awaitingCodexPromptAfterEnter;
 
-		// codex 的就绪信号走扫描缓冲快路径（尚未建模输入框结构）。
-		(session as NonNullable<typeof session>).triggerData("OpenAI Codex (v1.0.0)\n› ");
+		// 当前空框须含 dim 占位文案，光标停在用户内容起点。
+		(session as NonNullable<typeof session>).triggerData(
+			"OpenAI Codex (v1.0.0)\r\n› \u001b[2mAsk Codex to do anything\u001b[0m\r\u001b[2C",
+		);
 		manager.submitTaskChatInputWhenReady("task-deliver-codex", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
@@ -1406,9 +1426,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(tuiFreezeErrors.some((line) => line.includes("reason=terminal_prompt_readiness_timeout"))).toBe(true);
 	});
 
-	it("尚未建模输入框结构的 agent（codex）：扫描缓冲快路径保持既有语义，命中即投递", async () => {
-		// 上一条回归守卫刻意只关掉 claude 的扫描缓冲快路径（它有结构判定顶上）。codex / kimi 尚未建模
-		// 输入框结构，快路径仍是它们最便宜的就绪信号，语义必须原样保留——本例即该不对称性的钉子。
+	it("Codex：历史扫描提示符不能证明当前输入框为空，原生不可用时不写 PTY", async () => {
 		const manager = new TerminalSessionManager();
 		const write = vi.fn();
 		const summary = {
@@ -1431,7 +1449,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
-			// 镜像通道给不出就绪信号：若快路径被误删，本例只能拖到 deadline，测试即失败。
+			// 当前视口没有活动输入框；扫描缓冲中的旧提示符不能作为判空依据。
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
 				getViewportSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
@@ -1444,8 +1462,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		manager.submitTaskChatInputWhenReady("task-codex-scan-fast-path", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		expect(write).toHaveBeenCalledTimes(1);
-		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		expect(write).not.toHaveBeenCalled();
+		expect(entry.summary).toMatchObject({
+			terminalDeliveryContention: { waitingForHumanBecauseAutomaticPreemptionIsUnavailable: true },
+		});
 	});
 
 	it("无 TUI 就绪预测的终端 agent（droid）：经沉降后立即投递，不拖到 deadline", async () => {
@@ -2132,10 +2152,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		]);
 	});
 
-	// 硬约束的钉子：读屏对**未建模输入框语法**的 agent（codex / kimi / droid）恒无结论。若把「读不出框」
-	// 一律当成争用，它们的每一条程序化投递都会挂到预算耗尽、100% 以 human_terminal_contention_timeout
-	// 收场——比本轮修复前更差。对它们，输入侧字节跟踪才是判空的唯一主力，必须照常放行。
-	it("未建模输入框语法的 agent（codex）：读屏恒无结论 + 输入侧从未见过人类字节 → 仍照常投递，绝不挂起", async () => {
+	// 未见输入字节不等于空框。原生通道不可用时，Codex 的 PTY 后备必须有当前空框证据。
+	it("Codex：读屏无结论且没有输入侧字节时，等待可信空框而不盲写", async () => {
 		const manager = new TerminalSessionManager();
 		const write = vi.fn();
 		const summary = {
@@ -2147,7 +2165,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			summary,
 			active: {
 				session: { write },
-				// codex 走扫描缓冲快路径判就绪（它没有可读的输入框结构）。
+				// 历史提示符只证明曾出现过输入框，不能证明当前内容。
 				outputReactionScanBuffer: "OpenAI Codex (v1.0.0)\n› ",
 				outputReactionEngine: null,
 				outputReactionSession: null,
@@ -2159,7 +2177,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				submitConfirmGeneration: 0,
 				programmaticDeliveryReceipt: null,
 				awaitingCodexPromptAfterEnter: false,
-				// 从未 writeInput：输入侧这只眼睛也没接上人。两只眼睛都闭着，但对 codex 只能放行。
+				// 从未 writeInput，不能据此排除恢复前已有的草稿。
 				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 				ptyOutputChunkArrivalSequenceNumber: 0,
 				terminalSessionIncarnationToken: "task-codex-no-box-grammar-incarnation",
@@ -2176,8 +2194,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		manager.submitTaskChatInputWhenReady("task-codex-no-box-grammar", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
-		expect(entry.summary.terminalDeliveryContention ?? null).toBeNull();
+		expect(write).not.toHaveBeenCalled();
+		expect(entry.summary).toMatchObject({
+			terminalDeliveryContention: { waitingForHumanBecauseAutomaticPreemptionIsUnavailable: true },
+		});
 	});
 
 	it("屏上有字但输入侧接得上人（该会话收到过人类字节）→ 判为 agent 自绘的空框占位提示，照常投递", async () => {

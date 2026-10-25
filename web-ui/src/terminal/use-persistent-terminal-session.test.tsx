@@ -71,6 +71,7 @@ function HookHarness({
 		findPreviousInTerminal,
 		isSearchOpen,
 		searchResults,
+		focusTerminalInputAfterShortcutInsertion,
 	} = usePersistentTerminalSession({
 		taskId,
 		workspaceId,
@@ -97,6 +98,9 @@ function HookHarness({
 			</button>
 			<button type="button" onClick={() => findPreviousInTerminal("needle")}>
 				previous
+			</button>
+			<button type="button" onClick={focusTerminalInputAfterShortcutInsertion}>
+				聚焦当前终端输入
 			</button>
 		</div>
 	);
@@ -138,6 +142,34 @@ describe("usePersistentTerminalSession", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("快捷输入聚焦只交给当前挂载终端，禁用时跳过且不延迟执行", async () => {
+		const terminal = createPersistentTerminalMock();
+		ensurePersistentTerminalMock.mockReturnValue(terminal);
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+		const agentInput = document.createElement("textarea");
+		container.firstElementChild?.appendChild(agentInput);
+		terminal.focus.mockImplementation(() => agentInput.focus());
+		const shortcutButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "聚焦当前终端输入",
+		);
+		shortcutButton?.click();
+		expect(document.activeElement).toBe(agentInput);
+		expect(terminal.focus).toHaveBeenCalledOnce();
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} enabled={false} />);
+		});
+		shortcutButton?.focus();
+		shortcutButton?.click();
+		expect(terminal.focus).toHaveBeenCalledOnce();
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+		expect(document.activeElement).toBe(shortcutButton);
+		expect(terminal.focus).toHaveBeenCalledOnce();
 	});
 
 	it("resets the persistent terminal in place and re-requests the server mirror snapshot when a new session starts for the same task", async () => {

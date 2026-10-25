@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RUNTIME_AGENT_CATALOG } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
@@ -1840,7 +1841,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			{ agentId: "gemini", binary: "gemini", args: [], flag: "--yolo" },
 			{ agentId: "kiro", binary: "kiro-cli", args: ["chat"], flag: "--trust-all-tools" },
 			{ agentId: "cline", binary: "cline", args: [], flag: "--auto-approve-all" },
-			{ agentId: "kimi", binary: "kimi", args: [], flag: "--yolo" },
+			{ agentId: "kimi", binary: "kimi", args: [], flag: "--auto" },
 			{ agentId: "cursor", binary: "cursor-agent", args: [], flag: "--force" },
 		];
 
@@ -1963,7 +1964,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		// cursor / kimi 无法表达中间档：必须保守降级到 ask，绝不回落成全放行。
 		for (const { agentId, binary, forbiddenFlag } of [
 			{ agentId: "cursor", binary: "cursor-agent", forbiddenFlag: "--force" },
-			{ agentId: "kimi", binary: "kimi", forbiddenFlag: "--yolo" },
+			{ agentId: "kimi", binary: "kimi", forbiddenFlag: "--auto" },
 		] as const) {
 			const launch = await prepareAgentLaunch({
 				taskId: `task-${agentId}-accept-edits`,
@@ -2042,7 +2043,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(cursorPlanBypass.args).toContain("--plan");
 		expect(cursorPlanBypass.args).toContain("--force");
 
-		// kimi 同理：--plan 与 --yolo 各自独立。
+		// kimi 同理：--plan 与 --auto 各自独立。
 		const kimiPlanBypass = await prepareAgentLaunch({
 			taskId: "task-kimi-plan-bypass",
 			agentId: "kimi",
@@ -2054,7 +2055,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "",
 		});
 		expect(kimiPlanBypass.args).toContain("--plan");
-		expect(kimiPlanBypass.args).toContain("--yolo");
+		expect(kimiPlanBypass.args).toContain("--auto");
 	});
 
 	// 续跑不重放「plan 起步」，但会话死前若仍停在**没批准**的 plan 里，必须按转录恢复：否则卡片的
@@ -2176,6 +2177,116 @@ describe("prepareAgentLaunch hook strategies", () => {
 	});
 });
 
+describe("Kimi 原生权限参数与任务权限档位", () => {
+	it.each([
+		{ managed: true, explicitTrust: undefined, expectedTrust: "1" },
+		{ managed: false, explicitTrust: undefined, expectedTrust: undefined },
+		{ managed: true, explicitTrust: "0", expectedTrust: undefined },
+	])("仅任务工作树自动使用原生进程级信任 ($managed / $explicitTrust)", async (testCase) => {
+		const home = setupTempHome();
+		vi.stubEnv("KIMI_CODE_TRUST_WORKSPACE", undefined);
+		const launch = await prepareAgentLaunch({
+			taskId: "kimi-owned-worktree-trust",
+			agentId: "kimi",
+			args: ["--model", "isolated-model"],
+			cwd: testCase.managed ? join(home, ".cline", "worktrees", "isolated-task", "repository") : "/user-project",
+			prompt: "",
+			env: { KIMI_CODE_TRUST_WORKSPACE: testCase.explicitTrust },
+		});
+		expect(launch.env.KIMI_CODE_TRUST_WORKSPACE).toBe(testCase.expectedTrust);
+	});
+
+	it("catalog 的自主权限参数使用 Never Ask", () => {
+		expect(RUNTIME_AGENT_CATALOG.find(({ id }) => id === "kimi")?.autonomousArgs).toEqual(["--auto"]);
+	});
+
+	it.each([false, true])("Bypass 使用 Never Ask，Plan 起步为 %s", async (startInPlanMode) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-bypass-native-permission-mode",
+			agentId: "kimi",
+			args: ["--model", "isolated-model"],
+			cwd: "/isolated-working-directory",
+			prompt: "任务文本",
+			startInPlanMode,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+		expect(launch.args).toEqual(["--model", "isolated-model", "--auto", ...(startInPlanMode ? ["--plan"] : [])]);
+	});
+
+	it.each(["--auto", "--yolo", "-y", "--yes", "--auto-approve"])(
+		"显式权限参数 %s 保持优先且不追加互斥权限参数",
+		async (permissionArgument) => {
+			setupTempHome();
+			const args = ["--model", "isolated-model", permissionArgument];
+			const launch = await prepareAgentLaunch({
+				taskId: "task-kimi-explicit-native-permission-mode",
+				agentId: "kimi",
+				args,
+				cwd: "/isolated-working-directory",
+				prompt: "",
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			});
+			expect(launch.args).toEqual(args);
+		},
+	);
+
+	it.each(["ask_for_every_tool_use", "auto_approve_file_edits_only"] as const)(
+		"%s 不自动注入放权参数",
+		async (taskAgentPermissionMode) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-kimi-conservative-native-permission-mode",
+				agentId: "kimi",
+				args: ["--model", "isolated-model"],
+				cwd: "/isolated-working-directory",
+				prompt: "",
+				taskAgentPermissionMode,
+			});
+			expect(launch.args).toEqual(["--model", "isolated-model"]);
+		},
+	);
+
+	it.each(["--auto", "--yolo", "-y", "--yes", "--auto-approve"])(
+		"已绑定的原生恢复保留显式权限参数 %s",
+		async (permissionArgument) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-kimi-bound-resume-explicit-native-permission-mode",
+				agentId: "kimi",
+				args: [permissionArgument],
+				cwd: "/isolated-working-directory",
+				prompt: "不得重发任务文本",
+				startInPlanMode: true,
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "kimi",
+					sourceSessionId: "session-task-bound",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			});
+			expect(launch.args).toEqual([permissionArgument, "--session", "session-task-bound"]);
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+		},
+	);
+
+	it.each(["--auto", "--yolo", "-y", "--yes", "--auto-approve"])(
+		"选项值及终止符后的 %s 不被当成显式权限参数",
+		async (permissionLiteral) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-kimi-native-permission-option-value-boundaries",
+				agentId: "kimi",
+				args: ["--model", permissionLiteral, "--", permissionLiteral],
+				cwd: "/isolated-working-directory",
+				prompt: "",
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			});
+			expect(launch.args).toEqual(["--model", permissionLiteral, "--auto", "--", permissionLiteral]);
+		},
+	);
+});
+
 describe("kimiAdapter model selection", () => {
 	it("passes an explicit Kimi model override through to the CLI", async () => {
 		setupTempHome();
@@ -2270,7 +2381,7 @@ describe("kimiAdapter model selection", () => {
 				startInPlanMode: true,
 				taskAgentPermissionMode: "bypass_all_permission_prompts",
 			});
-			expect(launch.args).toEqual(args[0].startsWith("-y") ? args : [...args, "--yolo"]);
+			expect(launch.args).toEqual(args[0].startsWith("-y") ? args : [...args, "--auto"]);
 			expect(launch.resumesPriorAgentConversation).toBe(true);
 			expect(launch.deferredStartupPromptText).toBeUndefined();
 		},
@@ -2423,13 +2534,13 @@ describe("kimiAdapter model selection", () => {
 				args: ["--"],
 				taskModelId: null,
 				defaultModelResolutionCount: 1,
-				expectedArgs: ["--model", KIMI_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL, "--yolo", "--plan", "--"],
+				expectedArgs: ["--model", KIMI_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL, "--auto", "--plan", "--"],
 			},
 			{
 				args: ["--model", "kimi-code/explicit", "--"],
 				taskModelId: null,
 				defaultModelResolutionCount: 0,
-				expectedArgs: ["--model", "kimi-code/explicit", "--yolo", "--plan", "--"],
+				expectedArgs: ["--model", "kimi-code/explicit", "--auto", "--plan", "--"],
 			},
 			{
 				args: ["-ymkimi-code/old", "--"],
@@ -2446,7 +2557,7 @@ describe("kimiAdapter model selection", () => {
 					"--",
 					"--model",
 					KIMI_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL,
-					"--yolo",
+					"--auto",
 					"--plan",
 				],
 			},
@@ -2459,7 +2570,7 @@ describe("kimiAdapter model selection", () => {
 					"--",
 					"--model",
 					KIMI_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL,
-					"--yolo",
+					"--auto",
 					"--plan",
 					"--",
 				],
@@ -2468,7 +2579,7 @@ describe("kimiAdapter model selection", () => {
 				args: ["--model", "--"],
 				taskModelId: null,
 				defaultModelResolutionCount: 0,
-				expectedArgs: ["--model", "--", "--yolo", "--plan"],
+				expectedArgs: ["--model", "--", "--auto", "--plan"],
 			},
 		])(
 			"模型、权限与 Plan 选项位于真正终止符之前 ($args)",
@@ -2509,7 +2620,7 @@ describe("kimiAdapter model selection", () => {
 					taskAgentPermissionMode: "bypass_all_permission_prompts",
 					[resumeFlag]: true,
 				});
-				expect(launch.args).toEqual(["--yolo", "--continue", "--"]);
+				expect(launch.args).toEqual(["--auto", "--continue", "--"]);
 				expect(launch.resumesPriorAgentConversation).toBe(true);
 				expect(launch.deferredStartupPromptText).toBeUndefined();
 				expect(vi.mocked(resolveKimiLaunchDefaultModelId).mock.calls).toHaveLength(previousCallCount);

@@ -54,6 +54,7 @@ export type {
 	TaskMainSessionHandoverStatusResponse,
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+export * from "./task-rvf-history-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -2449,6 +2450,7 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"no_active_terminal_session",
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
 	"human_terminal_contention_timeout",
 	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
 	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
@@ -2463,9 +2465,19 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 ]);
 export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
 
+export const codexNativePromptDeliveryEvidenceSchema = z.object({
+	clientUserMessageId: z.string(),
+	nativeSessionId: z.string(),
+	nativeTurnId: z.string(),
+	nativeUserMessageId: z.string(),
+});
+export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePromptDeliveryEvidenceSchema>;
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2486,6 +2498,8 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	failureNote: z.string().optional(),
+	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 
@@ -2523,6 +2537,7 @@ export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliv
 // 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
 // PTY 单飞槽），前端复算必然漂移。
 export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	"awaiting_native_independent_user_turn_query_retry",
 	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
 	"awaiting_human_reconfirmation_after_runtime_restart",
 	"agent_still_generating",
@@ -2548,7 +2563,26 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 ]);
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
+const nativeIndependentUserTurnQueryRecoverySchema = z.object({
+	consecutiveQueryFailureCount: z.number().int().positive(),
+	waitingStartedAtEpochMs: z.number(),
+	lastQueryFailureAtEpochMs: z.number(),
+	lastQueryFailureReason: z.string(),
+	nextQueryRetryAtEpochMs: z.number().nullable(),
+	recoveredAtEpochMs: z.number().nullable(),
+});
+
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	// 新字段可选；旧 handed_to_transport 条目缺少零写入证明时，仍按未知处理。
+	nativeIndependentUserTurnSubmissionProgress: z
+		.object({
+			predecessorNativeTurnId: z.string().min(1),
+			submissionMayHaveStartedAtEpochMs: z.number().nullable(),
+		})
+		.optional(),
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
+	// 只恢复尚未认领、未写入 transport 的查询；可选字段保证旧队列继续可读。
+	nativeIndependentUserTurnPreflightQueryRecovery: nativeIndependentUserTurnQueryRecoverySchema.optional(),
 	// 取消 / 重排 / 合并的唯一句柄。由构造 mutation 的一侧生成（randomUUID），于是同一条意图重发天然幂等。
 	queueEntryId: z.string(),
 	// **会话 id**，不是看板卡片 id：by-the-way 子会话有自己独立的队列。
@@ -2705,6 +2739,12 @@ export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDe
 export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
 
 export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	nativeIndependentUserTurnSubmissionProgress:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnSubmissionProgress,
+	nativeIndependentUserTurnBeforeSubmissionQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnBeforeSubmissionQueryRecovery,
+	nativeIndependentUserTurnPreflightQueryRecovery:
+		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnPreflightQueryRecovery,
 	queueEntryId: z.string(),
 	taskId: z.string(),
 	deliveryState: queuedTaskPromptDeliveryStateSchema,
@@ -2716,6 +2756,8 @@ export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
 	// 前端靠它决定要不要播 5s 高亮、要不要发确认 mutation。
 	awaitsHumanReconfirmationAfterRuntimeRestart: z.boolean(),
 	deliveryAttemptCount: z.number().int().nonnegative(),
+	// 真正交给 transport 时的开始时间；旧 runtime 投影缺省时保留未知，不冒充结束时间。
+	lastAttemptedAt: z.number().nullable().optional(),
 	lastDeliveryFailureNote: z.string().nullable(),
 	sourcePromptLibraryEntryId: z.string().nullable(),
 	// true = 库里那条的正文在入队之后被改过；null = 没有来源条目，或来源条目已被删。
@@ -2748,6 +2790,16 @@ export const runtimeTaskPromptDeliveryQueueResponseSchema = z.object({
 	ok: z.boolean(),
 	queue: workspaceQueuedTaskPromptDeliverySnapshotSchema.nullable(),
 	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema.nullable(),
+	// 按需读取时提供真实实例路径；旧 runtime 缺省时前端仍可复制已知标识。
+	queuedTaskPromptDeliveryDebugReferenceContext: z
+		.object({
+			workspaceId: z.string(),
+			workspaceProjectPath: z.string(),
+			queuedTaskPromptDeliveriesFilePath: z.string(),
+			taskMessageInjectionLedgerFilePath: z.string(),
+		})
+		.nullable()
+		.optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskPromptDeliveryQueueResponse = z.infer<typeof runtimeTaskPromptDeliveryQueueResponseSchema>;
@@ -4969,6 +5021,7 @@ export const runtimeHookEventSchema = z.enum([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	"main_agent_conversation_context_compaction_started",
 	// harness 的 PostCompact（Claude / Codex / Kimi）：主对话上下文压缩已完成。专用事件、不复用 activity：
 	// 它只推进 Cache warm 起点，不该顺带推进「对话推进」药丸、刷新活动行或进入通知捕获。
 	"main_agent_conversation_context_compaction_completed",
@@ -5145,6 +5198,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// `trigger` 派生）。缺失时服务端按当时的回合归属判定。
 	mainAgentConversationContextCompactionTriggerReportedByHarness:
 		runtimeMainAgentConversationContextCompactionTriggerSchema.optional(),
+	// Codex 压缩阶段的原生回合与启动代际；仅用于关联待确认投递，不能作为接受证明。
+	mainAgentConversationContextCompactionNativeTurnId: z.string().min(1).max(200).optional(),
+	hookRuntimeSessionIncarnationId: z.string().uuid().optional(),
 	// 仅压缩完成事件、且 harness 报了压缩后上下文大小时携带（Kimi 的 estimatedTokenCount）。
 	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: z.number().int().nonnegative().optional(),
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，

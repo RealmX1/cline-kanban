@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueuedTaskPromptDeliveryEntry, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { CodexAppServerControlSocketRequestError } from "./codex-app-server-control-socket-request-connection";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
 import { type CodexNativeConversationTurn, readCodexConversationTurns } from "./codex-native-conversation-prefix";
 
@@ -11,6 +12,7 @@ export class NativeIndependentUserTurnDeliveryError extends Error {
 	constructor(
 		public readonly reason: NativeIndependentUserTurnDeliveryFailureReason,
 		message: string,
+		public readonly recovery: { retryableQueryFailure: boolean } = { retryableQueryFailure: false },
 	) {
 		super(message);
 	}
@@ -18,6 +20,11 @@ export class NativeIndependentUserTurnDeliveryError extends Error {
 
 // 此结果只表示该条正文已进入新原生回合，不替代 capture 的唯一消息/checkpoint/nonce 门禁。
 export class NativeIndependentUserTurnMessageAlreadyAccepted extends Error {}
+
+// 仅终止本 runtime 的只读等待；原队列和回执由新托管者或截止收敛继续负责。
+export class NativeIndependentUserTurnSubmissionRecoverySuspended extends Error {}
+
+export class NativeIndependentUserTurnDeliveryCancelledBeforeSubmission extends Error {}
 
 export async function readCurrentTuiNativeConversationTurns(input: {
 	workspaceId: string;
@@ -80,6 +87,13 @@ export async function readCurrentTuiNativeConversationTurns(input: {
 		throw new NativeIndependentUserTurnDeliveryError(
 			"native_independent_user_turn_capability_unavailable",
 			`无法读取当前 TUI 原生回合，未投递：${error instanceof Error ? error.message : String(error)}`,
+			{
+				retryableQueryFailure:
+					error instanceof CodexAppServerControlSocketRequestError &&
+					["request_timeout", "connection_timeout", "connection_error", "connection_closed"].includes(
+						error.outcome,
+					),
+			},
 		);
 	}
 	const latest = input.getSummary();

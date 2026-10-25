@@ -88,6 +88,7 @@ import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
 	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
@@ -275,8 +276,11 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 	throw new Error(`${commandName} requires either --task-id or --column.`);
 }
 
-export function createRuntimeTrpcClient(workspaceId: string | null) {
-	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
+export function createRuntimeTrpcClient(
+	workspaceId: string | null,
+	clientOptions: { timeoutMs?: number; waitForRuntimeRestartBeforeRetrying?: boolean } = {},
+) {
+	const trpcTimeoutMs = clientOptions.timeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -294,12 +298,16 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 						),
 				}),
 				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
-				fetch: (url, options) =>
-					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+				fetch: (url, options) => {
+					const request = async () => {
 						const runtimeFetch = await getRuntimeFetch();
 						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
 						return runtimeFetch(url, { ...options, signal });
-					}),
+					};
+					return clientOptions.waitForRuntimeRestartBeforeRetrying === false
+						? request()
+						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(request);
+				},
 			}),
 		],
 	});
@@ -1285,7 +1293,9 @@ interface TaskMessageCommandResult extends JsonRecord {
 	message_id: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
+	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
 	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
@@ -1309,10 +1319,19 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 		idempotency_key: record.idempotency_key,
 		message_id: record.message_id,
 		terminal_delivery_status: record.terminal_delivery_status,
+		...(record.terminal_delivery_failure_detail
+			? { terminal_delivery_failure_detail: record.terminal_delivery_failure_detail }
+			: {}),
 		...(record.terminal_delivery_failure_reason
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
 			: {}),
 		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.nativeCompactionAwareConfirmation
+			? { nativeCompactionAwareConfirmation: record.nativeCompactionAwareConfirmation }
+			: {}),
+		...(record.codex_native_prompt_delivery_evidence
+			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
 		...(record.required_native_independent_user_turn_session_id
 			? {
 					required_native_independent_user_turn_session_id:
@@ -1503,13 +1522,14 @@ async function sendTaskMessageCommand(input: {
 
 	// 第二段（锁外）：真正投递。锁外是必须的——投递要等 runtime 往返，占着账本锁会把 runtime
 	// 自己的终态回写堵死（runtime settle 时要拿同一把锁），直接死锁。
-	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason) => {
+	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason, failureDetail?: string) => {
 		await recordTaskMessageTerminalDeliveryOutcome({
 			ledgerPath,
 			taskId,
 			idempotencyKey,
 			status: "delivery_failed",
 			failureReason: reason,
+			...(failureDetail ? { failureDetail } : {}),
 			nowIso: new Date().toISOString(),
 		});
 	};
@@ -1535,7 +1555,10 @@ async function sendTaskMessageCommand(input: {
 	const messageId = chatResponse.message?.id ?? null;
 	const summary = chatResponse.summary ?? null;
 	if (!chatResponse.ok || !messageId || !summary) {
-		await settleFailure(chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session");
+		await settleFailure(
+			chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session",
+			chatResponse.terminalDelivery?.failureNote ?? chatResponse.error,
+		);
 		const failureResult = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
 		return toTaskMessageCommandResult(failureResult);
 	}
@@ -1551,6 +1574,12 @@ async function sendTaskMessageCommand(input: {
 			idempotencyKey,
 			status: immediateStatus,
 			...(chatResponse.terminalDelivery?.reason ? { failureReason: chatResponse.terminalDelivery.reason } : {}),
+			...(chatResponse.terminalDelivery?.failureNote
+				? { failureDetail: chatResponse.terminalDelivery.failureNote }
+				: {}),
+			...(chatResponse.terminalDelivery?.codexNativePromptDeliveryEvidence
+				? { codexNativePromptDeliveryEvidence: chatResponse.terminalDelivery.codexNativePromptDeliveryEvidence }
+				: {}),
 			...(checkpoint ? { turnId: String(checkpoint.turn), checkpointId: checkpoint.ref } : {}),
 			nowIso: new Date().toISOString(),
 		});
@@ -2272,6 +2301,15 @@ export function registerTaskCommand(program: Command): void {
 				),
 			);
 		});
+	registerTaskRvfHistoryCommand(task, {
+		queryRuntime: (workspaceId, input, timeoutMs) =>
+			createRuntimeTrpcClient(workspaceId, {
+				timeoutMs,
+				waitForRuntimeRestartBeforeRetrying: false,
+			}).runtime.getTaskRvfHistory.query(input),
+		runTaskCommand,
+	});
+
 	task
 		.command("rvf-automatic-closeout-status")
 		.description("查询 RVF 自动恢复与收尾投递的持久状态。")

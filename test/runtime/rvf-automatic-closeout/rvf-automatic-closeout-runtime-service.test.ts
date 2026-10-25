@@ -570,6 +570,26 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		const first = await context.service.reportExecutionResult(context.scope, land);
 		expect(first.record.status).toBe("closeout_prompt_submitted");
 		expect((await context.service.reportExecutionResult(context.scope, land)).record).toEqual(first.record);
+		const baseTipBeforeDeferral = context.repo.runGit(["rev-parse", "main"]).stdout;
+		const deferred = await context.service.reportExecutionResult(context.scope, {
+			...binding,
+			stage: "base_branch_sync",
+			outcome: "blocked",
+			blockedReasonKind: "agent_assessed_not_ready_for_base_sync",
+			reason: "当前候选仍依赖未闭合的协议变更，暂不整合到本地 main",
+			baseBranchSyncReassessmentCondition: "协议依赖闭合且相应验证通过后重新评估",
+		});
+		expect(deferred.record.baseBranchSyncExecutionResult).toMatchObject({
+			outcome: "blocked",
+			blockedReasonKind: "agent_assessed_not_ready_for_base_sync",
+			baseBranchSyncReassessmentCondition: "协议依赖闭合且相应验证通过后重新评估",
+		});
+		expect(deferred.record.landExecutionResult?.outcome).toBe("completed");
+		expect(deferred.record.status).not.toBe("completed");
+		const sendsBeforeDeferral = context.manager.forceStopTaskSession.mock.calls.length;
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledTimes(sendsBeforeDeferral);
+		expect(context.repo.runGit(["rev-parse", "main"]).stdout).toBe(baseTipBeforeDeferral);
 		const completed = await context.service.reportExecutionResult(context.scope, {
 			...binding,
 			stage: "base_branch_sync",
@@ -1091,9 +1111,10 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 		);
 		let record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
 		expect(record?.status).toBe("submitting_closeout_prompt");
-		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls[0]?.[1].text).toContain(
-			"$rvf-land 和 $base-branch-sync",
-		);
+		const closeoutText = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls[0]?.[1].text;
+		expect(closeoutText).toContain("$rvf-land");
+		expect(closeoutText).toContain("默认继续使用 $base-branch-sync");
+		expect(closeoutText).toContain("agent_assessed_not_ready_for_base_sync");
 		if (!record) throw new Error("缺少持久记录");
 		await recordTaskMessageTerminalDeliveryOutcome({
 			ledgerPath: getTaskMessageInjectionLedgerPath(mocked.directory),

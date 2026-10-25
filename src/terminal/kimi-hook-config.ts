@@ -36,8 +36,8 @@ const KIMI_SEEDED_CONFIG_FILE_MODE = 0o600;
 // seeded home 目录同样限制为 owner-only，避免其它用户枚举目录、或经软链探查用户真实 home 的登录态。
 const KIMI_SEEDED_HOME_DIRECTORY_MODE = 0o700;
 
-// kimi 的 Claude 风格 hook 事件 → Kanban 状态转换事件。镜像 claudeAdapter 的事件表，落到 kimi 暴露的
-// 事件集合（不带 matcher）。kimi-code 2.1.1 起也有 Notification / SubagentStop，目前未接。
+// Kimi 原生 hook → Kanban 事件入口。CLI 再按工具、前后台与子代理归一化；
+// Notification / SubagentStop 不作为主会话交棒信号，不注册它们。
 const KIMI_HOOK_EVENT_MAP: ReadonlyArray<{ kimiEvent: string; kanbanEvent: RuntimeHookEvent }> = [
 	{ kimiEvent: "SessionStart", kanbanEvent: "agent_conversation_session_identity_observed" },
 	{ kimiEvent: "UserPromptSubmit", kanbanEvent: "to_in_progress" },
@@ -45,8 +45,10 @@ const KIMI_HOOK_EVENT_MAP: ReadonlyArray<{ kimiEvent: string; kanbanEvent: Runti
 	{ kimiEvent: "PostToolUse", kanbanEvent: "to_in_progress" },
 	{ kimiEvent: "PostToolUseFailure", kanbanEvent: "to_in_progress" },
 	{ kimiEvent: "PermissionRequest", kanbanEvent: "to_review" },
+	{ kimiEvent: "PermissionResult", kanbanEvent: "activity" },
 	{ kimiEvent: "Stop", kanbanEvent: "to_review" },
 	{ kimiEvent: "StopFailure", kanbanEvent: "to_review" },
+	{ kimiEvent: "Interrupt", kanbanEvent: "to_review" },
 	// 压缩完成（载荷 `trigger: manual|auto`）。kimi 的 SessionStart 只在建会话时触发，压缩时不触发。
 	{ kimiEvent: "PostCompact", kanbanEvent: "main_agent_conversation_context_compaction_completed" },
 ];

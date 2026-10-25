@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
+import type { AgentTerminalPanelProps } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
 import type { RuntimeAgentSessionTransport, RuntimeConfigResponse, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -17,6 +18,8 @@ const {
 	mockDiffViewerPanel,
 	mockClineAppendToDraft,
 	mockClineSendText,
+	mockClineFocusAfterShortcutInsertion,
+	mockTerminalFocusAfterShortcutInsertion,
 	mockUseIsMobile,
 	mockPromptLibraryPanel,
 	mockUseAgentRaisedPendingUserDecision,
@@ -36,6 +39,8 @@ const {
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
 	mockClineSendText: vi.fn(async () => {}),
+	mockClineFocusAfterShortcutInsertion: vi.fn(() => true),
+	mockTerminalFocusAfterShortcutInsertion: vi.fn(() => true),
 	mockUseIsMobile: vi.fn(() => false),
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 	mockUseAgentRaisedPendingUserDecision: vi.fn(),
@@ -52,7 +57,12 @@ vi.mock("@/hooks/use-is-mobile", () => ({
 }));
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
-	AgentTerminalPanel: mockAgentTerminalPanel,
+	AgentTerminalPanel: (props: AgentTerminalPanelProps) => {
+		useImperativeHandle(props.shortcutInputFocusHandleRef, () => ({
+			focusAgentInputAfterShortcutInsertion: mockTerminalFocusAfterShortcutInsertion,
+		}));
+		return mockAgentTerminalPanel(props);
+	},
 }));
 vi.mock("@/components/detail-panels/read-only-task-conversation-history-panel", () => ({
 	ReadOnlyTaskConversationHistoryPanel: mockReadOnlyTaskConversationHistoryPanel,
@@ -72,6 +82,7 @@ vi.mock("@/components/detail-panels/cline-agent-chat-panel", () => ({
 		useImperativeHandle(ref, () => ({
 			appendToDraft: mockClineAppendToDraft,
 			sendText: mockClineSendText,
+			focusAgentInputAfterShortcutInsertion: mockClineFocusAfterShortcutInsertion,
 		}));
 		return <div data-testid="cline-agent-chat-panel" />;
 	}),
@@ -499,6 +510,8 @@ describe("CardDetailView", () => {
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
+		mockClineFocusAfterShortcutInsertion.mockClear();
+		mockTerminalFocusAfterShortcutInsertion.mockClear();
 		mockUseIsMobile.mockReturnValue(false);
 		mockPromptLibraryPanel.mockClear();
 		mockUseAgentRaisedPendingUserDecision.mockReset();
@@ -1552,11 +1565,32 @@ describe("CardDetailView", () => {
 		expect(requireAgentPanel(container).style.width).toBe("800px");
 	});
 
-	it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
-		"Prompts 填入按 %s 通道保留换行且不发送",
-		async (sessionTransport) => {
+	it.each(
+		(["pty_terminal", "acp_stdio_subprocess"] as const).flatMap((transport) => [
+			[transport, false] as const,
+			[transport, true] as const,
+		]),
+	)(
+		"Prompts 填入按 %s 通道保留换行且聚焦当前会话，不发送，侧会话=%s",
+		async (sessionTransport, selectsSideSession) => {
 			const onAddReviewComments = vi.fn();
 			const summary = createSessionSummary("task-1", { agentId: "omp", sessionTransport });
+			const targetSessionId = selectsSideSession ? "shortcut-side-session" : "task-1";
+			const sideSession = createSessionSummary(targetSessionId, {
+				agentId: "omp",
+				sessionTransport,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "快捷输入侧会话",
+				},
+			});
+			const originalUrl = window.location.href;
+			if (selectsSideSession) window.history.replaceState(null, "", `?conversationSession=${targetSessionId}`);
 			await act(async () => {
 				root.render(
 					<CardDetailView
@@ -1564,7 +1598,10 @@ describe("CardDetailView", () => {
 						currentProjectId="workspace-1"
 						selectedAgentId="omp"
 						sessionSummary={summary}
-						taskSessions={{ "task-1": summary }}
+						taskSessions={{
+							"task-1": summary,
+							...(selectsSideSession ? { [targetSessionId]: sideSession } : {}),
+						}}
 						onSessionSummary={() => {}}
 						onCardSelect={() => {}}
 						onTaskDragEnd={() => {}}
@@ -1577,6 +1614,12 @@ describe("CardDetailView", () => {
 					/>,
 				);
 			});
+			window.history.replaceState(null, "", originalUrl);
+			expect(
+				getLastMockFirstArg<{ taskId: string }>(
+					sessionTransport === "acp_stdio_subprocess" ? mockClineAgentChatPanel : mockAgentTerminalPanel,
+				).taskId,
+			).toBe(targetSessionId);
 			const promptProps = getLastMockFirstArg<{ onFillInput: (text: string) => void }>(mockPromptLibraryPanel);
 			await act(async () => {
 				promptProps.onFillInput("\n提示词\n");
@@ -1586,9 +1629,13 @@ describe("CardDetailView", () => {
 					preserveInsertedTextBoundaryWhitespace: true,
 				});
 				expect(onAddReviewComments).not.toHaveBeenCalled();
+				expect(mockClineFocusAfterShortcutInsertion).toHaveBeenCalledOnce();
+				expect(mockTerminalFocusAfterShortcutInsertion).not.toHaveBeenCalled();
 			} else {
-				expect(onAddReviewComments).toHaveBeenCalledExactlyOnceWith("task-1", "\n提示词\n");
+				expect(onAddReviewComments).toHaveBeenCalledExactlyOnceWith(targetSessionId, "\n提示词\n");
 				expect(mockClineAppendToDraft).not.toHaveBeenCalled();
+				expect(mockTerminalFocusAfterShortcutInsertion).toHaveBeenCalledOnce();
+				expect(mockClineFocusAfterShortcutInsertion).not.toHaveBeenCalled();
 			}
 			expect(mockClineSendText).not.toHaveBeenCalled();
 		},

@@ -895,6 +895,65 @@ describe("ClineAgentChatPanel", () => {
 		expect(restoredPlanButton?.getAttribute("aria-selected")).toBe("true");
 	});
 
+	it.each([false, true])("ACP 快捷输入可显式聚焦并将光标移到草稿末尾，手机视口=%s", async (isMobile) => {
+		vi.spyOn(window, "matchMedia").mockReturnValue({
+			matches: isMobile,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		} as unknown as MediaQueryList);
+		const panelRef = createRef<ClineAgentChatPanelHandle>();
+		const onSendMessage = vi.fn();
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					ref={panelRef}
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("idle", null, { agentId: "omp", sessionTransport: "acp_stdio_subprocess" })}
+					onLoadMessages={async () => []}
+					onSendMessage={onSendMessage}
+				/>,
+			);
+		});
+		await act(async () => {
+			panelRef.current?.appendToDraft("已有草稿\n快捷输入\n", { preserveInsertedTextBoundaryWhitespace: true });
+		});
+		const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+		const shortcutButton = document.createElement("button");
+		container.appendChild(shortcutButton);
+		shortcutButton.focus();
+		await act(async () => {
+			expect(panelRef.current?.focusAgentInputAfterShortcutInsertion()).toBe(true);
+		});
+		expect(document.activeElement).toBe(textarea);
+		expect(textarea?.selectionStart).toBe(textarea?.value.length);
+		expect(textarea?.selectionEnd).toBe(textarea?.value.length);
+		expect(onSendMessage).not.toHaveBeenCalled();
+	});
+
+	it("ACP 输入不可用时跳过快捷输入聚焦，恢复后不延迟抢焦", async () => {
+		const panelRef = createRef<ClineAgentChatPanelHandle>();
+		const renderConversationPanel = (canSend: boolean) =>
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					ref={panelRef}
+					taskId="task-1"
+					agentId="omp"
+					summary={null}
+					onSendMessage={canSend ? vi.fn() : undefined}
+				/>,
+			);
+		await act(async () => renderConversationPanel(false));
+		const otherInput = document.createElement("input");
+		container.appendChild(otherInput);
+		otherInput.focus();
+		expect(panelRef.current?.focusAgentInputAfterShortcutInsertion()).toBe(false);
+		await act(async () => renderConversationPanel(true));
+		expect(document.activeElement).toBe(otherInput);
+	});
+
 	it.each(["", "已有草稿  \n"])("ACP 草稿逐字保留填入提示词的边界换行：%j", async (initialDraft) => {
 		const panelRef = createRef<ClineAgentChatPanelHandle>();
 		const onSendMessage = vi.fn();

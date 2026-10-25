@@ -58,6 +58,10 @@ export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 		.optional(),
 	baseRef: z.string().min(1).optional(),
 	reason: z.string().trim().min(1).optional(),
+	blockedReasonKind: z
+		.enum(["user_restriction", "machine_precondition", "evidence_conflict", "agent_assessed_not_ready_for_base_sync"])
+		.optional(),
+	baseBranchSyncReassessmentCondition: z.string().trim().min(1).optional(),
 	reportedAt: z.number(),
 });
 export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewStartBoundaryRequestSchema
@@ -68,6 +72,17 @@ export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewS
 	})
 	.extend(rvfAutomaticCloseoutExecutionStageResultSchema.omit({ reportedAt: true }).shape)
 	.superRefine((value, context) => {
+		if (
+			value.blockedReasonKind === "agent_assessed_not_ready_for_base_sync" &&
+			(value.stage !== "base_branch_sync" ||
+				value.outcome !== "blocked" ||
+				!value.baseBranchSyncReassessmentCondition)
+		) {
+			context.addIssue({
+				code: "custom",
+				message: "Agent 暂缓仅用于 base 同步的 blocked 结果，且必须提供重新评估条件。",
+			});
+		}
 		if (value.outcome === "completed" && (!value.commitSha || (value.stage === "base_branch_sync" && !value.baseRef)))
 			context.addIssue({ code: "custom", message: "完成结果必须提供真实提交；base 同步还须提供本地 base ref。" });
 		if (value.outcome !== "completed" && !value.reason)

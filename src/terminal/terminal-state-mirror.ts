@@ -125,20 +125,33 @@ export class TerminalStateMirror {
 	// 成本远低于 getViewportSnapshot：只遍历 rows 行、不做序列化，也不吃 serialize 那份
 	// 阻塞事件循环的开销。仍排进 operationQueue，保证相对写入严格有序（否则会读到写入尚未
 	// 应用的中间态）。
-	async getScreenSnapshot(): Promise<TerminalScreenSnapshot> {
+	async getScreenSnapshot(options: { includeDimmedTextColumnRanges?: boolean } = {}): Promise<TerminalScreenSnapshot> {
 		await this.operationQueue;
 		const buffer = this.terminal.buffer.active;
 		const lines: TerminalScreenLineSnapshot[] = [];
 		for (let rowOffset = 0; rowOffset < this.terminal.rows; rowOffset += 1) {
 			const line = buffer.getLine(buffer.baseY + rowOffset);
+			const dimmedTextColumnRanges: [number, number][] = [];
+			if (options.includeDimmedTextColumnRanges && line) {
+				let dimmedRangeStart: number | null = null;
+				for (let column = 0; column <= this.terminal.cols; column += 1) {
+					const dimmed = column < this.terminal.cols && Boolean(line.getCell(column)?.isDim());
+					if (dimmed && dimmedRangeStart === null) dimmedRangeStart = column;
+					if (!dimmed && dimmedRangeStart !== null) {
+						dimmedTextColumnRanges.push([dimmedRangeStart, column]);
+						dimmedRangeStart = null;
+					}
+				}
+			}
 			lines.push({
 				// translateToString(false)：保留行内空白。输入框的续行缩进与提示符后的 U+00A0
 				// 都是有意义的定位信息，去掉就没法剥前缀了。
 				text: line?.translateToString(false) ?? "",
 				isWrapped: line?.isWrapped ?? false,
+				...(options.includeDimmedTextColumnRanges ? { dimmedTextColumnRanges } : {}),
 			});
 		}
-		return { lines, columnCount: this.terminal.cols };
+		return { lines, columnCount: this.terminal.cols, cursorRow: buffer.cursorY, cursorColumn: buffer.cursorX };
 	}
 
 	dispose(): void {

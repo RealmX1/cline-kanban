@@ -39,6 +39,7 @@ export function describeQueuedTaskPromptDeliveryStatusChip(
 }
 
 const DISPATCH_BLOCK_REASON_WORDING: Record<QueuedTaskPromptDispatchBlockReason, string> = {
+	awaiting_native_independent_user_turn_query_retry: "原生回合查询暂时失败，系统将在原截止时间内自动重试，尚未发送。",
 	task_main_session_handover_awaiting_user: "主会话正在交接或等待用户消息，排队投递已暂停。",
 	awaiting_human_reconfirmation_after_runtime_restart:
 		"Queued before Kanban restarted — keep it or cancel it before it is sent.",
