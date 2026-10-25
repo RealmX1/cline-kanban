@@ -11,6 +11,7 @@ export function projectTaskBoardAfterAcceptedMainConversationInput(
 	const accepted = summary.agentConversationPromptSubmissionAcceptance;
 	if (
 		accepted?.status !== "accepted" ||
+		accepted.acceptedByHistoricalReconciliation === true ||
 		!accepted.eventId ||
 		accepted.confirmedAtMs === undefined ||
 		accepted.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||

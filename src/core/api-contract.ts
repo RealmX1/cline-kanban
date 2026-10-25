@@ -55,7 +55,10 @@ import {
 	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
 } from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
-import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverExistingTargetBindingSchema,
+	taskMainSessionHandoverRecordSchema,
+} from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
 export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
@@ -1057,6 +1060,46 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	eventId: z.string().min(1).optional(),
 	nativeSessionId: z.string().min(1).optional(),
 	runtimeSessionIncarnationId: z.string().min(1),
+	submissionId: z.string().min(1).optional(),
+	acceptedByHistoricalReconciliation: z.boolean().optional(),
+	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
+	submittedPromptSha256: z.string().optional(),
+	predecessorAcceptedEventId: z.string().optional(),
+	verification: z
+		.object({
+			checkedAtMs: z.number(),
+			nextCheckAtMs: z.number().nullable(),
+			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
+			reason: z.enum([
+				"scanning_native_transcript",
+				"native_evidence_unavailable",
+				"no_matching_native_message",
+				"ambiguous_native_messages",
+				"native_acceptance_verified",
+				"native_identity_changed",
+			]),
+			transcriptCursor: z
+				.object({
+					fileIdentity: z.string(),
+					nextByteOffset: z.number().int().nonnegative(),
+					lastObservedFileSize: z.number().int().nonnegative(),
+					verifiedSessionMetadata: z.boolean(),
+					skippingOversizedRecord: z.boolean(),
+				})
+				.optional(),
+			matchingNativeMessages: z
+				.array(
+					z.object({
+						eventId: z.string(),
+						nativeTurnId: z.string(),
+						nativeItemId: z.string(),
+						acceptedAtMs: z.number(),
+					}),
+				)
+				.max(2)
+				.optional(),
+		})
+		.optional(),
 });
 export type RuntimeAgentConversationPromptSubmissionAcceptance = z.infer<
 	typeof runtimeAgentConversationPromptSubmissionAcceptanceSchema
@@ -4067,6 +4110,7 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
+		expectedExistingMainSessionHandoverTargetBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),

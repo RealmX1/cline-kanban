@@ -1,6 +1,6 @@
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, ClipboardList } from "lucide-react";
-import { type ReactElement, useEffect, useMemo, useState } from "react";
+import { type ReactElement, useEffect, useMemo } from "react";
 import {
 	countPostDeployVerificationTasksAwaitingVerification,
 	groupActiveDeploymentGroupTasksByDeploymentAttributionZone,
@@ -9,6 +9,7 @@ import {
 	POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER,
 } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import type { PostDeployVerificationEntryNavigationRequest } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
+import { usePostDeployVerificationPanelRememberedExpansionState } from "@/components/post-deploy-verification/post-deploy-verification-panel-expansion-state-context";
 import {
 	PostDeployVerificationTaskEntryWrappingRealTaskCard,
 	type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
@@ -65,7 +66,7 @@ function renderTaskEntry(
 	const { group, taskEntryActions } = props;
 	return (
 		<PostDeployVerificationTaskEntryWrappingRealTaskCard
-			key={`${group.deploymentId}:${task.taskId}`}
+			key={JSON.stringify([group.workspaceId, group.deploymentId, task.taskId])}
 			postDeployVerificationTask={task}
 			board={props.board}
 			realTaskCardRenderingInputs={props.realTaskCardRenderingInputs}
@@ -150,9 +151,12 @@ export function PostDeployVerificationActiveDeploymentGroupZoneSections(
 		() => groupActiveDeploymentGroupTasksByDeploymentAttributionZone(group.tasks),
 		[group.tasks],
 	);
-	const [expandedZones, setExpandedZones] = useState<
+	const [expandedZones, setExpandedZones] = usePostDeployVerificationPanelRememberedExpansionState<
 		ReadonlySet<RuntimePostDeployVerificationTaskDeploymentAttributionZone>
-	>(() => new Set(POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER.slice(0, 1)));
+	>(
+		JSON.stringify(["deployment_attribution_zones", group.workspaceId, group.deploymentId]),
+		() => new Set(POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER.slice(0, 1)),
+	);
 	useEffect(() => {
 		const entry = props.entryNavigationRequest?.target.entry;
 		if (!entry || entry.workspaceId !== group.workspaceId || entry.deploymentId !== group.deploymentId) return;
