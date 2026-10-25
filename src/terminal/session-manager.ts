@@ -7,6 +7,10 @@ import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import {
+	type CodexPromptSubmissionAcceptanceReconciliation,
+	submittedPromptSha256,
+} from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import {
 	buildCodexConversationStorageEnvironment,
@@ -3164,7 +3168,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			receiptBeforeSubmit.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
 				active.ptyOutputChunkArrivalSequenceNumber;
 		}
-		this.markAgentConversationPromptSubmissionPending(taskId);
+		this.markAgentConversationPromptSubmissionPending(
+			taskId,
+			receiptBeforeSubmit?.firstSubmitCarriageReturnAtEpochMs ?? now(),
+			{
+				source: "programmatic_submission",
+				submittedPromptText: receiptBeforeSubmit?.promptText,
+			},
+		);
 		if (!isOriginalSubmitTargetStillCurrent()) {
 			rejectObsoleteSubmitTarget();
 			return;
@@ -6354,26 +6365,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
-		if (data.includes(0x0d) || data.includes(0x0a)) {
-			this.markAgentConversationPromptSubmissionPending(taskId);
-			this.terminalSessionManagerOptions.onUserTerminalInputSubmissionObservedForSession?.(taskId);
-		}
 		// 输入侧字节跟踪：维护「框里有没有未提交内容」并给被 TUI 折叠掉的粘贴留原文账本。
 		// 必须在 session.write 之前记：这是纯内存计算，放前面才能保证「字节已进 PTY 但账没记上」
 		// 这个窗口不存在——争用判定与 Ctrl+S 取文都读这本账，漏一段就是把人类内容判丢。
-		recordTerminalInputBytesIntoOccupancyTracker(
+		const inputObservation = recordTerminalInputBytesIntoOccupancyTracker(
 			entry.active.inputBoxOccupancyTracker,
 			data,
 			entry.active.lastUserInputAt,
 		);
+		// 原始 Enter 只唤醒读取；空输入、菜单确认与换行不创建可见的提交候选。
+		if (inputObservation.submissionCarriageReturnObserved)
+			this.terminalSessionManagerOptions.onUserTerminalInputSubmissionObservedForSession?.(taskId);
 		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
 		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
 		clearResumeSubstantiveGuard(entry.active);
 		// PTY 字节可能只是仍在编辑，真正的 Claude/Kimi 用户提交由 hook 解除；Codex / Cursor 当前没有可靠的
-		// UserPromptSubmit hook，因此只在 Enter/换行这一提交边沿解除恢复续跑守卫。
+		// UserPromptSubmit hook，因此只在粘贴之外的提交 CR 边沿解除恢复续跑守卫。
 		if (
 			isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge(entry.summary.agentId) &&
-			(data.includes(13) || data.includes(10))
+			inputObservation.submissionCarriageReturnObserved
 		) {
 			this.disarmRestorationContinuationGuard(taskId);
 		}
@@ -6386,7 +6396,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			(entry.summary.reviewReason === "hook" ||
 				entry.summary.reviewReason === "attention" ||
 				entry.summary.reviewReason === "error") &&
-			(data.includes(13) || data.includes(10))
+			inputObservation.submissionCarriageReturnObserved
 		) {
 			entry.active.awaitingCodexPromptAfterEnter = true;
 		}
@@ -7347,6 +7357,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 	markAgentConversationPromptSubmissionPending(
 		taskId: string,
 		attemptedAtMs: number = now(),
+		context: { source: "harness_submit_hook" | "programmatic_submission"; submittedPromptText?: string } = {
+			source: "harness_submit_hook",
+		},
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		const incarnation = entry?.summary.runtimeSessionIncarnationId;
@@ -7354,6 +7367,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!Number.isFinite(attemptedAtMs) || attemptedAtMs < (entry.summary.startedAt ?? 0))
 			return cloneSummary(entry.summary);
 		const current = entry.summary.agentConversationPromptSubmissionAcceptance;
+		const receipt = entry.active?.programmaticDeliveryReceipt;
+		if (
+			current?.status !== "accepted" &&
+			current?.submissionSource === "programmatic_submission" &&
+			context.source === "harness_submit_hook" &&
+			receipt?.phase === "awaiting_submit_confirmation" &&
+			(context.submittedPromptText !== undefined
+				? submittedPromptSha256(context.submittedPromptText) === current.submittedPromptSha256
+				: (entry.active?.lastUserInputAt ?? 0) < current.attemptedAtMs)
+		)
+			return cloneSummary(entry.summary);
+
 		if (
 			current?.runtimeSessionIncarnationId === incarnation &&
 			(attemptedAtMs <= current.attemptedAtMs ||
@@ -7378,6 +7403,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			agentConversationPromptSubmissionAcceptance: {
 				status: "pending",
 				attemptedAtMs,
+				submissionId: randomUUID(),
+				submissionSource: context.source,
+				...(context.submittedPromptText !== undefined
+					? { submittedPromptSha256: submittedPromptSha256(context.submittedPromptText) }
+					: {}),
+				...(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
+					? { nativeSessionId: entry.summary.agentNativeConversationSessionIdentity.nativeSessionId }
+					: {}),
+				...(current?.status === "accepted" && current.eventId
+					? { predecessorAcceptedEventId: current.eventId }
+					: {}),
 				runtimeSessionIncarnationId: incarnation,
 			},
 		});
@@ -7399,6 +7435,49 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 		}, 15_000);
 		timer.unref();
+		return cloneSummary(summary);
+	}
+
+	// 历史补证只更新接受事实；不结算 Queue 回执、不交接主会话、不改变回合/活动/缓存计时。
+	reconcileAgentConversationPromptSubmissionAcceptance(
+		taskId: string,
+		result: CodexPromptSubmissionAcceptanceReconciliation,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		const current = entry?.summary.agentConversationPromptSubmissionAcceptance;
+		if (
+			!entry ||
+			!current ||
+			current.status === "accepted" ||
+			current.attemptedAtMs !== result.attemptedAtMs ||
+			current.submissionId !== result.submissionId ||
+			current.runtimeSessionIncarnationId !== result.runtimeSessionIncarnationId ||
+			entry.summary.runtimeSessionIncarnationId !== result.runtimeSessionIncarnationId ||
+			entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== result.nativeSessionId
+		)
+			return null;
+		const summary = updateSummary(entry, {
+			agentConversationPromptSubmissionAcceptance: {
+				...current,
+				status: result.accepted ? "accepted" : now() >= current.attemptedAtMs + 15_000 ? "unconfirmed" : "pending",
+				verification: result.verification,
+				...(result.accepted
+					? {
+							acceptedByHistoricalReconciliation: true,
+							eventId: result.accepted.eventId,
+							confirmedAtMs: result.accepted.acceptedAtMs,
+							nativeSessionId: result.nativeSessionId,
+						}
+					: {}),
+			},
+		});
+		if (result.accepted && entry.active)
+			this.rememberAcceptedAgentConversationInputEventIdentity(entry.active, {
+				eventId: result.accepted.eventId,
+				nativeSessionId: result.nativeSessionId,
+				runtimeSessionIncarnationId: result.runtimeSessionIncarnationId,
+			});
+		this.emitSummary(summary);
 		return cloneSummary(summary);
 	}
 
@@ -7464,6 +7543,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			acceptedNativeAgentTurnIsInProgress?: boolean;
 			acceptedNativeAgentTurnHasModelResponse?: boolean;
 			acceptanceEvidenceKind?: "native_user_prompt_acceptance" | "agent_lifecycle_hook_event";
+			observedSubmissionAttemptedAtMs?: number | null;
+			observedSubmissionId?: string;
 		},
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
@@ -7479,6 +7560,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			input.observedAtMs > now() + 60_000
 		)
 			return null;
+		const candidate = entry.summary.agentConversationPromptSubmissionAcceptance;
+		if (
+			input.observedSubmissionAttemptedAtMs !== undefined &&
+			candidate?.status !== "accepted" &&
+			candidate &&
+			(candidate.attemptedAtMs !== input.observedSubmissionAttemptedAtMs ||
+				candidate.submissionId !== input.observedSubmissionId)
+		)
+			return null;
+
+		const nativeInputMatchesPendingSubmission = !(
+			candidate &&
+			candidate.status !== "accepted" &&
+			candidate.submittedPromptSha256 &&
+			input.submittedPromptText !== undefined &&
+			submittedPromptSha256(input.submittedPromptText) !== candidate.submittedPromptSha256
+		);
+
 		const managedStartup = this.managedArgumentStartupDeliveryByTaskId.get(taskId);
 		if (
 			managedStartup &&
@@ -7564,14 +7663,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 					evidenceKind: input.acceptanceEvidenceKind ?? "native_user_prompt_acceptance",
 					activityKind: "accepted_user_input",
 				},
-				agentConversationPromptSubmissionAcceptance: {
-					status: "accepted",
-					attemptedAtMs: previous?.attemptedAtMs ?? input.observedAtMs,
-					confirmedAtMs: input.observedAtMs,
-					eventId: input.eventId,
-					nativeSessionId: input.nativeSessionId,
-					runtimeSessionIncarnationId: input.runtimeSessionIncarnationId,
-				},
+				agentConversationPromptSubmissionAcceptance: !nativeInputMatchesPendingSubmission
+					? previous
+					: {
+							...(previous && previous.status !== "accepted"
+								? { submissionId: previous.submissionId, submissionSource: previous.submissionSource }
+								: {}),
+							status: "accepted",
+							attemptedAtMs:
+								previous && previous.status !== "accepted" ? previous.attemptedAtMs : input.observedAtMs,
+							confirmedAtMs: input.observedAtMs,
+							eventId: input.eventId,
+							nativeSessionId: input.nativeSessionId,
+							runtimeSessionIncarnationId: input.runtimeSessionIncarnationId,
+						},
 				...(input.acceptedNativeAgentTurnHasModelResponse === true && correlatedRequestAtMs !== undefined
 					? {
 							lastAgentConversationPromptCacheReferenceObservation: {
