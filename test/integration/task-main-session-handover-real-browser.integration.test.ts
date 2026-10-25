@@ -22,14 +22,15 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(!packagedCliPath).each([
-	{ mainAgentId: "claude", destinationKind: "new_codex_session" },
-	{ mainAgentId: "claude", destinationKind: "existing_codex_session" },
-	{ mainAgentId: "codex", destinationKind: "new_codex_session" },
-	{ mainAgentId: "codex", destinationKind: "existing_codex_session" },
+	{ mainAgentId: "claude", destinationKind: "new_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "claude", destinationKind: "existing_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "new_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "existing_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "new_agent_session", targetAgentId: "claude" },
 ] as const)(
 	"打包态 $mainAgentId 主会话交接 $destinationKind：真实浏览器、PTY、迟到 hook 与冷恢复",
-	async ({ mainAgentId, destinationKind }) => {
-		const collaborationAgentId = "codex";
+	async ({ mainAgentId, destinationKind, targetAgentId }) => {
+		const collaborationAgentId = targetAgentId;
 
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
@@ -41,6 +42,11 @@ it.skipIf(!packagedCliPath).each([
 			codexTranscriptPath,
 			`${JSON.stringify({ type: "session_meta", payload: { id: nativeCodexId, source: "cli" } })}\n`,
 		);
+		const targetTranscriptPath =
+			targetAgentId === "codex"
+				? codexTranscriptPath
+				: join(fixture.isolatedHomeDirectoryPath, "claude-target.jsonl");
+		if (targetAgentId === "claude") writeFileSync(targetTranscriptPath, "");
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "collaboration-browser" });
 		writeFileSync(join(repository.repositoryPath, "initial.txt"), "隔离协作测试\n");
 		repository.commitAllRepositoryFilesAtDate({
@@ -61,6 +67,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const agent = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
+if (agent === 'claude' && args[0] === 'agents' && args.includes('--json')) { process.stdout.write('[]\n'); process.exit(0); }
 if (args.includes('--version') || args.includes('--help') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) {
   process.stdout.write(agent + ' 2.1.200\n'); process.exit(0);
 }
@@ -294,10 +301,11 @@ setInterval(() => {}, 1000);
 			await page.getByLabel("工作台格位 1").selectOption("task_sessions");
 			await page.screenshot({ path: join(evidenceDirectory, "sessions-before-handover.png") });
 			writeFileSync(join(evidenceDirectory, "sessions-before-handover.html"), await page.content());
-			await page.getByRole("button", { name: "交接给 Codex", exact: true }).click();
+			await page.getByRole("button", { name: "交接主会话", exact: true }).click();
 			await expect.poll(() => page.getByLabel("接收会话").inputValue()).toBe("new_codex_session");
 			if (destinationKind === "existing_codex_session")
 				await page.getByLabel("接收会话").selectOption(existingPeerId);
+			else await page.getByLabel("目标 Agent").selectOption(targetAgentId);
 			await page.getByLabel("补充交接说明").fill("真实浏览器交接验收：只读报告后等待用户。");
 			await page.screenshot({ path: join(evidenceDirectory, "handover-material-preview.png") });
 			await page.getByRole("button", { name: "确认交接", exact: true }).click();
@@ -328,9 +336,9 @@ setInterval(() => {}, 1000);
 					workspaceId,
 					event: "agent_conversation_session_identity_observed",
 					agentNativeConversationSessionIdentity: {
-						sourceAgentId: "codex",
+						sourceAgentId: targetAgentId,
 						nativeSessionId: nativeCodexId,
-						transcriptPath: codexTranscriptPath,
+						transcriptPath: targetTranscriptPath,
 						observedAt: Date.now(),
 					},
 				});
@@ -412,7 +420,9 @@ setInterval(() => {}, 1000);
 				const input = stripVTControlCharacters(
 					readFileSync(join(repository.repositoryPath, `input-${targetId}.txt`), "utf8"),
 				);
-				const start = input.indexOf("/plan KANBAN_MAIN_SESSION_HANDOVER_REPORT:");
+				const start = input.indexOf(
+					`${targetAgentId === "codex" ? "/plan " : ""}KANBAN_MAIN_SESSION_HANDOVER_REPORT:`,
+				);
 				return start < 0 ? "" : input.slice(start);
 			};
 			await expect
@@ -423,12 +433,24 @@ setInterval(() => {}, 1000);
 			expect(readSubmittedReportInput().split("KANBAN_MAIN_SESSION_HANDOVER_REPORT:")).toHaveLength(2);
 
 			appendFileSync(
-				codexTranscriptPath,
-				`${JSON.stringify({
-					type: "event_msg",
-					timestamp: new Date().toISOString(),
-					payload: { type: "user_message", message: expectedPrompt.slice(6) },
-				})}\n`,
+				targetTranscriptPath,
+				`${JSON.stringify(
+					targetAgentId === "codex"
+						? {
+								type: "event_msg",
+								timestamp: new Date().toISOString(),
+								payload: { type: "user_message", message: expectedPrompt.slice(6) },
+							}
+						: {
+								type: "user",
+								promptSource: "typed",
+								uuid: "44444444-4444-4444-8444-444444444444",
+								sessionId: nativeCodexId,
+								cwd: repository.repositoryPath,
+								timestamp: new Date().toISOString(),
+								message: { role: "user", content: expectedPrompt },
+							},
+				)}\n`,
 			);
 
 			await scoped.hooks.ingest.mutate({
@@ -436,9 +458,9 @@ setInterval(() => {}, 1000);
 				workspaceId,
 				event: "agent_conversation_session_identity_observed",
 				agentNativeConversationSessionIdentity: {
-					sourceAgentId: "codex",
+					sourceAgentId: targetAgentId,
 					nativeSessionId: nativeCodexId,
-					transcriptPath: codexTranscriptPath,
+					transcriptPath: targetTranscriptPath,
 					observedAt: Date.now(),
 				},
 			});
@@ -446,15 +468,15 @@ setInterval(() => {}, 1000);
 				taskId: targetId,
 				workspaceId,
 				event: "to_in_progress",
-				submittedPromptText: expectedPrompt.slice(6),
-				metadata: { source: "codex", hookEventName: "UserPromptSubmit" },
+				submittedPromptText: targetAgentId === "codex" ? expectedPrompt.slice(6) : expectedPrompt,
+				metadata: { source: targetAgentId, hookEventName: "UserPromptSubmit" },
 			});
 			await scoped.hooks.ingest.mutate({
 				taskId: targetId,
 				workspaceId,
 				event: "to_review",
 				metadata: {
-					source: "codex",
+					source: targetAgentId,
 					hookEventName: "Stop",
 					finalMessage: "计划总览：核对原计划。已经实现：材料已读取。有待进行：等待用户。",
 				},
@@ -486,7 +508,7 @@ setInterval(() => {}, 1000);
 			});
 			const afterLateHook = await scoped.workspace.getState.query();
 			expect(columnOfTask(afterLateHook)).toBe(columnOfTask(beforeLateHook));
-			expect(afterLateHook.sessions[targetId].agentId).toBe("codex");
+			expect(afterLateHook.sessions[targetId].agentId).toBe(targetAgentId);
 			expect(afterLateHook.sessions[taskId].taskConversationSessionMetadata?.taskConversationSessionRole).toBe(
 				"task_collaborator",
 			);
@@ -509,7 +531,7 @@ setInterval(() => {}, 1000);
 			});
 			expect(restarted.ok, restarted.error).toBe(true);
 			expect(restarted.summary?.taskId).toBe(targetId);
-			expect(restarted.summary?.agentId).toBe("codex");
+			expect(restarted.summary?.agentId).toBe(targetAgentId);
 			await expect
 				.poll(
 					() => JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${targetId}.json`), "utf8")).args,

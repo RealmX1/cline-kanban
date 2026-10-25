@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import lockfile from "proper-lockfile";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { preserveCodexHookTrustDuringConfigurationRefresh } from "./preserve-codex-hook-trust-during-configuration-refresh";
 
 export function resolveUserCodexHomeDirectoryPath(environment: NodeJS.ProcessEnv = process.env, cwd = process.cwd()) {
 	return environment.CODEX_HOME?.trim()
@@ -112,13 +114,66 @@ function preserveCodexConfigurationSourceFileResolution(
 				preserveCodexConfigurationSourceFileResolution(profile, sourceConfigurationDirectoryPath);
 }
 
+async function readExistingCodexConfigurationText(configurationPath: string) {
+	try {
+		return await readFile(configurationPath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+		throw error;
+	}
+}
+
+async function refreshManagedCodexConfigurationSnapshot(input: {
+	sourceConfigurationPath: string;
+	targetHomeDirectoryPath: string;
+	configurationFileName: string;
+	relocatedHookSourceFilePaths: ReadonlyMap<string, string>;
+}) {
+	const { sourceConfigurationPath, targetHomeDirectoryPath, configurationFileName, relocatedHookSourceFilePaths } =
+		input;
+	const snapshotPath = join(targetHomeDirectoryPath, configurationFileName);
+	await assertCodexStorageWritablePathInsideHome(targetHomeDirectoryPath, snapshotPath);
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const previousText = await readExistingCodexConfigurationText(snapshotPath);
+		const persistedManagedConfiguration = parse(previousText);
+		const configuration = parse(await readExistingCodexConfigurationText(sourceConfigurationPath));
+		if (configuration.cli_auth_credentials_store === "keyring")
+			throw new Error("当前 Codex 使用 keyring 登录；专用会话目录尚不支持共享该认证方式，原有会话保持原目录。");
+		configuration.sqlite_home = targetHomeDirectoryPath;
+		preserveCodexConfigurationSourceFileResolution(configuration, dirname(sourceConfigurationPath));
+		preserveCodexHookTrustDuringConfigurationRefresh({
+			configuration,
+			persistedManagedConfiguration,
+			relocatedHookSourceFilePaths,
+		});
+		const snapshotText = stringify(configuration);
+		// 统一为 TOML 解析器的表原型再比较，避免把合并生成的普通对象当成配置变更。
+		if (isDeepStrictEqual(parse(snapshotText), persistedManagedConfiguration)) return;
+		const pendingSnapshotPath = `${snapshotPath}.${randomUUID()}.pending-write`;
+		try {
+			await writeFile(pendingSnapshotPath, snapshotText, { mode: 0o600, flag: "wx" });
+			await assertCodexStorageWritablePathInsideHome(targetHomeDirectoryPath, snapshotPath);
+			// 原生 /hooks 不使用 Kanban 的目录锁；检测到新确认时重读合并，不能用旧快照覆盖。
+			if ((await readExistingCodexConfigurationText(snapshotPath)) !== previousText) continue;
+			await rename(pendingSnapshotPath, snapshotPath);
+			return;
+		} finally {
+			await rm(pendingSnapshotPath, { force: true });
+		}
+	}
+	throw new Error(`Codex 配置持续被并发更新，已保留现有信任记录；下次启动可重试：${configurationFileName}`);
+}
+
 export async function prepareManagedCodexConversationStorageHome(sourceHomeDirectoryPath: string) {
 	const target = getManagedCodexConversationStorageHomeDirectoryPath();
 	await mkdir(target, { recursive: true, mode: 0o700 });
 	if ((await lstat(target)).isSymbolicLink()) throw new Error("看板 Codex 专用目录是软链，未改写任何配置。");
 	if (resolve(sourceHomeDirectoryPath) === resolve(target)) return target;
+	const targetNativeHookSourceHomeDirectoryPath = await realpath(target);
+	let sourceNativeHookSourceHomeDirectoryPath = resolve(sourceHomeDirectoryPath);
 	try {
-		if ((await realpath(sourceHomeDirectoryPath)) === (await realpath(target)))
+		sourceNativeHookSourceHomeDirectoryPath = await realpath(sourceHomeDirectoryPath);
+		if (sourceNativeHookSourceHomeDirectoryPath === targetNativeHookSourceHomeDirectoryPath)
 			throw new Error("用户目录与看板 Codex 专用目录指向同一物理位置，未改写任何配置。");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -140,37 +195,11 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 		}
 		if (savedSource && savedSource !== resolve(sourceHomeDirectoryPath))
 			throw new Error("看板 Codex 专用目录绑定了另一套用户配置；保留原绑定，不能混用账号。");
-		let sourceConfig = "";
-		try {
-			sourceConfig = await readFile(join(sourceHomeDirectoryPath, "config.toml"), "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-		const configuration = parse(sourceConfig);
-		if (configuration.cli_auth_credentials_store === "keyring")
-			throw new Error("当前 Codex 使用 keyring 登录；专用会话目录尚不支持共享该认证方式，原有会话保持原目录。");
-		configuration.sqlite_home = target;
-		preserveCodexConfigurationSourceFileResolution(configuration, sourceHomeDirectoryPath);
-		const snapshot = stringify(configuration);
-		const snapshotPath = join(target, "config.toml");
-		await assertCodexStorageWritablePathInsideHome(target, snapshotPath);
-		const snapshotTemporaryPath = `${snapshotPath}.${randomUUID()}.pending-write`;
-		await writeFile(snapshotTemporaryPath, snapshot, { mode: 0o600 });
-		await rename(snapshotTemporaryPath, snapshotPath);
 		let sourceEntries: string[] = [];
 		try {
 			sourceEntries = await readdir(sourceHomeDirectoryPath);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-		for (const entry of sourceEntries.filter((name) => name.endsWith(".config.toml"))) {
-			await assertCodexStorageWritablePathInsideHome(target, join(target, entry));
-			const profile = parse(await readFile(join(sourceHomeDirectoryPath, entry), "utf8"));
-			profile.sqlite_home = target;
-			preserveCodexConfigurationSourceFileResolution(profile, sourceHomeDirectoryPath);
-			const pendingProfile = join(target, `${entry}.${randomUUID()}.pending-write`);
-			await writeFile(pendingProfile, stringify(profile), { mode: 0o600 });
-			await rename(pendingProfile, join(target, entry));
 		}
 		for (const name of [
 			"auth.json",
@@ -184,6 +213,21 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 			"marketplaces",
 		])
 			await linkExistingSharedCodexConfigurationEntry(join(sourceHomeDirectoryPath, name), join(target, name));
+		const configurationFileNames = ["config.toml", ...sourceEntries.filter((name) => name.endsWith(".config.toml"))];
+		// 原生来源键先规范化 home，再附加文件名；不能规范化共享文件软链本身或扩大账号绑定范围。
+		const relocatedHookSourceFilePaths = new Map(
+			[...configurationFileNames, ...(sourceEntries.includes("hooks.json") ? ["hooks.json"] : [])].map((name) => [
+				join(sourceNativeHookSourceHomeDirectoryPath, name),
+				join(targetNativeHookSourceHomeDirectoryPath, name),
+			]),
+		);
+		for (const configurationFileName of configurationFileNames)
+			await refreshManagedCodexConfigurationSnapshot({
+				sourceConfigurationPath: join(sourceHomeDirectoryPath, configurationFileName),
+				targetHomeDirectoryPath: target,
+				configurationFileName,
+				relocatedHookSourceFilePaths,
+			});
 		await writeFile(sourceMarkerPath, JSON.stringify({ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) }), {
 			mode: 0o600,
 		});

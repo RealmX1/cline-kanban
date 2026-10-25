@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeAgentNativeConversationSessionIdentity, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { doesConversationSessionBelongToTask } from "../core/task-main-conversation-session-binding";
+import { isTaskMainSessionHandoverAgentSupported } from "../core/task-main-session-handover-agent-capabilities";
+import { resolveTaskMainSessionHandoverTargetAgentId } from "../core/task-main-session-handover-contract";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { mutateWorkspaceState } from "./workspace-state";
 
@@ -13,8 +15,8 @@ export async function captureTaskMainSessionHandoverReportNativeIdentity(input: 
 	hookRuntimeSessionIncarnationId: string | undefined;
 }): Promise<void> {
 	if (
-		input.summary.agentId !== "codex" ||
-		input.identity.sourceAgentId !== "codex" ||
+		!isTaskMainSessionHandoverAgentSupported(input.summary.agentId) ||
+		input.identity.sourceAgentId !== input.summary.agentId ||
 		!input.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover ||
 		!input.hookRuntimeSessionIncarnationId ||
 		input.hookRuntimeSessionIncarnationId !== input.summary.runtimeSessionIncarnationId
@@ -35,6 +37,7 @@ export async function captureTaskMainSessionHandoverReportNativeIdentity(input: 
 					const binding = record?.reportNativeIdentityCaptureBinding;
 					if (
 						!record ||
+						resolveTaskMainSessionHandoverTargetAgentId(record.destination) !== input.identity.sourceAgentId ||
 						!binding ||
 						record.reportAcceptanceProbe ||
 						!["report_delivery_pending", "failed"].includes(record.status) ||
@@ -53,13 +56,18 @@ export async function captureTaskMainSessionHandoverReportNativeIdentity(input: 
 						taskMainSessionHandover: {
 							...record,
 							reportAcceptanceProbe: {
+								targetAgentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 								nativeSessionId: input.identity.nativeSessionId,
 								transcriptPath: input.identity.transcriptPath,
 								workingDirectoryPath: binding.workingDirectoryPath,
-								codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
-									codexConversationStorageHomeDirectoryPath: binding.codexConversationStorageHomeDirectoryPath,
-									transcriptPath: input.identity.transcriptPath,
-								}),
+								codexConversationStorageHomeDirectoryPath:
+									input.identity.sourceAgentId === "codex"
+										? resolveRecordedCodexConversationHome({
+												codexConversationStorageHomeDirectoryPath:
+													binding.codexConversationStorageHomeDirectoryPath,
+												transcriptPath: input.identity.transcriptPath,
+											})
+										: undefined,
 								nativeHistoryCursor: null,
 								transcriptHistoryCursor: null,
 								seenNativeHistoryCursors: [],

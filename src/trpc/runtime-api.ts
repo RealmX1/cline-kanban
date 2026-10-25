@@ -1261,7 +1261,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const previousNativeIdentity =
 						acpTaskSessionService.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
-						terminalManager.getSummary(body.taskId)?.agentNativeConversationSessionIdentity;
+						terminalManager.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
+						// 交接预备 fork 尚未进入服务注册表；普通 ACP 启动沿用既有活体寻址，不额外补读。
+						(taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+							? (await loadPersistedWorkspaceStateById(workspaceScope.workspaceId)).sessions[body.taskId]
+									?.agentNativeConversationSessionIdentity
+							: undefined);
 					const sharedDirectorySessions = [
 						...terminalManager.listSummaries(),
 						...acpTaskSessionService.listSummaries(),
