@@ -18,6 +18,8 @@
 - 子进程清掉 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，父进程不变。新目录同时设置 `CODEX_HOME`、`CODEX_SQLITE_HOME` 和 CLI `sqlite_home`；旧目录不重写其既有 SQLite 选择。
 - 全新上下文开局准备时复制 `config.toml` 和现有 `*.config.toml`，保留模型、MCP、插件设置，把 SQLite 指到专用目录。主配置、外置及内联 profile 的指令、compact prompt、模型目录和 `agents.<role>.config_file` 等已知文件引用保留原解析基址；角色配置仍引用原文件，其内部相对路径继续由原文件位置解释。已运行进程不会因刷新快照而重启。
 - 现有 `auth.json`、`.credentials.json`、`AGENTS.md`、`skills`、`plugins`、`rules`、`hooks.json`、`prompts`、`marketplaces` 用软链共享。原用户配置不被改写。共享登录入口意味着从专用目录执行登录操作可能更新同一账号文件；它不是独立账号。
+- 配置刷新保留专用目录已保存的 `hooks.state`，并把共享 `hooks.json`、复制的主配置及外置 profile 的文件来源键映射到专用目录；旧内联 profile 同样处理。来源键沿用 Codex 的真实 home 路径，再附加文件名，因此 home 或父目录为软链时仍能匹配；不对共享文件本身取真实路径，账号绑定与共享入口校验仍使用原有规则。已有本目录记录优先，缺失项继承原目录记录，任一明确禁用继续有效。只映射已共享或复制的文件，不映射其他项目或插件身份，也不重新计算 `trusted_hash`；新增或修改的定义仍由 Codex 原生信任门禁审查。
+- 语义相同的配置不重写，原生保存的格式和注释也保留。需要更新时，在现有目录锁内合并信任记录并原子替换；检测到写入前的并发变更会重读，最多三次。持续冲突或目标信任状态无法解析时保留现场并返回明确错误，下次启动可重试；不把坏配置覆盖为来源快照。
 - 专用目录保存来源标记，拒绝混用第二个账号目录。显式 `cli_auth_credentials_store="keyring"` 暂不支持配置桥接，会拒绝新启动。系统 OAuth/keyring 的实际可用性仍由原生客户端决定。
 - 配置可以共享软链；可写的会话、数据库、WAL 和 SHM 路径不允许软链逃逸回原库。
 
@@ -76,6 +78,10 @@ lineage 迁移限制为最多 256 个分片、合计 512 MiB 与最多 100,000 �
 # 按本机已安装的原生依赖 ABI 选择 Node；本次共享依赖为 Node 24，不能为测试重建共享 node_modules。
 KANBAN_CODEX_NATIVE_STORAGE_ISOLATION_SMOKE_BINARY=/opt/homebrew/bin/codex npm run test:guarded -- --project runtime-integration test/integration/codex-conversation-storage-native-cli.integration.test.ts test/integration/codex-conversation-storage-paginated-history-lineage.integration.test.ts
 ```
+
+hooks 信任回归另由 `test/integration/codex-hook-trust-configuration-refresh-native-cli.integration.test.ts` 覆盖。
+使用同一个原生 CLI 环境开关，通过 `hooks/list` 检查共享文件与内联 hooks 的信任继承、专用目录确认和禁用跨连续启动保留，以及新增/修改后的待审查状态；覆盖普通目录、来源 home 软链、来源父目录软链与专用目录父路径软链，不启动模型回合，不使用信任绕过参数。
+从已隔离的看板 Codex 会话运行迁移测试时，先清除测试父进程继承的 `CODEX_HOME` / `CODEX_SQLITE_HOME`，避免它们覆盖 fixture 的目录归属。
 
 只有部署后的真实实例能最终证明 CLI、实际进程环境和持久绑定已经接通。本 Task 注册了两项只读自动验证和一项 App Recents 引导观察；自动脚本只读取自然使用产生的样本，无样本时明确失败并保持待验，不为验证强停或迁移用户 Task。App 自动化访问被工具明确禁止，因此外部 App 视觉核对保留为人工兜底。
 
