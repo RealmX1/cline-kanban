@@ -294,6 +294,59 @@ describe("Done 任务只读会话历史", () => {
 		expect(new Set([...parent.messages, ...current.messages].map((message) => message.id)).size).toBe(2);
 		expect(parent.nextCursor).toBeNull();
 	});
+	it("Codex 原生 fork 沿明确父身份读取固定前缀，后续源分支正文不会混入", async () => {
+		const parentPrefix = `${[
+			{ type: "session_meta", payload: { id: "source-native", cwd: "/task-working-directory" } },
+			{ type: "event_msg", payload: { type: "user_message", message: "原主线输入" } },
+			{ type: "event_msg", payload: { type: "agent_message", message: "固定父回答" } },
+		]
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`;
+		const { input, path, summary } = await fixture("codex", [
+			{
+				type: "session_meta",
+				payload: {
+					id: "native",
+					history_mode: "paginated",
+					forked_from_id: "source-native",
+					history_base: {
+						thread_id: "source-native",
+						end_byte_offset: Buffer.byteLength(parentPrefix),
+						end_ordinal_exclusive: 3,
+					},
+				},
+			},
+			{ type: "event_msg", payload: { type: "agent_message", message: "新主回答" } },
+		]);
+		summary.workspacePath = "/task-working-directory";
+		const parentPath = join(dirname(path), "rollout-source-native.jsonl");
+		await writeFile(
+			parentPath,
+			parentPrefix +
+				JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "原主后来的偏题" } }) +
+				"\n",
+		);
+		const current = await loadTaskConversationHistoryPage(input);
+		expect(current.availability).toBe("available");
+		expect(current.nextCursor).not.toBeNull();
+		const parent = await loadTaskConversationHistoryPage({
+			...input,
+			request: { ...input.request, cursor: current.nextCursor },
+		});
+		expect(parent.availability).toBe("available");
+		expect([...parent.messages, ...current.messages].map((message) => message.content)).toEqual([
+			"原主线输入",
+			"固定父回答",
+			"新主回答",
+		]);
+		await writeFile(parentPath, parentPrefix.replace("source-native", "wrong-native"));
+		const rejected = await loadTaskConversationHistoryPage({
+			...input,
+			request: { ...input.request, cursor: current.nextCursor },
+		});
+		expect(rejected.availability).toBe("unavailable");
+	});
+
 	it("Codex 父段缺失时保留当前分段，并明确标记历史不完整", async () => {
 		const { input } = await fixture("codex", [
 			{

@@ -72,9 +72,15 @@ export function projectConversationSessionMetadataForMainSessionBinding(
 				? "by_the_way"
 				: "task_collaborator";
 	const suspended = isTaskMainSessionHandoverSuspendingAutomaticActions(card);
+	const hasHeldMainResponsibility =
+		previous?.taskConversationSessionHasHeldMainResponsibility === true ||
+		roleAtCreation === "main" ||
+		role === "main" ||
+		summary.taskId === card.taskMainSessionHandover?.sourceTaskConversationSessionId;
 	if (
 		previous?.taskConversationSessionRole === role &&
 		previous.taskConversationSessionRoleAtCreation === roleAtCreation &&
+		previous.taskConversationSessionHasHeldMainResponsibility === hasHeldMainResponsibility &&
 		previous.taskAutomationSuspendedForMainSessionHandover === suspended
 	) {
 		return previous;
@@ -89,6 +95,7 @@ export function projectConversationSessionMetadataForMainSessionBinding(
 		...previous,
 		taskConversationSessionRole: role,
 		taskConversationSessionRoleAtCreation: roleAtCreation,
+		taskConversationSessionHasHeldMainResponsibility: hasHeldMainResponsibility,
 		taskAutomationSuspendedForMainSessionHandover: suspended,
 	};
 }

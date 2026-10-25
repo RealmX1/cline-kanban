@@ -662,6 +662,8 @@ export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	taskConversationSessionRole: z.enum(["main", "by_the_way", "task_collaborator"]),
 	// 当前角色按主会话绑定派生；创建角色与上下文来源不随交接改写。
 	taskConversationSessionRoleAtCreation: z.enum(["main", "by_the_way", "task_collaborator"]).optional(),
+	// 持久历史事实：被提升过的协作会话在再次切主后仍是前主会话。
+	taskConversationSessionHasHeldMainResponsibility: z.boolean().optional(),
 	taskAutomationSuspendedForMainSessionHandover: z.boolean().optional(),
 	taskConversationSessionContextSource: z.enum(["main", "started_from_scratch", "forked_from_main_current_turn"]),
 	parentTaskConversationSessionId: z.string().nullable(),

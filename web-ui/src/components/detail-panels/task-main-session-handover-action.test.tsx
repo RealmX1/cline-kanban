@@ -143,4 +143,32 @@ describe("主会话交接入口", () => {
 			taskConversationSessionId: "codex-peer",
 		});
 	});
+
+	it("Codex 主会话可选择完整原生复刻，默认仍为全新上下文", async () => {
+		requests.prepare.mockResolvedValueOnce({
+			...preview,
+			completeNativeConversationForkAvailability: { available: true, unavailableReason: null },
+		});
+		await act(async () =>
+			root.render(
+				<TaskMainSessionHandoverAction
+					workspaceId="workspace"
+					taskCard={card}
+					mainSessionSummary={{ ...source, agentId: "codex" }}
+				/>,
+			),
+		);
+		await click("交接给 Codex");
+		const select = document.querySelector('select[aria-label="上下文方式"]') as HTMLSelectElement;
+		expect(select.value).toBe("fresh_context_with_handover_material");
+		await act(async () => {
+			select.value = "fork_complete_native_conversation";
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await click("确认交接");
+		expect(requests.request.mock.calls[0]?.[1].destination).toEqual({
+			kind: "new_codex_session",
+			contextInheritanceMode: "fork_complete_native_conversation",
+		});
+	});
 });
