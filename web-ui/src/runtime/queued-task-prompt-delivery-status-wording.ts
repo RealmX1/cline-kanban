@@ -15,45 +15,78 @@ export interface QueuedTaskPromptDeliveryStatusChip {
 }
 
 const STATUS_CHIP_BY_DELIVERY_STATE: Record<QueuedTaskPromptDeliveryState, QueuedTaskPromptDeliveryStatusChip> = {
-	queued: { label: "Queued", tone: "neutral" },
+	queued: { label: "等待投递", tone: "neutral" },
 	// 认领与交付对用户是同一件事：「正在发」。拆成两个词只会让人困惑它们有什么区别。
-	claimed_for_dispatch: { label: "Sending…", tone: "active" },
-	handed_to_transport: { label: "Sending…", tone: "active" },
-	settled_delivered: { label: "Delivered", tone: "success" },
-	settled_failed: { label: "Failed", tone: "danger" },
-	cancelled: { label: "Cancelled", tone: "muted" },
+	claimed_for_dispatch: { label: "发送中", tone: "active" },
+	handed_to_transport: { label: "等待提交确认", tone: "active" },
+	settled_delivered: { label: "已确认送达", tone: "success" },
+	settled_failed: { label: "投递失败", tone: "danger" },
+	cancelled: { label: "已取消", tone: "muted" },
 	// 不是失败：它从未被尝试过，只是放太久已经不可信了。
-	expired: { label: "Expired · not sent", tone: "muted" },
+	expired: { label: "已过期，未发送", tone: "muted" },
 };
 
 export function describeQueuedTaskPromptDeliveryStatusChip(
 	projection: Pick<
 		RuntimeQueuedTaskPromptDeliveryProjection,
 		"deliveryState" | "awaitsHumanReconfirmationAfterRuntimeRestart"
-	>,
+	> &
+		Partial<Pick<RuntimeQueuedTaskPromptDeliveryProjection, "managedDelivery" | "lastDeliveryFailureNote">>,
 ): QueuedTaskPromptDeliveryStatusChip {
 	if (projection.deliveryState === "queued" && projection.awaitsHumanReconfirmationAfterRuntimeRestart) {
-		return { label: "Confirm after restart", tone: "warning" };
+		return { label: "重启后待确认", tone: "warning" };
 	}
+	const receipt = projection.managedDelivery?.terminalDeliveryReceipt;
+	if (receipt?.status === "delivered_queued_behind_active_agent_turn")
+		return { label: "已送达，等待 agent 处理", tone: "success" };
+	if (
+		projection.deliveryState === "settled_failed" &&
+		(receipt?.reason === "submit_confirmation_budget_exhausted" ||
+			receipt?.reason === "runtime_restarted_before_confirmation" ||
+			receipt?.reason === "codex_native_prompt_delivery_unconfirmed" ||
+			/may or may not|未.*确认|possibly/i.test(projection.lastDeliveryFailureNote ?? ""))
+	)
+		return { label: "未确认送达", tone: "warning" };
 	return STATUS_CHIP_BY_DELIVERY_STATE[projection.deliveryState];
+}
+
+export function isTaskPromptDeliveryWaitingForAgentTurn(
+	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "managedDelivery">,
+): boolean {
+	return projection.managedDelivery == null || projection.managedDelivery.deliveryStrategy === "after_agent_turn";
+}
+
+export function describeTaskPromptDeliveryMessageType(projection: RuntimeQueuedTaskPromptDeliveryProjection): string {
+	const messageType =
+		projection.managedDelivery?.messageType ??
+		(projection.programmaticInjectionSource
+			? "programmatic_injection"
+			: projection.sourcePromptLibraryEntryId
+				? "prompt_library"
+				: "human_message");
+	return {
+		human_message: "人工发送",
+		prompt_library: "Prompt Library",
+		programmatic_injection: "自动注入",
+		task_action: "快捷动作",
+		session_startup: "启动提示",
+		user_decision_answer: "问题答复",
+		system_continuation: "系统续接",
+	}[messageType];
 }
 
 const DISPATCH_BLOCK_REASON_WORDING: Record<QueuedTaskPromptDispatchBlockReason, string> = {
 	awaiting_native_independent_user_turn_query_retry: "原生回合查询暂时失败，系统将在原截止时间内自动重试，尚未发送。",
 	task_main_session_handover_awaiting_user: "主会话正在交接或等待用户消息，排队投递已暂停。",
-	awaiting_human_reconfirmation_after_runtime_restart:
-		"Queued before Kanban restarted — keep it or cancel it before it is sent.",
-	agent_still_generating: "Waiting for the agent to finish its current turn.",
-	session_parked_awaiting_dispatched_background_work: "The agent is parked waiting for background work it dispatched.",
-	agent_awaiting_modal_user_decision: "The agent is waiting for your answer; the queue will not answer for you.",
-	session_not_live: "The agent session is not running. It will be sent after the session resumes and finishes a turn.",
-	session_restoring_conversation:
-		"The conversation was just restored. It will be sent after you continue the conversation and the agent finishes a turn.",
-	another_programmatic_delivery_in_flight: "Another automated message is being delivered to this task first.",
-	queued_under_another_live_kanban_runtime_instance:
-		"Queued through another running Kanban instance; that instance will send it.",
-	awaiting_first_agent_turn_end_after_restart_reconfirmation:
-		"Confirmed after the restart. It will be sent after the agent's next turn ends.",
+	awaiting_human_reconfirmation_after_runtime_restart: "此消息在重启前排入，请确认保留或取消。",
+	agent_still_generating: "等待 agent 结束当前回合。",
+	session_parked_awaiting_dispatched_background_work: "agent 正在等待它派发的后台工作。",
+	agent_awaiting_modal_user_decision: "agent 正在等你答复，队列暂不投递。",
+	session_not_live: "会话尚未运行，恢复会话并结束下一轮后再投递。",
+	session_restoring_conversation: "对话刚恢复，等你继续对话且 agent 结束一轮后再投递。",
+	another_programmatic_delivery_in_flight: "另一条自动消息正在投递，请稍候。",
+	queued_under_another_live_kanban_runtime_instance: "此消息由另一个仍在运行的 Kanban 实例负责投递。",
+	awaiting_first_agent_turn_end_after_restart_reconfirmation: "已在重启后确认，等待 agent 再结束一轮后投递。",
 };
 
 /** 只对仍在排队的条目有意义；null = 下一个停止边沿就发（或此刻就在发）。 */
@@ -97,7 +130,7 @@ export function summarizeQueuedTaskPromptDeliveryCountIndicator(
 	let hasFailedEntries = false;
 	let hasEntriesAwaitingReconfirmationAfterRestart = false;
 	for (const projection of projections) {
-		if (!isQueuedTaskPromptDeliveryTerminal(projection)) {
+		if (isTaskPromptDeliveryWaitingForAgentTurn(projection) && !isQueuedTaskPromptDeliveryTerminal(projection)) {
 			pendingCount += 1;
 		}
 		if (projection.deliveryState === "settled_failed") {

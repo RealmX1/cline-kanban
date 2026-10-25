@@ -131,3 +131,27 @@ for (const readMode of ["removed", "failed", "pending"] as const) {
 		await expect(row).toContainText(readMode === "removed" ? "已从当前队列移除" : "无法读取当前运行时队列");
 	});
 }
+
+for (const width of [320, 900]) {
+	test(`${width}px 即时注入与启动提示有类型标识、可筛选且不提供重排`, async ({ page }) => {
+		await page.setViewportSize({ width, height: 1200 });
+		await openIsolatedQueue(page);
+		await page.getByRole("button", { name: "模拟即时投递", exact: true }).click();
+		await expect(page.locator("[data-queued-prompt-entry-id]")).toHaveCount(5);
+		const immediate = page.locator('[data-queued-prompt-entry-id="immediate-browser-injection"]');
+		await expect(immediate).toContainText("自动注入");
+		await expect(immediate).toContainText("即时");
+		await expect(immediate).toContainText("等待提交确认");
+		await expect(immediate.getByRole("button", { name: "Move queued prompt up" })).toHaveCount(0);
+		await expect(page.locator('[data-queued-prompt-entry-id="startup-browser-unconfirmed"]')).toContainText(
+			"未确认送达",
+		);
+		await expect(page.locator('[data-queued-prompt-entry-id="startup-browser-unconfirmed"]')).toContainText(
+			"启动提示",
+		);
+		await page.getByRole("combobox", { name: "按消息类型筛选" }).selectOption({ label: "自动注入" });
+		await expect(page.locator("[data-queued-prompt-entry-id]")).toHaveCount(2);
+		expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+		await page.screenshot({ path: test.info().outputPath(`managed-delivery-${width}px.png`), fullPage: true });
+	});
+}

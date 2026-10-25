@@ -181,6 +181,7 @@ describe("useClineChatRuntimeActions", () => {
 		});
 
 		expect(sendTaskChatMessageMutateMock).toHaveBeenCalledWith({
+			deliveryRequestId: expect.any(String),
 			taskId: "task-1",
 			targetTaskConversationSessionId: "task-1",
 			text: "hello",
@@ -227,6 +228,7 @@ describe("useClineChatRuntimeActions", () => {
 		});
 
 		expect(sendTaskChatMessageMutateMock).toHaveBeenCalledWith({
+			deliveryRequestId: expect.any(String),
 			taskId: "task-1",
 			targetTaskConversationSessionId: "task-1",
 			text: "hello",
