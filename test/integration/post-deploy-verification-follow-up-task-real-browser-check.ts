@@ -1,7 +1,11 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "vitest";
-import type { RuntimeBoardData, RuntimePostDeployVerificationTask } from "../../src/core/api-contract";
+import type {
+	RuntimeBoardData,
+	RuntimePostDeployVerificationTask,
+	RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse,
+} from "../../src/core/api-contract";
 import type { GetRelationNeighborhoodSummaryResponse } from "../../src/core/work-unit-relation-read-api-contract";
 import type { Page } from "../../web-ui/node_modules/playwright-core";
 
@@ -16,6 +20,11 @@ export async function runPostDeployVerificationFollowUpTaskRealBrowserCheck(inpu
 	readOtherBoard: () => Promise<RuntimeBoardData>;
 	readSourceVerificationTask: () => Promise<RuntimePostDeployVerificationTask>;
 	readNeighborhood: (taskId: string) => Promise<GetRelationNeighborhoodSummaryResponse>;
+	readNavigationTargets: (
+		taskId: string,
+	) => Promise<RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse>;
+	recordAnotherDeployment: () => Promise<void>;
+	restartRuntime: () => Promise<void>;
 	observeUntil: (predicate: () => Promise<boolean>, description: string) => Promise<void>;
 	recordCheck: (description: string) => void;
 }) {
@@ -45,13 +54,20 @@ export async function runPostDeployVerificationFollowUpTaskRealBrowserCheck(inpu
 	if ((await zoneToggle.getAttribute("aria-expanded")) === "false") await zoneToggle.click();
 	const entry = page.locator(`[data-post-deploy-verification-task-entry="${input.sourceTaskId}"]`);
 	await entry.waitFor({ state: "visible" });
+	await entry.getByRole("button", { name: "定位部署后验证", exact: true }).click();
+	await observeUntil(
+		async () => (await entry.getAttribute("class"))?.includes("verification-spotlight-active") === true,
+		"从其他项目定位来源 Task 自身验证",
+	);
+	expect(new URL(page.url()).pathname).toBe(`/${input.otherWorkspaceId}`);
+	recordCheck("其他项目视图中的 Task PDV 入口定位正确项目，保留当前看板范围");
 	expect(await entry.getByPlaceholder("添加自定义核对项").count()).toBe(0);
 	await entry.getByRole("button", { name: "添加自定义核对项", exact: true }).click();
 	await entry.getByPlaceholder("添加自定义核对项").fill("取消的自定义项");
 	await entry.getByPlaceholder("添加自定义核对项").press("Escape");
 	expect(await entry.getByPlaceholder("添加自定义核对项").count()).toBe(0);
 	recordCheck("自定义项默认不占输入行，按需展开且 Escape 不关闭面板");
-	await entry.getByRole("button", { name: "从核对项新建后续任务", exact: true }).click();
+	await entry.getByRole("button", { name: "创建关联续接任务", exact: true }).click();
 	await entry.getByRole("checkbox", { name: "选择核对项：浏览器核对项甲", exact: true }).check();
 	await entry.getByRole("checkbox", { name: "选择核对项：浏览器核对项乙", exact: true }).check();
 	await entry.getByRole("button", { name: "下一步", exact: true }).click();
@@ -88,7 +104,7 @@ export async function runPostDeployVerificationFollowUpTaskRealBrowserCheck(inpu
 	// 草稿按项目隔离：从同一 PDV 来源入口重开，不能让当前 beta 项目的普通建卡入口恢复 alpha 草稿。
 	await page.getByTestId("open-post-deploy-verification-button").click();
 	if ((await zoneToggle.getAttribute("aria-expanded")) === "false") await zoneToggle.click();
-	await entry.getByRole("button", { name: "从核对项新建后续任务", exact: true }).click();
+	await entry.getByRole("button", { name: "创建关联续接任务", exact: true }).click();
 	await entry.getByRole("checkbox", { name: "选择核对项：浏览器核对项甲", exact: true }).check();
 	await entry.getByRole("checkbox", { name: "选择核对项：浏览器核对项乙", exact: true }).check();
 	await entry.getByRole("button", { name: "下一步", exact: true }).click();
@@ -116,7 +132,7 @@ export async function runPostDeployVerificationFollowUpTaskRealBrowserCheck(inpu
 	await page.setViewportSize({ width: 390, height: 844 });
 	await page.getByTestId("open-post-deploy-verification-button").click();
 	if ((await zoneToggle.getAttribute("aria-expanded")) === "false") await zoneToggle.click();
-	await entry.getByRole("button", { name: "从核对项新建后续任务", exact: true }).click();
+	await entry.getByRole("button", { name: "创建关联续接任务", exact: true }).click();
 	const selection = entry.getByRole("checkbox", { name: "选择核对项：浏览器核对项甲", exact: true });
 	await selection.check();
 	await page.screenshot({ path: join(input.evidenceOutputDirectory, "pdv-follow-up-selection-mobile.png") });
@@ -142,6 +158,89 @@ export async function runPostDeployVerificationFollowUpTaskRealBrowserCheck(inpu
 	).toBe(true);
 	expect(await input.readSourceVerificationTask()).toEqual(initialVerification);
 	recordCheck("手机宽度可多选与新建，单项上下文准确，关系落账后才启动隔离 agent 桩");
+	const sourceTarget = (await input.readNavigationTargets(created.id)).targets.find(
+		(target) => target.navigationKind === "follow_up_origin_entry",
+	);
+	if (!sourceTarget) throw new Error("创建并刷新后缺少持久化来源定位");
+	const sourceKey = JSON.stringify([
+		sourceTarget.entry.workspaceId,
+		sourceTarget.entry.deploymentId,
+		sourceTarget.entry.taskId,
+	]);
+	const exactSourceEntry = page.locator(`[data-post-deploy-verification-entry-navigation-key='${sourceKey}']`);
+	await input.recordAnotherDeployment();
+	await input.restartRuntime();
+	await page.setViewportSize({ width: 1280, height: 900 });
+	await page.goto(`${input.webUiOrigin}/${input.sourceWorkspaceId}`);
+	await page.getByTestId("open-post-deploy-verification-button").waitFor({ state: "visible" });
+	const showCurrentProject = page.getByRole("button", { name: "Show only the current project", exact: true });
+	if (await showCurrentProject.count()) await showCurrentProject.click();
+	const createdCard = page.locator(`[data-task-id="${created.id}"]`);
+	await createdCard.waitFor({ state: "visible" });
+	await page.getByTestId("open-post-deploy-verification-button").click();
+	await page.getByRole("button", { name: "折叠 Post-Deploy Verification 面板", exact: true }).click();
+	await createdCard.getByRole("button", { name: "定位部署后验证", exact: true }).click();
+	await exactSourceEntry.waitFor({ state: "visible" });
+	await observeUntil(
+		async () => (await exactSourceEntry.getAttribute("class"))?.includes("verification-spotlight-active") === true,
+		"续接任务定位精确历史来源并高亮",
+	);
+	expect(await page.getByRole("dialog").count()).toBe(0);
+	expect(sourceTarget.entry.deploymentId).not.toBe(
+		(await input.readNavigationTargets(input.sourceTaskId)).targets.find(
+			(target) => target.navigationKind === "task_own_entry",
+		)?.entry.deploymentId,
+	);
+	await page.screenshot({
+		path: join(input.evidenceOutputDirectory, "pdv-follow-up-exact-history-navigation-desktop.png"),
+	});
+	recordCheck("新部署且 runtime 重启后，续接 Task 仍精确定位历史来源，自动展开清单并高亮，点击不打开编辑器");
+	await exactSourceEntry.getByRole("button", { name: "创建关联续接任务", exact: true }).click();
+	await exactSourceEntry.getByRole("button", { name: "下一步", exact: true }).click();
+	await observeUntil(
+		async () => (await prompt.inputValue()).includes("仅携带来源任务和部署背景"),
+		"历史来源可不选核对项创建草稿",
+	);
+	expect(await prompt.inputValue()).toContain(sourceTarget.entry.deploymentId);
+	await page.keyboard.press("Escape");
+	await page.getByRole("alertdialog").getByRole("button", { name: "Discard", exact: true }).click();
+	await dialog.waitFor({ state: "detached" });
+	recordCheck("只读历史条目可仅携带背景创建关联续接草稿，取消后不增加卡片");
+	await page.getByRole("button", { name: "折叠 Post-Deploy Verification 面板", exact: true }).click();
+	await page.setViewportSize({ width: 390, height: 844 });
+	await createdCard.getByRole("button", { name: "定位部署后验证", exact: true }).click();
+	await exactSourceEntry.waitFor({ state: "visible" });
+	await observeUntil(
+		async () => (await exactSourceEntry.getAttribute("class"))?.includes("verification-spotlight-active") === true,
+		"手机重复定位历史来源",
+	);
+	expect(await page.evaluate("document.documentElement.scrollWidth <= innerWidth")).toBe(true);
+	await page.screenshot({
+		path: join(input.evidenceOutputDirectory, "pdv-follow-up-exact-history-navigation-mobile.png"),
+	});
+	recordCheck("手机上的 Task PDV 入口可重复展开历史来源，无横向溢出");
+	await page.getByRole("button", { name: "折叠 Post-Deploy Verification 面板", exact: true }).click();
+	await page.setViewportSize({ width: 1280, height: 900 });
+	const ownTarget = (await input.readNavigationTargets(input.sourceTaskId)).targets.find(
+		(target) => target.navigationKind === "task_own_entry",
+	);
+	if (!ownTarget) throw new Error("原 Task 缺少当前部署定位");
+	const ownKey = JSON.stringify([ownTarget.entry.workspaceId, ownTarget.entry.deploymentId, ownTarget.entry.taskId]);
+	const expandValidation = page.getByRole("button", { name: "Expand Validation column", exact: true });
+	if (await expandValidation.count()) await expandValidation.click();
+	await page
+		.locator(`[data-task-id="${input.sourceTaskId}"]`)
+		.getByRole("button", { name: "定位部署后验证", exact: true })
+		.click();
+	const exactOwnEntry = page.locator(`[data-post-deploy-verification-entry-navigation-key='${ownKey}']`);
+	await observeUntil(
+		async () => (await exactOwnEntry.getAttribute("class"))?.includes("verification-spotlight-active") === true,
+		"原 Task 定位当前部署而非同号历史副本",
+	);
+	await page.screenshot({
+		path: join(input.evidenceOutputDirectory, "pdv-original-task-current-deployment-navigation.png"),
+	});
+	recordCheck("原 Task 定位当前部署，续接来源定位精确历史副本，两种目标互不混淆");
 	writeFileSync(
 		join(input.evidenceOutputDirectory, "pdv-follow-up-created-task.json"),
 		JSON.stringify(

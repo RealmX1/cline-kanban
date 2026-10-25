@@ -18,8 +18,14 @@ export function resolvePostDeployVerificationWorkspaceIdShownForBoardOrSinglePro
 		| readonly RuntimeWorkspaceHavingPostDeployVerificationDeploymentGroupsSummary[]
 		| null;
 	availableRegisteredProjectIds: ReadonlySet<string>;
+	explicitEntryNavigationWorkspaceId?: string | null;
 }): string | null {
 	const { currentProjectRuntimeWorkspaceId, workspacesHavingPostDeployVerificationDeploymentGroups } = input;
+	if (
+		input.explicitEntryNavigationWorkspaceId &&
+		input.availableRegisteredProjectIds.has(input.explicitEntryNavigationWorkspaceId)
+	)
+		return input.explicitEntryNavigationWorkspaceId;
 	if (
 		input.selectedBoardOrSingleProjectScope === "single_project_scope" ||
 		workspacesHavingPostDeployVerificationDeploymentGroups === null
@@ -60,6 +66,7 @@ export type PostDeployVerificationPanelTaskCardBoardSource =
 	  };
 
 export function resolvePostDeployVerificationPanelTaskCardBoardSource(input: {
+	explicitEntryNavigationWorkspaceId?: string | null;
 	selectedBoardOrSingleProjectScope: SelectedBoardOrSingleProjectScope;
 	postDeployVerificationWorkspaceId: string | null;
 	currentProjectRuntimeWorkspaceId: string | null;
@@ -71,7 +78,9 @@ export function resolvePostDeployVerificationPanelTaskCardBoardSource(input: {
 	}
 	// 单项目范围的 PDV workspace 恒为当前项目，沿用改动前的行为（始终读浏览器里的 board）。
 	const isBrowserBoardHoldingPostDeployVerificationWorkspace =
-		input.selectedBoardOrSingleProjectScope === "single_project_scope" ||
+		(input.selectedBoardOrSingleProjectScope === "single_project_scope" &&
+			!input.explicitEntryNavigationWorkspaceId &&
+			postDeployVerificationWorkspaceId === input.currentProjectRuntimeWorkspaceId) ||
 		(postDeployVerificationWorkspaceId === input.currentProjectRuntimeWorkspaceId &&
 			postDeployVerificationWorkspaceId === input.projectIdOwningHydratedBoard);
 	return isBrowserBoardHoldingPostDeployVerificationWorkspace

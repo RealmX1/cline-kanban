@@ -108,7 +108,7 @@ describe("交接失败的显式恢复入口", () => {
 		expect(container.textContent).not.toContain("重试交接");
 		await click("新建 Codex 并重新交接");
 		expect(document.body.textContent).toContain("可能重复汇报");
-		expect(document.body.textContent).toContain("原 Claude、旧 Codex、交接材料和失败记录都会保留");
+		expect(document.body.textContent).toContain("原会话、旧 Codex、交接材料和失败记录都会保留");
 		expect(queries.recoverTaskMainSessionHandoverWithNewCodexSession).not.toHaveBeenCalled();
 		await click("取消恢复");
 		expect(queries.recoverTaskMainSessionHandoverWithNewCodexSession).not.toHaveBeenCalled();

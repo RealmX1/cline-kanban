@@ -175,6 +175,15 @@ export function ReferenceRelationModelingEditor({
 				currentTaskWorkUnit &&
 				isDeepEqual(editing?.relationStatementSubjectWorkUnitRef, direction ? currentTaskWorkUnit : ref) &&
 				isDeepEqual(editing?.relationStatementAnchorWorkUnitRef, direction ? ref : currentTaskWorkUnit);
+			if (
+				editing?.relationKind === "reference_requirement_originates_from" &&
+				value.relationKind === editing.relationKind &&
+				statementEndpointsUnchanged &&
+				editing.assertedRelationKindSpecificAttributes.originatingPostDeployVerificationEntry
+			) {
+				attributes.originatingPostDeployVerificationEntry = editing.assertedRelationKindSpecificAttributes
+					.originatingPostDeployVerificationEntry as AssertedReferenceRelationKindSpecificAttributes["originatingPostDeployVerificationEntry"];
+			}
 			// 端点完整身份与陈述角色不变时，沿用同名主张的结论；换端点、反向或改写主张均重新核验。
 			if (
 				editing?.relationKind === value.relationKind &&
