@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
+import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import type { RuntimeTaskImage } from "../core/api-contract";
 import type {
 	SharedTaskIndexingContext,
@@ -351,8 +352,12 @@ export async function executeStatelessTaskIndexingAgent<T>(
 				"launch_argument_budget_exceeded",
 				"共享索引执行器单个启动参数超出保守系统限额。",
 			);
-		// 身份认证沿用原位置；不复制凭据，不修改 HOME/CODEX_HOME，也不继承宿主 task 行动者声明。
-		const environment = buildStatelessTaskIndexingAgentEnvironment(process.env);
+		// 认证与历史保持原归属；独立 Codex writer 使用自己的配置，不继承宿主 task 行动者声明。
+		const baseEnvironment = buildStatelessTaskIndexingAgentEnvironment(process.env);
+		const environment =
+			request.settings.agentId === "codex"
+				? await prepareAuxiliaryCodexConfigurationEnvironment(baseEnvironment, directory)
+				: baseEnvironment;
 		const output = await new Promise<string>((resolve, reject) => {
 			request.abortSignal?.throwIfAborted();
 			const child = spawn(request.settings.agentId, args, {

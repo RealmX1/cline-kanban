@@ -129,7 +129,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_STORAGE_ISOLATION_SMOKE_BINARY)
 				);
 				await writeFile(
 					join(managed, "config.toml"),
-					stringify({ ...configuration, hooks: { state: managedTrustStates } }),
+					stringify({
+						...configuration,
+						hooks: { ...(configuration.hooks as TomlTable), state: managedTrustStates },
+					}),
 				);
 				configuration.model = "configuration-refresh-sentinel";
 				const originalConfigurationText = stringify(configuration);
@@ -140,7 +143,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_STORAGE_ISOLATION_SMOKE_BINARY)
 				expect(afterRepeatedStarts).toHaveLength(3);
 				expect(afterRepeatedStarts.every((hook) => hook.trustStatus === "trusted")).toBe(true);
 				expect(afterRepeatedStarts.find((hook) => hook.key === disabledHook?.key)?.enabled).toBe(false);
-				expect(await readFile(join(managed, "config.toml"), "utf8")).toContain("configuration-refresh-sentinel");
+				expect(await readFile(join(managed, "config.toml"), "utf8")).not.toContain(
+					"configuration-refresh-sentinel",
+				);
 
 				sharedHooks.UserPromptSubmit[0].hooks[0].command = "printf modified-hook-sentinel";
 				await writeFile(join(original, "hooks.json"), JSON.stringify({ hooks: sharedHooks }));

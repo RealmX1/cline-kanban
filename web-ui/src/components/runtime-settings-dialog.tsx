@@ -29,6 +29,7 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CodexConfigurationSyncSettings } from "@/components/codex-configuration-sync";
 import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
 import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
 import { ClineSetupSection } from "@/components/shared/cline-setup-section";
@@ -121,7 +122,7 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 	{ value: "pr", label: "Make PR" },
 ];
 
-export type RuntimeSettingsSection = "shortcuts";
+export type RuntimeSettingsSection = "shortcuts" | "codex-configuration-sync";
 
 const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
 
@@ -132,6 +133,7 @@ type SettingsNavId =
 	| "notifications"
 	| "task-analysis"
 	| "agent-reliability"
+	| "codex-configuration-sync"
 	| "appearance"
 	| "project";
 
@@ -147,6 +149,7 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
 	{ id: "task-analysis", label: "AI 任务分析", icon: <Bot size={16} /> },
 	{ id: "agent-reliability", label: "可靠性", icon: <PlugZap size={16} /> },
+	{ id: "codex-configuration-sync", label: "Codex 配置同步", icon: <Bot size={16} /> },
 	{ id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
 	{ id: "project", label: "Project", icon: <FolderOpen size={16} /> },
 ];
@@ -677,11 +680,16 @@ export function RuntimeSettingsDialog({
 	useWindowEvent("focus", open ? refreshNotificationPermission : null);
 
 	useEffect(() => {
-		if (!open || initialSection !== "shortcuts") {
+		if (!open || !initialSection) {
 			return;
 		}
 		const timeout = window.setTimeout(() => {
-			shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+			if (initialSection === "shortcuts")
+				shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+			else
+				bodyRef.current
+					?.querySelector('[data-settings-section="codex-configuration-sync"]')
+					?.scrollIntoView({ block: "start" });
 		}, 500);
 		return () => {
 			window.clearTimeout(timeout);
@@ -1182,6 +1190,8 @@ export function RuntimeSettingsDialog({
 					<NotificationIntelligenceSettingsSection draft={notificationSettings} disabled={controlsDisabled} />
 
 					{/* ---- 终端 agent 可靠性 ---- */}
+					<div data-settings-section="codex-configuration-sync" />
+					<CodexConfigurationSyncSettings workspaceId={workspaceId} enabled={open} />
 					<div data-settings-section="agent-reliability" />
 					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
 						<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
