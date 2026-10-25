@@ -509,6 +509,12 @@ import {
 	permanentlyDeletedTaskPromptVersionsResponseSchema,
 } from "../core/permanently-deleted-task-history-contract";
 import {
+	type RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
+	type RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse,
+	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema,
+	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema,
+} from "../core/post-deploy-verification-entry-navigation-contract";
+import {
 	type ProjectVisualIdentity,
 	projectVisualIdentitySchema,
 	readProjectIconImageRequestSchema,
@@ -1144,6 +1150,11 @@ export interface RuntimeTrpcContext {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
 	};
 	deploymentApi: {
+		resolveTaskPostDeployVerificationEntryNavigationTargets: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
+			readRelationNeighborhood: RuntimeTrpcContext["workUnitRelationReadApi"]["getRelationNeighborhoodSummary"],
+		) => Promise<RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse>;
 		getPostDeployVerificationState: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGetPostDeployVerificationStateRequest,
@@ -2538,6 +2549,16 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	deployment: t.router({
+		resolveTaskPostDeployVerificationEntryNavigationTargets: workspaceProcedure
+			.input(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema)
+			.output(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema)
+			.query(({ ctx, input }) =>
+				ctx.deploymentApi.resolveTaskPostDeployVerificationEntryNavigationTargets(
+					ctx.workspaceScope,
+					input,
+					ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary,
+				),
+			),
 		getPostDeployVerificationState: workspaceProcedure
 			.input(runtimeGetPostDeployVerificationStateRequestSchema)
 			.output(runtimeGetPostDeployVerificationStateResponseSchema)

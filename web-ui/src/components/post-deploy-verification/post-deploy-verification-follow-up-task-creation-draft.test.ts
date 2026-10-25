@@ -49,7 +49,7 @@ function parseSeedAsPersistedEditorDraft(seed: ReturnType<typeof buildSeedForChe
 }
 
 describe("从 PDV 核对项生成新任务上下文", () => {
-	it("只快照选择的未核对项，并预置新任务指向来源任务的需求关系", () => {
+	it("快照选择的核对项及真实状态，并持久保存精确部署来源", () => {
 		const task = createPostDeployVerificationTaskReadModelTestFixture({
 			checklist: [checklistItem("first"), checklistItem("second"), checklistItem("passed", true)],
 		});
@@ -63,12 +63,13 @@ describe("从 PDV 核对项生成新任务上下文", () => {
 			deployedSourceCommit: "abcdef",
 			deployedAtIso: "2026-10-18T00:00:00Z",
 			task,
-			selectedChecklistItemIds: ["second", "first", "passed", "removed"],
+			selectedChecklistItemIds: ["second", "first", "passed", "first"],
 		});
 		expect(seed.workspaceId).toBe("source-project");
 		expect(seed.prompt).toContain("核对 first");
 		expect(seed.prompt).toContain("核对 second");
-		expect(seed.prompt).not.toContain("核对 passed");
+		expect(seed.prompt).toContain("核对 passed");
+		expect(seed.prompt).toContain("核对状态：已核对");
 		expect(seed.prompt).toContain("尚未核对，不代表验证失败");
 		expect(seed.prompt).toContain("deployment-1");
 		expect(seed.referenceRelationDrafts).toMatchObject([
@@ -79,6 +80,15 @@ describe("从 PDV 核对项生成新任务上下文", () => {
 					workUnitType: "kanban_board_card",
 					workspaceId: "source-project",
 					taskId: task.taskId,
+				},
+				assertedRelationKindSpecificAttributes: {
+					originatingPostDeployVerificationEntry: {
+						workspaceId: "source-project",
+						deploymentId: "deployment-1",
+						taskId: task.taskId,
+						taskIncarnationCreatedAtEpochMs: 1,
+						selectedChecklistItemIds: ["first", "second", "passed"],
+					},
 				},
 			},
 		]);
@@ -265,19 +275,44 @@ describe("从 PDV 核对项生成新任务上下文", () => {
 		expect(seed.prompt).not.toContain("null");
 		expect(() => parseSeedAsPersistedEditorDraft(seed)).not.toThrow();
 	});
-	it("没有有效选项时拒绝生成空任务", () => {
-		expect(() =>
-			buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
-				workspaceId: "source",
-				projectName: "来源",
-				sourceTaskCreatedAt: 1,
-				sourceTaskTitle: "来源任务",
-				deploymentId: "deploy",
-				deployedSourceCommit: "abc",
-				deployedAtIso: "2026-10-18T00:00:00Z",
-				task: createPostDeployVerificationTaskReadModelTestFixture(),
-				selectedChecklistItemIds: [],
-			}),
-		).toThrow("请选择至少一个仍待核对的项目");
+	it("不选择核对项时仍可携带任务背景创建关联续接草稿", () => {
+		const seed = buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
+			workspaceId: "source",
+			projectName: "来源",
+			sourceTaskCreatedAt: 1,
+			sourceTaskTitle: "来源任务",
+			deploymentId: "deploy",
+			deployedSourceCommit: "abc",
+			deployedAtIso: "2026-10-18T00:00:00Z",
+			task: createPostDeployVerificationTaskReadModelTestFixture(),
+			selectedChecklistItemIds: [],
+		});
+		expect(() => parseSeedAsPersistedEditorDraft(seed)).not.toThrow();
+		expect(seed.prompt).toContain("仅携带来源任务和部署背景");
+		expect(seed.title).not.toContain("修复");
+		expect(seed.referenceRelationDrafts[0]?.assertedRelationKindSpecificAttributes).toMatchObject({
+			originatingPostDeployVerificationEntry: { selectedChecklistItemIds: [] },
+		});
+	});
+	it.each([
+		{ selectedChecklistItemIds: ["first", "removed"] },
+		{ selectedChecklistItemIds: ["removed", "first", "removed"] },
+	])("所选项部分被移除时拒绝生成缩水草稿：$selectedChecklistItemIds", ({ selectedChecklistItemIds }) => {
+		expect(() => buildSeedForChecklist([checklistItem("first")], { selectedChecklistItemIds })).toThrow(
+			"所选核对项已变化，请刷新后重新选择。",
+		);
+	});
+	it("重复选择 ID 只在正文与关系来源中保留一次", () => {
+		const seed = buildSeedForChecklist([checklistItem("first"), checklistItem("second")], {
+			selectedChecklistItemIds: ["first", "first"],
+		});
+		expect(seed.prompt.match(/核对项 ID：first；/g)).toHaveLength(1);
+		expect(seed.prompt).not.toContain("核对项 ID：second；");
+		expect(seed.referenceRelationDrafts[0]?.assertedRelationKindSpecificAttributes).toMatchObject({
+			originatingPostDeployVerificationEntry: { selectedChecklistItemIds: ["first"] },
+		});
+	});
+	it("所选项全部被移除时报告状态变化，不静默变成仅携带背景", () => {
+		expect(() => buildSeedForChecklist([], { selectedChecklistItemIds: ["removed"] })).toThrow("核对项已变化");
 	});
 });

@@ -192,8 +192,13 @@ async function* readCompleteTranscriptLinesBackwards(handle: FileHandle, beforeB
 async function assertNativeTranscriptIdentity(
 	handle: FileHandle,
 	summary: RuntimeTaskSessionSummary,
+	expectedNativeSessionId = summary.agentNativeConversationSessionIdentity?.nativeSessionId,
 ): Promise<Record<string, unknown> | null> {
-	const identity = summary.agentNativeConversationSessionIdentity;
+	const originalIdentity = summary.agentNativeConversationSessionIdentity;
+	const identity =
+		originalIdentity && expectedNativeSessionId
+			? { ...originalIdentity, nativeSessionId: expectedNativeSessionId }
+			: originalIdentity;
 	if (!identity) throw new Error("缺少可信原生会话身份，无法读取历史。");
 	let prefix = Buffer.alloc(0);
 	let position = 0;
@@ -283,11 +288,17 @@ export interface LoadTaskConversationHistoryPageInput {
 	card: RuntimeBoardCard | null;
 	sessions: Record<string, RuntimeTaskSessionSummary>;
 	retainedMessages?: readonly RuntimeTaskChatMessage[];
+	// 交接材料保存已核实的原生分段，不按目录猜选或漏掉 history_base 祖先。
+	onVerifiedTranscriptSegment?: (transcriptPath: string) => void;
 }
 
 async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summary: RuntimeTaskSessionSummary) {
 	const nativeConversationIdentity = summary.agentNativeConversationSessionIdentity;
-	if (nativeConversationIdentity?.sourceAgentId !== "codex" || resolveSessionFacets(summary).liveness === "live")
+	if (
+		nativeConversationIdentity?.sourceAgentId !== "codex" ||
+		summary.agentId !== "codex" ||
+		(resolveSessionFacets(summary).liveness === "live" && nativeConversationIdentity.transcriptPath)
+	)
 		return summary;
 	const recordedCodexConversationStorageHomeDirectoryPath =
 		inferCodexHomeDirectoryPathFromTranscriptPath(nativeConversationIdentity.transcriptPath) ??
@@ -299,26 +310,39 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 	);
 	if (
 		resolve(authoritativeCodexConversationStorageHomeDirectoryPath) ===
-		resolve(recordedCodexConversationStorageHomeDirectoryPath)
+			resolve(recordedCodexConversationStorageHomeDirectoryPath) &&
+		nativeConversationIdentity.transcriptPath
 	)
 		return summary;
 	// 正式迁移或回退后，旧 summary 的路径可以已归档或过期；只读原生当前指针，不启动 agent 或猜选分片。
-	const nativeCodexStateDatabase = new Database(
-		join(authoritativeCodexConversationStorageHomeDirectoryPath, "state_5.sqlite"),
-		{ readonly: true, fileMustExist: true },
-	);
-	let authoritativeTranscriptPath: string;
+	let nativeCodexStateDatabase: Database.Database | null = null;
+	let authoritativeTranscriptPath: string | undefined;
 	try {
-		authoritativeTranscriptPath = z
-			.object({ rollout_path: z.string() })
-			.parse(
-				nativeCodexStateDatabase
-					.prepare("SELECT rollout_path FROM threads WHERE id = ?")
-					.get(nativeConversationIdentity.nativeSessionId),
-			).rollout_path;
+		nativeCodexStateDatabase = new Database(
+			join(authoritativeCodexConversationStorageHomeDirectoryPath, "state_5.sqlite"),
+			{ readonly: true, fileMustExist: true },
+		);
+		const row = nativeCodexStateDatabase
+			.prepare("SELECT rollout_path FROM threads WHERE id = ?")
+			.get(nativeConversationIdentity.nativeSessionId);
+		if (row) authoritativeTranscriptPath = z.object({ rollout_path: z.string() }).parse(row).rollout_path;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "SQLITE_CANTOPEN") throw error;
 	} finally {
-		nativeCodexStateDatabase.close();
+		nativeCodexStateDatabase?.close();
 	}
+	if (!authoritativeTranscriptPath) {
+		const candidates = (
+			await listKnownCodexTranscriptSegmentPaths(
+				join(authoritativeCodexConversationStorageHomeDirectoryPath, "sessions"),
+				nativeConversationIdentity.nativeSessionId,
+			)
+		).filter((path) => !basename(path).includes(`${nativeConversationIdentity.nativeSessionId}_`));
+		if (candidates.length !== 1)
+			throw new Error("原生当前指针暂不可用，且精确身份的历史入口不唯一；等待索引或绑定记录恢复。");
+		authoritativeTranscriptPath = candidates[0];
+	}
+	if (!authoritativeTranscriptPath) throw new Error("缺少可信原生历史入口。");
 	const transcriptPathRelativeToAuthoritativeHome = relative(
 		await realpath(authoritativeCodexConversationStorageHomeDirectoryPath),
 		await realpath(authoritativeTranscriptPath),
@@ -331,6 +355,7 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 		throw new Error("原生历史指针超出已绑定存储目录，未读取其他来源。");
 	return {
 		...summary,
+		codexConversationStorageHomeDirectoryPath: authoritativeCodexConversationStorageHomeDirectoryPath,
 		agentNativeConversationSessionIdentity: {
 			...nativeConversationIdentity,
 			transcriptPath: authoritativeTranscriptPath,
@@ -359,6 +384,13 @@ export async function loadTaskConversationHistoryPage(
 			return buildUnavailableTaskConversationHistoryPage("历史分页标记无效，请刷新后重试。");
 		}
 	}
+	try {
+		summary = await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
+	} catch (error) {
+		return buildUnavailableTaskConversationHistoryPage(
+			error instanceof Error ? error.message : "原生历史绑定暂不可核实。",
+		);
+	}
 	const identity = summary.agentNativeConversationSessionIdentity;
 	if (
 		!identity?.transcriptPath ||
@@ -378,7 +410,6 @@ export async function loadTaskConversationHistoryPage(
 	}
 	let handle: FileHandle | null = null;
 	try {
-		summary = await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
 		const identity = summary.agentNativeConversationSessionIdentity;
 		if (!identity?.transcriptPath) return buildUnavailableTaskConversationHistoryPage("缺少当前绑定的会话记录。");
 		try {
@@ -414,6 +445,7 @@ export async function loadTaskConversationHistoryPage(
 		if (decodedCursor && decodedCursor.sourceRevision !== sourceRevision)
 			return buildUnavailableTaskConversationHistoryPage("会话记录已变化，请刷新后重新加载历史。");
 		let segmentMetadata = await assertNativeTranscriptIdentity(handle, summary);
+		input.onVerifiedTranscriptSegment?.(identity.transcriptPath);
 		const cursor: HistoryCursor = decodedCursor ?? {
 			sourceRevision,
 			beforeByteOffset: metadata.size,
@@ -423,21 +455,28 @@ export async function loadTaskConversationHistoryPage(
 			segmentThreadId: null,
 			segmentRevision: null,
 		};
-		let knownCodexSegmentPaths: string[] | null = null;
-		const findParentSegment = async (threadId: string): Promise<string | null> => {
-			knownCodexSegmentPaths ??= await listKnownCodexTranscriptSegmentPaths(
-				codexTranscriptSegmentSearchRoot(identity.transcriptPath as string),
-				identity.nativeSessionId,
-			);
-			const matching = knownCodexSegmentPaths.filter((path) =>
+		const knownCodexSegmentPaths = new Map<string, string[]>();
+		const findParentSegment = async (threadId: string, nativeSessionId: string): Promise<string | null> => {
+			let paths = knownCodexSegmentPaths.get(nativeSessionId);
+			if (!paths) {
+				paths = await listKnownCodexTranscriptSegmentPaths(
+					codexTranscriptSegmentSearchRoot(identity.transcriptPath as string),
+					nativeSessionId,
+				);
+				knownCodexSegmentPaths.set(nativeSessionId, paths);
+			}
+			const matching = paths.filter((path) =>
 				basename(path).endsWith(
-					threadId === identity.nativeSessionId
-						? `-${identity.nativeSessionId}.jsonl`
-						: `${identity.nativeSessionId}_${threadId}.jsonl`,
+					threadId === nativeSessionId ? `-${nativeSessionId}.jsonl` : `${nativeSessionId}_${threadId}.jsonl`,
 				),
 			);
 			return matching.length === 1 ? (matching[0] ?? null) : null;
 		};
+		let selectedSegmentNativeSessionId = identity.nativeSessionId;
+		// 原生 fork 的 history_base 可以跨原生 ID；只沿当前已验证元数据明确声明的 forked_from_id。
+		const parentNativeSessionId = (threadId: string) =>
+			segmentMetadata?.forked_from_id === threadId ? threadId : selectedSegmentNativeSessionId;
+
 		let selectedSegmentThreadId: string | null = null;
 		let selectedSegmentEndByteOffset = metadata.size;
 		const visitedSegmentPaths = new Set([identity.transcriptPath]);
@@ -450,7 +489,8 @@ export async function loadTaskConversationHistoryPage(
 				visitedSegmentPaths.size >= 32
 			)
 				return buildUnavailableTaskConversationHistoryPage("更早的会话分段链无法核实，请刷新后重试。");
-			const parentPath = await findParentSegment(base.data.thread_id);
+			const expectedParentNativeSessionId = parentNativeSessionId(base.data.thread_id);
+			const parentPath = await findParentSegment(base.data.thread_id, expectedParentNativeSessionId);
 			if (!parentPath || visitedSegmentPaths.has(parentPath))
 				return buildUnavailableTaskConversationHistoryPage("更早的会话分段缺失或归属不唯一。");
 			visitedSegmentPaths.add(parentPath);
@@ -458,7 +498,15 @@ export async function loadTaskConversationHistoryPage(
 			handle = null;
 			handle = await open(parentPath, "r");
 			metadata = await handle.stat();
-			segmentMetadata = await assertNativeTranscriptIdentity(handle, summary);
+			segmentMetadata = await assertNativeTranscriptIdentity(handle, summary, expectedParentNativeSessionId);
+			if (
+				typeof segmentMetadata?.cwd === "string" &&
+				summary.workspacePath &&
+				resolve(segmentMetadata.cwd) !== resolve(summary.workspacePath)
+			)
+				throw new Error("父历史分段的工作目录归属不符。");
+			selectedSegmentNativeSessionId = expectedParentNativeSessionId;
+			input.onVerifiedTranscriptSegment?.(parentPath);
 			selectedSegmentThreadId = base.data.thread_id;
 			selectedSegmentEndByteOffset = base.data.end_byte_offset;
 			if (selectedSegmentEndByteOffset > metadata.size)
@@ -489,7 +537,12 @@ export async function loadTaskConversationHistoryPage(
 				continue;
 			}
 			if (record.isSidechain === true) continue;
-			if (!transcriptMetadataMatchesNativeConversationIdentity(identity, record))
+			if (
+				!transcriptMetadataMatchesNativeConversationIdentity(
+					{ ...identity, nativeSessionId: selectedSegmentNativeSessionId },
+					record,
+				)
+			)
 				return buildUnavailableTaskConversationHistoryPage("原生会话身份与记录不匹配。");
 			const parentField =
 				identity.sourceAgentId === "claude" ? "parentUuid" : identity.sourceAgentId === "omp" ? "parentId" : null;
@@ -534,7 +587,9 @@ export async function loadTaskConversationHistoryPage(
 			segmentMetadata.history_base != null
 		) {
 			const base = codexHistoryBaseSchema.safeParse(segmentMetadata.history_base);
-			const parentPath = base.success ? await findParentSegment(base.data.thread_id) : null;
+			const parentPath = base.success
+				? await findParentSegment(base.data.thread_id, parentNativeSessionId(base.data.thread_id))
+				: null;
 			if (base.success && parentPath && !visitedSegmentPaths.has(parentPath)) {
 				cursor.segmentThreadId = base.data.thread_id;
 				cursor.segmentRevision = null;

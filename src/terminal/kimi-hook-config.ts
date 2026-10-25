@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { RuntimeHookEvent } from "../core/api-contract";
-import { buildKanbanCommandParts } from "../core/kanban-command";
+import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/workspace-state";
@@ -65,7 +65,7 @@ export function getKanbanManagedKimiCodeHome(): string {
 }
 
 function buildKimiHookIngestCommand(kanbanEvent: RuntimeHookEvent): string {
-	return buildKanbanCommandParts(["hooks", "ingest", "--event", kanbanEvent, "--source", "kimi"])
+	return buildKanbanAgentHookCommandParts(["ingest", "--event", kanbanEvent, "--source", "kimi"])
 		.map(quoteShellArg)
 		.join(" ");
 }

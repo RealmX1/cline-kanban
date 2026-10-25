@@ -62,6 +62,7 @@ beforeEach(() => {
 		hasLoadedOnce: true,
 		pendingVerificationTaskCount: 1,
 		refresh: vi.fn(),
+		entryNavigationReadModelRequest: null,
 		refreshAndReadActiveGroup: vi.fn(async () => group),
 		isVerificationWriteInFlight: false,
 		stayInFront: false,

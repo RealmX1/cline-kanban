@@ -141,6 +141,9 @@ function makeVerificationStateResponseForDeployment(
 }
 
 interface HookSnapshot {
+	refreshAndReadActiveGroup: ReturnType<typeof usePostDeployVerification>["refreshAndReadActiveGroup"];
+	entryNavigationReadModelRequest: ReturnType<typeof usePostDeployVerification>["entryNavigationReadModelRequest"];
+	loadError: string | null;
 	pendingVerificationTaskCount: number | null;
 	refresh: ReturnType<typeof usePostDeployVerification>["refresh"];
 	toggleChecklistItem: ReturnType<typeof usePostDeployVerification>["toggleChecklistItem"];
@@ -157,6 +160,9 @@ function HookHarness({
 	const verification = usePostDeployVerification(workspaceId);
 	useEffect(() => {
 		onSnapshot({
+			refreshAndReadActiveGroup: verification.refreshAndReadActiveGroup,
+			entryNavigationReadModelRequest: verification.entryNavigationReadModelRequest,
+			loadError: verification.loadError,
 			pendingVerificationTaskCount: verification.pendingVerificationTaskCount,
 			refresh: verification.refresh,
 			toggleChecklistItem: verification.toggleChecklistItem,
@@ -164,6 +170,9 @@ function HookHarness({
 		});
 	}, [
 		onSnapshot,
+		verification.refreshAndReadActiveGroup,
+		verification.entryNavigationReadModelRequest,
+		verification.loadError,
 		verification.refresh,
 		verification.toggleChecklistItem,
 		verification.activeGroup,
@@ -247,6 +256,122 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 			},
 		};
 	}
+
+	it("定位前的在途读取不能为新请求补证，逆序返回也不能覆盖新快照", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		const navigationRequest = { workspaceId: "workspace-a", requestId: 1 };
+		act(() => getSnapshot()?.refresh());
+		act(() => {
+			void getSnapshot()
+				?.refreshAndReadActiveGroup(navigationRequest)
+				.catch(() => {});
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve(
+				makeVerificationStateResponse(false),
+			);
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		act(() => getSnapshot()?.refresh());
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 3).resolve(makeVerificationStateResponse(true));
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toEqual(navigationRequest);
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve({
+				deploymentGroups: [],
+				activeDeploymentId: null,
+			});
+			await flushMicrotasks();
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(true);
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toEqual(navigationRequest);
+		expect(getSnapshot()?.loadError).toBeNull();
+	});
+
+	it("读取失败后保留定位归属，后续常规刷新成功可自动补证", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		const navigationRequest = { workspaceId: "workspace-a", requestId: 2 };
+		act(() => {
+			void getSnapshot()
+				?.refreshAndReadActiveGroup(navigationRequest)
+				.catch(() => {});
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).reject(new Error("网络中断"));
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.loadError).toBe("网络中断");
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		act(() => getSnapshot()?.refresh());
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(makeVerificationStateResponse(true));
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.loadError).toBeNull();
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toEqual(navigationRequest);
+	});
+
+	it("被本地写入丢弃的定位快照不能补证，写入后的刷新能够恢复", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		const navigationRequest = { workspaceId: "workspace-a", requestId: 3 };
+		act(() => {
+			void getSnapshot()
+				?.refreshAndReadActiveGroup(navigationRequest)
+				.catch(() => {});
+		});
+		act(() => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).resolve({ ok: true, task: makeTask(true) });
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve({
+				deploymentGroups: [],
+				activeDeploymentId: null,
+			});
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		expect(currentCheckedState(getSnapshot())).toBe(true);
+		act(() => getSnapshot()?.refresh());
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(makeVerificationStateResponse(true));
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toEqual(navigationRequest);
+	});
+
+	it("旧定位请求响应不能补证新请求，跨项目再返回也不能接受旧代际响应", async () => {
+		const { getSnapshot, rerenderWithWorkspaceId } = await mountAndEstablishBaseline();
+		act(() => {
+			void getSnapshot()
+				?.refreshAndReadActiveGroup({ workspaceId: "workspace-a", requestId: 4 })
+				.catch(() => {});
+		});
+		act(() => {
+			void getSnapshot()
+				?.refreshAndReadActiveGroup({ workspaceId: "workspace-a", requestId: 5 })
+				.catch(() => {});
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve(
+				makeVerificationStateResponse(false),
+			);
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		await rerenderWithWorkspaceId("workspace-b");
+		await rerenderWithWorkspaceId("workspace-a");
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(makeVerificationStateResponse(true));
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.activeGroup).toBeNull();
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		expect(getSnapshot()?.loadError).toBeNull();
+	});
 
 	it("手动勾选后，先前发起、点击前快照的过期轮询响应不得把勾选弹回未勾选", async () => {
 		const { getSnapshot } = await mountAndEstablishBaseline();

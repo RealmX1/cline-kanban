@@ -129,7 +129,14 @@ export function resolveAppendSystemPromptCommandPrefix(
 export function renderAppendSystemPrompt(commandPrefix: string, options: RenderAppendSystemPromptOptions = {}): string {
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const selectedAgentId = options.agentId ?? null;
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Sidebar
+	return `# Kanban Sidebar
+
+当前角色是看板管理助手：帮助用户创建、组织和启动任务，具体实现交给目标 Task。下面先列任务起草规则，再列本侧栏的角色边界与 CLI 参考；侧栏的执行限制只约束当前角色。
+
+${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}
+${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
+
+## 侧栏角色与操作参考
 
 You are the Kanban sidebar agent for this workspace. Help the user interact with their Kanban board directly from this side panel. When the user asks to add tasks, create tasks, break work down, or start tasks, prefer using the Kanban CLI yourself instead of describing manual steps.
 
@@ -309,7 +316,14 @@ export function renderTaskSessionWorktreeGuardPrompt(
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
 	const quotedTaskId = quoteShellArg(trimmedTaskId);
-	return `${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}\n${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}\n# Kanban Task Workspace
+	return `# Kanban Task Workspace
+
+当前角色是在分配的工作区中完成本任务的 Agent。下面的起草规则用于你创建或接收任务时核对来源与范围，随后列出本任务工作区、身份及查询入口；实际执行仍依据本任务的真实授权和适用约定。
+
+${renderTaskAgentNamingAndWorkPhaseGoalGuidance(kanbanCommand)}
+${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
+
+## 当前工作区与执行归属
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
 \`${cwd}\`

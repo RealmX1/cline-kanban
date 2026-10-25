@@ -51,6 +51,7 @@ import {
 	formatClineSelectedModelButtonText,
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
+import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
@@ -1056,6 +1057,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 				taskIncarnationCreatedAtEpochMs={card.createdAt}
 			/>
 		) : null;
+	const postDeployVerificationEntryNavigationShortcut = !historicalContext ? (
+		<PostDeployVerificationEntryNavigationButton
+			taskId={card.id}
+			workspaceId={taskCardOwnedByOtherProjectWorkspaceId}
+		/>
+	) : null;
 	const taskDirectoryRow = (
 		<div
 			data-task-directory=""
@@ -1103,6 +1110,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						coverage={reviewWorkspaceSnapshot?.taskCommitCoverageInCurrentDeployment}
 					/>
 				) : null}
+				{postDeployVerificationEntryNavigationShortcut}
 			</span>
 			{relatedTasksPreviewShortcut}
 			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
@@ -1760,7 +1768,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</span>
 							</span>
 						) : null}
-						{showDirectoryRow ? taskDirectoryRow : relatedTasksPreviewShortcut}
+						{showDirectoryRow ? (
+							taskDirectoryRow
+						) : (
+							<>
+								{postDeployVerificationEntryNavigationShortcut}
+								{relatedTasksPreviewShortcut}
+							</>
+						)}
 						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
 							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
 								{machineWaitingBadgeElement}
@@ -1788,7 +1803,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : (
 					<>
-						{showDirectoryRow ? taskDirectoryRow : relatedTasksPreviewShortcut}
+						{showDirectoryRow ? (
+							taskDirectoryRow
+						) : (
+							<>
+								{postDeployVerificationEntryNavigationShortcut}
+								{relatedTasksPreviewShortcut}
+							</>
+						)}
 						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
 							<Button
 								size="sm"

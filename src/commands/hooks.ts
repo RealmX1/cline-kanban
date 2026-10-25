@@ -738,6 +738,9 @@ function buildHookIngestRequest(
 		notificationCandidateId: args.notificationCandidateId,
 		taskId: args.taskId,
 		workspaceId: args.workspaceId,
+		...(process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID
+			? { hookRuntimeSessionIncarnationId: process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID }
+			: {}),
 		event: args.event,
 		metadata: args.metadata,
 		...(args.claudeNativeTaskListIdForPhaseGoalProjection !== undefined
@@ -762,9 +765,6 @@ function buildHookIngestRequest(
 			? {
 					mainAgentConversationContextCompactionNativeTurnId:
 						args.mainAgentConversationContextCompactionNativeTurnId,
-					...(process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID
-						? { hookRuntimeSessionIncarnationId: process.env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID }
-						: {}),
 				}
 			: {}),
 		...(args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined

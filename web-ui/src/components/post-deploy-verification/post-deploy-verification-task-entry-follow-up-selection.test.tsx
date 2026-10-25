@@ -83,8 +83,8 @@ describe("PDV 紧凑入口与后续任务选择", () => {
 	it("多选只提交上下文，不勾选、运行或结案原项目", () => {
 		const input = props();
 		render(input);
-		click("从核对项新建后续任务");
-		expect(button("下一步").disabled).toBe(true);
+		click("创建关联续接任务");
+		expect(button("下一步").disabled).toBe(false);
 		click("选择核对项：断言 a");
 		click("选择核对项：断言 b");
 		click("下一步");
@@ -112,32 +112,59 @@ describe("PDV 紧凑入口与后续任务选择", () => {
 	it("取消上下文选择不创建任务且恢复正常核对入口", () => {
 		const inputProps = props();
 		render(inputProps);
-		click("从核对项新建后续任务");
+		click("创建关联续接任务");
 		click("选择核对项：断言 a");
 		click("取消");
 		expect(inputProps.onCreateFollowUpTaskFromSelectedChecklistItems).not.toHaveBeenCalled();
-		expect(button("从核对项新建后续任务")).toBeDefined();
+		expect(button("创建关联续接任务")).toBeDefined();
 	});
-	it("选中的项变为已核对或被删除后，不再提交过时选择", () => {
+	it("已核对项可选，核对状态变化不丢失上下文选择", () => {
 		const input = props();
 		render(input);
-		click("从核对项新建后续任务");
+		click("创建关联续接任务");
 		click("选择核对项：断言 a");
+		click("选择核对项：断言 passed");
 		render({
 			...input,
-			postDeployVerificationTask: { ...input.postDeployVerificationTask, checklist: [item("a", true), item("b")] },
+			postDeployVerificationTask: {
+				...input.postDeployVerificationTask,
+				checklist: [item("a", true), item("b"), item("passed", true)],
+			},
 		});
-		expect(button("下一步").disabled).toBe(true);
+		click("下一步");
+		expect(input.onCreateFollowUpTaskFromSelectedChecklistItems).toHaveBeenCalledWith(["a", "passed"]);
 	});
-	it("只读历史、删除任务和完成途中不开放后续任务入口", () => {
+	it("历史、Done 和已删除来源仍可发起续接，不改变验证的只读状态", () => {
 		for (const override of [
 			{ interactive: false },
 			{ currentBoardColumnIdOfTaskCard: null },
-			{ isCompleting: true },
+			{ currentBoardColumnIdOfTaskCard: "trash" as const },
 		]) {
+			const input = { ...props(), ...override };
+			render(input);
+			click("创建关联续接任务");
+			click("下一步");
+			expect(input.onCreateFollowUpTaskFromSelectedChecklistItems).toHaveBeenCalledWith([]);
+			expect(input.onToggleChecklistItem).not.toHaveBeenCalled();
+		}
+	});
+	it("完成途中禁用后续任务入口", () => {
+		for (const override of [{ isCompleting: true }]) {
 			render({ ...props(), ...override });
-			const entry = container.querySelector<HTMLButtonElement>('[aria-label="从核对项新建后续任务"]');
+			const entry = container.querySelector<HTMLButtonElement>('[aria-label="创建关联续接任务"]');
 			expect(entry === null || entry.disabled).toBe(true);
 		}
+	});
+	it("全部所选项被删除时要求明确重置，不静默改为仅携带背景", () => {
+		const input = props();
+		render(input);
+		click("创建关联续接任务");
+		click("选择核对项：断言 a");
+		render({ ...input, postDeployVerificationTask: { ...input.postDeployVerificationTask, checklist: [item("b")] } });
+		expect(button("下一步").disabled).toBe(true);
+		expect(container.textContent).toContain("有已选核对项被移除");
+		click("重置选择");
+		click("下一步");
+		expect(input.onCreateFollowUpTaskFromSelectedChecklistItems).toHaveBeenCalledWith([]);
 	});
 });

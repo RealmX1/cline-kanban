@@ -3,6 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import {
 	createQueueBrowserReadResponse,
 	QUEUE_BROWSER_ENQUEUED_AT,
+	QUEUE_BROWSER_PROMPT_TEXT,
 	QUEUE_BROWSER_WORKSPACE_ID,
 } from "./queued-task-prompt-delivery-queue-browser-fixture";
 
@@ -53,6 +54,82 @@ async function openIsolatedQueue(
 	await page.addScriptTag({ type: "module", url: "/tests/queued-task-prompt-delivery-queue-browser-harness.tsx" });
 	await expect(page.locator("[data-queued-prompt-entry-id]")).toHaveCount(3);
 }
+
+for (const width of [320, 390, 900]) {
+	test(`${width}px 相对时间自行递增，时间排序不重排投递且可直接复制完整正文`, async ({ page }) => {
+		await page.setViewportSize({ width, height: 1200 });
+		await page.clock.setFixedTime(new Date(QUEUE_BROWSER_ENQUEUED_AT + 120_000));
+		let queueReadCount = 0;
+		const queueMutations: string[] = [];
+		page.on("request", (request) => {
+			if (request.url().includes("runtime.getTaskPromptDeliveryQueue")) queueReadCount += 1;
+			if (request.url().includes("runtime.mutateTaskPromptDeliveryQueue")) queueMutations.push(request.url());
+		});
+		await openIsolatedQueue(page);
+		const pending = page.locator('[data-queued-prompt-entry-id="pending-browser-entry"]');
+		const automated = page.locator('[data-queued-prompt-entry-id="automated-browser-entry"]');
+		await expect(automated).toContainText("距上次尝试：1 分钟");
+		await expect(automated).toContainText("最近投递：");
+		await expect(automated.locator("dl")).not.toContainText("尝试次数");
+		for (const text of await automated.locator("time").allTextContents()) expect(text).not.toContain("2026");
+		const sorting = page.getByRole("combobox", { name: "队列显示顺序" });
+		await expect(sorting).toHaveValue("delivery_order");
+		await sorting.selectOption("last_attempt_newest_first");
+		await expect(page.locator("[data-queued-prompt-entry-id]").first()).toHaveAttribute(
+			"data-queued-prompt-entry-id",
+			"automated-browser-entry",
+		);
+		await expect(automated).toContainText("投递 #2");
+		await expect(page.getByRole("button", { name: "Move queued prompt up" })).toHaveCount(0);
+		await page.getByRole("combobox", { name: "按消息类型筛选" }).selectOption({ label: "自动注入" });
+		await expect(page.locator("[data-queued-prompt-entry-id]")).toHaveCount(1);
+		await page.getByRole("combobox", { name: "按消息类型筛选" }).selectOption("all");
+		await sorting.selectOption("enqueued_oldest_first");
+		await expect(page.locator("[data-queued-prompt-entry-id]").first()).toHaveAttribute(
+			"data-queued-prompt-entry-id",
+			"automated-browser-entry",
+		);
+		await pending.getByRole("button", { name: "复制全文", exact: true }).click();
+		await expect(page.locator("body")).toHaveAttribute(
+			"data-copied-queue-debug-reference",
+			QUEUE_BROWSER_PROMPT_TEXT,
+		);
+		await expect(pending).toContainText("已复制全文");
+		expect(queueReadCount).toBe(1);
+		expect(queueMutations).toEqual([]);
+		await sorting.selectOption("delivery_order");
+		await expect(page.locator("[data-queued-prompt-entry-id]").first()).toHaveAttribute(
+			"data-queued-prompt-entry-id",
+			"pending-browser-entry",
+		);
+		await page.getByRole("button", { name: "模拟队列推送更新" }).click();
+		await expect(pending).toContainText("距上次尝试：0 秒");
+		await page.clock.setFixedTime(new Date(QUEUE_BROWSER_ENQUEUED_AT + 122_000));
+		await expect(pending).toContainText("距上次尝试：2 秒");
+		expect(queueReadCount).toBe(1);
+		expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+		await page.screenshot({ path: test.info().outputPath(`queue-time-order-copy-${width}px.png`), fullPage: true });
+	});
+}
+
+test("缺少 Clipboard API 时，已准备的完整正文仍能在单次点击中复制", async ({ page }) => {
+	await openIsolatedQueue(page, "missing");
+	const pending = page.locator('[data-queued-prompt-entry-id="pending-browser-entry"]');
+	await pending.getByRole("button", { name: "复制全文", exact: true }).click();
+	await expect(page.locator("body")).toHaveAttribute("data-copied-queue-debug-reference", QUEUE_BROWSER_PROMPT_TEXT);
+	await expect(pending).toContainText("已复制全文");
+});
+
+test("完整正文复制被拒绝时，显示可选全文和失败反馈", async ({ page }) => {
+	await openIsolatedQueue(page, "rejected");
+	const pending = page.locator('[data-queued-prompt-entry-id="pending-browser-entry"]');
+	await pending.getByRole("button", { name: "复制全文", exact: true }).click();
+	await expect(pending).toContainText("复制失败");
+	await expect(pending.getByRole("textbox", { name: "可手动复制的 Prompt 全文" })).toHaveValue(
+		QUEUE_BROWSER_PROMPT_TEXT,
+	);
+	await expect(pending).not.toContainText("已复制全文");
+});
 
 for (const width of [320, 390, 900]) {
 	test(`${width}px 展示时间摘要、实时更新并复制自动注入引用`, async ({ page }) => {

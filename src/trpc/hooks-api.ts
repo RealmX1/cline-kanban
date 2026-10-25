@@ -36,6 +36,7 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
+import { captureTaskMainSessionHandoverReportNativeIdentity } from "../state/capture-task-main-session-handover-report-native-identity";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -371,6 +372,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					const identityPersistenceOutcome = await persistNativeConversationIdentity(workspaceId, taskId, () =>
 						manager.getSummary(taskId),
 					);
+					const summaryWithCapturedIdentity = manager.getSummary(taskId);
+					if (summaryWithCapturedIdentity)
+						await captureTaskMainSessionHandoverReportNativeIdentity({
+							workspacePath,
+							summary: summaryWithCapturedIdentity,
+							identity: body.agentNativeConversationSessionIdentity,
+							hookRuntimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+						});
 					// 只有 revision 推进了才需要让客户端换新快照；再确认的 observedAt 由 task_sessions_updated 送达，
 					// 每个 hook 都广播整份快照会让所有客户端反复整板重水合。
 					if (identityPersistenceOutcome === "persisted_new_identity_and_invalidated_stale_snapshot_revision") {

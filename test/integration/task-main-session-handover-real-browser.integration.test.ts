@@ -1,10 +1,13 @@
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { renderTaskMainSessionHandoverReportPrompt } from "../../src/server/task-main-session-handover-coordinator";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { Browser, BrowserType } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -18,10 +21,14 @@ const packagedCliPath = process.env.KANBAN_MAIN_SESSION_HANDOVER_PACKAGED_CLI_PA
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
-it.skipIf(!packagedCliPath).each(["new_codex_session", "existing_codex_session"] as const)(
-	"打包态主会话交接 %s：真实浏览器、PTY、迟到 hook 与冷恢复",
-	async (destinationKind) => {
-		const mainAgentId = "claude";
+it.skipIf(!packagedCliPath).each([
+	{ mainAgentId: "claude", destinationKind: "new_codex_session" },
+	{ mainAgentId: "claude", destinationKind: "existing_codex_session" },
+	{ mainAgentId: "codex", destinationKind: "new_codex_session" },
+	{ mainAgentId: "codex", destinationKind: "existing_codex_session" },
+] as const)(
+	"打包态 $mainAgentId 主会话交接 $destinationKind：真实浏览器、PTY、迟到 hook 与冷恢复",
+	async ({ mainAgentId, destinationKind }) => {
 		const collaborationAgentId = "codex";
 
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
@@ -54,27 +61,27 @@ const fs = require('node:fs');
 const path = require('node:path');
 const agent = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
-if (args.includes('--version') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) {
+if (args.includes('--version') || args.includes('--help') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) {
   process.stdout.write(agent + ' 2.1.200\n'); process.exit(0);
 }
 const sessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID;
 fs.writeFileSync(path.join(process.cwd(), 'launch-' + sessionId + '.json'), JSON.stringify({ agent, args, pid: process.pid, cwd: process.cwd(), sessionId, workspaceTaskId: process.env.KANBAN_TASK_ID }));
 const firstFailedSessionFile = path.join(process.cwd(), 'codex-original-failure-session.txt');
-if (agent === 'codex' && process.env.KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO === '1' && !fs.existsSync(firstFailedSessionFile)) fs.writeFileSync(firstFailedSessionFile, sessionId);
+if (agent === 'codex' && sessionId !== process.env.KANBAN_TASK_ID && process.env.KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO === '1' && !fs.existsSync(firstFailedSessionFile)) fs.writeFileSync(firstFailedSessionFile, sessionId);
 const simulatesUnconfirmedFirstReport = agent === 'codex' && fs.existsSync(firstFailedSessionFile) && fs.readFileSync(firstFailedSessionFile, 'utf8') === sessionId;
 let startupReady = !simulatesUnconfirmedFirstReport;
 let failureExitScheduled = false;
-process.stdout.write(startupReady ? 'Claude Code · OpenAI Codex\nmodel: gpt-test\n› \n❯ ' : 'OpenAI Codex\nmodel: loading\n› ');
+process.stdout.write(startupReady ? (agent === 'codex' ? 'OpenAI Codex\nmodel: gpt-test\n› \x1b[2m输入消息\x1b[22m\r\x1b[2C' : 'Claude Code\n❯ ') : 'OpenAI Codex\nmodel: loading\n› ');
 if (!startupReady) setTimeout(() => {
  startupReady = true;
- process.stdout.write('\x1b[2J\x1b[HOpenAI Codex\nmodel: gpt-test\n› ');
+ process.stdout.write('\x1b[2J\x1b[HOpenAI Codex\nmodel: gpt-test\n› \x1b[2m输入消息\x1b[22m\r\x1b[2C');
 }, 20000);
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.on('data', chunk => {
  fs.appendFileSync(path.join(process.cwd(), 'input-' + sessionId + '.txt'), chunk);
  if (!startupReady && chunk.toString().includes('/plan ')) fs.writeFileSync(path.join(process.cwd(), 'incorrect-input-before-codex-ready.txt'), chunk);
- if (chunk.toString() === '\r') {
+ if (chunk.toString().includes('\r')) {
   if (simulatesUnconfirmedFirstReport) {
    if (!failureExitScheduled) { failureExitScheduled = true; setTimeout(() => process.exit(1), 20000); }
    return;
@@ -105,6 +112,7 @@ setInterval(() => {}, 1000);
 		Object.assign(environment, {
 			PATH: `${fakeAgentBinaryDirectory}:${dirname(process.execPath)}:/usr/bin:/bin`,
 			KANBAN_RUNTIME_PORT: String(port),
+			KANBAN_MAIN_SESSION_HANDOVER_TEST_CODEX_TRANSCRIPT_PATH: codexTranscriptPath,
 			KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO: destinationKind === "new_codex_session" ? "1" : "0",
 		});
 		const shutdownHook = join(sourcePath, "test/integration/shutdown-ipc-hook.cjs");
@@ -207,22 +215,21 @@ setInterval(() => {}, 1000);
 				startInPlanMode: false,
 			});
 			expect(mainStarted.ok).toBe(true);
-			const nativeClaudeId = "11111111-1111-4111-8111-111111111111";
-			const sourceTranscriptPath = join(fixture.isolatedHomeDirectoryPath, "old-claude-transcript.jsonl");
+			const nativeSourceId = "11111111-1111-4111-8111-111111111111";
+			const sourceTranscriptPath = join(fixture.isolatedHomeDirectoryPath, `old-${mainAgentId}-transcript.jsonl`);
 			writeFileSync(
 				sourceTranscriptPath,
-				`${JSON.stringify({
-					type: "assistant",
-					message: { content: [{ type: "text", text: "已完成材料整理，等待接任。" }] },
-				})}\n`,
+				mainAgentId === "codex"
+					? `${JSON.stringify({ type: "session_meta", payload: { id: nativeSourceId, source: "cli" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "已完成材料整理，等待接任。" } })}\n`
+					: `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "已完成材料整理，等待接任。" }] } })}\n`,
 			);
 			await scoped.hooks.ingest.mutate({
 				taskId,
 				workspaceId,
 				event: "agent_conversation_session_identity_observed",
 				agentNativeConversationSessionIdentity: {
-					sourceAgentId: "claude",
-					nativeSessionId: nativeClaudeId,
+					sourceAgentId: mainAgentId,
+					nativeSessionId: nativeSourceId,
 					transcriptPath: sourceTranscriptPath,
 					observedAt: Date.now(),
 				},
@@ -231,7 +238,7 @@ setInterval(() => {}, 1000);
 				taskId,
 				workspaceId,
 				event: "to_review",
-				metadata: { source: "claude", hookEventName: "Stop" },
+				metadata: { source: mainAgentId, hookEventName: "Stop" },
 			});
 
 			const existingPeerId = "task-conversation-session-33333333-3333-4333-8333-333333333333";
@@ -310,6 +317,25 @@ setInterval(() => {}, 1000);
 			await expect
 				.poll(() => existsSync(join(repository.repositoryPath, `launch-${targetId}.json`)), { timeout: 30_000 })
 				.toBe(true);
+			const observeTargetIdentity = async (id: string) => {
+				await expect
+					.poll(() => existsSync(join(repository.repositoryPath, `launch-${id}.json`)), { timeout: 30_000 })
+					.toBe(true);
+				await scoped.hooks.ingest.mutate({
+					taskId: id,
+					hookRuntimeSessionIncarnationId:
+						(await scoped.workspace.getState.query()).sessions[id].runtimeSessionIncarnationId ?? undefined,
+					workspaceId,
+					event: "agent_conversation_session_identity_observed",
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "codex",
+						nativeSessionId: nativeCodexId,
+						transcriptPath: codexTranscriptPath,
+						observedAt: Date.now(),
+					},
+				});
+			};
+			await observeTargetIdentity(targetId);
 			if (destinationKind === "new_codex_session") {
 				failedTargetId = targetId;
 				await expect
@@ -322,9 +348,10 @@ setInterval(() => {}, 1000);
 					)
 					.toBe(true);
 				expect(existsSync(join(repository.repositoryPath, "incorrect-input-before-codex-ready.txt"))).toBe(false);
-				const refresh = await scoped.runtime.refreshTaskTerminal.mutate({ taskId: failedTargetId });
-				expect(refresh.ok).toBe(false);
-				expect(refresh.error).toContain("新建 Codex 并重新交接");
+				expect(
+					(await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record?.automaticRecovery
+						?.classification,
+				).toBe("waiting_for_machine_evidence");
 				await page.getByRole("button", { name: "新建 Codex 并重新交接", exact: true }).click();
 				await expect
 					.poll(() => page.getByText("旧汇报的提交结果无法确认，重新交接可能重复汇报。", { exact: true }).count())
@@ -356,16 +383,21 @@ setInterval(() => {}, 1000);
 				const recovered = (await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record;
 				if (!recovered) throw new Error("恢复后交接记录缺失");
 				targetId = recovered.targetTaskConversationSessionId;
+				await observeTargetIdentity(targetId);
 				expect(recovered.recoveryReceipts).toHaveLength(1);
 				const retained = await scoped.workspace.getState.query();
 				expect(retained.sessions[failedTargetId]).toBeDefined();
-				expect(retained.sessions[taskId].agentId).toBe("claude");
+				expect(retained.sessions[taskId].agentId).toBe(mainAgentId);
 				await page.setViewportSize({ width: 1600, height: 1000 });
 			}
 			await expect
 				.poll(
 					async () => {
 						const status = await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId });
+						writeFileSync(
+							join(evidenceDirectory, "last-report-delivery-state.json"),
+							JSON.stringify({ status, state: await scoped.workspace.getState.query() }, null, 2),
+						);
 						if (status.record?.status === "failed") throw new Error(status.record.errorMessage ?? "交接失败");
 						const file = join(repository.repositoryPath, `input-${targetId}.txt`);
 						return existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -373,6 +405,32 @@ setInterval(() => {}, 1000);
 					{ timeout: 30_000 },
 				)
 				.toContain("KANBAN_MAIN_SESSION_HANDOVER_REPORT:");
+			const submittedRecord = (await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record;
+			assert(submittedRecord);
+			const expectedPrompt = renderTaskMainSessionHandoverReportPrompt(submittedRecord);
+			const readSubmittedReportInput = () => {
+				const input = stripVTControlCharacters(
+					readFileSync(join(repository.repositoryPath, `input-${targetId}.txt`), "utf8"),
+				);
+				const start = input.indexOf("/plan KANBAN_MAIN_SESSION_HANDOVER_REPORT:");
+				return start < 0 ? "" : input.slice(start);
+			};
+			await expect
+				.poll(() => readSubmittedReportInput().replaceAll("\r", "").trim(), { timeout: 30_000 })
+				.toBe(expectedPrompt);
+			// 仅在真实 PTY 已收到完整正文和提交键后，模拟原生接受记录；不能用报告标记代替接受证明。
+			await expect.poll(readSubmittedReportInput).toContain("\r");
+			expect(readSubmittedReportInput().split("KANBAN_MAIN_SESSION_HANDOVER_REPORT:")).toHaveLength(2);
+
+			appendFileSync(
+				codexTranscriptPath,
+				`${JSON.stringify({
+					type: "event_msg",
+					timestamp: new Date().toISOString(),
+					payload: { type: "user_message", message: expectedPrompt.slice(6) },
+				})}\n`,
+			);
+
 			await scoped.hooks.ingest.mutate({
 				taskId: targetId,
 				workspaceId,
@@ -388,7 +446,7 @@ setInterval(() => {}, 1000);
 				taskId: targetId,
 				workspaceId,
 				event: "to_in_progress",
-				submittedPromptText: "KANBAN_MAIN_SESSION_HANDOVER_REPORT:真实投递确认",
+				submittedPromptText: expectedPrompt.slice(6),
 				metadata: { source: "codex", hookEventName: "UserPromptSubmit" },
 			});
 			await scoped.hooks.ingest.mutate({
@@ -404,13 +462,13 @@ setInterval(() => {}, 1000);
 			await expect
 				.poll(
 					async () => (await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record?.status,
-					{ timeout: 15_000 },
+					{ timeout: 30_000 },
 				)
 				.toBe("awaiting_user_message");
 			await page.reload();
 			await page.getByLabel("工作台格位 1").selectOption("task_sessions");
-			await expect.poll(() => page.getByText("前主会话", { exact: true }).count()).toBe(1);
-			await page.screenshot({ path: join(evidenceDirectory, "codex-main-former-claude.png") });
+			await expect.poll(() => page.getByText("前主会话", { exact: true }).count()).toBe(failedTargetId ? 2 : 1);
+			await page.screenshot({ path: join(evidenceDirectory, "codex-main-former-source.png") });
 			const beforeLateHook = await scoped.workspace.getState.query();
 			const columnOfTask = (state: typeof beforeLateHook) =>
 				state.board.columns.find((column) => column.cards.some((entry) => entry.id === taskId))?.id;
@@ -418,13 +476,13 @@ setInterval(() => {}, 1000);
 				taskId,
 				workspaceId,
 				event: "to_in_progress",
-				metadata: { source: "claude", hookEventName: "PreToolUse" },
+				metadata: { source: mainAgentId, hookEventName: "PreToolUse" },
 			});
 			await scoped.hooks.ingest.mutate({
 				taskId,
 				workspaceId,
 				event: "to_review",
-				metadata: { source: "claude", hookEventName: "Stop", finalMessage: "迟到的原会话消息" },
+				metadata: { source: mainAgentId, hookEventName: "Stop", finalMessage: "迟到的原会话消息" },
 			});
 			const afterLateHook = await scoped.workspace.getState.query();
 			expect(columnOfTask(afterLateHook)).toBe(columnOfTask(beforeLateHook));
