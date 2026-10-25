@@ -116,7 +116,8 @@ function buildWorkingTreeContentEvidenceSha256(invokingWorktreePath: string): st
 	evidenceHash.update(
 		runGitEvidenceCommand({
 			workingDirectoryPath: invokingWorktreePath,
-			arguments: ["diff", "--binary", "HEAD", "--"],
+			// 对象库增长会改变 Git 的自动缩写长度；完整 OID 让相同内容始终产生相同证据。
+			arguments: ["diff", "--binary", "--full-index", "HEAD", "--"],
 			expectedExitCodes: [0, 128],
 		}),
 	);
