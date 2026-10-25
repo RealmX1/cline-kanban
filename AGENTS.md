@@ -113,6 +113,7 @@ web-ui：
 | `test/README.md` | 测试执行形态与 git 安全契约 |
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
 | `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
+| `docs/codex-configuration-writers-and-sync.md` | Codex 持久配置 writer、历史桥接、增量合并、选择性同步、原所有者重载及阶段闭包 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |

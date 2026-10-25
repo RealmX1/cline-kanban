@@ -16,6 +16,8 @@ handoff_sha256=${record.handoffSha256}
 
 每个写入阶段开始前，先调用 kanban task claim-rvf-automatic-closeout-execution-stage --task-id ${record.taskId} --decision-token ${record.receipt.decision_token} --run-id ${record.runId} --handoff-sha256 ${record.handoffSha256} --stage <阶段> --project-path <当前仓库 main checkout 路径>。只有 claimed 才执行，already_completed 直接复用；保存返回的 stageExecutionClaimId 到该阶段结果。不要后台执行阶段命令，也不能凭超时接管其它认领。
 
+若认领结果的 codexConfigurationExecutionBinding.executionClosureSkillPaths 非空，本阶段读取并执行这些持久路径中的 Skill 正文、references 和 helpers。已经认领的阶段继续使用同一闭包，后续默认配置或安装版本变化不替换它；新阶段重新核验绑定。用户 Stop、明确禁用和撤销始终优先。
+
 每个阶段结束后立即登记真实结果：先报告 land，再执行并报告 base_branch_sync。把完整 JSON 写入本 run 的 artifacts/automatic-closeout-<阶段>-execution-result.json，再调用 kanban task report-rvf-automatic-closeout-execution-result --project-path <当前仓库 main checkout 路径> --result-file <该文件>。字段绑定为 ${JSON.stringify({ taskId: record.taskId, decisionToken: record.receipt.decision_token, runId: record.runId, handoffSha256: record.handoffSha256 })}，另加 stage（land 或 base_branch_sync）、outcome（completed、blocked 或 failed）。成功须加实际 commitSha，base 同步还须加实际本地 baseRef；受阻或失败必须填写 reason；用户明确限制时加 blockedReasonKind=user_restriction，机器前置条件可自动补齐时加 blockedReasonKind=machine_precondition，实际证据冲突加 blockedReasonKind=evidence_conflict。不能以指令已提交、报告已写或 Agent 自述代替提交与整合成功；服务端会复核 land evidence、提交存在及祖先关系。
 
 ## 同步评估与明确限制

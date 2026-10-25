@@ -106,7 +106,9 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		const manager = createManager();
 		await manager.startTaskSession(request());
 		const home = getManagedCodexConversationStorageHomeDirectoryPath();
-		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(home);
+		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(
+			manager.getSummary(request().taskId)?.codexConfigurationWriterBinding?.configurationHomeDirectoryPath,
+		);
 		expect(spawned.mock.calls[0]?.[0].env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBeUndefined();
 		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(home);
 	});
@@ -144,7 +146,12 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			} as RuntimeTaskSessionSummary,
 		});
 		await manager.startTaskSession({ ...request(), resumeFromTrash: true });
-		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(join(fixture.path, ".codex"));
+		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(
+			manager.getSummary(request().taskId)?.codexConfigurationWriterBinding?.configurationHomeDirectoryPath,
+		);
+		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(
+			join(fixture.path, ".codex"),
+		);
 		expect(prepared.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing.sourceSessionId).toBe(
 			nativeSessionId,
 		);
@@ -173,7 +180,9 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			hydrateStoppedCodexSession(manager, home);
 			await manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true }, origin);
 			expect(spawned).toHaveBeenCalledOnce();
-			expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(home);
+			expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(
+				manager.getSummary(request().taskId)?.codexConfigurationWriterBinding?.configurationHomeDirectoryPath,
+			);
 			expect(
 				prepared.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing.sourceSessionId,
 			).toBe(nativeSessionId);
@@ -209,11 +218,15 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		});
 		await manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true });
 		expect(spawned).toHaveBeenCalledOnce();
-		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(home);
+		expect(spawned.mock.calls[0]?.[0].env.CODEX_HOME).toBe(
+			manager.getSummary(request().taskId)?.codexConfigurationWriterBinding?.configurationHomeDirectoryPath,
+		);
 		// 启动后的原生 hook 尚未刷新转录路径时，活体仍以本代实际目录为准。
 		await manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true });
 		expect(spawned).toHaveBeenCalledTimes(2);
-		expect(spawned.mock.calls[1]?.[0].env.CODEX_HOME).toBe(home);
+		expect(spawned.mock.calls[1]?.[0].env.CODEX_HOME).toBe(
+			manager.getSummary(request().taskId)?.codexConfigurationWriterBinding?.configurationHomeDirectoryPath,
+		);
 	});
 
 	it("专用目录预检失败时保留现有活体和原目录绑定", async () => {
