@@ -54,6 +54,7 @@ import {
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
+import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
@@ -905,7 +906,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
 				<span
 					role="status"
-					title="正在核验 harness 是否已接受输入；写入终端或前置 hook 放行不能证明提交成功。"
+					title={describePromptSubmissionAcceptance(sessionSummary.agentConversationPromptSubmissionAcceptance)}
 					className="inline-flex items-center gap-0.5 text-[10px] text-status-gold"
 				>
 					<Hourglass size={10} />

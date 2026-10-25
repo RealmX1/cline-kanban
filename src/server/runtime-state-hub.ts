@@ -61,6 +61,12 @@ import {
 	resolveSessionFacets,
 } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
+import {
+	createRuntimeStateBroadcastCostRecorder,
+	type RuntimeStateBroadcastCostOperation,
+	type RuntimeStateBroadcastCostRecorder,
+	type RuntimeStateWebSocketSendOutcome,
+} from "../diagnostics/runtime-state-broadcast-cost-recorder";
 import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
@@ -85,6 +91,8 @@ const TASK_SESSION_STREAM_BATCH_MS = 150;
 const PROJECTS_BROADCAST_COALESCING_WINDOW_AFTER_TASK_SESSION_SUMMARY_FLUSH_MS = 1_000;
 
 export interface CreateRuntimeStateHubDependencies {
+	// undefined 使用常驻刻度；null 仅用于隔离的开销对照，不新增运行时设置或推流字段。
+	runtimeStateBroadcastCostRecorder?: RuntimeStateBroadcastCostRecorder | null;
 	workspaceRegistry: Pick<
 		WorkspaceRegistry,
 		| "resolveWorkspaceForStream"
@@ -182,6 +190,26 @@ export interface QueuedTaskPromptDeliveryDispatchObserver {
 }
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
+	const broadcastCostRecorder =
+		deps.runtimeStateBroadcastCostRecorder === undefined
+			? createRuntimeStateBroadcastCostRecorder()
+			: deps.runtimeStateBroadcastCostRecorder;
+	const buildProjectsPayloadForStream = (
+		operation: RuntimeStateBroadcastCostOperation | undefined,
+		preferredCurrentProjectId: string | null,
+	) => {
+		const build = () =>
+			deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(preferredCurrentProjectId);
+		return operation ? operation.measureAsynchronousStage("projects_payload_build", build) : build();
+	};
+	const buildWorkspacePayloadForStream = (
+		operation: RuntimeStateBroadcastCostOperation | undefined,
+		workspaceId: string,
+		workspacePath: string,
+	) => {
+		const build = () => deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspaceId, workspacePath);
+		return operation ? operation.measureAsynchronousStage("workspace_payload_build", build) : build();
+	};
 	let taskVisualizationArtifactService: TaskVisualizationArtifactService | null = null;
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const acceptedEdgeBySession = new Map<string, string | null>();
@@ -223,15 +251,28 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				nativeAgentResponseAcceptedUserInputEventId: observation.nativeAgentResponseAcceptedUserInputEventId,
 			});
 		},
+		onPromptSubmissionAcceptanceReconciliation: (sessionId, workspaceId, result) => {
+			terminalManagersByWorkspaceId
+				.get(workspaceId)
+				?.reconcileAgentConversationPromptSubmissionAcceptance(sessionId, result);
+		},
 		onAccepted: async (observation) => {
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
-			if (!manager || !observation.runtimeSessionIncarnationId || !observation.eventId) return;
+			if (!manager || !observation.runtimeSessionIncarnationId || !observation.eventId) return false;
 			const before = manager.getSummary(observation.conversationSessionId);
 			if (
 				before?.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId ||
 				before.agentNativeConversationSessionIdentity?.nativeSessionId !== observation.nativeSessionId
 			)
-				return;
+				return false;
+			const candidate = before.agentConversationPromptSubmissionAcceptance;
+			if (
+				candidate &&
+				candidate.status !== "accepted" &&
+				(candidate.attemptedAtMs !== observation.observedSubmissionAttemptedAtMs ||
+					candidate.submissionId !== observation.observedSubmissionId)
+			)
+				return false;
 			if (before.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) {
 				const workspace = await loadWorkspaceContextById(observation.workspaceId);
 				if (!workspace) throw new Error("原生输入已接受，但暂时无法定位主会话交接工作区");
@@ -264,6 +305,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					summary: confirmed,
 					submittedPromptText: observation.submittedPromptText,
 				});
+			return confirmed !== null;
 		},
 		onReadFailed: (error, context) =>
 			logAgentSessionRetentionWarning(
@@ -361,14 +403,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 	});
 
-	const sendSerializedRuntimeStateMessage = (client: WebSocket, serializedPayload: string) => {
+	const sendSerializedRuntimeStateMessage = (
+		client: WebSocket,
+		serializedPayload: string,
+	): RuntimeStateWebSocketSendOutcome => {
 		if (client.readyState !== WebSocket.OPEN) {
-			return;
+			return "client_not_open";
 		}
 		try {
 			client.send(serializedPayload);
+			return "accepted";
 		} catch {
 			// Ignore websocket write errors; close handlers clean up disconnected sockets.
+			return "threw";
 		}
 	};
 
@@ -398,37 +445,54 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 
 	const broadcastRuntimeProjectsUpdated = async (preferredCurrentProjectId: string | null): Promise<void> => {
 		if (runtimeStateClients.size === 0) {
+			broadcastCostRecorder?.recordBroadcastSkippedWithoutClients("projects_updated");
 			return;
 		}
+		const operation = broadcastCostRecorder?.beginOperation("projects_updated");
+		let outcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
 		projectsBroadcastStartSequenceNumber += 1;
 		const startSequenceNumberOfThisProjectsBroadcast = projectsBroadcastStartSequenceNumber;
 		try {
-			const payload =
-				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
-					preferredCurrentProjectId,
-				);
-			const serializedPayload = JSON.stringify({
+			const payload = await buildProjectsPayloadForStream(operation, preferredCurrentProjectId);
+			const message = {
 				type: "projects_updated",
 				currentProjectId: payload.currentProjectId,
 				projects: payload.projects,
-			} satisfies RuntimeStateStreamProjectsMessage);
+			} satisfies RuntimeStateStreamProjectsMessage;
+			const serializedPayload = operation ? operation.serializePayload(message) : JSON.stringify(message);
 			if (startSequenceNumberOfThisProjectsBroadcast < highestStartSequenceNumberOfCompletedProjectsBroadcast) {
+				outcome = "superseded";
 				return;
 			}
 			highestStartSequenceNumberOfCompletedProjectsBroadcast = startSequenceNumberOfThisProjectsBroadcast;
-			if (serializedPayload === lastBroadcastProjectsPayloadFingerprint) {
+			const matchesPreviousPayload = () => serializedPayload === lastBroadcastProjectsPayloadFingerprint;
+			if (
+				operation
+					? operation.measureSynchronousStage("projects_fingerprint_compare", matchesPreviousPayload)
+					: matchesPreviousPayload()
+			) {
+				outcome = "deduplicated";
 				return;
 			}
-			for (const client of runtimeStateClients) {
-				if (runtimeStateClientsStillAwaitingInitialSnapshotMessage.has(client)) {
-					runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.add(client);
-					continue;
+			const sendToClients = () => {
+				for (const client of runtimeStateClients) {
+					if (runtimeStateClientsStillAwaitingInitialSnapshotMessage.has(client)) {
+						runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.add(client);
+						operation?.recordInitialSnapshotAwaitingClientSkip();
+						continue;
+					}
+					const sendOutcome = sendSerializedRuntimeStateMessage(client, serializedPayload);
+					operation?.recordWebSocketSendOutcome(sendOutcome);
 				}
-				sendSerializedRuntimeStateMessage(client, serializedPayload);
-			}
+			};
+			if (operation) operation.measureSynchronousStage("websocket_send_loop", sendToClients);
+			else sendToClients();
 			lastBroadcastProjectsPayloadFingerprint = serializedPayload;
+			outcome = "completed";
 		} catch {
 			// Ignore transient project summary failures; next update will resync.
+		} finally {
+			operation?.finish(outcome);
 		}
 	};
 
@@ -526,6 +590,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		// 交接 hold 解除会再次发布同一接受事件；解除前不能消耗这个边沿。
 		if (
 			previousEdgeWasObserved &&
+			!accepted?.acceptedByHistoricalReconciliation &&
 			acceptedEdge &&
 			!summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
 			acceptedEdge !== previousEdge &&
@@ -768,26 +833,37 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		void broadcastNotificationLogUpdated(workspaceId);
 		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!clients || clients.size === 0) {
+			broadcastCostRecorder?.recordBroadcastSkippedWithoutClients("workspace_state_updated");
 			return;
 		}
+		const operation = broadcastCostRecorder?.beginOperation("workspace_state_updated");
+		let outcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
 		try {
-			const workspaceState = await deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspaceId, workspacePath);
+			const workspaceState = await buildWorkspacePayloadForStream(operation, workspaceId, workspacePath);
 			const payload: RuntimeStateStreamWorkspaceStateMessage = {
 				type: "workspace_state_updated",
 				workspaceId,
 				workspaceState,
 			};
-			const serializedPayload = JSON.stringify(payload);
-			for (const client of clients) {
-				sendSerializedRuntimeStateMessage(client, serializedPayload);
-			}
+			const serializedPayload = operation ? operation.serializePayload(payload) : JSON.stringify(payload);
+			const sendToClients = () => {
+				for (const client of clients) {
+					const sendOutcome = sendSerializedRuntimeStateMessage(client, serializedPayload);
+					operation?.recordWebSocketSendOutcome(sendOutcome);
+				}
+			};
+			if (operation) operation.measureSynchronousStage("websocket_send_loop", sendToClients);
+			else sendToClients();
 			await workspaceMetadataMonitor.updateWorkspaceState({
 				workspaceId,
 				workspacePath,
 				board: workspaceState.board,
 			});
+			outcome = "completed";
 		} catch {
 			// Ignore transient state read failures; next update will resync.
+		} finally {
+			operation?.finish(outcome);
 		}
 	};
 
@@ -1065,6 +1141,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			// 其余全局广播（通知 / MCP auth / Cline 会话上下文）不改 currentProjectId，照常即时送达。
 			runtimeStateClientsStillAwaitingInitialSnapshotMessage.add(client);
 			let monitorWorkspaceId: string | null = null;
+			const operation = broadcastCostRecorder?.beginOperation("initial_snapshot");
+			let snapshotOutcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
 
 			try {
 				let projectsPayload: {
@@ -1076,19 +1154,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				if (workspace.status === "available") {
 					monitorWorkspaceId = workspace.projectId;
 					[projectsPayload, workspaceState] = await Promise.all([
-						deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(workspace.projectId),
-						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.projectId, workspace.workspacePath),
+						buildProjectsPayloadForStream(operation, workspace.projectId),
+						buildWorkspacePayloadForStream(operation, workspace.projectId, workspace.workspacePath),
 					]);
 				} else {
-					projectsPayload = await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
-						workspace.projectId,
-					);
+					projectsPayload = await buildProjectsPayloadForStream(operation, workspace.projectId);
 					workspaceState = null;
 					workspaceMetadata = null;
 				}
 				// 聚合全部 workspace 的通知 feed，随首帧快照下发（铃铛跨 repo）。独立于当前连接的 workspace scope。
 				const notificationLog = await buildAggregatedNotificationFeed();
 				if (client.readyState !== WebSocket.OPEN) {
+					snapshotOutcome = "client_closed";
 					cleanupRuntimeStateClient(client);
 					return;
 				}
@@ -1102,7 +1179,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
 					});
 				}
-				sendRuntimeStateMessage(client, {
+				const snapshotMessage = {
 					type: "snapshot",
 					currentProjectId: projectsPayload.currentProjectId,
 					projects: projectsPayload.projects,
@@ -1110,7 +1187,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceMetadata,
 					clineSessionContextVersion,
 					notificationLog,
-				} satisfies RuntimeStateStreamSnapshotMessage);
+				} satisfies RuntimeStateStreamSnapshotMessage;
+				const serializedSnapshot = operation
+					? operation.serializePayload(snapshotMessage)
+					: JSON.stringify(snapshotMessage);
+				const sendSnapshot = () => {
+					const sendOutcome = sendSerializedRuntimeStateMessage(client, serializedSnapshot);
+					operation?.recordWebSocketSendOutcome(sendOutcome);
+				};
+				if (operation) operation.measureSynchronousStage("websocket_send_loop", sendSnapshot);
+				else sendSnapshot();
+				snapshotOutcome = "completed";
+				operation?.finish(snapshotOutcome);
 				releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
 
 				if (client.readyState !== WebSocket.OPEN) {
@@ -1205,6 +1293,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					type: "error",
 					message,
 				} satisfies RuntimeStateStreamErrorMessage);
+			} finally {
+				operation?.finish(snapshotOutcome);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1329,6 +1419,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastQueuedTaskPromptDeliveriesUpdated,
 		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
+			broadcastCostRecorder?.close();
 			unsubscribePromptLibraryChanges();
 			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {

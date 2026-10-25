@@ -154,6 +154,7 @@ async function setup() {
 		isTaskSessionAutomaticContinuationSuppressed: () => false,
 		getAwaitingDispatchedBackgroundWork: () => ({ parked: false, label: null, sinceMs: null }),
 		resolveTaskTerminalInputBoxOccupancy: vi.fn(),
+		getTaskTerminalInputSideMutationSnapshot: () => null,
 		forceStopTaskSession: vi.fn(),
 		applyAgentNativeConversationSessionIdentity: vi.fn(),
 		publishRvfAutomaticCloseoutPaused: vi.fn(),

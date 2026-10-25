@@ -1060,6 +1060,46 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	eventId: z.string().min(1).optional(),
 	nativeSessionId: z.string().min(1).optional(),
 	runtimeSessionIncarnationId: z.string().min(1),
+	submissionId: z.string().min(1).optional(),
+	acceptedByHistoricalReconciliation: z.boolean().optional(),
+	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
+	submittedPromptSha256: z.string().optional(),
+	predecessorAcceptedEventId: z.string().optional(),
+	verification: z
+		.object({
+			checkedAtMs: z.number(),
+			nextCheckAtMs: z.number().nullable(),
+			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
+			reason: z.enum([
+				"scanning_native_transcript",
+				"native_evidence_unavailable",
+				"no_matching_native_message",
+				"ambiguous_native_messages",
+				"native_acceptance_verified",
+				"native_identity_changed",
+			]),
+			transcriptCursor: z
+				.object({
+					fileIdentity: z.string(),
+					nextByteOffset: z.number().int().nonnegative(),
+					lastObservedFileSize: z.number().int().nonnegative(),
+					verifiedSessionMetadata: z.boolean(),
+					skippingOversizedRecord: z.boolean(),
+				})
+				.optional(),
+			matchingNativeMessages: z
+				.array(
+					z.object({
+						eventId: z.string(),
+						nativeTurnId: z.string(),
+						nativeItemId: z.string(),
+						acceptedAtMs: z.number(),
+					}),
+				)
+				.max(2)
+				.optional(),
+		})
+		.optional(),
 });
 export type RuntimeAgentConversationPromptSubmissionAcceptance = z.infer<
 	typeof runtimeAgentConversationPromptSubmissionAcceptanceSchema

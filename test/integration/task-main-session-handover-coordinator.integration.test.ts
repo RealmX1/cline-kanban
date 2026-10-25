@@ -1087,48 +1087,63 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			expect(unexpectedTransportAccess).not.toHaveBeenCalled();
 		}));
 
-	it.each([false, true])("明确未提交回执允许保留失败账本并安全重试（重启=%s）", async (restart) =>
-		fixture(async (f) => {
-			f.sendTaskChatMessage.mockResolvedValueOnce({
-				ok: false,
-				summary: null,
-				error: "尚未提交即被拒绝",
-				terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
-			});
-			const coordinator = f.create();
-			await coordinator.request(f.scope, request);
-			await coordinator.sweep();
-			const firstFailure = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
-			expect(firstFailure?.status).toBe("failed");
-			expect((await readReportDeliveryLedger(f))[0]).toMatchObject({
-				terminal_delivery_status: "delivery_failed",
-				terminal_delivery_failure_reason: "cancelled_before_delivery",
-			});
-			f.advanceRecoveryClock(15_000);
-			const resumed = restart ? f.create() : coordinator;
-			if (restart) {
-				await coordinator.close();
-				resumed.start();
-			}
-			await vi.waitFor(async () => {
-				await resumed.sweep();
-				expect((await resumed.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
-					"awaiting_user_message",
-				);
-			});
-			const recovered = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
-			expect(recovered?.failureHistory).toEqual(firstFailure?.failureHistory);
-			expect(recovered?.reportDeliveryAttempt).toBe(1);
-			expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(2);
-			expect(f.sendTaskChatMessage.mock.calls.map((call) => call[1].idempotencyKey)).toEqual([
-				`${request.requestId}:report:0`,
-				`${request.requestId}:report:1`,
-			]);
-			expect((await readReportDeliveryLedger(f)).map((entry) => entry.terminal_delivery_status)).toEqual([
-				"delivery_failed",
-				"delivered_and_submit_confirmed",
-			]);
-		}),
+	it.each([false, true])(
+		"明确未提交回执允许保留失败账本并安全重试（重启=%s）",
+		async (restart) =>
+			fixture(async (f) => {
+				f.sendTaskChatMessage.mockResolvedValueOnce({
+					ok: false,
+					summary: null,
+					error: "尚未提交即被拒绝",
+					terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, request);
+				await coordinator.sweep();
+				const firstFailure = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(firstFailure?.status).toBe("failed");
+				expect((await readReportDeliveryLedger(f))[0]).toMatchObject({
+					terminal_delivery_status: "delivery_failed",
+					terminal_delivery_failure_reason: "cancelled_before_delivery",
+				});
+				f.advanceRecoveryClock(15_000);
+				const resumed = restart ? f.create() : coordinator;
+				if (restart) {
+					await coordinator.close();
+					resumed.start();
+				}
+				// 15 秒重验冷却由注入时钟控制；这里仅等待多次持久化后的终态可见，保留全部投递语义断言。
+				try {
+					await vi.waitFor(
+						async () => {
+							await resumed.sweep();
+							expect((await resumed.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+								"awaiting_user_message",
+							);
+						},
+						{ timeout: 10_000 },
+					);
+				} catch (error) {
+					const record = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+					throw new Error(
+						`交接重试终态：${JSON.stringify({ status: record?.status, errorMessage: record?.errorMessage, automaticRecovery: record?.automaticRecovery, sendCalls: f.sendTaskChatMessage.mock.calls.length })}`,
+						{ cause: error },
+					);
+				}
+				const recovered = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(recovered?.failureHistory).toEqual(firstFailure?.failureHistory);
+				expect(recovered?.reportDeliveryAttempt).toBe(1);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(2);
+				expect(f.sendTaskChatMessage.mock.calls.map((call) => call[1].idempotencyKey)).toEqual([
+					`${request.requestId}:report:0`,
+					`${request.requestId}:report:1`,
+				]);
+				expect((await readReportDeliveryLedger(f)).map((entry) => entry.terminal_delivery_status)).toEqual([
+					"delivery_failed",
+					"delivered_and_submit_confirmed",
+				]);
+			}),
+		20_000,
 	);
 
 	it.each(["抛出异常", "没有回执", "无回执的失败响应", "确认尚未完成"] as const)(

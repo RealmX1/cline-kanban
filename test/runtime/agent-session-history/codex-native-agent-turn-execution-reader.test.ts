@@ -103,8 +103,13 @@ describe("Codex 轻量原生回合执行状态", () => {
 				?.executionStatus,
 		).toBe(expected);
 	});
-	it("首次基线及超预算消息仍输出状态，不初始化接受游标", async () => {
+	it("首次超预算建立独立接受基线且不重放历史，新增输入只消费一次并始终独立输出执行状态", async () => {
 		const normal = request.getMockImplementation();
+		const overBudgetUserInputItems = Array.from({ length: 600 }, (_, index) => ({
+			id: String(index),
+			type: "userMessage",
+			content: [{ type: "text", text: "历史输入" }],
+		}));
 		request.mockImplementation(async (method, parameters) =>
 			method === "thread/turns/list" && parameters.itemsView === "full"
 				? {
@@ -112,21 +117,64 @@ describe("Codex 轻量原生回合执行状态", () => {
 							{
 								id: "current",
 								status: "inProgress",
-								items: Array.from({ length: 600 }, (_, index) => ({ id: String(index), type: "userMessage" })),
+								items: overBudgetUserInputItems,
 							},
 						],
 					}
 				: normal?.(method, parameters),
 		);
-		const result = await readNativeAgentConversationActivity({
+		const baselineObservation = await readNativeAgentConversationActivity({
 			workspaceId: "isolated",
 			summary: summary(),
 			cursor: null,
 			observedAtMs: NOW,
 		});
-		expect(result?.events).toEqual([]);
-		expect(result?.cursor).toBeNull();
-		expect(result?.codexNativeAgentTurnExecution?.executionStatus).toBe("running");
+		expect(baselineObservation?.events).toEqual([]);
+		expect(baselineObservation?.cursor).toMatchObject({
+			transport: "codex_control",
+			activityProjectionWasOverBudget: true,
+			predecessorTurnId: "current",
+			lastAcceptedUserInputItemId: "599",
+		});
+		expect(baselineObservation?.codexNativeAgentTurnExecution).toMatchObject({
+			executionStatus: "running",
+			observedAtMs: NOW,
+		});
+		overBudgetUserInputItems.push({
+			id: "appended-input",
+			type: "userMessage",
+			content: [{ type: "text", text: "追加输入" }],
+		});
+		const appendedInputObservation = await readNativeAgentConversationActivity({
+			workspaceId: "isolated",
+			summary: summary(),
+			cursor: baselineObservation?.cursor ?? null,
+			observedAtMs: NOW + 1_000,
+		});
+		expect(appendedInputObservation?.events).toEqual([
+			expect.objectContaining({
+				eventId: "codex:native:current:appended-input",
+				activityKind: "accepted_user_input",
+				evidenceKind: "native_user_prompt_acceptance",
+				submittedPromptText: "追加输入",
+			}),
+		]);
+		expect(appendedInputObservation?.cursor).toMatchObject({ lastAcceptedUserInputItemId: "appended-input" });
+		expect(appendedInputObservation?.codexNativeAgentTurnExecution).toMatchObject({
+			executionStatus: "running",
+			observedAtMs: NOW + 1_000,
+		});
+		const unchangedObservation = await readNativeAgentConversationActivity({
+			workspaceId: "isolated",
+			summary: summary(),
+			cursor: appendedInputObservation?.cursor ?? null,
+			observedAtMs: NOW + 2_000,
+		});
+		expect(unchangedObservation?.events).toEqual([]);
+		expect(unchangedObservation?.codexNativeAgentTurnExecution).toMatchObject({
+			executionStatus: "running",
+			observedAtMs: NOW + 2_000,
+		});
 	});
 	it("消息查询失败不吞掉已经取得的原生执行证明", async () => {
 		const normal = request.getMockImplementation();
