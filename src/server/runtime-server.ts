@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
+import { TRPCError } from "@trpc/server";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import {
@@ -112,6 +113,8 @@ import {
 	createTaskLookupConversationService,
 	TASK_LOOKUP_INSTRUCTION_VERSION,
 } from "../task-indexing-support/task-lookup-conversation-service";
+import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
+import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -281,6 +284,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
+	const taskVisualizationArtifactApi = new TaskVisualizationArtifactService({
+		resolveWorkspaceScope: async (workspaceId) => {
+			const workspace = await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(workspaceId);
+			return workspace ? { workspaceId, workspacePath: workspace.repoPath } : null;
+		},
+		assertTaskMayPublish: async (scope, taskId) => {
+			const board = await loadWorkspaceBoardById(scope.workspaceId);
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === taskId));
+			if (!column) throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在，只允许读取已有可视化。" });
+			if (column.id === "trash")
+				throw new TRPCError({ code: "FORBIDDEN", message: "任务已结束，只允许读取已有可视化。" });
+		},
+		onArtifactsUpdated: (workspaceId, taskId) =>
+			deps.runtimeStateHub.broadcastTaskVisualizationArtifactsUpdated?.(workspaceId, taskId),
+		warn: deps.warn,
+	});
+	deps.runtimeStateHub.attachTaskVisualizationArtifactService?.(taskVisualizationArtifactApi);
 	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
 		({ workspaceId, summary, submittedPromptText }) => {
 			promptDraftUsageService.notifyUserPromptSubmitted({
@@ -1074,6 +1094,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 			}),
 			exploratoryApi,
+			taskVisualizationArtifactApi,
 		};
 	};
 
@@ -1106,6 +1127,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const tlsConfig = getKanbanRuntimeTls();
 	const requestHandler = async (req: IncomingMessage, res: import("node:http").ServerResponse) => {
 		try {
+			// 内容仅凭单产物只读 capability 访问；opaque sandbox 的 Origin:null 不进入控制面门禁。
+			if (await handleTaskVisualizationContentHttpRequest(req, res, taskVisualizationArtifactApi)) return;
 			if (handleHttpRequest(req, res).end) {
 				return;
 			}
@@ -1319,6 +1342,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const closeRuntimeServerResources = async (): Promise<void> => {
+		await taskVisualizationArtifactApi.stop();
 		await taskLookupConversationApi.close();
 		await taskIndexingSupportApi.close();
 		await taskMainSessionHandoverApi.close();
@@ -1375,6 +1399,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			server.once("error", rejectListen);
 			server.listen(getKanbanRuntimePort(), getKanbanRuntimeHost(), () => {
 				server.off("error", rejectListen);
+				taskVisualizationArtifactApi.startRecovery();
 				resolveListen();
 			});
 		});
