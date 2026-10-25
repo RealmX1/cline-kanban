@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import {
 	buildCodexConversationStorageEnvironment,
 	resolveMigratedCodexConversationHome,
@@ -43,14 +44,15 @@ export async function withCodexAppServerRequestConnection<T>(
 			),
 		);
 	// 这是本次操作自己的 stdio 子进程，不连接或停止共享 daemon。它只读取/分支原生历史，绝不 turn/start。
+	let environment = {
+		...(input.environment ?? process.env),
+		...(home ? buildCodexConversationStorageEnvironment(home) : {}),
+	};
+	// 显式历史归属的运行时 helper 使用独立配置副本；原生隔离探针可直接持有其自行创建的测试 writer。
+	if (home) environment = await prepareAuxiliaryCodexConfigurationEnvironment(environment, input.workingDirectory);
 	const child = spawn(input.binary ?? "codex", [...(input.argumentsBeforeSubcommand ?? []), "app-server", "--stdio"], {
 		cwd: input.workingDirectory,
-		env: {
-			...(input.environment ?? process.env),
-			...(input.codexConversationStorageHomeDirectoryPath
-				? buildCodexConversationStorageEnvironment(input.codexConversationStorageHomeDirectoryPath)
-				: {}),
-		},
+		env: environment,
 		stdio: ["pipe", "pipe", "pipe"],
 		windowsHide: true,
 	});

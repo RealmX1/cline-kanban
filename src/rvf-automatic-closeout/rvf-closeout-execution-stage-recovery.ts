@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { z } from "zod";
+import { verifyCodexConfigurationExecutionClosure } from "../codex-configuration-sync/codex-configuration-execution-closure";
+import {
+	configurationDigest,
+	projectCodexConfigurationFields,
+} from "../codex-configuration-sync/codex-configuration-field-projection";
+import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { assertCodexConfigurationWriterBindingIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type RvfAutomaticCloseoutExecutionResultReportRequest,
@@ -37,6 +44,7 @@ import {
 import {
 	appendRvfCloseoutSkillEvidence,
 	captureRvfCloseoutAcceptedSkillSnapshot,
+	readRvfCloseoutSkillSnapshots,
 } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
 import {
@@ -793,6 +801,52 @@ export async function claimRvfCloseoutExecutionStage(
 				runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? "",
 				claimedAt: Date.now(),
 				status: "claimed" as const,
+				...(summary.codexConfigurationWriterBinding
+					? {
+							codexConfigurationExecutionBinding: await (async () => {
+								const binding = summary.codexConfigurationWriterBinding;
+								if (!binding) throw new Error("阶段配置绑定发生变化，等待原绑定恢复。");
+								await assertCodexConfigurationWriterBindingIdentity(binding);
+								const writer = (await readCodexConfigurationSyncStore()).writers[binding.writerId];
+								if (!writer) throw new Error("阶段配置 writer 记录缺失，等待原绑定恢复。");
+								const snapshots = await readRvfCloseoutSkillSnapshots(current);
+								const stageSkillName = input.stage === "land" ? "rvf-land" : "base-branch-sync";
+								const executionClosureSkillPaths: string[] = [];
+								for (const snapshot of snapshots)
+									for (const skill of snapshot.skills) {
+										if (
+											skill.executionClosure &&
+											(skill.referenceName === stageSkillName ||
+												skill.canonicalName.endsWith(`:${stageSkillName}`))
+										)
+											executionClosureSkillPaths.push(
+												await verifyCodexConfigurationExecutionClosure(skill.executionClosure),
+											);
+									}
+								return {
+									writerId: binding.writerId,
+									sharedVersionAtLaunch: binding.launchSharedVersion,
+									nativeBinaryVersion: writer.nativeBinaryVersion,
+									nativeExecutableRealPath: writer.nativeExecutableRealPath,
+									nativeExecutableIdentityDigest: writer.nativeExecutableIdentityDigest,
+									executionClosureSkillPaths: [...new Set(executionClosureSkillPaths)],
+									configurationDigest: configurationDigest(
+										await projectCodexConfigurationFields({
+											home: binding.configurationHomeDirectoryPath,
+											sourceHome: await realpath(binding.sourceHomeDirectoryPath),
+											fileNames: writer.fileNames,
+											onHookDefinitionObservationProblem: () => {
+												throw new Error("阶段配置的 hook 定义暂不可核验，等待定义恢复后重验摘要。");
+											},
+										}),
+									),
+									skillSnapshotSha256s: (current.skillAttachmentEvidenceHistory ?? []).map(
+										(reference) => reference.snapshotSha256,
+									),
+								};
+							})(),
+						}
+					: {}),
 			};
 			return {
 				records: records.map((entry) =>

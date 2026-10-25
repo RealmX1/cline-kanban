@@ -1,5 +1,5 @@
 import type * as FileSystemPromises from "node:fs/promises";
-import { lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,17 +12,23 @@ import {
 import { createTempDir } from "../../utilities/temp-dir";
 
 const snapshotWriteInterception = vi.hoisted(() => ({
-	afterPendingSnapshotWrite: null as ((pendingPath: string) => Promise<void>) | null,
+	beforeExclusiveSnapshotWrite: null as ((pendingPath: string) => Promise<void>) | null,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const fileSystem = await importOriginal<typeof FileSystemPromises>();
 	return {
 		...fileSystem,
 		writeFile: async (...arguments_: Parameters<typeof fileSystem.writeFile>) => {
-			await fileSystem.writeFile(...arguments_);
 			const path = arguments_[0];
-			if (typeof path === "string" && path.endsWith(".pending-write"))
-				await snapshotWriteInterception.afterPendingSnapshotWrite?.(path);
+			const options = arguments_[2];
+			if (
+				typeof path === "string" &&
+				path.endsWith("config.toml") &&
+				typeof options === "object" &&
+				options?.flag === "wx"
+			)
+				await snapshotWriteInterception.beforeExclusiveSnapshotWrite?.(path);
+			await fileSystem.writeFile(...arguments_);
 		},
 	};
 });
@@ -35,7 +41,7 @@ beforeEach(async () => {
 	vi.stubEnv("HOME", fixture.path);
 });
 afterEach(() => {
-	snapshotWriteInterception.afterPendingSnapshotWrite = null;
+	snapshotWriteInterception.beforeExclusiveSnapshotWrite = null;
 	vi.unstubAllEnvs();
 	fixture.cleanup();
 });
@@ -145,14 +151,14 @@ describe("Codex 会话独立目录", () => {
 		});
 		expect(await readFile(join(original, "config.toml"), "utf8")).toBe(configuration);
 	});
-	it("刷新配置快照，拒绝混用另一套账号目录", async () => {
+	it("旧共享配置保持原值，拒绝混用另一套账号目录", async () => {
 		const original = join(fixture.path, ".codex");
 		await mkdir(original);
 		await writeFile(join(original, "config.toml"), 'model="first"');
 		const managed = await prepareManagedCodexConversationStorageHome(original);
 		await writeFile(join(original, "config.toml"), 'model="second"');
 		await prepareManagedCodexConversationStorageHome(original);
-		expect(await readFile(join(managed, "config.toml"), "utf8")).toContain("second");
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toContain("first");
 		await expect(prepareManagedCodexConversationStorageHome(join(fixture.path, "another-account"))).rejects.toThrow(
 			"不能混用账号",
 		);
@@ -202,7 +208,7 @@ describe("Codex 会话独立目录", () => {
 			await writeFile(join(original, configurationFileName), stringify(sourceConfiguration));
 			await prepareManagedCodexConversationStorageHome(original);
 			expect(parse(await readFile(managedConfigurationPath, "utf8"))).toMatchObject({
-				model: "second-model",
+				model: "first-model",
 				hooks: {
 					state: {
 						[managedFileKey]: { trusted_hash: "sha256:confirmed-in-managed-home" },
@@ -293,7 +299,7 @@ describe("Codex 会话独立目录", () => {
 			);
 		},
 	);
-	it("来源明确禁用继续有效，目标的显式未信任记录不被来源信任填满", async () => {
+	it("旧共享目录不再刷新，原生重新启用和显式未信任决定保留", async () => {
 		const original = join(fixture.path, ".codex");
 		await mkdir(original);
 		await writeFile(join(original, "hooks.json"), '{"hooks":{}}');
@@ -311,7 +317,7 @@ describe("Codex 会话独立目录", () => {
 		);
 		await prepareManagedCodexConversationStorageHome(original);
 		const result = parse(await readFile(managedConfigurationPath, "utf8"));
-		expect(result.hooks).toMatchObject({ state: { [managedKey]: { enabled: false }, "local-untrusted-hook": {} } });
+		expect(result.hooks).toMatchObject({ state: { [managedKey]: { enabled: true }, "local-untrusted-hook": {} } });
 		expect((result.hooks as { state: Record<string, unknown> }).state[managedKey]).not.toHaveProperty("trusted_hash");
 	});
 	it("旧内联 profile 的信任确认继续保留，项目路径和插件身份不跨范围映射", async () => {
@@ -347,47 +353,23 @@ describe("Codex 会话独立目录", () => {
 		const managed = await prepareManagedCodexConversationStorageHome(original);
 		const invalidTargetConfiguration = 'model="keep"\n[hooks]\nstate="invalid"\n';
 		await writeFile(join(managed, "config.toml"), invalidTargetConfiguration);
-		await expect(prepareManagedCodexConversationStorageHome(original)).rejects.toThrow("有效的信任记录表");
+		await expect(prepareManagedCodexConversationStorageHome(original)).resolves.toBe(managed);
 		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(invalidTargetConfiguration);
 	});
-	it.for(["single_conflict", "continuous_conflicts"] as const)(
-		"%s：并发原生确认自动补读，持续冲突有界退出且后续启动可恢复",
-		async (conflictKind) => {
-			const original = join(fixture.path, ".codex");
-			await mkdir(original);
-			await writeFile(join(original, "config.toml"), 'model="first"');
-			const managed = await prepareManagedCodexConversationStorageHome(original);
-			const managedConfigurationPath = join(managed, "config.toml");
-			await writeFile(join(original, "config.toml"), 'model="second"');
-			let conflicts = 0;
-			snapshotWriteInterception.afterPendingSnapshotWrite = async () => {
-				if (conflictKind === "single_conflict" && conflicts > 0) return;
-				conflicts += 1;
-				await writeFile(
-					managedConfigurationPath,
-					stringify({
-						model: "first",
-						hooks: { state: { "native-confirmation": { trusted_hash: `sha256:${conflicts}` } } },
-					}),
-				);
-			};
-			if (conflictKind === "continuous_conflicts") {
-				await expect(prepareManagedCodexConversationStorageHome(original)).rejects.toThrow("持续被并发更新");
-				expect(conflicts).toBe(3);
-				expect(parse(await readFile(managedConfigurationPath, "utf8"))).toMatchObject({ model: "first" });
-				expect((await readdir(managed)).filter((name) => name.endsWith(".pending-write"))).toEqual([]);
-				snapshotWriteInterception.afterPendingSnapshotWrite = null;
-				await prepareManagedCodexConversationStorageHome(original);
-			} else {
-				await prepareManagedCodexConversationStorageHome(original);
-				expect(conflicts).toBe(1);
-			}
-			expect(parse(await readFile(managedConfigurationPath, "utf8"))).toMatchObject({
-				model: "second",
-				hooks: { state: { "native-confirmation": { trusted_hash: `sha256:${conflicts}` } } },
-			});
-		},
-	);
+	it("初始化最终写入窗口中原生先保存配置时，排他创建保留原生决定", async () => {
+		const original = join(fixture.path, ".codex");
+		await mkdir(original);
+		await writeFile(join(original, "config.toml"), 'model="source"');
+		const nativeSaved = 'model="native"\n[hooks.state.native]\nenabled=false\n';
+		snapshotWriteInterception.beforeExclusiveSnapshotWrite = async (path) => {
+			if (path.startsWith(original)) return;
+			await writeFile(path, nativeSaved);
+		};
+		const managed = await prepareManagedCodexConversationStorageHome(original);
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(nativeSaved);
+		await prepareManagedCodexConversationStorageHome(original);
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(nativeSaved);
+	});
 	it("旧会话按已保存的转录目录续接，配置中的默认值变化不会把它移走", () => {
 		expect(
 			resolveRecordedCodexConversationHome({

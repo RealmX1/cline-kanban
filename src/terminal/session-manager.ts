@@ -13,6 +13,11 @@ import {
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import {
+	buildCodexConfigurationWriterEnvironment,
+	prepareCodexConfigurationWriterBinding,
+	recordCodexConfigurationWriterLaunchArguments,
+} from "../codex-configuration-sync/codex-configuration-writer-binding";
+import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
 	prepareManagedCodexConversationStorageHome,
@@ -74,6 +79,7 @@ import type {
 	TerminalInputBoxStashOutcome,
 } from "../core/api-contract";
 import { runtimeTaskSessionSummarySchema } from "../core/api-contract";
+import type { CodexConfigurationWriterBinding } from "../core/codex-configuration-sync-contract";
 import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
@@ -5228,6 +5234,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 上面那道前置闸门已经把拒绝态排除干净，这里只剩「按 id」与「cwd-latest」两种。
 		const resumeAddressing = resumeAddressingResolvedBeforeAnyDestructiveStep;
 		let launch: PreparedAgentLaunch;
+		const runtimeSessionIncarnationId = randomUUID();
+		let codexConfigurationWriterBinding: CodexConfigurationWriterBinding | null = null;
+		const codexConversationStorageHomeDirectoryPath =
+			request.agentId === "codex" ? request.env?.CODEX_HOME : undefined;
 		let kanbanAssignedAgentNativeConversationSessionIdForFreshStart: string | undefined;
 		try {
 			await materializeTaskAgentSessionForExecutionWorkingDirectory({
@@ -5237,6 +5247,30 @@ export class TerminalSessionManager implements TerminalSessionService {
 			});
 			kanbanAssignedAgentNativeConversationSessionIdForFreshStart =
 				await this.establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(entry, request);
+			if (
+				request.agentId === "codex" &&
+				request.workspaceId &&
+				this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions
+			) {
+				codexConfigurationWriterBinding = await prepareCodexConfigurationWriterBinding({
+					purpose: "native_session",
+					storageHome: request.env?.CODEX_HOME ?? resolveUserCodexHomeDirectoryPath(),
+					sqliteHome: request.env?.CODEX_SQLITE_HOME,
+					workspaceId: request.workspaceId,
+					conversationSessionId: request.taskId,
+					runtimeSessionIncarnationId,
+					previousBinding:
+						request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt
+							? entry.summary.codexConfigurationWriterBinding
+							: null,
+					binary: request.binary,
+					environment: { ...process.env, ...request.env },
+				});
+				request = {
+					...request,
+					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
+				};
+			}
 			launch = await prepareAgentLaunch({
 				taskId: request.taskId,
 				taskConversationSessionMetadata: taskConversationSessionMetadataForLaunch,
@@ -5275,6 +5309,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					"forked_from_main_current_turn",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
+			if (codexConfigurationWriterBinding)
+				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 			if (
@@ -5306,7 +5342,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 		};
 		const env = buildTerminalEnvironment({ forceColor: true }, request.env, launch.env, taskContextEnv);
-		const runtimeSessionIncarnationId = randomUUID();
 		env.KANBAN_HOOK_RUNTIME_SESSION_INCARNATION_ID = runtimeSessionIncarnationId;
 		let codexControlHost: Awaited<ReturnType<typeof prepareCodexNativeSessionControlHostLaunch>> = null;
 		try {
@@ -5694,8 +5729,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
 			runtimeSessionIncarnationId,
 			codexNativeSessionControlEndpoint: codexControlHost?.endpoint ?? null,
+			codexConfigurationWriterBinding,
 			agentConversationPromptSubmissionAcceptance: null,
-			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath: request.env?.CODEX_HOME } : {}),
+			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath } : {}),
 			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
 			// 或换模型后整体替换」。未接入的 agent 返回 null——必须显式写 null 而不是省略，否则同一任务
 			// 从 claude 换成别的 agent 后，旧快照会留在 summary 里被误当成当前会话的启动参数。

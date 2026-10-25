@@ -102,6 +102,7 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	broadcastCodexConfigurationSyncUpdated?: (revision: number) => void;
 	broadcastDailyWorkProgressStatisticsUpdated?: (revision: number) => void;
 	attachTaskVisualizationArtifactService?: (service: TaskVisualizationArtifactService) => void;
 	broadcastTaskVisualizationArtifactsUpdated?: (workspaceId: string, taskId: string) => void;
@@ -1391,6 +1392,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastTaskLookupConversationUpdated: (conversationId, revision) => {
 			for (const client of runtimeStateClients)
 				sendRuntimeStateMessage(client, { type: "task_lookup_conversation_updated", conversationId, revision });
+		},
+		broadcastCodexConfigurationSyncUpdated: (revision) => {
+			for (const client of runtimeStateClients)
+				sendRuntimeStateMessage(client, { type: "codex_configuration_sync_updated", revision });
 		},
 		broadcastTaskChatCleared,
 		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,

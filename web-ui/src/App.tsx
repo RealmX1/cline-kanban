@@ -12,6 +12,7 @@ import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoar
 import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
+import { CodexConfigurationSyncNotice } from "@/components/codex-configuration-sync";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import {
 	DailyWorkProgressExpandedRegion,
@@ -1728,6 +1729,10 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+						<CodexConfigurationSyncNotice
+							workspaceId={currentProjectId}
+							onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
+						/>
 						<div
 							hidden={
 								mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded

@@ -16,6 +16,7 @@ import {
 	createInMemoryClineTaskSessionService,
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
+import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
@@ -450,6 +451,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return Array.from(summariesByTaskId.values());
 	};
+	const codexConfigurationSyncService = createCodexConfigurationSyncService({
+		listSessions: () =>
+			deps.workspaceRegistry
+				.listManagedWorkspaces()
+				.flatMap(({ workspaceId, terminalManager }) =>
+					terminalManager.listSummaries().map((summary) => ({ workspaceId, summary })),
+				),
+		onUpdated: (revision) => deps.runtimeStateHub.broadcastCodexConfigurationSyncUpdated?.(revision),
+	});
+	codexConfigurationSyncService.start();
 	// 「停止生成响应后固定宽限期」回收调度器。放在这里是因为三种 transport 的服务持有者都在本作用域：
 	// listProjectRuntimeSessionSummaries 已经把三条 summary 流合并成一个查询面，正是陈旧定时器防护
 	// 需要的「当前这个 task 的 summary 到底长什么样」。
@@ -983,6 +994,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
+			codexConfigurationSyncApi: codexConfigurationSyncService,
 			dailyWorkProgressStatisticsApi: dailyWorkProgressStatisticsService,
 			taskIndexingSupportApi,
 			taskLookupConversationApi,
@@ -1399,6 +1411,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const closeRuntimeServerResources = async (): Promise<void> => {
 		await taskVisualizationArtifactApi.stop();
 		await taskLookupConversationApi.close();
+		await codexConfigurationSyncService.close();
 		await taskIndexingSupportApi.close();
 		await taskMainSessionHandoverApi.close();
 		await rvfAutomaticCloseoutApi.stop();
