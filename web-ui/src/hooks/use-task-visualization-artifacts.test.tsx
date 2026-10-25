@@ -35,8 +35,13 @@ let detachSender: () => void;
 const outgoing: RuntimeStateStreamClientMessage[] = [];
 const failedFrameCounts: number[] = [];
 const opened = vi.fn();
-function Harness({ workspaceId = "workspace-a", taskId = "task-a" }) {
-	latest = useTaskVisualizationArtifacts({ workspaceId, taskId, onAutomaticPreview: opened });
+function Harness({ workspaceId = "workspace-a", taskId = "task-a", foregroundEligible = true }) {
+	latest = useTaskVisualizationArtifacts({
+		workspaceId,
+		taskId,
+		onAutomaticPreview: opened,
+		isAutomaticPreviewForegroundEligible: foregroundEligible,
+	});
 	return (
 		<div>
 			{latest.artifacts.map((entry) => entry.title).join(",")}
@@ -86,6 +91,29 @@ afterEach(async () => {
 	detachSender();
 	container.remove();
 	vi.restoreAllMocks();
+});
+
+it("切到其他前台视图只暂停自动投递，手动阅读的 iframe 与选择保持", async () => {
+	await act(async () => root.render(<Harness />));
+	await act(async () => latest.selectArtifact(artifact));
+	const selection = latest.selection;
+	const frame = container.querySelector("iframe");
+	await act(async () => root.render(<Harness foregroundEligible={false} />));
+	const message = offer();
+	await act(async () => deliverTaskVisualizationStreamMessage(message));
+	expect(latest.selection).toBe(selection);
+	expect(container.querySelector("iframe")).toBe(frame);
+	expect(outgoing).toContainEqual(
+		expect.objectContaining({
+			type: "acknowledge_task_visualization_preview",
+			outcome: "declined",
+			deliveryAttemptId: message.deliveryAttemptId,
+		}),
+	);
+	await act(async () => root.render(<Harness />));
+	expect(latest.selection).toBe(selection);
+	expect(container.querySelector("iframe")).toBe(frame);
+	expect(opened).not.toHaveBeenCalled();
 });
 
 it("跨项目切换清空旧清单，不接收其他项目同号任务的自动预览", async () => {

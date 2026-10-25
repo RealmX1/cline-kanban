@@ -9,7 +9,7 @@
 // docs/exploratory-mode-host-integration.md §3b）。所以它必须是一次明确的点击，
 // 按钮上写明代价，绝不做成自动刷新。
 
-import { ChevronDown, ChevronRight, GitBranch, RefreshCw, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch, Maximize2, RefreshCw, TriangleAlert } from "lucide-react";
 import { type ReactElement, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import {
@@ -19,6 +19,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
+import { ExpandedForegroundViewSurface } from "@/expanded-foreground-view/expanded-foreground-view-surface";
+import { useExpandedForegroundViewSurface } from "@/expanded-foreground-view/use-expanded-foreground-view-surface";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { requestExplorationThreadGraphMaintenance } from "@/runtime/exploration-thread-graph-query";
 
@@ -48,13 +50,32 @@ export function ExplorationThreadGraphPanel({
 	data,
 	initiallyExpanded = false,
 	isTaskAgentExecutionDisabled = false,
+	taskIncarnationCreatedAtEpochMs,
+	detachedForeground = false,
+	onRefresh,
+	readError,
 }: {
 	workspaceId: string;
 	explorationId: string;
 	data: ExplorationThreadGraphData;
 	initiallyExpanded?: boolean;
 	isTaskAgentExecutionDisabled?: boolean;
+	taskIncarnationCreatedAtEpochMs?: number;
+	detachedForeground?: boolean;
+	onRefresh?: () => void;
+	readError?: string | null;
 }): ReactElement {
+	const surface = useExpandedForegroundViewSurface(
+		taskIncarnationCreatedAtEpochMs === undefined
+			? null
+			: {
+					viewKind: "exploration_thread_graph",
+					workspaceId,
+					taskId: explorationId,
+					taskIncarnationCreatedAtEpochMs,
+				},
+		detachedForeground,
+	);
 	const [open, setOpen] = useState(initiallyExpanded);
 	const [expandedTurnRowIds, setExpandedTurnRowIds] = useState<ReadonlySet<string>>(new Set());
 	const [isMaintenancePending, setIsMaintenancePending] = useState(false);
@@ -114,37 +135,57 @@ export function ExplorationThreadGraphPanel({
 	};
 
 	return (
-		<div className="flex shrink-0 flex-col border-t border-border bg-surface-1">
-			<button
-				type="button"
-				onClick={() => setOpen((current) => !current)}
-				className="flex h-8 shrink-0 items-center gap-1.5 px-2 text-left hover:bg-surface-3"
-				aria-expanded={open}
-			>
-				{open ? (
-					<ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-				) : (
-					<ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-				)}
-				<GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="text-xs font-medium">探索地图</span>
-				{turnRows.length > 0 ? (
-					<span className="text-[11px] text-muted-foreground">
-						{threadCount} 条线 · {turnRows.length} 轮
-					</span>
-				) : null}
-				{view?.staleReason ? (
-					<span
-						className="ml-auto rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400"
-						title={STALE_REASON_DISPLAY[view.staleReason] ?? "图已过期"}
+		<ExpandedForegroundViewSurface
+			controller={surface}
+			title="探索地图"
+			className="flex shrink-0 flex-col border-t border-border bg-surface-1"
+		>
+			<div className="flex shrink-0 items-center">
+				<button
+					type="button"
+					onClick={() => setOpen((current) => !current)}
+					className="flex h-8 min-w-0 flex-1 items-center gap-1.5 px-2 text-left hover:bg-surface-3"
+					aria-expanded={open}
+				>
+					{open ? (
+						<ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+					) : (
+						<ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+					)}
+					<GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+					<span className="text-xs font-medium">探索地图</span>
+					{turnRows.length > 0 ? (
+						<span className="text-[11px] text-muted-foreground">
+							{threadCount} 条线 · {turnRows.length} 轮
+						</span>
+					) : null}
+					{view?.staleReason ? (
+						<span
+							className="ml-auto rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400"
+							title={STALE_REASON_DISPLAY[view.staleReason] ?? "图已过期"}
+						>
+							待更新
+						</span>
+					) : null}
+				</button>
+				{!surface.isExpanded ? (
+					<Button
+						variant="ghost"
+						size="sm"
+						aria-label="展开探索地图"
+						className="max-md:min-h-11 max-md:min-w-11"
+						onClick={() => {
+							setOpen(true);
+							surface.open();
+						}}
 					>
-						待更新
-					</span>
+						<Maximize2 size={14} />
+					</Button>
 				) : null}
-			</button>
+			</div>
 
 			{open ? (
-				<div className="flex min-h-0 flex-col">
+				<div className={cn("flex min-h-0 flex-col", surface.isExpanded && "flex-1")}>
 					<div className="flex shrink-0 items-center gap-2 px-2 pb-1.5">
 						<span className="text-[11px] text-muted-foreground">
 							{data.queryPhase === "loading" && view === null
@@ -166,6 +207,16 @@ export function ExplorationThreadGraphPanel({
 							立即维护
 						</Button>
 					</div>
+					{readError || data.queryPhase === "error" ? (
+						<div role="alert" className="px-2 py-2 text-xs text-status-red">
+							{readError ?? "探索地图读取失败。"}
+							{onRefresh ? (
+								<Button variant="ghost" size="sm" onClick={onRefresh}>
+									重试读取
+								</Button>
+							) : null}
+						</div>
+					) : null}
 
 					{data.turnSourceUnavailableSessionIds.length > 0 ? (
 						<div className="flex shrink-0 items-center gap-1.5 px-2 pb-1.5 text-[11px] text-amber-400">
@@ -181,7 +232,7 @@ export function ExplorationThreadGraphPanel({
 								: "还没有归位的轮次——探索几轮之后它会自己长出来。"}
 						</div>
 					) : (
-						<div className="max-h-80 min-h-0 overflow-y-auto">
+						<div className={cn("min-h-0 overflow-auto", surface.isExpanded ? "flex-1" : "max-h-80")}>
 							{turnRows.map((turnRow, rowIndex) => {
 								const isExpanded = expandedTurnRowIds.has(turnRow.turnRowId);
 								const threadTitle = turnRow.threadId === null ? null : threadTitleById.get(turnRow.threadId);
@@ -265,6 +316,6 @@ export function ExplorationThreadGraphPanel({
 					)}
 				</div>
 			) : null}
-		</div>
+		</ExpandedForegroundViewSurface>
 	);
 }

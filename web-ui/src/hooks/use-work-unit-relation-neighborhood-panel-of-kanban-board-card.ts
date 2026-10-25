@@ -84,8 +84,12 @@ type TaggedRelationNeighborhoodReadOutcome =
 			relationNeighborhoodReadFailure: WorkUnitRelationNeighborhoodSummaryReadFailure;
 	  };
 
-function buildRelationNeighborhoodReadSubjectKey(workspaceId: string, kanbanBoardCardTaskId: string): string {
-	return `${workspaceId}\u0000${kanbanBoardCardTaskId}`;
+function buildRelationNeighborhoodReadSubjectKey(
+	workspaceId: string,
+	kanbanBoardCardTaskId: string,
+	incarnation?: number,
+): string {
+	return `${workspaceId}\u0000${kanbanBoardCardTaskId}\u0000${incarnation ?? "current"}`;
 }
 
 export function describeRecordedRelationPresentationMutePreferenceWriteFailureForToast(
@@ -127,8 +131,9 @@ export function describeInterWorkUnitRelationAssertionWriteFailureForUser(
 export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string | null;
+	taskIncarnationCreatedAtEpochMs?: number;
 }): WorkUnitRelationNeighborhoodPanelController {
-	const { workspaceId, kanbanBoardCardTaskId } = input;
+	const { workspaceId, kanbanBoardCardTaskId, taskIncarnationCreatedAtEpochMs } = input;
 	const crossProjectTaskOpenHost = useCrossProjectRecentlyActiveTaskSwitcherHostContext();
 	const [taggedReadOutcome, setTaggedReadOutcome] = useState<TaggedRelationNeighborhoodReadOutcome | null>(null);
 	const [isReadRequestInFlight, setIsReadRequestInFlight] = useState(false);
@@ -143,7 +148,7 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 
 	const currentReadSubjectKey =
 		workspaceId && kanbanBoardCardTaskId
-			? buildRelationNeighborhoodReadSubjectKey(workspaceId, kanbanBoardCardTaskId)
+			? buildRelationNeighborhoodReadSubjectKey(workspaceId, kanbanBoardCardTaskId, taskIncarnationCreatedAtEpochMs)
 			: null;
 
 	useEffect(() => {
@@ -151,10 +156,18 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 			setIsReadRequestInFlight(false);
 			return;
 		}
-		const readSubjectKey = buildRelationNeighborhoodReadSubjectKey(workspaceId, kanbanBoardCardTaskId);
+		const readSubjectKey = buildRelationNeighborhoodReadSubjectKey(
+			workspaceId,
+			kanbanBoardCardTaskId,
+			taskIncarnationCreatedAtEpochMs,
+		);
 		let isSupersededByLaterRead = false;
 		setIsReadRequestInFlight(true);
-		fetchWorkUnitRelationNeighborhoodSummaryOfKanbanBoardCard({ workspaceId, kanbanBoardCardTaskId }).then(
+		fetchWorkUnitRelationNeighborhoodSummaryOfKanbanBoardCard({
+			workspaceId,
+			kanbanBoardCardTaskId,
+			...(taskIncarnationCreatedAtEpochMs === undefined ? {} : { taskIncarnationCreatedAtEpochMs }),
+		}).then(
 			(relationNeighborhoodSummary) => {
 				if (isSupersededByLaterRead) {
 					return;
@@ -177,7 +190,12 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 		return () => {
 			isSupersededByLaterRead = true;
 		};
-	}, [workspaceId, kanbanBoardCardTaskId, relationNeighborhoodRefetchRequestSequence]);
+	}, [
+		workspaceId,
+		kanbanBoardCardTaskId,
+		taskIncarnationCreatedAtEpochMs,
+		relationNeighborhoodRefetchRequestSequence,
+	]);
 
 	// 宿主值随通知日志等频繁换引用；这里只依赖项目列表本身。
 	const knownKanbanProjectsFromHost = crossProjectTaskOpenHost?.projects ?? null;

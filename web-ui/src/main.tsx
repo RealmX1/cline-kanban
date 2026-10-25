@@ -7,6 +7,7 @@ import { PasscodeGateProvider } from "@/components/passcode-gate";
 import { TaskVisualizationPreviewPage } from "@/components/task-visualization-preview-page";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UserInterfacePreferenceMigrationConflictNotice } from "@/components/user-interface-preference-migration-conflict-notice";
+import { ExpandedForegroundViewProvider } from "@/expanded-foreground-view/expanded-foreground-view-provider";
 import { isThemeId } from "@/hooks/use-theme";
 import { startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { migrateRenamedLocalStorageKeysIntoCurrentKeys } from "@/storage/legacy-local-storage-key-rename-migration";
@@ -42,7 +43,13 @@ ReactDOM.createRoot(root).render(
 		<TelemetryProvider>
 			<AppErrorBoundary>
 				<TooltipProvider>
-					{window.location.pathname === "/task-visualization-preview" ? <TaskVisualizationPreviewPage /> : <App />}
+					<ExpandedForegroundViewProvider>
+						{window.location.pathname === "/task-visualization-preview" ? (
+							<TaskVisualizationPreviewPage />
+						) : (
+							<App />
+						)}
+					</ExpandedForegroundViewProvider>
 					<UserInterfacePreferenceMigrationConflictNotice />
 					<Toaster
 						theme="dark"

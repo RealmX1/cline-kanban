@@ -14,7 +14,8 @@
 // 维护动作（requestExplorationThreadGraphMaintenance）不在此 hook 内：它会花钱，必须由组件里
 // 一次明确的点击直调 query 层，绝不能被 effect 依赖变化悄悄触发。
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { isTransientForegroundReadFailure } from "@/expanded-foreground-view/use-recoverable-foreground-read";
 import { fetchExplorationThreadGraph } from "@/runtime/exploration-thread-graph-query";
 import type {
 	RuntimeExplorationThreadGraphProjectionView,
@@ -25,6 +26,7 @@ export type ExplorationThreadGraphQueryPhase = "idle" | "loading" | "ready" | "e
 
 export interface ExplorationThreadGraphData {
 	queryPhase: ExplorationThreadGraphQueryPhase;
+	refresh?: () => void;
 	// null = 尚未加载（初始查询未落定且未收到过推送）。空图不是 null——服务端对「还没有任何 turn
 	// 归位」返回的是一张 turnRows 为空的图，两者对用户是不同的事。
 	view: RuntimeExplorationThreadGraphProjectionView | null;
@@ -48,6 +50,8 @@ export function useExplorationThreadGraph(input: {
 	pushedUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
 }): ExplorationThreadGraphData {
 	const { workspaceId, explorationId, refreshKey, pushedUpdate } = input;
+	const [manualRefreshSequence, setManualRefreshSequence] = useState(0);
+	const refresh = useCallback(() => setManualRefreshSequence((value) => value + 1), []);
 	const [data, setData] = useState<ExplorationThreadGraphData>(IDLE_EXPLORATION_THREAD_GRAPH_DATA);
 	// 最近一次「属于当前 exploration」的推送及其到达时刻，用于与在飞查询按时序归并。
 	const latestMatchingPushRef = useRef<{
@@ -88,11 +92,16 @@ export function useExplorationThreadGraph(input: {
 			return;
 		}
 		let cancelled = false;
+		let retryTimer: ReturnType<typeof setTimeout> | undefined;
+		let requestTimeout: ReturnType<typeof setTimeout> | undefined;
+		let requestAbort = new AbortController();
 		const fetchStartedAt = Date.now();
 		setData((current) => ({ ...current, queryPhase: "loading" }));
-		void (async () => {
+		const attempt = async (attemptNumber: number) => {
+			requestAbort = new AbortController();
+			requestTimeout = setTimeout(() => requestAbort.abort(), 8_000);
 			try {
-				const response = await fetchExplorationThreadGraph(workspaceId, explorationId);
+				const response = await fetchExplorationThreadGraph(workspaceId, explorationId, requestAbort.signal);
 				if (cancelled) {
 					return;
 				}
@@ -106,16 +115,32 @@ export function useExplorationThreadGraph(input: {
 					view,
 					turnSourceUnavailableSessionIds: response.turnSourceUnavailableSessionIds,
 				});
-			} catch {
-				if (!cancelled) {
-					setData((current) => ({ ...current, queryPhase: "error" }));
-				}
+			} catch (error) {
+				if (!cancelled && attemptNumber < 2 && isTransientForegroundReadFailure(error))
+					retryTimer = setTimeout(() => void attempt(attemptNumber + 1), attemptNumber === 0 ? 400 : 1_200);
+				else if (!cancelled) setData((current) => ({ ...current, queryPhase: "error" }));
+			} finally {
+				clearTimeout(requestTimeout);
 			}
-		})();
+		};
+		void attempt(0);
 		return () => {
 			cancelled = true;
+			requestAbort.abort();
+			clearTimeout(retryTimer);
+			clearTimeout(requestTimeout);
 		};
-	}, [workspaceId, explorationId, refreshKey]);
-
-	return data;
+	}, [workspaceId, explorationId, refreshKey, manualRefreshSequence]);
+	useEffect(() => {
+		const refreshWhenVisible = () => {
+			if (document.visibilityState === "visible") refresh();
+		};
+		window.addEventListener("online", refreshWhenVisible);
+		document.addEventListener("visibilitychange", refreshWhenVisible);
+		return () => {
+			window.removeEventListener("online", refreshWhenVisible);
+			document.removeEventListener("visibilitychange", refreshWhenVisible);
+		};
+	}, [refresh]);
+	return { ...data, refresh };
 }
