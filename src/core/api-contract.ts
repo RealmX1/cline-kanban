@@ -3056,7 +3056,12 @@ export const runtimeStateStreamPromptLibraryUpdatedMessageSchema = z.object({
 	workspaceId: z.string().nullable(),
 });
 
+export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema = z.object({
+	type: z.literal("daily_work_progress_statistics_updated"),
+	revision: z.number().int().nonnegative(),
+});
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
 	taskVisualizationPreviewRequestedMessageSchema,
 	z.object({
@@ -6413,4 +6418,75 @@ export const runtimeRequestExplorationThreadGraphMaintenanceResponseSchema = z.d
 ]);
 export type RuntimeRequestExplorationThreadGraphMaintenanceResponse = z.infer<
 	typeof runtimeRequestExplorationThreadGraphMaintenanceResponseSchema
+>;
+
+// 今日进展是运行时的只读统计投影；Done 数量不表示部署后验证通过。
+export const runtimeDailyWorkProgressMetricSchema = z.enum(["entered_validation", "entered_done", "human_prompt"]);
+export type RuntimeDailyWorkProgressMetric = z.infer<typeof runtimeDailyWorkProgressMetricSchema>;
+export const runtimeDailyWorkProgressRequestSchema = z.object({
+	workspaceId: z.string().min(1).nullable(),
+	dateKey: z.iso.date(),
+	timeZone: z
+		.string()
+		.max(100)
+		.refine((value) => {
+			try {
+				new Intl.DateTimeFormat("en", { timeZone: value });
+				return true;
+			} catch {
+				return false;
+			}
+		}, "需要有效的 IANA 时区"),
+});
+export type RuntimeDailyWorkProgressRequest = z.infer<typeof runtimeDailyWorkProgressRequestSchema>;
+export const runtimeDailyWorkProgressAchievementSchema = z.object({
+	achievementId: z.string(),
+	metric: runtimeDailyWorkProgressMetricSchema,
+	kind: z.enum(["daily_threshold", "personal_daily_record", "above_seven_day_average"]),
+	value: z.number().nonnegative(),
+	comparisonValue: z.number().nonnegative().nullable(),
+	threshold: z.number().positive().nullable(),
+});
+export type RuntimeDailyWorkProgressAchievement = z.infer<typeof runtimeDailyWorkProgressAchievementSchema>;
+export const runtimeDailyWorkProgressSummarySchema = z.object({
+	revision: z.number().int().nonnegative(),
+	dateKey: z.string(),
+	timeZone: z.string(),
+	workspaceId: z.string().nullable(),
+	projects: z.array(z.object({ workspaceId: z.string(), projectName: z.string() })),
+	metrics: z.array(
+		z.object({
+			metric: runtimeDailyWorkProgressMetricSchema,
+			value: z.number().int().nonnegative(),
+			nextMilestoneValue: z.number().positive().nullable(),
+			historicalDailyRecord: z.number().nonnegative().nullable(),
+			sevenDayAverage: z.number().nonnegative().nullable(),
+			historyStartDate: z.string().nullable(),
+		}),
+	),
+	achievements: z.array(runtimeDailyWorkProgressAchievementSchema),
+	celebrationEligibleAchievementIds: z.array(z.string()),
+	recentAccomplishments: z.array(
+		z.object({
+			workspaceId: z.string(),
+			taskId: z.string(),
+			taskTitle: z.string(),
+			metric: z.enum(["entered_validation", "entered_done"]),
+			occurredAtEpochMs: z.number(),
+		}),
+	),
+	coverage: z.object({ status: z.enum(["loading", "partial", "complete"]), warnings: z.array(z.string()) }),
+});
+export type RuntimeDailyWorkProgressSummary = z.infer<typeof runtimeDailyWorkProgressSummarySchema>;
+export const runtimeClaimDailyWorkProgressCelebrationsRequestSchema = runtimeDailyWorkProgressRequestSchema.extend({
+	achievementIds: z.array(z.string().max(1024)).max(100),
+});
+export type RuntimeClaimDailyWorkProgressCelebrationsRequest = z.infer<
+	typeof runtimeClaimDailyWorkProgressCelebrationsRequestSchema
+>;
+export const runtimeClaimDailyWorkProgressCelebrationsResponseSchema = z.object({
+	achievements: z.array(runtimeDailyWorkProgressAchievementSchema),
+});
+export type RuntimeClaimDailyWorkProgressCelebrationsResponse = z.infer<
+	typeof runtimeClaimDailyWorkProgressCelebrationsResponseSchema
 >;

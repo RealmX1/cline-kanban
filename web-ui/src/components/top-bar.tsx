@@ -362,6 +362,7 @@ export function TopBar({
 	onContinueConnectionRetrySessions,
 	onDismissConnectionRetrySessions,
 	bugReportTriggerButton,
+	dailyWorkProgressSummaryControl,
 	notificationCenter,
 	postDeployVerificationPendingCount,
 	onOpenPostDeployVerification,
@@ -423,6 +424,7 @@ export function TopBar({
 	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
 	// 报告按钮自持截图和对话框状态，顶栏只负责入口位置。
 	bugReportTriggerButton?: React.ReactNode;
+	dailyWorkProgressSummaryControl?: React.ReactNode;
 	// 全局通知铃铛（跨 repo）：由 App.tsx 渲染 <NotificationCenter/> 后作为 slot 传入，始终可见。
 	notificationCenter?: React.ReactNode;
 	// null/undefined 表示尚未加载或没有部署记录；number（含 0）保留当前及历史部署的唯一入口。
@@ -896,6 +898,7 @@ export function TopBar({
 
 					{/* 全局通知铃铛：跨 repo，始终可见。 */}
 					{bugReportTriggerButton}
+					{dailyWorkProgressSummaryControl}
 					{notificationCenter}
 
 					{onOpenPermanentlyDeletedTaskHistory ? (

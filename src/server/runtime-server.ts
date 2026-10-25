@@ -45,6 +45,8 @@ import {
 	projectConversationSessionMetadataForMainSessionBinding,
 	resolveMainTaskConversationSessionId,
 } from "../core/task-main-conversation-session-binding";
+import { createDailyWorkProgressStatisticsCollector } from "../daily-work-progress-statistics/daily-work-progress-statistics-collector";
+import { createDailyWorkProgressStatisticsService } from "../daily-work-progress-statistics/daily-work-progress-statistics-service";
 import {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
@@ -296,6 +298,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
+	const dailyWorkProgressStatisticsService = createDailyWorkProgressStatisticsService({
+		storageFilePath: join(
+			getRuntimeHomePath(),
+			"daily-work-progress-statistics",
+			"confirmed-work-progress-statistics.json",
+		),
+		collect: createDailyWorkProgressStatisticsCollector(),
+		onUpdated: (revision) => deps.runtimeStateHub.broadcastDailyWorkProgressStatisticsUpdated?.(revision),
+		warn: deps.warn,
+	});
 	const taskVisualizationArtifactApi = new TaskVisualizationArtifactService({
 		resolveWorkspaceScope: async (workspaceId) => {
 			const workspace = await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(workspaceId);
@@ -954,6 +966,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
+			dailyWorkProgressStatisticsApi: dailyWorkProgressStatisticsService,
 			taskIndexingSupportApi,
 			taskLookupConversationApi,
 			workspaceScope: scope.workspaceScope,
@@ -1373,6 +1386,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		await taskMainSessionHandoverApi.close();
 		await rvfAutomaticCloseoutApi.stop();
 		await promptDraftUsageService.close();
+		await dailyWorkProgressStatisticsService.close();
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();
 		// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
@@ -1458,6 +1472,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
 	promptDraftUsageService.startInitialHistoricalBackfill();
+	dailyWorkProgressStatisticsService.start();
 	taskIndexingSupportApi.startAutomaticBackfill(
 		async () =>
 			(await listWorkspaceIndexEntries()).map((entry) => ({

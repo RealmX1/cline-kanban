@@ -5,6 +5,7 @@ import {
 } from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
+import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type {
@@ -651,6 +652,10 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "daily_work_progress_statistics_updated") {
+						observeDailyWorkProgressStatisticsUpdated();
+						return;
+					}
 					if (
 						payload.type === "task_visualization_artifacts_updated" ||
 						payload.type === "task_visualization_preview_requested"
@@ -663,6 +668,7 @@ export function useRuntimeStateStream(
 						return;
 					}
 					if (payload.type === "snapshot") {
+						observeDailyWorkProgressStatisticsUpdated(true);
 						detachTaskVisualizationStreamSender?.();
 						detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
 							payload.currentProjectId,

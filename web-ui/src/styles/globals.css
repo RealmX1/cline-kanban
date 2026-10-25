@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+@keyframes daily-work-progress-reveal {
+	from { opacity: 0; transform: translateY(-4px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+@keyframes daily-work-progress-celebration {
+	from { opacity: 0; transform: scale(0.85); }
+	to { opacity: 1; transform: scale(1); }
+}
+.daily-work-progress-reveal { animation: daily-work-progress-reveal 180ms ease-out; }
+.daily-work-progress-celebration { animation: daily-work-progress-celebration 220ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+	.daily-work-progress-reveal, .daily-work-progress-celebration { animation: none; }
+}
+
 @theme {
 
 	/* Surface hierarchy */

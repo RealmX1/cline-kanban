@@ -94,6 +94,7 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	broadcastDailyWorkProgressStatisticsUpdated?: (revision: number) => void;
 	attachTaskVisualizationArtifactService?: (service: TaskVisualizationArtifactService) => void;
 	broadcastTaskVisualizationArtifactsUpdated?: (workspaceId: string, taskId: string) => void;
 	registerAgentConversationInputAcceptedListener?: (
@@ -1293,6 +1294,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "acp");
 		},
 		broadcastTaskChatMessage,
+		broadcastDailyWorkProgressStatisticsUpdated: (revision) => {
+			for (const client of runtimeStateClients)
+				sendRuntimeStateMessage(client, { type: "daily_work_progress_statistics_updated", revision });
+		},
 		broadcastTaskLookupConversationUpdated: (conversationId, revision) => {
 			for (const client of runtimeStateClients)
 				sendRuntimeStateMessage(client, { type: "task_lookup_conversation_updated", conversationId, revision });
