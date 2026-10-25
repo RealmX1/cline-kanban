@@ -4434,6 +4434,12 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
 			deferWhileUserTurn: true,
 			idempotencyKey: "rvf-run-1",
+			codexNativeDeliveryLedgerBinding: {
+				ledgerPath: join("/tmp/kanban-workspaces", "workspace-1", "task-message-injections.json"),
+				ledgerTaskId: "task-1",
+				idempotencyKey: "rvf-run-1",
+				requestOriginRuntimeProcessInstanceId: expect.any(String),
+			},
 			onDeliveryOutcome: expect.any(Function),
 			mayAutoStashAbsentHumanInputBox: true,
 			preemptivelyStashHumanInputBox: expect.any(Function),

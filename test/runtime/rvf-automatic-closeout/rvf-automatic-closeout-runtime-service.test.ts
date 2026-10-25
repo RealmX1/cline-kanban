@@ -727,6 +727,28 @@ describe("RVF 宿主自动收尾与持久投递链", () => {
 			pauseReason: expect.stringContaining("人工收尾"),
 		});
 	});
+	it("后继候选不会继承父版本已经激活的原生回退资格", async () => {
+		const context = await setup();
+		await context.complete();
+		await writeFile(
+			join(context.run, "artifacts", "inputs", "scope.contract.json"),
+			JSON.stringify({
+				run_id: "run",
+				review_candidate_snapshot_version_id: "expanded-version",
+				review_candidate_snapshot: {
+					review_candidate_snapshot_version_id: "expanded-version",
+					automatic_closeout_eligibility: { status: "unavailable" },
+				},
+			}),
+		);
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		expect((await context.service.status(context.scope, { taskId: "task" })).records[0]).toMatchObject({
+			status: "paused",
+			pauseReason: expect.stringContaining("后继候选"),
+		});
+	});
 	it("同一等待原因超过 30 秒只通知一次，重启不重置等待时刻或重复通知", async () => {
 		const context = await setup();
 		await context.complete();

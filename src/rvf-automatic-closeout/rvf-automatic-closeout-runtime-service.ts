@@ -35,6 +35,7 @@ import {
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import type { TaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
+import { assertRvfCurrentCandidateNativeCloseoutQualification } from "./assert-rvf-current-candidate-native-closeout-qualification";
 import {
 	type AutomaticLateNativePromptAcceptanceRecoveryTrigger,
 	createAutomaticLateNativeCloseoutPromptAcceptanceRecovery,
@@ -151,6 +152,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			.object({ run_id: z.string().min(1) })
 			.parse(JSON.parse(await readFile(scopeContractPath, "utf8")));
 		if (scopeContract.run_id !== binding.run_id) throw new Error("RVF scope contract 与绑定的 run id 不一致。");
+		await assertRvfCurrentCandidateNativeCloseoutQualification(runDirectory);
 		const runReceiptPath = join(runDirectory, "inputs", "automatic-closeout-review-start-receipt.json");
 		if ((await realpath(runReceiptPath)) !== runReceiptPath) throw new Error("RVF run 内的开审凭据不属于该 run。");
 		const runReceipt = rvfIndependentUserTurnBoundaryReceiptSchema
@@ -301,6 +303,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		record: RvfAutomaticCloseoutRecord,
 		save: (patch: Partial<RvfAutomaticCloseoutRecord>) => Promise<void>,
 	) {
+		if (record.runDirectory) await assertRvfCurrentCandidateNativeCloseoutQualification(record.runDirectory);
 		const { manager, summary, card } = await mainSummary(scope, record.taskId);
 		const launchSettings = summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 		if (
@@ -494,6 +497,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		record: RvfAutomaticCloseoutRecord,
 		assertOperationStillOwned: () => Promise<void>,
 	) {
+		if (record.runDirectory) await assertRvfCurrentCandidateNativeCloseoutQualification(record.runDirectory);
 		const deliveryIdentity = {
 			taskId: record.conversationSessionId,
 			source: "rvf_automatic_closeout",
