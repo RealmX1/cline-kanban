@@ -67,6 +67,23 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 	projectionState: RecordedInterWorkUnitRelationProjectionState,
 	selector: WorkUnitSelectorForRelationRead,
 ): InterWorkUnitRelationWorkUnitReference {
+	if (selector.workUnitSelectorKind === "kanban_board_card_by_qualified_reference") {
+		const reference = selector.kanbanBoardCard;
+		const candidate = listKanbanBoardCardIdentityProjectionsByBareTaskId(
+			projectionState.kanbanBoardCardIdentityProjectionState,
+			reference.taskId,
+		).find(
+			(projection) =>
+				projection.kanbanBoardCard.workspaceId === reference.workspaceId &&
+				projection.kanbanBoardCard.taskIncarnationCreatedAtEpochMs === reference.taskIncarnationCreatedAtEpochMs,
+		);
+		if (!candidate)
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "关系账本中没有这一世任务，不能改为读取同 ID 的其他任务。",
+			});
+		return candidate.kanbanBoardCard;
+	}
 	if (selector.workUnitSelectorKind === "kanban_unmanaged_standalone_agent_conversation_session") {
 		return {
 			workUnitType: "kanban_unmanaged_standalone_agent_conversation_session",

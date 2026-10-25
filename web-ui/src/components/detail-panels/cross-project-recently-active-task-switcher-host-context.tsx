@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import type { ExpandedForegroundViewTaskIdentity } from "@/expanded-foreground-view/expanded-foreground-view-navigation";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
 import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
@@ -24,6 +25,10 @@ export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	focusedTaskInProject: { workspaceId: string; taskId: string } | null;
 	// 同项目直接选中；跨项目先切 workspace，目标 board 加载出该任务后再打开（App 的 pendingCrossProjectTaskOpen）。
 	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
+	// 关联预览始终传被预览任务的完整一世身份，作为前台关系图的根。
+	onOpenRelationsVisualizationForTask?: (
+		task: ExpandedForegroundViewTaskIdentity & { workUnitType: "kanban_board_card" },
+	) => void;
 	// backlog 卡没有详情页：点它在 Focus View 之上原地打开任意项目的编辑对话框，不切项目、焦点任务不动。
 	// 缺省（单测宿主）时 backlog 行退回 onOpenTaskInProject。
 	onOpenBacklogTaskEditorInProject?: (workspaceId: string, taskId: string) => void;

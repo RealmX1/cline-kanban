@@ -8,8 +8,12 @@ import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } fro
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeBoardCard } from "@/runtime/types";
 
-export function readRelationModelingPreview(workspaceId: string, input: RelationModelingPreviewRequest) {
-	return getRuntimeTrpcClient(workspaceId).workUnit.getRelationModelingPreview.query(input);
+export function readRelationModelingPreview(
+	workspaceId: string,
+	input: RelationModelingPreviewRequest,
+	signal?: AbortSignal,
+) {
+	return getRuntimeTrpcClient(workspaceId).workUnit.getRelationModelingPreview.query(input, { signal });
 }
 export function requestReferenceRelationModelingSuggestions(
 	workspaceId: string,

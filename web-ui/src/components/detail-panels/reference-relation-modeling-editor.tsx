@@ -19,6 +19,7 @@ import { WorkUnitRelationCounterpartKanbanBoardCardPicker } from "@/components/d
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import type { ReferenceRelationModelingEditorController } from "@/hooks/use-reference-relation-modeling-editor";
 import {
 	type AddReferenceRelationDialogDraft,
@@ -52,6 +53,8 @@ export function ReferenceRelationModelingEditor({
 	onUnstagedFormChange,
 	creationInFlight = false,
 	onRelationsSaved,
+	presentation = "embedded",
+	readOnly = false,
 }: {
 	controller: ReferenceRelationModelingEditorController;
 	workspaceId: string;
@@ -61,7 +64,10 @@ export function ReferenceRelationModelingEditor({
 	onUnstagedFormChange?: (hasUnstagedForm: boolean) => void;
 	creationInFlight?: boolean;
 	onRelationsSaved?: () => void;
+	presentation?: "embedded" | "foreground";
+	readOnly?: boolean;
 }) {
+	const foregroundNavigation = useExpandedForegroundViewNavigation();
 	const id = useId();
 	const [form, setForm] = useState<AddReferenceRelationDialogDraft>(EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT);
 	const [direction, setDirection] = useState(true);
@@ -242,7 +248,7 @@ export function ReferenceRelationModelingEditor({
 								resetForm();
 								setFormOpen(true);
 							}}
-							disabled={!controller.ready || controller.saving}
+							disabled={!controller.ready || controller.saving || readOnly}
 						>
 							添加关系
 						</Button>
@@ -266,6 +272,11 @@ export function ReferenceRelationModelingEditor({
 				{controller.error ? (
 					<p role="alert" className="rounded-md bg-status-red/15 p-2 text-text-primary">
 						{controller.error}
+					</p>
+				) : null}
+				{readOnly ? (
+					<p role="status" className="text-text-secondary">
+						这是已删除任务的历史关系，只读展示这一世身份。
 					</p>
 				) : null}
 				{formOpen ? (
@@ -431,13 +442,19 @@ export function ReferenceRelationModelingEditor({
 						</Button>
 					</div>
 				</div>
-				{!preview ? (
+				{!preview && !controller.error ? (
 					<p role="status" className="flex items-center gap-2 py-4 text-text-secondary">
 						<Spinner size={12} />
 						正在读取关系预览…
 					</p>
-				) : (
-					<div className="grid min-w-0 gap-3 @min-[760px]:grid-cols-2">
+				) : preview ? (
+					<div
+						className={
+							presentation === "foreground"
+								? "grid min-w-0 gap-3 @min-[760px]:grid-cols-[minmax(16rem,1fr)_minmax(0,2fr)]"
+								: "grid min-w-0 gap-3 @min-[760px]:grid-cols-2"
+						}
+					>
 						<div className={`${narrowView === "list" ? "" : "hidden"} min-w-0 @min-[760px]:block`}>
 							<ul className="divide-y divide-border">
 								{preview.relations
@@ -486,6 +503,7 @@ export function ReferenceRelationModelingEditor({
 														onClick={() =>
 															editRelation(relation.assertedRelation as AssertedInterWorkUnitRelation)
 														}
+														disabled={readOnly}
 													>
 														修改
 													</Button>
@@ -514,6 +532,7 @@ export function ReferenceRelationModelingEditor({
 																		],
 																	})
 																}
+																disabled={readOnly}
 															>
 																{reason === "relation_was_incorrect" ? "标记关系有误" : "结束关系"}
 															</Button>
@@ -551,8 +570,9 @@ export function ReferenceRelationModelingEditor({
 							<ReferenceRelationModelingGraph
 								preview={preview}
 								rootTitle={rootTitle}
-								viewportResetKey={narrowView}
+								viewportResetKey={preview.rootWorkUnitKey}
 								onSelectWorkUnit={setSelectedKey}
+								expanded={presentation === "foreground"}
 							/>
 							<p className="mt-2 text-text-secondary">
 								实线：已保存。虚线：待保存变更。路径仅表示连通，不代表直接关系。
@@ -564,34 +584,52 @@ export function ReferenceRelationModelingEditor({
 										{selected.kanbanBoardCardIdentity?.promptFirstParagraph}
 									</p>
 									{selected.workUnit.workUnitType === "kanban_board_card" ? (
-										<Button
-											size="xs"
-											className="mt-2"
-											onClick={() => {
-												const ref = selected.workUnit;
-												if (ref.workUnitType !== "kanban_board_card") return;
-												resetForm();
-												setForm({
-													...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
-													selectedCounterpartKanbanBoardCard: {
-														counterpartKanbanBoardCardWorkspaceId: ref.workspaceId,
-														counterpartKanbanBoardCardTaskId: ref.taskId,
-														counterpartKanbanBoardCardTitle:
-															selected.kanbanBoardCardIdentity?.currentTitle ?? ref.taskId,
-														counterpartKanbanProjectDisplayName: ref.workspaceId,
-													},
-												});
-												setFormOpen(true);
-											}}
-										>
-											与当前任务建立关系
-										</Button>
+										<div className="flex flex-wrap gap-2">
+											{foregroundNavigation ? (
+												<Button
+													size="xs"
+													variant="ghost"
+													className="mt-2"
+													disabled={formOpen}
+													onClick={() => {
+														const ref = selected.workUnit;
+														if (ref.workUnitType === "kanban_board_card")
+															foregroundNavigation.open({ ...ref, viewKind: "task_relations" });
+													}}
+												>
+													以此任务为中心
+												</Button>
+											) : null}
+											<Button
+												size="xs"
+												className="mt-2"
+												disabled={readOnly}
+												onClick={() => {
+													const ref = selected.workUnit;
+													if (ref.workUnitType !== "kanban_board_card") return;
+													resetForm();
+													setForm({
+														...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
+														selectedCounterpartKanbanBoardCard: {
+															counterpartKanbanBoardCardWorkspaceId: ref.workspaceId,
+															counterpartKanbanBoardCardTaskId: ref.taskId,
+															counterpartKanbanBoardCardTitle:
+																selected.kanbanBoardCardIdentity?.currentTitle ?? ref.taskId,
+															counterpartKanbanProjectDisplayName: ref.workspaceId,
+														},
+													});
+													setFormOpen(true);
+												}}
+											>
+												与当前任务建立关系
+											</Button>
+										</div>
 									) : null}
 								</div>
 							) : null}
 						</div>
 					</div>
-				)}
+				) : null}
 				{preview?.truncated ? (
 					<p role="status" className="text-status-orange">
 						关系较多，预览已截断（最多 150 个任务、300 条关系）。可缩小跳数查看。
@@ -601,7 +639,13 @@ export function ReferenceRelationModelingEditor({
 					<span className="font-medium">AI 关系建议</span>
 					<Button
 						size="xs"
-						disabled={!controller.ready || controller.suggestionsLoading || controller.saving || creationInFlight}
+						disabled={
+							!controller.ready ||
+							controller.suggestionsLoading ||
+							controller.saving ||
+							creationInFlight ||
+							readOnly
+						}
 						onClick={() => {
 							void controller.requestSuggestions();
 						}}
@@ -668,7 +712,7 @@ export function ReferenceRelationModelingEditor({
 					<div className="flex gap-2">
 						<Button
 							size="xs"
-							disabled={!controller.hasChanges || controller.saving || !controller.ready || formOpen}
+							disabled={!controller.hasChanges || controller.saving || !controller.ready || formOpen || readOnly}
 							onClick={(event) => {
 								const characteristics =
 									collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(event);
@@ -683,7 +727,7 @@ export function ReferenceRelationModelingEditor({
 						<Button
 							size="xs"
 							variant="ghost"
-							disabled={!controller.hasChanges || controller.saving}
+							disabled={!controller.hasChanges || controller.saving || readOnly}
 							onClick={controller.discard}
 						>
 							放弃修改

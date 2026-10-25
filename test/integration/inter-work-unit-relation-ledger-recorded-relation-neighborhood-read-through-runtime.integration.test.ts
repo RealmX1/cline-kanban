@@ -112,6 +112,40 @@ describe("recorded inter-work-unit relation neighborhood read through the runtim
 					`This task was created by task p0001 "Coordinate the rollout" [${workspaceId}]`,
 				);
 				expect(childNeighborhood.hasAnyRelationVisibleByDefault).toBe(true);
+				const qualifiedPreview = await workUnitRelationReadApi.getRelationModelingPreview({
+					workUnit: {
+						workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+						kanbanBoardCard: {
+							workUnitType: "kanban_board_card",
+							workspaceId,
+							taskId: "c0001",
+							taskIncarnationCreatedAtEpochMs: 2_000,
+						},
+					},
+					draftTaskTitle: "子任务",
+					relationNeighborhoodDepth: 2,
+					referenceRelationDrafts: [],
+					relationRevocations: [],
+				});
+				expect(qualifiedPreview.rootWorkUnitKey).toBe(`kanban_board_card:${workspaceId}:c0001:2000`);
+				expect(qualifiedPreview.workUnits).toHaveLength(2);
+				await expect(
+					workUnitRelationReadApi.getRelationModelingPreview({
+						workUnit: {
+							workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+							kanbanBoardCard: {
+								workUnitType: "kanban_board_card",
+								workspaceId,
+								taskId: "c0001",
+								taskIncarnationCreatedAtEpochMs: 2_001,
+							},
+						},
+						draftTaskTitle: "不存在的一世",
+						relationNeighborhoodDepth: 2,
+						referenceRelationDrafts: [],
+						relationRevocations: [],
+					}),
+				).rejects.toMatchObject({ code: "NOT_FOUND" });
 
 				// 读之后的新事件在下一次读时增量追上。
 				await mutateWorkspaceState(repositoryPath, intentActedByParentCard(workspaceId), (state) => ({

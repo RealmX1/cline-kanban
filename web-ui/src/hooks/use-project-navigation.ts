@@ -291,7 +291,7 @@ export function useProjectNavigation({
 		if (nextUrl.pathname === nextPathname) {
 			return;
 		}
-		window.history.replaceState({}, "", `${nextPathname}${nextUrl.search}${nextUrl.hash}`);
+		window.history.replaceState(window.history.state, "", `${nextPathname}${nextUrl.search}${nextUrl.hash}`);
 	}, [currentProjectId]);
 
 	useEffect(() => {
@@ -303,7 +303,7 @@ export function useProjectNavigation({
 		}
 		const nextUrl = new URL(window.location.href);
 		if (nextUrl.pathname !== "/") {
-			window.history.replaceState({}, "", `/${nextUrl.search}${nextUrl.hash}`);
+			window.history.replaceState(window.history.state, "", `/${nextUrl.search}${nextUrl.hash}`);
 		}
 		setRequestedProjectId(null);
 	}, [hasNoProjects, requestedProjectId]);

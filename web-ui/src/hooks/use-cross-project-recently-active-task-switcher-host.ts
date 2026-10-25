@@ -18,6 +18,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	selectedCardTaskId,
 	pendingCrossProjectTaskOpen,
 	onOpenTaskInProject,
+	onOpenRelationsVisualizationForTask,
 	onOpenBacklogTaskEditorInProject,
 	onRequestCreateTaskInBoardScope,
 	onRequestPinCurrentProjectTaskToTaskPinboard,
@@ -33,6 +34,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	selectedCardTaskId: string | null;
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
+	onOpenRelationsVisualizationForTask?: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["onOpenRelationsVisualizationForTask"];
 	onOpenBacklogTaskEditorInProject: (workspaceId: string, taskId: string) => void;
 	onRequestCreateTaskInBoardScope: () => void;
 	onRequestPinCurrentProjectTaskToTaskPinboard: (taskId: string) => void;
@@ -57,6 +59,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 					? { workspaceId: currentProjectId, taskId: selectedCardTaskId }
 					: null,
 			onOpenTaskInProject,
+			onOpenRelationsVisualizationForTask,
 			onOpenBacklogTaskEditorInProject,
 			onRequestCreateTaskInBoardScope,
 			onRequestPinCurrentProjectTaskToTaskPinboard,
@@ -72,6 +75,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			onEditCurrentProjectTaskPinboardPinReason,
 			onOpenBacklogTaskEditorInProject,
 			onOpenTaskInProject,
+			onOpenRelationsVisualizationForTask,
 			onRequestCreateTaskInBoardScope,
 			onRequestPinCurrentProjectTaskToTaskPinboard,
 			onUnpinCurrentProjectTaskFromTaskPinboard,
