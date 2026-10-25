@@ -77,7 +77,13 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 	const candidates = listKanbanBoardCardIdentityProjectionsByBareTaskId(
 		projectionState.kanbanBoardCardIdentityProjectionState,
 		selector.bareTaskId,
-	).filter((projection) => !selector.workspaceId || projection.kanbanBoardCard.workspaceId === selector.workspaceId);
+	).filter(
+		(projection) =>
+			!selector.workspaceId ||
+			projection.kanbanBoardCard.workspaceId === selector.workspaceId ||
+			projection.currentWorkspaceId === selector.workspaceId ||
+			projection.workspaceIdsUsedByCard?.includes(selector.workspaceId),
+	);
 	if (candidates.length === 0) {
 		throw new TRPCError({
 			code: "NOT_FOUND",

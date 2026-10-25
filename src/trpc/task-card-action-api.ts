@@ -51,6 +51,11 @@ import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
 } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import {
+	recoverPendingBacklogTaskProjectTransfers,
+	transferNeverStartedBacklogTaskToProject,
+} from "../state/backlog-task-project-transfer";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
@@ -371,16 +376,18 @@ export function createTaskCardActionApi(
 		}
 	};
 
-	const runSeriallyForTaskCards = <TResult>(
+	const runSeriallyForTaskCards = async <TResult>(
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskIds: readonly string[],
 		taskCardActionCommand: () => Promise<TResult>,
-	): Promise<TResult> =>
-		deps.taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
+	): Promise<TResult> => {
+		await recoverPendingBacklogTaskProjectTransfers(workspaceScope.workspaceId);
+		return deps.taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
 			workspaceScope.workspaceId,
 			taskIds,
 			taskCardActionCommand,
 		);
+	};
 
 	// 恢复失败的回滚：卡片仍在 review（没被别处挪走）才移回 Done，并发挪走的尊重对方。
 	// 恢复时若关掉过自动 review，在移回 Done 的同一次写盘里还原成恢复前的开关值：浏览器旧路径 resumeTaskFromTrash
@@ -589,6 +596,22 @@ export function createTaskCardActionApi(
 		);
 
 	return {
+		transferNeverStartedBacklogTaskToProject: async (scope, input, evidence) => {
+			const live = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(scope.workspaceId, input.taskId);
+			if (live?.startedAt != null)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "任务已有启动会话，不能迁移项目。" });
+			const intent = await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+				taskMutationIntentKind: "backlog_task_project_transferred",
+				kanbanRequestOriginActorEvidence: evidence,
+				kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+			});
+			const result = await transferNeverStartedBacklogTaskToProject(scope.workspaceId, input, intent);
+			const target = await loadWorkspaceContextById(result.workspaceId);
+			await deps.broadcastRuntimeWorkspaceStateUpdated(scope.workspaceId, scope.workspacePath);
+			if (target) await deps.broadcastRuntimeWorkspaceStateUpdated(target.workspaceId, target.repoPath);
+			await deps.broadcastRuntimeProjectsUpdated(null);
+			return result;
+		},
 		readTaskCardWithBoardColumn: async (workspaceScope, input) => {
 			const persistedWorkspaceState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
 			const found = findTaskCardWithBoardColumn(persistedWorkspaceState.board, input.taskId);
@@ -1402,6 +1425,7 @@ export function createTaskCardActionApi(
 		// 排在一次慢启动（建 worktree 可达十几秒）后面只会让改名、置顶显得卡顿。
 		// EXPERIMENT_NODE: 改字段 / 置顶是否也进按卡串行器（换「启动途中改的 prompt 不会被这次启动读到」的确定性，代价是编辑卡顿）。
 		updateTaskCardFieldValues: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			await recoverPendingBacklogTaskProjectTransfers(workspaceScope.workspaceId);
 			const update = await mutateWorkspaceState<RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries>(
 				workspaceScope.workspacePath,
 				await resolveIntent(
@@ -1416,6 +1440,11 @@ export function createTaskCardActionApi(
 						input.taskId,
 						workspaceScope.workspacePath,
 					);
+					if (
+						input.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+						found.taskCard.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs
+					)
+						throw new TRPCError({ code: "CONFLICT", message: "任务身份已变化，未写入编辑内容。" });
 					const expected = input.expectedTaskTitleAndPromptForAiNameBackfill;
 					if (expected && (found.taskCard.title !== expected.title || found.taskCard.prompt !== expected.prompt)) {
 						return {

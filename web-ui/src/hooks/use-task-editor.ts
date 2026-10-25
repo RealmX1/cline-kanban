@@ -3,7 +3,6 @@ import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permissi
 import { deriveTaskTitleFromPrompt, resolveTaskTitle } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import {
 	areTaskEditDraftFormValuesEqual,
@@ -24,7 +23,10 @@ import {
 	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled,
 	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
 } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
-import { updateTaskCardFieldValuesInWorkspace } from "@/runtime/task-card-action-query";
+import {
+	transferNeverStartedBacklogTaskToProjectInWorkspace,
+	updateTaskCardFieldValuesInWorkspace,
+} from "@/runtime/task-card-action-query";
 import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
@@ -71,6 +73,7 @@ import type {
 	TaskImage,
 } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 import { useDebouncedEffect } from "@/utils/react-use";
 
 // dd2db Y-EVENT-12：建卡只用 runtime 预分配的 id。池里不够时如实提示并阻止这次建卡（调用方返回 null / []，
@@ -293,6 +296,9 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 
 export interface UseTaskEditorResult {
 	isInlineTaskCreateOpen: boolean;
+	taskEditorSessionWorkspaceId: string | null;
+	newTaskName: string;
+	setNewTaskName: Dispatch<SetStateAction<string>>;
 	newTaskPrompt: string;
 	setNewTaskPrompt: Dispatch<SetStateAction<string>>;
 	newTaskImages: TaskImage[];
@@ -352,6 +358,8 @@ export interface UseTaskEditorResult {
 	>;
 	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 	setEditTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
+	suspendedTaskEditorTitle: string | null;
+	handleResumeSuspendedTaskEditor: () => void;
 	handleOpenCreateTask: () => void;
 	handleCancelCreateTask: () => void;
 	// 值 = 铺表单用的那份草稿的 savedAt；null = 表单就是任务本体。
@@ -361,9 +369,11 @@ export interface UseTaskEditorResult {
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
 	// All projects 面板里点其他项目的 backlog 行：原地编辑那个项目的卡（卡片快照由调用方从服务端读来）。
 	handleOpenEditTaskCardInOtherProject: (workspaceId: string, task: BoardCard) => void;
-	// 正在编辑的卡所在项目（编辑对话框的 @file 搜索、分支列表、会话起步列表都按它取）；没在编辑时是当前项目。
+	// 正在编辑的卡的物理项目；迁移确认后更新，编辑会话的草稿来源仍固定。
 	editTaskWorkspaceId: string | null;
-	// 编辑对话框的分支选项：当前项目即调用方传入的 editTaskBranchOptions；其他项目按那个项目的分支列表。
+	editTaskTargetWorkspaceId: string | null;
+	handleSelectEditTaskTargetProject: (workspaceId: string) => void;
+	// 编辑对话框按用户选择的目标项目校验分支，独立于卡片当前物理归属。
 	editTaskBranchOptionsForEditTarget: Array<{ value: string; label: string }>;
 	// —— Board Scope 建卡（Task Creation Target Project）——
 	// 建卡框作用的项目：Board Scope 里钉住的目标，否则当前项目。
@@ -407,6 +417,9 @@ export function useTaskEditor({
 	openTaskInOtherProjectAfterStart,
 }: UseTaskEditorInput): UseTaskEditorResult {
 	const [isInlineTaskCreateOpen, setIsInlineTaskCreateOpen] = useState(false);
+	const [taskEditorSessionWorkspaceId, setTaskEditorSessionWorkspaceId] = useState<string | null>(null);
+	const taskEditorSessionIdentityRef = useRef(Symbol("task-editor-session"));
+	const [newTaskName, setNewTaskName] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
 	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useState(newTaskStartInPlanModeByDefault);
@@ -472,25 +485,48 @@ export function useTaskEditor({
 		[],
 	);
 	const editTaskWorkspaceId = editingTaskCardInOtherProject?.workspaceId ?? currentProjectId;
+	// 编辑来源固定到本次会话；选择目标只改变分支校验，保存成功后才改变卡的物理归属。
+	const [selectedEditTaskTargetWorkspaceId, setSelectedEditTaskTargetWorkspaceId] = useState<string | null>(null);
+	const editTaskTargetWorkspaceId = selectedEditTaskTargetWorkspaceId ?? editTaskWorkspaceId;
+	const handleSelectEditTaskTargetProject = useCallback((workspaceId: string) => {
+		setSelectedEditTaskTargetWorkspaceId(workspaceId);
+	}, []);
 	// 编辑其他项目的卡：分支列表与默认 base ref 按那个项目取（只读 workspace.getState，打开时读一次）。
 	const { gitRepositoryInfoOfOtherProject: gitRepositoryInfoOfOtherProjectBeingEdited } =
-		useGitRepositoryInfoOfOtherProjectForTaskEditorDialog(editingTaskCardInOtherProject?.workspaceId ?? null);
+		useGitRepositoryInfoOfOtherProjectForTaskEditorDialog(
+			editTaskTargetWorkspaceId !== currentProjectId ? editTaskTargetWorkspaceId : null,
+		);
 	const editTaskBranchOptionsForEditTarget = useMemo(() => {
-		if (!editingTaskCardInOtherProject) {
+		if (editTaskTargetWorkspaceId === currentProjectId) {
 			return editTaskBranchOptions;
 		}
 		const otherProjectTaskBranchOptions = buildTaskBranchOptions(gitRepositoryInfoOfOtherProjectBeingEdited);
 		// 分支列表还没读到（或读失败）时至少保留卡上现有的 base ref，免得下方的校验 effect 把它重置掉。
-		const baseRefOnTaskCard = editingTaskCardInOtherProject.taskCard.baseRef;
-		return !baseRefOnTaskCard || otherProjectTaskBranchOptions.some((option) => option.value === baseRefOnTaskCard)
+		const baseRefOnTaskCard =
+			editTaskTargetWorkspaceId === editTaskWorkspaceId ? editingTaskCardInOtherProject?.taskCard.baseRef : null;
+		return gitRepositoryInfoOfOtherProjectBeingEdited ||
+			!baseRefOnTaskCard ||
+			otherProjectTaskBranchOptions.some((option) => option.value === baseRefOnTaskCard)
 			? otherProjectTaskBranchOptions
 			: [{ value: baseRefOnTaskCard, label: baseRefOnTaskCard }, ...otherProjectTaskBranchOptions];
-	}, [editTaskBranchOptions, editingTaskCardInOtherProject, gitRepositoryInfoOfOtherProjectBeingEdited]);
+	}, [
+		currentProjectId,
+		editTaskBranchOptions,
+		editTaskTargetWorkspaceId,
+		editTaskWorkspaceId,
+		editingTaskCardInOtherProject,
+		gitRepositoryInfoOfOtherProjectBeingEdited,
+	]);
 	// 建卡路径的默认 base ref 恒按当前项目（Board Scope 往别的项目建卡另有 resolvedDefaultCreateTaskBranchRefForCreationTarget）。
 	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
-	const resolvedDefaultEditTaskBranchRefForEditTarget = editingTaskCardInOtherProject
-		? (gitRepositoryInfoOfOtherProjectBeingEdited?.defaultBranch ?? editingTaskCardInOtherProject.taskCard.baseRef)
-		: defaultTaskBranchRef;
+	const resolvedDefaultEditTaskBranchRefForEditTarget =
+		editTaskTargetWorkspaceId === currentProjectId
+			? defaultTaskBranchRef
+			: (gitRepositoryInfoOfOtherProjectBeingEdited?.defaultBranch ??
+				(editTaskTargetWorkspaceId === editTaskWorkspaceId
+					? editingTaskCardInOtherProject?.taskCard.baseRef
+					: "") ??
+				"");
 
 	// Board Scope 建卡的目标项目（Task Creation Target Project，docs/context-board-scope-all-projects-and-single-project-scope.md）。null = 当前项目：
 	// 单项目范围的唯一形态，建卡路径与改动前一致（乐观插入本页 board）。Board Scope 打开建卡框时由调用方显式给出目标并钉住，
@@ -577,6 +613,7 @@ export function useTaskEditor({
 	}, [isInlineTaskCreateOpen, newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault]);
 
 	useEffect(() => {
+		if (createTaskBranchOptionsForCreationTarget.length === 0) return;
 		const isCurrentValid = createTaskBranchOptionsForCreationTarget.some(
 			(option) => option.value === newTaskBranchRef,
 		);
@@ -599,7 +636,13 @@ export function useTaskEditor({
 		}
 	}, [isInlineTaskCreateOpen, newTaskBranchRef, resolvedDefaultCreateTaskBranchRefForCreationTarget]);
 
+	const restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef = useRef(false);
 	useEffect(() => {
+		if (!isInlineTaskCreateOpen) return;
+		if (restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef.current) {
+			restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef.current = false;
+			return;
+		}
 		const effectiveAgentId = newTaskAgentId ?? selectedAgentId;
 		const nextSettings = resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(
 			taskCreationTargetWorkspaceId,
@@ -608,7 +651,7 @@ export function useTaskEditor({
 		setNewTaskTerminalAgentModelOverrideSettings((currentSettings) =>
 			isSameTerminalAgentModelOverrideSettings(currentSettings, nextSettings) ? currentSettings : nextSettings,
 		);
-	}, [taskCreationTargetWorkspaceId, newTaskAgentId, selectedAgentId]);
+	}, [isInlineTaskCreateOpen, taskCreationTargetWorkspaceId, newTaskAgentId, selectedAgentId]);
 
 	useEffect(() => {
 		if (!isNewTaskStartInPlanModeDisabled || !newTaskStartInPlanMode) {
@@ -628,6 +671,7 @@ export function useTaskEditor({
 		if (!editingTaskId) {
 			return;
 		}
+		if (editTaskBranchOptionsForEditTarget.length === 0) return;
 		const isCurrentValid = editTaskBranchOptionsForEditTarget.some((option) => option.value === editTaskBranchRef);
 		if (isCurrentValid) {
 			return;
@@ -647,6 +691,7 @@ export function useTaskEditor({
 		prompt: editTaskPrompt,
 		images: editTaskImages,
 		startInPlanMode: editTaskStartInPlanMode,
+		taskConversationMode: editTaskConversationMode,
 		taskAgentPermissionMode: editTaskAgentPermissionMode,
 		autoReviewEnabled: editTaskAutoReviewEnabled,
 		autoReviewMode: editTaskAutoReviewMode,
@@ -666,20 +711,35 @@ export function useTaskEditor({
 	// `board` 只在这里被当作只读查表用（拿到被编辑卡片以做「草稿是否等于任务本体」的比较）。
 	// 放进 deps 会让本 effect 随每一次看板刷新（含 150ms 一拍的 session 广播）重跑一遍，
 	// 而它做的是 localStorage 写盘。改走 ref：读到的永远是最新 board，但不参与依赖触发。
+	const currentProjectIdRef = useRef(currentProjectId);
+	currentProjectIdRef.current = currentProjectId;
 	const boardRef = useRef(board);
 	boardRef.current = board;
+
+	// 保存、迁移与后续关系/启动共用一次编辑会话。广播可能先于响应，保留快照直到调用方确认整个提交成功。
+	const preservedTaskEditorSubmissionRef = useRef<{
+		sessionIdentity: symbol;
+		workspaceId: string;
+		taskCard: BoardCard;
+	} | null>(null);
 
 	// 被编辑的卡与它所在的列：当前项目查本页 board；其他项目用打开时读来的快照（只有 backlog 卡能打开编辑器）。
 	const findEditingTaskCardWithBoardColumn = useCallback(
 		(taskId: string): { card: BoardCard; columnId: BoardColumnId } | null => {
 			const taskCardInOtherProject = editingTaskCardInOtherProjectRef.current;
-			if (taskCardInOtherProject) {
+			if (taskCardInOtherProject && taskCardInOtherProject.workspaceId !== currentProjectIdRef.current) {
 				return taskCardInOtherProject.taskCard.id === taskId
 					? { card: taskCardInOtherProject.taskCard, columnId: "backlog" }
 					: null;
 			}
 			const selection = findCardSelection(boardRef.current, taskId);
-			return selection ? { card: selection.card, columnId: selection.column.id } : null;
+			if (selection) return { card: selection.card, columnId: selection.column.id };
+			const preservedSubmission = preservedTaskEditorSubmissionRef.current;
+			return preservedSubmission?.sessionIdentity === taskEditorSessionIdentityRef.current &&
+				preservedSubmission.workspaceId === currentProjectIdRef.current &&
+				preservedSubmission.taskCard.id === taskId
+				? { card: preservedSubmission.taskCard, columnId: "backlog" }
+				: null;
 		},
 		[],
 	);
@@ -693,6 +753,12 @@ export function useTaskEditor({
 		if (!editingTaskId) {
 			return;
 		}
+		const preservedSubmission = preservedTaskEditorSubmissionRef.current;
+		if (
+			preservedSubmission?.sessionIdentity === taskEditorSessionIdentityRef.current &&
+			preservedSubmission.taskCard.id === editingTaskId
+		)
+			return;
 		const selection = findEditingTaskCardWithBoardColumn(editingTaskId);
 		if (!selection || selection.columnId !== "backlog") {
 			setEditingTaskId(null);
@@ -741,6 +807,7 @@ export function useTaskEditor({
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
+				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
 				branchRef: editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget,
@@ -750,7 +817,7 @@ export function useTaskEditor({
 				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
 				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 			};
-			if (isTaskEditDraftEqualToTask(draft, selection.card)) {
+			if (!preservedTaskEditorSubmissionRef.current && isTaskEditDraftEqualToTask(draft, selection.card)) {
 				clearTaskEditDraft(editTaskWorkspaceId, editingTaskId);
 				return;
 			}
@@ -766,6 +833,7 @@ export function useTaskEditor({
 			findEditingTaskCardWithBoardColumn,
 			editTaskAgentId,
 			editTaskAgentPermissionMode,
+			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
@@ -782,7 +850,81 @@ export function useTaskEditor({
 		],
 	);
 
+	const [suspendedTaskEditorSeed, setSuspendedTaskEditorSeed] = useState<
+		| { kind: "edit"; workspaceId: string; taskCard: BoardCard }
+		| {
+				kind: "create";
+				workspaceId: string | null;
+				sessionWorkspaceId: string | null;
+				formValues: TaskEditDraftFormValues;
+		  }
+		| null
+	>(null);
+
+	const suspendCurrentTaskEditDraft = useCallback(
+		(preserveCreationDraft = true) => {
+			if (!editingTaskId && preserveCreationDraft && isInlineTaskCreateOpen)
+				setSuspendedTaskEditorSeed({
+					kind: "create",
+					workspaceId: taskCreationTargetWorkspaceId,
+					sessionWorkspaceId: taskEditorSessionWorkspaceId,
+					formValues: {
+						taskTitleOverride: newTaskName,
+						prompt: newTaskPrompt,
+						images: newTaskImages.map((image) => ({ ...image })),
+						startInPlanMode: newTaskStartInPlanMode,
+						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						taskConversationMode: newTaskConversationMode,
+						autoReviewEnabled: newTaskAutoReviewEnabled,
+						autoReviewMode: newTaskAutoReviewMode,
+						branchRef: newTaskBranchRef,
+						worktreeMode: newTaskWorktreeMode,
+						agentId: newTaskAgentId,
+						clineSettings: newTaskClineSettings,
+						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+						taskAgentSessionInitialization: newTaskAgentSessionInitialization,
+					},
+				});
+			if (!editingTaskId || !editTaskWorkspaceId) return;
+			const snapshot = editTaskCardTheFormWasSeededFromRef.current;
+			if (snapshot)
+				setSuspendedTaskEditorSeed({
+					kind: "edit",
+					workspaceId: editTaskWorkspaceId,
+					taskCard: { ...snapshot, title: editTaskName || snapshot.title },
+				});
+			saveTaskEditDraft(editTaskWorkspaceId, {
+				...editTaskFormValuesRef.current,
+				taskId: editingTaskId,
+				savedAt: Date.now(),
+			});
+		},
+		[
+			editingTaskId,
+			editTaskWorkspaceId,
+			editTaskName,
+			isInlineTaskCreateOpen,
+			taskCreationTargetWorkspaceId,
+			taskEditorSessionWorkspaceId,
+			newTaskName,
+			newTaskPrompt,
+			newTaskImages,
+			newTaskStartInPlanMode,
+			newTaskAgentPermissionMode,
+			newTaskConversationMode,
+			newTaskAutoReviewEnabled,
+			newTaskAutoReviewMode,
+			newTaskBranchRef,
+			newTaskWorktreeMode,
+			newTaskAgentId,
+			newTaskClineSettings,
+			newTaskTerminalAgentModelOverrideSettings,
+			newTaskAgentSessionInitialization,
+		],
+	);
+
 	const handleOpenCreateTask = useCallback(() => {
+		suspendCurrentTaskEditDraft(false);
 		if (!isNewTaskStartInPlanModeDefaultLoaded) {
 			return;
 		}
@@ -790,10 +932,17 @@ export function useTaskEditor({
 			// 之前的分配若因 runtime 暂时不在而失败，打开建卡框时再补一次，填完内容时 id 通常已就绪。
 			ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(currentProjectId);
 		}
+		taskEditorSessionIdentityRef.current = Symbol("create-task-editor-session");
+		preservedTaskEditorSubmissionRef.current = null;
+		setTaskEditorSessionWorkspaceId(currentProjectId);
 		setEditingTaskId(null);
 		setEditTaskPrompt("");
 		setEditTaskImages([]);
 
+		if (newTaskPrompt.trim() || newTaskImages.length) {
+			setIsInlineTaskCreateOpen(true);
+			return;
+		}
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(
@@ -803,9 +952,12 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
-		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
+		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(currentProjectId);
 		setIsInlineTaskCreateOpen(true);
 	}, [
+		suspendCurrentTaskEditDraft,
+		newTaskPrompt,
+		newTaskImages.length,
 		currentProjectId,
 		isNewTaskStartInPlanModeDefaultLoaded,
 		newTaskAgentPermissionModeByDefault,
@@ -825,10 +977,6 @@ export function useTaskEditor({
 					? resolvedDefaultCreateTaskBranchRef
 					: (readMostRecentlyUsedTaskCreateBaseRefForProject(targetWorkspaceId) ?? ""),
 			);
-			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(targetWorkspaceId, selectedAgentId),
-			);
-			setNewTaskAgentSessionInitialization(undefined);
 		},
 		[currentProjectId, resolvedDefaultCreateTaskBranchRef, selectedAgentId],
 	);
@@ -841,12 +989,16 @@ export function useTaskEditor({
 				return;
 			}
 			handleOpenCreateTask();
+			setTaskEditorSessionWorkspaceId(defaultTargetWorkspaceId);
 			pinTaskCreationTargetProject(defaultTargetWorkspaceId);
 		},
 		[handleOpenCreateTask, isNewTaskStartInPlanModeDefaultLoaded, pinTaskCreationTargetProject],
 	);
 
 	const handleCancelCreateTask = useCallback(() => {
+		taskEditorSessionIdentityRef.current = Symbol("closed-task-editor-session");
+		preservedTaskEditorSubmissionRef.current = null;
+		setNewTaskName("");
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setIsInlineTaskCreateOpen(false);
 
@@ -876,6 +1028,7 @@ export function useTaskEditor({
 					? task.images.map((image) => ({ ...image }))
 					: [],
 			startInPlanMode: savedDraft?.startInPlanMode ?? task.startInPlanMode,
+			taskConversationMode: savedDraft?.taskConversationMode ?? task.taskConversationMode ?? "operational",
 			taskAgentPermissionMode:
 				savedDraft?.taskAgentPermissionMode ?? task.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault,
 			autoReviewEnabled: savedDraft?.autoReviewEnabled ?? task.autoReviewEnabled === true,
@@ -903,9 +1056,7 @@ export function useTaskEditor({
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
 			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
-			// 会话模式不在编辑草稿体系里（runtimeTaskEditDraftSchema 尚未携带该字段，web 侧不能
-			// 单方面扩——store 校验会把未知字段剥掉），所以恒从卡片本体铺，草稿不参与。
-			setEditTaskConversationMode(task.taskConversationMode ?? "operational");
+			setEditTaskConversationMode(formValues.taskConversationMode ?? "operational");
 			setEditTaskAutoReviewEnabled(formValues.autoReviewEnabled);
 			setEditTaskAutoReviewMode(formValues.autoReviewMode);
 			setEditTaskBranchRef(formValues.branchRef);
@@ -966,8 +1117,13 @@ export function useTaskEditor({
 	// 当前项目与其他项目共用的那一段：按卡所在项目读草稿、铺表单。
 	const openEditTaskFormForTaskCardInWorkspace = useCallback(
 		(workspaceId: string | null, task: BoardCard) => {
+			taskEditorSessionIdentityRef.current = Symbol("edit-task-editor-session");
+			preservedTaskEditorSubmissionRef.current = null;
+			setTaskEditorSessionWorkspaceId(workspaceId);
+			setSelectedEditTaskTargetWorkspaceId(workspaceId);
 			setIsInlineTaskCreateOpen(false);
 
+			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			const savedDraft = readSavedTaskEditDraft(workspaceId, task.id);
@@ -988,28 +1144,41 @@ export function useTaskEditor({
 
 	const handleOpenEditTask = useCallback(
 		(task: BoardCard, options?: OpenEditTaskOptions) => {
+			suspendCurrentTaskEditDraft();
 			if (!options?.preserveDetailSelection) {
 				setSelectedTaskId(null);
 			}
-			setEditingTaskCardInOtherProject(null);
+			setEditingTaskCardInOtherProject(currentProjectId ? { workspaceId: currentProjectId, taskCard: task } : null);
 			openEditTaskFormForTaskCardInWorkspace(currentProjectId, task);
 		},
-		[currentProjectId, openEditTaskFormForTaskCardInWorkspace, setEditingTaskCardInOtherProject, setSelectedTaskId],
+		[
+			suspendCurrentTaskEditDraft,
+			currentProjectId,
+			openEditTaskFormForTaskCardInWorkspace,
+			setEditingTaskCardInOtherProject,
+			setSelectedTaskId,
+		],
 	);
 
 	// All projects 面板里点其他项目的 backlog 行：不切项目、不动 Focus View 的焦点任务，原地打开编辑对话框。
 	// 卡片快照由调用方从服务端读来（taskCardAction.readTaskCardWithBoardColumn）。
 	const handleOpenEditTaskCardInOtherProject = useCallback(
 		(workspaceId: string, task: BoardCard) => {
+			suspendCurrentTaskEditDraft();
 			if (workspaceId === currentProjectId) {
-				setEditingTaskCardInOtherProject(null);
+				setEditingTaskCardInOtherProject({ workspaceId, taskCard: task });
 				openEditTaskFormForTaskCardInWorkspace(currentProjectId, task);
 				return;
 			}
 			setEditingTaskCardInOtherProject({ workspaceId, taskCard: task });
 			openEditTaskFormForTaskCardInWorkspace(workspaceId, task);
 		},
-		[currentProjectId, openEditTaskFormForTaskCardInWorkspace, setEditingTaskCardInOtherProject],
+		[
+			suspendCurrentTaskEditDraft,
+			currentProjectId,
+			openEditTaskFormForTaskCardInWorkspace,
+			setEditingTaskCardInOtherProject,
+		],
 	);
 
 	/**
@@ -1054,6 +1223,8 @@ export function useTaskEditor({
 	);
 
 	const handleCancelEditTask = useCallback(() => {
+		taskEditorSessionIdentityRef.current = Symbol("closed-task-editor-session");
+		preservedTaskEditorSubmissionRef.current = null;
 		if (editingTaskId) {
 			clearTaskEditDraft(editTaskWorkspaceId, editingTaskId);
 		}
@@ -1095,13 +1266,20 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			if (!(editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget)) {
+			if (!(options?.baseRefOverride || editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget)) {
 				return null;
 			}
 
 			const workspaceId = editTaskWorkspaceId;
+			const targetWorkspaceId = options?.targetWorkspaceIdOverride ?? editTaskTargetWorkspaceId ?? workspaceId;
+			const submittedSessionIdentity = taskEditorSessionIdentityRef.current;
+			const isSubmittedEditorSessionStillOpen = () =>
+				taskEditorSessionIdentityRef.current === submittedSessionIdentity;
+			let physicalWorkspaceIdAfterSave = workspaceId;
 			// 其他项目的 board 不在浏览器里：不叠 overlay，结果随广播回来。
-			const isEditedTaskCardInOtherProject = editingTaskCardInOtherProjectRef.current !== null;
+			const isEditedTaskCardInOtherProject =
+				editingTaskCardInOtherProjectRef.current !== null &&
+				editingTaskCardInOtherProjectRef.current.workspaceId !== currentProjectId;
 			const savedTaskId = editingTaskId;
 			const submitted: TaskEditorSubmittedTaskCardFieldValues = {
 				taskTitleOverride: options?.taskNameOverride ?? editTaskName,
@@ -1112,7 +1290,7 @@ export function useTaskEditor({
 				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
-				baseRef: editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget,
+				baseRef: options?.baseRefOverride || editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget,
 				worktreeMode: editTaskWorktreeMode,
 				agentId: editTaskAgentId,
 				clineSettings: editTaskClineSettings,
@@ -1123,16 +1301,28 @@ export function useTaskEditor({
 				editTaskCardTheFormWasSeededFromRef.current?.id === savedTaskId
 					? editTaskCardTheFormWasSeededFromRef.current
 					: findEditingTaskCardWithBoardColumn(savedTaskId)?.card;
+			if (options?.preserveFormUntilCreationConfirmed && taskCardTheFormWasSeededFrom) {
+				setSelectedEditTaskTargetWorkspaceId(targetWorkspaceId);
+				setEditTaskBranchRef(submitted.baseRef);
+				preservedTaskEditorSubmissionRef.current = {
+					sessionIdentity: submittedSessionIdentity,
+					workspaceId,
+					taskCard: taskCardTheFormWasSeededFrom,
+				};
+				// 保存过程已经接管本次输入，迟到的旧来源草稿不能再重铺它。
+				isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current = false;
+			}
 			clearTaskEditDraft(workspaceId, savedTaskId);
 
 			const keepSubmittedEditsAsTaskEditDraft = (): void => {
-				saveTaskEditDraft(workspaceId, {
+				saveTaskEditDraft(physicalWorkspaceIdAfterSave, {
 					taskId: savedTaskId,
 					taskTitleOverride: submitted.taskTitleOverride,
 					prompt: submitted.prompt,
 					images: submitted.images.map((image) => ({ ...image })),
 					startInPlanMode: submitted.startInPlanMode,
 					taskAgentPermissionMode: submitted.taskAgentPermissionMode,
+					taskConversationMode: submitted.taskConversationMode,
 					autoReviewEnabled: submitted.autoReviewEnabled,
 					autoReviewMode: submitted.autoReviewMode,
 					branchRef: submitted.baseRef,
@@ -1144,6 +1334,22 @@ export function useTaskEditor({
 					savedAt: Date.now(),
 				});
 			};
+			const bindPreservedEditorToPersistedTask = (taskCard: BoardCard): void => {
+				if (!options?.preserveFormUntilCreationConfirmed || !isSubmittedEditorSessionStillOpen()) return;
+				const previousWorkspaceId = preservedTaskEditorSubmissionRef.current?.workspaceId ?? workspaceId;
+				preservedTaskEditorSubmissionRef.current = {
+					sessionIdentity: submittedSessionIdentity,
+					workspaceId: physicalWorkspaceIdAfterSave,
+					taskCard,
+				};
+				editTaskCardTheFormWasSeededFromRef.current = taskCard;
+				setEditingTaskCardInOtherProject({ workspaceId: physicalWorkspaceIdAfterSave, taskCard });
+				if (previousWorkspaceId !== physicalWorkspaceIdAfterSave)
+					clearTaskEditDraft(previousWorkspaceId, savedTaskId);
+				// 关系或启动失败后仍从已保存位置重试；不能因字段已等于卡片而丢掉恢复副本。
+				keepSubmittedEditsAsTaskEditDraft();
+			};
+			let taskCardSnapshotAfterFieldSave = taskCardTheFormWasSeededFrom;
 			const taskCardFieldValuePatch = taskCardTheFormWasSeededFrom
 				? buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(
 						taskCardTheFormWasSeededFrom,
@@ -1159,6 +1365,7 @@ export function useTaskEditor({
 			} else {
 				editedTaskCardFieldsSavedByRuntime = updateTaskCardFieldValuesThroughRuntime({
 					workspaceId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 					taskId: savedTaskId,
 					taskCardFieldValuePatch,
 					...(isEditedTaskCardInOtherProject
@@ -1176,6 +1383,9 @@ export function useTaskEditor({
 							}),
 				}).then((result) => {
 					if (result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime") {
+						physicalWorkspaceIdAfterSave = result.response.taskCardSnapshotAfterAction.workspaceId ?? workspaceId;
+						taskCardSnapshotAfterFieldSave = result.response.taskCardSnapshotAfterAction.taskCard;
+						bindPreservedEditorToPersistedTask(taskCardSnapshotAfterFieldSave);
 						if (taskCardFieldValuePatch.title === null) {
 							void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 								workspaceId,
@@ -1195,25 +1405,56 @@ export function useTaskEditor({
 					return false;
 				});
 			}
-			setEditingTaskId(null);
-			setEditingTaskCardInOtherProject(null);
+			if (targetWorkspaceId !== workspaceId && taskCardTheFormWasSeededFrom) {
+				const sourceSaved = editedTaskCardFieldsSavedByRuntime;
+				editedTaskCardFieldsSavedByRuntime = sourceSaved.then(async (saved) => {
+					if (!saved) return false;
+					try {
+						if (physicalWorkspaceIdAfterSave !== targetWorkspaceId) {
+							await transferNeverStartedBacklogTaskToProjectInWorkspace(physicalWorkspaceIdAfterSave, {
+								operationId: createRandomUuidV4WithInsecureContextFallback(),
+								taskId: savedTaskId,
+								taskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom.createdAt,
+								targetWorkspaceId,
+								targetBaseRef: submitted.baseRef,
+							});
+							physicalWorkspaceIdAfterSave = targetWorkspaceId;
+						}
+						bindPreservedEditorToPersistedTask({
+							...(taskCardSnapshotAfterFieldSave ?? taskCardTheFormWasSeededFrom),
+							baseRef: submitted.baseRef,
+						});
+						return true;
+					} catch (failure) {
+						keepSubmittedEditsAsTaskEditDraft();
+						notifyError(`项目迁移未完成：${failure instanceof Error ? failure.message : String(failure)}`);
+						return false;
+					}
+				});
+			}
+			if (options?.preserveFormUntilCreationConfirmed) keepSubmittedEditsAsTaskEditDraft();
+			options?.onTaskPersistenceRequested?.(editedTaskCardFieldsSavedByRuntime);
+			if (!options?.preserveFormUntilCreationConfirmed) {
+				setEditingTaskId(null);
+				setEditingTaskCardInOtherProject(null);
 
-			setEditTaskPrompt("");
-			setEditTaskStartInPlanMode(false);
-			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
-			setEditTaskConversationMode("operational");
-			setEditTaskAutoReviewEnabled(false);
-			setEditTaskAutoReviewMode("commit");
-			setEditTaskImages([]);
-			setEditTaskBranchRef("");
-			setEditTaskWorktreeMode("branch");
-			setEditTaskAgentId(undefined);
-			setEditTaskClineSettings(undefined);
-			setEditTaskTerminalAgentModelOverrideSettings(undefined);
-			setEditTaskAgentSessionInitialization(undefined);
+				setEditTaskPrompt("");
+				setEditTaskStartInPlanMode(false);
+				setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+				setEditTaskConversationMode("operational");
+				setEditTaskAutoReviewEnabled(false);
+				setEditTaskAutoReviewMode("commit");
+				setEditTaskImages([]);
+				setEditTaskBranchRef("");
+				setEditTaskWorktreeMode("branch");
+				setEditTaskAgentId(undefined);
+				setEditTaskClineSettings(undefined);
+				setEditTaskTerminalAgentModelOverrideSettings(undefined);
+				setEditTaskAgentSessionInitialization(undefined);
+			}
 			return {
 				savedTaskId,
-				savedTaskCardOtherProjectWorkspaceId: isEditedTaskCardInOtherProject ? workspaceId : null,
+				savedTaskCardOtherProjectWorkspaceId: targetWorkspaceId !== currentProjectId ? targetWorkspaceId : null,
 				editedTaskCardFieldsSavedByRuntime,
 			};
 		},
@@ -1234,6 +1475,8 @@ export function useTaskEditor({
 			editTaskWorktreeMode,
 			editingTaskId,
 			editTaskWorkspaceId,
+			editTaskTargetWorkspaceId,
+			currentProjectId,
 			findEditingTaskCardWithBoardColumn,
 			resolvedDefaultEditTaskBranchRefForEditTarget,
 			setEditingTaskCardInOtherProject,
@@ -1449,6 +1692,7 @@ export function useTaskEditor({
 	const resetNewTaskFormAfterTaskCardsCreatedInOtherProject = useCallback(
 		(workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
 			if (options?.preserveFormUntilCreationConfirmed) return;
+			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
@@ -1485,11 +1729,17 @@ export function useTaskEditor({
 			if (!isNewTaskStartInPlanModeDefaultLoaded) {
 				return null;
 			}
+			const explicitTargetOtherWorkspaceId = options?.targetWorkspaceIdOverride
+				? options.targetWorkspaceIdOverride !== currentProjectId
+					? options.targetWorkspaceIdOverride
+					: null
+				: taskCreationTargetOtherProjectWorkspaceId;
 			const prompt = (options?.promptOverride ?? newTaskPrompt).trim();
 			if (!prompt) {
 				return null;
 			}
 			const baseRef =
+				options?.baseRefOverride ||
 				newTaskBranchRef ||
 				(taskCreationTargetOtherProjectWorkspaceId
 					? resolvedDefaultCreateTaskBranchRefForCreationTarget
@@ -1498,11 +1748,11 @@ export function useTaskEditor({
 				return null;
 			}
 			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
-			const explicitTaskName = options?.taskNameOverride?.trim() ?? "";
+			const explicitTaskName = (options?.taskNameOverride ?? newTaskName).trim();
 			const title = explicitTaskName || deriveTaskTitleFromPrompt(prompt);
-			if (taskCreationTargetOtherProjectWorkspaceId) {
+			if (explicitTargetOtherWorkspaceId) {
 				const createdTaskCard = createBacklogTaskCardsInOtherProject(
-					taskCreationTargetOtherProjectWorkspaceId,
+					explicitTargetOtherWorkspaceId,
 					[{ prompt, title }],
 					baseRef,
 				)?.[0];
@@ -1512,7 +1762,7 @@ export function useTaskEditor({
 				options?.onTaskCardAllocatedForRelationModeling?.(createdTaskCard);
 				if (!explicitTaskName) {
 					backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject(
-						taskCreationTargetOtherProjectWorkspaceId,
+						explicitTargetOtherWorkspaceId,
 						createdTaskCard.id,
 						prompt,
 						createdTaskCard.title,
@@ -1524,11 +1774,7 @@ export function useTaskEditor({
 					...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 					prompt_character_count: prompt.length,
 				});
-				resetNewTaskFormAfterTaskCardsCreatedInOtherProject(
-					taskCreationTargetOtherProjectWorkspaceId,
-					options,
-					baseRef,
-				);
+				resetNewTaskFormAfterTaskCardsCreatedInOtherProject(explicitTargetOtherWorkspaceId, options, baseRef);
 				return createdTaskCard.id;
 			}
 			const runtimeAllocatedTaskIds = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
@@ -1590,6 +1836,7 @@ export function useTaskEditor({
 				prompt_character_count: prompt.length,
 			});
 			if (options?.preserveFormUntilCreationConfirmed) return created.task.id;
+			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
@@ -1636,6 +1883,7 @@ export function useTaskEditor({
 			// 全局默认只在建卡那一刻固化，所以必须进依赖：漏掉它时闭包会一直捕获旧通道，
 			// 用户在设置页切换后新建的卡仍被写成切换前的值。
 			ompAgentSessionTransportForNewTasks,
+			newTaskName,
 			newTaskPrompt,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
@@ -1759,6 +2007,7 @@ export function useTaskEditor({
 					prompt_character_count: prompt.length,
 				});
 			}
+			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
@@ -1867,6 +2116,9 @@ export function useTaskEditor({
 	);
 
 	const resetTaskEditorState = useCallback(() => {
+		taskEditorSessionIdentityRef.current = Symbol("reset-task-editor-session");
+		preservedTaskEditorSubmissionRef.current = null;
+		setNewTaskName("");
 		setIsInlineTaskCreateOpen(false);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setEditingTaskId(null);
@@ -1897,8 +2149,58 @@ export function useTaskEditor({
 		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault, setEditingTaskCardInOtherProject]);
 
+	const handleResumeSuspendedTaskEditor = useCallback(() => {
+		const seed = suspendedTaskEditorSeed;
+		if (!seed) return;
+		if (seed.kind === "edit") {
+			handleOpenEditTaskCardInOtherProject(seed.workspaceId, seed.taskCard);
+			return;
+		}
+		suspendCurrentTaskEditDraft(false);
+		taskEditorSessionIdentityRef.current = Symbol("resumed-create-task-editor-session");
+		preservedTaskEditorSubmissionRef.current = null;
+		setEditingTaskId(null);
+		setEditingTaskCardInOtherProject(null);
+		setTaskEditorSessionWorkspaceId(seed.sessionWorkspaceId);
+		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(seed.workspaceId);
+		const values = seed.formValues;
+		setNewTaskName(values.taskTitleOverride ?? "");
+		setNewTaskPrompt(values.prompt);
+		setNewTaskImages(values.images.map((image) => ({ ...image })));
+		setNewTaskStartInPlanMode(values.startInPlanMode);
+		setNewTaskAgentPermissionMode(values.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
+		setNewTaskConversationMode(values.taskConversationMode ?? "operational");
+		setNewTaskAutoReviewEnabled(values.autoReviewEnabled);
+		setNewTaskAutoReviewMode(values.autoReviewMode);
+		setNewTaskBranchRef(values.branchRef);
+		setNewTaskWorktreeMode(values.worktreeMode ?? "branch");
+		setNewTaskAgentId(values.agentId);
+		setNewTaskClineSettings(values.clineSettings);
+		restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef.current = true;
+		setNewTaskTerminalAgentModelOverrideSettings(values.terminalAgentModelOverrideSettings);
+		setNewTaskAgentSessionInitialization(values.taskAgentSessionInitialization);
+		setIsInlineTaskCreateOpen(true);
+	}, [
+		suspendedTaskEditorSeed,
+		suspendCurrentTaskEditDraft,
+		handleOpenEditTaskCardInOtherProject,
+		setEditingTaskCardInOtherProject,
+		newTaskAgentPermissionModeByDefault,
+		setNewTaskAutoReviewEnabled,
+		setNewTaskAutoReviewMode,
+	]);
+
 	return {
+		suspendedTaskEditorTitle: suspendedTaskEditorSeed
+			? suspendedTaskEditorSeed.kind === "create"
+				? "新建任务草稿"
+				: suspendedTaskEditorSeed.taskCard.title
+			: null,
+		handleResumeSuspendedTaskEditor,
 		isInlineTaskCreateOpen,
+		taskEditorSessionWorkspaceId,
+		newTaskName,
+		setNewTaskName,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -1964,6 +2266,8 @@ export function useTaskEditor({
 		handleOpenEditTask,
 		handleOpenEditTaskCardInOtherProject,
 		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
+		handleSelectEditTaskTargetProject,
 		editTaskBranchOptionsForEditTarget,
 		taskCreationTargetWorkspaceId,
 		taskCreationTargetOtherProjectWorkspaceId,

@@ -43,6 +43,7 @@ import type { TaskCreationTargetProjectField } from "@/components/task-creation-
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskLookupWorkbenchView } from "@/components/task-lookup-workbench-view";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
+import { TaskProjectAssignmentPreflightHost } from "@/components/task-project-assignment-preflight-host";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
 import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
@@ -677,6 +678,9 @@ export default function App(): ReactElement {
 
 	const {
 		isInlineTaskCreateOpen,
+		taskEditorSessionWorkspaceId,
+		newTaskName,
+		setNewTaskName,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -734,11 +738,15 @@ export default function App(): ReactElement {
 		setEditTaskTerminalAgentModelOverrideSettings,
 		editTaskAgentSessionInitialization,
 		setEditTaskAgentSessionInitialization,
+		suspendedTaskEditorTitle,
+		handleResumeSuspendedTaskEditor,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
 		handleOpenEditTaskCardInOtherProject,
 		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
+		handleSelectEditTaskTargetProject,
 		editTaskBranchOptionsForEditTarget,
 		taskCreationTargetWorkspaceId,
 		taskCreationTargetOtherProjectWorkspaceId,
@@ -837,21 +845,8 @@ export default function App(): ReactElement {
 		projects,
 	]);
 
-	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
+	// 创建与 Backlog 编辑共用项目选择，迁移在运行时校验未启动身份。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId || postDeployVerificationFollowUpTaskCreationDraftSeed || !isBoardScopeAllProjectsSelected) {
-			const workspaceId = editingTaskId
-				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
-				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);
-			if (!workspaceId) return undefined;
-			const project = projects.find((entry) => entry.id === workspaceId);
-			return {
-				taskCreationTargetProjectFieldPresentation: "target_project_shown_read_only",
-				workspaceId,
-				projectName: project?.name ?? workspaceId,
-				visualIdentity: project?.visualIdentity,
-			};
-		}
 		return {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
 			selectableProjects: projects
@@ -862,12 +857,15 @@ export default function App(): ReactElement {
 					projectName: project.name,
 					visualIdentity: project.visualIdentity,
 				})),
-			selectedTargetWorkspaceId: taskCreationTargetWorkspaceId,
-			onSelectTargetWorkspaceId: handleSelectTaskCreationTargetProject,
+			selectedTargetWorkspaceId: editingTaskId ? editTaskTargetWorkspaceId : taskCreationTargetWorkspaceId,
+			onSelectTargetWorkspaceId: editingTaskId
+				? handleSelectEditTaskTargetProject
+				: handleSelectTaskCreationTargetProject,
 		};
 	}, [
-		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
 		editingTaskId,
+		handleSelectEditTaskTargetProject,
 		handleSelectTaskCreationTargetProject,
 		isBoardScopeAllProjectsSelected,
 		projectRuntimeWorkspaceId,
@@ -1663,6 +1661,14 @@ export default function App(): ReactElement {
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
 
+	useEffect(() => {
+		const openAnalysisSettings = () => {
+			setIsSettingsOpen(true);
+		};
+		window.addEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+		return () => window.removeEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+	}, []);
+
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
@@ -2153,6 +2159,7 @@ export default function App(): ReactElement {
 							) : null}
 						</div>
 					</div>
+					<TaskProjectAssignmentPreflightHost />
 					<RuntimeSettingsDialog
 						open={isSettingsOpen}
 						workspaceId={settingsWorkspaceId}
@@ -2179,9 +2186,14 @@ export default function App(): ReactElement {
 						onResetAllState={handleResetAllState}
 					/>
 					<TaskEditorDialog
+						suspendedTaskEditorTitle={suspendedTaskEditorTitle}
+						onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
 						open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
 						onOpenChange={handleCreateDialogOpenChange}
 						taskEditorMode={editingTaskId ? "edit" : "create"}
+						creatingTaskName={newTaskName}
+						onCreatingTaskNameChange={setNewTaskName}
+						editorSessionWorkspaceId={taskEditorSessionWorkspaceId}
 						editingTaskName={editTaskName}
 						onEditingTaskNameChange={setEditTaskName}
 						editingTaskId={editingTaskId}
@@ -2208,7 +2220,7 @@ export default function App(): ReactElement {
 						}
 						onCreateStartAndOpen={
 							editingTaskId
-								? undefined
+								? () => editingTaskId
 								: taskCreationTargetOtherProjectWorkspaceId
 									? handleCreateStartAndOpenTaskInOtherProject
 									: handleCreateStartAndOpenTask

@@ -28,6 +28,11 @@ const harness = vi.hoisted(() => ({
 	capturedTaskMutationIntents: [] as unknown[],
 }));
 
+vi.mock("../../../src/state/backlog-task-project-transfer", () => ({
+	recoverPendingBacklogTaskProjectTransfers: vi.fn(async () => undefined),
+	transferNeverStartedBacklogTaskToProject: vi.fn(),
+}));
+
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	mutateWorkspaceState: async (
 		cwd: string,

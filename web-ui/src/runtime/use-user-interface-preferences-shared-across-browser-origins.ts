@@ -141,3 +141,18 @@ export function useTaskPromptPseudoHtmlBlockRecentlyUsedCustomNamesPreference():
 export function useUserInterfacePreferenceFieldsWhereServerAndBrowserDisagree(): readonly string[] {
 	return useUserInterfacePreferenceStoreState().fieldsWhereServerAndBrowserDisagree;
 }
+
+/** 创建与 Backlog 编辑共享；只发送本次修改的字段，避免不同客户端覆盖其他设置。 */
+export function useTaskEditorSettingPresentationPreference(): [
+	Record<string, "expanded" | "collapsed_in_group" | "hidden">,
+	(key: string, value: "expanded" | "collapsed_in_group" | "hidden") => void,
+] {
+	useUserInterfacePreferenceStoreState();
+	const preferences = readEffectiveUserInterfacePreferenceValue("taskEditorSettingPresentationBySettingKey") ?? {};
+	const setPresentation = useCallback((key: string, value: "expanded" | "collapsed_in_group" | "hidden") => {
+		saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+			taskEditorSettingPresentationBySettingKey: { [key]: value },
+		});
+	}, []);
+	return [preferences, setPresentation];
+}

@@ -9,6 +9,7 @@ import type {
 import { incomingWorkItemRelationAnalysisSchema } from "../core/task-indexing-support-contract";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
 import { executeStatelessTaskIndexingAgent } from "./stateless-task-indexing-agent-executor";
+import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "./task-analysis-shared-prompt-prefix";
 import { loadAndAdvanceSharedTaskIndexingContext } from "./task-indexing-support-storage";
 
 export const INCOMING_WORK_ITEM_RELATION_INSTRUCTION_VERSION = "incoming-work-item-relation-analysis-v1";
@@ -130,7 +131,7 @@ export async function analyzeIncomingWorkItemRelations(input: {
 		workspaceId: input.workspaceId,
 		materials: input.materials,
 		settings: input.settings,
-		instructionVersion: INCOMING_WORK_ITEM_RELATION_INSTRUCTION_VERSION,
+		instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 		now: Date.now(),
 		forModelRequest: true,
 	});
