@@ -916,6 +916,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	settleRvfCloseoutPromptTerminalDelivery = rvfAutomaticCloseoutApi.settleCloseoutPromptTerminalDelivery;
 
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
+		getAcpTaskSessionService: getScopedAcpTaskSessionService,
 		getTerminalManager: getScopedTerminalManager,
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 		startTaskSession: (scope, input) => runtimeApi.startTaskSession(scope, input),

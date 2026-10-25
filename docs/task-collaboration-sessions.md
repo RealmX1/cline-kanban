@@ -32,31 +32,37 @@ PTY、ACP 和既有 SDK 通路均保留宿主与当前会话两个 ID。启动�
 
 RVF 的编辑归属仍按各会话记录；共享 worktree 的全部改动不会自动归入主会话。本功能不迁移跨 agent 历史，不聚合平级会话状态，也不实现完整 Task Force。
 
-## Claude 或 Codex 到 Codex 的主会话交接
+## 跨 harness 主会话交接
 
-Sessions 提供「交接给 Codex」。Claude 和 Codex 主会话均可使用；原主会话保留为可继续对话的辅线，不转换历史或交换身份。默认创建全新 Codex，也可选择同任务已有且具备可靠原生身份的 Codex 协作会话。
+Sessions 提供「交接主会话」，支持 Claude、Codex、Cursor、Droid、Kiro、Kimi、OMP 之间创建新接任会话。目标选择显示安装状态；Cline 与禁用的 harness 不参与。原主保留为可继续对话的辅线，不交换身份。默认全新上下文＋材料；另保留同任务已有 Codex 协作会话接任。
 
-Codex 新建目标有两种上下文方式：默认「全新上下文＋交接材料」，用于重新聚焦；「完整复刻原对话」按原生完整回合 fork，保留已有 compaction 和偏题内容。旧请求未声明方式时仍为全新上下文。已有 Codex 接任始终沿用自身上下文；完整复刻缺少可靠身份时显示原因，不静默降级。
+新建目标有两种上下文方式：默认「全新上下文＋交接材料」，用于重新聚焦；「完整复刻原对话」仅在 Claude/Codex/OMP 同 harness 且可靠原生身份就绪时开放，保留已有 compaction 和偏题内容；跨 harness 只交接材料。OMP fork 保留原 PTY/ACP 通道。旧请求未声明方式时仍为全新上下文。已有 Codex 接任始终沿用自身上下文；完整复刻缺少可靠身份时显示原因，不静默降级。
 
 `RuntimeBoardCard.mainTaskConversationSessionId` 是当前主责任的持久权威，缺省回落到卡片 ID。当前角色由绑定派生，创建角色不变；`taskConversationSessionHasHeldMainResponsibility` 持久记录接任历史，因此 A → B → C 后 A、B 都显示「前主会话」。默认消息、生命周期、通知、移列和 checkpoint 跟随当前主绑定；显式选择前主仍可操作它。迟到 hook 只更新自己的 session，旧整板保存不能夺回主责任。Done 工作台保留只读门禁。
 
 双方的原生身份、存储归属及独立启动设置与主绑定一起保存。`startTaskSession` 省略 `workspaceTaskId` 时按 Task 默认入口跟随当前主绑定；显式传入时按 session 寻址。已有 peer 和已准备的 fork 按精确原生 ID 冷恢复，不使用 cwd-latest，也不通过「fork 当前主会话」再次分支。全新目标尚未建立原生对话时安全地全新启动；fork 保留原生模型，不被卡片旧 override 覆盖。
 
-全新 Codex 在首条输入前可能尚无原生 ID。运行时先持久固定目标进程代际、工作目录与存储归属，再沿 TUI 提交 `/plan`；可信原生 hook 带回同代际身份后固定只读接受查询的目标。迟到的旧代际 hook 不得覆盖该绑定。
+全新目标在首条输入前可能尚无原生 ID。运行时先持久固定目标 Agent、进程代际、工作目录及适用的存储归属；可信原生 hook 带回同代际身份后固定只读接受查询的目标。迟到的旧代际 hook 不得覆盖绑定。Droid/Kiro 没有可靠原生 ID 读取器时，必须同时具备完整正文输入 hook 和同代际后续处理 hook；前置输入、Enter 或活进程均不证明接受。新输入会使旧候选失效，避免跨回合串证。
 
-材料契约在 `src/core/task-main-session-handover-contract.ts`。Claude 采集器保留 ExitPlanMode 成功回执与计划逐字匹配的批准判据。Codex 采集器复用可信历史分页、分段祖先及消息去重，保留内嵌 `<proposed_plan>`、明确计划路径、最后连续非工具正文、需求、阶段目标、git 状态和用户补充；普通历史文本不推断为批准。读取、fork 和补证均跟随 `codexConversationStorageHomeDirectoryPath` 及迁移记录，不能按默认目录猜选。
+材料契约在 `src/core/task-main-session-handover-contract.ts`。Claude 采集器保留 ExitPlanMode 成功回执与计划逐字匹配的批准判据。通用采集器复用各 harness 可信历史分页、分段祖先及消息去重，保留内嵌 `<proposed_plan>`、明确计划路径、最后连续非工具正文、需求、阶段目标、git 状态和用户补充；普通历史文本不推断为批准。读取、fork 和补证均跟随 `codexConversationStorageHomeDirectoryPath` 及迁移记录，不能按默认目录猜选。
+
+`task-main-session-handover-material-provider.ts` 提供可替换的 `readUserIntentContext` 端口，返回值绑定 workspace、task incarnation、会话身份、asOf、来源与缺口。默认只组装原始材料；提供方缺失、失败或两秒预算耗尽时明确标注不完整并继续，不增加 LLM 采集。My AI Setup/ac08e 的工作单元意图卷宗尚未发布 CLI＋JSON，本实现预留接入，不调用交互式约束提炼，也不把 L1 Recap 冒充完整意图。
+
+Cursor 使用绑定原生 ID 及工作目录对应的 JSONL 导出，先核对 chat 归属，不打开原始 SQLite；Kimi 复用已核验的 session index、state 与主 agent wire 协议头。缺少导出时保持未知，导出出现或改变后自动补查；Cursor 等待真人的读取也跨重启恢复，机器报告不能自行解除等待。
+
+新请求为 `new_agent_session`＋`agentId`；`new_codex_session`、`existing_codex_session`、旧记录和旧恢复 API 保持兼容。Claude 通过官方 SDK 固定末消息 fork；OMP 使用原生 `--fork` 冻结副本，并复制、核对原生工具附件。已知子身份先持久化再验证，恢复沿原冻结历史，不夹带失败交接报告。
 
 正文与快照持久保存在运行时 HOME 的 `cross-task-handoff-artifacts/<workspaceId>/task-<taskId>-main-session-handover/<handoverId>/`，包括 `HANDOVER.md`、结构化材料、计划与 transcript 分段快照。原生准备凭据独立保存固定来源、完整回合 ID、每次未知尝试及已知子身份；准备失败后保留原材料，不用新读取结果覆盖固定快照。材料与关键凭据完成持久写入后才推进绑定。
 
 来源或目标仍在生成时，可暂不交接或等待双方停下；等待跨浏览器关闭和运行时重启保留。完整复刻先固定完成回合、创建独立子身份并持久保存，再校验完整历史与工作目录，最后原子切主。准备过程不启动模型；已知子身份只复验，不重复创建。来源身份或固定边界变化则停止陈旧交接。
 
-首条汇报保留 TUI 原生 `/plan` 命令和长粘贴处理，要求只读汇报「计划总览、已经实现、有待进行」，随后等待真人消息。交接及等待期间暂停自动继续、排队投递和自动 RVF/收尾；只有真人输入的实际接受证明解除 hold。Plan 与权限轴独立。
+首条汇报在 Codex 使用 TUI 原生 `/plan` 命令，其余目标使用各自 Plan 起步设置；共用长粘贴处理，要求只读汇报「计划总览、已经实现、有待进行」，随后等待真人消息。交接及等待期间暂停自动继续、排队投递和自动 RVF/收尾；只有真人输入的实际接受证明解除 hold。Plan 与权限轴独立。
 
 请求 ID、预留目标、投递 attempt 和账本保证幂等。报告提交前固定原生身份、目录和存储归属；接受未知时只读查询原生历史，控制端点不可用则读取可信持久记录，并保存分页进度。完整正文必须逐字一致，兼容原生 `/plan` 消费前缀；只有标记或截断正文不算接受。迟到证明独立于原失败账本保留，复核当前主绑定和原生身份后自动转入等用户，不自动重发模型回合。
 
 `automaticRecovery` 区分机器待证据、执行禁止与人类取舍。同一证据最多三次、至少间隔 15 秒，预算跨重启保留；预算耗尽等待历史、迁移绑定、端点或准备凭据变化。准备阶段确认未启动模型时，可从固定边界有界另建尝试，未知旧尝试继续保留，只有一个目标能取得主绑定。用户 Stop、归属不符或主绑定改变停止对应执行；Stop 不被后台恢复撤销。
 
-仍可显式选择「新建 Codex 并重新交接」，确认可能重复汇报后走原有恢复 API。恢复凭据保存原控制记录及预留目标，重复确认复用同一目标；完整复刻恢复沿原固定历史边界创建独立子会话，不改成空白上下文。绑定切换后的失败不静默回退到前主。
+仍可显式选择「新建目标 Agent 并重新交接」，确认可能重复汇报后走通用恢复 API。旧 Codex 恢复 API 继续兼容 Codex 记录，不能改变非 Codex 目标。恢复凭据保存原控制记录及预留目标，重复确认复用同一目标；完整复刻恢复沿原固定历史边界创建独立子会话，不改成空白上下文。绑定切换后的失败不静默回退到前主。
 
 ## 从侧会话分出独立任务
 
