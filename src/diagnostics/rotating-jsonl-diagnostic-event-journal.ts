@@ -36,6 +36,7 @@ const DIAGNOSTIC_EVENT_JOURNAL_DEFAULT_RETAINED_ROTATED_FILE_COUNT = 4;
 export type DiagnosticEventJournalChannel =
 	| "rvf-late-native-closeout-prompt-acceptance-automatic-recovery"
 	| "event-loop-delay-window-sample"
+	| "runtime-state-broadcast-cost-window-sample"
 	| "codex-native-control-socket-request-diagnostic"
 	| "git-command-failure"
 	// 以下四个通道原是 2026-08 那次 fd 耗尽调查的临时探针，现已转为常设绊线。转正的理由是根因修复

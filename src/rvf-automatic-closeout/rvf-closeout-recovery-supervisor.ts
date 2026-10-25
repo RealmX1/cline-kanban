@@ -59,6 +59,20 @@ export function remainingRvfCloseoutStages(record: RvfAutomaticCloseoutRecord) {
 		return result?.outcome !== "completed" && !hasRvfCloseoutStageResultBlockingAutomaticExecution(result);
 	});
 }
+export function remainingRvfCloseoutVerificationStages(record: RvfAutomaticCloseoutRecord) {
+	return (["land", "base_branch_sync"] as const).filter((stage) => {
+		const result = stage === "land" ? record.landExecutionResult : record.baseBranchSyncExecutionResult;
+		return (
+			result?.outcome !== "completed" &&
+			(!hasRvfCloseoutStageResultBlockingAutomaticExecution(result) || result?.blockedReasonKind === undefined)
+		);
+	});
+}
+function hasUnclassifiedHistoricalStageBlock(record: RvfAutomaticCloseoutRecord) {
+	return [record.landExecutionResult, record.baseBranchSyncExecutionResult].some(
+		(result) => result?.outcome === "blocked" && result.blockedReasonKind === undefined,
+	);
+}
 export async function advanceRvfCloseoutAutomaticRecovery(
 	deps: RecoverySupervisorDependencies,
 	original: RvfAutomaticCloseoutRecord,
@@ -154,7 +168,7 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 					},
 				});
 			};
-			if (!remainingRvfCloseoutStages(record).length) {
+			if (!remainingRvfCloseoutVerificationStages(record).length) {
 				if (record.automaticRecoveryProgress?.kind === "machine_waiting")
 					await progress("no_remaining_authorized_stage", "none", "settled");
 				return;
@@ -211,6 +225,7 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 				}
 			}
 			const needsRecovery =
+				hasUnclassifiedHistoricalStageBlock(record) ||
 				(record.status === "paused" && record.pauseReason?.startsWith("收尾投递失败：")) ||
 				injected?.terminal_delivery_status === "delivered_and_submit_confirmed" ||
 				record.lateNativePromptAcceptanceRecoveryReceipt !== undefined ||
@@ -381,7 +396,9 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 							(result) => result?.blockedReasonKind === "machine_precondition",
 						)),
 			);
+			const inspectUnclassifiedHistoricalBlock = hasUnclassifiedHistoricalStageBlock(record);
 			if (
+				!inspectUnclassifiedHistoricalBlock &&
 				!resumeVerifiedAcceptedStages &&
 				(!record.automaticRecoveryProgress ||
 					record.automaticRecoveryProgress.verificationAttemptCount < 3 ||
@@ -389,15 +406,17 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 			)
 				return;
 			if (
+				!inspectUnclassifiedHistoricalBlock &&
 				!resumeVerifiedAcceptedStages &&
 				!["native_prompt_acceptance_not_proven", "native_control_unavailable"].includes(
 					acceptanceVerificationReasonCode ?? "",
 				)
 			)
 				return;
-			const preparationFingerprint = resumeVerifiedAcceptedStages
-				? `verified-accepted:${await readContinuationEnqueueEvidenceFingerprint()}`
-				: (record.automaticRecoveryProgress?.evidenceFingerprint ?? "");
+			const preparationFingerprint =
+				resumeVerifiedAcceptedStages || inspectUnclassifiedHistoricalBlock
+					? `verified-accepted:${await readContinuationEnqueueEvidenceFingerprint()}`
+					: (record.automaticRecoveryProgress?.evidenceFingerprint ?? "");
 			// 旧版仅有一次性指纹时折算为已尝试一次，不把它继续当成永久完成标记。
 			const previousPreparationBudget =
 				record.automaticRecoveryProgress?.continuationPreparationObservationBudget ??
@@ -462,9 +481,12 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 			const unchanged =
 				record.restoreWorkspaceStateSha256 !== null &&
 				(await readRvfCloseoutWorkspaceStateDigest(record.receipt.worktree)) === record.restoreWorkspaceStateSha256;
-			const purpose = unchanged ? ("execute_remaining_stages" as const) : ("inspect_existing_state" as const);
+			const purpose =
+				unchanged && !inspectUnclassifiedHistoricalBlock
+					? ("execute_remaining_stages" as const)
+					: ("inspect_existing_state" as const);
 			const deliveryAttemptId = randomUUID();
-			const promptText = `这是同一 RVF run 的受控续验，来源为 Kanban 自动恢复，不是人类新授权。\nRVF_AUTOMATIC_CLOSEOUT_TOKEN=${record.receipt.decision_token}\n${record.handoffPath}\nrun_id=${record.runId}\nhandoff_sha256=${record.handoffSha256}\ndelivery_attempt_id=${deliveryAttemptId}\n先核验既有 Land 规范产物并报告真实结果，保留原投递与阶段历史，分别登记接受与完成事实。当前模式=${purpose}；仅处理 ${remainingRvfCloseoutStages(record).join("、")}。不要重做已完成阶段，不开启新 RVF，不部署，不移动 Done。先读取当前用户限制；用户禁止的阶段须报告 blocked、blockedReasonKind=user_restriction。任何写入前调用 kanban task claim-rvf-automatic-closeout-execution-stage，绑定 task=${record.taskId}、token/run/handoff 和本 deliveryAttemptId；只有 claimed 才可使用相应 $rvf-land 或 $base-branch-sync，已有 completed 直接复用。inspect_existing_state 模式先只读补证，原收尾资格或规范结果足以恢复后才可认领；不能凭本消息扩大授权。按原阶段结果报告命令登记，并附 deliveryAttemptId 和 stageExecutionClaimId。`;
+			const promptText = `这是同一 RVF run 的受控续验，来源为 Kanban 自动恢复，不是人类新授权。\nRVF_AUTOMATIC_CLOSEOUT_TOKEN=${record.receipt.decision_token}\n${record.handoffPath}\nrun_id=${record.runId}\nhandoff_sha256=${record.handoffSha256}\ndelivery_attempt_id=${deliveryAttemptId}\n先核验既有 Land 与 base 规范产物并报告真实结果，保留原投递与阶段历史，分别登记接受与完成事实。当前模式=${purpose}；待核验阶段=${remainingRvfCloseoutVerificationStages(record).join("、")}；允许申请执行的阶段=${remainingRvfCloseoutStages(record).join("、") || "无"}。旧未分类 blocked 只允许读取原报告、原生记录和当前用户限制，附明确来源报告分类；原因仍未知时保留待验与恢复条件，不能猜测为机器故障或用户禁止。不要重做已完成阶段，不开启新 RVF，不部署，不移动 Done。先读取当前用户限制；用户禁止的阶段须报告 blocked、blockedReasonKind=user_restriction。任何写入前调用 kanban task claim-rvf-automatic-closeout-execution-stage，绑定 task=${record.taskId}、token/run/handoff 和本 deliveryAttemptId；只有 claimed 才可使用相应 $rvf-land 或 $base-branch-sync，已有 completed 直接复用。inspect_existing_state 模式先只读补证，原收尾资格或规范结果足以恢复后才可认领；不能凭本消息扩大授权。按原阶段结果报告命令登记，并附 deliveryAttemptId 和 stageExecutionClaimId。`;
 			const attempt: RvfCloseoutDeliveryAttempt = {
 				deliveryAttemptId,
 				idempotencyKey: `rvf-automatic-closeout-${record.receipt.decision_token}-continuation`,

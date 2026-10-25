@@ -1898,11 +1898,11 @@ export default function App(): ReactElement {
 								}
 							/>
 						</div>
-						<DailyWorkProgressExpandedRegion
-							progress={dailyWorkProgressStatistics}
-							onOpenTask={handleOpenTaskInProject}
-						/>
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+							<DailyWorkProgressExpandedRegion
+								progress={dailyWorkProgressStatistics}
+								onOpenTask={handleOpenTaskInProject}
+							/>
 							<div
 								className="kb-home-layout"
 								aria-hidden={isFocusViewChromeShown ? true : undefined}
