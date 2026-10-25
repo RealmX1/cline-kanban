@@ -293,7 +293,10 @@ describe("useGitActions", () => {
 		await act(async () => {
 			expect(await actions!.runAutoReviewGitAction("task-1", action)).toBe(false);
 		});
-		expect(sendTaskChatMessage).toHaveBeenCalledExactlyOnceWith("task-1", action, { mode: "act" });
+		expect(sendTaskChatMessage).toHaveBeenCalledExactlyOnceWith("task-1", action, {
+			mode: "act",
+			deliveryOrigin: { messageType: "task_action", sourceLabel: action },
+		});
 		await act(async () => {
 			finishDelivery!({ ok: false, message: "模拟投递失败" });
 			await delivery;
@@ -312,7 +315,7 @@ describe("useGitActions", () => {
 		expect(actions!.taskGitActionLoadingByTaskId).toEqual({});
 	});
 
-	it.each(["commit", "pr"] as const)("终端 %s 仍粘贴提示词后提交回车", async (action) => {
+	it.each(["commit", "pr"] as const)("终端 %s 也通过统一消息出口，保留类型并禁止绕行粘贴", async (action) => {
 		vi.useFakeTimers();
 		try {
 			let actions: UseGitActionsResult | null = null;
@@ -342,18 +345,11 @@ describe("useGitActions", () => {
 				if (action === "commit") actions!.handleAgentCommitTask("task-1");
 				else actions!.handleAgentOpenPrTask("task-1");
 			});
-			expect(sendTaskSessionInput).toHaveBeenCalledExactlyOnceWith("task-1", `${action} main`, {
-				appendNewline: false,
-				mode: "paste",
+			expect(sendTaskChatMessage).toHaveBeenCalledExactlyOnceWith("task-1", `${action} main`, {
+				mode: "act",
+				deliveryOrigin: { messageType: "task_action", sourceLabel: action },
 			});
-			expect(
-				(action === "commit" ? actions!.agentCommitTaskLoadingById : actions!.agentOpenPrTaskLoadingById)["task-1"],
-			).toBe(true);
-			await act(async () => {
-				await vi.advanceTimersByTimeAsync(200);
-			});
-			expect(sendTaskSessionInput).toHaveBeenNthCalledWith(2, "task-1", "\r", { appendNewline: false });
-			expect(sendTaskChatMessage).not.toHaveBeenCalled();
+			expect(sendTaskSessionInput).not.toHaveBeenCalled();
 			expect(actions!.taskGitActionLoadingByTaskId).toEqual({});
 		} finally {
 			vi.useRealTimers();
@@ -443,7 +439,10 @@ describe("useGitActions", () => {
 			await Promise.resolve();
 		});
 
-		expect(sendTaskChatMessage).toHaveBeenCalledWith("task-1", expect.any(String), { mode: "act" });
+		expect(sendTaskChatMessage).toHaveBeenCalledWith("task-1", expect.any(String), {
+			mode: "act",
+			deliveryOrigin: { messageType: "task_action", sourceLabel: "commit" },
+		});
 		expect(sendTaskSessionInput).not.toHaveBeenCalled();
 		expect(showAppToastMock).not.toHaveBeenCalled();
 	});

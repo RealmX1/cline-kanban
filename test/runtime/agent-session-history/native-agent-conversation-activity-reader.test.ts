@@ -622,6 +622,41 @@ describe("有界原生活动增量读取", () => {
 			isLoaded ? ["thread/loaded/list", "thread/turns/list"] : ["thread/loaded/list"],
 		);
 	});
+	it("Codex 首次确认的正文提取接受 text+skill，不把手册正文拼进投递正文", async () => {
+		const target = summary("codex", "/isolated/native.jsonl");
+		request.mockImplementation(async (method) =>
+			method === "thread/loaded/list"
+				? { data: ["native"] }
+				: {
+						data: [
+							{
+								id: "current",
+								status: "inProgress",
+								items: [
+									{
+										id: "accepted-with-skill",
+										type: "userMessage",
+										content: [
+											{ type: "text", text: "逐字收尾正文 $base-branch-sync" },
+											{ type: "skill", name: "base-branch-sync", path: "/isolated/SKILL.md" },
+										],
+									},
+								],
+							},
+						],
+						nextCursor: null,
+					},
+		);
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: { transport: "codex_control", predecessorTurnId: "current", seenEventIds: [] },
+			observedAtMs: baselineAtMs,
+		});
+		expect(result?.events).toMatchObject([
+			{ activityKind: "accepted_user_input", submittedPromptText: "逐字收尾正文 $base-branch-sync" },
+		]);
+	});
 	it("Codex 缺本代控制端点或无法找到固定前驱时保持未知，不补发提示", async () => {
 		const target = summary("codex", "/isolated/native.jsonl");
 		expect(

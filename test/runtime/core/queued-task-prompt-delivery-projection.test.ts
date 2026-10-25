@@ -43,6 +43,34 @@ const baseInput = {
 	nowEpochMs: NOW,
 };
 
+describe("统一主动投递投影", () => {
+	it("即时注入保留类型、来源、策略与真实回执，不冒充等待队列", () => {
+		const managedDelivery = {
+			messageType: "programmatic_injection" as const,
+			deliveryStrategy: "immediate" as const,
+			sourceLabel: "rvf_test_source",
+			imageAttachmentCount: 0,
+			terminalDeliveryReceipt: { status: "delivered_queued_behind_active_agent_turn" as const, reason: null },
+		};
+		const projection = buildRuntimeQueuedTaskPromptDeliveryProjection(
+			makeEntry({ managedDelivery, deliveryState: "settled_delivered" }),
+			baseInput,
+		);
+		expect(projection).toMatchObject({ deliveryId: "q1", managedDelivery, dispatchBlockReason: null });
+	});
+
+	it("旧库条目无需迁移即可获得完整分类", () => {
+		expect(
+			buildRuntimeQueuedTaskPromptDeliveryProjection(
+				makeEntry({ sourcePromptLibraryEntryId: "library-1" }),
+				baseInput,
+			),
+		).toMatchObject({
+			managedDelivery: { messageType: "prompt_library", deliveryStrategy: "after_agent_turn" },
+		});
+	});
+});
+
 describe("queued-task-prompt-delivery-projection — 正文不上广播链路", () => {
 	it("透传最近一次开始投递的真实时间，未尝试时保持 null", () => {
 		expect(buildRuntimeQueuedTaskPromptDeliveryProjection(makeEntry(), baseInput)).toHaveProperty(

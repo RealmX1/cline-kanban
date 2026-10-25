@@ -51,6 +51,10 @@ import {
 	type WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import {
+	isManagedTaskPromptDeliveryScheduledAfterAgentTurn,
+	resolveManagedTaskPromptDeliveryMetadata,
+} from "../core/managed-task-prompt-delivery";
+import {
 	isQueuedTaskPromptDeliveryAwaitingDispatch,
 	QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS,
 } from "../core/queued-task-prompt-delivery-dispatch-eligibility";
@@ -240,8 +244,10 @@ export function isQueuedTaskPromptDeliveryQueueFullForTask(
 	taskId: string,
 ): boolean {
 	return (
-		getTaskEntries(snapshot, taskId).filter((entry) =>
-			isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
+		getTaskEntries(snapshot, taskId).filter(
+			(entry) =>
+				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+				isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
 		).length >= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK
 	);
 }
@@ -252,7 +258,10 @@ function countNonTerminalQueuedTaskPromptDeliveriesInWorkspace(
 	let count = 0;
 	for (const entries of Object.values(snapshot.entriesByTaskId)) {
 		for (const entry of entries) {
-			if (isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)) {
+			if (
+				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+				isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
+			) {
 				count += 1;
 			}
 		}
@@ -379,24 +388,49 @@ export function withExpiredAndOverflowingEntriesPruned(
 		// 现在两级裁剪口径一致：非终态条目（用户还在等的东西）任何情况下都不裁；上限对**队列本身**的
 		// 约束改由入队处显式拒绝承担（见 applyQueuedTaskPromptDeliveryMutation 的 enqueue 分支），
 		// 拒绝是可被调用方看见的，静默丢弃不是。
-		const cappedForTask = withOldestTerminalEntriesDroppedDownToCap(
-			retainedForTask,
-			MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK,
+		// 即时投递的历史独立限额，不能挤掉等待意图，也不能被尚未确认的即时消息当场裁掉。
+		const waitingEntries = retainedForTask.filter(isManagedTaskPromptDeliveryScheduledAfterAgentTurn);
+		const immediateEntries = retainedForTask.filter(
+			(entry) => !isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry),
 		);
+		const retainedIds = new Set(
+			[
+				...withOldestTerminalEntriesDroppedDownToCap(waitingEntries, MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK),
+				...withOldestTerminalEntriesDroppedDownToCap(
+					immediateEntries,
+					MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK +
+						immediateEntries.filter((entry) => isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState))
+							.length,
+				),
+			].map((entry) => entry.queueEntryId),
+		);
+		const cappedForTask = retainedForTask.filter((entry) => retainedIds.has(entry.queueEntryId));
 		if (cappedForTask.length === 0) {
 			continue;
 		}
-		retainedWorkspaceEntryCount += cappedForTask.length;
+		retainedWorkspaceEntryCount += cappedForTask.filter(isManagedTaskPromptDeliveryScheduledAfterAgentTurn).length;
 		entriesByTaskId[taskId] = cappedForTask;
 	}
-	if (retainedWorkspaceEntryCount <= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE) {
+	const allEntries = Object.values(entriesByTaskId).flat();
+	const immediateTerminalEntries = allEntries.filter(
+		(entry) =>
+			!isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+			!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
+	);
+	if (
+		retainedWorkspaceEntryCount <= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE &&
+		immediateTerminalEntries.length <= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE
+	) {
 		return { entriesByTaskId };
 	}
 	// workspace 级溢出按「最老的终态条目先走」裁——非终态条目是用户还在等的东西，任何情况下都不裁。
 	const terminalEntryAges: { taskId: string; queueEntryId: string; settledAt: number }[] = [];
 	for (const [taskId, entries] of Object.entries(entriesByTaskId)) {
 		for (const entry of entries) {
-			if (!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)) {
+			if (
+				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+				!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
+			) {
 				terminalEntryAges.push({
 					taskId,
 					queueEntryId: entry.queueEntryId,
@@ -406,10 +440,18 @@ export function withExpiredAndOverflowingEntriesPruned(
 		}
 	}
 	terminalEntryAges.sort((left, right) => left.settledAt - right.settledAt);
-	const dropCount = retainedWorkspaceEntryCount - MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE;
+	const dropCount = Math.max(0, retainedWorkspaceEntryCount - MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE);
 	const droppedEntryKeys = new Set(
 		terminalEntryAges.slice(0, dropCount).map((candidate) => `${candidate.taskId} ${candidate.queueEntryId}`),
 	);
+	immediateTerminalEntries.sort(
+		(left, right) => (left.settledAt ?? left.enqueuedAt) - (right.settledAt ?? right.enqueuedAt),
+	);
+	for (const entry of immediateTerminalEntries.slice(
+		0,
+		Math.max(0, immediateTerminalEntries.length - MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE),
+	))
+		droppedEntryKeys.add(`${entry.taskId} ${entry.queueEntryId}`);
 	const prunedEntriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 	for (const [taskId, entries] of Object.entries(entriesByTaskId)) {
 		const kept = entries.filter((entry) => !droppedEntryKeys.has(`${taskId} ${entry.queueEntryId}`));
@@ -561,7 +603,7 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		const failedEntry = entries.find(
 			(entry) => entry.queueEntryId === mutation.queueEntryId && entry.deliveryState === "settled_failed",
 		);
-		if (!failedEntry) {
+		if (!failedEntry || !isManagedTaskPromptDeliveryScheduledAfterAgentTurn(failedEntry)) {
 			return snapshot;
 		}
 		// 与 enqueue 同一条幂等判据，缺一不可：原条目重排之后仍是 settled_failed（刻意保留供对照），
@@ -577,6 +619,7 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		// 保留原条目（已 settled）供用户对照「上次为什么失败」。
 		const requeued: QueuedTaskPromptDeliveryEntry = {
 			...failedEntry,
+			managedDelivery: undefined,
 			// 新的人类意图不能继承旧自动投递的零写入证明或二次查询等待。
 			nativeIndependentUserTurnSubmissionProgress: undefined,
 			nativeIndependentUserTurnBeforeSubmissionQueryRecovery: undefined,
@@ -783,7 +826,9 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 			if (
 				entries.some(
 					(entry) =>
-						entry.deliveryState !== "queued" && isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
+						isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+						entry.deliveryState !== "queued" &&
+						isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
 				)
 			) {
 				return { next: pruned, result: null };
@@ -942,7 +987,7 @@ export async function settleQueuedTaskPromptDelivery(input: {
 					}
 					const link = entry.programmaticInjectionLedgerReceiptLink ?? null;
 					// 程序化条目把真实终端回执存下来，落定后的账本镜像原样用它（确认 vs 排在回合后面、哪种失败）。
-					const withReceipt: QueuedTaskPromptDeliveryEntry =
+					const withInjectionReceipt: QueuedTaskPromptDeliveryEntry =
 						link !== null && input.settlement.terminalDeliveryReceiptForInjectionLedger !== undefined
 							? {
 									...entry,
@@ -953,6 +998,16 @@ export async function settleQueuedTaskPromptDelivery(input: {
 									},
 								}
 							: entry;
+					const withReceipt =
+						input.settlement.terminalDeliveryReceiptForInjectionLedger !== undefined
+							? {
+									...withInjectionReceipt,
+									managedDelivery: {
+										...resolveManagedTaskPromptDeliveryMetadata(entry),
+										terminalDeliveryReceipt: input.settlement.terminalDeliveryReceiptForInjectionLedger,
+									},
+								}
+							: withInjectionReceipt;
 					if (input.settlement.outcome === "delivered") {
 						return {
 							...withReceipt,
@@ -972,7 +1027,12 @@ export async function settleQueuedTaskPromptDelivery(input: {
 					const retryBudgetExhausted = entry.deliveryAttemptCount >= MAX_QUEUED_TASK_PROMPT_DELIVERY_ATTEMPTS;
 					// 程序化条目一次定终身：已经交给终端投递了，就绝不回头再等 agent（与 RVF 的分工约定第 3 条）。
 					// 调用方有自己的重试策略与新 key；这里再重投一次，等于替它多送一遍、还用着它已经认定落定的 key。
-					if (input.settlement.outcome === "retryable_failure" && !retryBudgetExhausted && link === null) {
+					if (
+						input.settlement.outcome === "retryable_failure" &&
+						!retryBudgetExhausted &&
+						link === null &&
+						isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry)
+					) {
 						return {
 							...entry,
 							deliveryState: "queued" as const,
@@ -1117,6 +1177,7 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 						entry.survivedRuntimeRestartAtEpochMs !== null &&
 						entry.survivedRuntimeRestartAtEpochMs >= input.runtimeProcessStartedAtEpochMs;
 					if (
+						!isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) ||
 						alreadyStampedByThisRuntimeProcess ||
 						!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
 					) {
@@ -1306,6 +1367,17 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 							deliveryState: "settled_failed" as const,
 							settledAt: nowEpochMs,
 							lastDeliveryFailureNote: input.strandedDeliveryFailureNote,
+							...(entry.managedDelivery && !isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry)
+								? {
+										managedDelivery: {
+											...entry.managedDelivery,
+											terminalDeliveryReceipt: {
+												status: "delivery_failed" as const,
+												reason: "runtime_restarted_before_confirmation" as const,
+											},
+										},
+									}
+								: {}),
 						};
 					}
 					return entry;

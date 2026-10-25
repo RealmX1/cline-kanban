@@ -13,6 +13,7 @@ import type {
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "./api-contract";
+import { resolveManagedTaskPromptDeliveryMetadata } from "./managed-task-prompt-delivery";
 import { isQueuedTaskPromptDeliveryAwaitingDispatch } from "./queued-task-prompt-delivery-dispatch-eligibility";
 import { buildQueuedTaskPromptDeliveryTextPreview } from "./queued-task-prompt-delivery-merge";
 
@@ -83,6 +84,8 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 					nativeIndependentUserTurnPreflightQueryRecovery: entry.nativeIndependentUserTurnPreflightQueryRecovery,
 				}
 			: {}),
+		deliveryId: entry.queueEntryId,
+		managedDelivery: resolveManagedTaskPromptDeliveryMetadata(entry),
 		queueEntryId: entry.queueEntryId,
 		taskId: entry.taskId,
 		deliveryState,

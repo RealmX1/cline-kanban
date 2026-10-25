@@ -83,9 +83,13 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { observeManagedTaskPromptDeliveryChanges } from "../state/managed-task-prompt-delivery-coordinator";
 import { recordProgrammaticReviewExplicitUserStopObservations } from "../state/programmatic-review-explicit-user-stop-observations";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
-import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import {
+	computeQueuedTaskPromptDeliveryTextSha256,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../state/queued-task-prompt-delivery-store";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
@@ -559,6 +563,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	const unregisterQueuedTaskPromptDeliveryDispatchObserver =
 		deps.runtimeStateHub.registerQueuedTaskPromptDeliveryDispatchObserver(queuedTaskPromptDeliveryDispatcher);
+	const stopObservingManagedTaskPromptDeliveries = observeManagedTaskPromptDeliveryChanges(async (workspaceId) => {
+		await queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(
+			workspaceId,
+			await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId),
+		);
+	});
 	// 排队 prompt 的启动清扫：收敛被上一次生命周期撂在半路的在途投递，并给跨过这次重启的条目盖章
 	// （门控 0 据此等人看见再发）。必须在心跳写下之后——盖章按「托管实例此刻不在心跳里」判，同刻启动的
 	// 另一个实例得先看得见我。不 await：纠偏动作，不是服务可用性的前置条件。
@@ -829,6 +839,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	const runtimeApi = createRuntimeApi({
+		recordManagedTaskPromptDeliveries: true,
 		onTaskSessionStopRequested: async (workspaceId, taskId) => {
 			try {
 				await recordProgrammaticReviewExplicitUserStopObservations({
@@ -1366,6 +1377,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
 		queuedTaskPromptDeliveryDispatcher.stop();
 		unregisterQueuedTaskPromptDeliveryDispatchObserver();
+		stopObservingManagedTaskPromptDeliveries();
 		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
 		taskAttributedProcessTreeResourceSampler.stop();
 		taskAgentConversationModelTokenUsageJournalMonitor.stop();

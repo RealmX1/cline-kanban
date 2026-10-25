@@ -66,7 +66,7 @@ describe("queued-task-prompt-delivery-status-wording", () => {
 		expect(describeQueuedTaskPromptDispatchBlockReason(null)).toBeNull();
 	});
 
-	it("每一个状态都有状态 chip；认领与交付对用户都叫 Sending…", () => {
+	it("每种状态均有文案，并区分发送与等待提交确认", () => {
 		for (const deliveryState of ALL_DELIVERY_STATES) {
 			expect(
 				describeQueuedTaskPromptDeliveryStatusChip(projection({ deliveryState })).label,
@@ -75,23 +75,23 @@ describe("queued-task-prompt-delivery-status-wording", () => {
 		}
 		expect(
 			describeQueuedTaskPromptDeliveryStatusChip(projection({ deliveryState: "claimed_for_dispatch" })).label,
-		).toBe("Sending…");
+		).toBe("发送中");
 		expect(
 			describeQueuedTaskPromptDeliveryStatusChip(projection({ deliveryState: "handed_to_transport" })).label,
-		).toBe("Sending…");
+		).toBe("等待提交确认");
 	});
 
 	// 过期不是失败：它从未被尝试过。
 	it("expired 的措辞明说「没发」，且不是 danger 色", () => {
 		const chip = describeQueuedTaskPromptDeliveryStatusChip(projection({ deliveryState: "expired" }));
-		expect(chip.label).toContain("not sent");
+		expect(chip.label).toContain("未发送");
 		expect(chip.tone).not.toBe("danger");
 	});
 
 	it("重启后待确认盖过普通的 Queued，并用 warning 色", () => {
 		expect(
 			describeQueuedTaskPromptDeliveryStatusChip(projection({ awaitsHumanReconfirmationAfterRuntimeRestart: true })),
-		).toEqual({ label: "Confirm after restart", tone: "warning" });
+		).toEqual({ label: "重启后待确认", tone: "warning" });
 	});
 
 	it("在途判定只认认领 / 交付两态", () => {

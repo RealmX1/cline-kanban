@@ -9,11 +9,15 @@
 用户在 agent 干活时，把「下一步要它做什么」排进该任务的队列；**agent 这一轮结束后**由运行时自动发出。
 面板上看得见排了哪些、为什么还没发，随时可取消 / 重排 / 合并。
 
+Queue 现在也展示 Kanban 经其他路径主动投递的任务消息，含即时注入、人工发送、快捷动作、初始提示、
+问题答复及系统续接。**共同登记和展示不代表共同等待空闲**：只有 `after_agent_turn` 进入下述队列调度，
+即时和启动消息仍按各自原有发送条件执行。通用登记见 §12。
+
 它建在 RVF 自注入已经在用的那条链路之上：`src/trpc/task-chat-message-send-across-session-transports.ts`
 （三 transport 统一发送出口）+ PTY 侧 `submitTaskChatInputWhenReady` 的就绪门控 / 让位 / 写后确认状态机。
-**队列坐在出口之上，不改它一个字节**——RVF 的 196.5s 收敛承诺（跨仓契约
-`~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md`）正建立在
-「一条 RVF 投递永不排在别人后面」之上。
+**等待队列仍坐在发送出口之上**，统一登记层不让即时消息等待 FIFO，也不改终端自己的收敛预算。
+跨仓契约 `~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md` 仍依赖
+「一条 RVF 投递永不排在别人后面」这一保证。
 
 ## 2. 文件地图
 
@@ -197,3 +201,19 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 
 **不保证**：门控放行到真正粘贴之间（TUI 就绪等待，通常毫秒到 1–3s）agent 被唤醒时，回执如实报
 `delivered_queued_behind_active_agent_turn`；终端就绪判定属于 task 33612，这里不改。RVF 侧的复工撤回仍须保留。
+
+
+## 12. Kanban 主动投递统一登记与 Queue 观察面
+
+`src/state/managed-task-prompt-delivery-coordinator.ts` 负责即时/启动消息的登记和结果；沿用本文件的 durable 落点与锁，不另建正文账本。旧文件名、Queue API 和注入账本四态保持兼容。
+
+- 每条消息有稳定 `deliveryId`（兼容字段 `queueEntryId`），以及独立的 `messageType`、`sourceLabel`、`deliveryStrategy` 和 `terminalDeliveryReceipt`。缺少新字段的旧条目按原来源投影为 `after_agent_turn`，不回写或补造旧历史。
+- `immediate` 与 `session_startup` 从登记到真实回执共用一条记录，不进入 idle 出队、重排或合并，不占等待队列的 20/200 容量。其终态历史独立保留 24h、每会话最多 20 条/每 workspace 最多 200 条；尚未确认的记录不会为了历史限额被裁掉。
+- 三 transport 出口通过真实 runtime 显式启用登记；dispatcher 已拥有等待意图，继续使用原条目和真实回执，不在出队时复制一条“即时消息”。裸 transport/manager 测试默认不触碰用户持久存储。
+- 快捷 Commit/Open PR 与显式发送评审意见都发完整消息，经服务端统一分派；“仅填入输入框”、原生键盘输入、shell 控制字节及无新消息的 resume 不构造消息记录。显示标签不写进控制后台让位的 `source`。
+- deferred 首发及网络恢复消息在 paste 前登记；登记跨 await 后复核活体、原生身份、投递代际和人工输入。若已被人工输入或较新投递取代，真实取消且不写字节。首发登记失败保留原正文，最多三次自动尝试；写后不盲目重贴。
+- argv 首发在 spawn 前登记，由本代原生接受漏斗逐字匹配正文后确认；ACP 首发在 `session/prompt` 前登记，使用协议接受证据。空 prompt 或单纯恢复不记为首发。
+- 异步回执写盘失败最多重试三次，期间不把已发送的业务操作反报成失败。60s sweep 与首屏读取还会核对注入账本，要求宿主任务/key/目标会话/正文 hash 同时匹配。缺证据至观察预算结束则显示“未确认送达”，不重发；迟到的真实回执可补证，并保留先前未知回执与原因。
+- Queue 将等待条目和即时在途条目分开排列，终态按最近结果展示，提供类型筛选与全文读取。取消只提供给实际支持的通道；queued 计数只数等待策略，已送达但在 agent 内等待处理的终态不会冒充仍在 Kanban 排队。
+
+真实运行实例的 agent/harness 接受兼容性留待部署后自然使用核验。部署前的 API/CLI、隔离重启、真实浏览器推流与窄屏检查见任务 8bd3c 的实现合同和持久验证记录。

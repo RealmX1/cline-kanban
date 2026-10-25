@@ -150,6 +150,10 @@ import {
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
+import {
+	beginManagedTaskPromptDelivery,
+	reconcileManagedTaskPromptDeliveryReceipts,
+} from "../state/managed-task-prompt-delivery-coordinator";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import {
@@ -277,6 +281,7 @@ export interface CreateRuntimeApiDependencies {
 		QueuedTaskPromptDeliveryDispatcher,
 		"notifyQueueMutated" | "cancelInFlightQueuedPromptDelivery" | "buildProjectedEntriesByTaskId"
 	>;
+	recordManagedTaskPromptDeliveries?: boolean;
 }
 
 async function resolveExistingTaskCwdOrEnsure(options: {
@@ -2121,163 +2126,204 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						originRuntimeSessionIncarnationId,
 						idempotencyKey,
 					}) => {
-						if (sessionTransport === "acp_stdio_subprocess") {
-							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-							// ACP 的同步 summary 只代表已发出；等待有界的协议接受回执，不等待整轮结束。
-							return await new Promise<boolean>((resolveAcceptance) => {
-								void acpService
-									.sendTaskSessionInput(taskId, text, undefined, resolveAcceptance, idempotencyKey)
-									.then((summary) => {
-										if (!summary || !summary.agentConversationPromptSubmissionAcceptance)
-											resolveAcceptance(false);
-										else if (summary.agentConversationPromptSubmissionAcceptance.status !== "pending") {
-											resolveAcceptance(
-												summary.agentConversationPromptSubmissionAcceptance.status === "accepted",
-											);
-										}
-									})
-									.catch(() => resolveAcceptance(false));
-							});
-						}
-						if (sessionTransport === "in_process_cline_sdk") {
-							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
-							return (await clineService.sendTaskSessionInput(taskId, text)) !== null;
-						}
-						// 终端 agent：submitTaskChatInputWhenReady 要求 entry.active 存在，故必须在
-						// ensureTaskSessionReadyForDelivery 之后调用（见交付顺序注释）。
-						// 与 RVF followup 那条路径一样交出争用能力：这条投递同样绝不能插进人类打了一半的那一行，
-						// 而人不在场时把那半句无损暂存进 Prompt Library 再放行，对用户严格更好。
-						// durable 待答答案只有在 base 的诚实回执确认提交后才标 delivered；同步 summary 只代表
-						// 「已受理」。任何就绪超时、会话退出、被取代或提交确认失败都会结算 false，保留重试资格。
-						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-						// 提问它的那个活体还在、且仍停在提问回合：终端里此刻显示的是交互式选择器，不是输入框。
-						// 直接粘贴会被选择器吞掉、回车会替用户选中高亮项——必须先关掉选择器并读屏确认输入框出现。
-						// 会话已被回收 / resume 过（活体不同）则选择器早已不在，不发任何按键。
-						const liveTerminalSummary = terminalManager.getSummary(taskId);
-						const liveTerminalFacets = liveTerminalSummary ? resolveSessionFacets(liveTerminalSummary) : null;
-						const agentIsStoppedOnThisQuestionSelectorInLiveTerminal =
-							originRuntimeSessionIncarnationId !== null &&
-							liveTerminalSummary?.runtimeSessionIncarnationId === originRuntimeSessionIncarnationId &&
-							liveTerminalFacets?.turnOwner === "user" &&
-							liveTerminalFacets.userTurnKind === "question";
-						const expectedNativeSessionId =
-							liveTerminalSummary?.agentNativeConversationSessionIdentity?.nativeSessionId;
-						const expectedRuntimeSessionIncarnationId = liveTerminalSummary?.runtimeSessionIncarnationId;
-						let terminalWriteValidationFailure: Error | null = null;
-						const validateCodexQuestionImmediatelyBeforeTerminalWrite =
-							liveTerminalSummary?.agentId === "codex"
-								? async () => {
-										try {
-											const currentTerminalSummary = terminalManager.getSummary(taskId);
-											const records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
-											const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
-											const currentDecision = records.find(
-												(decision) => decision.decisionId === body.decisionId,
-											);
-											if (
-												identity?.sourceAgentId !== "codex" ||
-												identity.nativeSessionId !== expectedNativeSessionId ||
-												currentTerminalSummary?.runtimeSessionIncarnationId !==
-													expectedRuntimeSessionIncarnationId ||
-												(currentDecision?.nativeConversationSessionId &&
-													currentDecision.nativeConversationSessionId !== identity.nativeSessionId)
-											)
-												throw new Error("无法确认原问题所属的 Codex 对话，答案已保存但未投递。");
-											const recovered = await recoverCodexUserQuestionsFromKnownConversation({
-												sessionId: identity.nativeSessionId,
-												transcriptPath: identity.transcriptPath,
-												homeDirectoryPath:
-													currentTerminalSummary?.codexConversationStorageHomeDirectoryPath,
-											});
-											if (recovered.coverage !== "complete")
-												throw new Error("旧问答记录尚未完整读取，答案已保存；请稍后重试投递。");
-											const nativeQuestion = recovered.exchanges.find(
-												(exchange) =>
-													`${taskId}:${exchange.payload.decisionSourceId}` === body.decisionId ||
-													`${taskId}:${exchange.callId}` === body.decisionId,
-											);
-											if (!nativeQuestion) throw new Error("尚未核实原问题的完整记录，答案已保存但未投递。");
-											if (nativeQuestion?.resolution?.resolutionKind === "answered_in_agent_terminal")
-												throw new Error("此问题已在 Codex 终端作答，已保存的面板答案不会再次发送。");
-											if (recovered.exchanges.at(-1)?.callId !== nativeQuestion.callId)
-												throw new Error("此问题已被新提问取代，已保存的面板答案不会发送给新问题。");
-											// 转录读取跨 await，最终同步复查当前活体、对话与选择器，随后才允许 manager 写入。
-											const currentAfterTranscriptRead = terminalManager.getSummary(taskId);
-											if (
-												currentAfterTranscriptRead?.agentId !== "codex" ||
-												currentAfterTranscriptRead.agentNativeConversationSessionIdentity?.sourceAgentId !==
-													"codex" ||
-												currentAfterTranscriptRead?.runtimeSessionIncarnationId !==
-													expectedRuntimeSessionIncarnationId ||
-												currentAfterTranscriptRead?.agentNativeConversationSessionIdentity
-													?.nativeSessionId !== expectedNativeSessionId
-											)
-												throw new Error("核验期间 Codex 会话已更换，答案已保存但未投递。");
-											const currentTerminalFacets = resolveSessionFacets(currentAfterTranscriptRead);
-											const hasLiveQuestion = records.some(
-												(decision) =>
-													decision.taskId === taskId &&
-													decision.agentId === "codex" &&
-													decision.nativeToolCallOutcome === undefined &&
-													decision.originRuntimeSessionIncarnationId !== null &&
-													decision.originRuntimeSessionIncarnationId ===
-														currentTerminalSummary?.runtimeSessionIncarnationId &&
-													(decision.status === "pending" ||
-														(decision.answer?.answerSource === "kanban_panel" &&
-															decision.answerDeliveryState !== "delivered")),
-											);
-											if (
-												hasLiveQuestion ||
-												(currentTerminalFacets?.turnOwner === "user" &&
-													currentTerminalFacets.userTurnKind === "question")
-											)
-												throw new Error(
-													"Codex 正在等待终端选择题，请在终端作答；已保存的面板答案尚未投递。",
+						let observedQuestionDeliveryOutcome: TaskChatInputDeliveryOutcome | null = null;
+						const deliverWithExistingQuestionConstraints = async (): Promise<boolean> => {
+							if (sessionTransport === "acp_stdio_subprocess") {
+								const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+								// ACP 的同步 summary 只代表已发出；等待有界的协议接受回执，不等待整轮结束。
+								return await new Promise<boolean>((resolveAcceptance) => {
+									void acpService
+										.sendTaskSessionInput(taskId, text, undefined, resolveAcceptance, idempotencyKey)
+										.then((summary) => {
+											if (!summary || !summary.agentConversationPromptSubmissionAcceptance)
+												resolveAcceptance(false);
+											else if (summary.agentConversationPromptSubmissionAcceptance.status !== "pending") {
+												resolveAcceptance(
+													summary.agentConversationPromptSubmissionAcceptance.status === "accepted",
 												);
-										} catch (error) {
-											terminalWriteValidationFailure =
-												error instanceof Error ? error : new Error(String(error));
-											throw terminalWriteValidationFailure;
-										}
-									}
-								: undefined;
-						await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
-						if (agentIsStoppedOnThisQuestionSelectorInLiveTerminal) {
-							const selectorDismissalOutcome =
-								await terminalManager.dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(taskId);
-							if (!isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible(selectorDismissalOutcome)) {
-								// 抛出而不是返回 false：失败原因要原样进账本，让面板如实告诉用户卡在哪。
-								throw new Error(`无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`);
-							}
-						}
-						const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-						let resolveConfirmedDelivery: (delivered: boolean) => void = () => undefined;
-						const confirmedDelivery = new Promise<boolean>((resolve) => {
-							resolveConfirmedDelivery = resolve;
-						});
-						const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
-							validateBeforeTerminalWrite: validateCodexQuestionImmediatelyBeforeTerminalWrite,
-							onDeliveryOutcome: (outcome) => {
-								resolveConfirmedDelivery(outcome.status !== "delivery_failed");
-							},
-							mayAutoStashAbsentHumanInputBox:
-								contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
-							preemptivelyStashHumanInputBox: async (contendedTaskId) => {
-								const stash = await stashTaskTerminalInputBoxIntoPromptLibraryForWorkspaceScope({
-									workspaceScope,
-									taskId: contendedTaskId,
-									scope: "task",
-									initiatedBy: "programmatic_delivery_contention_preemption",
+											}
+										})
+										.catch(() => resolveAcceptance(false));
 								});
-								// 原样把 outcome 交回 manager：它要靠这个区分「瞬态失败，值得再等一拍」与
-								// 「确定性失败，再等也是同一句话」，并把真实判据写进日志。折成布尔就把这两件事
-								// 一起弄丢了（2026-08-20 事故的排查代价全压在这上面）。
-								return stash.outcome;
-							},
+							}
+							if (sessionTransport === "in_process_cline_sdk") {
+								const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
+								return (await clineService.sendTaskSessionInput(taskId, text)) !== null;
+							}
+							// 终端 agent：submitTaskChatInputWhenReady 要求 entry.active 存在，故必须在
+							// ensureTaskSessionReadyForDelivery 之后调用（见交付顺序注释）。
+							// 与 RVF followup 那条路径一样交出争用能力：这条投递同样绝不能插进人类打了一半的那一行，
+							// 而人不在场时把那半句无损暂存进 Prompt Library 再放行，对用户严格更好。
+							// durable 待答答案只有在 base 的诚实回执确认提交后才标 delivered；同步 summary 只代表
+							// 「已受理」。任何就绪超时、会话退出、被取代或提交确认失败都会结算 false，保留重试资格。
+							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+							// 提问它的那个活体还在、且仍停在提问回合：终端里此刻显示的是交互式选择器，不是输入框。
+							// 直接粘贴会被选择器吞掉、回车会替用户选中高亮项——必须先关掉选择器并读屏确认输入框出现。
+							// 会话已被回收 / resume 过（活体不同）则选择器早已不在，不发任何按键。
+							const liveTerminalSummary = terminalManager.getSummary(taskId);
+							const liveTerminalFacets = liveTerminalSummary ? resolveSessionFacets(liveTerminalSummary) : null;
+							const agentIsStoppedOnThisQuestionSelectorInLiveTerminal =
+								originRuntimeSessionIncarnationId !== null &&
+								liveTerminalSummary?.runtimeSessionIncarnationId === originRuntimeSessionIncarnationId &&
+								liveTerminalFacets?.turnOwner === "user" &&
+								liveTerminalFacets.userTurnKind === "question";
+							const expectedNativeSessionId =
+								liveTerminalSummary?.agentNativeConversationSessionIdentity?.nativeSessionId;
+							const expectedRuntimeSessionIncarnationId = liveTerminalSummary?.runtimeSessionIncarnationId;
+							let terminalWriteValidationFailure: Error | null = null;
+							const validateCodexQuestionImmediatelyBeforeTerminalWrite =
+								liveTerminalSummary?.agentId === "codex"
+									? async () => {
+											try {
+												const currentTerminalSummary = terminalManager.getSummary(taskId);
+												const records = await readAgentRaisedPendingUserDecisions(
+													workspaceScope.workspaceId,
+												);
+												const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
+												const currentDecision = records.find(
+													(decision) => decision.decisionId === body.decisionId,
+												);
+												if (
+													identity?.sourceAgentId !== "codex" ||
+													identity.nativeSessionId !== expectedNativeSessionId ||
+													currentTerminalSummary?.runtimeSessionIncarnationId !==
+														expectedRuntimeSessionIncarnationId ||
+													(currentDecision?.nativeConversationSessionId &&
+														currentDecision.nativeConversationSessionId !== identity.nativeSessionId)
+												)
+													throw new Error("无法确认原问题所属的 Codex 对话，答案已保存但未投递。");
+												const recovered = await recoverCodexUserQuestionsFromKnownConversation({
+													sessionId: identity.nativeSessionId,
+													transcriptPath: identity.transcriptPath,
+													homeDirectoryPath:
+														currentTerminalSummary?.codexConversationStorageHomeDirectoryPath,
+												});
+												if (recovered.coverage !== "complete")
+													throw new Error("旧问答记录尚未完整读取，答案已保存；请稍后重试投递。");
+												const nativeQuestion = recovered.exchanges.find(
+													(exchange) =>
+														`${taskId}:${exchange.payload.decisionSourceId}` === body.decisionId ||
+														`${taskId}:${exchange.callId}` === body.decisionId,
+												);
+												if (!nativeQuestion)
+													throw new Error("尚未核实原问题的完整记录，答案已保存但未投递。");
+												if (nativeQuestion?.resolution?.resolutionKind === "answered_in_agent_terminal")
+													throw new Error("此问题已在 Codex 终端作答，已保存的面板答案不会再次发送。");
+												if (recovered.exchanges.at(-1)?.callId !== nativeQuestion.callId)
+													throw new Error("此问题已被新提问取代，已保存的面板答案不会发送给新问题。");
+												// 转录读取跨 await，最终同步复查当前活体、对话与选择器，随后才允许 manager 写入。
+												const currentAfterTranscriptRead = terminalManager.getSummary(taskId);
+												if (
+													currentAfterTranscriptRead?.agentId !== "codex" ||
+													currentAfterTranscriptRead.agentNativeConversationSessionIdentity
+														?.sourceAgentId !== "codex" ||
+													currentAfterTranscriptRead?.runtimeSessionIncarnationId !==
+														expectedRuntimeSessionIncarnationId ||
+													currentAfterTranscriptRead?.agentNativeConversationSessionIdentity
+														?.nativeSessionId !== expectedNativeSessionId
+												)
+													throw new Error("核验期间 Codex 会话已更换，答案已保存但未投递。");
+												const currentTerminalFacets = resolveSessionFacets(currentAfterTranscriptRead);
+												const hasLiveQuestion = records.some(
+													(decision) =>
+														decision.taskId === taskId &&
+														decision.agentId === "codex" &&
+														decision.nativeToolCallOutcome === undefined &&
+														decision.originRuntimeSessionIncarnationId !== null &&
+														decision.originRuntimeSessionIncarnationId ===
+															currentTerminalSummary?.runtimeSessionIncarnationId &&
+														(decision.status === "pending" ||
+															(decision.answer?.answerSource === "kanban_panel" &&
+																decision.answerDeliveryState !== "delivered")),
+												);
+												if (
+													hasLiveQuestion ||
+													(currentTerminalFacets?.turnOwner === "user" &&
+														currentTerminalFacets.userTurnKind === "question")
+												)
+													throw new Error(
+														"Codex 正在等待终端选择题，请在终端作答；已保存的面板答案尚未投递。",
+													);
+											} catch (error) {
+												terminalWriteValidationFailure =
+													error instanceof Error ? error : new Error(String(error));
+												throw terminalWriteValidationFailure;
+											}
+										}
+									: undefined;
+							await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
+							if (agentIsStoppedOnThisQuestionSelectorInLiveTerminal) {
+								const selectorDismissalOutcome =
+									await terminalManager.dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(
+										taskId,
+									);
+								if (!isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible(selectorDismissalOutcome)) {
+									// 抛出而不是返回 false：失败原因要原样进账本，让面板如实告诉用户卡在哪。
+									throw new Error(`无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`);
+								}
+							}
+							const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+							let resolveConfirmedDelivery: (delivered: boolean) => void = () => undefined;
+							const confirmedDelivery = new Promise<boolean>((resolve) => {
+								resolveConfirmedDelivery = resolve;
+							});
+							const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
+								validateBeforeTerminalWrite: validateCodexQuestionImmediatelyBeforeTerminalWrite,
+								onDeliveryOutcome: (outcome) => {
+									observedQuestionDeliveryOutcome = outcome;
+									resolveConfirmedDelivery(outcome.status !== "delivery_failed");
+								},
+								mayAutoStashAbsentHumanInputBox:
+									contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+								preemptivelyStashHumanInputBox: async (contendedTaskId) => {
+									const stash = await stashTaskTerminalInputBoxIntoPromptLibraryForWorkspaceScope({
+										workspaceScope,
+										taskId: contendedTaskId,
+										scope: "task",
+										initiatedBy: "programmatic_delivery_contention_preemption",
+									});
+									// 原样把 outcome 交回 manager：它要靠这个区分「瞬态失败，值得再等一拍」与
+									// 「确定性失败，再等也是同一句话」，并把真实判据写进日志。折成布尔就把这两件事
+									// 一起弄丢了（2026-08-20 事故的排查代价全压在这上面）。
+									return stash.outcome;
+								},
+							});
+							const delivered = acceptedSummary ? await confirmedDelivery : false;
+							if (terminalWriteValidationFailure) throw terminalWriteValidationFailure;
+							return delivered;
+						};
+						if (!deps.recordManagedTaskPromptDeliveries) return deliverWithExistingQuestionConstraints();
+						const manager = await deps.getScopedTerminalManager(workspaceScope);
+						const { handle } = await beginManagedTaskPromptDelivery({
+							workspaceId: workspaceScope.workspaceId,
+							taskId,
+							text,
+							origin: { messageType: "user_decision_answer", sourceLabel: body.decisionId },
+							summary: manager.getSummary(taskId),
 						});
-						const delivered = acceptedSummary ? await confirmedDelivery : false;
-						if (terminalWriteValidationFailure) throw terminalWriteValidationFailure;
-						return delivered;
+						try {
+							const delivered = await deliverWithExistingQuestionConstraints();
+							await handle
+								.settle(
+									observedQuestionDeliveryOutcome ??
+										(delivered
+											? { status: "delivered_and_submit_confirmed", reason: null }
+											: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }),
+								)
+								.catch(() => undefined);
+							return delivered;
+						} catch (error) {
+							await handle
+								.settle(
+									observedQuestionDeliveryOutcome ?? {
+										status: "delivery_failed",
+										reason: "submit_confirmation_budget_exhausted",
+									},
+									String(error),
+								)
+								.catch(() => undefined);
+							throw error;
+						}
 					},
 				}).answerPendingUserDecision({
 					workspaceId: workspaceScope.workspaceId,
@@ -2997,6 +3043,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				taskChatSendResponse = await sendTaskChatMessageAcrossSessionTransports(
 					{
+						recordManagedTaskPromptDeliveries: deps.recordManagedTaskPromptDeliveries,
 						getScopedTerminalManager: deps.getScopedTerminalManager,
 						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
 						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
@@ -3091,6 +3138,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				});
 				const sendResponse = await sendTaskChatMessageAcrossSessionTransports(
 					{
+						recordManagedTaskPromptDeliveries: deps.recordManagedTaskPromptDeliveries,
 						getScopedTerminalManager: deps.getScopedTerminalManager,
 						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
 						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
@@ -3105,6 +3153,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					{
 						taskId: input.taskId,
 						text: releasedPromptText,
+						deliveryOrigin: { messageType: "system_continuation", sourceLabel: "恢复通知显式放行" },
 						// 刻意**不带** source：统一发送出口把「带 source」判成后台自动注入
 						// （deferWhileUserTurn=true），于是遇上恢复出来那种正等用户拍板的会话就一路让位到
 						// 预算耗尽、终态 agent_awaiting_user_decision_timeout，放行永远送不出去。
@@ -3212,7 +3261,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		getTaskPromptDeliveryQueue: async (workspaceScope) => {
 			try {
-				const queue = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceScope.workspaceId);
+				let queue = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceScope.workspaceId);
+				if (deps.recordManagedTaskPromptDeliveries)
+					queue = await reconcileManagedTaskPromptDeliveryReceipts(workspaceScope.workspaceId, queue);
 				return {
 					ok: true,
 					queue,

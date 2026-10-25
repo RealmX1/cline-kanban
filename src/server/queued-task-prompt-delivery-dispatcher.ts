@@ -84,6 +84,7 @@ import {
 	NativeIndependentUserTurnDeliveryError,
 	readCurrentTuiNativeConversationTurns,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import { reconcileManagedTaskPromptDeliveryReceipts } from "../state/managed-task-prompt-delivery-coordinator";
 import { reconcileInjectionLedgerWithSettledProgrammaticInjections } from "../state/mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import {
 	claimNextQueuedTaskPromptDeliveryRunForDispatch,
@@ -906,6 +907,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				await stampEntriesWhoseCustodianIsGone(workspaceId);
 				// 绕过缓存重读：兜底 sweep 的另一半职责就是捡回别的进程对队列文件的改动。
 				let snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+				snapshot = await reconcileManagedTaskPromptDeliveryReceipts(workspaceId, snapshot, now());
 				// 截止定时器之外的第二道：别的进程排进来、本进程没机会对准定时器的程序化条目，到点在这里写盘收敛。
 				const sweepNowEpochMs = now();
 				const hasProgrammaticInjectionPastDeadline = Object.values(snapshot.entriesByTaskId).some((entries) =>
