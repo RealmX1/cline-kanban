@@ -193,19 +193,76 @@ describe.sequential("invoking repository mutation canary", () => {
 		}
 	});
 
-	it("已 dirty 文件在 status 文本不变时仍按内容 hash 识别漂移", () => {
-		const { gitFixture, repository } = createCommittedCanaryRepository("dirty-content-mutation-repository");
+	it("仅新增未引用对象使 OID 缩写增长时不误报 working tree 漂移", () => {
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "object-id-abbreviation-growth-canary-repository",
+		});
 		try {
+			repository.runGit(["config", "core.abbrev", "4"]);
+			writeFileSync(join(repository.repositoryPath, "README.md"), "seed\n", "utf8");
+			repository.commitAllRepositoryFilesAtDate({
+				message: "固定 OID 缩写回归基线",
+				authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
+			});
 			writeFileSync(join(repository.repositoryPath, "README.md"), "dirty version one\n", "utf8");
+			const abbreviatedPatchBefore = repository.runGit(["diff", "--binary", "HEAD", "--"]).stdout;
+			const fullIndexPatchBefore = repository.runGit(["diff", "--binary", "--full-index", "HEAD", "--"]).stdout;
 			const before = captureInvokingRepositoryEvidenceSnapshot(repository.repositoryPath);
-			writeFileSync(join(repository.repositoryPath, "README.md"), "dirty version two\n", "utf8");
+
+			// 两个固定 blob 的 OID 共享 e31d 前缀；内容文件放在 worktree 外，写入对象不改变受保护状态。
+			const collidingBlobContentFilePath = join(
+				gitFixture.fixtureRootDirectoryPath,
+				"oid-prefix-collision-blob.txt",
+			);
+			writeFileSync(collidingBlobContentFilePath, "canary-abbreviation-collision-21212\n", "utf8");
+			expect(
+				repository.runGit(["hash-object", "-w", "--no-filters", collidingBlobContentFilePath]).stdout.trim(),
+			).toBe("e31dce9a68aad23bead686ab9a065e19d30e3541");
+
+			const abbreviatedPatchAfter = repository.runGit(["diff", "--binary", "HEAD", "--"]).stdout;
 			const after = captureInvokingRepositoryEvidenceSnapshot(repository.repositoryPath);
-			expect(after.porcelainVersionTwoStatus).toBe(before.porcelainVersionTwoStatus);
-			expect(compareInvokingRepositoryEvidenceSnapshots(before, after)).toContain("working-tree-status");
+			expect(abbreviatedPatchBefore).toMatch(/^index e31d\.\./mu);
+			expect(abbreviatedPatchAfter).toMatch(/^index e31de\.\./mu);
+			expect(abbreviatedPatchAfter).not.toBe(abbreviatedPatchBefore);
+			expect(repository.runGit(["diff", "--binary", "--full-index", "HEAD", "--"]).stdout).toBe(
+				fullIndexPatchBefore,
+			);
+			expect(after).toEqual(before);
+			expect(compareInvokingRepositoryEvidenceSnapshots(before, after)).toEqual([]);
 		} finally {
 			gitFixture.cleanup();
 		}
 	});
+
+	it.each([
+		{
+			fileTrackingDescription: "已修改的 tracked",
+			repositoryDirectoryName: "dirty-tracked-content-mutation-repository",
+			repositoryRelativeFilePath: "README.md",
+		},
+		{
+			fileTrackingDescription: "已存在的 untracked",
+			repositoryDirectoryName: "existing-untracked-content-mutation-repository",
+			repositoryRelativeFilePath: "existing-untracked-file.txt",
+		},
+	])(
+		"$fileTrackingDescription 文件在 status 文本不变时仍按内容 hash 识别漂移",
+		({ repositoryDirectoryName, repositoryRelativeFilePath }) => {
+			const { gitFixture, repository } = createCommittedCanaryRepository(repositoryDirectoryName);
+			try {
+				const mutatedFilePath = join(repository.repositoryPath, repositoryRelativeFilePath);
+				writeFileSync(mutatedFilePath, "dirty version one\n", "utf8");
+				const before = captureInvokingRepositoryEvidenceSnapshot(repository.repositoryPath);
+				writeFileSync(mutatedFilePath, "dirty version two\n", "utf8");
+				const after = captureInvokingRepositoryEvidenceSnapshot(repository.repositoryPath);
+				expect(after.porcelainVersionTwoStatus).toBe(before.porcelainVersionTwoStatus);
+				expect(compareInvokingRepositoryEvidenceSnapshots(before, after)).toEqual(["working-tree-status"]);
+			} finally {
+				gitFixture.cleanup();
+			}
+		},
+	);
 
 	it("漂移时以 mutation 为主错误、保留原退出码且不自动恢复", async () => {
 		const { gitFixture, repository } = createCommittedCanaryRepository("runner-mutation-repository");
