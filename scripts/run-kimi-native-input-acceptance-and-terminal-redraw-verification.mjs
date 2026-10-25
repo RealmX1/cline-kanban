@@ -12,12 +12,17 @@ const requestedPackagedCli = verifiesTerminalWorkflow ? requestedProbeArguments[
 const remainingProbeArguments = verifiesTerminalWorkflow ? requestedProbeArguments.slice(2) : requestedProbeArguments;
 const requestedProbeKinds = remainingProbeArguments.filter((argument) => argument !== "--start-in-plan-mode");
 assert(requestedProbeKinds.length <= (verifiesTerminalWorkflow ? 0 : 1), "只能指定一种 Kimi 原生验证种类");
-const requestedProbeKind = verifiesTerminalWorkflow ? "terminal-workflow" : requestedProbeKinds[0] ?? "acceptance-and-redraw";
+const requestedProbeKind = verifiesTerminalWorkflow
+	? "terminal-workflow"
+	: (requestedProbeKinds[0] ?? "acceptance-and-redraw");
 assert(
- requestedOutputDirectory && requestedKimiBinary,
- "用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 绝对路径> [initial-prompt | --terminal-workflow <打包 CLI 绝对路径>] [--start-in-plan-mode]",
+	requestedOutputDirectory && requestedKimiBinary,
+	"用法：node scripts/run-kimi-native-input-acceptance-and-terminal-redraw-verification.mjs <持久证据目录> <Kimi 绝对路径> [initial-prompt | --terminal-workflow <打包 CLI 绝对路径>] [--start-in-plan-mode]",
 );
-assert(["acceptance-and-redraw", "initial-prompt", "terminal-workflow"].includes(requestedProbeKind), "未知的 Kimi 原生验证种类");
+assert(
+	["acceptance-and-redraw", "initial-prompt", "terminal-workflow"].includes(requestedProbeKind),
+	"未知的 Kimi 原生验证种类",
+);
 assert(!verifiesTerminalWorkflow || requestedPackagedCli, "终端工作流核验需要打包后的 CLI 绝对路径");
 const outputRootDirectory = resolve(requestedOutputDirectory);
 const repositoryDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,7 +46,10 @@ try {
 	if (error.code !== "EEXIST") throw error;
 }
 assert.equal(await realpath(join(outputDirectory, "node_modules")), await realpath(dependenciesDirectory));
-const entrypoint = join(outputDirectory, verifiesInitialPrompt ? "native-kimi-initial-prompt-probe.mjs" : "native-kimi-probe.mjs");
+const entrypoint = join(
+	outputDirectory,
+	verifiesInitialPrompt ? "native-kimi-initial-prompt-probe.mjs" : "native-kimi-probe.mjs",
+);
 await build({
 	entryPoints: [
 		join(

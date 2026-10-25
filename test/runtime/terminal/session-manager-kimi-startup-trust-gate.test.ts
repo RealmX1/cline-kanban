@@ -107,7 +107,6 @@ describe("Kimi 首发正文等待工作区信任", () => {
 	it.each([
 		["普通草稿输入", trustPromptWithUnderlyingComposer, "用户手动草稿"],
 		["信任拒绝键", trustPromptWithUnderlyingComposer, "\u001b"],
-		["改变信任选项", trustPromptWithUnderlyingComposer, "\u001b[B"],
 		["混入草稿的回车", trustPromptWithUnderlyingComposer, "\r用户手动草稿"],
 		["没有信任提示的回车", interactivePrompt, "\r"],
 		["已关闭信任提示的回车", `${trustPromptWithUnderlyingComposer}${readyScreen}`, "\r"],
@@ -123,18 +122,21 @@ describe("Kimi 首发正文等待工作区信任", () => {
 		).toHaveLength(0);
 	});
 
-	it("拒绝或改变选项后再按 Enter 不能恢复已取消的自动首发", async () => {
+	it("信任模态内导航和确认继续保留唯一首发", async () => {
 		const session = await startIsolatedHostedKimiSession();
 		session.emitOutput(trustPromptWithUnderlyingComposer);
 		session.manager.writeInput("isolated-kimi-startup-trust", Buffer.from("\u001b[B"));
 		session.manager.writeInput("isolated-kimi-startup-trust", Buffer.from("\r"));
 		expect(session.handle.write).toHaveBeenNthCalledWith(1, Buffer.from("\u001b[B"));
 		expect(session.handle.write).toHaveBeenNthCalledWith(2, Buffer.from("\r"));
+		expect(
+			session.manager.getSummary("isolated-kimi-startup-trust")?.agentConversationPromptSubmissionAcceptance,
+		).toBeNull();
 		session.emitOutput(readyScreen);
 		await session.tryStartupSubmission();
 		expect(
 			vi.mocked(session.handle.write).mock.calls.filter(([text]) => String(text).includes(startupText)),
-		).toHaveLength(0);
+		).toHaveLength(1);
 	});
 
 	it("分块拆开的信任提示与启动横幅仍正确门控", async () => {

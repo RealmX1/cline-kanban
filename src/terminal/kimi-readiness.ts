@@ -52,11 +52,3 @@ export function isKimiWorkspaceTrustNavigationOrConfirmationInput(inputText: str
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: 原生终端方向键和回车的协议字节。
 	return /^(?:\u001b(?:\[|O)[ABCD]|\r|\n)+$/u.test(inputText);
 }
-
-// 2.3.1 的信任模态仍渲染底下的输入框；用户确认后才打印启动横幅。
-// 保留两者的先后关系，可覆盖提示滚出短屏幕、PTY 分块与运行时接管。
-export function hasKimiWorkspaceTrustAwaitingConfirmation(startupOutputText: string): boolean {
-	const normalized = stripAnsi(startupOutputText).replace(/\s+/gu, " ").toLowerCase();
-	const trustPromptIndex = normalized.lastIndexOf("trust this folder?");
-	return trustPromptIndex >= 0 && trustPromptIndex > normalized.lastIndexOf("welcome to kimi code");
-}
