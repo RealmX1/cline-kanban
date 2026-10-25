@@ -850,6 +850,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	);
 
 	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	let pauseAutomaticMainSessionHandoverForStoppedTask:
+		| ((workspaceId: string, taskId: string) => Promise<void>)
+		| undefined;
 	const runtimeApi = createRuntimeApi({
 		recordManagedTaskPromptDeliveries: true,
 		onTaskSessionStopRequested: async (workspaceId, taskId) => {
@@ -863,7 +866,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 				});
 			} finally {
-				await pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId);
+				await Promise.all([
+					pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId),
+					pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId),
+				]);
 			}
 		},
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -910,6 +916,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		warn: deps.warn,
 		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 	});
+	pauseAutomaticMainSessionHandoverForStoppedTask = taskMainSessionHandoverApi.pauseForExplicitStop;
 
 	const independentTaskCreationApi = createIndependentTaskCreationService({
 		findSession: findRuntimeSessionSummary,
