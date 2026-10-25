@@ -213,6 +213,55 @@ it("限定身份继续恢复原有草稿，历史一世只读且不覆盖当前�
 	expect(JSON.parse(localStorage.getItem(key) ?? "null").referenceRelationDrafts).toEqual([referenceDraft]);
 });
 
+it("迁移后的限定身份仍为当前任务叠加草稿并保存到目标项目", async () => {
+	const canonicalReference = {
+		workUnitType: "kanban_board_card",
+		workspaceId: "project-a",
+		taskId: "migrated-task",
+		taskIncarnationCreatedAtEpochMs: 10,
+	};
+	const rootKey = "kanban_board_card:project-a:migrated-task:10";
+	queries.readRelationModelingPreview.mockResolvedValue({
+		rootWorkUnitKey: rootKey,
+		workUnits: [
+			{
+				workUnitKey: rootKey,
+				workUnit: canonicalReference,
+				kanbanBoardCardIdentity: {
+					kanbanBoardCard: { ...canonicalReference, workspaceId: "project-b" },
+					canonicalKanbanBoardCard: canonicalReference,
+					permanentlyRemovedFromBoardAt: null,
+				},
+			},
+		],
+		relations: [],
+		truncated: false,
+		projectedThroughGlobalCommittedEventSequence: 1,
+	});
+	await act(async () =>
+		root.render(<Harness workspaceId="project-b" taskId="migrated-task" taskIncarnationCreatedAtEpochMs={10} />),
+	);
+	await act(async () => vi.advanceTimersByTimeAsync(150));
+	await act(async () => controller.addDraft(referenceDraft));
+	await act(async () => vi.advanceTimersByTimeAsync(250));
+	expect(queries.readRelationModelingPreview.mock.calls.at(-1)?.[1].referenceRelationDrafts).toEqual([referenceDraft]);
+	expect(queries.persistRelationModelingEditorDraft).toHaveBeenLastCalledWith(
+		"project-b",
+		expect.any(String),
+		expect.objectContaining({ referenceRelationDrafts: [referenceDraft] }),
+	);
+	await act(async () => controller.applyToTask("migrated-task", {} as WebUiUserDecisionClientCharacteristics));
+	expect(queries.applyReferenceRelationModelingChangesFromExplicitUserGesture).toHaveBeenLastCalledWith(
+		"project-b",
+		expect.objectContaining({
+			workUnit: {
+				workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+				kanbanBoardCard: { ...canonicalReference, workspaceId: "project-b" },
+			},
+		}),
+	);
+});
+
 describe("关系编辑草稿与失败恢复", () => {
 	it("普通 HTTP 缺少 randomUUID 时可初始化、修改、保存及放弃草稿", async () => {
 		await act(async () => root.unmount());

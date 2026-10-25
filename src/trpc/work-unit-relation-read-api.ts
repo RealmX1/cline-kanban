@@ -16,6 +16,7 @@ import { listConversationSessionOwnershipPeriodsOfWorkUnit } from "../inter-work
 import { assembleDirectlyRelatedTaskPreviewPage } from "../inter-work-unit-relation-ledger/directly-related-task-preview-page";
 import { InterWorkUnitRelationLedgerUnavailableError } from "../inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker-client";
 import {
+	buildInterWorkUnitRelationWorkUnitKey,
 	type KanbanBoardCardIdentityProjection,
 	listKanbanBoardCardIdentityProjectionsByBareTaskId,
 } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
@@ -70,14 +71,11 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 ): InterWorkUnitRelationWorkUnitReference {
 	if (selector.workUnitSelectorKind === "kanban_board_card_by_qualified_reference") {
 		const reference = selector.kanbanBoardCard;
-		const candidate = listKanbanBoardCardIdentityProjectionsByBareTaskId(
-			projectionState.kanbanBoardCardIdentityProjectionState,
-			reference.taskId,
-		).find(
-			(projection) =>
-				projection.kanbanBoardCard.workspaceId === reference.workspaceId &&
-				projection.kanbanBoardCard.taskIncarnationCreatedAtEpochMs === reference.taskIncarnationCreatedAtEpochMs,
-		);
+		// 项目迁移已登记的精确别名仍指向同一世；未知一世不能退回裸 ID 解析。
+		const candidate =
+			projectionState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.get(
+				buildInterWorkUnitRelationWorkUnitKey(reference),
+			);
 		if (!candidate)
 			throw new TRPCError({
 				code: "NOT_FOUND",

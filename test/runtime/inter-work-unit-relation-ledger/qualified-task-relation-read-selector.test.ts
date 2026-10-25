@@ -63,6 +63,45 @@ describe("Relations 前台视图按完整一世读取", () => {
 			}),
 		).toThrow("没有这一世任务");
 	});
+	it("迁移后的完整身份沿账本别名读取原始一世，不能改读目标项目的其他一世", () => {
+		const migratedState = createEmptyRecordedInterWorkUnitRelationProjectionState();
+		const canonicalReference = {
+			workUnitType: "kanban_board_card" as const,
+			workspaceId: "project-a",
+			taskId: "same-id",
+			taskIncarnationCreatedAtEpochMs: 2,
+		};
+		const canonicalKey = buildInterWorkUnitRelationWorkUnitKey(canonicalReference);
+		const originalProjection =
+			state.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.get(canonicalKey);
+		if (!originalProjection) throw new Error("测试缺少原始一世身份");
+		const migratedProjection = {
+			...originalProjection,
+			currentWorkspaceId: "project-c",
+			workspaceIdsUsedByCard: ["project-a", "project-c"],
+		};
+		const migratedReference = { ...canonicalReference, workspaceId: "project-c" };
+		migratedState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.set(
+			canonicalKey,
+			migratedProjection,
+		);
+		migratedState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.set(
+			buildInterWorkUnitRelationWorkUnitKey(migratedReference),
+			migratedProjection,
+		);
+		expect(
+			resolveWorkUnitSelectorAgainstRecordedRelationProjection(migratedState, {
+				workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+				kanbanBoardCard: migratedReference,
+			}),
+		).toEqual(canonicalReference);
+		expect(() =>
+			resolveWorkUnitSelectorAgainstRecordedRelationProjection(migratedState, {
+				workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+				kanbanBoardCard: { ...migratedReference, taskIncarnationCreatedAtEpochMs: 1 },
+			}),
+		).toThrow("没有这一世任务");
+	});
 	it("既有裸 ID 调用继续选择 workspace 中的当前一世", () => {
 		expect(
 			resolveWorkUnitSelectorAgainstRecordedRelationProjection(state, {

@@ -59,7 +59,8 @@ export function useReferenceRelationModelingEditor(input: {
 	const canUseExistingDraftForQualifiedRoot =
 		input.taskIncarnationCreatedAtEpochMs === undefined ||
 		(previewRoot?.workUnit.workUnitType === "kanban_board_card" &&
-			previewRoot.workUnit.workspaceId === input.workspaceId &&
+			(previewRoot.workUnit.workspaceId === input.workspaceId ||
+				previewRoot.kanbanBoardCardIdentity?.kanbanBoardCard.workspaceId === input.workspaceId) &&
 			previewRoot.workUnit.taskId === input.taskId &&
 			previewRoot.workUnit.taskIncarnationCreatedAtEpochMs === input.taskIncarnationCreatedAtEpochMs &&
 			previewRoot.kanbanBoardCardIdentity?.permanentlyRemovedFromBoardAt === null);
