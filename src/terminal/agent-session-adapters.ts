@@ -1314,11 +1314,14 @@ const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
-		const isTaskCollaboratorFork = Boolean(
-			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
-				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator",
+		const inheritsNativeForkModelWithoutCardDefault = Boolean(
+			(input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
+				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					"forked_from_main_current_turn" &&
+					input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover),
 		);
-		const modelBaseArgs = isTaskCollaboratorFork
+		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
 			: input.args;
 		const args = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
@@ -1348,7 +1351,9 @@ const claudeAdapter: AgentSessionAdapter = {
 		applyClaudePermissionAndPlanModeArgs(args, {
 			...input,
 			startInPlanMode:
-				(input.startInPlanMode && !continuesWithoutNewPrompt) ||
+				(input.startInPlanMode &&
+					(!continuesWithoutNewPrompt ||
+						input.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover)) ||
 				resumedConversationPlanModeState === "plan_mode_still_open",
 		});
 		// 四条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
@@ -1422,7 +1427,7 @@ const claudeAdapter: AgentSessionAdapter = {
 		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
 		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
 		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
-		if (!explicitModelId && !hasCliOption(args, "--model") && !isTaskCollaboratorFork) {
+		if (!explicitModelId && !hasCliOption(args, "--model") && !inheritsNativeForkModelWithoutCardDefault) {
 			args.push("--model", "default");
 		}
 		const hooks = resolveHookContext(input);
@@ -1604,11 +1609,14 @@ const codexAdapter: AgentSessionAdapter = {
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
-		const isTaskCollaboratorFork = Boolean(
-			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
-				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator",
+		const inheritsNativeForkModelWithoutCardDefault = Boolean(
+			(input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
+				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					"forked_from_main_current_turn" &&
+					input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover),
 		);
-		const modelBaseArgs = isTaskCollaboratorFork
+		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
 			: input.args;
 		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
@@ -2474,16 +2482,19 @@ const kiroAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmedPrompt = input.prompt.trim();
-		const planPrompt = input.startInPlanMode
-			? [
-					"First, inspect the codebase and produce a clear implementation plan only.",
-					"Do not modify files, do not use write tools, and do not implement anything yet.",
-					"After you present the plan, ask for approval before making changes.",
-					trimmedPrompt
-						? `\n\nTask:\n${trimmedPrompt}`
-						: " Ask the user what they want planned if the task is unclear.",
-				].join(" ")
-			: input.prompt;
+		// 交接先空白启动，再投递完整只读报告；不能为这次空启动另造一轮提问。
+		const planPrompt =
+			input.startInPlanMode &&
+			!(input.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover && !trimmedPrompt)
+				? [
+						"First, inspect the codebase and produce a clear implementation plan only.",
+						"Do not modify files, do not use write tools, and do not implement anything yet.",
+						"After you present the plan, ask for approval before making changes.",
+						trimmedPrompt
+							? `\n\nTask:\n${trimmedPrompt}`
+							: " Ask the user what they want planned if the task is unclear.",
+					].join(" ")
+				: input.prompt;
 		const withPromptLaunch = withPrompt(args, planPrompt, "append");
 		return {
 			...withPromptLaunch,

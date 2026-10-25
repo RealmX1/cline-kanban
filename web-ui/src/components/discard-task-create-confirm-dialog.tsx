@@ -31,24 +31,24 @@ export function DiscardTaskCreateConfirmDialog({
 			}}
 		>
 			<AlertDialogHeader>
-				<AlertDialogTitle>{alreadyCreatedTaskId ? "放弃剩余草稿？" : "Discard this task?"}</AlertDialogTitle>
+				<AlertDialogTitle>{alreadyCreatedTaskId ? "放弃剩余草稿？" : "放弃未保存的更改？"}</AlertDialogTitle>
 			</AlertDialogHeader>
 			<AlertDialogBody>
 				<AlertDialogDescription>
 					{alreadyCreatedTaskId
 						? `任务 ${alreadyCreatedTaskId} 已创建。关闭仅清除恢复草稿，已保存的任务和关系会保留。`
-						: "You have unsaved changes to this new task. Closing now will discard everything you entered."}
+						: "关闭后会放弃本次尚未保存的更改。"}
 				</AlertDialogDescription>
 			</AlertDialogBody>
 			<AlertDialogFooter>
 				<AlertDialogCancel asChild>
 					<Button variant="default" onClick={onCancel}>
-						Keep editing
+						继续编辑
 					</Button>
 				</AlertDialogCancel>
 				<AlertDialogAction asChild>
 					<Button variant="danger" onClick={onConfirm}>
-						{alreadyCreatedTaskId ? "放弃草稿" : "Discard"}
+						{alreadyCreatedTaskId ? "放弃草稿" : "放弃更改"}
 					</Button>
 				</AlertDialogAction>
 			</AlertDialogFooter>

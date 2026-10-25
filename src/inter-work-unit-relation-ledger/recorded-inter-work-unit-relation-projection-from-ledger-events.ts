@@ -40,13 +40,14 @@ import {
 	type KanbanBoardCardIdentityProjectionState,
 	readInterWorkUnitRelationWorkUnitReferenceFromLedgerValue,
 	readKanbanBoardCardReferenceFromLedgerPayloadValue,
+	resolveCanonicalWorkUnitReferenceAfterProjectTransfer,
 } from "./kanban-board-card-identity-projection-from-ledger-events";
 
 // dd2db 1b：记录型关系投影器（来源 3 个 kind + 交互 4 个 kind）。
 // 关系 = 事件日志 × 投影表版本的纯函数（d-vocab §2.2）：本模块按全局提交序号顺序消费已提交事件，
 // 不写账本、不落盘；runtime 在内存里持有状态并按游标增量追上（见 ...-catch-up-against-ledger-worker.ts）。
 // 投影规则改了就升版本号，持有方据此从头重放——账本只追加，所以重放的结果与「当初就按新规则投影」完全一致。
-export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 4;
+export const RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION = 5;
 
 const MOST_RECENT_PROJECTED_FROM_EVENT_IDS_RETAINED_PER_RECORDED_RELATION = 10;
 
@@ -58,6 +59,7 @@ const TASK_MUTATION_EVENT_KINDS_PROJECTED_AS_BOARD_LIFECYCLE_TRANSITION = new Se
 	"task_card_moved_to_trash_column",
 	"task_card_restored_from_trash_column",
 	"task_card_permanently_removed_from_board",
+	"task_card_project_transfer_completed",
 ]);
 
 const REQUIREMENTS_AMENDMENT_FIELD_NAMES = new Set<string>(TASK_CARD_FIELD_NAMES_PROJECTED_AS_REQUIREMENTS_AMENDMENT);
@@ -781,11 +783,31 @@ export function applyCommittedLedgerEventsToRecordedInterWorkUnitRelationProject
 		state,
 		eventsInGlobalCommittedSequenceOrder,
 	);
-	for (const event of eventsInGlobalCommittedSequenceOrder) {
+	for (const rawEvent of eventsInGlobalCommittedSequenceOrder) {
+		let event = rawEvent;
 		if (event.globalCommittedEventSequence <= state.lastAppliedGlobalCommittedEventSequence) {
 			continue;
 		}
 		applyCommittedLedgerEventToKanbanBoardCardIdentityProjection(state.kanbanBoardCardIdentityProjectionState, event);
+		const subject = readKanbanBoardCardReferenceFromLedgerPayloadValue(event.eventPayload.subjectKanbanBoardCard);
+		const canonical = (reference: InterWorkUnitRelationWorkUnitReference) =>
+			resolveCanonicalWorkUnitReferenceAfterProjectTransfer(state.kanbanBoardCardIdentityProjectionState, reference);
+		const initiatingWorkUnit = readInterWorkUnitRelationWorkUnitReferenceFromLedgerValue(
+			event.onBehalfOfInitiatingWorkUnit,
+		);
+		const actorCard =
+			event.actor.kanbanActorKind === "kanban_board_card_work_unit"
+				? readKanbanBoardCardReferenceFromLedgerPayloadValue(event.actor.actingKanbanBoardCardWorkUnit)
+				: null;
+		event = {
+			...event,
+			eventPayload: subject
+				? { ...event.eventPayload, subjectKanbanBoardCard: canonical(subject) }
+				: event.eventPayload,
+			...(actorCard ? { actor: { ...event.actor, actingKanbanBoardCardWorkUnit: canonical(actorCard) } } : {}),
+			onBehalfOfInitiatingWorkUnit: initiatingWorkUnit ? canonical(initiatingWorkUnit) : null,
+		};
+
 		if (event.eventFamily === "task_mutation_event") {
 			applyTaskMutationEvent(state, event, lookupRetainedFieldValueCanonicalJson);
 		} else if (event.eventFamily === "agent_conversation_session_identity_event") {

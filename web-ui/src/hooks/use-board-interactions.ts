@@ -505,7 +505,10 @@ export function useBoardInteractions({
 						timeout: 7000,
 					});
 				}
-				if (latestBoardInteractionStateRef.current.selectedTaskId === task.id) {
+				if (
+					(response.taskCardSnapshotAfterAction.workspaceId ?? currentProjectId) === currentProjectId &&
+					latestBoardInteractionStateRef.current.selectedTaskId === task.id
+				) {
 					const infoAfterStart = await fetchTaskWorkspaceInfo(task);
 					if (infoAfterStart) {
 						setTaskWorkspaceInfo(infoAfterStart);

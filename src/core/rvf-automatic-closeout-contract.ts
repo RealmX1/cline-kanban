@@ -69,7 +69,27 @@ export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 	blockedReasonKind: rvfCloseoutBlockedReasonKindSchema.optional(),
 	deliveryAttemptId: z.string().optional(),
 	stageExecutionClaimId: z.string().optional(),
-	verificationBasis: z.enum(["native_prompt_acceptance", "verified_stage_execution"]).optional(),
+	verificationBasis: z
+		.enum(["native_prompt_acceptance", "verified_stage_execution", "verified_base_integration_state"])
+		.optional(),
+	baseIntegrationObservation: z
+		.object({
+			source: z.literal("observed_local_base_ancestry"),
+			workspaceId: z.string(),
+			taskId: z.string(),
+			decisionToken: z.string(),
+			runId: z.string(),
+			handoffSha256: z.string(),
+			gitCommonDirectoryRealpath: z.string(),
+			landCommitSha: z.string(),
+			baseRef: z.string(),
+			baseCommitSha: z.string(),
+			candidateEvidenceSha256: z.string(),
+			scopeContractSha256: z.string(),
+			observedAt: z.number(),
+		})
+		.optional(),
+	blockedReasonClassificationSource: z.literal("bound_agent_report").optional(),
 	executionEvidenceSha256: z
 		.string()
 		.regex(/^[a-f0-9]{64}$/u)
@@ -88,6 +108,8 @@ export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewS
 			reportedAt: true,
 			verificationBasis: true,
 			executionEvidenceSha256: true,
+			baseIntegrationObservation: true,
+			blockedReasonClassificationSource: true,
 		}).shape,
 	)
 	.superRefine((value, context) => {
@@ -199,6 +221,14 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	nativeIdentitySwitchStartedAt: z.number().nullable(),
 	nativeForkAttemptStartedAt: z.number().nullable(),
 	activeCoordinatorOperationClaimId: z.string().nullable().optional(),
+	independentBackupRouteSuppressionObservation: z
+		.object({
+			observedAt: z.number(),
+			originalRunDirectory: z.string().nullable(),
+			controlDirectory: z.string(),
+			reason: z.enum(["active_backup_route_ownership", "original_run_consumed_by_backup_route"]),
+		})
+		.optional(),
 	pauseReason: z.string().nullable(),
 	explicitStopRequestedAt: z.number().optional(),
 	waitingReasonCode: rvfAutomaticCloseoutWaitingReasonCodeSchema.nullable().optional(),
@@ -215,7 +245,22 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	skillInstallationVersionReferences: z.array(rvfCloseoutSkillInstallationVersionReferenceSchema).optional(),
 	expectedSkillSnapshotCaptureAttemptKeys: z.array(z.string()).optional(),
 	independentLandResultObservationBudget: z
-		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })
+		.object({
+			fingerprint: z.string(),
+			count: z.number().int().min(0).max(3),
+			nextAttemptAtMs: z.number(),
+			nextCapabilityProbeAtMs: z.number().optional(),
+		})
+		.optional(),
+	independentBaseIntegrationObservationBudget: z
+		.object({
+			fingerprint: z.string(),
+			count: z.number().int().min(0).max(3),
+			nextAttemptAtMs: z.number(),
+			nextCapabilityProbeAtMs: z.number(),
+			reason: z.string().optional(),
+			recoveryCondition: z.string(),
+		})
 		.optional(),
 	acceptedSkillSnapshotObservationBudget: z
 		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })

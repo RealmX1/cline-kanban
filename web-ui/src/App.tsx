@@ -43,6 +43,7 @@ import type { TaskCreationTargetProjectField } from "@/components/task-creation-
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskLookupWorkbenchView } from "@/components/task-lookup-workbench-view";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
+import { TaskProjectAssignmentPreflightHost } from "@/components/task-project-assignment-preflight-host";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
 import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
@@ -59,6 +60,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { UnavailableProjectRuntimeState } from "@/components/unavailable-project-runtime-state";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
 import { createInitialBoardData } from "@/data/board-data";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
@@ -143,6 +145,7 @@ import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardCard, BoardData } from "@/types";
 
 export default function App(): ReactElement {
+	const expandedForegroundView = useExpandedForegroundViewNavigation();
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
@@ -161,7 +164,6 @@ export default function App(): ReactElement {
 		taskId: string;
 		expectedTaskIncarnationCreatedAtEpochMs?: number;
 	} | null>(null);
-	const taskEditorResetRef = useRef<() => void>(() => {});
 	// useWorkspacePersistence 在本组件更下方才调用；切项目入口经这个 ref 先把旧项目防抖中的整板保存立刻发出。
 	const flushPendingWorkspaceStatePersistImmediatelyRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
@@ -171,7 +173,6 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 		setPendingEditedTaskCardAgentSessionStart(null);
-		taskEditorResetRef.current();
 	}, []);
 	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
 	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
@@ -680,6 +681,10 @@ export default function App(): ReactElement {
 
 	const {
 		isInlineTaskCreateOpen,
+		taskEditorSessionWorkspaceId,
+		taskEditorDefaultAgentId,
+		newTaskName,
+		setNewTaskName,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -737,11 +742,15 @@ export default function App(): ReactElement {
 		setEditTaskTerminalAgentModelOverrideSettings,
 		editTaskAgentSessionInitialization,
 		setEditTaskAgentSessionInitialization,
+		suspendedTaskEditorTitle,
+		handleResumeSuspendedTaskEditor,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
 		handleOpenEditTaskCardInOtherProject,
 		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
+		handleSelectEditTaskTargetProject,
 		editTaskBranchOptionsForEditTarget,
 		taskCreationTargetWorkspaceId,
 		taskCreationTargetOtherProjectWorkspaceId,
@@ -787,9 +796,6 @@ export default function App(): ReactElement {
 		openTaskInOtherProjectAfterStart: handleOpenTaskInProject,
 	});
 
-	useEffect(() => {
-		taskEditorResetRef.current = resetTaskEditorState;
-	}, [resetTaskEditorState]);
 	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
 		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
 	useEffect(() => {
@@ -803,17 +809,7 @@ export default function App(): ReactElement {
 		resetWorkspaceSyncState();
 	}, [isProjectSwitching, resetWorkspaceSyncState]);
 
-	// Board Scope 的建卡框钉住了目标项目，与「当前项目」无关：在 All projects 面板里点别的项目的任务会切当前项目，
-	// 那不该清掉正在填的建卡框。用 ref 读，免得建卡框开合本身触发下面两处重置。
-	const isBoardScopeTaskCreateDialogOpenRef = useRef(false);
-	isBoardScopeTaskCreateDialogOpenRef.current = isBoardScopeAllProjectsSelected && isInlineTaskCreateOpen;
-
-	useEffect(() => {
-		if (!isProjectSwitching || isBoardScopeTaskCreateDialogOpenRef.current) {
-			return;
-		}
-		resetTaskEditorState();
-	}, [isProjectSwitching, resetTaskEditorState]);
+	// 活跃编辑会话已经固定来源与卡片快照；背景导航只切换看板，不关闭或重铺编辑器。
 
 	// Board Scope 建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：默认目标取上下文项目——
 	// 跨项目打开在途时是目标项目，否则是当前项目（Focus View 的焦点任务总在当前项目里）。
@@ -840,21 +836,8 @@ export default function App(): ReactElement {
 		projects,
 	]);
 
-	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
+	// 创建与 Backlog 编辑共用项目选择，迁移在运行时校验未启动身份。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId || postDeployVerificationFollowUpTaskCreationDraftSeed || !isBoardScopeAllProjectsSelected) {
-			const workspaceId = editingTaskId
-				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
-				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);
-			if (!workspaceId) return undefined;
-			const project = projects.find((entry) => entry.id === workspaceId);
-			return {
-				taskCreationTargetProjectFieldPresentation: "target_project_shown_read_only",
-				workspaceId,
-				projectName: project?.name ?? workspaceId,
-				visualIdentity: project?.visualIdentity,
-			};
-		}
 		return {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
 			selectableProjects: projects
@@ -865,12 +848,15 @@ export default function App(): ReactElement {
 					projectName: project.name,
 					visualIdentity: project.visualIdentity,
 				})),
-			selectedTargetWorkspaceId: taskCreationTargetWorkspaceId,
-			onSelectTargetWorkspaceId: handleSelectTaskCreationTargetProject,
+			selectedTargetWorkspaceId: editingTaskId ? editTaskTargetWorkspaceId : taskCreationTargetWorkspaceId,
+			onSelectTargetWorkspaceId: editingTaskId
+				? handleSelectEditTaskTargetProject
+				: handleSelectTaskCreationTargetProject,
 		};
 	}, [
-		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
 		editingTaskId,
+		handleSelectEditTaskTargetProject,
 		handleSelectTaskCreationTargetProject,
 		isBoardScopeAllProjectsSelected,
 		projectRuntimeWorkspaceId,
@@ -1043,25 +1029,23 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 		setSelectedTaskId(null);
-		resetTaskEditorState();
+		if (taskEditorSessionWorkspaceId === currentProjectId) resetTaskEditorState();
 		resetTerminalPanelsState();
-	}, [isCurrentProjectRuntimeUnavailable, resetTaskEditorState, resetTerminalPanelsState, setSelectedTaskId]);
+	}, [
+		currentProjectId,
+		taskEditorSessionWorkspaceId,
+		isCurrentProjectRuntimeUnavailable,
+		resetTaskEditorState,
+		resetTerminalPanelsState,
+		setSelectedTaskId,
+	]);
 
 	useEffect(() => {
-		if (!isBoardScopeTaskCreateDialogOpenRef.current) {
-			resetTaskEditorState();
-		}
 		setIsClearTrashDialogOpen(false);
 		resetGitActionState();
 		resetProjectNavigationState();
 		resetTerminalPanelsState();
-	}, [
-		currentProjectId,
-		resetGitActionState,
-		resetProjectNavigationState,
-		resetTaskEditorState,
-		resetTerminalPanelsState,
-	]);
+	}, [currentProjectId, resetGitActionState, resetProjectNavigationState, resetTerminalPanelsState]);
 
 	useEffect(() => {
 		if (selectedCard) {
@@ -1581,6 +1565,8 @@ export default function App(): ReactElement {
 		onRequestPinCurrentProjectTaskToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
+		onOpenRelationsVisualizationForTask: (task) =>
+			expandedForegroundView?.open({ ...task, viewKind: "task_relations" }),
 	});
 	useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
 		host: crossProjectRecentlyActiveTaskSwitcherHost,
@@ -1675,6 +1661,14 @@ export default function App(): ReactElement {
 		},
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
+
+	useEffect(() => {
+		const openAnalysisSettings = () => {
+			setIsSettingsOpen(true);
+		};
+		window.addEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+		return () => window.removeEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+	}, []);
 
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
@@ -1904,11 +1898,11 @@ export default function App(): ReactElement {
 								}
 							/>
 						</div>
-						<DailyWorkProgressExpandedRegion
-							progress={dailyWorkProgressStatistics}
-							onOpenTask={handleOpenTaskInProject}
-						/>
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+							<DailyWorkProgressExpandedRegion
+								progress={dailyWorkProgressStatistics}
+								onOpenTask={handleOpenTaskInProject}
+							/>
 							<div
 								className="kb-home-layout"
 								aria-hidden={isFocusViewChromeShown ? true : undefined}
@@ -2166,6 +2160,7 @@ export default function App(): ReactElement {
 							) : null}
 						</div>
 					</div>
+					<TaskProjectAssignmentPreflightHost />
 					<RuntimeSettingsDialog
 						open={isSettingsOpen}
 						workspaceId={settingsWorkspaceId}
@@ -2192,9 +2187,20 @@ export default function App(): ReactElement {
 						onResetAllState={handleResetAllState}
 					/>
 					<TaskEditorDialog
-						open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
+						suspendedTaskEditorTitle={suspendedTaskEditorTitle}
+						onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
+						open={
+							!projects.some(
+								(project) =>
+									project.id === taskEditorSessionWorkspaceId && project.availability.status === "unavailable",
+							) &&
+							(isInlineTaskCreateOpen || editingTaskId !== null)
+						}
 						onOpenChange={handleCreateDialogOpenChange}
 						taskEditorMode={editingTaskId ? "edit" : "create"}
+						creatingTaskName={newTaskName}
+						onCreatingTaskNameChange={setNewTaskName}
+						editorSessionWorkspaceId={taskEditorSessionWorkspaceId}
 						editingTaskName={editTaskName}
 						onEditingTaskNameChange={setEditTaskName}
 						editingTaskId={editingTaskId}
@@ -2221,7 +2227,7 @@ export default function App(): ReactElement {
 						}
 						onCreateStartAndOpen={
 							editingTaskId
-								? undefined
+								? () => editingTaskId
 								: taskCreationTargetOtherProjectWorkspaceId
 									? handleCreateStartAndOpenTaskInOtherProject
 									: handleCreateStartAndOpenTask
@@ -2299,7 +2305,7 @@ export default function App(): ReactElement {
 							editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
 						}
 						agents={runtimeProjectConfig?.agents ?? []}
-						defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+						defaultAgentId={taskEditorDefaultAgentId}
 						defaultProviderId={defaultTaskClineProviderId}
 						defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
 						defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}

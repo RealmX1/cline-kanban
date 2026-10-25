@@ -53,7 +53,7 @@ _Avoid_: hot tasks, urgent
 紧凑行：第 1 行前导点（Running 脉动点 / 未读交接点）/ agent 图标 / 标题，第 2 行项目名 / stage 标签（仅置顶区），右侧依次是倒计时药丸（仅 Cache warm 区）、三颗时长药丸（创建、停止生成、对话推进，与卡片同源）、置顶标记（置顶且不在 Pinned 区），置顶区另有第 3 行置顶理由。hover 动作组（Edit pin reason / Pin / 展开开关）叠在第 1 行**上方**（见下方「hover 动作组位置」），倒计时药丸与置顶标记放第 2 行，与完整卡片元信息行右侧同一组、同一顺序。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
 元信息行还显示 worktree 的 git 元数据（2026-10-05 用户要求，与 This project 卡片目录行同一套显隐规则）：相对 base 分支的 ahead / behind 与已集成提交数，以及未提交改动「(N files +A -D)」。Backlog 不显示；没有可说的提交关系、且未提交改动全为 0 时整组隐藏。取数唯一入口 `useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry`：
 - 当前项目的精简行与完整卡（hover 展开 / 固定展开）：优先读 `workspace_metadata_updated` 推流 store；Board Scope 下推流只探焦点任务与 auto-review 的 Review 列任务，其余任务在推流里没有数据，回落到下面的轮询 store。完整卡由展开宿主显式传入项目 ID，普通看板卡继续只订阅推流。
-- 全部非 Backlog 的行（含当前项目）：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
+- 全部非 Backlog 的行（含当前项目）：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每批最多 100 条，串行覆盖全部候选，不截断尾部任务），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
 - 不并入 `projects_updated`：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
 
 **Hover Expansion In Place / Keep Expanded In List（hover 原地展开与固定展开）**：
@@ -101,7 +101,9 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 - 阶段筛选为可组合的 `In progress / Review`、`Backlog`、`Validation`、`Done`，选项间取并集；默认启用 `In progress / Review`；全部未选时即 `All`，点击 `All` 清空选择。`Done` 对应内部列 ID `trash`。
 - Project 筛选支持按 workspaceId 多选项目，默认所有项目；可搜索项目名或路径。项目间取并集，与阶段筛选取交集，只影响 Recent。
 - 候选统一按最近触达时间截取默认 7 天；排序切换不改变候选范围。「Show older」按需扩展至 30 天（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不扩大广播窗口）。
-- 阶段、项目筛选与 Recent / Cache warm 的展开态由 App 共享模型持有，跨视图、任务切换和过渡壳重挂载保留，页面刷新恢复 `In progress / Review`、所有项目与展开。排序偏好沿用原 localStorage key；旧 `Unread + opened` 值回落至默认，通知未读圆点仍保留。
+- 工作树筛选为单一组合开关「未提交改动 / 独有提交」，默认关闭；`changedFiles > 0` 或相对任务本地 `baseRef` 的 `commitsAheadOfBaseRef > 0` 即命中，与项目、阶段和时间窗取交集。内容等价地合入 base 不抵消仍在 ahead 中的原提交；不使用历史保留提交统计替代当前 ahead。缺失工作树不命中，未知状态显示检查或暂不可用提示，不冒充零值。
+- 开关开启后仍轮询筛选前的候选，隐藏任务出现改动时自动加入，条件消失时退出。请求失败或外层成功但计数全未知的探针失败均保留上次可信快照并提示，下轮自动重试；页面隐藏时暂停剩余批次，恢复可见或候选变化时补查。当前项目推流只有具备可用计数或明确的缺失 / 历史状态时才优先，行展示与筛选共用来源选择；base 关系未知不否定独立的 dirty 正向证据。
+- 工作树、阶段、项目筛选与 Recent / Cache warm 的展开态由 App 共享模型持有，跨视图、任务切换和过渡壳重挂载保留，页面刷新恢复工作树开关关闭、`In progress / Review`、所有项目与展开。排序偏好沿用原 localStorage key；旧 `Unread + opened` 值回落至默认，通知未读圆点仍保留。
 - 组头数量反映筛选后的条目。展开时显示排序与多选阶段按钮；空列表仍保留筛选和扩展时间窗入口。
 快照只补广播取景范围**之外**的旧任务：落在取景范围内却不在广播里的快照条目已失效（取消置顶 / 已删除），不补回；扩展期间随面板 30 秒 tick 重新拉取快照，范围外任务的变化在一个 tick 内收敛。
 

@@ -54,7 +54,7 @@ export interface ModelProviderChatCompletionRequest {
 	 */
 	modelUsagePurpose: Exclude<
 		ModelUsagePurpose,
-		"task_indexing_support_relation_analysis" | "task_lookup_conversation"
+		"task_indexing_support_relation_analysis" | "task_lookup_conversation" | "task_project_assignment_analysis"
 	>;
 	/** 交代角色与输出格式的那一段。 */
 	systemPrompt: string;

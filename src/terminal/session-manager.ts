@@ -2,7 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
@@ -7476,6 +7476,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const oldestIdentity = acceptedEventIdentities.values().next().value;
 			if (oldestIdentity !== undefined) acceptedEventIdentities.delete(oldestIdentity);
 		}
+	}
+
+	// 调用方已经持久核验完整输入 hook 与同代际后续处理事件；这里只结算完全相同正文的在途回执。
+	confirmHandoverInputAcceptedFromCorrelatedProcessingHooks(
+		taskId: string,
+		evidence: { runtimeSessionIncarnationId: string; promptSha256: string },
+	): void {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry?.active ||
+			(entry.summary.agentId !== "droid" && entry.summary.agentId !== "kiro") ||
+			entry.summary.runtimeSessionIncarnationId !== evidence.runtimeSessionIncarnationId
+		)
+			return;
+		const receipt = resolveTerminalSubmissionProgrammaticDeliveryReceipt(entry.active);
+		if (
+			receipt?.phase !== "awaiting_submit_confirmation" ||
+			createHash("sha256").update(receipt.promptText).digest("hex") !== evidence.promptSha256
+		)
+			return;
+		clearSubmitConfirmTimer(entry.active);
+		entry.active.submitConfirmGeneration++;
+		settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+			entry.active,
+			receipt.queuedBehindActiveAgentTurn
+				? "delivered_queued_behind_active_agent_turn"
+				: "delivered_and_submit_confirmed",
+			null,
+		);
 	}
 
 	confirmAcceptedAgentConversationInput(

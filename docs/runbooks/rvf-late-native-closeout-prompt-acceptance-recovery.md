@@ -94,3 +94,17 @@ kanban task reconcile-rvf-automatic-closeout-late-native-prompt-acceptance \
 本轮实际直接分析的成功样本为 38fd3。9c9c1、df81c、30555 仅作为协调报告背景，本卡没有独立重跑它们，也不把引用等同于已完成回归。
 
 持久交接目录：`~/.cline/kanban/cross-task-handoff-artifacts/task-7e075-rvf-late-native-closeout-acceptance-recovery/`。其中 `analyze-native-closeout-compaction-preconditions.py` 可重建四样本 ancestry 用量观察，`native-compaction-preconditions-observation.json` 保存来源边界与摘要；最终交接附实际检查、提交及逐样本命令。消费者正式恢复由 646eb 协调，本任务不修改它们的账本，不替它们 commit/base-sync，不部署。
+
+## 历史 Land 与本地 base 整合状态的自动对账
+
+恢复器在原生接受补证、会话恢复及续验投递前，先观察规范 Land 工件，再核验已验收 Land 提交是否位于绑定的本地 base ref 的祖先链。核验复用 run/handoff、候选摘要、真实 worktree 与 Git common-dir 身份；固定观察到的 base OID，在短写锁内重新检查后经原结果漏斗追加登记。
+
+`baseBranchSyncExecutionResult.verificationBasis=verified_base_integration_state` 表示本次独立观察到的等价完成状态。`baseIntegrationObservation` 保存来源 `observed_local_base_ancestry`、workspace/task/token/run/handoff、common-dir、本地 ref、Land/base OID、候选及 scope 摘要和观察时间；`executionEvidenceSha256` 是不含观察时间的证据对象摘要。它不证明某次历史 handback 的执行者、时间或执行过程。原 failed/blocked 报告、投递账本和 pauseReason 保留；已接受完成结果不会被迟到失败覆盖，同一 ref 的 `main` / `refs/heads/main` 报告重放等价。
+
+base 观察预算保存在 `independentBaseIntegrationObservationBudget`：同一证据指纹最多三次全面核验，间隔十五秒；耗尽后每六十秒只探测相关 ref、文件身份及凭据是否改变。变化后重开该指纹的预算，重启不清空计数。失败原因与机器恢复条件保存在同一预算中。规范 Land 的既有预算也增加六十秒能力探测间隔。
+
+待核验阶段与可执行阶段分开。缺少 `blockedReasonKind` 的历史 blocked 进入只读续验；它仍阻止阶段认领，不能自动解释成机器故障或用户禁止。续验必须读取原报告、原生记录和当前用户限制，明确分类的报告追加 `blockedReasonClassificationSource=bound_agent_report` 及历史；未知则继续待验。报告入口补证不会在校验该报告前改换 active delivery。真实写入继续走原生接受、身份及阶段认领门禁。
+
+显式 Stop 不被观察器解除，也不恢复会话、投递消息或认领执行。备用路线的 active/consumed 互斥继续有效；普通结果登记使用同一 normal mutation reservation，不把备用结果冒充普通回执。
+
+跨仓依赖 `review-validate-fix/abc87` 负责正式历史补充完成证明。目前只有方案，尚未发布 `rvf land supplemental-completion verify` 的正式参数、响应契约及夹具；本消费端不自行重建其评审资格判据，也不凭文件存在、Agent 自述或草案授证。该依赖发布后，需要按精确 task/token/run/handoff/提交接入正式只读核验，并将补充证明与普通 Land 回执分开标注来源。当前缺少规范结果的 run 继续保留未知并按已有恢复链补证。
