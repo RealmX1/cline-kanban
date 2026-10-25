@@ -19,6 +19,25 @@ export interface RestoredCodexConversationIdentity {
 	transcriptPath: string;
 }
 
+export async function assertCodexNativeConversationLoadedByCurrentHost(
+	port: CodexAppServerRequestPort,
+	nativeSessionId: string,
+) {
+	let cursor: string | null = null;
+	const seenCursors = new Set<string>();
+	let loaded = false;
+	do {
+		const page = z
+			.object({ data: z.array(z.string()), nextCursor: z.string().nullable() })
+			.parse(await port.request("thread/loaded/list", { cursor, limit: 100 }));
+		loaded ||= page.data.includes(nativeSessionId);
+		cursor = page.nextCursor;
+		if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
+		if (cursor) seenCursors.add(cursor);
+	} while (cursor);
+	if (!loaded) throw new Error("恢复会话并未由当前 TUI 宿主持有。");
+}
+
 export async function readCodexConversationTurns(port: CodexAppServerRequestPort, threadId: string) {
 	const turns: CodexNativeConversationTurn[] = [];
 	const seenCursors = new Set<string>();

@@ -54,6 +54,7 @@ export * from "./permanently-deleted-task-history-contract.js";
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
 export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
+export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,

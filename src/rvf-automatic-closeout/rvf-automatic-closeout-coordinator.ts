@@ -46,6 +46,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 			const current = records.find((entry) => entry.receipt.decision_token === token);
 			if (
 				!current ||
+				current.promptDeliveryAttempts?.length ||
 				current.status === "captured_review_start_boundary" ||
 				current.status === "paused" ||
 				current.status === "closeout_prompt_submitted" ||

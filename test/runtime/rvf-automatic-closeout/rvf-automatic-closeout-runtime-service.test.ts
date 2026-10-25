@@ -8,13 +8,27 @@ import {
 	type TaskMessageInjectionRecord,
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
+import * as diagnosticEventJournal from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { computeRvfTextSha256 } from "../../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
+import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { buildRvfAutomaticCloseoutPrompt } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import { createRvfAutomaticCloseoutRuntimeService } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	getRvfAutomaticCloseoutStorePath,
 	updateRvfAutomaticCloseoutRecords,
 } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
+import {
+	claimRvfCloseoutExecutionStage,
+	observeExistingRvfLandExecutionResultOnce,
+} from "../../../src/rvf-automatic-closeout/rvf-closeout-execution-stage-recovery";
+import { captureRvfCloseoutSkillInstallationVersionReference } from "../../../src/rvf-automatic-closeout/rvf-closeout-historical-skill-installation-evidence";
+import * as skillSnapshotStore from "../../../src/rvf-automatic-closeout/rvf-closeout-skill-attachment-snapshot-store";
+import {
+	captureRvfCloseoutAcceptedSkillSnapshot,
+	captureRvfCloseoutExpectedSkillSnapshot,
+	readRvfCloseoutSkillSnapshots,
+} from "../../../src/rvf-automatic-closeout/rvf-closeout-skill-attachment-snapshot-store";
+import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "../../../src/rvf-automatic-closeout/verify-codex-native-closeout-skill-attachment-evidence";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -1463,6 +1477,8 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 			duplicate?: boolean;
 			metadataSessionId?: string;
 			nativeMessageRecordedAtMs?: number;
+			skillAttachment?: { name: string; path: string; body: string };
+			skillExpansionMetadata?: unknown;
 		} = {},
 	) {
 		const nativeMessage = {
@@ -1474,7 +1490,12 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 				item: {
 					type: "UserMessage",
 					id: "closeout-native-user-message",
-					content: [{ type: "text", text: options.text ?? text }],
+					content: [
+						{ type: "text", text: options.text ?? text },
+						...(options.skillAttachment
+							? [{ type: "skill", name: options.skillAttachment.name, path: options.skillAttachment.path }]
+							: []),
+					],
 				},
 			},
 		};
@@ -1510,12 +1531,38 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 				},
 			},
 			...(options.includeMessage === false ? [] : [nativeMessage]),
+			...(options.skillAttachment
+				? [
+						{
+							type: "response_item",
+							timestamp: iso((options.nativeMessageRecordedAtMs ?? 121_575) + 2),
+							payload: {
+								type: "message",
+								role: "user",
+								content: [
+									{
+										type: "input_text",
+										text: `<skill>\n<name>${options.skillAttachment.name}</name>\n<path>${options.skillAttachment.path}</path>\n${options.skillAttachment.body}\n</skill>`,
+									},
+								],
+								internal_chat_message_metadata_passthrough:
+									options.skillExpansionMetadata === undefined
+										? {
+												turn_id: "closeout-user-turn",
+												content_item_kinds: ["skills.selected_skill_instructions"],
+												content_item_metadata: [{ provenance: { type: "skills" } }],
+											}
+										: options.skillExpansionMetadata,
+							},
+						},
+					]
+				: []),
 			...(options.duplicate ? [nativeMessage] : []),
 		];
 		await writeFile(transcriptPath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 	}
 	await writeNativeEvidence();
-	const activeTurns = [
+	const activeTurns: CodexNativeConversationTurn[] = [
 		{ id: "implementation", status: "completed", items: [] },
 		{
 			id: "closeout-user-turn",
@@ -1538,7 +1585,156 @@ async function setupLateNativeCloseoutPromptAcceptance(mainConversationSessionId
 	return { ...context, record, request, ledgerPath, transcriptPath, activeTurns, writeNativeEvidence };
 }
 
+async function setupLateNativeCloseoutWithSkillAttachment() {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	const skillDirectory = join(context.fixture.fixtureRootDirectoryPath, "installed-closeout-skill");
+	await mkdir(skillDirectory);
+	const skill = {
+		name: "base-branch-sync",
+		path: join(skillDirectory, "SKILL.md"),
+		body: "核对本地 base 的隔离手册。\n",
+	};
+	await writeFile(skill.path, skill.body);
+	await context.writeNativeEvidence({ skillAttachment: skill });
+	const reference = { type: "skill", name: skill.name, path: skill.path };
+	const message = context.activeTurns[1]?.items[0];
+	if (!message?.content) throw new Error("缺少隔离的原生消息");
+	message.content.push(reference);
+	const catalogEntry = {
+		cwd: context.repo.repositoryPath,
+		skills: [{ name: skill.name, path: skill.path, enabled: true }],
+		errors: [],
+	};
+	const previousRequest = mocked.request.getMockImplementation();
+	mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) =>
+		method === "skills/list" ? { data: [catalogEntry] } : previousRequest?.(method, parameters),
+	);
+	return { ...context, skill, message, reference, catalogEntry };
+}
+
 describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
+	it("合法 Skill 附件可自动补证，dry-run 与重建幂等且原失败、正文和投递次数不变", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		const ledgerBefore = await readFile(context.ledgerPath);
+		const transcriptBefore = await readFile(context.transcriptPath);
+		const storeBefore = await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId));
+		const enqueueCount = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		expect(
+			await context.service.reconcileLateNativePromptAcceptance(context.scope, { ...context.request, dryRun: true }),
+		).toMatchObject({ status: "eligible" });
+		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(storeBefore);
+		await context.service.sweepPendingCloseoutsOnce();
+		const recovered = await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		expect(recovered).toMatchObject({
+			status: "already_recovered",
+			receipt: { originalDeliveryFailure: { status: "delivery_failed" } },
+		});
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toEqual(recovered);
+		expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+		expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledTimes(enqueueCount);
+	});
+	it.each(["错回合", "普通用户来源", "无可信归属"])(
+		"Skill 展开为 %s 时保持 unknown，暂停和原失败账本不变",
+		async (scenario) => {
+			const context = await setupLateNativeCloseoutWithSkillAttachment();
+			await context.writeNativeEvidence({
+				skillAttachment: context.skill,
+				skillExpansionMetadata:
+					scenario === "无可信归属"
+						? null
+						: {
+								turn_id: scenario === "错回合" ? "another-user-turn" : "closeout-user-turn",
+								content_item_kinds: [
+									scenario === "普通用户来源" ? "user.text" : "skills.selected_skill_instructions",
+								],
+								content_item_metadata: [
+									{ provenance: { type: scenario === "普通用户来源" ? "user" : "skills" } },
+								],
+							},
+			});
+			const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+			const storeBefore = await readFile(storePath);
+			const ledgerBefore = await readFile(context.ledgerPath);
+			mocked.request.mockClear();
+			expect(
+				await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+			).toMatchObject({
+				status: "unknown",
+				reasonCode: "native_prompt_acceptance_not_proven",
+			});
+			expect(await readFile(storePath)).toEqual(storeBefore);
+			expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+			expect(mocked.request).not.toHaveBeenCalled();
+		},
+	);
+	it.each([
+		"attachment_removed",
+		"attachment_changed",
+		"unknown_attachment",
+		"duplicate_with_unknown_attachment",
+	] as const)("活动分支 %s 时拒绝恢复，不能只修转录 reader", async (scenario) => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		if (!context.message.content) throw new Error("缺少消息正文");
+		if (scenario === "attachment_removed") context.message.content.pop();
+		if (scenario === "attachment_changed") context.reference.path = "/unrelated/SKILL.md";
+		if (scenario === "unknown_attachment") context.message.content.push({ type: "unknown_future_attachment" });
+		if (scenario === "duplicate_with_unknown_attachment")
+			context.activeTurns.push({
+				id: "another-turn",
+				status: "completed",
+				items: [
+					{ ...context.message, id: "another-message", content: [...context.message.content, { type: "image" }] },
+				],
+			});
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "blocked",
+			reasonCode: "native_message_not_on_active_branch",
+		});
+	});
+	it.each(["stop", "identity_changed", "installation_changed"] as const)(
+		"Skill 核验中 %s 分别核验历史事实与当前资格",
+		async (scenario) => {
+			const context = await setupLateNativeCloseoutWithSkillAttachment();
+			const independentStopper = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			const originalRequest = mocked.request.getMockImplementation();
+			mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+				if (method === "thread/turns/list") {
+					if (scenario === "stop")
+						await independentStopper.pauseForExplicitStop(context.scope.workspaceId, "task");
+					if (scenario === "identity_changed")
+						context.manager.getSummary().runtimeSessionIncarnationId = "another-incarnation";
+					if (scenario === "installation_changed") await writeFile(context.skill.path, "变更后的手册");
+				}
+				return originalRequest?.(method, parameters);
+			});
+			if (scenario === "installation_changed") {
+				expect(
+					await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+				).toMatchObject({ status: "recovered" });
+				return;
+			}
+			expect(
+				await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+			).toMatchObject({
+				status: "blocked",
+				reasonCode:
+					scenario === "stop"
+						? "record_changed"
+						: scenario === "identity_changed"
+							? "session_binding_changed"
+							: "native_prompt_acceptance_not_proven",
+			});
+			if (scenario === "stop") {
+				const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+				expect(await restarted.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+					status: "blocked",
+					reasonCode: "explicit_stop",
+				});
+			}
+		},
+	);
 	it("自动补证对未知证据退避并限次，新转录证据到达后重新核验", async () => {
 		const context = await setupLateNativeCloseoutPromptAcceptance();
 		const originalRequest = mocked.request.getMockImplementation();
@@ -1557,7 +1753,9 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 				clock.mockReturnValue(observedAt + offset);
 				await context.service.status(context.scope, { taskId: "task" });
 			}
-			expect(mocked.request).toHaveBeenCalledTimes(callsPerAttempt * 3);
+			expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/loaded/list")).toHaveLength(
+				callsPerAttempt * 3,
+			);
 			if (!originalRequest) throw new Error("缺少原生控制面测试适配器。");
 			mocked.request.mockImplementation(originalRequest);
 			await context.writeNativeEvidence({ nativeMessageRecordedAtMs: 121_576 });
@@ -1625,7 +1823,9 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 					}
 					const state = await context.service.status(context.scope, { taskId: "task" });
 					expect(state.records[0]?.status).toBe("paused");
-					expect(mocked.request.mock.calls.length).toBeLessThanOrEqual(callsPerAttempt * maximumAttempts);
+					expect(
+						mocked.request.mock.calls.filter((call) => call[0] === "thread/loaded/list").length,
+					).toBeLessThanOrEqual(callsPerAttempt * maximumAttempts);
 				}
 				expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
 				expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
@@ -1638,7 +1838,7 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 		},
 	);
 
-	it.each(["runtime_incarnation", "process_start", "service_restart"] as const)(
+	it.each(["runtime_incarnation", "process_start"] as const)(
 		"%s 在相同转录已耗尽自动补证预算后仍可恢复",
 		async (changedGeneration) => {
 			const context = await setupLateNativeCloseoutPromptAcceptance();
@@ -1658,7 +1858,9 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 					clock.mockReturnValue(observedAt + offset);
 					await context.service.status(context.scope, { taskId: "task" });
 				}
-				expect(mocked.request).toHaveBeenCalledTimes(callsPerAttempt * 3);
+				expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/loaded/list")).toHaveLength(
+					callsPerAttempt * 3,
+				);
 				if (!originalRequest) throw new Error("缺少原生控制面测试适配器。");
 				mocked.request.mockImplementation(originalRequest);
 				const summary = context.manager.getSummary();
@@ -1673,10 +1875,7 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 				} else if (changedGeneration === "process_start") {
 					summary.startedAt = (summary.startedAt ?? 0) + 1;
 				}
-				const service =
-					changedGeneration === "service_restart"
-						? createRvfAutomaticCloseoutRuntimeService(context.dependencies)
-						: context.service;
+				const service = context.service;
 				const state = await service.status(context.scope, { taskId: "task" });
 				expect(state.records[0]?.status).toBe("closeout_prompt_submitted");
 				expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
@@ -1889,7 +2088,20 @@ describe("RVF 迟到原生收尾接受补证与暂停结果报告", () => {
 		});
 		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(before);
 		await context.service.sweepPendingCloseoutsOnce();
-		expect(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId))).toEqual(before);
+		const after = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		const prior = JSON.parse(before.toString("utf8"));
+		const withoutMachineProgress = (records: typeof after) =>
+			records.map(
+				({
+					automaticRecoveryProgress: _progress,
+					...entry
+				}: {
+					automaticRecoveryProgress?: unknown;
+					[key: string]: unknown;
+				}) => entry,
+			);
+		expect(withoutMachineProgress(after)).toEqual(withoutMachineProgress(prior));
+		expect(after[0]?.automaticRecoveryProgress.kind).toBe("machine_waiting");
 	});
 	it("实时分支已回退、无控制面或缺页均不复活历史记录", async () => {
 		const context = await setupLateNativeCloseoutPromptAcceptance();
@@ -2187,4 +2399,1012 @@ describe("RVF 执行完成事实的跨 service 持久单调性", () => {
 			expect(context.manager.publishRvfAutomaticCloseoutPaused).not.toHaveBeenCalled();
 		},
 	);
+});
+
+describe("完整恢复闭环：独立结果与阶段认领", () => {
+	it("base 暂缓的重新评估条件变化须追加历史，相同报告重放保持幂等", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		context.manager.getSummary().runtimeSessionIncarnationId = "base-deferral-condition-incarnation";
+		const report = {
+			...context.binding,
+			stage: "base_branch_sync" as const,
+			outcome: "blocked" as const,
+			blockedReasonKind: "agent_assessed_not_ready_for_base_sync" as const,
+			reason: "协议依赖尚未闭合",
+			baseBranchSyncReassessmentCondition: "协议依赖闭合后重新评估",
+		};
+		const first = await context.service.reportExecutionResult(context.scope, report);
+		const changed = { ...report, baseBranchSyncReassessmentCondition: "协议依赖闭合且新增整合验证通过后重新评估" };
+		const second = await context.service.reportExecutionResult(context.scope, changed);
+		expect(second.record.baseBranchSyncExecutionResult?.baseBranchSyncReassessmentCondition).toBe(
+			changed.baseBranchSyncReassessmentCondition,
+		);
+		expect(second.record.executionResultReportHistory).toHaveLength(
+			(first.record.executionResultReportHistory?.length ?? 0) + 1,
+		);
+		expect((await context.service.reportExecutionResult(context.scope, changed)).record).toEqual(second.record);
+	});
+	it("完整恢复闭环的新执行代际不能用自述受阻报告释放旧认领", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		context.manager.getSummary().runtimeSessionIncarnationId = "old-claim-owner-incarnation";
+		const request = { ...context.binding, stage: "land" as const };
+		const claimed = await context.service.claimExecutionStage(context.scope, request);
+		if (claimed.status !== "claimed") throw new Error("隔离阶段未认领");
+		context.manager.getSummary().runtimeSessionIncarnationId = "new-claim-owner-incarnation";
+		await expect(
+			context.service.reportExecutionResult(context.scope, {
+				...request,
+				outcome: "blocked",
+				reason: "新代尚未取得旧执行结果",
+				blockedReasonKind: "machine_precondition",
+				stageExecutionClaimId: claimed.claim.stageExecutionClaimId,
+			}),
+		).rejects.toThrow("代际");
+		const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		expect(saved[0].stageExecutionClaims[0].status).toBe("claimed");
+	});
+	it.each(["user_restriction", "evidence_conflict"] as const)(
+		"完整恢复闭环保留 failed 报告中的明确禁止分类：%s",
+		async (blockedReasonKind) => {
+			const context = await setupExecutionResultInterleavingEvidence();
+			context.manager.getSummary().runtimeSessionIncarnationId = "classified-failure-incarnation";
+			await context.service.reportExecutionResult(context.scope, {
+				...context.binding,
+				stage: "land",
+				outcome: "failed",
+				blockedReasonKind,
+				reason: "阶段存在明确限制或证据冲突",
+			});
+			expect(
+				await context.service.claimExecutionStage(context.scope, { ...context.binding, stage: "land" }),
+			).toMatchObject({ status: "blocked" });
+		},
+	);
+	it("完整恢复闭环不会把新认领的同语义受阻报告当作旧报告重放", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		context.manager.getSummary().runtimeSessionIncarnationId = "new-claim-report-incarnation";
+		const request = { ...context.binding, stage: "land" as const };
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const claimed = await context.service.claimExecutionStage(context.scope, request);
+			if (claimed.status !== "claimed") throw new Error("隔离阶段未取得认领");
+			await context.service.reportExecutionResult(context.scope, {
+				...request,
+				outcome: "blocked",
+				blockedReasonKind: "machine_precondition",
+				reason: "等待同一机器前置条件",
+				deliveryAttemptId: claimed.claim.deliveryAttemptId,
+				stageExecutionClaimId: claimed.claim.stageExecutionClaimId,
+			});
+		}
+		const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		expect(saved[0].executionResultReportHistory).toHaveLength(2);
+		expect(saved[0].stageExecutionClaims.map((claim: { status: string }) => claim.status)).toEqual([
+			"released",
+			"released",
+		]);
+	});
+	it("完整恢复闭环不凭未知原接受直接认领写入阶段", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence({ includeMessage: false });
+		const result = await context.service.claimExecutionStage(context.scope, { ...context.request, stage: "land" });
+		expect(result.status).toBe("waiting");
+		const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		expect(saved[0].stageExecutionClaims).toBeUndefined();
+	});
+	it.each(["matching", "matching_reused", "tampered", "missing", "corrupt_ledger"])(
+		"RVF-002 完整恢复闭环在旧接受未知且原控制面消失时仍核验实际 Land：%s",
+		async (evidenceScenario) => {
+			const evidenceDigest =
+				evidenceScenario === "corrupt_ledger" || evidenceScenario === "matching_reused"
+					? "matching"
+					: evidenceScenario;
+			const context = await setupExecutionResultInterleavingEvidence();
+			const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+			const bound = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+			if (!bound?.runDirectory) throw new Error("缺少绑定 run");
+			await withTaskMessageInjectionLedgerLock(
+				getTaskMessageInjectionLedgerPath(mocked.directory),
+				async (records) => ({
+					records: records.map((entry) => ({
+						...entry,
+						terminal_delivery_status: "delivery_failed" as const,
+						terminal_delivery_failure_reason: "submit_confirmation_budget_exhausted" as const,
+					})),
+					result: undefined,
+				}),
+			);
+			await updateRvfAutomaticCloseoutRecords(storePath, (records) => ({
+				records: records.map((entry) => ({
+					...entry,
+					status: "paused" as const,
+					pauseReason: "收尾投递失败：submit_confirmation_budget_exhausted",
+				})),
+				value: undefined,
+			}));
+			const candidatePath = context.repo
+				.runGit([
+					"rev-parse",
+					"--path-format=absolute",
+					"--git-path",
+					"rvf/evidence/reviewed-task-candidate-evidence.json",
+				])
+				.stdout.trim();
+			const candidateDigest = computeRvfTextSha256(await readFile(candidatePath));
+			await writeFile(
+				join(bound.runDirectory, "artifacts", "rvf-land-commit-result.json"),
+				JSON.stringify({
+					schema_version: 1,
+					run_id: "run",
+					run_dir: bound.runDirectory,
+					repo_root: context.repo.repositoryPath,
+					head_oid_after_commit: context.land.commitSha,
+					result: {
+						exit_code: 0,
+						commit_oid: context.land.commitSha,
+						candidate_evidence: {
+							status: evidenceScenario === "matching_reused" ? "reused" : "written",
+							...(evidenceDigest === "missing"
+								? {}
+								: {
+										candidate_evidence_sha256:
+											evidenceDigest === "matching" ? candidateDigest : "f".repeat(64),
+									}),
+						},
+						round_baseline_seal: { sealed: true },
+					},
+				}),
+			);
+			const resultBytes = await readFile(join(bound.runDirectory, "artifacts", "rvf-land-commit-result.json"));
+			const immutableDirectory = join(bound.runDirectory, "artifacts", "rvf-land-commit-execution-results");
+			await mkdir(immutableDirectory);
+			await writeFile(join(immutableDirectory, `${computeRvfTextSha256(resultBytes)}.json`), resultBytes);
+			context.manager.getSummary().codexNativeSessionControlEndpoint = undefined;
+			if (evidenceScenario === "corrupt_ledger")
+				await writeFile(getTaskMessageInjectionLedgerPath(mocked.directory), "{隔离损坏的旧投递账本");
+			const ledgerBefore = await readFile(getTaskMessageInjectionLedgerPath(mocked.directory));
+			if (evidenceDigest !== "matching") {
+				await expect(context.service.reportExecutionResult(context.scope, context.land)).rejects.toThrow("摘要");
+				expect(
+					(await context.service.status(context.scope, { taskId: "task" })).records[0]?.landExecutionResult,
+				).toBeUndefined();
+				const clock = vi.spyOn(Date, "now");
+				const now = Date.now();
+				try {
+					for (const offset of [16_000, 32_000, 48_000]) {
+						clock.mockReturnValue(now + offset);
+						await context.service.sweepPendingCloseoutsOnce();
+					}
+					const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+					await restarted.status(context.scope, { taskId: "task" });
+					const saved = JSON.parse(await readFile(storePath, "utf8"));
+					expect(saved[0].independentLandResultObservationBudget?.count).toBe(3);
+				} finally {
+					clock.mockRestore();
+				}
+				expect(await readFile(getTaskMessageInjectionLedgerPath(mocked.directory))).toEqual(ledgerBefore);
+				return;
+			}
+			const controlObservations: boolean[] = [];
+			const getManager = context.dependencies.getManager;
+			context.dependencies.getManager = async () => {
+				const saved = JSON.parse(await readFile(storePath, "utf8"));
+				controlObservations.push(saved[0].landExecutionResult?.outcome === "completed");
+				return getManager();
+			};
+			await context.service.status(context.scope, { taskId: "task" });
+			expect(controlObservations.every(Boolean)).toBe(true);
+			const result = await context.service.reportExecutionResult(context.scope, context.land);
+			expect(result.record.landExecutionResult).toMatchObject({
+				outcome: "completed",
+				verificationBasis: "verified_stage_execution",
+				executionEvidenceSha256: computeRvfTextSha256(resultBytes),
+			});
+			expect(result.record.lateNativePromptAcceptanceRecoveryReceipt).toBeUndefined();
+			expect(await readFile(getTaskMessageInjectionLedgerPath(mocked.directory))).toEqual(ledgerBefore);
+		},
+	);
+	it.each(["missing", "wrong_digest", "symbolic_link"] as const)(
+		"RVF-003 独立 Land 预算耗尽后仅补齐候选摘要即可重新验收：%s",
+		async (sidecarScenario) => {
+			const context = await setupExecutionResultInterleavingEvidence();
+			let record = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+			if (!record?.runDirectory) throw new Error("缺少绑定 run");
+			const candidatePath = context.repo
+				.runGit([
+					"rev-parse",
+					"--path-format=absolute",
+					"--git-path",
+					"rvf/evidence/reviewed-task-candidate-evidence.json",
+				])
+				.stdout.trim();
+			const candidateDigest = computeRvfTextSha256(await readFile(candidatePath));
+			const canonicalBytes = JSON.stringify({
+				run_id: record.runId,
+				run_dir: record.runDirectory,
+				repo_root: context.repo.repositoryPath,
+				head_oid_after_commit: context.land.commitSha,
+				result: {
+					exit_code: 0,
+					commit_oid: context.land.commitSha,
+					candidate_evidence: { status: "written", candidate_evidence_sha256: candidateDigest },
+					round_baseline_seal: { sealed: true },
+				},
+			});
+			await writeFile(join(record.runDirectory, "artifacts", "rvf-land-commit-result.json"), canonicalBytes);
+			const immutableDirectory = join(record.runDirectory, "artifacts", "rvf-land-commit-execution-results");
+			await mkdir(immutableDirectory);
+			await writeFile(join(immutableDirectory, `${computeRvfTextSha256(canonicalBytes)}.json`), canonicalBytes);
+			if (sidecarScenario === "missing") await rm(`${candidatePath}.sha256`);
+			else if (sidecarScenario === "wrong_digest") await writeFile(`${candidatePath}.sha256`, "错误摘要");
+			else {
+				const sidecarTarget = `${candidatePath}.sha256-symlink-target`;
+				await writeFile(sidecarTarget, candidateDigest);
+				await rm(`${candidatePath}.sha256`);
+				await symlink(sidecarTarget, `${candidatePath}.sha256`);
+			}
+			const dependencies = {
+				workspaceId: context.scope.workspaceId,
+				rvfHome: context.rvfHome,
+				getMainSummary: async () => context.manager.getSummary(),
+				isStopped: () => false,
+				verifyLateAcceptance: async () => undefined,
+			};
+			const now = Date.now();
+			const clock = vi.spyOn(Date, "now");
+			try {
+				for (const offset of [0, 16_000, 32_000, 48_000]) {
+					clock.mockReturnValue(now + offset);
+					record = await observeExistingRvfLandExecutionResultOnce(dependencies, record);
+				}
+				expect(record.independentLandResultObservationBudget?.count).toBe(3);
+				expect(record.landExecutionResult).toBeUndefined();
+				const exhaustedFingerprint = record.independentLandResultObservationBudget?.fingerprint;
+				await rm(`${candidatePath}.sha256`, { force: true });
+				await writeFile(`${candidatePath}.sha256`, candidateDigest);
+				record = await observeExistingRvfLandExecutionResultOnce(dependencies, record);
+				expect(record.independentLandResultObservationBudget?.fingerprint).not.toBe(exhaustedFingerprint);
+				expect(record.independentLandResultObservationBudget?.count).toBe(1);
+				expect(record.landExecutionResult).toMatchObject({
+					outcome: "completed",
+					commitSha: context.land.commitSha,
+					verificationBasis: "verified_stage_execution",
+				});
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+	it("完整恢复闭环的阶段认领同代幂等且显式 Stop 禁止新认领", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		context.manager.getSummary().runtimeSessionIncarnationId = "claim-incarnation";
+		const request = { ...context.binding, stage: "land" as const };
+		const first = await context.service.claimExecutionStage(context.scope, request);
+		expect(first.status).toBe("claimed");
+		expect(await context.service.claimExecutionStage(context.scope, request)).toEqual(first);
+		context.manager.getSummary().runtimeSessionIncarnationId = "replacement-incarnation";
+		expect(await context.service.claimExecutionStage(context.scope, request)).toMatchObject({ status: "waiting" });
+		await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+		expect(await context.service.claimExecutionStage(context.scope, request)).toMatchObject({ status: "blocked" });
+	});
+	it.each(
+		(["land", "base_branch_sync"] as const).flatMap((stage) =>
+			(["permission", "question", "plan_review", "needs_input"] as const).map((userTurnKind) => ({
+				stage,
+				userTurnKind,
+			})),
+		),
+	)("RVF-001 认领写锁内出现 $userTurnKind 时等待用户决策：$stage", async ({ stage, userTurnKind }) => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		if (stage === "base_branch_sync") await context.service.reportExecutionResult(context.scope, context.land);
+		const initial = { ...context.manager.getSummary(), runtimeSessionIncarnationId: "modal-decision-incarnation" };
+		let observations = 0;
+		const result = await claimRvfCloseoutExecutionStage(
+			{
+				workspaceId: context.scope.workspaceId,
+				rvfHome: context.rvfHome,
+				getMainSummary: async () => ({
+					...initial,
+					userTurnKind: ++observations === 1 ? "review" : userTurnKind,
+				}),
+				isStopped: () => false,
+				verifyLateAcceptance: async () => undefined,
+			},
+			{ ...context.binding, stage },
+		);
+		expect(observations).toBe(2);
+		expect(result).toMatchObject({ status: "waiting", reason: expect.stringContaining("用户决策") });
+		const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		expect(saved[0].stageExecutionClaims).toBeUndefined();
+	});
+	it("完整恢复闭环在认领写锁内发现执行会话换代时不生成认领", async () => {
+		const context = await setupExecutionResultInterleavingEvidence();
+		const initial = { ...context.manager.getSummary(), runtimeSessionIncarnationId: "initial-incarnation" };
+		let observations = 0;
+		const result = await claimRvfCloseoutExecutionStage(
+			{
+				workspaceId: context.scope.workspaceId,
+				rvfHome: context.rvfHome,
+				getMainSummary: async () => ({
+					...initial,
+					runtimeSessionIncarnationId: ++observations === 1 ? "initial-incarnation" : "replacement-incarnation",
+				}),
+				isStopped: () => false,
+				verifyLateAcceptance: async () => undefined,
+			},
+			{ ...context.binding, stage: "land" },
+		);
+		expect(result.status).toBe("blocked");
+		expect(
+			(await context.service.status(context.scope, { taskId: "task" })).records[0]?.stageExecutionClaims,
+		).toBeUndefined();
+	});
+});
+
+describe("完整恢复闭环：持久预算和快照", () => {
+	it.each(["同一安装文件", "不同安装文件"])(
+		"RVF-006 历史快照按 realPath 区分%s，安装删除后仍保留去重依据",
+		async (scenario) => {
+			const context = await setupLateNativeCloseoutWithSkillAttachment();
+			const firstAliasPath = join(context.fixture.fixtureRootDirectoryPath, "recorded-first-skill-alias.md");
+			const secondAliasPath = join(context.fixture.fixtureRootDirectoryPath, "recorded-second-skill-alias.md");
+			const secondInstallationPath = join(context.fixture.fixtureRootDirectoryPath, "second-installed-skill.md");
+			await writeFile(secondInstallationPath, context.skill.body);
+			await symlink(context.skill.path, firstAliasPath);
+			await symlink(scenario === "同一安装文件" ? context.skill.path : secondInstallationPath, secondAliasPath);
+			const skillReferences = [
+				{ type: "skill" as const, name: "rvf-land", path: firstAliasPath },
+				{ type: "skill" as const, name: context.skill.name, path: secondAliasPath },
+			];
+			context.catalogEntry.skills = skillReferences.map((reference) => ({ ...reference, enabled: true }));
+			const text = buildRvfAutomaticCloseoutPrompt(context.record);
+			const expected = await captureRvfCloseoutExpectedSkillSnapshot({
+				record: context.record,
+				port: { request: mocked.request },
+				text,
+				idempotencyKey: context.record.promptDeliveryIdempotencyKey,
+			});
+			if (!expected) throw new Error("缺少事件绑定的预期 Skill 快照");
+			const historicalSnapshots = await readRvfCloseoutSkillSnapshots({
+				...context.record,
+				skillAttachmentEvidenceHistory: [expected],
+			});
+			expect(historicalSnapshots).toHaveLength(1);
+			await Promise.all(
+				[firstAliasPath, secondAliasPath, context.skill.path, secondInstallationPath].map((path) => rm(path)),
+			);
+			const request = vi.fn();
+			const verification = verifyCodexNativeCloseoutSkillAttachmentEvidence({
+				port: { request },
+				worktree: context.repo.repositoryPath,
+				text,
+				skillReferences,
+				nativeSkillExpansionTexts: skillReferences.map(
+					(reference) =>
+						`<skill>\n<name>${reference.name}</name>\n<path>${reference.path}</path>\n${context.skill.body}\n</skill>`,
+				),
+				historicalSnapshots,
+			});
+			if (scenario === "同一安装文件") await expect(verification).rejects.toThrow("重复");
+			else await expect(verification).resolves.toBeTypeOf("function");
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
+	it("完整恢复闭环在历史别名快照重新可用时自动刷新证据预算并补证", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		const alias = join(context.fixture.fixtureRootDirectoryPath, "historically-bound-skill-alias.md");
+		await symlink(context.skill.path, alias);
+		context.reference.path = alias;
+		const raw = (await readFile(context.transcriptPath, "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		for (const entry of raw)
+			for (const part of entry.payload?.item?.content ?? []) if (part.type === "skill") part.path = alias;
+		await writeFile(context.transcriptPath, `${raw.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+		const reference = await skillSnapshotStore.writeRvfCloseoutSkillSnapshot({
+			schema: "rvf-closeout-skill-attachment-snapshot/v1",
+			workspaceId: context.scope.workspaceId,
+			taskId: "task",
+			decisionToken: context.token,
+			runId: context.record.runId ?? "",
+			handoffSha256: context.record.handoffSha256 ?? "",
+			promptDeliveryIdempotencyKey: context.record.promptDeliveryIdempotencyKey,
+			promptSha256: computeRvfTextSha256(buildRvfAutomaticCloseoutPrompt(context.record)),
+			phase: "expected_installation",
+			capturedAt: Date.now(),
+			skills: [
+				{
+					referenceName: context.skill.name,
+					referencePath: alias,
+					canonicalName: context.skill.name,
+					canonicalPath: context.skill.path,
+					realPath: context.skill.path,
+					instructionText: context.skill.body,
+				},
+			],
+		});
+		await updateRvfAutomaticCloseoutRecords(
+			getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+			(records) => ({
+				records: records.map((entry) => ({ ...entry, skillAttachmentEvidenceHistory: [reference] })),
+				value: undefined,
+			}),
+		);
+		const path = join(
+			dirname(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId)),
+			"rvf-closeout-skill-attachment-snapshots",
+			`${reference.snapshotSha256}.json`,
+		);
+		const bytes = await readFile(path);
+		await rm(path);
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			await writeFile(path, bytes);
+			clock.mockReturnValue(now + 48_000);
+			const recovered = (
+				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).status(context.scope, {
+					taskId: "task",
+				})
+			).records[0];
+			expect(recovered?.lateNativePromptAcceptanceRecoveryReceipt).toBeDefined();
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("完整恢复闭环的 dry-run 跳过损坏的备用快照且不写诊断日志", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		await updateRvfAutomaticCloseoutRecords(
+			getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+			(records) => ({
+				records: records.map((entry) => ({
+					...entry,
+					skillAttachmentEvidenceHistory: [
+						{
+							schema: "rvf-closeout-skill-attachment-evidence/v1" as const,
+							phase: "expected_installation" as const,
+							snapshotSha256: "f".repeat(64),
+							promptDeliveryIdempotencyKey: entry.promptDeliveryIdempotencyKey,
+							capturedAt: Date.now(),
+						},
+					],
+				})),
+				value: undefined,
+			}),
+		);
+		const journal = vi
+			.spyOn(diagnosticEventJournal, "appendDiagnosticEventToRotatingJsonlJournal")
+			.mockImplementation(() => undefined);
+		onTestFinished(() => journal.mockRestore());
+		expect(
+			await context.service.reconcileLateNativePromptAcceptance(context.scope, { ...context.request, dryRun: true }),
+		).toMatchObject({ status: "eligible" });
+		expect(journal).not.toHaveBeenCalled();
+	});
+	it("完整恢复闭环的实际快照采集失败不阻止严格补证恢复", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		const capture = vi
+			.spyOn(skillSnapshotStore, "captureRvfCloseoutAcceptedSkillSnapshot")
+			.mockRejectedValue(new Error("隔离快照暂不可写"));
+		onTestFinished(() => capture.mockRestore());
+		const ledgerBefore = await readFile(context.ledgerPath);
+		expect(await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request)).toMatchObject({
+			status: "recovered",
+		});
+		expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+	});
+	it("完整恢复闭环的同证据预算在 service 重建后仍不重置", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		mocked.request.mockRejectedValue(new Error("控制面暂不可读"));
+		await context.service.status(context.scope, { taskId: "task" });
+		const before = mocked.request.mock.calls.length;
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await restarted.status(context.scope, { taskId: "task" });
+		expect(mocked.request.mock.calls.length).toBe(before);
+		const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+		expect(saved[0].automaticRecoveryProgress).toMatchObject({
+			kind: "machine_waiting",
+			verificationAttemptCount: 1,
+		});
+	});
+	it("完整恢复闭环分别保存预期和实际快照，文件删除后仍能读取实际历史", async () => {
+		const context = await setupLateNativeCloseoutWithSkillAttachment();
+		const expected = await captureRvfCloseoutExpectedSkillSnapshot({
+			record: context.record,
+			port: { request: mocked.request },
+			text: "请用 $base-branch-sync",
+			idempotencyKey: context.record.promptDeliveryIdempotencyKey,
+		});
+		const ledger: TaskMessageInjectionRecord[] = JSON.parse(await readFile(context.ledgerPath, "utf8"));
+		const entry = ledger.find((item) => item.idempotency_key === context.record.promptDeliveryIdempotencyKey);
+		if (!entry || !expected) throw new Error("缺少预期快照或投递");
+		const actual = await captureRvfCloseoutAcceptedSkillSnapshot(context.record, {
+			idempotencyKey: entry.idempotency_key,
+			promptSha256: entry.prompt_sha256,
+			createdAt: entry.created_at,
+		});
+		if (!actual) throw new Error("缺少实际快照");
+		await rm(context.skill.path);
+		const snapshots = await readRvfCloseoutSkillSnapshots({
+			...context.record,
+			skillAttachmentEvidenceHistory: [expected, actual],
+		});
+		expect(snapshots.map((item) => item.phase)).toEqual(["expected_installation", "accepted_native_expansion"]);
+		expect(snapshots[1]?.skills[0]?.instructionText).toBe(context.skill.body);
+	});
+});
+
+describe("完整恢复闭环：自动控制面与受控续验", () => {
+	it.each([false, true])("RVF-004：续验准备瞬时失败后退避重试且不重复入队：原接受已知=%s", async (acceptanceKnown) => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		if (acceptanceKnown) {
+			expect(
+				await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+			).toMatchObject({ status: "recovered" });
+			const summary = context.manager.getSummary();
+			const endpoint = summary.codexNativeSessionControlEndpoint;
+			summary.liveness = "exited";
+			summary.pid = null;
+			summary.codexNativeSessionControlEndpoint = undefined;
+			await context.service.sweepPendingCloseoutsOnce();
+			summary.liveness = "live";
+			summary.pid = 123;
+			summary.codexNativeSessionControlEndpoint = endpoint;
+		} else {
+			await context.writeNativeEvidence({ includeMessage: false });
+			const originalTurn = context.activeTurns[1];
+			if (!originalTurn) throw new Error("缺少原回合");
+			originalTurn.items = [];
+		}
+		const originalRequest = mocked.request.getMockImplementation();
+		if (!originalRequest) throw new Error("缺少隔离原生控制面");
+		let preparationQueries = 0;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/turns/list") {
+				const saved = JSON.parse(
+					await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+				);
+				if (
+					saved[0].automaticRecoveryProgress?.reasonCode ===
+						"continuation_preparation_native_history_query_pending" &&
+					++preparationQueries === 1
+				)
+					throw new Error("隔离续验准备首次查询超时");
+			}
+			return originalRequest(method, parameters);
+		});
+		const before = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of acceptanceKnown ? [48_000] : [0, 16_000, 32_000, 48_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			expect(preparationQueries).toBe(1);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before);
+			const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			clock.mockReturnValue(now + 62_999);
+			await restarted.sweepPendingCloseoutsOnce();
+			expect(preparationQueries).toBe(1);
+			clock.mockReturnValue(now + 64_000);
+			await restarted.sweepPendingCloseoutsOnce();
+			expect(preparationQueries).toBe(2);
+			const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+			expect(saved[0].promptDeliveryAttempts).toHaveLength(1);
+			expect(saved[0].automaticRecoveryProgress.continuationPreparationObservationBudget.count).toBe(2);
+			await restarted.sweepPendingCloseoutsOnce();
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before + 1);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("RVF-004：续验准备持续查询失败共用持久三次预算，恢复服务能力不刷新同证据预算", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence({ includeMessage: false });
+		const originalTurn = context.activeTurns[1];
+		if (!originalTurn) throw new Error("缺少原回合");
+		originalTurn.items = [];
+		const originalRequest = mocked.request.getMockImplementation();
+		if (!originalRequest) throw new Error("缺少隔离原生控制面");
+		let preparationQueries = 0;
+		let controlUnavailable = true;
+		mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+			if (method === "thread/turns/list") {
+				preparationQueries += 1;
+				if (controlUnavailable) throw new Error("隔离续验准备控制面持续超时");
+			}
+			return originalRequest(method, parameters);
+		});
+		const before = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000, 48_000, 64_000, 80_000, 96_000]) {
+				clock.mockReturnValue(now + offset);
+				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			}
+			expect(preparationQueries).toBe(3);
+			controlUnavailable = false;
+			clock.mockReturnValue(now + 112_000);
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(preparationQueries).toBe(3);
+			const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+			expect(saved[0].automaticRecoveryProgress.continuationPreparationObservationBudget.count).toBe(3);
+			expect(saved[0].promptDeliveryAttempts ?? []).toHaveLength(0);
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("RVF-004：原接受预算耗尽后清空未提交草稿自动续验，原转录与失败账本保持不变", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence({ includeMessage: false });
+		const originalTurn = context.activeTurns[1];
+		if (!originalTurn) throw new Error("缺少原回合");
+		originalTurn.items = [];
+		const transcriptBefore = await readFile(context.transcriptPath);
+		const ledgerBefore = JSON.parse(await readFile(context.ledgerPath, "utf8")) as TaskMessageInjectionRecord[];
+		context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue({
+			hasUncommittedInput: true,
+			inputSideByteTrackingSaysNonEmpty: true,
+			inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: false,
+			screenReadingSaysNonEmpty: true,
+			unrecoverablePasteCount: 0,
+		});
+		const before = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		mocked.request.mockClear();
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000, 48_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			expect(mocked.request).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before);
+			const waiting = JSON.parse(
+				await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+			);
+			expect(waiting[0].automaticRecoveryProgress).toMatchObject({
+				reasonCode: "terminal_input_box_not_confirmed_empty",
+				nativePromptAcceptanceVerificationReasonCode: "native_prompt_acceptance_not_proven",
+			});
+			context.manager.resolveTaskTerminalInputBoxOccupancy.mockResolvedValue({
+				hasUncommittedInput: false,
+				inputSideByteTrackingSaysNonEmpty: false,
+				inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition: true,
+				screenReadingSaysNonEmpty: false,
+				unrecoverablePasteCount: 0,
+			});
+			clock.mockReturnValue(now + 64_000);
+			const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			await restarted.sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before + 1);
+			const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+			expect(saved[0].promptDeliveryAttempts).toHaveLength(1);
+			expect(saved[0].automaticRecoveryProgress.verificationAttemptCount).toBe(3);
+			expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+			const ledgerAfter = JSON.parse(await readFile(context.ledgerPath, "utf8")) as TaskMessageInjectionRecord[];
+			expect(
+				ledgerAfter.find((entry) => entry.idempotency_key === context.record.promptDeliveryIdempotencyKey),
+			).toEqual(ledgerBefore.find((entry) => entry.idempotency_key === context.record.promptDeliveryIdempotencyKey));
+			await restarted.sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(before + 1);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("完整恢复闭环的同会话启动暂时失败会有界重试，跨 service 共用三次预算", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence({ includeMessage: false });
+		const summary = context.manager.getSummary();
+		summary.liveness = "exited";
+		summary.pid = null;
+		summary.codexNativeSessionControlEndpoint = undefined;
+		context.runtimeApi.startTaskSession.mockResolvedValue({ ok: false, summary: context.manager.getSummary() });
+		const before = context.runtimeApi.startTaskSession.mock.calls.length;
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000, 48_000, 64_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.startTaskSession.mock.calls.length - before).toBe(3);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("完整恢复闭环在已补证转录后来丢失时保留收据并自动建立受控续验", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		const recovered = await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request);
+		if (recovered.status !== "recovered") throw new Error("隔离原接受未恢复");
+		await rm(context.transcriptPath);
+		expect(
+			await context.service.claimExecutionStage(context.scope, { ...context.request, stage: "land" }),
+		).toMatchObject({ status: "waiting" });
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000, 48_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			const saved = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+			expect(saved[0].lateNativePromptAcceptanceRecoveryReceipt).toEqual(recovered.receipt);
+			expect(saved[0].promptDeliveryAttempts).toHaveLength(1);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("完整恢复闭环的续验入队失败使用持久三次预算，不因 service 重建无限重试", async () => {
+		const context = await setupLateNativeCloseoutPromptAcceptance();
+		await context.writeNativeEvidence({ includeMessage: false });
+		const originalTurn = context.activeTurns[1];
+		if (!originalTurn) throw new Error("缺少原回合");
+		originalTurn.items = [];
+		context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mockResolvedValue({
+			ok: false,
+			error: "隔离入队暂不可用",
+		});
+		const before = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 16_000, 32_000, 48_000, 64_000, 80_000, 96_000, 112_000]) {
+				clock.mockReturnValue(now + offset);
+				await context.service.sweepPendingCloseoutsOnce();
+			}
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length - before).toBe(3);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it.each([false, true])(
+		"完整恢复闭环自动恢复同一已退出原生会话，重启不重复启动：原接受已知=%s",
+		async (acceptanceKnown) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			if (acceptanceKnown)
+				expect(
+					await context.service.reconcileLateNativePromptAcceptance(context.scope, context.request),
+				).toMatchObject({ status: "recovered" });
+			else await context.writeNativeEvidence({ includeMessage: false });
+			const summary = context.manager.getSummary();
+			const endpoint = summary.codexNativeSessionControlEndpoint;
+			summary.liveness = "exited";
+			summary.pid = null;
+			summary.codexNativeSessionControlEndpoint = undefined;
+			const before = context.runtimeApi.startTaskSession.mock.calls.length;
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.startTaskSession.mock.calls.length).toBe(before + 1);
+			expect(context.runtimeApi.startTaskSession).toHaveBeenLastCalledWith(
+				context.scope,
+				expect.objectContaining({
+					prompt: "",
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				}),
+			);
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(context.runtimeApi.startTaskSession.mock.calls.length).toBe(before + 1);
+			if (acceptanceKnown) {
+				summary.liveness = "live";
+				summary.runtimeSessionIncarnationId = "known-acceptance-resumed-incarnation";
+				if (!endpoint) throw new Error("缺少隔离原生控制面");
+				summary.codexNativeSessionControlEndpoint = {
+					...endpoint,
+					runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+				};
+				await context.service.sweepPendingCloseoutsOnce();
+				const saved = JSON.parse(
+					await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+				);
+				expect(saved[0].promptDeliveryAttempts).toHaveLength(1);
+			}
+		},
+	);
+	it.each([false, true])(
+		"完整恢复闭环为缺失接受创建至多一次续验，保留原键且跨重启不重复入队：工作区漂移=%s",
+		async (workspaceChanged) => {
+			const context = await setupLateNativeCloseoutPromptAcceptance();
+			await context.writeNativeEvidence({ includeMessage: false });
+			const originalTurn = context.activeTurns[1];
+			if (!originalTurn) throw new Error("缺少原回合");
+			const originalItems = originalTurn.items;
+			originalTurn.items = [];
+			if (workspaceChanged)
+				await writeFile(join(context.repo.repositoryPath, "implementation.txt"), "续验准备前已有工作区漂移\n");
+			const before = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+			const now = Date.now();
+			const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+			try {
+				for (const offset of [0, 16_000, 32_000, 48_000]) {
+					clock.mockReturnValue(now + offset);
+					await context.service.sweepPendingCloseoutsOnce();
+				}
+				const records = JSON.parse(
+					await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+				);
+				expect(records[0].promptDeliveryIdempotencyKey).toBe(context.record.promptDeliveryIdempotencyKey);
+				expect(records[0].promptDeliveryAttempts).toHaveLength(1);
+				expect(records[0].lateNativePromptAcceptanceRecoveryReceipt).toBeUndefined();
+				expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(
+					before + 1,
+				);
+				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+				expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length).toBe(
+					before + 1,
+				);
+				const attempt = records[0].promptDeliveryAttempts[0];
+				if (workspaceChanged) {
+					expect(attempt.purpose).toBe("inspect_existing_state");
+					originalTurn.items = originalItems;
+					await context.writeNativeEvidence();
+					clock.mockReturnValue(now + 64_000);
+					const recovered = (await context.service.status(context.scope, { taskId: "task" })).records[0];
+					expect(recovered?.lateNativePromptAcceptanceRecoveryReceipt).toBeDefined();
+					expect(recovered?.promptDeliveryAttempts).toHaveLength(1);
+					return;
+				}
+				expect(attempt.purpose).toBe("execute_remaining_stages");
+				const turnId = "accepted-continuation-turn";
+				const messageId = "accepted-continuation-message";
+				const content = [{ type: "text", text: attempt.promptText }];
+				const eventRecords = [
+					{
+						type: "event_msg",
+						timestamp: new Date(attempt.createdAt + 1000).toISOString(),
+						payload: { type: "task_started", turn_id: turnId, turn_attribution: { turn_trigger: "user" } },
+					},
+					{
+						type: "event_msg",
+						timestamp: new Date(attempt.createdAt + 1002).toISOString(),
+						payload: {
+							type: "item_completed",
+							turn_id: turnId,
+							item: { type: "UserMessage", id: messageId, content },
+						},
+					},
+				];
+				await writeFile(
+					context.transcriptPath,
+					`${await readFile(context.transcriptPath, "utf8")}${eventRecords.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+				);
+				context.activeTurns.push({
+					id: turnId,
+					status: "completed",
+					items: [{ id: messageId, type: "userMessage", content }],
+				});
+				clock.mockReturnValue(attempt.createdAt + 2000);
+				const request = {
+					...context.request,
+					stage: "land" as const,
+					deliveryAttemptId: attempt.deliveryAttemptId,
+				};
+				const previousNativeRequest = mocked.request.getMockImplementation();
+				if (!previousNativeRequest) throw new Error("缺少隔离原生控制面");
+				mocked.request.mockImplementation(async (method: string, parameters: Record<string, unknown>) => {
+					const identity = context.manager.getSummary().agentNativeConversationSessionIdentity;
+					if (identity) identity.observedAt += 1;
+					return previousNativeRequest(method, parameters);
+				});
+				expect(await context.service.claimExecutionStage(context.scope, request)).toMatchObject({
+					status: "claimed",
+				});
+				const originalTranscript = await readFile(context.transcriptPath, "utf8");
+				const rewrittenRecords = originalTranscript
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				rewrittenRecords[0].payload.historyMarker = "隔离历史前缀被改写";
+				await writeFile(
+					context.transcriptPath,
+					`${rewrittenRecords.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+				);
+				expect(await context.service.claimExecutionStage(context.scope, request)).toMatchObject({
+					status: "waiting",
+				});
+				await writeFile(context.transcriptPath, originalTranscript);
+				await writeFile(join(context.repo.repositoryPath, "implementation.txt"), "续验排队后出现新的工作区改动\n");
+				expect(await context.service.claimExecutionStage(context.scope, request)).toMatchObject({
+					status: "waiting",
+				});
+				const inspected = JSON.parse(
+					await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+				);
+				expect(inspected[0].promptDeliveryAttempts[0].executionRequiresReadOnlyInspection).toBe(true);
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+});
+
+it("完整恢复闭环的预算耗尽后 service 重建不能重新获得三次尝试", async () => {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	mocked.request.mockRejectedValue(new Error("暂不可读"));
+	mocked.request.mockClear();
+	const now = Date.now();
+	const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+	try {
+		for (const offset of [0, 16_000, 32_000, 48_000]) {
+			clock.mockReturnValue(now + offset);
+			await context.service.sweepPendingCloseoutsOnce();
+		}
+		const count = mocked.request.mock.calls.filter((call) => call[0] === "thread/loaded/list").length;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(mocked.request.mock.calls.filter((call) => call[0] === "thread/loaded/list")).toHaveLength(count);
+		expect(count).toBe(3);
+	} finally {
+		clock.mockRestore();
+	}
+});
+
+it("完整恢复闭环只按事件绑定的 Git 版本恢复旧手册，保留完整换行并拒绝错误摘要", async () => {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	const path = join(context.repo.repositoryPath, "historical-closeout-SKILL.md");
+	const instructionText = "旧版本手册，保留尾部换行。\n\n";
+	await writeFile(path, instructionText);
+	context.repo.commitAllRepositoryFilesAtDate({
+		message: "隔离历史手册",
+		authorAndCommitterIsoDate: "2026-01-03T00:00:00Z",
+	});
+	const reference = await captureRvfCloseoutSkillInstallationVersionReference({
+		record: context.record,
+		idempotencyKey: context.record.promptDeliveryIdempotencyKey,
+		promptSha256: computeRvfTextSha256(buildRvfAutomaticCloseoutPrompt(context.record)),
+		skill: {
+			referenceName: "base-branch-sync",
+			referencePath: path,
+			canonicalName: "base-branch-sync",
+			canonicalPath: path,
+			realPath: path,
+			instructionText,
+		},
+	});
+	expect(reference.gitVersion).toBeDefined();
+	await rm(path);
+	const snapshots = await readRvfCloseoutSkillSnapshots({
+		...context.record,
+		skillInstallationVersionReferences: [reference],
+	});
+	expect(snapshots[0]?.skills[0]?.instructionText).toBe(instructionText);
+	expect(
+		await readRvfCloseoutSkillSnapshots({
+			...context.record,
+			skillInstallationVersionReferences: [{ ...reference, instructionSha256: "0".repeat(64) }],
+		}),
+	).toEqual([]);
+});
+
+it("完整恢复闭环不把 Git 中损坏的 UTF-8 blob 误绑到有效安装正文", async () => {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	const path = join(context.repo.repositoryPath, "historical-invalid-utf8-closeout-SKILL.md");
+	await writeFile(path, Buffer.from([0xf0, 0x9f, 0x92]));
+	context.repo.commitAllRepositoryFilesAtDate({
+		message: "隔离损坏的历史 blob",
+		authorAndCommitterIsoDate: "2026-01-03T00:00:00Z",
+	});
+	await writeFile(path, "\ufffd");
+	const reference = await captureRvfCloseoutSkillInstallationVersionReference({
+		record: context.record,
+		idempotencyKey: context.record.promptDeliveryIdempotencyKey,
+		promptSha256: "a".repeat(64),
+		skill: {
+			referenceName: "base-branch-sync",
+			referencePath: path,
+			canonicalName: "base-branch-sync",
+			canonicalPath: path,
+			realPath: path,
+			instructionText: "\ufffd",
+		},
+	});
+	expect(reference.gitVersion).toBeUndefined();
 });
