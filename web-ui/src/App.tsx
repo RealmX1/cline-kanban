@@ -60,6 +60,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { UnavailableProjectRuntimeState } from "@/components/unavailable-project-runtime-state";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
 import { createInitialBoardData } from "@/data/board-data";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
@@ -144,6 +145,7 @@ import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardCard, BoardData } from "@/types";
 
 export default function App(): ReactElement {
+	const expandedForegroundView = useExpandedForegroundViewNavigation();
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
@@ -1563,6 +1565,8 @@ export default function App(): ReactElement {
 		onRequestPinCurrentProjectTaskToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
+		onOpenRelationsVisualizationForTask: (task) =>
+			expandedForegroundView?.open({ ...task, viewKind: "task_relations" }),
 	});
 	useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
 		host: crossProjectRecentlyActiveTaskSwitcherHost,

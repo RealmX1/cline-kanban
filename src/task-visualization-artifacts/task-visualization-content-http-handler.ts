@@ -34,7 +34,7 @@ export async function handleTaskVisualizationContentHttpRequest(
 		if (resource.contentLoadConfirmation && resource.contentType.startsWith("text/html")) {
 			// 只有成功读取并校验当前修订的入口文档才含此证明，404 与旧 frame 的 load 均不能确认展示。
 			const message = JSON.stringify(resource.contentLoadConfirmation).replace(/</gu, "\\u003c");
-			const confirmationScript = `<script>window.addEventListener("load",()=>parent.postMessage(${message},"*"),{once:true});</script>`;
+			const confirmationScript = `<script>window.addEventListener("load",()=>parent.postMessage(${message},"*"),{once:true});window.addEventListener("keydown",event=>{if(event.key==="Escape"&&!event.defaultPrevented){parent.postMessage({...${message},type:"kanban_visualization_request_collapse_foreground_view"},"*");}});</script>`;
 			const html = content.toString("utf8");
 			const doctype = /^(\s*<!doctype[^>]*>)/iu.exec(html)?.[0] ?? "";
 			content = Buffer.from(`${doctype}${confirmationScript}${html.slice(doctype.length)}`);

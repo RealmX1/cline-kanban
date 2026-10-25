@@ -1,7 +1,8 @@
 import dagre from "@dagrejs/dagre";
 import type { RelationModelingPreviewResponse } from "@runtime-work-unit-relation-modeling-api-contract";
 import { Background, Controls, type Edge, MarkerType, type Node, Position, ReactFlow } from "@xyflow/react";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
+import { cn } from "@/components/ui/cn";
 import { useMeasure } from "@/utils/react-use";
 import "@xyflow/react/dist/style.css";
 
@@ -21,14 +22,26 @@ export function ReferenceRelationModelingGraph({
 	rootTitle,
 	onSelectWorkUnit,
 	viewportResetKey,
+	expanded = false,
 }: {
 	preview: RelationModelingPreviewResponse;
 	rootTitle: string;
 	onSelectWorkUnit: (key: string) => void;
 	viewportResetKey: string;
+	expanded?: boolean;
 }) {
-	const [measureGraphContainer, { width: graphContainerWidth }] = useMeasure<HTMLDivElement>();
-	const useVerticalLayout = graphContainerWidth > 0 && graphContainerWidth < 560;
+	const [measureGraphContainer, { width: graphContainerWidth, height: graphContainerHeight }] =
+		useMeasure<HTMLDivElement>();
+	const layoutOrientation = useRef<{ rootKey: string; vertical: boolean } | null>(null);
+	if (
+		graphContainerWidth > 0 &&
+		graphContainerHeight > 0 &&
+		layoutOrientation.current?.rootKey !== preview.rootWorkUnitKey
+	)
+		layoutOrientation.current = { rootKey: preview.rootWorkUnitKey, vertical: graphContainerWidth < 560 };
+	// 首次 fitView 等待有效尺寸和最终布局；后续零尺寸不卸载图，保留手工视口。
+	const hasInitializedCurrentRootLayout = layoutOrientation.current?.rootKey === preview.rootWorkUnitKey;
+	const useVerticalLayout = layoutOrientation.current?.vertical ?? false;
 	const graph = useMemo(() => {
 		const layout = new dagre.graphlib.Graph({ multigraph: true })
 			.setGraph({ rankdir: useVerticalLayout ? "TB" : "LR", nodesep: 32, ranksep: useVerticalLayout ? 52 : 105 })
@@ -105,32 +118,37 @@ export function ReferenceRelationModelingGraph({
 	return (
 		<div
 			ref={measureGraphContainer}
-			className="h-[360px] min-w-0 overflow-hidden rounded-md border border-border-bright bg-surface-0"
+			className={cn(
+				"min-w-0 overflow-hidden rounded-md border border-border-bright bg-surface-0",
+				expanded ? "h-[max(360px,calc(100dvh-16rem))]" : "h-[360px]",
+			)}
 			role="group"
 			aria-label="任务多跳关系图"
 		>
-			<ReactFlow
-				key={`${viewportResetKey}:${useVerticalLayout}:${graph.nodes.map((node) => node.id).join("|")}:${graph.edges.map((edge) => edge.id).join("|")}`}
-				nodes={graph.nodes}
-				edges={graph.edges}
-				fitView
-				fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
-				nodesDraggable={false}
-				nodesConnectable={false}
-				edgesReconnectable={false}
-				onNodeClick={(_event, node) => onSelectWorkUnit(node.id)}
-				minZoom={0.2}
-				maxZoom={1.8}
-				colorMode="dark"
-				ariaLabelConfig={{
-					"controls.zoomIn.ariaLabel": "放大关系图",
-					"controls.zoomOut.ariaLabel": "缩小关系图",
-					"controls.fitView.ariaLabel": "显示完整关系图",
-				}}
-			>
-				<Background />
-				<Controls showInteractive={false} />
-			</ReactFlow>
+			{hasInitializedCurrentRootLayout && (
+				<ReactFlow
+					key={viewportResetKey}
+					nodes={graph.nodes}
+					edges={graph.edges}
+					fitView
+					fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
+					nodesDraggable={false}
+					nodesConnectable={false}
+					edgesReconnectable={false}
+					onNodeClick={(_event, node) => onSelectWorkUnit(node.id)}
+					minZoom={0.2}
+					maxZoom={1.8}
+					colorMode="dark"
+					ariaLabelConfig={{
+						"controls.zoomIn.ariaLabel": "放大关系图",
+						"controls.zoomOut.ariaLabel": "缩小关系图",
+						"controls.fitView.ariaLabel": "显示完整关系图",
+					}}
+				>
+					<Background />
+					<Controls showInteractive={false} />
+				</ReactFlow>
+			)}
 		</div>
 	);
 }

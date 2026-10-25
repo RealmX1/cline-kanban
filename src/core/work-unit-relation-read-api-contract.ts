@@ -15,6 +15,10 @@ import {
 // 输入面接受裸 id（Y-EVENT-12）：runtime 解析到唯一一世；候选不唯一时 fail closed，要求带 workspaceId 消歧。
 export const workUnitSelectorForRelationReadSchema = z.discriminatedUnion("workUnitSelectorKind", [
 	z.object({
+		workUnitSelectorKind: z.literal("kanban_board_card_by_qualified_reference"),
+		kanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	}),
+	z.object({
 		workUnitSelectorKind: z.literal("kanban_board_card_by_bare_task_id"),
 		bareTaskId: z.string().trim().min(1),
 		workspaceId: z.string().trim().min(1).optional(),

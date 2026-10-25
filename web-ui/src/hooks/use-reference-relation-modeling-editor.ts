@@ -7,6 +7,7 @@ import type {
 import { referenceRelationModelingEditorDraftSchema } from "@runtime-work-unit-relation-modeling-api-contract";
 import isDeepEqual from "fast-deep-equal";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRecoverableForegroundRead } from "@/expanded-foreground-view/use-recoverable-foreground-read";
 import {
 	applyReferenceRelationModelingChangesFromExplicitUserGesture,
 	persistRelationModelingEditorDraft,
@@ -39,6 +40,7 @@ function browserDraftOwnerId() {
 export function useReferenceRelationModelingEditor(input: {
 	workspaceId: string | null;
 	taskId: string | null;
+	taskIncarnationCreatedAtEpochMs?: number;
 	draftTaskTitle?: string;
 	draftTaskPrompt?: string;
 	active?: boolean;
@@ -53,6 +55,15 @@ export function useReferenceRelationModelingEditor(input: {
 	const [hydratedScope, setHydratedScope] = useState<string | null>(null);
 	const [writeError, setWriteError] = useState<string | null>(null);
 	const [preview, setPreview] = useState<RelationModelingPreviewResponse | null>(null);
+	const previewRoot = preview?.workUnits.find((entry) => entry.workUnitKey === preview.rootWorkUnitKey);
+	const canUseExistingDraftForQualifiedRoot =
+		input.taskIncarnationCreatedAtEpochMs === undefined ||
+		(previewRoot?.workUnit.workUnitType === "kanban_board_card" &&
+			(previewRoot.workUnit.workspaceId === input.workspaceId ||
+				previewRoot.kanbanBoardCardIdentity?.kanbanBoardCard.workspaceId === input.workspaceId) &&
+			previewRoot.workUnit.taskId === input.taskId &&
+			previewRoot.workUnit.taskIncarnationCreatedAtEpochMs === input.taskIncarnationCreatedAtEpochMs &&
+			previewRoot.kanbanBoardCardIdentity?.permanentlyRemovedFromBoardAt === null);
 	const [error, setError] = useState<string | null>(null);
 	const [draftPersistenceError, setDraftPersistenceError] = useState<string | null>(null);
 	const [draftScopesWithApplyInFlight, setDraftScopesWithApplyInFlight] = useState<ReadonlySet<string>>(
@@ -69,6 +80,7 @@ export function useReferenceRelationModelingEditor(input: {
 	const suggestionsRequestIdentityRef = useRef<symbol | null>(null);
 	const saveTail = useRef<Promise<unknown>>(Promise.resolve());
 	const draftRef = useRef(draft);
+	const draftWasEditedInCurrentScope = useRef(false);
 	draftRef.current = draft;
 	useEffect(() => {
 		suggestionsRequestIdentityRef.current = null;
@@ -80,6 +92,7 @@ export function useReferenceRelationModelingEditor(input: {
 	useEffect(() => {
 		let current = true;
 		setReady(false);
+		draftWasEditedInCurrentScope.current = false;
 		setPreview(null);
 		setWriteError(null);
 		setError(null);
@@ -121,7 +134,7 @@ export function useReferenceRelationModelingEditor(input: {
 		return () => {
 			current = false;
 		};
-	}, [input.workspaceId, input.active, draftScopeId, mirrorKey]);
+	}, [input.workspaceId, input.active, input.taskIncarnationCreatedAtEpochMs, draftScopeId, mirrorKey]);
 	const persist = useCallback(
 		(value: ReferenceRelationModelingEditorDraft | null) => {
 			if (!input.workspaceId) return Promise.resolve();
@@ -134,9 +147,10 @@ export function useReferenceRelationModelingEditor(input: {
 		[input.workspaceId, draftScopeId],
 	);
 	useEffect(() => {
-		if (!ready || hydratedScope !== mirrorKey) return;
+		if (!ready || hydratedScope !== mirrorKey || !canUseExistingDraftForQualifiedRoot) return;
 		const persistableDraft =
 			draft.referenceRelationDrafts.length || draft.relationRevocations.length || draft.createdTaskId ? draft : null;
+		if (!persistableDraft && !draftWasEditedInCurrentScope.current) return;
 		if (persistableDraft) localStorage.setItem(mirrorKey, JSON.stringify(persistableDraft));
 		else localStorage.removeItem(mirrorKey);
 		const timeout = setTimeout(() => {
@@ -149,51 +163,65 @@ export function useReferenceRelationModelingEditor(input: {
 			);
 		}, 250);
 		return () => clearTimeout(timeout);
-	}, [draft, ready, mirrorKey, persist, hydratedScope]);
-	useEffect(() => {
-		if (!ready || hydratedScope !== mirrorKey || !input.workspaceId || input.active === false) return;
-		let current = true;
-		const workspaceId = input.workspaceId;
-		const taskId = input.taskId ?? draft.createdTaskId;
-		const timeout = setTimeout(() => {
-			void readRelationModelingPreview(workspaceId, {
-				workUnit: taskId
-					? { workUnitSelectorKind: "kanban_board_card_by_bare_task_id", bareTaskId: taskId, workspaceId }
-					: null,
-				draftTaskTitle: input.draftTaskTitle ?? "待创建任务",
-				relationNeighborhoodDepth: depth,
-				referenceRelationDrafts: draft.referenceRelationDrafts,
-				relationRevocations: draft.relationRevocations,
-			}).then(
-				(result) => {
-					if (current) {
-						setPreview(result);
-						setError(null);
-					}
+	}, [draft, ready, mirrorKey, persist, hydratedScope, canUseExistingDraftForQualifiedRoot]);
+	const shouldOverlayDraftOnPreview =
+		canUseExistingDraftForQualifiedRoot &&
+		(draft.referenceRelationDrafts.length > 0 || draft.relationRevocations.length > 0);
+	const readPreview = useCallback(
+		(signal: AbortSignal) => {
+			if (!input.workspaceId) return Promise.reject(new Error("缺少项目归属。"));
+			const taskId = input.taskId ?? draft.createdTaskId;
+			return readRelationModelingPreview(
+				input.workspaceId,
+				{
+					workUnit: taskId
+						? input.taskIncarnationCreatedAtEpochMs !== undefined
+							? {
+									workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+									kanbanBoardCard: {
+										workUnitType: "kanban_board_card",
+										workspaceId: input.workspaceId,
+										taskId,
+										taskIncarnationCreatedAtEpochMs: input.taskIncarnationCreatedAtEpochMs,
+									},
+								}
+							: {
+									workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+									bareTaskId: taskId,
+									workspaceId: input.workspaceId,
+								}
+						: null,
+					draftTaskTitle: input.draftTaskTitle ?? "待创建任务",
+					relationNeighborhoodDepth: depth,
+					referenceRelationDrafts: shouldOverlayDraftOnPreview ? draft.referenceRelationDrafts : [],
+					relationRevocations: shouldOverlayDraftOnPreview ? draft.relationRevocations : [],
 				},
-				(failure: unknown) => {
-					if (current) setError(failure instanceof Error ? failure.message : String(failure));
-				},
+				signal,
 			);
-		}, 150);
-		return () => {
-			current = false;
-			clearTimeout(timeout);
-		};
-	}, [
-		input.workspaceId,
-		input.taskId,
-		input.active,
-		input.draftTaskTitle,
-		depth,
-		draft,
-		ready,
-		refreshSequence,
-		hydratedScope,
-		mirrorKey,
-	]);
+		},
+		[
+			input.workspaceId,
+			input.taskId,
+			input.taskIncarnationCreatedAtEpochMs,
+			input.draftTaskTitle,
+			draft,
+			depth,
+			shouldOverlayDraftOnPreview,
+		],
+	);
+	const previewRead = useRecoverableForegroundRead({
+		identity: `${mirrorKey}:${refreshSequence}`,
+		read: readPreview,
+		initialReadDebounceMs: 150,
+		enabled: ready && hydratedScope === mirrorKey && input.workspaceId !== null && input.active !== false,
+	});
+	useEffect(() => {
+		if (previewRead.value) setPreview(previewRead.value);
+		setError(previewRead.error);
+	}, [previewRead.value, previewRead.error]);
 	const updateDraft = useCallback(
 		(change: Partial<ReferenceRelationModelingEditorDraft>) => {
+			draftWasEditedInCurrentScope.current = true;
 			const next = {
 				...draftRef.current,
 				...change,
@@ -209,6 +237,7 @@ export function useReferenceRelationModelingEditor(input: {
 		[mirrorKey],
 	);
 	const addDraft = useCallback((value: ReferenceRelationModelingDraft) => {
+		draftWasEditedInCurrentScope.current = true;
 		setDraft((previous) => ({
 			...previous,
 			modelingSubmissionId: createRandomUuidV4WithInsecureContextFallback(),
@@ -241,11 +270,22 @@ export function useReferenceRelationModelingEditor(input: {
 			localStorage.setItem(mirrorKey, JSON.stringify(snapshot));
 			await persist(snapshot);
 			await applyReferenceRelationModelingChangesFromExplicitUserGesture(targetWorkspaceId ?? input.workspaceId, {
-				workUnit: {
-					workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-					bareTaskId: taskId,
-					workspaceId: targetWorkspaceId ?? input.workspaceId,
-				},
+				workUnit:
+					input.taskIncarnationCreatedAtEpochMs !== undefined
+						? {
+								workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+								kanbanBoardCard: {
+									workUnitType: "kanban_board_card",
+									workspaceId: targetWorkspaceId ?? input.workspaceId,
+									taskId,
+									taskIncarnationCreatedAtEpochMs: input.taskIncarnationCreatedAtEpochMs,
+								},
+							}
+						: {
+								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+								bareTaskId: taskId,
+								workspaceId: targetWorkspaceId ?? input.workspaceId,
+							},
 				modelingSubmissionId: snapshot.modelingSubmissionId,
 				referenceRelationDrafts: snapshot.referenceRelationDrafts,
 				relationRevocations: snapshot.relationRevocations,

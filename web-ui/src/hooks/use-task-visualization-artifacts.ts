@@ -21,11 +21,13 @@ export function useTaskVisualizationArtifacts({
 	taskId,
 	observeBrowser = true,
 	onAutomaticPreview,
+	isAutomaticPreviewForegroundEligible = true,
 }: {
 	workspaceId: string | null;
 	taskId: string;
 	observeBrowser?: boolean;
 	onAutomaticPreview?: () => void;
+	isAutomaticPreviewForegroundEligible?: boolean;
 }) {
 	const identity = JSON.stringify([workspaceId, taskId]);
 	const [state, setState] = useState<{
@@ -40,6 +42,8 @@ export function useTaskVisualizationArtifacts({
 	});
 	const activeQuery = useRef<AbortController | null>(null);
 	const automaticPreview = useRef<TaskVisualizationPreviewRequestedMessage | null>(null);
+	const automaticPreviewForegroundEligibleRef = useRef(isAutomaticPreviewForegroundEligible);
+	automaticPreviewForegroundEligibleRef.current = isAutomaticPreviewForegroundEligible;
 	const selectionRequestSequence = useRef(0);
 	const failedDeliveryAttemptIds = useRef(new Set<string>());
 	const pendingFailure = useRef<{ message: TaskVisualizationPreviewRequestedMessage; reason: string } | null>(null);
@@ -69,6 +73,16 @@ export function useTaskVisualizationArtifacts({
 	}, [selectionState]);
 	const onAutomaticPreviewRef = useRef(onAutomaticPreview);
 	onAutomaticPreviewRef.current = onAutomaticPreview;
+	useEffect(() => {
+		if (!workspaceId || !observeBrowser) return;
+		declareTaskVisualizationBrowserContext(
+			workspaceId,
+			taskId,
+			isAutomaticPreviewForegroundEligible && document.visibilityState === "visible" && document.hasFocus(),
+		);
+		if (!isAutomaticPreviewForegroundEligible && automaticPreview.current)
+			failAutomaticPreview(undefined, "已切换到其他前台视图，自动预览已取消。");
+	}, [workspaceId, taskId, observeBrowser, isAutomaticPreviewForegroundEligible, failAutomaticPreview]);
 	const refreshArtifacts = useCallback(async () => {
 		if (!workspaceId) return;
 		activeQuery.current?.abort();
@@ -143,7 +157,11 @@ export function useTaskVisualizationArtifacts({
 					acknowledgeTaskVisualizationPreview(currentDelivery, "accepted");
 					return;
 				}
-				if (document.visibilityState !== "visible" || !document.hasFocus()) {
+				if (
+					!automaticPreviewForegroundEligibleRef.current ||
+					document.visibilityState !== "visible" ||
+					!document.hasFocus()
+				) {
 					acknowledgeTaskVisualizationPreview(message, "declined");
 					return;
 				}
@@ -190,7 +208,9 @@ export function useTaskVisualizationArtifacts({
 			declareTaskVisualizationBrowserContext(
 				workspaceId,
 				taskId,
-				document.visibilityState === "visible" && document.hasFocus(),
+				automaticPreviewForegroundEligibleRef.current &&
+					document.visibilityState === "visible" &&
+					document.hasFocus(),
 				hasInteraction,
 			);
 		const onInteraction = () => declare(true);
@@ -250,7 +270,11 @@ export function useTaskVisualizationArtifacts({
 				artifact.revisionId !== request.previewRequest.revisionId
 			)
 				return;
-			if (document.visibilityState !== "visible" || !document.hasFocus()) {
+			if (
+				!automaticPreviewForegroundEligibleRef.current ||
+				document.visibilityState !== "visible" ||
+				!document.hasFocus()
+			) {
 				failAutomaticPreview(selectionRequestKey, "页面已转入后台，已取消自动预览。");
 				return;
 			}
