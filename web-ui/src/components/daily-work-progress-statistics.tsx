@@ -131,7 +131,7 @@ export function DailyWorkProgressExpandedRegion({
 			id="daily-work-progress-expanded-region"
 			aria-label="今日进展详情"
 			data-verification-anchor="daily-work-progress-expanded-region"
-			className="shrink-0 border-b border-border bg-surface-1"
+			className="absolute inset-x-0 top-0 z-40 max-h-full overflow-y-auto border-b border-border bg-surface-1 shadow-md"
 		>
 			<div className="daily-work-progress-reveal mx-auto flex max-w-screen-2xl flex-col gap-3 px-3 py-3 sm:px-4">
 				<div className="flex min-w-0 flex-wrap items-center gap-2">

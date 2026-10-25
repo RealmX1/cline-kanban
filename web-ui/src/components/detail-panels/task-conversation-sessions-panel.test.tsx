@@ -84,6 +84,11 @@ describe("TaskConversationSessionsPanel", () => {
 		});
 		const sideSessionSummary = createSessionSummary("side-1", {
 			updatedAt: 20,
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 20,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			},
 			turnOwner: "user",
 			liveness: "live",
 			userTurnKind: "review",
@@ -128,6 +133,364 @@ describe("TaskConversationSessionsPanel", () => {
 		expect(
 			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
 		).toMatchObject({ "side-1": 20 });
+	});
+
+	function createSideSessionWithCompletedAnswer(
+		overrides: Partial<RuntimeTaskSessionSummary> = {},
+	): RuntimeTaskSessionSummary {
+		return createSessionSummary("side-1", {
+			updatedAt: 30,
+			turnOwner: "user",
+			userTurnKind: "review",
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 20,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			},
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "task_collaborator",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: "task-1",
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: "主任务",
+				latestUserMessagePreview: "侧会话问题",
+			},
+			...overrides,
+		});
+	}
+
+	async function renderSessionsPanelForUnreadAnswerAssertion(
+		sideSessionSummary: RuntimeTaskSessionSummary,
+		selectedTaskConversationSessionId = "task-1",
+		mainTaskConversationSessionId = "task-1",
+	): Promise<void> {
+		const mainSessionSummary = createSessionSummary(mainTaskConversationSessionId);
+		await renderSessionsPanelWithSessionSummaries(
+			mainSessionSummary,
+			{
+				[mainSessionSummary.taskId]: mainSessionSummary,
+				[sideSessionSummary.taskId]: sideSessionSummary,
+			},
+			selectedTaskConversationSessionId,
+		);
+	}
+
+	async function renderSessionsPanelWithSessionSummaries(
+		mainSessionSummary: RuntimeTaskSessionSummary,
+		taskSessions: Record<string, RuntimeTaskSessionSummary>,
+		selectedTaskConversationSessionId = mainSessionSummary.taskId,
+	): Promise<void> {
+		await act(async () => {
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId="task-1"
+					mainSessionSummary={mainSessionSummary}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId="codex"
+					taskSessions={taskSessions}
+					selectedTaskConversationSessionId={selectedTaskConversationSessionId}
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={async () => ({ ok: true })}
+				/>,
+			);
+		});
+	}
+
+	it.each([
+		["协作会话", "task_collaborator", false],
+		["By the way", "by_the_way", false],
+		["前主会话", "task_collaborator", true],
+	] as const)(
+		"%s：已读后摘要更新、重新聚焦和重挂载均不重复显示白点",
+		async (_, sessionRole, hasHeldMainResponsibility) => {
+			const sideSessionSummary = createSideSessionWithCompletedAnswer();
+			if (sideSessionSummary.taskConversationSessionMetadata) {
+				sideSessionSummary.taskConversationSessionMetadata.taskConversationSessionRole = sessionRole;
+				sideSessionSummary.taskConversationSessionMetadata.taskConversationSessionHasHeldMainResponsibility =
+					hasHeldMainResponsibility;
+			}
+			await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary);
+			expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+			const sideSessionButton = Array.from(container.querySelectorAll("button")).find((button) =>
+				button.textContent?.includes("侧会话问题"),
+			);
+			expect(sideSessionButton).toBeInstanceOf(HTMLButtonElement);
+			await act(async () => sideSessionButton?.click());
+			expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+
+			const redrawnSideSessionSummary = { ...sideSessionSummary, updatedAt: 40, lastOutputAt: 40 };
+			await renderSessionsPanelForUnreadAnswerAssertion(redrawnSideSessionSummary);
+			expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+			await act(async () => root.unmount());
+			root = createRootRenderingInsideTooltipProvider(container);
+			await renderSessionsPanelForUnreadAnswerAssertion(redrawnSideSessionSummary);
+			expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+			expect(
+				JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+			).toEqual({
+				"side-1": 20,
+			});
+		},
+	);
+
+	it("已读后真正的新交棒会再次提示，即使摘要更新时间保持不变", async () => {
+		const sideSessionSummary = createSideSessionWithCompletedAnswer({ updatedAt: 100 });
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary, "side-1");
+		const nextAnswerSummary = createSideSessionWithCompletedAnswer({
+			updatedAt: 100,
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 50,
+				signalConfidence: "structured_user_turn",
+				turnSequence: 2,
+			},
+		});
+		await renderSessionsPanelForUnreadAnswerAssertion(nextAnswerSummary);
+		expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+		await renderSessionsPanelForUnreadAnswerAssertion(nextAnswerSummary, "side-1");
+		await renderSessionsPanelForUnreadAnswerAssertion(nextAnswerSummary);
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+	});
+
+	it("当前选中会话完成新回答时自动记为已读，后续重绘不更新已读时间", async () => {
+		await renderSessionsPanelForUnreadAnswerAssertion(
+			createSideSessionWithCompletedAnswer({ turnOwner: "agent", userTurnKind: null }),
+			"side-1",
+		);
+		const completedSideSessionSummary = createSideSessionWithCompletedAnswer({
+			updatedAt: 100,
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 50,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 2,
+			},
+		});
+		await renderSessionsPanelForUnreadAnswerAssertion(completedSideSessionSummary, "side-1");
+		await renderSessionsPanelForUnreadAnswerAssertion({ ...completedSideSessionSummary, updatedAt: 150 }, "side-1");
+		await renderSessionsPanelForUnreadAnswerAssertion({ ...completedSideSessionSummary, updatedAt: 200 });
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({
+			"side-1": 50,
+		});
+	});
+
+	it("主会话交接后，选中仍使用宿主任务 ID 的前主会话也会自动记为已读", async () => {
+		const formerMainSessionSummary = createSideSessionWithCompletedAnswer({ taskId: "task-1" });
+		if (formerMainSessionSummary.taskConversationSessionMetadata)
+			formerMainSessionSummary.taskConversationSessionMetadata.taskConversationSessionHasHeldMainResponsibility = true;
+		await renderSessionsPanelForUnreadAnswerAssertion(formerMainSessionSummary, "task-1", "promoted-main-session");
+		const completedFormerMainSessionSummary: RuntimeTaskSessionSummary = {
+			...formerMainSessionSummary,
+			updatedAt: 100,
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 50,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 2,
+			},
+		};
+		await renderSessionsPanelForUnreadAnswerAssertion(
+			completedFormerMainSessionSummary,
+			"task-1",
+			"promoted-main-session",
+		);
+		await renderSessionsPanelForUnreadAnswerAssertion(
+			{ ...completedFormerMainSessionSummary, updatedAt: 150 },
+			"promoted-main-session",
+			"promoted-main-session",
+		);
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({
+			"task-1": 50,
+		});
+	});
+
+	it("A→B→C：B 选中期间完成的主会话回答在再次交接后保持已读，后续新回答仍提示", async () => {
+		const originalMainSessionSummary = createSessionSummary("task-1");
+		const collaborationSessionSummary = createSideSessionWithCompletedAnswer({ taskId: "session-B" });
+		const collaborationSessionMetadata = collaborationSessionSummary.taskConversationSessionMetadata;
+		if (!collaborationSessionMetadata) throw new Error("回归场景缺少协作会话元数据");
+		const nextMainSessionSummary = createSessionSummary("session-C");
+		await renderSessionsPanelWithSessionSummaries(
+			originalMainSessionSummary,
+			{
+				"task-1": originalMainSessionSummary,
+				"session-B": collaborationSessionSummary,
+				"session-C": nextMainSessionSummary,
+			},
+			"session-B",
+		);
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({ "session-B": 20 });
+
+		const promotedMainSessionSummary: RuntimeTaskSessionSummary = {
+			...collaborationSessionSummary,
+			turnOwner: "agent",
+			userTurnKind: null,
+			taskConversationSessionMetadata: {
+				...collaborationSessionMetadata,
+				taskConversationSessionRole: "main",
+				taskConversationSessionHasHeldMainResponsibility: true,
+			},
+		};
+		await renderSessionsPanelWithSessionSummaries(promotedMainSessionSummary, {
+			"task-1": originalMainSessionSummary,
+			"session-B": promotedMainSessionSummary,
+			"session-C": nextMainSessionSummary,
+		});
+		const completedMainSessionSummary: RuntimeTaskSessionSummary = {
+			...promotedMainSessionSummary,
+			turnOwner: "user",
+			userTurnKind: "review",
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: 50,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 2,
+			},
+		};
+		await renderSessionsPanelWithSessionSummaries(completedMainSessionSummary, {
+			"task-1": originalMainSessionSummary,
+			"session-B": completedMainSessionSummary,
+			"session-C": nextMainSessionSummary,
+		});
+
+		const formerMainSessionSummary: RuntimeTaskSessionSummary = {
+			...completedMainSessionSummary,
+			updatedAt: 100,
+			taskConversationSessionMetadata: {
+				...collaborationSessionMetadata,
+				taskConversationSessionHasHeldMainResponsibility: true,
+			},
+		};
+		await renderSessionsPanelWithSessionSummaries(nextMainSessionSummary, {
+			"task-1": originalMainSessionSummary,
+			"session-B": formerMainSessionSummary,
+			"session-C": nextMainSessionSummary,
+		});
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({ "session-B": 50 });
+
+		await renderSessionsPanelWithSessionSummaries(nextMainSessionSummary, {
+			"task-1": originalMainSessionSummary,
+			"session-B": {
+				...formerMainSessionSummary,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: 80,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 3,
+				},
+			},
+			"session-C": nextMainSessionSummary,
+		});
+		expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({ "session-B": 50 });
+	});
+
+	it("原始主会话在选中期间完成回答后，首次交接不会把已读回答重新标为未读", async () => {
+		const originalMainSessionSummary = createSessionSummary("task-1");
+		await renderSessionsPanelWithSessionSummaries(originalMainSessionSummary, {
+			"task-1": originalMainSessionSummary,
+		});
+		const completedOriginalMainSessionSummary = createSideSessionWithCompletedAnswer({ taskId: "task-1" });
+		const originalMainSessionMetadata = completedOriginalMainSessionSummary.taskConversationSessionMetadata;
+		if (!originalMainSessionMetadata) throw new Error("回归场景缺少原始主会话元数据");
+		const completedCurrentMainSessionSummary: RuntimeTaskSessionSummary = {
+			...completedOriginalMainSessionSummary,
+			taskConversationSessionMetadata: {
+				...originalMainSessionMetadata,
+				taskConversationSessionRole: "main",
+			},
+		};
+		await renderSessionsPanelWithSessionSummaries(completedCurrentMainSessionSummary, {
+			"task-1": completedCurrentMainSessionSummary,
+		});
+
+		const promotedMainSessionSummary = createSessionSummary("promoted-main-session");
+		await renderSessionsPanelWithSessionSummaries(promotedMainSessionSummary, {
+			"task-1": {
+				...completedOriginalMainSessionSummary,
+				taskConversationSessionMetadata: {
+					...originalMainSessionMetadata,
+					taskConversationSessionHasHeldMainResponsibility: true,
+				},
+			},
+			"promoted-main-session": promotedMainSessionSummary,
+		});
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({ "task-1": 20 });
+	});
+
+	it("兼容旧版摘要时间已读记录且不会在阅读较早交棒时回退", async () => {
+		window.localStorage.setItem(
+			LocalStorageKey.TaskConversationSessionReadReceipts,
+			JSON.stringify({ "side-1": 100 }),
+		);
+		const sideSessionSummary = createSideSessionWithCompletedAnswer({ updatedAt: 200 });
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary);
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary, "side-1");
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts) ?? "{}"),
+		).toEqual({
+			"side-1": 100,
+		});
+		await renderSessionsPanelForUnreadAnswerAssertion(
+			createSideSessionWithCompletedAnswer({
+				updatedAt: 300,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: 250,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 2,
+				},
+			}),
+		);
+		expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+	});
+
+	it.each([undefined, null])("缺少真实交棒记录时不以摘要或进程待命时间制造未读（%s）", async (handoffObservation) => {
+		const sideSessionSummary = createSideSessionWithCompletedAnswer({
+			lastAgentConversationUserHandoffObservation: handoffObservation,
+			agentResponseGenerationStopped: { stoppedAt: 25, signalConfidence: "prompt_ready_fallback", turnSequence: 1 },
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt: 25,
+				signalConfidence: "prompt_ready_fallback",
+				turnSequence: 1,
+			},
+		});
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary);
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary, "side-1");
+		expect(window.localStorage.getItem(LocalStorageKey.TaskConversationSessionReadReceipts)).toBeNull();
+	});
+
+	it("其他标签页读过回答后同步清除白点，后续摘要更新不重新点亮", async () => {
+		const sideSessionSummary = createSideSessionWithCompletedAnswer();
+		await renderSessionsPanelForUnreadAnswerAssertion(sideSessionSummary);
+		expect(container.querySelector('[aria-label="Unread answer"]')).not.toBeNull();
+		const storedReadReceipts = JSON.stringify({ "side-1": 20 });
+		window.localStorage.setItem(LocalStorageKey.TaskConversationSessionReadReceipts, storedReadReceipts);
+		await act(async () => {
+			window.dispatchEvent(
+				new StorageEvent("storage", {
+					key: LocalStorageKey.TaskConversationSessionReadReceipts,
+					newValue: storedReadReceipts,
+				}),
+			);
+		});
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+		await renderSessionsPanelForUnreadAnswerAssertion({ ...sideSessionSummary, updatedAt: 60 });
+		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
 	});
 
 	it("creates a fork of the current main session from the 新建会话 form", async () => {
