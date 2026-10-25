@@ -417,7 +417,8 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 	// 本次字节到达的时刻。由调用方传入而不是模块自己读时钟：本模块其余部分是纯状态机，
 	// 唯一用到时间的是未闭合粘贴的封账上界，把它留在参数上，判据就能在测试里被直接钉住。
 	nowEpochMs: number,
-): void {
+): { submissionCarriageReturnObserved: boolean } {
+	let submissionCarriageReturnObserved = false;
 	// 上一 chunk 结转过来的那截未解析尾巴总是以 ESC 开头（它就是「疑似被切断的转义序列 / 粘贴标记」），
 	// 且总是坐在拼接后文本的最前面。记下它的长度，就能认出「哪个 ESC 跨过了 chunk 边界」。
 	const carriedOverUnparsedTextLength = state.pendingUnparsedText.length;
@@ -479,6 +480,7 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 			character === END_OF_TEXT_CLEARS_INPUT_BOX ||
 			character === DEVICE_CONTROL_3_STASHES_AND_CLEARS_INPUT_BOX
 		) {
+			if (character === CARRIAGE_RETURN_SUBMITS_CURRENT_COMPOSITION) submissionCarriageReturnObserved = true;
 			resetTerminalInputBoxOccupancyTrackerComposition(state);
 			index += 1;
 			continue;
@@ -502,6 +504,7 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 		index += 1;
 	}
 	state.pendingUnparsedText = text.slice(index);
+	return { submissionCarriageReturnObserved };
 }
 
 // 输入侧字节跟踪与读屏两路汇合后的占用结论。

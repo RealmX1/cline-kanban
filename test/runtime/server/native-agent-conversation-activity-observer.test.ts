@@ -1,11 +1,12 @@
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
 	NativeAgentConversationActivityReadResult,
 	ReadNativeAgentConversationActivityInput,
 } from "../../../src/agent-session-history/native-agent-conversation-activity-reader";
+import { readNativeAgentConversationActivity } from "../../../src/agent-session-history/native-agent-conversation-activity-reader";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { canReconcileCodexNeedsInputWithNativeDirectInputReadiness } from "../../../src/core/codex-native-direct-input-readiness";
 import { applySessionFacets } from "../../../src/core/session-activity";
@@ -14,6 +15,180 @@ import { createNativeAgentConversationActivityObserver } from "../../../src/serv
 const directories: string[] = [];
 afterEach(async () => {
 	for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
+});
+
+describe("Codex 转录缺失与轮换后的自动补证恢复", { timeout: 60_000 }, () => {
+	const observers: ReturnType<typeof createNativeAgentConversationActivityObserver>[] = [];
+	afterEach(() => {
+		for (const observer of observers.splice(0)) observer.dispose();
+	});
+	async function recoveryFixture(fileIsInitiallyMissing: boolean, parentDirectoryIsInitiallyMissing = false) {
+		const { summary, transcriptPath: initialTranscriptPath } = await transcriptFixture();
+		const transcriptPath = parentDirectoryIsInitiallyMissing
+			? join(dirname(initialTranscriptPath), "sessions-created-after-retry-exhaustion", "main.jsonl")
+			: initialTranscriptPath;
+		const state = {
+			nowMs: 10_000,
+			summary: {
+				...summary,
+				agentId: "codex" as const,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex" as const,
+					nativeSessionId: "main",
+					transcriptPath,
+					observedAt: 1,
+				},
+				agentConversationPromptSubmissionAcceptance: {
+					status: "unconfirmed" as const,
+					attemptedAtMs: 10_000,
+					runtimeSessionIncarnationId: "incarnation-1",
+				},
+			} as RuntimeTaskSessionSummary,
+		};
+		const metadataLine = `${JSON.stringify({ type: "session_meta", payload: { id: "main", cwd: summary.workspacePath, source: "cli" } })}\n`;
+		const acceptedLine = `${JSON.stringify({
+			timestamp: new Date(10_100).toISOString(),
+			type: "event_msg",
+			payload: {
+				type: "item_completed",
+				thread_id: "main",
+				turn_id: "turn",
+				item: { type: "UserMessage", id: "accepted-input", content: [{ type: "text", text: "继续" }] },
+			},
+		})}\n`;
+		if (fileIsInitiallyMissing) await rm(transcriptPath, { force: true });
+		else await writeFile(transcriptPath, metadataLine);
+		const readNativeActivity = vi.fn(readNativeAgentConversationActivity);
+		const onAccepted = vi.fn();
+		const observer = createNativeAgentConversationActivityObserver({
+			readNativeActivity,
+			onAccepted,
+			cooldownMs: 0,
+			nowMs: () => state.nowMs,
+			onPromptSubmissionAcceptanceReconciliation(_sessionId, _workspaceId, result) {
+				const candidate = state.summary.agentConversationPromptSubmissionAcceptance;
+				if (!candidate) throw new Error("恢复测试缺少持久候选");
+				state.summary = {
+					...state.summary,
+					agentConversationPromptSubmissionAcceptance: {
+						...candidate,
+						verification: result.verification,
+						...(result.accepted ? { status: "accepted", eventId: result.accepted.eventId } : {}),
+					},
+				};
+			},
+		});
+		observers.push(observer);
+		const observe = () => observer.observeTaskSessionSummary("workspace", state.summary, () => state.summary);
+		const exhaustOrdinaryRetries = async () => {
+			for (const elapsedMs of [0, 15_000, 30_000, 60_000]) {
+				state.nowMs += elapsedMs;
+				await observe();
+			}
+			expect(state.summary.agentConversationPromptSubmissionAcceptance?.verification?.nextCheckAtMs).toBeNull();
+		};
+		return {
+			state,
+			transcriptPath,
+			metadataLine,
+			acceptedLine,
+			observer,
+			observe,
+			exhaustOrdinaryRetries,
+			readNativeActivity,
+			onAccepted,
+		};
+	}
+
+	it("文件初始不存在且普通重试耗尽后，创建合法原生转录会自动补证", async () => {
+		const target = await recoveryFixture(true);
+		await target.exhaustOrdinaryRetries();
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(4);
+		await writeFile(target.transcriptPath, target.metadataLine + target.acceptedLine);
+		await vi.waitFor(
+			() => expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted"),
+			{ timeout: 25_000, interval: 50 },
+		);
+		expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.eventId).toBe(
+			"codex:main:turn:accepted-input",
+		);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
+	it("父目录也缺失时，耗尽普通预算后由低频元数据观察恢复并重新挂载目录观察", async () => {
+		const target = await recoveryFixture(true, true);
+		await target.exhaustOrdinaryRetries();
+		await mkdir(dirname(target.transcriptPath), { recursive: true });
+		await writeFile(target.transcriptPath, target.metadataLine);
+		const metadata = await stat(target.transcriptPath);
+		await vi.waitFor(
+			() =>
+				expect(
+					target.state.summary.agentConversationPromptSubmissionAcceptance?.verification?.transcriptCursor
+						?.fileIdentity,
+				).toBe(`${metadata.dev}:${metadata.ino}`),
+			{ timeout: 25_000, interval: 50 },
+		);
+		target.state.nowMs += 10_000;
+		await target.exhaustOrdinaryRetries();
+		await appendFile(target.transcriptPath, target.acceptedLine);
+		await vi.waitFor(
+			() => expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted"),
+			{ timeout: 3_000, interval: 50 },
+		);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
+
+	it.each(["rename", "atomic_replace"])("%s 后普通重试再耗尽，新文件后续追加仍能自动唤醒", async (replacement) => {
+		const target = await recoveryFixture(false);
+		await target.exhaustOrdinaryRetries();
+		if (replacement === "rename") {
+			await rename(target.transcriptPath, `${target.transcriptPath}.rotated`);
+			await writeFile(target.transcriptPath, target.metadataLine);
+		} else {
+			await writeFile(`${target.transcriptPath}.replacement`, target.metadataLine);
+			await rename(`${target.transcriptPath}.replacement`, target.transcriptPath);
+		}
+		const metadata = await stat(target.transcriptPath);
+		await vi.waitFor(
+			() =>
+				expect(
+					target.state.summary.agentConversationPromptSubmissionAcceptance?.verification?.transcriptCursor
+						?.fileIdentity,
+				).toBe(`${metadata.dev}:${metadata.ino}`),
+			{ timeout: 25_000, interval: 50 },
+		);
+		target.state.nowMs += 10_000;
+		await target.exhaustOrdinaryRetries();
+		await appendFile(target.transcriptPath, target.acceptedLine);
+		await vi.waitFor(
+			() => expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted"),
+			{ timeout: 25_000, interval: 50 },
+		);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
+
+	it("耗尽后静默不重扫，身份更换或 dispose 后旧文件变化不能再次读取旧会话", async () => {
+		const target = await recoveryFixture(false);
+		await target.exhaustOrdinaryRetries();
+		target.state.nowMs += 10 * 60_000;
+		const unchangedReadCount = target.readNativeActivity.mock.calls.length;
+		await new Promise<void>((resolve) => setTimeout(resolve, 300));
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(unchangedReadCount);
+		target.state.summary = {
+			...target.state.summary,
+			runtimeSessionIncarnationId: "replacement-incarnation",
+			agentConversationPromptSubmissionAcceptance: null,
+		};
+		await target.observe();
+		const replacedReadCount = target.readNativeActivity.mock.calls.length;
+		await appendFile(target.transcriptPath, target.acceptedLine);
+		await new Promise<void>((resolve) => setTimeout(resolve, 300));
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(replacedReadCount);
+		target.observer.dispose();
+		await appendFile(target.transcriptPath, target.acceptedLine);
+		await new Promise<void>((resolve) => setTimeout(resolve, 300));
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(replacedReadCount);
+	});
 });
 
 describe("Codex 原生待输入核验的有界重试", () => {
@@ -116,9 +291,257 @@ describe("Codex 原生待输入核验的有界重试", () => {
 				},
 			};
 		};
-		return { state, observe, rewind, readNativeActivity, onAccepted, onActivity, onNativeReadiness };
+		return { state, observer, observe, rewind, readNativeActivity, onAccepted, onActivity, onNativeReadiness };
 	}
 
+	it.each([true, false])("新输入边沿存在=%s 时，正常接受与历史补证只选择一个出口", async (hasLiveEvent) => {
+		const target = fixture();
+		target.state.summary = {
+			...target.state.summary,
+			userTurnKind: "review",
+			agentConversationPromptSubmissionAcceptance: {
+				status: "unconfirmed",
+				attemptedAtMs: 1,
+				runtimeSessionIncarnationId: "incarnation-1",
+			},
+		};
+		const onAccepted = vi.fn();
+		const onReconciliation = vi.fn();
+		const observer = createNativeAgentConversationActivityObserver({
+			onAccepted,
+			onPromptSubmissionAcceptanceReconciliation: onReconciliation,
+			readNativeActivity: async () => ({
+				events: hasLiveEvent
+					? [
+							{
+								observedAtMs: 200,
+								eventId: "native-input",
+								nativeSessionId: "main",
+								activityKind: "accepted_user_input",
+								evidenceKind: "native_user_prompt_acceptance",
+							},
+						]
+					: [],
+				cursor: null,
+				promptSubmissionAcceptanceReconciliation: {
+					attemptedAtMs: 1,
+					runtimeSessionIncarnationId: "incarnation-1",
+					nativeSessionId: "main",
+					verification: {
+						checkedAtMs: Date.now(),
+						nextCheckAtMs: null,
+						consecutiveUnchangedCheckCount: 0,
+						reason: "native_acceptance_verified",
+					},
+					accepted: { eventId: "native-input", acceptedAtMs: 200 },
+				},
+			}),
+		});
+		observers.push(observer);
+		await observer.observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
+		expect(onAccepted).toHaveBeenCalledTimes(hasLiveEvent ? 1 : 0);
+		expect(onReconciliation).toHaveBeenCalledTimes(hasLiveEvent ? 0 : 1);
+	});
+
+	it("空闲会话缺证按 15/30/60 秒自动重试，耗尽后停下并在重启时重验", async () => {
+		const target = fixture();
+		target.state.summary = {
+			...target.state.summary,
+			userTurnKind: "review",
+			agentConversationPromptSubmissionAcceptance: {
+				status: "unconfirmed",
+				attemptedAtMs: 1,
+				runtimeSessionIncarnationId: "incarnation-1",
+			},
+		};
+		const read = vi.fn(async (): Promise<NativeAgentConversationActivityReadResult | null> => null);
+		const onAccepted = vi.fn();
+		const createObserver = () => {
+			const observer = createNativeAgentConversationActivityObserver({
+				readNativeActivity: read,
+				onAccepted,
+				onPromptSubmissionAcceptanceReconciliation(_sessionId, _workspaceId, result) {
+					const candidate = target.state.summary.agentConversationPromptSubmissionAcceptance;
+					if (candidate)
+						target.state.summary = {
+							...target.state.summary,
+							agentConversationPromptSubmissionAcceptance: { ...candidate, verification: result.verification },
+						};
+				},
+			});
+			observers.push(observer);
+			return observer;
+		};
+		const observer = createObserver();
+		const observe = () =>
+			observer.observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
+		await observe();
+		expect(read).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(read).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(read).toHaveBeenCalledTimes(3);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(read).toHaveBeenCalledTimes(4);
+		expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.verification?.nextCheckAtMs).toBeNull();
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(read).toHaveBeenCalledTimes(4);
+		observer.dispose();
+		await createObserver().observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
+		expect(read).toHaveBeenCalledTimes(5);
+		expect(onAccepted).not.toHaveBeenCalled();
+	});
+
+	it("会话已 idle 且标记已 accepted 时，已知分页仍自动续读到结束", async () => {
+		const target = fixture(0);
+		target.state.summary = {
+			...target.state.summary,
+			userTurnKind: "review",
+			agentConversationPromptSubmissionAcceptance: {
+				status: "accepted",
+				attemptedAtMs: 1,
+				runtimeSessionIncarnationId: "incarnation-1",
+			},
+		};
+		let readCount = 0;
+		target.readNativeActivity.mockImplementation(async () => {
+			readCount += 1;
+			return {
+				events: [],
+				cursor: { transport: "codex_control", predecessorTurnId: `page-${readCount}`, seenEventIds: [] },
+				...(readCount < 25
+					? {
+							codexFullMessageReadContinuation: { progressToken: String(readCount), madeProgress: true },
+						}
+					: {}),
+			};
+		});
+		await target.observe();
+		await vi.advanceTimersByTimeAsync(7_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(25);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(25);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+		expect(target.onActivity).not.toHaveBeenCalled();
+	});
+	it("分页在同一位置失败时有界退避，恢复取得新进度后继续完成", async () => {
+		const target = fixture(0);
+		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+		let nativePageIsAvailable = false;
+		let pageCount = 0;
+		target.readNativeActivity.mockImplementation(async () => {
+			if (nativePageIsAvailable) pageCount += 1;
+			return {
+				events: [],
+				cursor: { transport: "codex_control", predecessorTurnId: "old", seenEventIds: [] },
+				...(pageCount < 2
+					? {
+							codexFullMessageReadContinuation: {
+								progressToken: String(pageCount),
+								madeProgress: nativePageIsAvailable,
+							},
+						}
+					: {}),
+			};
+		});
+		await target.observe();
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(2);
+		nativePageIsAvailable = true;
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(3);
+		await vi.advanceTimersByTimeAsync(250);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(4);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(4);
+	});
+	it("分页重复声称同一进度时耗尽退避；新输入唤醒后可以继续补证", async () => {
+		const target = fixture(0);
+		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+		target.readNativeActivity.mockImplementation(async () => ({
+			events: [],
+			cursor: { transport: "codex_control", predecessorTurnId: "old", seenEventIds: [] },
+			codexFullMessageReadContinuation: { progressToken: "unchanged", madeProgress: true },
+		}));
+		await target.observe();
+		await vi.advanceTimersByTimeAsync(250 + 15_000 + 30_000 + 60_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(5);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(5);
+		target.readNativeActivity.mockImplementation(async () => ({
+			events: [],
+			cursor: { transport: "codex_control", predecessorTurnId: "new", seenEventIds: [] },
+		}));
+		target.observer.wakeForPotentialUserPromptSubmission(
+			"workspace",
+			target.state.summary,
+			() => target.state.summary,
+		);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(6);
+	});
+	it.each(["dispose", "identity"] as const)("待补分页在 %s 后取消旧会话的自动续读", async (change) => {
+		const target = fixture(0);
+		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+		target.readNativeActivity.mockImplementation(async (input) => ({
+			events: [],
+			cursor: { transport: "codex_control", predecessorTurnId: "old", seenEventIds: [] },
+			...(input.summary.agentNativeConversationSessionIdentity?.nativeSessionId === "main"
+				? {
+						codexFullMessageReadContinuation: { progressToken: "next-page", madeProgress: true },
+					}
+				: {}),
+		}));
+		await target.observe();
+		const firstSignal = target.readNativeActivity.mock.calls[0]?.[0].signal;
+		if (change === "dispose") target.observer.dispose();
+		else {
+			const originalNativeIdentity = target.state.summary.agentNativeConversationSessionIdentity;
+			if (!originalNativeIdentity) throw new Error("测试会话缺少原生身份");
+			target.state.summary = {
+				...target.state.summary,
+				agentNativeConversationSessionIdentity: {
+					...originalNativeIdentity,
+					nativeSessionId: "replacement",
+				},
+			};
+			await target.observe();
+		}
+		expect(firstSignal?.aborted).toBe(true);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(target.readNativeActivity).toHaveBeenCalledTimes(change === "dispose" ? 1 : 2);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
+	it("新 Rewind 取消旧分支分页书签，保留已消费位置再核对当前分支", async () => {
+		const target = fixture(0);
+		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+		target.readNativeActivity.mockImplementationOnce(async () => ({
+			events: [],
+			cursor: {
+				transport: "codex_control",
+				predecessorTurnId: "old",
+				seenEventIds: [],
+				acceptedSummaryUserInputEventIdsPendingFullRead: [],
+				fullMessagePageReadRecovery: {
+					phase: "locating_predecessor",
+					nextSummaryPageCursor: "old-page",
+					newerSummaryPages: [],
+				},
+			},
+			codexFullMessageReadContinuation: { progressToken: "old-page", madeProgress: true },
+		}));
+		await target.observe();
+		target.rewind();
+		await target.observe();
+		const cursorAfterRewind = target.readNativeActivity.mock.calls[1]?.[0].cursor;
+		expect(cursorAfterRewind).toMatchObject({ predecessorTurnId: "old" });
+		if (cursorAfterRewind?.transport === "codex_control")
+			expect(cursorAfterRewind.fullMessagePageReadRecovery).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
 	it.each(["active", "unknown"])("旧窗口过期后，新 rewind 的首次 %s 结果仍会在窗口内补读", async (mode) => {
 		const target = fixture();
 		target.state.nativeReadIsUnknown = mode === "unknown";
@@ -264,6 +687,185 @@ function userRecord(uuid: string) {
 }
 
 describe("原生会话的可靠输入接受边沿", () => {
+	it.each([false, true])(
+		"读取期间已有候选=%s 时，新候选保留 live 接受并自动以最新提交身份重验",
+		async (hadCandidate) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(10_000);
+			const { summary } = await transcriptFixture();
+			let current: RuntimeTaskSessionSummary = {
+				...summary,
+				...(hadCandidate
+					? {
+							agentConversationPromptSubmissionAcceptance: {
+								status: "pending" as const,
+								attemptedAtMs: 9_000,
+								submissionId: "previous-submission",
+								runtimeSessionIncarnationId: "incarnation-1",
+							},
+						}
+					: {}),
+			};
+			const baselineCursor = {
+				transport: "codex_control" as const,
+				predecessorTurnId: "baseline",
+				seenEventIds: [],
+			};
+			const acceptedCursor = { ...baselineCursor, seenEventIds: ["native-input"] };
+			let releaseRead: ((result: NativeAgentConversationActivityReadResult) => void) | undefined;
+			const readNativeActivity = vi.fn(async (input: ReadNativeAgentConversationActivityInput) => {
+				if (!input.cursor) return { events: [], cursor: baselineCursor };
+				if (readNativeActivity.mock.calls.length === 2)
+					return new Promise<NativeAgentConversationActivityReadResult>((resolve) => {
+						releaseRead = resolve;
+					});
+				return {
+					events: input.cursor.seenEventIds.includes("native-input")
+						? []
+						: [
+								{
+									observedAtMs: input.observedAtMs,
+									activityKind: "accepted_user_input" as const,
+									evidenceKind: "native_user_prompt_acceptance" as const,
+									eventId: "native-input",
+									nativeSessionId: "main",
+								},
+							],
+					cursor: acceptedCursor,
+				};
+			});
+			const liveEffects = vi.fn();
+			const onAccepted = vi.fn((observation) => {
+				const candidate = current.agentConversationPromptSubmissionAcceptance;
+				if (!candidate) return false;
+				if (
+					candidate?.attemptedAtMs !== observation.observedSubmissionAttemptedAtMs ||
+					candidate?.submissionId !== observation.observedSubmissionId
+				)
+					return false;
+				liveEffects(observation);
+				current = { ...current, agentConversationPromptSubmissionAcceptance: { ...candidate, status: "accepted" } };
+				return true;
+			});
+			const onReconciliation = vi.fn();
+			const observer = createNativeAgentConversationActivityObserver({
+				onAccepted,
+				onPromptSubmissionAcceptanceReconciliation: onReconciliation,
+				readNativeActivity,
+				cooldownMs: 0,
+			});
+			const observe = () => observer.observeTaskSessionSummary("workspace", current, () => current);
+			try {
+				await observe();
+				const pendingRead = observe();
+				await vi.advanceTimersByTimeAsync(0);
+				const readStartedAtMs = readNativeActivity.mock.calls[1]?.[0].observedAtMs;
+				await vi.advanceTimersByTimeAsync(10);
+				const firstSubmitCarriageReturnAtMs = Date.now();
+				current = {
+					...current,
+					agentConversationPromptSubmissionAcceptance: {
+						status: "pending",
+						attemptedAtMs: firstSubmitCarriageReturnAtMs,
+						submissionId: "current-submission",
+						runtimeSessionIncarnationId: "incarnation-1",
+					},
+				};
+				observer.wakeForPotentialUserPromptSubmission("workspace", current, () => current);
+				if (!releaseRead || readStartedAtMs === undefined) throw new Error("在途读取尚未启动");
+				releaseRead({
+					events: [
+						{
+							observedAtMs: readStartedAtMs,
+							activityKind: "accepted_user_input",
+							evidenceKind: "native_user_prompt_acceptance",
+							eventId: "native-input",
+							nativeSessionId: "main",
+						},
+					],
+					cursor: acceptedCursor,
+				});
+				await pendingRead;
+				expect(current.agentConversationPromptSubmissionAcceptance?.status).toBe("pending");
+				await vi.advanceTimersByTimeAsync(250);
+				expect(liveEffects).toHaveBeenCalledOnce();
+				expect(liveEffects.mock.calls[0]?.[0]).toMatchObject({
+					observedSubmissionId: "current-submission",
+					observedSubmissionAttemptedAtMs: firstSubmitCarriageReturnAtMs,
+				});
+				expect(liveEffects.mock.calls[0]?.[0].observedAtMs).toBeGreaterThanOrEqual(firstSubmitCarriageReturnAtMs);
+				expect(readNativeActivity.mock.calls[2]?.[0].cursor).toEqual(baselineCursor);
+				expect(current.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted");
+				expect(onReconciliation).not.toHaveBeenCalled();
+				await observe();
+				expect(liveEffects).toHaveBeenCalledOnce();
+			} finally {
+				observer.dispose();
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("接受出口明确拒绝时保留游标，部分已成功事件不重复执行且不关闭后续候选的重试窗口", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10_000);
+		const { summary } = await transcriptFixture();
+		let current = summary;
+		const appliedEventIds: string[] = [];
+		let rejectedOnce = false;
+		const readNativeActivity = vi.fn(async (input: ReadNativeAgentConversationActivityInput) => ({
+			events: ["first", "second"]
+				.filter((eventId) => !input.cursor?.seenEventIds.includes(eventId))
+				.map((eventId) => ({
+					observedAtMs: input.observedAtMs,
+					activityKind: "accepted_user_input" as const,
+					evidenceKind: "native_user_prompt_acceptance" as const,
+					eventId,
+					nativeSessionId: "main",
+				})),
+			cursor: { transport: "codex_control" as const, predecessorTurnId: "turn", seenEventIds: ["first", "second"] },
+		}));
+		const observer = createNativeAgentConversationActivityObserver({
+			readNativeActivity,
+			cooldownMs: 0,
+			onAccepted(observation) {
+				if (observation.eventId === "second" && !rejectedOnce) {
+					rejectedOnce = true;
+					return false;
+				}
+				appliedEventIds.push(observation.eventId ?? "");
+				if (observation.eventId === "second") {
+					current = {
+						...current,
+						agentConversationPromptSubmissionAcceptance: {
+							status: "pending",
+							attemptedAtMs: Date.now(),
+							submissionId: "later-submission",
+							runtimeSessionIncarnationId: "incarnation-1",
+						},
+					};
+					observer.wakeForPotentialUserPromptSubmission("workspace", current, () => current);
+				}
+				return true;
+			},
+		});
+		try {
+			observer.wakeForPotentialUserPromptSubmission("workspace", current, () => current);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(appliedEventIds).toEqual(["first"]);
+			await vi.advanceTimersByTimeAsync(250);
+			expect(appliedEventIds).toEqual(["first", "second"]);
+			expect(readNativeActivity.mock.calls[1]?.[0].cursor).toBeNull();
+			expect(current.agentConversationPromptSubmissionAcceptance?.submissionId).toBe("later-submission");
+			await vi.advanceTimersByTimeAsync(250);
+			expect(readNativeActivity).toHaveBeenCalledTimes(3);
+			expect(appliedEventIds).toEqual(["first", "second"]);
+		} finally {
+			observer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("首次读取无新增消息仍交付独立的原生就绪观测，且不调用接受或活动出口", async () => {
 		const { summary } = await transcriptFixture();
 		const target = {

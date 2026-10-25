@@ -557,6 +557,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				manager.markAgentConversationPromptSubmissionPending?.(
 					taskId,
 					hookEventObservedAtEpochMs ?? hookIngestReceivedAtEpochMs,
+					{ source: "harness_submit_hook", submittedPromptText: body.submittedPromptText },
 				);
 				if (body.metadata) manager.applyHookActivity(taskId, body.metadata);
 				return respondAfterRememberingAppliedHookDelivery({

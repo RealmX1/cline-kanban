@@ -22,6 +22,10 @@ import {
 	withCodexNativeObservationReadSlot,
 } from "./codex-native-agent-turn-execution-reader";
 import {
+	type CodexPromptSubmissionAcceptanceReconciliation,
+	reconcileCodexPromptSubmissionAcceptance,
+} from "./codex-prompt-submission-acceptance-reconciliation";
+import {
 	type KimiNativeConversationActivityReadCursor,
 	readKimiNativeConversationActivity,
 } from "./kimi-native-conversation-activity-reader";
@@ -36,6 +40,22 @@ export const MAX_INCREMENTAL_NATIVE_ACTIVITY_TRANSCRIPT_READ_BYTES = 256 * 1024;
 export const MAX_RECENT_CODEX_NATIVE_ACTIVITY_TURNS = 32;
 const MAX_REMEMBERED_NATIVE_ACTIVITY_EVENT_IDS = 512;
 
+interface CodexFullMessageSummaryPageReadFrame {
+	summaryPageCursor: string | null;
+	turnIdSequenceDigest: string;
+}
+type CodexFullMessagePageReadRecovery =
+	| {
+			phase: "locating_predecessor";
+			nextSummaryPageCursor: string;
+			newerSummaryPages: CodexFullMessageSummaryPageReadFrame[];
+	  }
+	| {
+			phase: "reading_full_pages";
+			summaryPagesPendingFullRead: CodexFullMessageSummaryPageReadFrame[];
+	  }
+	| { phase: "establishing_rewind_baseline" };
+
 export type NativeAgentConversationActivityReadCursor =
 	| KimiNativeConversationActivityReadCursor
 	| {
@@ -48,16 +68,22 @@ export type NativeAgentConversationActivityReadCursor =
 	| {
 			transport: "codex_control";
 			predecessorTurnId: string | null;
+			lastAcceptedUserInputItemId?: string | null;
+			activityProjectionWasOverBudget?: boolean;
+			acceptedSummaryUserInputEventIdsPendingFullRead?: string[];
+			fullMessagePageReadRecovery?: CodexFullMessagePageReadRecovery;
 			seenEventIds: string[];
 	  };
 export interface NativeAgentConversationActivityReadResult {
 	events: NativeAgentConversationTranscriptActivityObservation[];
 	cursor: NativeAgentConversationActivityReadCursor | null;
 	moreAppendedTranscriptBytesRemain?: boolean;
+	promptSubmissionAcceptanceReconciliation?: CodexPromptSubmissionAcceptanceReconciliation | null;
 	codexNativeDirectInputReadiness?: CodexNativeDirectInputReadinessObservation;
 	codexNativeAgentTurnExecution?: CodexNativeAgentTurnExecutionObservation;
 	codexNativeAgentTurnExecutionReadFailure?: string;
 	nativeActivityProjectionReadFailure?: string;
+	codexFullMessageReadContinuation?: { progressToken: string; madeProgress: boolean };
 	codexToolTranscriptCursor?: CodexCurrentNativeTurnToolActivityReadCursor;
 }
 export interface ReadNativeAgentConversationActivityInput {
@@ -69,6 +95,8 @@ export interface ReadNativeAgentConversationActivityInput {
 	codexToolTranscriptCursor?: CodexCurrentNativeTurnToolActivityReadCursor | null;
 	// false 仅跳过独立执行状态查询，保留原生消息活动与输入接受核验。
 	shouldReadCodexNativeAgentTurnExecution?: boolean;
+	shouldReconcilePromptSubmissionAcceptance?: boolean;
+	forcePromptSubmissionAcceptanceReconciliation?: boolean;
 }
 
 function rememberEventIds(ids: Iterable<string>): string[] {
@@ -152,6 +180,44 @@ const nativeTurnPageSchema = z.object({
 	nextCursor: z.string().nullable().optional(),
 });
 
+function describeCodexFullMessageSummaryPage(
+	summaryPageCursor: string | null,
+	page: z.infer<typeof nativeTurnPageSchema>,
+): CodexFullMessageSummaryPageReadFrame {
+	return {
+		summaryPageCursor,
+		turnIdSequenceDigest: createHash("sha256")
+			.update(JSON.stringify(page.data.map((turn) => turn.id)))
+			.digest("hex"),
+	};
+}
+
+function codexFullMessageReadContinuation(
+	cursor: NativeAgentConversationActivityReadCursor | null,
+	madeProgress: boolean,
+): Pick<NativeAgentConversationActivityReadResult, "codexFullMessageReadContinuation"> {
+	if (
+		cursor?.transport !== "codex_control" ||
+		(cursor.acceptedSummaryUserInputEventIdsPendingFullRead === undefined && !cursor.fullMessagePageReadRecovery)
+	)
+		return {};
+	return {
+		codexFullMessageReadContinuation: {
+			progressToken: createHash("sha256")
+				.update(
+					JSON.stringify([
+						cursor.predecessorTurnId,
+						cursor.lastAcceptedUserInputItemId,
+						cursor.acceptedSummaryUserInputEventIdsPendingFullRead,
+						cursor.fullMessagePageReadRecovery,
+					]),
+				)
+				.digest("hex"),
+			madeProgress,
+		},
+	};
+}
+
 function serializeCodexNativeItemSemanticActivity(item: Record<string, unknown>): string {
 	const semanticItem = { ...item };
 	// 子代理自己的状态与工具耗时变化不等于主对话收到新结果；调用/完成状态和实际输出仍参与身份。
@@ -176,16 +242,24 @@ async function readCurrentCodexNativeActivity(
 	const { summary } = input;
 	const identity = summary.agentNativeConversationSessionIdentity;
 	const endpoint = summary.codexNativeSessionControlEndpoint;
+	if (summary.agentId !== "codex" || identity?.sourceAgentId !== "codex" || !identity.nativeSessionId) return null;
+	const cursor = input.cursor?.transport === "codex_control" ? input.cursor : null;
+	const reconciliation =
+		input.shouldReconcilePromptSubmissionAcceptance === false
+			? null
+			: await reconcileCodexPromptSubmissionAcceptance({
+					summary,
+					observedAtMs: input.observedAtMs,
+					force: input.forcePromptSubmissionAcceptanceReconciliation,
+				});
 	if (
-		summary.agentId !== "codex" ||
-		identity?.sourceAgentId !== "codex" ||
-		!identity.nativeSessionId ||
 		!endpoint ||
 		endpoint.workspaceId !== input.workspaceId ||
 		endpoint.conversationSessionId !== summary.taskId ||
 		endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId
 	)
-		return null;
+		return reconciliation ? { events: [], cursor, promptSubmissionAcceptanceReconciliation: reconciliation } : null;
+
 	let execution: CodexNativeAgentTurnExecutionObservation | null = null;
 	let executionReadFailure: string | undefined;
 	if (input.shouldReadCodexNativeAgentTurnExecution !== false) {
@@ -195,7 +269,6 @@ async function readCurrentCodexNativeActivity(
 			executionReadFailure = error instanceof Error ? error.message : String(error);
 		}
 	}
-	const cursor = input.cursor?.transport === "codex_control" ? input.cursor : null;
 	const independentObservations = {
 		...(execution ? { codexNativeAgentTurnExecution: execution } : {}),
 		...(executionReadFailure ? { codexNativeAgentTurnExecutionReadFailure: executionReadFailure } : {}),
@@ -219,48 +292,196 @@ async function readCurrentCodexNativeActivity(
 					const loaded = z
 						.object({ data: z.array(z.string()), nextCursor: z.string().nullable().optional() })
 						.parse(await port.request("thread/loaded/list", { cursor: null, limit: 100 }));
-					if (!loaded.data.includes(identity.nativeSessionId)) return null;
+					if (!loaded.data.includes(identity.nativeSessionId))
+						return reconciliation
+							? { events: [], cursor, promptSubmissionAcceptanceReconciliation: reconciliation }
+							: null;
 				}
-				const page = nativeTurnPageSchema.parse(
+				const recoveryBeforeRead = cursor?.fullMessagePageReadRecovery;
+				// 一次只定位或完整读取一页；先证明前驱仍在分支中，再按旧到新消费保存的页书签。
+				const expectedFullReadFrame =
+					recoveryBeforeRead?.phase === "reading_full_pages"
+						? recoveryBeforeRead.summaryPagesPendingFullRead.at(-1)
+						: undefined;
+				const summaryPageCursor =
+					recoveryBeforeRead?.phase === "locating_predecessor"
+						? recoveryBeforeRead.nextSummaryPageCursor
+						: (expectedFullReadFrame?.summaryPageCursor ?? null);
+				const summaryPage = nativeTurnPageSchema.parse(
 					await port.request("thread/turns/list", {
 						threadId: identity.nativeSessionId,
-						cursor: null,
+						cursor: summaryPageCursor,
 						limit: MAX_RECENT_CODEX_NATIVE_ACTIVITY_TURNS,
 						sortDirection: "desc",
-						itemsView: "full",
+						itemsView: "summary",
 					}),
 				);
-				const turns = [...page.data].reverse();
-				const predecessorIndex = cursor?.predecessorTurnId
-					? turns.findIndex((turn) => turn.id === cursor.predecessorTurnId)
-					: -1;
-				const isBaseline = !cursor || (cursor.predecessorTurnId !== null && predecessorIndex < 0);
-				const seen = new Set(cursor?.seenEventIds ?? []);
-				const eligibleTurns = isBaseline ? turns : turns.slice(Math.max(0, predecessorIndex));
-				// 超长当前回合缺少可完整保留的消息游标时保持未知，不能因逐出旧 ID 而重报接受。
+				const summaryPageFrame = describeCodexFullMessageSummaryPage(summaryPageCursor, summaryPage);
 				if (
-					eligibleTurns.reduce((count, turn) => count + turn.items.length, 0) >
-					MAX_REMEMBERED_NATIVE_ACTIVITY_EVENT_IDS
+					expectedFullReadFrame &&
+					expectedFullReadFrame.turnIdSequenceDigest !== summaryPageFrame.turnIdSequenceDigest
 				) {
-					// 独立证明输入就绪不初始化活动基线；超预算时保留原游标，首次读取仍为 null。
-					return { events: [], cursor, ...independentObservations };
+					// 页布局已经变化，旧书签不能证明当前分支；保留已消费位置，从最新页重新定位。
+					const resetCursor = cursor ? { ...cursor, fullMessagePageReadRecovery: undefined } : null;
+					return {
+						events: [],
+						cursor: resetCursor,
+						...independentObservations,
+						promptSubmissionAcceptanceReconciliation: reconciliation,
+						...codexFullMessageReadContinuation(resetCursor, true),
+						nativeActivityProjectionReadFailure: "原生回合页布局已变化，自动重新定位待补前驱。",
+					};
 				}
+				const summaryTurns = [...summaryPage.data].reverse();
+				const predecessorIndex = cursor?.predecessorTurnId
+					? summaryTurns.findIndex((turn) => turn.id === cursor.predecessorTurnId)
+					: -1;
+				let fullMessagePageReadRecovery = recoveryBeforeRead;
+				if (
+					cursor?.acceptedSummaryUserInputEventIdsPendingFullRead !== undefined &&
+					cursor.predecessorTurnId !== null &&
+					predecessorIndex < 0 &&
+					!expectedFullReadFrame &&
+					recoveryBeforeRead?.phase !== "establishing_rewind_baseline" &&
+					(summaryPage.nextCursor || recoveryBeforeRead?.phase === "locating_predecessor")
+				) {
+					const newerSummaryPages =
+						recoveryBeforeRead?.phase === "locating_predecessor" ? recoveryBeforeRead.newerSummaryPages : [];
+					if (
+						summaryPage.nextCursor &&
+						(!summaryPage.data.length ||
+							[...newerSummaryPages, summaryPageFrame].some(
+								(frame) => frame.summaryPageCursor === summaryPage.nextCursor,
+							))
+					)
+						throw new Error("原生回合分页没有向前推进，保留恢复位置并退避重试。");
+					const nextCursor = {
+						...cursor,
+						fullMessagePageReadRecovery: summaryPage.nextCursor
+							? {
+									phase: "locating_predecessor" as const,
+									nextSummaryPageCursor: summaryPage.nextCursor,
+									newerSummaryPages: [...newerSummaryPages, summaryPageFrame],
+								}
+							: { phase: "establishing_rewind_baseline" as const },
+					};
+					return {
+						events: [],
+						cursor: nextCursor,
+						...independentObservations,
+						promptSubmissionAcceptanceReconciliation: reconciliation,
+						...codexFullMessageReadContinuation(nextCursor, true),
+					};
+				}
+				if (recoveryBeforeRead?.phase === "locating_predecessor" && predecessorIndex >= 0)
+					fullMessagePageReadRecovery = {
+						phase: "reading_full_pages",
+						summaryPagesPendingFullRead: [...recoveryBeforeRead.newerSummaryPages, summaryPageFrame],
+					};
+				const isPagedFullRead = fullMessagePageReadRecovery?.phase === "reading_full_pages";
+				const isBaseline =
+					recoveryBeforeRead?.phase === "establishing_rewind_baseline" ||
+					!cursor ||
+					(!isPagedFullRead && cursor.predecessorTurnId !== null && predecessorIndex < 0);
+				// 首次只读取最新回合建立基线；之后只读取前驱起的新增前缀，避免每次搬运旧工具历史。
+
+				const fullReadLimit = isBaseline ? 1 : Math.max(1, summaryTurns.length - Math.max(0, predecessorIndex));
+				let fullPage = summaryPage;
+				let fullReadFailure: string | undefined;
+				try {
+					fullPage = nativeTurnPageSchema.parse(
+						await port.request("thread/turns/list", {
+							threadId: identity.nativeSessionId,
+							cursor: summaryPageCursor,
+							limit: fullReadLimit,
+							sortDirection: "desc",
+							itemsView: "full",
+						}),
+					);
+					if (fullPage.data.length < Math.min(fullReadLimit, summaryPage.data.length))
+						throw new Error("完整原生回合页尚未覆盖待核验前驱，保留恢复水位。");
+				} catch (error) {
+					fullReadFailure = error instanceof Error ? error.message : String(error);
+					fullPage = summaryPage;
+					// 冷启动仍须完整建基线；已有前驱时，新回合首条输入的 summary 证据可以独立落地。
+					if (isBaseline)
+						return {
+							events: [],
+							cursor,
+							...independentObservations,
+							promptSubmissionAcceptanceReconciliation: reconciliation,
+							...codexFullMessageReadContinuation(cursor, false),
+							nativeActivityProjectionReadFailure: fullReadFailure,
+						};
+				}
+
+				const fullTurns = fullPage.data.slice(0, fullReadLimit);
+				if (fullTurns.some((turn, index) => turn.id !== summaryPage.data[index]?.id))
+					return {
+						events: [],
+						cursor,
+						...independentObservations,
+						...codexFullMessageReadContinuation(cursor, false),
+						nativeActivityProjectionReadFailure: "summary 与 full 原生回合位置不一致，等待重新核验。",
+					};
+				const turns = fullTurns.reverse();
+				const seen = new Set(cursor?.seenEventIds ?? []);
+				const acceptedSummaryUserInputEventIdsPendingFullRead = new Set(
+					cursor?.acceptedSummaryUserInputEventIdsPendingFullRead ?? [],
+				);
+				const eligibleTurns = isBaseline ? turns.slice(-1) : turns;
+				const activityBudgetExceeded =
+					eligibleTurns.reduce((count, turn) => count + turn.items.length, 0) >
+					MAX_REMEMBERED_NATIVE_ACTIVITY_EVENT_IDS;
+
 				const events: NativeAgentConversationTranscriptActivityObservation[] = [];
 				for (const turn of eligibleTurns) {
+					const predecessorUserInputIndex =
+						turn.id === cursor?.predecessorTurnId && cursor.lastAcceptedUserInputItemId
+							? turn.items.findIndex(
+									(item) => item.id === cursor.lastAcceptedUserInputItemId && item.type === "userMessage",
+								)
+							: -1;
 					const firstUserInputIndex = turn.items.findIndex((item) => item.type === "userMessage");
 					const firstUserInput = turn.items[firstUserInputIndex];
 					const hasModelResponseAfterFirstUserInput =
 						firstUserInputIndex >= 0 &&
 						turn.items.slice(firstUserInputIndex + 1).some(isCodexNativeModelResponseItem);
-					for (const item of turn.items) {
+					for (const [itemIndex, item] of turn.items.entries()) {
 						const nativeItemIdentity = `${identity.nativeSessionId}:${turn.id}:${item.id}`;
 						const eventId =
 							item.type === "userMessage"
 								? `codex:${nativeItemIdentity}`
 								: `codex:${nativeItemIdentity}:${createHash("sha256").update(serializeCodexNativeItemSemanticActivity(item)).digest("hex")}`;
-						if (seen.has(eventId)) continue;
+						if (
+							seen.has(eventId) ||
+							(item.type === "userMessage" && acceptedSummaryUserInputEventIdsPendingFullRead.has(eventId))
+						)
+							continue;
 						seen.add(eventId);
 						if (isBaseline) continue;
+						if (item.type === "userMessage") {
+							if (
+								activityBudgetExceeded &&
+								turn.id === cursor?.predecessorTurnId &&
+								cursor.lastAcceptedUserInputItemId === undefined
+							)
+								continue;
+							// 用户消息有独立位置水位，不因工具条目挤出 512 个去重 ID 而重复或丢失接受。
+							if (
+								turn.id === cursor?.predecessorTurnId &&
+								cursor.lastAcceptedUserInputItemId !== undefined &&
+								cursor.lastAcceptedUserInputItemId !== null &&
+								(predecessorUserInputIndex < 0 || itemIndex <= predecessorUserInputIndex)
+							)
+								continue;
+						} else if (
+							activityBudgetExceeded ||
+							// 分页补读只补用户接受；旧工具历史留作基线，不以发现时刻刷新当前活动。
+							isPagedFullRead ||
+							(cursor?.activityProjectionWasOverBudget && turn.id === cursor.predecessorTurnId)
+						)
+							continue;
 						let activityKind: RuntimeLastEffectiveAgentConversationActivityObservation["activityKind"] | null =
 							null;
 						if (item.type === "userMessage") activityKind = "accepted_user_input";
@@ -325,16 +546,47 @@ async function readCurrentCodexNativeActivity(
 									: {}),
 								...(prompt ? { submittedPromptText: prompt.text } : {}),
 							});
+						if (activityKind === "accepted_user_input" && fullReadFailure)
+							acceptedSummaryUserInputEventIdsPendingFullRead.add(eventId);
 					}
 				}
+				if (!fullReadFailure && fullMessagePageReadRecovery?.phase === "reading_full_pages") {
+					const remainingSummaryPages = fullMessagePageReadRecovery.summaryPagesPendingFullRead.slice(0, -1);
+					fullMessagePageReadRecovery = remainingSummaryPages.length
+						? { phase: "reading_full_pages", summaryPagesPendingFullRead: remainingSummaryPages }
+						: undefined;
+				} else if (!fullReadFailure) fullMessagePageReadRecovery = undefined;
+				const nextCursor: Extract<NativeAgentConversationActivityReadCursor, { transport: "codex_control" }> = {
+					transport: "codex_control",
+					activityProjectionWasOverBudget: fullReadFailure
+						? cursor?.activityProjectionWasOverBudget
+						: activityBudgetExceeded || isPagedFullRead,
+					// summary 只证明首条输入；完整位置须等 full 覆盖后再推进，避免跳过旧回合 steering。
+					predecessorTurnId: fullReadFailure ? (cursor?.predecessorTurnId ?? null) : (turns.at(-1)?.id ?? null),
+					lastAcceptedUserInputItemId: fullReadFailure
+						? cursor?.lastAcceptedUserInputItemId
+						: (turns
+								.at(-1)
+								?.items.slice()
+								.reverse()
+								.find((item) => item.type === "userMessage")?.id ?? null),
+					...(fullReadFailure || fullMessagePageReadRecovery
+						? {
+								acceptedSummaryUserInputEventIdsPendingFullRead: [
+									...acceptedSummaryUserInputEventIdsPendingFullRead,
+								],
+							}
+						: {}),
+					...(fullMessagePageReadRecovery ? { fullMessagePageReadRecovery } : {}),
+					seenEventIds: rememberEventIds(seen),
+				};
 				return {
 					events,
+					promptSubmissionAcceptanceReconciliation: reconciliation,
+					...(fullReadFailure ? { nativeActivityProjectionReadFailure: fullReadFailure } : {}),
 					...independentObservations,
-					cursor: {
-						transport: "codex_control",
-						predecessorTurnId: turns.at(-1)?.id ?? null,
-						seenEventIds: rememberEventIds(seen),
-					},
+					cursor: nextCursor,
+					...codexFullMessageReadContinuation(nextCursor, !fullReadFailure),
 				};
 			},
 			{
@@ -346,11 +598,13 @@ async function readCurrentCodexNativeActivity(
 		),
 	).catch((error: unknown) => {
 		// 消息投影读取失败不能吞掉已取得的轻量执行状态，也不消费活动游标。
-		if (execution)
+		if (execution || reconciliation || cursor?.acceptedSummaryUserInputEventIdsPendingFullRead !== undefined)
 			return {
 				events: [],
 				cursor,
 				...independentObservations,
+				promptSubmissionAcceptanceReconciliation: reconciliation,
+				...codexFullMessageReadContinuation(cursor, false),
 				nativeActivityProjectionReadFailure: error instanceof Error ? error.message : String(error),
 			};
 		throw error;
