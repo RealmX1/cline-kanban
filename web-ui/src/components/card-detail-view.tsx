@@ -17,6 +17,7 @@ import {
 	Maximize2,
 	MessageSquare,
 	Minimize2,
+	Monitor,
 	X,
 } from "lucide-react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
@@ -40,6 +41,7 @@ import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/q
 import { ReadOnlyTaskConversationHistoryPanel } from "@/components/detail-panels/read-only-task-conversation-history-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
@@ -68,6 +70,8 @@ import { MobileFocusViewIdleCollapseControllerProvider } from "@/hooks/use-mobil
 import type { StoredPrompt } from "@/hooks/use-prompt-library";
 import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
 import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
+import { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
+import type { TaskWorkbenchModule } from "@/resize/focus-view-desktop-panel-arrangement";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
 import { clampBetween } from "@/resize/resize-persistence";
@@ -453,11 +457,12 @@ function WorkspaceChangesStaleDataWarning({
 	);
 }
 
-type MobileTab = "chat" | "sessions" | "prompts" | "commands" | "queue" | "diff" | "files";
+type MobileTab = "chat" | "sessions" | "prompts" | "commands" | "queue" | "diff" | "files" | "visualizations";
 
 const MOBILE_DEFAULT_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "sessions", label: "Sessions", icon: <List size={14} /> },
+	{ id: "visualizations", label: "可视化", icon: <Monitor size={14} /> },
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
 	{ id: "commands", label: "Commands", icon: <FileText size={14} /> },
 	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
@@ -879,6 +884,51 @@ export function CardDetailView({
 	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
+	const [visualizationWorkbenchSelection, setVisualizationWorkbenchSelection] = useState<{
+		slot: 0 | 1;
+		module: TaskWorkbenchModule;
+		requestKey: number;
+		persistSelection: boolean;
+	}>();
+	const [visualizationOverridesWorkspaceChanges, setVisualizationOverridesWorkspaceChanges] = useState(false);
+	const visualizationRequestSequence = useRef(0);
+	const showAutomaticVisualizationPreview = useCallback(() => {
+		setMobileTab("visualizations");
+		setVisualizationOverridesWorkspaceChanges(true);
+		setVisualizationWorkbenchSelection({
+			slot: 1,
+			module: "task_visualizations",
+			requestKey: ++visualizationRequestSequence.current,
+			persistSelection: false,
+		});
+	}, []);
+	const taskVisualizations = useTaskVisualizationArtifacts({
+		workspaceId: currentProjectId,
+		taskId: selection.card.id,
+		observeBrowser: !taskLookupWorkbenchContent && !isDoneTaskReadOnly,
+		onAutomaticPreview: showAutomaticVisualizationPreview,
+	});
+	const taskVisualizationPanel = (
+		<TaskVisualizationArtifactsPanel
+			workspaceId={currentProjectId}
+			taskId={selection.card.id}
+			controller={taskVisualizations}
+			onClosePreview={() => {
+				taskVisualizations.dismissAutomaticPreview();
+				setMobileTab("chat");
+				setVisualizationOverridesWorkspaceChanges(false);
+				setVisualizationWorkbenchSelection({
+					slot: 1,
+					module: "prompt_tools",
+					requestKey: ++visualizationRequestSequence.current,
+					persistSelection: false,
+				});
+			}}
+		/>
+	);
+	useEffect(() => {
+		setVisualizationOverridesWorkspaceChanges(false);
+	}, [currentProjectId, selection.card.id]);
 	const terminalThemeColors = useTerminalThemeColors();
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
 	// 每次「显式选中」（文件树点击 / 父级主动设置）递增，作为告知 DiffViewerPanel 应展开+滚动的信号。
@@ -1699,6 +1749,7 @@ export function CardDetailView({
 
 	if (isMobile) {
 		const handleMobileTabChange = (tab: MobileTab) => {
+			if (tab !== "visualizations") taskVisualizations.dismissAutomaticPreview();
 			setMobileTab(tab);
 			if (isDetailUtilityTab(tab)) {
 				setDetailUtilityTab(tab);
@@ -1771,6 +1822,12 @@ export function CardDetailView({
 							style={{ display: mobileTab === "chat" ? "flex" : "none" }}
 						>
 							{agentChatPanel}
+						</div>
+						<div
+							className="min-h-0 min-w-0 flex-1 flex-col"
+							style={{ display: mobileTab === "visualizations" ? "flex" : "none" }}
+						>
+							{taskVisualizationPanel}
 						</div>
 						{/* Sessions panel + 本会话 findings（同位下方的独立可折叠 section） */}
 						<div
@@ -2004,7 +2061,7 @@ export function CardDetailView({
 									/>
 								) : null}
 								<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
-									{isTaskChangesSidebarOpen ? (
+									{isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges ? (
 										<div className="flex min-h-0 flex-1 flex-col">
 											<div className="flex min-h-0 flex-1 flex-col">
 												<DiffToolbar
@@ -2088,9 +2145,22 @@ export function CardDetailView({
 									) : null}
 									<div
 										className="min-h-0 min-w-0 flex-1 flex-col"
-										style={{ display: isTaskChangesSidebarOpen ? "none" : "flex" }}
+										style={{
+											display:
+												isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges
+													? "none"
+													: "flex",
+										}}
 									>
 										<TaskWorkbench
+											moduleSelectionResetKey={mobileFocusedTaskIdentity}
+											moduleSelectionRequest={visualizationWorkbenchSelection}
+											onModuleSelectionChange={(module) => {
+												if (module !== "task_visualizations") {
+													taskVisualizations.dismissAutomaticPreview();
+													setVisualizationOverridesWorkspaceChanges(false);
+												}
+											}}
 											queueAnnouncement={queuedPromptRestartReminderAnnouncement}
 											onOpenQueue={() => handleDetailUtilityTabChange("queue")}
 											isBelowAgent={isWorkbenchBelowAgent}
@@ -2122,6 +2192,7 @@ export function CardDetailView({
 														</>
 													) : null,
 												prompt_tools: detailUtilityPanel,
+												task_visualizations: taskVisualizationPanel,
 											}}
 										/>
 									</div>

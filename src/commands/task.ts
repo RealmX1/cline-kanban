@@ -89,6 +89,7 @@ import {
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
 import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
+import { registerTaskVisualizationCommand } from "./task-visualization";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
 	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
@@ -278,9 +279,9 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 
 export function createRuntimeTrpcClient(
 	workspaceId: string | null,
-	clientOptions: { timeoutMs?: number; waitForRuntimeRestartBeforeRetrying?: boolean } = {},
+	clientOptions: { retryWhileKanbanRuntimeRestarts?: boolean; requestTimeoutMs?: number } = {},
 ) {
-	const trpcTimeoutMs = clientOptions.timeoutMs ?? resolveCliTrpcTimeoutMs();
+	const trpcTimeoutMs = clientOptions.requestTimeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -299,14 +300,14 @@ export function createRuntimeTrpcClient(
 				}),
 				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
 				fetch: (url, options) => {
-					const request = async () => {
+					const send = async () => {
 						const runtimeFetch = await getRuntimeFetch();
 						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
 						return runtimeFetch(url, { ...options, signal });
 					};
-					return clientOptions.waitForRuntimeRestartBeforeRetrying === false
-						? request()
-						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(request);
+					return clientOptions.retryWhileKanbanRuntimeRestarts === false
+						? send()
+						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(send);
 				},
 			}),
 		],
@@ -1876,6 +1877,7 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
+	registerTaskVisualizationCommand(task);
 
 	task
 		.command("list")
@@ -2304,8 +2306,8 @@ export function registerTaskCommand(program: Command): void {
 	registerTaskRvfHistoryCommand(task, {
 		queryRuntime: (workspaceId, input, timeoutMs) =>
 			createRuntimeTrpcClient(workspaceId, {
-				timeoutMs,
-				waitForRuntimeRestartBeforeRetrying: false,
+				requestTimeoutMs: timeoutMs,
+				retryWhileKanbanRuntimeRestarts: false,
 			}).runtime.getTaskRvfHistory.query(input),
 		runTaskCommand,
 	});

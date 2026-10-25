@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
+} from "./task-visualization-artifact-contract";
+
+export * from "./task-visualization-artifact-contract";
+
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
@@ -2936,6 +2945,8 @@ export const runtimeStateStreamPromptLibraryUpdatedMessageSchema = z.object({
 });
 
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
 	z.object({
 		type: z.literal("task_lookup_conversation_updated"),
 		conversationId: z.string().uuid(),
@@ -2987,6 +2998,8 @@ export const runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSc
 });
 // 浏览器 → 服务端的状态流消息（其余消息都是服务端 → 浏览器）。
 export const runtimeStateStreamClientMessageSchema = z.discriminatedUnion("type", [
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
 	runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema,
 ]);
 export type RuntimeStateStreamClientMessage = z.infer<typeof runtimeStateStreamClientMessageSchema>;
