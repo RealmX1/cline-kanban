@@ -23,7 +23,6 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
-	RuntimeTaskChatSendRequest,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -502,7 +501,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
 	let rvfAutomaticCloseoutPromptDeliveryValidator:
-		| ((scope: RuntimeTrpcWorkspaceScope, input: RuntimeTaskChatSendRequest) => Promise<void>)
+		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["validateCloseoutPromptDelivery"]
+		| undefined;
+	let settleRvfCloseoutPromptTerminalDelivery:
+		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["settleCloseoutPromptTerminalDelivery"]
 		| undefined;
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: findRuntimeSessionSummary,
@@ -530,7 +532,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					resolveClineTaskSessionLaunchConfig: async () =>
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-					onProgrammaticTerminalDeliverySettled,
+					onProgrammaticTerminalDeliverySettled: (outcome) => {
+						onProgrammaticTerminalDeliverySettled?.(outcome);
+						if (request.source === "rvf_automatic_closeout")
+							void settleRvfCloseoutPromptTerminalDelivery?.(
+								scope,
+								request,
+								outcome.status === "delivered_and_submit_confirmed",
+							).catch((error) => deps.warn(`收尾终端投递登记尚待对账：${String(error)}`));
+					},
 					programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
 					validateBeforeTerminalWrite:
@@ -540,7 +550,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 									if (request.source === "rvf_automatic_closeout") {
 										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
 											throw new Error("自动收尾投递门尚未就绪。");
-										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request, phase);
 									}
 								}
 							: undefined,
@@ -903,6 +913,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	pauseAutomaticRvfCloseoutForStoppedTask = rvfAutomaticCloseoutApi.pauseForExplicitStop;
 	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
+	settleRvfCloseoutPromptTerminalDelivery = rvfAutomaticCloseoutApi.settleCloseoutPromptTerminalDelivery;
 
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
 		getTerminalManager: getScopedTerminalManager,
