@@ -10,6 +10,7 @@ import {
 	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useRecentTaskWorktreeChangesFilter } from "@/hooks/use-recent-task-worktree-changes-filter";
 import { fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon } from "@/runtime/cross-project-recently-active-task-switcher-query";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
@@ -38,6 +39,7 @@ export type CrossProjectTaskSwitcherExtendedActivityHorizonLoadState =
 export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel
 	extends CrossProjectTaskSwitcherFocusViewSectionVisibility {
 	sections: CrossProjectTaskSwitcherSections;
+	sectionsBeforeRecentWorktreeChangesFilter: CrossProjectTaskSwitcherSections;
 	nowMs: number;
 	unreadHandoffEntryKeys: ReadonlySet<string>;
 	remainingSectionOrderingMode: CrossProjectTaskSwitcherRemainingSectionOrderingMode;
@@ -56,6 +58,10 @@ export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel
 	setSelectedRecentTaskStageFilters: (filters: readonly CrossProjectTaskSwitcherRecentTaskStageFilter[]) => void;
 	selectedRecentProjectWorkspaceIds: readonly string[];
 	setSelectedRecentProjectWorkspaceIds: (workspaceIds: readonly string[]) => void;
+	showsOnlyRecentTasksWithWorktreeChanges: boolean;
+	setShowsOnlyRecentTasksWithWorktreeChanges: (showsOnly: boolean) => void;
+	recentTaskWorktreeChangesFilterPendingCount: number;
+	recentTaskWorktreeChangesFilterUnavailableCount: number;
 	recentProjectFilterOptions: readonly { workspaceId: string; projectName: string; projectPath: string }[];
 	extendedActivityHorizonLoadState: CrossProjectTaskSwitcherExtendedActivityHorizonLoadState;
 	requestEntriesWithinExtendedActivityHorizon: () => void;
@@ -165,6 +171,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		readonly CrossProjectTaskSwitcherRecentTaskStageFilter[]
 	>(["in_progress_and_review"]);
 	const [selectedRecentProjectWorkspaceIds, setSelectedRecentProjectWorkspaceIds] = useState<readonly string[]>([]);
+	const [showsOnlyRecentTasksWithWorktreeChanges, setShowsOnlyRecentTasksWithWorktreeChanges] = useState(false);
 	const recentProjectFilterOptions = useMemo(
 		() =>
 			projects
@@ -289,7 +296,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 			collectCrossProjectTaskSwitcherEntriesInProjects(projects, entriesWithinExtendedActivityHorizon, Date.now()),
 		[projects, entriesWithinExtendedActivityHorizon],
 	);
-	const liveSections = useMemo(
+	const sectionsBeforeRecentWorktreeChangesFilter = useMemo(
 		() =>
 			assignCrossProjectTaskSwitcherSections({
 				entriesInProjects,
@@ -310,10 +317,38 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 			selectedRecentProjectWorkspaceIds,
 		],
 	);
+	const recentTaskWorktreeChangesFilter = useRecentTaskWorktreeChangesFilter({
+		entries: sectionsBeforeRecentWorktreeChangesFilter.remainingSection.entries,
+		currentProjectId,
+		isEnabled: showsOnlyRecentTasksWithWorktreeChanges,
+	});
+	const liveSections = useMemo(
+		() =>
+			showsOnlyRecentTasksWithWorktreeChanges
+				? {
+						...sectionsBeforeRecentWorktreeChangesFilter,
+						remainingSection: {
+							...sectionsBeforeRecentWorktreeChangesFilter.remainingSection,
+							entries: sectionsBeforeRecentWorktreeChangesFilter.remainingSection.entries.filter(
+								({ workspaceId, entry }) =>
+									recentTaskWorktreeChangesFilter.matchingEntryKeys.has(
+										buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId),
+									),
+							),
+						},
+					}
+				: sectionsBeforeRecentWorktreeChangesFilter,
+		[
+			sectionsBeforeRecentWorktreeChangesFilter,
+			showsOnlyRecentTasksWithWorktreeChanges,
+			recentTaskWorktreeChangesFilter,
+		],
+	);
 	const recentSectionOrderingConfigurationKey = JSON.stringify([
 		remainingSectionOrderingMode,
 		selectedRecentTaskStageFilters,
 		selectedRecentProjectWorkspaceIds,
+		showsOnlyRecentTasksWithWorktreeChanges,
 	]);
 	const sections = useMemo(() => {
 		if (recentSectionKeyboardNavigationOrderLock?.configurationKey !== recentSectionOrderingConfigurationKey) {
@@ -370,6 +405,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 
 	return {
 		sections,
+		sectionsBeforeRecentWorktreeChangesFilter,
 		nowMs,
 		unreadHandoffEntryKeys,
 		remainingSectionOrderingMode,
@@ -390,6 +426,10 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		setSelectedRecentTaskStageFilters,
 		selectedRecentProjectWorkspaceIds,
 		setSelectedRecentProjectWorkspaceIds,
+		showsOnlyRecentTasksWithWorktreeChanges,
+		setShowsOnlyRecentTasksWithWorktreeChanges,
+		recentTaskWorktreeChangesFilterPendingCount: recentTaskWorktreeChangesFilter.pendingCount,
+		recentTaskWorktreeChangesFilterUnavailableCount: recentTaskWorktreeChangesFilter.unavailableCount,
 		recentProjectFilterOptions,
 		extendedActivityHorizonLoadState,
 		requestEntriesWithinExtendedActivityHorizon,
