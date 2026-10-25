@@ -11,6 +11,8 @@ import type {
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
 	RuntimeAgentSessionTransportSwitchRequest,
 	RuntimeAgentSessionTransportSwitchResponse,
+	RuntimeAllProjectsTaskGroupQueryRequest,
+	RuntimeAllProjectsTaskGroupQuerySnapshot,
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
@@ -233,6 +235,8 @@ import {
 	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
+	runtimeAllProjectsTaskGroupQueryRequestSchema,
+	runtimeAllProjectsTaskGroupQuerySnapshotSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
@@ -1090,6 +1094,9 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse>;
 	};
 	projectsApi: {
+		getAllProjectsTaskGroupQuerySnapshot: (
+			input: RuntimeAllProjectsTaskGroupQueryRequest,
+		) => Promise<RuntimeAllProjectsTaskGroupQuerySnapshot>;
 		setProjectVisualIdentity: (input: SetProjectVisualIdentityRequest) => Promise<ProjectVisualIdentity>;
 		resetProjectVisualIdentityToDefault: (input: { workspaceId: string }) => Promise<ProjectVisualIdentity>;
 		readProjectIconImage: (input: {
@@ -2426,6 +2433,10 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx }) => {
 				return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
 			}),
+		getAllProjectsTaskGroupQuerySnapshot: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeAllProjectsTaskGroupQueryRequestSchema)
+			.output(runtimeAllProjectsTaskGroupQuerySnapshotSchema)
+			.query(({ ctx, input }) => ctx.projectsApi.getAllProjectsTaskGroupQuerySnapshot(input)),
 		add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeProjectAddRequestSchema)
 			.output(runtimeProjectAddResponseSchema)

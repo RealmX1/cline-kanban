@@ -85,6 +85,7 @@ import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import { reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending } from "./report-rvf-closeout-execution-result-while-delivery-confirmation-pending";
+import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -1888,25 +1889,14 @@ export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
 	registerTaskVisualizationCommand(task);
 
-	task
-		.command("list")
-		.description("List Kanban tasks for a workspace.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.option(
-			"--column <column>",
-			"Filter column: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
-		.action(async (options: { projectPath?: string; column?: ListTaskColumn }) => {
-			await runTaskCommand(
-				async () =>
-					await listTasks({
-						cwd: process.cwd(),
-						projectPath: options.projectPath,
-						column: options.column,
-					}),
-			);
-		});
+	registerAllProjectsTaskGroupQueryCommands(task, {
+		querySnapshot: (input, signal) =>
+			createRuntimeTrpcClient(null, {
+				retryWhileKanbanRuntimeRestarts: false,
+			}).projects.getAllProjectsTaskGroupQuerySnapshot.query(input, { signal }),
+		listSingleProjectTasks: (options) => listTasks({ cwd: process.cwd(), ...options }),
+		runTaskCommand,
+	});
 
 	task
 		.command("get")

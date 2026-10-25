@@ -22,6 +22,7 @@ import {
 	DEFAULT_CLI_TELEMETRY_FLUSH_MS,
 	installCliFatalErrorHandlers,
 	installCliHardTimeoutIfNeeded,
+	installCliTaskGroupWatchInterruptionGuard,
 	registerCliFatalErrorReporter,
 	registerCliProcessExit,
 	safeErrorMessage,
@@ -845,6 +846,7 @@ async function run(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const isServerStyleInvocation = shouldAutoOpenBrowserTabForInvocation(argv);
 	const cancelCliHardTimeout = installCliHardTimeoutIfNeeded(argv, isServerStyleInvocation);
+	const watchInterruptionGuard = installCliTaskGroupWatchInterruptionGuard(argv);
 	let invocationFailed = false;
 	try {
 		const program = createProgram(argv);
@@ -869,8 +871,14 @@ async function run(): Promise<void> {
 						}),
 				),
 			);
+			const exitCode = watchInterruptionGuard?.signal.aborted
+				? watchInterruptionGuard.signal.reason === "SIGTERM"
+					? 143
+					: 130
+				: (process.exitCode ?? 0);
+			watchInterruptionGuard?.dispose();
 			cancelCliHardTimeout();
-			process.exit(process.exitCode ?? 0);
+			process.exit(exitCode);
 		}
 	}
 }

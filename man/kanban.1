@@ -53,6 +53,24 @@ Subcommands:
 .RI [ --project-path " " path ]
 .RI [ --column " " backlog|in_progress|review ]
 .br
+.B list --all-projects
+.RI [ --group " " pinned|running|cache_warm_awaiting_user|recent ]
+.RI [ --query " " text ]
+.RI [ --recent-days " " 7|30 ]
+.br
+.B watch --all-projects
+.RI [ --group " " pinned|running|cache_warm_awaiting_user|recent ]
+.RI [ --query " " text ]
+.RI [ --column " " column ]
+.RI [ --recent-days " " 7|30 ]
+.RI [ --interval-ms " " milliseconds ]
+.RI [ --exit-when-empty ]
+.br
+全项目查询复用 All Projects 分组。watch 按 NDJSON 持续输出；显式指定分组后，
+--exit-when-empty 在连续两次完整空结果时退出，仅表示筛选结果清空，不代表任务完成。
+默认间隔 5000ms；读取失败自动重试，持续不可完整查询 60 秒后退出非零。
+--all-projects 与 --project-path 互斥；原有单项目 list 的 JSON 结构保持兼容。
+.br
 .B create
 .B --prompt
 .RI " " text
