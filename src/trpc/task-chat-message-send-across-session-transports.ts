@@ -16,18 +16,27 @@ import type {
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
 } from "../core/api-contract";
+import { terminalDeliveryReceiptSchema } from "../core/api-contract";
 import { parseTaskChatSendRequest } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
 } from "../core/task-message-injection-ledger";
+import {
+	beginManagedTaskPromptDelivery,
+	buildManagedTaskPromptDeliveryOrigin,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
+} from "../state/managed-task-prompt-delivery-coordinator";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import type { TaskChatInputDeliveryOutcomeObserver, TerminalSessionManager } from "../terminal/session-manager";
 import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../terminal/stash-task-terminal-input-box-into-prompt-library";
 import type { RuntimeTrpcWorkspaceScope } from "./app-router";
 
 export interface SendTaskChatMessageAcrossSessionTransportsDependencies {
+	// 真实 runtime 启用；裸 transport 单测不读写用户的持久工作区。
+	recordManagedTaskPromptDeliveries?: boolean;
+	managedTerminalDeliveryCancellationKey?: string;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
@@ -70,6 +79,75 @@ function buildTerminalTaskChatDeliveryMessage(input: {
 }
 
 export async function sendTaskChatMessageAcrossSessionTransports(
+	deps: SendTaskChatMessageAcrossSessionTransportsDependencies,
+	workspaceScope: RuntimeTrpcWorkspaceScope,
+	input: RuntimeTaskChatSendRequest,
+): Promise<RuntimeTaskChatSendResponse> {
+	if (!deps.recordManagedTaskPromptDeliveries || isClineClearSlashCommand(input.text))
+		return sendTaskChatMessageThroughSelectedTransport(deps, workspaceScope, input);
+	try {
+		parseTaskChatSendRequest(input);
+		const acp = await deps.getScopedAcpTaskSessionService(workspaceScope);
+		const terminal = await deps.getScopedTerminalManager(workspaceScope);
+		const summary = acp.getSummary(input.taskId) ?? terminal.getSummary(input.taskId);
+		const registration = await beginManagedTaskPromptDelivery({
+			workspaceId: workspaceScope.workspaceId,
+			taskId: input.taskId,
+			workspaceTaskId: summary?.taskConversationSessionMetadata?.workspaceTaskId,
+			text: input.text,
+			origin: buildManagedTaskPromptDeliveryOrigin(input),
+			deliveryRequestId: input.deliveryRequestId,
+			idempotencyKey: input.idempotencyKey,
+			injectionLedgerTaskId: deps.programmaticInjectionLedgerTaskId,
+			imageAttachments: input.images,
+			summary,
+			cancellationSupported:
+				summary != null &&
+				!isRuntimeAgentSessionSummaryDrivenByAcpProtocol(summary) &&
+				summary.sessionTransport !== "in_process_cline_sdk",
+		});
+		const { handle, entry } = registration;
+		if (!registration.newlyRegistered)
+			return {
+				ok: entry.deliveryState !== "settled_failed" && entry.deliveryState !== "cancelled",
+				deliveryId: handle.deliveryId,
+				summary: summary ?? null,
+				message: buildTerminalTaskChatDeliveryMessage(input),
+				terminalDelivery: terminalDeliveryReceiptSchema.parse(
+					entry.managedDelivery?.terminalDeliveryReceipt ?? {
+						status: "accepted_pending_submit_confirmation",
+						reason: null,
+					},
+				),
+			};
+		const response = await sendTaskChatMessageThroughSelectedTransport(
+			{
+				...deps,
+				managedTerminalDeliveryCancellationKey: input.idempotencyKey ?? handle.deliveryId,
+				onProgrammaticTerminalDeliverySettled: (outcome) => {
+					try {
+						deps.onProgrammaticTerminalDeliverySettled?.(outcome);
+					} finally {
+						settleManagedTaskPromptDeliveryWithoutBlocking(handle, outcome);
+					}
+				},
+			},
+			workspaceScope,
+			input,
+		);
+		if (response.terminalDelivery && response.terminalDelivery.status !== "accepted_pending_submit_confirmation")
+			await handle.settle(response.terminalDelivery).catch(() => undefined);
+		else if (!response.ok)
+			await handle
+				.settle({ status: "delivery_failed", reason: "no_active_terminal_session" }, response.error)
+				.catch(() => undefined);
+		return { ...response, deliveryId: handle.deliveryId };
+	} catch (error) {
+		return { ok: false, summary: null, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function sendTaskChatMessageThroughSelectedTransport(
 	deps: SendTaskChatMessageAcrossSessionTransportsDependencies,
 	workspaceScope: RuntimeTrpcWorkspaceScope,
 	input: RuntimeTaskChatSendRequest,
@@ -228,7 +306,7 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
-						idempotencyKey: injectionIdempotencyKey,
+						idempotencyKey: injectionIdempotencyKey ?? deps.managedTerminalDeliveryCancellationKey,
 						mayAutoStashAbsentHumanInputBox:
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 						preemptivelyStashHumanInputBox: async (taskId) => {

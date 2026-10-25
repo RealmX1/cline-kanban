@@ -95,9 +95,63 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		});
 	}
 
+	function selectMessageType(label: string) {
+		const filter = container.querySelector("select");
+		expect(filter).not.toBeNull();
+		act(() => {
+			if (filter) {
+				filter.value = label;
+				filter.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+	}
+
 	it("空队列给一句引导", () => {
 		render(createControllerDouble([]));
-		expect(container.textContent).toContain("Queue a prompt from the Prompts tab");
+		expect(container.textContent).toContain("当前没有待投递消息");
+	});
+
+	it("即时注入与启动提示分型展示，可筛选，且不显示重排或合并操作", () => {
+		const controller = createControllerDouble([
+			projection("immediate", {
+				deliveryState: "handed_to_transport",
+				managedDelivery: {
+					messageType: "programmatic_injection",
+					sourceLabel: "RVF",
+					deliveryStrategy: "immediate",
+					imageAttachmentCount: 1,
+					terminalDeliveryReceipt: null,
+				},
+			}),
+			projection("startup", {
+				deliveryState: "settled_failed",
+				lastDeliveryFailureNote: "尚未确认",
+				managedDelivery: {
+					messageType: "session_startup",
+					sourceLabel: "ACP",
+					deliveryStrategy: "session_startup",
+					imageAttachmentCount: 0,
+					terminalDeliveryReceipt: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" },
+				},
+			}),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("自动注入");
+		expect(container.textContent).toContain("启动提示");
+		expect(container.textContent).toContain("未确认送达");
+		expect(container.textContent).toContain("1 个附件");
+		expect(buttonsWithLabel(container, "Move queued prompt up")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Link with next queued prompt")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "重新排队")).toHaveLength(0);
+		const filter = container.querySelector("select");
+		act(() => {
+			if (filter) {
+				filter.value = "自动注入";
+				filter.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+		expect(container.querySelector('[data-queued-prompt-entry-id="startup"]')).toBeNull();
+		expect(container.querySelector('[data-queued-prompt-entry-id="immediate"]')).not.toBeNull();
 	});
 
 	it("直接展示入队时间、尝试次数和最近尝试开始时间，推送后更新", () => {
@@ -236,7 +290,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			row.getAttribute("data-queued-prompt-entry-id"),
 		);
 		expect(rows).toEqual(["q1", "q2"]);
-		expect(container.textContent).toContain("Waiting for the agent to finish its current turn.");
+		expect(container.textContent).toContain("等待 agent 结束当前回合。");
 	});
 
 	it("首行不能上移、末行不能下移；中间点击发出对应意图", () => {
@@ -261,6 +315,62 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			linkButtons[0]?.click();
 		});
 		expect(controller.setQueuedPromptDeliveryMergeWithNext).toHaveBeenCalledWith("q1", true);
+	});
+
+	it.each([false, true])("筛选隐藏 A/B/C 中间的 B 后，A/C 不显示合并控件或连线（A 原合并值：%s）", (isMerged) => {
+		const controller = createControllerDouble([
+			projection("A", { deliverTogetherWithNextQueuedEntry: isMerged }),
+			projection("B", { sourcePromptLibraryEntryId: "library-entry" }),
+			projection("C"),
+		]);
+		render(controller);
+		selectMessageType("人工发送");
+		expect(
+			Array.from(container.querySelectorAll("[data-queued-prompt-entry-id]")).map((row) =>
+				row.getAttribute("data-queued-prompt-entry-id"),
+			),
+		).toEqual(["A", "C"]);
+		expect(buttonsWithLabel(container, "Link with next queued prompt")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Unlink from next queued prompt")).toHaveLength(0);
+		for (const queueEntryId of ["A", "C"]) {
+			expect(container.querySelector(`[data-queued-prompt-entry-id="${queueEntryId}"]`)?.className).not.toContain(
+				"border-l-accent",
+			);
+		}
+		expect(controller.setQueuedPromptDeliveryMergeWithNext).not.toHaveBeenCalled();
+
+		selectMessageType("all");
+		expect(buttonsWithLabel(container, "Link with next queued prompt")).toHaveLength(isMerged ? 1 : 2);
+		expect(buttonsWithLabel(container, "Unlink from next queued prompt")).toHaveLength(isMerged ? 1 : 0);
+		act(() => {
+			buttonsWithLabel(
+				container,
+				isMerged ? "Unlink from next queued prompt" : "Link with next queued prompt",
+			)[0]?.click();
+		});
+		expect(controller.setQueuedPromptDeliveryMergeWithNext).toHaveBeenCalledWith("A", !isMerged);
+	});
+
+	it("筛选仍保留真实相邻且可见的两条记录的合并操作", () => {
+		const controller = createControllerDouble([
+			projection("hidden-library", { sourcePromptLibraryEntryId: "library-entry" }),
+			projection("human-1", { deliverTogetherWithNextQueuedEntry: true }),
+			projection("human-2"),
+		]);
+		render(controller);
+		selectMessageType("人工发送");
+		const unlinkButtons = buttonsWithLabel(container, "Unlink from next queued prompt");
+		expect(unlinkButtons).toHaveLength(1);
+		expect(unlinkButtons[0]?.disabled).toBe(false);
+		for (const queueEntryId of ["human-1", "human-2"]) {
+			expect(container.querySelector(`[data-queued-prompt-entry-id="${queueEntryId}"]`)?.className).toContain(
+				"border-l-accent",
+			);
+		}
+		act(() => {
+			unlinkButtons[0]?.click();
+		});
+		expect(controller.setQueuedPromptDeliveryMergeWithNext).toHaveBeenCalledWith("human-1", false);
 	});
 
 	// 那一串在认领时就冻结了：此时改开关，界面显示的与实际发出去的会不一致。
@@ -288,9 +398,9 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			}),
 		]);
 		render(controller);
-		expect(container.textContent).toContain("Queued before Kanban restarted");
+		expect(container.textContent).toContain("此消息在重启前排入");
 		act(() => {
-			buttonsWithLabel(container, "Keep")[0]?.click();
+			buttonsWithLabel(container, "保留")[0]?.click();
 		});
 		expect(controller.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart).toHaveBeenCalledWith(["q1"]);
 	});
@@ -305,9 +415,9 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			}),
 		]);
 		render(controller);
-		expect(container.textContent).toContain("Recent");
+		expect(container.textContent).toContain("最近结果");
 		expect(container.textContent).toContain("It may still be sitting in the input box.");
-		const requeueButtons = buttonsWithLabel(container, "Requeue");
+		const requeueButtons = buttonsWithLabel(container, "重新排队");
 		expect(requeueButtons).toHaveLength(1);
 		act(() => {
 			requeueButtons[0]?.click();
@@ -324,7 +434,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			projection("human-2"),
 		]);
 		render(controller);
-		expect(container.textContent).toContain("Automated · rvf-out-of-band-decision-point");
+		expect(container.textContent).toContain("rvf-out-of-band-decision-point");
 		const toggles = [
 			...buttonsWithLabel(container, "Link with next queued prompt"),
 			...buttonsWithLabel(container, "Unlink from next queued prompt"),

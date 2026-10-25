@@ -1,14 +1,10 @@
-import {
-	isRuntimeAgentSessionRenderedAsConversationPanel,
-	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
-} from "@runtime-agent-catalog";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
 import { buildTaskGitActionPrompt, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
-	RuntimeAgentId,
+	ManagedTaskPromptDeliveryOrigin,
 	RuntimeConfigResponse,
 	RuntimeGitSyncAction,
 	RuntimeTaskSessionSummary,
@@ -48,7 +44,7 @@ interface UseGitActionsInput {
 	sendTaskChatMessage: (
 		taskId: string,
 		text: string,
-		options?: { mode?: "plan" | "act" },
+		options?: { mode?: "plan" | "act"; deliveryOrigin?: ManagedTaskPromptDeliveryOrigin },
 	) => Promise<{ ok: boolean; message?: string }>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 	// 按 taskId 取当前活会话摘要。Commit / Open PR 的投递通道判定必须读它而不是卡片 agentId：
@@ -97,7 +93,6 @@ export function useGitActions({
 	board,
 	selectedCard,
 	runtimeProjectConfig,
-	sendTaskSessionInput,
 	sendTaskChatMessage,
 	fetchTaskWorkspaceInfo,
 	taskConversationSessionSummariesByTaskId,
@@ -207,24 +202,7 @@ export function useGitActions({
 		return next;
 	}, [taskGitActionLoadingByTaskId]);
 
-	// Commit / Open PR 的投递通道必须按**该任务当前这条活会话实际在用的通道**判定，而不是工作区默认
-	// agent，也不是卡片 agentId，更不是「是不是 cline」：会话以对话面板呈现的通道（Cline SDK 与 ACP）
-	// 走 sendTaskChatMessage，只有 PTY 通道才粘贴进终端。判错会把指令粘进不存在的 PTY。
-	// omp 一个 agentId 对应两条通道，所以有活会话时必须读会话自己盖的通道章；没有活会话才回落
-	// 到按 agentId 预判（此时两条通道都不存在，粘不粘得进去都是后话）。
-	const resolveShouldUseChatChannelForTaskGitActions = useCallback(
-		(taskId: string, taskAgentId: RuntimeAgentId | null | undefined): boolean => {
-			const { taskConversationSessionSummariesByTaskId } = latestTaskGitActionStateRef.current;
-			const sessionSummary = taskConversationSessionSummariesByTaskId[taskId];
-			if (sessionSummary) {
-				return isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary);
-			}
-			return isRuntimeAgentSessionRenderedAsConversationPanel(
-				taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null,
-			);
-		},
-		[runtimeProjectConfig?.selectedAgentId],
-	);
+	// 快捷动作一律作为完整消息交给 runtime，transport 分派与回执由统一出口负责。
 
 	const runTaskGitAction = useCallback(
 		async (taskId: string, action: TaskGitAction, source: TaskGitActionSource) => {
@@ -295,38 +273,15 @@ export function useGitActions({
 							}
 						: null,
 				});
-				if (resolveShouldUseChatChannelForTaskGitActions(taskId, selection.card.agentId)) {
-					const sent = await sendTaskChatMessage(taskId, prompt, { mode: "act" });
-					if (!sent.ok) {
-						showAppToast({
-							intent: "danger",
-							icon: "warning-sign",
-							message: sent.message ?? "Could not send instructions to the task chat session.",
-							timeout: 7000,
-						});
-						return false;
-					}
-					return true;
-				}
-				const typed = await sendTaskSessionInput(taskId, prompt, { appendNewline: false, mode: "paste" });
-				if (!typed.ok) {
-					showAppToast({
-						intent: "danger",
-						icon: "warning-sign",
-						message: typed.message ?? "Could not send instructions to the task session.",
-						timeout: 7000,
-					});
-					return false;
-				}
-				await new Promise<void>((resolve) => {
-					window.setTimeout(resolve, 200);
+				const sent = await sendTaskChatMessage(taskId, prompt, {
+					mode: "act",
+					deliveryOrigin: { messageType: "task_action", sourceLabel: action },
 				});
-				const submitted = await sendTaskSessionInput(taskId, "\r", { appendNewline: false });
-				if (!submitted.ok) {
+				if (!sent.ok) {
 					showAppToast({
 						intent: "danger",
 						icon: "warning-sign",
-						message: submitted.message ?? "Could not submit instructions to the task session.",
+						message: sent.message ?? "无法投递任务操作指令。",
 						timeout: 7000,
 					});
 					return false;
@@ -340,9 +295,7 @@ export function useGitActions({
 			fetchTaskWorkspaceInfo,
 			runtimeProjectConfig,
 			sendTaskChatMessage,
-			sendTaskSessionInput,
 			setTaskGitActionLoading,
-			resolveShouldUseChatChannelForTaskGitActions,
 			taskGitActionLoadingByTaskId,
 		],
 	);

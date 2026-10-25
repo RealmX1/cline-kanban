@@ -322,6 +322,7 @@ function HookHarness({
 	selectedTaskId = null,
 	setSelectedTaskIdOverride,
 	sendTaskSessionInput = NOOP_SEND_TASK_INPUT,
+	sendTaskChatMessage = NOOP_SEND_TASK_INPUT,
 	initialSessions,
 	captureCacheWarmTaskFocusNavigationAfterValidationMove,
 	onSnapshot,
@@ -333,6 +334,7 @@ function HookHarness({
 	selectedTaskId?: string | null;
 	setSelectedTaskIdOverride?: Dispatch<SetStateAction<string | null>>;
 	sendTaskSessionInput?: UseTaskSessionsResult["sendTaskSessionInput"];
+	sendTaskChatMessage?: UseTaskSessionsResult["sendTaskChatMessage"];
 	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
 	captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
@@ -358,6 +360,7 @@ function HookHarness({
 		setIsGitHistoryOpen,
 		fetchTaskWorkspaceInfo: NOOP_FETCH_WORKSPACE_INFO,
 		sendTaskSessionInput,
+		sendTaskChatMessage,
 		readyForReviewNotificationsEnabled: false,
 		taskGitActionLoadingByTaskId: {},
 		runAutoReviewGitAction: NOOP_RUN_AUTO_REVIEW,
@@ -508,11 +511,12 @@ describe("useBoardInteractions", () => {
 		};
 	}
 
-	it("仅填入启用严格粘贴，显式发送保留程序化投递与单独提交", async () => {
+	it("仅填入保持草稿，显式发送经过统一消息出口", async () => {
 		mockUnavailableProgrammaticCardMoves();
 		const sendTaskSessionInput = vi
 			.fn<UseTaskSessionsResult["sendTaskSessionInput"]>()
 			.mockResolvedValue({ ok: true });
+		const sendTaskChatMessage = vi.fn(async () => ({ ok: true }));
 		let latestSnapshot: HookSnapshot | null = null;
 		await act(async () => {
 			root.render(
@@ -520,6 +524,7 @@ describe("useBoardInteractions", () => {
 					board={createBoard()}
 					setBoard={() => {}}
 					sendTaskSessionInput={sendTaskSessionInput}
+					sendTaskChatMessage={sendTaskChatMessage}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -540,12 +545,10 @@ describe("useBoardInteractions", () => {
 			await vi.advanceTimersByTimeAsync(200);
 			await sending;
 		});
-		expect(sendTaskSessionInput).toHaveBeenNthCalledWith(1, "task-1", "审查指令", {
-			appendNewline: false,
-			mode: "paste",
+		expect(sendTaskChatMessage).toHaveBeenCalledExactlyOnceWith("task-1", "审查指令", {
+			deliveryOrigin: { messageType: "human_message", sourceLabel: "评审意见" },
 		});
-		expect(sendTaskSessionInput).toHaveBeenNthCalledWith(2, "task-1", "\r", { appendNewline: false });
-		expect(sendTaskSessionInput).toHaveBeenCalledTimes(2);
+		expect(sendTaskSessionInput).not.toHaveBeenCalled();
 	});
 
 	it("回调身份跨 board/session 更新稳定，旧回调仍读取最新卡片及会话", async () => {

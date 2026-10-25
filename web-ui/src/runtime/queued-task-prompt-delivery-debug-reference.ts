@@ -69,6 +69,9 @@ export function buildQueuedTaskPromptDeliveryDebugReference(input: {
 				}
 			: {}),
 		deliveryState: projectedSnapshot?.deliveryState ?? metadata.deliveryState,
+		...(metadata.managedDelivery
+			? { deliveryId: projection.queueEntryId, managedDelivery: metadata.managedDelivery }
+			: {}),
 		dispatchBlockReason:
 			projectedSnapshot?.dispatchBlockReason ?? (candidate ? null : projection.dispatchBlockReason),
 		deliveryAttemptCount: metadata.deliveryAttemptCount,

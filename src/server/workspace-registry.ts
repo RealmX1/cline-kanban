@@ -414,6 +414,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		const loading = (async () => {
 			const manager = new TerminalSessionManager({
+				enableManagedTaskPromptDeliveryRecording: true,
 				enableManagedCodexConversationStorageForNewSessions: true,
 				prepareCodexNativeSessionControlHostLaunch,
 				restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,

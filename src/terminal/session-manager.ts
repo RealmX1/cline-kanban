@@ -1,6 +1,7 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
+
 import { randomUUID } from "node:crypto";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
@@ -97,6 +98,11 @@ import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+import {
+	beginManagedTaskPromptDelivery,
+	type ManagedTaskPromptDeliveryHandle,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
+} from "../state/managed-task-prompt-delivery-coordinator";
 import {
 	createAgentOutputSubstanceMemory,
 	detectFreshSubstantiveAgentOutputFromStripped,
@@ -567,6 +573,35 @@ function clearTaskChatInputDeliveryContentionVisibility(entry: SessionEntry): bo
 	return true;
 }
 
+type ProgrammaticDeliveryReceiptOwner = Pick<ActiveProcessState, "programmaticDeliveryReceipt">;
+
+// 自动首发必须先于已登记的 task-chat 写入，但不能夺走其尚未写出的 intent 与回执。
+// 自动 writer 只持有本次 PTY 确认；task-chat 的单飞槽与投递代际保持原样。
+const automaticPasteSubmissionReceiptByActiveProcess = new WeakMap<
+	ProgrammaticDeliveryReceiptOwner,
+	PendingProgrammaticDeliveryReceipt
+>();
+
+function resolveTerminalSubmissionProgrammaticDeliveryReceipt(
+	active: ProgrammaticDeliveryReceiptOwner,
+): PendingProgrammaticDeliveryReceipt | null {
+	return automaticPasteSubmissionReceiptByActiveProcess.get(active) ?? active.programmaticDeliveryReceipt;
+}
+
+function settleOwnedProgrammaticDeliveryReceipt(
+	active: ProgrammaticDeliveryReceiptOwner,
+	receipt: PendingProgrammaticDeliveryReceipt | null,
+	status: TerminalDeliveryStatus,
+	reason: TerminalDeliveryFailureReason | null,
+	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
+): void {
+	if (!receipt) return;
+	if (active.programmaticDeliveryReceipt === receipt) active.programmaticDeliveryReceipt = null;
+	if (automaticPasteSubmissionReceiptByActiveProcess.get(active) === receipt)
+		automaticPasteSubmissionReceiptByActiveProcess.delete(active);
+	settleProgrammaticDeliveryReceipt(receipt, status, reason, codexNativePromptDeliveryEvidence);
+}
+
 // 会话侧统一注销入口：把 active 上的登记结掉并清空槽位。
 function settleActiveProgrammaticDelivery(
 	active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null },
@@ -574,13 +609,21 @@ function settleActiveProgrammaticDelivery(
 	reason: TerminalDeliveryFailureReason | null,
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
 ): void {
-	settleProgrammaticDeliveryReceipt(
+	settleOwnedProgrammaticDeliveryReceipt(
+		active,
 		active.programmaticDeliveryReceipt,
 		status,
 		reason,
 		codexNativePromptDeliveryEvidence,
 	);
-	active.programmaticDeliveryReceipt = null;
+	// 会话结束或新 intent 取代确认链时，自动 writer 也已失去继续提交的资格。
+	if (reason === "session_ended_before_delivery" || reason === "superseded_by_later_delivery")
+		settleOwnedProgrammaticDeliveryReceipt(
+			active,
+			automaticPasteSubmissionReceiptByActiveProcess.get(active) ?? null,
+			status,
+			reason,
+		);
 }
 
 // 「提交确认」这一族出口的专用注销入口：只对**已经写进 PTY、正在等确认**的那条投递下结论。
@@ -594,10 +637,11 @@ function settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
 ): void {
-	if (active.programmaticDeliveryReceipt?.phase !== "awaiting_submit_confirmation") {
+	const receipt = resolveTerminalSubmissionProgrammaticDeliveryReceipt(active);
+	if (receipt?.phase !== "awaiting_submit_confirmation") {
 		return;
 	}
-	settleActiveProgrammaticDelivery(active, status, reason);
+	settleOwnedProgrammaticDeliveryReceipt(active, receipt, status, reason);
 }
 
 interface SessionEntry {
@@ -1169,6 +1213,7 @@ function takeLastLines(text: string, lineCount: number): string {
 }
 
 export interface TerminalSessionManagerOptions {
+	enableManagedTaskPromptDeliveryRecording?: boolean;
 	deliverCodexNativePromptWithoutChangingComposer?: typeof deliverCodexNativePromptWithoutChangingComposer;
 	// 真实运行时由 workspace registry 启用；裸 manager 可继续作为不访问用户配置的进程编排器使用。
 	enableManagedCodexConversationStorageForNewSessions?: boolean;
@@ -1197,6 +1242,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {}
 
 	private readonly entries = new Map<string, SessionEntry>();
+	private readonly startupDeliveryRegistrationFailureCountByActiveProcess = new WeakMap<ActiveProcessState, number>();
+	private readonly managedArgumentStartupDeliveryByTaskId = new Map<
+		string,
+		{ handle: ManagedTaskPromptDeliveryHandle; text: string; runtimeSessionIncarnationId: string }
+	>();
 	// 接受事件去重独立于最新提交 marker；弱引用随活体释放，完整身份隔离原生会话与进程代际。
 	private readonly recentlyAcceptedAgentConversationInputEventIdentitiesByActiveProcess = new WeakMap<
 		ActiveProcessState,
@@ -1236,6 +1286,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (active.deferredStartupPromptText === null) {
 			return false;
 		}
+		if ((this.startupDeliveryRegistrationFailureCountByActiveProcess.get(active) ?? 0) >= 3) return false;
 		const trustPromptVisible =
 			active.workspaceTrustBuffer !== null &&
 			((entry.summary.agentId === "codex" && hasCodexWorkspaceTrustPrompt(active.workspaceTrustBuffer)) ||
@@ -1259,9 +1310,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// Deferred input 已经注入，wall-clock 兜底 timer 不再需要，立即清除以避免
 		// 在已经 idle 的 session 上空跑回调。
 		clearStartupReadinessTimer(active);
-		this.writePasteSubmissionWithConfirm(taskId, active, deferredStartupPromptText, {
+		const written = await this.writePasteSubmissionWithConfirm(taskId, active, deferredStartupPromptText, {
 			waitsForStartupCompletion: true,
 		});
+		if (!written) return false;
+		this.startupDeliveryRegistrationFailureCountByActiveProcess.delete(active);
 		logTuiFreezeWarning(
 			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredStartupPromptText.length}`,
 		);
@@ -1269,6 +1322,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	// 是否为该任务挂载输出反应引擎：开关开启（默认开）且有 reaction 适用于该 agent。
+	private settleUnconfirmedManagedArgumentStartupDelivery(entry: SessionEntry): void {
+		const startup = this.managedArgumentStartupDeliveryByTaskId.get(entry.summary.taskId);
+		if (!startup || startup.runtimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId) return;
+		this.managedArgumentStartupDeliveryByTaskId.delete(entry.summary.taskId);
+		settleManagedTaskPromptDeliveryWithoutBlocking(startup.handle, {
+			status: "delivery_failed",
+			reason: "submit_confirmation_budget_exhausted",
+		});
+	}
+
 	private resolveOutputReactionEngine(request: StartTaskSessionRequest): OutputReactionEngine | null {
 		if (request.autoContinueOnConnectionDropEnabled === false) {
 			return null;
@@ -1576,9 +1639,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	// 实际把续跑指令注入 PTY：bracketed paste 引用续跑指令文件；Codex 追加回车。
-	private submitConnectionDropContinuation(
+	private async submitConnectionDropContinuation(
 		taskId: string,
-	): ConnectionRetryContinuationSubmissionResult | Promise<ConnectionRetryContinuationSubmissionResult> {
+	): Promise<ConnectionRetryContinuationSubmissionResult> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -1593,7 +1656,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 经写后确认闭环注入：paste 框架与提交 CR 分两次写、第二次以 TUI 摄入为门；若 CR 仍被重绘吞掉（框卡 idle、
 		// 续跑不发送），确认 tick 会补发裸 `\r`——绝不重发整段 paste（重 paste 正是连接中断路径旧的「文本翻倍」病）。
 		// Codex 置位 awaitingCodexPromptAfterEnter 由该闭环统一处理，且跟着第二次写（提交 CR）而非框架。
-		this.writePasteSubmissionWithConfirm(taskId, active, line);
+		const written = await this.writePasteSubmissionWithConfirm(taskId, active, line);
+		if (!written) return { outcome: "target_invalidated" };
 		return { outcome: "written_to_terminal", terminalWrittenAtMs: now() };
 	}
 
@@ -1607,7 +1671,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (firstErrorAt === undefined) return { outcome: "target_invalidated" };
 		const retryEpisodeGeneration = this.connectionRetryEpisodeGenerationByActiveProcess.get(active);
 		const originalGeneration = active.submitConfirmGeneration;
-		const originalProgrammaticDeliveryReceipt = active.programmaticDeliveryReceipt;
+		let originalProgrammaticDeliveryReceipt = active.programmaticDeliveryReceipt;
 		const lastHumanInputAtBeforeNativeReadinessCheck = active.lastUserInputAt;
 		let pasteWritten = false;
 		let firstSubmitCarriageReturnState: ConnectionRetryContinuationFirstSubmitCarriageReturnState =
@@ -1688,7 +1752,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		await validateBeforeTerminalWrite();
 		if (!targetIsCurrent()) return { outcome: "target_invalidated" };
 		void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {});
-		this.writePasteSubmissionWithConfirm(
+		const written = await this.writePasteSubmissionWithConfirm(
 			taskId,
 			active,
 			buildNetworkInterruptionContinuationLine(getNetworkInterruptionResumeInstructionsPath()),
@@ -1699,6 +1763,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				},
 			},
 		);
+		if (!written) return { outcome: "target_invalidated" };
+		originalProgrammaticDeliveryReceipt = active.programmaticDeliveryReceipt;
 		pasteWritten = true;
 		return {
 			outcome: "written_to_terminal",
@@ -1863,8 +1929,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 三个 phase 都算「在途」：awaiting_readiness 尚未交给执行通道，另两个分别等待 PTY 提交确认
 	// 或 Codex 原生接受确认；单飞槽在确认完成前均不能被排队 prompt 抢走。
 	hasPendingProgrammaticTaskChatInputDelivery(taskId: string): boolean {
-		const receipt = this.entries.get(taskId)?.active?.programmaticDeliveryReceipt ?? null;
-		return receipt !== null && !receipt.settled;
+		const active = this.entries.get(taskId)?.active;
+		return (
+			active !== null &&
+			active !== undefined &&
+			[active.programmaticDeliveryReceipt, automaticPasteSubmissionReceiptByActiveProcess.get(active)].some(
+				(receipt) => receipt != null && !receipt.settled,
+			)
+		);
 	}
 
 	// 一次投递 attempt：就绪 ∧ 输入框空 才写 PTY；未就绪或框被人占着则隔 RECHECK_MS 再探，两条预算各自到点
@@ -1886,6 +1958,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		active.taskChatInputDeliveryTimer = null;
+		if (automaticPasteSubmissionReceiptByActiveProcess.has(active)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
 		const readiness = await this.resolveInteractivePromptReadiness(entry, plan.requiresCodexStartupPromptReady);
 		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
 		const currentEntry = this.entries.get(taskId);
@@ -1898,6 +1974,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// await 期间可能有更晚的投递（submitTaskChatInputWhenReady）已自增代际：本 attempt 已过时，
 		// 直接放弃——既不写旧文本也不重排，保证 last-write-wins 跨越 await 仍成立。
 		if (currentActive.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		if (automaticPasteSubmissionReceiptByActiveProcess.has(currentActive)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
 			return;
 		}
 		// Fix B 让位守卫：后台自动注入（deferWhileUserTurn=true）遇 agent **正在等用户拍板**（AskUserQuestion /
@@ -1984,6 +2064,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (activeAfterContentionRead.taskChatInputDeliveryGeneration !== generation) {
 			return;
 		}
+		if (automaticPasteSubmissionReceiptByActiveProcess.has(currentActive)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
+			return;
+		}
 		if (
 			entryAfterContentionRead.summary.agentId === "codex" &&
 			contention?.verdict !== "input_box_clear_for_programmatic_delivery"
@@ -2019,6 +2103,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			currentActive.taskChatInputDeliveryGeneration !== generation
 		)
 			return;
+		if (automaticPasteSubmissionReceiptByActiveProcess.has(currentActive)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
+			return;
+		}
 		// 框是空的（或读框拿不到结论）：本条投递不再挂在争用上，清掉挂起可见性再写。
 		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		// 程序化投递的是一条**已提交的用户轮**（task-chat 手动发送 / RVF followup），语义上等价于用户在
@@ -2050,7 +2138,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deliveryReceipt.phase = "awaiting_submit_confirmation";
 			deliveryReceipt.queuedBehindActiveAgentTurn = resolveSessionFacets(currentEntry.summary).turnOwner === "agent";
 		}
-		this.writePasteSubmissionWithConfirm(taskId, currentActive, text, {
+		await this.writePasteSubmissionWithConfirm(taskId, currentActive, text, {
 			retainsProgrammaticDeliveryReceipt: true,
 			validateBeforeTerminalWrite: plan.validateBeforeTerminalWrite,
 		});
@@ -2426,27 +2514,34 @@ export class TerminalSessionManager implements TerminalSessionService {
 		active: ActiveProcessState,
 		validateBeforeTerminalWrite: () => Promise<void>,
 		isCurrentGeneration: () => boolean,
+		originalReceipt: PendingProgrammaticDeliveryReceipt | null = active.programmaticDeliveryReceipt,
 	): Promise<boolean> {
 		const originalEntry = this.entries.get(taskId);
 		if (!originalEntry || originalEntry.active !== active || !isCurrentGeneration()) return false;
 		const originalIdentity = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(
 			originalEntry.summary,
 		);
-		const originalReceipt = active.programmaticDeliveryReceipt;
+		const stillOwnsOriginalReceipt = () =>
+			active.programmaticDeliveryReceipt === originalReceipt ||
+			automaticPasteSubmissionReceiptByActiveProcess.get(active) === originalReceipt;
 		const hasSameNativeIdentity = () => {
 			const currentEntry = this.entries.get(taskId);
 			return (
 				currentEntry?.active === active &&
 				isCurrentGeneration() &&
-				active.programmaticDeliveryReceipt === originalReceipt &&
+				stillOwnsOriginalReceipt() &&
 				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(currentEntry.summary) ===
 					originalIdentity
 			);
 		};
 		const settleOriginalReceiptAfterNativeIdentityChanged = () => {
-			if (active.programmaticDeliveryReceipt === originalReceipt && originalReceipt) {
-				active.programmaticDeliveryReceipt = null;
-				settleProgrammaticDeliveryReceipt(originalReceipt, "delivery_failed", "session_ended_before_delivery");
+			if (stillOwnsOriginalReceipt() && originalReceipt) {
+				settleOwnedProgrammaticDeliveryReceipt(
+					active,
+					originalReceipt,
+					"delivery_failed",
+					"session_ended_before_delivery",
+				);
 			}
 		};
 		try {
@@ -2457,22 +2552,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 				return false;
 			}
 			if (error instanceof NativeIndependentUserTurnMessageAlreadyAccepted) {
-				if (this.entries.get(taskId)?.active === active && isCurrentGeneration())
-					settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
-						active,
-						"delivered_and_submit_confirmed",
-						null,
-					);
+				if (originalReceipt?.phase === "awaiting_submit_confirmation")
+					settleOwnedProgrammaticDeliveryReceipt(active, originalReceipt, "delivered_and_submit_confirmed", null);
 				return false;
 			}
 			// 核验期间可能已被另一条投递取代；只结算仍属于本次的回执与可见性。
 			if (this.entries.get(taskId)?.active !== active || !isCurrentGeneration()) return false;
-			settleActiveProgrammaticDelivery(
+			settleOwnedProgrammaticDeliveryReceipt(
 				active,
+				originalReceipt,
 				"delivery_failed",
 				error instanceof NativeIndependentUserTurnDeliveryError
 					? error.reason
-					: active.programmaticDeliveryReceipt?.phase === "awaiting_readiness"
+					: originalReceipt?.phase === "awaiting_readiness"
 						? "cancelled_before_delivery"
 						: "submit_confirmation_budget_exhausted",
 			);
@@ -2503,7 +2595,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 「回执说失败、文本其实送达」，调用方按契约换新 key 重投就把同一段文本送进终端两次。故按 phase 分流。
 	// 不收 entry：本步只写框架，agent 形态（Codex enter 守卫）与它无关；需要 entry 的那一步在
 	// runSubmitCarriageReturnAfterPasteIngestionAttempt 里按 taskId 重新取，取到的才是写 CR 那一刻的会话。
-	private writePasteSubmissionWithConfirm(
+	private async writePasteSubmissionWithConfirm(
 		taskId: string,
 		active: ActiveProcessState,
 		text: string,
@@ -2513,7 +2605,93 @@ export class TerminalSessionManager implements TerminalSessionService {
 			validateBeforeTerminalWrite?: (() => Promise<void>) | null;
 			onFirstSubmitCarriageReturnWritten?: () => void;
 		},
-	): void {
+	): Promise<boolean> {
+		const entry = this.entries.get(taskId);
+		const workspaceId = entry?.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : undefined;
+		let automaticPasteSubmissionReceipt: PendingProgrammaticDeliveryReceipt | null = null;
+		if (
+			!options?.retainsProgrammaticDeliveryReceipt &&
+			this.terminalSessionManagerOptions.enableManagedTaskPromptDeliveryRecording &&
+			workspaceId
+		) {
+			const expectedGeneration = active.submitConfirmGeneration;
+			const expectedHumanInputAt = active.lastUserInputAt;
+			const expectedDeliveryGeneration = active.taskChatInputDeliveryGeneration;
+			const expectedNativeIdentity = entry
+				? buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(entry.summary)
+				: null;
+			let handle: ManagedTaskPromptDeliveryHandle;
+			try {
+				({ handle } = await beginManagedTaskPromptDelivery({
+					workspaceId,
+					taskId,
+					text,
+					workspaceTaskId: entry?.summary.taskConversationSessionMetadata?.workspaceTaskId,
+					origin: {
+						messageType: options?.waitsForStartupCompletion ? "session_startup" : "system_continuation",
+						sourceLabel: options?.waitsForStartupCompletion ? "初始提示" : "连接恢复续接",
+					},
+					deliveryStrategy: options?.waitsForStartupCompletion ? "session_startup" : "immediate",
+					summary: entry?.summary,
+				}));
+			} catch (error) {
+				// 这里只覆盖登记阶段，尚未写出任何字节，才允许恢复首发并有界重试。
+				if (
+					options?.waitsForStartupCompletion &&
+					this.entries.get(taskId)?.active === active &&
+					active.lastUserInputAt === expectedHumanInputAt &&
+					active.submitConfirmGeneration === expectedGeneration
+				) {
+					active.deferredStartupPromptText = text;
+					const failedCount = (this.startupDeliveryRegistrationFailureCountByActiveProcess.get(active) ?? 0) + 1;
+					this.startupDeliveryRegistrationFailureCountByActiveProcess.set(active, failedCount);
+					if (failedCount < 3) {
+						active.startupReadinessTimer = setTimeout(() => {
+							active.startupReadinessTimer = null;
+							void this.trySubmitDeferredStartupPrompt(taskId).catch((retryError) =>
+								logTuiFreezeWarning(
+									`managed-startup-registration-retry-failed taskId=${taskId} reason=${String(retryError)}`,
+								),
+							);
+						}, failedCount * 1000);
+						active.startupReadinessTimer.unref?.();
+					}
+				}
+				throw error;
+			}
+			const stillOwnsInputBeforePaste = () => {
+				const current = this.entries.get(taskId);
+				return (
+					current?.active === active &&
+					active.submitConfirmGeneration === expectedGeneration &&
+					active.lastUserInputAt === expectedHumanInputAt &&
+					active.taskChatInputDeliveryGeneration === expectedDeliveryGeneration &&
+					expectedNativeIdentity ===
+						buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(current.summary)
+				);
+			};
+			if (stillOwnsInputBeforePaste()) {
+				try {
+					await options?.validateBeforeTerminalWrite?.();
+				} catch (error) {
+					await handle.settle({ status: "delivery_failed", reason: "cancelled_before_delivery" }, String(error));
+					return false;
+				}
+			}
+			if (!stillOwnsInputBeforePaste()) {
+				await handle.settle({ status: "delivery_failed", reason: "cancelled_before_delivery" });
+				return false;
+			}
+			automaticPasteSubmissionReceipt = {
+				idempotencyKey: handle.deliveryId,
+				phase: "awaiting_submit_confirmation",
+				promptText: text,
+				outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
+				queuedBehindActiveAgentTurn: false,
+				settled: false,
+				observer: (outcome) => settleManagedTaskPromptDeliveryWithoutBlocking(handle, outcome),
+			};
+		}
 		if (!options?.retainsProgrammaticDeliveryReceipt) {
 			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
 				active,
@@ -2521,6 +2699,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				"submit_confirmation_budget_exhausted",
 			);
 		}
+		if (automaticPasteSubmissionReceipt)
+			automaticPasteSubmissionReceiptByActiveProcess.set(active, automaticPasteSubmissionReceipt);
 		// 分离写第一步：只写 bracketed paste 框架，**不带**提交用的 CR。
 		// 刻意**不**在这里置 awaitingCodexPromptAfterEnter：那个标志的语义是「回车刚发出去」，
 		// 必须跟着 CR（见 runSubmitCarriageReturnAfterPasteIngestionAttempt），不能跟着框架。
@@ -2548,6 +2728,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputChunkArrivalSequenceNumberAtPasteWrite: active.ptyOutputChunkArrivalSequenceNumber,
 			ingestionEvidenceDeadlineAt: now() + PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS,
 		});
+		return true;
 	}
 
 	// 排一次「TUI 摄入了没有」的探测。定时器仍占用 submitConfirmTimer 槽位：确认链与本探测在时间上首尾相接、
@@ -2602,7 +2783,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, ingestionWatch);
 			return;
 		}
-		const receiptBeforeSubmit = active.programmaticDeliveryReceipt;
+		const receiptBeforeSubmit = resolveTerminalSubmissionProgrammaticDeliveryReceipt(active);
 		const nativeIdentityBeforeSubmit = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(
 			entry.summary,
 		);
@@ -2611,15 +2792,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return (
 				current?.active === active &&
 				active.submitConfirmGeneration === generation &&
-				active.programmaticDeliveryReceipt === receiptBeforeSubmit &&
+				resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) === receiptBeforeSubmit &&
 				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(current.summary) ===
 					nativeIdentityBeforeSubmit
 			);
 		};
 		const rejectObsoleteSubmitTarget = () => {
-			if (receiptBeforeSubmit && active.programmaticDeliveryReceipt === receiptBeforeSubmit) {
-				active.programmaticDeliveryReceipt = null;
-				settleProgrammaticDeliveryReceipt(receiptBeforeSubmit, "delivery_failed", "session_ended_before_delivery");
+			if (
+				receiptBeforeSubmit &&
+				resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) === receiptBeforeSubmit
+			) {
+				settleOwnedProgrammaticDeliveryReceipt(
+					active,
+					receiptBeforeSubmit,
+					"delivery_failed",
+					"session_ended_before_delivery",
+				);
 			}
 		};
 		if (
@@ -2654,6 +2842,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				active,
 				ingestionWatch.validateBeforeTerminalWrite,
 				isOriginalSubmitTargetStillCurrent,
+				receiptBeforeSubmit,
 			))
 		)
 			return;
@@ -2661,11 +2850,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			rejectObsoleteSubmitTarget();
 			return;
 		}
-		if (active.programmaticDeliveryReceipt?.phase === "awaiting_submit_confirmation") {
-			active.programmaticDeliveryReceipt.nativeConversationIdentityImmediatelyBeforeFirstSubmitCarriageReturn ??=
+		if (receiptBeforeSubmit?.phase === "awaiting_submit_confirmation") {
+			receiptBeforeSubmit.nativeConversationIdentityImmediatelyBeforeFirstSubmitCarriageReturn ??=
 				nativeIdentityBeforeSubmit;
-			active.programmaticDeliveryReceipt.firstSubmitCarriageReturnAtEpochMs ??= now();
-			active.programmaticDeliveryReceipt.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
+			receiptBeforeSubmit.firstSubmitCarriageReturnAtEpochMs ??= now();
+			receiptBeforeSubmit.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
 				active.ptyOutputChunkArrivalSequenceNumber;
 		}
 		this.markAgentConversationPromptSubmissionPending(taskId);
@@ -2762,13 +2951,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const nativeIdentityBeforeConfirmation = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(
 			entry.summary,
 		);
-		const confirmationReceipt = active.programmaticDeliveryReceipt;
+		const confirmationReceipt = resolveTerminalSubmissionProgrammaticDeliveryReceipt(active);
 		const isOriginalConfirmationTargetStillCurrent = () => {
 			const current = this.entries.get(taskId);
 			return (
 				current?.active === active &&
 				active.submitConfirmGeneration === generation &&
-				active.programmaticDeliveryReceipt === confirmationReceipt &&
+				resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) === confirmationReceipt &&
 				(confirmationReceipt?.phase !== "awaiting_submit_confirmation" ||
 					confirmationReceipt.nativeConversationIdentityImmediatelyBeforeFirstSubmitCarriageReturn ===
 						nativeIdentityBeforeConfirmation) &&
@@ -2777,9 +2966,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 		};
 		const rejectObsoleteConfirmationTarget = () => {
-			if (confirmationReceipt && active.programmaticDeliveryReceipt === confirmationReceipt) {
-				active.programmaticDeliveryReceipt = null;
-				settleProgrammaticDeliveryReceipt(confirmationReceipt, "delivery_failed", "session_ended_before_delivery");
+			if (
+				confirmationReceipt &&
+				resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) === confirmationReceipt
+			) {
+				settleOwnedProgrammaticDeliveryReceipt(
+					active,
+					confirmationReceipt,
+					"delivery_failed",
+					"session_ended_before_delivery",
+				);
 			}
 		};
 		if (!isOriginalConfirmationTargetStillCurrent()) {
@@ -2805,6 +3001,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				active,
 				validateBeforeTerminalWrite,
 				isOriginalConfirmationTargetStillCurrent,
+				confirmationReceipt,
 			))
 		)
 			return;
@@ -2814,7 +3011,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		if (
 			entry.summary.agentConversationPromptSubmissionAcceptance?.status === "accepted" &&
-			active.programmaticDeliveryReceipt === null
+			resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) === null
 		)
 			return;
 
@@ -4607,6 +4804,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			});
 			this.emitSummary(restoringSummary);
 		}
+		let managedArgumentStartupRegistration: Awaited<ReturnType<typeof beginManagedTaskPromptDelivery>> | null = null;
 		let session: TerminalPtyProcessHandle;
 		// 「这条 PTY 在 entry.active 装载完成之前就退出了」的挂起事件。此刻还没有任何状态可更新，
 		// 直接丢弃会留下一条已死却仍标 running、且**永远等不到第二次退出事件**的会话。与输出侧的
@@ -4645,10 +4843,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (currentActive.session !== session) {
 				return;
 			}
+			this.settleUnconfirmedManagedArgumentStartupDelivery(currentEntry);
 			this.finalizeTaskAgentPtyProcessExit(request.taskId, currentEntry, currentActive, event);
 		};
 		const hostedTerminalPtyProcessSpawner = this.terminalSessionManagerOptions.hostedTerminalPtyProcessSpawner;
 		try {
+			managedArgumentStartupRegistration =
+				this.terminalSessionManagerOptions.enableManagedTaskPromptDeliveryRecording &&
+				request.workspaceId &&
+				request.prompt?.trim() &&
+				!request.resumeFromTrash &&
+				!request.resumePriorAgentConversationWithoutResendingPrompt &&
+				!launch.deferredStartupPromptText
+					? await beginManagedTaskPromptDelivery({
+							workspaceId: request.workspaceId,
+							taskId: request.taskId,
+							workspaceTaskId: request.workspaceTaskId,
+							text: request.prompt,
+							origin: { messageType: "session_startup", sourceLabel: "启动参数提交" },
+							deliveryStrategy: "session_startup",
+							imageAttachments: request.images,
+							summary: { ...entry.summary, runtimeSessionIncarnationId },
+						})
+					: null;
+			if (managedArgumentStartupRegistration)
+				this.managedArgumentStartupDeliveryByTaskId.set(request.taskId, {
+					handle: managedArgumentStartupRegistration.handle,
+					text: request.prompt ?? "",
+					runtimeSessionIncarnationId,
+				});
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
@@ -4705,6 +4928,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 终端实例都会自动续跑一次，而每次续跑失败又把空快照续上，环就是这么闭合的。
 			// 装一份写着失败原因的镜像同时解决两件事：环断了，用户也终于看得见为什么起不来。
 			const spawnFailureMessage = formatSpawnFailure(commandBinary, error);
+			if (managedArgumentStartupRegistration) {
+				this.managedArgumentStartupDeliveryByTaskId.delete(request.taskId);
+				settleManagedTaskPromptDeliveryWithoutBlocking(managedArgumentStartupRegistration.handle, {
+					status: "delivery_failed",
+					reason: "no_active_terminal_session",
+				});
+			}
 			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
 				entry,
 				request,
@@ -5509,17 +5739,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry: SessionEntry,
 		_modalDecisionObserved: boolean,
 	): void {
+		this.settleUnconfirmedManagedArgumentStartupDelivery(entry);
 		const active = entry.active;
 		if (!active) return;
 		clearSubmitConfirmTimer(active);
 		active.submitConfirmGeneration += 1;
 		active.deferredStartupPromptText = null;
 		clearStartupReadinessTimer(active);
-		const receipt = active.programmaticDeliveryReceipt;
-		if (receipt?.phase !== "awaiting_submit_confirmation") return;
 		// 同步摘下原回执，后续击键/新投递不能用其新输出再次确认这条已被接管的投递。
-		active.programmaticDeliveryReceipt = null;
-		settleProgrammaticDeliveryReceipt(receipt, "delivery_failed", "submit_confirmation_budget_exhausted");
+		settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+			active,
+			"delivery_failed",
+			"submit_confirmation_budget_exhausted",
+		);
 	}
 
 	writeInput(taskId: string, data: Buffer): RuntimeTaskSessionSummary | null {
@@ -6506,6 +6738,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			input.observedAtMs > now() + 60_000
 		)
 			return null;
+		const managedStartup = this.managedArgumentStartupDeliveryByTaskId.get(taskId);
+		if (
+			managedStartup &&
+			managedStartup.runtimeSessionIncarnationId === input.runtimeSessionIncarnationId &&
+			input.submittedPromptText?.replace(/\r\n/g, "\n").trim() === managedStartup.text.replace(/\r\n/g, "\n").trim()
+		) {
+			this.managedArgumentStartupDeliveryByTaskId.delete(taskId);
+			settleManagedTaskPromptDeliveryWithoutBlocking(managedStartup.handle, {
+				status: "delivered_and_submit_confirmed",
+				reason: null,
+			});
+		}
 		const previous = entry.summary.agentConversationPromptSubmissionAcceptance;
 		const acceptedEventIdentityKey = JSON.stringify([
 			input.runtimeSessionIncarnationId,
@@ -6522,7 +6766,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				previous.runtimeSessionIncarnationId === input.runtimeSessionIncarnationId)
 		)
 			return cloneSummary(entry.summary);
-		const receipt = entry.active.programmaticDeliveryReceipt;
+		const receipt = resolveTerminalSubmissionProgrammaticDeliveryReceipt(entry.active);
 		const capturedNativeCursor = receipt?.nativeConversationActivityCursorImmediatelyBeforeSubmit;
 		const isNewMessageAfterCapturedNativePredecessor =
 			capturedNativeCursor !== null &&
@@ -6606,6 +6850,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt(taskId, input.observedAtMs);
 		}
 		if (inputMatchesPendingProgrammaticReceipt && receipt) {
+			clearSubmitConfirmTimer(entry.active);
+			entry.active.submitConfirmGeneration += 1;
 			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
 				entry.active,
 				receipt.queuedBehindActiveAgentTurn

@@ -7,12 +7,15 @@ import { useCallback, useRef } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
-import { type ClineChatActionResult, useClineChatRuntimeActions } from "@/hooks/use-cline-chat-runtime-actions";
+import {
+	type ClineChatActionResult,
+	type SendClineChatMessageOptions,
+	useClineChatRuntimeActions,
+} from "@/hooks/use-cline-chat-runtime-actions";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskChatMessage,
-	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeTaskWorktreeMode,
@@ -105,7 +108,7 @@ export interface UseTaskSessionsResult {
 	sendTaskChatMessage: (
 		taskId: string,
 		text: string,
-		options?: { mode?: RuntimeTaskSessionMode },
+		options?: SendClineChatMessageOptions,
 	) => Promise<ClineChatActionResult>;
 	abortTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
 	cancelTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;

@@ -18,6 +18,7 @@ import type {
 	QueuedTaskPromptDispatchBlockReason,
 	RuntimeTaskSessionSummary,
 } from "./api-contract";
+import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "./managed-task-prompt-delivery";
 import {
 	hasReclaimableAgentSessionRuntime,
 	isAgentAwaitingModalUserDecision,
@@ -40,7 +41,11 @@ export function isQueuedTaskPromptDeliveryAwaitingDispatch(
 	entry: QueuedTaskPromptDeliveryEntry,
 	nowEpochMs: number,
 ): boolean {
-	return entry.deliveryState === "queued" && nowEpochMs < entry.expiresAt;
+	return (
+		isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+		entry.deliveryState === "queued" &&
+		nowEpochMs < entry.expiresAt
+	);
 }
 
 export interface QueuedTaskPromptDispatchEligibilityInput {
