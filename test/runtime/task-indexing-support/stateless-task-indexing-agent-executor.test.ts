@@ -445,3 +445,15 @@ describe("共享索引无状态执行器的隔离与返回校验", () => {
 		).toThrow("认证失败");
 	});
 });
+
+it("三种用途的共同 Context 前缀字节一致，用途指令只在末尾分化", () => {
+	const prompts = ["判断项目归属", "查卡第一阶段候选召回", "提出任务关系建议"].map((instructionText) =>
+		assembleStatelessTaskIndexingAgentPrompt({ ...controlledExecutorRequest, instructionText }),
+	);
+	expect(new Set(prompts.map((prompt) => prompt.stablePrefix)).size).toBe(1);
+	expect(new Set(prompts.map((prompt) => prompt.query)).size).toBe(3);
+	for (const prompt of prompts) {
+		expect(prompt.stablePrefix).toContain("禁止调用工具");
+		expect(prompt.stablePrefix).not.toContain("判断项目归属");
+	}
+});

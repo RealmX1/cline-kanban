@@ -2,9 +2,41 @@ import { describe, expect, it } from "vitest";
 import {
 	buildIndependentTaskCreationGenerationContext,
 	projectIndependentTaskCreationTranscript,
+	renderIndependentTaskCreationGenerationContext,
 } from "../../../src/independent-task-creation/conversation-context";
 
 describe("分出独立任务的生成上下文", () => {
+	it("先呈现当前范围与历史缺口，并用可读来源段落保留原文和引用", () => {
+		const historicalCloseoutInstruction = "不要开启新 RVF，直接提交并继续 base-branch-sync。";
+		const context = buildIndependentTaskCreationGenerationContext({
+			beforeSideSession: [{ role: "user", text: "当前研究先不实施", reference: "parent:1" }],
+			afterSideSession: [
+				{ role: "assistant", text: historicalCloseoutInstruction, reference: "side:2" },
+				{ role: "tool_reference", text: "工具结果见原始转录", reference: "side:3" },
+			],
+			userTaskDescription: "实现新任务并按本任务约定验证",
+			contextWarnings: ["来源工具结果仅有引用"],
+		});
+		expect(context).toMatch(/^## 本次分出说明\n\n实现新任务并按本任务约定验证/u);
+		expect(context.indexOf("来源工具结果仅有引用")).toBeLessThan(context.indexOf("parent:1"));
+		expect(context).toContain("### 来源记录 1：用户角色记录（须核对实际来源）\n\n来源引用：parent:1");
+		expect(context).toContain(`来源引用：side:2\n\n${historicalCloseoutInstruction}`);
+		expect(context).toContain("### 来源记录 2：工具引用（未包含工具结果正文）");
+		expect(context).toContain("不能直接成为新任务的规则");
+	});
+
+	it("持久化的旧版来源段落可直接复用，不改写历史正文或假装读取工具结果", () => {
+		const historicalContextSegment = "[assistant; source:1]\n原样保留 <tag> & 已有换行\n第二行";
+		const context = renderIndependentTaskCreationGenerationContext({
+			contextBeforeSideSession: historicalContextSegment,
+			contextAfterSideSession: "",
+			userTaskDescription: "",
+		});
+		expect(context).toContain(historicalContextSegment);
+		expect(context).toContain("未另行填写");
+		expect(context).toContain("未记录已知缺口。");
+		expect(context).toContain("无已捕获记录。");
+	});
 	it("Claude 已批准计划的调用正文与成功回执按真人决定保留，并保留原始引用", () => {
 		const plan = "批准前须保留的计划正文";
 		const approval = "User has approved your plan. You can now start coding.";

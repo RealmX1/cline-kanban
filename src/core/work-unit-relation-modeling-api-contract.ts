@@ -107,6 +107,7 @@ export const referenceRelationModelingSuggestionsResponseSchema = z.object({
 export const referenceRelationModelingEditorDraftSchema = z.object({
 	referenceRelationDrafts: z.array(referenceRelationModelingDraftSchema).max(50),
 	relationRevocations: z.array(referenceRelationModelingRevocationSchema).max(50),
+	createdTaskWorkspaceId: z.string().optional(),
 	createdTaskId: z.string().nullable(),
 	createdTaskCardSnapshot: runtimeBoardCardSchema.nullable().default(null),
 	modelingSubmissionId: z.string().min(1).max(100),

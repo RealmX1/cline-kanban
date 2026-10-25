@@ -491,6 +491,36 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 				normalizeBoardToPersistedReadBackShape(recordInput.nextBoard),
 			);
 			const occurrences = diffWorkspaceBoardSnapshotsIntoTaskMutationOccurrences(previous.snapshot, next.snapshot);
+			const transfer = recordInput.taskMutationIntentWithResolvedActor.backlogTaskProjectTransfer;
+			const ordinaryOccurrences = transfer
+				? occurrences.filter((occurrence) => occurrence.taskId !== transfer.taskId)
+				: occurrences;
+			const transferEvents =
+				transfer?.writeSide === "source"
+					? [
+							buildEventDraft({
+								eventFamily: "task_mutation_event",
+								eventKind: "task_card_project_transfer_completed",
+								occurredAt: now(),
+								actor: recordInput.taskMutationIntentWithResolvedActor.resolvedKanbanActor,
+								intent: recordInput.taskMutationIntentWithResolvedActor,
+								idempotencyKey: `backlog-project-transfer:${transfer.operationId}`,
+								subjectWorkspaceId: transfer.sourceWorkspaceId,
+								subjectTaskId: transfer.taskId,
+								eventPayload: {
+									operationId: transfer.operationId,
+									subjectKanbanBoardCard: {
+										workUnitType: "kanban_board_card",
+										workspaceId: transfer.sourceWorkspaceId,
+										taskId: transfer.taskId,
+										taskIncarnationCreatedAtEpochMs: transfer.taskIncarnationCreatedAtEpochMs,
+									},
+									targetWorkspaceId: transfer.targetWorkspaceId,
+								},
+							}),
+						]
+					: [];
+
 			const occurredAt = now();
 			const nativeIdentityChangeEventDrafts = buildNativeIdentityChangeEventDrafts({
 				workspaceId: recordInput.workspaceId,
@@ -519,17 +549,17 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 				nextWorkspaceBoardSnapshot: next.snapshot,
 				eventDrafts: buildTaskMutationEventDrafts({
 					workspaceId: recordInput.workspaceId,
-					occurrences,
+					occurrences: ordinaryOccurrences,
 					taskMutationOccurrenceCaptureMode: "captured_within_runtime_persistence_funnel",
 					intent: recordInput.taskMutationIntentWithResolvedActor,
 					boardRevisionAfterMutation: recordInput.nextBoardRevision,
 					occurredAt,
-				}).concat(nativeIdentityChangeEventDrafts),
+				}).concat(nativeIdentityChangeEventDrafts, transferEvents),
 				retainedFieldContents: collectRetainedFieldContentsReferencedByOccurrences(
 					occurrences,
 					retainedFieldContentsBySha256,
 				),
-				createdTaskCardIdentities: collectTaskCardIdentitiesOfCreatedTaskCards(occurrences),
+				createdTaskCardIdentities: collectTaskCardIdentitiesOfCreatedTaskCards(ordinaryOccurrences),
 			});
 			return { pendingBatchId };
 		},

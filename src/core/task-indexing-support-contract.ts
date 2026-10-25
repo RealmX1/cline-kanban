@@ -21,6 +21,22 @@ export const taskIndexingSupportExecutorSettingsSchema = z.object({
 });
 export type TaskIndexingSupportExecutorSettings = z.infer<typeof taskIndexingSupportExecutorSettingsSchema>;
 
+export const taskProjectAssignmentAnalysisRequestSchema = z.object({
+	operationId: z.string().uuid(),
+	title: z.string().max(1000),
+	prompt: z.string().min(1).max(200000),
+});
+export const taskProjectAssignmentAnalysisResponseSchema = z.object({
+	operationId: z.string().uuid(),
+	inputFingerprint: z.string(),
+	currentWorkspaceId: z.string(),
+	suggestedWorkspaceId: z.string().nullable(),
+	suggestedProjectName: z.string().nullable(),
+	rationale: z.string().min(1).max(4000),
+	confidence: z.enum(["high", "medium", "low"]),
+	stablePromptPrefixSha256: z.string(),
+});
+
 export const taskIndexingMaterialSchema = z.object({
 	taskReference: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
 	projectName: z.string(),

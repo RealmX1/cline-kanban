@@ -106,15 +106,13 @@ import {
 } from "../state/workspace-state";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
+import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
 	readTaskIndexingSupportExecutorSettings,
 } from "../task-indexing-support/task-indexing-support-storage";
-import {
-	createTaskLookupConversationService,
-	TASK_LOOKUP_INSTRUCTION_VERSION,
-} from "../task-indexing-support/task-lookup-conversation-service";
+import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -860,6 +858,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	);
 
 	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	let pauseAutomaticMainSessionHandoverForStoppedTask:
+		| ((workspaceId: string, taskId: string) => Promise<void>)
+		| undefined;
 	const runtimeApi = createRuntimeApi({
 		recordManagedTaskPromptDeliveries: true,
 		onTaskSessionStopRequested: async (workspaceId, taskId) => {
@@ -873,7 +874,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 				});
 			} finally {
-				await pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId);
+				await Promise.all([
+					pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId),
+					pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId),
+				]);
 			}
 		},
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -921,6 +925,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		warn: deps.warn,
 		broadcastState: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 	});
+	pauseAutomaticMainSessionHandoverForStoppedTask = taskMainSessionHandoverApi.pauseForExplicitStop;
 
 	const independentTaskCreationApi = createIndependentTaskCreationService({
 		findSession: findRuntimeSessionSummary,
@@ -952,7 +957,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				workspaceId,
 				materials,
 				settings,
-				instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
+				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 				now: Date.now(),
 				forModelRequest: true,
 			}),

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import type { ReferenceRelationModelingEditorController } from "@/hooks/use-reference-relation-modeling-editor";
+import type { TaskEditorClipboardTaskSelectionRequest } from "@/hooks/use-task-editor-clipboard-task-reference";
 import {
 	type AddReferenceRelationDialogDraft,
 	EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
@@ -52,6 +53,7 @@ export function ReferenceRelationModelingEditor({
 	onUnstagedFormChange,
 	creationInFlight = false,
 	onRelationsSaved,
+	clipboardSelectionRequest,
 }: {
 	controller: ReferenceRelationModelingEditorController;
 	workspaceId: string;
@@ -61,6 +63,7 @@ export function ReferenceRelationModelingEditor({
 	onUnstagedFormChange?: (hasUnstagedForm: boolean) => void;
 	creationInFlight?: boolean;
 	onRelationsSaved?: () => void;
+	clipboardSelectionRequest?: TaskEditorClipboardTaskSelectionRequest | null;
 }) {
 	const id = useId();
 	const [form, setForm] = useState<AddReferenceRelationDialogDraft>(EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT);
@@ -100,6 +103,38 @@ export function ReferenceRelationModelingEditor({
 			pendingCounterpartResolutionAttemptRef.current = null;
 		};
 	}, [workspaceId, taskId, resetForm]);
+	const lastClipboardSelectionSequenceRef = useRef<number | null>(null);
+	const [clipboardCandidates, setClipboardCandidates] = useState<
+		TaskEditorClipboardTaskSelectionRequest["candidates"]
+	>([]);
+	function selectClipboardCounterpart(candidate: TaskEditorClipboardTaskSelectionRequest["candidates"][number]) {
+		if (formOpen) return;
+		setForm({
+			...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
+			selectedCounterpartKanbanBoardCard: {
+				counterpartKanbanBoardCardWorkspaceId: candidate.kanbanBoardCard.workspaceId,
+				counterpartKanbanBoardCardTaskId: candidate.kanbanBoardCard.taskId,
+				counterpartKanbanBoardCardTitle: candidate.currentTitle ?? candidate.kanbanBoardCard.taskId,
+				counterpartKanbanProjectDisplayName: candidate.kanbanBoardCard.workspaceId,
+			},
+		});
+		setClipboardCandidates([]);
+		setFormOpen(true);
+	}
+	useEffect(() => {
+		if (
+			!clipboardSelectionRequest ||
+			lastClipboardSelectionSequenceRef.current === clipboardSelectionRequest.sequence
+		)
+			return;
+		lastClipboardSelectionSequenceRef.current = clipboardSelectionRequest.sequence;
+		// 正在编辑关系时不覆盖其对端，也不排队迟到覆盖。
+		if (formOpen) return;
+		if (clipboardSelectionRequest.candidates.length === 1 && clipboardSelectionRequest.candidates[0])
+			selectClipboardCounterpart(clipboardSelectionRequest.candidates[0]);
+		else setClipboardCandidates(clipboardSelectionRequest.candidates);
+	}, [clipboardSelectionRequest, formOpen]);
+
 	function editRelation(relation: AssertedInterWorkUnitRelation) {
 		const rootKey = preview?.rootWorkUnitKey;
 		const subjectIsRoot =
@@ -231,6 +266,22 @@ export function ReferenceRelationModelingEditor({
 		>
 			<fieldset disabled={controller.saving || creationInFlight} className="flex min-w-0 flex-col gap-3">
 				<div className="flex flex-wrap items-center justify-between gap-2">
+					{clipboardCandidates.length ? (
+						<div className="space-y-2" role="group" aria-label="剪贴板任务匹配">
+							<p className="text-xs text-text-secondary">剪贴板任务在多个项目中匹配，请选择：</p>
+							{clipboardCandidates.map((candidate) => (
+								<Button
+									key={JSON.stringify(candidate.kanbanBoardCard)}
+									size="sm"
+									onClick={() => selectClipboardCounterpart(candidate)}
+								>
+									{candidate.kanbanBoardCard.workspaceId} /{" "}
+									{candidate.currentTitle ?? candidate.kanbanBoardCard.taskId}
+								</Button>
+							))}
+						</div>
+					) : null}
+
 					<div>
 						<h3 className="font-medium">关联任务</h3>
 						<p className="mt-1 text-text-secondary">搜索已有任务，说明它与当前任务的关系。</p>

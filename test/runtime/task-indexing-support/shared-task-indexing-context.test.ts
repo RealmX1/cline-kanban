@@ -35,6 +35,24 @@ const input = (materials = [material("a"), material("b"), material("c"), materia
 });
 
 describe("共享任务 Context 的快照与追加变化", () => {
+	it.each(["\n", "\r\n"])("L2 需求摘要跳过 TLDR 标题，保留真正的目标首段：%j", (newline) => {
+		const task = material("a");
+		task.prompt = [
+			"## TLDR",
+			"",
+			"为新任务保留可核查的需求来源。",
+			"",
+			"本次实现并验证来源信息展示。",
+			"",
+			'<task-initial-prompt schema-version="1">详细正文</task-initial-prompt>',
+		].join(newline);
+		const { snapshot, context } = advanceSharedTaskIndexingSnapshot(null, input([task]));
+		expect(snapshot.latestEntries["project/a"]?.recap?.requirementsFirstParagraph).toBe(
+			"为新任务保留可核查的需求来源。",
+		);
+		expect(context.levelTwoProjectTaskRecapsText).toContain("为新任务保留可核查的需求来源。");
+		expect(context.levelTwoProjectTaskRecapsText).not.toContain("## TLDR");
+	});
 	it("排序、查询时间与运行身份不改变 L1–L2 的真实字节", () => {
 		const one = advanceSharedTaskIndexingSnapshot(null, input());
 		const two = advanceSharedTaskIndexingSnapshot(one.snapshot, {

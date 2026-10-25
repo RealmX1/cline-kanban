@@ -6,6 +6,7 @@ import { createTaskCommentEntryId } from "@/utils/create-task-comment-entry-id";
 interface TaskCommentBeforeMoveIntoDoneRequest {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs: number;
 	taskTitle: string;
 	taskCommentEntryId: string;
 	commentText: string;
@@ -27,6 +28,7 @@ export function useTaskCommentBeforeMoveIntoDone() {
 			replaceRequest({
 				workspaceId,
 				taskId: card.id,
+				expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
 				taskTitle: card.title,
 				taskCommentEntryId: createTaskCommentEntryId(),
 				commentText: "",

@@ -3,13 +3,68 @@ import type { ComponentProps } from "react";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import * as relationModelingHooks from "@/hooks/use-reference-relation-modeling-editor";
+import * as taskCardActionQueries from "@/runtime/task-card-action-query";
 import * as relationModelingQueries from "@/runtime/work-unit-relation-modeling-query";
+import * as taskCardActionCommands from "@/state/task-card-action-commands-for-any-workspace";
+import * as taskProjectAssignmentPreflight from "@/state/task-project-assignment-preflight";
+import type { BoardCard } from "@/types";
 
 type Props = ComponentProps<typeof TaskEditorDialog>;
 
+vi.mock("@/state/task-project-assignment-preflight", () => ({
+	runTaskProjectAssignmentPreflight: vi.fn(async (input: { workspaceId: string; baseRef: string }) => ({
+		workspaceId: input.workspaceId,
+		baseRef: input.baseRef,
+	})),
+	rememberTaskProjectAssignmentAnalysisAccepted: vi.fn(),
+	hasAcceptedTaskProjectAssignmentAnalysis: vi.fn(() => true),
+}));
+vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards", () => ({
+	ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission: vi.fn(async () => undefined),
+}));
 beforeEach(() => {
+	vi.mocked(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight)
+		.mockReset()
+		.mockImplementation(async ({ workspaceId, baseRef }) => ({ workspaceId, baseRef }));
+	vi.spyOn(taskCardActionQueries, "updateTaskCardFieldValuesInWorkspace").mockImplementation(
+		async (_workspaceId, request) => ({
+			taskCardSnapshotAfterAction: {
+				taskCard: {
+					id: request.taskId,
+					title: "已恢复任务",
+					prompt: "恢复内容",
+					baseRef: "main",
+					startInPlanMode: false,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+				boardColumnIdContainingTaskCard: "backlog",
+				taskSessionSummaryLiveInRuntimeProcessMemory: null,
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		}),
+	);
+	vi.spyOn(taskCardActionQueries, "readTaskCardWithBoardColumnInWorkspace").mockImplementation(
+		async (_workspaceId, taskId) => ({
+			taskCardLookupOutcome: "task_card_found_on_workspace_board",
+			taskCardSnapshot: {
+				taskCard: {
+					id: taskId,
+					title: "已恢复任务",
+					prompt: "恢复内容",
+					baseRef: "main",
+					startInPlanMode: false,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+				boardColumnIdContainingTaskCard: "backlog",
+				taskSessionSummaryLiveInRuntimeProcessMemory: null,
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		}),
+	);
 	localStorage.clear();
 	sessionStorage.clear();
 });
@@ -54,7 +109,7 @@ function findButtonByText(label: string): HTMLButtonElement | undefined {
 }
 
 function findCloseButton(): HTMLButtonElement | null {
-	return document.body.querySelector<HTMLButtonElement>('[aria-label="Close"]');
+	return document.body.querySelector<HTMLButtonElement>('[aria-label="关闭任务编辑器"]');
 }
 
 function hasPlanModeOverridesPermissionTierNotice(): boolean {
@@ -136,7 +191,7 @@ describe("TaskEditorDialog interactions", () => {
 		});
 	}
 
-	it("Project 是单条与批量创建的首个表单字段，初始焦点仍在原输入框", async () => {
+	it("项目分组与单条和批量任务正文并列，初始焦点仍在原输入框", async () => {
 		vi.spyOn(relationModelingQueries, "readRelationModelingEditorDraft").mockResolvedValue(null);
 		vi.spyOn(relationModelingQueries, "persistRelationModelingEditorDraft").mockResolvedValue({ saved: true });
 		await render(
@@ -155,7 +210,7 @@ describe("TaskEditorDialog interactions", () => {
 		expect(projectField).not.toBeNull();
 		expect(taskInput).not.toBeNull();
 		expect(
-			Boolean((projectField?.compareDocumentPosition(taskInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING),
+			Boolean((projectField?.compareDocumentPosition(taskInput as Node) ?? 0) & Node.DOCUMENT_POSITION_PRECEDING),
 		).toBe(true);
 		expect(projectField?.contains(document.activeElement)).toBe(false);
 		const splitButton = Array.from(document.querySelectorAll("button")).find((button) =>
@@ -168,7 +223,7 @@ describe("TaskEditorDialog interactions", () => {
 		const batchInput = document.querySelector('input[placeholder="Describe the task..."]');
 		expect(batchInput).not.toBeNull();
 		expect(
-			(projectField?.compareDocumentPosition(batchInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING,
+			(projectField?.compareDocumentPosition(batchInput as Node) ?? 0) & Node.DOCUMENT_POSITION_PRECEDING,
 		).toBeTruthy();
 	});
 
@@ -181,7 +236,7 @@ describe("TaskEditorDialog interactions", () => {
 		});
 
 		expect(onOpenChange).toHaveBeenCalledWith(false);
-		expect(findButtonByText("Discard")).toBeUndefined();
+		expect(findButtonByText("放弃更改")).toBeUndefined();
 	});
 
 	it("asks for confirmation via the X button when the form has edits, and does not close until confirmed", async () => {
@@ -196,11 +251,11 @@ describe("TaskEditorDialog interactions", () => {
 
 		// 有编辑 → 弹确认，不直接关闭
 		expect(onOpenChange).not.toHaveBeenCalled();
-		expect(findButtonByText("Discard")).toBeDefined();
-		expect(findButtonByText("Keep editing")).toBeDefined();
+		expect(findButtonByText("放弃更改")).toBeDefined();
+		expect(findButtonByText("继续编辑")).toBeDefined();
 
 		await act(async () => {
-			findButtonByText("Discard")?.click();
+			findButtonByText("放弃更改")?.click();
 		});
 
 		expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -214,32 +269,27 @@ describe("TaskEditorDialog interactions", () => {
 		await act(async () => {
 			findCloseButton()?.click();
 		});
-		expect(findButtonByText("Discard")).toBeDefined();
+		expect(findButtonByText("放弃更改")).toBeDefined();
 
 		await act(async () => {
-			findButtonByText("Keep editing")?.click();
+			findButtonByText("继续编辑")?.click();
 		});
 
 		expect(onOpenChange).not.toHaveBeenCalled();
-		expect(findButtonByText("Discard")).toBeUndefined();
+		expect(findButtonByText("放弃更改")).toBeUndefined();
 	});
 
-	it("does NOT guard in edit mode: closes directly even with edits (edit close clears the draft)", async () => {
+	it("编辑模式在显式关闭时也检查未保存更改", async () => {
 		const onOpenChange = vi.fn();
-		// edit 模式：即便表单有改动，关闭也不弹「放弃」确认——直通 base 的关闭语义（草稿随关闭清除）。
-		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "" }));
-		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "Edited body" }));
-
+		await render(makeProps({ onOpenChange, taskEditorMode: "edit", editingTaskId: "task-1", prompt: "旧内容" }));
+		await render(makeProps({ onOpenChange, taskEditorMode: "edit", editingTaskId: "task-1", prompt: "新内容" }));
 		await act(async () => {
 			findCloseButton()?.click();
 		});
-
-		expect(onOpenChange).toHaveBeenCalledWith(false);
-		expect(findButtonByText("Discard")).toBeUndefined();
+		expect(onOpenChange).not.toHaveBeenCalled();
+		expect(findButtonByText("放弃更改")).toBeDefined();
 	});
 
-	// droid 的 autonomyMode 是单轴（spec / normal / auto-high）：勾了 plan 起步就写 spec，
-	// 权限档根本不会被写入。用户看到的两条正交设置与实际执行不一致，必须当场明示。
 	it("warns that plan-mode start swallows the permission tier on single-axis harnesses", async () => {
 		await render(makeProps({ defaultAgentId: "droid", startInPlanMode: true }));
 		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(true);
@@ -250,7 +300,7 @@ describe("TaskEditorDialog interactions", () => {
 	// 把任务真的建出来 / 启动掉——用户当时只是在敲拼音。
 	async function dispatchDocumentKeyDown(init: KeyboardEventInit): Promise<void> {
 		await act(async () => {
-			document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+			getPromptTextarea().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
 		});
 	}
 
@@ -315,6 +365,205 @@ describe("TaskEditorDialog interactions", () => {
 		};
 	}
 
+	function mockSuccessfulTaskStart() {
+		return vi
+			.spyOn(taskCardActionCommands, "startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime")
+			.mockImplementation(async ({ taskId }) => ({
+				taskCardActionCommandExecutionOutcome: "command_completed_by_runtime",
+				response: {
+					boardColumnIdOfTaskCardBeforeAction: "backlog",
+					taskCardWasMovedIntoInProgressColumnByThisAction: true,
+					agentSessionStartOutcome: "agent_session_started",
+					agentSessionStartFailureMessage: null,
+					ensuredTaskWorktreeWarningMessage: null,
+					startedAgentSessionSummary: null,
+					taskCardSnapshotAfterAction: {
+						taskCard: {
+							id: taskId,
+							title: "创建任务",
+							prompt: "创建内容",
+							baseRef: "main",
+							startInPlanMode: false,
+							createdAt: 41,
+							updatedAt: 41,
+						},
+						boardColumnIdContainingTaskCard: "in_progress",
+						taskSessionSummaryLiveInRuntimeProcessMemory: null,
+						taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+					},
+				},
+			}));
+	}
+
+	it.each(["create", "start"] as const)("批量 %s 在真实关系 hook inactive 且未就绪时仍逐项提交", async (action) => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const actualRelationHook = relationModelingHooks.useReferenceRelationModelingEditor;
+		let observedInactiveRelationHookWithoutReady = false;
+		vi.spyOn(relationModelingHooks, "useReferenceRelationModelingEditor").mockImplementation(
+			function useObservedRealRelationModelingEditor(input) {
+				const controller = actualRelationHook(input);
+				if (input.active === false && !controller.ready) observedInactiveRelationHookWithoutReady = true;
+				return controller;
+			},
+		);
+		const startTask = mockSuccessfulTaskStart();
+		let nextTaskNumber = 0;
+		const onCreate: Props["onCreate"] = vi.fn(() => `batch-task-${++nextTaskNumber}`);
+		const props = makeProps({
+			prompt: "- 第一项任务\n- 第二项任务",
+			onCreate,
+			onCreateAndStartMultiple: vi.fn(() => []),
+		});
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		await act(async () => findButtonByText("Split into 2 tasks")?.click());
+		expect(observedInactiveRelationHookWithoutReady).toBe(true);
+		const submitButton = findButtonByText(action === "create" ? "Create 2 tasks" : "Start 2 tasks");
+		expect(submitButton).toBeDefined();
+		expect(submitButton?.disabled).toBe(false);
+		await act(async () => submitButton?.click());
+		expect(onCreate).toHaveBeenCalledTimes(2);
+		expect(vi.mocked(onCreate).mock.calls.map(([options]) => options?.promptOverride)).toEqual([
+			"第一项任务",
+			"第二项任务",
+		]);
+		expect(applyChanges).not.toHaveBeenCalled();
+		expect(startTask).toHaveBeenCalledTimes(action === "start" ? 2 : 0);
+		expect(props.onOpenChange).toHaveBeenCalledWith(false);
+	});
+
+	it("恢复卡片在检查后被同 ID 重建，字段更新按原 createdAt 拒绝且不覆盖新一世", async () => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const recoveredSnapshot: BoardCard = {
+			id: "abcde",
+			title: "原任务",
+			prompt: "原任务内容",
+			baseRef: "main",
+			startInPlanMode: false,
+			createdAt: 41,
+			updatedAt: 41,
+		};
+		const recreatedTask = { ...recoveredSnapshot, title: "重新创建的新任务", prompt: "新一世内容", createdAt: 99 };
+		// 初次核验成功后，更新请求到达前由另一动作删除并重建；服务端须在写锁内再次核验身份。
+		vi.spyOn(relationModelingQueries, "ensureRelationModelingCreatedTaskCardPersisted").mockResolvedValue(undefined);
+		const updateTask = vi
+			.spyOn(taskCardActionQueries, "updateTaskCardFieldValuesInWorkspace")
+			.mockImplementation(async (_workspaceId, request) => {
+				if (
+					request.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+					request.expectedTaskIncarnationCreatedAtEpochMs !== recreatedTask.createdAt
+				)
+					throw new Error("任务身份已变化，未写入编辑内容。");
+				if (
+					request.taskCardFieldUpdate.taskCardFieldUpdateInputKind === "three_state_task_card_field_value_patch"
+				) {
+					recreatedTask.prompt =
+						request.taskCardFieldUpdate.taskCardFieldValuePatch.prompt ?? recreatedTask.prompt;
+				}
+				return {
+					taskCardSnapshotAfterAction: {
+						taskCard: recreatedTask,
+						boardColumnIdContainingTaskCard: "backlog",
+						taskSessionSummaryLiveInRuntimeProcessMemory: null,
+						taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+					},
+				};
+			});
+		const props = makeProps();
+		await render(props);
+		await act(async () =>
+			resolveDraftRead({
+				...restoredCreationDraft("project-1"),
+				createdTaskId: recoveredSnapshot.id,
+				createdTaskWorkspaceId: "project-1",
+				createdTaskCardSnapshot: recoveredSnapshot,
+			}),
+		);
+		await act(async () => findButtonByText("创建任务")?.click());
+		expect(recreatedTask.prompt).toBe("新一世内容");
+		expect(recreatedTask.title).toBe("重新创建的新任务");
+		expect(updateTask).toHaveBeenCalledWith(
+			"project-1",
+			expect.objectContaining({ expectedTaskIncarnationCreatedAtEpochMs: 41 }),
+		);
+		expect(applyChanges).not.toHaveBeenCalled();
+		expect(props.onOpenChange).not.toHaveBeenCalled();
+		expect(document.body.textContent).toContain("任务身份已变化，未写入编辑内容。");
+	});
+
+	it("采纳其他项目后关系保存成功但启动失败，重试保留目标项目和同一世身份", async () => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		vi.spyOn(taskProjectAssignmentPreflight, "runTaskProjectAssignmentPreflight").mockResolvedValue({
+			workspaceId: "target-project",
+			baseRef: "main",
+		});
+		const snapshot: BoardCard = {
+			id: "abcde",
+			title: "跨项目创建",
+			prompt: "创建需求",
+			baseRef: "main",
+			startInPlanMode: false,
+			createdAt: 41,
+			updatedAt: 41,
+		};
+		const ensureTask = vi
+			.spyOn(relationModelingQueries, "ensureRelationModelingCreatedTaskCardPersisted")
+			.mockImplementation(async (workspaceId, card) => {
+				if (workspaceId !== "target-project" || card.id !== snapshot.id || card.createdAt !== snapshot.createdAt)
+					throw new Error("恢复身份或目标项目错误，拒绝重复建卡。");
+			});
+		const transferTask = vi.spyOn(taskCardActionQueries, "transferNeverStartedBacklogTaskToProjectInWorkspace");
+		const startTask = mockSuccessfulTaskStart().mockResolvedValueOnce({
+			taskCardActionCommandExecutionOutcome: "command_failed",
+			commandFailureMessage: "模拟 Agent 启动失败",
+		});
+		const onCreate: Props["onCreate"] = vi.fn((options) => {
+			expect(options?.targetWorkspaceIdOverride).toBe("target-project");
+			options?.onTaskCardAllocatedForRelationModeling?.(snapshot);
+			return snapshot.id;
+		});
+		const props = makeProps({ workspaceId: "source-project", onCreate, onCreateAndStart: vi.fn(() => null) });
+		await render(props);
+		await act(async () =>
+			resolveDraftRead({
+				...restoredCreationDraft("source-project"),
+				createdTaskId: null,
+				creationPrompt: snapshot.prompt,
+				creationTitle: snapshot.title ?? "",
+			}),
+		);
+		await act(async () => findButtonByText("Start task")?.click());
+		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
+			"target-project",
+			expect.objectContaining({
+				workUnit: expect.objectContaining({ workspaceId: "target-project", bareTaskId: "abcde" }),
+			}),
+		);
+		expect(props.onOpenChange).not.toHaveBeenCalled();
+		expect(document.body.textContent).toContain("模拟 Agent 启动失败");
+		const mirrorKey = Object.keys(localStorage).find((key) => key.startsWith("reference-relation-modeling:"));
+		expect(mirrorKey).toBeDefined();
+		expect(JSON.parse(localStorage.getItem(mirrorKey ?? "") ?? "null")).toMatchObject({
+			createdTaskId: snapshot.id,
+			createdTaskWorkspaceId: "target-project",
+			createdTaskCardSnapshot: { id: snapshot.id, createdAt: snapshot.createdAt },
+			referenceRelationDrafts: [],
+		});
+		await act(async () => findButtonByText("Start task")?.click());
+		expect(onCreate).toHaveBeenCalledTimes(1);
+		expect(ensureTask).toHaveBeenCalledExactlyOnceWith("target-project", snapshot);
+		expect(taskCardActionQueries.updateTaskCardFieldValuesInWorkspace).toHaveBeenCalledWith(
+			"target-project",
+			expect.objectContaining({ taskId: snapshot.id, expectedTaskIncarnationCreatedAtEpochMs: snapshot.createdAt }),
+		);
+		expect(transferTask).not.toHaveBeenCalled();
+		expect(startTask).toHaveBeenCalledTimes(2);
+		for (const [request] of startTask.mock.calls)
+			expect(request).toMatchObject({ workspaceId: "target-project", taskId: snapshot.id });
+		expect(applyChanges).toHaveBeenCalledTimes(1);
+		expect(props.onOpenChange).toHaveBeenCalledWith(false);
+	});
+
 	it("PDV 预填等待关系草稿恢复，且只初始化一次", async () => {
 		const deferred = prepareDeferredRelationDraftRead();
 		const seed = followUpSeed();
@@ -358,7 +607,7 @@ describe("TaskEditorDialog interactions", () => {
 		await render(makeProps({ postDeployVerificationFollowUpTaskCreationDraftSeed: seed }));
 		await act(async () => deferred.resolveDraftRead(null));
 		expect(getPromptTextarea().value).toBe("");
-		expect(findButtonByText("Create")?.disabled).toBe(true);
+		expect(findButtonByText("创建任务")?.disabled).toBe(true);
 	});
 
 	it("草稿尚未水合时按钮和全部创建快捷键均等待，空草稿水合后照常创建", async () => {
@@ -370,11 +619,11 @@ describe("TaskEditorDialog interactions", () => {
 			onCreateStartAndOpen: vi.fn(() => "new-opened-task"),
 		});
 		await render(props);
-		expect(findButtonByText("Create")?.disabled).toBe(true);
+		expect(findButtonByText("创建任务")?.disabled).toBe(true);
 		expect(findButtonByText("Start task")?.disabled).toBe(true);
 		expect(document.querySelector<HTMLButtonElement>('[aria-label="More start options"]')?.disabled).toBe(true);
 		await act(async () => {
-			findButtonByText("Create")?.click();
+			findButtonByText("创建任务")?.click();
 			findButtonByText("Start task")?.click();
 		});
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
@@ -385,8 +634,8 @@ describe("TaskEditorDialog interactions", () => {
 		expect(props.onCreateStartAndOpen).not.toHaveBeenCalled();
 		expect(applyChanges).not.toHaveBeenCalled();
 		await act(async () => resolveDraftRead(null));
-		expect(findButtonByText("Create")?.disabled).toBe(false);
-		await act(async () => findButtonByText("Create")?.click());
+		expect(findButtonByText("创建任务")?.disabled).toBe(false);
+		await act(async () => findButtonByText("创建任务")?.click());
 		expect(props.onCreate).toHaveBeenCalledExactlyOnceWith(
 			expect.objectContaining({ promptOverride: "普通创建需求" }),
 		);
@@ -402,8 +651,9 @@ describe("TaskEditorDialog interactions", () => {
 		const recoveredDraft = restoredCreationDraft("project-1");
 		await act(async () => resolveDraftRead(recoveredDraft));
 		expect(document.querySelector("textarea")?.value).toBe(recoveredDraft.creationPrompt);
-		await act(async () => findButtonByText("Create")?.click());
+		await act(async () => findButtonByText("创建任务")?.click());
 		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(document.querySelector('[role="alert"]')?.textContent).toBeUndefined();
 		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
 			"project-1",
 			expect.objectContaining({
@@ -420,13 +670,13 @@ describe("TaskEditorDialog interactions", () => {
 		const props = makeProps({ prompt: "创建需求", onCreate: vi.fn(() => "incorrect-new-task") });
 		await render(props);
 		await render({ ...props, workspaceId: "project-2" });
-		expect(findButtonByText("Create")?.disabled).toBe(true);
+		expect(findButtonByText("创建任务")?.disabled).toBe(true);
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
 		expect(props.onCreate).not.toHaveBeenCalled();
 		expect(applyChanges).not.toHaveBeenCalled();
 		const recoveredDraft = restoredCreationDraft("project-2");
 		await act(async () => resolveDraftRead(recoveredDraft));
-		await act(async () => findButtonByText("Create")?.click());
+		await act(async () => findButtonByText("创建任务")?.click());
 		expect(props.onCreate).not.toHaveBeenCalled();
 		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
 			"project-2",
@@ -439,7 +689,7 @@ describe("TaskEditorDialog interactions", () => {
 
 	it("does not create the task on a Mod+Enter emitted while the IME is still composing", async () => {
 		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");
-		await render(makeProps({ onCreate }));
+		await render(makeProps({ onCreate, prompt: "测试任务" }));
 
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true, isComposing: true });
 		expect(onCreate).not.toHaveBeenCalled();
@@ -450,14 +700,16 @@ describe("TaskEditorDialog interactions", () => {
 	});
 
 	it("does not start-and-open on an Alt+Shift+Enter emitted while the IME is still composing", async () => {
+		const onCreate: Props["onCreate"] = vi.fn(() => null);
 		const onCreateStartAndOpen: Props["onCreateStartAndOpen"] = vi.fn(() => "task-1");
-		await render(makeProps({ onCreateStartAndOpen }));
+		await render(makeProps({ onCreateStartAndOpen, onCreate, prompt: "测试任务" }));
 
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true, isComposing: true });
 		expect(onCreateStartAndOpen).not.toHaveBeenCalled();
 
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true });
-		expect(onCreateStartAndOpen).toHaveBeenCalledTimes(1);
+		expect(onCreate).toHaveBeenCalledTimes(1);
+		expect(onCreateStartAndOpen).not.toHaveBeenCalled();
 	});
 
 	it("does not warn about a plan-mode conflict when the harness keeps the two axes independent", async () => {
@@ -645,7 +897,7 @@ describe("TaskEditorDialog prompt draft ownership", () => {
 		await typeIntoPrompt("Ship the fix");
 
 		await act(async () => {
-			findButtonByText("Create")?.click();
+			findButtonByText("创建任务")?.click();
 		});
 
 		expect(onCreate).toHaveBeenCalledTimes(1);
@@ -692,7 +944,7 @@ describe("TaskEditorDialog prompt draft ownership", () => {
 
 		await typeIntoPrompt("Ship the fix");
 		await act(async () => {
-			findButtonByText("Create")?.click();
+			findButtonByText("创建任务")?.click();
 		});
 
 		// create 路径关闭：open 翻 false，而父层 prompt 依旧是空串。

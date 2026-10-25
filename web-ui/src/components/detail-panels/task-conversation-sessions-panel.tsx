@@ -380,7 +380,8 @@ export function TaskConversationSessionsPanel({
 								<div className="flex items-center gap-2">
 									<MessageCircleQuestion size={13} className="text-status-purple" />
 									<span className="text-xs font-medium text-text-primary">
-										{metadata.taskConversationSessionRoleAtCreation === "main"
+										{metadata.taskConversationSessionHasHeldMainResponsibility ||
+										metadata.taskConversationSessionRoleAtCreation === "main"
 											? "前主会话"
 											: metadata.taskConversationSessionRole === "task_collaborator"
 												? "协作会话"
@@ -411,6 +412,7 @@ export function TaskConversationSessionsPanel({
 							/>
 							{workspaceId &&
 								!isTaskAgentExecutionDisabled &&
+								!metadata.taskConversationSessionHasHeldMainResponsibility &&
 								metadata.taskConversationSessionRoleAtCreation !== "main" && (
 									<IndependentTaskCreationAction
 										workspaceId={workspaceId}

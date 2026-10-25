@@ -1,5 +1,5 @@
 import { ArrowLeft, ExternalLink, Plus, Search, Send, Square } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { TaskLookupTurnExecutionDetails } from "@/components/task-lookup-turn-execution-details";
 import { TaskLookupTurnQuestion } from "@/components/task-lookup-turn-question";
@@ -43,46 +43,14 @@ const STAGE_LABELS: Record<string, string> = {
 const conversationScrollPositions = new Map<string, number>();
 
 function TaskLookupExecutorSettings({ controller }: { controller: TaskLookupWorkbenchController }) {
-	const [agentId, setAgentId] = useState<"claude" | "codex">("codex");
-	const [modelId, setModelId] = useState("");
-	useEffect(() => {
-		if (controller.executorSettings) {
-			setAgentId(controller.executorSettings.agentId);
-			setModelId(controller.executorSettings.modelId ?? "");
-		}
-	}, [controller.executorSettings]);
 	return (
 		<div className="space-y-3 border-t border-border pt-3">
 			<p className="text-xs text-text-secondary">
-				共享执行器设置，作用于 {controller.contextWorkspaceId} 的索引功能。
+				AI 任务分析共用全局设置：{controller.executorSettings?.agentId ?? "codex"} /{" "}
+				{controller.executorSettings?.modelId ?? "默认模型"}
 			</p>
-			<label className="flex flex-col gap-1 text-xs">
-				执行 Agent
-				<select
-					aria-label="查卡执行 Agent"
-					value={agentId}
-					onChange={(event) => setAgentId(event.target.value as "claude" | "codex")}
-					className="h-11 rounded-md border border-border bg-surface-2 px-2 text-base md:h-9 md:text-xs"
-				>
-					<option value="codex">Codex</option>
-					<option value="claude">Claude</option>
-				</select>
-			</label>
-			<label className="flex flex-col gap-1 text-xs">
-				模型
-				<input
-					aria-label="查卡模型"
-					value={modelId}
-					onChange={(event) => setModelId(event.target.value)}
-					placeholder="使用 Agent 默认模型"
-					className="h-11 min-w-0 rounded-md border border-border bg-surface-2 px-2 text-base placeholder:text-text-secondary md:h-9 md:text-sm"
-				/>
-			</label>
-			<Button
-				disabled={controller.isPending || !controller.executorSettings || controller.isRunning}
-				onClick={() => void controller.saveExecutorSettings({ agentId, modelId: modelId.trim() || null })}
-			>
-				保存执行设置
+			<Button onClick={() => window.dispatchEvent(new Event("kanban-open-task-analysis-settings"))}>
+				打开全局分析设置
 			</Button>
 		</div>
 	);

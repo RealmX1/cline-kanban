@@ -1,3 +1,5 @@
+import type { RuntimeAppRouterInputs } from "@runtime-trpc";
+import { TRPCClientError } from "@trpc/client";
 // 看板卡片 per-card 动作（`taskCardAction.*`，唯一实现在 src/trpc/task-card-action-api.ts）的浏览器侧传输助手。
 // 只挡住 tRPC 细节；在途闸、overlay、失败提示的编排在 task-card-action-command-execution.ts。
 //
@@ -28,8 +30,15 @@ import type {
 export async function readTaskCardWithBoardColumnInWorkspace(
 	workspaceId: string,
 	taskId: string,
+	expectedTaskIncarnationCreatedAtEpochMs?: number,
+	signal?: AbortSignal,
 ): Promise<RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse> {
-	return await getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskCardWithBoardColumn.query({ taskId });
+	const request = {
+		taskId,
+		...(expectedTaskIncarnationCreatedAtEpochMs !== undefined ? { expectedTaskIncarnationCreatedAtEpochMs } : {}),
+	};
+	const query = getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskCardWithBoardColumn;
+	return signal ? await query.query(request, { signal }) : await query.query(request);
 }
 
 export async function startTaskCardAgentSessionMovingItIntoInProgressInWorkspace(
@@ -90,7 +99,36 @@ export async function updateTaskCardFieldValuesInWorkspace(
 	workspaceId: string,
 	request: RuntimeTaskCardActionUpdateFieldValuesRequest,
 ): Promise<RuntimeTaskCardActionUpdateFieldValuesResponse> {
-	return await getRuntimeTrpcClient(workspaceId).taskCardAction.updateTaskCardFieldValues.mutate(request);
+	try {
+		return await getRuntimeTrpcClient(workspaceId).taskCardAction.updateTaskCardFieldValues.mutate(request);
+	} catch (error) {
+		if (
+			!(error instanceof TRPCClientError) ||
+			error.data?.code !== "NOT_FOUND" ||
+			request.expectedTaskIncarnationCreatedAtEpochMs === undefined
+		)
+			throw error;
+		const identities = await getRuntimeTrpcClient(
+			workspaceId,
+		).workUnit.resolveKanbanBoardCardIdentityByBareTaskId.query({ bareTaskId: request.taskId });
+		const current = identities.kanbanBoardCardIdentityCandidates.filter(
+			(candidate) =>
+				candidate.permanentlyRemovedFromBoardAt === null &&
+				candidate.kanbanBoardCard.taskIncarnationCreatedAtEpochMs ===
+					request.expectedTaskIncarnationCreatedAtEpochMs,
+		);
+		if (current.length !== 1 || !current[0] || current[0].kanbanBoardCard.workspaceId === workspaceId) throw error;
+		const response = await getRuntimeTrpcClient(
+			current[0].kanbanBoardCard.workspaceId,
+		).taskCardAction.updateTaskCardFieldValues.mutate(request);
+		return {
+			...response,
+			taskCardSnapshotAfterAction: {
+				...response.taskCardSnapshotAfterAction,
+				workspaceId: current[0].kanbanBoardCard.workspaceId,
+			},
+		};
+	}
 }
 
 export async function setTaskPinboardPinStateOfTaskCardInWorkspace(
@@ -98,4 +136,11 @@ export async function setTaskPinboardPinStateOfTaskCardInWorkspace(
 	request: RuntimeTaskCardActionSetTaskPinboardPinStateRequest,
 ): Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse> {
 	return await getRuntimeTrpcClient(workspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate(request);
+}
+
+export function transferNeverStartedBacklogTaskToProjectInWorkspace(
+	workspaceId: string,
+	request: RuntimeAppRouterInputs["taskCardAction"]["transferNeverStartedBacklogTaskToProject"],
+) {
+	return getRuntimeTrpcClient(workspaceId).taskCardAction.transferNeverStartedBacklogTaskToProject.mutate(request);
 }

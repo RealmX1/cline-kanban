@@ -4,7 +4,10 @@ import type {
 	RelationModelingPreviewRequest,
 	RelationModelingPreviewResponse,
 } from "../core/work-unit-relation-modeling-api-contract";
-import { buildInterWorkUnitRelationWorkUnitKey } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
+import {
+	buildInterWorkUnitRelationWorkUnitKey,
+	resolveCanonicalWorkUnitReferenceAfterProjectTransfer,
+} from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 import type { RecordedInterWorkUnitRelationProjectionReader } from "../inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
 import { collectBoundedRelationModelingNeighborhood } from "../inter-work-unit-relation-ledger/relation-modeling-multi-hop-preview";
 import {
@@ -19,6 +22,16 @@ export async function buildRelationModelingPreview(
 	getWorkspacePathById: WorkspaceRepositoryPathLookupByWorkspaceId,
 ): Promise<RelationModelingPreviewResponse> {
 	const state = reader.projectionState;
+	input = {
+		...input,
+		referenceRelationDrafts: input.referenceRelationDrafts.map((draft) => ({
+			...draft,
+			counterpartWorkUnit: resolveCanonicalWorkUnitReferenceAfterProjectTransfer(
+				state.kanbanBoardCardIdentityProjectionState,
+				draft.counterpartWorkUnit,
+			),
+		})),
+	};
 	const rootWorkUnitKey = root ? buildInterWorkUnitRelationWorkUnitKey(root) : "pending-task-creation";
 	const refsByKey = new Map<string, InterWorkUnitRelationWorkUnitReference>();
 	if (root) refsByKey.set(rootWorkUnitKey, root);

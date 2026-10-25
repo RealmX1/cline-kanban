@@ -13,6 +13,7 @@ import type {
 	WorkUnitSelectorForRelationRead,
 } from "../core/work-unit-relation-read-api-contract";
 import { listConversationSessionOwnershipPeriodsOfWorkUnit } from "../inter-work-unit-relation-ledger/conversation-session-ownership-period-projection-from-ledger-events";
+import { assembleDirectlyRelatedTaskPreviewPage } from "../inter-work-unit-relation-ledger/directly-related-task-preview-page";
 import { InterWorkUnitRelationLedgerUnavailableError } from "../inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker-client";
 import {
 	type KanbanBoardCardIdentityProjection,
@@ -77,7 +78,13 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 	const candidates = listKanbanBoardCardIdentityProjectionsByBareTaskId(
 		projectionState.kanbanBoardCardIdentityProjectionState,
 		selector.bareTaskId,
-	).filter((projection) => !selector.workspaceId || projection.kanbanBoardCard.workspaceId === selector.workspaceId);
+	).filter(
+		(projection) =>
+			!selector.workspaceId ||
+			projection.kanbanBoardCard.workspaceId === selector.workspaceId ||
+			projection.currentWorkspaceId === selector.workspaceId ||
+			projection.workspaceIdsUsedByCard?.includes(selector.workspaceId),
+	);
 	if (candidates.length === 0) {
 		throw new TRPCError({
 			code: "NOT_FOUND",
@@ -118,6 +125,10 @@ export function createWorkUnitRelationReadApi(
 	deps: CreateWorkUnitRelationReadApiDependencies,
 ): RuntimeTrpcContext["workUnitRelationReadApi"] {
 	return {
+		getDirectlyRelatedTaskPreviewPage: (input) =>
+			readProjectionTranslatingLedgerUnavailability(deps, (reader) =>
+				assembleDirectlyRelatedTaskPreviewPage(reader, input, deps.getWorkspacePathById),
+			),
 		listPermanentlyDeletedTaskCards: (input) =>
 			readProjectionTranslatingLedgerUnavailability(deps, (reader) =>
 				listPermanentlyDeletedTaskCards(reader, input, deps.getWorkspacePathById),
