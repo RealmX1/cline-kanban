@@ -1,17 +1,14 @@
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, ClipboardList } from "lucide-react";
-import type { ReactElement } from "react";
-
+import { type ReactElement, useEffect, useMemo, useState } from "react";
 import {
 	countPostDeployVerificationTasksAwaitingVerification,
 	groupActiveDeploymentGroupTasksByDeploymentAttributionZone,
 	isPostDeployVerificationTaskAwaitingVerification,
 	POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONE_SECTION_TITLE,
 	POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER,
-	readTaskDeploymentAttributionOrNullWhenNotYetComputed,
 } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
-import { resolveTaskTitleForPostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-closure-dialog-task-entries-from-read-model-and-board";
-import { shortenCommitSha } from "@/components/post-deploy-verification/post-deploy-verification-format";
+import type { PostDeployVerificationEntryNavigationRequest } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import {
 	PostDeployVerificationTaskEntryWrappingRealTaskCard,
 	type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
@@ -52,6 +49,7 @@ export interface PostDeployVerificationDeploymentGroupTaskEntryActions {
 }
 
 interface PostDeployVerificationDeploymentGroupSharedProps {
+	entryNavigationRequest?: PostDeployVerificationEntryNavigationRequest | null;
 	group: RuntimePostDeployVerificationDeploymentGroup;
 	board: BoardData;
 	realTaskCardRenderingInputs: RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries | null;
@@ -74,6 +72,14 @@ function renderTaskEntry(
 			retainedDeploymentGroupsByDeploymentId={props.retainedDeploymentGroupsByDeploymentId}
 			interactive={options.interactive}
 			checklistInitiallyExpanded={options.checklistInitiallyExpanded}
+			entryReference={{ workspaceId: group.workspaceId, deploymentId: group.deploymentId, taskId: task.taskId }}
+			checklistExpansionNavigationRequestId={
+				props.entryNavigationRequest?.target.entry.workspaceId === group.workspaceId &&
+				props.entryNavigationRequest.target.entry.deploymentId === group.deploymentId &&
+				props.entryNavigationRequest.target.entry.taskId === task.taskId
+					? props.entryNavigationRequest.requestId
+					: null
+			}
 			isCompleting={taskEntryActions.completingTaskId === task.taskId}
 			onToggleChecklistItem={(itemId, checked) =>
 				taskEntryActions.onToggleChecklistItem(group.deploymentId, task.taskId, itemId, checked)
@@ -140,8 +146,21 @@ export function PostDeployVerificationActiveDeploymentGroupZoneSections(
 	props: PostDeployVerificationActiveDeploymentGroupZoneSectionsProps,
 ): ReactElement {
 	const { group, board, onRequestBatchClosureWithReasonsOfZoneTasks, isBatchClosureWithReasonsInFlight } = props;
-	const { tasksByDeploymentAttributionZone, tasksAlreadyInDoneColumnIncludedAsReadOnly } =
-		groupActiveDeploymentGroupTasksByDeploymentAttributionZone(group.tasks);
+	const { tasksByDeploymentAttributionZone, tasksAlreadyInDoneColumnIncludedAsReadOnly } = useMemo(
+		() => groupActiveDeploymentGroupTasksByDeploymentAttributionZone(group.tasks),
+		[group.tasks],
+	);
+	const [expandedZones, setExpandedZones] = useState<
+		ReadonlySet<RuntimePostDeployVerificationTaskDeploymentAttributionZone>
+	>(() => new Set(POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER.slice(0, 1)));
+	useEffect(() => {
+		const entry = props.entryNavigationRequest?.target.entry;
+		if (!entry || entry.workspaceId !== group.workspaceId || entry.deploymentId !== group.deploymentId) return;
+		const zone = POST_DEPLOY_VERIFICATION_TASK_DEPLOYMENT_ATTRIBUTION_ZONES_IN_PANEL_ORDER.find((zone) =>
+			tasksByDeploymentAttributionZone[zone].some((task) => task.taskId === entry.taskId),
+		);
+		if (zone) setExpandedZones((previous) => new Set([...previous, zone]));
+	}, [props.entryNavigationRequest, group.workspaceId, group.deploymentId, tasksByDeploymentAttributionZone]);
 
 	return (
 		<div className="space-y-2">
@@ -154,7 +173,15 @@ export function PostDeployVerificationActiveDeploymentGroupZoneSections(
 				return (
 					<div key={zone}>
 						<RadixCollapsible.Root
-							defaultOpen={isFirstZone}
+							open={expandedZones.has(zone)}
+							onOpenChange={(open) =>
+								setExpandedZones((previous) => {
+									const next = new Set(previous);
+									if (open) next.add(zone);
+									else next.delete(zone);
+									return next;
+								})
+							}
 							data-post-deploy-verification-deployment-attribution-zone={zone}
 							className="rounded-md border border-border bg-surface-1"
 						>
@@ -220,19 +247,12 @@ export function PostDeployVerificationActiveDeploymentGroupZoneSections(
 										<li
 											key={task.taskId}
 											data-post-deploy-verification-read-only-done-task={task.taskId}
-											className="flex items-baseline gap-2 text-[12px]"
+											className="text-[12px]"
 										>
-											<span className="min-w-0 flex-1 truncate text-text-secondary">
-												{resolveTaskTitleForPostDeployVerificationPanel(board, task.taskId)}
-											</span>
-											<span className="shrink-0 font-mono text-[11px] text-text-tertiary">
-												{(
-													readTaskDeploymentAttributionOrNullWhenNotYetComputed(task)
-														?.matchedDeployedCommitsInThisDeploymentDelta ?? []
-												)
-													.map((matchedCommit) => shortenCommitSha(matchedCommit.deployedCommitSha))
-													.join(" ")}
-											</span>
+											{renderTaskEntry(props, task, {
+												interactive: false,
+												checklistInitiallyExpanded: false,
+											})}
 										</li>
 									))}
 								</ul>

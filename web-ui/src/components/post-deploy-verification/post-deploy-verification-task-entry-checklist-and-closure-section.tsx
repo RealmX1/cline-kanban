@@ -42,6 +42,7 @@ import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-eve
 // 核对清单、自定义项录入、完成区 / 结案记录。
 
 export interface PostDeployVerificationTaskEntryChecklistAndClosureSectionProps {
+	checklistExpansionNavigationRequestId?: number | null;
 	postDeployVerificationTask: RuntimePostDeployVerificationTask;
 	// 当前实际所在列；null = 卡已不在看板（被删）。
 	currentBoardColumnIdOfTaskCard: BoardColumnId | null;
@@ -133,6 +134,7 @@ function PostDeployVerificationTaskEntryClosureRecord({
 }
 
 export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
+	checklistExpansionNavigationRequestId = null,
 	postDeployVerificationTask: task,
 	currentBoardColumnIdOfTaskCard,
 	retainedDeploymentGroupsByDeploymentId,
@@ -150,6 +152,9 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryChecklistAndClosureSectionProps): ReactElement {
 	const [isChecklistExpanded, setIsChecklistExpanded] = useState(checklistInitiallyExpanded);
+	useEffect(() => {
+		if (checklistExpansionNavigationRequestId !== null) setIsChecklistExpanded(true);
+	}, [checklistExpansionNavigationRequestId]);
 	const [customChecklistItemDraft, setCustomChecklistItemDraft] = useState("");
 	const followUpContextSelectionIdPrefix = useId();
 	const [isCustomChecklistItemInputExpanded, setIsCustomChecklistItemInputExpanded] = useState(false);
@@ -168,22 +173,17 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	const isChecklistInteractive = interactive && isAwaitingVerification && carriedForwardIntoDeploymentId === null;
 	// 完成区：仍在看板上（含已在 Done 但未结案的滞留态，走 controller 的恢复分支）才有按钮。
 	const canRequestComplete = isChecklistInteractive && currentBoardColumnIdOfTaskCard !== null;
-	const canCreateFollowUpTask =
-		canRequestComplete &&
-		currentBoardColumnIdOfTaskCard !== "trash" &&
-		!!onCreateFollowUpTaskFromSelectedChecklistItems &&
-		task.checklist.some((item) => !item.checked);
+	// 创建新工作与修改核对结果是两种能力，历史、Done 及墓碑条目同样可以提供来源背景。
+	const canCreateFollowUpTask = !!onCreateFollowUpTaskFromSelectedChecklistItems;
 	const isSelectingFollowUpContext = canCreateFollowUpTask && followUpSelectedChecklistItemIds !== null;
 	const selectedChecklistItemIds = task.checklist
-		.filter((item) => !item.checked && followUpSelectedChecklistItemIds?.includes(item.id))
+		.filter((item) => followUpSelectedChecklistItemIds?.includes(item.id))
 		.map((item) => item.id);
+	const hasRemovedSelectedChecklistItems =
+		(followUpSelectedChecklistItemIds?.length ?? 0) !== selectedChecklistItemIds.length;
 	useEffect(() => {
-		setFollowUpSelectedChecklistItemIds((previous) => {
-			if (!previous || !canCreateFollowUpTask) return null;
-			const remaining = previous.filter((id) => task.checklist.some((item) => item.id === id && !item.checked));
-			return remaining.length === previous.length ? previous : remaining;
-		});
-	}, [task.checklist, canCreateFollowUpTask]);
+		if (!canCreateFollowUpTask) setFollowUpSelectedChecklistItemIds(null);
+	}, [canCreateFollowUpTask]);
 
 	const addCustomChecklistItem = (): void => {
 		const trimmedLabel = customChecklistItemDraft.trim();
@@ -255,7 +255,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 			) : null}
 
 			{/* 可折叠的核对清单 */}
-			<div className="flex items-center gap-1">
+			<div className="flex flex-wrap items-center gap-1">
 				<button
 					type="button"
 					aria-expanded={isChecklistExpanded}
@@ -284,33 +284,44 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 					</Tooltip>
 				) : null}
 				{canCreateFollowUpTask && !isSelectingFollowUpContext ? (
-					<Tooltip content="从核对项新建后续任务">
+					<Tooltip content="选择核对项或仅携带任务背景，创建关联续接任务">
 						<Button
 							size="xs"
 							variant="ghost"
 							icon={<GitBranchPlus size={12} />}
-							aria-label="从核对项新建后续任务"
+							aria-label="创建关联续接任务"
 							disabled={isCompleting}
 							onClick={() => {
 								setIsChecklistExpanded(true);
 								setIsCustomChecklistItemInputExpanded(false);
 								setFollowUpSelectedChecklistItemIds([]);
 							}}
-						/>
+						>
+							创建关联续接任务
+						</Button>
 					</Tooltip>
 				) : null}
 			</div>
 			{isSelectingFollowUpContext ? (
 				<div className="flex flex-wrap items-center gap-1 text-[11px]">
 					<span className="min-w-0 flex-1 text-text-secondary">
-						选择作为新任务上下文的核对项（已选 {selectedChecklistItemIds.length}）
+						{hasRemovedSelectedChecklistItems
+							? "有已选核对项被移除，请重置后重新选择。"
+							: selectedChecklistItemIds.length > 0
+								? `选择作为新任务上下文的核对项（已选 ${selectedChecklistItemIds.length}）`
+								: "可选择核对项；不选则仅携带任务背景"}
 					</span>
+					{hasRemovedSelectedChecklistItems ? (
+						<Button size="xs" variant="ghost" onClick={() => setFollowUpSelectedChecklistItemIds([])}>
+							重置选择
+						</Button>
+					) : null}
 					<Button size="xs" variant="ghost" onClick={() => setFollowUpSelectedChecklistItemIds(null)}>
 						取消
 					</Button>
 					<Button
 						size="xs"
-						disabled={selectedChecklistItemIds.length === 0 || isCompleting}
+						disabled={isCompleting || hasRemovedSelectedChecklistItems}
 						onClick={() => {
 							onCreateFollowUpTaskFromSelectedChecklistItems?.(selectedChecklistItemIds);
 							setFollowUpSelectedChecklistItemIds(null);
@@ -333,7 +344,7 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 									id={`${followUpContextSelectionIdPrefix}:${item.id}`}
 									aria-label={`选择核对项：${item.label}`}
 									checked={selectedChecklistItemIds.includes(item.id)}
-									disabled={item.checked || isCompleting}
+									disabled={isCompleting}
 									onCheckedChange={(checked) =>
 										setFollowUpSelectedChecklistItemIds((previous) =>
 											checked === true

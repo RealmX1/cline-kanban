@@ -44,7 +44,7 @@ function renderSelectedChecklistItemContext(
 	const heading = [
 		`### ${renderTextWithinSnapshotBudget(item.label, metadataCharacterBudget)}`,
 		`核对项 ID：${renderTextWithinSnapshotBudget(item.id, metadataCharacterBudget)}；来源：${item.source}；类型：${item.kind}`,
-		"核对状态：尚未核对，不代表验证失败。",
+		item.checked ? "核对状态：已核对。" : "核对状态：尚未核对，不代表验证失败。",
 	].join("\n");
 	const details = renderChecklistItemGuidanceAndExecutionContext(item);
 	return details
@@ -64,10 +64,12 @@ export function buildPostDeployVerificationFollowUpTaskCreationDraftSeed(input: 
 	selectedChecklistItemIds: readonly string[];
 }): PostDeployVerificationFollowUpTaskCreationDraftSeed {
 	const selectedIds = new Set(input.selectedChecklistItemIds);
-	const selectedItems = input.task.checklist.filter((item) => !item.checked && selectedIds.has(item.id));
-	if (selectedItems.length === 0) throw new Error("请选择至少一个仍待核对的项目。");
+	const availableChecklistItemIds = new Set(input.task.checklist.map((item) => item.id));
+	if ([...selectedIds].some((id) => !availableChecklistItemIds.has(id)))
+		throw new Error("所选核对项已变化，请刷新后重新选择。");
+	const selectedItems = input.task.checklist.filter((item) => selectedIds.has(item.id));
 	const sourceTaskTitle = input.sourceTaskTitle.replace(/^(?:\[[^\]]+\]\s*)+/, "").trim();
-	const title = `[FIX]核查并修复${sourceTaskTitle.slice(0, 35)}的部署后问题`;
+	const title = `[RESEARCH]核查${sourceTaskTitle.slice(0, 35)}的部署后表现`;
 	const sourcePointer = `PDV workspace=${input.workspaceId} deployment=${input.deploymentId} task=${input.task.taskId}`;
 	const sourceContext = [
 		`项目：${input.projectName}（${input.workspaceId}）`,
@@ -76,16 +78,19 @@ export function buildPostDeployVerificationFollowUpTaskCreationDraftSeed(input: 
 	];
 	const renderPrompt = (itemContexts: string[], summarizeSource = false) =>
 		[
-			"请核查以下部署后核对项涉及的问题；先确认是否存在，再修复并验证选中的断言。",
+			"请根据以下来源背景和补充需求开展后续工作，先核查真实表现，不预设存在故障。",
 			"## 来源",
 			...sourceContext.map((context) => (summarizeSource ? renderTextWithinSnapshotBudget(context, 1000) : context)),
 			"需要原始需求时，用 kanban task get 按上述项目与 Task ID 读取；不要依赖原 worktree 或复用原 Session。",
 			"## 实际现象",
 			"（可补充复现过程、截图或错误信息；未填写时先调查，不预设核对失败。）",
 			"## 选中的核对项（创建草稿时的快照）",
+			...(selectedItems.length === 0
+				? ["仅携带来源任务和部署背景，未指定核对项；请补充本次续接的目标与验收。"]
+				: []),
 			...itemContexts,
 			"## 目标与验收",
-			"先依据当前代码和真实行为确认问题，再完成必要修复并验证以上断言；区分已复现、未复现与无法验证。",
+			"先依据当前代码和真实行为核查，再按补充需求完成必要改动与验证；区分已复现、未复现与无法验证。",
 			"原 Task 的核对结果与结案状态由原流程管理，本任务不自动将它标成通过或移入 Done。",
 		].join("\n\n");
 	const maximumPromptCharacters =
@@ -123,7 +128,10 @@ export function buildPostDeployVerificationFollowUpTaskCreationDraftSeed(input: 
 		referenceRelationModelingDraftSchema.shape.relationAssertionEvidencePointers.unwrap().element.maxLength ??
 		Number.POSITIVE_INFINITY;
 	const sourcePointerRequiresSummary = sourcePointer.length > maximumEvidencePointerCharacters;
-	const selectedItemIndex = selectedItems.map((item) => `${item.id}：${item.label}`).join("\n");
+	const selectedItemIndex =
+		selectedItems.length > 0
+			? selectedItems.map((item) => `${item.id}：${item.label}`).join("\n")
+			: "来源任务的部署后背景；未指定核对项。";
 	return {
 		initializationId: createRandomUuidV4WithInsecureContextFallback(),
 		workspaceId: input.workspaceId,
@@ -143,13 +151,20 @@ export function buildPostDeployVerificationFollowUpTaskCreationDraftSeed(input: 
 				relationKind: "reference_requirement_originates_from",
 				currentTaskIsStatementSubject: true,
 				relationAssertionRationaleOneSentence:
-					"本任务的需求来自原任务中选定的部署后核对项，需核查并处理其涉及的问题。",
+					"本任务延续来源任务的部署后背景及所选核对项，具体后续目标以本任务补充需求为准。",
 				relationAssertionEvidencePointers: [
 					sourcePointerRequiresSummary
 						? "PDV 完整来源与所选项索引见本关系的 originatedRequirementPortionSummary 属性。"
 						: sourcePointer,
 				],
 				assertedRelationKindSpecificAttributes: {
+					originatingPostDeployVerificationEntry: {
+						workspaceId: input.workspaceId,
+						deploymentId: input.deploymentId,
+						taskId: input.task.taskId,
+						taskIncarnationCreatedAtEpochMs: input.sourceTaskCreatedAt,
+						selectedChecklistItemIds: selectedItems.map((item) => item.id),
+					},
 					originatedRequirementPortionSummary:
 						snapshotRequiresSummary || sourcePointerRequiresSummary
 							? [sourcePointer, ...sourceContext, "完整所选项索引：", selectedItemIndex].join("\n")
