@@ -16,6 +16,7 @@ export function TaskVisualizationArtifactsPanel({
 	onClosePreview,
 	taskIncarnationCreatedAtEpochMs,
 	detachedForeground = false,
+	initialSelection,
 }: {
 	workspaceId: string | null;
 	taskId: string;
@@ -23,6 +24,7 @@ export function TaskVisualizationArtifactsPanel({
 	onClosePreview?: () => void;
 	taskIncarnationCreatedAtEpochMs?: number;
 	detachedForeground?: boolean;
+	initialSelection?: { visualizationArtifactId: string; revisionId?: string };
 }) {
 	const iframeRef = useRef<HTMLIFrameElement>(null);
 	const activePreparedPreview = useRef<{
@@ -31,7 +33,11 @@ export function TaskVisualizationArtifactsPanel({
 	} | null>(null);
 	const contentLoadTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const selectorRef = useRef<HTMLSelectElement>(null);
-	const [hasBeenVisible, setHasBeenVisible] = useState(false);
+	const [isPanelIntersecting, setIsPanelIntersecting] = useState(false);
+	const [isDocumentForeground, setIsDocumentForeground] = useState(
+		() => document.visibilityState === "visible" && document.hasFocus(),
+	);
+	const [preparationRequestKey, setPreparationRequestKey] = useState<number | null>(null);
 	const [prepared, setPrepared] = useState<
 		(Awaited<ReturnType<typeof prepareTaskVisualizationPreview>> & { preparedSelectionRequestKey: number }) | null
 	>(null);
@@ -78,7 +84,33 @@ export function TaskVisualizationArtifactsPanel({
 	collapseForegroundRef.current = () => {
 		if (surface.isExpanded) surface.close();
 	};
-	const hasAlignedExpandedSelection = useRef(false);
+	const [hasAlignedExpandedSelection, setHasAlignedExpandedSelection] = useState(false);
+	const [alignedInitialSelectionKey, setAlignedInitialSelectionKey] = useState<string | null>(null);
+	const initialSelectionKey = JSON.stringify([workspaceId, taskId, initialSelection]);
+	const requestedInitialSelection =
+		initialSelection && alignedInitialSelectionKey !== initialSelectionKey
+			? initialSelection
+			: isExpanded && !hasAlignedExpandedSelection && navigation?.target?.viewKind === "task_visualization"
+				? navigation.target
+				: null;
+	const isActiveForegroundPanel = isPanelIntersecting && isDocumentForeground && (!navigation?.target || isExpanded);
+	const needsInitialSelectionAlignment =
+		requestedInitialSelection?.visualizationArtifactId !== undefined &&
+		(requestedInitialSelection.visualizationArtifactId !== visualizationArtifactId ||
+			(requestedInitialSelection.revisionId !== undefined && requestedInitialSelection.revisionId !== revisionId));
+	const initialSelectionError =
+		requestedInitialSelection?.visualizationArtifactId !== undefined &&
+		!controller.isLoading &&
+		!controller.error &&
+		!controller.artifacts.some(
+			(artifact) => artifact.visualizationArtifactId === requestedInitialSelection.visualizationArtifactId,
+		)
+			? "未找到链接指定的可视化产物。"
+			: null;
+	const canPrepareSelection =
+		selectionRequestKey !== undefined &&
+		preparationRequestKey === selectionRequestKey &&
+		!needsInitialSelectionAlignment;
 	useEffect(() => {
 		const receiveNavigation = (event: MessageEvent) => {
 			const active = activePreparedPreview.current;
@@ -126,24 +158,72 @@ export function TaskVisualizationArtifactsPanel({
 	useEffect(() => {
 		const panel = panelRef.current;
 		if (!panel || typeof IntersectionObserver === "undefined") {
-			setHasBeenVisible(true);
+			setIsPanelIntersecting(true);
 			return;
 		}
 		const observer = new IntersectionObserver((entries) => {
-			if (entries.some((entry) => entry.isIntersecting)) {
-				setHasBeenVisible(true);
-				observer.disconnect();
-			}
+			const latestPanelIntersectionEntry = entries.at(-1);
+			if (latestPanelIntersectionEntry) setIsPanelIntersecting(latestPanelIntersectionEntry.isIntersecting);
 		});
 		observer.observe(panel);
 		return () => observer.disconnect();
 	}, []);
 	useEffect(() => {
+		const updateForeground = () =>
+			setIsDocumentForeground(document.visibilityState === "visible" && document.hasFocus());
+		document.addEventListener("visibilitychange", updateForeground);
+		window.addEventListener("focus", updateForeground);
+		window.addEventListener("blur", updateForeground);
+		return () => {
+			document.removeEventListener("visibilitychange", updateForeground);
+			window.removeEventListener("focus", updateForeground);
+			window.removeEventListener("blur", updateForeground);
+		};
+	}, []);
+	useEffect(() => {
+		setHasAlignedExpandedSelection(false);
+	}, [workspaceId, taskId, isExpanded]);
+	useEffect(() => {
+		if (!isActiveForegroundPanel) return;
+		if (requestedInitialSelection?.visualizationArtifactId !== undefined) {
+			if (controller.isLoading || controller.error) return;
+			const artifact = controller.artifacts.find(
+				(entry) => entry.visualizationArtifactId === requestedInitialSelection.visualizationArtifactId,
+			);
+			if (!artifact) return;
+			setAlignedInitialSelectionKey(initialSelectionKey);
+			setHasAlignedExpandedSelection(true);
+			if (needsInitialSelectionAlignment)
+				controller.selectArtifact({
+					...artifact,
+					revisionId: requestedInitialSelection.revisionId ?? artifact.revisionId,
+				});
+			return;
+		}
+		if (isExpanded) setHasAlignedExpandedSelection(true);
+		controller.ensureDefaultSelection();
+	}, [
+		isActiveForegroundPanel,
+		isExpanded,
+		requestedInitialSelection,
+		needsInitialSelectionAlignment,
+		initialSelectionKey,
+		controller.artifacts,
+		controller.isLoading,
+		controller.error,
+		controller.selectArtifact,
+		controller.ensureDefaultSelection,
+	]);
+	useEffect(() => {
+		if (isActiveForegroundPanel && !needsInitialSelectionAlignment && selection)
+			setPreparationRequestKey(selection.selectionRequestKey);
+	}, [isActiveForegroundPanel, needsInitialSelectionAlignment, selection]);
+	useEffect(() => {
 		activePreparedPreview.current = null;
 		setPrepared(null);
 		setPreviewError(null);
 		setIsPreparing(false);
-		if (!workspaceId || !visualizationArtifactId || !hasBeenVisible) return;
+		if (!workspaceId || !visualizationArtifactId || !canPrepareSelection) return;
 		const abort = new AbortController();
 		setIsPreparing(true);
 		const failPreview = (reason: string) => {
@@ -182,48 +262,19 @@ export function TaskVisualizationArtifactsPanel({
 		visualizationArtifactId,
 		revisionId,
 		selectionRequestKey,
-		hasBeenVisible,
+		canPrepareSelection,
 		controller.failAutomaticPreview,
 	]);
 	useEffect(() => {
-		if (!isExpanded) {
-			hasAlignedExpandedSelection.current = false;
-			return;
-		}
+		if (!isExpanded || !hasAlignedExpandedSelection) return;
 		if (!target || !navigation || navigation.target?.viewKind !== "task_visualization") return;
-		if (!hasAlignedExpandedSelection.current) {
-			const requested = navigation.target;
-			if (
-				requested.visualizationArtifactId &&
-				(requested.visualizationArtifactId !== target.visualizationArtifactId ||
-					(requested.revisionId && requested.revisionId !== target.revisionId))
-			) {
-				const artifact = controller.artifacts.find(
-					(entry) => entry.visualizationArtifactId === requested.visualizationArtifactId,
-				);
-				if (artifact) {
-					hasAlignedExpandedSelection.current = true;
-					controller.selectArtifact({ ...artifact, revisionId: requested.revisionId ?? artifact.revisionId });
-				} else if (!controller.isLoading && !controller.error) setPreviewError("未找到链接指定的可视化产物。");
-				return;
-			}
-			hasAlignedExpandedSelection.current = true;
-		}
 		if (!target.visualizationArtifactId) return;
 		if (
 			navigation.target.visualizationArtifactId !== target.visualizationArtifactId ||
 			navigation.target.revisionId !== target.revisionId
 		)
 			navigation.open(target, navigation.ownerSurfaceId ?? undefined);
-	}, [
-		isExpanded,
-		target,
-		navigation,
-		controller.artifacts,
-		controller.isLoading,
-		controller.error,
-		controller.selectArtifact,
-	]);
+	}, [isExpanded, hasAlignedExpandedSelection, target, navigation]);
 	const validPrepared =
 		prepared?.artifact.workspaceId === workspaceId &&
 		prepared.artifact.taskId === taskId &&
@@ -233,6 +284,11 @@ export function TaskVisualizationArtifactsPanel({
 			: null;
 	const hasNewRevision =
 		validPrepared && selectedArtifact && validPrepared.artifact.revisionId !== selectedArtifact.revisionId;
+	const selectArtifactFromPanel = (artifact: (typeof controller.artifacts)[number]) => {
+		setAlignedInitialSelectionKey(initialSelectionKey);
+		setHasAlignedExpandedSelection(isExpanded);
+		controller.selectArtifact(artifact);
+	};
 	return (
 		<ExpandedForegroundViewSurface
 			controller={surface}
@@ -249,7 +305,7 @@ export function TaskVisualizationArtifactsPanel({
 						const artifact = controller.artifacts.find(
 							(entry) => entry.visualizationArtifactId === event.target.value,
 						);
-						if (artifact) controller.selectArtifact(artifact);
+						if (artifact) selectArtifactFromPanel(artifact);
 					}}
 				>
 					<option value="" disabled>
@@ -267,7 +323,7 @@ export function TaskVisualizationArtifactsPanel({
 					className="h-7 px-2"
 					aria-label={selectedArtifact ? "重新加载可视化" : "刷新可视化清单"}
 					onClick={() =>
-						selectedArtifact ? controller.selectArtifact(selectedArtifact) : void controller.refreshArtifacts()
+						selectedArtifact ? selectArtifactFromPanel(selectedArtifact) : void controller.refreshArtifacts()
 					}
 				>
 					<RefreshCw size={14} />
@@ -333,19 +389,27 @@ export function TaskVisualizationArtifactsPanel({
 					<span>
 						当前第 {validPrepared?.artifact.versionNumber} 版，第 {selectedArtifact.versionNumber} 版已就绪
 					</span>
-					<Button variant="ghost" size="sm" onClick={() => controller.selectArtifact(selectedArtifact)}>
+					<Button variant="ghost" size="sm" onClick={() => selectArtifactFromPanel(selectedArtifact)}>
 						加载最新版本
 					</Button>
 				</div>
 			) : null}
-			{previewError || controller.automaticPreviewError ? (
+			{initialSelectionError || previewError || controller.automaticPreviewError ? (
 				<div role="alert" className="p-3 text-sm text-status-red">
-					预览暂不可用：{previewError ?? controller.automaticPreviewError}
-					{selectedArtifact ? (
-						<Button variant="ghost" size="sm" onClick={() => controller.selectArtifact(selectedArtifact)}>
-							重试预览
-						</Button>
-					) : null}
+					预览暂不可用：{initialSelectionError ?? previewError ?? controller.automaticPreviewError}
+					<Button
+						variant="ghost"
+						size="sm"
+						onClick={() =>
+							initialSelectionError
+								? void controller.refreshArtifacts()
+								: selectedArtifact
+									? selectArtifactFromPanel(selectedArtifact)
+									: controller.retryDefaultSelection()
+						}
+					>
+						重试预览
+					</Button>
 				</div>
 			) : null}
 			{isPreparing ? (
@@ -363,7 +427,7 @@ export function TaskVisualizationArtifactsPanel({
 					referrerPolicy="no-referrer"
 					className="min-h-0 w-full flex-1 border-0 bg-white"
 				/>
-			) : !isPreparing && !previewError ? (
+			) : !isPreparing && !previewError && !initialSelectionError && !controller.automaticPreviewError ? (
 				<div className="flex min-h-0 flex-1 flex-col justify-center gap-2 p-4 text-sm text-text-secondary">
 					<p>
 						{controller.isLoading
