@@ -31,6 +31,10 @@ export type RvfCompletionEvidence = Pick<
 export function createRvfAutomaticCloseoutCoordinator(deps: {
 	storePath: string;
 	inspectCompletion: (record: RvfAutomaticCloseoutRecord) => Promise<RvfCompletionEvidence | null>;
+	observeExistingCompletionBeforeNativeAction?: (
+		record: RvfAutomaticCloseoutRecord,
+		assertOperationLockStillOwned: () => void,
+	) => Promise<RvfAutomaticCloseoutRecord>;
 	restore: (
 		record: RvfAutomaticCloseoutRecord,
 		save: (patch: Partial<RvfAutomaticCloseoutRecord>) => Promise<void>,
@@ -95,6 +99,15 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					};
 				});
 			};
+			const completedOrPausedAfterExistingResultObservation = async () => {
+				if (!deps.observeExistingCompletionBeforeNativeAction) return false;
+				// 复用当前操作锁，覆盖刚绑定完成凭据和恢复后尚未投递的持久 checkpoint。
+				record = await deps.observeExistingCompletionBeforeNativeAction(record, assertOperationLockStillOwned);
+				assertOperationLockStillOwned();
+				if (record.activeCoordinatorOperationClaimId !== claimId)
+					throw new RvfAutomaticCloseoutRecordOperationClaimLostError("既有结果观察期间操作认领已改变。");
+				return record.status === "completed" || record.status === "paused";
+			};
 			try {
 				if (record.status === "awaiting_rvf_completion") {
 					let completion: RvfCompletionEvidence | null;
@@ -107,6 +120,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					await save({ ...completion, status: "restoring_pre_review_conversation" });
 				}
 				if (record.status === "restoring_pre_review_conversation") {
+					if (await completedOrPausedAfterExistingResultObservation()) return;
 					await deps.restore(record, save);
 					await save({
 						status: "restored_pre_review_conversation",
@@ -120,6 +134,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					record.status === "restored_pre_review_conversation" ||
 					record.status === "submitting_closeout_prompt"
 				) {
+					if (await completedOrPausedAfterExistingResultObservation()) return;
 					await save({ status: "submitting_closeout_prompt" });
 					// 同一持久幂等键贯穿重启；投递账本不确定时不能生成新键绕过它。
 					await deps.enqueue(record, () => save({}));

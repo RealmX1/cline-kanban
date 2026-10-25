@@ -21,12 +21,15 @@ import {
 	getRvfAutomaticCloseoutStorePath,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
+	withRvfAutomaticCloseoutRecordOperationLock,
 } from "../../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import {
 	claimRvfCloseoutExecutionStage,
 	observeExistingRvfLandExecutionResultOnce,
+	reportRvfCloseoutExecutionResultWithIndependentEvidence,
 } from "../../../src/rvf-automatic-closeout/rvf-closeout-execution-stage-recovery";
 import { observeExistingRvfBaseIntegrationStateOnce } from "../../../src/rvf-automatic-closeout/rvf-closeout-existing-base-integration-observation";
+import { observeExistingRvfSupplementalLandCompletionOnce } from "../../../src/rvf-automatic-closeout/rvf-closeout-existing-supplemental-land-completion-observation";
 import { captureRvfCloseoutSkillInstallationVersionReference } from "../../../src/rvf-automatic-closeout/rvf-closeout-historical-skill-installation-evidence";
 import {
 	remainingRvfCloseoutStages,
@@ -41,6 +44,7 @@ import {
 } from "../../../src/rvf-automatic-closeout/rvf-closeout-skill-attachment-snapshot-store";
 import * as baseIntegrationEvidence from "../../../src/rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
 import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "../../../src/rvf-automatic-closeout/verify-codex-native-closeout-skill-attachment-evidence";
+import * as supplementalCompletionEvidence from "../../../src/rvf-automatic-closeout/verify-rvf-supplemental-land-completion-evidence";
 import {
 	getWorkspaceQueuedTaskPromptDeliveriesPath,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
@@ -53,6 +57,7 @@ import {
 } from "../../../src/terminal/terminal-input-box-occupancy";
 import { enqueueAgentIdleGatedProgrammaticTaskChatMessage } from "../../../src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { createSupplementalCompletionVerificationProtocolFixture } from "../../utilities/rvf-supplemental-completion-verification-protocol-fixture";
 
 const mocked = vi.hoisted(() => ({
 	directory: "",
@@ -5004,6 +5009,317 @@ it.each([
 	expect(await readTaskMessageInjectionLedger(context.ledgerPath)).toEqual(ledgerBeforeRestart);
 });
 
+async function setupCloseoutCheckpointWithReusedLandCompletion(
+	checkpoint: "awaiting_rvf_completion" | "restoring_pre_review_conversation" | "restored_pre_review_conversation",
+	evidenceSource: "canonical" | "supplemental" = "canonical",
+) {
+	const context = await setup("task", false, "run", true);
+	await context.complete();
+	const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+	if (checkpoint !== "awaiting_rvf_completion") {
+		const originalWrite = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
+		let interruptedAtCheckpoint = false;
+		const checkpointInterruption = vi
+			.spyOn(lockedFileSystem, "writeJsonFileAtomic")
+			.mockImplementation(async (path, payload, options) => {
+				await originalWrite(path, payload, options);
+				if (path !== storePath || interruptedAtCheckpoint) return;
+				const record = (await readRvfAutomaticCloseoutRecords(storePath))[0];
+				if (record?.status !== checkpoint) return;
+				interruptedAtCheckpoint = true;
+				throw new Error("模拟 checkpoint 持久化后运行时退出");
+			});
+		try {
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(interruptedAtCheckpoint).toBe(true);
+		} finally {
+			checkpointInterruption.mockRestore();
+		}
+	}
+	const record = (await readRvfAutomaticCloseoutRecords(storePath))[0];
+	expect(record.status).toBe(checkpoint);
+	const commitSha = context.repo.runGit(["rev-parse", "HEAD"]).stdout.trim();
+	expect(commitSha).toBe(record.receipt.worktree_head_commit_sha);
+	const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+	const candidatePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+	const evidence = JSON.stringify({
+		subject: {
+			head_oid: commitSha,
+			worktree_realpath: context.repo.repositoryPath,
+			git_common_dir_realpath: gitDirectory,
+		},
+		review: { run_id: "run", protocol_valid: true },
+	});
+	await mkdir(dirname(candidatePath), { recursive: true });
+	await writeFile(candidatePath, evidence);
+	await writeFile(`${candidatePath}.sha256`, computeRvfTextSha256(evidence));
+	const completionRecord = {
+		...record,
+		runId: "run",
+		runDirectory: context.run,
+		handoffPath: join(context.run, "artifacts", "handoff.md"),
+		handoffSha256: computeRvfTextSha256("RVF 修复已完成"),
+	};
+	const canonical = JSON.stringify({
+		run_id: "run",
+		run_dir: context.run,
+		repo_root: context.repo.repositoryPath,
+		head_oid_after_commit: commitSha,
+		result: {
+			exit_code: 0,
+			commit_oid: commitSha,
+			candidate_evidence: { status: "reused", candidate_evidence_sha256: computeRvfTextSha256(evidence) },
+			round_baseline_seal: { sealed: true },
+		},
+	});
+	await writeFile(join(context.run, "artifacts", "rvf-land-commit-result.json"), canonical);
+	const immutableDirectory = join(context.run, "artifacts", "rvf-land-commit-execution-results");
+	await mkdir(immutableDirectory);
+	await writeFile(join(immutableDirectory, `${computeRvfTextSha256(canonical)}.json`), canonical);
+	context.repo.runGit(["branch", "--force", "main", commitSha]);
+	if (evidenceSource === "supplemental") {
+		await rm(join(context.run, "artifacts", "rvf-land-commit-result.json"));
+		await rm(candidatePath);
+		await rm(`${candidatePath}.sha256`);
+		const protocol = await createSupplementalCompletionVerificationProtocolFixture({
+			record: completionRecord,
+			targetCommitSha: commitSha,
+			targetTreeSha: context.repo.runGit(["rev-parse", "HEAD^{tree}"]).stdout.trim(),
+			gitCommonDirectoryRealpath: gitDirectory,
+			fixtureRootDirectoryPath: context.fixture.fixtureRootDirectoryPath,
+		});
+		vi.stubEnv("KANBAN_RVF_INSPECTION_EXECUTABLE_PATH", protocol.executablePath);
+	}
+	context.manager.forceStopTaskSession.mockClear();
+	context.manager.applyAgentNativeConversationSessionIdentity.mockClear();
+	context.runtimeApi.startTaskSession.mockClear();
+	context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mockClear();
+	mocked.request.mockClear();
+	return { ...context, storePath, gitDirectory, candidatePath, commitSha, completionRecord };
+}
+
+describe("RVF-002：既有完成事实先于恢复和投递", () => {
+	it.each(
+		(["canonical", "supplemental"] as const).flatMap((evidenceSource) =>
+			(
+				[
+					"awaiting_rvf_completion",
+					"restoring_pre_review_conversation",
+					"restored_pre_review_conversation",
+				] as const
+			).map((checkpoint) => ({ evidenceSource, checkpoint })),
+		),
+	)(
+		"$checkpoint 的 $evidenceSource Land 复用原 HEAD 时只追加完成，不恢复或入队",
+		async ({ checkpoint, evidenceSource }) => {
+			const context = await setupCloseoutCheckpointWithReusedLandCompletion(checkpoint, evidenceSource);
+			const refsBefore = context.repo.runGit(["show-ref"]).stdout;
+			const worktreeBefore = context.repo.runGit(["status", "--porcelain=v2"]).stdout;
+			const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+			await restarted.sweepPendingCloseoutsOnce();
+			const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+			expect(context.manager.applyAgentNativeConversationSessionIdentity).not.toHaveBeenCalled();
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+			expect(mocked.request).not.toHaveBeenCalled();
+			expect(record).toMatchObject({
+				status: "completed",
+				landExecutionResult: {
+					outcome: "completed",
+					commitSha: context.commitSha,
+					verificationBasis:
+						evidenceSource === "canonical" ? "verified_stage_execution" : "verified_supplemental_land_completion",
+				},
+				baseBranchSyncExecutionResult: {
+					outcome: "completed",
+					verificationBasis: "verified_base_integration_state",
+				},
+			});
+			expect(record.lateNativePromptAcceptanceRecoveryReceipt).toBeUndefined();
+			expect(record.promptDeliveryAttempts).toBeUndefined();
+			expect(record.stageExecutionClaims).toBeUndefined();
+			expect(await readTaskMessageInjectionLedger(getTaskMessageInjectionLedgerPath(mocked.directory))).toEqual([]);
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect(await readRvfAutomaticCloseoutRecords(context.storePath)).toEqual([record]);
+			expect(context.repo.runGit(["show-ref"]).stdout).toBe(refsBefore);
+			expect(context.repo.runGit(["status", "--porcelain=v2"]).stdout).toBe(worktreeBefore);
+		},
+	);
+
+	it.each(["restoring_pre_review_conversation", "restored_pre_review_conversation"] as const)(
+		"%s 的普通客户端报告不能提前跳阶段",
+		async (checkpoint) => {
+			const context = await setupCloseoutCheckpointWithReusedLandCompletion(checkpoint);
+			const report = {
+				taskId: "task",
+				decisionToken: context.token,
+				runId: "run",
+				handoffSha256: context.completionRecord.handoffSha256,
+				stage: "land" as const,
+				outcome: "completed" as const,
+				commitSha: context.commitSha,
+			};
+			await expect(
+				reportRvfCloseoutExecutionResultWithIndependentEvidence(
+					{
+						workspaceId: context.scope.workspaceId,
+						rvfHome: context.rvfHome,
+						isStopped: () => false,
+						getMainSummary: async () => context.manager.getSummary(),
+						verifyLateAcceptance: async () => undefined,
+					},
+					report,
+				),
+			).rejects.toThrow("尚未进入收尾");
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0].landExecutionResult).toBeUndefined();
+		},
+	);
+
+	it("只有 Land 已完成时保持原生接受未知，base 仍须取得原执行资格", async () => {
+		const context = await setupCloseoutCheckpointWithReusedLandCompletion("restored_pre_review_conversation");
+		context.manager.getSummary().runtimeSessionIncarnationId = "restored-current-execution-incarnation";
+		context.repo.runGit(["branch", "--force", "main", `${context.commitSha}^`]);
+		const dependencies = {
+			workspaceId: context.scope.workspaceId,
+			rvfHome: context.rvfHome,
+			isStopped: () => false,
+			getMainSummary: async () => context.manager.getSummary(),
+			verifyLateAcceptance: async () => {
+				throw new Error("尚无原生接受证据");
+			},
+		};
+		const before = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		const observed = await observeExistingRvfLandExecutionResultOnce(dependencies, before);
+		expect(observed.landExecutionResult?.outcome).toBe("completed");
+		expect(observed.status).toBe("restored_pre_review_conversation");
+		expect(observed.lateNativePromptAcceptanceRecoveryReceipt).toBeUndefined();
+		expect(
+			await claimRvfCloseoutExecutionStage(dependencies, {
+				taskId: "task",
+				decisionToken: context.token,
+				runId: "run",
+				handoffSha256: context.completionRecord.handoffSha256,
+				stage: "base_branch_sync",
+			}),
+		).toMatchObject({ status: "waiting" });
+		expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0].stageExecutionClaims).toBeUndefined();
+	});
+
+	it.each(["restoring_pre_review_conversation", "restored_pre_review_conversation"] as const)(
+		"%s 的规范 Land 后台观察等待 coordinator 的记录操作锁",
+		async (checkpoint) => {
+			const context = await setupCloseoutCheckpointWithReusedLandCompletion(checkpoint);
+			const before = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			const dependencies = {
+				workspaceId: context.scope.workspaceId,
+				rvfHome: context.rvfHome,
+				isStopped: () => false,
+				getMainSummary: async () => {
+					throw new Error("规范结果观察不恢复会话");
+				},
+				verifyLateAcceptance: async () => {
+					throw new Error("规范结果观察不使用原生接受");
+				},
+			};
+			await withRvfAutomaticCloseoutRecordOperationLock(context.storePath, context.token, async () => {
+				expect(await observeExistingRvfLandExecutionResultOnce(dependencies, before)).toEqual(before);
+				expect(await readRvfAutomaticCloseoutRecords(context.storePath)).toEqual([before]);
+			});
+			expect(
+				(await observeExistingRvfLandExecutionResultOnce(dependencies, before)).landExecutionResult,
+			).toMatchObject({
+				outcome: "completed",
+				verificationBasis: "verified_stage_execution",
+			});
+		},
+	);
+
+	it("既有证据无效时保留未知并继续原有授权恢复和投递", async () => {
+		const context = await setupCloseoutCheckpointWithReusedLandCompletion("awaiting_rvf_completion");
+		await rm(`${context.candidatePath}.sha256`);
+		await context.service.sweepPendingCloseoutsOnce();
+		const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		expect(record.landExecutionResult).toBeUndefined();
+		expect(record.status).not.toBe("completed");
+		expect(context.manager.forceStopTaskSession).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.startTaskSession).toHaveBeenCalledOnce();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).toHaveBeenCalledOnce();
+	});
+
+	it("coordinator 持有操作锁和 normal reservation 观察，落盘前失锁时不登记 base 或执行原生动作", async () => {
+		const context = await setupCloseoutCheckpointWithReusedLandCompletion("awaiting_rvf_completion");
+		let compromiseOperationLock: () => void = () => {
+			throw new Error("尚未捕获 coordinator 的操作锁");
+		};
+		const withLocks = lockedFileSystem.withLocks.bind(lockedFileSystem);
+		const operationLock = vi
+			.spyOn(lockedFileSystem, "withLocks")
+			.mockImplementation(async <T>(requests: readonly LockRequest[], operation: () => Promise<T>): Promise<T> => {
+				const recordOperationLock = requests.find((request) =>
+					request.path.startsWith(`${context.storePath}.record-operation-`),
+				);
+				if (recordOperationLock?.onCompromised)
+					compromiseOperationLock = () => recordOperationLock.onCompromised?.(new Error("模拟操作锁失效"));
+				return withLocks(requests, operation);
+			});
+		const readBaseState = baseIntegrationEvidence.readBoundRvfBaseIntegrationState;
+		let reads = 0;
+		const verification = vi
+			.spyOn(baseIntegrationEvidence, "readBoundRvfBaseIntegrationState")
+			.mockImplementation(async (record) => {
+				reads += 1;
+				expect(record.activeCoordinatorOperationClaimId).toBeTruthy();
+				expect(
+					(await readdir(join(context.gitDirectory, "rvf-independent-backup-route", "normal-mutations"))).length,
+				).toBeGreaterThan(0);
+				const result = await readBaseState(record);
+				if (reads === 3) compromiseOperationLock();
+				return result;
+			});
+		try {
+			await context.service.sweepPendingCloseoutsOnce();
+			const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(reads).toBe(3);
+			expect(record.landExecutionResult?.outcome).toBe("completed");
+			expect(record.baseBranchSyncExecutionResult).toBeUndefined();
+			expect(record.status).toBe("restoring_pre_review_conversation");
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		} finally {
+			verification.mockRestore();
+			operationLock.mockRestore();
+		}
+	});
+
+	it.each(["explicit_stop", "active_backup", "consumed_backup"] as const)(
+		"恢复 checkpoint 遇到 %s 时不补登、不恢复也不投递",
+		async (scenario) => {
+			const context = await setupCloseoutCheckpointWithReusedLandCompletion("restoring_pre_review_conversation");
+			if (scenario === "explicit_stop")
+				await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+			else {
+				const control = join(context.gitDirectory, "rvf-independent-backup-route");
+				if (scenario === "active_backup") await mkdir(join(control, "active-owner"), { recursive: true });
+				else {
+					const consumed = join(control, "consumed-original-runs");
+					await mkdir(consumed, { recursive: true });
+					await writeFile(join(consumed, `${computeRvfTextSha256(context.run)}.json`), "{}");
+				}
+			}
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(record.status).not.toBe("completed");
+			expect(record.landExecutionResult).toBeUndefined();
+			expect(record.baseBranchSyncExecutionResult).toBeUndefined();
+			expect(context.manager.forceStopTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		},
+	);
+});
+
 async function setupHistoricalBaseIntegrationObservation() {
 	const context = await setupExecutionResultInterleavingEvidence();
 	const storePath = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
@@ -5044,6 +5360,322 @@ async function setupHistoricalBaseIntegrationObservation() {
 	context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mockClear();
 	return { ...context, storePath, candidatePath, gitDirectory, boundRecord: record };
 }
+
+async function setupHistoricalSupplementalLandCompletionObservation() {
+	const context = await setupHistoricalBaseIntegrationObservation();
+	await rm(join(context.boundRecord.runDirectory ?? "", "artifacts", "rvf-land-commit-result.json"));
+	await rm(context.candidatePath);
+	await rm(`${context.candidatePath}.sha256`);
+	const protocol = await createSupplementalCompletionVerificationProtocolFixture({
+		record: context.boundRecord,
+		targetCommitSha: context.land.commitSha,
+		targetTreeSha: context.repo.runGit(["rev-parse", "HEAD^{tree}"]).stdout.trim(),
+		gitCommonDirectoryRealpath: context.gitDirectory,
+		fixtureRootDirectoryPath: context.fixture.fixtureRootDirectoryPath,
+	});
+	vi.stubEnv("KANBAN_RVF_INSPECTION_EXECUTABLE_PATH", protocol.executablePath);
+	await updateRvfAutomaticCloseoutRecords(context.storePath, (records) => ({
+		records: records.map((record) => ({
+			...record,
+			landExecutionResult: { outcome: "blocked" as const, reason: "旧收尾缺少完成标记", reportedAt: 1 },
+			supplementalLandCompletionObservationBudget: undefined,
+		})),
+		value: undefined,
+	}));
+	const observationDependencies = {
+		workspaceId: context.scope.workspaceId,
+		rvfHome: context.rvfHome,
+		isStopped: (record: { explicitStopRequestedAt?: number }) => record.explicitStopRequestedAt !== undefined,
+		getMainSummary: async () => {
+			throw new Error("只读补证不恢复 Agent");
+		},
+		verifyLateAcceptance: async () => {
+			throw new Error("不借用原生接受证明");
+		},
+	};
+	return { ...context, protocol, observationDependencies };
+}
+
+describe("历史补充完成证明的消费与自动恢复", () => {
+	it("补充 Land 验收后当前 scope 不能改绑到另一条已含目标的 base ref", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		await observeExistingRvfSupplementalLandCompletionOnce(context.observationDependencies, record);
+		const accepted = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		expect(accepted.landExecutionResult?.outcome).toBe("completed");
+		context.repo.runGit(["branch", "unrelated-base-with-same-target"]);
+		const scopePath = join(record.runDirectory ?? "", "artifacts", "inputs", "scope.contract.json");
+		const scope = JSON.parse(await readFile(scopePath, "utf8"));
+		await writeFile(scopePath, JSON.stringify({ ...scope, base_ref: "unrelated-base-with-same-target" }));
+		await observeExistingRvfBaseIntegrationStateOnce(context.observationDependencies, accepted);
+		const after = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		expect(after.baseBranchSyncExecutionResult?.outcome).toBe("blocked");
+		expect(after.independentBaseIntegrationObservationBudget?.reason).toContain("冻结原件");
+		expect(after.landExecutionResult).toEqual(accepted.landExecutionResult);
+	});
+
+	it("目标对象补回但 HEAD 未变化时自动刷新能力指纹", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		const commit = context.land.commitSha;
+		const objectPath = join(context.gitDirectory, "objects", commit.slice(0, 2), commit.slice(2));
+		const bytes = await readFile(objectPath);
+		const available = await supplementalCompletionEvidence.readRvfSupplementalCompletionCapabilityFingerprint(record);
+		await rm(objectPath);
+		try {
+			const missing =
+				await supplementalCompletionEvidence.readRvfSupplementalCompletionCapabilityFingerprint(record);
+			expect(missing).not.toBe(available);
+		} finally {
+			await writeFile(objectPath, bytes);
+		}
+		expect(await supplementalCompletionEvidence.readRvfSupplementalCompletionCapabilityFingerprint(record)).toBe(
+			available,
+		);
+	});
+
+	it("补充原件缺失时保存恢复条件，耗尽预算后原件恢复可跨 service 自动收口", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		const proof = await readFile(context.protocol.reference.evidencePath);
+		await rm(context.protocol.reference.evidencePath);
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const offset of [0, 15_001, 30_002, 90_003]) {
+				clock.mockReturnValue(now + offset);
+				await observeExistingRvfSupplementalLandCompletionOnce(
+					context.observationDependencies,
+					(await readRvfAutomaticCloseoutRecords(context.storePath))[0],
+				);
+			}
+			const waiting = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(waiting.supplementalLandCompletionObservationBudget).toMatchObject({
+				count: 3,
+				reason: expect.stringContaining("尚无"),
+				recoveryCondition: expect.stringContaining("自动重验"),
+			});
+			expect(await readFile(context.protocol.invocationLogPath, "utf8")).toBe("");
+			await writeFile(context.protocol.reference.evidencePath, proof);
+			clock.mockReturnValue(now + 150_004);
+			await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0].status).toBe("completed");
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("并发扫描追加补充 Land/base 来源，保留旧失败、Git refs 与投递历史，重启和迟到报告幂等", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		const refs = context.repo.runGit(["show-ref"]).stdout;
+		const ledgerPath = getTaskMessageInjectionLedgerPath(mocked.directory);
+		const ledger = await readFile(ledgerPath);
+		const handoff = await readFile(context.boundRecord.handoffPath ?? "");
+		context.dependencies.getManager = vi.fn(async () => {
+			throw new Error("已完成任务不读取或恢复会话");
+		});
+		const restarted = createRvfAutomaticCloseoutRuntimeService(context.dependencies);
+		await Promise.all([context.service.sweepPendingCloseoutsOnce(), restarted.sweepPendingCloseoutsOnce()]);
+		const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		expect(record).toMatchObject({
+			status: "completed",
+			pauseReason: "收尾投递失败：submit_confirmation_budget_exhausted",
+			landExecutionResult: {
+				outcome: "completed",
+				commitSha: context.land.commitSha,
+				verificationBasis: "verified_supplemental_land_completion",
+				supplementalLandCompletionEvidence: context.protocol.reference,
+				supplementalLandCompletionVerification: {
+					source: "historical_supplemental_completion",
+					doesNotAttestPrecommitReview: true,
+					doesNotAuthorizeFollowupExecution: true,
+					currentExecutionEligibility: "requires_current_authorization_check",
+				},
+			},
+			baseBranchSyncExecutionResult: {
+				outcome: "completed",
+				verificationBasis: "verified_base_integration_state",
+				baseIntegrationObservation: {
+					supplementalLandCompletionEvidenceSha256: context.protocol.reference.evidenceSha256,
+				},
+			},
+		});
+		expect(record.baseBranchSyncExecutionResult?.baseIntegrationObservation?.candidateEvidenceSha256).toBeUndefined();
+		expect(record.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual([
+			"blocked",
+			"blocked",
+			"completed",
+			"completed",
+		]);
+		const invocations = await readFile(context.protocol.invocationLogPath);
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		await restarted.reportExecutionResult(context.scope, {
+			...context.land,
+			supplementalLandCompletionEvidence: context.protocol.reference,
+		});
+		await expect(
+			restarted.reportExecutionResult(context.scope, { ...context.land, outcome: "failed", reason: "迟到自述" }),
+		).rejects.toThrow("不能");
+		expect(await readRvfAutomaticCloseoutRecords(context.storePath)).toEqual([record]);
+		expect(await readFile(context.protocol.invocationLogPath)).toEqual(invocations);
+		expect(await readFile(context.boundRecord.handoffPath ?? "")).toEqual(handoff);
+		expect(await readFile(ledgerPath)).toEqual(ledger);
+		expect(context.repo.runGit(["show-ref"]).stdout).toBe(refs);
+		expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+	});
+
+	it.each(["awaiting_machine_evidence", "invalid_evidence", "execution_prohibited"])(
+		"生产方返回 %s 不登记完成，三次预算跨重启保留，能力变化后自动恢复",
+		async (status) => {
+			const context = await setupHistoricalSupplementalLandCompletionObservation();
+			await writeFile(context.protocol.configurationPath, JSON.stringify({ status }));
+			const now = Date.now();
+			const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+			try {
+				for (const offset of [0, 14_999, 15_001, 30_002, 90_003, 150_004]) {
+					clock.mockReturnValue(now + offset);
+					const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+					await observeExistingRvfSupplementalLandCompletionOnce(context.observationDependencies, record);
+				}
+				let record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+				expect(record.landExecutionResult?.outcome).toBe("blocked");
+				expect(record.supplementalLandCompletionObservationBudget).toMatchObject({
+					count: 3,
+					reason: expect.stringContaining(status),
+				});
+				expect((await readFile(context.protocol.invocationLogPath, "utf8")).trim().split("\n")).toHaveLength(3);
+				// 模拟同路径的生产方能力升级；响应配置变化本身不伪装能力指纹变化。
+				await appendFile(context.protocol.executablePath, "\n// 已恢复正式只读核验能力\n");
+				await writeFile(context.protocol.configurationPath, JSON.stringify({ status: "acceptable" }));
+				clock.mockReturnValue(now + 210_005);
+				await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+				record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+				expect(record.status).toBe("completed");
+				expect(record.supplementalLandCompletionObservationBudget?.count).toBe(1);
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+
+	it.each(["proof_missing", "wrong_task", "wrong_common_directory", "digest_tampered", "wrong_target_tree"])(
+		"拒绝缺失或冲突的补充凭据：%s",
+		async (scenario) => {
+			const context = await setupHistoricalSupplementalLandCompletionObservation();
+			if (scenario === "proof_missing") await rm(context.protocol.reference.evidencePath);
+			if (scenario === "digest_tampered") await appendFile(context.protocol.reference.evidencePath, " ");
+			if (scenario === "wrong_target_tree")
+				await writeFile(
+					context.protocol.configurationPath,
+					JSON.stringify({
+						status: "acceptable",
+						responseOverride: {
+							historical_completion: {
+								status: "verified",
+								target_commit: context.land.commitSha,
+								target_tree: "0".repeat(40),
+							},
+						},
+					}),
+				);
+			if (scenario === "wrong_task" || scenario === "wrong_common_directory") {
+				const payload = { ...context.protocol.payload, binding: { ...context.protocol.payload.binding } };
+				if (scenario === "wrong_task") payload.binding.task_id = "foreign-task";
+				else payload.repository_git_common_directory = context.fixture.fixtureRootDirectoryPath;
+				const bytes = JSON.stringify(payload);
+				const digest = computeRvfTextSha256(bytes);
+				await rm(context.protocol.reference.evidencePath);
+				const path = join(dirname(context.protocol.reference.evidencePath), `${digest}.json`);
+				await writeFile(path, bytes);
+				await writeFile(`${path}.sha256`, digest);
+			}
+			const before = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			await observeExistingRvfSupplementalLandCompletionOnce(context.observationDependencies, before);
+			const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(record.landExecutionResult).toEqual(before.landExecutionResult);
+			expect(record.executionResultReportHistory).toEqual(before.executionResultReportHistory);
+			expect(record.supplementalLandCompletionObservationBudget?.reason).toBeTruthy();
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		},
+	);
+
+	it("未整合的 base 只接受历史 Land，旧未分类阻塞不授予 base 执行资格", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		context.repo.runGit(["switch", "--create", "historical-supplemental-target"]);
+		context.repo.runGit(["update-ref", "refs/heads/main", `${context.land.commitSha}^`]);
+		await context.service.sweepPendingCloseoutsOnce();
+		const record = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+		expect(record.landExecutionResult?.verificationBasis).toBe("verified_supplemental_land_completion");
+		expect(record.baseBranchSyncExecutionResult?.outcome).toBe("blocked");
+		expect(
+			await claimRvfCloseoutExecutionStage(context.observationDependencies, {
+				...context.binding,
+				stage: "base_branch_sync",
+			}),
+		).toMatchObject({ status: "blocked" });
+		expect(record.stageExecutionClaims).toBeUndefined();
+	});
+
+	it.each(["explicit_stop", "active_backup", "consumed_backup"])(
+		"%s 保留原状态，不核验、不恢复会话、不投递或认领执行",
+		async (scenario) => {
+			const context = await setupHistoricalSupplementalLandCompletionObservation();
+			if (scenario === "explicit_stop")
+				await context.service.pauseForExplicitStop(context.scope.workspaceId, "task");
+			else {
+				const directory =
+					scenario === "active_backup"
+						? join(context.gitDirectory, "rvf-independent-backup-route", "active-owner")
+						: join(
+								context.gitDirectory,
+								"rvf-independent-backup-route",
+								"consumed-original-runs",
+								`${computeRvfTextSha256(context.boundRecord.runDirectory ?? "")}.json`,
+							);
+				if (scenario === "active_backup") await mkdir(directory, { recursive: true });
+				else {
+					await mkdir(dirname(directory), { recursive: true });
+					await writeFile(directory, "{}");
+				}
+			}
+			const before = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			await observeExistingRvfSupplementalLandCompletionOnce(context.observationDependencies, before);
+			expect((await readRvfAutomaticCloseoutRecords(context.storePath))[0]).toEqual(before);
+			expect(await readFile(context.protocol.invocationLogPath, "utf8")).toBe("");
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+		},
+	);
+
+	it("最终补充核验 await 期间 Stop 生效后不写完成或释放认领", async () => {
+		const context = await setupHistoricalSupplementalLandCompletionObservation();
+		let stopped = false;
+		const original = supplementalCompletionEvidence.verifyBoundRvfSupplementalLandCompletionEvidence;
+		let calls = 0;
+		const verification = vi
+			.spyOn(supplementalCompletionEvidence, "verifyBoundRvfSupplementalLandCompletionEvidence")
+			.mockImplementation(async (...arguments_) => {
+				const result = await original(...arguments_);
+				if (++calls === 3) stopped = true;
+				return result;
+			});
+		try {
+			const before = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			await observeExistingRvfSupplementalLandCompletionOnce(
+				{ ...context.observationDependencies, isStopped: () => stopped },
+				before,
+			);
+			const after = (await readRvfAutomaticCloseoutRecords(context.storePath))[0];
+			expect(calls).toBe(3);
+			expect(after.landExecutionResult).toEqual(before.landExecutionResult);
+			expect(after.executionResultReportHistory).toEqual(before.executionResultReportHistory);
+			expect(after.stageExecutionClaims).toEqual(before.stageExecutionClaims);
+		} finally {
+			verification.mockRestore();
+		}
+	});
+});
 
 describe("历史 base 整合状态的独立观察", () => {
 	it("并发扫描先补登 Land/base，原失败历史、Git refs 和投递账本保持原样，重启及迟到报告幂等", async () => {

@@ -25,6 +25,8 @@ kanban task rvf-history --task-id <id> --project-path <main-checkout> --cursor <
 
 服务端已核验并接受的 land＋base 同步完成记录，也是历史完成的等价依据（`kanban_server_accepted_closeout_record`）。它必须保留精确 run/handoff 摘要、真实提交与本地 base ref；当前生产方缺失或旧验证缓存被清理不会撤销该接受事实。当前覆盖仍需本次独立鉴证，不能由旧接受记录直接推定。
 
+服务端通过正式 `rvf land supplemental-completion verify` 接受的历史 Land 补充证明，单列为 `kanban_server_verified_supplemental_land_completion`。它不要求 base 已整合，`completedAt` 记录本次补充验收时间；Land 结果保存具体证明摘要、核验绑定及“不证明提交前评审、不授予后续执行”的边界。补充证明不能作为当前 candidate evidence 或 base 同步执行凭据，当前覆盖保持独立鉴证，Stop 与执行资格不变。
+
 查询不会触发恢复、finalize、验证执行、提交或同步；不会使用全局 latest。执行后续操作时仍使用查询返回的精确 run/handoff，并核对该操作自己的门禁。
 
 ## 生产方与恢复

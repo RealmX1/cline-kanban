@@ -94,6 +94,7 @@ import {
 	resolveRvfCloseoutActiveDelivery,
 } from "./rvf-closeout-execution-stage-recovery";
 import { observeExistingRvfBaseIntegrationStateOnce } from "./rvf-closeout-existing-base-integration-observation";
+import { observeExistingRvfSupplementalLandCompletionOnce } from "./rvf-closeout-existing-supplemental-land-completion-observation";
 import { captureExpectedRvfCloseoutSkillEvidenceOnce } from "./rvf-closeout-expected-skill-snapshot-capture";
 import {
 	advanceRvfCloseoutAutomaticRecovery,
@@ -1007,6 +1008,29 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			},
 		);
 	}
+	async function observeExistingCloseoutCompletion(
+		scope: RuntimeTrpcWorkspaceScope,
+		originalRecord: RvfAutomaticCloseoutRecord,
+		assertObservationStillOwned?: () => void,
+	) {
+		const recoveryDependencies = executionRecoveryDependencies(scope, originalRecord.taskId);
+		if (recoveryDependencies.isStopped(originalRecord)) return originalRecord;
+		const canonicalLandObserved = await observeExistingRvfLandExecutionResultOnce(
+			recoveryDependencies,
+			originalRecord,
+			assertObservationStillOwned,
+		);
+		const landObserved = await observeExistingRvfSupplementalLandCompletionOnce(
+			recoveryDependencies,
+			canonicalLandObserved,
+			assertObservationStillOwned,
+		);
+		return observeExistingRvfBaseIntegrationStateOnce(
+			recoveryDependencies,
+			landObserved,
+			assertObservationStillOwned,
+		);
+	}
 	// 调用方只持 workspace 串行队列；主会话队列与记录锁各进入一次，避免补证入口重入死锁。
 	async function recoverEligiblePausedCloseouts(
 		scope: RuntimeTrpcWorkspaceScope,
@@ -1016,11 +1040,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		for (const originalRecord of records) {
 			const recoveryDependencies = executionRecoveryDependencies(scope, originalRecord.taskId);
 			if (recoveryDependencies.isStopped(originalRecord)) continue;
-			const landObserved = await observeExistingRvfLandExecutionResultOnce(
-				executionRecoveryDependencies(scope, originalRecord.taskId),
-				originalRecord,
-			);
-			const record = await observeExistingRvfBaseIntegrationStateOnce(recoveryDependencies, landObserved);
+			const record = await observeExistingCloseoutCompletion(scope, originalRecord);
 			if (recoveryDependencies.isStopped(record) || record.status === "completed") continue;
 			try {
 				await reconcileUnknownNormalCloseoutOperations(scope, record);
@@ -1257,6 +1277,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							throw new Error("RVF 完成证据与激活时绑定的 run 不一致。");
 						return completion;
 					},
+					observeExistingCompletionBeforeNativeAction: (record, assertOwned) =>
+						observeExistingCloseoutCompletion(scope, record, assertOwned),
 					restore: (record, save) =>
 						serializeMainConversationOperation(scope, record.taskId, () => restore(scope, record, save)),
 					enqueue: (record, assertOperationStillOwned) =>

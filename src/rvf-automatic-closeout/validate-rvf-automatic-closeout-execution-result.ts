@@ -7,6 +7,7 @@ import type {
 } from "../core/rvf-automatic-closeout-contract";
 import { getGitStdout } from "../workspace/git-utils";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
+import { verifyBoundRvfSupplementalLandCompletionEvidence } from "./verify-rvf-supplemental-land-completion-evidence";
 
 export class RvfAutomaticCloseoutExecutionResultDeliveryPendingError extends Error {}
 
@@ -48,6 +49,12 @@ export async function readBoundRvfLandCandidateEvidence(record: RvfAutomaticClos
 export async function readBoundRvfLocalBaseRef(record: RvfAutomaticCloseoutRecord) {
 	if (!record.runDirectory) throw new Error("缺少绑定的 RVF run 目录。");
 	const scopeBytes = await readFile(join(record.runDirectory, "artifacts", "inputs", "scope.contract.json"));
+	if (
+		record.landExecutionResult?.verificationBasis === "verified_supplemental_land_completion" &&
+		computeRvfTextSha256(scopeBytes) !==
+			record.landExecutionResult.supplementalLandCompletionVerification?.scopeContractSha256
+	)
+		throw new Error("当前 base scope 与已接受补充证明中的冻结原件不符。");
 	const scopeContract = z
 		.object({ base_ref: z.string().nullable().optional() })
 		.parse(JSON.parse(scopeBytes.toString("utf8")));
@@ -59,6 +66,24 @@ export async function readBoundRvfLocalBaseRef(record: RvfAutomaticCloseoutRecor
 	return { baseRef, scopeContractSha256: computeRvfTextSha256(scopeBytes) };
 }
 
+async function readBoundRvfLandCompletionEvidence(record: RvfAutomaticCloseoutRecord, commitSha: string) {
+	const accepted = record.landExecutionResult;
+	if (accepted?.verificationBasis === "verified_supplemental_land_completion") {
+		if (!accepted.supplementalLandCompletionEvidence || accepted.commitSha !== commitSha)
+			throw new Error("已接受的历史 Land 缺少原补充证明引用。");
+		const verification = await verifyBoundRvfSupplementalLandCompletionEvidence(
+			record,
+			commitSha,
+			accepted.supplementalLandCompletionEvidence,
+		);
+		return {
+			gitCommonDirectoryRealpath: verification.gitCommonDirectoryRealpath,
+			supplementalLandCompletionEvidenceSha256: accepted.supplementalLandCompletionEvidence.evidenceSha256,
+		};
+	}
+	return readBoundRvfLandCandidateEvidence(record, commitSha);
+}
+
 // 证明本次观测到的等价整合状态，不证明历史上由谁、在哪次 handback 中执行。
 export async function readBoundRvfBaseIntegrationState(record: RvfAutomaticCloseoutRecord) {
 	const landCommitSha = record.landExecutionResult?.commitSha;
@@ -66,7 +91,7 @@ export async function readBoundRvfBaseIntegrationState(record: RvfAutomaticClose
 		throw new Error("尚未确认 land 成功，不能核验 base 整合。");
 	if (record.receipt.kanban_task_id !== record.taskId) throw new Error("开审凭据的 task 归属不符。");
 	const [candidate, base] = await Promise.all([
-		readBoundRvfLandCandidateEvidence(record, landCommitSha),
+		readBoundRvfLandCompletionEvidence(record, landCommitSha),
 		readBoundRvfLocalBaseRef(record),
 	]);
 	const git = (arguments_: string[]) =>
@@ -103,7 +128,13 @@ export async function validateRvfAutomaticCloseoutExecutionResult(
 	await git(["cat-file", "-e", `${commit}^{commit}`]);
 	if (input.stage === "land") {
 		// 已提交候选可以复用开审前 HEAD，是否完成由当前 run 的 candidate evidence 证明。
-		await readBoundRvfLandCandidateEvidence(record, commit);
+		if (input.supplementalLandCompletionEvidence)
+			await verifyBoundRvfSupplementalLandCompletionEvidence(
+				record,
+				commit,
+				input.supplementalLandCompletionEvidence,
+			);
+		else await readBoundRvfLandCompletionEvidence(record, commit);
 	} else {
 		if (record.landExecutionResult?.outcome !== "completed" || !record.landExecutionResult.commitSha)
 			throw new Error("尚未确认 land 成功，不能登记 base 同步完成。");

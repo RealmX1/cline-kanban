@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -25,6 +25,7 @@ import {
 } from "../../src/state/workspace-state";
 import { type RuntimeAppRouter, type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { createSupplementalCompletionVerificationProtocolFixture } from "../utilities/rvf-supplemental-completion-verification-protocol-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import { createSpawnedChildProcessRegistrySigkilledAfterEachTest } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
@@ -111,7 +112,8 @@ process.stdout.write(JSON.stringify(result));
 	},
 );
 
-it("真实 HTTP 与 CLI 共用只读查询，离线和服务重建后仍可重读历史", { timeout: 100_000 }, async () => {
+async function verifyHistoricalCompletionThroughCliAndTrpc(completionProofKind: string) {
+	const baseIntegrationPending = completionProofKind === "supplemental_base_pending";
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 	const projectPath = join(fixture.ownedIntegrationProjectsDirectoryPath, "rvf-history-project");
@@ -296,23 +298,57 @@ it("真实 HTTP 与 CLI 共用只读查询，离线和服务重建后仍可重�
 		join(runDirectory, "artifacts", "rvf-land-commit-execution-results", `${computeRvfTextSha256(canonical)}.json`),
 		canonical,
 	);
+	const supplementalProtocol =
+		completionProofKind !== "canonical"
+			? await createSupplementalCompletionVerificationProtocolFixture({
+					record,
+					targetCommitSha: head,
+					targetTreeSha: repository.runGit(["rev-parse", "HEAD^{tree}"]).stdout.trim(),
+					gitCommonDirectoryRealpath: gitDirectory,
+					fixtureRootDirectoryPath: fixture.fixtureRootDirectoryPath,
+				})
+			: null;
+	if (supplementalProtocol) {
+		await rm(join(runDirectory, "artifacts", "rvf-land-commit-result.json"));
+		await rm(candidatePath);
+		await rm(`${candidatePath}.sha256`);
+	}
 	// 本用例验证进程与 HTTP 契约；canonical 完成判据在 RVF 的真实 Python 回归中验证。
 	const producer = join(fixture.fixtureRootDirectoryPath, "rvf-read-only-inspection-protocol-fixture.cjs");
 	await writeFile(
 		producer,
 		`#!${process.execPath}
 const args=process.argv.slice(2);
+${supplementalProtocol?.protocolScriptBody ?? ""}
 const result=args[1]==='storage-paths'?{schema:'rvf-storage-paths/v1',run_logs_root:${JSON.stringify(runRoot)},rvf_home:${JSON.stringify(join(fixture.fixtureRootDirectoryPath, "rvf-home"))}}:{schema:'rvf-run-review-evidence/v1',runs:[{run_id:'completed-run',run_directory:${JSON.stringify(runDirectory)},repository_path:${JSON.stringify(projectPath)},kanban_task_id:'abc12',review_completion_status:'completed',completion_evidence_source:'canonical_review_artifacts',handoff_sha256:'a'.repeat(64),reviewed_candidate_content_manifest_sha256:'b'.repeat(64),reason_code:'canonical_review_completed',current_candidate_coverage:{status:'covered',reason_code:'candidate_evidence_eligible'}}]};
 process.stdout.write(JSON.stringify(result));
 `,
 	);
 	await chmod(producer, 0o700);
 	vi.stubEnv("KANBAN_RVF_INSPECTION_EXECUTABLE_PATH", producer);
+	if (baseIntegrationPending) repository.runGit(["branch", "--move", "historical-task-target"]);
 	const originalBoard = await readFile(getPersistedWorkspaceBoardFilePathById(workspace.workspaceId));
 	const originalSummary = await readFile(join(runDirectory, "summary.json"));
 	const originalGit = repository.runGit(["status", "--porcelain=v2"]).stdout;
 	const originalRefs = repository.runGit(["show-ref"]).stdout;
+	const rejectUnexpectedSessionOperation = vi.fn((): never => {
+		throw new Error("暂无会话的历史查询不能操作 Agent");
+	});
 	const getManager = vi.fn(async () => {
+		// base 未完成时允许读取“暂无会话”的摘要，不创建或恢复进程。
+		if (baseIntegrationPending)
+			return {
+				listSummaries: () => [],
+				getSummary: rejectUnexpectedSessionOperation,
+				isTaskSessionAutomaticContinuationSuppressed: rejectUnexpectedSessionOperation,
+				getAwaitingDispatchedBackgroundWork: rejectUnexpectedSessionOperation,
+				resolveTaskTerminalInputBoxOccupancy: rejectUnexpectedSessionOperation,
+				getTaskTerminalInputSideMutationSnapshot: rejectUnexpectedSessionOperation,
+				forceStopTaskSession: rejectUnexpectedSessionOperation,
+				applyAgentNativeConversationSessionIdentity: rejectUnexpectedSessionOperation,
+				publishRvfAutomaticCloseoutPaused: vi.fn(),
+				publishRvfAutomaticCloseoutWaiting: vi.fn(),
+			};
 		throw new Error("已完成状态无需恢复 Agent");
 	});
 	function makeServer() {
@@ -388,12 +424,10 @@ process.stdout.write(JSON.stringify(result));
 		const status = rvfAutomaticCloseoutStatusResponseSchema.parse(
 			await runCli(port, "rvf-automatic-closeout-status"),
 		);
-		expect(status.records[0]?.status).toBe("completed");
-		expect(status.records[0]?.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual([
-			"blocked",
-			"completed",
-			"completed",
-		]);
+		expect(status.records[0]?.status).toBe(baseIntegrationPending ? "paused" : "completed");
+		expect(status.records[0]?.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual(
+			baseIntegrationPending ? ["blocked", "completed"] : ["blocked", "completed", "completed"],
+		);
 		const client = createTRPCProxyClient<RuntimeAppRouter>({
 			links: [
 				httpBatchLink({
@@ -404,7 +438,21 @@ process.stdout.write(JSON.stringify(result));
 		});
 		const api = await client.runtime.getTaskRvfHistory.query({ taskId: "abc12" });
 		expect(api.hasVerifiedCompletedRvf).toBe(true);
-		expect(api.currentCandidateReviewCoverage.status).toBe("covered");
+		expect(api.currentCandidateReviewCoverage.status).toBe(supplementalProtocol ? "unknown" : "covered");
+		if (supplementalProtocol) {
+			expect(api.mostRecentVerifiedCompletedRun?.completedAt).toBe(
+				status.records[0]?.landExecutionResult?.reportedAt,
+			);
+			expect(status.records[0]?.landExecutionResult?.verificationBasis).toBe(
+				"verified_supplemental_land_completion",
+			);
+			expect(api.mostRecentVerifiedCompletedRun?.completionEvidenceSource).toBe(
+				"kanban_server_verified_supplemental_land_completion",
+			);
+			expect(api.mostRecentVerifiedCompletedRun?.landExecutionResult).toEqual(
+				status.records[0]?.landExecutionResult,
+			);
+		}
 		expect(api.mostRecentVerifiedCompletedRun?.baseBranchSyncExecutionResult).toEqual(
 			status.records[0]?.baseBranchSyncExecutionResult,
 		);
@@ -419,7 +467,8 @@ process.stdout.write(JSON.stringify(result));
 		expect(restarted.mostRecentVerifiedCompletedRun?.baseBranchSyncExecutionResult).toEqual(
 			status.records[0]?.baseBranchSyncExecutionResult,
 		);
-		expect(getManager).not.toHaveBeenCalled();
+		if (!baseIntegrationPending) expect(getManager).not.toHaveBeenCalled();
+		expect(rejectUnexpectedSessionOperation).not.toHaveBeenCalled();
 		expect(await readFile(getPersistedWorkspaceBoardFilePathById(workspace.workspaceId))).toEqual(originalBoard);
 		expect(await readFile(join(runDirectory, "summary.json"))).toEqual(originalSummary);
 		expect(repository.runGit(["status", "--porcelain=v2"]).stdout).toBe(originalGit);
@@ -428,4 +477,11 @@ process.stdout.write(JSON.stringify(result));
 		server.closeAllConnections();
 		await new Promise<void>((accept) => server.close(() => accept()));
 	}
-});
+}
+
+const historicalCompletionProofKinds = ["canonical", "supplemental", "supplemental_base_pending"];
+it.each(historicalCompletionProofKinds)(
+	"CLI/tRPC 持久消费 %s 完成事实",
+	verifyHistoricalCompletionThroughCliAndTrpc,
+	100_000,
+);
