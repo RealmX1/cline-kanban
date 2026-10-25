@@ -231,6 +231,31 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 		expect(fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon).not.toHaveBeenCalled();
 	});
 
+	it.each(["kanban_board", "task_focus"] as const)(
+		"%s：后台静默超过五分钟仍留在 Running，不进入 Cache warm New turn",
+		async (allProjectsTaskSwitcherView) => {
+			const projects = makeInputs().projects;
+			const entry = projects[0]?.crossProjectTaskSwitcherEntries[0];
+			if (!entry) throw new Error("缺少后台等待测试条目");
+			entry.lastOutputAt = INITIAL_NOW_MS - 20 * MINUTE_MS;
+			entry.lastEffectiveAgentConversationActivityObservation = {
+				observedAtMs: INITIAL_NOW_MS - 20 * MINUTE_MS,
+				activityKind: "tool_activity",
+				evidenceKind: "persisted_agent_transcript",
+			};
+			entry.lastAgentConversationPromptCacheReferenceObservation = {
+				observedAtMs: INITIAL_NOW_MS - MINUTE_MS,
+				evidenceKind: "post_tool_use_hook_event",
+			};
+			render({ projects, allProjectsTaskSwitcherView });
+			expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);
+			expect(model.sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+			await advanceTime(10 * MINUTE_MS);
+			expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);
+			expect(model.sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		},
+	);
+
 	it.each(["resolved", "rejected"] as const)("停用前首次加载的迟到结果不写入模型与记忆：%s", async (outcome) => {
 		const pendingRequest = deferredSnapshotRequest();
 		fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReturnValueOnce(pendingRequest.promise);
