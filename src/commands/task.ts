@@ -88,6 +88,7 @@ import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
 
 const KANBAN_CLI_PACKAGE_VERSION_FOR_ACTOR_CLAIMS =
 	typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
@@ -275,8 +276,11 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 	throw new Error(`${commandName} requires either --task-id or --column.`);
 }
 
-export function createRuntimeTrpcClient(workspaceId: string | null) {
-	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
+export function createRuntimeTrpcClient(
+	workspaceId: string | null,
+	clientOptions: { timeoutMs?: number; waitForRuntimeRestartBeforeRetrying?: boolean } = {},
+) {
+	const trpcTimeoutMs = clientOptions.timeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -294,12 +298,16 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 						),
 				}),
 				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
-				fetch: (url, options) =>
-					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+				fetch: (url, options) => {
+					const request = async () => {
 						const runtimeFetch = await getRuntimeFetch();
 						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
 						return runtimeFetch(url, { ...options, signal });
-					}),
+					};
+					return clientOptions.waitForRuntimeRestartBeforeRetrying === false
+						? request()
+						: retryCliRuntimeRequestWhileKanbanRuntimeRestarts(request);
+				},
 			}),
 		],
 	});
@@ -2293,6 +2301,15 @@ export function registerTaskCommand(program: Command): void {
 				),
 			);
 		});
+	registerTaskRvfHistoryCommand(task, {
+		queryRuntime: (workspaceId, input, timeoutMs) =>
+			createRuntimeTrpcClient(workspaceId, {
+				timeoutMs,
+				waitForRuntimeRestartBeforeRetrying: false,
+			}).runtime.getTaskRvfHistory.query(input),
+		runTaskCommand,
+	});
+
 	task
 		.command("rvf-automatic-closeout-status")
 		.description("查询 RVF 自动恢复与收尾投递的持久状态。")
