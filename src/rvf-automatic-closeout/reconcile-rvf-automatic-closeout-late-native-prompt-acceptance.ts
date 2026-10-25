@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { z } from "zod";
+import type { z } from "zod";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type RvfAutomaticCloseoutRecord,
@@ -15,6 +15,7 @@ import {
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
 } from "../core/task-message-injection-ledger";
+import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
@@ -22,7 +23,10 @@ import {
 	parseCodexNativeCloseoutUserMessageContent,
 	readCodexNativeCloseoutCandidateText,
 } from "./codex-native-closeout-user-message-content";
-import { readCodexConversationTurns } from "./codex-native-conversation-prefix";
+import {
+	assertCodexNativeConversationLoadedByCurrentHost,
+	readCodexConversationTurns,
+} from "./codex-native-conversation-prefix";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { readCodexNativeCloseoutPromptAcceptanceEvidence } from "./read-codex-native-closeout-prompt-acceptance-evidence";
 import {
@@ -31,6 +35,11 @@ import {
 	updateRvfAutomaticCloseoutRecords,
 	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
+import {
+	appendRvfCloseoutSkillEvidence,
+	captureRvfCloseoutAcceptedSkillSnapshot,
+	readRvfCloseoutSkillSnapshots,
+} from "./rvf-closeout-skill-attachment-snapshot-store";
 import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "./verify-codex-native-closeout-skill-attachment-evidence";
 
 const eligiblePauseReason = "收尾投递失败：submit_confirmation_budget_exhausted";
@@ -44,6 +53,7 @@ class LateNativePromptAcceptanceRecoveryError extends Error {
 	}
 }
 interface NativePromptAcceptanceVerificationDependencies {
+	persistSkillEvidenceDiagnostics?: boolean;
 	workspaceId: string;
 	rvfHome: string;
 	getMainSummary: () => Promise<RuntimeTaskSessionSummary>;
@@ -219,19 +229,7 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 	try {
 		await withRunningCodexAppServerControlSocketConnection(
 			async (port) => {
-				let cursor: string | null = null;
-				const seenCursors = new Set<string>();
-				let loaded = false;
-				do {
-					const page = z
-						.object({ data: z.array(z.string()), nextCursor: z.string().nullable() })
-						.parse(await port.request("thread/loaded/list", { cursor, limit: 100 }));
-					loaded ||= page.data.includes(record.restoredNativeSessionId ?? "");
-					cursor = page.nextCursor ?? null;
-					if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
-					if (cursor) seenCursors.add(cursor);
-				} while (cursor);
-				if (!loaded) throw new Error("恢复会话并未由当前 TUI 宿主持有。");
+				await assertCodexNativeConversationLoadedByCurrentHost(port, record.restoredNativeSessionId ?? "");
 				let revalidateSkillInstallation: (() => Promise<void>) | undefined;
 				if (evidence.skillReferences.length) {
 					try {
@@ -239,6 +237,17 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 							port,
 							worktree: record.receipt.worktree,
 							text: evidence.text,
+							historicalSnapshots: (
+								await readRvfCloseoutSkillSnapshots(record, evidence.nativeSkillExpansionTexts, {
+									persistDiagnostics: deps.persistSkillEvidenceDiagnostics !== false,
+								})
+							).filter(
+								(snapshot) =>
+									snapshot.promptDeliveryIdempotencyKey === delivery.idempotency_key &&
+									snapshot.promptSha256 === delivery.prompt_sha256,
+							),
+							nativeUserMessageId: evidence.nativeUserMessageId,
+							nativeTurnId: evidence.nativeTurnId,
 							skillReferences: evidence.skillReferences,
 							nativeSkillExpansionTexts: evidence.nativeSkillExpansionTexts,
 						});
@@ -246,7 +255,7 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 						throw new LateNativePromptAcceptanceRecoveryError(
 							"unknown",
 							"native_prompt_acceptance_not_proven",
-							"不能唯一核对 Skill 附件的当前 catalog、路径与原生展开正文。",
+							"不能唯一核对 Skill 附件的事件时路径、显式引用与原生展开正文。",
 						);
 					}
 				}
@@ -284,11 +293,23 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 				}
 				try {
 					await revalidateSkillInstallation?.();
+					await readCodexNativeCloseoutPromptAcceptanceEvidence({
+						transcriptPath: record.restoredTranscriptPath ?? "",
+						nativeSessionId: record.restoredNativeSessionId ?? "",
+						worktree: record.receipt.worktree,
+						promptSha256: delivery.prompt_sha256,
+						deliveryCreatedAt: delivery.created_at,
+						decisionToken: record.receipt.decision_token,
+						runId: completion.runId,
+						handoffSha256: completion.handoffSha256,
+						handoffPath: completion.handoffPath,
+						previousTranscriptSnapshot: evidence,
+					});
 				} catch {
 					throw new LateNativePromptAcceptanceRecoveryError(
 						"unknown",
 						"native_prompt_acceptance_not_proven",
-						"核验期间 Skill 安装内容或归属改变。",
+						"核验期间历史转录或 Skill 接受证据改变。",
 					);
 				}
 			},
@@ -367,15 +388,56 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 			assertNotExplicitlyStopped(deps, record);
 			if (
 				record.lateNativePromptAcceptanceRecoveryReceipt
-					? !["closeout_prompt_submitted", "completed"].includes(record.status)
-					: record.status !== "paused" || record.pauseReason !== eligiblePauseReason
+					? !["closeout_prompt_submitted", "completed"].includes(record.status) &&
+						!(
+							(record.promptDeliveryAttempts?.[0]?.purpose === "inspect_existing_state" ||
+								record.promptDeliveryAttempts?.[0]?.executionRequiresReadOnlyInspection) &&
+							record.status === "submitting_closeout_prompt"
+						)
+					: (record.status !== "paused" &&
+							!(
+								(record.promptDeliveryAttempts?.[0]?.purpose === "inspect_existing_state" ||
+									record.promptDeliveryAttempts?.[0]?.executionRequiresReadOnlyInspection) &&
+								["submitting_closeout_prompt", "closeout_prompt_submitted"].includes(record.status)
+							)) ||
+						record.pauseReason !== eligiblePauseReason
 			)
 				throw new LateNativePromptAcceptanceRecoveryError(
 					"blocked",
 					"pause_reason_not_eligible",
 					"本轮并非确认预算耗尽暂停，不能通过此入口恢复。",
 				);
-			const receipt = await verifyRvfAutomaticCloseoutLateNativePromptAcceptance(deps, record);
+			const receipt = await verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
+				request.dryRun ? { ...deps, persistSkillEvidenceDiagnostics: false } : deps,
+				record,
+			);
+			let skillEvidenceReference: Awaited<ReturnType<typeof captureRvfCloseoutAcceptedSkillSnapshot>> | null = null;
+			if (
+				!request.dryRun &&
+				!record.skillAttachmentEvidenceHistory?.some(
+					(entry) =>
+						entry.phase === "accepted_native_expansion" &&
+						entry.promptDeliveryIdempotencyKey === record.promptDeliveryIdempotencyKey,
+				)
+			) {
+				try {
+					skillEvidenceReference = await captureRvfCloseoutAcceptedSkillSnapshot(record, {
+						idempotencyKey: record.promptDeliveryIdempotencyKey,
+						promptSha256: receipt.promptSha256,
+						createdAt: receipt.originalDeliveryFailure.createdAt,
+						nativeMessageId: receipt.nativeUserMessageId,
+					});
+				} catch {
+					appendDiagnosticEventToRotatingJsonlJournal(
+						"rvf-late-native-closeout-prompt-acceptance-automatic-recovery",
+						{
+							outcome: "accepted_skill_snapshot_capture_unavailable",
+							workspaceId: record.workspaceId,
+							taskId: record.taskId,
+						},
+					);
+				}
+			}
 			assertOwned();
 			const current = (await readRvfAutomaticCloseoutRecords(storePath)).find(
 				(entry) => entry.taskId === request.taskId && entry.receipt.decision_token === request.decisionToken,
@@ -387,10 +449,26 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 					"核验期间自动收尾记录已改变，请重新核对。",
 				);
 			if (record.lateNativePromptAcceptanceRecoveryReceipt || request.dryRun) {
+				const savedRecord = skillEvidenceReference
+					? await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
+							assertOwned();
+							const latest = records.find(
+								(entry) =>
+									entry.taskId === record.taskId && entry.receipt.decision_token === request.decisionToken,
+							);
+							if (JSON.stringify(latest) !== JSON.stringify(record)) throw new Error("补证追加期间记录改变。");
+							assertNotExplicitlyStopped(deps, record);
+							const updated = {
+								...record,
+								skillAttachmentEvidenceHistory: appendRvfCloseoutSkillEvidence(record, skillEvidenceReference),
+							};
+							return { records: records.map((entry) => (entry === latest ? updated : entry)), value: updated };
+						})
+					: record;
 				response = {
 					status: record.lateNativePromptAcceptanceRecoveryReceipt ? "already_recovered" : "eligible",
 					reasonCode: "native_prompt_acceptance_verified",
-					record,
+					record: savedRecord,
 					receipt,
 				};
 				return;
@@ -416,6 +494,9 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 					waitingSince: null,
 					waitingNotificationSentAt: null,
 					lateNativePromptAcceptanceRecoveryReceipt: receipt,
+					...(skillEvidenceReference
+						? { skillAttachmentEvidenceHistory: appendRvfCloseoutSkillEvidence(record, skillEvidenceReference) }
+						: {}),
 					updatedAt: Date.now(),
 				};
 				return { records: records.map((entry) => (entry === latest ? updated : entry)), value: updated };

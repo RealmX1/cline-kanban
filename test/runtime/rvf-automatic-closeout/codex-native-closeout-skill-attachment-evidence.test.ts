@@ -116,7 +116,39 @@ async function setupSkillEvidence() {
 }
 
 describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
-	it("原生 text+skill 与相邻展开记录保持精确摘要，当前 catalog 和安装内容核验成功", async () => {
+	it("规范化后相同的 Skill 路径不能通过不同名称重复出现", async () => {
+		const context = await setupSkillEvidence();
+		const alternatePath = context.skillPath.replace("/SKILL.md", "/./SKILL.md");
+		await expect(
+			verifyCodexNativeCloseoutSkillAttachmentEvidence({
+				port: { request: vi.fn() },
+				worktree: context.directory,
+				text: "$first $second",
+				skillReferences: [
+					{ type: "skill", name: "first", path: context.skillPath },
+					{ type: "skill", name: "second", path: alternatePath },
+				],
+				nativeSkillExpansionTexts: [
+					`<skill>\n<name>first</name>\n<path>${context.skillPath}</path>\n${context.skillBody}\n</skill>`,
+					`<skill>\n<name>second</name>\n<path>${alternatePath}</path>\n${context.skillBody}\n</skill>`,
+				],
+			}),
+		).rejects.toThrow("重复");
+	});
+	it.each(["updated", "removed", "disabled", "catalog_unavailable"])(
+		"事件时历史证据在手册 %s 后仍可核验，不依赖当前安装",
+		async (scenario) => {
+			const context = await setupSkillEvidence();
+			if (scenario === "updated") await writeFile(context.skillPath, "后来更新的手册\n");
+			if (scenario === "removed") await rm(context.skillPath);
+			if (scenario === "disabled") context.selectedSkill.enabled = false;
+			if (scenario === "catalog_unavailable") context.request.mockRejectedValue(new Error("catalog 已不可用"));
+			const revalidate = await context.verify();
+			await expect(revalidate()).resolves.toBeUndefined();
+			expect(context.request).not.toHaveBeenCalled();
+		},
+	);
+	it("原生 text+skill 与相邻展开记录保持精确摘要，可信原生来源核验成功", async () => {
 		const context = await setupSkillEvidence();
 		const evidence = await readCodexNativeCloseoutPromptAcceptanceEvidence(context.input);
 		expect(evidence).toMatchObject({
@@ -128,7 +160,7 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 		});
 		const revalidate = await context.verify();
 		await expect(revalidate()).resolves.toBeUndefined();
-		expect(context.request).toHaveBeenCalledWith("skills/list", { cwds: [context.directory], forceReload: true });
+		expect(context.request).not.toHaveBeenCalled();
 	});
 	it.each([
 		"缺少元数据",
@@ -231,7 +263,7 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 		await context.writeRecords([context.expansionRecord(), duplicate]);
 		await expect(context.verify()).rejects.toThrow("唯一");
 	});
-	it.each(["missing", "duplicate", "after_turn_boundary", "modified_body", "modified_name", "modified_path"])(
+	it.each(["missing", "duplicate", "after_turn_boundary", "modified_name", "modified_path"])(
 		"Skill 展开记录 %s 时不猜测归属或忽略差异",
 		async (scenario) => {
 			const context = await setupSkillEvidence();
@@ -241,8 +273,6 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 			if (scenario === "duplicate") records.push(expansion);
 			if (scenario === "after_turn_boundary")
 				records.unshift({ type: "event_msg", payload: { type: "task_started", turn_id: "other" } });
-			if (scenario === "modified_body")
-				expansion.payload.content[0].text = context.expansionText(context.skillReference, "改过的手册");
 			if (scenario === "modified_name")
 				expansion.payload.content[0].text = context.expansionText({ ...context.skillReference, name: "other" });
 			if (scenario === "modified_path")
@@ -262,7 +292,7 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 		"path_mismatch",
 		"ambiguous_name",
 		"not_explicitly_referenced",
-	])("当前 catalog 为 %s 时不认可历史附件", async (scenario) => {
+	])("当前 catalog 为 %s 时历史接受独立核验", async (scenario) => {
 		const context = await setupSkillEvidence();
 		const catalog = context.catalogEntry;
 		const selected = context.selectedSkill;
@@ -282,8 +312,44 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 			);
 			await context.writeRecords();
 		}
-		await expect(context.verify()).rejects.toThrow();
+		if (scenario === "not_explicitly_referenced") await expect(context.verify()).rejects.toThrow();
+		else await expect(context.verify()).resolves.toBeTypeOf("function");
 	});
+	it.each(["完整引用", "唯一短名引用", "歧义短名引用", "错误命名空间"])(
+		"RVF-005 可信规范展开配合短名附件时按规范名称判断%s",
+		async (scenario) => {
+			const context = await setupSkillEvidence();
+			const canonicalName = "trusted-plugin:base-branch-sync";
+			const otherCanonicalName = "other-plugin:base-branch-sync";
+			const otherPath = join(context.directory, "other-installed-skill.md");
+			const text = context.text.replace(
+				"$base-branch-sync",
+				scenario === "错误命名空间"
+					? `$${otherCanonicalName}`
+					: scenario === "完整引用"
+						? `$${canonicalName}`
+						: "$base-branch-sync",
+			);
+			context.input.promptSha256 = computeRvfTextSha256(text);
+			context.nativeMessage.payload.item.content = [{ type: "text", text }, context.skillReference];
+			const records = [
+				context.expansionRecord(context.expansionText({ ...context.skillReference, name: canonicalName })),
+			];
+			if (scenario === "歧义短名引用") {
+				const otherReference = { ...context.skillReference, name: otherCanonicalName, path: otherPath };
+				context.nativeMessage.payload.item.content.push(otherReference);
+				records.push(context.expansionRecord(context.expansionText(otherReference)));
+			}
+			await context.writeRecords(records);
+			if (scenario === "歧义短名引用" || scenario === "错误命名空间")
+				await expect(context.verify()).rejects.toThrow("显式引用");
+			else {
+				const revalidate = await context.verify();
+				await expect(revalidate()).resolves.toBeUndefined();
+			}
+			expect(context.request).not.toHaveBeenCalled();
+		},
+	);
 	it.each(["reference_path", "canonical_catalog_identity"])(
 		"%s 的唯一命名空间短名与软链接可核验",
 		async (expansionIdentity) => {
@@ -303,11 +369,13 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 							}),
 				),
 			]);
-			await expect(context.verify()).resolves.toBeTypeOf("function");
+			if (expansionIdentity === "canonical_catalog_identity")
+				await expect(context.verify()).rejects.toThrow("历史归属");
+			else await expect(context.verify()).resolves.toBeTypeOf("function");
 		},
 	);
 	it.each(["file_changed", "catalog_disabled", "symlink_retargeted"])(
-		"核验中 %s 时拒绝发放补证资格",
+		"核验中 %s 不改变已核验历史事实",
 		async (scenario) => {
 			const context = await setupSkillEvidence();
 			const alias = join(context.directory, "mutable-skill-alias.md");
@@ -323,7 +391,7 @@ describe("原生收尾 Skill 附件的结构、归属与正文证据", () => {
 				await rm(alias);
 				await symlink(replacement, alias);
 			}
-			await expect(revalidate()).rejects.toThrow();
+			await expect(revalidate()).resolves.toBeUndefined();
 		},
 	);
 	it("已有凭据绑定的转录前缀被改写时，即使正文仍一致也拒绝", async () => {

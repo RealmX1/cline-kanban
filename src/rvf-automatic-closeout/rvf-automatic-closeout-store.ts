@@ -60,10 +60,14 @@ export async function readRvfAutomaticCloseoutRecords(path: string): Promise<Rvf
 }
 export async function updateRvfAutomaticCloseoutRecords<T>(
 	path: string,
-	operation: (records: RvfAutomaticCloseoutRecord[]) => { records: RvfAutomaticCloseoutRecord[]; value: T },
+	operation: (
+		records: RvfAutomaticCloseoutRecord[],
+	) =>
+		| { records: RvfAutomaticCloseoutRecord[]; value: T }
+		| Promise<{ records: RvfAutomaticCloseoutRecord[]; value: T }>,
 ): Promise<T> {
 	return lockedFileSystem.withLocks([{ path }], async () => {
-		const outcome = operation(await readRvfAutomaticCloseoutRecords(path));
+		const outcome = await operation(await readRvfAutomaticCloseoutRecords(path));
 		const parsed = z.array(rvfAutomaticCloseoutRecordSchema).parse(outcome.records);
 		await lockedFileSystem.writeJsonFileAtomic(path, parsed, { lock: null });
 		return outcome.value;

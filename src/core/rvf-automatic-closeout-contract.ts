@@ -1,5 +1,13 @@
 import { z } from "zod";
 import { reviewStartBoundaryCaptureDiagnosticSchema } from "../rvf-automatic-closeout/review-start-boundary-capture-diagnostic";
+import {
+	rvfCloseoutBlockedReasonKindSchema,
+	rvfCloseoutDeliveryAttemptSchema,
+	rvfCloseoutRecoveryProgressSchema,
+	rvfCloseoutSkillEvidenceReferenceSchema,
+	rvfCloseoutSkillInstallationVersionReferenceSchema,
+	rvfCloseoutStageExecutionClaimSchema,
+} from "./rvf-automatic-closeout-recovery-contract";
 
 export const rvfReviewStartBoundaryRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -58,8 +66,13 @@ export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 		.optional(),
 	baseRef: z.string().min(1).optional(),
 	reason: z.string().trim().min(1).optional(),
-	blockedReasonKind: z
-		.enum(["user_restriction", "machine_precondition", "evidence_conflict", "agent_assessed_not_ready_for_base_sync"])
+	blockedReasonKind: rvfCloseoutBlockedReasonKindSchema.optional(),
+	deliveryAttemptId: z.string().optional(),
+	stageExecutionClaimId: z.string().optional(),
+	verificationBasis: z.enum(["native_prompt_acceptance", "verified_stage_execution"]).optional(),
+	executionEvidenceSha256: z
+		.string()
+		.regex(/^[a-f0-9]{64}$/u)
 		.optional(),
 	baseBranchSyncReassessmentCondition: z.string().trim().min(1).optional(),
 	reportedAt: z.number(),
@@ -70,7 +83,13 @@ export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewS
 		handoffSha256: z.string().regex(/^[a-f0-9]{64}$/u),
 		stage: z.enum(["land", "base_branch_sync"]),
 	})
-	.extend(rvfAutomaticCloseoutExecutionStageResultSchema.omit({ reportedAt: true }).shape)
+	.extend(
+		rvfAutomaticCloseoutExecutionStageResultSchema.omit({
+			reportedAt: true,
+			verificationBasis: true,
+			executionEvidenceSha256: true,
+		}).shape,
+	)
 	.superRefine((value, context) => {
 		if (
 			value.blockedReasonKind === "agent_assessed_not_ready_for_base_sync" &&
@@ -192,6 +211,18 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 		.array(rvfAutomaticCloseoutExecutionStageResultSchema.extend({ stage: z.enum(["land", "base_branch_sync"]) }))
 		.optional(),
 	lateNativePromptAcceptanceRecoveryReceipt: rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema.optional(),
+	skillAttachmentEvidenceHistory: z.array(rvfCloseoutSkillEvidenceReferenceSchema).optional(),
+	skillInstallationVersionReferences: z.array(rvfCloseoutSkillInstallationVersionReferenceSchema).optional(),
+	expectedSkillSnapshotCaptureAttemptKeys: z.array(z.string()).optional(),
+	independentLandResultObservationBudget: z
+		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })
+		.optional(),
+	acceptedSkillSnapshotObservationBudget: z
+		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })
+		.optional(),
+	promptDeliveryAttempts: z.array(rvfCloseoutDeliveryAttemptSchema).max(1).optional(),
+	automaticRecoveryProgress: rvfCloseoutRecoveryProgressSchema.optional(),
+	stageExecutionClaims: z.array(rvfCloseoutStageExecutionClaimSchema).optional(),
 	promptDeliveryIdempotencyKey: z.string(),
 });
 export type RvfAutomaticCloseoutRecord = z.infer<typeof rvfAutomaticCloseoutRecordSchema>;

@@ -21,6 +21,7 @@ import {
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
 } from "../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
+import { claimRvfCloseoutExecutionStage } from "../../src/rvf-automatic-closeout/rvf-closeout-execution-stage-recovery";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -39,7 +40,7 @@ const cliExitDeadline = {
 const timeout = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
 	runtimeColdStartCount: 0,
 	testBodyTimeoutBudgetMs: 30_000,
-	cliChildProcessSpawns: { cliChildProcessSpawnCount: 7, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
+	cliChildProcessSpawns: { cliChildProcessSpawnCount: 9, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
 });
 const messageShapes = ["pure_text", "text_with_skill"] as const;
 
@@ -302,7 +303,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			// 只挂接本次实际消费的服务接口，原生身份与事件由隔离宿主控制；其余会话起停能力不参与。
 			const api: Pick<
 				NonNullable<RuntimeTrpcContext["rvfAutomaticCloseoutApi"]>,
-				"reconcileLateNativePromptAcceptance"
+				"reconcileLateNativePromptAcceptance" | "claimExecutionStage"
 			> = {
 				reconcileLateNativePromptAcceptance: async (_scope, input) =>
 					reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
@@ -311,6 +312,28 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 							rvfHome,
 							getMainSummary: async () => summary,
 							isExplicitlyStopped: () => false,
+						},
+						input,
+					),
+				claimExecutionStage: async (_scope, input) =>
+					claimRvfCloseoutExecutionStage(
+						{
+							workspaceId: scope.workspaceId,
+							rvfHome,
+							getMainSummary: async () => summary,
+							isStopped: () => false,
+							verifyLateAcceptance: async () => {
+								const checked = await reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
+									{
+										workspaceId: scope.workspaceId,
+										rvfHome,
+										getMainSummary: async () => summary,
+										isExplicitlyStopped: () => false,
+									},
+									{ ...input, dryRun: true },
+								);
+								if (checked.status !== "already_recovered") throw new Error("接受证据未通过重验。");
+							},
 						},
 						input,
 					),
@@ -339,7 +362,10 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			return address.port;
 		}
 		let runtimePort = await startHttpRuntimeApi();
-		async function invokeCli(additionalArguments: string[] = []) {
+		async function invokeCli(
+			additionalArguments: string[] = [],
+			command = "reconcile-rvf-automatic-closeout-late-native-prompt-acceptance",
+		) {
 			const child = children.register(
 				spawn(
 					process.execPath,
@@ -348,7 +374,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 						resolve("node_modules/tsx/dist/loader.mjs"),
 						resolve("src/cli.ts"),
 						"task",
-						"reconcile-rvf-automatic-closeout-late-native-prompt-acceptance",
+						command,
 						"--project-path",
 						repository.repositoryPath,
 						"--task-id",
@@ -435,8 +461,8 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 		);
 		if (messageShape === "text_with_skill") {
 			skillEnabled = false;
-			expect(await invokeCli(["--dry-run"])).toMatchObject({ exitCode: 12, response: { status: "unknown" } });
-			skillEnabled = true;
+			await rm(skill.path);
+			expect(await invokeCli(["--dry-run"])).toMatchObject({ exitCode: 0, response: { status: "eligible" } });
 		}
 		const storeBeforeDryRun = await readFile(storePath);
 		expect(await invokeCli(["--dry-run"])).toMatchObject({ exitCode: 0, response: { status: "eligible" } });
@@ -451,6 +477,9 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			response: { status: "already_recovered", receipt: recovered.response.receipt },
 		});
 		expect((await readRvfAutomaticCloseoutRecords(storePath))[0]?.status).toBe("closeout_prompt_submitted");
+		const claimed = await invokeCli(["--stage", "land"], "claim-rvf-automatic-closeout-execution-stage");
+		expect(claimed).toMatchObject({ exitCode: 0, response: { status: "claimed" } });
+		expect(await invokeCli(["--stage", "land"], "claim-rvf-automatic-closeout-execution-stage")).toEqual(claimed);
 		expect(await readFile(ledgerPath)).toEqual(ledgerBefore);
 		expect(repository.runGit(["status", "--porcelain=v2"]).stdout).toBe(gitBefore);
 		expect(
