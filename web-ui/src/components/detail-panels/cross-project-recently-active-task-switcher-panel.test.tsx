@@ -1161,6 +1161,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			taskId: "recent",
 			targetBoardColumnId: "validation",
 			boardMutationInitiator: "web_ui_user_gesture",
+			expectedTaskIncarnationCreatedAtEpochMs: NOW_MS - DAY_MS,
 		});
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 

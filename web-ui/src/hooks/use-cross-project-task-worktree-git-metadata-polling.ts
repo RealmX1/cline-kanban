@@ -7,7 +7,11 @@ import { useEffect, useMemo, useRef } from "react";
 
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries } from "@/runtime/cross-project-task-worktree-git-metadata-query";
-import { applyCrossProjectTaskWorktreeGitMetadataPollResults } from "@/stores/cross-project-task-worktree-git-metadata-store";
+import {
+	applyCrossProjectTaskWorktreeGitMetadataPollResults,
+	markCrossProjectTaskWorktreeGitMetadataPollFailed,
+	markCrossProjectTaskWorktreeGitMetadataPollStarted,
+} from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { useInterval } from "@/utils/react-use";
 
 // EXPERIMENT_NODE: 跨项目切换面板「其他项目」行的 git 元数据轮询间隔取 5 秒（当前项目推流是 3 秒一轮）；
@@ -47,9 +51,6 @@ export function selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataP
 		}
 		seenEntryKeys.add(entryKey);
 		tasks.push({ workspaceId, taskId: entry.taskId });
-		if (tasks.length >= CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT) {
-			break;
-		}
 	}
 	return tasks;
 }
@@ -71,34 +72,81 @@ export function useCrossProjectTaskWorktreeGitMetadataPolling({
 	const tasksNeedingPollSignature = tasksNeedingPoll
 		.map(({ workspaceId, taskId }) => buildCrossProjectTaskSwitcherEntryKey(workspaceId, taskId))
 		.join("\n");
-	const latestPollInputRef = useRef({ tasksNeedingPoll, currentProjectId });
-	latestPollInputRef.current = { tasksNeedingPoll, currentProjectId };
-	const isPollRequestInFlightRef = useRef(false);
+	const latestPollInputRef = useRef({ tasksNeedingPoll, currentProjectId, isDocumentVisible });
+	latestPollInputRef.current = { tasksNeedingPoll, currentProjectId, isDocumentVisible };
+	const isPollCycleInFlightRef = useRef(false);
+	const isPollingHostMountedRef = useRef(false);
+	const needsImmediatePollAfterCurrentCycleRef = useRef(false);
+	useEffect(() => {
+		isPollingHostMountedRef.current = true;
+		return () => {
+			isPollingHostMountedRef.current = false;
+		};
+	}, []);
 
-	const pollOnce = useRef(() => {
+	const pollOnce: () => void = useRef(() => {
 		const { tasksNeedingPoll: tasks, currentProjectId: scopeProjectId } = latestPollInputRef.current;
-		if (tasks.length === 0 || isPollRequestInFlightRef.current) {
+		if (tasks.length === 0 || isPollCycleInFlightRef.current) {
 			return;
 		}
-		isPollRequestInFlightRef.current = true;
-		void fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(scopeProjectId, { tasks })
-			.then((response) => {
-				applyCrossProjectTaskWorktreeGitMetadataPollResults(response.tasks);
-			})
-			.catch(() => {
-				// 失败保留上一份快照，下个 tick 重试；行上的 git 元数据只是辅助信息，不弹错。
-			})
-			.finally(() => {
-				isPollRequestInFlightRef.current = false;
-			});
+		isPollCycleInFlightRef.current = true;
+		needsImmediatePollAfterCurrentCycleRef.current = false;
+		markCrossProjectTaskWorktreeGitMetadataPollStarted(tasks);
+		void (async () => {
+			try {
+				for (
+					let offset = 0;
+					offset < tasks.length;
+					offset += CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT
+				) {
+					if (!isPollingHostMountedRef.current || !latestPollInputRef.current.isDocumentVisible) break;
+					// 候选变化不重置本轮进度，整轮结束后补查新集合，避免持续重排饿死后半段任务。
+					const batch = tasks.slice(
+						offset,
+						offset + CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT,
+					);
+					try {
+						const response = await fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(
+							scopeProjectId,
+							{ tasks: batch },
+						);
+						if (!isPollingHostMountedRef.current) break;
+						applyCrossProjectTaskWorktreeGitMetadataPollResults(response.tasks);
+						const returnedEntryKeys = new Set(
+							response.tasks.map(({ workspaceId, taskId }) =>
+								buildCrossProjectTaskSwitcherEntryKey(workspaceId, taskId),
+							),
+						);
+						markCrossProjectTaskWorktreeGitMetadataPollFailed(
+							batch.filter(
+								({ workspaceId, taskId }) =>
+									!returnedEntryKeys.has(buildCrossProjectTaskSwitcherEntryKey(workspaceId, taskId)),
+							),
+						);
+					} catch {
+						// 失败保留上一份快照，也不能饿死后续批次；下个 tick 自动重试。
+						if (isPollingHostMountedRef.current) markCrossProjectTaskWorktreeGitMetadataPollFailed(batch);
+					}
+				}
+			} finally {
+				isPollCycleInFlightRef.current = false;
+				if (
+					isPollingHostMountedRef.current &&
+					latestPollInputRef.current.isDocumentVisible &&
+					needsImmediatePollAfterCurrentCycleRef.current
+				)
+					pollOnce();
+			}
+		})();
 	}).current;
 
 	// 签名变化（条目集合变化）或页面重新可见时立刻补一轮，不等下一个 tick。
 	useEffect(() => {
 		if (isDocumentVisible) {
+			needsImmediatePollAfterCurrentCycleRef.current = true;
 			pollOnce();
 		}
-	}, [isDocumentVisible, tasksNeedingPollSignature, pollOnce]);
+	}, [isDocumentVisible, tasksNeedingPollSignature, currentProjectId, pollOnce]);
 
 	useInterval(
 		() => {
