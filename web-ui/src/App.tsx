@@ -13,6 +13,10 @@ import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigg
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
+import {
+	DailyWorkProgressExpandedRegion,
+	DailyWorkProgressSummaryButton,
+} from "@/components/daily-work-progress-statistics";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -69,6 +73,7 @@ import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
 import { useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage } from "@/hooks/use-current-project-task-cards-for-cross-project-task-switcher-row-expansion-on-board-scope-home-page";
+import { useDailyWorkProgressStatistics } from "@/hooks/use-daily-work-progress-statistics";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
@@ -587,6 +592,7 @@ export default function App(): ReactElement {
 		navigationCurrentProjectId,
 		openTaskInProjectInPlace: handleOpenTaskInProject,
 	});
+	const dailyWorkProgressStatistics = useDailyWorkProgressStatistics();
 	useNotificationTaskFocus({ openTaskInProjectInPlace: handleOpenTaskInProject });
 
 	useEffect(() => {
@@ -1709,6 +1715,9 @@ export default function App(): ReactElement {
 							data-mobile-focus-view-collapsible-region=""
 						>
 							<TopBar
+								dailyWorkProgressSummaryControl={
+									<DailyWorkProgressSummaryButton progress={dailyWorkProgressStatistics} />
+								}
 								onOpenPermanentlyDeletedTaskHistory={
 									!isFocusViewChromeShown || mobileFocusViewControls.isEnabled
 										? openPermanentlyDeletedTaskHistory
@@ -1867,6 +1876,10 @@ export default function App(): ReactElement {
 								}
 							/>
 						</div>
+						<DailyWorkProgressExpandedRegion
+							progress={dailyWorkProgressStatistics}
+							onOpenTask={handleOpenTaskInProject}
+						/>
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 							<div
 								className="kb-home-layout"

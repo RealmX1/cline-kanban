@@ -238,6 +238,8 @@ import {
 	runtimeArchiveExploratoryFindingResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
+	runtimeClaimDailyWorkProgressCelebrationsRequestSchema,
+	runtimeClaimDailyWorkProgressCelebrationsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
 	runtimeClineAccountOrganizationsResponseSchema,
 	runtimeClineAccountProfileResponseSchema,
@@ -278,6 +280,8 @@ import {
 	runtimeConversationSessionTurnProjectionRequestSchema,
 	runtimeConversationSessionTurnProjectionResponseSchema,
 	runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema,
+	runtimeDailyWorkProgressRequestSchema,
+	runtimeDailyWorkProgressSummarySchema,
 	runtimeDebugResetAllStateResponseSchema,
 	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
 	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
@@ -577,6 +581,7 @@ import {
 	setRecordedRelationPresentationMutePreferenceRequestSchema,
 	setRecordedRelationPresentationMutePreferenceResponseSchema,
 } from "../core/work-unit-relation-read-api-contract";
+import type { DailyWorkProgressStatisticsService } from "../daily-work-progress-statistics/daily-work-progress-statistics-service";
 import type { IndependentTaskCreationService } from "../independent-task-creation/independent-task-creation-service";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { issueKanbanWebUiPageLoadRequestOriginNonce } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
@@ -607,6 +612,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
 	taskLookupConversationApi?: TaskLookupConversationService;
 	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
 	independentTaskCreationApi?: IndependentTaskCreationService;
@@ -1280,6 +1286,24 @@ const gitSyncActionInputSchema = z.object({
 });
 
 export const runtimeAppRouter = t.router({
+	dailyWorkProgressStatistics: t.router({
+		getSummary: t.procedure
+			.input(runtimeDailyWorkProgressRequestSchema)
+			.output(runtimeDailyWorkProgressSummarySchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.dailyWorkProgressStatisticsApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
+				return ctx.dailyWorkProgressStatisticsApi.getSummary(input);
+			}),
+		claimCelebrations: t.procedure
+			.input(runtimeClaimDailyWorkProgressCelebrationsRequestSchema)
+			.output(runtimeClaimDailyWorkProgressCelebrationsResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.dailyWorkProgressStatisticsApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
+				return ctx.dailyWorkProgressStatisticsApi.claimCelebrations(input);
+			}),
+	}),
 	notificationIntelligence: t.router({
 		getSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(notificationIntelligenceSettingsResponseSchema)

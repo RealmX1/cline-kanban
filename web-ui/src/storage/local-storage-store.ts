@@ -1,4 +1,5 @@
 export enum LocalStorageKey {
+	DailyWorkProgressSelectedWorkspace = "kanban.daily-work-progress-selected-workspace.v1",
 	TaskAutoReviewEnabled = "kanban.task-auto-review-enabled",
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
 	TaskEditDrafts = "kanban.task-edit-drafts.v1",
