@@ -83,6 +83,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { recordProgrammaticReviewExplicitUserStopObservations } from "../state/programmatic-review-explicit-user-stop-observations";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
@@ -138,7 +139,10 @@ import { createAgentSessionInactivityReclamationScheduler } from "./agent-sessio
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
-import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
+import {
+	startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime,
+	sweepStalePendingTaskMessageInjectionsForAllWorkspaces,
+} from "./pending-task-message-injection-startup-sweep";
 import { createPromptDraftUsageService } from "./prompt-draft-usage-service";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
@@ -233,7 +237,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。启动之后仍按超期判据持续清扫：
 	// runtime 活着期间也会冒出没人收敛的 pending（见清扫模块头注）。
 	const stalePendingTaskMessageInjectionSweepsForRuntimeLifetime =
-		startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime();
+		startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime({
+			sweepAllWorkspacesOnce: () =>
+				sweepStalePendingTaskMessageInjectionsForAllWorkspaces({
+					getSummary: (workspaceId, conversationSessionId) =>
+						deps.workspaceRegistry
+							.getTerminalManagerForWorkspace(workspaceId)
+							?.getSummary(conversationSessionId) ?? null,
+				}),
+		});
 
 	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
 	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
@@ -817,8 +829,20 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	const runtimeApi = createRuntimeApi({
-		onTaskSessionStopRequested: (workspaceId, taskId) =>
-			pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId) ?? Promise.resolve(),
+		onTaskSessionStopRequested: async (workspaceId, taskId) => {
+			try {
+				await recordProgrammaticReviewExplicitUserStopObservations({
+					workspaceId,
+					workspaceTaskId: taskId,
+					summaries: listProjectRuntimeSessionSummaries(workspaceId).filter(
+						(summary) =>
+							summary.taskId === taskId || summary.taskConversationSessionMetadata?.workspaceTaskId === taskId,
+					),
+				});
+			} finally {
+				await pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId);
+			}
+		},
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
 		getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,

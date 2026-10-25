@@ -33,13 +33,16 @@
 // 契约：~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md
 // § 时序保证 1（有界收敛）与 § 时序保证 2（runtime 重启不会留下永久 pending）。
 
+import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	getTaskMessageInjectionLedgerPath,
 	sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart,
 } from "../core/task-message-injection-ledger";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
+import { getThisRuntimeProcessInstanceId } from "../state/runtime-process-instance-heartbeat-registry";
 import { getWorkspaceDirectoryPath, listWorkspaceIndexEntries } from "../state/workspace-state";
 import { TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS } from "../terminal/session-manager";
+import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 
 // 判超期时在契约上界之外再多等这点余量，吸收账本时间戳的取整、受理前的那一跳 RPC，以及定时器抖动。
 // 它加在**判据**上而不是只加在续排的定时器上：周期兜底那一趟会在任意时刻落下，只在定时器上留余量的话，
@@ -53,7 +56,9 @@ export const STALE_PENDING_SWEEP_MARGIN_BEYOND_CONTRACT_CONVERGENCE_BOUND_MS = 5
 //   - 一趟的成本是读一次 workspace 索引 + 每个 workspace 取一次账本锁、读一份小 JSON，没超期的不写盘。
 export const STALE_PENDING_SWEEP_PERIODIC_BACKSTOP_INTERVAL_MS = 60_000;
 
-export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(): Promise<{
+export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(
+	deps: { getSummary?: (workspaceId: string, conversationSessionId: string) => RuntimeTaskSessionSummary | null } = {},
+): Promise<{
 	sweptCount: number;
 	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
 }> {
@@ -69,6 +74,14 @@ export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(): 
 	}
 	for (const workspaceEntry of workspaceEntries) {
 		try {
+			if (deps.getSummary)
+				await reconcileWorkspaceCodexNativePromptDeliveryAcceptances({
+					reconcilerRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
+					workspaceId: workspaceEntry.workspaceId,
+					ledgerPath: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceEntry.workspaceId)),
+					getSummary: (conversationSessionId) =>
+						deps.getSummary?.(workspaceEntry.workspaceId, conversationSessionId) ?? null,
+				});
 			const result = await sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart({
 				ledgerPath: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceEntry.workspaceId)),
 				nowIso: new Date().toISOString(),

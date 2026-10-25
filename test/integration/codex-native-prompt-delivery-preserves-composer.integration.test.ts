@@ -1,13 +1,19 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { spawn as spawnPty } from "node-pty";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
+import { createCodexNativePromptDeliveryJournal } from "../../src/core/codex-native-prompt-delivery-journal";
+import {
+	createPendingTaskMessageInjectionRecord,
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+	withTaskMessageInjectionLedgerLock,
+} from "../../src/core/task-message-injection-ledger";
 import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
 import { deliverCodexNativePromptWithoutChangingComposer } from "../../src/terminal/codex-native-prompt-delivery";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../src/terminal/session-manager";
@@ -15,6 +21,7 @@ import {
 	createTerminalInputBoxOccupancyTrackerState,
 	recordTerminalInputBytesIntoOccupancyTracker,
 } from "../../src/terminal/terminal-input-box-occupancy";
+import { TerminalStateMirror } from "../../src/terminal/terminal-state-mirror";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 
@@ -185,6 +192,7 @@ it.skipIf(process.platform === "win32").each(["human_draft_edit", "question", "p
 		expect(turnStartRequests).toEqual([
 			{
 				threadId: "confirmation-thread",
+				turnTrigger: "user",
 				clientUserMessageId: submittedClientMessageId,
 				input: [{ type: "text", text: prompt, text_elements: [] }],
 			},
@@ -370,7 +378,14 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 			cols: 120,
 			rows: 36,
 		});
+		const terminalStateMirror = new TerminalStateMirror(120, 36);
 		let output = "";
+		let lastObservedCurrentScreenText = "";
+		const readCurrentScreen = async () => {
+			const screen = await terminalStateMirror.getScreenSnapshot();
+			lastObservedCurrentScreenText = screen.lines.map((line) => line.text.trimEnd()).join("\n");
+			return screen;
+		};
 		let exited = false;
 		const exit = new Promise<void>((done) =>
 			pty.onExit(() => {
@@ -380,6 +395,7 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 		);
 		pty.onData((text) => {
 			output += text;
+			terminalStateMirror.applyOutput(Buffer.from(text));
 			if (text.includes("\u001b[6n")) pty.write("\u001b[1;1R");
 			if (text.includes("\u001b[c")) pty.write("\u001b[?1;2c");
 		});
@@ -395,7 +411,7 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 					if (exited) throw new Error(`隔离 Codex 提前退出：${output.slice(-1500)}`);
 					return condition();
 				},
-				{ describeLastObservedStateForFailureMessage: () => output.slice(-3000) },
+				{ describeLastObservedStateForFailureMessage: () => lastObservedCurrentScreenText || output.slice(-3000) },
 			);
 		const hooks = async () =>
 			(await readFile(observedHooksPath, "utf8").catch(() => ""))
@@ -416,13 +432,54 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 			await wait("初始 TUI 回到可输入状态", async () => output.includes("state=done:app=codex"));
 			// 初始回合结束后，由用户正常切换模式；投递本身不得替换当前模式或权限。
 			pty.write("/plan");
-			await delay(400);
+			await wait("当前 TUI 输入框已完整接收 plan 命令", async () => {
+				const screen = await readCurrentScreen();
+				return screen.cursorRow !== undefined && screen.lines[screen.cursorRow]?.text.trim() === "› /plan";
+			});
 			pty.write("\r");
-			await wait("TUI 切换 Plan 模式", async () => /plan mode/iu.test(output));
+			// 命令候选本身就含有「switch to Plan mode」，不能用历史输出证明模式已经生效。
+			// 只认当前屏幕底部的状态栏，原生发送后的模型请求还会独立验证实际模式。
+			await wait("当前 TUI 状态栏确认 Plan 模式已生效", async () => {
+				const screen = await readCurrentScreen();
+				const footer =
+					screen.lines
+						.map((line) => line.text.trim())
+						.filter(Boolean)
+						.at(-1) ?? "";
+				return /\bPlan mode\b/u.test(footer) && !/^\s*›/u.test(footer);
+			});
 			const draft = `HUMAN_UNSENT_DRAFT\n${"中文😀 保留空格  ".repeat(190)}\n末尾  `;
 			pty.write(`\u001b[200~${draft}\u001b[201~`);
-			await delay(600);
+			await wait("当前 TUI 输入框已接收完整未提交草稿", async () => {
+				const screen = await readCurrentScreen();
+				return (
+					screen.cursorRow !== undefined &&
+					screen.lines[screen.cursorRow]?.text.includes(`[Pasted Content ${Array.from(draft).length} chars]`) ===
+						true
+				);
+			});
 			const prompt = "NATIVE_INJECTION_KEEP_DRAFT";
+			const ledgerPath = getTaskMessageInjectionLedgerPath(
+				join(fixture.fixtureRootDirectoryPath, "native-delivery-ledger"),
+			);
+			const ledgerBinding = {
+				ledgerPath,
+				ledgerTaskId: "isolated-card",
+				idempotencyKey: "isolated-native-injection",
+			};
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({
+				records: [
+					createPendingTaskMessageInjectionRecord({
+						taskId: "isolated-card",
+						attemptId: "isolated-conversation",
+						source: "rvf",
+						idempotencyKey: ledgerBinding.idempotencyKey,
+						promptSha256: createHash("sha256").update(prompt).digest("hex"),
+						nowIso: new Date().toISOString(),
+					}),
+				],
+				result: undefined,
+			}));
 			const summary = runtimeTaskSessionSummarySchema.parse({
 				taskId: "isolated-conversation",
 				agentId: "codex",
@@ -448,6 +505,7 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 				workspaceId: "isolated-workspace",
 				text: prompt,
 				clientUserMessageId: randomUUID(),
+				deliveryJournal: createCodexNativePromptDeliveryJournal(ledgerBinding),
 				isCurrent: () => !exited,
 				beforeSubmit: async () => true,
 				onRequestAttempted: () => {},
@@ -460,6 +518,24 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 				"回答用户提问后原生注入回合完成",
 				async () => (await hooks()).filter((event) => event.hook_event_name === "Stop").length >= 2,
 			);
+			const recovered = await deliverCodexNativePromptWithoutChangingComposer({
+				summary,
+				workspaceId: "isolated-workspace",
+				text: prompt,
+				clientUserMessageId: randomUUID(),
+				deliveryJournal: createCodexNativePromptDeliveryJournal(ledgerBinding),
+				reconcileAcceptanceOnly: true,
+				isCurrent: () => !exited,
+				beforeSubmit: async () => false,
+				onRequestAttempted: () => {
+					throw new Error("重建投递器后只能补证");
+				},
+			});
+			expect(recovered.status).toBe("confirmed");
+			expect(
+				(await readTaskMessageInjectionLedger(ledgerPath))[0]?.codex_native_prompt_delivery_operation
+					?.actualSendAttemptCount,
+			).toBe(1);
 			const injectionRequest = modelRequests.find((body) => body.includes(prompt));
 			expect(injectionRequest).toBeDefined();
 			expect(injectionRequest).toMatch(/plan mode/iu);
@@ -534,6 +610,7 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 				clearTimeout(escalation);
 			}
 			await launch.cleanup();
+			terminalStateMirror.dispose();
 			modelServer.closeAllConnections();
 			await new Promise<void>((done) => modelServer.close(() => done()));
 		}

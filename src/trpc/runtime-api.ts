@@ -1838,7 +1838,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionStopRequest(input);
 				// 自动收尾的持久暂停或取消失败不能拦住用户停止 agent 本体。
-				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch(() => undefined);
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch((error: unknown) => {
+					logAgentSessionRetentionWarning(
+						`显式停止的程序化工作取消证据写入失败 taskId=${body.taskId} error=${String(error)}`,
+					);
+				});
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);

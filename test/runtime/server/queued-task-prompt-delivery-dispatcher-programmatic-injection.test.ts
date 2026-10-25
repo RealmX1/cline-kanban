@@ -175,7 +175,10 @@ const acceptedPendingPtyConfirmation: SendBehavior = () => ({
 function createUnifiedTaskChatTransportDependencies(input: {
 	transport: "pty" | "acp";
 	getSummary: () => RuntimeTaskSessionSummary | null;
-	registerOutcomeObserver: (observer: TaskChatInputDeliveryOutcomeObserver) => void;
+	registerOutcomeObserver?: (observer: TaskChatInputDeliveryOutcomeObserver) => void;
+	observeTerminalSubmissionOptions?: (
+		options: Parameters<TerminalSessionManager["submitTaskChatInputWhenReady"]>[2],
+	) => void;
 }) {
 	return {
 		getScopedTerminalManager: async () => ({
@@ -185,8 +188,11 @@ function createUnifiedTaskChatTransportDependencies(input: {
 				_text: string,
 				options: Parameters<TerminalSessionManager["submitTaskChatInputWhenReady"]>[2],
 			) => {
-				if (!options?.onDeliveryOutcome) throw new Error("缺少统一出口终态回执观察者");
-				input.registerOutcomeObserver(options.onDeliveryOutcome);
+				input.observeTerminalSubmissionOptions?.(options);
+				if (input.registerOutcomeObserver) {
+					if (!options?.onDeliveryOutcome) throw new Error("缺少统一出口终态回执观察者");
+					input.registerOutcomeObserver(options.onDeliveryOutcome);
+				}
 				return input.getSummary();
 			},
 		}),
@@ -201,7 +207,9 @@ function createUnifiedTaskChatTransportDependencies(input: {
 				_images: unknown,
 				onAccepted: (accepted: boolean) => void,
 			) => {
-				input.registerOutcomeObserver((outcome) => onAccepted(outcome.status === "delivered_and_submit_confirmed"));
+				input.registerOutcomeObserver?.((outcome) =>
+					onAccepted(outcome.status === "delivered_and_submit_confirmed"),
+				);
 				return input.getSummary();
 			},
 			listMessages: () => [],
@@ -434,6 +442,88 @@ async function transferUnsubmittedQueueEntryToCurrentRuntime() {
 		"isolated-unsubmitted-transport-custody-transfer",
 	);
 }
+
+describe("真实统一出口的原生 journal 绑定与终态回执归属", () => {
+	it.each(["task_chat_transport", "queued_task_prompt_delivery_store"] as const)(
+		"%s 都按原始宿主卡绑定 journal，仅终态所有者直接回写账本",
+		async (receiptPersistenceOwner) => {
+			const ledgerPath = getTaskMessageInjectionLedgerPath(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID));
+			const ledgerWrites = observeFileLockOperations();
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({
+				records: [
+					createPendingTaskMessageInjectionRecord({
+						taskId: TASK_ID,
+						idempotencyKey: KEY,
+						promptSha256: "sha-1",
+						source: "journal 绑定回归",
+						nowIso: new Date().toISOString(),
+					}),
+				],
+				result: null,
+			}));
+			const conversationSessionId = "main-conversation-after-handover";
+			let observedSubmissionOptions: Parameters<TerminalSessionManager["submitTaskChatInputWhenReady"]>[2];
+			let outcomeObserver: TaskChatInputDeliveryOutcomeObserver = () => {
+				throw new Error("原生 journal 绑定测试尚未登记回执观察者");
+			};
+			const onProgrammaticTerminalDeliverySettled = vi.fn();
+			const response = await sendTaskChatMessageAcrossSessionTransports(
+				{
+					...createUnifiedTaskChatTransportDependencies({
+						transport: "pty",
+						getSummary: () => ({ ...nativeStoppedSummary(), taskId: conversationSessionId }),
+						registerOutcomeObserver: (observer) => {
+							outcomeObserver = observer;
+						},
+						observeTerminalSubmissionOptions: (options) => {
+							observedSubmissionOptions = options;
+						},
+					}),
+					programmaticTerminalDeliveryReceiptPersistenceOwner: receiptPersistenceOwner,
+					programmaticInjectionLedgerTaskId: TASK_ID,
+					onProgrammaticTerminalDeliverySettled,
+				},
+				{ workspaceId: WORKSPACE_ID, workspacePath: "/isolated" },
+				{ taskId: conversationSessionId, text: "原生程序化投递正文", idempotencyKey: KEY },
+			);
+			expect(response.ok).toBe(true);
+			expect(observedSubmissionOptions?.codexNativeDeliveryLedgerBinding).toEqual({
+				requestOriginRuntimeProcessInstanceId: testRuntimeHome.runtimeProcessInstanceId,
+				ledgerPath,
+				ledgerTaskId: TASK_ID,
+				idempotencyKey: KEY,
+			});
+			const outcome = { status: "delivered_and_submit_confirmed" as const, reason: null };
+			outcomeObserver(outcome);
+			await ledgerWrites.waitForLedgerWrites();
+			expect(onProgrammaticTerminalDeliverySettled).toHaveBeenCalledExactlyOnceWith(outcome);
+			expect((await readLedgerRecord())?.terminal_delivery_status).toBe(
+				receiptPersistenceOwner === "task_chat_transport"
+					? "delivered_and_submit_confirmed"
+					: "accepted_pending_submit_confirmation",
+			);
+		},
+	);
+
+	it("无幂等键的普通人工输入不创建 journal 绑定或终态观察者", async () => {
+		let observedSubmissionOptions: Parameters<TerminalSessionManager["submitTaskChatInputWhenReady"]>[2];
+		const response = await sendTaskChatMessageAcrossSessionTransports(
+			createUnifiedTaskChatTransportDependencies({
+				transport: "pty",
+				getSummary: nativeStoppedSummary,
+				observeTerminalSubmissionOptions: (options) => {
+					observedSubmissionOptions = options;
+				},
+			}),
+			{ workspaceId: WORKSPACE_ID, workspacePath: "/isolated" },
+			{ taskId: TASK_ID, text: "普通人工输入" },
+		);
+		expect(response.ok).toBe(true);
+		expect(observedSubmissionOptions).toBeDefined();
+		expect(observedSubmissionOptions?.codexNativeDeliveryLedgerBinding).toBeUndefined();
+		expect(observedSubmissionOptions?.onDeliveryOutcome).toBeUndefined();
+	});
+});
 
 describe("真实统一出口 × dispatcher 的终态托管归属", () => {
 	it.each(["delivery_failed", "delivered_and_submit_confirmed"] as const)(

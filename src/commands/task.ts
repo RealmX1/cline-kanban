@@ -443,6 +443,10 @@ function formatTaskRecordWithSessionSummary(
 						liveness: sessionFacets.liveness,
 						userTurnKind: sessionFacets.userTurnKind,
 						agentId: session.agentId,
+						conversationSessionId: session.taskId,
+						runtimeSessionIncarnationId: session.runtimeSessionIncarnationId,
+						agentNativeConversationSessionIdentity: session.agentNativeConversationSessionIdentity,
+						codexNativeSessionControlEndpoint: session.codexNativeSessionControlEndpoint,
 						pid: session.pid,
 						startedAt: session.startedAt,
 						updatedAt: session.updatedAt,
@@ -1297,6 +1301,7 @@ interface TaskMessageCommandResult extends JsonRecord {
 	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
 	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
+	codex_native_prompt_delivery_operation?: TaskMessageInjectionRecord["codex_native_prompt_delivery_operation"];
 	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
@@ -1332,6 +1337,9 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			: {}),
 		...(record.codex_native_prompt_delivery_evidence
 			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
+		...(record.codex_native_prompt_delivery_operation
+			? { codex_native_prompt_delivery_operation: record.codex_native_prompt_delivery_operation }
 			: {}),
 		...(record.required_native_independent_user_turn_session_id
 			? {

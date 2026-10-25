@@ -82,6 +82,10 @@ import {
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
 } from "../core/codex-native-direct-input-readiness";
 import {
+	type CodexNativePromptDeliveryLedgerBinding,
+	createCodexNativePromptDeliveryJournal,
+} from "../core/codex-native-prompt-delivery-journal";
+import {
 	applyCodexAutomaticCompactionPhaseObservation,
 	type CodexRvfCloseoutCompactionAwareConfirmation,
 	createCodexRvfCloseoutCompactionAwareConfirmation,
@@ -512,6 +516,7 @@ interface TaskChatInputDeliveryAttemptPlan {
 	taskId: string;
 	text: string;
 	codexNativeClientUserMessageId: string;
+	codexNativeDeliveryLedgerBinding: CodexNativePromptDeliveryLedgerBinding | null;
 	// 等 TUI 就绪的绝对截止时刻；两条让路预算都以它为起点再加各自的上限。
 	deadlineAt: number;
 	// 调度时捕获的投递代际；写入 / 重排前复查，被更晚的投递取代者直接放弃。
@@ -1822,6 +1827,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			requiresCodexStartupPromptReady?: boolean;
 			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator;
 			idempotencyKey?: string | null;
+			codexNativeDeliveryLedgerBinding?: CodexNativePromptDeliveryLedgerBinding;
 			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
 			// 争用策略与抢占执行者，见 TaskChatInputDeliveryAttemptPlan。默认不抢占：
 			// 缺省即最保守的一档，调用方必须显式把能力交进来才可能动人类的框。
@@ -1901,6 +1907,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskId,
 			text,
 			codexNativeClientUserMessageId: randomUUID(),
+			codexNativeDeliveryLedgerBinding: options?.codexNativeDeliveryLedgerBinding ?? null,
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
@@ -2332,6 +2339,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspaceId,
 			text: plan.text,
 			clientUserMessageId: plan.codexNativeClientUserMessageId,
+			...(plan.codexNativeDeliveryLedgerBinding
+				? { deliveryJournal: createCodexNativePromptDeliveryJournal(plan.codexNativeDeliveryLedgerBinding) }
+				: {}),
 			isCurrent: bindingStillMatches,
 			beforeSubmit: async () => {
 				if (!bindingStillMatches() || active.lastUserInputAt !== capturedHumanInputAt) return false;

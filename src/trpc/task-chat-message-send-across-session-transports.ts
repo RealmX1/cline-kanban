@@ -29,6 +29,7 @@ import {
 	NativeIndependentUserTurnSubmissionRecoverySuspended,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import { getThisRuntimeProcessInstanceId } from "../state/runtime-process-instance-heartbeat-registry";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import type { TaskChatInputDeliveryOutcomeObserver, TerminalSessionManager } from "../terminal/session-manager";
 import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../terminal/stash-task-terminal-input-box-into-prompt-library";
@@ -215,12 +216,12 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 					// runtime 在投递落定（或失败）后就地改写同一条记录——CLI 早已退出，这是唯一能把
 					// 「pending → 终态」补上的地方。写账本失败不阻断会话：启动清扫会兜底判失败。
 					const injectionIdempotencyKey = body.idempotencyKey ?? null;
-					const injectionLedgerPath =
-						injectionIdempotencyKey && transportPersistsProgrammaticTerminalDeliveryReceipt
-							? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
-							: null;
+					// 原生 journal 定位独立于终态回执托管权；排队投递同样须在原生发送前持久化意图。
+					const injectionLedgerPath = injectionIdempotencyKey
+						? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
+						: null;
 					const observesProgrammaticDeliveryOutcome =
-						(injectionLedgerPath != null && injectionIdempotencyKey != null) ||
+						(transportPersistsProgrammaticTerminalDeliveryReceipt && injectionLedgerPath != null) ||
 						deps.onProgrammaticTerminalDeliverySettled != null;
 					// 争用策略在受理这一刻读一次（一条投递最多活 ~196s，全程用同一份策略）。
 					// 抢占执行者就是 Ctrl+S 那条链路本身，只是 origin 标成「被程序化投递抢占」，
@@ -278,6 +279,16 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
 						idempotencyKey: injectionIdempotencyKey,
+						...(injectionLedgerPath && injectionIdempotencyKey
+							? {
+									codexNativeDeliveryLedgerBinding: {
+										requestOriginRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
+										ledgerPath: injectionLedgerPath,
+										ledgerTaskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
+										idempotencyKey: injectionIdempotencyKey,
+									},
+								}
+							: {}),
 						mayAutoStashAbsentHumanInputBox:
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 						preemptivelyStashHumanInputBox: async (taskId) => {
@@ -303,7 +314,11 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 						...(observesProgrammaticDeliveryOutcome
 							? {
 									onDeliveryOutcome: (outcome) => {
-										if (injectionLedgerPath && injectionIdempotencyKey) {
+										if (
+											transportPersistsProgrammaticTerminalDeliveryReceipt &&
+											injectionLedgerPath &&
+											injectionIdempotencyKey
+										) {
 											void recordTaskMessageTerminalDeliveryOutcome({
 												ledgerPath: injectionLedgerPath,
 												taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,

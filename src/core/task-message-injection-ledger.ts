@@ -20,7 +20,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type FileLockRequest, lockedFileSystem } from "../fs/locked-file-system";
-import type { CodexNativePromptDeliveryEvidence } from "./api-contract";
+import {
+	type CodexNativePromptDeliveryEvidence,
+	type CodexNativePromptDeliveryOperation,
+	codexNativePromptDeliveryOperationSchema,
+} from "./api-contract";
 import {
 	CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS,
 	type CodexRvfCloseoutCompactionAwareConfirmation,
@@ -95,6 +99,8 @@ export interface TaskMessageInjectionRecord {
 	turn_id?: string;
 	checkpoint_id?: string;
 	codex_native_prompt_delivery_evidence?: CodexNativePromptDeliveryEvidence;
+	// 发送意图与历史接受独立于不可改写的终端失败回执；重启只补证，不抹去原失败。
+	codex_native_prompt_delivery_operation?: CodexNativePromptDeliveryOperation;
 	// 遗留镜像，由 terminal_delivery_status 派生，不作判据。
 	status?: string;
 	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
@@ -163,6 +169,13 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		...(isCodexNativePromptDeliveryEvidence(record.codex_native_prompt_delivery_evidence)
 			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
 			: {}),
+		...(record.codex_native_prompt_delivery_operation === undefined
+			? {}
+			: {
+					codex_native_prompt_delivery_operation: codexNativePromptDeliveryOperationSchema.parse(
+						record.codex_native_prompt_delivery_operation,
+					),
+				}),
 		status: legacyStatus ?? LEGACY_STATUS_MIRROR[terminalStatus],
 		terminal_delivery_status: terminalStatus,
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
@@ -243,7 +256,7 @@ async function writeTaskMessageInjectionLedger(
 	records: readonly TaskMessageInjectionRecord[],
 ): Promise<void> {
 	// lock: null —— 调用方已持有 withTaskMessageInjectionLedgerLock 取的那把锁，这里再取会自锁。
-	await lockedFileSystem.writeJsonFileAtomic(ledgerPath, records, { lock: null });
+	await lockedFileSystem.writeJsonFileAtomic(ledgerPath, records, { lock: null, durable: true });
 }
 
 // 全部读改写都必须经这里：跨进程锁（CLI 与 runtime 是两个进程）。

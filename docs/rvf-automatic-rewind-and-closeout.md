@@ -1,5 +1,7 @@
 # RVF 默认自动恢复与收尾投递
 
+普通扩围的后继候选隔离、原生发送持久化和跨重启补证见 [RVF 候选版本与原生投递恢复](rvf-candidate-version-and-native-prompt-recovery.md)。
+
 ## 普通审查与可选自动收尾
 
 普通 RVF 以真实决策 token 和独立候选快照冻结输入。Harness 发行版本、原生回退 receipt、当前控制端点或完整历史前缀缺失时，review/fix/handoff 仍可继续，随后人工 land/base 同步。下文的独立原生分界与实时 nonce 只服务自动恢复，不是普通审查准入条件。

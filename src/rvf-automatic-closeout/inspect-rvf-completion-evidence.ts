@@ -2,6 +2,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import type { RvfAutomaticCloseoutRecord } from "../core/rvf-automatic-closeout-contract";
+import { assertRvfCurrentCandidateNativeCloseoutQualification } from "./assert-rvf-current-candidate-native-closeout-qualification";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 
 const completionSchema = z.object({
@@ -24,6 +25,7 @@ const finalizeSchema = z.object({
 });
 export async function inspectRvfCompletionEvidence(record: RvfAutomaticCloseoutRecord, rvfHome: string) {
 	if (record.runDirectory) {
+		await assertRvfCurrentCandidateNativeCloseoutQualification(record.runDirectory);
 		try {
 			const registration = z
 				.object({
