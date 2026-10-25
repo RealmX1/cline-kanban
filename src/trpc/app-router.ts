@@ -514,6 +514,10 @@ import {
 	setProjectVisualIdentityRequestSchema,
 } from "../core/project-visual-identity";
 import {
+	rvfCloseoutStageClaimRequestSchema,
+	rvfCloseoutStageClaimResponseSchema,
+} from "../core/rvf-automatic-closeout-recovery-contract";
+import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
 	IncomingWorkItemTriageOperationError,
@@ -671,6 +675,10 @@ export interface RuntimeTrpcContext {
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
 	};
 	rvfAutomaticCloseoutApi?: {
+		claimExecutionStage?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
+		) => Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>>;
 		reconcileLateNativePromptAcceptance?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
@@ -1680,6 +1688,13 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
 				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
+			}),
+		claimRvfAutomaticCloseoutExecutionStage: workspaceProcedure
+			.input(rvfCloseoutStageClaimRequestSchema)
+			.output(rvfCloseoutStageClaimResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.rvfAutomaticCloseoutApi?.claimExecutionStage) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.rvfAutomaticCloseoutApi.claimExecutionStage(ctx.workspaceScope, input);
 			}),
 		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
 			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)

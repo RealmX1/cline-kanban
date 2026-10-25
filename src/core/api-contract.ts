@@ -54,6 +54,7 @@ export * from "./permanently-deleted-task-history-contract.js";
 // （原因见该文件顶部），这里原样转出，调用方照旧从 api-contract 取。
 export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
+export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
@@ -2512,6 +2513,43 @@ export const codexNativePromptDeliveryEvidenceSchema = z.object({
 	nativeUserMessageId: z.string(),
 });
 export type CodexNativePromptDeliveryEvidence = z.infer<typeof codexNativePromptDeliveryEvidenceSchema>;
+
+export const codexNativePromptAcceptanceHistoryQueryProgressSchema = z.object({
+	nextCursor: z.string().nullable(),
+	queriedCursorSha256s: z.array(z.string().length(64)),
+	lastQueryStatus: z.enum(["pending", "history_exhausted", "cursor_read_failed", "cursor_cycle_detected"]),
+});
+export type CodexNativePromptAcceptanceHistoryQueryProgress = z.infer<
+	typeof codexNativePromptAcceptanceHistoryQueryProgressSchema
+>;
+
+export const codexNativePromptDeliveryOperationSchema = z.object({
+	requestOriginRuntimeProcessInstanceId: z.string().optional(),
+	lastAcceptanceReconciliationRuntimeProcessInstanceId: z.string().optional(),
+	clientUserMessageId: z.string().min(1),
+	workspaceId: z.string().min(1),
+	conversationSessionId: z.string().min(1),
+	nativeSessionId: z.string().min(1),
+	workingDirectoryPath: z.string().min(1),
+	promptSha256: z.string().min(1),
+	sendPhase: z.enum(["registered", "request_intent_persisted", "request_invoked", "native_accepted"]),
+	actualSendAttemptCount: z.number().int().nonnegative().max(3),
+	previousTurnId: z.string().nullable(),
+	returnedTurnId: z.string().nullable(),
+	acceptanceHistoryQueryProgress: codexNativePromptAcceptanceHistoryQueryProgressSchema.optional(),
+	historicalAcceptanceEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	lastAcceptanceReconciliationAtIso: z.string().optional(),
+	lastAcceptanceReconciliationStatus: z.enum(["confirmed", "unknown"]).optional(),
+	currentExecutionQualification: z
+		.enum([
+			"current_native_conversation_matches",
+			"current_native_conversation_changed",
+			"current_native_control_unavailable",
+		])
+		.optional(),
+	updatedAtIso: z.string(),
+});
+export type CodexNativePromptDeliveryOperation = z.infer<typeof codexNativePromptDeliveryOperationSchema>;
 
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,

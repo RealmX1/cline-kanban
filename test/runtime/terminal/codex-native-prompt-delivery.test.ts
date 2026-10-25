@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,11 +9,19 @@ import {
 	runtimeTaskSessionSummarySchema,
 	type WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../../../src/core/api-contract";
+import { createCodexNativePromptDeliveryJournal } from "../../../src/core/codex-native-prompt-delivery-journal";
 import {
 	applyCodexAutomaticCompactionPhaseObservation,
 	createCodexRvfCloseoutCompactionAwareConfirmation,
 	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
 } from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
+import {
+	createPendingTaskMessageInjectionRecord,
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+	recordTaskMessageTerminalDeliveryOutcome,
+	withTaskMessageInjectionLedgerLock,
+} from "../../../src/core/task-message-injection-ledger";
 import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { createNativeIndependentUserTurnBeforeSubmissionValidator } from "../../../src/server/native-independent-user-turn-before-submission-validator";
@@ -176,6 +185,97 @@ describe("Codex 原生投递保留 composer", () => {
 		});
 		expect((await deliverCodexNativePromptWithoutChangingComposer(createInput())).status).toBe("confirmed");
 		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+	});
+
+	it("发送前等待持久意图落盘，重启后沿用消息 ID 并跨页补证", async () => {
+		let requestMayHaveBeenSent = false;
+		let persisted = false;
+		const journal = {
+			prepare: vi.fn(async () => ({
+				clientUserMessageId: CLIENT_MESSAGE_ID,
+				requestMayHaveBeenSent,
+				previousTurnId: null,
+				returnedTurnId: null,
+			})),
+			recordRequestIntent: vi.fn(async () => {
+				persisted = true;
+				requestMayHaveBeenSent = true;
+			}),
+			recordRequestInvoked: vi.fn(async () => {}),
+			recordReturnedTurn: vi.fn(async () => {}),
+			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+			recordAcceptance: vi.fn(async () => {}),
+		};
+		mocks.request.mockImplementation(async (method: string) => {
+			if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+			if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+			if (method === "turn/start") {
+				expect(persisted).toBe(true);
+				throw new Error("发送后连接断开");
+			}
+			if (method === "thread/turns/list")
+				return { data: [{ id: "latest", status: "completed", items: [] }], nextCursor: null };
+			throw new Error(method);
+		});
+		expect(
+			(await deliverCodexNativePromptWithoutChangingComposer(createInput({ deliveryJournal: journal }))).status,
+		).toBe("unconfirmed");
+		mocks.request.mockImplementation(async (method: string, params: { cursor?: string | null }) => {
+			if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+			if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+			if (method === "thread/turns/list")
+				return params.cursor === "older-page"
+					? {
+							data: [
+								{
+									id: "accepted-before-restart",
+									status: "completed",
+									items: [
+										{ id: CLIENT_MESSAGE_ID, type: "userMessage", content: [{ type: "text", text: PROMPT }] },
+									],
+								},
+							],
+							nextCursor: null,
+						}
+					: {
+							data: Array.from({ length: 10 }, (_, i) => ({ id: `later-${i}`, status: "completed", items: [] })),
+							nextCursor: "older-page",
+						};
+			throw new Error("恢复期间不得再次发送");
+		});
+		const recovered = await deliverCodexNativePromptWithoutChangingComposer(
+			createInput({
+				clientUserMessageId: "new-process-proposed-id",
+				deliveryJournal: journal,
+				confirmationDeadlineAtEpochMs: async () => 0,
+			}),
+		);
+		expect(recovered.status).toBe("confirmed");
+		expect(journal.recordRequestIntent).toHaveBeenCalledOnce();
+		expect(journal.recordRequestInvoked).toHaveBeenCalledOnce();
+		expect(journal.recordAcceptance).toHaveBeenCalledOnce();
+	});
+
+	it("持久写入失败时不调用 turn/start", async () => {
+		const journal = {
+			prepare: vi.fn(async () => ({
+				clientUserMessageId: CLIENT_MESSAGE_ID,
+				requestMayHaveBeenSent: false,
+				previousTurnId: null,
+				returnedTurnId: null,
+			})),
+			recordRequestIntent: vi.fn(async () => {
+				throw new Error("磁盘写入失败");
+			}),
+			recordRequestInvoked: vi.fn(async () => {}),
+			recordReturnedTurn: vi.fn(async () => {}),
+			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+			recordAcceptance: vi.fn(async () => {}),
+		};
+		expect(
+			(await deliverCodexNativePromptWithoutChangingComposer(createInput({ deliveryJournal: journal }))).status,
+		).toBe("unconfirmed");
+		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(0);
 	});
 
 	it.each([
@@ -346,6 +446,20 @@ describe("Codex 原生投递保留 composer", () => {
 			});
 			const input = createInput({
 				now: () => clock,
+				deliveryJournal: {
+					prepare: vi.fn(async () => ({
+						clientUserMessageId: CLIENT_MESSAGE_ID,
+						requestMayHaveBeenSent: false,
+						previousTurnId: null,
+						returnedTurnId: null,
+					})),
+					recordRequestIntent: vi.fn(async () => {}),
+					recordRequestInvoked: vi.fn(async () => {}),
+					recordReturnedTurn: vi.fn(async () => {}),
+					recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+					recordAcceptance: vi.fn(async () => {}),
+				},
+				onNativeTurnStarted: vi.fn(async () => {}),
 				confirmationDeadlineAtEpochMs: async () => resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(state),
 				waitMilliseconds: async (milliseconds) => {
 					clock += milliseconds;
@@ -362,8 +476,58 @@ describe("Codex 原生投递保留 composer", () => {
 			expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("confirmed");
 			expect(clock).toBeGreaterThan(15_000);
 			expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+			expect(input.deliveryJournal?.recordRequestIntent).toHaveBeenCalledExactlyOnceWith("prior-turn");
+			expect(input.deliveryJournal?.recordReturnedTurn).toHaveBeenCalledExactlyOnceWith("native-turn-2");
+			expect(input.deliveryJournal?.recordAcceptance).toHaveBeenCalledOnce();
+			expect(input.onNativeTurnStarted).toHaveBeenCalledExactlyOnceWith("native-turn-2");
 		},
 	);
+
+	it("接管提交快照优先于仅登记的 journal，截止后跨页补证且不重复发送", async () => {
+		mocks.request.mockImplementation(async (method: string, params: { cursor?: string | null }) => {
+			if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+			if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+			if (method === "thread/turns/list")
+				return params.cursor === "older-accepted-turn"
+					? {
+							data: [
+								{
+									id: "native-turn-2",
+									status: "completed",
+									items: [
+										{ id: "native-user-2", type: "userMessage", content: [{ type: "text", text: PROMPT }] },
+									],
+								},
+							],
+							nextCursor: null,
+						}
+					: { data: [{ id: "later-turn", status: "completed", items: [] }], nextCursor: "older-accepted-turn" };
+			throw new Error("接管历史提交时不得重新发送");
+		});
+		const input = createInput({
+			previouslySubmitted: { predecessorNativeTurnId: "prior-turn", nativeTurnId: "native-turn-2" },
+			confirmationDeadlineAtEpochMs: async () => 0,
+			deliveryJournal: {
+				prepare: vi.fn(async () => ({
+					clientUserMessageId: CLIENT_MESSAGE_ID,
+					requestMayHaveBeenSent: false,
+					previousTurnId: null,
+					returnedTurnId: null,
+				})),
+				recordRequestIntent: vi.fn(async () => {}),
+				recordRequestInvoked: vi.fn(async () => {}),
+				recordReturnedTurn: vi.fn(async () => {}),
+				recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+				recordAcceptance: vi.fn(async () => {}),
+			},
+		});
+		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("confirmed");
+		expect(mocks.request.mock.calls.filter(([method]) => method === "thread/turns/list")).toHaveLength(2);
+		expect(mocks.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+		expect(input.onRequestAttempted).not.toHaveBeenCalled();
+		expect(input.deliveryJournal?.recordRequestIntent).not.toHaveBeenCalled();
+		expect(input.deliveryJournal?.recordAcceptance).toHaveBeenCalledOnce();
+	});
 
 	it("热接管截止后先只读核对接受事实，无法证明时有界返回，不重发", async () => {
 		installNativeResponses({ neverAccepted: true });
@@ -385,6 +549,199 @@ describe("Codex 原生投递保留 composer", () => {
 		});
 		expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unconfirmed");
 		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	describe("历史接受查询的持久分页进度", () => {
+		let directory: string;
+		let ledgerPath: string;
+		let clock: number;
+		const binding = () => ({ ledgerPath, ledgerTaskId: "card-1", idempotencyKey: "historical-acceptance" });
+		beforeEach(async () => {
+			directory = await mkdtemp(join(tmpdir(), "kanban-native-acceptance-pagination-"));
+			ledgerPath = getTaskMessageInjectionLedgerPath(directory);
+			clock = 0;
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({
+				records: [
+					createPendingTaskMessageInjectionRecord({
+						taskId: "card-1",
+						attemptId: "conversation-1",
+						source: "rvf",
+						idempotencyKey: "historical-acceptance",
+						promptSha256: createHash("sha256").update(PROMPT).digest("hex"),
+						nowIso: new Date().toISOString(),
+					}),
+				],
+				result: undefined,
+			}));
+			const journal = createCodexNativePromptDeliveryJournal(binding());
+			await journal.prepare({
+				clientUserMessageId: CLIENT_MESSAGE_ID,
+				workspaceId: "workspace-1",
+				conversationSessionId: "conversation-1",
+				nativeSessionId: "thread-1",
+				workingDirectoryPath: "/workspace",
+				text: PROMPT,
+			});
+			await journal.recordRequestIntent("prior-turn");
+			await journal.recordRequestInvoked();
+			await recordTaskMessageTerminalDeliveryOutcome({
+				...binding(),
+				taskId: "card-1",
+				status: "delivery_failed",
+				failureReason: "codex_native_prompt_delivery_unconfirmed",
+				nowIso: new Date().toISOString(),
+			});
+		});
+		afterEach(async () => {
+			await rm(directory, { recursive: true, force: true });
+		});
+		function createHistoricalQueryInput() {
+			return createInput({
+				deliveryJournal: createCodexNativePromptDeliveryJournal(binding()),
+				reconcileAcceptanceOnly: true,
+				expectedHistoricalPromptSha256: createHash("sha256").update(PROMPT).digest("hex"),
+				confirmationBudgetMs: 2_000,
+				confirmationDeadlineAtEpochMs: async () => 0,
+				now: () => clock,
+				waitMilliseconds: async (milliseconds) => {
+					clock += milliseconds;
+				},
+			});
+		}
+
+		it("五页历史在单轮预算之外接受，重建 journal 后继续旧页并保留原失败和发送计数", async () => {
+			const queriedCursors: (string | null)[][] = [[], []];
+			let queryRound = 0;
+			mocks.request.mockImplementation(async (method: string, params: { cursor?: string | null }) => {
+				if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+				if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+				if (method !== "thread/turns/list") throw new Error("历史补证不得提交新回合");
+				queriedCursors[queryRound].push(params.cursor ?? null);
+				clock += 900;
+				const pageNumber = params.cursor ? Number(params.cursor.slice("page-".length)) : 0;
+				return {
+					data: [
+						{
+							id: `historical-turn-${pageNumber}`,
+							status: "completed",
+							items:
+								pageNumber === 4
+									? [{ id: CLIENT_MESSAGE_ID, type: "userMessage", content: [{ type: "text", text: PROMPT }] }]
+									: [],
+						},
+					],
+					nextCursor: pageNumber === 4 ? null : `page-${pageNumber + 1}`,
+				};
+			});
+			const firstInput = createHistoricalQueryInput();
+			const firstResult = await deliverCodexNativePromptWithoutChangingComposer(firstInput);
+			queryRound += 1;
+			const restartedInput = createHistoricalQueryInput();
+			const secondResult = await deliverCodexNativePromptWithoutChangingComposer(restartedInput);
+			expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(0);
+			expect(firstInput.onRequestAttempted).not.toHaveBeenCalled();
+			expect(restartedInput.onRequestAttempted).not.toHaveBeenCalled();
+			expect([firstResult.status, secondResult.status]).toEqual(["unconfirmed", "confirmed"]);
+			expect(queriedCursors).toEqual([
+				[null, "page-1", "page-2"],
+				["page-3", "page-4"],
+			]);
+			const record = (await readTaskMessageInjectionLedger(ledgerPath))[0];
+			expect(record.terminal_delivery_status).toBe("delivery_failed");
+			expect(record.terminal_delivery_failure_reason).toBe("codex_native_prompt_delivery_unconfirmed");
+			expect(record.codex_native_prompt_delivery_operation?.actualSendAttemptCount).toBe(1);
+			expect(record.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence?.nativeTurnId).toBe(
+				"historical-turn-4",
+			);
+		});
+
+		it("持久 cursor 失效时保留未知，下一轮从最新页重新补证且不重发", async () => {
+			await createCodexNativePromptDeliveryJournal(binding()).recordAcceptanceHistoryQueryProgress({
+				nextCursor: "expired-cursor",
+				queriedCursorSha256s: [],
+				lastQueryStatus: "pending",
+			});
+			const queriedCursors: (string | null)[] = [];
+			mocks.request.mockImplementation(async (method: string, params: { cursor?: string | null }) => {
+				if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+				if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+				if (method !== "thread/turns/list") throw new Error("历史补证不得提交新回合");
+				queriedCursors.push(params.cursor ?? null);
+				clock += 900;
+				if (params.cursor === "expired-cursor") throw new Error("模拟原生 cursor 已失效");
+				return {
+					data: [
+						{
+							id: "recovered-turn",
+							status: "completed",
+							items: [{ id: CLIENT_MESSAGE_ID, type: "userMessage", content: [{ type: "text", text: PROMPT }] }],
+						},
+					],
+					nextCursor: null,
+				};
+			});
+			expect((await deliverCodexNativePromptWithoutChangingComposer(createHistoricalQueryInput())).status).toBe(
+				"unconfirmed",
+			);
+			expect(
+				(await readTaskMessageInjectionLedger(ledgerPath))[0].codex_native_prompt_delivery_operation
+					?.acceptanceHistoryQueryProgress,
+			).toEqual({ nextCursor: null, queriedCursorSha256s: [], lastQueryStatus: "cursor_read_failed" });
+			expect((await deliverCodexNativePromptWithoutChangingComposer(createHistoricalQueryInput())).status).toBe(
+				"confirmed",
+			);
+			expect(queriedCursors).toEqual(["expired-cursor", null]);
+			expect(mocks.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+			expect(
+				(await readTaskMessageInjectionLedger(ledgerPath))[0].codex_native_prompt_delivery_operation
+					?.actualSendAttemptCount,
+			).toBe(1);
+		});
+
+		it("跨轮次的循环 cursor 有界返回未知，重启后可从最新页恢复而不取得发送资格", async () => {
+			let nativeCursorLoopRecovered = false;
+			const queriedCursors: (string | null)[] = [];
+			mocks.request.mockImplementation(async (method: string, params: { cursor?: string | null }) => {
+				if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
+				if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
+				if (method !== "thread/turns/list") throw new Error("历史补证不得提交新回合");
+				queriedCursors.push(params.cursor ?? null);
+				clock += 900;
+				return {
+					data: [
+						{
+							id: "recovered-turn",
+							status: "completed",
+							items: nativeCursorLoopRecovered
+								? [{ id: CLIENT_MESSAGE_ID, type: "userMessage", content: [{ type: "text", text: PROMPT }] }]
+								: [],
+						},
+					],
+					nextCursor: nativeCursorLoopRecovered ? null : params.cursor === "cycle-a" ? "cycle-b" : "cycle-a",
+				};
+			});
+			for (let queryRound = 0; queryRound < 3; queryRound++) {
+				const input = createHistoricalQueryInput();
+				input.confirmationBudgetMs = 900;
+				expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unconfirmed");
+				expect(input.beforeSubmit).not.toHaveBeenCalled();
+				expect(input.onRequestAttempted).not.toHaveBeenCalled();
+			}
+			expect(queriedCursors).toEqual([null, "cycle-a", "cycle-b"]);
+			expect(
+				(await readTaskMessageInjectionLedger(ledgerPath))[0].codex_native_prompt_delivery_operation
+					?.acceptanceHistoryQueryProgress,
+			).toEqual({ nextCursor: null, queriedCursorSha256s: [], lastQueryStatus: "cursor_cycle_detected" });
+			nativeCursorLoopRecovered = true;
+			expect((await deliverCodexNativePromptWithoutChangingComposer(createHistoricalQueryInput())).status).toBe(
+				"confirmed",
+			);
+			expect(queriedCursors).toEqual([null, "cycle-a", "cycle-b", null]);
+			expect(mocks.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+			const record = (await readTaskMessageInjectionLedger(ledgerPath))[0];
+			expect(record.terminal_delivery_status).toBe("delivery_failed");
+			expect(record.codex_native_prompt_delivery_operation?.actualSendAttemptCount).toBe(1);
+		});
 	});
 
 	describe("真实提交前 validator 与原生 sender 的确认预算", () => {

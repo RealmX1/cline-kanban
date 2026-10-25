@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { LockOptions } from "proper-lockfile";
 import * as lockfile from "proper-lockfile";
@@ -74,6 +74,7 @@ interface NormalizedLockRequest {
 export interface AtomicTextWriteOptions {
 	lock?: LockRequest | null;
 	executable?: boolean;
+	durable?: boolean;
 }
 
 function safeLockErrorMessage(error: unknown): string {
@@ -124,6 +125,15 @@ async function readFileIfExists(path: string): Promise<string | null> {
 			return null;
 		}
 		throw error;
+	}
+}
+
+async function synchronizeFilesystemPath(path: string): Promise<void> {
+	const handle = await open(path, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
 	}
 }
 
@@ -204,14 +214,23 @@ export class LockedFileSystem {
 				if (options.executable) {
 					await chmod(path, 0o755);
 				}
+				if (options.durable) {
+					// 上次可能已 rename，但目录 fsync 失败；同内容重试仍须完成持久化。
+					await synchronizeFilesystemPath(path);
+					await synchronizeFilesystemPath(dirname(path));
+				}
 				return;
 			}
 			await mkdir(dirname(path), { recursive: true });
 			const tempPath = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
-			await writeFile(tempPath, content, "utf8");
-			await rename(tempPath, path);
-			if (options.executable) {
-				await chmod(path, 0o755);
+			try {
+				await writeFile(tempPath, content, "utf8");
+				if (options.executable) await chmod(tempPath, 0o755);
+				if (options.durable) await synchronizeFilesystemPath(tempPath);
+				await rename(tempPath, path);
+				if (options.durable) await synchronizeFilesystemPath(dirname(path));
+			} finally {
+				await rm(tempPath, { force: true });
 			}
 		};
 		if (lockRequest) {

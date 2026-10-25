@@ -21,6 +21,7 @@ import {
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
 } from "../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
+import { claimRvfCloseoutExecutionStage } from "../../src/rvf-automatic-closeout/rvf-closeout-execution-stage-recovery";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -39,8 +40,9 @@ const cliExitDeadline = {
 const timeout = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
 	runtimeColdStartCount: 0,
 	testBodyTimeoutBudgetMs: 30_000,
-	cliChildProcessSpawns: { cliChildProcessSpawnCount: 6, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
+	cliChildProcessSpawns: { cliChildProcessSpawnCount: 9, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
 });
+const messageShapes = ["pure_text", "text_with_skill"] as const;
 
 afterEach(async () => {
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
@@ -48,7 +50,7 @@ afterEach(async () => {
 });
 
 describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与持久重入", { timeout }, () => {
-	it("正文迟到前退出 12；精确正文到达后 dry-run、恢复和服务重建幂等，所有查询均无原生副作用", async (testContext) => {
+	it.for(messageShapes)("%s：CLI 补证与持久重入", async (messageShape, testContext) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "late-native-acceptance" });
@@ -58,6 +60,11 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 		});
 		await writeFile(join(repository.repositoryPath, "implementation.txt"), "必须保留的未提交内容\n");
+		const skillDirectory = join(fixture.fixtureRootDirectoryPath, "installed-closeout-base-branch-sync");
+		await mkdir(skillDirectory);
+		const skill = { type: "skill", name: "base-branch-sync", path: join(skillDirectory, "SKILL.md") };
+		const skillBody = "隔离实例的本地 base 同步手册。\n";
+		await writeFile(skill.path, skillBody);
 		const workspace = await loadWorkspaceContext(repository.repositoryPath);
 		const scope = { workspaceId: workspace.workspaceId, workspacePath: workspace.repoPath };
 		const rvfHome = join(fixture.fixtureRootDirectoryPath, "rvf-evidence");
@@ -207,6 +214,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 		const nativeServer = createServer();
 		const nativeSockets = new WebSocketServer({ server: nativeServer });
 		const nativeRequests: string[] = [];
+		let skillEnabled = true;
 		nativeSockets.on("connection", (socket) =>
 			socket.on("message", (bytes) => {
 				const request = JSON.parse(bytes.toString()) as { id?: number; method: string };
@@ -217,18 +225,35 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 						? {}
 						: request.method === "thread/loaded/list"
 							? { data: ["restored-native"], nextCursor: null }
-							: {
-									data: [
-										{
-											id: "closeout-turn",
-											status: "completed",
-											items: [
-												{ id: "closeout-message", type: "userMessage", content: [{ type: "text", text }] },
-											],
-										},
-									],
-									nextCursor: null,
-								};
+							: request.method === "skills/list"
+								? {
+										data: [
+											{
+												cwd: repository.repositoryPath,
+												skills: [{ ...skill, enabled: skillEnabled }],
+												errors: [],
+											},
+										],
+									}
+								: {
+										data: [
+											{
+												id: "closeout-turn",
+												status: "completed",
+												items: [
+													{
+														id: "closeout-message",
+														type: "userMessage",
+														content: [
+															{ type: "text", text },
+															...(messageShape === "text_with_skill" ? [skill] : []),
+														],
+													},
+												],
+											},
+										],
+										nextCursor: null,
+									};
 				socket.send(JSON.stringify({ id: request.id, result }));
 			}),
 		);
@@ -278,7 +303,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			// 只挂接本次实际消费的服务接口，原生身份与事件由隔离宿主控制；其余会话起停能力不参与。
 			const api: Pick<
 				NonNullable<RuntimeTrpcContext["rvfAutomaticCloseoutApi"]>,
-				"reconcileLateNativePromptAcceptance"
+				"reconcileLateNativePromptAcceptance" | "claimExecutionStage"
 			> = {
 				reconcileLateNativePromptAcceptance: async (_scope, input) =>
 					reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
@@ -287,6 +312,28 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 							rvfHome,
 							getMainSummary: async () => summary,
 							isExplicitlyStopped: () => false,
+						},
+						input,
+					),
+				claimExecutionStage: async (_scope, input) =>
+					claimRvfCloseoutExecutionStage(
+						{
+							workspaceId: scope.workspaceId,
+							rvfHome,
+							getMainSummary: async () => summary,
+							isStopped: () => false,
+							verifyLateAcceptance: async () => {
+								const checked = await reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
+									{
+										workspaceId: scope.workspaceId,
+										rvfHome,
+										getMainSummary: async () => summary,
+										isExplicitlyStopped: () => false,
+									},
+									{ ...input, dryRun: true },
+								);
+								if (checked.status !== "already_recovered") throw new Error("接受证据未通过重验。");
+							},
 						},
 						input,
 					),
@@ -315,7 +362,10 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			return address.port;
 		}
 		let runtimePort = await startHttpRuntimeApi();
-		async function invokeCli(additionalArguments: string[] = []) {
+		async function invokeCli(
+			additionalArguments: string[] = [],
+			command = "reconcile-rvf-automatic-closeout-late-native-prompt-acceptance",
+		) {
 			const child = children.register(
 				spawn(
 					process.execPath,
@@ -324,7 +374,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 						resolve("node_modules/tsx/dist/loader.mjs"),
 						resolve("src/cli.ts"),
 						"task",
-						"reconcile-rvf-automatic-closeout-late-native-prompt-acceptance",
+						command,
 						"--project-path",
 						repository.repositoryPath,
 						"--task-id",
@@ -367,16 +417,53 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 		expect((await readRvfAutomaticCloseoutRecords(storePath))[0]?.status).toBe("paused");
 		await writeFile(
 			transcriptPath,
-			`${nativeRecords.map((entry) => JSON.stringify(entry)).join("\n")}\n${JSON.stringify({
-				type: "event_msg",
-				timestamp: iso(121_574),
-				payload: {
-					type: "item_completed",
-					turn_id: "closeout-turn",
-					item: { type: "UserMessage", id: "closeout-message", content: [{ type: "text", text }] },
+			`${[
+				...nativeRecords,
+				{
+					type: "event_msg",
+					timestamp: iso(121_574),
+					payload: {
+						type: "item_completed",
+						turn_id: "closeout-turn",
+						item: {
+							type: "UserMessage",
+							id: "closeout-message",
+							content: [{ type: "text", text }, ...(messageShape === "text_with_skill" ? [skill] : [])],
+						},
+					},
 				},
-			})}\n`,
+				...(messageShape === "text_with_skill"
+					? [
+							{
+								type: "response_item",
+								timestamp: iso(121_576),
+								payload: {
+									type: "message",
+									role: "user",
+									content: [
+										{
+											type: "input_text",
+											text: `<skill>\n<name>${skill.name}</name>\n<path>${skill.path}</path>\n${skillBody}\n</skill>`,
+										},
+									],
+									internal_chat_message_metadata_passthrough: {
+										turn_id: "closeout-turn",
+										content_item_kinds: ["skills.selected_skill_instructions"],
+										content_item_metadata: [{ provenance: { type: "skills" } }],
+									},
+								},
+							},
+						]
+					: []),
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n")}\n`,
 		);
+		if (messageShape === "text_with_skill") {
+			skillEnabled = false;
+			await rm(skill.path);
+			expect(await invokeCli(["--dry-run"])).toMatchObject({ exitCode: 0, response: { status: "eligible" } });
+		}
 		const storeBeforeDryRun = await readFile(storePath);
 		expect(await invokeCli(["--dry-run"])).toMatchObject({ exitCode: 0, response: { status: "eligible" } });
 		expect(await readFile(storePath)).toEqual(storeBeforeDryRun);
@@ -390,11 +477,14 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			response: { status: "already_recovered", receipt: recovered.response.receipt },
 		});
 		expect((await readRvfAutomaticCloseoutRecords(storePath))[0]?.status).toBe("closeout_prompt_submitted");
+		const claimed = await invokeCli(["--stage", "land"], "claim-rvf-automatic-closeout-execution-stage");
+		expect(claimed).toMatchObject({ exitCode: 0, response: { status: "claimed" } });
+		expect(await invokeCli(["--stage", "land"], "claim-rvf-automatic-closeout-execution-stage")).toEqual(claimed);
 		expect(await readFile(ledgerPath)).toEqual(ledgerBefore);
 		expect(repository.runGit(["status", "--porcelain=v2"]).stdout).toBe(gitBefore);
 		expect(
 			nativeRequests.every((method) =>
-				["initialize", "initialized", "thread/loaded/list", "thread/turns/list"].includes(method),
+				["initialize", "initialized", "thread/loaded/list", "thread/turns/list", "skills/list"].includes(method),
 			),
 		).toBe(true);
 	});

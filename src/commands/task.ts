@@ -44,6 +44,7 @@ import {
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
+import { rvfCloseoutStageClaimRequestSchema } from "../core/rvf-automatic-closeout-recovery-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
@@ -444,6 +445,10 @@ function formatTaskRecordWithSessionSummary(
 						liveness: sessionFacets.liveness,
 						userTurnKind: sessionFacets.userTurnKind,
 						agentId: session.agentId,
+						conversationSessionId: session.taskId,
+						runtimeSessionIncarnationId: session.runtimeSessionIncarnationId,
+						agentNativeConversationSessionIdentity: session.agentNativeConversationSessionIdentity,
+						codexNativeSessionControlEndpoint: session.codexNativeSessionControlEndpoint,
 						pid: session.pid,
 						startedAt: session.startedAt,
 						updatedAt: session.updatedAt,
@@ -1298,6 +1303,7 @@ interface TaskMessageCommandResult extends JsonRecord {
 	terminal_delivery_failure_detail?: string;
 	terminal_delivery_status_updated_at: string;
 	codex_native_prompt_delivery_evidence?: TaskMessageInjectionRecord["codex_native_prompt_delivery_evidence"];
+	codex_native_prompt_delivery_operation?: TaskMessageInjectionRecord["codex_native_prompt_delivery_operation"];
 	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
@@ -1333,6 +1339,9 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 			: {}),
 		...(record.codex_native_prompt_delivery_evidence
 			? { codex_native_prompt_delivery_evidence: record.codex_native_prompt_delivery_evidence }
+			: {}),
+		...(record.codex_native_prompt_delivery_operation
+			? { codex_native_prompt_delivery_operation: record.codex_native_prompt_delivery_operation }
 			: {}),
 		...(record.required_native_independent_user_turn_session_id
 			? {
@@ -2271,6 +2280,36 @@ export function registerTaskCommand(program: Command): void {
 				).runtime.reconcileRvfAutomaticCloseoutLateNativePromptAcceptance.mutate(request);
 				printJson(result);
 				if (result.status === "unknown" || result.status === "blocked") process.exitCode = 12;
+			},
+		);
+	task
+		.command("claim-rvf-automatic-closeout-execution-stage")
+		.description("认领精确 run 的收尾阶段；已有结果直接复用，不能凭超时接管。")
+		.requiredOption("--project-path <path>", "main checkout 路径。")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--decision-token <token>", "本轮 token。")
+		.requiredOption("--run-id <id>", "已绑定 run。")
+		.requiredOption("--handoff-sha256 <sha256>", "已绑定 handoff 摘要。")
+		.requiredOption("--stage <stage>", "land 或 base_branch_sync。")
+		.option("--delivery-attempt-id <id>", "当前投递尝试 ID。")
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				decisionToken: string;
+				runId: string;
+				handoffSha256: string;
+				stage: string;
+				deliveryAttemptId?: string;
+			}) => {
+				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+					autoCreateIfMissing: false,
+				});
+				const result = await createRuntimeTrpcClient(
+					workspace.workspaceId,
+				).runtime.claimRvfAutomaticCloseoutExecutionStage.mutate(rvfCloseoutStageClaimRequestSchema.parse(options));
+				printJson(result);
+				if (result.status === "waiting" || result.status === "blocked") process.exitCode = 12;
 			},
 		);
 	task
