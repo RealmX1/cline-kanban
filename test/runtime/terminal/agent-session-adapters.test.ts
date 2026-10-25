@@ -2178,6 +2178,24 @@ describe("prepareAgentLaunch hook strategies", () => {
 });
 
 describe("Kimi 原生权限参数与任务权限档位", () => {
+	it.each([
+		{ managed: true, explicitTrust: undefined, expectedTrust: "1" },
+		{ managed: false, explicitTrust: undefined, expectedTrust: undefined },
+		{ managed: true, explicitTrust: "0", expectedTrust: undefined },
+	])("仅任务工作树自动使用原生进程级信任 ($managed / $explicitTrust)", async (testCase) => {
+		const home = setupTempHome();
+		vi.stubEnv("KIMI_CODE_TRUST_WORKSPACE", undefined);
+		const launch = await prepareAgentLaunch({
+			taskId: "kimi-owned-worktree-trust",
+			agentId: "kimi",
+			args: ["--model", "isolated-model"],
+			cwd: testCase.managed ? join(home, ".cline", "worktrees", "isolated-task", "repository") : "/user-project",
+			prompt: "",
+			env: { KIMI_CODE_TRUST_WORKSPACE: testCase.explicitTrust },
+		});
+		expect(launch.env.KIMI_CODE_TRUST_WORKSPACE).toBe(testCase.expectedTrust);
+	});
+
 	it("catalog 的自主权限参数使用 Never Ask", () => {
 		expect(RUNTIME_AGENT_CATALOG.find(({ id }) => id === "kimi")?.autonomousArgs).toEqual(["--auto"]);
 	});

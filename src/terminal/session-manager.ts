@@ -6317,6 +6317,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			isKimiWorkspaceTrustNavigationOrConfirmationInput(data.toString("utf8"))
 		) {
 			// 信任确认不是替代正文，也不是一条用户消息。等原生横幅和 composer 真正就绪后续发待发正文。
+			entry.active.lastUserInputAt = now();
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
 		}
@@ -6952,6 +6953,30 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
+		const beforeFacets = resolveSessionFacets(before);
+		if (before.agentId === "kimi" && reason === "hook" && beforeFacets.turnOwner === "user") {
+			const userTurnKind = userTurnKindOverride ?? "review";
+			// 存活终端的原生中断与 agent 回合一样使用 hook 成因；中断语义由 userTurnKind 保留，
+			// 避免套用进程中断退出后不能通过真实工作 hook 恢复的 interrupted 成因。
+			const reviewReason = userTurnKind === "error" ? "error" : "hook";
+			if (beforeFacets.userTurnKind === userTurnKind && before.reviewReason === reviewReason)
+				return cloneSummary(before);
+			const summary = updateSummary(
+				entry,
+				{
+					turnOwner: "user",
+					liveness: beforeFacets.liveness,
+					userTurnKind,
+					reviewReason,
+				},
+				undefined,
+				domainEventTiming,
+			);
+			// 用户回合内只校正模态，不虚构新回合、输入接受或新的历史交棒。
+			for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+			this.emitSummary(summary);
+			return cloneSummary(summary);
+		}
 		if (
 			entry.active &&
 			reason === "hook" &&
