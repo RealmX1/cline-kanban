@@ -5,7 +5,7 @@ import { resolveMainTaskConversationSessionSummary } from "@runtime-session-acti
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime-task-agent-permission-mode";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
@@ -27,12 +27,9 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
 import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
-import { isPostDeployVerificationTaskAwaitingVerification } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
-import {
-	buildPostDeployVerificationFollowUpTaskCreationDraftSeed,
-	type PostDeployVerificationFollowUpTaskCreationDraftSeed,
-} from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
+import { PostDeployVerificationEntryNavigationHostProvider } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
+import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
@@ -70,6 +67,7 @@ import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
+import { useCreatePostDeployVerificationFollowUpTask } from "@/hooks/use-create-post-deploy-verification-follow-up-task";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
@@ -90,6 +88,7 @@ import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-controller-inputs-for-board-or-single-project-scope";
+import { usePostDeployVerificationEntryNavigation } from "@/hooks/use-post-deploy-verification-entry-navigation";
 import { usePostDeployVerificationForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-for-board-or-single-project-scope";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
@@ -1117,6 +1116,11 @@ export default function App(): ReactElement {
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
 	// 单项目范围绑定当前项目；All projects 下不跟随当前项目，绑定有部署组的项目（见 hook）。
 	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
+	const postDeployVerificationEntryNavigation = usePostDeployVerificationEntryNavigation({
+		projects,
+		currentWorkspaceId: projectRuntimeWorkspaceId,
+		selectedBoardOrSingleProjectScope,
+	});
 	const postDeployVerificationForBoardOrSingleProjectScope = usePostDeployVerificationForBoardOrSingleProjectScope({
 		selectedBoardOrSingleProjectScope,
 		currentProjectRuntimeWorkspaceId: projectRuntimeWorkspaceId,
@@ -1125,6 +1129,7 @@ export default function App(): ReactElement {
 		currentProjectDisplayedBoard: displayedBoard,
 		currentProjectTaskSessions: sessions,
 		currentProjectWorkspacePath: workspacePath ?? null,
+		explicitEntryNavigationWorkspaceId: postDeployVerificationEntryNavigation.explicitEntryNavigationWorkspaceId,
 	});
 	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
 	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
@@ -1237,8 +1242,22 @@ export default function App(): ReactElement {
 	const postDeployVerificationPendingCount = postDeployVerification.pendingVerificationTaskCount;
 	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
 	const handleOpenPostDeployVerification = useCallback(() => {
+		postDeployVerificationEntryNavigation.clearNavigation();
 		setPostDeployVerificationCollapsed(false);
-	}, [setPostDeployVerificationCollapsed]);
+	}, [setPostDeployVerificationCollapsed, postDeployVerificationEntryNavigation.clearNavigation]);
+	const handleNavigateToPostDeployVerificationEntry = useCallback(
+		(
+			target: Parameters<typeof postDeployVerificationEntryNavigation.requestNavigation>[0],
+			navigationIntent: AbortSignal,
+		) => {
+			if (postDeployVerificationEntryNavigation.requestNavigation(target, navigationIntent))
+				setPostDeployVerificationCollapsed(false);
+		},
+		[postDeployVerificationEntryNavigation.requestNavigation, setPostDeployVerificationCollapsed],
+	);
+	useLayoutEffect(() => {
+		if (postDeployVerification.collapsed) postDeployVerificationEntryNavigation.clearNavigation();
+	}, [postDeployVerification.collapsed, postDeployVerificationEntryNavigation.clearNavigation]);
 	// PDV 面板条目上半部分是真实任务卡体：面板读浏览器里当前项目的 board 时，数据与动作和主看板同一份（条目上的
 	// 「移入 Done」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
 	const {
@@ -1275,57 +1294,29 @@ export default function App(): ReactElement {
 		moveToTrashLoadingById,
 		moveToReviewLoadingById,
 	});
-	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCallback(
-		(deploymentId: string, taskId: string, selectedChecklistItemIds: string[]) => {
-			const group = postDeployVerification.activeGroup;
-			const task = group?.tasks.find((candidate) => candidate.taskId === taskId);
-			const card = boardShownInPostDeployVerificationPanel
-				? findCardSelection(boardShownInPostDeployVerificationPanel, taskId)
-				: null;
-			const project = projects.find((candidate) => candidate.id === group?.workspaceId);
-			if (isInlineTaskCreateOpen || editingTaskId) {
-				showAppToast({ intent: "warning", message: "请先完成或关闭当前任务编辑，再从核对项创建后续任务。" });
-				return;
-			}
-			if (
-				!runtimeProjectConfig ||
-				!group ||
-				group.deploymentId !== deploymentId ||
-				!task ||
-				!isPostDeployVerificationTaskAwaitingVerification(task) ||
-				!card ||
-				card.column.id === "trash" ||
-				project?.availability.status !== "available"
-			) {
-				showAppToast({ intent: "warning", message: "来源任务或部署状态已变化，请刷新核对清单后重试。" });
-				return;
-			}
-			try {
-				const seed = buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
-					workspaceId: group.workspaceId,
-					projectName: project.name,
-					sourceTaskTitle: card.card.title,
-					sourceTaskCreatedAt: card.card.createdAt,
-					deploymentId,
-					deployedSourceCommit: group.deployedSourceCommit,
-					deployedAtIso: group.deployedAtIso,
-					task,
-					selectedChecklistItemIds,
-				});
-				handleOpenCreateTaskInBoardScope(group.workspaceId);
-				setPostDeployVerificationFollowUpTaskCreationDraftSeed(seed);
-			} catch (error) {
-				showAppToast({ intent: "warning", message: error instanceof Error ? error.message : String(error) });
-			}
-		},
-		[
-			postDeployVerification.activeGroup,
-			boardShownInPostDeployVerificationPanel,
+	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCreatePostDeployVerificationFollowUpTask(
+		{
+			activeGroup: postDeployVerification.activeGroup,
+			historyGroups: postDeployVerification.historyGroups,
+			board: boardShownInPostDeployVerificationPanel,
 			projects,
-			isInlineTaskCreateOpen,
-			editingTaskId,
-			runtimeProjectConfig,
-			handleOpenCreateTaskInBoardScope,
+			isTaskEditorOpen: isInlineTaskCreateOpen || editingTaskId !== null,
+			canOpenTaskEditor: runtimeProjectConfig !== null,
+			openTaskEditor: handleOpenCreateTaskInBoardScope,
+			initializeFollowUpDraft: setPostDeployVerificationFollowUpTaskCreationDraftSeed,
+		},
+	);
+	const postDeployVerificationEntryNavigationHost = useMemo(
+		() => ({
+			workspaceIdOwningHydratedBoard: projectIdOwningHydratedBoard ?? projectRuntimeWorkspaceId,
+			beginNavigationIntent: postDeployVerificationEntryNavigation.beginNavigationIntent,
+			navigateToEntry: handleNavigateToPostDeployVerificationEntry,
+		}),
+		[
+			projectIdOwningHydratedBoard,
+			projectRuntimeWorkspaceId,
+			handleNavigateToPostDeployVerificationEntry,
+			postDeployVerificationEntryNavigation.beginNavigationIntent,
 		],
 	);
 
@@ -2471,6 +2462,8 @@ export default function App(): ReactElement {
 								"no-post-deploy-verification-workspace"
 							}
 							verification={postDeployVerification}
+							entryNavigationRequest={postDeployVerificationEntryNavigation.entryNavigationRequest}
+							onEntryNavigationFinished={postDeployVerificationEntryNavigation.finishNavigation}
 							board={boardShownInPostDeployVerificationPanel}
 							completePostDeployVerificationMoveToDone={
 								completePostDeployVerificationMoveToDoneForPanelBoardSource
@@ -2504,7 +2497,9 @@ export default function App(): ReactElement {
 	return (
 		<ProjectVisualIdentityProvider projects={projects}>
 			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
-				{renderedApplicationView}
+				<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
+					{renderedApplicationView}
+				</PostDeployVerificationEntryNavigationHostProvider>
 			</TaskCommentsDialogProvider>
 		</ProjectVisualIdentityProvider>
 	);

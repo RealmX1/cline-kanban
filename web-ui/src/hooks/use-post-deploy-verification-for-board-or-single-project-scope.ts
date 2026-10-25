@@ -48,6 +48,7 @@ export function usePostDeployVerificationForBoardOrSingleProjectScope(input: {
 	currentProjectDisplayedBoard: BoardData;
 	currentProjectTaskSessions: Record<string, RuntimeTaskSessionSummary>;
 	currentProjectWorkspacePath: string | null;
+	explicitEntryNavigationWorkspaceId?: string | null;
 }): UsePostDeployVerificationForBoardOrSingleProjectScopeResult {
 	const {
 		selectedBoardOrSingleProjectScope,
@@ -71,9 +72,11 @@ export function usePostDeployVerificationForBoardOrSingleProjectScope(input: {
 		currentProjectRuntimeWorkspaceId,
 		workspacesHavingPostDeployVerificationDeploymentGroups,
 		availableRegisteredProjectIds,
+		explicitEntryNavigationWorkspaceId: input.explicitEntryNavigationWorkspaceId,
 	});
 	const postDeployVerification = usePostDeployVerification(postDeployVerificationWorkspaceId);
 	const postDeployVerificationPanelTaskCardBoardSource = resolvePostDeployVerificationPanelTaskCardBoardSource({
+		explicitEntryNavigationWorkspaceId: input.explicitEntryNavigationWorkspaceId,
 		selectedBoardOrSingleProjectScope,
 		postDeployVerificationWorkspaceId,
 		currentProjectRuntimeWorkspaceId,

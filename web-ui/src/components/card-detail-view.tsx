@@ -46,6 +46,7 @@ import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
+import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import {
 	queuedTaskPromptDeliveryQueueTabAnchorKey,
 	taskDetailAnchorKey,
@@ -1398,6 +1399,7 @@ export function CardDetailView({
 	);
 	const detailUtilityTabs = (
 		<>
+			<PostDeployVerificationEntryNavigationButton taskId={selection.card.id} />
 			<DetailUtilityTabList
 				activeTab={detailUtilityTab}
 				onTabChange={handleDetailUtilityTabChange}

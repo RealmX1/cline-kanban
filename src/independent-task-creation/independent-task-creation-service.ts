@@ -146,6 +146,7 @@ export function createIndependentTaskCreationService(deps: IndependentTaskCreati
 					!card ||
 					!source ||
 					source.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation === "main" ||
+					source.taskConversationSessionMetadata?.taskConversationSessionHasHeldMainResponsibility ||
 					source.taskConversationSessionMetadata?.workspaceTaskId !== card.id ||
 					!["by_the_way", "task_collaborator"].includes(
 						source.taskConversationSessionMetadata.taskConversationSessionRole,

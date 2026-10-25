@@ -62,6 +62,10 @@ export function getPostDeployVerificationStatePath(): string {
 	return join(getRuntimeHomePath(), POST_DEPLOY_VERIFICATION_STATE_FILENAME);
 }
 
+export function getLegacyGuidedVerificationStatePath(): string {
+	return join(getRuntimeHomePath(), LEGACY_GUIDED_VERIFICATION_STATE_FILENAME);
+}
+
 // 单一全局锁：state 被 CLI / tRPC mutation / 轮询 reconcile 三方读改写，写频率低，不做分组锁。
 // ponytail: global lock, per-workspace 锁只有在写吞吐成为瓶颈时才需要——dogfood 场景不会。
 function getPostDeployVerificationStateLockRequest(): LockRequest {
@@ -107,7 +111,7 @@ export async function migrateLegacyPostDeployVerificationStateFileIfNeeded(): Pr
 	} catch {
 		// 新文件不存在，尝试从 legacy 文件名迁移。
 	}
-	const legacyPath = join(getRuntimeHomePath(), LEGACY_GUIDED_VERIFICATION_STATE_FILENAME);
+	const legacyPath = getLegacyGuidedVerificationStatePath();
 	try {
 		await rename(legacyPath, newPath);
 		logDeploymentDiagnosticWarning(
