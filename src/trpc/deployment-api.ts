@@ -17,18 +17,22 @@ import type {
 	RuntimePostDeployVerificationState,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
+	RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
+	RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
 	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeUpdateVerificationChecklistRequest,
 	RuntimeUpdateVerificationChecklistResponse,
 } from "../core/api-contract";
 import { parsePostDeployVerificationState } from "../core/api-validation";
+import type { GetRelationNeighborhoodSummaryResponse } from "../core/work-unit-relation-read-api-contract";
 import {
 	backfillDeferredNaturalUsageObservationRecordsMissingForClosedPostDeployVerificationTasks,
 	isChecklistOfPostDeployVerificationTaskFullyChecked,
 } from "../deployment/post-deploy-verification-closure-application";
 import { listPostDeployVerificationDeferredNaturalUsageObservationRecords } from "../deployment/post-deploy-verification-deferred-natural-usage-observation-records";
 import { isPostDeployVerificationTaskClosed } from "../deployment/post-deploy-verification-deployment-group-task-assembly";
+import { resolveTaskPostDeployVerificationEntryNavigationTargetsFromSnapshot } from "../deployment/post-deploy-verification-entry-navigation-targets";
 import type {
 	ComputeTaskDeploymentAttributionsForDeploymentGroup,
 	ConsumePendingConfirmationFailureReason,
@@ -40,6 +44,7 @@ import {
 	consumePendingConfirmationAndMarkVerified,
 	findPostDeployVerificationTaskFollowingCarriedForwardChain,
 	getActiveGroup,
+	getLegacyGuidedVerificationStatePath,
 	getPostDeployVerificationStatePath,
 	markTaskVerified,
 	reconcileGroup,
@@ -78,12 +83,21 @@ function isEnoentError(error: unknown): boolean {
 
 // 只读快照：直接读盘 + schema 校验。ENOENT（尚无 state）与损坏都降级为空组 —— 损坏文件的隔离 + 重建由
 // state 模块的写路径（mutate 骨架 / getActiveGroup）负责，查询侧不重复实现隔离逻辑。
-async function readPostDeployVerificationStateSnapshot(): Promise<RuntimePostDeployVerificationState> {
+async function readPostDeployVerificationStateSnapshot(
+	throwOnReadFailure = false,
+): Promise<RuntimePostDeployVerificationState> {
 	try {
-		const raw = await readFile(getPostDeployVerificationStatePath(), "utf8");
+		let raw: string;
+		try {
+			raw = await readFile(getPostDeployVerificationStatePath(), "utf8");
+		} catch (error) {
+			if (!isEnoentError(error)) throw error;
+			raw = await readFile(getLegacyGuidedVerificationStatePath(), "utf8");
+		}
 		return parsePostDeployVerificationState(JSON.parse(raw));
 	} catch (error) {
 		if (!isEnoentError(error)) {
+			if (throwOnReadFailure) throw error;
 			logDeploymentDiagnosticWarning(
 				`[deployment-api] 读取 post-deploy-verification-state 失败，降级为空组：${errorMessage(error)}`,
 			);
@@ -133,6 +147,36 @@ function describeConsumeFailure(reason: ConsumePendingConfirmationFailureReason 
 
 export function createDeploymentApi(deps: CreateDeploymentApiDependencies): RuntimeTrpcContext["deploymentApi"] {
 	return {
+		resolveTaskPostDeployVerificationEntryNavigationTargets: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
+			readRelationNeighborhood: RuntimeTrpcContext["workUnitRelationReadApi"]["getRelationNeighborhoodSummary"],
+		): Promise<RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse> => {
+			const snapshot = await readPostDeployVerificationStateSnapshot(true);
+			let neighborhood: GetRelationNeighborhoodSummaryResponse | null = null;
+			let originEntriesReadError: string | null = null;
+			try {
+				neighborhood = await readRelationNeighborhood({
+					workUnit: {
+						workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+						bareTaskId: input.taskId,
+						workspaceId: scope.workspaceId,
+					},
+				});
+			} catch (error) {
+				originEntriesReadError = `续接来源暂时无法读取：${errorMessage(error)}`;
+			}
+			return {
+				targets: resolveTaskPostDeployVerificationEntryNavigationTargetsFromSnapshot({
+					workspaceId: scope.workspaceId,
+					taskId: input.taskId,
+					deploymentGroups: snapshot.deploymentGroups,
+					subjectWorkUnit: neighborhood?.subjectWorkUnit.workUnit ?? null,
+					assertedRelations: neighborhood?.assertedRelations ?? [],
+				}),
+				originEntriesReadError,
+			};
+		},
 		getPostDeployVerificationState: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGetPostDeployVerificationStateRequest,

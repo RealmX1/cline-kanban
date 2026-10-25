@@ -554,6 +554,43 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 								workspaceId: alphaWorkspaceId,
 							},
 						}),
+					readNavigationTargets: (taskId) =>
+						client.deployment.resolveTaskPostDeployVerificationEntryNavigationTargets.query({ taskId }),
+					recordAnotherDeployment: async () => {
+						await runCli(
+							[
+								"deployment",
+								"record",
+								"--project-path",
+								firstProject.repositoryPath,
+								"--source-checkout-path",
+								firstProject.repositoryPath,
+								"--new-commit",
+								firstProject.runGit(["rev-parse", "HEAD"]).stdout.trim(),
+							],
+							firstProject.repositoryPath,
+						);
+					},
+					restartRuntime: async () => {
+						initialRuntimeProcess.kill("SIGINT");
+						await observeUntil(
+							async () => hasChildProcessExited(initialRuntimeProcess),
+							"来源持久化验收前关闭隔离 runtime",
+						);
+						startOwnedProcess(
+							"isolated-runtime-after-source-persistence-restart",
+							process.execPath,
+							[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+							firstProject.repositoryPath,
+						);
+						await observeUntil(
+							async () =>
+								fetch(`${runtimeOrigin}/api/trpc/projects.list`)
+									.then((response) => response.ok)
+									.catch(() => false),
+							"重启后隔离 runtime 就绪",
+						);
+					},
 				});
 				expect(pageErrors).toEqual([]);
 				writeFileSync(

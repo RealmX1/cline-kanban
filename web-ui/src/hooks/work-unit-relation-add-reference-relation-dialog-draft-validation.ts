@@ -66,6 +66,7 @@ export const REFERENCE_RELATION_KIND_SPECIFIC_ATTRIBUTE_FORM_FIELD_LABEL_BY_ATTR
 	reusedOutputSummary: "Reused output summary",
 	reusedOutputPointers: "Reused output pointers",
 	originatedRequirementPortionSummary: "Originated requirement portion",
+	originatingPostDeployVerificationEntry: "部署后验证来源",
 	sharedCrossRepositoryContractPointer: "Shared contract pointer",
 	relatednessRationaleOneSentence: "Relatedness rationale",
 };
@@ -75,7 +76,9 @@ export function listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogIn
 	relationKind: AssertedInterWorkUnitReferenceRelationKind,
 ): ReferenceRelationKindSpecificAttributeKey[] {
 	return ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[relationKind].allowedKindSpecificAttributeKeys.filter(
-		(attributeKey) => attributeKey !== "relatednessRationaleOneSentence",
+		(attributeKey) =>
+			attributeKey !== "relatednessRationaleOneSentence" &&
+			attributeKey !== "originatingPostDeployVerificationEntry",
 	);
 }
 

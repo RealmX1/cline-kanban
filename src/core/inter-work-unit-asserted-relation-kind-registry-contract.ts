@@ -1,10 +1,10 @@
 import { z } from "zod";
-
 import { isUserOrIndependentVerifierConfirmationDecisionSource } from "./inter-work-unit-relation-assertion-lifecycle-event-contract";
 import {
 	type InterWorkUnitRelationWorkUnitReference,
 	interWorkUnitRelationWorkUnitReferenceSchema,
 } from "./inter-work-unit-relation-ledger-event-contract";
+import { postDeployVerificationFollowUpSourceEntryReferenceSchema } from "./post-deploy-verification-entry-navigation-contract";
 
 // dd2db 阶段 2：断言型关系（义务 / 门 / 参照三轴，d-vocab §1.3：品种由轴前缀唯一决定）的 kind 注册表与读侧信封。
 // 2.1 只注册参照轴 6 个 kind（d-vocab §3.5，写入动词 `kanban work-unit assert-reference-relation`，R3.4）；
@@ -57,6 +57,7 @@ export const assertedReferenceRelationKindSpecificAttributesSchema = z
 		reusedOutputPointers: z.array(z.string().trim().min(1)).optional(),
 		reusedOutputSummary: z.string().trim().min(1).optional(),
 		originatedRequirementPortionSummary: z.string().trim().min(1).optional(),
+		originatingPostDeployVerificationEntry: postDeployVerificationFollowUpSourceEntryReferenceSchema.optional(),
 		sharedCrossRepositoryContractPointer: z.string().trim().min(1).optional(),
 		relatednessRationaleOneSentence: z.string().trim().min(1).optional(),
 	})
@@ -158,7 +159,10 @@ export const ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY: Record<
 		allowedAnchorWorkUnitTypes: KANBAN_BOARD_CARD_AND_STANDALONE_SESSION_WORK_UNIT_TYPES,
 		rejectsEndpointsInSameKanbanWorkspace: false,
 		requiredKindSpecificAttributeKeyAlternatives: [],
-		allowedKindSpecificAttributeKeys: ["originatedRequirementPortionSummary"],
+		allowedKindSpecificAttributeKeys: [
+			"originatedRequirementPortionSummary",
+			"originatingPostDeployVerificationEntry",
+		],
 		riskRelevantAttributeKeys: [],
 		neighborhoodSummarySectionPriority: 8,
 		defaultVisibleInNeighborhoodSummary: true,
