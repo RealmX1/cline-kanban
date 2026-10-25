@@ -67,7 +67,9 @@ async function readBoundedJsonObject(path: string): Promise<Record<string, unkno
 	}
 }
 
-async function resolveExactKimiMainWirePath(input: ReadNativeAgentConversationActivityInput): Promise<string | null> {
+export async function resolveExactKimiMainWirePath(
+	input: Pick<ReadNativeAgentConversationActivityInput, "summary">,
+): Promise<string | null> {
 	const identity = input.summary.agentNativeConversationSessionIdentity;
 	const cwd = input.summary.workspacePath;
 	if (identity?.sourceAgentId !== "kimi" || !identity.nativeSessionId || input.summary.agentId !== "kimi" || !cwd)
@@ -116,7 +118,7 @@ async function resolveExactKimiMainWirePath(input: ReadNativeAgentConversationAc
 	}
 }
 
-function parseAcceptedKimiMainUserMessage(
+export function parseAcceptedKimiMainUserMessage(
 	record: Record<string, unknown>,
 	nativeSessionId: string,
 ): NativeAgentConversationTranscriptActivityObservation | null {
