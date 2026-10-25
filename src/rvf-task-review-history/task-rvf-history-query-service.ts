@@ -740,32 +740,47 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 					record.baseBranchSyncExecutionResult.commitSha &&
 					record.baseBranchSyncExecutionResult.baseRef,
 			);
+			const acceptedSupplementalCompletion = Boolean(
+				record?.landExecutionResult?.outcome === "completed" &&
+					record.landExecutionResult.commitSha &&
+					record.landExecutionResult.verificationBasis === "verified_supplemental_land_completion" &&
+					record.landExecutionResult.supplementalLandCompletionEvidence &&
+					record.landExecutionResult.supplementalLandCompletionVerification,
+			);
 			const useAcceptedHistoricalCompletion =
-				previouslyAcceptedCompletion && evidence?.review_completion_status !== "completed";
+				acceptedSupplementalCompletion ||
+				(previouslyAcceptedCompletion && evidence?.review_completion_status !== "completed");
 			return {
 				runId: evidence?.run_id ?? candidate.runId,
 				runDirectory: directory,
 				decisionToken: evidence?.decision_token ?? candidate.decisionToken,
 				sessionId: evidence?.session_id ?? candidate.sessionId,
 				startedAt: candidate.startedAt,
-				completedAt:
-					observedTime(evidence?.completed_at) ??
-					(useAcceptedHistoricalCompletion ? (record?.baseBranchSyncExecutionResult?.reportedAt ?? null) : null),
+				completedAt: acceptedSupplementalCompletion
+					? (record?.landExecutionResult?.reportedAt ?? null)
+					: (observedTime(evidence?.completed_at) ??
+						(useAcceptedHistoricalCompletion
+							? (record?.baseBranchSyncExecutionResult?.reportedAt ?? null)
+							: null)),
 				completionStatus: useAcceptedHistoricalCompletion
 					? "completed"
 					: (evidence?.review_completion_status ?? "unknown"),
-				completionEvidenceSource: useAcceptedHistoricalCompletion
-					? "kanban_server_accepted_closeout_record"
-					: (evidence?.completion_evidence_source ?? null),
+				completionEvidenceSource: acceptedSupplementalCompletion
+					? "kanban_server_verified_supplemental_land_completion"
+					: useAcceptedHistoricalCompletion
+						? "kanban_server_accepted_closeout_record"
+						: (evidence?.completion_evidence_source ?? null),
 				recordedFinalizationKind: evidence?.recorded_finalization_kind ?? null,
 				handoffPath:
 					evidence?.handoff_path ?? candidate.migrationVerifiedHandoffPath ?? record?.handoffPath ?? null,
 				handoffSha256:
 					evidence?.handoff_sha256 ?? candidate.migrationVerifiedHandoffSha256 ?? record?.handoffSha256 ?? null,
 				reviewedCandidateContentManifestSha256: evidence?.reviewed_candidate_content_manifest_sha256 ?? null,
-				reasonCode: useAcceptedHistoricalCompletion
-					? "historical_completion_previously_accepted"
-					: (evidence?.reason_code ?? candidate.ownershipIssue?.reasonCode ?? "producer_evidence_unavailable"),
+				reasonCode: acceptedSupplementalCompletion
+					? "historical_supplemental_completion_previously_accepted"
+					: useAcceptedHistoricalCompletion
+						? "historical_completion_previously_accepted"
+						: (evidence?.reason_code ?? candidate.ownershipIssue?.reasonCode ?? "producer_evidence_unavailable"),
 				reason: evidence?.reason ?? candidate.ownershipIssue?.reason ?? null,
 				recoveryCondition:
 					evidence?.recovery_condition ??
