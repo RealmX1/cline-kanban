@@ -12,6 +12,7 @@ import { loadWorkspaceContext, saveWorkspaceState } from "../../src/state/worksp
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
+import { startIsolatedCodexSecondFullQueryTimeoutProxy } from "./fixtures/isolated-codex-control-socket-second-full-query-timeout-proxy";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	waitForChildProcessExit,
@@ -22,6 +23,8 @@ const packagedCliPath = process.env.KANBAN_RVF_SESSION_DELIVERY_PACKAGED_CLI_PAT
 const nativeCodexBinary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY;
 const rvfRepository = process.env.KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY;
 const evidenceRoot = process.env.KANBAN_RVF_SESSION_DELIVERY_EVIDENCE_DIRECTORY;
+const injectPreSubmissionQueryTimeout =
+	process.env.KANBAN_RVF_SESSION_DELIVERY_INJECT_PRE_SUBMISSION_QUERY_TIMEOUT === "1";
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(async () => {
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
@@ -213,6 +216,7 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 		let terminalOutput = "";
 		let stopOutput = "";
 		const driverActions: string[] = [];
+		let queryTimeoutProxy: Awaited<ReturnType<typeof startIsolatedCodexSecondFullQueryTimeoutProxy>> | null = null;
 		async function runChild(binary: string, args: string[], input?: string) {
 			const child = children.register(
 				spawn(binary, args, { cwd: repository.repositoryPath, env: environment, stdio: ["pipe", "pipe", "pipe"] }),
@@ -303,6 +307,15 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 			const nativeId = summary?.agentNativeConversationSessionIdentity?.nativeSessionId;
 			const transcript = summary?.agentNativeConversationSessionIdentity?.transcriptPath;
 			if (!nativeId || !transcript) throw new Error("真实原生身份或转录缺失");
+			if (injectPreSubmissionQueryTimeout) {
+				const socketPath = summary?.codexNativeSessionControlEndpoint?.socketPath;
+				if (!socketPath) throw new Error("隔离原生控制 socket 缺失");
+				queryTimeoutProxy = await startIsolatedCodexSecondFullQueryTimeoutProxy(
+					socketPath,
+					nativeId,
+					join(workspace.statePath, "queued-task-prompt-deliveries.json"),
+				);
+			}
 			Object.assign(environment, {
 				KANBAN_TASK_ID: taskId,
 				KANBAN_ATTEMPT_ID: sessionId,
@@ -350,6 +363,23 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 				},
 				{ timeout: 20_000, interval: 250 },
 			);
+			if (queryTimeoutProxy) {
+				const queue = JSON.parse(
+					readFileSync(join(workspace.statePath, "queued-task-prompt-deliveries.json"), "utf8"),
+				);
+				const entry = queue.entriesByTaskId[sessionId]?.find(
+					(candidate: { dispatchIdempotencyKey: string }) => candidate.dispatchIdempotencyKey === key,
+				);
+				expect(queryTimeoutProxy.observations.injectedTimeoutCount).toBe(1);
+				expect(queryTimeoutProxy.observations.turnStartCount).toBe(1);
+				expect(entry?.nativeIndependentUserTurnBeforeSubmissionQueryRecovery).toMatchObject({
+					consecutiveQueryFailureCount: 1,
+					recoveredAtEpochMs: expect.any(Number),
+				});
+				expect(entry?.nativeIndependentUserTurnSubmissionProgress?.submissionMayHaveStartedAtEpochMs).toEqual(
+					expect.any(Number),
+				);
+			}
 			const receipt = JSON.parse(
 				await runChild(process.execPath, [
 					packagedCliPath,
@@ -441,6 +471,7 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 							taskId,
 							sessionId,
 							nativeId,
+							queryTimeoutProxyObservations: queryTimeoutProxy?.observations,
 							receipt,
 							duplicate,
 							tokenRecord,
@@ -451,6 +482,7 @@ it.skipIf(!packagedCliPath || !nativeCodexBinary || !rvfRepository)(
 					),
 				);
 		} finally {
+			await queryTimeoutProxy?.stop();
 			for (const socket of sockets) socket.terminate();
 			await api.runtime.stopTaskSession.mutate({ taskId }).catch(() => undefined);
 			await children.sigkillEveryStillRunningChildProcessAndWaitForExit();

@@ -19,6 +19,7 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "./api-contract";
 import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "./managed-task-prompt-delivery";
+import { resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs } from "./queued-task-prompt-native-independent-user-turn-query-recovery";
 import {
 	hasReclaimableAgentSessionRuntime,
 	isAgentAwaitingModalUserDecision,
@@ -143,7 +144,8 @@ export function resolveQueuedPromptDispatchBlockReason(
 	}
 
 	// 查询退避不消耗投递次数，也不能被重复的 summary 广播绕过。
-	if ((headEntry.nativeIndependentUserTurnPreflightQueryRecovery?.nextQueryRetryAtEpochMs ?? 0) > input.nowEpochMs) {
+	const queryRetryNotBeforeEpochMs = resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs(headEntry);
+	if (queryRetryNotBeforeEpochMs !== null && queryRetryNotBeforeEpochMs > input.nowEpochMs) {
 		return "awaiting_native_independent_user_turn_query_retry";
 	}
 

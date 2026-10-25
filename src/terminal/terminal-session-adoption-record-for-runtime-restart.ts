@@ -21,6 +21,8 @@ export type ActiveProcessStateFieldDispositionAcrossRuntimeRestart =
 	| "reset_on_adoption";
 
 export const ACTIVE_PROCESS_STATE_FIELD_DISPOSITION_ACROSS_RUNTIME_RESTART = {
+	codexAutomaticCompactionPhaseHooksConfigured: "carried_in_adoption_record",
+	nativeCompactionAwareConfirmation: "carried_in_adoption_record",
 	session: "taken_from_agent_session_pty_host",
 	workspaceTrustBuffer: "carried_in_adoption_record",
 	cols: "taken_from_agent_session_pty_host",
@@ -100,6 +102,8 @@ export function captureActiveProcessStateFieldsCarriedInAdoptionRecord(
 	active: ActiveProcessState,
 ): ActiveProcessStateFieldsCarriedInAdoptionRecord {
 	return {
+		codexAutomaticCompactionPhaseHooksConfigured: active.codexAutomaticCompactionPhaseHooksConfigured,
+		nativeCompactionAwareConfirmation: active.nativeCompactionAwareConfirmation,
 		workspaceTrustBuffer: active.workspaceTrustBuffer,
 		deferredStartupPromptText: active.deferredStartupPromptText,
 		awaitingCodexPromptAfterEnter: active.awaitingCodexPromptAfterEnter,

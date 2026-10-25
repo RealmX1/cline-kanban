@@ -54,6 +54,26 @@ afterEach(() => {
 });
 
 describe("跨项目精简行的创建时间", () => {
+	it("后台等待保持 Agent 回合，历史 fallback 交棒隐藏，活动时长继续走而不归零", () => {
+		const task = {
+			turnOwner: "agent" as const,
+			lastEffectiveAgentConversationActivityObservation: {
+				observedAtMs: NOW_MS - 10 * 60_000,
+				activityKind: "tool_activity" as const,
+				evidenceKind: "persisted_agent_transcript" as const,
+			},
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: NOW_MS - 5 * 60_000,
+				signalConfidence: "prompt_ready_fallback" as const,
+				turnSequence: 7,
+			},
+		};
+		renderElapsedTimePills(task);
+		expect(container.querySelector("[data-agent-response-generation-stopped-pill]")).toBeNull();
+		expect(container.querySelector("[data-last-conversation-progress-pill]")?.textContent).toBe("10m");
+		renderElapsedTimePills(task, NOW_MS + 10 * 60_000);
+		expect(container.querySelector("[data-last-conversation-progress-pill]")?.textContent).toBe("20m");
+	});
 	it("活动未知时仍显示创建时长，并提供准确创建时间", () => {
 		const creationTimePill = renderElapsedTimePills();
 		expect(creationTimePill?.textContent).toBe("3d");

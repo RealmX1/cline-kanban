@@ -1,3 +1,8 @@
+import {
+	isNativeIndependentUserTurnSubmissionKnownNotStarted,
+	resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs,
+} from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 // 排队 prompt 的出队引擎：agent 这一轮停下来 → 从该任务的 durable 队列里认领队首（及被合并开关链住的
 // 那一串）→ 经既有三 transport 统一发送出口发出去 → 按回执结算。
 //
@@ -51,7 +56,6 @@
 //   - 兜底 sweep 额外对一次账：已落定的程序化条目，账本却还 pending 的，补写。
 
 import { randomUUID } from "node:crypto";
-
 import type {
 	QueuedTaskPromptDeliveryEntry,
 	QueuedTaskPromptDispatchBlockReason,
@@ -77,7 +81,6 @@ import {
 } from "../core/queued-task-prompt-delivery-outcome-routing";
 import { buildRuntimeQueuedTaskPromptDeliveryProjectionsByTaskId } from "../core/queued-task-prompt-delivery-projection";
 import {
-	assertIndependentUserTurnImmediatelyBeforeTerminalWrite,
 	NativeIndependentUserTurnDeliveryError,
 	readCurrentTuiNativeConversationTurns,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
@@ -87,6 +90,7 @@ import {
 	claimNextQueuedTaskPromptDeliveryRunForDispatch,
 	isQueuedTaskPromptDeliveryProgrammaticInjection,
 	markQueuedTaskPromptDeliveryHandedToTransport,
+	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	releaseQueuedTaskPromptDeliveryClaim,
 	settleExpiredQueuedTaskPromptDeliveries,
@@ -100,6 +104,7 @@ import {
 	type TaskChatInputDeliveryOutcomeObserver,
 } from "../terminal/session-manager";
 import type { RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
+import { createNativeIndependentUserTurnBeforeSubmissionValidator } from "./native-independent-user-turn-before-submission-validator";
 
 // 发送出口的 source 标记。带 source 即被统一发送出口判为「后台自动注入」（deferWhileUserTurn=true），
 // 于是 agent 停在模态待答时 PTY 侧会让位——这是门控 3 之外的**第二道**保险。
@@ -140,7 +145,7 @@ export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 		request: RuntimeTaskChatSendRequest,
 		onProgrammaticTerminalDeliverySettled: TaskChatInputDeliveryOutcomeObserver,
 		injectionLedgerTaskId?: string,
-		validateBeforeTerminalWrite?: () => Promise<void>,
+		validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator,
 	) => Promise<RuntimeTaskChatSendResponse>;
 	// 既有 cancelTaskChatDelivery（PTY 单飞槽的取消）。
 	cancelProgrammaticTerminalDelivery: (
@@ -249,6 +254,10 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	const pendingOperations = new Set<Promise<unknown>>();
 	let fallbackSweepTimer: NodeJS.Timeout | null = null;
 	let stopped = false;
+	let resolveStopped: () => void = () => {};
+	const whenStopped = new Promise<void>((resolve) => {
+		resolveStopped = resolve;
+	});
 
 	const track = <T>(operation: Promise<T>): Promise<T> => {
 		pendingOperations.add(operation);
@@ -328,7 +337,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		if (stopped) return;
 		for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
 			const head = entries.find((entry) => isQueuedTaskPromptDeliveryAwaitingDispatch(entry, now()));
-			const retryAt = head?.nativeIndependentUserTurnPreflightQueryRecovery?.nextQueryRetryAtEpochMs;
+			const retryAt = head ? resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs(head) : null;
 			if (
 				retryAt == null ||
 				head?.deliveryState !== "queued" ||
@@ -490,14 +499,17 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			observer: ((settledOutcome) => {
 				resolveOutcome(settledOutcome);
 			}) satisfies TaskChatInputDeliveryOutcomeObserver,
-			waitWithinBudget: async (): Promise<TaskChatInputDeliveryOutcome | null> => {
+			waitWithinBudget: async (minimumBudgetMs = 0): Promise<TaskChatInputDeliveryOutcome | null> => {
 				let budgetTimer: NodeJS.Timeout | null = null;
 				const budgetExhausted = new Promise<null>((resolve) => {
-					budgetTimer = setTimeout(() => resolve(null), programmaticTerminalDeliveryOutcomeWaitBudgetMs);
+					budgetTimer = setTimeout(
+						() => resolve(null),
+						Math.max(minimumBudgetMs, programmaticTerminalDeliveryOutcomeWaitBudgetMs),
+					);
 					budgetTimer.unref?.();
 				});
 				try {
-					return await Promise.race([outcome, budgetExhausted]);
+					return await Promise.race([outcome, budgetExhausted, whenStopped.then(() => null)]);
 				} finally {
 					if (budgetTimer !== null) {
 						clearTimeout(budgetTimer);
@@ -512,12 +524,14 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		taskId: string,
 		queueEntryIds: readonly string[],
 		settlement: QueuedTaskPromptDeliverySettlement,
+		isCurrentTransportAttemptActive?: () => boolean,
 	): Promise<void> => {
 		const snapshot = await settleQueuedTaskPromptDelivery({
 			workspaceId,
 			taskId,
 			queueEntryIds,
 			settlement,
+			isCurrentTransportAttemptActive,
 			nowEpochMs: now(),
 		});
 		await commitSnapshotAndBroadcast(workspaceId, snapshot);
@@ -598,7 +612,10 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 					}
 					return;
 				}
-				nativePredecessorTurnId = turns.at(-1)?.id ?? null;
+				nativePredecessorTurnId =
+					headEntry.nativeIndependentUserTurnSubmissionProgress?.predecessorNativeTurnId ??
+					turns.at(-1)?.id ??
+					null;
 			} catch (error) {
 				if (!(error instanceof NativeIndependentUserTurnDeliveryError)) throw error;
 				if (error.recovery.retryableQueryFailure) {
@@ -657,8 +674,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 
-		// 程序化条目用调用方的 key 与 source 交出：交出之后的取消（message-cancel）、账本回写（发送出口的
-		// onDeliveryOutcome）就与不带 --deliver-when-agent-idle 的那条路径逐字相同，不必另造一套映射。
+		// 程序化条目用调用方的 key 与 source 交出；终态只经下方受托管归属保护的结算写入，再由 store 镜像账本。
 		const programmaticInjectionLink = claimedHead.programmaticInjectionLedgerReceiptLink ?? null;
 		const dispatchIdempotencyKey =
 			programmaticInjectionLink?.injectionLedgerIdempotencyKey ?? createDispatchIdempotencyKey();
@@ -667,6 +683,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			taskId,
 			queueEntryIds: claimedQueueEntryIds,
 			dispatchIdempotencyKey,
+			predecessorNativeTurnId: nativePredecessorTurnId ?? undefined,
 			nowEpochMs: now(),
 		});
 		await commitSnapshotAndBroadcast(workspaceId, handedOff);
@@ -694,6 +711,21 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 
+		const settleCurrentTransportAttempt = (settlement: QueuedTaskPromptDeliverySettlement) =>
+			settleHandedOffRun(
+				workspaceId,
+				taskId,
+				claimedQueueEntryIds,
+				{
+					...settlement,
+					expectedHandedToTransportAttemptOwnership: {
+						dispatchIdempotencyKey,
+						custodianRuntimeProcessInstanceId: handedOffEntries[0].custodianRuntimeProcessInstanceId,
+						claimedForSessionIncarnationId: handedOffEntries[0].claimedForSessionIncarnationId,
+					},
+				},
+				() => !stopped,
+			);
 		handedOffAtTurnKeyByTaskKey.set(taskKey, turnKey);
 		const waiter = createProgrammaticTerminalDeliveryOutcomeWaiter();
 		const dispatchedText = buildMergedQueuedTaskPromptDeliveryText(claimed.claimedEntries);
@@ -710,34 +742,29 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				waiter.observer,
 				programmaticInjectionLink?.injectionLedgerTaskId,
 				nativePredecessorTurnId
-					? async () => {
-							const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
-							const current = fresh.entriesByTaskId[taskId]?.find(
-								(entry) => entry.queueEntryId === claimedHead.queueEntryId,
-							);
-							if (
-								stopped ||
-								!current ||
-								current.deliveryState !== "handed_to_transport" ||
-								current.dispatchIdempotencyKey !== dispatchIdempotencyKey
-							)
-								throw new Error("独立原生回合投递已取消或失效。");
-							assertIndependentUserTurnImmediatelyBeforeTerminalWrite({
-								turns: await (deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
+					? createNativeIndependentUserTurnBeforeSubmissionValidator({
+							workspaceId,
+							entry: handedOffEntries[0],
+							predecessorNativeTurnId: nativePredecessorTurnId,
+							text: dispatchedText,
+							now,
+							isStopped: () => stopped,
+							whenStopped,
+							readNativeConversationTurns: () =>
+								(deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
 									workspaceId,
 									entry: claimedHead,
 									getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
 								}),
-								predecessorTurnId: nativePredecessorTurnId ?? "",
-								text: dispatchedText,
-							});
-						}
+							onSnapshotChanged: (snapshot) => commitSnapshotAndBroadcast(workspaceId, snapshot),
+						})
 					: undefined,
 			);
 		} catch (error) {
+			if (stopped) return;
 			// 统一出口自己兜住了异常并返回 ok:false；能走到这里说明是出口之外的东西抛了（例：依赖注入的包装层）。
 			// 不知道字节有没有出去 ⇒ 交给人。
-			await settleHandedOffRun(workspaceId, taskId, claimedQueueEntryIds, {
+			await settleCurrentTransportAttempt({
 				outcome: "terminal_failure",
 				failureNote: `Sending the queued prompt failed unexpectedly: ${
 					error instanceof Error ? error.message : String(error)
@@ -748,14 +775,12 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		}
 
 		// 每一个落定点都把「这次投递真实的终端回执」随结算带进 store：程序化条目据此镜像进账本，人排的条目忽略它。
+		if (stopped) return;
 		const terminalDelivery = response.terminalDelivery ?? null;
 		if (terminalDelivery === null) {
 			// 出口在受理之前就回了：ok 只可能是 Cline SDK 的 /clear 这类不走投递的分支；不 ok 则一个字节都没进 agent
 			// ——与 `kanban task message` 在同一情形下落的原因相同（它回退到 no_active_terminal_session）。
-			await settleHandedOffRun(
-				workspaceId,
-				taskId,
-				claimedQueueEntryIds,
+			await settleCurrentTransportAttempt(
 				response.ok
 					? {
 							outcome: "delivered",
@@ -776,17 +801,17 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 		if (terminalDelivery.status !== "accepted_pending_submit_confirmation") {
-			await settleHandedOffRun(workspaceId, taskId, claimedQueueEntryIds, {
+			await settleCurrentTransportAttempt({
 				...routeQueuedTaskPromptDeliveryTerminalOutcome(terminalDelivery),
 				terminalDeliveryReceiptForInjectionLedger: terminalDelivery,
 			});
 			return;
 		}
-		const settledOutcome = await waiter.waitWithinBudget();
-		await settleHandedOffRun(
-			workspaceId,
-			taskId,
-			claimedQueueEntryIds,
+		const settledOutcome = await waiter.waitWithinBudget(
+			nativePredecessorTurnId ? Math.max(0, claimedHead.expiresAt - now()) : 0,
+		);
+		if (stopped) return;
+		await settleCurrentTransportAttempt(
 			settledOutcome === null
 				? {
 						outcome: "terminal_failure",
@@ -799,6 +824,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 						terminalDeliveryReceiptForInjectionLedger: {
 							status: settledOutcome.status,
 							reason: settledOutcome.reason,
+							...(settledOutcome.failureNote ? { failureNote: settledOutcome.failureNote } : {}),
 							...(settledOutcome.codexNativePromptDeliveryEvidence
 								? { codexNativePromptDeliveryEvidence: settledOutcome.codexNativePromptDeliveryEvidence }
 								: {}),
@@ -930,6 +956,23 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			if (entry?.deliveryState !== "handed_to_transport" || entry.dispatchIdempotencyKey === null) {
 				return null;
 			}
+			if (isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)) {
+				const cancelled = await mutateWorkspaceQueuedTaskPromptDeliveries(
+					workspaceId,
+					{
+						kind: "cancel_queued_prompt_delivery",
+						taskId,
+						queueEntryId,
+					},
+					now(),
+				);
+				await commitSnapshotAndBroadcast(workspaceId, cancelled);
+				if (
+					cancelled.entriesByTaskId[taskId]?.find((candidate) => candidate.queueEntryId === queueEntryId)
+						?.deliveryState === "cancelled"
+				)
+					return "cancelled_before_delivery";
+			}
 			const scope = deps.resolveWorkspaceScope(workspaceId);
 			if (scope === null) {
 				return "no_pending_delivery";
@@ -978,6 +1021,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		},
 		stop: () => {
 			stopped = true;
+			resolveStopped();
 			for (const timer of nativeTurnPollTimerByTaskKey.values()) clearTimeout(timer);
 			nativeTurnPollTimerByTaskKey.clear();
 			if (fallbackSweepTimer !== null) {

@@ -13,8 +13,42 @@ export function hasKimiInteractivePrompt(text: string): boolean {
 	return /│\s*>\s/u.test(stripped);
 }
 
-// Kimi 启动横幅："Welcome to Kimi Code!"。
+// 窄终端会把原生横幅裁成 `Welcome to Kim…` 等带省略号的前缀；信任门禁与首发必须识别同一事件。
+function findLastKimiStartupBannerIndex(normalizedText: string): number {
+	const startupBannerText = "welcome to kimi code";
+	let lastStartupBannerIndex = normalizedText.lastIndexOf(startupBannerText);
+	for (const match of normalizedText.matchAll(/welcome to [a-z ]+…/gu)) {
+		if (startupBannerText.startsWith(match[0].slice(0, -1))) {
+			lastStartupBannerIndex = Math.max(lastStartupBannerIndex, match.index);
+		}
+	}
+	return lastStartupBannerIndex;
+}
+
 export function hasKimiStartupUiRendered(text: string): boolean {
 	const stripped = stripAnsi(text).toLowerCase();
-	return stripped.includes("welcome to kimi code");
+	return findLastKimiStartupBannerIndex(stripped) >= 0;
+}
+
+// 原生信任模态可能同时渲染底下的 composer。只有后来的启动横幅才能证明该模态已经关闭；
+// 使用累积输出处理分块与短屏幕，当前屏幕另作独立核验。
+export function hasKimiWorkspaceTrustAwaitingConfirmation(startupOutputText: string): boolean {
+	const normalized = stripAnsi(startupOutputText).replace(/\s+/gu, " ").toLowerCase();
+	const trustPromptIndex = normalized.lastIndexOf("trust this folder?");
+	return trustPromptIndex >= 0 && trustPromptIndex > findLastKimiStartupBannerIndex(normalized);
+}
+
+export function hasKimiStartupPromptReady(screenText: string, startupOutputText: string): boolean {
+	return (
+		hasKimiInteractivePrompt(screenText) &&
+		hasKimiStartupUiRendered(startupOutputText) &&
+		!hasKimiWorkspaceTrustAwaitingConfirmation(startupOutputText) &&
+		!hasKimiWorkspaceTrustAwaitingConfirmation(screenText)
+	);
+}
+
+// 只保留原生信任对话框支持的方向键和确认键；普通文本或 Esc 仍让出自动首发控制权。
+export function isKimiWorkspaceTrustNavigationOrConfirmationInput(inputText: string): boolean {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: 原生终端方向键和回车的协议字节。
+	return /^(?:\u001b(?:\[|O)[ABCD]|\r|\n)+$/u.test(inputText);
 }

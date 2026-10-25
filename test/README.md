@@ -33,6 +33,16 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 - 等启动 banner 用 `waitForRuntimeServerStartupBannerOrSigkillChild`（失败分支先 SIGKILL 并等退出再 reject）；判退出用 `hasChildProcessExited`（被信号结束的进程 `exitCode` 为 null）。启动等待放宽后，用例超时用 `computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts` 按冷启动次数计算，并挂在 `describe(name, { timeout }, fn)` 上——给 `it(title, fn, <标识符>)` 传非数字字面量会让 biome 放弃 test-call 排版、重缩进整个用例体。
 - `test/integration/shutdown-ipc-hook.cjs` 把 IPC 断开（vitest worker 被杀）当作父进程死亡：已装 SIGINT 处理器则发一次 SIGINT 走优雅关停并设兜底退出，仍在启动则立即退出。
 
+## Codex 后台终端等待的真实原生检查
+
+Codex 后台终端等待有独立的真实原生集成用例：模型使用隔离的本地 HTTP fixture，不调用外部模型；真实 Codex 创建后台 `sleep` 命令并连续执行 `write_stdin`，宿主判定时间推进六分钟验证静默门，再验证同回合误判纠正。通过以下入口启用，证据目录使用持久路径：
+
+```sh
+KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY=/absolute/path/to/codex \
+KANBAN_CODEX_BACKGROUND_WAIT_EVIDENCE_DIRECTORY=/absolute/persistent/background-wait-evidence \
+npm run test:guarded -- --project runtime-integration test/integration/codex-native-background-terminal-wait.integration.test.ts
+```
+
 ## 手机后台 Codex 首发的真实浏览器检查
 
 手机后台 Codex 首发的真实浏览器检查按需启用，会调用真实模型。它通过隔离 Git fixture、HOME 和 Codex 配置覆盖
@@ -104,6 +114,8 @@ npm run test:guarded -- --project runtime-integration test/integration/rvf-decis
 ```
 
 CLI 构建目录不能指向在线实例的共享 `dist` 软链接。测试结束或失败时都会回收自身启动的子进程，并把指定目录中的证据持久保留。
+
+额外设置 `KANBAN_RVF_SESSION_DELIVERY_INJECT_PRE_SUBMISSION_QUERY_TIMEOUT=1` 可在同一隔离链路中丢弃一次二次完整回合查询响应，验证真实超时后的恢复、唯一原生提交以及先于提交持久化的边界；不向常驻实例注入故障。
 
 - `npm run test:policy`：只运行 Git 测试安全策略。
 - `npm run test:guarded -- <vitest args>`：在 policy 与宿主仓 canary 下运行指定 Vitest 参数。

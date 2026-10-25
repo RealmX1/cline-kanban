@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import type { CodexRvfCloseoutCompactionAwareConfirmation } from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
 import type {
 	CodexNativePromptDeliveryInput,
 	CodexNativePromptDeliveryResult,
@@ -51,6 +52,9 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 		},
 	});
 	const active = {
+		codexAutomaticCompactionPhaseHooksConfigured: true,
+		nativeCompactionAwareConfirmation: null,
+		terminalSessionIncarnationSpawnedAtEpochMs: 1,
 		session: { write },
 		inputBoxOccupancyTracker: tracker,
 		lastUserInputAt: null as number | null,
@@ -671,4 +675,70 @@ describe("session manager 的 Codex 原生投递", () => {
 		expect(write).not.toHaveBeenCalled();
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "codex_native_prompt_delivery_unconfirmed" }]);
 	});
+	it.each([true, false])(
+		"原生请求必须等快照持久化，写入成功=%s；失败不能改成延长或发送",
+		async (persistenceSucceeds) => {
+			const snapshots: CodexRvfCloseoutCompactionAwareConfirmation[] = [];
+			const persist = vi.fn(async (snapshot: CodexRvfCloseoutCompactionAwareConfirmation) => {
+				if (persistenceSucceeds) snapshots.push(snapshot);
+				return persistenceSucceeds;
+			});
+			let submitted = false;
+			const native = vi.fn(
+				async (input: CodexNativePromptDeliveryInput): Promise<CodexNativePromptDeliveryResult> => {
+					expect(await input.beforeSubmit()).toBe(true);
+					try {
+						await input.onRequestAttempted({ predecessorNativeTurnId: "prior-turn" });
+					} catch {
+						return { status: "unconfirmed" };
+					}
+					submitted = true;
+					expect(snapshots).toHaveLength(1);
+					expect(await input.confirmationDeadlineAtEpochMs?.()).toBe(616_000);
+					await input.onNativeTurnStarted?.("new-turn");
+					return {
+						status: "confirmed",
+						evidence: {
+							clientUserMessageId: input.clientUserMessageId,
+							nativeSessionId: "thread-1",
+							nativeTurnId: "new-turn",
+							nativeUserMessageId: "message-1",
+						},
+					};
+				},
+			);
+			const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
+			const { write } = installSession(manager);
+			const outcomes: TaskChatInputDeliveryOutcome[] = [];
+			manager.submitTaskChatInputWhenReady("conversation-1", "INJECTION", {
+				idempotencyKey: "bound-closeout",
+				onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+				rvfCloseoutCompactionConfirmationPersistence: {
+					binding: {
+						workspaceId: "workspace-1",
+						taskId: "card",
+						conversationSessionId: "conversation-1",
+						decisionToken: "token",
+						runId: "run",
+						handoffSha256: "a".repeat(64),
+						idempotencyKey: "bound-closeout",
+						promptSha256: "b".repeat(64),
+						nativeSessionId: "thread-1",
+						runtimeSessionIncarnationId: INCARNATION,
+						controlHostSocketPath: "/isolated/control.sock",
+					},
+					promptText: "INJECTION",
+					validateStillAuthorized: async () => true,
+					persistSnapshot: persist,
+				},
+			});
+			await vi.advanceTimersByTimeAsync(1100);
+			expect(submitted).toBe(persistenceSucceeds);
+			expect(persist).toHaveBeenCalledTimes(persistenceSucceeds ? 2 : 1);
+			if (persistenceSucceeds)
+				expect(snapshots.at(-1)).toMatchObject({ nativeTurnIdReturnedBySubmissionRequest: "new-turn" });
+			expect(outcomes[0]?.status).toBe(persistenceSucceeds ? "delivered_and_submit_confirmed" : "delivery_failed");
+			expect(write).not.toHaveBeenCalled();
+		},
+	);
 });
