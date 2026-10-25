@@ -562,6 +562,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 						newTaskAutoReviewEnabled: true,
 						workspaceOpenTargetPreferredApplicationId: "zed",
 						projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
+						taskEditorSettingPresentationBySettingKey: { relations: "hidden" },
 					},
 				});
 				expect(saved.userInterfacePreferencesSharedAcrossBrowserOrigins.newTaskAutoReviewEnabled).toBe(true);
@@ -580,6 +581,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 					workspaceOpenTargetPreferredApplicationId: "zed",
 					projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
+					taskEditorSettingPresentationBySettingKey: { relations: "hidden" },
 					mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 					taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: [],
 				});

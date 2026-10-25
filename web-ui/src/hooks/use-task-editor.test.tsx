@@ -1,3 +1,12 @@
+vi.mock("@/state/task-project-assignment-preflight", () => ({
+	runTaskProjectAssignmentPreflight: vi.fn(async (input: { workspaceId: string; baseRef: string }) => ({
+		workspaceId: input.workspaceId,
+		baseRef: input.baseRef,
+	})),
+	rememberTaskProjectAssignmentAnalysisAccepted: vi.fn(),
+	hasAcceptedTaskProjectAssignmentAnalysis: vi.fn(() => true),
+}));
+
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -178,6 +187,7 @@ const runtimeAllocatedTaskIdPrefetchPoolStandIn = vi.hoisted(() => ({
 }));
 
 vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards", () => ({
+	ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission: vi.fn(async () => undefined),
 	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled: (workspaceId: string) => {
 		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds.push(workspaceId);
 	},
@@ -260,6 +270,10 @@ const startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock = vi.hoiste
 	})),
 );
 vi.mock("@/runtime/task-card-action-query", () => ({
+	readTaskCardWithBoardColumnInWorkspace: vi.fn(async () => ({
+		taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
+	})),
+	transferNeverStartedBacklogTaskToProjectInWorkspace: vi.fn(),
 	updateTaskCardFieldValuesInWorkspace: updateTaskCardFieldValuesInWorkspaceMock,
 	startTaskCardAgentSessionMovingItIntoInProgressInWorkspace:
 		startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock,
@@ -1235,6 +1249,7 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).editingTaskId).toBeNull();
 		// 只发改过的字段（标题不发：服务端保留最新标题）；会被保存的 board 不动，显示看板立刻是新值。
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-1", {
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
 			taskId: "task-1",
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
@@ -1975,7 +1990,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			resolveSaveCommand();
 		});
-		expect(queueTaskStartAfterEdit).toHaveBeenCalledWith("task-1");
+		expect(queueTaskStartAfterEdit).toHaveBeenCalledWith("task-1", 1);
 	});
 
 	it("编辑其他项目的 backlog 卡：草稿、分支、保存、保存并启动都作用于那个项目，不叠当前项目的 overlay", async () => {
@@ -2020,6 +2035,7 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
+			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskId: "task-1",
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
@@ -2087,6 +2103,7 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
+			expectedTaskIncarnationCreatedAtEpochMs: 2,
 			taskId: "task-only-in-project-b",
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
@@ -2868,7 +2885,7 @@ describe("useTaskEditor", () => {
 
 		// 对话框留在原地不卸载，所以这一次靠换 key 重挂来清——上一张卡的候选不该跟到下一张。
 		await act(async () => {
-			findDialogButtonByLabel("Create")?.click();
+			findDialogButtonByLabel("创建任务")?.click();
 		});
 		expect(currentDialogElement().textContent).not.toContain("Suggestion 1");
 	});

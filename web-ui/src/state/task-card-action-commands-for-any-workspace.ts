@@ -5,9 +5,11 @@ import {
 	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
 	moveTaskCardIntoReviewByHandingTurnToUserInWorkspace,
 	permanentlyDeleteTaskCardsWithFullResourceCleanupInWorkspace,
+	readTaskCardWithBoardColumnInWorkspace,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace,
 	setTaskPinboardPinStateOfTaskCardInWorkspace,
 	startTaskCardAgentSessionMovingItIntoInProgressInWorkspace,
+	transferNeverStartedBacklogTaskToProjectInWorkspace,
 	updateTaskCardFieldValuesInWorkspace,
 } from "@/runtime/task-card-action-query";
 import type {
@@ -30,8 +32,14 @@ import {
 	executeTaskCardActionCommand,
 	type TaskCardActionCommandExecutionResult,
 } from "@/state/task-card-action-command-execution";
+import {
+	hasAcceptedTaskProjectAssignmentAnalysis,
+	rememberTaskProjectAssignmentAnalysisAccepted,
+	runTaskProjectAssignmentPreflight,
+} from "@/state/task-project-assignment-preflight";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 // 每个用户交互卡片动作在浏览器侧的唯一入口，主看板、Focus View（This project）、跨项目切换面板（All projects）共用。
 // 差别只在调用方给不给 `currentProjectBoardForOptimisticOverlay`：
@@ -74,6 +82,7 @@ function expectedBoardEffectsForSingleTaskCard(
 export async function updateTaskCardFieldValuesThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	taskCardFieldValuePatch: RuntimeTaskCardFieldValuePatch;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	optimisticBoardTransformation?: (board: BoardData) => { board: BoardData; updated: boolean };
@@ -104,6 +113,9 @@ export async function updateTaskCardFieldValuesThroughRuntime(input: {
 		sendCommand: () =>
 			updateTaskCardFieldValuesInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				taskCardFieldUpdate: {
 					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 					taskCardFieldValuePatch: input.taskCardFieldValuePatch,
@@ -133,6 +145,7 @@ function expectedTaskCardMoveIntoBoardColumn(
 export async function moveTaskCardBetweenNonTrashColumnsThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	targetBoardColumnId: BoardColumnId;
 	// 拖放落点；缺省 = 列顶（与浏览器既有的「移列即置顶」一致）。
 	insertAtIndexWithinTargetBoardColumn?: number;
@@ -154,6 +167,9 @@ export async function moveTaskCardBetweenNonTrashColumnsThroughRuntime(input: {
 		sendCommand: () =>
 			moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				targetBoardColumnId: input.targetBoardColumnId,
 				...(input.insertAtIndexWithinTargetBoardColumn !== undefined
 					? { insertAtIndexWithinTargetBoardColumn: input.insertAtIndexWithinTargetBoardColumn }
@@ -166,14 +182,73 @@ export async function moveTaskCardBetweenNonTrashColumnsThroughRuntime(input: {
 
 // --- 启动：backlog / in_progress → in_progress，服务端先移列再 ensure worktree、再起会话 ---
 export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime(input: {
+	skipTaskProjectAssignmentPreflight?: boolean;
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	insertAtIndexWithinInProgressBoardColumn?: number;
 	agentTerminalGeometryForTaskSessionSpawn?: RuntimeAgentTerminalGeometryForTaskSessionSpawn;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionStartAgentSessionResponse>> {
-	return await executeTaskCardActionCommand({
+	const originalWorkspaceId = input.workspaceId;
+	if (
+		!input.skipTaskProjectAssignmentPreflight &&
+		(!input.boardMutationInitiator || input.boardMutationInitiator === "web_ui_user_gesture")
+	) {
+		try {
+			const found = await readTaskCardWithBoardColumnInWorkspace(input.workspaceId, input.taskId);
+			if (
+				found.taskCardLookupOutcome === "task_card_found_on_workspace_board" &&
+				found.taskCardSnapshot.boardColumnIdContainingTaskCard === "backlog"
+			) {
+				const card = found.taskCardSnapshot.taskCard;
+				if (!hasAcceptedTaskProjectAssignmentAnalysis(input.workspaceId, input.taskId, card.title, card.prompt)) {
+					const assignment = await runTaskProjectAssignmentPreflight({
+						workspaceId: input.workspaceId,
+						title: card.title,
+						prompt: card.prompt,
+						baseRef: card.baseRef ?? "",
+					});
+					if (!assignment)
+						return {
+							taskCardActionCommandExecutionOutcome: "command_failed",
+							commandFailureMessage: "已取消启动，任务保留在 Backlog。",
+						};
+					const latest = await readTaskCardWithBoardColumnInWorkspace(input.workspaceId, input.taskId);
+					if (
+						latest.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
+						latest.taskCardSnapshot.taskCard.prompt !== card.prompt ||
+						latest.taskCardSnapshot.taskCard.title !== card.title ||
+						latest.taskCardSnapshot.taskCard.createdAt !== card.createdAt
+					)
+						throw new Error("分析期间任务已变化，请重新启动。");
+					if (assignment.workspaceId !== input.workspaceId) {
+						await transferNeverStartedBacklogTaskToProjectInWorkspace(input.workspaceId, {
+							operationId: createRandomUuidV4WithInsecureContextFallback(),
+							taskId: card.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+							targetWorkspaceId: assignment.workspaceId,
+							targetBaseRef: assignment.baseRef,
+						});
+						input = {
+							...input,
+							workspaceId: assignment.workspaceId,
+							currentProjectBoardForOptimisticOverlay: undefined,
+						};
+					}
+					rememberTaskProjectAssignmentAnalysisAccepted(input.workspaceId, input.taskId, card.title, card.prompt);
+				}
+			}
+		} catch (failure) {
+			return {
+				taskCardActionCommandExecutionOutcome: "command_failed",
+				commandFailureMessage: failure instanceof Error ? failure.message : String(failure),
+			};
+		}
+	}
+
+	const result = await executeTaskCardActionCommand({
 		workspaceId: input.workspaceId,
 		taskIds: [input.taskId],
 		commandKind: "start_task_card_agent_session_moving_it_into_in_progress",
@@ -188,6 +263,9 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 		sendCommand: () =>
 			startTaskCardAgentSessionMovingItIntoInProgressInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 				...(input.agentTerminalGeometryForTaskSessionSpawn
 					? { agentTerminalGeometryForTaskSessionSpawn: input.agentTerminalGeometryForTaskSessionSpawn }
@@ -198,12 +276,28 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
 	});
+	if (
+		result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+		originalWorkspaceId !== input.workspaceId
+	)
+		return {
+			...result,
+			response: {
+				...result.response,
+				taskCardSnapshotAfterAction: {
+					...result.response.taskCardSnapshotAfterAction,
+					workspaceId: input.workspaceId,
+				},
+			},
+		};
+	return result;
 }
 
 // --- 移到 review：把 agent 回合交还用户，成功后服务端显式移列 ---
 export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionMoveIntoReviewResponse>> {
@@ -218,6 +312,9 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 		sendCommand: () =>
 			moveTaskCardIntoReviewByHandingTurnToUserInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
@@ -229,6 +326,7 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	// 拖放 / 动画落点；缺省 = 列顶。
 	insertAtIndexWithinDoneBoardColumn?: number;
@@ -252,6 +350,9 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 		sendCommand: () =>
 			moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				...(input.taskCommentToAppendWhenMovingIntoDone
 					? { taskCommentToAppendWhenMovingIntoDone: input.taskCommentToAppendWhenMovingIntoDone }
 					: {}),
@@ -272,6 +373,7 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 export async function restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	insertAtIndexWithinReviewBoardColumn?: number;
 	agentTerminalGeometryForTaskSessionSpawn?: RuntimeAgentTerminalGeometryForTaskSessionSpawn;
 	currentProjectBoardForOptimisticOverlay?: BoardData;
@@ -292,6 +394,9 @@ export async function restoreTaskCardFromDoneIntoReviewResumingAgentSessionThrou
 		sendCommand: () =>
 			restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 				...(input.agentTerminalGeometryForTaskSessionSpawn
 					? { agentTerminalGeometryForTaskSessionSpawn: input.agentTerminalGeometryForTaskSessionSpawn }
@@ -308,6 +413,7 @@ export async function restoreTaskCardFromDoneIntoReviewResumingAgentSessionThrou
 export async function permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime(input: {
 	workspaceId: string;
 	permanentlyDeletedTaskCardSelection: RuntimePermanentlyDeletedTaskCardSelection;
+	expectedTaskIncarnationCreatedAtEpochMsByTaskId?: Record<string, number>;
 	// 在途闸与 overlay 的对象：单卡就是那张，清空整列时是调用方此刻看到的整列卡片。
 	taskIdsExpectedToBeDeleted: readonly string[];
 	currentProjectBoardForOptimisticOverlay?: BoardData;
@@ -328,6 +434,12 @@ export async function permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRu
 		sendCommand: () =>
 			permanentlyDeleteTaskCardsWithFullResourceCleanupInWorkspace(input.workspaceId, {
 				permanentlyDeletedTaskCardSelection: input.permanentlyDeletedTaskCardSelection,
+				...(input.expectedTaskIncarnationCreatedAtEpochMsByTaskId
+					? {
+							expectedTaskIncarnationCreatedAtEpochMsByTaskId:
+								input.expectedTaskIncarnationCreatedAtEpochMsByTaskId,
+						}
+					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 			}),
 	});
@@ -337,6 +449,7 @@ export async function permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRu
 export async function setTaskPinboardPinStateOfTaskCardThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	taskPinboardPinChange:
 		| { taskPinboardPinAction: "pin_task_card_or_update_pin_reason"; taskPinboardPinReason: string | null }
 		| { taskPinboardPinAction: "unpin_task_card" };
@@ -375,10 +488,20 @@ export async function setTaskPinboardPinStateOfTaskCardThroughRuntime(input: {
 			setTaskPinboardPinStateOfTaskCardInWorkspace(
 				input.workspaceId,
 				taskPinboardPinChange.taskPinboardPinAction === "unpin_task_card"
-					? { taskPinboardPinAction: "unpin_task_card", taskId: input.taskId, boardMutationInitiator }
+					? {
+							taskPinboardPinAction: "unpin_task_card",
+							taskId: input.taskId,
+							boardMutationInitiator,
+							...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+								? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+								: {}),
+						}
 					: {
 							taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
 							taskId: input.taskId,
+							...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+								? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+								: {}),
 							taskPinboardPinReason: taskPinboardPinChange.taskPinboardPinReason,
 							boardMutationInitiator,
 						},

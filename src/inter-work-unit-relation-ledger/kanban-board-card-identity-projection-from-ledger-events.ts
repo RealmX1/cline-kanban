@@ -21,6 +21,8 @@ export type KanbanBoardCardIdentityFirstObservationRoute =
 
 export interface KanbanBoardCardIdentityProjection {
 	kanbanBoardCard: KanbanBoardCardWorkUnitQualifiedReference;
+	currentWorkspaceId?: string;
+	workspaceIdsUsedByCard?: string[];
 	kanbanBoardCardFirstObservationRoute: KanbanBoardCardIdentityFirstObservationRoute;
 	firstObservedAt: number;
 	// 只有激活之后在 live 捕获内建的卡才知道创建者；基线里的存量卡为 null（2b 回填补）。
@@ -58,6 +60,17 @@ export function buildInterWorkUnitRelationWorkUnitKey(workUnit: InterWorkUnitRel
 		return `kanban_board_card:${workUnit.workspaceId}:${workUnit.taskId}:${workUnit.taskIncarnationCreatedAtEpochMs}`;
 	}
 	return `kanban_unmanaged_standalone_agent_conversation_session:${workUnit.conversationSessionHostKanbanAgentId}:${workUnit.nativeConversationSessionId}`;
+}
+
+/** 迁移只增加位置别名，关系自然键始终使用创建时的不可变身份。 */
+export function resolveCanonicalWorkUnitReferenceAfterProjectTransfer(
+	state: KanbanBoardCardIdentityProjectionState,
+	reference: InterWorkUnitRelationWorkUnitReference,
+): InterWorkUnitRelationWorkUnitReference {
+	return reference.workUnitType === "kanban_board_card"
+		? (state.projectionsByKanbanBoardCardWorkUnitKey.get(buildInterWorkUnitRelationWorkUnitKey(reference))
+				?.kanbanBoardCard ?? reference)
+		: reference;
 }
 
 function buildWorkspaceAndTaskIdKey(workspaceId: string, taskId: string): string {
@@ -192,6 +205,29 @@ export function applyCommittedLedgerEventToKanbanBoardCardIdentityProjection(
 	if (!card) {
 		return;
 	}
+
+	if (event.eventKind === "task_card_project_transfer_completed") {
+		const targetWorkspaceId = readOptionalString(event.eventPayload.targetWorkspaceId);
+		if (!targetWorkspaceId) return;
+		const projection = getOrRegisterKanbanBoardCardIdentityProjection(state, card, event.occurredAt);
+		const canonicalKey = buildInterWorkUnitRelationWorkUnitKey(projection.kanbanBoardCard);
+		projection.workspaceIdsUsedByCard = [
+			...new Set([...(projection.workspaceIdsUsedByCard ?? []), card.workspaceId, targetWorkspaceId]),
+		];
+		projection.currentWorkspaceId = targetWorkspaceId;
+		state.projectionsByKanbanBoardCardWorkUnitKey.set(
+			buildInterWorkUnitRelationWorkUnitKey({ ...card, workspaceId: targetWorkspaceId }),
+			projection,
+		);
+		state.liveKanbanBoardCardWorkUnitKeyByWorkspaceAndTaskId.delete(
+			buildWorkspaceAndTaskIdKey(card.workspaceId, card.taskId),
+		);
+		state.liveKanbanBoardCardWorkUnitKeyByWorkspaceAndTaskId.set(
+			buildWorkspaceAndTaskIdKey(targetWorkspaceId, card.taskId),
+			canonicalKey,
+		);
+		return;
+	}
 	if (event.eventKind === "task_card_created_on_board") {
 		const cardKey = buildInterWorkUnitRelationWorkUnitKey(card);
 		const knownProjection = state.projectionsByKanbanBoardCardWorkUnitKey.get(cardKey);
@@ -252,7 +288,7 @@ export function applyCommittedLedgerEventToKanbanBoardCardIdentityProjection(
 			projection.lastFieldValueSha256ByFieldNameBeforeRemoval = { ...lastFieldValueSha256ByFieldName };
 			if (
 				state.liveKanbanBoardCardWorkUnitKeyByWorkspaceAndTaskId.get(workspaceAndTaskIdKey) ===
-				buildInterWorkUnitRelationWorkUnitKey(card)
+				buildInterWorkUnitRelationWorkUnitKey(projection.kanbanBoardCard)
 			) {
 				state.liveKanbanBoardCardWorkUnitKeyByWorkspaceAndTaskId.delete(workspaceAndTaskIdKey);
 			}
@@ -282,7 +318,7 @@ export function listKanbanBoardCardIdentityProjectionsByBareTaskId(
 	const projections = (state.kanbanBoardCardWorkUnitKeysByBareTaskId.get(taskId) ?? [])
 		.map((cardKey) => state.projectionsByKanbanBoardCardWorkUnitKey.get(cardKey))
 		.filter((projection): projection is KanbanBoardCardIdentityProjection => projection !== undefined);
-	return projections.sort((left, right) => {
+	return [...new Set(projections)].sort((left, right) => {
 		const leftRemoved = left.permanentlyRemovedFromBoardAt !== null ? 1 : 0;
 		const rightRemoved = right.permanentlyRemovedFromBoardAt !== null ? 1 : 0;
 		if (leftRemoved !== rightRemoved) {

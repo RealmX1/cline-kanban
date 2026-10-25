@@ -253,7 +253,11 @@ export function useReferenceRelationModelingEditor(input: {
 			),
 		}));
 	}, []);
-	const applyToTask = async (taskId: string, characteristics: WebUiUserDecisionClientCharacteristics) => {
+	const applyToTask = async (
+		taskId: string,
+		characteristics: WebUiUserDecisionClientCharacteristics,
+		targetWorkspaceId?: string,
+	) => {
 		if (!input.workspaceId) throw new Error("请先选择项目。");
 		const isStillCurrentScope = () => currentScopeRef.current === mirrorKey;
 		setDraftScopesWithApplyInFlight((previous) => new Set(previous).add(mirrorKey));
@@ -264,14 +268,14 @@ export function useReferenceRelationModelingEditor(input: {
 			setDraft(snapshot);
 			localStorage.setItem(mirrorKey, JSON.stringify(snapshot));
 			await persist(snapshot);
-			await applyReferenceRelationModelingChangesFromExplicitUserGesture(input.workspaceId, {
+			await applyReferenceRelationModelingChangesFromExplicitUserGesture(targetWorkspaceId ?? input.workspaceId, {
 				workUnit:
 					input.taskIncarnationCreatedAtEpochMs !== undefined
 						? {
 								workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
 								kanbanBoardCard: {
 									workUnitType: "kanban_board_card",
-									workspaceId: input.workspaceId,
+									workspaceId: targetWorkspaceId ?? input.workspaceId,
 									taskId,
 									taskIncarnationCreatedAtEpochMs: input.taskIncarnationCreatedAtEpochMs,
 								},
@@ -279,7 +283,7 @@ export function useReferenceRelationModelingEditor(input: {
 						: {
 								workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
 								bareTaskId: taskId,
-								workspaceId: input.workspaceId,
+								workspaceId: targetWorkspaceId ?? input.workspaceId,
 							},
 				modelingSubmissionId: snapshot.modelingSubmissionId,
 				referenceRelationDrafts: snapshot.referenceRelationDrafts,
@@ -292,6 +296,7 @@ export function useReferenceRelationModelingEditor(input: {
 				...(!input.taskId
 					? {
 							createdTaskId: taskId,
+							createdTaskWorkspaceId: latestDraftForSubmittedScope.createdTaskWorkspaceId,
 							createdTaskCardSnapshot: latestDraftForSubmittedScope.createdTaskCardSnapshot,
 							creationPrompt: latestDraftForSubmittedScope.creationPrompt,
 							creationTitle: latestDraftForSubmittedScope.creationTitle,

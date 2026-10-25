@@ -33,6 +33,8 @@ export type WorkUnitSelectorForRelationRead = z.infer<typeof workUnitSelectorFor
 
 // 一世卡片的身份投影（全局 task 身份登记簿的读侧）。永久删除的卡也在，permanentlyRemovedFromBoardAt 非空即墓碑。
 export const kanbanBoardCardIdentityResolutionCandidateSchema = z.object({
+	canonicalKanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema.optional(),
+	previousWorkspaceRepositoryPaths: z.array(z.string()).optional(),
 	kanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
 	workspaceRepositoryPath: z.string().nullable(),
 	currentTitle: z.string().nullable(),
@@ -69,6 +71,48 @@ export const workUnitDisplayEntrySchema = z.object({
 	kanbanBoardCardIdentity: kanbanBoardCardIdentityResolutionCandidateSchema.nullable(),
 });
 export type WorkUnitDisplayEntry = z.infer<typeof workUnitDisplayEntrySchema>;
+
+// 卡片悬停只读标题与关系摘要；不把 prompt、证据正文或完整多跳图带入列表请求。
+export const directlyRelatedTaskRelationSummarySchema = z.object({
+	relationId: z.string(),
+	relationKind: z.string(),
+	relationClass: z.enum(["recorded", "asserted"]),
+	directionFromPreviewSubject: z.enum(["outgoing", "incoming", "symmetric"]),
+	mutedInPresentation: z.boolean(),
+	assertionActorKind: z.string().nullable(),
+	assertionAsserterWorkUnitRef: interWorkUnitRelationWorkUnitReferenceSchema.nullable().optional(),
+	assertionDecisionSources: z.array(z.string()),
+});
+export type DirectlyRelatedTaskRelationSummary = z.infer<typeof directlyRelatedTaskRelationSummarySchema>;
+
+export const directlyRelatedTaskPreviewEntrySchema = z.object({
+	task: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	title: z.string().nullable(),
+	workspaceRepositoryPath: z.string().nullable(),
+	lastKnownBoardColumnId: z.string().nullable(),
+	permanentlyRemovedFromBoardAt: z.number().nullable(),
+	identityKnownToLedger: z.boolean(),
+	mutedOnly: z.boolean(),
+	relations: z.array(directlyRelatedTaskRelationSummarySchema),
+});
+export type DirectlyRelatedTaskPreviewEntry = z.infer<typeof directlyRelatedTaskPreviewEntrySchema>;
+
+export const getDirectlyRelatedTaskPreviewPageRequestSchema = z.object({
+	task: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	pageSize: z.number().int().min(1).max(50).optional(),
+	cursor: z.string().min(1).max(4096).optional(),
+});
+export type GetDirectlyRelatedTaskPreviewPageRequest = z.infer<typeof getDirectlyRelatedTaskPreviewPageRequestSchema>;
+export const getDirectlyRelatedTaskPreviewPageResponseSchema = z.object({
+	subjectTask: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	entries: z.array(directlyRelatedTaskPreviewEntrySchema),
+	totalTaskCount: z.number().int().nonnegative(),
+	mutedOnlyTaskCount: z.number().int().nonnegative(),
+	standaloneSessionCount: z.number().int().nonnegative(),
+	neighborhoodRevision: z.string(),
+	nextCursor: z.string().nullable(),
+});
+export type GetDirectlyRelatedTaskPreviewPageResponse = z.infer<typeof getDirectlyRelatedTaskPreviewPageResponseSchema>;
 
 export const conversationSessionOwnershipConflictDiagnosticForReadSchema = z.object({
 	conversationSessionIdentityKey: agentConversationSessionIdentityKeySchema,

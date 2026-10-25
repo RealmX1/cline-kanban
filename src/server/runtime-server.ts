@@ -107,15 +107,13 @@ import {
 } from "../state/workspace-state";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
+import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
 	readTaskIndexingSupportExecutorSettings,
 } from "../task-indexing-support/task-indexing-support-storage";
-import {
-	createTaskLookupConversationService,
-	TASK_LOOKUP_INSTRUCTION_VERSION,
-} from "../task-indexing-support/task-lookup-conversation-service";
+import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -948,7 +946,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				workspaceId,
 				materials,
 				settings,
-				instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
+				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 				now: Date.now(),
 				forModelRequest: true,
 			}),

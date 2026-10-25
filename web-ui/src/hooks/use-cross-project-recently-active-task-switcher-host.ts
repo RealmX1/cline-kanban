@@ -2,13 +2,14 @@ import { useMemo } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { PendingCrossProjectTaskOpen } from "@/hooks/use-cross-project-task-open-in-project";
-import type { RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
 
 /**
  * 组装跨项目「最近活跃任务」切换面板的宿主值（docs/context-cross-project-recently-active-task-switcher.md），
  * 并给出「跨项目跳转在途、要不要渲染 Focus View 过渡外壳」及外壳上显示的目标。
  */
 export function useCrossProjectRecentlyActiveTaskSwitcherHost({
+	defaultAgentId,
 	otherProjectTaskCardActionHandlers,
 	crossProjectTaskSwitcherSectionsModel,
 	projects,
@@ -17,6 +18,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	isBoardScopeAllProjectsSelected,
 	selectedCardTaskId,
 	pendingCrossProjectTaskOpen,
+	onOpenRelationsVisualizationForTask,
 	onOpenTaskInProject,
 	onOpenRelationsVisualizationForTask,
 	onOpenBacklogTaskEditorInProject,
@@ -25,6 +27,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	onUnpinCurrentProjectTaskFromTaskPinboard,
 	onEditCurrentProjectTaskPinboardPinReason,
 }: {
+	defaultAgentId?: RuntimeAgentId | null;
 	otherProjectTaskCardActionHandlers?: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["otherProjectTaskCardActionHandlers"];
 	crossProjectTaskSwitcherSectionsModel: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
 	projects: RuntimeProjectSummary[];
@@ -33,8 +36,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	isBoardScopeAllProjectsSelected: boolean;
 	selectedCardTaskId: string | null;
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
-	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
 	onOpenRelationsVisualizationForTask?: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["onOpenRelationsVisualizationForTask"];
+	onOpenTaskInProject: (workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
 	onOpenBacklogTaskEditorInProject: (workspaceId: string, taskId: string) => void;
 	onRequestCreateTaskInBoardScope: () => void;
 	onRequestPinCurrentProjectTaskToTaskPinboard: (taskId: string) => void;
@@ -47,6 +50,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 } {
 	const crossProjectRecentlyActiveTaskSwitcherHost = useMemo<CrossProjectRecentlyActiveTaskSwitcherHostContextValue>(
 		() => ({
+			defaultAgentId,
 			otherProjectTaskCardActionHandlers,
 			crossProjectTaskSwitcherSectionsModel,
 			projects,
@@ -58,6 +62,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 				: currentProjectId && selectedCardTaskId
 					? { workspaceId: currentProjectId, taskId: selectedCardTaskId }
 					: null,
+			onOpenRelationsVisualizationForTask,
 			onOpenTaskInProject,
 			onOpenRelationsVisualizationForTask,
 			onOpenBacklogTaskEditorInProject,
@@ -67,6 +72,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			onEditCurrentProjectTaskPinboardPinReason,
 		}),
 		[
+			defaultAgentId,
 			otherProjectTaskCardActionHandlers,
 			crossProjectTaskSwitcherSectionsModel,
 			currentProjectId,
@@ -74,6 +80,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			notificationLogByWorkspaceId,
 			onEditCurrentProjectTaskPinboardPinReason,
 			onOpenBacklogTaskEditorInProject,
+			onOpenRelationsVisualizationForTask,
 			onOpenTaskInProject,
 			onOpenRelationsVisualizationForTask,
 			onRequestCreateTaskInBoardScope,

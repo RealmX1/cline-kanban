@@ -60,7 +60,7 @@ function Harness({
 	return null;
 }
 beforeEach(async () => {
-	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	vi.useFakeTimers();
 	localStorage.clear();
 	sessionStorage.clear();
@@ -275,6 +275,51 @@ describe("关系编辑草稿与失败恢复", () => {
 		await act(async () => root.render(<Harness />));
 		expect(controller.ready).toBe(true);
 		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+	});
+	it("关系保存清理保留跨项目已创建卡片的项目、快照和同一世身份，重挂载可恢复", async () => {
+		const snapshot = {
+			id: "abcde",
+			title: "目标项目任务",
+			prompt: "创建内容",
+			baseRef: "main",
+			startInPlanMode: false,
+			createdAt: 41,
+			updatedAt: 41,
+		};
+		await act(async () =>
+			controller.updateDraft({
+				createdTaskId: snapshot.id,
+				createdTaskWorkspaceId: "project-b",
+				createdTaskCardSnapshot: snapshot,
+				creationPrompt: snapshot.prompt,
+				creationTitle: snapshot.title,
+				referenceRelationDrafts: [referenceDraft],
+			}),
+		);
+		await act(async () =>
+			controller.applyToTask(snapshot.id, {} as WebUiUserDecisionClientCharacteristics, "project-b"),
+		);
+		expect(controller.hasChanges).toBe(false);
+		const expectedRecovery = {
+			createdTaskId: snapshot.id,
+			createdTaskWorkspaceId: "project-b",
+			createdTaskCardSnapshot: snapshot,
+			creationPrompt: snapshot.prompt,
+			creationTitle: snapshot.title,
+			referenceRelationDrafts: [],
+			relationRevocations: [],
+		};
+		expect(controller.readLatestDraft()).toMatchObject(expectedRecovery);
+		expect(queries.persistRelationModelingEditorDraft).toHaveBeenLastCalledWith(
+			"project-a",
+			expect.any(String),
+			expect.objectContaining(expectedRecovery),
+		);
+		await act(async () => root.unmount());
+		root = createRoot(container);
+		await act(async () => root.render(<Harness />));
+		expect(controller.draft).toMatchObject(expectedRecovery);
+		expect(queries.applyReferenceRelationModelingChangesFromExplicitUserGesture).toHaveBeenCalledTimes(1);
 	});
 	it("旧保存未完成时放弃并重开，草稿读取等待删除完成且不会复活旧内容", async () => {
 		await act(async () => controller.addDraft(referenceDraft));

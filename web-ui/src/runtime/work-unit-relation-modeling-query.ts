@@ -1,3 +1,4 @@
+import { getWorkspaceFolderLabelForWorktreePath } from "@runtime-task-worktree-path";
 import type {
 	ApplyReferenceRelationModelingChangesRequest,
 	ReferenceRelationModelingEditorDraft,
@@ -56,7 +57,23 @@ export async function resolveRelationModelingCounterpart(workspaceId: string, ta
 	if (candidates.length !== 1) throw new Error("任务身份已变化，请重新搜索并选择。 ");
 	const candidate = candidates[0];
 	if (!candidate) throw new Error("未找到任务身份。 ");
-	return candidate.kanbanBoardCard;
+	return candidate.canonicalKanbanBoardCard ?? candidate.kanbanBoardCard;
+}
+
+export async function resolveTaskEditorClipboardTaskCandidates(
+	workspaceId: string,
+	reference: { taskId: string; repositoryFolder: string | null },
+) {
+	const response = await getRuntimeTrpcClient(workspaceId).workUnit.resolveKanbanBoardCardIdentityByBareTaskId.query({
+		bareTaskId: reference.taskId,
+	});
+	return response.kanbanBoardCardIdentityCandidates.filter((candidate) => {
+		if (candidate.permanentlyRemovedFromBoardAt !== null) return false;
+		if (!reference.repositoryFolder) return true;
+		return [candidate.workspaceRepositoryPath, ...(candidate.previousWorkspaceRepositoryPaths ?? [])].some(
+			(path) => path && getWorkspaceFolderLabelForWorktreePath(path) === reference.repositoryFolder,
+		);
+	});
 }
 
 export async function ensureRelationModelingCreatedTaskCardPersisted(
