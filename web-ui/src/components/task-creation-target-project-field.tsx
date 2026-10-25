@@ -4,13 +4,7 @@ import { ProjectIcon } from "@/components/project-visual-identity";
 
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
 
-/**
- * 任务编辑对话框的「目标项目」（Task Creation Target Project，见 docs/context-board-scope-all-projects-and-single-project-scope.md）字段怎么呈现。
- * 单项目与编辑任务时均显示只读归属；全项目建卡时允许选择目标。
- *   - Board Scope 建卡：可选，默认取上下文项目（焦点任务所属项目，否则当前项目）；
- *   - 编辑其他项目的卡（All projects 面板原地编辑）：只读标签，卡不能换项目。
- * 不复用顶栏项目切换器的 popover：那是导航语义，这里只是给新卡挑归属。
- */
+/** 编辑器内的项目选择只修改草稿归属，不改变背景导航；迁移在保存时执行。 */
 export type TaskCreationTargetProjectField =
 	| {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope";

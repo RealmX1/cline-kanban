@@ -15,6 +15,10 @@ import {
 // 输入面接受裸 id（Y-EVENT-12）：runtime 解析到唯一一世；候选不唯一时 fail closed，要求带 workspaceId 消歧。
 export const workUnitSelectorForRelationReadSchema = z.discriminatedUnion("workUnitSelectorKind", [
 	z.object({
+		workUnitSelectorKind: z.literal("kanban_board_card_by_qualified_reference"),
+		kanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
+	}),
+	z.object({
 		workUnitSelectorKind: z.literal("kanban_board_card_by_bare_task_id"),
 		bareTaskId: z.string().trim().min(1),
 		workspaceId: z.string().trim().min(1).optional(),
@@ -29,6 +33,8 @@ export type WorkUnitSelectorForRelationRead = z.infer<typeof workUnitSelectorFor
 
 // 一世卡片的身份投影（全局 task 身份登记簿的读侧）。永久删除的卡也在，permanentlyRemovedFromBoardAt 非空即墓碑。
 export const kanbanBoardCardIdentityResolutionCandidateSchema = z.object({
+	canonicalKanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema.optional(),
+	previousWorkspaceRepositoryPaths: z.array(z.string()).optional(),
 	kanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
 	workspaceRepositoryPath: z.string().nullable(),
 	currentTitle: z.string().nullable(),

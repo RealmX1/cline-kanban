@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
@@ -22,6 +23,7 @@ export interface TaskEditDraft {
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
+	taskConversationMode?: RuntimeTaskConversationMode;
 	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled: boolean;
 	autoReviewMode: TaskAutoReviewMode;
@@ -99,6 +101,7 @@ export function areTaskEditDraftFormValuesEqual(
 		left.prompt === right.prompt &&
 		areTaskImagesEqual(left.images, right.images) &&
 		left.startInPlanMode === right.startInPlanMode &&
+		(left.taskConversationMode ?? "operational") === (right.taskConversationMode ?? "operational") &&
 		left.taskAgentPermissionMode === right.taskAgentPermissionMode &&
 		left.autoReviewEnabled === right.autoReviewEnabled &&
 		left.autoReviewMode === right.autoReviewMode &&
@@ -144,6 +147,7 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 		draft.prompt === task.prompt.trim() &&
 		areTaskImagesEqual(draft.images, task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&
+		(draft.taskConversationMode ?? "operational") === (task.taskConversationMode ?? "operational") &&
 		draft.taskAgentPermissionMode === task.taskAgentPermissionMode &&
 		draft.autoReviewEnabled === (task.autoReviewEnabled === true) &&
 		draft.autoReviewMode === resolveTaskAutoReviewMode(task.autoReviewMode) &&

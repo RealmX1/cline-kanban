@@ -22,7 +22,10 @@ import {
 	RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger,
 	type RecordedInterWorkUnitRelationProjectionReader,
 } from "../../../src/inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
-import { assembleRecordedRelationNeighborhoodSummaryOfWorkUnit } from "../../../src/inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
+import {
+	assembleRecordedRelationNeighborhoodSummaryOfWorkUnit,
+	buildWorkUnitDisplayEntries,
+} from "../../../src/inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
 
 function card(workspaceId: string, taskId: string, incarnation = 1_000): KanbanBoardCardWorkUnitQualifiedReference {
 	return { workUnitType: "kanban_board_card", workspaceId, taskId, taskIncarnationCreatedAtEpochMs: incarnation };
@@ -1165,3 +1168,94 @@ function readerOf(state: RecordedInterWorkUnitRelationProjectionState): Recorded
 		findRetainedTaskCardFieldKeywordMatchesBySha256: async () => new Map(),
 	};
 }
+
+it("跨项目迁移后 canonical 关系节点仍展示当前位置、标题、正文和所在列", async () => {
+	const ledger = new SyntheticLedger();
+	ledger.cardCreated(PARENT);
+	ledger.cardCreated(CHILD, actedByCard(PARENT));
+	const moved = { ...CHILD, workspaceId: "ws-c" };
+	ledger.taskMutation("task_card_project_transfer_completed", CHILD, actedByCard(PARENT), {
+		targetWorkspaceId: moved.workspaceId,
+	});
+	ledger.taskMutation("task_card_field_value_changed", moved, actedByCard(PARENT), {
+		changedTaskCardFieldName: "title",
+		fieldValueAfterSha256: "migrated-card-title",
+	});
+	ledger.taskMutation("task_card_field_value_changed", moved, actedByCard(PARENT), {
+		changedTaskCardFieldName: "prompt",
+		fieldValueAfterSha256: "migrated-card-prompt",
+	});
+	ledger.taskMutation("task_card_moved_between_non_trash_board_columns", moved, actedByCard(PARENT), {
+		fromBoardColumnId: "backlog",
+		toBoardColumnId: "in_progress",
+	});
+	const fieldValues = new Map([
+		["migrated-card-title", "迁移后任务标题"],
+		["migrated-card-prompt", "迁移后任务正文\n\n第二段"],
+	]);
+	const reader: RecordedInterWorkUnitRelationProjectionReader = {
+		...readerOf(ledger.project()),
+		readRetainedTaskCardFieldValuesBySha256: async (sha256s) =>
+			new Map(
+				sha256s.flatMap((sha256) => {
+					const value = fieldValues.get(sha256);
+					return value === undefined ? [] : [[sha256, value] as const];
+				}),
+			),
+	};
+	const lookupWorkspacePath = (workspaceId: string) => `/repo/${workspaceId}`;
+	const [displayEntry] = await buildWorkUnitDisplayEntries(reader, [CHILD], lookupWorkspacePath);
+	const expectedIdentity = {
+		kanbanBoardCard: moved,
+		canonicalKanbanBoardCard: CHILD,
+		workspaceRepositoryPath: "/repo/ws-c",
+		currentTitle: "迁移后任务标题",
+		promptFirstParagraph: "迁移后任务正文",
+		lastKnownBoardColumnId: "in_progress",
+	};
+	const summary = await assembleRecordedRelationNeighborhoodSummaryOfWorkUnit(reader, PARENT, lookupWorkspacePath);
+	expect(displayEntry?.workUnit).toEqual(CHILD);
+	expect(displayEntry?.kanbanBoardCardIdentity).toMatchObject(expectedIdentity);
+	expect(
+		summary.neighborWorkUnits.find((entry) => entry.workUnitKey === displayEntry?.workUnitKey)
+			?.kanbanBoardCardIdentity,
+	).toMatchObject(expectedIdentity);
+	expect(summary.renderedNeighborhoodSummaryText).toContain('task c0001 "迁移后任务标题" [ws-c]');
+});
+
+it("跨项目与返回迁移保持关系身份，后续改字段仍接到原关系节点", () => {
+	const ledger = new SyntheticLedger();
+	ledger.cardCreated(PARENT);
+	ledger.cardCreated(CHILD, actedByCard(PARENT));
+	const initial = listRecordedInterWorkUnitRelationsTouchingWorkUnit(ledger.project(), CHILD).find(
+		(relation) => relation.relationKind === "provenance_created_by",
+	);
+	const moved = { ...CHILD, workspaceId: "ws-c" };
+	ledger.taskMutation("task_card_project_transfer_completed", CHILD, actedByCard(PARENT), {
+		targetWorkspaceId: moved.workspaceId,
+	});
+	ledger.taskMutation("task_card_field_value_changed", moved, actedByCard(PARENT), {
+		changedTaskCardFieldName: "prompt",
+		fieldValueAfterSha256: "changed-prompt",
+	});
+	let state = ledger.project();
+	const relations = listRecordedInterWorkUnitRelationsTouchingWorkUnit(state, CHILD);
+	expect(relations.find((relation) => relation.relationKind === "provenance_created_by")?.relationId).toBe(
+		initial?.relationId,
+	);
+	expect(
+		relations.find((relation) => relation.relationKind === "interaction_requirements_amended_by")
+			?.relationStatementSubjectWorkUnitRef,
+	).toEqual(CHILD);
+	expect(
+		listKanbanBoardCardIdentityProjectionsByBareTaskId(state.kanbanBoardCardIdentityProjectionState, CHILD.taskId),
+	).toHaveLength(1);
+	ledger.taskMutation("task_card_project_transfer_completed", moved, actedByCard(PARENT), {
+		targetWorkspaceId: CHILD.workspaceId,
+	});
+	state = ledger.project();
+	expect(
+		listKanbanBoardCardIdentityProjectionsByBareTaskId(state.kanbanBoardCardIdentityProjectionState, CHILD.taskId)[0]
+			?.currentWorkspaceId,
+	).toBe(CHILD.workspaceId);
+});

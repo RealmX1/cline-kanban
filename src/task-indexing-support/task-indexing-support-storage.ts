@@ -5,7 +5,7 @@ import {
 	taskIndexingSupportExecutorSettingsSchema,
 } from "../core/task-indexing-support-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
-import { getWorkspaceDirectoryPath } from "../state/workspace-state";
+import { getRuntimeHomePath, getWorkspaceDirectoryPath } from "../state/workspace-state";
 import { advanceSharedTaskIndexingSnapshot, taskIndexingTextFingerprint } from "./shared-task-indexing-context";
 
 export function taskIndexingSupportWorkspaceStoragePath(workspaceId: string, filename: string): string {
@@ -21,19 +21,26 @@ export async function readTaskIndexingSupportJsonFile(path: string): Promise<unk
 	}
 }
 export async function readTaskIndexingSupportExecutorSettings(
-	workspaceId: string,
+	workspaceId: string | null,
 ): Promise<TaskIndexingSupportExecutorSettings> {
-	const value = await readTaskIndexingSupportJsonFile(
-		taskIndexingSupportWorkspaceStoragePath(workspaceId, "executor-settings.json"),
+	const globalValue = await readTaskIndexingSupportJsonFile(
+		join(getRuntimeHomePath(), "task-analysis", "executor-settings.json"),
 	);
+	const value =
+		globalValue ??
+		(workspaceId
+			? await readTaskIndexingSupportJsonFile(
+					taskIndexingSupportWorkspaceStoragePath(workspaceId, "executor-settings.json"),
+				)
+			: null);
 	return taskIndexingSupportExecutorSettingsSchema.parse(value ?? {});
 }
 export async function saveTaskIndexingSupportExecutorSettings(
-	workspaceId: string,
+	_workspaceId: string | null,
 	settings: TaskIndexingSupportExecutorSettings,
 ) {
 	await lockedFileSystem.writeJsonFileAtomic(
-		taskIndexingSupportWorkspaceStoragePath(workspaceId, "executor-settings.json"),
+		join(getRuntimeHomePath(), "task-analysis", "executor-settings.json"),
 		taskIndexingSupportExecutorSettingsSchema.parse(settings),
 	);
 	return settings;

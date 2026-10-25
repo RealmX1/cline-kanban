@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -182,6 +182,7 @@ async function setup(
 		],
 	});
 	const manager = {
+		hasPendingProgrammaticTaskChatInputDelivery: vi.fn(() => false),
 		listSummaries: () =>
 			mainConversationSessionId === "task"
 				? [summary]
@@ -3655,4 +3656,260 @@ it("完整恢复闭环不把 Git 中损坏的 UTF-8 blob 误绑到有效安装�
 		},
 	});
 	expect(reference.gitVersion).toBeUndefined();
+});
+
+it.each(["native_fork", "restore_start"])(
+	"长期服务仍存活时 %s 区分已登记暂停与真实 unknown，并以原生事实补证",
+	async (failureStage) => {
+		const context = await setup();
+		await context.complete();
+		if (failureStage === "restore_start")
+			context.runtimeApi.startTaskSession.mockRejectedValueOnce(new Error("原生恢复响应未知"));
+		else {
+			const originalRequest = mocked.request.getMockImplementation();
+			mocked.request.mockImplementation(async (method: string, input: Record<string, unknown>) => {
+				if (method === "thread/fork") throw new Error("原生 fork 响应未知");
+				return originalRequest?.(method, input);
+			});
+		}
+		await context.service.sweepPendingCloseoutsOnce();
+		const control = join(
+			context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim(),
+			"rvf-independent-backup-route",
+		);
+		const reservations = join(control, "normal-mutations");
+		if (failureStage === "native_fork") {
+			expect(await readdir(reservations)).toEqual([]);
+			const [record] = JSON.parse(
+				await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"),
+			);
+			expect(record.status).toBe("paused");
+			expect(record.pauseReason).toContain("原生 fork 未确认");
+			expect(record.nativeForkAttemptStartedAt).toBeTypeOf("number");
+			await context.service.sweepPendingCloseoutsOnce();
+			expect(mocked.request.mock.calls.filter(([method]) => method === "thread/fork")).toHaveLength(1);
+			expect(context.runtimeApi.startTaskSession).not.toHaveBeenCalled();
+			return;
+		}
+		const [name] = await readdir(reservations);
+		if (!name) throw new Error("缺少未知操作的登记");
+		const reservationBefore = JSON.parse(await readFile(join(reservations, name), "utf8"));
+		expect(reservationBefore).toMatchObject({ pid: process.pid, outcome: "unknown" });
+		await mkdir(join(control, "active-owner"));
+		const transcriptPath = join(context.fixture.fixtureRootDirectoryPath, "unknown-operation-native-evidence.jsonl");
+		await writeFile(transcriptPath, "尚无原生静止证据\n");
+		const summary = context.manager.getSummary();
+		const expectedNativeSessionId = failureStage === "restore_start" ? "restored" : "native";
+		Object.assign(summary, {
+			runtimeSessionIncarnationId: "restored-incarnation",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: expectedNativeSessionId,
+				transcriptPath,
+				observedAt: Date.now(),
+			},
+			codexNativeSessionControlEndpoint: {
+				workspaceId: context.scope.workspaceId,
+				conversationSessionId: "task",
+				runtimeSessionIncarnationId: "restored-incarnation",
+				socketPath: "/isolated-control",
+			},
+		});
+		await updateRvfAutomaticCloseoutRecords(
+			getRvfAutomaticCloseoutStorePath(context.scope.workspaceId),
+			(records) => ({
+				records: records.map((record) => ({ ...record, restoredTranscriptPath: transcriptPath })),
+				value: undefined,
+			}),
+		);
+		let nativeIdleVerified = false;
+		mocked.request.mockImplementation(async (method: string) => {
+			if (method === "thread/loaded/list") return { data: [expectedNativeSessionId], nextCursor: null };
+			if (method === "thread/read")
+				return {
+					thread: {
+						id: expectedNativeSessionId,
+						status: { type: nativeIdleVerified ? "idle" : "active" },
+						canAcceptDirectInput: nativeIdleVerified,
+					},
+				};
+			return {
+				data: [{ id: "implementation", status: nativeIdleVerified ? "completed" : "inProgress", items: [] }],
+				nextCursor: null,
+			};
+		});
+		await context.service.sweepPendingCloseoutsOnce();
+		expect(await readdir(reservations)).toContain(name);
+		const requestsAfterUnproven = mocked.request.mock.calls.length;
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(mocked.request.mock.calls).toHaveLength(requestsAfterUnproven);
+		nativeIdleVerified = true;
+		await writeFile(transcriptPath, "原生回合已完成，控制面可直接接受输入\n");
+		await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+		expect(await readdir(reservations)).not.toContain(name);
+		const reconciledBytes = await readFile(join(control, "reconciled-normal-mutations", name));
+		const reconciled = JSON.parse(reconciledBytes.toString("utf8"));
+		if (process.env.KANBAN_EMIT_ISOLATED_NORMAL_CLOSEOUT_RESERVATION_FOR_INTEROPERABILITY === "1")
+			process.stdout.write(`隔离 Node reservation 原始字节（base64）：${reconciledBytes.toString("base64")}\n`);
+		expect(reconciled).toMatchObject({
+			outcome: "unknown",
+			operation_state: "settled",
+			native_outcome_evidence: {
+				schema: "kanban-normal-closeout-quiescence/v1",
+				native_control_verified_idle: true,
+				queued_delivery_absent: true,
+				terminal_delivery_pending: false,
+			},
+		});
+		expect(context.runtimeApi.startTaskSession).toHaveBeenCalledTimes(failureStage === "restore_start" ? 1 : 0);
+		expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage).not.toHaveBeenCalled();
+	},
+);
+
+it.each(["confirmed", "failed"])("实际投递 reservation 跨过临写预检，收到 %s 终态后才结算", async (outcome) => {
+	const context = await setup();
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	const [record] = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+	const input = {
+		taskId: record.conversationSessionId,
+		source: "rvf_automatic_closeout",
+		idempotencyKey: record.promptDeliveryIdempotencyKey,
+	};
+	const control = join(
+		context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim(),
+		"rvf-independent-backup-route",
+	);
+	const directory = join(control, "normal-mutations");
+	await context.service.validateCloseoutPromptDelivery(context.scope, input, "before_first_transport_write");
+	const [name] = await readdir(directory);
+	expect(name).toBeDefined();
+	if (outcome === "failed") {
+		await mkdir(join(control, "active-owner"));
+		await expect(
+			context.service.validateCloseoutPromptDelivery(context.scope, input, "after_transport_write"),
+		).rejects.toThrow("备用路线");
+		await context.service.settleCloseoutPromptTerminalDelivery(context.scope, input, false);
+		const value = JSON.parse(await readFile(join(directory, name as string), "utf8"));
+		expect(value).toMatchObject({
+			operation_kind: "terminal_delivery",
+			operation_state: "settled",
+			outcome: "unknown",
+		});
+	} else {
+		await context.service.settleCloseoutPromptTerminalDelivery(context.scope, input, true);
+		expect(await readdir(directory)).toEqual([]);
+	}
+});
+
+it("首次实际写入前已接管时拒绝且不遗留没有开始的终端 reservation", async () => {
+	const context = await setup();
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	const [record] = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+	const control = join(
+		context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim(),
+		"rvf-independent-backup-route",
+	);
+	await mkdir(join(control, "active-owner"));
+	await expect(
+		context.service.validateCloseoutPromptDelivery(
+			context.scope,
+			{
+				taskId: record.conversationSessionId,
+				source: "rvf_automatic_closeout",
+				idempotencyKey: record.promptDeliveryIdempotencyKey,
+			},
+			"before_first_transport_write",
+		),
+	).rejects.toThrow("备用路线");
+	expect(await readdir(join(control, "normal-mutations"))).toEqual([]);
+});
+
+it.each(["active", "consumed"])("排队后的实际临写出口在备用 %s 状态拒绝旧收尾投递", async (kind) => {
+	const context = await setup();
+	await context.complete();
+	await context.service.sweepPendingCloseoutsOnce();
+	const [record] = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+	expect(record.waitingReasonCode).toBe("closeout_delivery_confirmation_pending");
+	const control = join(
+		context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim(),
+		"rvf-independent-backup-route",
+	);
+	if (kind === "active") await mkdir(join(control, "active-owner"), { recursive: true });
+	else {
+		await mkdir(join(control, "consumed-original-runs"), { recursive: true });
+		await writeFile(join(control, "consumed-original-runs", `${computeRvfTextSha256(context.run)}.json`), "消费事实");
+	}
+	await expect(
+		context.service.validateCloseoutPromptDelivery(context.scope, {
+			taskId: record.conversationSessionId,
+			source: "rvf_automatic_closeout",
+			idempotencyKey: record.promptDeliveryIdempotencyKey,
+		}),
+	).rejects.toThrow("备用路线");
+});
+
+it.each(["active", "consumed"])("备用 %s 状态仍记录接管前的真实原生接受且保留失败历史", async (kind) => {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	const ledgerBefore = await readFile(context.ledgerPath);
+	const transcriptBefore = await readFile(context.transcriptPath);
+	const control = join(
+		context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim(),
+		"rvf-independent-backup-route",
+	);
+	if (kind === "active") await mkdir(join(control, "active-owner"), { recursive: true });
+	else {
+		await mkdir(join(control, "consumed-original-runs"), { recursive: true });
+		await writeFile(join(control, "consumed-original-runs", `${computeRvfTextSha256(context.run)}.json`), "消费事实");
+	}
+	const beforeEnqueues = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+	const beforeStarts = context.runtimeApi.startTaskSession.mock.calls.length;
+	await context.service.sweepPendingCloseoutsOnce();
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	const [record] = JSON.parse(await readFile(getRvfAutomaticCloseoutStorePath(context.scope.workspaceId), "utf8"));
+	expect(record.lateNativePromptAcceptanceRecoveryReceipt).toMatchObject({
+		previousPauseReason: "收尾投递失败：submit_confirmation_budget_exhausted",
+		originalDeliveryFailure: { status: "delivery_failed", failureReason: "submit_confirmation_budget_exhausted" },
+		nativeUserMessageId: "closeout-native-user-message",
+	});
+	expect(await readFile(context.ledgerPath)).toEqual(ledgerBefore);
+	expect(await readFile(context.transcriptPath)).toEqual(transcriptBefore);
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls).toHaveLength(beforeEnqueues);
+	expect(context.runtimeApi.startTaskSession.mock.calls).toHaveLength(beforeStarts);
+	expect(record.landExecutionResult).toBeUndefined();
+	expect(record.baseBranchSyncExecutionResult).toBeUndefined();
+	expect(record.independentBackupRouteSuppressionObservation).toBeDefined();
+});
+
+it.each(["active", "consumed"])("完整恢复闭环在备用 %s 状态不恢复或重派原 run", async (kind) => {
+	const context = await setupLateNativeCloseoutPromptAcceptance();
+	await context.writeNativeEvidence({ includeMessage: false });
+	const originalTurn = context.activeTurns[1];
+	if (!originalTurn) throw new Error("缺少隔离原回合");
+	originalTurn.items = [];
+	const gitDirectory = context.repo.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+	const control = join(gitDirectory, "rvf-independent-backup-route");
+	if (kind === "active") await mkdir(join(control, "active-owner"), { recursive: true });
+	else {
+		const consumed = join(control, "consumed-original-runs");
+		await mkdir(consumed, { recursive: true });
+		await writeFile(join(consumed, `${computeRvfTextSha256(context.run)}.json`), "合成备用完成事实");
+	}
+	const store = getRvfAutomaticCloseoutStorePath(context.scope.workspaceId);
+	const [beforeRecord] = JSON.parse(await readFile(store, "utf8"));
+	const beforeEnqueues = context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls.length;
+	await context.service.sweepPendingCloseoutsOnce();
+	await createRvfAutomaticCloseoutRuntimeService(context.dependencies).sweepPendingCloseoutsOnce();
+	const [record] = JSON.parse(await readFile(store, "utf8"));
+	expect(context.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mock.calls).toHaveLength(beforeEnqueues);
+	expect(record.status).toBe(beforeRecord.status);
+	expect(record.pauseReason).toBe(beforeRecord.pauseReason);
+	expect(record.promptDeliveryAttempts).toEqual(beforeRecord.promptDeliveryAttempts);
+	expect(record.landExecutionResult).toEqual(beforeRecord.landExecutionResult);
+	expect(record.baseBranchSyncExecutionResult).toEqual(beforeRecord.baseBranchSyncExecutionResult);
+	expect(record.independentBackupRouteSuppressionObservation).toMatchObject({
+		originalRunDirectory: context.run,
+		reason: kind === "active" ? "active_backup_route_ownership" : "original_run_consumed_by_backup_route",
+	});
 });

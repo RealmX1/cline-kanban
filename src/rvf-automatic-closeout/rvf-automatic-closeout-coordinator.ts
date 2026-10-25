@@ -4,6 +4,11 @@ import type {
 	RvfAutomaticCloseoutWaitingReasonCode,
 } from "../core/rvf-automatic-closeout-contract";
 import {
+	normalRvfCloseoutReconciliationContext,
+	recordIndependentBackupRouteSuppressionObservation,
+	withNormalRvfCloseoutMutation,
+} from "./independent-backup-route-ownership";
+import {
 	RvfAutomaticCloseoutRecordOperationClaimLostError,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
@@ -173,10 +178,23 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					deps.storePath,
 					record.receipt.decision_token,
 					(assertOwned) =>
-						processRecord(
-							record.receipt.decision_token,
-							record.activeCoordinatorOperationClaimId ?? null,
-							assertOwned,
+						withNormalRvfCloseoutMutation(
+							record.receipt.worktree,
+							record.runDirectory,
+							() =>
+								processRecord(
+									record.receipt.decision_token,
+									record.activeCoordinatorOperationClaimId ?? null,
+									assertOwned,
+								),
+							(reason, controlDirectory) =>
+								recordIndependentBackupRouteSuppressionObservation(
+									deps.storePath,
+									record,
+									reason,
+									controlDirectory,
+								),
+							normalRvfCloseoutReconciliationContext(deps.storePath, record),
 						),
 				);
 			} catch (error) {

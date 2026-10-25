@@ -352,6 +352,8 @@ describe("任务可视化运行时服务", () => {
 			expect(html).toContain(prepared.contentLoadConfirmationId);
 			expect(html).toContain(prepared.artifact.revisionId);
 			expect(html).toContain('window.addEventListener("load"');
+			expect(html).toContain("kanban_visualization_request_collapse_foreground_view");
+			expect(html).toContain('event.key==="Escape"&&!event.defaultPrevented');
 			vi.spyOn(runtimeService.store, "readRevisionFile").mockRejectedValueOnce(new Error("模拟读取失败"));
 			const failure = await fetch(contentUrl);
 			expect(failure.status).toBe(404);
