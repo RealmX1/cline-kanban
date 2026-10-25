@@ -31,10 +31,14 @@ export async function assembleDirectlyRelatedTaskPreviewPage(
 ): Promise<GetDirectlyRelatedTaskPreviewPageResponse> {
 	const state = reader.projectionState;
 	const identities = state.kanbanBoardCardIdentityProjectionState;
-	const subjectKey = buildInterWorkUnitRelationWorkUnitKey(input.task);
-	if (!identities.projectionsByKanbanBoardCardWorkUnitKey.has(subjectKey)) {
+	const subjectIdentity = identities.projectionsByKanbanBoardCardWorkUnitKey.get(
+		buildInterWorkUnitRelationWorkUnitKey(input.task),
+	);
+	if (!subjectIdentity) {
 		throw new TRPCError({ code: "NOT_FOUND", message: "账本尚未记录这张任务卡的身份，暂时无法查询关联。" });
 	}
+	// 迁移只改变卡片当前位置，关系邻接始终属于最初登记的不可变身份。
+	const subjectKey = buildInterWorkUnitRelationWorkUnitKey(subjectIdentity.kanbanBoardCard);
 	const neighbors = new Map<
 		string,
 		{ task: KanbanBoardCardWorkUnitQualifiedReference; relations: DirectlyRelatedTaskRelationSummary[] }
@@ -120,6 +124,7 @@ export async function assembleDirectlyRelatedTaskPreviewPage(
 				entries.map((entry) => [
 					entry.key,
 					entry.relations.slice().sort((left, right) => left.relationId.localeCompare(right.relationId, "en")),
+					entry.identity?.currentWorkspaceId ?? entry.task.workspaceId,
 					entry.identity?.currentFieldValueSha256ByFieldName.title,
 					entry.identity?.lastKnownBoardColumnId,
 					entry.identity?.permanentlyRemovedFromBoardAt,
@@ -160,12 +165,13 @@ export async function assembleDirectlyRelatedTaskPreviewPage(
 		entries: page.map((entry) => {
 			const titleHash = entry.identity?.currentFieldValueSha256ByFieldName.title;
 			const title = titleHash ? titleValues.get(titleHash) : null;
+			const task = { ...entry.task, workspaceId: entry.identity?.currentWorkspaceId ?? entry.task.workspaceId };
 			return {
-				task: entry.task,
+				task,
 				title: typeof title === "string" ? title : null,
 				workspaceRepositoryPath:
-					getWorkspacePathById(entry.task.workspaceId) ??
-					identities.workspaceRepositoryPathByWorkspaceIdObservedAtBaseline.get(entry.task.workspaceId) ??
+					getWorkspacePathById(task.workspaceId) ??
+					identities.workspaceRepositoryPathByWorkspaceIdObservedAtBaseline.get(task.workspaceId) ??
 					null,
 				lastKnownBoardColumnId: entry.identity?.lastKnownBoardColumnId ?? null,
 				permanentlyRemovedFromBoardAt: entry.identity?.permanentlyRemovedFromBoardAt ?? null,

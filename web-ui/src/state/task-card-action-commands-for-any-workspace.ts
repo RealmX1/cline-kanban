@@ -80,7 +80,6 @@ function expectedBoardEffectsForSingleTaskCard(
 // 合并在服务端 board 锁内对最新卡片进行，所以「只改标题」不会抹掉别人刚改的 prompt。
 // overlay 的乐观值由调用方给的 board 变换算出（与改动前浏览器 setBoard 用的是同一个纯函数）。
 export async function updateTaskCardFieldValuesThroughRuntime(input: {
-	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	workspaceId: string;
 	taskId: string;
 	expectedTaskIncarnationCreatedAtEpochMs?: number;

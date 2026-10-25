@@ -23,6 +23,7 @@ import {
 	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled,
 	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
 } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
+import { fetchRuntimeConfig } from "@/runtime/runtime-config-query";
 import {
 	transferNeverStartedBacklogTaskToProjectInWorkspace,
 	updateTaskCardFieldValuesInWorkspace,
@@ -297,6 +298,7 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 export interface UseTaskEditorResult {
 	isInlineTaskCreateOpen: boolean;
 	taskEditorSessionWorkspaceId: string | null;
+	taskEditorDefaultAgentId: RuntimeAgentId | null;
 	newTaskName: string;
 	setNewTaskName: Dispatch<SetStateAction<string>>;
 	newTaskPrompt: string;
@@ -419,6 +421,24 @@ export function useTaskEditor({
 	const [isInlineTaskCreateOpen, setIsInlineTaskCreateOpen] = useState(false);
 	const [taskEditorSessionWorkspaceId, setTaskEditorSessionWorkspaceId] = useState<string | null>(null);
 	const taskEditorSessionIdentityRef = useRef(Symbol("task-editor-session"));
+	const [taskEditorDefaultAgentIdAtSessionOpen, setTaskEditorDefaultAgentIdAtSessionOpen] = useState(selectedAgentId);
+	const captureTaskEditorSessionDefaultAgentId = useCallback(
+		(workspaceId: string | null) => {
+			const sessionIdentity = taskEditorSessionIdentityRef.current;
+			setTaskEditorDefaultAgentIdAtSessionOpen(selectedAgentId);
+			if (!workspaceId || workspaceId === currentProjectId) return;
+			void fetchRuntimeConfig(workspaceId).then(
+				(config) => {
+					if (taskEditorSessionIdentityRef.current === sessionIdentity)
+						setTaskEditorDefaultAgentIdAtSessionOpen(config.selectedAgentId);
+				},
+				() => {
+					// 来源配置暂不可读时保留打开时已显示的默认，不改取后来的背景默认。
+				},
+			);
+		},
+		[currentProjectId, selectedAgentId],
+	);
 	const [newTaskName, setNewTaskName] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
@@ -466,6 +486,10 @@ export function useTaskEditor({
 	const [editTaskAgentSessionInitialization, setEditTaskAgentSessionInitialization] = useState<
 		RuntimeTaskAgentSessionInitialization | undefined
 	>(undefined);
+
+	const taskEditorDefaultAgentId =
+		isInlineTaskCreateOpen || editingTaskId ? taskEditorDefaultAgentIdAtSessionOpen : selectedAgentId;
+	const taskCreationDefaultAgentId = isInlineTaskCreateOpen ? taskEditorDefaultAgentIdAtSessionOpen : selectedAgentId;
 
 	const resolvedDefaultCreateTaskBranchRef = defaultCreateTaskBranchRef;
 
@@ -556,7 +580,7 @@ export function useTaskEditor({
 		) => {
 			setNewTaskTerminalAgentModelOverrideSettings((currentSettings) => {
 				const resolvedSettings = typeof nextSettings === "function" ? nextSettings(currentSettings) : nextSettings;
-				const effectiveAgentId = resolvedSettings?.agentId ?? newTaskAgentId ?? selectedAgentId;
+				const effectiveAgentId = resolvedSettings?.agentId ?? newTaskAgentId ?? taskCreationDefaultAgentId;
 				if (
 					options?.rememberSelectionForFutureCreateTasks !== false &&
 					isTerminalAgentModelSelectionAgentId(effectiveAgentId)
@@ -570,7 +594,7 @@ export function useTaskEditor({
 				return resolvedSettings;
 			});
 		},
-		[taskCreationTargetWorkspaceId, newTaskAgentId, selectedAgentId],
+		[taskCreationTargetWorkspaceId, newTaskAgentId, taskCreationDefaultAgentId],
 	);
 
 	const { gitRepositoryInfoOfOtherProject: gitRepositoryInfoOfTaskCreationTargetOtherProject } =
@@ -643,7 +667,7 @@ export function useTaskEditor({
 			restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef.current = false;
 			return;
 		}
-		const effectiveAgentId = newTaskAgentId ?? selectedAgentId;
+		const effectiveAgentId = newTaskAgentId ?? taskCreationDefaultAgentId;
 		const nextSettings = resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(
 			taskCreationTargetWorkspaceId,
 			effectiveAgentId,
@@ -651,7 +675,7 @@ export function useTaskEditor({
 		setNewTaskTerminalAgentModelOverrideSettings((currentSettings) =>
 			isSameTerminalAgentModelOverrideSettings(currentSettings, nextSettings) ? currentSettings : nextSettings,
 		);
-	}, [isInlineTaskCreateOpen, taskCreationTargetWorkspaceId, newTaskAgentId, selectedAgentId]);
+	}, [isInlineTaskCreateOpen, taskCreationTargetWorkspaceId, newTaskAgentId, taskCreationDefaultAgentId]);
 
 	useEffect(() => {
 		if (!isNewTaskStartInPlanModeDisabled || !newTaskStartInPlanMode) {
@@ -856,6 +880,7 @@ export function useTaskEditor({
 				kind: "create";
 				workspaceId: string | null;
 				sessionWorkspaceId: string | null;
+				defaultAgentId: RuntimeAgentId | null;
 				formValues: TaskEditDraftFormValues;
 		  }
 		| null
@@ -868,6 +893,7 @@ export function useTaskEditor({
 					kind: "create",
 					workspaceId: taskCreationTargetWorkspaceId,
 					sessionWorkspaceId: taskEditorSessionWorkspaceId,
+					defaultAgentId: taskEditorDefaultAgentIdAtSessionOpen,
 					formValues: {
 						taskTitleOverride: newTaskName,
 						prompt: newTaskPrompt,
@@ -906,6 +932,7 @@ export function useTaskEditor({
 			isInlineTaskCreateOpen,
 			taskCreationTargetWorkspaceId,
 			taskEditorSessionWorkspaceId,
+			taskEditorDefaultAgentIdAtSessionOpen,
 			newTaskName,
 			newTaskPrompt,
 			newTaskImages,
@@ -933,6 +960,7 @@ export function useTaskEditor({
 			ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(currentProjectId);
 		}
 		taskEditorSessionIdentityRef.current = Symbol("create-task-editor-session");
+		captureTaskEditorSessionDefaultAgentId(currentProjectId);
 		preservedTaskEditorSubmissionRef.current = null;
 		setTaskEditorSessionWorkspaceId(currentProjectId);
 		setEditingTaskId(null);
@@ -955,6 +983,7 @@ export function useTaskEditor({
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(currentProjectId);
 		setIsInlineTaskCreateOpen(true);
 	}, [
+		captureTaskEditorSessionDefaultAgentId,
 		suspendCurrentTaskEditDraft,
 		newTaskPrompt,
 		newTaskImages.length,
@@ -990,9 +1019,15 @@ export function useTaskEditor({
 			}
 			handleOpenCreateTask();
 			setTaskEditorSessionWorkspaceId(defaultTargetWorkspaceId);
+			captureTaskEditorSessionDefaultAgentId(defaultTargetWorkspaceId);
 			pinTaskCreationTargetProject(defaultTargetWorkspaceId);
 		},
-		[handleOpenCreateTask, isNewTaskStartInPlanModeDefaultLoaded, pinTaskCreationTargetProject],
+		[
+			captureTaskEditorSessionDefaultAgentId,
+			handleOpenCreateTask,
+			isNewTaskStartInPlanModeDefaultLoaded,
+			pinTaskCreationTargetProject,
+		],
 	);
 
 	const handleCancelCreateTask = useCallback(() => {
@@ -1118,6 +1153,7 @@ export function useTaskEditor({
 	const openEditTaskFormForTaskCardInWorkspace = useCallback(
 		(workspaceId: string | null, task: BoardCard) => {
 			taskEditorSessionIdentityRef.current = Symbol("edit-task-editor-session");
+			captureTaskEditorSessionDefaultAgentId(workspaceId);
 			preservedTaskEditorSubmissionRef.current = null;
 			setTaskEditorSessionWorkspaceId(workspaceId);
 			setSelectedEditTaskTargetWorkspaceId(workspaceId);
@@ -1139,7 +1175,7 @@ export function useTaskEditor({
 			setEditTaskFormSeededFromSavedDraftAt(savedDraft?.savedAt ?? null);
 			applyEditTaskFormValuesFromTask(task, savedDraft);
 		},
-		[applyEditTaskFormValuesFromTask],
+		[applyEditTaskFormValuesFromTask, captureTaskEditorSessionDefaultAgentId],
 	);
 
 	const handleOpenEditTask = useCallback(
@@ -1368,7 +1404,6 @@ export function useTaskEditor({
 					workspaceId,
 					expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 					taskId: savedTaskId,
-					expectedTaskIncarnationCreatedAtEpochMs: taskCardTheFormWasSeededFrom?.createdAt,
 					taskCardFieldValuePatch,
 					...(isEditedTaskCardInOtherProject
 						? {}
@@ -1606,7 +1641,7 @@ export function useTaskEditor({
 						autoReviewMode: newTaskAutoReviewMode,
 						images: newTaskImages,
 						agentId: newTaskAgentId,
-						workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 						ompAgentSessionTransportForNewTasks,
 						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
@@ -1651,7 +1686,7 @@ export function useTaskEditor({
 			newTaskWorktreeMode,
 			ompAgentSessionTransportForNewTasks,
 			onTaskCardsCreatedInOtherProject,
-			selectedAgentId,
+			taskCreationDefaultAgentId,
 		],
 	);
 
@@ -1709,7 +1744,7 @@ export function useTaskEditor({
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(workspaceId, selectedAgentId),
+				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(workspaceId, taskCreationDefaultAgentId),
 			);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -1724,13 +1759,13 @@ export function useTaskEditor({
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			newTaskWorktreeMode,
-			selectedAgentId,
+			taskCreationDefaultAgentId,
 		],
 	);
 
 	const handleCreateTask = useCallback(
 		(options?: TaskEditorSubmitOptions): string | null => {
-			if (!isNewTaskStartInPlanModeDefaultLoaded) {
+			if (!isNewTaskStartInPlanModeDefaultLoaded && !isInlineTaskCreateOpen) {
 				return null;
 			}
 			const explicitTargetOtherWorkspaceId = options?.targetWorkspaceIdOverride
@@ -1773,7 +1808,7 @@ export function useTaskEditor({
 					);
 				}
 				trackTaskCreated({
-					selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
+					selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? taskCreationDefaultAgentId),
 					start_in_plan_mode: newTaskStartInPlanMode,
 					...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 					prompt_character_count: prompt.length,
@@ -1804,7 +1839,7 @@ export function useTaskEditor({
 					agentId: newTaskAgentId,
 					// 用户没在建卡对话框里挑 agent 时 newTaskAgentId 是空的，这张卡会跑工作区默认 agent。
 					// 会话通道要不要固化看的正是「实际会跑哪个 agent」，所以工作区默认也得一起下沉到域层。
-					workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+					workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 					ompAgentSessionTransportForNewTasks,
 					clineSettings: newTaskClineSettings,
 					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
@@ -1834,7 +1869,7 @@ export function useTaskEditor({
 			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			trackTaskCreated({
-				selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
+				selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? taskCreationDefaultAgentId),
 				start_in_plan_mode: newTaskStartInPlanMode,
 				...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 				prompt_character_count: prompt.length,
@@ -1858,7 +1893,7 @@ export function useTaskEditor({
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
+				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, taskCreationDefaultAgentId),
 			);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -1876,6 +1911,7 @@ export function useTaskEditor({
 			taskCreationTargetOtherProjectWorkspaceId,
 			board,
 			isNewTaskStartInPlanModeDefaultLoaded,
+			isInlineTaskCreateOpen,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
@@ -1896,7 +1932,7 @@ export function useTaskEditor({
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
-			selectedAgentId,
+			taskCreationDefaultAgentId,
 			currentProjectId,
 			setBoard,
 			setNewTaskAgentId,
@@ -1906,7 +1942,7 @@ export function useTaskEditor({
 
 	const handleCreateTasks = useCallback(
 		(prompts: string[], options?: TaskEditorSubmitOptions): string[] => {
-			if (!isNewTaskStartInPlanModeDefaultLoaded) {
+			if (!isNewTaskStartInPlanModeDefaultLoaded && !isInlineTaskCreateOpen) {
 				return [];
 			}
 			const validPrompts = prompts.map((p) => p.trim()).filter(Boolean);
@@ -1932,7 +1968,7 @@ export function useTaskEditor({
 				}
 				for (const prompt of validPrompts) {
 					trackTaskCreated({
-						selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
+						selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? taskCreationDefaultAgentId),
 						start_in_plan_mode: newTaskStartInPlanMode,
 						...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 						prompt_character_count: prompt.length,
@@ -1972,7 +2008,7 @@ export function useTaskEditor({
 						images: newTaskImages,
 						agentId: newTaskAgentId,
 						// 同 handleCreateTask：agentId 留空的卡片跑的是工作区默认 agent，固化判据要看它。
-						workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 						ompAgentSessionTransportForNewTasks,
 						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
@@ -2005,7 +2041,7 @@ export function useTaskEditor({
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			for (const prompt of validPrompts) {
 				trackTaskCreated({
-					selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
+					selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? taskCreationDefaultAgentId),
 					start_in_plan_mode: newTaskStartInPlanMode,
 					...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 					prompt_character_count: prompt.length,
@@ -2029,7 +2065,7 @@ export function useTaskEditor({
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
+				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, taskCreationDefaultAgentId),
 			);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -2045,6 +2081,7 @@ export function useTaskEditor({
 			taskCreationTargetOtherProjectWorkspaceId,
 			board,
 			isNewTaskStartInPlanModeDefaultLoaded,
+			isInlineTaskCreateOpen,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
@@ -2061,7 +2098,7 @@ export function useTaskEditor({
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
-			selectedAgentId,
+			taskCreationDefaultAgentId,
 			currentProjectId,
 			setBoard,
 			setNewTaskAgentId,
@@ -2166,6 +2203,7 @@ export function useTaskEditor({
 		setEditingTaskId(null);
 		setEditingTaskCardInOtherProject(null);
 		setTaskEditorSessionWorkspaceId(seed.sessionWorkspaceId);
+		setTaskEditorDefaultAgentIdAtSessionOpen(seed.defaultAgentId);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(seed.workspaceId);
 		const values = seed.formValues;
 		setNewTaskName(values.taskTitleOverride ?? "");
@@ -2203,6 +2241,7 @@ export function useTaskEditor({
 		handleResumeSuspendedTaskEditor,
 		isInlineTaskCreateOpen,
 		taskEditorSessionWorkspaceId,
+		taskEditorDefaultAgentId,
 		newTaskName,
 		setNewTaskName,
 		newTaskPrompt,

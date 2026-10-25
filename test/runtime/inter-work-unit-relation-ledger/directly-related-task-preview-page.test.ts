@@ -108,12 +108,86 @@ function createPreviewHarness() {
 		);
 	};
 	addTask(subject);
-	const read = (cursor?: string) =>
-		assembleDirectlyRelatedTaskPreviewPage(reader, { task: subject, cursor }, () => "/repo");
-	return { subject, reader, addTask, addRecorded, addAsserted, read };
+	const moveTask = (reference: KanbanBoardCardWorkUnitQualifiedReference, workspaceId: string) => {
+		const identities = projectionState.kanbanBoardCardIdentityProjectionState;
+		const identity = identities.projectionsByKanbanBoardCardWorkUnitKey.get(
+			buildInterWorkUnitRelationWorkUnitKey(reference),
+		);
+		if (!identity) throw new Error("迁移 fixture 缺少任务身份");
+		identity.currentWorkspaceId = workspaceId;
+		identity.workspaceIdsUsedByCard = [
+			...new Set([...(identity.workspaceIdsUsedByCard ?? []), reference.workspaceId, workspaceId]),
+		];
+		const currentReference = { ...reference, workspaceId };
+		identities.projectionsByKanbanBoardCardWorkUnitKey.set(
+			buildInterWorkUnitRelationWorkUnitKey(currentReference),
+			identity,
+		);
+		return currentReference;
+	};
+	const read = (cursor?: string, subjectTask = subject) =>
+		assembleDirectlyRelatedTaskPreviewPage(
+			reader,
+			{ task: subjectTask, cursor },
+			(workspaceId) => `/repo/${workspaceId}`,
+		);
+	return { subject, reader, addTask, addRecorded, addAsserted, moveTask, read };
 }
 
 describe("直接关联任务的轻量分页预览", () => {
+	it("从迁移目标查询时仍读取原身份的记录型与声明型邻接", async () => {
+		const h = createPreviewHarness();
+		const neighbor = task("neighbor");
+		h.addTask(neighbor);
+		h.addRecorded("recorded", neighbor);
+		h.addAsserted("asserted", neighbor);
+		const migratedSubject = h.moveTask(h.subject, "project-b");
+		const page = await h.read(undefined, migratedSubject);
+		expect(page.subjectTask).toEqual(migratedSubject);
+		expect(page.totalTaskCount).toBe(1);
+		expect(page.entries[0]?.relations).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ relationId: "recorded", directionFromPreviewSubject: "outgoing" }),
+				expect.objectContaining({ relationId: "asserted", directionFromPreviewSubject: "symmetric" }),
+			]),
+		);
+	});
+
+	it("迁移邻居的预览和导航返回当前位置，同时保留唯一身份与全部关系", async () => {
+		const h = createPreviewHarness();
+		const neighbor = task("neighbor");
+		h.addTask(neighbor);
+		h.addRecorded("recorded", neighbor);
+		h.addAsserted("asserted", neighbor);
+		const migratedNeighbor = h.moveTask(neighbor, "project-b");
+		const page = await h.read();
+		expect(page.totalTaskCount).toBe(1);
+		expect(page.entries[0]).toMatchObject({
+			task: migratedNeighbor,
+			workspaceRepositoryPath: "/repo/project-b",
+			title: "标题 neighbor",
+			lastKnownBoardColumnId: "review",
+			identityKnownToLedger: true,
+		});
+		expect(page.entries[0]?.relations).toHaveLength(2);
+	});
+
+	it("邻居只改变物理项目也使旧分页失效，避免继续返回旧导航位置", async () => {
+		const h = createPreviewHarness();
+		for (let index = 0; index < 21; index++) {
+			const neighbor = task(`neighbor-${index}`);
+			h.addTask(neighbor);
+			h.addRecorded(`relation-${index}`, neighbor);
+		}
+		const first = await h.read();
+		expect(first.nextCursor).not.toBeNull();
+		h.moveTask(task("neighbor-20"), "project-b");
+		await expect(h.read(first.nextCursor ?? undefined)).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: "RELATED_TASK_PREVIEW_PAGE_EXPIRED",
+		});
+	});
+
 	it("合并记录和有效声明，完整身份去重，独立会话不混入任务列表", async () => {
 		const h = createPreviewHarness();
 		const first = task("same"),

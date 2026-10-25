@@ -1811,7 +1811,6 @@ export const runtimeTaskCardFieldUpdateSchema = z.discriminatedUnion("taskCardFi
 export type RuntimeTaskCardFieldUpdate = z.infer<typeof runtimeTaskCardFieldUpdateSchema>;
 
 export const runtimeTaskCardActionUpdateFieldValuesRequestSchema = z.object({
-	expectedTaskIncarnationCreatedAtEpochMs: z.number().optional(),
 	taskId: z.string().min(1),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	taskCardFieldUpdate: runtimeTaskCardFieldUpdateSchema,

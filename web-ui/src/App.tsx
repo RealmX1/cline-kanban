@@ -162,7 +162,6 @@ export default function App(): ReactElement {
 		taskId: string;
 		expectedTaskIncarnationCreatedAtEpochMs?: number;
 	} | null>(null);
-	const taskEditorResetRef = useRef<() => void>(() => {});
 	// useWorkspacePersistence 在本组件更下方才调用；切项目入口经这个 ref 先把旧项目防抖中的整板保存立刻发出。
 	const flushPendingWorkspaceStatePersistImmediatelyRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
@@ -172,7 +171,6 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 		setPendingEditedTaskCardAgentSessionStart(null);
-		taskEditorResetRef.current();
 	}, []);
 	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
 	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
@@ -682,6 +680,7 @@ export default function App(): ReactElement {
 	const {
 		isInlineTaskCreateOpen,
 		taskEditorSessionWorkspaceId,
+		taskEditorDefaultAgentId,
 		newTaskName,
 		setNewTaskName,
 		newTaskPrompt,
@@ -795,9 +794,6 @@ export default function App(): ReactElement {
 		openTaskInOtherProjectAfterStart: handleOpenTaskInProject,
 	});
 
-	useEffect(() => {
-		taskEditorResetRef.current = resetTaskEditorState;
-	}, [resetTaskEditorState]);
 	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
 		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
 	useEffect(() => {
@@ -811,17 +807,7 @@ export default function App(): ReactElement {
 		resetWorkspaceSyncState();
 	}, [isProjectSwitching, resetWorkspaceSyncState]);
 
-	// Board Scope 的建卡框钉住了目标项目，与「当前项目」无关：在 All projects 面板里点别的项目的任务会切当前项目，
-	// 那不该清掉正在填的建卡框。用 ref 读，免得建卡框开合本身触发下面两处重置。
-	const isBoardScopeTaskCreateDialogOpenRef = useRef(false);
-	isBoardScopeTaskCreateDialogOpenRef.current = isBoardScopeAllProjectsSelected && isInlineTaskCreateOpen;
-
-	useEffect(() => {
-		if (!isProjectSwitching || isBoardScopeTaskCreateDialogOpenRef.current) {
-			return;
-		}
-		resetTaskEditorState();
-	}, [isProjectSwitching, resetTaskEditorState]);
+	// 活跃编辑会话已经固定来源与卡片快照；背景导航只切换看板，不关闭或重铺编辑器。
 
 	// Board Scope 建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：默认目标取上下文项目——
 	// 跨项目打开在途时是目标项目，否则是当前项目（Focus View 的焦点任务总在当前项目里）。
@@ -1041,25 +1027,23 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 		setSelectedTaskId(null);
-		resetTaskEditorState();
+		if (taskEditorSessionWorkspaceId === currentProjectId) resetTaskEditorState();
 		resetTerminalPanelsState();
-	}, [isCurrentProjectRuntimeUnavailable, resetTaskEditorState, resetTerminalPanelsState, setSelectedTaskId]);
+	}, [
+		currentProjectId,
+		taskEditorSessionWorkspaceId,
+		isCurrentProjectRuntimeUnavailable,
+		resetTaskEditorState,
+		resetTerminalPanelsState,
+		setSelectedTaskId,
+	]);
 
 	useEffect(() => {
-		if (!isBoardScopeTaskCreateDialogOpenRef.current) {
-			resetTaskEditorState();
-		}
 		setIsClearTrashDialogOpen(false);
 		resetGitActionState();
 		resetProjectNavigationState();
 		resetTerminalPanelsState();
-	}, [
-		currentProjectId,
-		resetGitActionState,
-		resetProjectNavigationState,
-		resetTaskEditorState,
-		resetTerminalPanelsState,
-	]);
+	}, [currentProjectId, resetGitActionState, resetProjectNavigationState, resetTerminalPanelsState]);
 
 	useEffect(() => {
 		if (selectedCard) {
@@ -2201,7 +2185,13 @@ export default function App(): ReactElement {
 					<TaskEditorDialog
 						suspendedTaskEditorTitle={suspendedTaskEditorTitle}
 						onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
-						open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
+						open={
+							!projects.some(
+								(project) =>
+									project.id === taskEditorSessionWorkspaceId && project.availability.status === "unavailable",
+							) &&
+							(isInlineTaskCreateOpen || editingTaskId !== null)
+						}
 						onOpenChange={handleCreateDialogOpenChange}
 						taskEditorMode={editingTaskId ? "edit" : "create"}
 						creatingTaskName={newTaskName}
@@ -2311,7 +2301,7 @@ export default function App(): ReactElement {
 							editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
 						}
 						agents={runtimeProjectConfig?.agents ?? []}
-						defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+						defaultAgentId={taskEditorDefaultAgentId}
 						defaultProviderId={defaultTaskClineProviderId}
 						defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
 						defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}

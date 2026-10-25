@@ -141,9 +141,11 @@ let renderCount = 0;
 function SessionHarness({
 	showDialog = false,
 	currentProjectId = "source-project",
+	selectedAgentId = "codex",
 }: {
 	showDialog?: boolean;
 	currentProjectId?: string;
+	selectedAgentId?: "codex" | "claude";
 }) {
 	const [board, setBoard] = useState(boardWithTask);
 	const [, setSelectedTaskId] = useState<string | null>(null);
@@ -155,7 +157,7 @@ function SessionHarness({
 		defaultTaskBranchRef: "main",
 		defaultCreateTaskBranchRef: "main",
 		currentProjectId,
-		selectedAgentId: "codex",
+		selectedAgentId,
 		newTaskStartInPlanModeByDefault: true,
 		isNewTaskStartInPlanModeDefaultLoaded: true,
 		ompAgentSessionTransportForNewTasks: "pty_terminal",
@@ -423,6 +425,25 @@ describe("任务编辑会话的挂起、目标与迁移生命周期", () => {
 		await act(async () => latestEditor.handleOpenEditTask(originalTask));
 		expect(latestEditor.editTaskConversationMode).toBe("exploratory");
 		expect(readSavedTaskEditDraft("source-project", originalTask.id)?.taskConversationMode).toBe("exploratory");
+	});
+
+	it.each([undefined, "codex"] as const)("后台默认 Agent 变化不覆盖未提交的 %s 模型选择", async (explicitAgentId) => {
+		await act(async () => root.render(<SessionHarness />));
+		await act(async () => latestEditor.handleOpenCreateTask());
+		await act(async () => latestEditor.setNewTaskAgentId(explicitAgentId));
+		await act(async () =>
+			latestEditor.setNewTaskTerminalAgentModelOverrideSettings(
+				{ agentId: "codex", modelId: "model-kept-with-source-draft" },
+				{ rememberSelectionForFutureCreateTasks: false },
+			),
+		);
+		await act(async () =>
+			root.render(<SessionHarness currentProjectId="background-project" selectedAgentId="claude" />),
+		);
+		expect(latestEditor.newTaskTerminalAgentModelOverrideSettings).toEqual({
+			agentId: "codex",
+			modelId: "model-kept-with-source-draft",
+		});
 	});
 
 	it("原卡为探索模式时，未改动表单仍可采用迟到的服务端草稿", async () => {
