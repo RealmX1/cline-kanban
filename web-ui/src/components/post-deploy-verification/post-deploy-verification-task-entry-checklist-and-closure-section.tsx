@@ -22,6 +22,7 @@ import {
 	formatBoardColumnLabel,
 	formatDeployTimestamp,
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
+import { usePostDeployVerificationPanelRememberedExpansionState } from "@/components/post-deploy-verification/post-deploy-verification-panel-expansion-state-context";
 import {
 	describePostDeployVerificationTaskDeploymentAttributionForPanelEntry,
 	type PostDeployVerificationTaskDeploymentAttributionBadgeTone,
@@ -42,6 +43,7 @@ import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-eve
 // 核对清单、自定义项录入、完成区 / 结案记录。
 
 export interface PostDeployVerificationTaskEntryChecklistAndClosureSectionProps {
+	checklistExpansionStateKey?: string;
 	checklistExpansionNavigationRequestId?: number | null;
 	postDeployVerificationTask: RuntimePostDeployVerificationTask;
 	// 当前实际所在列；null = 卡已不在看板（被删）。
@@ -134,6 +136,7 @@ function PostDeployVerificationTaskEntryClosureRecord({
 }
 
 export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
+	checklistExpansionStateKey,
 	checklistExpansionNavigationRequestId = null,
 	postDeployVerificationTask: task,
 	currentBoardColumnIdOfTaskCard,
@@ -151,7 +154,10 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 	onLocateChecklistItem,
 	onCreateFollowUpTaskFromSelectedChecklistItems,
 }: PostDeployVerificationTaskEntryChecklistAndClosureSectionProps): ReactElement {
-	const [isChecklistExpanded, setIsChecklistExpanded] = useState(checklistInitiallyExpanded);
+	const [isChecklistExpanded, setIsChecklistExpanded] = usePostDeployVerificationPanelRememberedExpansionState(
+		checklistExpansionStateKey,
+		() => checklistInitiallyExpanded,
+	);
 	useEffect(() => {
 		if (checklistExpansionNavigationRequestId !== null) setIsChecklistExpanded(true);
 	}, [checklistExpansionNavigationRequestId]);

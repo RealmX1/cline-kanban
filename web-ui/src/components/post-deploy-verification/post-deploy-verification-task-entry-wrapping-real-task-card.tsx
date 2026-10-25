@@ -281,6 +281,16 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				onSelectTask={onSelectTask}
 			/>
 			<PostDeployVerificationTaskEntryChecklistAndClosureSection
+				checklistExpansionStateKey={
+					entryReference
+						? JSON.stringify([
+								"task_checklist",
+								entryReference.workspaceId,
+								entryReference.deploymentId,
+								entryReference.taskId,
+							])
+						: undefined
+				}
 				postDeployVerificationTask={task}
 				currentBoardColumnIdOfTaskCard={currentBoardColumnIdOfTaskCard}
 				retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}

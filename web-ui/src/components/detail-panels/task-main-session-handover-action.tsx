@@ -120,7 +120,21 @@ export function TaskMainSessionHandoverAction({
 	const forkAvailability =
 		selectedTargetCapabilities?.completeNativeConversationForkAvailability ??
 		preview?.completeNativeConversationForkAvailability;
-	const recordTargetAgentId = record?.destination.kind === "new_agent_session" ? record.destination.agentId : "codex";
+	const existingPeerCandidates =
+		preview?.existingPeerCandidates ??
+		preview?.codexPeerTaskConversationSessionIds.map((id) => ({
+			taskConversationSessionId: id,
+			agentId: "codex" as const,
+			displayName: id,
+			available: true,
+			unavailableReason: null,
+		})) ??
+		[];
+	const selectedExistingPeer = existingPeerCandidates.find((entry) => entry.taskConversationSessionId === target);
+	const recordTargetAgentId =
+		record?.destination.kind === "new_agent_session" || record?.destination.kind === "existing_agent_session"
+			? record.destination.agentId
+			: "codex";
 	const recordTargetAgentLabel =
 		recordTargetAgentId === "codex"
 			? "Codex"
@@ -155,6 +169,10 @@ export function TaskMainSessionHandoverAction({
 	}
 	async function submit() {
 		if (!preview) return;
+		if (target !== "new_codex_session" && !selectedExistingPeer?.available) {
+			setError(selectedExistingPeer?.unavailableReason ?? "所选会话已不可用，请重新打开交接预览。");
+			return;
+		}
 		const epoch = requestEpoch.current;
 		if (targetIsBusy && !showWaitChoice) {
 			setShowWaitChoice(true);
@@ -180,7 +198,13 @@ export function TaskMainSessionHandoverAction({
 							: contextInheritanceMode === "fork_complete_native_conversation"
 								? { kind: "new_codex_session", contextInheritanceMode }
 								: { kind: "new_codex_session" }
-						: { kind: "existing_codex_session", taskConversationSessionId: target },
+						: preview.existingPeerCandidates && selectedExistingPeer
+							? {
+									kind: "existing_agent_session",
+									agentId: selectedExistingPeer.agentId,
+									taskConversationSessionId: target,
+								}
+							: { kind: "existing_codex_session", taskConversationSessionId: target },
 				userContextNotes: notes,
 				additionalPlanReferencePaths: planPaths
 					.split("\n")
@@ -326,7 +350,9 @@ export function TaskMainSessionHandoverAction({
 				<DialogHeader title={`新建 ${recordTargetAgentLabel} 接任会话`} />
 				<DialogBody className="space-y-3 text-sm">
 					<DialogDescription>旧汇报的提交结果无法确认，重新交接可能重复汇报。</DialogDescription>
-					<p>原会话、旧接任会话、交接材料和失败记录都会保留。新会话将读取原交接材料，汇报后等待你的消息。</p>
+					<p>
+						原会话、旧接任会话、交接材料和失败记录都会保留。新会话使用全新上下文读取原交接材料，汇报后等待你的消息。
+					</p>
 					{error && (
 						<p role="alert" className="break-words text-status-red">
 							{error}
@@ -361,7 +387,7 @@ export function TaskMainSessionHandoverAction({
 						(showWaitChoice ? (
 							<p>
 								原主会话或所选接任会话
-								仍在生成内容。选择等待后，会在两者都停下时自动交接；关闭浏览器后仍会继续等待。
+								仍在生成或等待未决交互处理。选择等待后，会在两者都可接任时自动交接；关闭浏览器后仍会继续等待。
 							</p>
 						) : (
 							<>
@@ -374,13 +400,22 @@ export function TaskMainSessionHandoverAction({
 										onChange={(event) => setTarget(event.target.value)}
 									>
 										<option value="new_codex_session">新建会话（默认）</option>
-										{preview.codexPeerTaskConversationSessionIds.map((id) => (
-											<option key={id} value={id}>
-												已有 Codex：{id}
+										{existingPeerCandidates.map((entry) => (
+											<option
+												key={entry.taskConversationSessionId}
+												value={entry.taskConversationSessionId}
+												disabled={!entry.available}
+											>
+												已有 {getRuntimeAgentCatalogEntry(entry.agentId)?.label ?? entry.agentId}：
+												{entry.displayName}
+												{entry.unavailableReason ? `（${entry.unavailableReason}）` : ""}
 											</option>
 										))}
 									</select>
 								</label>
+								{target !== "new_codex_session" && (
+									<p className="text-sm">保留所选会话的历史、模型、权限与通道；原主会话保留为辅线。</p>
+								)}
 								{target === "new_codex_session" && preview.targetAgentCapabilities && (
 									<label className="block space-y-1 text-sm">
 										<span>目标 Agent</span>
@@ -502,6 +537,7 @@ export function TaskMainSessionHandoverAction({
 							busy ||
 							!preview ||
 							isPreparingNoteImages ||
+							(target !== "new_codex_session" && !selectedExistingPeer?.available) ||
 							(target === "new_codex_session" &&
 								selectedTargetCapabilities?.installationStatus === "not_installed")
 						}

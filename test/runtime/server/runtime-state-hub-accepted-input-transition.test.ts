@@ -6,6 +6,7 @@ import {
 	createRuntimeStateHub,
 	type RuntimeStateHub,
 } from "../../../src/server/runtime-state-hub";
+import type * as WorkspaceState from "../../../src/state/workspace-state";
 import type { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import type { moveTaskCardIntoInProgressAfterAcceptedMainConversationInput } from "../../../src/trpc/task-card-action-api";
 import { createTempDir } from "../../utilities/temp-dir";
@@ -17,7 +18,16 @@ const mockedDependencies = vi.hoisted(() => ({
 	forgetNativeWorkspace: vi.fn(),
 	disposeNativeObserver: vi.fn(),
 	retentionWarning: vi.fn(),
+	completeMainSessionHandover: vi.fn(),
 	observerOptions: null as CreateNativeAgentConversationActivityObserverOptions | null,
+}));
+
+vi.mock("../../../src/state/workspace-state", async (importOriginal) => ({
+	...(await importOriginal<typeof WorkspaceState>()),
+	loadWorkspaceContextById: async () => ({ repoPath: "/isolated/accepted-input-worktree" }),
+}));
+vi.mock("../../../src/state/complete-task-main-session-handover-after-user-message", () => ({
+	completeTaskMainSessionHandoverAfterUserMessage: mockedDependencies.completeMainSessionHandover,
 }));
 
 vi.mock("../../../src/trpc/task-card-action-api", () => ({
@@ -106,11 +116,13 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 	const hub = createRuntimeStateHub({ workspaceRegistry });
 	const recordEffectiveActivity = vi.fn();
 	const reconcileNativeDirectInputReadiness = vi.fn();
+	const confirmAcceptedInput = vi.fn<TerminalSessionManager["confirmAcceptedAgentConversationInput"]>();
 	const manager = {
 		listSummaries: () => [...currentByTaskId.values()],
 		getSummary: (taskId: string) => currentByTaskId.get(taskId) ?? null,
 		recordEffectiveAgentConversationActivity: recordEffectiveActivity,
 		reconcileCodexNeedsInputWithNativeDirectInputReadiness: reconcileNativeDirectInputReadiness,
+		confirmAcceptedAgentConversationInput: confirmAcceptedInput,
 		onSummary: (onSummary: (summary: RuntimeTaskSessionSummary) => void) => {
 			listener = onSummary;
 			return () => {
@@ -124,6 +136,7 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 		workspaceRegistry,
 		recordEffectiveActivity,
 		reconcileNativeDirectInputReadiness,
+		confirmAcceptedInput,
 		emit(summary: RuntimeTaskSessionSummary) {
 			currentByTaskId.set(summary.taskId, summary);
 			if (!listener) throw new Error("没有存活的 summary 订阅");
@@ -171,6 +184,72 @@ describe("runtime-state-hub 服务端输入接受边沿", () => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
 		temporaryHome.cleanup();
+	});
+
+	it("历史补证标记不会触发卡片移列", async () => {
+		const { emit } = trackedHub([makeSummary("pending")]);
+		const accepted = makeSummary("accepted");
+		if (accepted.agentConversationPromptSubmissionAcceptance)
+			accepted.agentConversationPromptSubmissionAcceptance.acceptedByHistoricalReconciliation = true;
+		emit(accepted);
+		await vi.advanceTimersByTimeAsync(100);
+		expect(mockedDependencies.moveAcceptedInput).not.toHaveBeenCalled();
+	});
+	it("原生接受出口明确报告旧候选拒绝及 manager 的实际应用结果", async () => {
+		const pending = {
+			...makeSummary("pending"),
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex" as const,
+				nativeSessionId: "native",
+				transcriptPath: "/isolated/native.jsonl",
+				observedAt: NOW_MS,
+			},
+		};
+		const tracked = trackedHub([pending]);
+		const acceptedInputListener = vi.fn();
+		tracked.hub.registerAgentConversationInputAcceptedListener?.(acceptedInputListener);
+		const observation = {
+			workspaceId: WORKSPACE_ID,
+			conversationSessionId: TASK_ID,
+			runtimeSessionIncarnationId: "first-process",
+			nativeSessionId: "native",
+			eventId: "native-message-1",
+			observedAtMs: NOW_MS,
+			activityKind: "accepted_user_input" as const,
+			evidenceKind: "native_user_prompt_acceptance" as const,
+			observedSubmissionAttemptedAtMs: NOW_MS - 200,
+		};
+		expect(await mockedDependencies.observerOptions?.onAccepted(observation)).toBe(false);
+		expect(tracked.confirmAcceptedInput).not.toHaveBeenCalled();
+		tracked.confirmAcceptedInput.mockReturnValueOnce(null);
+		const currentObservation = { ...observation, observedSubmissionAttemptedAtMs: NOW_MS - 100 };
+		expect(await mockedDependencies.observerOptions?.onAccepted(currentObservation)).toBe(false);
+		expect(acceptedInputListener).not.toHaveBeenCalled();
+		const held = {
+			...pending,
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "owner-card",
+				taskConversationSessionRole: "main" as const,
+				taskConversationSessionContextSource: "started_from_scratch" as const,
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: null,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+				taskAutomationSuspendedForMainSessionHandover: true,
+			},
+		};
+		tracked.emit(held);
+		const accepted = { ...held, ...makeSummary("accepted") };
+		tracked.confirmAcceptedInput.mockReturnValueOnce(accepted);
+		expect(await mockedDependencies.observerOptions?.onAccepted(currentObservation)).toBe(true);
+		expect(mockedDependencies.completeMainSessionHandover).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({
+				workspaceId: WORKSPACE_ID,
+				workspacePath: "/isolated/accepted-input-worktree",
+				taskConversationSessionId: TASK_ID,
+			}),
+		);
+		expect(acceptedInputListener).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, summary: accepted });
 	});
 
 	it("原生输入就绪只路由给本工作区的状态校正出口，不冒充接受或活动", async () => {

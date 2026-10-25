@@ -149,6 +149,54 @@ describe("TerminalSessionManager resume addressing", () => {
 		}));
 	});
 
+	it("既有接任启动在 adapter 准备完成后重验，身份改变时不会 spawn", async () => {
+		const { manager } = createManagerWithSpawnedSessions();
+		const revalidate = vi.fn(async () => {
+			throw new Error("固定 peer 身份已改变");
+		});
+		await expect(
+			manager.startTaskSession({
+				taskId: MAIN_TASK_ID,
+				agentId: "claude",
+				binary: "claude",
+				args: [],
+				cwd: SHARED_EXECUTION_WORKING_DIRECTORY,
+				prompt: "",
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch: revalidate,
+			}),
+		).rejects.toThrow("固定 peer 身份已改变");
+		expect(prepareAgentLaunchMock).toHaveBeenCalledOnce();
+		expect(revalidate).toHaveBeenCalledOnce();
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		expect(manager.hasLiveTaskSession(MAIN_TASK_ID)).toBe(false);
+	});
+	it("交接启动重验只作用于当次启动，不阻止之后按自身身份自动恢复", async () => {
+		const { manager, spawnedSessions } = createManagerWithSpawnedSessions();
+		const revalidate = vi.fn(async () => {});
+		await manager.startTaskSession({
+			taskId: MAIN_TASK_ID,
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: SHARED_EXECUTION_WORKING_DIRECTORY,
+			prompt: "开始",
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+			revalidateExistingMainSessionHandoverTargetBeforeLaunch: revalidate,
+		});
+		manager.attach(MAIN_TASK_ID, { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+		manager.applyAgentNativeConversationSessionIdentity(MAIN_TASK_ID, {
+			sourceAgentId: "claude",
+			nativeSessionId: MAIN_NATIVE_SESSION_ID,
+			transcriptPath: null,
+			observedAt: 1,
+		});
+		revalidate.mockRejectedValue(new Error("交接阶段已经结束"));
+		spawnedSessions[0]?.triggerExit(130);
+		await vi.waitFor(() => expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2));
+		expect(revalidate).toHaveBeenCalledOnce();
+		expect(readMostRecentResumeAddressing()?.sourceSessionId).toBe(MAIN_NATIVE_SESSION_ID);
+	});
+
 	it("addresses a By the way refresh by its own native session id, not the shared working directory", async () => {
 		const { manager } = createManagerWithSpawnedSessions();
 		await startMainSession(manager);
