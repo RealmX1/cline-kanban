@@ -1261,7 +1261,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const previousNativeIdentity =
 						acpTaskSessionService.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
-						terminalManager.getSummary(body.taskId)?.agentNativeConversationSessionIdentity;
+						terminalManager.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
+						// 交接预备 fork 尚未进入服务注册表；普通 ACP 启动沿用既有活体寻址，不额外补读。
+						(taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+							? (await loadPersistedWorkspaceStateById(workspaceScope.workspaceId)).sessions[body.taskId]
+									?.agentNativeConversationSessionIdentity
+							: undefined);
 					const sharedDirectorySessions = [
 						...terminalManager.listSummaries(),
 						...acpTaskSessionService.listSummaries(),
@@ -2955,6 +2960,26 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 			}
 			input = { ...input, taskId: resolvedSessionId };
+			if (input.source === "task_main_session_handover") {
+				const handoverCard = board.columns
+					.filter((column) => column.id !== "trash")
+					.flatMap((column) => column.cards)
+					.find((card) => card.mainTaskConversationSessionId === resolvedSessionId);
+				const handover = handoverCard?.taskMainSessionHandover;
+				if (
+					!handover ||
+					handover.targetTaskConversationSessionId !== resolvedSessionId ||
+					handover.status !== "report_delivery_pending" ||
+					handover.automaticRecovery?.classification === "execution_prohibited" ||
+					input.idempotencyKey !== `${handover.handoverId}:report:${handover.reportDeliveryAttempt}`
+				)
+					return {
+						ok: false,
+						summary: null,
+						error: "交接已停止、绑定已变化或投递身份不符，未提交汇报。",
+						terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+					};
+			}
 			if (
 				input.source != null &&
 				input.source !== "task_main_session_handover" &&

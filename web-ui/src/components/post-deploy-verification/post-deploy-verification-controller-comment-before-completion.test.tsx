@@ -82,6 +82,7 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 		hasLoadedOnce: true,
 		pendingVerificationTaskCount: 1,
 		refresh: vi.fn(),
+		entryNavigationReadModelRequest: null,
 		refreshAndReadActiveGroup: vi.fn(),
 		isVerificationWriteInFlight: false,
 		stayInFront: true,

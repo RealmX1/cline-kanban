@@ -1,5 +1,21 @@
 @import "tailwindcss";
 
+/* 前台页面低于对话框与菜单；固定定位保留原内容 DOM 和 iframe 浏览上下文。 */
+.kb-expanded-foreground-view {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	min-height: 0;
+	max-height: 100dvh;
+	overflow: hidden;
+	background: var(--color-surface-1);
+	color: var(--color-text-primary);
+	padding-bottom: env(safe-area-inset-bottom);
+}
+
 @keyframes daily-work-progress-reveal {
 	from { opacity: 0; transform: translateY(-4px); }
 	to { opacity: 1; transform: translateY(0); }

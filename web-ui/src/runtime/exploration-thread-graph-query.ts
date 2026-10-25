@@ -17,9 +17,10 @@ import type {
 export async function fetchExplorationThreadGraph(
 	workspaceId: string,
 	explorationId: string,
+	signal?: AbortSignal,
 ): Promise<RuntimeGetExplorationThreadGraphResponse> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
-	return await trpcClient.exploratory.getExplorationThreadGraph.query({ explorationId });
+	return await trpcClient.exploratory.getExplorationThreadGraph.query({ explorationId }, { signal });
 }
 
 /** 只在用户显式点「立即维护一次」时调用——这一下会花钱。 */

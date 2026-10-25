@@ -1,29 +1,15 @@
 import dagre from "@dagrejs/dagre";
 import type { RelationModelingPreviewResponse } from "@runtime-work-unit-relation-modeling-api-contract";
 import { Background, Controls, type Edge, MarkerType, type Node, Position, ReactFlow } from "@xyflow/react";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
+import { cn } from "@/components/ui/cn";
 import { useMeasure } from "@/utils/react-use";
 import "@xyflow/react/dist/style.css";
 
-export const REFERENCE_RELATION_LABELS: Record<string, string> = {
-	reference_concerns_behavior_or_state_of: "研究／诊断",
-	reference_verifies_claims_of: "核验主张",
-	reference_reuses_produced_outputs_of: "复用产物",
-	reference_requirement_originates_from: "需求源自",
-	reference_is_cross_repository_counterpart_with: "跨仓对应",
-	reference_is_generally_related_with: "一般相关",
-};
-export const RELATION_GRAPH_LABELS: Record<string, string> = {
-	...REFERENCE_RELATION_LABELS,
-	provenance_created_by: "创建来源",
-	provenance_split_from_side_conversation_of: "侧会话分出来源",
-	provenance_resumed_and_adopted_conversation_session_of: "续用会话来源",
-	provenance_forked_conversation_session_of: "派生会话来源",
-	interaction_agent_session_dispatched_or_controlled_by: "会话受其调度",
-	interaction_requirements_amended_by: "需求由其修订",
-	interaction_execution_configuration_changed_by: "配置由其修改",
-	interaction_board_lifecycle_transitioned_by: "状态由其迁移",
-};
+import { RELATION_GRAPH_LABELS } from "@/hooks/work-unit-relation-kind-display-labels";
+
+export { REFERENCE_RELATION_LABELS, RELATION_GRAPH_LABELS } from "@/hooks/work-unit-relation-kind-display-labels";
+
 export const RELATION_PREVIEW_STATE_LABELS = {
 	saved: "已保存",
 	pending_addition: "待新增",
@@ -36,14 +22,26 @@ export function ReferenceRelationModelingGraph({
 	rootTitle,
 	onSelectWorkUnit,
 	viewportResetKey,
+	expanded = false,
 }: {
 	preview: RelationModelingPreviewResponse;
 	rootTitle: string;
 	onSelectWorkUnit: (key: string) => void;
 	viewportResetKey: string;
+	expanded?: boolean;
 }) {
-	const [measureGraphContainer, { width: graphContainerWidth }] = useMeasure<HTMLDivElement>();
-	const useVerticalLayout = graphContainerWidth > 0 && graphContainerWidth < 560;
+	const [measureGraphContainer, { width: graphContainerWidth, height: graphContainerHeight }] =
+		useMeasure<HTMLDivElement>();
+	const layoutOrientation = useRef<{ rootKey: string; vertical: boolean } | null>(null);
+	if (
+		graphContainerWidth > 0 &&
+		graphContainerHeight > 0 &&
+		layoutOrientation.current?.rootKey !== preview.rootWorkUnitKey
+	)
+		layoutOrientation.current = { rootKey: preview.rootWorkUnitKey, vertical: graphContainerWidth < 560 };
+	// 首次 fitView 等待有效尺寸和最终布局；后续零尺寸不卸载图，保留手工视口。
+	const hasInitializedCurrentRootLayout = layoutOrientation.current?.rootKey === preview.rootWorkUnitKey;
+	const useVerticalLayout = layoutOrientation.current?.vertical ?? false;
 	const graph = useMemo(() => {
 		const layout = new dagre.graphlib.Graph({ multigraph: true })
 			.setGraph({ rankdir: useVerticalLayout ? "TB" : "LR", nodesep: 32, ranksep: useVerticalLayout ? 52 : 105 })
@@ -120,32 +118,37 @@ export function ReferenceRelationModelingGraph({
 	return (
 		<div
 			ref={measureGraphContainer}
-			className="h-[360px] min-w-0 overflow-hidden rounded-md border border-border-bright bg-surface-0"
+			className={cn(
+				"min-w-0 overflow-hidden rounded-md border border-border-bright bg-surface-0",
+				expanded ? "h-[max(360px,calc(100dvh-16rem))]" : "h-[360px]",
+			)}
 			role="group"
 			aria-label="任务多跳关系图"
 		>
-			<ReactFlow
-				key={`${viewportResetKey}:${useVerticalLayout}:${graph.nodes.map((node) => node.id).join("|")}:${graph.edges.map((edge) => edge.id).join("|")}`}
-				nodes={graph.nodes}
-				edges={graph.edges}
-				fitView
-				fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
-				nodesDraggable={false}
-				nodesConnectable={false}
-				edgesReconnectable={false}
-				onNodeClick={(_event, node) => onSelectWorkUnit(node.id)}
-				minZoom={0.2}
-				maxZoom={1.8}
-				colorMode="dark"
-				ariaLabelConfig={{
-					"controls.zoomIn.ariaLabel": "放大关系图",
-					"controls.zoomOut.ariaLabel": "缩小关系图",
-					"controls.fitView.ariaLabel": "显示完整关系图",
-				}}
-			>
-				<Background />
-				<Controls showInteractive={false} />
-			</ReactFlow>
+			{hasInitializedCurrentRootLayout && (
+				<ReactFlow
+					key={viewportResetKey}
+					nodes={graph.nodes}
+					edges={graph.edges}
+					fitView
+					fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
+					nodesDraggable={false}
+					nodesConnectable={false}
+					edgesReconnectable={false}
+					onNodeClick={(_event, node) => onSelectWorkUnit(node.id)}
+					minZoom={0.2}
+					maxZoom={1.8}
+					colorMode="dark"
+					ariaLabelConfig={{
+						"controls.zoomIn.ariaLabel": "放大关系图",
+						"controls.zoomOut.ariaLabel": "缩小关系图",
+						"controls.fitView.ariaLabel": "显示完整关系图",
+					}}
+				>
+					<Background />
+					<Controls showInteractive={false} />
+				</ReactFlow>
+			)}
 		</div>
 	);
 }

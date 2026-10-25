@@ -58,6 +58,8 @@ export type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
 	  };
 
 export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
+	entryReference?: { workspaceId: string; deploymentId: string; taskId: string };
+	checklistExpansionNavigationRequestId?: number | null;
 	postDeployVerificationTask: RuntimePostDeployVerificationTask;
 	board: BoardData;
 	// null = 宿主没给（隔离的浏览器 fixture）：上半部分退回标题行。
@@ -221,6 +223,8 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 }
 
 export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
+	entryReference,
+	checklistExpansionNavigationRequestId = null,
 	postDeployVerificationTask: task,
 	board,
 	realTaskCardRenderingInputs,
@@ -258,6 +262,12 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 	return (
 		<div
 			data-post-deploy-verification-task-entry={task.taskId}
+			data-post-deploy-verification-entry-navigation-key={
+				entryReference
+					? JSON.stringify([entryReference.workspaceId, entryReference.deploymentId, entryReference.taskId])
+					: undefined
+			}
+			tabIndex={-1}
 			className="rounded-md border border-border bg-surface-1"
 			{...{ [VERIFICATION_ANCHOR_ATTR]: verificationPanelTaskAnchorKey(task.taskId) }}
 		>
@@ -276,6 +286,7 @@ export function PostDeployVerificationTaskEntryWrappingRealTaskCard({
 				retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
 				interactive={interactive}
 				checklistInitiallyExpanded={checklistInitiallyExpanded}
+				checklistExpansionNavigationRequestId={checklistExpansionNavigationRequestId}
 				isCompleting={isCompleting}
 				onToggleChecklistItem={onToggleChecklistItem}
 				onAddCustomChecklistItem={onAddCustomChecklistItem}

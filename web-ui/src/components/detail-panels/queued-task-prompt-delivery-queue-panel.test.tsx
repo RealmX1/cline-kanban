@@ -7,11 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
+import { createQueuedTaskPromptDeliveryFullTextReader } from "@/runtime/queued-task-prompt-delivery-query";
 import type { RuntimeQueuedTaskPromptDeliveryProjection } from "@/runtime/types";
 
 const clipboardMocks = vi.hoisted(() => ({ writeText: vi.fn() }));
+const queueReadMocks = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock("@/utils/write-text-to-system-clipboard-with-insecure-context-fallback", () => ({
 	writeTextToSystemClipboardWithInsecureContextFallback: clipboardMocks.writeText,
+}));
+vi.mock("@/runtime/trpc-client", () => ({
+	getRuntimeTrpcClient: () => ({ runtime: { getTaskPromptDeliveryQueue: { query: queueReadMocks.query } } }),
 }));
 
 function projection(
@@ -50,7 +55,7 @@ function createControllerDouble(
 		dismissSettledQueuedPromptDelivery: vi.fn(async () => {}),
 		retrySettledFailedQueuedPromptDelivery: vi.fn(async () => {}),
 		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: vi.fn(async () => true),
-		fetchFullText: vi.fn(async () => "全文"),
+		fetchFullText: vi.fn(() => new Promise<string | null>(() => {})),
 		fetchDebugReference: vi.fn(async (entry) => ({ text: `调试引用 ${entry.queueEntryId}`, notice: null })),
 	};
 }
@@ -68,6 +73,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 
 	beforeEach(() => {
 		clipboardMocks.writeText.mockReset().mockResolvedValue(undefined);
+		queueReadMocks.query.mockReset();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -81,6 +87,8 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			root.unmount();
 		});
 		container.remove();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 			previousActEnvironment;
 	});
@@ -96,7 +104,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 	}
 
 	function selectMessageType(label: string) {
-		const filter = container.querySelector("select");
+		const filter = container.querySelector<HTMLSelectElement>('select[aria-label="按消息类型筛选"]');
 		expect(filter).not.toBeNull();
 		act(() => {
 			if (filter) {
@@ -105,6 +113,252 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			}
 		});
 	}
+
+	function selectDisplayOrder(value: string) {
+		const select = container.querySelector<HTMLSelectElement>('select[aria-label="队列显示顺序"]');
+		expect(select).not.toBeNull();
+		act(() => {
+			if (select) {
+				select.value = value;
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+	}
+
+	function displayedQueueEntryIds() {
+		return Array.from(container.querySelectorAll("[data-queued-prompt-entry-id]")).map((row) =>
+			row.getAttribute("data-queued-prompt-entry-id"),
+		);
+	}
+
+	it("时间不显示年份，尝试次数置于时间信息之外", () => {
+		const enqueuedAt = Date.parse("2026-10-24T12:00:00Z");
+		render(
+			createControllerDouble([
+				projection("metadata", { enqueuedAt, deliveryAttemptCount: 1, lastAttemptedAt: enqueuedAt }),
+			]),
+		);
+		const row = container.querySelector('[data-queued-prompt-entry-id="metadata"]');
+		expect(row?.textContent).toContain("尝试次数：1");
+		expect(row?.querySelector("dl")?.textContent).not.toContain("尝试次数");
+		expect(row?.textContent).toContain("最近投递：");
+		expect(row?.textContent).not.toContain("最近投递开始");
+		for (const timestamp of row?.querySelectorAll("time") ?? []) {
+			expect(timestamp.textContent).not.toMatch(/2026|1970/);
+			expect(timestamp.getAttribute("title")).toMatch(/^\d{4}-/);
+		}
+	});
+
+	it("无需新推送也会递增距上次尝试时长，新的尝试立即重新计时", () => {
+		vi.useFakeTimers();
+		const now = Date.parse("2026-10-25T12:00:00Z");
+		vi.setSystemTime(now);
+		const controller = createControllerDouble([
+			projection("elapsed", { deliveryAttemptCount: 1, lastAttemptedAt: now - 59_000 }),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("距上次尝试：59 秒");
+		act(() => vi.advanceTimersByTime(1_000));
+		expect(container.textContent).toContain("距上次尝试：1 分钟");
+		render({
+			...controller,
+			projections: [projection("elapsed", { deliveryAttemptCount: 2, lastAttemptedAt: Date.now() })],
+		});
+		expect(container.textContent).toContain("距上次尝试：0 秒");
+	});
+
+	it("未尝试、时间缺失及未来时钟分别如实展示", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-25T12:00:00Z"));
+		render(
+			createControllerDouble([
+				projection("never"),
+				projection("unknown", { deliveryAttemptCount: 2 }),
+				projection("future", { deliveryAttemptCount: 1, lastAttemptedAt: Date.now() + 60_000 }),
+			]),
+		);
+		expect(container.querySelector('[data-queued-prompt-entry-id="never"]')?.textContent).toContain(
+			"距上次尝试：尚未尝试",
+		);
+		expect(container.querySelector('[data-queued-prompt-entry-id="unknown"]')?.textContent).toContain(
+			"距上次尝试：时间未知",
+		);
+		expect(container.querySelector('[data-queued-prompt-entry-id="future"]')?.textContent).toContain(
+			"距上次尝试：0 秒",
+		);
+	});
+
+	it("页面隐藏时停止时钟，重新可见时立即补齐经过时长", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-25T12:00:00Z"));
+		const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+		render(
+			createControllerDouble([
+				projection("visible-clock", { deliveryAttemptCount: 1, lastAttemptedAt: Date.now() - 30_000 }),
+			]),
+		);
+		expect(container.textContent).toContain("距上次尝试：30 秒");
+		act(() => {
+			visibility.mockReturnValue("hidden");
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		act(() => vi.advanceTimersByTime(120_000));
+		expect(container.textContent).toContain("距上次尝试：30 秒");
+		act(() => {
+			visibility.mockReturnValue("visible");
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		expect(container.textContent).toContain("距上次尝试：2 分钟");
+	});
+
+	it("时间排序只改变显示，保留真实投递序号，切回后恢复重排与合并操作", () => {
+		const controller = createControllerDouble([
+			projection("manual-first", {
+				enqueuedAt: 30,
+				deliveryAttemptCount: 1,
+				lastAttemptedAt: 100,
+				deliverTogetherWithNextQueuedEntry: true,
+			}),
+			projection("enqueued-first", { enqueuedAt: 10 }),
+			projection("recent-first", { enqueuedAt: 20, deliveryAttemptCount: 1, lastAttemptedAt: 200 }),
+			projection("unknown", { enqueuedAt: 15, deliveryAttemptCount: 2 }),
+		]);
+		render(controller);
+		expect(displayedQueueEntryIds()).toEqual(["manual-first", "enqueued-first", "recent-first", "unknown"]);
+		selectDisplayOrder("last_attempt_newest_first");
+		expect(displayedQueueEntryIds()).toEqual(["recent-first", "manual-first", "enqueued-first", "unknown"]);
+		expect(container.querySelector('[data-queued-prompt-entry-id="recent-first"]')?.textContent).toContain("投递 #3");
+		expect(buttonsWithLabel(container, "Move queued prompt up")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Link with next queued prompt")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Unlink from next queued prompt")).toHaveLength(0);
+		selectDisplayOrder("enqueued_oldest_first");
+		expect(displayedQueueEntryIds()).toEqual(["enqueued-first", "unknown", "recent-first", "manual-first"]);
+		selectDisplayOrder("delivery_order");
+		expect(displayedQueueEntryIds()).toEqual(controller.projections.map((entry) => entry.queueEntryId));
+		expect(buttonsWithLabel(container, "Move queued prompt up")).toHaveLength(4);
+		expect(buttonsWithLabel(container, "Unlink from next queued prompt")).toHaveLength(1);
+		expect(controller.moveQueuedPromptDelivery).not.toHaveBeenCalled();
+		expect(controller.setQueuedPromptDeliveryMergeWithNext).not.toHaveBeenCalled();
+	});
+
+	it("时间排序与类型筛选组合，终态分区保留且相同时间保持原序", () => {
+		render(
+			createControllerDouble([
+				projection("hidden", { sourcePromptLibraryEntryId: "library", enqueuedAt: 1 }),
+				projection("stable-first", { enqueuedAt: 20 }),
+				projection("stable-second", { enqueuedAt: 20 }),
+				projection("settled-later", { deliveryState: "settled_failed", enqueuedAt: 15 }),
+				projection("settled-earlier", { deliveryState: "settled_delivered", enqueuedAt: 5 }),
+			]),
+		);
+		selectMessageType("人工发送");
+		selectDisplayOrder("enqueued_oldest_first");
+		expect(displayedQueueEntryIds()).toEqual(["stable-first", "stable-second", "settled-earlier", "settled-later"]);
+		expect(container.querySelector('[data-queued-prompt-entry-id="stable-first"]')?.textContent).toContain("投递 #2");
+	});
+
+	it("准备全文后一次点击复制完整正文，保留换行与首尾空白", async () => {
+		const fullText = `  ${"很长的正文".repeat(80)}\n第二行\n  `;
+		const controller = createControllerDouble([
+			projection("copy", { textPreview: "很长的正文…", textLength: fullText.length }),
+		]);
+		vi.mocked(controller.fetchFullText).mockResolvedValue(fullText);
+		await act(async () => render(controller));
+		const copyButton = buttonsWithLabel(container, "复制全文")[0];
+		expect(copyButton?.disabled).toBe(false);
+		await act(async () => copyButton?.click());
+		expect(clipboardMocks.writeText).toHaveBeenCalledWith(fullText);
+		expect(container.textContent).toContain("已复制全文");
+		await act(async () => buttonsWithLabel(container, `展开全文（${fullText.length} 字符）`)[0]?.click());
+		expect(container.textContent).toContain("第二行");
+		expect(controller.fetchFullText).toHaveBeenCalledTimes(1);
+	});
+
+	it("新行加入旧快照读取后自动准备全文，无需点击重试", async () => {
+		let releaseEarlierSnapshot!: () => void;
+		const newEntryFullText = "  后加入消息的完整正文\n第二行  ";
+		queueReadMocks.query
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						releaseEarlierSnapshot = () =>
+							resolve({
+								ok: true,
+								queue: { entriesByTaskId: { "task-1": [{ queueEntryId: "first", text: "第一条" }] } },
+							});
+					}),
+			)
+			.mockResolvedValueOnce({
+				ok: true,
+				queue: { entriesByTaskId: { "task-1": [{ queueEntryId: "second", text: newEntryFullText }] } },
+			});
+		const controller = createControllerDouble([projection("first")]);
+		controller.fetchFullText = createQueuedTaskPromptDeliveryFullTextReader("workspace", "task-1");
+		render(controller);
+		controller.projections = [
+			...controller.projections,
+			projection("second", { textPreview: "后加入消息…", textLength: newEntryFullText.length }),
+		];
+		render(controller);
+		const newEntryRow = container.querySelector<HTMLElement>('[data-queued-prompt-entry-id="second"]');
+		expect(newEntryRow).not.toBeNull();
+		if (!newEntryRow) throw new Error("未渲染后加入的消息行");
+		expect(buttonsWithLabel(newEntryRow, "复制全文")[0]?.disabled).toBe(true);
+		expect(queueReadMocks.query).toHaveBeenCalledTimes(1);
+		await act(async () => releaseEarlierSnapshot());
+		expect(queueReadMocks.query).toHaveBeenCalledTimes(2);
+		expect(newEntryRow.textContent).not.toContain("无法读取全文");
+		expect(buttonsWithLabel(newEntryRow, "复制全文")[0]?.disabled).toBe(false);
+		const expandButton = buttonsWithLabel(newEntryRow, `展开全文（${newEntryFullText.length} 字符）`)[0];
+		expect(expandButton?.disabled).toBe(false);
+		await act(async () => expandButton?.click());
+		expect(newEntryRow.textContent).toContain(newEntryFullText);
+		await act(async () => buttonsWithLabel(newEntryRow, "复制全文")[0]?.click());
+		expect(clipboardMocks.writeText).toHaveBeenCalledWith(newEntryFullText);
+	});
+
+	it("全文读取失败可重试，不能把截断预览复制成全文", async () => {
+		const controller = createControllerDouble([projection("retry")]);
+		vi.mocked(controller.fetchFullText).mockResolvedValueOnce(null).mockResolvedValueOnce("恢复的完整正文");
+		await act(async () => render(controller));
+		expect(buttonsWithLabel(container, "复制全文")[0]?.disabled).toBe(true);
+		expect(container.textContent).toContain("无法读取全文");
+		await act(async () => buttonsWithLabel(container, "重新读取全文")[0]?.click());
+		await act(async () => buttonsWithLabel(container, "复制全文")[0]?.click());
+		expect(clipboardMocks.writeText).toHaveBeenCalledWith("恢复的完整正文");
+	});
+
+	it("剪贴板拒绝后保留可选的完整正文，失败不显示成功", async () => {
+		const controller = createControllerDouble([projection("copy-failed")]);
+		vi.mocked(controller.fetchFullText).mockResolvedValue("供手动复制的完整正文\n下一行");
+		clipboardMocks.writeText.mockRejectedValue(new Error("拒绝"));
+		await act(async () => render(controller));
+		await act(async () => buttonsWithLabel(container, "复制全文")[0]?.click());
+		expect(container.textContent).toContain("复制失败");
+		expect(container.textContent).not.toContain("已复制全文");
+		expect(
+			container.querySelector<HTMLTextAreaElement>('textarea[aria-label="可手动复制的 Prompt 全文"]')?.value,
+		).toBe("供手动复制的完整正文\n下一行");
+	});
+
+	it("切换项目或会话后不会使用旧全文请求的迟到结果", async () => {
+		let resolveOldText: ((value: string) => void) | undefined;
+		const previousController = createControllerDouble([projection("same-entry")]);
+		vi.mocked(previousController.fetchFullText).mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveOldText = resolve;
+				}),
+		);
+		render(previousController);
+		const nextController = createControllerDouble([projection("same-entry")]);
+		vi.mocked(nextController.fetchFullText).mockResolvedValue("当前会话全文");
+		await act(async () => render(nextController));
+		await act(async () => resolveOldText?.("旧会话全文"));
+		await act(async () => buttonsWithLabel(container, "复制全文")[0]?.click());
+		expect(clipboardMocks.writeText).toHaveBeenCalledWith("当前会话全文");
+		expect(clipboardMocks.writeText).not.toHaveBeenCalledWith("旧会话全文");
+	});
 
 	it("空队列给一句引导", () => {
 		render(createControllerDouble([]));
@@ -171,7 +425,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			]),
 		);
 		expect(row?.textContent).toContain("尝试次数：1");
-		expect(row?.textContent).toContain("最近投递开始");
+		expect(row?.textContent).toContain("最近投递：");
 		expect(row?.querySelector(`time[datetime="${new Date(lastAttemptedAt).toISOString()}"]`)).not.toBeNull();
 	});
 

@@ -144,7 +144,11 @@ export function spotlightAnchor(anchorKey: string, options?: SpotlightAnchorOpti
 	if (!matchedTarget) {
 		return false;
 	}
-	const spotlightTargetElement = matchedTarget;
+	return spotlightElement(matchedTarget, options);
+}
+
+// 精确部署条目有独立身份；复用同一套滚动与高亮，旧引导锚点保持兼容。
+export function spotlightElement(spotlightTargetElement: Element, options?: SpotlightAnchorOptions): boolean {
 	const spotlightClassName = options?.spotlightClassName ?? VERIFICATION_SPOTLIGHT_CLASS;
 	const scrollIntoViewMode = options?.scrollIntoView ?? true;
 	if (scrollIntoViewMode === "only_if_out_of_view") {

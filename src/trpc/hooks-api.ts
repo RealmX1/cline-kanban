@@ -36,6 +36,8 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 } from "../state/agent-raised-pending-user-decision-store";
+import { captureTaskMainSessionHandoverReportNativeIdentity } from "../state/capture-task-main-session-handover-report-native-identity";
+import { confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks } from "../state/confirm-task-main-session-handover-input-after-correlated-processing-hooks";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -371,6 +373,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					const identityPersistenceOutcome = await persistNativeConversationIdentity(workspaceId, taskId, () =>
 						manager.getSummary(taskId),
 					);
+					const summaryWithCapturedIdentity = manager.getSummary(taskId);
+					if (summaryWithCapturedIdentity)
+						await captureTaskMainSessionHandoverReportNativeIdentity({
+							workspacePath,
+							summary: summaryWithCapturedIdentity,
+							identity: body.agentNativeConversationSessionIdentity,
+							hookRuntimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+						});
 					// 只有 revision 推进了才需要让客户端换新快照；再确认的 observedAt 由 task_sessions_updated 送达，
 					// 每个 hook 都广播整份快照会让所有客户端反复整板重水合。
 					if (identityPersistenceOutcome === "persisted_new_identity_and_invalidated_stale_snapshot_revision") {
@@ -428,6 +438,18 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
 			}
 
+			const processedHandoverInput = await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+				workspacePath,
+				summary: manager.getSummary(taskId) ?? summary,
+				hook: body,
+			});
+			if (processedHandoverInput?.metadata)
+				manager.applyTaskConversationSessionMetadata(taskId, processedHandoverInput.metadata);
+			if (processedHandoverInput?.acceptedPromptSha256 && body.hookRuntimeSessionIncarnationId)
+				manager.confirmHandoverInputAcceptedFromCorrelatedProcessingHooks?.(taskId, {
+					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+					promptSha256: processedHandoverInput.acceptedPromptSha256,
+				});
 			const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 			const isClaudeUserPromptSubmit =
 				event === "to_in_progress" &&

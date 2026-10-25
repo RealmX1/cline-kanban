@@ -5,7 +5,7 @@ import { resolveMainTaskConversationSessionSummary } from "@runtime-session-acti
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime-task-agent-permission-mode";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "@/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
@@ -27,12 +27,9 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
 import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
-import { isPostDeployVerificationTaskAwaitingVerification } from "@/components/post-deploy-verification/post-deploy-verification-active-deployment-group-tasks-grouped-by-deployment-attribution-zone";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
-import {
-	buildPostDeployVerificationFollowUpTaskCreationDraftSeed,
-	type PostDeployVerificationFollowUpTaskCreationDraftSeed,
-} from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
+import { PostDeployVerificationEntryNavigationHostProvider } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
+import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
@@ -46,6 +43,7 @@ import type { TaskCreationTargetProjectField } from "@/components/task-creation-
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskLookupWorkbenchView } from "@/components/task-lookup-workbench-view";
 import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
+import { TaskProjectAssignmentPreflightHost } from "@/components/task-project-assignment-preflight-host";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
 import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
@@ -62,6 +60,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { UnavailableProjectRuntimeState } from "@/components/unavailable-project-runtime-state";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
 import { createInitialBoardData } from "@/data/board-data";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
@@ -70,6 +69,7 @@ import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
+import { useCreatePostDeployVerificationFollowUpTask } from "@/hooks/use-create-post-deploy-verification-follow-up-task";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
@@ -90,6 +90,7 @@ import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { usePostDeployVerificationControllerInputsForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-controller-inputs-for-board-or-single-project-scope";
+import { usePostDeployVerificationEntryNavigation } from "@/hooks/use-post-deploy-verification-entry-navigation";
 import { usePostDeployVerificationForBoardOrSingleProjectScope } from "@/hooks/use-post-deploy-verification-for-board-or-single-project-scope";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
@@ -144,6 +145,7 @@ import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardCard, BoardData } from "@/types";
 
 export default function App(): ReactElement {
+	const expandedForegroundView = useExpandedForegroundViewNavigation();
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
@@ -158,8 +160,10 @@ export default function App(): ReactElement {
 	// 开启时置换 home 主视图，非 overlay；与 git history / All projects 首页互斥。
 	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
-	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
-	const taskEditorResetRef = useRef<() => void>(() => {});
+	const [pendingEditedTaskCardAgentSessionStart, setPendingEditedTaskCardAgentSessionStart] = useState<{
+		taskId: string;
+		expectedTaskIncarnationCreatedAtEpochMs?: number;
+	} | null>(null);
 	// useWorkspacePersistence 在本组件更下方才调用；切项目入口经这个 ref 先把旧项目防抖中的整板保存立刻发出。
 	const flushPendingWorkspaceStatePersistImmediatelyRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
@@ -168,8 +172,7 @@ export default function App(): ReactElement {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
-		setPendingTaskStartAfterEditId(null);
-		taskEditorResetRef.current();
+		setPendingEditedTaskCardAgentSessionStart(null);
 	}, []);
 	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
 	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
@@ -657,8 +660,8 @@ export default function App(): ReactElement {
 		workspaceGit,
 		rememberedTaskCreateBaseRefForCurrentProject,
 	});
-	const queueTaskStartAfterEdit = useCallback((taskId: string) => {
-		setPendingTaskStartAfterEditId(taskId);
+	const queueTaskStartAfterEdit = useCallback((taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => {
+		setPendingEditedTaskCardAgentSessionStart({ taskId, expectedTaskIncarnationCreatedAtEpochMs });
 	}, []);
 	// Board Scope 往其他项目建卡不切项目：提示建到了哪里，新卡随 projects 广播出现在 All projects 面板。
 	const handleTaskCardsCreatedInOtherProject = useCallback(
@@ -678,6 +681,10 @@ export default function App(): ReactElement {
 
 	const {
 		isInlineTaskCreateOpen,
+		taskEditorSessionWorkspaceId,
+		taskEditorDefaultAgentId,
+		newTaskName,
+		setNewTaskName,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -735,11 +742,15 @@ export default function App(): ReactElement {
 		setEditTaskTerminalAgentModelOverrideSettings,
 		editTaskAgentSessionInitialization,
 		setEditTaskAgentSessionInitialization,
+		suspendedTaskEditorTitle,
+		handleResumeSuspendedTaskEditor,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
 		handleOpenEditTaskCardInOtherProject,
 		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
+		handleSelectEditTaskTargetProject,
 		editTaskBranchOptionsForEditTarget,
 		taskCreationTargetWorkspaceId,
 		taskCreationTargetOtherProjectWorkspaceId,
@@ -785,9 +796,6 @@ export default function App(): ReactElement {
 		openTaskInOtherProjectAfterStart: handleOpenTaskInProject,
 	});
 
-	useEffect(() => {
-		taskEditorResetRef.current = resetTaskEditorState;
-	}, [resetTaskEditorState]);
 	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
 		useState<PostDeployVerificationFollowUpTaskCreationDraftSeed | null>(null);
 	useEffect(() => {
@@ -801,17 +809,7 @@ export default function App(): ReactElement {
 		resetWorkspaceSyncState();
 	}, [isProjectSwitching, resetWorkspaceSyncState]);
 
-	// Board Scope 的建卡框钉住了目标项目，与「当前项目」无关：在 All projects 面板里点别的项目的任务会切当前项目，
-	// 那不该清掉正在填的建卡框。用 ref 读，免得建卡框开合本身触发下面两处重置。
-	const isBoardScopeTaskCreateDialogOpenRef = useRef(false);
-	isBoardScopeTaskCreateDialogOpenRef.current = isBoardScopeAllProjectsSelected && isInlineTaskCreateOpen;
-
-	useEffect(() => {
-		if (!isProjectSwitching || isBoardScopeTaskCreateDialogOpenRef.current) {
-			return;
-		}
-		resetTaskEditorState();
-	}, [isProjectSwitching, resetTaskEditorState]);
+	// 活跃编辑会话已经固定来源与卡片快照；背景导航只切换看板，不关闭或重铺编辑器。
 
 	// Board Scope 建卡入口（热键 c、跨项目面板与 All projects 首页的 Create task）：默认目标取上下文项目——
 	// 跨项目打开在途时是目标项目，否则是当前项目（Focus View 的焦点任务总在当前项目里）。
@@ -838,21 +836,8 @@ export default function App(): ReactElement {
 		projects,
 	]);
 
-	// 新建任务的归属始终可见；仅全项目创建允许选择，已有任务禁止迁移归属。
+	// 创建与 Backlog 编辑共用项目选择，迁移在运行时校验未启动身份。
 	const taskCreationTargetProjectFieldOfTaskEditorDialog = useMemo((): TaskCreationTargetProjectField | undefined => {
-		if (editingTaskId || postDeployVerificationFollowUpTaskCreationDraftSeed || !isBoardScopeAllProjectsSelected) {
-			const workspaceId = editingTaskId
-				? (editTaskWorkspaceId ?? projectRuntimeWorkspaceId)
-				: (postDeployVerificationFollowUpTaskCreationDraftSeed?.workspaceId ?? projectRuntimeWorkspaceId);
-			if (!workspaceId) return undefined;
-			const project = projects.find((entry) => entry.id === workspaceId);
-			return {
-				taskCreationTargetProjectFieldPresentation: "target_project_shown_read_only",
-				workspaceId,
-				projectName: project?.name ?? workspaceId,
-				visualIdentity: project?.visualIdentity,
-			};
-		}
 		return {
 			taskCreationTargetProjectFieldPresentation: "target_project_selectable_in_board_scope",
 			selectableProjects: projects
@@ -863,12 +848,15 @@ export default function App(): ReactElement {
 					projectName: project.name,
 					visualIdentity: project.visualIdentity,
 				})),
-			selectedTargetWorkspaceId: taskCreationTargetWorkspaceId,
-			onSelectTargetWorkspaceId: handleSelectTaskCreationTargetProject,
+			selectedTargetWorkspaceId: editingTaskId ? editTaskTargetWorkspaceId : taskCreationTargetWorkspaceId,
+			onSelectTargetWorkspaceId: editingTaskId
+				? handleSelectEditTaskTargetProject
+				: handleSelectTaskCreationTargetProject,
 		};
 	}, [
-		editTaskWorkspaceId,
+		editTaskTargetWorkspaceId,
 		editingTaskId,
+		handleSelectEditTaskTargetProject,
 		handleSelectTaskCreationTargetProject,
 		isBoardScopeAllProjectsSelected,
 		projectRuntimeWorkspaceId,
@@ -1041,25 +1029,23 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
 		setSelectedTaskId(null);
-		resetTaskEditorState();
+		if (taskEditorSessionWorkspaceId === currentProjectId) resetTaskEditorState();
 		resetTerminalPanelsState();
-	}, [isCurrentProjectRuntimeUnavailable, resetTaskEditorState, resetTerminalPanelsState, setSelectedTaskId]);
+	}, [
+		currentProjectId,
+		taskEditorSessionWorkspaceId,
+		isCurrentProjectRuntimeUnavailable,
+		resetTaskEditorState,
+		resetTerminalPanelsState,
+		setSelectedTaskId,
+	]);
 
 	useEffect(() => {
-		if (!isBoardScopeTaskCreateDialogOpenRef.current) {
-			resetTaskEditorState();
-		}
 		setIsClearTrashDialogOpen(false);
 		resetGitActionState();
 		resetProjectNavigationState();
 		resetTerminalPanelsState();
-	}, [
-		currentProjectId,
-		resetGitActionState,
-		resetProjectNavigationState,
-		resetTaskEditorState,
-		resetTerminalPanelsState,
-	]);
+	}, [currentProjectId, resetGitActionState, resetProjectNavigationState, resetTerminalPanelsState]);
 
 	useEffect(() => {
 		if (selectedCard) {
@@ -1117,6 +1103,11 @@ export default function App(): ReactElement {
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
 	// 单项目范围绑定当前项目；All projects 下不跟随当前项目，绑定有部署组的项目（见 hook）。
 	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
+	const postDeployVerificationEntryNavigation = usePostDeployVerificationEntryNavigation({
+		projects,
+		currentWorkspaceId: projectRuntimeWorkspaceId,
+		selectedBoardOrSingleProjectScope,
+	});
 	const postDeployVerificationForBoardOrSingleProjectScope = usePostDeployVerificationForBoardOrSingleProjectScope({
 		selectedBoardOrSingleProjectScope,
 		currentProjectRuntimeWorkspaceId: projectRuntimeWorkspaceId,
@@ -1125,6 +1116,7 @@ export default function App(): ReactElement {
 		currentProjectDisplayedBoard: displayedBoard,
 		currentProjectTaskSessions: sessions,
 		currentProjectWorkspacePath: workspacePath ?? null,
+		explicitEntryNavigationWorkspaceId: postDeployVerificationEntryNavigation.explicitEntryNavigationWorkspaceId,
 	});
 	const { postDeployVerification } = postDeployVerificationForBoardOrSingleProjectScope;
 	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
@@ -1237,8 +1229,22 @@ export default function App(): ReactElement {
 	const postDeployVerificationPendingCount = postDeployVerification.pendingVerificationTaskCount;
 	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
 	const handleOpenPostDeployVerification = useCallback(() => {
+		postDeployVerificationEntryNavigation.clearNavigation();
 		setPostDeployVerificationCollapsed(false);
-	}, [setPostDeployVerificationCollapsed]);
+	}, [setPostDeployVerificationCollapsed, postDeployVerificationEntryNavigation.clearNavigation]);
+	const handleNavigateToPostDeployVerificationEntry = useCallback(
+		(
+			target: Parameters<typeof postDeployVerificationEntryNavigation.requestNavigation>[0],
+			navigationIntent: AbortSignal,
+		) => {
+			if (postDeployVerificationEntryNavigation.requestNavigation(target, navigationIntent))
+				setPostDeployVerificationCollapsed(false);
+		},
+		[postDeployVerificationEntryNavigation.requestNavigation, setPostDeployVerificationCollapsed],
+	);
+	useLayoutEffect(() => {
+		if (postDeployVerification.collapsed) postDeployVerificationEntryNavigation.clearNavigation();
+	}, [postDeployVerification.collapsed, postDeployVerificationEntryNavigation.clearNavigation]);
 	// PDV 面板条目上半部分是真实任务卡体：面板读浏览器里当前项目的 board 时，数据与动作和主看板同一份（条目上的
 	// 「移入 Done」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
 	const {
@@ -1275,57 +1281,29 @@ export default function App(): ReactElement {
 		moveToTrashLoadingById,
 		moveToReviewLoadingById,
 	});
-	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCallback(
-		(deploymentId: string, taskId: string, selectedChecklistItemIds: string[]) => {
-			const group = postDeployVerification.activeGroup;
-			const task = group?.tasks.find((candidate) => candidate.taskId === taskId);
-			const card = boardShownInPostDeployVerificationPanel
-				? findCardSelection(boardShownInPostDeployVerificationPanel, taskId)
-				: null;
-			const project = projects.find((candidate) => candidate.id === group?.workspaceId);
-			if (isInlineTaskCreateOpen || editingTaskId) {
-				showAppToast({ intent: "warning", message: "请先完成或关闭当前任务编辑，再从核对项创建后续任务。" });
-				return;
-			}
-			if (
-				!runtimeProjectConfig ||
-				!group ||
-				group.deploymentId !== deploymentId ||
-				!task ||
-				!isPostDeployVerificationTaskAwaitingVerification(task) ||
-				!card ||
-				card.column.id === "trash" ||
-				project?.availability.status !== "available"
-			) {
-				showAppToast({ intent: "warning", message: "来源任务或部署状态已变化，请刷新核对清单后重试。" });
-				return;
-			}
-			try {
-				const seed = buildPostDeployVerificationFollowUpTaskCreationDraftSeed({
-					workspaceId: group.workspaceId,
-					projectName: project.name,
-					sourceTaskTitle: card.card.title,
-					sourceTaskCreatedAt: card.card.createdAt,
-					deploymentId,
-					deployedSourceCommit: group.deployedSourceCommit,
-					deployedAtIso: group.deployedAtIso,
-					task,
-					selectedChecklistItemIds,
-				});
-				handleOpenCreateTaskInBoardScope(group.workspaceId);
-				setPostDeployVerificationFollowUpTaskCreationDraftSeed(seed);
-			} catch (error) {
-				showAppToast({ intent: "warning", message: error instanceof Error ? error.message : String(error) });
-			}
-		},
-		[
-			postDeployVerification.activeGroup,
-			boardShownInPostDeployVerificationPanel,
+	const handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems = useCreatePostDeployVerificationFollowUpTask(
+		{
+			activeGroup: postDeployVerification.activeGroup,
+			historyGroups: postDeployVerification.historyGroups,
+			board: boardShownInPostDeployVerificationPanel,
 			projects,
-			isInlineTaskCreateOpen,
-			editingTaskId,
-			runtimeProjectConfig,
-			handleOpenCreateTaskInBoardScope,
+			isTaskEditorOpen: isInlineTaskCreateOpen || editingTaskId !== null,
+			canOpenTaskEditor: runtimeProjectConfig !== null,
+			openTaskEditor: handleOpenCreateTaskInBoardScope,
+			initializeFollowUpDraft: setPostDeployVerificationFollowUpTaskCreationDraftSeed,
+		},
+	);
+	const postDeployVerificationEntryNavigationHost = useMemo(
+		() => ({
+			workspaceIdOwningHydratedBoard: projectIdOwningHydratedBoard ?? projectRuntimeWorkspaceId,
+			beginNavigationIntent: postDeployVerificationEntryNavigation.beginNavigationIntent,
+			navigateToEntry: handleNavigateToPostDeployVerificationEntry,
+		}),
+		[
+			projectIdOwningHydratedBoard,
+			projectRuntimeWorkspaceId,
+			handleNavigateToPostDeployVerificationEntry,
+			postDeployVerificationEntryNavigation.beginNavigationIntent,
 		],
 	);
 
@@ -1416,16 +1394,24 @@ export default function App(): ReactElement {
 	});
 
 	useEffect(() => {
-		if (!pendingTaskStartAfterEditId) {
+		if (!pendingEditedTaskCardAgentSessionStart) {
 			return;
 		}
-		const selection = findCardSelection(board, pendingTaskStartAfterEditId);
+		const selection = findCardSelection(board, pendingEditedTaskCardAgentSessionStart.taskId);
 		if (!selection || selection.column.id !== "backlog") {
 			return;
 		}
-		handleStartTaskFromBoard(pendingTaskStartAfterEditId);
-		setPendingTaskStartAfterEditId(null);
-	}, [board, handleStartTaskFromBoard, pendingTaskStartAfterEditId]);
+		if (
+			pendingEditedTaskCardAgentSessionStart.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+			selection.card.createdAt !== pendingEditedTaskCardAgentSessionStart.expectedTaskIncarnationCreatedAtEpochMs
+		) {
+			setPendingEditedTaskCardAgentSessionStart(null);
+			showAppToast({ intent: "warning", message: "编辑的任务已被删除并重建，未启动同 ID 的新任务。" });
+			return;
+		}
+		handleStartTaskFromBoard(pendingEditedTaskCardAgentSessionStart.taskId);
+		setPendingEditedTaskCardAgentSessionStart(null);
+	}, [board, handleStartTaskFromBoard, pendingEditedTaskCardAgentSessionStart]);
 
 	const detailSession = selectedCard
 		? (resolveMainTaskConversationSessionSummary(selectedCard.card, sessions) ??
@@ -1554,6 +1540,7 @@ export default function App(): ReactElement {
 		[handleNavigateToProjectBoard, setSelectedBoardOrSingleProjectScope],
 	);
 	const otherProjectTaskCardActionHandlers = useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
+		onRequestEditBacklogTaskCardInOtherProject: handleOpenEditTaskCardInOtherProject,
 		onOpenTaskInProject: handleOpenTaskInProject,
 		onNavigateToProjectBoard: navigateToProjectBoardForVerification,
 	});
@@ -1563,6 +1550,7 @@ export default function App(): ReactElement {
 		isFocusViewCrossProjectTaskOpenInTransit,
 		crossProjectTaskOpenInTransitTarget,
 	} = useCrossProjectRecentlyActiveTaskSwitcherHost({
+		defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		otherProjectTaskCardActionHandlers,
 		crossProjectTaskSwitcherSectionsModel,
 		projects,
@@ -1577,6 +1565,8 @@ export default function App(): ReactElement {
 		onRequestPinCurrentProjectTaskToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
+		onOpenRelationsVisualizationForTask: (task) =>
+			expandedForegroundView?.open({ ...task, viewKind: "task_relations" }),
 	});
 	useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
 		host: crossProjectRecentlyActiveTaskSwitcherHost,
@@ -1671,6 +1661,14 @@ export default function App(): ReactElement {
 		},
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
+
+	useEffect(() => {
+		const openAnalysisSettings = () => {
+			setIsSettingsOpen(true);
+		};
+		window.addEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+		return () => window.removeEventListener("kanban-open-task-analysis-settings", openAnalysisSettings);
+	}, []);
 
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
@@ -2162,6 +2160,7 @@ export default function App(): ReactElement {
 							) : null}
 						</div>
 					</div>
+					<TaskProjectAssignmentPreflightHost />
 					<RuntimeSettingsDialog
 						open={isSettingsOpen}
 						workspaceId={settingsWorkspaceId}
@@ -2188,9 +2187,20 @@ export default function App(): ReactElement {
 						onResetAllState={handleResetAllState}
 					/>
 					<TaskEditorDialog
-						open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
+						suspendedTaskEditorTitle={suspendedTaskEditorTitle}
+						onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
+						open={
+							!projects.some(
+								(project) =>
+									project.id === taskEditorSessionWorkspaceId && project.availability.status === "unavailable",
+							) &&
+							(isInlineTaskCreateOpen || editingTaskId !== null)
+						}
 						onOpenChange={handleCreateDialogOpenChange}
 						taskEditorMode={editingTaskId ? "edit" : "create"}
+						creatingTaskName={newTaskName}
+						onCreatingTaskNameChange={setNewTaskName}
+						editorSessionWorkspaceId={taskEditorSessionWorkspaceId}
 						editingTaskName={editTaskName}
 						onEditingTaskNameChange={setEditTaskName}
 						editingTaskId={editingTaskId}
@@ -2217,7 +2227,7 @@ export default function App(): ReactElement {
 						}
 						onCreateStartAndOpen={
 							editingTaskId
-								? undefined
+								? () => editingTaskId
 								: taskCreationTargetOtherProjectWorkspaceId
 									? handleCreateStartAndOpenTaskInOtherProject
 									: handleCreateStartAndOpenTask
@@ -2295,7 +2305,7 @@ export default function App(): ReactElement {
 							editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
 						}
 						agents={runtimeProjectConfig?.agents ?? []}
-						defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+						defaultAgentId={taskEditorDefaultAgentId}
 						defaultProviderId={defaultTaskClineProviderId}
 						defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
 						defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
@@ -2471,6 +2481,8 @@ export default function App(): ReactElement {
 								"no-post-deploy-verification-workspace"
 							}
 							verification={postDeployVerification}
+							entryNavigationRequest={postDeployVerificationEntryNavigation.entryNavigationRequest}
+							onEntryNavigationFinished={postDeployVerificationEntryNavigation.finishNavigation}
 							board={boardShownInPostDeployVerificationPanel}
 							completePostDeployVerificationMoveToDone={
 								completePostDeployVerificationMoveToDoneForPanelBoardSource
@@ -2504,7 +2516,9 @@ export default function App(): ReactElement {
 	return (
 		<ProjectVisualIdentityProvider projects={projects}>
 			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
-				{renderedApplicationView}
+				<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
+					{renderedApplicationView}
+				</PostDeployVerificationEntryNavigationHostProvider>
 			</TaskCommentsDialogProvider>
 		</ProjectVisualIdentityProvider>
 	);

@@ -17,9 +17,12 @@ export class WorkspaceStateConflictError extends Error {
 	}
 }
 
-export async function fetchWorkspaceState(workspaceId: string): Promise<RuntimeWorkspaceStateResponse> {
+export async function fetchWorkspaceState(
+	workspaceId: string,
+	signal?: AbortSignal,
+): Promise<RuntimeWorkspaceStateResponse> {
 	const trpcClient = createWorkspaceTrpcClient(workspaceId);
-	return await trpcClient.workspace.getState.query();
+	return await trpcClient.workspace.getState.query(undefined, { signal });
 }
 
 export async function fetchTaskWorkspaceInfoForWorkspace(

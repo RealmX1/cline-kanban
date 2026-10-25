@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskChatSendRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../core/kanban-cli-invocation-environment-actor-claims";
@@ -14,13 +15,13 @@ import {
 } from "../core/rvf-automatic-closeout-contract";
 import type { rvfCloseoutStageClaimRequestSchema } from "../core/rvf-automatic-closeout-recovery-contract";
 import { resolveSessionFacets } from "../core/session-activity";
+import type { TaskChatDeliveryWriteValidationPhase } from "../core/task-chat-delivery-write-validation";
 import {
 	projectConversationSessionMetadataForMainSessionBinding,
 	resolveMainTaskConversationSessionSummary,
 } from "../core/task-main-conversation-session-binding";
 import { isTaskMainSessionHandoverSuspendingAutomaticActions } from "../core/task-main-session-handover-contract";
 import {
-	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
 } from "../core/task-message-injection-ledger";
@@ -51,6 +52,14 @@ import {
 	readCodexConversationTurns,
 	verifyRestoredCodexConversationPrefix,
 } from "./codex-native-conversation-prefix";
+import {
+	normalRvfCloseoutReconciliationContext,
+	readNormalRvfCloseoutSuppression,
+	reconcileSettledNormalRvfCloseoutMutations,
+	recordIndependentBackupRouteSuppressionObservation,
+	reserveNormalRvfCloseoutTerminalDelivery,
+	settleNormalRvfCloseoutTerminalDelivery,
+} from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { observeRvfReviewStartActiveBranch } from "./observe-rvf-review-start-active-branch";
 import {
@@ -68,6 +77,7 @@ import {
 	getRvfAutomaticCloseoutStorePath,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
+	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
 import {
 	claimRvfCloseoutExecutionStage,
@@ -78,6 +88,7 @@ import {
 } from "./rvf-closeout-execution-stage-recovery";
 import { captureExpectedRvfCloseoutSkillEvidenceOnce } from "./rvf-closeout-expected-skill-snapshot-capture";
 import { advanceRvfCloseoutAutomaticRecovery, remainingRvfCloseoutStages } from "./rvf-closeout-recovery-supervisor";
+import { readRvfCloseoutSkillSnapshots } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
 
 type RvfAutomaticCloseoutTerminalManager = Pick<
@@ -91,7 +102,9 @@ type RvfAutomaticCloseoutTerminalManager = Pick<
 	| "applyAgentNativeConversationSessionIdentity"
 	| "publishRvfAutomaticCloseoutPaused"
 > &
-	Partial<Pick<TerminalSessionManager, "publishRvfAutomaticCloseoutWaiting">>;
+	Partial<
+		Pick<TerminalSessionManager, "publishRvfAutomaticCloseoutWaiting" | "hasPendingProgrammaticTaskChatInputDelivery">
+	>;
 export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	taskCardActionPerTaskCommandSerializer?: TaskCardActionPerTaskCommandSerializer;
 	getManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<RvfAutomaticCloseoutTerminalManager>;
@@ -180,6 +193,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	async function validateCloseoutPromptDelivery(
 		scope: RuntimeTrpcWorkspaceScope,
 		input: Pick<RuntimeTaskChatSendRequest, "taskId" | "source" | "idempotencyKey">,
+		phase?: TaskChatDeliveryWriteValidationPhase,
 	) {
 		if (input.source !== "rvf_automatic_closeout") return;
 		const record = (await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))).find(
@@ -198,6 +212,29 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`)
 		)
 			throw new RvfAutomaticCloseoutPauseError("用户已停止会话或本轮收尾已暂停，不能继续投递。");
+		const newlyReserved =
+			(phase === "before_first_transport_write" || phase === "after_transport_write") &&
+			(await reserveNormalRvfCloseoutTerminalDelivery(
+				getRvfAutomaticCloseoutStorePath(scope.workspaceId),
+				record,
+				input.idempotencyKey ?? "",
+			));
+		const suppression = await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory);
+		if (suppression) {
+			if (phase === "before_first_transport_write" && newlyReserved)
+				await settleNormalRvfCloseoutTerminalDelivery(
+					record.receipt.worktree,
+					input.idempotencyKey ?? "",
+					"not_started",
+				);
+			await recordIndependentBackupRouteSuppressionObservation(
+				getRvfAutomaticCloseoutStorePath(scope.workspaceId),
+				record,
+				suppression.reason,
+				suppression.controlDirectory,
+			);
+			throw new RvfAutomaticCloseoutPauseError("独立备用路线已接管或消费原 run，不能继续投递旧收尾。");
+		}
 	}
 	async function cancelCloseoutPromptDelivery(scope: RuntimeTrpcWorkspaceScope, record: RvfAutomaticCloseoutRecord) {
 		try {
@@ -513,31 +550,107 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		if (!record.handoffPath || computeRvfTextSha256(await readFile(record.handoffPath)) !== record.handoffSha256)
 			throw new RvfAutomaticCloseoutPauseError("投递前 handoff 内容已改变。");
 		await requireNoPendingUserInput(scope, record);
-		const text = buildRvfAutomaticCloseoutPrompt(record);
-		await captureExpectedRvfCloseoutSkillEvidenceOnce({
-			record,
-			summary,
-			text,
-			idempotencyKey: record.promptDeliveryIdempotencyKey,
-			warn: deps.warn,
-		});
-		await validateCloseoutPromptDelivery(scope, deliveryIdentity);
-		await assertOperationStillOwned();
-		const response = await deps.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-			scope,
-			{
-				taskId: record.conversationSessionId,
+		const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId));
+		const readBoundCloseoutDeliveryReceipt = async () => {
+			const matches = (await readTaskMessageInjectionLedger(ledgerPath)).filter(
+				(entry) =>
+					entry.task_id === record.conversationSessionId &&
+					entry.idempotency_key === record.promptDeliveryIdempotencyKey,
+			);
+			const delivery = matches[0];
+			if (
+				matches.length > 1 ||
+				(delivery &&
+					(delivery.source !== "rvf_automatic_closeout" ||
+						(delivery.attempt_id !== undefined && delivery.attempt_id !== record.conversationSessionId) ||
+						delivery.required_native_independent_user_turn_session_id !== undefined))
+			)
+				throw new RvfAutomaticCloseoutPauseError("既有收尾投递回执的来源、会话绑定或唯一性不符。");
+			return delivery;
+		};
+		let enqueueFailureReason: string | null = null;
+		// 同键重放不会补排；已有回执只读其真实状态，避免模板升级改变首次冻结的正文哈希。
+		if (!(await readBoundCloseoutDeliveryReceipt())) {
+			const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(scope.workspaceId);
+			const queuedMatches = (snapshot.entriesByTaskId[record.conversationSessionId] ?? []).filter(
+				(entry) =>
+					entry.dispatchIdempotencyKey === record.promptDeliveryIdempotencyKey ||
+					entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey ===
+						record.promptDeliveryIdempotencyKey,
+			);
+			const frozenQueueEntry = queuedMatches[0];
+			const receiptLink = frozenQueueEntry?.programmaticInjectionLedgerReceiptLink;
+			if (
+				queuedMatches.length > 1 ||
+				(frozenQueueEntry &&
+					(frozenQueueEntry.taskId !== record.conversationSessionId ||
+						frozenQueueEntry.workspaceTaskId !== record.taskId ||
+						receiptLink?.injectionSource !== "rvf_automatic_closeout" ||
+						receiptLink.injectionLedgerIdempotencyKey !== record.promptDeliveryIdempotencyKey ||
+						(receiptLink.injectionLedgerTaskId ?? frozenQueueEntry.taskId) !== record.conversationSessionId ||
+						frozenQueueEntry.requiredNativeIndependentUserTurnSessionId !== undefined))
+			)
+				throw new RvfAutomaticCloseoutPauseError("既有收尾队列的来源、任务或会话绑定不符。");
+			const frozenPromptHasVerifiedBinding =
+				!frozenQueueEntry ||
+				computeRvfTextSha256(frozenQueueEntry.text) ===
+					computeRvfTextSha256(buildRvfAutomaticCloseoutPrompt(record)) ||
+				(await readRvfCloseoutSkillSnapshots(record, [], { persistDiagnostics: false })).some(
+					(snapshot) =>
+						snapshot.promptDeliveryIdempotencyKey === record.promptDeliveryIdempotencyKey &&
+						snapshot.promptSha256 === computeRvfTextSha256(frozenQueueEntry.text) &&
+						(snapshot.nativeSessionId === undefined ||
+							snapshot.nativeSessionId === record.restoredNativeSessionId),
+				);
+			if (
+				!frozenPromptHasVerifiedBinding ||
+				(frozenQueueEntry &&
+					(frozenQueueEntry.deliveryState !== "queued" ||
+						frozenQueueEntry.deliveryAttemptCount !== 0 ||
+						frozenQueueEntry.lastAttemptedAt !== null ||
+						receiptLink?.settledTerminalDeliveryReceipt !== null)) ||
+				(!frozenQueueEntry && record.waitingReasonCode === "closeout_delivery_confirmation_pending")
+			) {
+				await validateCloseoutPromptDelivery(scope, deliveryIdentity);
+				await assertOperationStillOwned();
+				const receipt = receiptLink?.settledTerminalDeliveryReceipt;
+				if (frozenPromptHasVerifiedBinding && receipt?.status === "delivered_and_submit_confirmed") return;
+				if (receipt?.status === "delivery_failed")
+					throw new RvfAutomaticCloseoutPauseError(`收尾投递失败：${receipt.reason}`);
+				// 只观察原 key；账本、不可变正文摘要或队列真实回执恢复后，后续 sweep 自动接续。
+				throw new RvfAutomaticCloseoutWaitError(
+					"closeout_delivery_confirmation_pending",
+					"等待原收尾账本、正文摘要或队列真实回执恢复；可能已发送的正文不会再次投递。",
+				);
+			}
+			// 仅尚未尝试投递的条目可经现有入队入口恢复缺失账本，正文和队列截止沿用首次快照。
+			const text = frozenQueueEntry?.text ?? buildRvfAutomaticCloseoutPrompt(record);
+			await captureExpectedRvfCloseoutSkillEvidenceOnce({
+				record,
+				summary,
 				text,
-				source: "rvf_automatic_closeout",
 				idempotencyKey: record.promptDeliveryIdempotencyKey,
-				promptSha256: computeRvfTextSha256(text),
-				maxWaitForAgentIdleMs: 60_000,
-			},
-			{
-				decodedCliActorClaimsRequestHeader:
-					decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(undefined),
-			},
-		);
+				warn: deps.warn,
+			});
+			await validateCloseoutPromptDelivery(scope, deliveryIdentity);
+			await assertOperationStillOwned();
+			const response = await deps.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				scope,
+				{
+					taskId: record.conversationSessionId,
+					text,
+					source: "rvf_automatic_closeout",
+					idempotencyKey: record.promptDeliveryIdempotencyKey,
+					promptSha256: computeRvfTextSha256(text),
+					maxWaitForAgentIdleMs: frozenQueueEntry ? Math.max(0, frozenQueueEntry.expiresAt - Date.now()) : 60_000,
+				},
+				{
+					decodedCliActorClaimsRequestHeader:
+						decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(undefined),
+				},
+			);
+			if (!response.ok) enqueueFailureReason = response.error ?? "收尾投递失败。";
+		}
 		try {
 			await validateCloseoutPromptDelivery(scope, deliveryIdentity);
 		} catch (error) {
@@ -545,15 +658,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			await cancelCloseoutPromptDelivery(scope, record);
 			throw error;
 		}
-		if (!response.ok) throw new RvfAutomaticCloseoutPauseError(response.error ?? "收尾投递失败。");
-		const ledger = await readTaskMessageInjectionLedger(
-			getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId)),
-		);
-		const delivery = findTaskMessageInjectionRecord(
-			ledger,
-			record.conversationSessionId,
-			record.promptDeliveryIdempotencyKey,
-		);
+		if (enqueueFailureReason !== null) throw new RvfAutomaticCloseoutPauseError(enqueueFailureReason);
+		const delivery = await readBoundCloseoutDeliveryReceipt();
 		if (delivery?.terminal_delivery_status === "delivery_failed")
 			throw new RvfAutomaticCloseoutPauseError(`收尾投递失败：${delivery.terminal_delivery_failure_reason}`);
 		if (delivery?.terminal_delivery_status !== "delivered_and_submit_confirmed")
@@ -594,6 +700,141 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 				),
 		};
 	}
+	async function reconcileUnknownNormalCloseoutOperations(
+		scope: RuntimeTrpcWorkspaceScope,
+		original: RvfAutomaticCloseoutRecord,
+	) {
+		const storePath = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
+		await withRvfAutomaticCloseoutRecordOperationLock(
+			storePath,
+			original.receipt.decision_token,
+			async (assertOwned) => {
+				const record = (await readRvfAutomaticCloseoutRecords(storePath)).find(
+					(entry) =>
+						entry.taskId === original.taskId && entry.receipt.decision_token === original.receipt.decision_token,
+				);
+				if (!record || !record.runId || !record.runDirectory || record.activeCoordinatorOperationClaimId) return;
+				const { manager, summary } = await mainSummary(scope, record.taskId);
+				const identityFingerprint = (target: RuntimeTaskSessionSummary = summary) =>
+					JSON.stringify([
+						target.taskId,
+						target.runtimeSessionIncarnationId,
+						target.startedAt,
+						target.agentNativeConversationSessionIdentity,
+						target.codexNativeSessionControlEndpoint,
+					]);
+				const beforeIdentity = identityFingerprint();
+				const transcript = await stat(summary.agentNativeConversationSessionIdentity?.transcriptPath ?? "").catch(
+					() => null,
+				);
+				const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId));
+				const fingerprint = JSON.stringify([
+					beforeIdentity,
+					resolveSessionFacets(summary),
+					record.runId,
+					record.handoffSha256,
+					transcript ? [transcript.ino, transcript.size, transcript.mtimeMs] : null,
+					computeRvfTextSha256(await readFile(ledgerPath).catch(() => Buffer.alloc(0))),
+				]);
+				await reconcileSettledNormalRvfCloseoutMutations(
+					record.receipt.worktree,
+					normalRvfCloseoutReconciliationContext(storePath, record),
+					fingerprint,
+					async (operationId) => {
+						const delivery = resolveRvfCloseoutActiveDelivery(record);
+						if (
+							summary.taskId !== delivery.conversationSessionId ||
+							summary.agentNativeConversationSessionIdentity?.nativeSessionId !== delivery.nativeSessionId ||
+							!summary.runtimeSessionIncarnationId ||
+							record.stageExecutionClaims?.some((claim) => claim.status === "claimed") ||
+							(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
+						)
+							return null;
+						if (
+							!manager.hasPendingProgrammaticTaskChatInputDelivery ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId)
+						)
+							return null;
+						const cancelled = await deps.runtimeApi.cancelTaskChatDelivery(scope, {
+							taskId: delivery.conversationSessionId,
+							idempotencyKey: delivery.idempotencyKey,
+						});
+						if (!cancelled.ok || !cancelled.cancelResult) return null;
+						const queued = await readWorkspaceQueuedTaskPromptDeliverySnapshot(scope.workspaceId);
+						if (
+							(queued.entriesByTaskId[delivery.conversationSessionId] ?? []).some(
+								(entry) =>
+									entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey ===
+										delivery.idempotencyKey &&
+									["queued", "handed_to_transport"].includes(entry.deliveryState),
+							)
+						)
+							return null;
+						if (
+							!manager.hasPendingProgrammaticTaskChatInputDelivery ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId) ||
+							manager.getAwaitingDispatchedBackgroundWork(delivery.conversationSessionId).parked
+						)
+							return null;
+						const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(delivery.conversationSessionId);
+						if (
+							!occupancy ||
+							occupancy.hasUncommittedInput ||
+							!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition
+						)
+							return null;
+						const native = await readCodexNativeAgentTurnExecution({
+							workspaceId: scope.workspaceId,
+							summary,
+							observedAtMs: Date.now(),
+						});
+						if (
+							native?.executionStatus !== "finished" ||
+							native.threadStatus !== "idle" ||
+							native.canAcceptDirectInput !== true
+						)
+							return null;
+						assertOwned();
+						const latest = await mainSummary(scope, record.taskId);
+						if (
+							identityFingerprint(latest.summary) !== beforeIdentity ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId)
+						)
+							return null;
+						const current = (await readRvfAutomaticCloseoutRecords(storePath)).find(
+							(entry) =>
+								entry.taskId === record.taskId &&
+								entry.receipt.decision_token === record.receipt.decision_token,
+						);
+						if (JSON.stringify(current) !== JSON.stringify(record)) return null;
+						const ledger = await readTaskMessageInjectionLedger(ledgerPath);
+						return {
+							schema: "kanban-normal-closeout-quiescence/v1",
+							operation_id: operationId,
+							observed_at: new Date().toISOString(),
+							workspace_id: record.workspaceId,
+							task_id: record.taskId,
+							decision_token: record.receipt.decision_token,
+							run_id: record.runId as string,
+							run_directory: record.runDirectory as string,
+							conversation_session_id: delivery.conversationSessionId,
+							native_session_id: delivery.nativeSessionId as string,
+							runtime_session_incarnation_id: summary.runtimeSessionIncarnationId as string,
+							delivery_idempotency_key: delivery.idempotencyKey,
+							queued_delivery_absent: true,
+							terminal_delivery_pending: false,
+							native_control_verified_idle: true,
+							native_turns_sha256: computeRvfTextSha256(
+								JSON.stringify([native.nativeTurnId, native.nativeTurnStatus]),
+							),
+							delivery_ledger_sha256: computeRvfTextSha256(JSON.stringify(ledger)),
+							native_execution_observation: native,
+						};
+					},
+				);
+			},
+		);
+	}
 	// 调用方只持 workspace 串行队列；主会话队列与记录锁各进入一次，避免补证入口重入死锁。
 	async function recoverEligiblePausedCloseouts(
 		scope: RuntimeTrpcWorkspaceScope,
@@ -605,6 +846,11 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 				executionRecoveryDependencies(scope, originalRecord.taskId),
 				originalRecord,
 			);
+			try {
+				await reconcileUnknownNormalCloseoutOperations(scope, record);
+			} catch {
+				/* 机器补证缺失时保留 unknown，继续本轮不依赖它的核验。 */
+			}
 			const stopped = executionRecoveryDependencies(scope, record.taskId).isStopped;
 			if (stopped(record)) continue;
 			if (
@@ -863,6 +1109,30 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	};
 	return {
 		validateCloseoutPromptDelivery,
+		settleCloseoutPromptTerminalDelivery: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: Pick<RuntimeTaskChatSendRequest, "taskId" | "source" | "idempotencyKey">,
+			confirmed: boolean,
+		) => {
+			if (input.source !== "rvf_automatic_closeout" || !input.idempotencyKey) return;
+			const record = (
+				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
+			).find(
+				(entry) =>
+					(entry.promptDeliveryIdempotencyKey === input.idempotencyKey &&
+						entry.conversationSessionId === input.taskId) ||
+					entry.promptDeliveryAttempts?.some(
+						(attempt) =>
+							attempt.idempotencyKey === input.idempotencyKey && attempt.conversationSessionId === input.taskId,
+					),
+			);
+			if (record)
+				await settleNormalRvfCloseoutTerminalDelivery(
+					record.receipt.worktree,
+					input.idempotencyKey,
+					confirmed ? "confirmed" : "unknown",
+				);
+		},
 		pauseForExplicitStop: async (workspaceId: string, taskId: string) => {
 			explicitlyStoppedTasks.set(`${workspaceId}:${taskId}`, ++explicitStopSequence);
 			let pendingRecords: RvfAutomaticCloseoutRecord[] = [];

@@ -8,7 +8,7 @@ export const QUEUE_BROWSER_WORKSPACE_ID = "queue-metadata-browser-project";
 export const QUEUE_BROWSER_BOARD_TASK_ID = "owning-board-task";
 export const QUEUE_BROWSER_CONVERSATION_SESSION_ID = "independent-conversation-session";
 export const QUEUE_BROWSER_ENQUEUED_AT = Date.parse("2026-10-24T12:00:00Z");
-const QUEUE_BROWSER_PROMPT_TEXT = "浏览器隔离测试 Prompt，不应出现在调试引用中。";
+export const QUEUE_BROWSER_PROMPT_TEXT = `  浏览器隔离测试 Prompt，不应出现在调试引用中。${"完整正文需要保留。".repeat(40)}\n第二行正文\n  `;
 
 function createProjection(
 	queueEntryId: string,
@@ -18,7 +18,7 @@ function createProjection(
 		queueEntryId,
 		taskId: QUEUE_BROWSER_CONVERSATION_SESSION_ID,
 		deliveryState: "queued",
-		textPreview: QUEUE_BROWSER_PROMPT_TEXT,
+		textPreview: `${QUEUE_BROWSER_PROMPT_TEXT.trim().slice(0, 200)}…`,
 		textLength: QUEUE_BROWSER_PROMPT_TEXT.length,
 		deliverTogetherWithNextQueuedEntry: false,
 		dispatchBlockReason: "agent_still_generating",
@@ -38,6 +38,7 @@ function createProjection(
 export const queueBrowserProjections = [
 	createProjection("pending-browser-entry"),
 	createProjection("automated-browser-entry", {
+		enqueuedAt: QUEUE_BROWSER_ENQUEUED_AT - 60_000,
 		deliveryAttemptCount: 2,
 		lastAttemptedAt: QUEUE_BROWSER_ENQUEUED_AT + 60_000,
 		programmaticInjectionSource: "rvf_automatic_closeout",
@@ -77,10 +78,10 @@ export const immediateDeliveryBrowserProjections = [
 ];
 
 export function createQueueBrowserReadResponse(): RuntimeTaskPromptDeliveryQueueResponse {
-	const entries = queueBrowserProjections.map(
+	const entries = [...queueBrowserProjections, ...immediateDeliveryBrowserProjections].map(
 		(projection): QueuedTaskPromptDeliveryEntry => ({
 			...projection,
-			text: projection.textPreview,
+			text: QUEUE_BROWSER_PROMPT_TEXT,
 			lastAttemptedAt: projection.lastAttemptedAt ?? null,
 			workspaceTaskId: QUEUE_BROWSER_BOARD_TASK_ID,
 			sourcePromptLibraryEntryTextSha256: null,

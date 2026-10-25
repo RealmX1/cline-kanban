@@ -39,6 +39,7 @@ import {
 	type RuntimeShortcutIconOption,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
+import { TaskAnalysisExecutorSettingsSection } from "@/components/task-analysis-executor-settings-section";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -48,6 +49,7 @@ import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-act
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
+import { useTaskAnalysisExecutorSettingsDraft } from "@/hooks/use-task-analysis-executor-settings-draft";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
@@ -128,6 +130,7 @@ type SettingsNavId =
 	| "cline"
 	| "git-prompts"
 	| "notifications"
+	| "task-analysis"
 	| "agent-reliability"
 	| "appearance"
 	| "project";
@@ -142,6 +145,7 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	{ id: "cline", label: "Cline", icon: <Bot size={16} />, clineOnly: true },
 	{ id: "git-prompts", label: "Git Prompts", icon: <GitCommit size={16} /> },
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
+	{ id: "task-analysis", label: "AI 任务分析", icon: <Bot size={16} /> },
 	{ id: "agent-reliability", label: "可靠性", icon: <PlugZap size={16} /> },
 	{ id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
 	{ id: "project", label: "Project", icon: <FolderOpen size={16} /> },
@@ -438,6 +442,7 @@ export function RuntimeSettingsDialog({
 	const isScrollingProgrammatically = useRef(false);
 	const [activeSection, setActiveSection] = useState<SettingsNavId>("general");
 	const notificationSettings = useNotificationIntelligenceSettingsDraft(open);
+	const taskAnalysisSettings = useTaskAnalysisExecutorSettingsDraft(open);
 	const [isSavingAllSettings, setIsSavingAllSettings] = useState(false);
 	const controlsDisabled = isLoading || isSaving || isSavingAllSettings || config === null;
 	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
@@ -559,7 +564,7 @@ export function RuntimeSettingsDialog({
 		if (postDeployVerificationForceCompleteEnabled !== initialPostDeployVerificationForceCompleteEnabled) {
 			return true;
 		}
-		if (notificationSettings.hasUnsavedChanges) return true;
+		if (notificationSettings.hasUnsavedChanges || taskAnalysisSettings.hasUnsavedChanges) return true;
 		if (clineSettings.hasUnsavedChanges) {
 			return true;
 		}
@@ -590,6 +595,7 @@ export function RuntimeSettingsDialog({
 		clineMcpSettings.hasUnsavedChanges,
 		clineSettings.hasUnsavedChanges,
 		notificationSettings.hasUnsavedChanges,
+		taskAnalysisSettings.hasUnsavedChanges,
 		commitPromptTemplate,
 		config,
 		draftThemeId,
@@ -821,6 +827,7 @@ export function RuntimeSettingsDialog({
 			}
 		}
 		await notificationSettings.save();
+		await taskAnalysisSettings.save();
 		const saved = await save({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
@@ -1170,6 +1177,8 @@ export function RuntimeSettingsDialog({
 						</div>
 					</div>
 
+					<div data-settings-section="task-analysis" />
+					<TaskAnalysisExecutorSettingsSection draft={taskAnalysisSettings} disabled={controlsDisabled} />
 					<NotificationIntelligenceSettingsSection draft={notificationSettings} disabled={controlsDisabled} />
 
 					{/* ---- 终端 agent 可靠性 ---- */}

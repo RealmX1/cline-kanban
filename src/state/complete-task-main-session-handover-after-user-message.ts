@@ -65,6 +65,8 @@ export async function completeTaskMainSessionHandoverAfterUserMessage(input: {
 										taskMainSessionHandover: {
 											...currentHandover,
 											status: "completed" as const,
+											automaticRecovery: undefined,
+											errorMessage: null,
 											updatedAt: Date.now(),
 										},
 									}

@@ -19,6 +19,17 @@ const ALL_REGISTERED_PROJECTS_AVAILABLE = new Set([
 ]);
 
 describe("resolvePostDeployVerificationWorkspaceIdShownForBoardOrSingleProjectScope", () => {
+	it("显式定位可暂时绑定来源项目，不改变当前单项目范围", () => {
+		expect(
+			resolvePostDeployVerificationWorkspaceIdShownForBoardOrSingleProjectScope({
+				selectedBoardOrSingleProjectScope: "single_project_scope",
+				currentProjectRuntimeWorkspaceId: "project-without-deploys",
+				workspacesHavingPostDeployVerificationDeploymentGroups: null,
+				availableRegisteredProjectIds: ALL_REGISTERED_PROJECTS_AVAILABLE,
+				explicitEntryNavigationWorkspaceId: "cline-kanban",
+			}),
+		).toBe("cline-kanban");
+	});
 	it("单项目范围：恒为当前项目（没有部署记录也一样，与改动前一致）", () => {
 		expect(
 			resolvePostDeployVerificationWorkspaceIdShownForBoardOrSingleProjectScope({
@@ -103,6 +114,35 @@ describe("resolvePostDeployVerificationWorkspaceIdShownForBoardOrSingleProjectSc
 });
 
 describe("resolvePostDeployVerificationPanelTaskCardBoardSource", () => {
+	it("显式定位时，即使项目已切换，也不能读尚未完成水合的旧项目看板", () => {
+		expect(
+			resolvePostDeployVerificationPanelTaskCardBoardSource({
+				selectedBoardOrSingleProjectScope: "single_project_scope",
+				postDeployVerificationWorkspaceId: "cline-kanban",
+				currentProjectRuntimeWorkspaceId: "cline-kanban",
+				projectIdOwningHydratedBoard: "other-project",
+				explicitEntryNavigationWorkspaceId: "cline-kanban",
+			}),
+		).toEqual({
+			postDeployVerificationPanelTaskCardBoardSourceKind:
+				"runtime_board_snapshot_of_workspace_not_hydrated_in_browser",
+			workspaceIdOwningRuntimeBoardSnapshot: "cline-kanban",
+		});
+	});
+	it("单项目范围中显式定位其他项目时读其 runtime 快照，避免同号卡串项目", () => {
+		expect(
+			resolvePostDeployVerificationPanelTaskCardBoardSource({
+				selectedBoardOrSingleProjectScope: "single_project_scope",
+				postDeployVerificationWorkspaceId: "cline-kanban",
+				currentProjectRuntimeWorkspaceId: "other-project",
+				projectIdOwningHydratedBoard: "other-project",
+			}),
+		).toEqual({
+			postDeployVerificationPanelTaskCardBoardSourceKind:
+				"runtime_board_snapshot_of_workspace_not_hydrated_in_browser",
+			workspaceIdOwningRuntimeBoardSnapshot: "cline-kanban",
+		});
+	});
 	it("没有 PDV workspace：no_post_deploy_verification_workspace", () => {
 		expect(
 			resolvePostDeployVerificationPanelTaskCardBoardSource({

@@ -478,6 +478,7 @@ export function useBoardInteractions({
 				const result = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId: currentProjectId,
 					taskId: task.id,
+					expectedTaskIncarnationCreatedAtEpochMs: task.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(task.id),
 					currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
 					...(options?.insertAtIndexWithinInProgressBoardColumn !== undefined
@@ -504,7 +505,10 @@ export function useBoardInteractions({
 						timeout: 7000,
 					});
 				}
-				if (latestBoardInteractionStateRef.current.selectedTaskId === task.id) {
+				if (
+					(response.taskCardSnapshotAfterAction.workspaceId ?? currentProjectId) === currentProjectId &&
+					latestBoardInteractionStateRef.current.selectedTaskId === task.id
+				) {
 					const infoAfterStart = await fetchTaskWorkspaceInfo(task);
 					if (infoAfterStart) {
 						setTaskWorkspaceInfo(infoAfterStart);

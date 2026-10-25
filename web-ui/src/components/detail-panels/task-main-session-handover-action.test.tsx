@@ -92,8 +92,81 @@ describe("主会话交接入口", () => {
 		await act(async () => button(text).click());
 	}
 
+	it("任意受支持来源可以选择新目标 Agent，并使用通用请求", async () => {
+		requests.prepare.mockResolvedValueOnce({
+			...preview,
+			targetAgentCapabilities: [
+				{
+					agentId: "codex",
+					label: "OpenAI Codex",
+					installationStatus: "installed",
+					completeNativeConversationForkAvailability: {
+						available: false,
+						unavailableReason: "跨 Agent 请使用交接材料",
+					},
+				},
+				{
+					agentId: "claude",
+					label: "Claude Code",
+					installationStatus: "installed",
+					completeNativeConversationForkAvailability: {
+						available: false,
+						unavailableReason: "跨 Agent 请使用交接材料",
+					},
+				},
+			],
+		});
+		await act(async () =>
+			root.render(
+				<TaskMainSessionHandoverAction
+					workspaceId="workspace"
+					taskCard={card}
+					mainSessionSummary={{ ...source, agentId: "kimi" }}
+				/>,
+			),
+		);
+		await click("交接主会话");
+		const select = document.querySelector('select[aria-label="目标 Agent"]') as HTMLSelectElement;
+		await act(async () => {
+			select.value = "claude";
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await click("确认交接");
+		expect(requests.request.mock.calls[0]?.[1].destination).toEqual({ kind: "new_agent_session", agentId: "claude" });
+	});
+
+	it.each(["claude", "omp"] as const)("%s 缺少转录路径时禁用复刻并保留全新上下文", async (agentId) => {
+		const unavailableReason = "等待可靠的原生转录路径；全新上下文仍可使用。";
+		requests.prepare.mockResolvedValueOnce({
+			...preview,
+			targetAgentCapabilities: [
+				{
+					agentId,
+					label: agentId,
+					installationStatus: "installed",
+					completeNativeConversationForkAvailability: { available: false, unavailableReason },
+				},
+			],
+		});
+		await click("交接主会话");
+		const targetAgent = document.querySelector('select[aria-label="目标 Agent"]') as HTMLSelectElement;
+		await act(async () => {
+			targetAgent.value = agentId;
+			targetAgent.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		const contextMode = document.querySelector('select[aria-label="上下文方式"]') as HTMLSelectElement;
+		expect(contextMode.value).toBe("fresh_context_with_handover_material");
+		expect(
+			contextMode.querySelector<HTMLOptionElement>('option[value="fork_complete_native_conversation"]')?.disabled,
+		).toBe(true);
+		expect(document.body.textContent).toContain(unavailableReason);
+		expect(button("确认交接").disabled).toBe(false);
+		await click("确认交接");
+		expect(requests.request.mock.calls[0]?.[1].destination).toEqual({ kind: "new_agent_session", agentId });
+	});
+
 	it("默认新建，材料缺失可见，失败保留补充内容且沿用幂等请求 ID", async () => {
-		await click("交接给 Codex");
+		await click("交接主会话");
 		expect((document.querySelector('select[aria-label="接收会话"]') as HTMLSelectElement).value).toBe(
 			"new_codex_session",
 		);
@@ -117,21 +190,21 @@ describe("主会话交接入口", () => {
 
 	it("生成中先给两种选择，暂不交接不发请求，确认等待才持久排定", async () => {
 		requests.prepare.mockResolvedValueOnce({ ...preview, busyTaskConversationSessionIds: ["task-1"] });
-		await click("交接给 Codex");
+		await click("交接主会话");
 		await click("确认交接");
 		expect(button("暂不交接")).toBeTruthy();
 		expect(button("等待两者都停下后自动交接")).toBeTruthy();
 		expect(requests.request).not.toHaveBeenCalled();
 		await click("暂不交接");
 		requests.prepare.mockResolvedValueOnce({ ...preview, busyTaskConversationSessionIds: ["task-1"] });
-		await click("交接给 Codex");
+		await click("交接主会话");
 		await click("确认交接");
 		await click("等待两者都停下后自动交接");
 		expect(requests.request).toHaveBeenCalledTimes(1);
 	});
 
 	it("选择已有 peer 时投递精确 session ID", async () => {
-		await click("交接给 Codex");
+		await click("交接主会话");
 		const select = document.querySelector('select[aria-label="接收会话"]') as HTMLSelectElement;
 		await act(async () => {
 			select.value = "codex-peer";
@@ -141,6 +214,34 @@ describe("主会话交接入口", () => {
 		expect(requests.request.mock.calls[0]?.[1].destination).toEqual({
 			kind: "existing_codex_session",
 			taskConversationSessionId: "codex-peer",
+		});
+	});
+
+	it("Codex 主会话可选择完整原生复刻，默认仍为全新上下文", async () => {
+		requests.prepare.mockResolvedValueOnce({
+			...preview,
+			completeNativeConversationForkAvailability: { available: true, unavailableReason: null },
+		});
+		await act(async () =>
+			root.render(
+				<TaskMainSessionHandoverAction
+					workspaceId="workspace"
+					taskCard={card}
+					mainSessionSummary={{ ...source, agentId: "codex" }}
+				/>,
+			),
+		);
+		await click("交接主会话");
+		const select = document.querySelector('select[aria-label="上下文方式"]') as HTMLSelectElement;
+		expect(select.value).toBe("fresh_context_with_handover_material");
+		await act(async () => {
+			select.value = "fork_complete_native_conversation";
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await click("确认交接");
+		expect(requests.request.mock.calls[0]?.[1].destination).toEqual({
+			kind: "new_codex_session",
+			contextInheritanceMode: "fork_complete_native_conversation",
 		});
 	});
 });
