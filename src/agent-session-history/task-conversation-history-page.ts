@@ -18,8 +18,10 @@ import { resolveSessionFacets } from "../core/session-activity";
 import { doesConversationSessionBelongToTask } from "../core/task-main-conversation-session-binding";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
+import { parseAcceptedKimiMainUserMessage } from "./kimi-native-conversation-activity-reader";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 import { extractSubmittedUserPromptFromTranscriptRecord } from "./submitted-user-prompt-transcript-record-parser";
+import { resolveVerifiedAdditionalNativeConversationTranscriptPath } from "./verified-additional-native-conversation-transcript-location";
 
 const HISTORY_MESSAGES_PER_PAGE = 100;
 const TRANSCRIPT_READ_CHUNK_BYTES = 64 * 1024;
@@ -83,8 +85,10 @@ function projectNativeHistoryRecord(
 	byteOffset: number,
 ): RuntimeTaskChatMessage[] {
 	if (record.isSidechain === true) return [];
+	if (agentId === "kimi" && (record.type !== "context.append_message" || record.agentId !== "main")) return [];
 	const payload = readTranscriptRecord(record.payload) ?? record;
-	const message = readTranscriptRecord(payload.message) ?? payload;
+	const rawMessage = readTranscriptRecord(payload.message) ?? payload;
+	const message = agentId === "cursor" ? { ...rawMessage, role: payload.role } : rawMessage;
 	const rawTimestamp = record.timestamp ?? message.timestamp;
 	const timestamp = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(String(rawTimestamp ?? ""));
 	const messages: RuntimeTaskChatMessage[] = [];
@@ -103,8 +107,15 @@ function projectNativeHistoryRecord(
 			meta: { toolName, toolCallId },
 		});
 	};
-	const user = extractSubmittedUserPromptFromTranscriptRecord(agentId, record);
-	if (user) append("user", user.text);
+	const user =
+		agentId === "kimi"
+			? parseAcceptedKimiMainUserMessage(record, conversationSessionId)?.submittedPromptText
+			: extractSubmittedUserPromptFromTranscriptRecord(
+					agentId,
+					agentId === "cursor" ? { ...record, message } : record,
+				)?.text;
+	if (user) append("user", user);
+	else if (agentId === "kimi" && message.role === "user") return [];
 	else if (
 		agentId === "claude" &&
 		message.role === "user" &&
@@ -200,6 +211,8 @@ async function assertNativeTranscriptIdentity(
 			? { ...originalIdentity, nativeSessionId: expectedNativeSessionId }
 			: originalIdentity;
 	if (!identity) throw new Error("缺少可信原生会话身份，无法读取历史。");
+	// 这两个来源已经逐次通过精确 chat/state/index 归属和原生导出路径核验；导出正文自身没有 session header。
+	if (identity.sourceAgentId === "cursor" || identity.sourceAgentId === "kimi") return null;
 	let prefix = Buffer.alloc(0);
 	let position = 0;
 	while (position < MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES) {
@@ -386,6 +399,18 @@ export async function loadTaskConversationHistoryPage(
 	}
 	try {
 		summary = await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
+		if (summary.agentId === "cursor" || summary.agentId === "kimi") {
+			const transcriptPath = await resolveVerifiedAdditionalNativeConversationTranscriptPath(summary);
+			if (!transcriptPath || !summary.agentNativeConversationSessionIdentity)
+				return buildUnavailableTaskConversationHistoryPage("等待此原生身份及工作目录的可信导出记录。");
+			summary = {
+				...summary,
+				agentNativeConversationSessionIdentity: {
+					...summary.agentNativeConversationSessionIdentity,
+					transcriptPath,
+				},
+			};
+		}
 	} catch (error) {
 		return buildUnavailableTaskConversationHistoryPage(
 			error instanceof Error ? error.message : "原生历史绑定暂不可核实。",
@@ -395,7 +420,7 @@ export async function loadTaskConversationHistoryPage(
 	if (
 		!identity?.transcriptPath ||
 		identity.sourceAgentId !== summary.agentId ||
-		!["claude", "codex", "omp"].includes(identity.sourceAgentId)
+		!["claude", "codex", "omp", "cursor", "kimi"].includes(identity.sourceAgentId)
 	) {
 		if (input.retainedMessages?.length) {
 			try {

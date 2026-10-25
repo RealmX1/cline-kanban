@@ -288,12 +288,13 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		[host.projects],
 	);
 	// 其他项目行的 git 元数据（ahead/behind、未提交改动）只在呈现面挂载且页面可见时轮询；当前项目的行读推流 store。
-	const entriesShownInSections = useMemo(
-		() => collectEntriesShownInCrossProjectTaskSwitcherSections(sections),
-		[sections],
+	const entriesNeedingWorktreeGitMetadataPolling = useMemo(
+		() =>
+			collectEntriesShownInCrossProjectTaskSwitcherSections(sectionsModel.sectionsBeforeRecentWorktreeChangesFilter),
+		[sectionsModel.sectionsBeforeRecentWorktreeChangesFilter],
 	);
 	useCrossProjectTaskWorktreeGitMetadataPolling({
-		entriesInProjects: entriesShownInSections,
+		entriesInProjects: entriesNeedingWorktreeGitMetadataPolling,
 		currentProjectId: host.currentProjectId,
 	});
 
