@@ -38,20 +38,34 @@ export async function assertCodexNativeConversationLoadedByCurrentHost(
 	if (!loaded) throw new Error("恢复会话并未由当前 TUI 宿主持有。");
 }
 
-export async function readCodexConversationTurns(port: CodexAppServerRequestPort, threadId: string) {
+export async function readCodexConversationTurnHistoryPage(
+	port: CodexAppServerRequestPort,
+	threadId: string,
+	cursor: string | null,
+) {
+	return turnPageSchema.parse(
+		await port.request("thread/turns/list", {
+			threadId,
+			cursor,
+			limit: 100,
+			sortDirection: "asc",
+			itemsView: "full",
+		}),
+	);
+}
+
+export async function readCodexConversationTurns(
+	port: CodexAppServerRequestPort,
+	threadId: string,
+	options?: { onNativeTurnHistoryPageReadFailure?: (cursor: string | null) => Promise<void> },
+) {
 	const turns: CodexNativeConversationTurn[] = [];
 	const seenCursors = new Set<string>();
 	let cursor: string | null = null;
 	do {
-		let rawPage: unknown;
+		let page: z.infer<typeof turnPageSchema>;
 		try {
-			rawPage = await port.request("thread/turns/list", {
-				threadId,
-				cursor,
-				limit: 100,
-				sortDirection: "asc",
-				itemsView: "full",
-			});
+			page = await readCodexConversationTurnHistoryPage(port, threadId, cursor);
 		} catch (error) {
 			// 0.164 的 legacy 历史明确不支持分页；只在第一页的这一能力拒绝上走原生完整读取。
 			// 网络失败、分页中断及其它协议错误仍须原样失败，不能把未知当成完整历史。
@@ -60,8 +74,10 @@ export async function readCodexConversationTurns(port: CodexAppServerRequestPort
 				turns.length ||
 				!(error instanceof Error) ||
 				!error.message.includes("list_turns is not supported yet")
-			)
+			) {
+				await options?.onNativeTurnHistoryPageReadFailure?.(cursor);
 				throw error;
+			}
 			const legacyTurns = z
 				.object({ thread: z.object({ turns: z.array(nativeTurnSchema) }) })
 				.parse(await port.request("thread/read", { threadId, includeTurns: true })).thread.turns;
@@ -69,7 +85,6 @@ export async function readCodexConversationTurns(port: CodexAppServerRequestPort
 				throw new Error("Codex 完整读取重复返回回合。");
 			return legacyTurns;
 		}
-		const page = turnPageSchema.parse(rawPage);
 		turns.push(...page.data);
 		cursor = page.nextCursor;
 		if (cursor !== null) {
@@ -85,6 +100,8 @@ export async function forkCodexConversationBeforeReviewTurn(
 	port: CodexAppServerRequestPort,
 	input: { sourceThreadId: string; boundaryTurnId: string; lastPreReviewTurnId: string; workingDirectory: string },
 	onForkCreated?: (identity: RestoredCodexConversationIdentity) => Promise<void> | void,
+	beforeForkRequest?: () => Promise<void>,
+	assertImmediatelyBeforeForkRequest?: () => void,
 ): Promise<RestoredCodexConversationIdentity> {
 	const original = await readCodexConversationTurns(port, input.sourceThreadId);
 	const boundaryIndex = original.findIndex((turn) => turn.id === input.boundaryTurnId);
@@ -92,6 +109,8 @@ export async function forkCodexConversationBeforeReviewTurn(
 	if (boundaryIndex <= 0 || prefix.at(-1)?.id !== input.lastPreReviewTurnId || prefix.at(-1)?.status !== "completed") {
 		throw new Error("开审分界与此前完整回合不一致，未创建恢复分支。");
 	}
+	await beforeForkRequest?.();
+	assertImmediatelyBeforeForkRequest?.();
 	const forked = forkResponseSchema.parse(
 		await port.request("thread/fork", {
 			threadId: input.sourceThreadId,
