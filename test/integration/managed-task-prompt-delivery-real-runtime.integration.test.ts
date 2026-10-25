@@ -204,8 +204,10 @@ describe(
 				page.on("pageerror", (error) => pageErrors.push(error.message));
 				await page.goto(`${origin}/${workspaceId}?task=${taskId}`);
 				const onboarding = page.getByRole("dialog").filter({ hasText: "Get started" });
-				if (await onboarding.isVisible())
+				// 首次引导可在页面加载后才出现，交互前持续处理，避免一次 isVisible 探测漏掉模态。
+				await page.addLocatorHandler(onboarding, async () => {
 					await onboarding.getByRole("button", { name: "Close", exact: true }).click();
+				});
 				await page.getByRole("tab", { name: /^Queue/ }).click();
 				await expect
 					.poll(() => page.locator("[data-queued-prompt-entry-id]").count(), { timeout: 15000 })
@@ -254,6 +256,21 @@ describe(
 						2,
 					),
 				);
+			} catch (error) {
+				// 隔离实例失败时持久保存页面现场，避免关闭进程后丢失可自动诊断的证据。
+				const failedPage = browser
+					.contexts()
+					.flatMap((context) => context.pages())
+					.at(-1);
+				if (failedPage) {
+					await failedPage.screenshot({
+						path: join(evidenceDirectory, "failed-runtime-page.png"),
+						fullPage: true,
+					});
+					writeFileSync(join(evidenceDirectory, "failed-runtime-page.html"), await failedPage.content());
+					writeFileSync(join(evidenceDirectory, "failed-runtime-page-url.txt"), failedPage.url());
+				}
+				throw error;
 			} finally {
 				await browser.close();
 				runtime.kill("SIGINT");

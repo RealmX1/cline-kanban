@@ -124,14 +124,14 @@ import {
 	NativeIndependentUserTurnSubmissionRecoverySuspended,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import {
+	type RvfCloseoutCompactionConfirmationPersistence,
+	resolveRvfCloseoutCompactionConfirmationPersistence,
+} from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import {
 	beginManagedTaskPromptDelivery,
 	type ManagedTaskPromptDeliveryHandle,
 	settleManagedTaskPromptDeliveryWithoutBlocking,
 } from "../state/managed-task-prompt-delivery-coordinator";
-import {
-	type RvfCloseoutCompactionConfirmationPersistence,
-	resolveRvfCloseoutCompactionConfirmationPersistence,
-} from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import {
 	createAgentOutputSubstanceMemory,
@@ -632,12 +632,13 @@ function settleOwnedProgrammaticDeliveryReceipt(
 	status: TerminalDeliveryStatus,
 	reason: TerminalDeliveryFailureReason | null,
 	codexNativePromptDeliveryEvidence?: CodexNativePromptDeliveryEvidence,
+	failureNote?: string,
 ): void {
 	if (!receipt) return;
 	if (active.programmaticDeliveryReceipt === receipt) active.programmaticDeliveryReceipt = null;
 	if (automaticPasteSubmissionReceiptByActiveProcess.get(active) === receipt)
 		automaticPasteSubmissionReceiptByActiveProcess.delete(active);
-	settleProgrammaticDeliveryReceipt(receipt, status, reason, codexNativePromptDeliveryEvidence);
+	settleProgrammaticDeliveryReceipt(receipt, status, reason, codexNativePromptDeliveryEvidence, failureNote);
 }
 
 // 会话侧统一注销入口：把 active 上的登记结掉并清空槽位。
@@ -3120,7 +3121,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		if (receiptBeforeSubmit?.phase === "awaiting_submit_confirmation") {
 			const context = this.compactionConfirmationPersistenceByActiveProcess.get(active);
-			if (context && receiptBeforeSubmit === active.programmaticDeliveryReceipt && !active.nativeCompactionAwareConfirmation) {
+			if (
+				context &&
+				receiptBeforeSubmit === active.programmaticDeliveryReceipt &&
+				!active.nativeCompactionAwareConfirmation
+			) {
 				const cursor = receiptBeforeSubmit.nativeConversationActivityCursorImmediatelyBeforeSubmit;
 				await this.mutateCompactionConfirmationSnapshot(taskId, active, () =>
 					createCodexRvfCloseoutCompactionAwareConfirmation({
@@ -3255,7 +3260,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 					);
 				return;
 			}
-			if (this.entries.get(taskId)?.active !== active || resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) !== confirmationReceipt)
+			if (
+				this.entries.get(taskId)?.active !== active ||
+				resolveTerminalSubmissionProgrammaticDeliveryReceipt(active) !== confirmationReceipt
+			)
 				return;
 			convergenceDeadlineAt = resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(compactionConfirmation);
 			if (

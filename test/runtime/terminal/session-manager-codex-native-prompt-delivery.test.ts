@@ -190,6 +190,49 @@ describe("session manager 的 Codex 原生投递", () => {
 		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(false);
 	});
 
+	it("自动首发不使用另一条待发 RVF 消息的压缩确认持久化", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { active, write } = installSession(manager, "");
+		Object.assign(active, { deferredStartupPromptText: "本次自动首发" });
+		const persistSnapshot = vi.fn(async () => true);
+		const validateStillAuthorized = vi.fn(async () => false);
+		manager.submitTaskChatInputWhenReady("conversation-1", "原来待发的 RVF 消息", {
+			idempotencyKey: "pending-rvf-closeout",
+			onDeliveryOutcome: vi.fn(),
+			rvfCloseoutCompactionConfirmationPersistence: {
+				binding: {
+					workspaceId: "workspace-1",
+					taskId: "card",
+					conversationSessionId: "conversation-1",
+					decisionToken: "token",
+					runId: "run",
+					handoffSha256: "a".repeat(64),
+					idempotencyKey: "pending-rvf-closeout",
+					promptSha256: "b".repeat(64),
+					nativeSessionId: "thread-1",
+					runtimeSessionIncarnationId: INCARNATION,
+					controlHostSocketPath: "/isolated/control.sock",
+				},
+				promptText: "原来待发的 RVF 消息",
+				validateStillAuthorized,
+				persistSnapshot,
+			},
+		});
+		const pendingReceipt = active.programmaticDeliveryReceipt;
+		managedRecording.begin.mockResolvedValue({ handle: { deliveryId: "automatic-startup", settle: vi.fn() } });
+		await (
+			manager as unknown as {
+				writePasteSubmissionWithConfirm(taskId: string, target: unknown, text: string): Promise<boolean>;
+			}
+		).writePasteSubmissionWithConfirm("conversation-1", active, "本次自动首发");
+		await vi.advanceTimersByTimeAsync(4100);
+		expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(1);
+		expect(active.programmaticDeliveryReceipt).toBe(pendingReceipt);
+		expect(persistSnapshot).not.toHaveBeenCalled();
+		expect(validateStillAuthorized).not.toHaveBeenCalled();
+		expect(active.nativeCompactionAwareConfirmation).toBeNull();
+	});
+
 	it.each([
 		{ startup: true, confirmsAutomaticInput: true },
 		{ startup: false, confirmsAutomaticInput: true },

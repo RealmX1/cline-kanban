@@ -257,12 +257,12 @@ export async function beginManagedTaskPromptDelivery(input: ManagedTaskPromptDel
 // 回执先反馈业务调用方，存储异常独立记录；不能把已发送的消息反报成失败诱导重发。
 export function settleManagedTaskPromptDeliveryWithoutBlocking(
 	handle: ManagedTaskPromptDeliveryHandle,
-	receipt: InjectionLedgerTerminalDeliveryReceipt,
+	receipt: InjectionLedgerTerminalDeliveryReceipt & { failureNote?: string },
 ): void {
 	void (async () => {
 		for (let attempt = 0; attempt < 3; attempt++) {
 			try {
-				await handle.settle(receipt);
+				await handle.settle(receipt, receipt.failureNote);
 				return;
 			} catch (error) {
 				logAgentSessionRetentionWarning(

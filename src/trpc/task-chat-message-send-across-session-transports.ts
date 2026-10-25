@@ -25,16 +25,16 @@ import {
 	recordTaskMessageTerminalDeliveryOutcome,
 } from "../core/task-message-injection-ledger";
 import {
-	beginManagedTaskPromptDelivery,
-	buildManagedTaskPromptDeliveryOrigin,
-	settleManagedTaskPromptDeliveryWithoutBlocking,
-} from "../state/managed-task-prompt-delivery-coordinator";
-import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
 	NativeIndependentUserTurnSubmissionRecoverySuspended,
 } from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
+import {
+	beginManagedTaskPromptDelivery,
+	buildManagedTaskPromptDeliveryOrigin,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
+} from "../state/managed-task-prompt-delivery-coordinator";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import type { TaskChatInputDeliveryOutcomeObserver, TerminalSessionManager } from "../terminal/session-manager";
 import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../terminal/stash-task-terminal-input-box-into-prompt-library";

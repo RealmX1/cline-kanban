@@ -16,6 +16,7 @@ import {
 	beginManagedTaskPromptDelivery,
 	observeManagedTaskPromptDeliveryChanges,
 	reconcileManagedTaskPromptDeliveryReceipts,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
 } from "../../../src/state/managed-task-prompt-delivery-coordinator";
 import {
 	claimNextQueuedTaskPromptDeliveryRunForDispatch,
@@ -63,6 +64,26 @@ afterEach(async () => {
 });
 
 describe("所有主动投递使用统一记录", () => {
+	it("保留原生投递失败的具体诊断，不只保存通用原因码", async () => {
+		const { handle } = await beginManagedTaskPromptDelivery({
+			workspaceId: "workspace",
+			taskId: "session-1",
+			text: "待确认的消息",
+			origin: { messageType: "programmatic_injection" },
+		});
+		settleManagedTaskPromptDeliveryWithoutBlocking(handle, {
+			status: "delivery_failed",
+			reason: "codex_native_prompt_delivery_unconfirmed",
+			failureNote: "第二次原生回合查询超时，尚未获得可靠接受证据。",
+		});
+		await vi.waitFor(async () => {
+			const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace");
+			expect(snapshot.entriesByTaskId["session-1"][0].lastDeliveryFailureNote).toBe(
+				"第二次原生回合查询超时，尚未获得可靠接受证据。",
+			);
+		});
+	});
+
 	it("迟到的真实 transport 回执可补证未知状态，明确取消不会被覆盖", async () => {
 		const { handle } = await beginManagedTaskPromptDelivery({
 			workspaceId: "workspace",
