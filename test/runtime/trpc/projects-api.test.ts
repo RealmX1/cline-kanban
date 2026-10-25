@@ -14,6 +14,11 @@ function createTestCwd(): string {
 
 function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 	return {
+		getAllProjectsTaskGroupQuerySnapshot: vi.fn(async (input) => ({
+			observedAtMs: 0,
+			recentDays: input.recentDays,
+			projects: [],
+		})),
 		getActiveWorkspacePath: vi.fn(() => null),
 		getActiveWorkspaceId: vi.fn(() => null),
 		rememberWorkspace: vi.fn(),

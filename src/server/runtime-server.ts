@@ -998,6 +998,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
+				getAllProjectsTaskGroupQuerySnapshot: deps.workspaceRegistry.getAllProjectsTaskGroupQuerySnapshot,
 				listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon:
 					deps.workspaceRegistry.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
 				readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:

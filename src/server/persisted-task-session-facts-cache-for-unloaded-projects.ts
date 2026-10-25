@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { createParsedPersistedJsonFileReadCache } from "../state/parsed-persisted-json-file-read-cache";
 import {
 	getPersistedWorkspaceSessionsFilePathById,
 	loadPersistedWorkspaceSessionsById,
@@ -13,8 +14,8 @@ import {
 //
 // 为什么要缓存：projects_updated 在任何 agent 输出期间每 150ms 广播一次、每次覆盖全部项目；而 sessions.json
 // 本机合计约 31 MB、单个最大 2.8 MB。未加载项目的这个文件几乎不变（只在 graceful shutdown 与浏览器
-// saveState 时写），按 (mtimeMs, size) 判失效即可；缓存里只留 TaskSessionFactsForCrossProjectTaskViews 的几个字段，
-// 不留整条 summary。
+// saveState 时写），宽松 UI 路径保留 (mtimeMs, size) 缓存；严格查询改用含文件身份和 ctime 的指纹。
+// 缓存里只留 TaskSessionFactsForCrossProjectTaskViews 的几个字段，不留整条 summary。
 //
 // 状态口径与「项目被打开时 TerminalSessionManager.hydrateFromRecord 重建出来的样子」一致（共用
 // reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgentProcess）。额外一条：没有 terminal manager 的项目
@@ -24,6 +25,7 @@ import {
 export interface PersistedTaskSessionFactsCacheForUnloadedProjects {
 	loadTaskSessionFactsByTaskId: (
 		workspaceId: string,
+		options?: { requireCompleteRead?: boolean },
 	) => Promise<ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>>;
 	forgetWorkspace: (workspaceId: string) => void;
 }
@@ -40,6 +42,9 @@ function demoteUnclaimableAgentTurnForProjectWithoutLiveRuntime(
 }
 
 export function createPersistedTaskSessionFactsCacheForUnloadedProjects(): PersistedTaskSessionFactsCacheForUnloadedProjects {
+	// 完整性读取使用包含 inode/ctime 的文件指纹，并与宽松 UI 的旧缓存和回退隔离。
+	const completeTaskSessionFactsReadCache =
+		createParsedPersistedJsonFileReadCache<ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>>();
 	const cachedByWorkspaceId = new Map<
 		string,
 		{ sessionsFileStamp: string; factsByTaskId: ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews> }
@@ -49,14 +54,43 @@ export function createPersistedTaskSessionFactsCacheForUnloadedProjects(): Persi
 		Promise<ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>>
 	>();
 
+	const readCurrentTaskSessionFactsByTaskId = async (
+		workspaceId: string,
+		requireCompleteRead = false,
+	): Promise<ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>> => {
+		const sessions = await loadPersistedWorkspaceSessionsById(workspaceId, { requireCompleteRead });
+		const factsByTaskId = new Map<string, TaskSessionFactsForCrossProjectTaskViews>();
+		for (const summary of Object.values(sessions)) {
+			factsByTaskId.set(
+				summary.taskId,
+				demoteUnclaimableAgentTurnForProjectWithoutLiveRuntime(
+					extractTaskSessionFactsForCrossProjectTaskViews(
+						reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgentProcess(summary, {
+							logsReconciliation: false,
+						}),
+					),
+				),
+			);
+		}
+		return factsByTaskId;
+	};
+
 	const loadTaskSessionFactsByTaskId = async (
 		workspaceId: string,
+		options: { requireCompleteRead?: boolean } = {},
 	): Promise<ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>> => {
+		if (options.requireCompleteRead) {
+			return await completeTaskSessionFactsReadCache.read(
+				getPersistedWorkspaceSessionsFilePathById(workspaceId),
+				() => readCurrentTaskSessionFactsByTaskId(workspaceId, true),
+			);
+		}
 		let sessionsFileStamp: string;
 		try {
 			const sessionsFileStat = await stat(getPersistedWorkspaceSessionsFilePathById(workspaceId));
 			sessionsFileStamp = `${sessionsFileStat.mtimeMs}:${sessionsFileStat.size}`;
 		} catch {
+			// 从未建立会话的项目可以没有 sessions.json，沿用持久层的有效空集合语义。
 			return EMPTY_TASK_SESSION_FACTS_BY_TASK_ID;
 		}
 		const cached = cachedByWorkspaceId.get(workspaceId);
@@ -69,20 +103,7 @@ export function createPersistedTaskSessionFactsCacheForUnloadedProjects(): Persi
 			return await pending;
 		}
 		const loading = (async () => {
-			const sessions = await loadPersistedWorkspaceSessionsById(workspaceId);
-			const factsByTaskId = new Map<string, TaskSessionFactsForCrossProjectTaskViews>();
-			for (const summary of Object.values(sessions)) {
-				factsByTaskId.set(
-					summary.taskId,
-					demoteUnclaimableAgentTurnForProjectWithoutLiveRuntime(
-						extractTaskSessionFactsForCrossProjectTaskViews(
-							reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgentProcess(summary, {
-								logsReconciliation: false,
-							}),
-						),
-					),
-				);
-			}
+			const factsByTaskId = await readCurrentTaskSessionFactsByTaskId(workspaceId);
 			cachedByWorkspaceId.set(workspaceId, { sessionsFileStamp, factsByTaskId });
 			return factsByTaskId;
 		})().finally(() => {
@@ -100,6 +121,7 @@ export function createPersistedTaskSessionFactsCacheForUnloadedProjects(): Persi
 		loadTaskSessionFactsByTaskId,
 		forgetWorkspace: (workspaceId) => {
 			cachedByWorkspaceId.delete(workspaceId);
+			completeTaskSessionFactsReadCache.forget(getPersistedWorkspaceSessionsFilePathById(workspaceId));
 		},
 	};
 }

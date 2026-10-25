@@ -33,7 +33,10 @@ function getTaskLastOpenedByUserRecordPath(workspaceId: string): string {
 	return join(workspaceDirectory, TASK_LAST_OPENED_BY_USER_RECORD_FILENAME);
 }
 
-async function readTaskLastOpenedByUserRecordsFromDisk(workspaceId: string): Promise<Map<string, number>> {
+async function readTaskLastOpenedByUserRecordsFromDisk(
+	workspaceId: string,
+	requireCompleteRead = false,
+): Promise<Map<string, number>> {
 	let raw: string;
 	try {
 		raw = await readFile(getTaskLastOpenedByUserRecordPath(workspaceId), "utf8");
@@ -45,9 +48,11 @@ async function readTaskLastOpenedByUserRecordsFromDisk(workspaceId: string): Pro
 	}
 	try {
 		const parsed = persistedTaskLastOpenedByUserRecordFileSchema.safeParse(JSON.parse(raw) as unknown);
+		if (requireCompleteRead && !parsed.success) throw parsed.error;
 		// fail-open：账本损坏只损失「我最近打开」这一个排序信号，按空处理。
 		return parsed.success ? new Map(Object.entries(parsed.data)) : new Map();
-	} catch {
+	} catch (error) {
+		if (requireCompleteRead) throw error;
 		return new Map();
 	}
 }
@@ -87,7 +92,11 @@ async function loadCachedTaskLastOpenedByUserRecords(workspaceId: string): Promi
 	return await loading;
 }
 
-export async function readTaskLastOpenedByUserAtByTaskId(workspaceId: string): Promise<ReadonlyMap<string, number>> {
+export async function readTaskLastOpenedByUserAtByTaskId(
+	workspaceId: string,
+	options: { requireCompleteRead?: boolean } = {},
+): Promise<ReadonlyMap<string, number>> {
+	if (options.requireCompleteRead) return await readTaskLastOpenedByUserRecordsFromDisk(workspaceId, true);
 	return await loadCachedTaskLastOpenedByUserRecords(workspaceId);
 }
 

@@ -5,6 +5,8 @@ import {
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
+	RuntimeAllProjectsTaskGroupQueryRequest,
+	RuntimeAllProjectsTaskGroupQuerySnapshot,
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeCrossProjectTaskSwitcherEntry,
@@ -45,6 +47,7 @@ import type {
 	HostedTerminalPtySessionAdoptionCandidate,
 } from "../terminal/terminal-pty-process-handle";
 import { runGit } from "../workspace/git-utils";
+import { collectAllProjectsTaskGroupQuerySnapshot } from "./all-projects-task-group-query-snapshot";
 import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "./cross-project-task-switcher-entry-projection";
 import {
 	collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts,
@@ -273,6 +276,9 @@ export interface WorkspaceRegistry {
 	) => Promise<
 		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
 	>;
+	getAllProjectsTaskGroupQuerySnapshot: (
+		input: RuntimeAllProjectsTaskGroupQueryRequest,
+	) => Promise<RuntimeAllProjectsTaskGroupQuerySnapshot>;
 	listManagedWorkspaces: () => Array<{
 		workspaceId: string;
 		workspacePath: string | null;
@@ -377,6 +383,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const projectSummaryBoardReadCache = createParsedPersistedJsonFileReadCache<RuntimeBoardData>();
+	const completeProjectSummaryBoardReadCache = createParsedPersistedJsonFileReadCache<RuntimeBoardData>();
 	const persistedTaskSessionFactsCacheForUnloadedProjects = createPersistedTaskSessionFactsCacheForUnloadedProjects();
 	const now = deps.now ?? Date.now;
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
@@ -496,6 +503,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		projectTaskCountsByWorkspaceId.delete(workspaceId);
 		projectSummaryBoardReadCache.forget(getPersistedWorkspaceBoardFilePathById(workspaceId));
+		completeProjectSummaryBoardReadCache.forget(getPersistedWorkspaceBoardFilePathById(workspaceId));
 		runtimeProjectAvailabilityByWorkspaceId.delete(workspaceId);
 		persistedTaskSessionFactsCacheForUnloadedProjects.forgetWorkspace(workspaceId);
 		const workspacePath = workspacePathsById.get(workspaceId) ?? null;
@@ -514,14 +522,17 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	//     同样的会话叠加。
 	const loadProjectBoardAndTaskSessionFacts = async (
 		workspaceId: string,
+		requireCompleteRead = false,
 	): Promise<{
 		board: RuntimeBoardData;
 		terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null;
 		sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
 		lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
 	}> => {
-		const board = await projectSummaryBoardReadCache.read(getPersistedWorkspaceBoardFilePathById(workspaceId), () =>
-			loadWorkspaceBoardById(workspaceId),
+		// 宽松读取可能把旧版 null 正文投影为空看板，严格查询不能继承这份兼容结果。
+		const boardReadCache = requireCompleteRead ? completeProjectSummaryBoardReadCache : projectSummaryBoardReadCache;
+		const board = await boardReadCache.read(getPersistedWorkspaceBoardFilePathById(workspaceId), () =>
+			loadWorkspaceBoardById(workspaceId, { requireCompleteRead }),
 		);
 		const terminalManager = getTerminalManagerForWorkspace(workspaceId);
 		let terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null = null;
@@ -536,15 +547,20 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			);
 		} else {
 			sessionFactsByTaskId = new Map(
-				await persistedTaskSessionFactsCacheForUnloadedProjects.loadTaskSessionFactsByTaskId(workspaceId),
+				await persistedTaskSessionFactsCacheForUnloadedProjects.loadTaskSessionFactsByTaskId(workspaceId, {
+					requireCompleteRead,
+				}),
 			);
 		}
 		for (const summary of deps.listConversationTaskSessionSummariesForWorkspace?.(workspaceId) ?? []) {
 			sessionFactsByTaskId.set(summary.taskId, extractTaskSessionFactsForCrossProjectTaskViews(summary));
 		}
-		const lastOpenedByUserAtByTaskId = await readTaskLastOpenedByUserAtByTaskId(workspaceId).catch(
-			() => new Map<string, number>(),
-		);
+		const lastOpenedByUserAtByTaskId = await readTaskLastOpenedByUserAtByTaskId(workspaceId, {
+			requireCompleteRead,
+		}).catch((error) => {
+			if (requireCompleteRead) throw error;
+			return new Map<string, number>();
+		});
 		return { board, terminalManagerSessionsByTaskId, sessionFactsByTaskId, lastOpenedByUserAtByTaskId };
 	};
 
@@ -827,6 +843,16 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		buildProjectsPayloadUsingCachedRuntimeProjectAvailability,
 		resolveWorkspaceForStream,
 		listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
+		getAllProjectsTaskGroupQuerySnapshot: async (input) =>
+			collectAllProjectsTaskGroupQuerySnapshot({
+				recentDays: input.recentDays,
+				nowMs: now(),
+				projects: await listWorkspaceIndexEntries({ requireCompleteRead: true }),
+				loadEntries: async (workspaceId, nowMs, activityHorizonMs) => {
+					const facts = await loadProjectBoardAndTaskSessionFacts(workspaceId, true);
+					return collectCrossProjectTaskSwitcherEntriesFromBoard({ ...facts, nowMs, activityHorizonMs });
+				},
+			}),
 		listManagedWorkspaces: () => {
 			return Array.from(terminalManagersByWorkspaceId.entries()).map(([workspaceId, terminalManager]) => ({
 				workspaceId,

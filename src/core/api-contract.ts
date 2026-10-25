@@ -1911,6 +1911,37 @@ export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskD
 });
 export type RuntimeCrossProjectTaskSwitcherEntry = z.infer<typeof runtimeCrossProjectTaskSwitcherEntrySchema>;
 
+export const runtimeAllProjectsTaskGroupQueryRequestSchema = z.object({
+	recentDays: z.union([z.literal(7), z.literal(30)]).default(7),
+});
+export type RuntimeAllProjectsTaskGroupQueryRequest = z.infer<typeof runtimeAllProjectsTaskGroupQueryRequestSchema>;
+
+const allProjectsTaskGroupQueryProjectIdentitySchema = z.object({
+	workspaceId: z.string(),
+	projectName: z.string(),
+	projectPath: z.string(),
+});
+
+// 监控的空结果必须带完整读取证明；旧服务或失败回退不得默认成 complete。
+export const runtimeAllProjectsTaskGroupQuerySnapshotSchema = z.object({
+	observedAtMs: z.number(),
+	recentDays: z.union([z.literal(7), z.literal(30)]),
+	projects: z.array(
+		z.discriminatedUnion("taskEntriesReadStatus", [
+			allProjectsTaskGroupQueryProjectIdentitySchema.extend({
+				taskEntriesReadStatus: z.literal("complete"),
+				crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema),
+			}),
+			allProjectsTaskGroupQueryProjectIdentitySchema.extend({
+				taskEntriesReadStatus: z.literal("unavailable"),
+				unavailableReason: z.string().min(1),
+				crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema).max(0),
+			}),
+		]),
+	),
+});
+export type RuntimeAllProjectsTaskGroupQuerySnapshot = z.infer<typeof runtimeAllProjectsTaskGroupQuerySnapshotSchema>;
+
 export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
