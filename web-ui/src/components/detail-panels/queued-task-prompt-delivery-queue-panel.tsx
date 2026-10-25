@@ -1,5 +1,5 @@
 // 详情视图的 Queue 面板：这个任务（会话）排着哪些「等 agent 这一轮结束再发」的 prompt，以及它们此刻为什么
-// 还没发。数据来自服务端投影（正文截断预览 + 阻塞原因），动作全部是发给服务端的意图。
+// 还没发。数据来自服务端投影（正文截断预览 + 阻塞原因）；投递顺序修改发给服务端，时间排序与复制只读。
 //
 // 两条刻意的交互选择：
 //   - 重排用「上移 / 下移」按钮，不用拖拽：对着一个会自己推流刷新的列表做 DnD，是「我拖了它又弹回去」的
@@ -42,6 +42,7 @@ import {
 	type QueuedTaskPromptDeliveryStatusChipTone,
 } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeQueuedTaskPromptDeliveryProjection } from "@/runtime/types";
+import { useDocumentEvent, useInterval } from "@/utils/react-use";
 import { writeTextToSystemClipboardWithInsecureContextFallback } from "@/utils/write-text-to-system-clipboard-with-insecure-context-fallback";
 
 const STATUS_CHIP_TONE_CLASS: Record<QueuedTaskPromptDeliveryStatusChipTone, string> = {
@@ -52,6 +53,59 @@ const STATUS_CHIP_TONE_CLASS: Record<QueuedTaskPromptDeliveryStatusChipTone, str
 	danger: "border-status-red/40 bg-status-red/10 text-status-red",
 	muted: "border-border bg-surface-2 text-text-tertiary",
 };
+
+type QueuedPromptDisplayOrder = "delivery_order" | "last_attempt_newest_first" | "enqueued_oldest_first";
+
+function resolveQueuedPromptLastAttemptTimestamp(projection: RuntimeQueuedTaskPromptDeliveryProjection): number | null {
+	return projection.deliveryAttemptCount > 0 &&
+		typeof projection.lastAttemptedAt === "number" &&
+		Number.isFinite(new Date(projection.lastAttemptedAt).getTime())
+		? projection.lastAttemptedAt
+		: null;
+}
+
+function describeQueuedPromptTimeSinceLastAttempt(
+	projection: RuntimeQueuedTaskPromptDeliveryProjection,
+	nowEpochMs: number,
+): string {
+	if (projection.deliveryAttemptCount === 0) return "尚未尝试";
+	const lastAttemptedAt = resolveQueuedPromptLastAttemptTimestamp(projection);
+	if (lastAttemptedAt === null) return "时间未知";
+	const elapsedSeconds = Math.floor(Math.max(0, nowEpochMs - lastAttemptedAt) / 1_000);
+	if (elapsedSeconds < 60) return `${elapsedSeconds} 秒`;
+	if (elapsedSeconds < 3_600) return `${Math.floor(elapsedSeconds / 60)} 分钟`;
+	if (elapsedSeconds < 86_400) return `${Math.floor(elapsedSeconds / 3_600)} 小时`;
+	return `${Math.floor(elapsedSeconds / 86_400)} 天`;
+}
+
+function compareQueuedPromptDisplayTimestamps(
+	left: RuntimeQueuedTaskPromptDeliveryProjection,
+	right: RuntimeQueuedTaskPromptDeliveryProjection,
+	displayOrder: QueuedPromptDisplayOrder,
+): number {
+	if (displayOrder === "enqueued_oldest_first") return left.enqueuedAt - right.enqueuedAt;
+	const leftTimestamp = resolveQueuedPromptLastAttemptTimestamp(left);
+	const rightTimestamp = resolveQueuedPromptLastAttemptTimestamp(right);
+	if (leftTimestamp === null) return rightTimestamp === null ? 0 : 1;
+	if (rightTimestamp === null) return -1;
+	return rightTimestamp - leftTimestamp;
+}
+
+function useQueuedPromptDeliveryElapsedClock(
+	projections: readonly RuntimeQueuedTaskPromptDeliveryProjection[],
+): number {
+	const [nowEpochMs, setNowEpochMs] = useState(() => Date.now());
+	const [isDocumentVisible, setIsDocumentVisible] = useState(() => document.visibilityState !== "hidden");
+	useDocumentEvent("visibilitychange", () => {
+		setIsDocumentVisible(document.visibilityState !== "hidden");
+		setNowEpochMs(Date.now());
+	});
+	const hasKnownLastAttempt = projections.some(
+		(projection) => resolveQueuedPromptLastAttemptTimestamp(projection) !== null,
+	);
+	useInterval(() => setNowEpochMs(Date.now()), isDocumentVisible && hasKnownLastAttempt ? 1_000 : null);
+	return nowEpochMs;
+}
 
 function QueuedPromptStatusChip({
 	projection,
@@ -79,7 +133,6 @@ function QueuedPromptDeliveryTimestamp({ timestamp }: { timestamp: number | null
 	return (
 		<time dateTime={date.toISOString()} title={date.toISOString()}>
 			{date.toLocaleString(undefined, {
-				year: "numeric",
 				month: "2-digit",
 				day: "2-digit",
 				hour: "2-digit",
@@ -94,8 +147,10 @@ function QueuedPromptDeliveryTimestamp({ timestamp }: { timestamp: number | null
 
 function QueuedPromptDeliveryMetadata({
 	projection,
+	nowEpochMs,
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+	nowEpochMs: number;
 }): React.ReactElement {
 	const resultTimeLabel = {
 		settled_delivered: "送达时间",
@@ -113,6 +168,10 @@ function QueuedPromptDeliveryMetadata({
 	return (
 		<dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] leading-4 text-text-secondary">
 			<div className="min-w-0 break-words">
+				<dt className="inline">距上次尝试：</dt>
+				<dd className="inline tabular-nums">{describeQueuedPromptTimeSinceLastAttempt(projection, nowEpochMs)}</dd>
+			</div>
+			<div className="min-w-0 break-words">
 				<dt className="inline">
 					{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? "入队时间：" : "登记时间："}
 				</dt>
@@ -120,12 +179,8 @@ function QueuedPromptDeliveryMetadata({
 					<QueuedPromptDeliveryTimestamp timestamp={projection.enqueuedAt} />
 				</dd>
 			</div>
-			<div>
-				<dt className="inline">尝试次数：</dt>
-				<dd className="inline tabular-nums">{projection.deliveryAttemptCount}</dd>
-			</div>
 			<div className="min-w-0 break-words">
-				<dt className="inline">最近投递开始：</dt>
+				<dt className="inline">最近投递：</dt>
 				<dd className="inline tabular-nums">
 					{projection.deliveryAttemptCount === 0 ? (
 						"尚未尝试"
@@ -144,26 +199,64 @@ function QueuedPromptDeliveryMetadata({
 	);
 }
 
-function QueuedPromptTextPreview({
+function QueuedPromptTextPreviewAndFullTextCopy({
 	projection,
 	fetchFullText,
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 	fetchFullText: (queueEntryId: string) => Promise<string | null>;
 }): React.ReactElement {
-	const [fullText, setFullText] = useState<string | null>(null);
+	const [preparedFullText, setPreparedFullText] = useState<{
+		queueEntryId: string;
+		fetchFullText: typeof fetchFullText;
+		text: string | null;
+		isLoading: boolean;
+	} | null>(null);
 	const [isExpanded, setIsExpanded] = useState(false);
-	const isTruncated = projection.textLength > projection.textPreview.length;
-	const handleToggle = async () => {
-		if (isExpanded) {
-			setIsExpanded(false);
-			return;
-		}
-		setIsExpanded(true);
-		if (fullText === null) {
-			setFullText(await fetchFullText(projection.queueEntryId));
+	const [readRetryGeneration, setReadRetryGeneration] = useState(0);
+	const [copyFeedback, setCopyFeedback] = useState("");
+	const [showManualCopy, setShowManualCopy] = useState(false);
+	const requestGeneration = useRef(0);
+	const isCurrentPreparedText =
+		preparedFullText?.queueEntryId === projection.queueEntryId && preparedFullText.fetchFullText === fetchFullText;
+	const fullText = isCurrentPreparedText ? preparedFullText.text : null;
+	const isLoading = !isCurrentPreparedText || preparedFullText.isLoading;
+	useEffect(() => {
+		const generation = ++requestGeneration.current;
+		const readIdentity = { queueEntryId: projection.queueEntryId, fetchFullText };
+		setPreparedFullText({ ...readIdentity, text: null, isLoading: true });
+		setIsExpanded(false);
+		setCopyFeedback("");
+		setShowManualCopy(false);
+		void fetchFullText(projection.queueEntryId)
+			.catch(() => null)
+			.then((text) => {
+				if (generation === requestGeneration.current)
+					setPreparedFullText({ ...readIdentity, text, isLoading: false });
+			});
+		return () => {
+			requestGeneration.current += 1;
+		};
+	}, [fetchFullText, projection.queueEntryId, readRetryGeneration]);
+	const copyFullText = async () => {
+		if (fullText === null) return;
+		const generation = requestGeneration.current;
+		setCopyFeedback("");
+		setShowManualCopy(false);
+		try {
+			// 正文提前准备好；复制调用留在本次点击栈内，兼容 HTTP 环境的同步降级。
+			await writeTextToSystemClipboardWithInsecureContextFallback(fullText);
+			if (generation === requestGeneration.current) setCopyFeedback("已复制全文");
+		} catch {
+			if (generation === requestGeneration.current) {
+				setCopyFeedback("复制失败，可重试或在下方选择全文手动复制。");
+				setShowManualCopy(true);
+			}
 		}
 	};
+	const isTruncated =
+		projection.textLength > projection.textPreview.length ||
+		(fullText !== null && fullText !== projection.textPreview);
 	return (
 		<div className="min-w-0">
 			<p
@@ -174,15 +267,53 @@ function QueuedPromptTextPreview({
 			>
 				{isExpanded && fullText !== null ? fullText : projection.textPreview}
 			</p>
-			{isTruncated || projection.textPreview.split("\n").length > 3 ? (
-				<button
-					type="button"
-					className="mt-0.5 inline-flex items-center gap-0.5 text-[11px] text-text-tertiary hover:text-text-primary"
-					onClick={() => void handleToggle()}
+			<div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+				<Button
+					variant="ghost"
+					size="xs"
+					icon={<Copy size={12} />}
+					disabled={fullText === null}
+					onClick={() => void copyFullText()}
 				>
-					{isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-					{isExpanded ? "Collapse" : `Show full prompt (${projection.textLength} chars)`}
-				</button>
+					复制全文
+				</Button>
+				{isTruncated || projection.textPreview.split("\n").length > 3 ? (
+					<Button
+						variant="ghost"
+						size="xs"
+						icon={isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+						disabled={fullText === null}
+						onClick={() => setIsExpanded(!isExpanded)}
+					>
+						{isExpanded ? "收起全文" : `展开全文（${projection.textLength} 字符）`}
+					</Button>
+				) : null}
+				{isLoading ? (
+					<span className="text-[11px] text-text-secondary">读取全文中…</span>
+				) : fullText === null ? (
+					<>
+						<span className="text-[11px] text-status-orange">无法读取全文。</span>
+						<Button
+							variant="ghost"
+							size="xs"
+							onClick={() => setReadRetryGeneration((generation) => generation + 1)}
+						>
+							重新读取全文
+						</Button>
+					</>
+				) : null}
+				<span role="status" className="text-[11px] text-text-secondary">
+					{copyFeedback}
+				</span>
+			</div>
+			{showManualCopy && fullText !== null ? (
+				<textarea
+					aria-label="可手动复制的 Prompt 全文"
+					readOnly
+					value={fullText}
+					className="mt-1 min-h-24 w-full rounded border border-border bg-surface-1 p-2 text-xs text-text-primary"
+					onFocus={(event) => event.currentTarget.select()}
+				/>
 			) : null}
 		</div>
 	);
@@ -342,6 +473,8 @@ function QueuedPromptSourceBadge({
 function PendingQueuedPromptRow({
 	isTaskAgentExecutionDisabled,
 	projection,
+	nowEpochMs,
+	allowDeliveryOrderEditing,
 	position,
 	isFirstPending,
 	isLastPending,
@@ -351,6 +484,8 @@ function PendingQueuedPromptRow({
 }: {
 	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+	nowEpochMs: number;
+	allowDeliveryOrderEditing: boolean;
 	position: number;
 	isFirstPending: boolean;
 	isLastPending: boolean;
@@ -371,12 +506,15 @@ function PendingQueuedPromptRow({
 		>
 			<div className="mb-1 flex flex-wrap items-center gap-1.5">
 				{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
-					<span className="text-[10px] leading-4 tabular-nums text-text-tertiary">#{position}</span>
+					<span className="text-[10px] leading-4 tabular-nums text-text-tertiary">投递 #{position}</span>
 				) : null}
 				<QueuedPromptStatusChip projection={projection} />
 				<QueuedPromptSourceBadge projection={projection} />
+				<span className="text-[11px] leading-4 tabular-nums text-text-secondary">
+					尝试次数：{projection.deliveryAttemptCount}
+				</span>
 				<div className="ml-auto flex items-center gap-0.5">
-					{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
+					{allowDeliveryOrderEditing && isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
 						<>
 							<Tooltip content="上移">
 								<Button
@@ -415,8 +553,8 @@ function PendingQueuedPromptRow({
 					) : null}
 				</div>
 			</div>
-			<QueuedPromptTextPreview projection={projection} fetchFullText={controller.fetchFullText} />
-			<QueuedPromptDeliveryMetadata projection={projection} />
+			<QueuedPromptTextPreviewAndFullTextCopy projection={projection} fetchFullText={controller.fetchFullText} />
+			<QueuedPromptDeliveryMetadata projection={projection} nowEpochMs={nowEpochMs} />
 			<QueuedPromptDebugReferenceDisclosure
 				projection={projection}
 				fetchDebugReference={controller.fetchDebugReference}
@@ -496,10 +634,12 @@ function MergeWithNextToggle({
 function SettledQueuedPromptRow({
 	isTaskAgentExecutionDisabled,
 	projection,
+	nowEpochMs,
 	controller,
 }: {
 	isTaskAgentExecutionDisabled: boolean;
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+	nowEpochMs: number;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
 	return (
@@ -510,6 +650,9 @@ function SettledQueuedPromptRow({
 			<div className="mb-1 flex flex-wrap items-center gap-1.5">
 				<QueuedPromptStatusChip projection={projection} />
 				<QueuedPromptSourceBadge projection={projection} />
+				<span className="text-[11px] leading-4 tabular-nums text-text-secondary">
+					尝试次数：{projection.deliveryAttemptCount}
+				</span>
 				<div className="ml-auto flex items-center gap-0.5">
 					{projection.deliveryState === "settled_failed" && isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
 						<Tooltip
@@ -541,8 +684,8 @@ function SettledQueuedPromptRow({
 					</Tooltip>
 				</div>
 			</div>
-			<QueuedPromptTextPreview projection={projection} fetchFullText={controller.fetchFullText} />
-			<QueuedPromptDeliveryMetadata projection={projection} />
+			<QueuedPromptTextPreviewAndFullTextCopy projection={projection} fetchFullText={controller.fetchFullText} />
+			<QueuedPromptDeliveryMetadata projection={projection} nowEpochMs={nowEpochMs} />
 			<QueuedPromptDebugReferenceDisclosure
 				projection={projection}
 				fetchDebugReference={controller.fetchDebugReference}
@@ -569,6 +712,9 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 	headerContent?: ReactNode;
 }): React.ReactElement {
 	const [selectedMessageTypeLabel, setSelectedMessageTypeLabel] = useState("all");
+	const [displayOrder, setDisplayOrder] = useState<QueuedPromptDisplayOrder>("delivery_order");
+	const allowDeliveryOrderEditing = displayOrder === "delivery_order";
+	const nowEpochMs = useQueuedPromptDeliveryElapsedClock(controller.projections);
 	const messageTypeLabels = [...new Set(controller.projections.map(describeTaskPromptDeliveryMessageType))];
 	useEffect(() => {
 		if (
@@ -592,18 +738,23 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 		.map((projection) => projection.queueEntryId);
 	const pending = filtered
 		.filter((projection) => !isQueuedTaskPromptDeliveryTerminal(projection))
-		.sort(
-			(left, right) =>
-				Number(isTaskPromptDeliveryWaitingForAgentTurn(right)) -
-				Number(isTaskPromptDeliveryWaitingForAgentTurn(left)),
+		.sort((left, right) =>
+			allowDeliveryOrderEditing
+				? Number(isTaskPromptDeliveryWaitingForAgentTurn(right)) -
+					Number(isTaskPromptDeliveryWaitingForAgentTurn(left))
+				: compareQueuedPromptDisplayTimestamps(left, right, displayOrder),
 		);
 	const settled = filtered
 		.filter(isQueuedTaskPromptDeliveryTerminal)
 		.slice()
-		.sort((left, right) => (right.settledAt ?? right.enqueuedAt) - (left.settledAt ?? left.enqueuedAt));
+		.sort((left, right) =>
+			allowDeliveryOrderEditing
+				? (right.settledAt ?? right.enqueuedAt) - (left.settledAt ?? left.enqueuedAt)
+				: compareQueuedPromptDisplayTimestamps(left, right, displayOrder),
+		);
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
-			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
+			<div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-3 py-2">
 				{headerContent ?? (
 					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Queue</span>
 				)}
@@ -620,8 +771,31 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						</option>
 					))}
 				</select>
+				<select
+					aria-label="队列显示顺序"
+					value={displayOrder}
+					onChange={(event) => {
+						const value = event.target.value;
+						if (
+							value === "delivery_order" ||
+							value === "last_attempt_newest_first" ||
+							value === "enqueued_oldest_first"
+						)
+							setDisplayOrder(value);
+					}}
+					className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
+				>
+					<option value="delivery_order">实际投递顺序</option>
+					<option value="last_attempt_newest_first">最近尝试在前</option>
+					<option value="enqueued_oldest_first">最早入队在前</option>
+				</select>
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
+				{!allowDeliveryOrderEditing ? (
+					<p className="px-1 py-1 text-[11px] text-text-secondary">
+						当前仅调整显示；切回“实际投递顺序”可上移、下移或合并消息。
+					</p>
+				) : null}
 				{isTaskAgentExecutionDisabled ? (
 					<p className="px-1 py-2 text-xs text-text-secondary">
 						任务已完成，恢复任务后可继续投递。现有队列记录仍可查看和取消。
@@ -638,13 +812,15 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						);
 						// 筛选不能改变合并对象：只连接仍可见、且在完整等待队列里也相邻的两条。
 						const previousPendingProjection =
+							allowDeliveryOrderEditing &&
 							pending[index - 1]?.queueEntryId ===
-							waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex - 1]
+								waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex - 1]
 								? pending[index - 1]
 								: undefined;
 						const nextPendingProjection =
+							allowDeliveryOrderEditing &&
 							pending[index + 1]?.queueEntryId ===
-							waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex + 1]
+								waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex + 1]
 								? pending[index + 1]
 								: undefined;
 						// 竖线只画真的会一起发出的那几条：程序化条目两侧的链在服务端就是断的。
@@ -666,9 +842,13 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 								<PendingQueuedPromptRow
 									isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 									projection={projection}
-									position={pending.slice(0, index + 1).filter(isTaskPromptDeliveryWaitingForAgentTurn).length}
-									isFirstPending={index === 0}
-									isLastPending={index === pending.length - 1}
+									nowEpochMs={nowEpochMs}
+									allowDeliveryOrderEditing={allowDeliveryOrderEditing}
+									position={waitingQueueEntryIndex + 1}
+									isFirstPending={waitingQueueEntryIndex === 0}
+									isLastPending={
+										waitingQueueEntryIndex === waitingQueueEntryIdsBeforeMessageTypeFilter.length - 1
+									}
 									isChainedFromPrevious={isChainedFromPrevious}
 									isChainedToNext={isChainedToNext}
 									controller={controller}
@@ -696,6 +876,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 								isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 								key={projection.queueEntryId}
 								projection={projection}
+								nowEpochMs={nowEpochMs}
 								controller={controller}
 							/>
 						))}

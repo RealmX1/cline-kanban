@@ -6,7 +6,7 @@
 //
 // taskId 是**会话 id**（by-the-way 子会话有自己独立的队列），与 PromptLibraryPanel 同一口径。
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
 import {
@@ -14,7 +14,7 @@ import {
 	type QueuedTaskPromptDeliveryDebugReference,
 } from "@/runtime/queued-task-prompt-delivery-debug-reference";
 import {
-	fetchQueuedTaskPromptDeliveryFullText,
+	createQueuedTaskPromptDeliveryFullTextReader,
 	fetchTaskPromptDeliveryQueue,
 	mutateTaskPromptDeliveryQueue,
 } from "@/runtime/queued-task-prompt-delivery-query";
@@ -224,17 +224,8 @@ export function useQueuedTaskPromptDeliveryQueueController(
 		[sendMutation, taskId],
 	);
 
-	const fetchFullText = useCallback(
-		async (queueEntryId: string) => {
-			if (!workspaceId) {
-				return null;
-			}
-			try {
-				return await fetchQueuedTaskPromptDeliveryFullText(workspaceId, taskId, queueEntryId);
-			} catch {
-				return null;
-			}
-		},
+	const fetchFullText = useMemo(
+		() => createQueuedTaskPromptDeliveryFullTextReader(workspaceId, taskId),
 		[workspaceId, taskId],
 	);
 
