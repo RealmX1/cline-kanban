@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskVisualizationPreviewPage } from "@/components/task-visualization-preview-page";
 import type { TaskVisualizationArtifact } from "@/runtime/types";
+import { deliverTaskVisualizationStreamMessage } from "@/stores/task-visualization-browser-bridge";
 
 const queries = vi.hoisted(() => ({ list: vi.fn(), prepare: vi.fn() }));
 vi.mock("@/runtime/task-visualization-query", () => ({
@@ -33,6 +34,7 @@ let root: Root;
 beforeEach(() => {
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 	vi.stubGlobal("IntersectionObserver", undefined);
+	vi.spyOn(document, "hasFocus").mockReturnValue(true);
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
@@ -56,6 +58,7 @@ afterEach(async () => {
 	container.remove();
 	window.history.replaceState(null, "", "/");
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 async function renderViewer(revisionId?: string) {
@@ -71,6 +74,7 @@ async function renderViewer(revisionId?: string) {
 
 it("独立页遵循旧修订链接，加载最新版本后才切换内容及新标签链接", async () => {
 	await renderViewer(firstArtifact.revisionId);
+	expect(queries.prepare).toHaveBeenCalledTimes(1);
 	expect(container.querySelector("iframe")?.getAttribute("src")).toBe(
 		`/content/${firstArtifact.revisionId}/chart.html`,
 	);
@@ -103,4 +107,62 @@ it.each(["d".repeat(64), ""])("无效修订参数 %j 显示错误，不静默打
 	await renderViewer(revisionId);
 	expect(container.querySelector('[role="alert"]')?.textContent).toContain("未找到指定修订。");
 	expect(container.querySelector("iframe")).toBeNull();
+});
+
+it("首次发布只在面板可见后默认展示，普通更新保留当前 iframe", async () => {
+	let reportPanelIntersections = (..._states: boolean[]) => {};
+	vi.stubGlobal(
+		"IntersectionObserver",
+		class {
+			constructor(callback: IntersectionObserverCallback) {
+				reportPanelIntersections = (...states) =>
+					callback(
+						states.map((isIntersecting) => ({ isIntersecting }) as IntersectionObserverEntry),
+						this as unknown as IntersectionObserver,
+					);
+			}
+			observe() {}
+			disconnect() {}
+		},
+	);
+	queries.list.mockResolvedValue({ artifacts: [] });
+	window.history.replaceState(null, "", "/task-visualization-preview?workspaceId=workspace-a&taskId=task-a");
+	await act(async () => root.render(<TaskVisualizationPreviewPage />));
+	const notifyPublication = () =>
+		deliverTaskVisualizationStreamMessage({
+			type: "task_visualization_artifacts_updated",
+			workspaceId: "workspace-a",
+			taskId: "task-a",
+		});
+	queries.list.mockResolvedValue({ artifacts: [firstArtifact] });
+	await act(async () => notifyPublication());
+	expect(queries.prepare).not.toHaveBeenCalled();
+	await act(async () => reportPanelIntersections(true, false));
+	expect(queries.prepare).not.toHaveBeenCalled();
+	await act(async () => reportPanelIntersections(true));
+	const frame = container.querySelector("iframe");
+	expect(frame).not.toBeNull();
+	await act(async () => reportPanelIntersections(false));
+	expect(container.querySelector("iframe")).toBe(frame);
+	queries.list.mockResolvedValue({ artifacts: [latestArtifact] });
+	await act(async () => notifyPublication());
+	expect(container.querySelector("iframe")).toBe(frame);
+	expect(container.textContent).toContain("当前第 1 版，第 2 版已就绪");
+});
+
+it("显式无效产物链接保留错误，重试不静默替换", async () => {
+	await renderViewer();
+	queries.prepare.mockClear();
+	window.history.replaceState(
+		null,
+		"",
+		"/task-visualization-preview?workspaceId=workspace-a&taskId=task-a&visualizationArtifactId=missing",
+	);
+	await act(async () => root.render(<TaskVisualizationPreviewPage />));
+	expect(container.textContent).toContain("未找到链接指定的可视化产物");
+	const retry = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "重试预览");
+	expect(retry).toBeDefined();
+	await act(async () => retry?.click());
+	expect(queries.prepare).not.toHaveBeenCalled();
+	expect(container.textContent).toContain("未找到链接指定的可视化产物");
 });
