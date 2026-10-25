@@ -554,6 +554,7 @@ import type {
 import {
 	taskMainSessionHandoverPrepareRequestSchema,
 	taskMainSessionHandoverPrepareResponseSchema,
+	taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema,
 	taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema,
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
@@ -675,6 +676,11 @@ export interface RuntimeTrpcContext {
 		getStatus: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
+		) => Promise<TaskMainSessionHandoverStatusResponse>;
+		recoverWithNewAgentSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
 		) => Promise<TaskMainSessionHandoverStatusResponse>;
 		recoverWithNewCodexSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1675,6 +1681,17 @@ export const runtimeAppRouter = t.router({
 			.mutation(({ ctx, input }) => {
 				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+			}),
+		recoverTaskMainSessionHandoverWithNewAgentSession: workspaceProcedure
+			.input(taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.recoverWithNewAgentSession(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		recoverTaskMainSessionHandoverWithNewCodexSession: workspaceProcedure
 			.input(taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema)

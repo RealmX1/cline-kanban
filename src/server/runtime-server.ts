@@ -907,6 +907,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
 
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
+		getAcpTaskSessionService: getScopedAcpTaskSessionService,
 		getTerminalManager: getScopedTerminalManager,
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 		startTaskSession: (scope, input) => runtimeApi.startTaskSession(scope, input),

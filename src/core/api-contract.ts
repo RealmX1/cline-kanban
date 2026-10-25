@@ -66,9 +66,11 @@ export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
 export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
+	TaskMainSessionHandoverAgentId,
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewAgentSessionRequest,
 	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
 	TaskMainSessionHandoverStatusResponse,

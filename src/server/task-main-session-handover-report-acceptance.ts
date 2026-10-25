@@ -145,7 +145,8 @@ export async function queryCodexMainSessionHandoverReportAcceptance(input: {
 			resolvedTranscriptPath ??= path;
 		},
 	});
-	if (page.availability === "unavailable") return probe;
+	// 不可用页不提供接受证据；丢弃可能过期的游标，下次仍按原绑定重新只读核验。
+	if (page.availability === "unavailable") return { ...probe, transcriptHistoryCursor: null };
 	for (const message of page.messages) {
 		if (message.role === "user" && isExactSubmittedHandoverReport(message.content, input.prompt))
 			return {
@@ -161,4 +162,92 @@ export async function queryCodexMainSessionHandoverReportAcceptance(input: {
 		transcriptPath: resolvedTranscriptPath ?? probe.transcriptPath,
 		transcriptHistoryCursor: page.nextCursor,
 	};
+}
+
+export async function queryTaskMainSessionHandoverReportAcceptance(
+	input: Parameters<typeof queryCodexMainSessionHandoverReportAcceptance>[0] & {
+		expectedReportDeliveryKey?: string;
+	},
+): Promise<TaskMainSessionHandoverReportAcceptanceProbe> {
+	const agentId = input.probe.targetAgentId ?? "codex";
+	if (agentId === "codex") return await queryCodexMainSessionHandoverReportAcceptance(input);
+	if (
+		input.summary.agentId !== agentId ||
+		input.summary.agentNativeConversationSessionIdentity?.sourceAgentId !== agentId ||
+		input.summary.agentNativeConversationSessionIdentity.nativeSessionId !== input.probe.nativeSessionId ||
+		!input.summary.workspacePath ||
+		resolve(input.summary.workspacePath) !== resolve(input.probe.workingDirectoryPath)
+	)
+		throw new TaskMainSessionHandoverExecutionProhibitedError("报告接受补证的目标 Agent、原生身份或目录归属不符。");
+	if (input.probe.historicalAcceptanceEvidence) return input.probe;
+	const acceptance = input.summary.agentConversationPromptSubmissionAcceptance;
+	if (
+		input.summary.sessionTransport === "acp_stdio_subprocess" &&
+		input.expectedReportDeliveryKey &&
+		acceptance?.status === "accepted" &&
+		acceptance.confirmedAtMs !== undefined &&
+		acceptance.eventId === input.expectedReportDeliveryKey &&
+		acceptance.nativeSessionId === input.probe.nativeSessionId &&
+		acceptance.runtimeSessionIncarnationId === input.summary.runtimeSessionIncarnationId
+	) {
+		return {
+			...input.probe,
+			historicalAcceptanceEvidence: {
+				sourceReference: `acp-native:${input.probe.nativeSessionId}:${acceptance.eventId}`,
+				observedAt: acceptance.confirmedAtMs,
+			},
+		};
+	}
+	let resolvedTranscriptPath: string | null = null;
+	const page = await loadTaskConversationHistoryPage({
+		card: input.card,
+		sessions: { [input.summary.taskId]: input.summary },
+		request: {
+			workspaceTaskId: input.card.id,
+			taskConversationSessionId: input.summary.taskId,
+			cursor: input.probe.transcriptHistoryCursor,
+		},
+		onVerifiedTranscriptSegment: (path) => {
+			resolvedTranscriptPath ??= path;
+		},
+	});
+	// 不可用页不提供接受证据；丢弃可能过期的游标，下次仍按原绑定重新只读核验。
+	if (page.availability === "unavailable") return { ...input.probe, transcriptHistoryCursor: null };
+	const accepted = page.messages.find((message) => message.role === "user" && message.content === input.prompt);
+	return {
+		...input.probe,
+		transcriptPath: resolvedTranscriptPath ?? input.probe.transcriptPath,
+		transcriptHistoryCursor: page.nextCursor,
+		historicalAcceptanceEvidence: accepted
+			? {
+					sourceReference: `${agentId}-native-history:${input.probe.nativeSessionId}:${accepted.id}`,
+					observedAt: Date.now(),
+				}
+			: null,
+	};
+}
+
+// Cursor 新接任只允许 fresh，会话中报告以外的原生用户正文才可能解除等待；导出读取器已排除子会话。
+export async function queryCursorMainSessionHandoverAcceptedHumanFollowup(input: {
+	card: RuntimeBoardCard;
+	summary: RuntimeTaskSessionSummary;
+}): Promise<string | null> {
+	if (input.summary.agentId !== "cursor") return null;
+	const page = await loadTaskConversationHistoryPage({
+		card: input.card,
+		sessions: { [input.summary.taskId]: input.summary },
+		request: { workspaceTaskId: input.card.id, taskConversationSessionId: input.summary.taskId },
+	});
+	if (page.availability !== "available") return null;
+	return (
+		[...page.messages]
+			.reverse()
+			.find(
+				(message) =>
+					message.role === "user" &&
+					message.content.trim() &&
+					!message.content.includes("KANBAN_MAIN_SESSION_HANDOVER_REPORT:") &&
+					!message.content.trimStart().startsWith("<task-notification>"),
+			)?.content ?? null
+	);
 }
