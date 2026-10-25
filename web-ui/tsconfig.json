@@ -30,6 +30,7 @@
         "../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract.ts"
       ],
       "@runtime-work-unit-relation-modeling-api-contract": ["../src/core/work-unit-relation-modeling-api-contract.ts"],
+      "@runtime-inter-work-unit-relation-ledger-event-contract": ["../src/core/inter-work-unit-relation-ledger-event-contract.ts"],
       "@runtime-work-unit-relation-read-api-contract": ["../src/core/work-unit-relation-read-api-contract.ts"],
       "@runtime-work-unit-relation-assertion-write-api-contract": [
         "../src/core/work-unit-relation-assertion-write-api-contract.ts"

@@ -60,6 +60,7 @@ import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { TaskRelatedTasksPreviewButton } from "@/components/task-related-tasks-preview-button";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -218,6 +219,8 @@ export type TaskCardBodyRenderRole =
 	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡也可点开。
 	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
 	| "task_card_copy_in_post_deploy_verification_panel_entry"
+	// 关联列表旁的完整可操作副本：无本体身份、无拖拽，也不递归打开关联预览。
+	| "task_card_copy_in_related_task_preview"
 	| "permanently_deleted_task_history_card";
 
 /**
@@ -413,6 +416,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
+	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
+	const usesInFlowActionToolbar = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy;
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
 		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
@@ -422,7 +427,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
 	// 嵌套，也不改标题几何。其他角色不变。
 	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
-		(isCrossProjectTaskSwitcherRowCopy || historicalSnapshot != null) && onClick != null;
+		(isCrossProjectTaskSwitcherRowCopy || isRelatedTaskPreviewCopy || historicalSnapshot != null) && onClick != null;
 	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
 	const isHoverPresentationShown =
 		historicalSnapshot != null ||
@@ -437,11 +442,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 	const isInlineTitleEditEnabled =
 		!isPassiveFocusedTaskCardCopy &&
 		!isCrossProjectTaskSwitcherRowCopy &&
+		!isRelatedTaskPreviewCopy &&
 		onSaveTitle != null &&
 		(isNavigatingColumn || isTrashCard);
-	const delaysSingleClickActivationForDoubleClickTitleEdit = isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy;
+	const delaysSingleClickActivationForDoubleClickTitleEdit =
+		isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy && !isRelatedTaskPreviewCopy;
 	const clickActivationTimerRef = useRef<number | null>(null);
-	const cardDragBindings = isMobileDetailHeaderCopy ? null : drag;
+	const cardDragBindings = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy ? null : drag;
 	const isDragging = cardDragBindings?.isDragging ?? false;
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
@@ -1041,6 +1048,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 		shouldDisplayTaskRetainedCommittedLineChangeSummary(
 			reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary,
 		);
+	const relatedTasksPreviewShortcut =
+		!historicalContext && !isRelatedTaskPreviewCopy ? (
+			<TaskRelatedTasksPreviewButton
+				workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+				taskId={card.id}
+				taskIncarnationCreatedAtEpochMs={card.createdAt}
+			/>
+		) : null;
 	const taskDirectoryRow = (
 		<div
 			data-task-directory=""
@@ -1089,6 +1104,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					/>
 				) : null}
 			</span>
+			{relatedTasksPreviewShortcut}
 			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
 				<span
 					data-task-card-line-change-statistics-group=""
@@ -1143,6 +1159,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			className={cn(
 				"kb-board-card-shell",
 				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
+				isRelatedTaskPreviewCopy && "max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11",
 			)}
 			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
 			data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
@@ -1365,7 +1382,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</span>
 							</button>
 						) : null}
-						{showTitleEditButton && !isCompactRowInFocusViewLeftColumn && !isMobileDetailHeaderCopy ? (
+						{showTitleEditButton &&
+						!isCompactRowInFocusViewLeftColumn &&
+						!isMobileDetailHeaderCopy &&
+						!isRelatedTaskPreviewCopy ? (
 							<TaskCardTitleRowHoverActions>
 								<Tooltip
 									side="bottom"
@@ -1394,7 +1414,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				</div>
 				<div
 					className={cn(
-						isMobileDetailHeaderCopy
+						usesInFlowActionToolbar
 							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
 							: cn(
 									// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
@@ -1410,7 +1430,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 								),
 					)}
 				>
-					{showTitleEditButton && (isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy) ? (
+					{showTitleEditButton &&
+					(isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy) ? (
 						<Tooltip
 							side="bottom"
 							content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
@@ -1459,7 +1480,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);
-									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id);
+									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id, card.createdAt);
 								}}
 							/>
 						</Tooltip>
@@ -1739,7 +1760,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</span>
 							</span>
 						) : null}
-						{showDirectoryRow ? taskDirectoryRow : null}
+						{showDirectoryRow ? taskDirectoryRow : relatedTasksPreviewShortcut}
 						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
 							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
 								{machineWaitingBadgeElement}
@@ -1767,7 +1788,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : (
 					<>
-						{showDirectoryRow ? taskDirectoryRow : null}
+						{showDirectoryRow ? taskDirectoryRow : relatedTasksPreviewShortcut}
 						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
 							<Button
 								size="sm"

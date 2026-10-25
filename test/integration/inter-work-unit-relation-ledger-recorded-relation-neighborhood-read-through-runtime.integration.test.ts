@@ -112,6 +112,26 @@ describe("recorded inter-work-unit relation neighborhood read through the runtim
 					`This task was created by task p0001 "Coordinate the rollout" [${workspaceId}]`,
 				);
 				expect(childNeighborhood.hasAnyRelationVisibleByDefault).toBe(true);
+				const relatedPreview = await workUnitRelationReadApi.getDirectlyRelatedTaskPreviewPage({
+					task: {
+						workUnitType: "kanban_board_card",
+						workspaceId,
+						taskId: "c0001",
+						taskIncarnationCreatedAtEpochMs: 2_000,
+					},
+				});
+				expect(relatedPreview.totalTaskCount).toBe(1);
+				expect(relatedPreview.entries[0]).toMatchObject({
+					task: { workspaceId, taskId: "p0001", taskIncarnationCreatedAtEpochMs: PARENT_CARD_CREATED_AT },
+					title: "Coordinate the rollout",
+					relations: [
+						{
+							relationClass: "recorded",
+							relationKind: "provenance_created_by",
+							directionFromPreviewSubject: "outgoing",
+						},
+					],
+				});
 
 				// 读之后的新事件在下一次读时增量追上。
 				await mutateWorkspaceState(repositoryPath, intentActedByParentCard(workspaceId), (state) => ({
