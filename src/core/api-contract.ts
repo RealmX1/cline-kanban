@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
+} from "./task-visualization-artifact-contract";
+
+export * from "./task-visualization-artifact-contract";
+
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
@@ -2564,6 +2573,45 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 ]);
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
+export const managedTaskPromptDeliveryMessageTypeSchema = z.enum([
+	"human_message",
+	"prompt_library",
+	"programmatic_injection",
+	"task_action",
+	"session_startup",
+	"user_decision_answer",
+	"system_continuation",
+]);
+export type ManagedTaskPromptDeliveryMessageType = z.infer<typeof managedTaskPromptDeliveryMessageTypeSchema>;
+
+// 显示来源与 source 的后台让位语义独立，人工消息的标签不改变投递权限。
+export const managedTaskPromptDeliveryOriginSchema = z.object({
+	messageType: managedTaskPromptDeliveryMessageTypeSchema,
+	sourceLabel: z.string().optional(),
+});
+export type ManagedTaskPromptDeliveryOrigin = z.infer<typeof managedTaskPromptDeliveryOriginSchema>;
+
+export const managedTaskPromptDeliveryMetadataSchema = z.object({
+	messageType: managedTaskPromptDeliveryMessageTypeSchema,
+	deliveryStrategy: z.enum(["immediate", "after_agent_turn", "session_startup"]),
+	sourceLabel: z.string().nullable(),
+	imageAttachmentCount: z.number().int().nonnegative(),
+	// 仅保存按附件顺序计算的内容摘要；旧记录缺省，缺失时不能宣称有图请求相同。
+	imageAttachmentContentsSha256: z
+		.string()
+		.regex(/^[a-f0-9]{64}$/u)
+		.optional(),
+	cancellationSupported: z.boolean().optional(),
+	terminalDeliveryReceipt: injectionLedgerTerminalDeliveryReceiptSchema.nullable(),
+	targetRuntimeSessionIncarnationId: z.string().nullable().optional(),
+	targetNativeSessionId: z.string().nullable().optional(),
+	injectionLedgerReference: z.object({ taskId: z.string(), idempotencyKey: z.string() }).optional(),
+	recoveredTerminalReceiptAtEpochMs: z.number().optional(),
+	previousUnconfirmedTerminalDeliveryReceipt: injectionLedgerTerminalDeliveryReceiptSchema.nullable().optional(),
+	previousUnconfirmedDeliveryFailureNote: z.string().nullable().optional(),
+});
+export type ManagedTaskPromptDeliveryMetadata = z.infer<typeof managedTaskPromptDeliveryMetadataSchema>;
+
 const nativeIndependentUserTurnQueryRecoverySchema = z.object({
 	consecutiveQueryFailureCount: z.number().int().positive(),
 	waitingStartedAtEpochMs: z.number(),
@@ -2574,6 +2622,8 @@ const nativeIndependentUserTurnQueryRecoverySchema = z.object({
 });
 
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	// 旧条目缺省是等待队列，即时及启动消息不进入 idle 调度。
+	managedDelivery: managedTaskPromptDeliveryMetadataSchema.optional(),
 	// 新字段可选；旧 handed_to_transport 条目缺少零写入证明时，仍按未知处理。
 	nativeIndependentUserTurnSubmissionProgress: z
 		.object({
@@ -2740,6 +2790,8 @@ export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDe
 export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
 
 export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	deliveryId: z.string().optional(),
+	managedDelivery: managedTaskPromptDeliveryMetadataSchema.optional(),
 	nativeIndependentUserTurnSubmissionProgress:
 		queuedTaskPromptDeliveryEntrySchema.shape.nativeIndependentUserTurnSubmissionProgress,
 	nativeIndependentUserTurnBeforeSubmissionQueryRecovery:
@@ -2937,6 +2989,8 @@ export const runtimeStateStreamPromptLibraryUpdatedMessageSchema = z.object({
 });
 
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	taskVisualizationArtifactsUpdatedMessageSchema,
+	taskVisualizationPreviewRequestedMessageSchema,
 	z.object({
 		type: z.literal("task_lookup_conversation_updated"),
 		conversationId: z.string().uuid(),
@@ -2988,6 +3042,8 @@ export const runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSc
 });
 // 浏览器 → 服务端的状态流消息（其余消息都是服务端 → 浏览器）。
 export const runtimeStateStreamClientMessageSchema = z.discriminatedUnion("type", [
+	taskVisualizationBrowserContextMessageSchema,
+	taskVisualizationPreviewAcknowledgmentMessageSchema,
 	runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema,
 ]);
 export type RuntimeStateStreamClientMessage = z.infer<typeof runtimeStateStreamClientMessageSchema>;
@@ -4326,6 +4382,8 @@ export type RuntimeTaskConversationHistoryPageResponse = z.infer<
 >;
 
 export const runtimeTaskChatSendRequestSchema = z.object({
+	deliveryRequestId: z.string().min(1).optional(),
+	deliveryOrigin: managedTaskPromptDeliveryOriginSchema.optional(),
 	taskId: z.string(),
 	// 显式会话选择（含前主会话）；省略且 taskId 是卡片 ID 时投给当前主会话。
 	targetTaskConversationSessionId: z.string().optional(),
@@ -4377,6 +4435,7 @@ export type RuntimeReleaseDeferredRestorationHarnessNotificationsResponse = z.in
 >;
 
 export const runtimeTaskChatSendResponseSchema = z.object({
+	deliveryId: z.string().optional(),
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	message: runtimeTaskChatMessageSchema.nullable().optional(),

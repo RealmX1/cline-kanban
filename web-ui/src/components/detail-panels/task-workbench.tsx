@@ -40,6 +40,8 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	moduleSlotsStorageKey = LocalStorageKey.TaskWorkbenchModuleSlots,
 	workbenchTitle = "任务工作台",
 	moduleSelectionRequest,
+	moduleSelectionResetKey,
+	onModuleSelectionChange,
 	modules,
 	isBelowAgent,
 	arrangementPreference,
@@ -55,7 +57,9 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	defaultSlots?: readonly [Module, Module];
 	moduleSlotsStorageKey?: LocalStorageKey;
 	workbenchTitle?: string;
-	moduleSelectionRequest?: { slot: 0 | 1; module: Module; requestKey: number };
+	moduleSelectionRequest?: { slot: 0 | 1; module: Module; requestKey: number; persistSelection?: boolean };
+	onModuleSelectionChange?: (module: Module) => void;
+	moduleSelectionResetKey?: string;
 	isBelowAgent: boolean;
 	arrangementPreference: FocusViewDesktopPanelArrangementPreference;
 	onArrangementPreferenceChange: (value: FocusViewDesktopPanelArrangementPreference) => void;
@@ -67,6 +71,10 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 }) {
 	const availableModules = Object.keys(moduleLabels) as Module[];
 	const [slots, setSlots] = useState(() => loadModuleSlots(moduleLabels, defaultSlots, moduleSlotsStorageKey));
+	useEffect(() => {
+		if (moduleSelectionResetKey !== undefined)
+			setSlots(loadModuleSlots(moduleLabels, defaultSlots, moduleSlotsStorageKey));
+	}, [moduleSelectionResetKey, moduleLabels, defaultSlots, moduleSlotsStorageKey]);
 	const rootRef = useRef<HTMLDivElement>(null);
 	const slotAwaitingKeyboardFocus = useRef<number | null>(null);
 	useEffect(() => {
@@ -80,16 +88,18 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	const requestedSlot = moduleSelectionRequest?.slot;
 	const requestedModule = moduleSelectionRequest?.module;
 	const requestKey = moduleSelectionRequest?.requestKey;
+	const persistRequestedSelection = moduleSelectionRequest?.persistSelection !== false;
 	useEffect(() => {
 		if (!requestKey || requestedSlot === undefined || !requestedModule) return;
 		setSlots((current) => {
 			const next = selectTaskWorkbenchModuleInSlot(current, requestedSlot, requestedModule);
-			writeLocalStorageItem(moduleSlotsStorageKey, JSON.stringify(next));
+			if (persistRequestedSelection) writeLocalStorageItem(moduleSlotsStorageKey, JSON.stringify(next));
 			return next;
 		});
-	}, [requestedSlot, requestedModule, requestKey, moduleSlotsStorageKey]);
+	}, [requestedSlot, requestedModule, requestKey, moduleSlotsStorageKey, persistRequestedSelection]);
 	useLayoutResetEffect(() => setSlots(defaultSlots));
 	const selectModule = (slot: 0 | 1, module: Module) => {
+		onModuleSelectionChange?.(module);
 		slotAwaitingKeyboardFocus.current = slot;
 		setSlots((current) => {
 			const next = selectTaskWorkbenchModuleInSlot(current, slot, module);

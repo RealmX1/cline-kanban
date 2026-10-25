@@ -1198,6 +1198,7 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen,
 		fetchTaskWorkspaceInfo,
 		sendTaskSessionInput,
+		sendTaskChatMessage,
 		readyForReviewNotificationsEnabled,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,

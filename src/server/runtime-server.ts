@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
+import { TRPCError } from "@trpc/server";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import {
@@ -82,8 +83,12 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { observeManagedTaskPromptDeliveryChanges } from "../state/managed-task-prompt-delivery-coordinator";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
-import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import {
+	computeQueuedTaskPromptDeliveryTextSha256,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../state/queued-task-prompt-delivery-store";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
@@ -108,6 +113,8 @@ import {
 	createTaskLookupConversationService,
 	TASK_LOOKUP_INSTRUCTION_VERSION,
 } from "../task-indexing-support/task-lookup-conversation-service";
+import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
+import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -277,6 +284,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
+	const taskVisualizationArtifactApi = new TaskVisualizationArtifactService({
+		resolveWorkspaceScope: async (workspaceId) => {
+			const workspace = await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(workspaceId);
+			return workspace ? { workspaceId, workspacePath: workspace.repoPath } : null;
+		},
+		assertTaskMayPublish: async (scope, taskId) => {
+			const board = await loadWorkspaceBoardById(scope.workspaceId);
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === taskId));
+			if (!column) throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在，只允许读取已有可视化。" });
+			if (column.id === "trash")
+				throw new TRPCError({ code: "FORBIDDEN", message: "任务已结束，只允许读取已有可视化。" });
+		},
+		onArtifactsUpdated: (workspaceId, taskId) =>
+			deps.runtimeStateHub.broadcastTaskVisualizationArtifactsUpdated?.(workspaceId, taskId),
+		warn: deps.warn,
+	});
+	deps.runtimeStateHub.attachTaskVisualizationArtifactService?.(taskVisualizationArtifactApi);
 	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
 		({ workspaceId, summary, submittedPromptText }) => {
 			promptDraftUsageService.notifyUserPromptSubmitted({
@@ -527,6 +551,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	const unregisterQueuedTaskPromptDeliveryDispatchObserver =
 		deps.runtimeStateHub.registerQueuedTaskPromptDeliveryDispatchObserver(queuedTaskPromptDeliveryDispatcher);
+	const stopObservingManagedTaskPromptDeliveries = observeManagedTaskPromptDeliveryChanges(async (workspaceId) => {
+		await queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(
+			workspaceId,
+			await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId),
+		);
+	});
 	// 排队 prompt 的启动清扫：收敛被上一次生命周期撂在半路的在途投递，并给跨过这次重启的条目盖章
 	// （门控 0 据此等人看见再发）。必须在心跳写下之后——盖章按「托管实例此刻不在心跳里」判，同刻启动的
 	// 另一个实例得先看得见我。不 await：纠偏动作，不是服务可用性的前置条件。
@@ -797,6 +827,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	const runtimeApi = createRuntimeApi({
+		recordManagedTaskPromptDeliveries: true,
 		onTaskSessionStopRequested: (workspaceId, taskId) =>
 			pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId) ?? Promise.resolve(),
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -1063,6 +1094,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 			}),
 			exploratoryApi,
+			taskVisualizationArtifactApi,
 		};
 	};
 
@@ -1095,6 +1127,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const tlsConfig = getKanbanRuntimeTls();
 	const requestHandler = async (req: IncomingMessage, res: import("node:http").ServerResponse) => {
 		try {
+			// 内容仅凭单产物只读 capability 访问；opaque sandbox 的 Origin:null 不进入控制面门禁。
+			if (await handleTaskVisualizationContentHttpRequest(req, res, taskVisualizationArtifactApi)) return;
 			if (handleHttpRequest(req, res).end) {
 				return;
 			}
@@ -1308,6 +1342,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const closeRuntimeServerResources = async (): Promise<void> => {
+		await taskVisualizationArtifactApi.stop();
 		await taskLookupConversationApi.close();
 		await taskIndexingSupportApi.close();
 		await taskMainSessionHandoverApi.close();
@@ -1318,6 +1353,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
 		queuedTaskPromptDeliveryDispatcher.stop();
 		unregisterQueuedTaskPromptDeliveryDispatchObserver();
+		stopObservingManagedTaskPromptDeliveries();
 		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
 		taskAttributedProcessTreeResourceSampler.stop();
 		taskAgentConversationModelTokenUsageJournalMonitor.stop();
@@ -1363,6 +1399,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			server.once("error", rejectListen);
 			server.listen(getKanbanRuntimePort(), getKanbanRuntimeHost(), () => {
 				server.off("error", rejectListen);
+				taskVisualizationArtifactApi.startRecovery();
 				resolveListen();
 			});
 		});

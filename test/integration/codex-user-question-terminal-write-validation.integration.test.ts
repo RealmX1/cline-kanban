@@ -8,12 +8,20 @@ import {
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecision,
 } from "../../src/state/agent-raised-pending-user-decision-store";
-import { TerminalSessionManager } from "../../src/terminal/session-manager";
+import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../src/state/queued-task-prompt-delivery-store";
+import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../src/terminal/terminal-input-box-occupancy";
+import type { PendingProgrammaticDeliveryReceipt } from "../../src/terminal/terminal-session-active-process-state";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../src/trpc/runtime-api";
+import { confirmTestNativeUserInputAcceptance } from "../utilities/confirm-test-native-user-input-acceptance";
 import { withIsolatedWorkspaceHome } from "./isolated-workspace-home-fixture";
 
 const nativeSessionId = "01a147e5-2f4c-77c2-834d-a1f23008f27e";
+// 当前 Codex 投递要求明确的空框证据；null 只代表不可读，不能再用它模拟空框。
+const inputBoxClearReading = {
+	verdict: "input_box_clear_for_programmatic_delivery",
+	unrecoverablePasteCount: 0,
+} as const;
 const toolInput = {
 	questions: [{ id: "storage", question: "采用哪种存储方案？", options: [{ label: "SQLite" }, { label: "文件" }] }],
 };
@@ -37,13 +45,14 @@ const resultLine = (output: string) =>
 
 async function withSyntheticCodexConversation(
 	run: (harness: Awaited<ReturnType<typeof createHarness>>) => Promise<void>,
+	recordManagedTaskPromptDeliveries = false,
 ) {
 	await withIsolatedWorkspaceHome(async (register) => {
 		const { workspaceId, path } = await register("codex-prewrite-validation");
 		const previousCodexHome = process.env.CODEX_HOME;
 		process.env.CODEX_HOME = join(homedir(), ".codex");
 		try {
-			await run(await createHarness(workspaceId, path));
+			await run(await createHarness(workspaceId, path, recordManagedTaskPromptDeliveries));
 		} finally {
 			vi.clearAllTimers();
 			vi.useRealTimers();
@@ -53,7 +62,7 @@ async function withSyntheticCodexConversation(
 	});
 }
 
-async function createHarness(workspaceId: string, workspacePath: string) {
+async function createHarness(workspaceId: string, workspacePath: string, recordManagedTaskPromptDeliveries: boolean) {
 	const transcriptDirectory = join(homedir(), ".codex", "sessions", "2026", "10", "17");
 	await mkdir(transcriptDirectory, { recursive: true });
 	const transcriptPath = join(transcriptDirectory, `rollout-${nativeSessionId}.jsonl`);
@@ -119,7 +128,7 @@ async function createHarness(workspaceId: string, workspacePath: string) {
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
-			programmaticDeliveryReceipt: null,
+			programmaticDeliveryReceipt: null as PendingProgrammaticDeliveryReceipt | null,
 			lastUserInputAt: null,
 			outputReactionScanBuffer: null,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
@@ -130,16 +139,17 @@ async function createHarness(workspaceId: string, workspacePath: string) {
 	const internals = manager as unknown as {
 		entries: Map<string, typeof entry>;
 		resolveInteractivePromptReadiness: () => Promise<"prompt">;
-		resolveProgrammaticDeliveryInputBoxContentionForTask: () => Promise<null>;
+		resolveProgrammaticDeliveryInputBoxContentionForTask: () => Promise<typeof inputBoxClearReading>;
 	};
 	internals.entries.set("guarded-answer", entry);
 	const readiness = vi.spyOn(internals, "resolveInteractivePromptReadiness").mockResolvedValue("prompt");
 	const contention = vi
 		.spyOn(internals, "resolveProgrammaticDeliveryInputBoxContentionForTask")
-		.mockResolvedValue(null);
+		.mockResolvedValue(inputBoxClearReading);
 	vi.spyOn(manager, "resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery").mockResolvedValue(true);
 	const submit = vi.spyOn(manager, "submitTaskChatInputWhenReady");
 	const runtime = createRuntimeApi({
+		recordManagedTaskPromptDeliveries,
 		getScopedTerminalManager: async () => manager,
 		loadScopedRuntimeConfig: async () => ({ selectedAgentId: "codex" }),
 	} as unknown as CreateRuntimeApiDependencies);
@@ -183,8 +193,8 @@ describe.sequential("Codex 面板答题在实际 PTY 写入前重新读取原生
 					if (stage === "contention_wait")
 						harness.contention.mockImplementation(
 							() =>
-								new Promise<null>((resolve) => {
-									releaseGate = () => resolve(null);
+								new Promise<typeof inputBoxClearReading>((resolve) => {
+									releaseGate = () => resolve(inputBoxClearReading);
 								}),
 						);
 					const pendingAnswer = harness.answer();
@@ -256,11 +266,59 @@ describe.sequential("Codex 面板答题在实际 PTY 写入前重新读取原生
 			harness.entry.active.ptyOutputChunkArrivalSequenceNumber++;
 			await vi.advanceTimersByTimeAsync(60);
 			await vi.waitFor(() => expect(harness.write).toHaveBeenCalledTimes(2));
-			harness.entry.summary.lastOutputAt = Date.now() + 2500;
+			const receipt = harness.entry.active.programmaticDeliveryReceipt;
+			if (!receipt) throw new Error("缺少待确认的问题答复回执");
+			receipt.nativeConversationActivityCursorImmediatelyBeforeSubmit = {
+				transport: "codex_control",
+				predecessorTurnId: "question-answer-before-submit",
+				seenEventIds: [],
+			};
+			confirmTestNativeUserInputAcceptance({
+				manager: harness.manager,
+				taskId: "guarded-answer",
+				promptText: receipt.promptText,
+			});
 			await vi.advanceTimersByTimeAsync(2500);
 			expect((await pendingAnswer).delivered).toBe(true);
 			expect((await harness.answer()).delivered).toBe(true);
 			expect(harness.write).toHaveBeenCalledTimes(2);
 		});
+	});
+
+	it("问题答复先登记并等待真实回执，保留 agent 内排队的结果且重复答题不新增消息", async () => {
+		await withSyntheticCodexConversation(async (harness) => {
+			let confirmDelivery: ((outcome: TaskChatInputDeliveryOutcome) => void) | undefined;
+			harness.submit.mockImplementation((_taskId, _text, options) => {
+				confirmDelivery = options?.onDeliveryOutcome;
+				return harness.entry.summary;
+			});
+			const pendingAnswer = harness.answer();
+			await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledOnce());
+			const pending = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(harness.workspaceId)).entriesByTaskId[
+				"guarded-answer"
+			];
+			expect(pending).toHaveLength(1);
+			expect(pending[0]).toMatchObject({
+				deliveryState: "handed_to_transport",
+				managedDelivery: {
+					messageType: "user_decision_answer",
+					deliveryStrategy: "immediate",
+					terminalDeliveryReceipt: null,
+				},
+			});
+			expect(pending[0].text).toContain("保留已保存的答案");
+			confirmDelivery?.({ status: "delivered_queued_behind_active_agent_turn", reason: null });
+			expect((await pendingAnswer).delivered).toBe(true);
+			expect((await harness.answer()).delivered).toBe(true);
+			expect(harness.submit).toHaveBeenCalledOnce();
+			const confirmed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(harness.workspaceId)).entriesByTaskId[
+				"guarded-answer"
+			];
+			expect(confirmed).toHaveLength(1);
+			expect(confirmed[0]).toMatchObject({
+				deliveryState: "settled_delivered",
+				managedDelivery: { terminalDeliveryReceipt: { status: "delivered_queued_behind_active_agent_turn" } },
+			});
+		}, true);
 	});
 });

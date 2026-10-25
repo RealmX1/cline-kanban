@@ -35,8 +35,10 @@ import type { QueuedTaskPromptDeliveryDebugReference } from "@/runtime/queued-ta
 import {
 	describeQueuedTaskPromptDeliveryStatusChip,
 	describeQueuedTaskPromptDispatchBlockReason,
+	describeTaskPromptDeliveryMessageType,
 	isQueuedTaskPromptDeliveryInFlight,
 	isQueuedTaskPromptDeliveryTerminal,
+	isTaskPromptDeliveryWaitingForAgentTurn,
 	type QueuedTaskPromptDeliveryStatusChipTone,
 } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeQueuedTaskPromptDeliveryProjection } from "@/runtime/types";
@@ -111,7 +113,9 @@ function QueuedPromptDeliveryMetadata({
 	return (
 		<dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] leading-4 text-text-secondary">
 			<div className="min-w-0 break-words">
-				<dt className="inline">入队时间：</dt>
+				<dt className="inline">
+					{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? "入队时间：" : "登记时间："}
+				</dt>
 				<dd className="inline tabular-nums">
 					<QueuedPromptDeliveryTimestamp timestamp={projection.enqueuedAt} />
 				</dd>
@@ -297,7 +301,10 @@ function QueuedPromptDebugReferenceDisclosure({
 }
 
 function isProgrammaticInjectionProjection(projection: RuntimeQueuedTaskPromptDeliveryProjection): boolean {
-	return projection.programmaticInjectionSource != null;
+	return (
+		projection.programmaticInjectionSource != null ||
+		projection.managedDelivery?.messageType === "programmatic_injection"
+	);
 }
 
 function QueuedPromptSourceBadge({
@@ -305,26 +312,27 @@ function QueuedPromptSourceBadge({
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 }): React.ReactElement | null {
-	if (projection.programmaticInjectionSource != null) {
-		return (
-			<Tooltip content="Queued by an automation to be delivered once the agent is idle. It is always sent as its own message, and gives up at the automation's deadline instead of interrupting the agent.">
-				<span className="inline-flex items-center gap-1 text-[10px] leading-4 text-text-tertiary">
-					<Bot size={10} />
-					Automated · {projection.programmaticInjectionSource}
-				</span>
-			</Tooltip>
-		);
-	}
-	if (projection.sourcePromptLibraryEntryId === null) {
-		return null;
-	}
+	const source = projection.managedDelivery?.sourceLabel ?? projection.programmaticInjectionSource;
+	const strategy = projection.managedDelivery?.deliveryStrategy ?? "after_agent_turn";
 	return (
-		<span className="inline-flex items-center gap-1 text-[10px] leading-4 text-text-tertiary">
-			<FileText size={10} />
-			From prompt library
-			{projection.sourcePromptLibraryEntryTextChangedSinceEnqueue === true ? (
-				<Tooltip content="The library prompt was edited after this was queued. The queued text is the version you queued.">
-					<span className="text-status-orange">· library prompt has changed since</span>
+		<span
+			className="inline-flex min-w-0 flex-wrap items-center gap-x-1 text-[11px] leading-4 text-text-secondary"
+			data-delivery-message-type={projection.managedDelivery?.messageType}
+		>
+			{isProgrammaticInjectionProjection(projection) ? (
+				<Bot size={11} className="shrink-0" />
+			) : (
+				<FileText size={11} className="shrink-0" />
+			)}
+			<span>{describeTaskPromptDeliveryMessageType(projection)}</span>
+			{source ? <span className="break-all">· {source}</span> : null}
+			<span>· {strategy === "immediate" ? "即时" : strategy === "session_startup" ? "启动时提交" : "等待空闲"}</span>
+			{(projection.managedDelivery?.imageAttachmentCount ?? 0) > 0 ? (
+				<span>· {projection.managedDelivery?.imageAttachmentCount} 个附件</span>
+			) : null}
+			{projection.sourcePromptLibraryEntryTextChangedSinceEnqueue ? (
+				<Tooltip content="库中正文已修改，本次投递仍使用登记时的版本。">
+					<span className="text-status-orange">· 库条目已修改</span>
 				</Tooltip>
 			) : null}
 		</span>
@@ -361,47 +369,50 @@ function PendingQueuedPromptRow({
 				projection.awaitsHumanReconfirmationAfterRuntimeRestart && "border-status-orange/50",
 			)}
 		>
-			<div className="mb-1 flex items-center gap-1.5">
-				<span className="text-[10px] leading-4 tabular-nums text-text-tertiary">#{position}</span>
+			<div className="mb-1 flex flex-wrap items-center gap-1.5">
+				{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
+					<span className="text-[10px] leading-4 tabular-nums text-text-tertiary">#{position}</span>
+				) : null}
 				<QueuedPromptStatusChip projection={projection} />
 				<QueuedPromptSourceBadge projection={projection} />
 				<div className="ml-auto flex items-center gap-0.5">
-					<Tooltip content="Move up">
-						<Button
-							variant="ghost"
-							size="xs"
-							icon={<ArrowUp size={12} />}
-							aria-label="Move queued prompt up"
-							disabled={isFirstPending || isInFlight}
-							onClick={() => void controller.moveQueuedPromptDelivery(projection.queueEntryId, "up")}
-						/>
-					</Tooltip>
-					<Tooltip content="Move down">
-						<Button
-							variant="ghost"
-							size="xs"
-							icon={<ArrowDown size={12} />}
-							aria-label="Move queued prompt down"
-							disabled={isLastPending || isInFlight}
-							onClick={() => void controller.moveQueuedPromptDelivery(projection.queueEntryId, "down")}
-						/>
-					</Tooltip>
-					<Tooltip
-						content={
-							isInFlight
-								? "Try to stop it. If it was already pasted into the agent's input, it is too late."
-								: "Cancel — it will not be sent"
-						}
-					>
-						<Button
-							variant="ghost"
-							size="xs"
-							icon={<X size={12} />}
-							aria-label="Cancel queued prompt"
-							className="hover:text-status-red"
-							onClick={() => void controller.cancelQueuedPromptDelivery(projection.queueEntryId)}
-						/>
-					</Tooltip>
+					{isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
+						<>
+							<Tooltip content="上移">
+								<Button
+									variant="ghost"
+									size="xs"
+									icon={<ArrowUp size={12} />}
+									aria-label="Move queued prompt up"
+									disabled={isFirstPending || isInFlight}
+									onClick={() => void controller.moveQueuedPromptDelivery(projection.queueEntryId, "up")}
+								/>
+							</Tooltip>
+							<Tooltip content="下移">
+								<Button
+									variant="ghost"
+									size="xs"
+									icon={<ArrowDown size={12} />}
+									aria-label="Move queued prompt down"
+									disabled={isLastPending || isInFlight}
+									onClick={() => void controller.moveQueuedPromptDelivery(projection.queueEntryId, "down")}
+								/>
+							</Tooltip>
+						</>
+					) : null}
+					{isTaskPromptDeliveryWaitingForAgentTurn(projection) ||
+					projection.managedDelivery?.cancellationSupported ? (
+						<Tooltip content={isInFlight ? "尝试取消；若消息已经提交，则无法撤回。" : "取消，不再发送"}>
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={<X size={12} />}
+								aria-label="Cancel queued prompt"
+								className="hover:text-status-red"
+								onClick={() => void controller.cancelQueuedPromptDelivery(projection.queueEntryId)}
+							/>
+						</Tooltip>
+					) : null}
 				</div>
 			</div>
 			<QueuedPromptTextPreview projection={projection} fetchFullText={controller.fetchFullText} />
@@ -413,7 +424,7 @@ function PendingQueuedPromptRow({
 			{projection.awaitsHumanReconfirmationAfterRuntimeRestart ? (
 				<div className="mt-1 flex items-center gap-1.5 text-[11px] leading-4 text-status-orange">
 					<AlertTriangle size={12} className="shrink-0" />
-					<span className="flex-1">Queued before Kanban restarted. Still needed?</span>
+					<span className="flex-1">此消息在重启前排入，是否保留？</span>
 					<Button
 						variant="ghost"
 						size="xs"
@@ -423,7 +434,7 @@ function PendingQueuedPromptRow({
 							void controller.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart([projection.queueEntryId])
 						}
 					>
-						Keep
+						保留
 					</Button>
 				</div>
 			) : blockReasonWording ? (
@@ -431,7 +442,7 @@ function PendingQueuedPromptRow({
 			) : null}
 			{projection.lastDeliveryFailureNote && !isInFlight ? (
 				<p className="mt-1 text-[11px] leading-4 text-text-tertiary">
-					Last attempt: {projection.lastDeliveryFailureNote}
+					上次尝试： {projection.lastDeliveryFailureNote}
 				</p>
 			) : null}
 		</div>
@@ -496,16 +507,16 @@ function SettledQueuedPromptRow({
 			data-queued-prompt-entry-id={projection.queueEntryId}
 			className="rounded-md border border-border bg-surface-1 px-2 py-1.5"
 		>
-			<div className="mb-1 flex items-center gap-1.5">
+			<div className="mb-1 flex flex-wrap items-center gap-1.5">
 				<QueuedPromptStatusChip projection={projection} />
 				<QueuedPromptSourceBadge projection={projection} />
 				<div className="ml-auto flex items-center gap-0.5">
-					{projection.deliveryState === "settled_failed" ? (
+					{projection.deliveryState === "settled_failed" && isTaskPromptDeliveryWaitingForAgentTurn(projection) ? (
 						<Tooltip
 							content={
 								isProgrammaticInjectionProjection(projection)
-									? "Queue it again at the end as your own prompt (the automation is not told)"
-									: "Queue it again at the end"
+									? "作为人工消息重新排队，原自动调用方不会收到新回执"
+									: "重新排到队尾"
 							}
 						>
 							<Button
@@ -515,11 +526,11 @@ function SettledQueuedPromptRow({
 								disabled={isTaskAgentExecutionDisabled}
 								onClick={() => void controller.retrySettledFailedQueuedPromptDelivery(projection.queueEntryId)}
 							>
-								Requeue
+								重新排队
 							</Button>
 						</Tooltip>
 					) : null}
-					<Tooltip content="Remove from this list">
+					<Tooltip content="从列表移除">
 						<Button
 							variant="ghost"
 							size="xs"
@@ -530,9 +541,7 @@ function SettledQueuedPromptRow({
 					</Tooltip>
 				</div>
 			</div>
-			<p className="line-clamp-2 whitespace-pre-wrap break-words text-xs leading-5 text-text-secondary">
-				{projection.textPreview}
-			</p>
+			<QueuedPromptTextPreview projection={projection} fetchFullText={controller.fetchFullText} />
 			<QueuedPromptDeliveryMetadata projection={projection} />
 			<QueuedPromptDebugReferenceDisclosure
 				projection={projection}
@@ -559,14 +568,58 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 	controller: QueuedTaskPromptDeliveryQueueController;
 	headerContent?: ReactNode;
 }): React.ReactElement {
-	const pending = controller.projections.filter((projection) => !isQueuedTaskPromptDeliveryTerminal(projection));
-	const settled = controller.projections.filter((projection) => isQueuedTaskPromptDeliveryTerminal(projection));
+	const [selectedMessageTypeLabel, setSelectedMessageTypeLabel] = useState("all");
+	const messageTypeLabels = [...new Set(controller.projections.map(describeTaskPromptDeliveryMessageType))];
+	useEffect(() => {
+		if (
+			selectedMessageTypeLabel !== "all" &&
+			!controller.projections.some(
+				(projection) => describeTaskPromptDeliveryMessageType(projection) === selectedMessageTypeLabel,
+			)
+		)
+			setSelectedMessageTypeLabel("all");
+	}, [controller.projections, selectedMessageTypeLabel]);
+	const filtered = controller.projections.filter(
+		(projection) =>
+			selectedMessageTypeLabel === "all" ||
+			describeTaskPromptDeliveryMessageType(projection) === selectedMessageTypeLabel,
+	);
+	const waitingQueueEntryIdsBeforeMessageTypeFilter = controller.projections
+		.filter(
+			(projection) =>
+				!isQueuedTaskPromptDeliveryTerminal(projection) && isTaskPromptDeliveryWaitingForAgentTurn(projection),
+		)
+		.map((projection) => projection.queueEntryId);
+	const pending = filtered
+		.filter((projection) => !isQueuedTaskPromptDeliveryTerminal(projection))
+		.sort(
+			(left, right) =>
+				Number(isTaskPromptDeliveryWaitingForAgentTurn(right)) -
+				Number(isTaskPromptDeliveryWaitingForAgentTurn(left)),
+		);
+	const settled = filtered
+		.filter(isQueuedTaskPromptDeliveryTerminal)
+		.slice()
+		.sort((left, right) => (right.settledAt ?? right.enqueuedAt) - (left.settledAt ?? left.enqueuedAt));
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
 				{headerContent ?? (
 					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Queue</span>
 				)}
+				<select
+					aria-label="按消息类型筛选"
+					value={selectedMessageTypeLabel}
+					onChange={(event) => setSelectedMessageTypeLabel(event.target.value)}
+					className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
+				>
+					<option value="all">全部类型</option>
+					{messageTypeLabels.map((label) => (
+						<option key={label} value={label}>
+							{label}
+						</option>
+					))}
+				</select>
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
 				{isTaskAgentExecutionDisabled ? (
@@ -576,20 +629,36 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				) : null}
 				{pending.length === 0 ? (
 					<p className="px-1 py-2 text-xs leading-5 text-text-tertiary">
-						Queue a prompt from the Prompts tab to send it after the agent finishes its current turn.
+						当前没有待投递消息。Kanban 的即时注入、人工发送及排队消息都会在此显示。
 					</p>
 				) : (
 					pending.map((projection, index) => {
-						const previousPendingProjection = pending[index - 1];
-						const nextPendingProjection = pending[index + 1];
+						const waitingQueueEntryIndex = waitingQueueEntryIdsBeforeMessageTypeFilter.indexOf(
+							projection.queueEntryId,
+						);
+						// 筛选不能改变合并对象：只连接仍可见、且在完整等待队列里也相邻的两条。
+						const previousPendingProjection =
+							pending[index - 1]?.queueEntryId ===
+							waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex - 1]
+								? pending[index - 1]
+								: undefined;
+						const nextPendingProjection =
+							pending[index + 1]?.queueEntryId ===
+							waitingQueueEntryIdsBeforeMessageTypeFilter[waitingQueueEntryIndex + 1]
+								? pending[index + 1]
+								: undefined;
 						// 竖线只画真的会一起发出的那几条：程序化条目两侧的链在服务端就是断的。
 						const isChainedToNext =
 							nextPendingProjection !== undefined &&
+							isTaskPromptDeliveryWaitingForAgentTurn(projection) &&
+							isTaskPromptDeliveryWaitingForAgentTurn(nextPendingProjection) &&
 							projection.deliverTogetherWithNextQueuedEntry &&
 							!isProgrammaticInjectionProjection(projection) &&
 							!isProgrammaticInjectionProjection(nextPendingProjection);
 						const isChainedFromPrevious =
 							previousPendingProjection?.deliverTogetherWithNextQueuedEntry === true &&
+							isTaskPromptDeliveryWaitingForAgentTurn(projection) &&
+							isTaskPromptDeliveryWaitingForAgentTurn(previousPendingProjection) &&
 							!isProgrammaticInjectionProjection(previousPendingProjection) &&
 							!isProgrammaticInjectionProjection(projection);
 						return (
@@ -597,14 +666,16 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 								<PendingQueuedPromptRow
 									isTaskAgentExecutionDisabled={isTaskAgentExecutionDisabled}
 									projection={projection}
-									position={index + 1}
+									position={pending.slice(0, index + 1).filter(isTaskPromptDeliveryWaitingForAgentTurn).length}
 									isFirstPending={index === 0}
 									isLastPending={index === pending.length - 1}
 									isChainedFromPrevious={isChainedFromPrevious}
 									isChainedToNext={isChainedToNext}
 									controller={controller}
 								/>
-								{nextPendingProjection ? (
+								{nextPendingProjection &&
+								isTaskPromptDeliveryWaitingForAgentTurn(projection) &&
+								isTaskPromptDeliveryWaitingForAgentTurn(nextPendingProjection) ? (
 									<MergeWithNextToggle
 										projection={projection}
 										nextProjection={nextPendingProjection}
@@ -618,7 +689,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				{settled.length > 0 ? (
 					<div className="mt-3 flex flex-col gap-1">
 						<span className="px-1 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-							Recent
+							最近结果
 						</span>
 						{settled.map((projection) => (
 							<SettledQueuedPromptRow

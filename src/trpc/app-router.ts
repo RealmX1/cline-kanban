@@ -546,6 +546,15 @@ import {
 } from "../core/task-main-session-handover-contract";
 import { taskRvfHistoryRequestSchema, taskRvfHistoryResponseSchema } from "../core/task-rvf-history-contract";
 import {
+	taskVisualizationListRequestSchema,
+	taskVisualizationListResponseSchema,
+	taskVisualizationPreparePreviewResponseSchema,
+	taskVisualizationPublishRequestSchema,
+	taskVisualizationPublishResponseSchema,
+	taskVisualizationRequestPreviewResponseSchema,
+	taskVisualizationSelectArtifactRequestSchema,
+} from "../core/task-visualization-artifact-contract";
+import {
 	type AssertReferenceRelationAsActingWorkUnitRequest,
 	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
 	assertReferenceRelationAsActingWorkUnitRequestSchema,
@@ -621,6 +630,7 @@ import {
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
+import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -628,6 +638,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
 	taskLookupConversationApi?: TaskLookupConversationService;
 	taskIndexingSupportApi?: TaskIndexingSupportRuntimeService;
 	independentTaskCreationApi?: IndependentTaskCreationService;
@@ -2652,6 +2663,40 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConversationSessionTurnProjectionResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+			}),
+	}),
+	taskVisualizationArtifacts: t.router({
+		publish: workspaceProcedure
+			.input(taskVisualizationPublishRequestSchema)
+			.output(taskVisualizationPublishResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.publish(ctx.workspaceScope, input);
+			}),
+		list: workspaceProcedure
+			.input(taskVisualizationListRequestSchema)
+			.output(taskVisualizationListResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.list(ctx.workspaceScope, input);
+			}),
+		preparePreview: workspaceProcedure
+			.input(taskVisualizationSelectArtifactRequestSchema)
+			.output(taskVisualizationPreparePreviewResponseSchema)
+			.query(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.preparePreview(ctx.workspaceScope, input);
+			}),
+		requestPreview: workspaceProcedure
+			.input(taskVisualizationSelectArtifactRequestSchema)
+			.output(taskVisualizationRequestPreviewResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskVisualizationArtifactApi)
+					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+				return ctx.taskVisualizationArtifactApi.requestPreview(ctx.workspaceScope, input);
 			}),
 	}),
 	exploratory: t.router({

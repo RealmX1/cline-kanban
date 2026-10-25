@@ -10,8 +10,18 @@ import {
 	createTerminalInputBoxOccupancyTrackerState,
 	recordTerminalInputBytesIntoOccupancyTracker,
 } from "../../../src/terminal/terminal-input-box-occupancy";
+import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
 
 const INCARNATION = "e96aa879-02a4-480e-bbd6-97b7e5e83843";
+const managedRecording = vi.hoisted(() => ({ begin: vi.fn(), settle: vi.fn() }));
+const readNativeActivity = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/agent-session-history/native-agent-conversation-activity-reader", () => ({
+	readNativeAgentConversationActivity: readNativeActivity,
+}));
+vi.mock("../../../src/state/managed-task-prompt-delivery-coordinator", () => ({
+	beginManagedTaskPromptDelivery: managedRecording.begin,
+	settleManagedTaskPromptDeliveryWithoutBlocking: managedRecording.settle,
+}));
 function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") {
 	const tracker = createTerminalInputBoxOccupancyTrackerState();
 	if (draft) recordTerminalInputBytesIntoOccupancyTracker(tracker, Buffer.from(draft), 1);
@@ -53,7 +63,7 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 		taskChatInputDeliveryGeneration: 0,
 		submitConfirmTimer: null,
 		submitConfirmGeneration: 0,
-		programmaticDeliveryReceipt: null,
+		programmaticDeliveryReceipt: null as PendingProgrammaticDeliveryReceipt | null,
 		outputReactionScanBuffer: null,
 		ptyOutputChunkArrivalSequenceNumber: 0,
 		awaitingCodexPromptAfterEnter: false,
@@ -91,12 +101,331 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 
 describe("session manager 的 Codex 原生投递", () => {
 	beforeEach(() => {
+		managedRecording.begin.mockReset();
+		managedRecording.settle.mockReset();
+		readNativeActivity.mockReset();
+		readNativeActivity.mockResolvedValue({
+			events: [],
+			cursor: { transport: "codex_control", predecessorTurnId: "prior-turn", seenEventIds: ["prior-input"] },
+		});
 		vi.useFakeTimers();
 		vi.setSystemTime(600_000);
 	});
 	afterEach(() => {
 		vi.clearAllTimers();
 		vi.useRealTimers();
+	});
+
+	it.each([true, false])("自动 PTY 投递 startup=%s：原生接受才释放确认回执", async (startup) => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { entry, active, write } = installSession(manager, "");
+		entry.summary.agentId = "claude";
+		const handle = { deliveryId: "automatic-delivery", settle: vi.fn() };
+		managedRecording.begin.mockResolvedValue({ handle });
+		const promptText = startup ? "初始提示正文" : "连接恢复正文";
+		if (startup) {
+			Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: promptText });
+			expect(
+				await (
+					manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+				).trySubmitDeferredStartupPrompt("conversation-1"),
+			).toBe(true);
+		} else {
+			expect(
+				await (
+					manager as unknown as {
+						writePasteSubmissionWithConfirm(taskId: string, target: unknown, text: string): Promise<boolean>;
+					}
+				).writePasteSubmissionWithConfirm("conversation-1", active, promptText),
+			).toBe(true);
+		}
+		expect(write).toHaveBeenCalledOnce();
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(true);
+		await vi.advanceTimersByTimeAsync(1600);
+		expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(1);
+		expect(readNativeActivity).toHaveBeenCalledOnce();
+		expect(managedRecording.settle).not.toHaveBeenCalled();
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(true);
+		manager.confirmAcceptedAgentConversationInput("conversation-1", {
+			observedAtMs: Date.now(),
+			eventId: "new-automatic-input",
+			nativeSessionId: "thread-1",
+			runtimeSessionIncarnationId: INCARNATION,
+			submittedPromptText: promptText,
+		});
+		expect(managedRecording.settle).toHaveBeenCalledExactlyOnceWith(handle, {
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(false);
+		await vi.advanceTimersByTimeAsync(70_000);
+		expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(1);
+		expect(managedRecording.settle).toHaveBeenCalledOnce();
+	});
+
+	it.each([true, false])("自动 PTY 投递 startup=%s：确认预算耗尽后诚实失败", async (startup) => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { entry, active, write } = installSession(manager, "");
+		entry.summary.agentId = "claude";
+		const handle = { deliveryId: "unconfirmed-automatic-delivery", settle: vi.fn() };
+		managedRecording.begin.mockResolvedValue({ handle });
+		await (
+			manager as unknown as {
+				writePasteSubmissionWithConfirm(
+					taskId: string,
+					target: unknown,
+					text: string,
+					options: { waitsForStartupCompletion: boolean },
+				): Promise<boolean>;
+			}
+		).writePasteSubmissionWithConfirm("conversation-1", active, "无法确认的正文", {
+			waitsForStartupCompletion: startup,
+		});
+		await vi.advanceTimersByTimeAsync(70_000);
+		expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(1);
+		expect(managedRecording.settle).toHaveBeenCalledExactlyOnceWith(handle, {
+			status: "delivery_failed",
+			reason: "submit_confirmation_budget_exhausted",
+		});
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(false);
+	});
+
+	it("自动首发不使用另一条待发 RVF 消息的压缩确认持久化", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { active, write } = installSession(manager, "");
+		Object.assign(active, { deferredStartupPromptText: "本次自动首发" });
+		const persistSnapshot = vi.fn(async () => true);
+		const validateStillAuthorized = vi.fn(async () => false);
+		manager.submitTaskChatInputWhenReady("conversation-1", "原来待发的 RVF 消息", {
+			idempotencyKey: "pending-rvf-closeout",
+			onDeliveryOutcome: vi.fn(),
+			rvfCloseoutCompactionConfirmationPersistence: {
+				binding: {
+					workspaceId: "workspace-1",
+					taskId: "card",
+					conversationSessionId: "conversation-1",
+					decisionToken: "token",
+					runId: "run",
+					handoffSha256: "a".repeat(64),
+					idempotencyKey: "pending-rvf-closeout",
+					promptSha256: "b".repeat(64),
+					nativeSessionId: "thread-1",
+					runtimeSessionIncarnationId: INCARNATION,
+					controlHostSocketPath: "/isolated/control.sock",
+				},
+				promptText: "原来待发的 RVF 消息",
+				validateStillAuthorized,
+				persistSnapshot,
+			},
+		});
+		const pendingReceipt = active.programmaticDeliveryReceipt;
+		managedRecording.begin.mockResolvedValue({ handle: { deliveryId: "automatic-startup", settle: vi.fn() } });
+		await (
+			manager as unknown as {
+				writePasteSubmissionWithConfirm(taskId: string, target: unknown, text: string): Promise<boolean>;
+			}
+		).writePasteSubmissionWithConfirm("conversation-1", active, "本次自动首发");
+		await vi.advanceTimersByTimeAsync(4100);
+		expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(1);
+		expect(active.programmaticDeliveryReceipt).toBe(pendingReceipt);
+		expect(persistSnapshot).not.toHaveBeenCalled();
+		expect(validateStillAuthorized).not.toHaveBeenCalled();
+		expect(active.nativeCompactionAwareConfirmation).toBeNull();
+	});
+
+	it.each([
+		{ startup: true, confirmsAutomaticInput: true },
+		{ startup: false, confirmsAutomaticInput: true },
+		{ startup: true, confirmsAutomaticInput: false },
+		{ startup: false, confirmsAutomaticInput: false },
+	])(
+		"自动 writer startup=$startup、确认=$confirmsAutomaticInput：旧 intent 在自动投递落定后继续",
+		async ({ startup, confirmsAutomaticInput }) => {
+			const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+			const { entry, active, write } = installSession(manager, "");
+			entry.summary.agentId = "claude";
+			entry.terminalStateMirror.getViewportSnapshot = async () => ({
+				snapshot: "╭──────────────────────╮\n│ > │\n╰──────────────────────╯",
+				cols: 80,
+				rows: 24,
+			});
+			Object.assign(active, {
+				workspaceTrustBuffer: null,
+				deferredStartupPromptText: startup ? "必须先发送的首发" : null,
+			});
+			const handle = { deliveryId: "startup-before-pending-message", settle: vi.fn() };
+			managedRecording.begin.mockResolvedValue({ handle });
+			const outcomes: TaskChatInputDeliveryOutcome[] = [];
+			manager.submitTaskChatInputWhenReady("conversation-1", "原来尚未写出的消息", {
+				idempotencyKey: "original-pending-message",
+				onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			});
+			const originalReceipt = active.programmaticDeliveryReceipt;
+			const originalDeliveryGeneration = active.taskChatInputDeliveryGeneration;
+			if (startup)
+				await (
+					manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+				).trySubmitDeferredStartupPrompt("conversation-1");
+			else
+				await (
+					manager as unknown as {
+						writePasteSubmissionWithConfirm(taskId: string, target: unknown, text: string): Promise<boolean>;
+					}
+				).writePasteSubmissionWithConfirm("conversation-1", active, "必须先发送的首发");
+			expect(outcomes).toEqual([]);
+			expect(active.programmaticDeliveryReceipt).toBe(originalReceipt);
+			expect(active.taskChatInputDeliveryGeneration).toBe(originalDeliveryGeneration);
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(write.mock.calls.filter(([text]) => String(text).includes("原来尚未写出的消息"))).toHaveLength(0);
+			if (confirmsAutomaticInput)
+				manager.confirmAcceptedAgentConversationInput("conversation-1", {
+					observedAtMs: Date.now(),
+					eventId: "accepted-startup-input",
+					nativeSessionId: "thread-1",
+					runtimeSessionIncarnationId: INCARNATION,
+					submittedPromptText: "必须先发送的首发",
+				});
+			else {
+				for (
+					let confirmationTick = 0;
+					confirmationTick < 30 && !managedRecording.settle.mock.calls.length;
+					confirmationTick++
+				)
+					await vi.advanceTimersByTimeAsync(2500);
+			}
+			expect(outcomes).toEqual([]);
+			expect(managedRecording.settle).toHaveBeenCalledExactlyOnceWith(handle, {
+				status: confirmsAutomaticInput ? "delivered_and_submit_confirmed" : "delivery_failed",
+				reason: confirmsAutomaticInput ? null : "submit_confirmation_budget_exhausted",
+			});
+			await vi.advanceTimersByTimeAsync(2500);
+			expect(write.mock.calls.filter(([text]) => String(text).includes("原来尚未写出的消息"))).toHaveLength(1);
+			manager.confirmAcceptedAgentConversationInput("conversation-1", {
+				observedAtMs: Date.now(),
+				eventId: "accepted-original-pending-input",
+				nativeSessionId: "thread-1",
+				runtimeSessionIncarnationId: INCARNATION,
+				submittedPromptText: "原来尚未写出的消息",
+			});
+			expect(outcomes).toEqual([
+				{
+					status: confirmsAutomaticInput
+						? "delivered_queued_behind_active_agent_turn"
+						: "delivered_and_submit_confirmed",
+					reason: null,
+				},
+			]);
+			expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(false);
+		},
+	);
+
+	it.each(["human_input", "native_identity", "submit_generation"] as const)(
+		"自动 writer 读取原生基线期间 %s 改变，不再写 CR 或结算尚未写出的消息",
+		async (change) => {
+			const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+			const { entry, active, write } = installSession(manager, "");
+			entry.summary.agentId = "claude";
+			Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "必须先发送的首发" });
+			const handle = { deliveryId: "automatic-read-in-flight", settle: vi.fn() };
+			managedRecording.begin.mockResolvedValue({ handle });
+			const outcomes: TaskChatInputDeliveryOutcome[] = [];
+			manager.submitTaskChatInputWhenReady("conversation-1", "仍待发送的消息", {
+				idempotencyKey: "preserved-pending-message",
+				onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			});
+			let releaseNativeBaseline: (value: unknown) => void = () => {};
+			readNativeActivity.mockReturnValueOnce(
+				new Promise((resolveBaseline) => {
+					releaseNativeBaseline = resolveBaseline;
+				}),
+			);
+			await (
+				manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1");
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(readNativeActivity).toHaveBeenCalledOnce();
+			if (change === "human_input") manager.writeInput("conversation-1", Buffer.from("人工草稿"));
+			else if (change === "native_identity")
+				Object.assign(entry.summary.agentNativeConversationSessionIdentity ?? {}, { nativeSessionId: "changed" });
+			else active.submitConfirmGeneration += 1;
+			releaseNativeBaseline({
+				events: [],
+				cursor: { transport: "codex_control", predecessorTurnId: "prior-turn", seenEventIds: [] },
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			expect(write.mock.calls.filter(([text]) => text === "\r")).toHaveLength(0);
+			expect(outcomes).toEqual([]);
+			expect(managedRecording.settle).toHaveBeenCalledExactlyOnceWith(handle, {
+				status: "delivery_failed",
+				reason: change === "human_input" ? "submit_confirmation_budget_exhausted" : "session_ended_before_delivery",
+			});
+		},
+	);
+
+	it("deferred 启动提示在首字节写出前登记，粘贴本身不冒充确认", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { entry, active, write } = installSession(manager, "");
+		entry.summary.agentId = "claude";
+		Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "初始提示正文" });
+		let releaseRegistration: (value: unknown) => void = () => {};
+		managedRecording.begin.mockReturnValueOnce(
+			new Promise((resolveRegistration) => {
+				releaseRegistration = resolveRegistration;
+			}),
+		);
+		const submitting = (
+			manager as unknown as { trySubmitDeferredStartupPrompt: (taskId: string) => Promise<boolean> }
+		).trySubmitDeferredStartupPrompt("conversation-1");
+		expect(write).not.toHaveBeenCalled();
+		expect(managedRecording.begin).toHaveBeenCalledWith(
+			expect.objectContaining({
+				text: "初始提示正文",
+				deliveryStrategy: "session_startup",
+				origin: expect.objectContaining({ messageType: "session_startup" }),
+			}),
+		);
+		const handle = { deliveryId: "startup-record", settle: vi.fn() };
+		releaseRegistration({ handle });
+		expect(await submitting).toBe(true);
+		expect(write).toHaveBeenCalledOnce();
+		expect(handle.settle).not.toHaveBeenCalled();
+	});
+
+	it("首发登记期间人开始输入则取消，不覆盖人工草稿", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { entry, active, write } = installSession(manager, "");
+		entry.summary.agentId = "claude";
+		Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "初始提示正文" });
+		const handle = { deliveryId: "cancelled-startup", settle: vi.fn(async () => {}) };
+		managedRecording.begin.mockImplementationOnce(async () => {
+			active.lastUserInputAt = 600_001;
+			return { handle };
+		});
+		expect(
+			await (
+				manager as unknown as { trySubmitDeferredStartupPrompt: (taskId: string) => Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1"),
+		).toBe(false);
+		expect(write).not.toHaveBeenCalled();
+		expect(handle.settle).toHaveBeenCalledWith({ status: "delivery_failed", reason: "cancelled_before_delivery" });
+	});
+
+	it("首发登记失败保留正文并有界重试，三次后不随屏幕重绘无限重试", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { entry, active, write } = installSession(manager, "");
+		entry.summary.agentId = "claude";
+		Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "仍需提交的初始正文" });
+		managedRecording.begin.mockRejectedValue(new Error("登记文件暂不可写"));
+		const submit = () =>
+			(
+				manager as unknown as { trySubmitDeferredStartupPrompt: (taskId: string) => Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1");
+		await expect(submit()).rejects.toThrow("登记文件暂不可写");
+		await vi.advanceTimersByTimeAsync(3001);
+		expect(managedRecording.begin).toHaveBeenCalledTimes(3);
+		expect(await submit()).toBe(false);
+		expect(active.deferredStartupPromptText).toBe("仍需提交的初始正文");
+		expect(write).not.toHaveBeenCalled();
 	});
 
 	it("草稿存在仍走原生通道，不写 PTY、不调用暂存，并保留输入账本", async () => {

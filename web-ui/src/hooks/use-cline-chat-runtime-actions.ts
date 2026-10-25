@@ -2,14 +2,15 @@
 // Detail view and home sidebar both use this to send messages, cancel turns,
 // and load history through one runtime contract.
 import { useCallback } from "react";
-
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	ManagedTaskPromptDeliveryOrigin,
 	RuntimeTaskChatMessage,
 	RuntimeTaskImage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
 } from "@/runtime/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 export interface ClineChatActionResult {
 	ok: boolean;
@@ -18,6 +19,7 @@ export interface ClineChatActionResult {
 }
 
 export interface SendClineChatMessageOptions {
+	deliveryOrigin?: ManagedTaskPromptDeliveryOrigin;
 	mode?: RuntimeTaskSessionMode;
 	images?: RuntimeTaskImage[];
 }
@@ -61,6 +63,8 @@ export function useClineChatRuntimeActions({
 					taskId,
 					targetTaskConversationSessionId: taskId,
 					text,
+					deliveryRequestId: createRandomUuidV4WithInsecureContextFallback(),
+					...(options?.deliveryOrigin ? { deliveryOrigin: options.deliveryOrigin } : {}),
 					...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
 					...(options?.mode ? { mode: options.mode } : {}),
 				});

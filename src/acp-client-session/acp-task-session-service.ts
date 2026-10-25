@@ -23,6 +23,10 @@ import {
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
+import {
+	beginManagedTaskPromptDelivery,
+	settleManagedTaskPromptDeliveryWithoutBlocking,
+} from "../state/managed-task-prompt-delivery-coordinator";
 import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
 import {
 	AcpClientConnectionRuntime,
@@ -896,6 +900,39 @@ export class AcpTaskSessionService {
 		}, ACP_PROMPT_ACCEPTANCE_CONFIRMATION_TIMEOUT_MS);
 		pending.confirmationTimeout.unref();
 		try {
+			// 其余消息已由统一出口或问答协调器登记；无 observer 的首发在协议调用前登记。
+			if (
+				!onPromptAcceptanceSettled &&
+				!programmaticPromptSubmissionIdempotencyKey &&
+				this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
+			) {
+				const { handle } = await beginManagedTaskPromptDelivery({
+					workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
+					taskId,
+					workspaceTaskId: entry.summary.taskConversationSessionMetadata?.workspaceTaskId,
+					text: originalSubmittedPromptText,
+					origin: { messageType: "session_startup", sourceLabel: "ACP 初始提示" },
+					deliveryStrategy: "session_startup",
+					summary: entry.summary,
+					imageAttachments: promptBlocks.filter((block) => block.type === "image"),
+				});
+				// 登记跨越 await；取消或失效时只结算明确取消，不再挂通用结束回调。
+				if (pending.cancellationRequested || !this.isPromptTurnStillCurrent(taskId, pending)) {
+					settleManagedTaskPromptDeliveryWithoutBlocking(handle, {
+						status: "delivery_failed",
+						reason: "cancelled_before_delivery",
+					});
+					return;
+				}
+				pending.onPromptAcceptanceSettledCallbacks.push((accepted) =>
+					settleManagedTaskPromptDeliveryWithoutBlocking(
+						handle,
+						accepted
+							? { status: "delivered_and_submit_confirmed", reason: null }
+							: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" },
+					),
+				);
+			}
 			const response = await connection.prompt(promptBlocks);
 			if (pending.cancellationRequested || !this.isPromptTurnStillCurrent(taskId, pending)) return;
 			this.confirmPromptAcceptedFromProtocolEvidence(taskId);

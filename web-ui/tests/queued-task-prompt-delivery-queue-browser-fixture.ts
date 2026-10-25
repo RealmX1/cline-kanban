@@ -50,6 +50,32 @@ export const queueBrowserProjections = [
 	}),
 ];
 
+export const immediateDeliveryBrowserProjections = [
+	createProjection("immediate-browser-injection", {
+		deliveryState: "handed_to_transport",
+		dispatchBlockReason: null,
+		managedDelivery: {
+			messageType: "programmatic_injection",
+			deliveryStrategy: "immediate",
+			sourceLabel: "rvf_instant_injection_with_long_source_label",
+			imageAttachmentCount: 1,
+			terminalDeliveryReceipt: null,
+		},
+	}),
+	createProjection("startup-browser-unconfirmed", {
+		deliveryState: "settled_failed",
+		dispatchBlockReason: null,
+		settledAt: QUEUE_BROWSER_ENQUEUED_AT + 10_000,
+		managedDelivery: {
+			messageType: "session_startup",
+			deliveryStrategy: "session_startup",
+			sourceLabel: "ACP",
+			imageAttachmentCount: 0,
+			terminalDeliveryReceipt: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" },
+		},
+	}),
+];
+
 export function createQueueBrowserReadResponse(): RuntimeTaskPromptDeliveryQueueResponse {
 	const entries = queueBrowserProjections.map(
 		(projection): QueuedTaskPromptDeliveryEntry => ({

@@ -21,6 +21,7 @@ import {
 import {
 	describeInFlightDeliveryCancelResult,
 	isQueuedTaskPromptDeliveryTerminal,
+	isTaskPromptDeliveryWaitingForAgentTurn,
 } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type {
 	QueuedTaskPromptDeliveryMutation,
@@ -162,7 +163,9 @@ export function useQueuedTaskPromptDeliveryQueueController(
 			// 只在还没落定的条目之间挪；终态条目不发给服务端，由它按「未知 id 追加到尾」留在后面。
 			const orderedQueueEntryIds = buildQueuedPromptDeliveryOrderAfterMove(
 				getQueuedTaskPromptDeliveryProjectionsForTask(taskId).filter(
-					(projection) => !isQueuedTaskPromptDeliveryTerminal(projection),
+					(projection) =>
+						isTaskPromptDeliveryWaitingForAgentTurn(projection) &&
+						!isQueuedTaskPromptDeliveryTerminal(projection),
 				),
 				queueEntryId,
 				direction,

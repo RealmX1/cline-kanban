@@ -186,6 +186,7 @@ function HookHarness({
 		setIsGitHistoryOpen,
 		fetchTaskWorkspaceInfo: NOOP_FETCH_TASK_WORKSPACE_INFO,
 		sendTaskSessionInput: NOOP_SEND_TASK_SESSION_INPUT,
+		sendTaskChatMessage: NOOP_SEND_TASK_SESSION_INPUT,
 		readyForReviewNotificationsEnabled: false,
 		taskGitActionLoadingByTaskId: EMPTY_TASK_GIT_ACTION_LOADING_BY_TASK_ID,
 		runAutoReviewGitAction: NOOP_RUN_AUTO_REVIEW_GIT_ACTION,
