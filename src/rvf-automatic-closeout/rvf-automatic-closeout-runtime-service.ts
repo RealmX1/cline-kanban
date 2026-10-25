@@ -86,8 +86,12 @@ import {
 	reportRvfCloseoutExecutionResultWithIndependentEvidence,
 	resolveRvfCloseoutActiveDelivery,
 } from "./rvf-closeout-execution-stage-recovery";
+import { observeExistingRvfBaseIntegrationStateOnce } from "./rvf-closeout-existing-base-integration-observation";
 import { captureExpectedRvfCloseoutSkillEvidenceOnce } from "./rvf-closeout-expected-skill-snapshot-capture";
-import { advanceRvfCloseoutAutomaticRecovery, remainingRvfCloseoutStages } from "./rvf-closeout-recovery-supervisor";
+import {
+	advanceRvfCloseoutAutomaticRecovery,
+	remainingRvfCloseoutVerificationStages,
+} from "./rvf-closeout-recovery-supervisor";
 import { readRvfCloseoutSkillSnapshots } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
 
@@ -842,10 +846,14 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		trigger: AutomaticLateNativePromptAcceptanceRecoveryTrigger,
 	) {
 		for (const originalRecord of records) {
-			const record = await observeExistingRvfLandExecutionResultOnce(
+			const recoveryDependencies = executionRecoveryDependencies(scope, originalRecord.taskId);
+			if (recoveryDependencies.isStopped(originalRecord)) continue;
+			const landObserved = await observeExistingRvfLandExecutionResultOnce(
 				executionRecoveryDependencies(scope, originalRecord.taskId),
 				originalRecord,
 			);
+			const record = await observeExistingRvfBaseIntegrationStateOnce(recoveryDependencies, landObserved);
+			if (recoveryDependencies.isStopped(record) || record.status === "completed") continue;
 			try {
 				await reconcileUnknownNormalCloseoutOperations(scope, record);
 			} catch {
@@ -854,7 +862,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			const stopped = executionRecoveryDependencies(scope, record.taskId).isStopped;
 			if (stopped(record)) continue;
 			if (
-				remainingRvfCloseoutStages(record).length &&
+				remainingRvfCloseoutVerificationStages(record).length &&
 				isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery(record)
 			) {
 				try {
@@ -882,6 +890,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					/* 保留机器待验；仍尝试规范结果等独立证据。 */
 				}
 			}
+			// 报告入口只补证；不能在校验这份结果前改换 active delivery 或派发续验。
+			if (trigger === "execution_report") continue;
 			try {
 				await serializeMainConversationOperation(scope, record.taskId, () =>
 					advanceRvfCloseoutAutomaticRecovery(
@@ -1377,7 +1387,16 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					} catch {
 						/* 自动补齐原生证据仍可推进。 */
 					}
-					if (!hasIndependentResult) await recoverEligiblePausedCloseouts(scope, targets, "execution_report");
+					const target = targets[0];
+					const priorStageResult =
+						input.stage === "land" ? target?.landExecutionResult : target?.baseBranchSyncExecutionResult;
+					if (
+						!hasIndependentResult &&
+						target &&
+						priorStageResult?.outcome !== "completed" &&
+						isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery(target)
+					)
+						await recoverEligiblePausedCloseouts(scope, targets, "execution_report");
 				}
 				return serializeMainConversationOperation(scope, input.taskId, () =>
 					reportRvfCloseoutExecutionResultWithIndependentEvidence(

@@ -7,7 +7,17 @@ import { pathToFileURL } from "node:url";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { afterEach, expect, it, vi } from "vitest";
+import {
+	type RvfAutomaticCloseoutRecord,
+	rvfAutomaticCloseoutStatusResponseSchema,
+} from "../../src/core/rvf-automatic-closeout-contract";
 import { taskRvfHistoryResponseSchema } from "../../src/core/task-rvf-history-contract";
+import { computeRvfTextSha256 } from "../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
+import { createRvfAutomaticCloseoutRuntimeService } from "../../src/rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
+import {
+	getRvfAutomaticCloseoutStorePath,
+	updateRvfAutomaticCloseoutRecords,
+} from "../../src/rvf-automatic-closeout/rvf-automatic-closeout-store";
 import {
 	getPersistedWorkspaceBoardFilePathById,
 	loadWorkspaceContext,
@@ -149,7 +159,7 @@ it("真实 HTTP 与 CLI 共用只读查询，离线和服务重建后仍可重�
 	await mkdir(join(runDirectory, "artifacts", "inputs"), { recursive: true });
 	await writeFile(
 		join(runDirectory, "artifacts", "inputs", "scope.contract.json"),
-		JSON.stringify({ run_id: "completed-run", repo: projectPath, created_at: 10 }),
+		JSON.stringify({ run_id: "completed-run", repo: projectPath, created_at: 10, base_ref: "main" }),
 	);
 	await writeFile(
 		join(runDirectory, "summary.json"),
@@ -163,6 +173,128 @@ it("真实 HTTP 与 CLI 共用只读查询，离线和服务重建后仍可重�
 	await writeFile(
 		join(runDirectory, "inputs", "automatic-closeout-review-start-receipt.json"),
 		JSON.stringify({ kanban_task_id: "abc12" }),
+	);
+	const rvfHome = join(fixture.fixtureRootDirectoryPath, "rvf-home");
+	vi.stubEnv("RVF_HOME", rvfHome);
+	const head = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+	const gitDirectory = repository.runGit(["rev-parse", "--absolute-git-dir"]).stdout.trim();
+	const token = "0123456789abcdef";
+	const handoffPath = join(runDirectory, "artifacts", "handoff.md");
+	await writeFile(handoffPath, "已完成的历史 RVF\n");
+	const handoffSha256 = computeRvfTextSha256(await readFile(handoffPath));
+	const receipt: RvfAutomaticCloseoutRecord["receipt"] = {
+		schema: "rvf-independent-user-turn-boundary/v1",
+		decision_token: token,
+		session_id: "historical-native",
+		worktree: projectPath,
+		native_user_message_id: "boundary-message",
+		native_turn_id: "boundary-turn",
+		transcript_path: join(fixture.fixtureRootDirectoryPath, "historical.jsonl"),
+		boundary_message_sha256: "a".repeat(64),
+		candidate_fingerprint: "historical-candidate",
+		worktree_head_commit_sha: head,
+		checkpoint_commit: head,
+		checkpoint_tree: repository.runGit(["rev-parse", "HEAD^{tree}"]).stdout.trim(),
+		comparison_base_tip: head,
+		comparison_base_ref: "main",
+		comparison_base_ref_tip: head,
+		source: "explicit_user_command",
+		kanban_task_id: "abc12",
+		idempotency_key: "historical-closeout-boundary",
+	};
+	const record: RvfAutomaticCloseoutRecord = {
+		workspaceId: workspace.workspaceId,
+		taskId: "abc12",
+		conversationSessionId: "abc12",
+		receipt,
+		preReviewTurnIds: ["implementation"],
+		status: "paused",
+		createdAt: 10,
+		updatedAt: 20,
+		runId: "completed-run",
+		runDirectory,
+		handoffPath,
+		handoffSha256,
+		restoredNativeSessionId: "restored-native",
+		restoredTranscriptPath: null,
+		restoreWorkspaceStateSha256: null,
+		nativeIdentitySwitchStartedAt: null,
+		nativeForkAttemptStartedAt: null,
+		pauseReason: "收尾投递失败：submit_confirmation_budget_exhausted",
+		promptDeliveryIdempotencyKey: "historical-closeout-delivery",
+		baseBranchSyncExecutionResult: { outcome: "blocked", reason: "旧未分类结果", reportedAt: 15 },
+	};
+	await updateRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(workspace.workspaceId), () => ({
+		records: [record],
+		value: undefined,
+	}));
+	const notificationDirectory = join(rvfHome, "automatic-closeout-completion-notifications");
+	const bindingDirectory = join(rvfHome, "review-start-independent-user-turn-boundary-receipts");
+	await mkdir(notificationDirectory, { recursive: true });
+	await mkdir(bindingDirectory, { recursive: true });
+	await writeFile(
+		join(notificationDirectory, `${token}.json`),
+		JSON.stringify({
+			schema: "rvf-automatic-closeout-completion/v1",
+			decision_token: token,
+			session_id: receipt.session_id,
+			worktree: projectPath,
+			run_id: record.runId,
+			run_dir: runDirectory,
+			handoff_path: handoffPath,
+			handoff_sha256: handoffSha256,
+		}),
+	);
+	await writeFile(
+		join(bindingDirectory, `${token}.run-binding.json`),
+		JSON.stringify({
+			run_id: record.runId,
+			run_dir: runDirectory,
+			receipt_sha256: computeRvfTextSha256(
+				JSON.stringify(
+					Object.fromEntries(
+						Object.entries(receipt).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+					),
+				),
+			),
+		}),
+	);
+	await writeFile(
+		join(runDirectory, "artifacts", ".finalize.lock"),
+		JSON.stringify({
+			run_id: record.runId,
+			run_dir: runDirectory,
+			repo: projectPath,
+			decision_kind: "handoff",
+			completed_at: "2026-01-01T00:00:01Z",
+			errors: [],
+		}),
+	);
+	const candidatePath = join(gitDirectory, "rvf", "evidence", "reviewed-task-candidate-evidence.json");
+	await mkdir(join(gitDirectory, "rvf", "evidence"), { recursive: true });
+	const candidate = JSON.stringify({
+		subject: { head_oid: head, worktree_realpath: projectPath, git_common_dir_realpath: gitDirectory },
+		review: { run_id: record.runId, protocol_valid: true },
+	});
+	await writeFile(candidatePath, candidate);
+	await writeFile(`${candidatePath}.sha256`, computeRvfTextSha256(candidate));
+	const canonical = JSON.stringify({
+		run_id: record.runId,
+		run_dir: runDirectory,
+		repo_root: projectPath,
+		head_oid_after_commit: head,
+		result: {
+			exit_code: 0,
+			commit_oid: head,
+			candidate_evidence: { status: "written", candidate_evidence_sha256: computeRvfTextSha256(candidate) },
+			round_baseline_seal: { sealed: true },
+		},
+	});
+	await writeFile(join(runDirectory, "artifacts", "rvf-land-commit-result.json"), canonical);
+	await mkdir(join(runDirectory, "artifacts", "rvf-land-commit-execution-results"));
+	await writeFile(
+		join(runDirectory, "artifacts", "rvf-land-commit-execution-results", `${computeRvfTextSha256(canonical)}.json`),
+		canonical,
 	);
 	// 本用例验证进程与 HTTP 契约；canonical 完成判据在 RVF 的真实 Python 回归中验证。
 	const producer = join(fixture.fixtureRootDirectoryPath, "rvf-read-only-inspection-protocol-fixture.cjs");
@@ -179,7 +311,17 @@ process.stdout.write(JSON.stringify(result));
 	const originalBoard = await readFile(getPersistedWorkspaceBoardFilePathById(workspace.workspaceId));
 	const originalSummary = await readFile(join(runDirectory, "summary.json"));
 	const originalGit = repository.runGit(["status", "--porcelain=v2"]).stdout;
+	const originalRefs = repository.runGit(["show-ref"]).stdout;
+	const getManager = vi.fn(async () => {
+		throw new Error("已完成状态无需恢复 Agent");
+	});
 	function makeServer() {
+		const closeout = createRvfAutomaticCloseoutRuntimeService({
+			getManager,
+			runtimeApi: {} as Parameters<typeof createRvfAutomaticCloseoutRuntimeService>[0]["runtimeApi"],
+			listWorkspaces: async () => [{ workspaceId: workspace.workspaceId, workspacePath: projectPath }],
+			warn: () => undefined,
+		});
 		return createServer(
 			createHTTPHandler({
 				basePath: "/api/trpc/",
@@ -188,10 +330,11 @@ process.stdout.write(JSON.stringify(result));
 					({
 						requestedWorkspaceId: req.headers["x-kanban-workspace-id"] ?? null,
 						workspaceScope: { workspaceId: workspace.workspaceId, workspacePath: projectPath },
+						rvfAutomaticCloseoutApi: closeout,
 						kanbanRequestOriginActorEvidence: {
 							decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
 						},
-					}) as RuntimeTrpcContext,
+					}) as unknown as RuntimeTrpcContext,
 			}),
 		);
 	}
@@ -202,7 +345,7 @@ process.stdout.write(JSON.stringify(result));
 		if (!address || typeof address === "string") throw new Error("隔离 HTTP 未分配端口。");
 		return address.port;
 	}
-	async function runCli(port: number) {
+	async function runCli(port: number, command = "rvf-history") {
 		return await new Promise<unknown>((accept, reject) => {
 			const child = execFile(
 				process.execPath,
@@ -211,7 +354,11 @@ process.stdout.write(JSON.stringify(result));
 					pathToFileURL(requireFromHere.resolve("tsx")).href,
 					resolve("src/cli.ts"),
 					"task",
-					"rvf-history",
+					command,
+					"--task-id",
+					"abc12",
+					"--project-path",
+					projectPath,
 				],
 				{
 					timeout: 35_000,
@@ -238,6 +385,15 @@ process.stdout.write(JSON.stringify(result));
 	}
 	try {
 		const port = await listen();
+		const status = rvfAutomaticCloseoutStatusResponseSchema.parse(
+			await runCli(port, "rvf-automatic-closeout-status"),
+		);
+		expect(status.records[0]?.status).toBe("completed");
+		expect(status.records[0]?.executionResultReportHistory?.map((entry) => entry.outcome)).toEqual([
+			"blocked",
+			"completed",
+			"completed",
+		]);
 		const client = createTRPCProxyClient<RuntimeAppRouter>({
 			links: [
 				httpBatchLink({
@@ -249,6 +405,9 @@ process.stdout.write(JSON.stringify(result));
 		const api = await client.runtime.getTaskRvfHistory.query({ taskId: "abc12" });
 		expect(api.hasVerifiedCompletedRvf).toBe(true);
 		expect(api.currentCandidateReviewCoverage.status).toBe("covered");
+		expect(api.mostRecentVerifiedCompletedRun?.baseBranchSyncExecutionResult).toEqual(
+			status.records[0]?.baseBranchSyncExecutionResult,
+		);
 		expect(taskRvfHistoryResponseSchema.parse(await runCli(port)).querySource).toBe("runtime");
 		await new Promise<void>((accept) => server.close(() => accept()));
 		const offline = taskRvfHistoryResponseSchema.parse(await runCli(port));
@@ -257,9 +416,14 @@ process.stdout.write(JSON.stringify(result));
 		server = makeServer();
 		const restarted = taskRvfHistoryResponseSchema.parse(await runCli(await listen()));
 		expect(restarted.mostRecentVerifiedCompletedRun?.runId).toBe("completed-run");
+		expect(restarted.mostRecentVerifiedCompletedRun?.baseBranchSyncExecutionResult).toEqual(
+			status.records[0]?.baseBranchSyncExecutionResult,
+		);
+		expect(getManager).not.toHaveBeenCalled();
 		expect(await readFile(getPersistedWorkspaceBoardFilePathById(workspace.workspaceId))).toEqual(originalBoard);
 		expect(await readFile(join(runDirectory, "summary.json"))).toEqual(originalSummary);
 		expect(repository.runGit(["status", "--porcelain=v2"]).stdout).toBe(originalGit);
+		expect(repository.runGit(["show-ref"]).stdout).toBe(originalRefs);
 	} finally {
 		server.closeAllConnections();
 		await new Promise<void>((accept) => server.close(() => accept()));
