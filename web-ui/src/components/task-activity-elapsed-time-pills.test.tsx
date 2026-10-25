@@ -54,6 +54,28 @@ afterEach(() => {
 });
 
 describe("跨项目精简行的创建时间", () => {
+	it("未确认接受显示持久的来源、时间、原因，接受后消失", () => {
+		const acceptance = {
+			status: "unconfirmed" as const,
+			attemptedAtMs: NOW_MS - 60_000,
+			runtimeSessionIncarnationId: "process",
+			submissionSource: "programmatic_submission" as const,
+			verification: {
+				checkedAtMs: NOW_MS,
+				nextCheckAtMs: null,
+				consecutiveUnchangedCheckCount: 4,
+				reason: "no_matching_native_message" as const,
+			},
+		};
+		renderElapsedTimePills({ agentConversationPromptSubmissionAcceptance: acceptance });
+		const status = container.querySelector('[role="status"]');
+		expect(status?.textContent).toContain("尚未确认接受");
+		expect(status?.getAttribute("title")).toContain("程序化提交");
+		expect(status?.getAttribute("title")).toContain("尚无可关联的原生接受记录");
+		renderElapsedTimePills({ agentConversationPromptSubmissionAcceptance: { ...acceptance, status: "accepted" } });
+		expect(container.querySelector('[role="status"]')).toBeNull();
+	});
+
 	it("后台等待保持 Agent 回合，历史 fallback 交棒隐藏，活动时长继续走而不归零", () => {
 		const task = {
 			turnOwner: "agent" as const,

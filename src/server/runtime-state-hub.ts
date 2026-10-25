@@ -223,15 +223,28 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				nativeAgentResponseAcceptedUserInputEventId: observation.nativeAgentResponseAcceptedUserInputEventId,
 			});
 		},
+		onPromptSubmissionAcceptanceReconciliation: (sessionId, workspaceId, result) => {
+			terminalManagersByWorkspaceId
+				.get(workspaceId)
+				?.reconcileAgentConversationPromptSubmissionAcceptance(sessionId, result);
+		},
 		onAccepted: async (observation) => {
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
-			if (!manager || !observation.runtimeSessionIncarnationId || !observation.eventId) return;
+			if (!manager || !observation.runtimeSessionIncarnationId || !observation.eventId) return false;
 			const before = manager.getSummary(observation.conversationSessionId);
 			if (
 				before?.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId ||
 				before.agentNativeConversationSessionIdentity?.nativeSessionId !== observation.nativeSessionId
 			)
-				return;
+				return false;
+			const candidate = before.agentConversationPromptSubmissionAcceptance;
+			if (
+				candidate &&
+				candidate.status !== "accepted" &&
+				(candidate.attemptedAtMs !== observation.observedSubmissionAttemptedAtMs ||
+					candidate.submissionId !== observation.observedSubmissionId)
+			)
+				return false;
 			if (before.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover) {
 				const workspace = await loadWorkspaceContextById(observation.workspaceId);
 				if (!workspace) throw new Error("原生输入已接受，但暂时无法定位主会话交接工作区");
@@ -264,6 +277,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					summary: confirmed,
 					submittedPromptText: observation.submittedPromptText,
 				});
+			return confirmed !== null;
 		},
 		onReadFailed: (error, context) =>
 			logAgentSessionRetentionWarning(
@@ -526,6 +540,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		// 交接 hold 解除会再次发布同一接受事件；解除前不能消耗这个边沿。
 		if (
 			previousEdgeWasObserved &&
+			!accepted?.acceptedByHistoricalReconciliation &&
 			acceptedEdge &&
 			!summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
 			acceptedEdge !== previousEdge &&

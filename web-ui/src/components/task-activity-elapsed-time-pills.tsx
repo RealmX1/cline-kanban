@@ -4,6 +4,7 @@ import {
 } from "@runtime-agent-conversation-activity-observation";
 import { Activity, Clock, Hourglass, MessagesSquare } from "lucide-react";
 import { useMemo } from "react";
+import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "@/runtime/types";
@@ -83,7 +84,11 @@ export function TaskActivityElapsedTimePills({
 			</Tooltip>
 			{task.agentConversationPromptSubmissionAcceptance?.status === "pending" ||
 			task.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
-				<span role="status" className="inline-flex items-center gap-0.5 text-status-gold">
+				<span
+					role="status"
+					title={describePromptSubmissionAcceptance(task.agentConversationPromptSubmissionAcceptance)}
+					className="inline-flex items-center gap-0.5 text-status-gold"
+				>
 					<Hourglass size={10} />
 					{task.agentConversationPromptSubmissionAcceptance.status === "pending" ? "提交待确认" : "尚未确认接受"}
 				</span>

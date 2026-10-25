@@ -58,6 +58,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
+- **输入接受不能受工具历史预算阻塞**：Codex 用户消息单独记原生位置水位；历史补证只修正标记，不发布新输入或重开回合。持久扫描、按键候选和退出/Rewind 边界见 `docs/runbooks/prompt-submission-acceptance-reconciliation.md`。
 - **RVF 收尾的阶段等待与迟到补证分开**：可信自动压缩可有界暂停普通确认计时，仍须精确正文证明接受；旧失败只追加补证，不重发或覆盖历史。首次策略见 `docs/runbooks/codex-rvf-closeout-compaction-aware-confirmation.md`，恢复入口及历史样本见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/rvf-native-independent-user-turn-before-submission-query-recovery.md`。
 - **RVF 收尾恢复区分历史接受、执行资格与真实结果**：保留原失败账本，以事件时证据自动补证，或独立核验规范执行结果；机器缺证走有界恢复和受控续验，Stop 与身份门禁不放宽。`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
