@@ -5,15 +5,92 @@ import {
 	independentTaskCreationDraftEditSchema,
 	independentTaskCreationDraftSchema,
 } from "../../../src/core/independent-task-creation-contract";
+import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
+import * as sourceAgentDraftGeneration from "../../../src/independent-task-creation/generate-draft-with-source-agent-fork";
 import { createIndependentTaskCreationService } from "../../../src/independent-task-creation/independent-task-creation-service";
 import {
 	readIndependentTaskCreationDraft,
 	writeIndependentTaskCreationDraft,
 } from "../../../src/independent-task-creation/persisted-creation-draft";
+import * as modelProviderChatCompletion from "../../../src/model-provider-access/request-model-provider-chat-completion";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+	vi.unstubAllEnvs();
+	vi.restoreAllMocks();
+});
 describe("持久任务草稿生成", () => {
+	it.each(["kanban_model_provider", "source_agent_fork"] as const)(
+		"%s 实际生成请求复用共享起草规则，并保留本次范围及历史收尾材料",
+		async (generationSource) => {
+			const fixture = createIsolatedGitTestWorkspaceFixture();
+			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+			const requestId = "11111111-1111-4111-8111-111111111111";
+			const draft = independentTaskCreationDraftSchema.parse({
+				requestId,
+				sourceTaskId: "source",
+				sourceTaskConversationSessionId: "peer",
+				revision: 0,
+				status: "ready",
+				userTaskDescription: "实现新任务，按本任务约定审查",
+				suggestedTaskDescription: "",
+				title: "",
+				initialPrompt: "",
+				titleWasEditedByUser: false,
+				initialPromptWasEditedByUser: false,
+				contextInheritance: "fresh_conversation",
+				worktreeSource: "local_main_immediately",
+				generationSource,
+				generatedFromDescription: null,
+				contextCapturedAt: 1,
+				contextWarnings: [],
+				forkUnavailableReason: null,
+				sourceGitStatus: "",
+				sourceCommitsNotInLocalMain: 0,
+				errorMessage: null,
+				createdTaskId: null,
+			});
+			await writeIndependentTaskCreationDraft("test", {
+				draft,
+				sourceSummary: null,
+				contextBeforeSideSession: "[user; parent:1]\n本阶段只调查",
+				contextAfterSideSession: "[assistant; side:2]\n不要开启新 RVF，直接提交并继续 base-branch-sync。",
+				nativeConversationSeed: null,
+				reservedTaskId: null,
+				generationAttemptId: null,
+			});
+			const generatedDefinition = {
+				suggestedTaskDescription: "实现新任务",
+				title: "[FEAT]实现新任务",
+				initialPrompt: "## TLDR\n\n实现新任务。\n\n按当前约定验证。\n\n<task-initial-prompt />",
+			};
+			const result = { status: "completed" as const, parsedJsonObject: generatedDefinition };
+			const provider = vi
+				.spyOn(modelProviderChatCompletion, "requestModelProviderJsonObject")
+				.mockResolvedValue(result);
+			const sourceAgent = vi
+				.spyOn(sourceAgentDraftGeneration, "generateIndependentTaskDraftWithSourceAgentFork")
+				.mockResolvedValue(result);
+			const service = createIndependentTaskCreationService();
+			const generated = await service.generate(
+				{ workspaceId: "test", workspacePath: join(fixture.fixtureRootDirectoryPath, "repository") },
+				{ requestId },
+			);
+			const prompt =
+				generationSource === "kanban_model_provider"
+					? `${provider.mock.calls[0]?.[0].systemPrompt}\n\n${provider.mock.calls[0]?.[0].userPrompt}`
+					: sourceAgent.mock.calls[0]?.[0].prompt;
+			expect(provider).toHaveBeenCalledTimes(generationSource === "kanban_model_provider" ? 1 : 0);
+			expect(sourceAgent).toHaveBeenCalledTimes(generationSource === "source_agent_fork" ? 1 : 0);
+			const guidance = renderTaskInitialPromptAuthoringAndStartupSettingsGuidance();
+			expect(prompt?.split(guidance)).toHaveLength(2);
+			expect(prompt).toContain("Markdown 标题 ## TLDR");
+			expect(prompt).toContain("不能把它们自动改写成新任务的免审规则、提交授权或同步授权");
+			expect(prompt).toContain("## 本次分出说明\n\n实现新任务，按本任务约定审查");
+			expect(prompt).toContain("[assistant; side:2]\n不要开启新 RVF，直接提交并继续 base-branch-sync。");
+			expect(generated.initialPrompt).toBe(generatedDefinition.initialPrompt);
+		},
+	);
 	it("JSON 编辑快照可清除 provider 覆盖，重读后生成使用用途默认绑定", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
