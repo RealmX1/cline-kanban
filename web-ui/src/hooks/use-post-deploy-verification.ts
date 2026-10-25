@@ -18,6 +18,11 @@ import { useBooleanLocalStorageValue, useInterval } from "@/utils/react-use";
 // MVP 无 WebSocket：30s 心跳轮询 + tab focus 时 immediate refresh（plan 数据流）。
 const POST_DEPLOY_VERIFICATION_POLL_INTERVAL_MS = 30_000;
 
+export interface PostDeployVerificationEntryNavigationReadModelRequest {
+	workspaceId: string;
+	requestId: number;
+}
+
 export interface UsePostDeployVerificationResult {
 	// active 组 = 该 workspace 中 activeDeploymentId 指向的组（foldedAtIso === null 的最新组）；无则 null。
 	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
@@ -31,7 +36,11 @@ export interface UsePostDeployVerificationResult {
 	pendingVerificationTaskCount: number | null;
 	refresh: () => void;
 	// 结案前等待权威快照；有在途写入或项目已变化时拒绝，不能把过期快照当成通过。
-	refreshAndReadActiveGroup: () => Promise<RuntimePostDeployVerificationDeploymentGroup | null>;
+	refreshAndReadActiveGroup: (
+		entryNavigationRequest?: PostDeployVerificationEntryNavigationReadModelRequest,
+	) => Promise<RuntimePostDeployVerificationDeploymentGroup | null>;
+	// 只有通过项目、读取顺序与本地写入守卫的快照，才可证明对应定位目标存在或缺失。
+	entryNavigationReadModelRequest: PostDeployVerificationEntryNavigationReadModelRequest | null;
 	isVerificationWriteInFlight: boolean;
 	// 「保持最前」偏好（默认 true，见 plan 面板行为表）。
 	stayInFront: boolean;
@@ -155,6 +164,7 @@ export function usePostDeployVerification(
 	const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+	const [workspaceIdOfLoadedReadModel, setWorkspaceIdOfLoadedReadModel] = useState<string | null>(null);
 	const [stayInFront, setStayInFront] = useBooleanLocalStorageValue(
 		LocalStorageKey.PostDeployVerificationStayInFront,
 		true,
@@ -164,6 +174,12 @@ export function usePostDeployVerification(
 		false,
 	);
 
+	const [entryNavigationReadModelRequest, setEntryNavigationReadModelRequest] =
+		useState<PostDeployVerificationEntryNavigationReadModelRequest | null>(null);
+	const pendingEntryNavigationReadModelRequestRef =
+		useRef<PostDeployVerificationEntryNavigationReadModelRequest | null>(null);
+	const nextReadRequestSequenceRef = useRef(0);
+	const lastAppliedReadRequestSequenceRef = useRef(0);
 	const isMountedRef = useRef(true);
 	// 守护过期响应：workspace 切换后旧请求返回不得覆盖新 workspace 数据。
 	const requestWorkspaceIdRef = useRef<string | null>(workspaceId);
@@ -217,57 +233,83 @@ export function usePostDeployVerification(
 		[],
 	);
 
-	const refreshAndReadActiveGroup = useCallback(async () => {
-		if (!workspaceId) throw new Error("未选择核对项目");
-		const requestWorkspaceId = workspaceId;
-		const writeCompletionSeqAtRefreshLaunch = verificationWriteCompletionSeqRef.current;
-		try {
-			if (inFlightVerificationWriteCountRef.current > 0) throw new Error("核对结果仍在保存或运行，请稍后继续");
-			const response = await getRuntimeTrpcClient(
-				requestWorkspaceId,
-			).deployment.getPostDeployVerificationState.query({});
-			if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
-				throw new Error("核对项目已变化，请重新操作");
+	const refreshAndReadActiveGroup = useCallback(
+		async (entryNavigationRequest?: PostDeployVerificationEntryNavigationReadModelRequest) => {
+			if (!workspaceId) throw new Error("未选择核对项目");
+			if (entryNavigationRequest && entryNavigationRequest.workspaceId !== workspaceId) {
+				throw new Error("定位项目与核对项目不一致，请等待项目切换完成");
 			}
-			if (
-				inFlightVerificationWriteCountRef.current > 0 ||
-				verificationWriteCompletionSeqRef.current !== writeCompletionSeqAtRefreshLaunch
-			) {
-				throw new Error("核对状态正在更新，请稍后继续");
+			if (entryNavigationRequest) pendingEntryNavigationReadModelRequestRef.current = entryNavigationRequest;
+			const navigationRequestAtLaunch = pendingEntryNavigationReadModelRequestRef.current;
+			const readRequestSequence = ++nextReadRequestSequenceRef.current;
+			const workspaceGenerationAtLaunch = verificationWriteWorkspaceGenerationRef.current;
+			const requestWorkspaceId = workspaceId;
+			const writeCompletionSeqAtRefreshLaunch = verificationWriteCompletionSeqRef.current;
+			try {
+				if (inFlightVerificationWriteCountRef.current > 0) throw new Error("核对结果仍在保存或运行，请稍后继续");
+				const response = await getRuntimeTrpcClient(
+					requestWorkspaceId,
+				).deployment.getPostDeployVerificationState.query({});
+				if (
+					!isMountedRef.current ||
+					requestWorkspaceIdRef.current !== requestWorkspaceId ||
+					verificationWriteWorkspaceGenerationRef.current !== workspaceGenerationAtLaunch
+				) {
+					throw new Error("核对项目已变化，请重新操作");
+				}
+				if (
+					inFlightVerificationWriteCountRef.current > 0 ||
+					verificationWriteCompletionSeqRef.current !== writeCompletionSeqAtRefreshLaunch
+				) {
+					throw new Error("核对状态正在更新，请稍后继续");
+				}
+				if (readRequestSequence < lastAppliedReadRequestSequenceRef.current) {
+					throw new Error("已有更新的核对快照，已忽略迟到响应");
+				}
+				lastAppliedReadRequestSequenceRef.current = readRequestSequence;
+				setEntryNavigationReadModelRequest(
+					navigationRequestAtLaunch === pendingEntryNavigationReadModelRequestRef.current
+						? navigationRequestAtLaunch
+						: null,
+				);
+				setDeploymentGroups(response.deploymentGroups);
+				setActiveDeploymentId(response.activeDeploymentId);
+				setLoadError(null);
+				setHasLoadedOnce(true);
+				setWorkspaceIdOfLoadedReadModel(requestWorkspaceId);
+				const previousActiveDeploymentId = previousActiveDeploymentIdRef.current;
+				previousActiveDeploymentIdRef.current = response.activeDeploymentId;
+				if (
+					showDeploymentNotifications &&
+					previousActiveDeploymentId !== undefined &&
+					response.activeDeploymentId !== null &&
+					response.activeDeploymentId !== previousActiveDeploymentId
+				) {
+					showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Post-Deploy Verification" });
+					setCollapsed(false);
+				}
+				return (
+					response.deploymentGroups.find(
+						(group) =>
+							group.deploymentId === response.activeDeploymentId && group.workspaceId === requestWorkspaceId,
+					) ?? null
+				);
+			} catch (error) {
+				if (
+					isMountedRef.current &&
+					requestWorkspaceIdRef.current === requestWorkspaceId &&
+					verificationWriteWorkspaceGenerationRef.current === workspaceGenerationAtLaunch &&
+					readRequestSequence >= lastAppliedReadRequestSequenceRef.current &&
+					inFlightVerificationWriteCountRef.current === 0 &&
+					verificationWriteCompletionSeqRef.current === writeCompletionSeqAtRefreshLaunch
+				) {
+					setLoadError(resolveErrorMessage(error, "加载 Post-Deploy Verification 状态失败"));
+				}
+				throw error;
 			}
-			setDeploymentGroups(response.deploymentGroups);
-			setActiveDeploymentId(response.activeDeploymentId);
-			setLoadError(null);
-			setHasLoadedOnce(true);
-			const previousActiveDeploymentId = previousActiveDeploymentIdRef.current;
-			previousActiveDeploymentIdRef.current = response.activeDeploymentId;
-			if (
-				showDeploymentNotifications &&
-				previousActiveDeploymentId !== undefined &&
-				response.activeDeploymentId !== null &&
-				response.activeDeploymentId !== previousActiveDeploymentId
-			) {
-				showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Post-Deploy Verification" });
-				setCollapsed(false);
-			}
-			return (
-				response.deploymentGroups.find(
-					(group) =>
-						group.deploymentId === response.activeDeploymentId && group.workspaceId === requestWorkspaceId,
-				) ?? null
-			);
-		} catch (error) {
-			if (
-				isMountedRef.current &&
-				requestWorkspaceIdRef.current === requestWorkspaceId &&
-				inFlightVerificationWriteCountRef.current === 0 &&
-				verificationWriteCompletionSeqRef.current === writeCompletionSeqAtRefreshLaunch
-			) {
-				setLoadError(resolveErrorMessage(error, "加载 Post-Deploy Verification 状态失败"));
-			}
-			throw error;
-		}
-	}, [workspaceId, setCollapsed, showDeploymentNotifications]);
+		},
+		[workspaceId, setCollapsed, showDeploymentNotifications],
+	);
 
 	const refresh = useCallback(() => {
 		if (!workspaceId) {
@@ -287,7 +329,10 @@ export function usePostDeployVerification(
 		inFlightVerificationWriteCountRef.current = 0;
 		setIsVerificationWriteInFlight(false);
 		previousActiveDeploymentIdRef.current = undefined;
+		pendingEntryNavigationReadModelRequestRef.current = null;
+		setEntryNavigationReadModelRequest(null);
 		setHasLoadedOnce(false);
+		setWorkspaceIdOfLoadedReadModel(null);
 		setDeploymentGroups([]);
 		setActiveDeploymentId(null);
 		setLoadError(null);
@@ -532,10 +577,11 @@ export function usePostDeployVerification(
 		historyGroups,
 		activeDeploymentId,
 		loadError,
-		hasLoadedOnce,
+		hasLoadedOnce: hasLoadedOnce && workspaceIdOfLoadedReadModel === workspaceId,
 		pendingVerificationTaskCount,
 		refresh,
 		refreshAndReadActiveGroup,
+		entryNavigationReadModelRequest,
 		isVerificationWriteInFlight,
 		stayInFront,
 		setStayInFront,

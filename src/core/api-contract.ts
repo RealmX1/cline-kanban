@@ -1,4 +1,14 @@
 import { z } from "zod";
+
+export {
+	type PostDeployVerificationEntryReference,
+	type RuntimePostDeployVerificationEntryNavigationTarget,
+	type RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
+	type RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponse,
+	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema,
+	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema,
+} from "./post-deploy-verification-entry-navigation-contract";
+
 import {
 	taskVisualizationArtifactsUpdatedMessageSchema,
 	taskVisualizationBrowserContextMessageSchema,

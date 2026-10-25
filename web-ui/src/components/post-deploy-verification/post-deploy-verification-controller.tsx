@@ -8,6 +8,7 @@ import {
 	isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate,
 	listUncheckedChecklistItemsRequiringClosureReason,
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
+import type { PostDeployVerificationEntryNavigationRequest } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import { PostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-panel";
 import { PostDeployVerificationReviewBeforeMoveIntoDoneDialog } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
@@ -28,6 +29,8 @@ import type {
 } from "@/types/task-card-move-into-done-request";
 
 export interface PostDeployVerificationControllerProps {
+	entryNavigationRequest?: PostDeployVerificationEntryNavigationRequest | null;
+	onEntryNavigationFinished?: (requestId: number) => void;
 	// hook 单实例由 App.tsx 持有并下传：controller 与顶栏 badge 共用同一份轮询/状态，
 	// 避免双实例重复轮询与「检测到新部署」重复 toast（原 remount-nonce hack 的根因已消除）。
 	verification: UsePostDeployVerificationResult;
@@ -86,6 +89,8 @@ export function PostDeployVerificationController({
 	realTaskCardRenderingInputsForPostDeployVerificationPanelEntries = null,
 	isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel = false,
 	postDeployVerificationWorkspaceProjectNameShownInPanelHeader = null,
+	entryNavigationRequest = null,
+	onEntryNavigationFinished,
 }: PostDeployVerificationControllerProps): ReactElement {
 	const { refresh, requestComplete, confirmComplete } = verification;
 	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
@@ -620,6 +625,11 @@ export function PostDeployVerificationController({
 			) : null}
 
 			<PostDeployVerificationPanel
+				entryNavigationRequest={entryNavigationRequest}
+				entryNavigationReadModelRequest={verification.entryNavigationReadModelRequest}
+				onRefreshEntryNavigationReadModel={verification.refreshAndReadActiveGroup}
+				isVerificationWriteInFlight={verification.isVerificationWriteInFlight}
+				onEntryNavigationFinished={onEntryNavigationFinished}
 				activeGroup={verification.activeGroup}
 				historyGroups={verification.historyGroups}
 				hasLoadedOnce={verification.hasLoadedOnce}

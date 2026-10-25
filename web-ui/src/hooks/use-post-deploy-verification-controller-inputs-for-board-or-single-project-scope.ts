@@ -222,12 +222,14 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 		completePostDeployVerificationMoveToDone: isReadingRuntimeBoardSnapshot
 			? completeRuntimeBoardSnapshotPostDeployVerificationMoveToDone
 			: completeCurrentProjectPostDeployVerificationMoveToDone,
-		onSelectTaskInPostDeployVerificationPanel: isBoardScopeAllProjectsSelected
-			? openTaskOfPostDeployVerificationWorkspaceInItsProject
-			: setSelectedTaskId,
+		onSelectTaskInPostDeployVerificationPanel:
+			isBoardScopeAllProjectsSelected || isReadingRuntimeBoardSnapshot
+				? openTaskOfPostDeployVerificationWorkspaceInItsProject
+				: setSelectedTaskId,
 		realTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
-		postDeployVerificationWorkspaceProjectNameShownInPanelHeader: isBoardScopeAllProjectsSelected
-			? (input.projects.find((project) => project.id === postDeployVerificationWorkspaceId)?.name ?? null)
-			: null,
+		postDeployVerificationWorkspaceProjectNameShownInPanelHeader:
+			isBoardScopeAllProjectsSelected || isReadingRuntimeBoardSnapshot
+				? (input.projects.find((project) => project.id === postDeployVerificationWorkspaceId)?.name ?? null)
+				: null,
 	};
 }

@@ -1,8 +1,8 @@
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, ClipboardCheck, Minus, Pin, PinOff } from "lucide-react";
-import { type ReactElement, useMemo } from "react";
+import { type ReactElement, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-
+import { showAppToast } from "@/components/app-toaster";
 import {
 	countPostDeployVerificationTasksAwaitingVerification,
 	isPostDeployVerificationTaskClosed,
@@ -14,17 +14,28 @@ import {
 	type PostDeployVerificationDeploymentGroupTaskEntryActions,
 	PostDeployVerificationHistoryDeploymentGroupTaskEntries,
 } from "@/components/post-deploy-verification/post-deploy-verification-deployment-group";
+import type { PostDeployVerificationEntryNavigationRequest } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import {
 	formatDeployShaRange,
 	formatDeployTimestamp,
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
+import { spotlightElement } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
+import type {
+	PostDeployVerificationEntryNavigationReadModelRequest,
+	UsePostDeployVerificationResult,
+} from "@/hooks/use-post-deploy-verification";
 import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
 export interface PostDeployVerificationPanelProps extends PostDeployVerificationDeploymentGroupTaskEntryActions {
+	entryNavigationRequest?: PostDeployVerificationEntryNavigationRequest | null;
+	entryNavigationReadModelRequest?: PostDeployVerificationEntryNavigationReadModelRequest | null;
+	onRefreshEntryNavigationReadModel?: UsePostDeployVerificationResult["refreshAndReadActiveGroup"];
+	isVerificationWriteInFlight?: boolean;
+	onEntryNavigationFinished?: (requestId: number) => void;
 	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
 	historyGroups: RuntimePostDeployVerificationDeploymentGroup[];
 	hasLoadedOnce: boolean;
@@ -88,7 +99,15 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		onSelectTask,
 		onNavigateToBoard,
 		onCreateFollowUpTaskFromChecklistItems,
+		entryNavigationRequest = null,
+		entryNavigationReadModelRequest = null,
+		onRefreshEntryNavigationReadModel,
+		isVerificationWriteInFlight = false,
+		onEntryNavigationFinished,
 	} = props;
+	const [expandedHistoryDeploymentIds, setExpandedHistoryDeploymentIds] = useState<ReadonlySet<string>>(
+		() => new Set(),
+	);
 	const taskEntryActions: PostDeployVerificationDeploymentGroupTaskEntryActions = {
 		completingTaskId,
 		onToggleChecklistItem,
@@ -111,6 +130,84 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 			),
 		[activeGroup, historyGroups],
 	);
+	// 每次显式定位先发起读取。短暂失败最多尝试三次；之后保留请求，既有轮询或写入结束再补证。
+	useEffect(() => {
+		if (!entryNavigationRequest || collapsed || !onRefreshEntryNavigationReadModel || isVerificationWriteInFlight)
+			return;
+		let cancelled = false;
+		let retryTimer: ReturnType<typeof setTimeout> | undefined;
+		const refreshForNavigation = async (attempt: number) => {
+			try {
+				await onRefreshEntryNavigationReadModel({
+					workspaceId: entryNavigationRequest.target.entry.workspaceId,
+					requestId: entryNavigationRequest.requestId,
+				});
+			} catch {
+				if (cancelled) return;
+				if (attempt < 3) retryTimer = setTimeout(() => void refreshForNavigation(attempt + 1), attempt * 500);
+				else
+					showAppToast({
+						intent: "warning",
+						message: "读取验证条目失败，已保留定位请求；后续刷新成功后将自动定位，也可再次点击 PDV 重试。",
+					});
+			}
+		};
+		void refreshForNavigation(1);
+		return () => {
+			cancelled = true;
+			clearTimeout(retryTimer);
+		};
+	}, [entryNavigationRequest, collapsed, onRefreshEntryNavigationReadModel, isVerificationWriteInFlight]);
+	useEffect(() => {
+		if (
+			!entryNavigationRequest ||
+			collapsed ||
+			!hasLoadedOnce ||
+			loadError ||
+			entryNavigationReadModelRequest?.requestId !== entryNavigationRequest.requestId ||
+			entryNavigationReadModelRequest.workspaceId !== entryNavigationRequest.target.entry.workspaceId
+		)
+			return;
+		const entry = entryNavigationRequest.target.entry;
+		const groups = [...(activeGroup ? [activeGroup] : []), ...historyGroups];
+		if (groups.some((group) => group.workspaceId !== entry.workspaceId)) return;
+		const group = groups.find(
+			(group) => group.deploymentId === entry.deploymentId && group.workspaceId === entry.workspaceId,
+		);
+		if (!group?.tasks.some((task) => task.taskId === entry.taskId)) {
+			showAppToast({ intent: "warning", message: "该部署后验证条目已不在保留记录中，请重新读取定位目标。" });
+			onEntryNavigationFinished?.(entryNavigationRequest.requestId);
+			return;
+		}
+		if (historyGroups.some((history) => history.deploymentId === entry.deploymentId)) {
+			setExpandedHistoryDeploymentIds((previous) => new Set([...previous, entry.deploymentId]));
+		}
+		let attempts = 0;
+		let frame = 0;
+		const key = JSON.stringify([entry.workspaceId, entry.deploymentId, entry.taskId]);
+		const locate = () => {
+			const target = Array.from(
+				document.querySelectorAll<HTMLElement>("[data-post-deploy-verification-entry-navigation-key]"),
+			).find((element) => element.getAttribute("data-post-deploy-verification-entry-navigation-key") === key);
+			if (target) {
+				spotlightElement(target);
+				target.focus({ preventScroll: true });
+				onEntryNavigationFinished?.(entryNavigationRequest.requestId);
+			} else if (++attempts < 20) frame = window.requestAnimationFrame(locate);
+			else showAppToast({ intent: "warning", message: "验证条目暂未完成展开，可再次点击 PDV 重试。" });
+		};
+		frame = window.requestAnimationFrame(locate);
+		return () => window.cancelAnimationFrame(frame);
+	}, [
+		entryNavigationRequest,
+		entryNavigationReadModelRequest,
+		collapsed,
+		hasLoadedOnce,
+		loadError,
+		activeGroup,
+		historyGroups,
+		onEntryNavigationFinished,
+	]);
 
 	// 门控：数据未到达前不闪现；本 workspace 无任何 deployment 组时不挂载（即工作区维度门控，见 plan）。
 	if (typeof document === "undefined" || !hasLoadedOnce || (!activeGroup && historyGroups.length === 0)) {
@@ -216,6 +313,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 							taskEntryActions={taskEntryActions}
 							onRequestBatchClosureWithReasonsOfZoneTasks={onRequestBatchClosureWithReasonsOfZoneTasks}
 							isBatchClosureWithReasonsInFlight={isBatchClosureWithReasonsInFlight}
+							entryNavigationRequest={entryNavigationRequest}
 						/>
 					</section>
 				) : null}
@@ -229,6 +327,15 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 							return (
 								<RadixCollapsible.Root
 									key={group.deploymentId}
+									open={expandedHistoryDeploymentIds.has(group.deploymentId)}
+									onOpenChange={(open) =>
+										setExpandedHistoryDeploymentIds((previous) => {
+											const next = new Set(previous);
+											if (open) next.add(group.deploymentId);
+											else next.delete(group.deploymentId);
+											return next;
+										})
+									}
 									className="rounded-md border border-border bg-surface-1"
 								>
 									<RadixCollapsible.Trigger asChild>
@@ -264,6 +371,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 											realTaskCardRenderingInputs={realTaskCardRenderingInputs}
 											retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
 											taskEntryActions={taskEntryActions}
+											entryNavigationRequest={entryNavigationRequest}
 										/>
 									</RadixCollapsible.Content>
 								</RadixCollapsible.Root>
