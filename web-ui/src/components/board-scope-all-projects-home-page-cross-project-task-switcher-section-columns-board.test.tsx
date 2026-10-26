@@ -247,7 +247,13 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 	it("同一组分区横排成列，与 Focus View 同序：Pinned | Running | Cache warm · your turn | Recent", () => {
 		renderBoard(makeHost());
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
+			"pinned",
+			"running",
+			"prompt-cache-warm",
+			"remaining",
+			"shelved",
+		]);
 		expect(rowTaskIds(sectionColumnScrollContainer("pinned"))).toEqual(["recent"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("prompt-cache-warm"))).toEqual(["warm"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("running"))).toEqual(["running"]);
@@ -266,7 +272,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			}),
 		);
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["running", "prompt-cache-warm", "remaining", "shelved"]);
 	});
 
 	it("Pinned 列全量显示、不折叠；Running 列不读左栏的收起偏好，始终列出行", () => {
@@ -340,7 +346,13 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		isMobileViewportForTest.value = true;
 		renderBoard(makeHost());
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["pinned", "running", "prompt-cache-warm", "remaining"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
+			"pinned",
+			"running",
+			"prompt-cache-warm",
+			"remaining",
+			"shelved",
+		]);
 		expect(
 			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
 		).not.toBeNull();

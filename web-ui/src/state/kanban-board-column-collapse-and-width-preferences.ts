@@ -1,4 +1,4 @@
-import type { BoardColumnId } from "@/types";
+import type { BoardDisplayGroupId } from "@/types";
 
 /**
  * 主看板（非 Focus View）各 stage 列的「折叠 + 自定义宽度」偏好：纯函数层。
@@ -8,43 +8,45 @@ import type { BoardColumnId } from "@/types";
  * - 宽度只存用户拖过的列（px）；未设置的列保持 `flex: 1 1 0` 填充剩余空间。
  */
 
-export type KanbanBoardColumnCollapsedOverrides = Partial<Record<BoardColumnId, boolean>>;
-export type KanbanBoardColumnCustomWidthsPx = Partial<Record<BoardColumnId, number>>;
+export type KanbanBoardColumnCollapsedOverrides = Partial<Record<BoardDisplayGroupId, boolean>>;
+export type KanbanBoardColumnCustomWidthsPx = Partial<Record<BoardDisplayGroupId, number>>;
 
 export const KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX = 200;
 export const KANBAN_BOARD_COLUMN_MAX_CUSTOM_WIDTH_PX = 900;
 
-const KANBAN_BOARD_COLUMN_IDS_COLLAPSED_BY_DEFAULT: ReadonlySet<BoardColumnId> = new Set<BoardColumnId>([
+const KANBAN_BOARD_COLUMN_IDS_COLLAPSED_BY_DEFAULT: ReadonlySet<BoardDisplayGroupId> = new Set<BoardDisplayGroupId>([
 	"validation",
 	"trash",
+	"shelved",
 ]);
 
-const KNOWN_KANBAN_BOARD_COLUMN_IDS: ReadonlySet<string> = new Set<BoardColumnId>([
+const KNOWN_KANBAN_BOARD_COLUMN_IDS: ReadonlySet<string> = new Set<BoardDisplayGroupId>([
 	"backlog",
 	"in_progress",
 	"review",
 	"validation",
 	"trash",
+	"shelved",
 ]);
 
-function isKnownKanbanBoardColumnId(value: string): value is BoardColumnId {
+function isKnownKanbanBoardDisplayGroupId(value: string): value is BoardDisplayGroupId {
 	return KNOWN_KANBAN_BOARD_COLUMN_IDS.has(value);
 }
 
-export function isKanbanBoardColumnCollapsedByDefault(columnId: BoardColumnId): boolean {
+export function isKanbanBoardColumnCollapsedByDefault(columnId: BoardDisplayGroupId): boolean {
 	return KANBAN_BOARD_COLUMN_IDS_COLLAPSED_BY_DEFAULT.has(columnId);
 }
 
 export function resolveKanbanBoardColumnCollapsed(
 	overrides: KanbanBoardColumnCollapsedOverrides,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 ): boolean {
 	return overrides[columnId] ?? isKanbanBoardColumnCollapsedByDefault(columnId);
 }
 
 export function setKanbanBoardColumnCollapsedOverride(
 	overrides: KanbanBoardColumnCollapsedOverrides,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 	collapsed: boolean,
 ): KanbanBoardColumnCollapsedOverrides {
 	// 解析值已是目标值就原样返回：不把当前默认固化成显式覆盖（否则该列再也不跟随将来的新默认），也省一次写盘。
@@ -56,7 +58,7 @@ export function setKanbanBoardColumnCollapsedOverride(
 
 export function toggleKanbanBoardColumnCollapsedOverride(
 	overrides: KanbanBoardColumnCollapsedOverrides,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 ): KanbanBoardColumnCollapsedOverrides {
 	return setKanbanBoardColumnCollapsedOverride(
 		overrides,
@@ -73,7 +75,7 @@ export function clampKanbanBoardColumnWidthPx(widthPx: number): number {
 
 export function applyKanbanBoardColumnWidthToSingleColumn(
 	customWidthsPx: KanbanBoardColumnCustomWidthsPx,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 	widthPx: number,
 ): KanbanBoardColumnCustomWidthsPx {
 	return { ...customWidthsPx, [columnId]: clampKanbanBoardColumnWidthPx(widthPx) };
@@ -82,7 +84,7 @@ export function applyKanbanBoardColumnWidthToSingleColumn(
 /** 「一次调整全部列宽」：给所有当前展开的列设同一宽度；折叠列的既有宽度原样保留，展开后仍沿用。 */
 export function applyKanbanBoardColumnWidthToAllExpandedColumns(
 	customWidthsPx: KanbanBoardColumnCustomWidthsPx,
-	expandedColumnIds: readonly BoardColumnId[],
+	expandedColumnIds: readonly BoardDisplayGroupId[],
 	widthPx: number,
 ): KanbanBoardColumnCustomWidthsPx {
 	const clampedWidthPx = clampKanbanBoardColumnWidthPx(widthPx);
@@ -95,7 +97,7 @@ export function applyKanbanBoardColumnWidthToAllExpandedColumns(
 
 export function clearKanbanBoardColumnCustomWidth(
 	customWidthsPx: KanbanBoardColumnCustomWidthsPx,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 ): KanbanBoardColumnCustomWidthsPx {
 	if (!(columnId in customWidthsPx)) {
 		return customWidthsPx;
@@ -120,7 +122,7 @@ export function normalizeKanbanBoardColumnCollapsedOverrides(value: unknown): Ka
 	}
 	const normalized: KanbanBoardColumnCollapsedOverrides = {};
 	for (const [columnId, collapsed] of Object.entries(value)) {
-		if (isKnownKanbanBoardColumnId(columnId) && typeof collapsed === "boolean") {
+		if (isKnownKanbanBoardDisplayGroupId(columnId) && typeof collapsed === "boolean") {
 			normalized[columnId] = collapsed;
 		}
 	}
@@ -134,7 +136,7 @@ export function normalizeKanbanBoardColumnCustomWidthsPx(value: unknown): Kanban
 	}
 	const normalized: KanbanBoardColumnCustomWidthsPx = {};
 	for (const [columnId, widthPx] of Object.entries(value)) {
-		if (isKnownKanbanBoardColumnId(columnId) && typeof widthPx === "number" && Number.isFinite(widthPx)) {
+		if (isKnownKanbanBoardDisplayGroupId(columnId) && typeof widthPx === "number" && Number.isFinite(widthPx)) {
 			normalized[columnId] = clampKanbanBoardColumnWidthPx(widthPx);
 		}
 	}
@@ -144,7 +146,7 @@ export function normalizeKanbanBoardColumnCustomWidthsPx(value: unknown): Kanban
 /** 展开列的 flex 样式：只写 flex-basis，不写 width——移动端的 `flex: 0 0 auto !important` 才能照常压过它。 */
 export function resolveKanbanBoardExpandedColumnFlexStyle(
 	customWidthsPx: KanbanBoardColumnCustomWidthsPx,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 ): { flex: string } {
 	const customWidthPx = customWidthsPx[columnId];
 	return customWidthPx === undefined ? { flex: "1 1 0" } : { flex: `0 0 ${customWidthPx}px` };

@@ -6,7 +6,7 @@ import { boardColumnAnchorKey } from "@/components/post-deploy-verification/veri
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
-import type { BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
+import type { BoardDisplayGroup as BoardColumnModel, BoardDisplayGroupId } from "@/types";
 
 /**
  * 主看板上被折叠的 stage 列：约 40px 宽的竖条，只显示指示器、卡片数和竖排标题，点击即展开。
@@ -24,9 +24,9 @@ export const BoardColumnCollapsedVerticalStrip = memo(function BoardColumnCollap
 	programmaticCardMoveInFlight,
 }: {
 	column: BoardColumnModel;
-	onExpandColumn: (columnId: BoardColumnId) => void;
+	onExpandColumn: (columnId: BoardDisplayGroupId) => void;
 	activeDragTaskId?: string | null;
-	activeDragSourceColumnId?: BoardColumnId | null;
+	activeDragSourceColumnId?: BoardDisplayGroupId | null;
 	programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
 }): React.ReactElement {
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null, {

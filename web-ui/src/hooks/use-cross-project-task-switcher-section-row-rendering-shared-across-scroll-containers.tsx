@@ -281,6 +281,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 				onEditTask: localHandlers.onEditTask,
 				onRequestPinToTaskPinboard: localHandlers.onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard: localHandlers.onUnpinFromTaskPinboard,
+				onSetTaskShelvingState: localHandlers.onSetTaskShelvingState,
 			};
 		};
 	const projectPathByWorkspaceId = useMemo(
@@ -341,7 +342,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		const { workspaceId, entry } = entryInProject;
 		// 已经点了：待发的 hover 意图作废。已经 hover 展开的行不收起——收起会让列表在指针下移动。
 		rowHoverExpansionOfHostingScrollContainer.cancelPendingHoverIntent();
-		if (entry.columnId === "backlog" && onOpenBacklogTaskEditorInProject) {
+		if (entry.columnId === "backlog" && !entry.taskShelvingState?.isShelved && onOpenBacklogTaskEditorInProject) {
 			onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
 			return;
 		}

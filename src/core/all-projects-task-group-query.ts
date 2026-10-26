@@ -5,7 +5,13 @@ import {
 	type CrossProjectTaskSwitcherEntryInProject,
 } from "./cross-project-recently-active-task-switcher-section-assignment";
 
-export const ALL_PROJECTS_TASK_QUERY_GROUPS = ["pinned", "running", "cache_warm_awaiting_user", "recent"] as const;
+export const ALL_PROJECTS_TASK_QUERY_GROUPS = [
+	"pinned",
+	"running",
+	"cache_warm_awaiting_user",
+	"recent",
+	"shelved",
+] as const;
 export type AllProjectsTaskQueryGroup = (typeof ALL_PROJECTS_TASK_QUERY_GROUPS)[number];
 
 export interface AllProjectsTaskGroupQueryFilters {
@@ -34,6 +40,7 @@ export function buildAllProjectsTaskGroupQueryResult(
 		remainingSectionOrderingMode: "most_recently_touched_by_conversation_progress_or_user_open_or_description_edit",
 	});
 	const entriesByGroup: Record<AllProjectsTaskQueryGroup, readonly CrossProjectTaskSwitcherEntryInProject[]> = {
+		shelved: sections.shelvedEntries,
 		pinned: sections.pinnedEntries,
 		running: sections.runningEntries,
 		cache_warm_awaiting_user: sections.promptCacheWarmAwaitingUserEntries,

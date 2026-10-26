@@ -65,6 +65,7 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 	onEditTask: (card: BoardCard) => void;
 	onRequestPinToTaskPinboard: (taskId: string) => void;
 	onUnpinFromTaskPinboard: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	moveToTrashLoadingById: Record<string, boolean>;
 	moveToReviewLoadingById: Record<string, boolean>;
 }): PostDeployVerificationControllerInputsForBoardOrSingleProjectScope {
@@ -92,6 +93,7 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 		onEditTask,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
+		onSetTaskShelvingState,
 		moveToTrashLoadingById,
 		moveToReviewLoadingById,
 	} = input;
@@ -177,6 +179,7 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 					onEditTask,
 					onRequestPinToTaskPinboard,
 					onUnpinFromTaskPinboard,
+					onSetTaskShelvingState,
 					moveToTrashLoadingById,
 					moveToReviewLoadingById,
 				},
@@ -205,6 +208,7 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 			onSaveTitle,
 			onStartTask,
 			onUnpinFromTaskPinboard,
+			onSetTaskShelvingState,
 			openTaskOfPostDeployVerificationWorkspaceInItsProject,
 			resolveTaskWorkspaceAbsoluteDirectoryPath,
 			runtimeBoardSnapshotOfPostDeployVerificationWorkspace,

@@ -366,7 +366,7 @@ describe("KanbanBoard", () => {
 	it("collapses validation and done by default and renders a width handle only after expanded columns", async () => {
 		await renderFiveEmptyColumnBoard();
 
-		expect(readCollapsedColumnIds()).toEqual(["validation", "trash"]);
+		expect(readCollapsedColumnIds()).toEqual(["validation", "trash", "shelved"]);
 		expect(Array.from(boardColumnMock.onCollapseColumnByColumnId.keys())).toEqual([
 			"backlog",
 			"in_progress",
@@ -390,12 +390,12 @@ describe("KanbanBoard", () => {
 		await act(async () => {
 			container.querySelector<HTMLButtonElement>('button[aria-label="Expand Done column"]')?.click();
 		});
-		expect(readCollapsedColumnIds()).toEqual(["validation"]);
+		expect(readCollapsedColumnIds()).toEqual(["validation", "shelved"]);
 
 		await act(async () => {
 			boardColumnMock.onCollapseColumnByColumnId.get("backlog")?.("backlog");
 		});
-		expect(readCollapsedColumnIds()).toEqual(["backlog", "validation"]);
+		expect(readCollapsedColumnIds()).toEqual(["backlog", "validation", "shelved"]);
 		expect(
 			JSON.parse(window.localStorage.getItem(LocalStorageKey.KanbanBoardColumnCollapsedOverrides) ?? "{}"),
 		).toEqual({ trash: false, backlog: true });

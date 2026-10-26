@@ -10,7 +10,7 @@ import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
-import type { BoardColumn, BoardColumnId, CardSelection } from "@/types";
+import type { BoardDisplayGroup, BoardDisplayGroupId, CardSelection } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
 /**
@@ -28,6 +28,8 @@ interface StageRailFocusedCardProps {
 
 interface StageHeaderRailsProps extends StageRailFocusedCardProps {
 	selection: CardSelection;
+	displayGroups: BoardDisplayGroup[];
+	focusedDisplayGroupId: BoardDisplayGroupId;
 	/** 已滚过、卡头钉顶的 stage columnId（文档序）。 */
 	topPinnedColumnIds: string[];
 	/** 未到达、卡头钉底的 stage columnId（文档序）。 */
@@ -35,11 +37,14 @@ interface StageHeaderRailsProps extends StageRailFocusedCardProps {
 	/** 焦点卡钉住状态：决定焦点 stage 的 rail 条目是否挂焦点卡克隆及挂在哪条 rail。 */
 	focusedCardPinState: SelectedCardPinState;
 	/** 折叠状态真源（面板层 `useFocusViewStageSectionExpansion`）：rail 条目的箭头必须如实呈现它。 */
-	isStageSectionExpanded: (columnId: BoardColumnId) => boolean;
+	isStageSectionExpanded: (columnId: BoardDisplayGroupId) => boolean;
 	/** rail 条目的折叠按钮：与行内卡头共用同一份状态，滚动策略按所在 rail 沿区分。 */
-	onToggleStageSectionExpandedFromStageHeaderRail: (columnId: BoardColumnId, railEdge: StageHeaderRailEdge) => void;
+	onToggleStageSectionExpandedFromStageHeaderRail: (
+		columnId: BoardDisplayGroupId,
+		railEdge: StageHeaderRailEdge,
+	) => void;
 	/** rail 条目的标签：跳到该 stage，第一张卡完整露在顶 rail 之下。 */
-	onJumpToStageSectionBelowTopRail: (columnId: BoardColumnId) => void;
+	onJumpToStageSectionBelowTopRail: (columnId: BoardDisplayGroupId) => void;
 	scrollRootRef: RefObject<HTMLElement | null>;
 }
 
@@ -58,7 +63,7 @@ function StageHeaderRailEntry({
 	defaultClineModelId,
 	defaultAgentId,
 }: StageRailFocusedCardProps & {
-	column: BoardColumn;
+	column: BoardDisplayGroup;
 	withCard: boolean;
 	selection: CardSelection;
 	isStageSectionExpanded: boolean;
@@ -142,7 +147,7 @@ function StageHeaderRailEntry({
 						renderRole="focused_card_copy_under_sticky_stage_header"
 						{...buildTaskCardBusinessProps({
 							card,
-							columnId,
+							columnId: selection.column.id,
 							sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 							taskSessions,
 							selected: true,
@@ -174,6 +179,8 @@ function StageHeaderRailEntry({
  */
 export function StageHeaderRails({
 	selection,
+	displayGroups,
+	focusedDisplayGroupId,
 	topPinnedColumnIds,
 	bottomPinnedColumnIds,
 	focusedCardPinState,
@@ -184,8 +191,8 @@ export function StageHeaderRails({
 	...focusedCardProps
 }: StageHeaderRailsProps): React.ReactElement | null {
 	const columnById = useMemo(
-		() => new Map<string, BoardColumn>(selection.allColumns.map((column) => [column.id, column])),
-		[selection.allColumns],
+		() => new Map<string, BoardDisplayGroup>(displayGroups.map((column) => [column.id, column])),
+		[displayGroups],
 	);
 
 	// 让出滚动条宽度，使纵向滚动条仍可见可点（macOS overlay 滚动条则为 0）。与旧钉住条一致。
@@ -219,7 +226,7 @@ export function StageHeaderRails({
 		if (!column) {
 			return null;
 		}
-		const withCard = columnId === selection.column.id && focusedCardPinState === edge;
+		const withCard = columnId === focusedDisplayGroupId && focusedCardPinState === edge;
 		return (
 			<StageHeaderRailEntry
 				key={columnId}

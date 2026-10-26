@@ -4,6 +4,7 @@
 
 ```bash
 kanban task list --all-projects
+kanban task list --all-projects --group shelved
 kanban task list --all-projects --group running
 kanban task list --all-projects --group recent --recent-days 30 --query "修复"
 kanban task watch --all-projects --group running
@@ -15,14 +16,14 @@ kanban task watch --all-projects --group running --interval-ms 5000 --exit-when-
 | 参数 | 行为 |
 | --- | --- |
 | `--all-projects` | 查询 runtime 已注册的全部项目；与 `--project-path` 互斥，不依赖调用者当前目录 |
-| `--group` | `pinned`、`running`、`cache_warm_awaiting_user`、`recent`；省略时按此顺序返回四组 |
+| `--group` | `pinned`、`running`、`cache_warm_awaiting_user`、`recent`、`shelved`；省略时按此顺序返回五组 |
 | `--query` | 任务 ID 或投影标题的不区分大小写字面子串；不搜索 Prompt，不做模糊或语义搜索 |
 | `--column` | 对组内任务进一步筛选；`done` 对应内部列 `trash` |
 | `--recent-days` | `7`（默认）或 `30`；只影响 Recent，按最近触达倒序 |
 | `--interval-ms` | 仅 watch；默认 `5000`，范围 `1000` 至 `2147483647` |
 | `--exit-when-empty` | 仅 watch，必须指定 `--group`；所选组内筛选结果连续两次完整为空后退出 |
 
-Running 使用可信主会话的 `turnOwner`、`liveness` 与明确 park 事实，包含 agent 回合中的 retrying 和后台等待。`in_progress` 列中等待用户的任务可以不在 Running；其他列的任务也可以在 Running。Pinned 可以同时属于主分组，主分组 Running／Cache warm／Recent 互斥。Recent 包含符合时间窗的 Done 卡。
+Running 使用可信主会话的 `turnOwner`、`liveness` 与明确 park 事实，包含 agent 回合中的 retrying 和后台等待。`in_progress` 列中等待用户的任务可以不在 Running；其他列的任务也可以在 Running。Pinned 可以同时属于主分组，主分组 Running／Cache warm／Recent 互斥。Recent 包含符合时间窗的 Done 卡。搁置任务只属于最后的 Shelved，不受 Recent 时间窗限制，也不再出现在 Pinned 或其他主分组；卡片仍保留置顶意图与原 Stage。
 
 CLI 使用共享规则的默认排序，不读取浏览器的本地筛选、展开状态或排序偏好。查询不隐式排除调用者自身的任务；它若仍在 Running，也会被列出。较长标题与界面一样采用现有投影的展示文本。
 

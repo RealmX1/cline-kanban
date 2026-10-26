@@ -314,3 +314,17 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 		expect(entry?.userTurnKind).toBe("review");
 	});
 });
+
+it("全量取景包含五个 Stage 的过期搁置任务", () => {
+	const board = makeBoard(
+		Object.fromEntries(
+			["backlog", "in_progress", "review", "validation", "trash"].map((stage) => [
+				stage,
+				[makeCard(stage, { taskShelvingState: { isShelved: true, lastChangedAt: 1 } })],
+			]),
+		),
+	);
+	const entries = collect(board);
+	expect(entries).toHaveLength(5);
+	expect(entries.every((entry) => entry.taskShelvingState?.isShelved)).toBe(true);
+});

@@ -26,6 +26,7 @@ import {
 	moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime,
 	permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime,
+	setTaskCardShelvingStateThroughRuntime,
 	setTaskPinboardPinStateOfTaskCardThroughRuntime,
 	startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime,
 	updateTaskCardFieldValuesThroughRuntime,
@@ -365,6 +366,14 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				onRequestPinTaskCardInOtherProjectToTaskPinboard
 					? onRequestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard)
 					: setPendingPinReason({ workspaceId, taskCard }),
+			onSetTaskShelvingState: (taskId, isShelved) => {
+				void setTaskCardShelvingStateThroughRuntime({
+					workspaceId,
+					taskId,
+					isShelved,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+				}).then((result) => reportTaskCardActionCommandFailure("更新搁置状态", result));
+			},
 			onUnpinFromTaskPinboard: (taskId) =>
 				onUnpinTaskCardInOtherProjectFromTaskPinboard
 					? onUnpinTaskCardInOtherProjectFromTaskPinboard(workspaceId, taskId)

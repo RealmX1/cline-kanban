@@ -26,6 +26,7 @@ export function projectTaskBoardAfterAcceptedMainConversationInput(
 		if (!card) continue;
 		if (
 			(column.id !== "review" && column.id !== "validation") ||
+			(card.taskShelvingState?.lastChangedAt ?? 0) >= accepted.confirmedAtMs ||
 			resolveMainTaskConversationSessionId(card) !== summary.taskId ||
 			card.updatedAt > accepted.confirmedAtMs
 		)

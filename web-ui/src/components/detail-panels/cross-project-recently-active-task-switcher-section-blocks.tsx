@@ -571,3 +571,45 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }
+
+/** 搁置优先于其他归属，默认收起；定位到该组时仍保留唯一焦点卡。 */
+export function CrossProjectTaskSwitcherShelvedSectionBlock({
+	sectionBlockPresentation,
+	sectionsModel,
+	renderRowInHostingScrollContainer,
+	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
+}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
+	const { sections, isShelvedSectionExpanded, setIsShelvedSectionExpanded } = sectionsModel;
+	const isSectionColumnCollapsed =
+		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" && !isShelvedSectionExpanded;
+	const entries = collectVisibleCrossProjectTaskSwitcherSectionEntries(
+		sections.shelvedEntries,
+		"shelved",
+		sectionsModel,
+		focusedTaskRowToKeepMounted,
+		true,
+	);
+	return (
+		<CrossProjectTaskSwitcherSectionFrame
+			testIdSuffix="shelved"
+			sectionBlockPresentation={sectionBlockPresentation}
+			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
+			isSectionColumnCollapsed={isSectionColumnCollapsed}
+			header={
+				<CrossProjectTaskSwitcherSectionExpansionButton
+					title="Shelved"
+					count={sections.shelvedEntries.length}
+					isExpanded={isShelvedSectionExpanded}
+					setIsExpanded={setIsShelvedSectionExpanded}
+					isSectionColumnCollapsed={isSectionColumnCollapsed}
+				/>
+			}
+		>
+			{entries.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "shelved"))}
+			{isShelvedSectionExpanded && entries.length === 0 ? (
+				<div className="px-2 py-1.5 text-xs text-text-secondary">没有搁置任务。</div>
+			) : null}
+		</CrossProjectTaskSwitcherSectionFrame>
+	);
+}

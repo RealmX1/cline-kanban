@@ -25,7 +25,12 @@ import { resolveBoardColumnTitle } from "@/data/board-data";
 import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 
-export type CrossProjectTaskSwitcherTaskRowSection = "pinned" | "running" | "prompt_cache_warm" | "remaining";
+export type CrossProjectTaskSwitcherTaskRowSection =
+	| "pinned"
+	| "running"
+	| "prompt_cache_warm"
+	| "remaining"
+	| "shelved";
 
 /**
  * 一行在列表里的形态。hover 展开是临时的（指针挪到别的行停够、或离开面板就收回，见
@@ -161,7 +166,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 									currentProjectId={currentProjectId}
 								/>
 							</span>
-							{section === "pinned" ? (
+							{section === "pinned" || section === "shelved" ? (
 								<span className="inline-flex shrink-0 items-center gap-0.5">
 									<ColumnIndicator columnId={entry.columnId} size={10} />
 									{resolveBoardColumnTitle(entry.columnId)}

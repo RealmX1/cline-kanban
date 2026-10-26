@@ -40,6 +40,7 @@ import {
 } from "../core/task-main-conversation-session-binding";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { buildTaskSessionStartRequestFromBoardCard } from "../core/task-session-start-request-from-board-card";
+import { isTaskCardShelved, setTaskCardShelvingState } from "../core/task-shelving-state";
 import { buildTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import type {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
@@ -112,6 +113,11 @@ export interface TaskCardActionPostDeployVerificationDoneEntryGate {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone: typeof authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone;
 	finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone: typeof finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone;
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed: typeof revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed;
+}
+
+function assertTaskCardUnshelvedBeforeStageAction(card: RuntimeBoardCard): void {
+	if (isTaskCardShelved(card))
+		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请先取消搁置，再移动任务 Stage。" });
 }
 
 interface TaskCardFoundWithBoardColumn {
@@ -559,6 +565,7 @@ export function createTaskCardActionApi(
 				);
 				const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 					resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
+				assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 				const completionComment = input.taskCommentToAppendWhenMovingIntoDone;
 				const existingCompletionComment = completionComment
 					? found.taskCard.taskCommentEntries?.find(
@@ -703,6 +710,7 @@ export function createTaskCardActionApi(
 					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 					if (found.boardColumnId === "in_progress") {
+						assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 						// 本来就在 in_progress：没有卡片级变化，不写盘、不产生空事件批次。
 						return {
 							board: state.board,
@@ -714,7 +722,8 @@ export function createTaskCardActionApi(
 							save: false,
 						};
 					}
-					const moved = moveTaskToColumn(state.board, input.taskId, "in_progress", undefined, {
+					const boardAfterUnshelvingBacklog = setTaskCardShelvingState(state.board, input.taskId, false).board;
+					const moved = moveTaskToColumn(boardAfterUnshelvingBacklog, input.taskId, "in_progress", undefined, {
 						insertAtIndex: input.insertAtIndexWithinInProgressBoardColumn,
 					});
 					if (!moved.moved || !moved.task) {
@@ -825,6 +834,7 @@ export function createTaskCardActionApi(
 					input.taskId,
 					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
+				assertTaskCardUnshelvedBeforeStageAction(foundBeforeHandoff.taskCard);
 				if (foundBeforeHandoff.boardColumnId !== "in_progress") {
 					throw createTaskCardInBoardColumnNotAllowingActionError(
 						`Task "${input.taskId}" is in "${foundBeforeHandoff.boardColumnId}" and can only be moved to review from in_progress.`,
@@ -931,6 +941,7 @@ export function createTaskCardActionApi(
 							workspaceScope.workspacePath,
 							input.expectedTaskIncarnationCreatedAtEpochMs,
 						);
+						assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 						if (
 							!isTaskCardBoardPlacementChangeAllowedWithoutSessionSideEffects(
 								found.boardColumnId,
@@ -1110,6 +1121,7 @@ export function createTaskCardActionApi(
 								workspaceScope.workspacePath,
 								input.expectedTaskIncarnationCreatedAtEpochMs,
 							);
+							assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 							if (found.boardColumnId !== "trash") {
 								throw createTaskCardInBoardColumnNotAllowingActionError(
 									`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be restored from done.`,
@@ -1248,7 +1260,8 @@ export function createTaskCardActionApi(
 					? [...new Set(selection.selectedTaskIds)]
 					: ((await loadWorkspaceBoardById(workspaceScope.workspaceId)).columns
 							.find((column) => column.id === selection.selectedBoardColumnId)
-							?.cards.map((taskCard) => taskCard.id) ?? []);
+							?.cards.filter((taskCard) => !isTaskCardShelved(taskCard))
+							.map((taskCard) => taskCard.id) ?? []);
 			const subjectTaskIdSetHoldingPerTaskCommandSerialization = new Set(subjectTaskIdsOfTaskCardAction);
 			return await runSeriallyForTaskCards(
 				workspaceScope,
@@ -1283,8 +1296,10 @@ export function createTaskCardActionApi(
 											state.board.columns.find((column) => column.id === selection.selectedBoardColumnId)
 												?.cards ?? []
 										)
-											.filter((taskCard) =>
-												subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id),
+											.filter(
+												(taskCard) =>
+													subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id) &&
+													!isTaskCardShelved(taskCard),
 											)
 											.map((taskCard) => ({ taskCard, boardColumnId: selection.selectedBoardColumnId }));
 							const deleted = deleteTasksFromBoard(
@@ -1518,6 +1533,44 @@ export function createTaskCardActionApi(
 			broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, update.saved);
 			return { taskCardSnapshotAfterAction: update.value };
 		},
+
+		setTaskCardShelvingStateWithoutSessionSideEffects: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) =>
+			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const shelving = await mutateWorkspaceState(
+					workspaceScope.workspacePath,
+					await resolveIntent(
+						"set_task_card_shelving_state",
+						kanbanRequestOriginActorEvidence,
+						input.boardMutationInitiator,
+						[input.taskId],
+					),
+					(state) => {
+						const found = findTaskCardWithBoardColumnOrThrowNotFound(
+							state.board,
+							input.taskId,
+							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
+						);
+						const mutation = setTaskCardShelvingState(state.board, input.taskId, input.isShelved);
+						const updatedFound = findTaskCardWithBoardColumn(mutation.board, input.taskId) ?? found;
+						return {
+							board: mutation.board,
+							save: mutation.updated,
+							value: buildTaskCardSnapshot(
+								workspaceScope,
+								updatedFound,
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
+							),
+						};
+					},
+				);
+				broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, shelving.saved);
+				return { boardWasSaved: shelving.saved, taskCardSnapshotAfterAction: shelving.value };
+			}),
 
 		// 同 updateTaskCardFieldValues，不进按卡串行器。与浏览器 setBoard 用同一组纯函数（src/core/task-pinboard-pinning.ts）。
 		setTaskPinboardPinStateOfTaskCard: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {

@@ -422,6 +422,7 @@ function formatTaskRecordWithSessionSummary(
 		title: task.title,
 		prompt: task.prompt,
 		column: columnId,
+		taskShelvingState: task.taskShelvingState ?? null,
 		baseRef: task.baseRef,
 		startInPlanMode: task.startInPlanMode,
 		taskAgentPermissionMode: task.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
@@ -1897,6 +1898,37 @@ export function registerTaskCommand(program: Command): void {
 		listSingleProjectTasks: (options) => listTasks({ cwd: process.cwd(), ...options }),
 		runTaskCommand,
 	});
+
+	for (const commandName of ["shelve", "unshelve"] as const) {
+		task
+			.command(commandName)
+			.description(commandName === "shelve" ? "搁置任务，保留 Stage 和会话。" : "取消搁置，恢复原 Stage 展示。")
+			.requiredOption("--task-id <id>", "任务 ID。")
+			.option("--project-path <path>", "项目主仓库路径。")
+			.action(async (options: { taskId: string; projectPath?: string }) => {
+				await runTaskCommand(async () => {
+					const workspaceRepoPath = await resolveWorkspaceRepoPath(options.projectPath, process.cwd());
+					const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+					const result = await createRuntimeTrpcClient(
+						workspaceId,
+					).taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects.mutate({
+						taskId: options.taskId,
+						isShelved: commandName === "shelve",
+					});
+					const snapshot = result.taskCardSnapshotAfterAction;
+					return {
+						ok: true,
+						workspacePath: workspaceRepoPath,
+						boardWasSaved: result.boardWasSaved,
+						task: formatTaskRecordWithSessionSummary(
+							snapshot.taskCard,
+							snapshot.boardColumnIdContainingTaskCard,
+							snapshot.taskSessionSummaryPersistedInWorkspaceSessionsFile,
+						),
+					};
+				});
+			});
+	}
 
 	task
 		.command("get")

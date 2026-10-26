@@ -38,6 +38,8 @@ export type CrossProjectTaskSwitcherExtendedActivityHorizonLoadState =
 
 export interface CrossProjectRecentlyActiveTaskSwitcherSectionsModel
 	extends CrossProjectTaskSwitcherFocusViewSectionVisibility {
+	isShelvedSectionExpanded: boolean;
+	setIsShelvedSectionExpanded: (expanded: boolean) => void;
 	sections: CrossProjectTaskSwitcherSections;
 	sectionsBeforeRecentWorktreeChangesFilter: CrossProjectTaskSwitcherSections;
 	nowMs: number;
@@ -150,6 +152,10 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
 }): CrossProjectRecentlyActiveTaskSwitcherSectionsModel {
+	const [isShelvedSectionExpanded, setIsShelvedSectionExpanded] = useBooleanLocalStorageValue(
+		LocalStorageKey.CrossProjectTaskSwitcherShelvedSectionExpanded,
+		false,
+	);
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	// 模型常驻 App，跨视图、任务切换与过渡壳重挂载保留；页面刷新恢复展开与 In progress / Review。
 	const [isRecentSectionExpanded, setIsRecentSectionExpanded] = useState(true);
@@ -404,6 +410,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 	}, [recentSectionKeyboardNavigationOrderLock, recentSectionOrderingConfigurationKey, sections]);
 
 	return {
+		isShelvedSectionExpanded,
+		setIsShelvedSectionExpanded,
 		sections,
 		sectionsBeforeRecentWorktreeChangesFilter,
 		nowMs,

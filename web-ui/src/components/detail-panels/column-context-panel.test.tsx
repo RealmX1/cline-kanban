@@ -657,6 +657,7 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		review: { top: 200, height: 200 },
 		validation: { top: 420, height: 60 },
 		trash: { top: 500, height: 60 },
+		shelved: { top: 580, height: 60 },
 	};
 
 	const columns: BoardColumn[] = [

@@ -1176,6 +1176,7 @@ export default function App(): ReactElement {
 		handleCancelTaskPinboardPinReason,
 		handleConfirmTaskPinboardPinReason,
 		handleUnpinTaskFromTaskPinboard,
+		handleSetTaskShelvingState,
 		taskPinboardPinReasonRequest,
 		handleOpenClearTrash,
 		handleConfirmClearTrash,
@@ -1279,6 +1280,7 @@ export default function App(): ReactElement {
 		onEditTask: handleOpenEditTaskKeepingDetailSelection,
 		onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+		onSetTaskShelvingState: handleSetTaskShelvingState,
 		moveToTrashLoadingById,
 		moveToReviewLoadingById,
 	});
@@ -1595,6 +1597,7 @@ export default function App(): ReactElement {
 			onEditTask: handleOpenEditTask,
 			onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 			onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
+			onSetTaskShelvingState: handleSetTaskShelvingState,
 			onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
 			moveToTrashLoadingById,
 		});
@@ -1995,6 +1998,7 @@ export default function App(): ReactElement {
 														onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
 														onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
 														onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+														onSetTaskShelvingState={handleSetTaskShelvingState}
 														onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
 														moveToTrashLoadingById={moveToTrashLoadingById}
 														moveToReviewLoadingById={moveToReviewLoadingById}
@@ -2120,6 +2124,7 @@ export default function App(): ReactElement {
 										onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
 										onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
 										onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+										onSetTaskShelvingState={handleSetTaskShelvingState}
 										onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
 										onAddReviewComments={(taskId: string, text: string) => {
 											void handleAddReviewComments(taskId, text);
