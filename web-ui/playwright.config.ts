@@ -4,17 +4,20 @@ import { defineConfig } from "@playwright/test";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
+const webUiPort = Number(process.env.KANBAN_PLAYWRIGHT_WEB_UI_PORT ?? "4173");
+const webUiBaseUrl = `http://127.0.0.1:${webUiPort}`;
+
 export default defineConfig({
 	testDir: "./tests",
 	timeout: 30_000,
 	use: {
-		baseURL: "http://127.0.0.1:4173",
+		baseURL: webUiBaseUrl,
 		headless: true,
 	},
 	webServer: {
-		command: "npm run dev -- --host 127.0.0.1 --port 4173",
+		command: `npm run dev -- --host 127.0.0.1 --port ${webUiPort}`,
 		cwd: currentDir,
-		url: "http://127.0.0.1:4173",
-		reuseExistingServer: !process.env.CI,
+		url: webUiBaseUrl,
+		reuseExistingServer: !process.env.CI && !process.env.KANBAN_PLAYWRIGHT_WEB_UI_PORT,
 	},
 });

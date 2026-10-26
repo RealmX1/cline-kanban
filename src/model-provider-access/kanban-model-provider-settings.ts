@@ -16,6 +16,10 @@ import {
 	notificationIntelligenceSettingsSchema,
 	saveKanbanModelProviderProfileRequestSchema,
 } from "../core/notification-intelligence-settings-contract";
+import {
+	type TaskAssistanceModelProviderRoutingSettings,
+	taskAssistanceModelProviderRoutingSettingsSchema,
+} from "../core/task-assistance-model-provider-routing-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { validateNotificationSpeechConfiguration } from "../notifications/notification-speech-provider-catalog";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
@@ -28,8 +32,12 @@ import {
 	resolveModelProviderCredential,
 	toModelProviderEnvironmentVariableSegment,
 } from "./model-provider-credentials-from-environment";
+import type { ModelUsagePurpose } from "./model-provider-usage-record";
 
 const persistedSchema = z.object({
+	taskAssistanceRoutingSettings: taskAssistanceModelProviderRoutingSettingsSchema.default(() =>
+		taskAssistanceModelProviderRoutingSettingsSchema.parse({}),
+	),
 	settings: notificationIntelligenceSettingsSchema.default(() => notificationIntelligenceSettingsSchema.parse({})),
 	profiles: z
 		.array(kanbanModelProviderProfileSchema.extend({ credentialReference: z.string().optional() }))
@@ -91,6 +99,23 @@ const NOTIFICATION_SPEECH_CONFIGURATION_FIELDS_VALIDATED_ON_CHANGE = [
 ] as const satisfies readonly (keyof NotificationIntelligenceSettings)[];
 export async function readNotificationIntelligenceSettings(): Promise<NotificationIntelligenceSettings> {
 	return (await readPersistedSettings()).settings;
+}
+export async function readTaskAssistanceModelProviderRoutingSettings(): Promise<TaskAssistanceModelProviderRoutingSettings> {
+	return (await readPersistedSettings()).taskAssistanceRoutingSettings;
+}
+export async function saveTaskAssistanceModelProviderRoutingSettings(
+	input: TaskAssistanceModelProviderRoutingSettings,
+) {
+	const taskAssistanceRoutingSettings = taskAssistanceModelProviderRoutingSettingsSchema.parse(input);
+	await lockedFileSystem.withLock({ path: settingsPath() }, async () => {
+		const persisted = await readPersistedSettings();
+		await lockedFileSystem.writeJsonFileAtomic(
+			settingsPath(),
+			{ ...persisted, taskAssistanceRoutingSettings },
+			{ lock: null },
+		);
+	});
+	return taskAssistanceRoutingSettings;
 }
 export async function saveNotificationIntelligenceSettings(input: NotificationIntelligenceSettings): Promise<void> {
 	const settings = notificationIntelligenceSettingsSchema.parse(input);
@@ -201,7 +226,7 @@ export async function resolveKanbanProviderAccess(
 	return apiKey ? { profile, apiKey } : null;
 }
 export async function resolveKanbanChatCredential(
-	purpose: "task_name_suggestion" | "notification_assessment" | "independent_task_creation_draft_generation",
+	purpose: ModelUsagePurpose,
 	explicitProviderId?: string,
 ): Promise<ModelProviderCredential | null> {
 	const settings = await readNotificationIntelligenceSettings();

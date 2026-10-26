@@ -3,8 +3,8 @@ import { z } from "zod";
 import { CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID } from "../core/coding-agent-prompt-cache-retention-measured-ttl-lower-bounds";
 import type {
 	SharedTaskIndexingContext,
+	TaskAnalysisContextSettings,
 	TaskIndexingMaterial,
-	TaskIndexingSupportExecutorSettings,
 } from "../core/task-indexing-support-contract";
 
 const normalizedTaskSchema = z.object({
@@ -68,7 +68,7 @@ export function advanceSharedTaskIndexingSnapshot(
 	previous: unknown,
 	input: {
 		workspaceId: string;
-		settings: TaskIndexingSupportExecutorSettings;
+		settings: TaskAnalysisContextSettings;
 		instructionVersion: string;
 		materials: readonly TaskIndexingMaterial[];
 		now: number;
@@ -132,7 +132,10 @@ export function advanceSharedTaskIndexingSnapshot(
 			snapshot.instructionVersion !== input.instructionVersion)
 	)
 		reason = "instruction_version_changed";
-	const ttl = CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID[input.settings.agentId];
+	const ttl =
+		"agentId" in input.settings
+			? CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID[input.settings.agentId]
+			: undefined;
 	if (snapshot && !reason && snapshot.lastModelRequestAt !== null) {
 		if (
 			input.forModelRequest &&

@@ -8,7 +8,11 @@ import type { RuntimeTaskNameSuggestionResponse } from "@/runtime/types";
 
 export async function suggestTaskNamesFromTaskDescription(
 	taskDescription: string,
+	abortSignal?: AbortSignal,
 ): Promise<RuntimeTaskNameSuggestionResponse> {
 	const trpcClient = getRuntimeTrpcClient(null);
-	return await trpcClient.runtime.suggestTaskNamesFromTaskDescription.mutate({ taskDescription });
+	return await trpcClient.runtime.suggestTaskNamesFromTaskDescription.mutate(
+		{ taskDescription },
+		{ signal: abortSignal },
+	);
 }

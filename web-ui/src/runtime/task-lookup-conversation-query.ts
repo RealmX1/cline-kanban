@@ -5,7 +5,8 @@ export type TaskLookupConversation = RuntimeAppRouterOutputs["support"]["getTask
 export type TaskLookupCandidate = NonNullable<TaskLookupConversation["turns"][number]["result"]>["candidates"][number];
 export type TaskLookupCandidatePreview = RuntimeAppRouterOutputs["support"]["readTaskLookupCandidatePreview"];
 export type TaskLookupScope = TaskLookupConversation["scope"];
-export type TaskLookupExecutorSettings = RuntimeAppRouterOutputs["support"]["getExecutorSettings"];
+export type TaskLookupExecutorSettings =
+	RuntimeAppRouterOutputs["support"]["getTaskAssistanceModelProviderRoutingSettings"];
 export const taskLookupConversationQueries = {
 	list: () => getRuntimeTrpcClient(null).support.listTaskLookupConversations.query(),
 	get: (conversationId: string) =>
@@ -21,7 +22,8 @@ export const taskLookupConversationQueries = {
 			conversationId,
 			taskReference: candidate.taskReference,
 		}),
-	getSettings: (workspaceId: string) => getRuntimeTrpcClient(workspaceId).support.getExecutorSettings.query(),
-	saveSettings: (workspaceId: string, settings: TaskLookupExecutorSettings) =>
-		getRuntimeTrpcClient(workspaceId).support.setExecutorSettings.mutate(settings),
+	getSettings: (_workspaceId: string) =>
+		getRuntimeTrpcClient(null).support.getTaskAssistanceModelProviderRoutingSettings.query(),
+	saveSettings: (_workspaceId: string, settings: TaskLookupExecutorSettings) =>
+		getRuntimeTrpcClient(null).support.setTaskAssistanceModelProviderRoutingSettings.mutate(settings),
 };
