@@ -19,6 +19,7 @@ const BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER: readonly CrossPro
 	"running",
 	"prompt_cache_warm",
 	"remaining",
+	"shelved",
 ];
 
 interface BoardScopeAllProjectsHomePageProps {

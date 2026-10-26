@@ -35,8 +35,14 @@ let detachSender: () => void;
 const outgoing: RuntimeStateStreamClientMessage[] = [];
 const failedFrameCounts: number[] = [];
 const opened = vi.fn();
-function Harness({ workspaceId = "workspace-a", taskId = "task-a" }) {
-	latest = useTaskVisualizationArtifacts({ workspaceId, taskId, onAutomaticPreview: opened });
+function Harness({ workspaceId = "workspace-a", taskId = "task-a", foregroundEligible = true, observeBrowser = true }) {
+	latest = useTaskVisualizationArtifacts({
+		workspaceId,
+		taskId,
+		observeBrowser,
+		onAutomaticPreview: opened,
+		isAutomaticPreviewForegroundEligible: foregroundEligible,
+	});
 	return (
 		<div>
 			{latest.artifacts.map((entry) => entry.title).join(",")}
@@ -88,14 +94,67 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-it("跨项目切换清空旧清单，不接收其他项目同号任务的自动预览", async () => {
+it("切到其他前台视图只暂停自动投递，手动阅读的 iframe 与选择保持", async () => {
+	await act(async () => root.render(<Harness />));
+	await act(async () => latest.selectArtifact(artifact));
+	const selection = latest.selection;
+	const frame = container.querySelector("iframe");
+	await act(async () => root.render(<Harness foregroundEligible={false} />));
+	const message = offer();
+	await act(async () => deliverTaskVisualizationStreamMessage(message));
+	expect(latest.selection).toBe(selection);
+	expect(container.querySelector("iframe")).toBe(frame);
+	expect(outgoing).toContainEqual(
+		expect.objectContaining({
+			type: "acknowledge_task_visualization_preview",
+			outcome: "declined",
+			deliveryAttemptId: message.deliveryAttemptId,
+		}),
+	);
+	await act(async () => root.render(<Harness />));
+	expect(latest.selection).toBe(selection);
+	expect(container.querySelector("iframe")).toBe(frame);
+	expect(opened).not.toHaveBeenCalled();
+});
+
+it("空归属停止加载，恢复与跨项目切换清空旧清单，不接收其他项目同号任务的自动预览", async () => {
+	await act(async () => root.render(<Harness workspaceId="" />));
+	expect(queries.list).not.toHaveBeenCalled();
+	expect(latest.isLoading).toBe(false);
 	await act(async () => root.render(<Harness />));
 	expect(container.textContent).toContain("任务图表");
+	await act(async () => root.render(<Harness workspaceId="" />));
+	expect(latest.isLoading).toBe(false);
+	expect(latest.artifacts).toEqual([]);
+	expect(queries.list).toHaveBeenCalledTimes(1);
+	await act(async () => root.render(<Harness />));
+	expect(container.textContent).toContain("任务图表");
+	expect(queries.list).toHaveBeenCalledTimes(2);
 	queries.list.mockResolvedValue({ artifacts: [] });
 	await act(async () => root.render(<Harness workspaceId="workspace-b" />));
 	expect(container.textContent).not.toContain("任务图表");
 	await grant(offer());
 	expect(opened).not.toHaveBeenCalled();
+});
+it("默认选最新产物并按 ID 打破同时间平局，重复调用和更新保留当前修订", async () => {
+	const newestArtifact = { ...artifact, visualizationArtifactId: "c".repeat(64), publishedAtMs: 2 };
+	queries.list.mockResolvedValue({
+		artifacts: [{ ...newestArtifact, visualizationArtifactId: "d".repeat(64) }, artifact, newestArtifact],
+	});
+	await act(async () => root.render(<Harness />));
+	await act(async () => latest.ensureDefaultSelection());
+	expect(latest.selection).toMatchObject({
+		visualizationArtifactId: newestArtifact.visualizationArtifactId,
+		revisionId: newestArtifact.revisionId,
+	});
+	const selection = latest.selection;
+	queries.list.mockResolvedValue({ artifacts: [{ ...newestArtifact, revisionId: "e".repeat(64) }] });
+	await act(async () => latest.refreshArtifacts());
+	await act(async () => {
+		latest.ensureDefaultSelection();
+		latest.ensureDefaultSelection();
+	});
+	expect(latest.selection).toBe(selection);
 });
 it("offer 只确认接受，匹配服务端 grant 后才挂载，错误页面和未请求 grant 不打开", async () => {
 	await act(async () => root.render(<Harness />));
@@ -161,6 +220,21 @@ it("关闭未加载预览后重放不重新抢回，失败释放在 frame 卸载
 	expect(latest.selection).toBeNull();
 	expect(failedFrameCounts).toEqual([0]);
 	expect(outgoing.at(-1)).toMatchObject({ outcome: "failed", failureReason: "模拟内容失败" });
+	await act(async () => latest.refreshArtifacts());
+	await act(async () => latest.ensureDefaultSelection());
+	expect(latest.selection).toBeNull();
+	await act(async () => latest.retryDefaultSelection());
+	expect(latest.selection?.visualizationArtifactId).toBe(artifact.visualizationArtifactId);
+});
+it("停止浏览器观察时在卸载后释放自动预览，恢复观察不会重挂", async () => {
+	await act(async () => root.render(<Harness />));
+	await grant(offer());
+	await act(async () => root.render(<Harness observeBrowser={false} />));
+	expect(container.querySelector("iframe")).toBeNull();
+	expect(failedFrameCounts).toEqual([0]);
+	await act(async () => root.render(<Harness />));
+	await act(async () => latest.ensureDefaultSelection());
+	expect(latest.selection).toBeNull();
 });
 it("取消或断线先移除旧 frame，迟到 grant 与成功回执不重新打开", async () => {
 	await act(async () => root.render(<Harness />));

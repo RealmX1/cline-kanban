@@ -15,6 +15,10 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "../../../src/core/api-contract";
 import {
+	createRuntimeStateBroadcastCostRecorder,
+	type RuntimeStateBroadcastCostWindowSample,
+} from "../../../src/diagnostics/runtime-state-broadcast-cost-recorder";
+import {
 	type CreateRuntimeStateHubDependencies,
 	createRuntimeStateHub,
 	type RuntimeStateHub,
@@ -152,6 +156,7 @@ interface HubTestHarness {
 	streamUrl: string;
 	projects: RuntimeProjectSummary[];
 	buildProjectsPayload: ReturnType<typeof vi.fn>;
+	readCostWindow: () => RuntimeStateBroadcastCostWindowSample;
 	// 扣住下一次 projects payload 构建直到放行；被扣住的那次返回进入时的 projects 副本（模拟慢 snapshot 带的旧数据）。
 	holdNextProjectsPayloadBuildUntilReleased: () => HeldProjectsPayloadBuild;
 	emitTerminalSummary: (summary: RuntimeTaskSessionSummary) => void;
@@ -186,7 +191,11 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 			throw new Error("not used in this test");
 		},
 	};
-	const hub = createRuntimeStateHub({ workspaceRegistry });
+	const costWindows: RuntimeStateBroadcastCostWindowSample[] = [];
+	const costRecorder = createRuntimeStateBroadcastCostRecorder({
+		writeWindowSample: (sample) => costWindows.push(sample),
+	});
+	const hub = createRuntimeStateHub({ workspaceRegistry, runtimeStateBroadcastCostRecorder: costRecorder });
 
 	let terminalSummaryListener: ((summary: RuntimeTaskSessionSummary) => void) | null = null;
 	const fakeTerminalManager = {
@@ -216,6 +225,10 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 		streamUrl: `ws://127.0.0.1:${port}/api/runtime/ws`,
 		projects,
 		buildProjectsPayload,
+		readCostWindow: () => {
+			costRecorder.flushWindow();
+			return costWindows[costWindows.length - 1];
+		},
 		holdNextProjectsPayloadBuildUntilReleased: () => {
 			let markHeldProjectsPayloadBuildStarted = () => {};
 			const heldProjectsPayloadBuildStarted = new Promise<void>((resolve) => {
@@ -309,6 +322,43 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
 		// 去重发生在发送层：payload 构建照常进行，只有广播被跳过。
 		expect(harness.buildProjectsPayload).toHaveBeenCalledTimes(3);
+		const costs = harness.readCostWindow();
+		expect(costs.operations.initial_snapshot.completedOperationCount).toBe(1);
+		expect(costs.operations.projects_updated).toMatchObject({
+			completedOperationCount: 2,
+			serializedPayloadCount: 2,
+			webSocketAcceptedSendCount: 1,
+			outcomeCounts: { completed: 1, deduplicated: 1 },
+		});
+		expect(costs.operations.projects_updated.stages.projects_payload_build.completedStageCount).toBe(2);
+		expect(costs.operations.projects_updated.stages.payload_json_stringify.completedStageCount).toBe(2);
+	});
+
+	it("无连接时记录早退，构建失败独立计数且下一次广播仍可成功", async () => {
+		harness.readCostWindow();
+		harness.buildProjectsPayload.mockRejectedValueOnce(new Error("合成私密错误，不得写入成本记录"));
+		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+		await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
+		const costs = harness.readCostWindow();
+		expect(costs.operations.projects_updated).toMatchObject({
+			completedOperationCount: 2,
+			serializedPayloadCount: 1,
+			outcomeCounts: { failed: 1, completed: 1 },
+		});
+		expect(costs.operations.projects_updated.stages.projects_payload_build.failedStageCount).toBe(1);
+		expect(JSON.stringify(costs)).not.toContain("合成私密错误");
+		const disconnectedHarness = await setupHubHarness();
+		try {
+			await disconnectedHarness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+			await disconnectedHarness.hub.broadcastRuntimeWorkspaceStateUpdated(WORKSPACE_ID, tempHome.path);
+			const disconnectedCosts = disconnectedHarness.readCostWindow();
+			expect(disconnectedCosts.operations.projects_updated.outcomeCounts.no_clients).toBe(1);
+			expect(disconnectedCosts.operations.workspace_state_updated.outcomeCounts.no_clients).toBe(1);
+			expect(disconnectedHarness.buildProjectsPayload).not.toHaveBeenCalled();
+		} finally {
+			await disconnectedHarness.cleanup();
+		}
 	});
 
 	it("内容变化时确实重发 projects_updated", async () => {
@@ -413,11 +463,13 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 			await staleGenerationBroadcastCompletion;
 			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
 			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
-
 			// 指纹仍是较新内容：再来一次与较新内容相同的广播照常被去重跳过。
 			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
 			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+			const costs = harness.readCostWindow().operations.projects_updated;
+			expect(costs.outcomeCounts.superseded).toBe(1);
+			expect(costs.outcomeCounts.deduplicated).toBe(1);
 		} finally {
 			heldStaleGenerationProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
 			await staleGenerationBroadcastCompletion;
@@ -469,6 +521,9 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 				await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
 				expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
 				expect(lateClient.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+				const costs = harness.readCostWindow();
+				expect(costs.operations.initial_snapshot.completedOperationCount).toBe(2);
+				expect(costs.operations.projects_updated.initialSnapshotAwaitingClientSkipCount).toBe(1);
 			} finally {
 				heldHandshakeProjectsPayloadBuild.releaseHeldProjectsPayloadBuild();
 				if (

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import type { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
+import { loadRuntimeConfig } from "../../src/config/runtime-config";
 import {
 	type RuntimeBoardData,
 	type RuntimeTaskChatSendRequest,
@@ -13,6 +16,7 @@ import {
 	runtimeTaskSessionSummarySchema,
 } from "../../src/core/api-contract";
 import { mergeSummaryWithFacets, resolveSessionFacets } from "../../src/core/session-activity";
+import { taskMainSessionHandoverRequestSchema } from "../../src/core/task-main-session-handover-contract";
 import {
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
@@ -21,10 +25,15 @@ import type {
 	prepareCodexMainSessionHandoverNativeFork,
 	prepareCodexMainSessionHandoverRecoveryNativeFork,
 } from "../../src/server/codex-main-session-handover-native-fork";
-import { createTaskMainSessionHandoverCoordinator } from "../../src/server/task-main-session-handover-coordinator";
+import {
+	createTaskMainSessionHandoverCoordinator,
+	renderTaskMainSessionHandoverReportPrompt,
+} from "../../src/server/task-main-session-handover-coordinator";
+import type { prepareTaskMainSessionHandoverTranscriptNativeFork } from "../../src/server/task-main-session-handover-native-fork";
 import type { queryCodexMainSessionHandoverReportAcceptance } from "../../src/server/task-main-session-handover-report-acceptance";
 import { captureTaskMainSessionHandoverReportNativeIdentity } from "../../src/state/capture-task-main-session-handover-report-native-identity";
 import { completeTaskMainSessionHandoverAfterUserMessage } from "../../src/state/complete-task-main-session-handover-after-user-message";
+import { confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks } from "../../src/state/confirm-task-main-session-handover-input-after-correlated-processing-hooks";
 import {
 	loadWorkspaceContext,
 	loadWorkspaceState,
@@ -32,6 +41,7 @@ import {
 	savePersistedWorkspaceSessionsById,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
+import * as commandDiscovery from "../../src/terminal/command-discovery";
 import type { TerminalSessionManager } from "../../src/terminal/session-manager";
 import type { RuntimeTrpcWorkspaceScope } from "../../src/trpc/app-router";
 import { createRuntimeApi } from "../../src/trpc/runtime-api";
@@ -133,7 +143,9 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			workspaceId: (await loadWorkspaceContext(repositoryPath)).workspaceId,
 			workspacePath: repositoryPath,
 		};
+		const liveProcessSessionIds = new Set<string>();
 		const manager = {
+			hasLiveTaskSession: vi.fn((id: string) => liveProcessSessionIds.has(id)),
 			hydrateFromRecord: (summaries: Record<string, RuntimeTaskSessionSummary>) => Object.assign(live, summaries),
 			listSummaries: () => Object.values(live),
 			getSummary: (id: string) => live[id] ?? null,
@@ -155,17 +167,20 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				const summary = runtimeTaskSessionSummarySchema.parse({
 					...source,
 					taskId: input.taskId,
-					agentId: "codex",
+					agentId: input.agentId ?? "codex",
+					sessionTransport: input.requestedAgentSessionTransport ?? "pty_terminal",
+					taskConversationMode: input.taskConversationMode,
 					taskConversationSessionMetadata: input.taskConversationSessionMetadata,
 					codexConversationStorageHomeDirectoryPath: reserved?.codexConversationStorageHomeDirectoryPath,
 					agentNativeConversationSessionIdentity: reserved?.agentNativeConversationSessionIdentity ?? {
-						sourceAgentId: "codex",
+						sourceAgentId: input.agentId ?? "codex",
 						nativeSessionId: "22222222-2222-4222-8222-222222222222",
 						transcriptPath: null,
 						observedAt: 2,
 					},
 				});
 				live[input.taskId] = summary;
+				liveProcessSessionIds.add(input.taskId);
 				await mutateWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
 					board: state.board,
 					sessions: { ...state.sessions, [input.taskId]: summary },
@@ -208,8 +223,27 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				sourceCompletedTurnCount: 3,
 			}),
 		);
+		const prepareTranscriptNativeFork = vi.fn(
+			async (_input: Parameters<typeof prepareTaskMainSessionHandoverTranscriptNativeFork>[0]) => ({
+				nativeSessionId: "88888888-8888-4888-8888-888888888888",
+				transcriptPath: join(root.isolatedHomeDirectoryPath, "prepared-fork.jsonl"),
+				sourceCompletedTurnCount: null,
+				codexConversationStorageHomeDirectoryPath: undefined,
+			}),
+		);
+		const acp = {
+			hasLiveTaskSession: vi.fn((id: string) => liveProcessSessionIds.has(id)),
+			getSummary: (id: string) => (live[id]?.sessionTransport === "acp_stdio_subprocess" ? live[id] : null),
+			listSummaries: () =>
+				Object.values(live).filter((summary) => summary.sessionTransport === "acp_stdio_subprocess"),
+			listMessages: () => [],
+			applyTaskConversationSessionMetadata: manager.applyTaskConversationSessionMetadata,
+			stopTaskSession: vi.fn(async (id: string) => live[id] ?? null),
+		} as unknown as AcpTaskSessionService;
 		const create = (agentAutonomousModeEnabled = true) => {
 			const coordinator = createTaskMainSessionHandoverCoordinator({
+				getAcpTaskSessionService: async () => acp,
+				prepareTranscriptNativeFork,
 				queryReportAcceptance,
 				prepareNativeFork,
 				prepareRecoveryNativeFork,
@@ -237,6 +271,7 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 		};
 		return {
 			scope,
+			liveProcessSessionIds,
 			live,
 			source,
 			board,
@@ -251,6 +286,8 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			queryReportAcceptance,
 			prepareNativeFork,
 			prepareRecoveryNativeFork,
+			prepareTranscriptNativeFork,
+			acp,
 			advanceRecoveryClock: (milliseconds: number) => {
 				recoveryClock += milliseconds;
 			},
@@ -264,6 +301,427 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 		userContextNotes: "先检查真实实现",
 		additionalPlanReferencePaths: [],
 	};
+
+	const maintainedHandoverAgentIds = ["claude", "codex", "cursor", "droid", "kiro", "kimi", "omp"] as const;
+	it("Cursor 等待真人时跨重启继续读取精确原生导出，机器报告不能解除等待", async () =>
+		fixture(async (f) => {
+			const previousConfig = process.env.CURSOR_CONFIG_DIR;
+			const previousData = process.env.CURSOR_DATA_DIR;
+			const home = process.env.HOME;
+			assert(home);
+			process.env.CURSOR_CONFIG_DIR = join(home, ".cursor");
+			process.env.CURSOR_DATA_DIR = join(home, ".cursor");
+			try {
+				const coordinator = f.create();
+				await coordinator.request(
+					f.scope,
+					taskMainSessionHandoverRequestSchema.parse({
+						...request,
+						destination: { kind: "new_agent_session", agentId: "cursor" },
+					}),
+				);
+				await coordinator.sweep();
+				const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				assert(record);
+				const target = f.live[record.targetTaskConversationSessionId];
+				assert(target?.workspacePath);
+				assert(target.agentNativeConversationSessionIdentity);
+				const nativeId = target.agentNativeConversationSessionIdentity.nativeSessionId;
+				const cwd = await realpath(target.workspacePath);
+				const chatDirectory = join(home, ".cursor", "chats", createHash("md5").update(cwd).digest("hex"), nativeId);
+				mkdirSync(chatDirectory, { recursive: true });
+				writeFileSync(join(chatDirectory, "store.db"), "不打开原始 sqlite");
+				writeFileSync(
+					join(chatDirectory, "meta.json"),
+					JSON.stringify({ hasConversation: true, isSubagent: false }),
+				);
+				const slug = cwd
+					.replace(/[^a-zA-Z0-9]/gu, "-")
+					.replace(/-+/gu, "-")
+					.replace(/^-+|-+$/gu, "");
+				const directory = join(home, ".cursor", "projects", slug, "agent-transcripts", nativeId);
+				mkdirSync(directory, { recursive: true });
+				const path = join(directory, `${nativeId}.jsonl`);
+				const report = `${JSON.stringify({ role: "user", message: { content: [{ type: "text", text: renderTaskMainSessionHandoverReportPrompt(record) }] } })}\n`;
+				writeFileSync(path, report);
+				await coordinator.sweep();
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+					"awaiting_user_message",
+				);
+				await coordinator.close();
+				writeFileSync(
+					path,
+					report +
+						`${JSON.stringify({ role: "user", message: { content: [{ type: "text", text: "现在继续原主线" }] } })}\n`,
+				);
+				const restarted = f.create();
+				restarted.start();
+				await expect
+					.poll(async () => (await restarted.getStatus(f.scope, { taskId: "task-1" })).record?.status)
+					.toBe("completed");
+				expect(
+					f.live[target.taskId].taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover,
+				).toBe(false);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
+			} finally {
+				if (previousConfig === undefined) delete process.env.CURSOR_CONFIG_DIR;
+				else process.env.CURSOR_CONFIG_DIR = previousConfig;
+				if (previousData === undefined) delete process.env.CURSOR_DATA_DIR;
+				else process.env.CURSOR_DATA_DIR = previousData;
+			}
+		}));
+	it.each(
+		maintainedHandoverAgentIds.flatMap((sourceAgentId) =>
+			maintainedHandoverAgentIds.map((targetAgentId) => [sourceAgentId, targetAgentId] as const),
+		),
+	)("材料交接 %s → %s 复用同一流程并保留原主", async (sourceAgentId, targetAgentId) =>
+		fixture(async (f) => {
+			assert(f.source.agentNativeConversationSessionIdentity);
+			f.live["task-1"] = {
+				...f.source,
+				agentId: sourceAgentId,
+				agentNativeConversationSessionIdentity: {
+					...f.source.agentNativeConversationSessionIdentity,
+					sourceAgentId,
+				},
+			};
+			await mutateWorkspaceState(f.scope.workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+				board: state.board,
+				sessions: f.live,
+				value: null,
+			}));
+			const coordinator = f.create();
+			const prepared = await coordinator.prepare(f.scope, { taskId: "task-1" });
+			expect(prepared.material.sourceAgentId).toBe(sourceAgentId);
+			expect(prepared.material.userIntentContext).toMatchObject({
+				providerAvailability: "unavailable",
+				workUnitReference: { taskId: "task-1", workspaceId: f.scope.workspaceId },
+			});
+			await coordinator.request(
+				f.scope,
+				taskMainSessionHandoverRequestSchema.parse({
+					...request,
+					destination: { kind: "new_agent_session", agentId: targetAgentId },
+				}),
+			);
+			await coordinator.sweep();
+			await coordinator.sweep();
+			const state = await loadWorkspaceState(f.scope.workspacePath);
+			const record = findFixtureTaskCard(state.board).taskMainSessionHandover;
+			assert(record);
+			expect(record?.status).toBe("awaiting_user_message");
+			expect(state.sessions[record.targetTaskConversationSessionId]?.agentId).toBe(targetAgentId);
+			expect(state.sessions["task-1"]?.agentId).toBe(sourceAgentId);
+			expect(state.sessions["task-1"]?.taskConversationSessionMetadata?.taskConversationSessionRole).toBe(
+				"task_collaborator",
+			);
+			const report = f.sendTaskChatMessage.mock.calls[0]?.[1].text ?? "";
+			expect(report.startsWith("/plan ")).toBe(targetAgentId === "codex");
+			expect(f.startTaskSession.mock.calls[0]?.[1].agentId).toBe(targetAgentId);
+			expect(f.prepareNativeFork).not.toHaveBeenCalled();
+		}),
+	);
+
+	it("跨 harness 的完整复刻在创建任何目标前拒绝，不降级成材料交接", async () =>
+		fixture(async (f) => {
+			const coordinator = f.create();
+			await expect(
+				coordinator.request(
+					f.scope,
+					taskMainSessionHandoverRequestSchema.parse({
+						...request,
+						destination: {
+							kind: "new_agent_session",
+							agentId: "omp",
+							contextInheritanceMode: "fork_complete_native_conversation",
+						},
+					}),
+				),
+			).rejects.toThrow("同一 Agent");
+			expect(f.startTaskSession).not.toHaveBeenCalled();
+			expect(
+				findFixtureTaskCard((await loadWorkspaceState(f.scope.workspacePath)).board).mainTaskConversationSessionId,
+			).toBeUndefined();
+		}));
+
+	it.each(["claude", "omp", "codex"] as const)("%s 缺少转录路径时预览与请求门禁一致", async (agentId) =>
+		fixture(async (f) => {
+			assert(f.source.agentNativeConversationSessionIdentity);
+			f.live["task-1"] = {
+				...f.source,
+				agentId,
+				agentNativeConversationSessionIdentity: {
+					...f.source.agentNativeConversationSessionIdentity,
+					sourceAgentId: agentId,
+					transcriptPath: null,
+				},
+			};
+			const coordinator = f.create();
+			const preview = await coordinator.prepare(f.scope, { taskId: "task-1" });
+			const availability = preview.targetAgentCapabilities?.find(
+				(entry) => entry.agentId === agentId,
+			)?.completeNativeConversationForkAvailability;
+			const forkRequest = taskMainSessionHandoverRequestSchema.parse({
+				...request,
+				destination: {
+					kind: "new_agent_session",
+					agentId,
+					contextInheritanceMode: "fork_complete_native_conversation",
+				},
+			});
+			if (agentId === "codex") {
+				expect(availability).toEqual({ available: true, unavailableReason: null });
+				await coordinator.request(f.scope, forkRequest);
+				await coordinator.sweep();
+				expect(f.prepareNativeFork).toHaveBeenCalledOnce();
+			} else {
+				expect(availability?.available).toBe(false);
+				expect(availability?.unavailableReason).toContain("原生转录路径");
+				await expect(coordinator.request(f.scope, forkRequest)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record).toBeNull();
+				expect(f.startTaskSession).not.toHaveBeenCalled();
+				await coordinator.request(f.scope, request);
+				await coordinator.sweep();
+				expect(f.prepareNativeFork).not.toHaveBeenCalled();
+			}
+			expect(f.startTaskSession).toHaveBeenCalledOnce();
+			expect(f.prepareTranscriptNativeFork).not.toHaveBeenCalled();
+		}),
+	);
+
+	it.each([
+		{ agentId: "claude", transport: "pty_terminal" },
+		{ agentId: "omp", transport: "pty_terminal" },
+		{ agentId: "omp", transport: "acp_stdio_subprocess" },
+	] as const)("$agentId/$transport 原生 fork 接任按独立子身份启动，保留来源通道", async ({ agentId, transport }) =>
+		fixture(async (f) => {
+			assert(f.source.agentNativeConversationSessionIdentity);
+			f.live["task-1"] = {
+				...f.source,
+				agentId,
+				sessionTransport: transport,
+				agentNativeConversationSessionIdentity: {
+					...f.source.agentNativeConversationSessionIdentity,
+					sourceAgentId: agentId,
+				},
+			};
+			await mutateWorkspaceState(f.scope.workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+				board: state.board,
+				sessions: f.live,
+				value: null,
+			}));
+			const coordinator = f.create();
+			const preview = await coordinator.prepare(f.scope, { taskId: "task-1" });
+			expect(
+				preview.targetAgentCapabilities?.find((entry) => entry.agentId === agentId)
+					?.completeNativeConversationForkAvailability,
+			).toEqual({ available: true, unavailableReason: null });
+			await coordinator.request(
+				f.scope,
+				taskMainSessionHandoverRequestSchema.parse({
+					...request,
+					destination: {
+						kind: "new_agent_session",
+						agentId,
+						contextInheritanceMode: "fork_complete_native_conversation",
+					},
+				}),
+			);
+			await coordinator.sweep();
+			await coordinator.sweep();
+			const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			expect(record?.status).toBe("awaiting_user_message");
+			assert(record);
+			expect(f.prepareTranscriptNativeFork).toHaveBeenCalledTimes(1);
+			expect(f.prepareNativeFork).not.toHaveBeenCalled();
+			const state = await loadWorkspaceState(f.scope.workspacePath);
+			expect(
+				state.sessions[record.targetTaskConversationSessionId]?.agentNativeConversationSessionIdentity,
+			).toMatchObject({ sourceAgentId: agentId, nativeSessionId: "88888888-8888-4888-8888-888888888888" });
+			expect(f.startTaskSession.mock.calls[0]?.[1]).toMatchObject({
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+				requestedAgentSessionTransport: transport,
+				startInPlanMode: true,
+			});
+		}),
+	);
+
+	it("非 Codex 失败交接按原目标和原材料恢复，旧 Codex 入口不能改变它", async () =>
+		fixture(async (f) => {
+			f.sendTaskChatMessage.mockRejectedValueOnce(new Error("发送回执未知"));
+			const coordinator = f.create();
+			await coordinator.request(
+				f.scope,
+				taskMainSessionHandoverRequestSchema.parse({
+					...request,
+					destination: { kind: "new_agent_session", agentId: "kimi" },
+				}),
+			);
+			await coordinator.sweep();
+			const failed = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(failed);
+			expect(failed.status).toBe("failed");
+			const recovery = {
+				taskId: "task-1",
+				expectedHandoverId: failed.handoverId,
+				expectedReportDeliveryAttempt: failed.reportDeliveryAttempt,
+				requestId: "77777777-7777-4777-8777-777777777777",
+				acknowledgePossibleDuplicateReport: true as const,
+			};
+			await expect(coordinator.recoverWithNewCodexSession(f.scope, recovery)).rejects.toThrow("旧 Codex");
+			await coordinator.recoverWithNewAgentSession(f.scope, recovery);
+			await coordinator.sweep();
+			await coordinator.sweep();
+			const restored = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(restored);
+			expect(restored.status).toBe("awaiting_user_message");
+			expect(restored?.materialDirectoryPath).toBe(failed.materialDirectoryPath);
+			expect(restored?.targetTaskConversationSessionId).not.toBe(failed.targetTaskConversationSessionId);
+			const state = await loadWorkspaceState(f.scope.workspacePath);
+			expect(state.sessions[restored.targetTaskConversationSessionId]?.agentId).toBe("kimi");
+			expect(state.sessions[failed.targetTaskConversationSessionId]?.agentId).toBe("kimi");
+		}));
+
+	it.each(["droid", "kiro"] as const)(
+		"%s 缺原生身份时，输入前置 hook 不算接受，关联处理证据跨状态持久生效",
+		async (agentId) =>
+			fixture(async (f) => {
+				const originalStart = f.startTaskSession.getMockImplementation();
+				assert(originalStart);
+				f.startTaskSession.mockImplementationOnce(async (...args) => {
+					const result = await originalStart(...args);
+					assert(result.summary);
+					const summary = {
+						...result.summary,
+						agentNativeConversationSessionIdentity: undefined,
+						runtimeSessionIncarnationId: "66666666-6666-4666-8666-666666666666",
+					};
+					f.live[summary.taskId] = summary;
+					await mutateWorkspaceState(f.scope.workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+						board: state.board,
+						sessions: { ...state.sessions, [summary.taskId]: summary },
+						value: null,
+					}));
+					return { ...result, summary };
+				});
+				f.sendTaskChatMessage.mockResolvedValue({
+					ok: true,
+					summary: null,
+					terminalDelivery: { status: "accepted_pending_submit_confirmation", reason: null },
+				});
+				const coordinator = f.create();
+				await coordinator.request(
+					f.scope,
+					taskMainSessionHandoverRequestSchema.parse({
+						...request,
+						destination: { kind: "new_agent_session", agentId },
+					}),
+				);
+				await coordinator.sweep();
+				const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				assert(record);
+				const summary = f.live[record.targetTaskConversationSessionId];
+				assert(summary);
+				assert(summary.runtimeSessionIncarnationId);
+				const runtimeSessionIncarnationId = summary.runtimeSessionIncarnationId;
+				expect(record.reportAcceptanceProbe).toBeUndefined();
+				const capturedAt = Date.now();
+				const hook = {
+					workspaceId: f.scope.workspaceId,
+					taskId: summary.taskId,
+					event: "to_in_progress" as const,
+					metadata: { source: agentId, hookEventName: "UserPromptSubmit" },
+					submittedPromptText: renderTaskMainSessionHandoverReportPrompt(record),
+					hookRuntimeSessionIncarnationId: runtimeSessionIncarnationId,
+					hookEventDeliveryIdempotencyKey: "report-submission",
+					hookEventCapturedAtEpochMs: capturedAt,
+				};
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook,
+				});
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).not.toBe(
+					"awaiting_user_message",
+				);
+				const processing = {
+					...hook,
+					submittedPromptText: undefined,
+					hookEventDeliveryIdempotencyKey: "report-processing",
+					hookEventCapturedAtEpochMs: capturedAt + 1,
+					metadata: { source: agentId, hookEventName: "PreToolUse" },
+				};
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: { ...processing, hookRuntimeSessionIncarnationId: "obsolete-incarnation" },
+				});
+				expect(
+					(await coordinator.getStatus(f.scope, { taskId: "task-1" })).record
+						?.reportCorrelatedProcessingAcceptanceEvidence,
+				).toBeUndefined();
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: {
+						...hook,
+						submittedPromptText: "<task-notification>机器消息</task-notification>",
+						hookEventDeliveryIdempotencyKey: "machine-submission",
+						hookEventCapturedAtEpochMs: capturedAt + 1,
+					},
+				});
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: { ...processing, hookEventCapturedAtEpochMs: capturedAt + 2 },
+				});
+				expect(
+					(await coordinator.getStatus(f.scope, { taskId: "task-1" })).record
+						?.reportCorrelatedProcessingAcceptanceEvidence,
+				).toBeUndefined();
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: { ...hook, hookEventCapturedAtEpochMs: capturedAt + 3 },
+				});
+				processing.hookEventCapturedAtEpochMs = capturedAt + 4;
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: processing,
+				});
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record).toMatchObject({
+					status: "awaiting_user_message",
+					reportCorrelatedProcessingAcceptanceEvidence: {
+						submittedHookEventId: "report-submission",
+						processingHookEventId: "report-processing",
+					},
+				});
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: {
+						...hook,
+						submittedPromptText: "现在继续主线",
+						hookEventDeliveryIdempotencyKey: "human-submission",
+						hookEventCapturedAtEpochMs: capturedAt + 5,
+					},
+				});
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+					"awaiting_user_message",
+				);
+				await confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks({
+					workspacePath: f.scope.workspacePath,
+					summary,
+					hook: {
+						...processing,
+						hookEventDeliveryIdempotencyKey: "human-processing",
+						hookEventCapturedAtEpochMs: capturedAt + 6,
+					},
+				});
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe("completed");
+			}),
+	);
 
 	it("Codex 连续切主时保留两任前主会话及各自的创建角色", async () =>
 		fixture(async (f) => {
@@ -629,48 +1087,63 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			expect(unexpectedTransportAccess).not.toHaveBeenCalled();
 		}));
 
-	it.each([false, true])("明确未提交回执允许保留失败账本并安全重试（重启=%s）", async (restart) =>
-		fixture(async (f) => {
-			f.sendTaskChatMessage.mockResolvedValueOnce({
-				ok: false,
-				summary: null,
-				error: "尚未提交即被拒绝",
-				terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
-			});
-			const coordinator = f.create();
-			await coordinator.request(f.scope, request);
-			await coordinator.sweep();
-			const firstFailure = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
-			expect(firstFailure?.status).toBe("failed");
-			expect((await readReportDeliveryLedger(f))[0]).toMatchObject({
-				terminal_delivery_status: "delivery_failed",
-				terminal_delivery_failure_reason: "cancelled_before_delivery",
-			});
-			f.advanceRecoveryClock(15_000);
-			const resumed = restart ? f.create() : coordinator;
-			if (restart) {
-				await coordinator.close();
-				resumed.start();
-			}
-			await vi.waitFor(async () => {
-				await resumed.sweep();
-				expect((await resumed.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
-					"awaiting_user_message",
-				);
-			});
-			const recovered = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
-			expect(recovered?.failureHistory).toEqual(firstFailure?.failureHistory);
-			expect(recovered?.reportDeliveryAttempt).toBe(1);
-			expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(2);
-			expect(f.sendTaskChatMessage.mock.calls.map((call) => call[1].idempotencyKey)).toEqual([
-				`${request.requestId}:report:0`,
-				`${request.requestId}:report:1`,
-			]);
-			expect((await readReportDeliveryLedger(f)).map((entry) => entry.terminal_delivery_status)).toEqual([
-				"delivery_failed",
-				"delivered_and_submit_confirmed",
-			]);
-		}),
+	it.each([false, true])(
+		"明确未提交回执允许保留失败账本并安全重试（重启=%s）",
+		async (restart) =>
+			fixture(async (f) => {
+				f.sendTaskChatMessage.mockResolvedValueOnce({
+					ok: false,
+					summary: null,
+					error: "尚未提交即被拒绝",
+					terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, request);
+				await coordinator.sweep();
+				const firstFailure = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(firstFailure?.status).toBe("failed");
+				expect((await readReportDeliveryLedger(f))[0]).toMatchObject({
+					terminal_delivery_status: "delivery_failed",
+					terminal_delivery_failure_reason: "cancelled_before_delivery",
+				});
+				f.advanceRecoveryClock(15_000);
+				const resumed = restart ? f.create() : coordinator;
+				if (restart) {
+					await coordinator.close();
+					resumed.start();
+				}
+				// 15 秒重验冷却由注入时钟控制；这里仅等待多次持久化后的终态可见，保留全部投递语义断言。
+				try {
+					await vi.waitFor(
+						async () => {
+							await resumed.sweep();
+							expect((await resumed.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+								"awaiting_user_message",
+							);
+						},
+						{ timeout: 10_000 },
+					);
+				} catch (error) {
+					const record = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+					throw new Error(
+						`交接重试终态：${JSON.stringify({ status: record?.status, errorMessage: record?.errorMessage, automaticRecovery: record?.automaticRecovery, sendCalls: f.sendTaskChatMessage.mock.calls.length })}`,
+						{ cause: error },
+					);
+				}
+				const recovered = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(recovered?.failureHistory).toEqual(firstFailure?.failureHistory);
+				expect(recovered?.reportDeliveryAttempt).toBe(1);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(2);
+				expect(f.sendTaskChatMessage.mock.calls.map((call) => call[1].idempotencyKey)).toEqual([
+					`${request.requestId}:report:0`,
+					`${request.requestId}:report:1`,
+				]);
+				expect((await readReportDeliveryLedger(f)).map((entry) => entry.terminal_delivery_status)).toEqual([
+					"delivery_failed",
+					"delivered_and_submit_confirmed",
+				]);
+			}),
+		20_000,
 	);
 
 	it.each(["抛出异常", "没有回执", "无回执的失败响应", "确认尚未完成"] as const)(
@@ -823,6 +1296,84 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			expect(f.sendTaskChatMessage).toHaveBeenCalledOnce();
 		}));
 
+	it.each(["nativeHistoryCursor", "transcriptHistoryCursor"] as const)(
+		"分页扫描跨重启继续，页尾仅完成一轮预算且外部变化后恢复：%s",
+		async (cursorField) =>
+			fixture(async (f) => {
+				f.queryReportAcceptance.mockImplementation(async ({ probe }) => {
+					const page = Number(probe[cursorField] ?? 0);
+					return { ...probe, [cursorField]: page < 3 ? String(page + 1) : null };
+				});
+				const { coordinator, failed } = await failFirstReport(f);
+				await coordinator.close();
+				f.advanceRecoveryClock(15_000);
+				const resumed = f.create();
+				resumed.start();
+				await vi.waitFor(() => expect(f.queryReportAcceptance).toHaveBeenCalledTimes(2));
+				await resumed.sweep();
+				for (let page = 2; page < 12; page += 1) {
+					f.advanceRecoveryClock(14_999);
+					await resumed.sweep();
+					expect(f.queryReportAcceptance).toHaveBeenCalledTimes(page);
+					f.advanceRecoveryClock(1);
+					await resumed.sweep();
+				}
+				expect(f.queryReportAcceptance).toHaveBeenCalledTimes(12);
+				const exhausted = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(exhausted?.automaticRecovery?.attemptCount).toBe(3);
+				expect(exhausted?.automaticRecovery?.nextAttemptAt).toBeNull();
+				f.advanceRecoveryClock(60_000);
+				await resumed.sweep();
+				expect(f.queryReportAcceptance).toHaveBeenCalledTimes(12);
+				f.live[failed.targetTaskConversationSessionId] = {
+					...f.live[failed.targetTaskConversationSessionId],
+					runtimeSessionIncarnationId: "changed-native-control-generation",
+				};
+				f.queryReportAcceptance.mockImplementationOnce(async ({ probe }) => ({
+					...probe,
+					historicalAcceptanceEvidence: { sourceReference: "native-history:new-evidence", observedAt: Date.now() },
+				}));
+				await resumed.sweep();
+				expect(f.queryReportAcceptance).toHaveBeenCalledTimes(13);
+				expect((await resumed.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+					"awaiting_user_message",
+				);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledOnce();
+			}),
+	);
+
+	it.each(["重复游标", "循环游标", "读取错误"] as const)(
+		"分页进度异常不得无限续期，跨重启保留预算和循环历史：%s",
+		async (scenario) =>
+			fixture(async (f) => {
+				f.queryReportAcceptance.mockImplementation(async ({ probe }) => {
+					if (scenario === "读取错误") throw new Error("原生历史暂不可读");
+					return {
+						...probe,
+						transcriptHistoryCursor: scenario === "循环游标" && probe.transcriptHistoryCursor === "a" ? "b" : "a",
+					};
+				});
+				const { coordinator } = await failFirstReport(f);
+				await coordinator.close();
+				f.advanceRecoveryClock(15_000);
+				const resumed = f.create();
+				resumed.start();
+				await vi.waitFor(() => expect(f.queryReportAcceptance).toHaveBeenCalledTimes(2));
+				await resumed.sweep();
+				for (let retry = 0; retry < 10; retry += 1) {
+					f.advanceRecoveryClock(15_000);
+					await resumed.sweep();
+				}
+				const exhausted = (await resumed.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(exhausted?.automaticRecovery?.attemptCount).toBe(3);
+				expect(exhausted?.automaticRecovery?.nextAttemptAt).toBeNull();
+				expect(f.queryReportAcceptance).toHaveBeenCalledTimes(
+					scenario === "循环游标" ? 7 : scenario === "重复游标" ? 4 : 3,
+				);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledOnce();
+			}),
+	);
+
 	it("同一证据最多补查三次，预算跨重启保留；证据变化后自动恢复", async () =>
 		fixture(async (f) => {
 			const { coordinator, failed } = await failFirstReport(f);
@@ -846,8 +1397,13 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				...f.live[failed.targetTaskConversationSessionId],
 				runtimeSessionIncarnationId: "new-native-control-generation",
 			};
-			await resumed.sweep();
-			expect(f.queryReportAcceptance).toHaveBeenCalledTimes(4);
+			await vi.waitFor(async () => {
+				await resumed.sweep();
+				expect(
+					f.queryReportAcceptance,
+					JSON.stringify((await resumed.getStatus(f.scope, { taskId: "task-1" })).record),
+				).toHaveBeenCalledTimes(4);
+			});
 			expect(f.sendTaskChatMessage).toHaveBeenCalledOnce();
 		}));
 
@@ -1226,6 +1782,673 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 			expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe("cancelled");
 			expect(resolveSessionFacets(f.live["task-1"]).turnOwner).toBe("agent");
 		}));
+	const existingPeerAgentIds = ["claude", "codex", "cursor", "kimi", "omp"] as const;
+	function installExistingPeer(
+		f: Awaited<ReturnType<typeof setup>>,
+		agentId: (typeof existingPeerAgentIds)[number],
+		sessionTransport: "pty_terminal" | "acp_stdio_subprocess" = "pty_terminal",
+	) {
+		const peer = runtimeTaskSessionSummarySchema.parse({
+			...f.source,
+			taskId: "selected-peer",
+			agentId,
+			sessionTransport,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: agentId,
+				nativeSessionId: "selected-exact-native-id",
+				transcriptPath: null,
+				observedAt: 2,
+			},
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "task_collaborator",
+				taskConversationSessionRoleAtCreation: "task_collaborator",
+				taskConversationSessionContextSource: "forked_from_main_current_turn",
+				parentTaskConversationSessionId: "task-1",
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: `既有 ${agentId}`,
+				taskConversationSessionLaunchSettings: {
+					taskAgentPermissionMode: "ask_for_every_tool_use",
+					startInPlanMode: false,
+					sessionTransport,
+					terminalAgentModelOverrideSettings:
+						agentId === "omp"
+							? undefined
+							: {
+									agentId,
+									modelId: agentId === "cursor" ? "auto" : "peer-own-model",
+								},
+				},
+			},
+		});
+		f.live[peer.taskId] = peer;
+		return peer;
+	}
+	const existingTargetCases = existingPeerAgentIds.flatMap((agentId) =>
+		(agentId === "omp" ? (["pty_terminal", "acp_stdio_subprocess"] as const) : (["pty_terminal"] as const)).flatMap(
+			(sessionTransport) => [true, false].map((live) => ({ agentId, sessionTransport, live })),
+		),
+	);
+	it.each(
+		existingPeerAgentIds.flatMap((sourceAgentId) =>
+			existingTargetCases.map((target) => ({ sourceAgentId, ...target })),
+		),
+	)(
+		"$sourceAgentId → 既有 $agentId/$sessionTransport（活体=$live）保留身份与独立设置，不再次 fork",
+		async ({ sourceAgentId, agentId, sessionTransport, live }) =>
+			fixture(async (f) => {
+				f.live["task-1"] = {
+					...f.source,
+					agentId: sourceAgentId,
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId,
+						nativeSessionId: "source-native-id",
+						transcriptPath: null,
+						observedAt: 1,
+					},
+				};
+				const peer = installExistingPeer(f, agentId, sessionTransport);
+				if (live) f.liveProcessSessionIds.add(peer.taskId);
+				const coordinator = f.create();
+				const input = {
+					...request,
+					destination: {
+						kind: "existing_agent_session" as const,
+						agentId,
+						taskConversationSessionId: peer.taskId,
+					},
+				};
+				await coordinator.request(f.scope, input);
+				await coordinator.request(f.scope, input);
+				await coordinator.sweep();
+				await coordinator.sweep();
+				const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(record?.status, record?.errorMessage ?? undefined).toBe("awaiting_user_message");
+				expect(record?.existingTargetSessionBinding).toMatchObject({
+					agentId,
+					nativeSessionId: "selected-exact-native-id",
+					sessionTransport,
+					launchSettingsSnapshot: JSON.parse(
+						JSON.stringify(peer.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings),
+					),
+				});
+				expect(f.startTaskSession).toHaveBeenCalledTimes(live ? 0 : 1);
+				if (!live)
+					expect(f.startTaskSession.mock.calls[0][1]).toMatchObject({
+						taskId: peer.taskId,
+						agentId,
+						resumePriorAgentConversationWithoutResendingPrompt: true,
+						expectedExistingMainSessionHandoverTargetBinding: record?.existingTargetSessionBinding,
+						requestedAgentSessionTransport: sessionTransport,
+						startInPlanMode: false,
+						taskAgentPermissionMode: "ask_for_every_tool_use",
+						terminalAgentModelOverrideSettings:
+							peer.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+								?.terminalAgentModelOverrideSettings,
+					});
+				expect(f.manager.stopTaskSession).not.toHaveBeenCalled();
+				expect(f.acp.stopTaskSession).not.toHaveBeenCalled();
+				expect(f.prepareNativeFork).not.toHaveBeenCalled();
+				expect(f.prepareTranscriptNativeFork).not.toHaveBeenCalled();
+				expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
+				expect(f.sendTaskChatMessage.mock.calls[0][1].taskId).toBe(peer.taskId);
+				expect(f.live[peer.taskId].taskConversationSessionMetadata?.taskConversationSessionLaunchSettings).toEqual(
+					peer.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings,
+				);
+			}),
+	);
+	it.each(
+		(["pty_terminal", "acp_stdio_subprocess"] as const).flatMap((sessionTransport) =>
+			(["exploratory", "operational", undefined] as const).map((taskConversationMode) => ({
+				sessionTransport,
+				taskConversationMode,
+			})),
+		),
+	)(
+		"冷恢复 $sessionTransport peer 保留 $taskConversationMode 会话模式与固定绑定",
+		async ({ sessionTransport, taskConversationMode }) =>
+			fixture(async (f) => {
+				const peer = installExistingPeer(f, "omp", sessionTransport);
+				f.live[peer.taskId] = { ...peer, taskConversationMode };
+				f.live["task-1"] = mergeSummaryWithFacets(f.source, {
+					turnOwner: "agent",
+					liveness: "live",
+					userTurnKind: null,
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, {
+					...request,
+					destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+				});
+				await coordinator.close();
+				// 模拟跨运行时恢复：服务注册表为空，只保留接单时持久化的 peer。
+				delete f.live[peer.taskId];
+				f.live["task-1"] = f.source;
+				const recovered = f.create();
+				recovered.start();
+				await vi.waitFor(
+					async () => {
+						await recovered.sweep();
+						expect((await recovered.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+							"awaiting_user_message",
+						);
+					},
+					{ timeout: 10_000 },
+				);
+				const expectedMode = taskConversationMode ?? "operational";
+				expect(f.live[peer.taskId]?.taskConversationMode ?? "operational").toBe(expectedMode);
+				const record = (await recovered.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(record?.status, record?.errorMessage ?? undefined).toBe("awaiting_user_message");
+				expect(record?.existingTargetSessionBinding).toMatchObject({ taskConversationMode: expectedMode });
+				expect(f.startTaskSession).toHaveBeenCalledOnce();
+				expect(f.startTaskSession.mock.calls[0][1]).toMatchObject({
+					taskId: peer.taskId,
+					taskConversationMode: expectedMode,
+					requestedAgentSessionTransport: sessionTransport,
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				});
+				expect(f.live[peer.taskId]?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+					"selected-exact-native-id",
+				);
+				expect(f.sendTaskChatMessage).toHaveBeenCalledOnce();
+			}),
+	);
+	it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
+		"旧 %s peer 绑定缺少会话模式时仍按自身 exploratory 模式冷恢复",
+		async (sessionTransport) =>
+			fixture(async (f) => {
+				const peer = installExistingPeer(f, "omp", sessionTransport);
+				f.live[peer.taskId] = { ...peer, taskConversationMode: "exploratory" };
+				f.live["task-1"] = mergeSummaryWithFacets(f.source, {
+					turnOwner: "agent",
+					liveness: "live",
+					userTurnKind: null,
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, {
+					...request,
+					destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+				});
+				await coordinator.close();
+				await mutateWorkspaceState(f.scope.workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+					board: {
+						...state.board,
+						columns: state.board.columns.map((column) => ({
+							...column,
+							cards: column.cards.map((card) => {
+								const record = card.taskMainSessionHandover;
+								const binding = record?.existingTargetSessionBinding;
+								assert(record && binding);
+								const legacyBinding = { ...binding };
+								delete legacyBinding.taskConversationMode;
+								return {
+									...card,
+									taskMainSessionHandover: {
+										...record,
+										existingTargetSessionBinding: legacyBinding,
+									},
+								};
+							}),
+						})),
+					},
+					value: null,
+				}));
+				delete f.live[peer.taskId];
+				f.live["task-1"] = f.source;
+				const recovered = f.create();
+				recovered.start();
+				await vi.waitFor(
+					async () => {
+						await recovered.sweep();
+						expect((await recovered.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+							"awaiting_user_message",
+						);
+					},
+					{ timeout: 10_000 },
+				);
+				const record = (await recovered.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(record?.status, record?.errorMessage ?? undefined).toBe("awaiting_user_message");
+				expect(f.live[peer.taskId]?.taskConversationMode).toBe("exploratory");
+				expect(f.startTaskSession.mock.calls[0][1].taskConversationMode).toBe("exploratory");
+			}),
+	);
+	it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
+		"%s peer 切主后、启动前会话模式漂移时禁止启动与报告投递",
+		async (sessionTransport) =>
+			fixture(async (f) => {
+				const peer = installExistingPeer(f, "omp", sessionTransport);
+				f.live[peer.taskId] = { ...peer, taskConversationMode: "exploratory" };
+				let modeChanged = false;
+				f.broadcastState.mockImplementation(async () => {
+					const card = findFixtureTaskCard((await loadWorkspaceState(f.scope.workspacePath)).board);
+					if (modeChanged || card.taskMainSessionHandover?.status !== "report_delivery_pending") return;
+					modeChanged = true;
+					f.live[peer.taskId] = { ...f.live[peer.taskId], taskConversationMode: "operational" };
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, {
+					...request,
+					destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+				});
+				await coordinator.sweep();
+				expect(modeChanged).toBe(true);
+				const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(record?.automaticRecovery?.classification).toBe("execution_prohibited");
+				expect(f.startTaskSession).not.toHaveBeenCalled();
+				expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+			}),
+	);
+	it.each(
+		(["pty_terminal", "acp_stdio_subprocess"] as const).flatMap((sessionTransport) =>
+			(["request_mode", "summary_mode_before_spawn"] as const).map((driftStage) => ({
+				sessionTransport,
+				driftStage,
+			})),
+		),
+	)("真实 runtime 在 $sessionTransport 的 $driftStage 模式漂移时阻止启动", async ({ sessionTransport, driftStage }) =>
+		fixture(async (f) => {
+			// 只检查启动门禁接线，不依赖宿主装有 Agent；transport 在进程启动点前被替换。
+			const binaryAvailability = vi.spyOn(commandDiscovery, "isBinaryAvailableOnPath").mockReturnValue(true);
+			onTestFinished(() => binaryAvailability.mockRestore());
+			const peer = installExistingPeer(f, "omp", sessionTransport);
+			f.live[peer.taskId] = { ...peer, taskConversationMode: "exploratory" };
+			const spawnedProcess = vi.fn();
+			let runtimeStartResponse: RuntimeTaskSessionStartResponse | undefined;
+			const revalidateBeforeSpawning = async (input: {
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
+			}): Promise<never> => {
+				f.live[peer.taskId] = { ...f.live[peer.taskId], taskConversationMode: "operational" };
+				assert(input.revalidateExistingMainSessionHandoverTargetBeforeLaunch);
+				await input.revalidateExistingMainSessionHandoverTargetBeforeLaunch();
+				spawnedProcess();
+				throw new Error("会话模式漂移后不应到达进程启动点");
+			};
+			const terminalStart = vi.fn(revalidateBeforeSpawning);
+			const acpStart = vi.fn(revalidateBeforeSpawning);
+			const unexpectedServiceAccess = async (): Promise<never> => {
+				throw new Error("既有 peer 恢复不应访问其他 Agent 服务");
+			};
+			const api = createRuntimeApi({
+				getActiveWorkspaceId: () => f.scope.workspaceId,
+				loadScopedRuntimeConfig: async () => await loadRuntimeConfig(f.scope.workspacePath),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: async () =>
+					({ ...f.manager, startTaskSession: terminalStart }) as unknown as TerminalSessionManager,
+				getScopedClineTaskSessionService: unexpectedServiceAccess,
+				getScopedAcpTaskSessionService: async () =>
+					({ ...f.acp, startTaskSession: acpStart }) as unknown as AcpTaskSessionService,
+				resolveInteractiveShellCommand: () => {
+					throw new Error("既有 peer 恢复不应启动交互 shell");
+				},
+				runCommand: unexpectedServiceAccess,
+				getUpdateStatus: vi.fn(),
+				runUpdateNow: unexpectedServiceAccess,
+			});
+			f.startTaskSession.mockImplementationOnce(async (scope, input) => {
+				runtimeStartResponse = await api.startTaskSession(scope, {
+					...input,
+					taskConversationMode: driftStage === "request_mode" ? "operational" : "exploratory",
+				});
+				return runtimeStartResponse;
+			});
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			expect(f.startTaskSession).toHaveBeenCalledOnce();
+			expect(runtimeStartResponse?.ok).toBe(false);
+			expect(runtimeStartResponse?.error).toContain(
+				driftStage === "request_mode" ? "固定身份、主绑定或执行资格已改变" : "会话模式或启动设置已改变",
+			);
+			expect(terminalStart).toHaveBeenCalledTimes(
+				driftStage === "summary_mode_before_spawn" && sessionTransport === "pty_terminal" ? 1 : 0,
+			);
+			expect(acpStart).toHaveBeenCalledTimes(
+				driftStage === "summary_mode_before_spawn" && sessionTransport === "acp_stdio_subprocess" ? 1 : 0,
+			);
+			expect(spawnedProcess).not.toHaveBeenCalled();
+			expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+		}),
+	);
+	it.each(["question", "permission", "plan_review", "needs_input"] as const)(
+		"既有 peer 的未决 %s 持久等待，解除后原活体接任",
+		async (userTurnKind) =>
+			fixture(async (f) => {
+				const peer = installExistingPeer(f, "claude");
+				f.liveProcessSessionIds.add(peer.taskId);
+				f.live[peer.taskId] = mergeSummaryWithFacets(peer, { turnOwner: "user", liveness: "live", userTurnKind });
+				const coordinator = f.create();
+				await coordinator.request(f.scope, {
+					...request,
+					destination: {
+						kind: "existing_agent_session",
+						agentId: "claude",
+						taskConversationSessionId: peer.taskId,
+					},
+				});
+				await coordinator.sweep();
+				expect((await coordinator.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+					"waiting_for_sessions_to_stop",
+				);
+				expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+				await coordinator.close();
+				f.live[peer.taskId] = mergeSummaryWithFacets(peer, {
+					turnOwner: "user",
+					liveness: "live",
+					userTurnKind: "review",
+				});
+				const recovered = f.create();
+				recovered.start();
+				await vi.waitFor(
+					async () => {
+						await recovered.sweep();
+						expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
+					},
+					{ timeout: 5000 },
+				);
+				expect(f.startTaskSession).not.toHaveBeenCalled();
+			}),
+	);
+	const existingMainSessionHandoverPeerBindingFieldsRevalidatedDuringMaterialPreparation = [
+		"nativeSessionId",
+		"workspacePath",
+		"sessionTransport",
+		"settings",
+		"ownership",
+		"taskConversationMode",
+	] as const;
+	it.each(existingMainSessionHandoverPeerBindingFieldsRevalidatedDuringMaterialPreparation)(
+		"材料准备期间 peer 的 %s 改变会禁止切主和投递",
+		async (change) =>
+			fixture(async (f) => {
+				const peer = installExistingPeer(f, "omp");
+				f.beforeLoadingScopedRuntimeConfig.mockImplementationOnce(async () => {
+					const current = f.live[peer.taskId];
+					const metadata = current.taskConversationSessionMetadata;
+					const identity = current.agentNativeConversationSessionIdentity;
+					const launchSettings = metadata?.taskConversationSessionLaunchSettings;
+					if (!metadata || !identity || !launchSettings) throw new Error("测试 peer 缺少固定身份或设置");
+					if (change === "nativeSessionId")
+						f.live[peer.taskId] = {
+							...current,
+							agentNativeConversationSessionIdentity: {
+								...identity,
+								nativeSessionId: "changed-native-id",
+							},
+						};
+					else if (change === "workspacePath")
+						f.live[peer.taskId] = { ...current, workspacePath: `${f.scope.workspacePath}/changed` };
+					else if (change === "sessionTransport")
+						f.live[peer.taskId] = { ...current, sessionTransport: "acp_stdio_subprocess" };
+					else if (change === "taskConversationMode")
+						f.live[peer.taskId] = { ...current, taskConversationMode: "exploratory" };
+					else
+						f.live[peer.taskId] = {
+							...current,
+							taskConversationSessionMetadata: {
+								...metadata,
+								...(change === "ownership"
+									? { workspaceTaskId: "other-task" }
+									: {
+											taskConversationSessionLaunchSettings: {
+												...launchSettings,
+												startInPlanMode: true,
+											},
+										}),
+							},
+						};
+				});
+				const coordinator = f.create();
+				await coordinator.request(f.scope, {
+					...request,
+					destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+				});
+				await coordinator.sweep();
+				const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+				expect(record?.automaticRecovery?.classification).toBe("execution_prohibited");
+				expect(
+					findFixtureTaskCard((await loadWorkspaceState(f.scope.workspacePath)).board)
+						.mainTaskConversationSessionId,
+				).toBeUndefined();
+				expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+				expect(f.startTaskSession).not.toHaveBeenCalled();
+			}),
+	);
+
+	it("A → B → A 允许前主会话按自身原生身份回任", async () =>
+		fixture(async (f) => {
+			const peer = installExistingPeer(f, "codex");
+			f.liveProcessSessionIds.add("task-1");
+			f.liveProcessSessionIds.add(peer.taskId);
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "codex", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			await coordinator.sweep();
+			await completeTaskMainSessionHandoverAfterUserMessage({
+				...f.scope,
+				taskConversationSessionId: peer.taskId,
+				promptText: "返回原主线",
+			});
+			const originalSettings =
+				f.live["task-1"].taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
+			await coordinator.request(f.scope, {
+				...request,
+				expectedMainTaskConversationSessionId: peer.taskId,
+				requestId: "55555555-5555-4555-8555-555555555555",
+				destination: { kind: "existing_agent_session", agentId: "claude", taskConversationSessionId: "task-1" },
+			});
+			await coordinator.sweep();
+			await coordinator.sweep();
+			const record = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			expect(record?.status, record?.errorMessage ?? undefined).toBe("awaiting_user_message");
+			expect(record?.targetTaskConversationSessionId).toBe("task-1");
+			expect(f.live["task-1"].taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation).toBe("main");
+			expect(f.live["task-1"].taskConversationSessionMetadata?.taskConversationSessionLaunchSettings).toEqual(
+				originalSettings,
+			);
+			expect(f.startTaskSession).not.toHaveBeenCalled();
+			expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(2);
+		}));
+	it("五种候选显示可用性，排除当前主线、By the way 与其他 Task", async () =>
+		fixture(async (f) => {
+			for (const agentId of existingPeerAgentIds) {
+				const peer = installExistingPeer(f, agentId);
+				f.live[`peer-${agentId}`] = { ...peer, taskId: `peer-${agentId}` };
+			}
+			delete f.live["selected-peer"];
+			f.live["peer-kimi"] = { ...f.live["peer-kimi"], agentNativeConversationSessionIdentity: undefined };
+			const valid = f.live["peer-claude"];
+			if (!valid.taskConversationSessionMetadata) throw new Error("测试 peer 缺少归属");
+			f.live["by-the-way"] = {
+				...valid,
+				taskId: "by-the-way",
+				taskConversationSessionMetadata: {
+					...valid.taskConversationSessionMetadata,
+					taskConversationSessionRole: "by_the_way",
+				},
+			};
+			f.live["other-task"] = {
+				...valid,
+				taskId: "other-task",
+				taskConversationSessionMetadata: {
+					...valid.taskConversationSessionMetadata,
+					workspaceTaskId: "other-task",
+				},
+			};
+			const coordinator = f.create();
+			const preview = await coordinator.prepare(f.scope, { taskId: "task-1" });
+			expect(preview.existingPeerCandidates?.map((entry) => entry.agentId)).toEqual(existingPeerAgentIds);
+			expect(preview.existingPeerCandidates?.find((entry) => entry.agentId === "kimi")).toMatchObject({
+				available: false,
+				unavailableReason: "等待可靠的原生会话身份。",
+			});
+			await expect(
+				coordinator.request(f.scope, {
+					...request,
+					destination: {
+						kind: "existing_agent_session",
+						agentId: "codex",
+						taskConversationSessionId: valid.taskId,
+					},
+				}),
+			).rejects.toThrow("Agent 与请求不符");
+		}));
+
+	it("既有 peer 的显式新建恢复保留 Agent、清除旧绑定并保存旧现场", async () =>
+		fixture(async (f) => {
+			const peer = installExistingPeer(f, "kimi");
+			f.liveProcessSessionIds.add(peer.taskId);
+			f.sendTaskChatMessage.mockRejectedValueOnce(new Error("原报告提交结果未知"));
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "kimi", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			const failed = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(failed);
+			expect(failed.status).toBe("failed");
+			await coordinator.recoverWithNewAgentSession(f.scope, {
+				taskId: "task-1",
+				expectedHandoverId: failed.handoverId,
+				expectedReportDeliveryAttempt: failed.reportDeliveryAttempt,
+				requestId: "77777777-7777-4777-8777-777777777777",
+				acknowledgePossibleDuplicateReport: true,
+			});
+			await coordinator.sweep();
+			await coordinator.sweep();
+			const restored = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(restored);
+			expect(restored.status, restored.errorMessage ?? undefined).toBe("awaiting_user_message");
+			expect(restored.destination).toEqual({ kind: "new_agent_session", agentId: "kimi" });
+			expect(restored.existingTargetSessionBinding).toBeUndefined();
+			expect(restored.targetTaskConversationSessionId).not.toBe(peer.taskId);
+			const receipt = restored.recoveryReceipts?.[0];
+			assert(receipt);
+			expect(
+				JSON.parse(await readFile(receipt.receiptFilePath, "utf8")).previousHandoverRecord
+					.existingTargetSessionBinding,
+			).toEqual(failed.existingTargetSessionBinding);
+			expect(f.live[peer.taskId].agentNativeConversationSessionIdentity).toEqual(
+				peer.agentNativeConversationSessionIdentity,
+			);
+			expect(f.prepareNativeFork).not.toHaveBeenCalled();
+			expect(f.prepareTranscriptNativeFork).not.toHaveBeenCalled();
+		}));
+	it("既有 peer 的未知投递跨重启只补证，不重发或再次启动", async () =>
+		fixture(async (f) => {
+			const peer = installExistingPeer(f, "claude");
+			f.liveProcessSessionIds.add(peer.taskId);
+			f.sendTaskChatMessage.mockRejectedValueOnce(new Error("报告回执未知"));
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "claude", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			await coordinator.close();
+			const failed = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(failed);
+			f.queryReportAcceptance.mockImplementation(async (input) => ({
+				...input.probe,
+				historicalAcceptanceEvidence: { sourceReference: "原 peer 的可信原生用户记录", observedAt: Date.now() },
+			}));
+			f.advanceRecoveryClock(15_000);
+			const recovered = f.create();
+			recovered.start();
+			await vi.waitFor(
+				async () => {
+					await recovered.sweep();
+					expect((await recovered.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+						"awaiting_user_message",
+					);
+				},
+				{ timeout: 10_000 },
+			);
+			expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
+			expect(f.startTaskSession).not.toHaveBeenCalled();
+			expect(
+				(await recovered.getStatus(f.scope, { taskId: "task-1" })).record?.existingTargetSessionBinding,
+			).toEqual(failed.existingTargetSessionBinding);
+		}));
+	it("既有 peer 切主后启动失败，重启仍只恢复同一原生 ID", async () =>
+		fixture(async (f) => {
+			const peer = installExistingPeer(f, "omp", "acp_stdio_subprocess");
+			f.startTaskSession.mockResolvedValueOnce({ ok: false, summary: null, error: "模拟连接暂不可用" });
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "omp", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			await coordinator.close();
+			const failed = (await coordinator.getStatus(f.scope, { taskId: "task-1" })).record;
+			assert(failed);
+			expect(failed.status).toBe("failed");
+			expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+			f.advanceRecoveryClock(15_000);
+			const recovered = f.create();
+			recovered.start();
+			await vi.waitFor(
+				async () => {
+					await recovered.sweep();
+					expect((await recovered.getStatus(f.scope, { taskId: "task-1" })).record?.status).toBe(
+						"awaiting_user_message",
+					);
+				},
+				{ timeout: 10_000 },
+			);
+			expect(f.startTaskSession).toHaveBeenCalledTimes(2);
+			for (const [, input] of f.startTaskSession.mock.calls)
+				expect(input).toMatchObject({
+					taskId: peer.taskId,
+					agentId: "omp",
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+					expectedExistingMainSessionHandoverTargetBinding: failed.existingTargetSessionBinding,
+				});
+			expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
+			expect(f.prepareTranscriptNativeFork).not.toHaveBeenCalled();
+		}));
+	it("既有 peer 的显式 Stop 跨协调器重启仍阻止自动接任", async () =>
+		fixture(async (f) => {
+			const peer = installExistingPeer(f, "claude");
+			f.liveProcessSessionIds.add(peer.taskId);
+			f.live[peer.taskId] = mergeSummaryWithFacets(peer, {
+				turnOwner: "agent",
+				liveness: "live",
+				userTurnKind: null,
+			});
+			const coordinator = f.create();
+			await coordinator.request(f.scope, {
+				...request,
+				destination: { kind: "existing_agent_session", agentId: "claude", taskConversationSessionId: peer.taskId },
+			});
+			await coordinator.sweep();
+			await coordinator.pauseForExplicitStop(f.scope.workspaceId, peer.taskId);
+			await coordinator.close();
+			f.live[peer.taskId] = mergeSummaryWithFacets(peer, {
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "review",
+			});
+			f.advanceRecoveryClock(60_000);
+			const recovered = f.create();
+			recovered.start();
+			await recovered.sweep();
+			await recovered.close();
+			const record = (await recovered.getStatus(f.scope, { taskId: "task-1" })).record;
+			expect(record?.status).toBe("failed");
+			expect(record?.automaticRecovery?.classification).toBe("execution_prohibited");
+			expect(f.sendTaskChatMessage).not.toHaveBeenCalled();
+			expect(f.startTaskSession).not.toHaveBeenCalled();
+		}));
+
 	it("已有 Codex 仍在生成时等待，随后精确续跑该 peer 而不再创建会话", async () =>
 		fixture(async (f) => {
 			f.live["task-1"] = {

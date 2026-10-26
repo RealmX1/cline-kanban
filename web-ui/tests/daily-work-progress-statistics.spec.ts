@@ -61,7 +61,7 @@ for (const viewport of [
 	{ name: "桌面", width: 1280, height: 800 },
 	{ name: "手机", width: 375, height: 812 },
 ]) {
-	test(`${viewport.name}：向下展开、庆祝计时、手动保持及焦点连续`, async ({ page }) => {
+	test(`${viewport.name}：覆盖展开不挤压工作区、庆祝计时、手动保持及焦点连续`, async ({ page }) => {
 		await page.setViewportSize(viewport);
 		await page.clock.install({ time: new Date("2026-10-23T12:00:00Z") });
 		const errors: string[] = [];
@@ -100,6 +100,8 @@ for (const viewport of [
 		const input = page.getByRole("textbox", { name: "正在编辑的任务指令" });
 		await input.fill("保留这段正在输入的指令");
 		await input.focus();
+		const workspaceBeforeExpansion = await page.getByRole("main").boundingBox();
+		const inputBeforeExpansion = await input.boundingBox();
 		summary = {
 			...summary,
 			revision: 2,
@@ -127,6 +129,9 @@ for (const viewport of [
 		const navigation = await page.locator("nav").boundingBox();
 		const expanded = await region.boundingBox();
 		expect(Math.abs((expanded?.y ?? 0) - ((navigation?.y ?? 0) + (navigation?.height ?? 0)))).toBeLessThan(2);
+		expect(await page.getByRole("main").boundingBox()).toEqual(workspaceBeforeExpansion);
+		expect(await input.boundingBox()).toEqual(inputBeforeExpansion);
+		expect(expanded?.y).toBeLessThan((inputBeforeExpansion?.y ?? 0) + (inputBeforeExpansion?.height ?? 0));
 		expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 		await screenshot(
 			page,
@@ -137,6 +142,12 @@ for (const viewport of [
 		await trigger.click();
 		await page.clock.fastForward(20_000);
 		await expect(region).toBeVisible();
+		await page.setViewportSize({ ...viewport, height: 240 });
+		const compactWorkspace = await page.getByRole("main").boundingBox();
+		const compactOverlay = await region.boundingBox();
+		expect(compactOverlay?.height).toBeLessThanOrEqual(compactWorkspace?.height ?? 0);
+		expect(await region.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+		await page.setViewportSize(viewport);
 		await region.getByRole("button", { name: "收起今日进展" }).click();
 		await expect(region).toHaveCount(0);
 		await page.evaluate(() =>

@@ -18,7 +18,11 @@ import {
 
 export * from "./task-visualization-artifact-contract";
 
+import { codexConfigurationWriterBindingSchema } from "./codex-configuration-sync-contract";
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
+
+export * from "./codex-configuration-sync-contract";
+
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
 export * from "./independent-task-creation-contract.js";
@@ -55,7 +59,10 @@ import {
 	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
 } from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
-import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverExistingTargetBindingSchema,
+	taskMainSessionHandoverRecordSchema,
+} from "./task-main-session-handover-contract";
 import { resolveTaskTitle } from "./task-title.js";
 
 export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
@@ -66,9 +73,11 @@ export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
 export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
+	TaskMainSessionHandoverAgentId,
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewAgentSessionRequest,
 	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
 	TaskMainSessionHandoverStatusResponse,
@@ -386,9 +395,15 @@ export const runtimeTaskConversationModeSchema = z.enum([
 ]);
 export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversationModeSchema>;
 
+export const runtimeTaskShelvingStateSchema = z.object({
+	isShelved: z.boolean(),
+	lastChangedAt: z.number().finite().nonnegative(),
+});
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
+		taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
 		mainTaskConversationSessionId: z.string().min(1).optional(),
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
@@ -1055,6 +1070,46 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	eventId: z.string().min(1).optional(),
 	nativeSessionId: z.string().min(1).optional(),
 	runtimeSessionIncarnationId: z.string().min(1),
+	submissionId: z.string().min(1).optional(),
+	acceptedByHistoricalReconciliation: z.boolean().optional(),
+	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
+	submittedPromptSha256: z.string().optional(),
+	predecessorAcceptedEventId: z.string().optional(),
+	verification: z
+		.object({
+			checkedAtMs: z.number(),
+			nextCheckAtMs: z.number().nullable(),
+			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
+			reason: z.enum([
+				"scanning_native_transcript",
+				"native_evidence_unavailable",
+				"no_matching_native_message",
+				"ambiguous_native_messages",
+				"native_acceptance_verified",
+				"native_identity_changed",
+			]),
+			transcriptCursor: z
+				.object({
+					fileIdentity: z.string(),
+					nextByteOffset: z.number().int().nonnegative(),
+					lastObservedFileSize: z.number().int().nonnegative(),
+					verifiedSessionMetadata: z.boolean(),
+					skippingOversizedRecord: z.boolean(),
+				})
+				.optional(),
+			matchingNativeMessages: z
+				.array(
+					z.object({
+						eventId: z.string(),
+						nativeTurnId: z.string(),
+						nativeItemId: z.string(),
+						acceptedAtMs: z.number(),
+					}),
+				)
+				.max(2)
+				.optional(),
+		})
+		.optional(),
 });
 export type RuntimeAgentConversationPromptSubmissionAcceptance = z.infer<
 	typeof runtimeAgentConversationPromptSubmissionAcceptanceSchema
@@ -1188,6 +1243,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
 	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
 	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
+	codexConfigurationWriterBinding: codexConfigurationWriterBindingSchema.nullable().optional(),
 	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
 	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
@@ -1490,11 +1546,28 @@ export type RuntimeAgentTerminalGeometryForTaskSessionSpawn = z.infer<
 // 两份摘要分开给：盘上那份是 board 锁内读到的 sessions.json（CLI 的 JSON 输出一直用它）；活的那份是 runtime 内存里
 // 三种 transport 合并后的当前摘要（未加载过该项目的终端管理器时为 null）。浏览器取「活的 ?? 盘上的」。
 export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema = z.object({
+	workspaceId: z.string().optional(),
 	taskCard: runtimeBoardCardSchema,
 	boardColumnIdContainingTaskCard: runtimeBoardColumnIdSchema,
 	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
 	taskSessionSummaryPersistedInWorkspaceSessionsFile: runtimeTaskSessionSummarySchema.nullable(),
 });
+export const runtimeTaskCardActionSetShelvingStateRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
+	isShelved: z.boolean(),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export const runtimeTaskCardActionSetShelvingStateResponseSchema = z.object({
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionSetShelvingStateRequest = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateRequestSchema
+>;
+export type RuntimeTaskCardActionSetShelvingStateResponse = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateResponseSchema
+>;
 export type RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries = z.infer<
 	typeof runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
 >;
@@ -1507,6 +1580,19 @@ export const runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema = z.object(
 export type RuntimeTaskWorktreeDeletionResultOfTaskCardAction = z.infer<
 	typeof runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema
 >;
+
+export const runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema = z.object({
+	operationId: z.string().uuid(),
+	taskId: z.string().min(1),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	targetWorkspaceId: z.string().regex(/^[a-zA-Z0-9_-]+$/u),
+	targetBaseRef: z.string().min(1),
+});
+export const runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema = z.object({
+	operationId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+});
 
 // --- readTaskCardWithBoardColumn（query，只读）---
 // 供浏览器在**非当前项目**上打开编辑器、看原始 prompt、展开跨项目行。
@@ -1902,6 +1988,7 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 	taskConversationSessionActivityObservations: z
 		.array(runtimeTaskConversationSessionActivityObservationSchema)
 		.optional(),
@@ -3081,6 +3168,7 @@ export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema =
 	revision: z.number().int().nonnegative(),
 });
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	z.object({ type: z.literal("codex_configuration_sync_updated"), revision: z.number().int().nonnegative() }),
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
 	taskVisualizationPreviewRequestedMessageSchema,
@@ -3244,6 +3332,8 @@ export const runtimeCrossProjectTaskWorktreeGitMetadataSchema = z.discriminatedU
 		workspaceId: z.string(),
 		taskId: z.string(),
 		availability: z.literal("available"),
+		// 新运行时仅在探针前后核对同一世身份后提供；旧运行时缺省时不能用于完整身份预览。
+		taskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		// 与当前项目推流里的同名结构完全一致（同一个探针算出），浏览器用同一套展示规则。
 		taskWorkspaceMetadata: runtimeTaskWorkspaceMetadataSchema,
 	}),
@@ -3893,6 +3983,10 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
+	taskEditorSettingPresentationBySettingKey: z
+		.record(z.string().max(100), z.enum(["expanded", "collapsed_in_group", "hidden"]))
+		.optional(),
 	newTaskAutoReviewEnabled: z.boolean().nullable(),
 	newTaskAutoReviewMode: runtimeTaskAutoReviewModeSchema.nullable(),
 	taskCreateDialogPrimaryStartAction: runtimeTaskCreateDialogPrimaryStartActionSchema.nullable(),
@@ -4047,6 +4141,7 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
+		expectedExistingMainSessionHandoverTargetBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -4769,6 +4864,7 @@ export const runtimeTaskEditDraftSchema = z.object({
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),
+	taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 	startInPlanMode: z.boolean(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 	autoReviewEnabled: z.boolean(),

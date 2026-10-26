@@ -1,13 +1,17 @@
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@runtime-task-pinboard-pinning";
+import { setTaskCardShelvingState } from "@runtime-task-state";
 import {
 	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace,
 	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
 	moveTaskCardIntoReviewByHandingTurnToUserInWorkspace,
 	permanentlyDeleteTaskCardsWithFullResourceCleanupInWorkspace,
+	readTaskCardWithBoardColumnInWorkspace,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace,
+	setTaskCardShelvingStateInWorkspace,
 	setTaskPinboardPinStateOfTaskCardInWorkspace,
 	startTaskCardAgentSessionMovingItIntoInProgressInWorkspace,
+	transferNeverStartedBacklogTaskToProjectInWorkspace,
 	updateTaskCardFieldValuesInWorkspace,
 } from "@/runtime/task-card-action-query";
 import type {
@@ -19,6 +23,7 @@ import type {
 	RuntimeTaskCardActionMoveIntoReviewResponse,
 	RuntimeTaskCardActionPermanentlyDeleteResponse,
 	RuntimeTaskCardActionRestoreFromDoneResponse,
+	RuntimeTaskCardActionSetShelvingStateResponse,
 	RuntimeTaskCardActionSetTaskPinboardPinStateResponse,
 	RuntimeTaskCardActionStartAgentSessionResponse,
 	RuntimeTaskCardActionUpdateFieldValuesResponse,
@@ -30,8 +35,14 @@ import {
 	executeTaskCardActionCommand,
 	type TaskCardActionCommandExecutionResult,
 } from "@/state/task-card-action-command-execution";
+import {
+	hasAcceptedTaskProjectAssignmentAnalysis,
+	rememberTaskProjectAssignmentAnalysisAccepted,
+	runTaskProjectAssignmentPreflight,
+} from "@/state/task-project-assignment-preflight";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 // 每个用户交互卡片动作在浏览器侧的唯一入口，主看板、Focus View（This project）、跨项目切换面板（All projects）共用。
 // 差别只在调用方给不给 `currentProjectBoardForOptimisticOverlay`：
@@ -174,6 +185,7 @@ export async function moveTaskCardBetweenNonTrashColumnsThroughRuntime(input: {
 
 // --- 启动：backlog / in_progress → in_progress，服务端先移列再 ensure worktree、再起会话 ---
 export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime(input: {
+	skipTaskProjectAssignmentPreflight?: boolean;
 	workspaceId: string;
 	taskId: string;
 	expectedTaskIncarnationCreatedAtEpochMs?: number;
@@ -182,7 +194,64 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionStartAgentSessionResponse>> {
-	return await executeTaskCardActionCommand({
+	const originalWorkspaceId = input.workspaceId;
+	if (
+		!input.skipTaskProjectAssignmentPreflight &&
+		(!input.boardMutationInitiator || input.boardMutationInitiator === "web_ui_user_gesture")
+	) {
+		try {
+			const found = await readTaskCardWithBoardColumnInWorkspace(input.workspaceId, input.taskId);
+			if (
+				found.taskCardLookupOutcome === "task_card_found_on_workspace_board" &&
+				found.taskCardSnapshot.boardColumnIdContainingTaskCard === "backlog"
+			) {
+				const card = found.taskCardSnapshot.taskCard;
+				if (!hasAcceptedTaskProjectAssignmentAnalysis(input.workspaceId, input.taskId, card.title, card.prompt)) {
+					const assignment = await runTaskProjectAssignmentPreflight({
+						workspaceId: input.workspaceId,
+						title: card.title,
+						prompt: card.prompt,
+						baseRef: card.baseRef ?? "",
+					});
+					if (!assignment)
+						return {
+							taskCardActionCommandExecutionOutcome: "command_failed",
+							commandFailureMessage: "已取消启动，任务保留在 Backlog。",
+						};
+					const latest = await readTaskCardWithBoardColumnInWorkspace(input.workspaceId, input.taskId);
+					if (
+						latest.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
+						latest.taskCardSnapshot.taskCard.prompt !== card.prompt ||
+						latest.taskCardSnapshot.taskCard.title !== card.title ||
+						latest.taskCardSnapshot.taskCard.createdAt !== card.createdAt
+					)
+						throw new Error("分析期间任务已变化，请重新启动。");
+					if (assignment.workspaceId !== input.workspaceId) {
+						await transferNeverStartedBacklogTaskToProjectInWorkspace(input.workspaceId, {
+							operationId: createRandomUuidV4WithInsecureContextFallback(),
+							taskId: card.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+							targetWorkspaceId: assignment.workspaceId,
+							targetBaseRef: assignment.baseRef,
+						});
+						input = {
+							...input,
+							workspaceId: assignment.workspaceId,
+							currentProjectBoardForOptimisticOverlay: undefined,
+						};
+					}
+					rememberTaskProjectAssignmentAnalysisAccepted(input.workspaceId, input.taskId, card.title, card.prompt);
+				}
+			}
+		} catch (failure) {
+			return {
+				taskCardActionCommandExecutionOutcome: "command_failed",
+				commandFailureMessage: failure instanceof Error ? failure.message : String(failure),
+			};
+		}
+	}
+
+	const result = await executeTaskCardActionCommand({
 		workspaceId: input.workspaceId,
 		taskIds: [input.taskId],
 		commandKind: "start_task_card_agent_session_moving_it_into_in_progress",
@@ -210,6 +279,21 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
 	});
+	if (
+		result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime" &&
+		originalWorkspaceId !== input.workspaceId
+	)
+		return {
+			...result,
+			response: {
+				...result.response,
+				taskCardSnapshotAfterAction: {
+					...result.response.taskCardSnapshotAfterAction,
+					workspaceId: input.workspaceId,
+				},
+			},
+		};
+	return result;
 }
 
 // --- 移到 review：把 agent 回合交还用户，成功后服务端显式移列 ---
@@ -425,6 +509,45 @@ export async function setTaskPinboardPinStateOfTaskCardThroughRuntime(input: {
 							boardMutationInitiator,
 						},
 			),
+		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
+	});
+}
+
+export async function setTaskCardShelvingStateThroughRuntime(input: {
+	workspaceId: string;
+	taskId: string;
+	isShelved: boolean;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
+	currentProjectBoardForOptimisticOverlay?: BoardData;
+}): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionSetShelvingStateResponse>> {
+	const patch = input.currentProjectBoardForOptimisticOverlay
+		? buildTaskCardFieldPatchProducedByBoardTransformation(
+				input.currentProjectBoardForOptimisticOverlay,
+				input.taskId,
+				(board) => setTaskCardShelvingState(board, input.taskId, input.isShelved),
+				["taskShelvingState"],
+			)
+		: null;
+	return await executeTaskCardActionCommand({
+		workspaceId: input.workspaceId,
+		taskIds: [input.taskId],
+		commandKind: "set_task_card_shelving_state",
+		expectedBoardEffectByTaskId: expectedBoardEffectsForSingleTaskCard(
+			input.taskId,
+			patch
+				? {
+						pendingTaskCardCommandExpectedBoardEffectKind: "task_card_fields_patched",
+						taskCardFieldPatch: patch,
+					}
+				: null,
+		),
+		sendCommand: () =>
+			setTaskCardShelvingStateInWorkspace(input.workspaceId, {
+				taskId: input.taskId,
+				isShelved: input.isShelved,
+				expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs,
+				boardMutationInitiator: "web_ui_user_gesture",
+			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
 	});
 }

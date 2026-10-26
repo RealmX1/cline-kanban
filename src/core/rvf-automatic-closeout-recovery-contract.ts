@@ -40,6 +40,9 @@ export const rvfCloseoutSkillSnapshotSchema = z.object({
 			canonicalPath: z.string(),
 			realPath: z.string(),
 			instructionText: z.string(),
+			executionClosure: z
+				.object({ sha256: z.string(), directoryPath: z.string(), skillFilePath: z.string(), fileCount: z.number() })
+				.optional(),
 			expansionText: z.string().optional(),
 		}),
 	),
@@ -93,6 +96,18 @@ export const rvfCloseoutStageExecutionClaimSchema = z.object({
 	nativeSessionId: z.string(),
 	runtimeSessionIncarnationId: z.string(),
 	claimedAt: z.number(),
+	codexConfigurationExecutionBinding: z
+		.object({
+			writerId: z.string(),
+			configurationDigest: z.string(),
+			sharedVersionAtLaunch: z.number(),
+			nativeBinaryVersion: z.string().nullable().optional(),
+			nativeExecutableRealPath: z.string().nullable().optional(),
+			nativeExecutableIdentityDigest: z.string().nullable().optional(),
+			skillSnapshotSha256s: z.array(z.string()),
+			executionClosureSkillPaths: z.array(z.string()).optional(),
+		})
+		.optional(),
 	status: z.enum(["claimed", "completed", "released"]),
 });
 export const rvfCloseoutStageClaimRequestSchema = z.object({

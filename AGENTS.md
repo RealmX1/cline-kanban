@@ -58,11 +58,13 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
+- **输入接受不能受工具历史预算阻塞**：Codex 用户消息单独记原生位置水位；历史补证只修正标记，不发布新输入或重开回合。持久扫描、按键候选和退出/Rewind 边界见 `docs/runbooks/prompt-submission-acceptance-reconciliation.md`。
 - **RVF 收尾的阶段等待与迟到补证分开**：可信自动压缩可有界暂停普通确认计时，仍须精确正文证明接受；旧失败只追加补证，不重发或覆盖历史。首次策略见 `docs/runbooks/codex-rvf-closeout-compaction-aware-confirmation.md`，恢复入口及历史样本见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/rvf-native-independent-user-turn-before-submission-query-recovery.md`。
 - **RVF 收尾恢复区分历史接受、执行资格与真实结果**：保留原失败账本，以事件时证据自动补证，或独立核验规范执行结果；机器缺证走有界恢复和受控续验，Stop 与身份门禁不放宽。`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
+- **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **Done 卡复用完整工作台但禁止执行**：历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
@@ -104,6 +106,7 @@ web-ui：
 | --- | --- |
 | `installation.md` | 安装单一出处（前置要求 / 三项目依赖 / 全局 link / 卸载） |
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
+| `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
 | `docs/rvf-automatic-rewind-and-closeout.md` | Codex RVF 开审分界、默认自动恢复与收尾投递、跨仓完成凭据及重启边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
@@ -112,6 +115,7 @@ web-ui：
 | `test/README.md` | 测试执行形态与 git 安全契约 |
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
 | `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
+| `docs/codex-configuration-writers-and-sync.md` | Codex 持久配置 writer、历史桥接、增量合并、选择性同步、原所有者重载及阶段闭包 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |

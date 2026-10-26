@@ -3,11 +3,14 @@ import { copyFile, mkdir, open, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { TRPCError } from "@trpc/server";
-import { collectClaudeMainSessionHandoverMaterial } from "../agent-session-history/claude-main-session-handover-material";
-import { collectCodexMainSessionHandoverMaterial } from "../agent-session-history/codex-main-session-handover-material";
+import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
+import {
+	collectTaskMainSessionHandoverMaterial,
+	type TaskMainSessionHandoverUserIntentContextProvider,
+} from "../agent-session-history/task-main-session-handover-material-provider";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeConfigState } from "../config/runtime-config";
-import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
+import { getRuntimeAgentCatalogEntry, resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
 import {
 	type RuntimeBoardCard,
 	type RuntimeBoardData,
@@ -15,13 +18,18 @@ import {
 	type RuntimeTaskSessionSummary,
 	runtimeTaskSessionSummarySchema,
 } from "../core/api-contract";
-import { resolveSessionFacets } from "../core/session-activity";
+import { MODAL_USER_DECISION_TURN_KINDS, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import {
 	doesConversationSessionBelongToTask,
 	projectTaskConversationSessionsForMainSessionBinding,
 	resolveMainTaskConversationSessionId,
 } from "../core/task-main-conversation-session-binding";
+import {
+	getTaskMainSessionHandoverNativeForkAvailability,
+	isTaskMainSessionHandoverAgentSupported,
+	listTaskMainSessionHandoverTargetCapabilities,
+} from "../core/task-main-session-handover-agent-capabilities";
 import type {
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
@@ -31,10 +39,15 @@ import type {
 	TaskMainSessionHandoverStatusResponse,
 } from "../core/task-main-session-handover-contract";
 import {
+	isTaskMainSessionHandoverExistingTarget,
+	isTaskMainSessionHandoverNativeForkRequested,
+	resolveTaskMainSessionHandoverTargetAgentId,
+	taskMainSessionHandoverExistingPeerAgentIdSchema,
 	taskMainSessionHandoverMaterialSchema,
 	taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema,
 	taskMainSessionHandoverRecoveryReceiptReferenceSchema,
 	taskMainSessionHandoverRecoveryReceiptSchema,
+	taskMainSessionHandoverRequestSchema,
 } from "../core/task-main-session-handover-contract";
 import {
 	createPendingTaskMessageInjectionRecord,
@@ -48,6 +61,7 @@ import {
 import { lockedFileSystem } from "../fs/locked-file-system";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import { completeTaskMainSessionHandoverAfterUserMessage } from "../state/complete-task-main-session-handover-after-user-message";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
@@ -55,6 +69,7 @@ import {
 	loadPersistedWorkspaceStateById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
+import { isBinaryAvailableOnPath } from "../terminal/command-discovery";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import type { TaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
@@ -69,21 +84,37 @@ import {
 	beginTaskMainSessionHandoverMachineEvidenceAttempt,
 	canRetryTaskMainSessionHandoverMachineEvidence,
 	fingerprintTaskMainSessionHandoverRecoveryEvidence,
+	recordTaskMainSessionHandoverReportAcceptanceScanProgress,
 } from "./task-main-session-handover-automatic-recovery";
-import { queryCodexMainSessionHandoverReportAcceptance } from "./task-main-session-handover-report-acceptance";
+import {
+	assertTaskMainSessionHandoverExistingTargetBinding,
+	captureTaskMainSessionHandoverExistingTargetBinding,
+	getTaskMainSessionHandoverExistingPeerUnavailableReason,
+} from "./task-main-session-handover-existing-target";
+import { prepareTaskMainSessionHandoverTranscriptNativeFork } from "./task-main-session-handover-native-fork";
+import {
+	queryCursorMainSessionHandoverAcceptedHumanFollowup,
+	queryTaskMainSessionHandoverReportAcceptance,
+} from "./task-main-session-handover-report-acceptance";
 
 export const MAIN_SESSION_HANDOVER_REPORT_SOURCE = "task_main_session_handover";
 export const MAIN_SESSION_HANDOVER_REPORT_MARKER = "KANBAN_MAIN_SESSION_HANDOVER_REPORT:";
 
 interface HandoverCoordinatorDependencies {
+	getAcpTaskSessionService?: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
+	userIntentContextProvider?: TaskMainSessionHandoverUserIntentContextProvider;
 	prepareNativeFork?: typeof prepareCodexMainSessionHandoverNativeFork;
 	prepareRecoveryNativeFork?: typeof prepareCodexMainSessionHandoverRecoveryNativeFork;
-	queryReportAcceptance?: typeof queryCodexMainSessionHandoverReportAcceptance;
+	prepareTranscriptNativeFork?: typeof prepareTaskMainSessionHandoverTranscriptNativeFork;
+	queryReportAcceptance?: typeof queryTaskMainSessionHandoverReportAcceptance;
 	now?: () => number;
 	getTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	loadScopedRuntimeConfig: (
 		scope: RuntimeTrpcWorkspaceScope,
-	) => Promise<Pick<RuntimeConfigState, "agentAutonomousModeEnabled">>;
+	) => Promise<
+		Pick<RuntimeConfigState, "agentAutonomousModeEnabled"> &
+			Partial<Pick<RuntimeConfigState, "ompAgentSessionTransportForNewTasks">>
+	>;
 	startTaskSession: RuntimeTrpcContext["runtimeApi"]["startTaskSession"];
 	sendTaskChatMessage: RuntimeTrpcContext["runtimeApi"]["sendTaskChatMessage"];
 	serializer: TaskCardActionPerTaskCommandSerializer;
@@ -117,6 +148,17 @@ export function isConversationSessionStillGenerating(summary: RuntimeTaskSession
 	);
 }
 
+function isConversationSessionWaitingBeforeHandover(summary: RuntimeTaskSessionSummary | null | undefined): boolean {
+	if (!summary) return false;
+	const facets = resolveSessionFacets(summary);
+	return (
+		isConversationSessionStillGenerating(summary) ||
+		(facets.userTurnKind !== null && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind)) ||
+		facets.liveness === "starting" ||
+		facets.liveness === "retrying"
+	);
+}
+
 const systemIntent = () =>
 	buildTaskMutationIntentForKanbanRuntimeSystemComponent(
 		"runtime_task_main_session_handover",
@@ -129,6 +171,9 @@ function isHandoverPendingProgress(record: TaskMainSessionHandoverRecord | undef
 	return Boolean(
 		record &&
 			(["waiting_for_sessions_to_stop", "report_delivery_pending"].includes(record.status) ||
+				(record.status === "awaiting_user_message" &&
+					resolveTaskMainSessionHandoverTargetAgentId(record.destination) === "cursor" &&
+					record.automaticRecovery?.classification !== "execution_prohibited") ||
 				(record.status === "failed" &&
 					record.automaticRecovery?.classification === "waiting_for_machine_evidence")),
 	);
@@ -153,23 +198,37 @@ function isReportDefinitelyUndelivered(
 }
 
 function assertHandoverReportTargetExecutionEligibility(input: {
+	workspaceId: string;
 	card: RuntimeBoardCard;
 	record: TaskMainSessionHandoverRecord;
 	summary: RuntimeTaskSessionSummary | undefined;
 }) {
 	const { card, record, summary } = input;
+	if (record.existingTargetSessionBinding)
+		assertTaskMainSessionHandoverExistingTargetBinding({
+			workspaceId: input.workspaceId,
+			card,
+			binding: record.existingTargetSessionBinding,
+			target: summary,
+		});
 	const expectedWorkingDirectoryPath =
 		record.reportAcceptanceProbe?.workingDirectoryPath ??
 		record.reportNativeIdentityCaptureBinding?.workingDirectoryPath;
 	if (
 		resolveMainTaskConversationSessionId(card) !== record.targetTaskConversationSessionId ||
 		!summary ||
-		summary.agentId !== "codex" ||
+		summary.agentId !== resolveTaskMainSessionHandoverTargetAgentId(record.destination) ||
 		!doesConversationSessionBelongToTask(summary, card.id) ||
+		(record.reportAcceptanceProbe?.targetAgentId && record.reportAcceptanceProbe.targetAgentId !== summary.agentId) ||
+		(!summary.agentNativeConversationSessionIdentity &&
+			record.reportNativeIdentityCaptureBinding &&
+			record.reportNativeIdentityCaptureBinding.runtimeSessionIncarnationId !==
+				summary.runtimeSessionIncarnationId) ||
 		(expectedWorkingDirectoryPath &&
 			(!summary.workspacePath || resolve(summary.workspacePath) !== resolve(expectedWorkingDirectoryPath))) ||
 		(record.reportAcceptanceProbe &&
-			(summary.agentNativeConversationSessionIdentity?.sourceAgentId !== "codex" ||
+			(summary.agentNativeConversationSessionIdentity?.sourceAgentId !==
+				resolveTaskMainSessionHandoverTargetAgentId(record.destination) ||
 				summary.agentNativeConversationSessionIdentity.nativeSessionId !==
 					record.reportAcceptanceProbe.nativeSessionId))
 	)
@@ -179,7 +238,7 @@ function assertHandoverReportTargetExecutionEligibility(input: {
 }
 
 export function renderTaskMainSessionHandoverReportPrompt(record: TaskMainSessionHandoverRecord): string {
-	return `/plan ${MAIN_SESSION_HANDOVER_REPORT_MARKER}${record.handoverId}:report:${record.reportDeliveryAttempt}
+	return `${resolveTaskMainSessionHandoverTargetAgentId(record.destination) === "codex" ? "/plan " : ""}${MAIN_SESSION_HANDOVER_REPORT_MARKER}${record.handoverId}:report:${record.reportDeliveryAttempt}
 你现在接任本任务的 Main Session。此前作为协作会话的职责限制已被本次明确交接取代。
 先读取持久交接材料：${join(record.materialDirectoryPath ?? "", "HANDOVER.md")}。
 读取其中的任务需求、用户约束、计划引用、前任最后一条消息；需要补充证据时按需读取 transcript 与当前工作区。
@@ -194,14 +253,14 @@ function resolveHandoverSourceSummary(
 ): RuntimeTaskSessionSummary {
 	const sessionId = resolveMainTaskConversationSessionId(card);
 	const existing = sessions[sessionId];
-	if (existing && (existing.agentId === "claude" || existing.agentId === "codex")) {
+	if (existing && isTaskMainSessionHandoverAgentSupported(existing.agentId)) {
 		if (!doesConversationSessionBelongToTask(existing, card.id))
 			throw new TRPCError({ code: "BAD_REQUEST", message: "来源会话不属于当前任务。" });
 		return existing;
 	}
 	const declaredAgentId = existing?.agentId ?? card.mostRecentlyLaunchedAgentSessionAgentId ?? card.agentId;
-	if (declaredAgentId !== "claude" && declaredAgentId !== "codex")
-		throw new TRPCError({ code: "BAD_REQUEST", message: "当前仅支持可确认的 Claude 或 Codex 主会话交接给 Codex。" });
+	if (!isTaskMainSessionHandoverAgentSupported(declaredAgentId))
+		throw new TRPCError({ code: "BAD_REQUEST", message: "当前 Agent 不在维护中的可启动交接能力范围内。" });
 	if (existing) return { ...existing, agentId: declaredAgentId };
 	// 旧任务可能只剩启动设置；保留确切 session ID，缺失身份与历史由材料层明确列出。
 	return runtimeTaskSessionSummarySchema.parse({
@@ -220,17 +279,16 @@ function resolveHandoverSourceSummary(
 	});
 }
 
-function validateExistingCodexTarget(card: RuntimeBoardCard, target: RuntimeTaskSessionSummary | undefined): void {
-	if (
-		!target ||
-		target.agentId !== "codex" ||
-		!doesConversationSessionBelongToTask(target, card.id) ||
-		target.taskConversationSessionMetadata?.taskConversationSessionRole !== "task_collaborator" ||
-		target.agentNativeConversationSessionIdentity?.sourceAgentId !== "codex"
-	) {
+function validateExistingAgentTarget(
+	card: RuntimeBoardCard,
+	target: RuntimeTaskSessionSummary | undefined,
+	expectedAgentId: string,
+): asserts target is RuntimeTaskSessionSummary {
+	const reason = target ? getTaskMainSessionHandoverExistingPeerUnavailableReason(card, target) : "所选会话已不存在。";
+	if (!target || target.agentId !== expectedAgentId || reason) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "所选 Codex 协作会话已不存在、归属不符或缺少可靠的原生身份。",
+			message: reason ?? "所选会话的 Agent 与请求不符。",
 		});
 	}
 }
@@ -277,7 +335,7 @@ async function persistHandoverMaterial(
 			"",
 			`交接 ID：${record.handoverId}`,
 			`来源：${record.sourceTaskConversationSessionId}（${material.sourceAgentId} ${material.sourceNativeConversationSessionId ?? "原生身份未知"}）`,
-			`接收方：${record.targetTaskConversationSessionId}（Codex）`,
+			`接收方：${record.targetTaskConversationSessionId}（${resolveTaskMainSessionHandoverTargetAgentId(record.destination)}）`,
 			"",
 			"## 原任务需求与用户约束",
 			material.taskPrompt,
@@ -292,6 +350,11 @@ async function persistHandoverMaterial(
 				`内嵌计划（批准状态待确认；来源：${plan.sourceReference}）：`,
 				plan.text,
 			]),
+			"",
+			"## 意图材料来源",
+			`提供方：${material.userIntentContext?.providerName ?? "原始材料（旧版本）"}；材料时间：${material.userIntentContext?.asOf ?? "未知"}`,
+			material.userIntentContext?.userIntentContextText ?? "工作单元意图卷宗不可用，以上是未分类原始材料。",
+			...(material.userIntentContext?.sourceReferences ?? []).map((reference) => `- 来源：${reference}`),
 			"",
 			"## 最后一条可确认的 agent 正文",
 			material.lastAgentMessage?.text ?? "缺失",
@@ -326,10 +389,39 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 	let recovering: Promise<void> | null = null;
 	let closed = false;
 	const liveDeliveryKeys = new Set<string>();
+	const cursorFollowupEvidenceFingerprintByTask = new Map<string, string>();
 
 	async function loadState(scope: RuntimeTrpcWorkspaceScope) {
 		const state = await loadPersistedWorkspaceStateById(scope.workspaceId);
-		const manager = await deps.getTerminalManager(scope);
+		const terminalManager = await deps.getTerminalManager(scope);
+		const acp = await deps.getAcpTaskSessionService?.(scope);
+		const manager = {
+			hasLiveTaskSession: (id: string) =>
+				acp?.getSummary(id)
+					? (acp.hasLiveTaskSession?.(id) ?? false)
+					: (terminalManager.hasLiveTaskSession?.(id) ?? false),
+			getSummary: (id: string) => acp?.getSummary(id) ?? terminalManager.getSummary(id),
+			listSummaries: () => [...terminalManager.listSummaries(), ...(acp?.listSummaries() ?? [])],
+			applyTaskConversationSessionMetadata: (
+				id: string,
+				metadata: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
+			) =>
+				acp?.getSummary(id)
+					? acp.applyTaskConversationSessionMetadata(id, metadata)
+					: terminalManager.applyTaskConversationSessionMetadata(id, metadata),
+			hydrateFromRecord: (summaries: Record<string, RuntimeTaskSessionSummary>) =>
+				terminalManager.hydrateFromRecord(
+					Object.fromEntries(
+						Object.entries(summaries).filter(
+							([, summary]) => summary.sessionTransport !== "acp_stdio_subprocess",
+						),
+					),
+				),
+			stopTaskSession: async (id: string) =>
+				acp?.getSummary(id) ? await acp.stopTaskSession(id) : terminalManager.stopTaskSession(id),
+			hasPendingProgrammaticTaskChatInputDelivery: (id: string) =>
+				terminalManager.hasPendingProgrammaticTaskChatInputDelivery?.(id) ?? false,
+		};
 		const live = Object.fromEntries(manager.listSummaries().map((summary) => [summary.taskId, summary]));
 		return {
 			...state,
@@ -406,14 +498,18 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 			deps.runCommand("git status --short", cwd).catch(() => null),
 			deps.runCommand("git rev-parse HEAD", cwd).catch(() => null),
 		]);
-		const collectMaterial =
-			source.agentId === "codex"
-				? collectCodexMainSessionHandoverMaterial
-				: collectClaudeMainSessionHandoverMaterial;
-		return await collectMaterial({
+		const sessions = Object.values((await loadState(scope)).sessions).filter((summary) =>
+			doesConversationSessionBelongToTask(summary, card.id),
+		);
+		const acp = await deps.getAcpTaskSessionService?.(scope);
+		return await collectTaskMainSessionHandoverMaterial({
+			workspaceId: scope.workspaceId,
 			card,
 			sourceSummary: source,
 			workspacePath: cwd,
+			conversationSessions: sessions,
+			userIntentContextProvider: deps.userIntentContextProvider,
+			retainedMessages: acp?.listMessages(source.taskId),
 			userContextNotes: record?.userContextNotes,
 			additionalPlanReferencePaths: record?.additionalPlanReferencePaths,
 			workspaceGitStatus: status?.exitCode === 0 ? status.stdout.trim() : null,
@@ -430,18 +526,15 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 		const source = resolveHandoverSourceSummary(card, state.sessions);
 		return {
 			material: await collect(scope, card, source),
-			completeNativeConversationForkAvailability: {
-				available:
-					source.agentId === "codex" &&
-					source.agentNativeConversationSessionIdentity?.sourceAgentId === "codex" &&
-					Boolean(source.workspacePath),
-				unavailableReason:
-					source.agentId !== "codex"
-						? "完整原生复刻需要 Codex 来源会话。"
-						: source.agentNativeConversationSessionIdentity?.sourceAgentId !== "codex" || !source.workspacePath
-							? "等待可靠的 Codex 原生身份与工作目录；全新上下文仍可使用。"
-							: null,
-			},
+			targetAgentCapabilities: listTaskMainSessionHandoverTargetCapabilities(source).map((capability) => ({
+				...capability,
+				installationStatus: isBinaryAvailableOnPath(
+					getRuntimeAgentCatalogEntry(capability.agentId)?.binary ?? capability.agentId,
+				)
+					? "installed"
+					: "not_installed",
+			})),
+			completeNativeConversationForkAvailability: getTaskMainSessionHandoverNativeForkAvailability(source, "codex"),
 			mainTaskConversationSessionId: sourceId,
 			codexPeerTaskConversationSessionIds: Object.values(state.sessions)
 				.filter(
@@ -449,14 +542,36 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						summary.agentId === "codex" &&
 						doesConversationSessionBelongToTask(summary, card.id) &&
 						summary.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator" &&
-						summary.agentNativeConversationSessionIdentity?.sourceAgentId === "codex",
+						summary.agentNativeConversationSessionIdentity?.sourceAgentId === "codex" &&
+						getTaskMainSessionHandoverExistingPeerUnavailableReason(card, summary) === null,
 				)
 				.map((summary) => summary.taskId),
+			existingPeerCandidates: Object.values(state.sessions).flatMap((summary) => {
+				const parsed = taskMainSessionHandoverExistingPeerAgentIdSchema.safeParse(summary.agentId);
+				if (
+					!parsed.success ||
+					!doesConversationSessionBelongToTask(summary, card.id) ||
+					summary.taskId === sourceId ||
+					summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "task_collaborator" ||
+					summary.taskConversationSessionMetadata.taskConversationSessionRoleAtCreation === "by_the_way"
+				)
+					return [];
+				const unavailableReason = getTaskMainSessionHandoverExistingPeerUnavailableReason(card, summary);
+				return [
+					{
+						taskConversationSessionId: summary.taskId,
+						agentId: parsed.data,
+						displayName: summary.taskConversationSessionMetadata.latestUserMessagePreview ?? summary.taskId,
+						available: unavailableReason === null,
+						unavailableReason,
+					},
+				];
+			}),
 			busyTaskConversationSessionIds: Object.values(state.sessions)
 				.filter(
 					(summary) =>
 						doesConversationSessionBelongToTask(summary, card.id) &&
-						isConversationSessionStillGenerating(summary),
+						isConversationSessionWaitingBeforeHandover(summary),
 				)
 				.map((summary) => summary.taskId),
 		};
@@ -467,6 +582,47 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 			const state = await loadState(scope);
 			const card = findCard(state.board, taskId);
 			let record = card.taskMainSessionHandover;
+			if (
+				record?.status === "awaiting_user_message" &&
+				resolveTaskMainSessionHandoverTargetAgentId(record.destination) === "cursor" &&
+				record.automaticRecovery?.classification !== "execution_prohibited"
+			) {
+				const target = state.sessions[record.targetTaskConversationSessionId];
+				assertHandoverReportTargetExecutionEligibility({
+					workspaceId: scope.workspaceId,
+					card,
+					record,
+					summary: target,
+				});
+				if (!target) return;
+				const fingerprint = await fingerprintTaskMainSessionHandoverRecoveryEvidence({ record, target });
+				const key = `${scope.workspaceId}:${taskId}`;
+				if (cursorFollowupEvidenceFingerprintByTask.get(key) === fingerprint) return;
+				const promptText = await queryCursorMainSessionHandoverAcceptedHumanFollowup({ card, summary: target });
+				cursorFollowupEvidenceFingerprintByTask.set(key, fingerprint);
+				if (cursorFollowupEvidenceFingerprintByTask.size > 1_000) {
+					const oldestKey = cursorFollowupEvidenceFingerprintByTask.keys().next().value;
+					if (oldestKey !== undefined) cursorFollowupEvidenceFingerprintByTask.delete(oldestKey);
+				}
+				if (promptText)
+					await completeTaskMainSessionHandoverAfterUserMessage({
+						...scope,
+						taskConversationSessionId: target.taskId,
+						expectedHandoverId: record.handoverId,
+						promptText,
+						isAcceptedConversationIdentityStillCurrent: () => {
+							const current = state.manager.getSummary(target.taskId);
+							return (
+								current?.runtimeSessionIncarnationId === target.runtimeSessionIncarnationId &&
+								current?.agentNativeConversationSessionIdentity?.nativeSessionId ===
+									target.agentNativeConversationSessionIdentity?.nativeSessionId
+							);
+						},
+						onTaskConversationSessionMetadataChanged: (id, metadata) =>
+							state.manager.applyTaskConversationSessionMetadata(id, metadata),
+					});
+				return;
+			}
 			if (!record || !["waiting_for_sessions_to_stop", "report_delivery_pending", "failed"].includes(record.status))
 				return;
 			const resumingFailedRecord = record.status === "failed";
@@ -510,6 +666,8 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						reportDeliveryAttempt: record.reportDeliveryAttempt + 1,
 						reportNativeIdentityCaptureBinding: undefined,
 						reportAcceptanceProbe: undefined,
+						inputAwaitingCorrelatedProcessingHook: undefined,
+						reportCorrelatedProcessingAcceptanceEvidence: undefined,
 					};
 					const retried = record;
 					await setRecord(scope, taskId, record.handoverId, () => retried);
@@ -540,8 +698,34 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 				}
 				const source = resolveHandoverSourceSummary(card, state.sessions);
 				const target = state.sessions[record.targetTaskConversationSessionId];
-				if (record.destination.kind === "existing_codex_session") validateExistingCodexTarget(card, target);
-				if (isConversationSessionStillGenerating(source) || isConversationSessionStillGenerating(target)) return;
+				if (isTaskMainSessionHandoverExistingTarget(record.destination)) {
+					if (!record.existingTargetSessionBinding) {
+						validateExistingAgentTarget(
+							card,
+							target,
+							resolveTaskMainSessionHandoverTargetAgentId(record.destination),
+						);
+						const binding = captureTaskMainSessionHandoverExistingTargetBinding(scope.workspaceId, card, target);
+						await setRecord(scope, taskId, record.handoverId, (current) => ({
+							...current,
+							existingTargetSessionBinding: binding,
+						}));
+						record = { ...record, existingTargetSessionBinding: binding };
+					}
+					assertTaskMainSessionHandoverExistingTargetBinding({
+						workspaceId: scope.workspaceId,
+						card,
+						target,
+						binding: record.existingTargetSessionBinding as NonNullable<
+							TaskMainSessionHandoverRecord["existingTargetSessionBinding"]
+						>,
+					});
+				}
+				if (
+					isConversationSessionWaitingBeforeHandover(source) ||
+					isConversationSessionWaitingBeforeHandover(target)
+				)
+					return;
 				const material =
 					record.nativeForkPreparationReceiptPath && record.materialDirectoryPath
 						? taskMainSessionHandoverMaterialSchema.parse(
@@ -562,11 +746,11 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					record.nativeForkPreparationReceiptPath && record.materialDirectoryPath
 						? record.materialDirectoryPath
 						: await persistHandoverMaterial(scope.workspaceId, taskId, record, material);
-				let nativeFork: PreparedCodexMainSessionHandoverNativeFork | undefined;
-				if (
-					record.destination.kind === "new_codex_session" &&
-					record.destination.contextInheritanceMode === "fork_complete_native_conversation"
-				) {
+				let nativeFork:
+					| PreparedCodexMainSessionHandoverNativeFork
+					| Awaited<ReturnType<typeof prepareTaskMainSessionHandoverTranscriptNativeFork>>
+					| undefined;
+				if (isTaskMainSessionHandoverNativeForkRequested(record.destination)) {
 					const receiptFilePath =
 						record.nativeForkPreparationReceiptPath ?? join(directory, "native-fork-preparation.json");
 					await setRecord(scope, taskId, record.handoverId, (current) => ({
@@ -583,11 +767,40 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						throw new TaskMainSessionHandoverExecutionProhibitedError(
 							"交接已停止或来源主绑定改变，未继续原生准备。",
 						);
-					nativeFork = await (deps.prepareNativeFork ?? prepareCodexMainSessionHandoverNativeFork)({
-						handoverId: record.handoverId,
-						sourceSummary: source,
-						receiptFilePath,
-					});
+					if (source.agentId === "codex") {
+						nativeFork = await (deps.prepareNativeFork ?? prepareCodexMainSessionHandoverNativeFork)({
+							handoverId: record.handoverId,
+							sourceSummary: source,
+							receiptFilePath,
+						});
+					} else {
+						const identity = source.agentNativeConversationSessionIdentity;
+						if (
+							(source.agentId !== "claude" && source.agentId !== "omp") ||
+							!identity?.transcriptPath ||
+							!source.workspacePath
+						)
+							throw new TaskMainSessionHandoverExecutionProhibitedError(
+								"等待同 harness 的可靠原生身份与固定历史。",
+							);
+						nativeFork = await (
+							deps.prepareTranscriptNativeFork ?? prepareTaskMainSessionHandoverTranscriptNativeFork
+						)({
+							handoverId: record.handoverId,
+							sourceAgentId: source.agentId,
+							sourceTaskConversationSessionId: source.taskId,
+							sourceNativeSessionId: identity.nativeSessionId,
+							sourceTranscriptPath: identity.transcriptPath,
+							sourceTranscriptSnapshotPath: material.transcriptReferences.includes(identity.transcriptPath)
+								? join(
+										directory,
+										`source-agent-transcript-${material.transcriptReferences.indexOf(identity.transcriptPath) + 1}.jsonl`,
+									)
+								: undefined,
+							workingDirectoryPath: source.workspacePath,
+							receiptFilePath,
+						});
+					}
 					record = { ...record, nativeForkPreparationReceiptPath: receiptFilePath };
 					const latestSource = (await loadState(scope)).sessions[source.taskId];
 					if (
@@ -598,8 +811,10 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 				}
 				// 材料读取期间可能又开始一轮；在改绑定前重新核对，保持原主责任直到真正空闲。
 				if (
-					isConversationSessionStillGenerating(state.manager.getSummary(source.taskId)) ||
-					isConversationSessionStillGenerating(state.manager.getSummary(record.targetTaskConversationSessionId))
+					isConversationSessionWaitingBeforeHandover(state.manager.getSummary(source.taskId)) ||
+					isConversationSessionWaitingBeforeHandover(
+						state.manager.getSummary(record.targetTaskConversationSessionId),
+					)
 				)
 					return;
 				const selectedRecord = record;
@@ -610,8 +825,8 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						latest.board.columns.some(
 							(column) => column.id === "trash" && column.cards.some((entry) => entry.id === taskId),
 						) ||
-						isConversationSessionStillGenerating(state.manager.getSummary(source.taskId)) ||
-						isConversationSessionStillGenerating(
+						isConversationSessionWaitingBeforeHandover(state.manager.getSummary(source.taskId)) ||
+						isConversationSessionWaitingBeforeHandover(
 							state.manager.getSummary(selectedRecord.targetTaskConversationSessionId),
 						) ||
 						resolveMainTaskConversationSessionId(current) !== selectedRecord.sourceTaskConversationSessionId ||
@@ -629,7 +844,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					};
 					const nextBoard = replaceCard(latest.board, taskId, (entry) => ({
 						...entry,
-						agentId: "codex",
+						agentId: resolveTaskMainSessionHandoverTargetAgentId(selectedRecord.destination),
 						mainTaskConversationSessionId: selectedRecord.targetTaskConversationSessionId,
 						taskMainSessionHandover: nextRecord,
 					}));
@@ -638,12 +853,22 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
 							scopedRuntimeConfig.agentAutonomousModeEnabled,
 						);
+					const latestExistingTarget =
+						state.manager.getSummary(selectedRecord.targetTaskConversationSessionId) ??
+						latest.sessions[selectedRecord.targetTaskConversationSessionId];
+					if (selectedRecord.existingTargetSessionBinding)
+						assertTaskMainSessionHandoverExistingTargetBinding({
+							workspaceId: scope.workspaceId,
+							card: current,
+							target: latestExistingTarget,
+							binding: selectedRecord.existingTargetSessionBinding,
+						});
 					const targetSummary =
-						state.sessions[selectedRecord.targetTaskConversationSessionId] ??
+						latestExistingTarget ??
 						runtimeTaskSessionSummarySchema.parse({
 							taskId: selectedRecord.targetTaskConversationSessionId,
 							state: "idle",
-							agentId: "codex",
+							agentId: resolveTaskMainSessionHandoverTargetAgentId(selectedRecord.destination),
 							workspacePath: material.workspacePath,
 							pid: null,
 							startedAt: null,
@@ -656,7 +881,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 							...(nativeFork
 								? {
 										agentNativeConversationSessionIdentity: {
-											sourceAgentId: "codex",
+											sourceAgentId: resolveTaskMainSessionHandoverTargetAgentId(selectedRecord.destination),
 											nativeSessionId: nativeFork.nativeSessionId,
 											transcriptPath: nativeFork.transcriptPath,
 											observedAt: Date.now(),
@@ -683,7 +908,14 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								// 与主绑定一起落盘，冷恢复不依赖首次 start 已经写入快照。
 								taskConversationSessionLaunchSettings: {
 									taskAgentPermissionMode,
-									sessionTransport: "pty_terminal",
+									...(selectedRecord.destination.kind === "new_agent_session"
+										? { startInPlanMode: true }
+										: {}),
+									sessionTransport: nativeFork
+										? resolveRuntimeAgentSessionTransportFromSummary(source)
+										: resolveTaskMainSessionHandoverTargetAgentId(selectedRecord.destination) === "omp"
+											? (scopedRuntimeConfig.ompAgentSessionTransportForNewTasks ?? "pty_terminal")
+											: "pty_terminal",
 								},
 							},
 						});
@@ -708,6 +940,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								latest.sessions[source.taskId]?.taskConversationSessionMetadata
 									?.taskConversationSessionLaunchSettings ?? {
 									taskAgentPermissionMode,
+									...(selectedRecord.destination.kind === "new_agent_session"
+										? { startInPlanMode: true }
+										: {}),
 									sessionTransport: resolveRuntimeAgentSessionTransportFromSummary(sourceSummary),
 									terminalAgentModelOverrideSettings:
 										current.terminalAgentModelOverrideSettings?.agentId === sourceSummary.agentId
@@ -755,6 +990,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 				if (delivery?.terminal_delivery_status === "delivered_and_submit_confirmed") {
 					const current = await loadState(scope);
 					assertHandoverReportTargetExecutionEligibility({
+						workspaceId: scope.workspaceId,
 						card: findCard(current.board, taskId),
 						record,
 						summary: current.sessions[record.targetTaskConversationSessionId],
@@ -802,20 +1038,30 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								}),
 							}));
 						}
-						const probe = await (deps.queryReportAcceptance ?? queryCodexMainSessionHandoverReportAcceptance)({
+						const probe = await (deps.queryReportAcceptance ?? queryTaskMainSessionHandoverReportAcceptance)({
 							workspaceId: scope.workspaceId,
 							card,
 							summary: target,
 							probe: record.reportAcceptanceProbe,
 							prompt: renderTaskMainSessionHandoverReportPrompt(record),
+							expectedReportDeliveryKey: reportDeliveryKey(record),
 						});
 						await setRecord(scope, taskId, record.handoverId, (current) => ({
 							...current,
 							reportAcceptanceProbe: probe,
+							automaticRecovery:
+								current.automaticRecovery && current.reportAcceptanceProbe
+									? recordTaskMainSessionHandoverReportAcceptanceScanProgress({
+											previous: current.automaticRecovery,
+											before: current.reportAcceptanceProbe,
+											after: probe,
+										})
+									: current.automaticRecovery,
 						}));
 						if (probe.historicalAcceptanceEvidence) {
 							const latest = await loadState(scope);
 							assertHandoverReportTargetExecutionEligibility({
+								workspaceId: scope.workspaceId,
 								card: findCard(latest.board, taskId),
 								record: { ...record, reportAcceptanceProbe: probe },
 								summary: latest.sessions[record.targetTaskConversationSessionId],
@@ -844,11 +1090,21 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 			if (target?.agentNativeConversationSessionIdentity && !state.manager.getSummary(target.taskId))
 				state.manager.hydrateFromRecord({ [target.taskId]: target });
 			const canReuseStartedTarget =
-				record.targetSessionStartupCompletedAt !== undefined &&
 				target &&
-				["live", "starting"].includes(resolveSessionFacets(target).liveness);
-			if (isConversationSessionStillGenerating(target) && !canReuseStartedTarget) return;
-			if (!canReuseStartedTarget && target?.startedAt != null) state.manager.stopTaskSession(target.taskId);
+				state.manager.hasLiveTaskSession(target.taskId) &&
+				(record.targetSessionStartupCompletedAt !== undefined ||
+					isTaskMainSessionHandoverExistingTarget(record.destination));
+			if (
+				isConversationSessionWaitingBeforeHandover(target) &&
+				(!canReuseStartedTarget || isTaskMainSessionHandoverExistingTarget(record.destination))
+			)
+				return;
+			if (
+				!isTaskMainSessionHandoverExistingTarget(record.destination) &&
+				!canReuseStartedTarget &&
+				target?.startedAt != null
+			)
+				await state.manager.stopTaskSession(target.taskId);
 			const metadata = target?.taskConversationSessionMetadata ?? {
 				workspaceTaskId: taskId,
 				taskConversationSessionRole: "main" as const,
@@ -865,6 +1121,13 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 				latestBeforeStart.taskMainSessionHandover.handoverId !== record.handoverId
 			)
 				throw new TaskMainSessionHandoverExecutionProhibitedError("交接已经停止或改变，未启动接任会话。");
+			if (record.existingTargetSessionBinding)
+				assertTaskMainSessionHandoverExistingTargetBinding({
+					workspaceId: scope.workspaceId,
+					card: latestBeforeStart,
+					target,
+					binding: record.existingTargetSessionBinding,
+				});
 			const startup = canReuseStartedTarget
 				? { ok: true, summary: target }
 				: await deps.startTaskSession(scope, {
@@ -875,25 +1138,43 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 							taskConversationSessionRole: "main",
 							taskAutomationSuspendedForMainSessionHandover: true,
 						},
-						agentId: "codex",
+						agentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 						prompt: "",
 						baseRef: card.baseRef,
 						worktreeMode: card.worktreeMode,
+						taskConversationMode: isTaskMainSessionHandoverExistingTarget(record.destination)
+							? (record.existingTargetSessionBinding?.taskConversationMode ??
+								target?.taskConversationMode ??
+								"operational")
+							: undefined,
 						taskAgentPermissionMode:
 							metadata.taskConversationSessionLaunchSettings?.taskAgentPermissionMode ??
 							card.taskAgentPermissionMode,
 						terminalAgentModelOverrideSettings:
 							metadata.taskConversationSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 						resumePriorAgentConversationWithoutResendingPrompt:
-							target?.agentNativeConversationSessionIdentity?.sourceAgentId === "codex",
+							target?.agentNativeConversationSessionIdentity?.sourceAgentId ===
+							resolveTaskMainSessionHandoverTargetAgentId(record.destination),
+						startInPlanMode: isTaskMainSessionHandoverExistingTarget(record.destination)
+							? metadata.taskConversationSessionLaunchSettings?.startInPlanMode
+							: resolveTaskMainSessionHandoverTargetAgentId(record.destination) !== "codex",
+						expectedExistingMainSessionHandoverTargetBinding: record.existingTargetSessionBinding,
+						requestedAgentSessionTransport: metadata.taskConversationSessionLaunchSettings?.sessionTransport,
 					});
-			if (!startup.ok) throw new Error(startup.error ?? "Codex 启动失败。");
+			if (!startup.ok) throw new Error(startup.error ?? "接任 Agent 启动失败。");
 			await setRecord(scope, taskId, record.handoverId, (current) => ({
 				...current,
 				targetSessionStartupCompletedAt: current.targetSessionStartupCompletedAt ?? Date.now(),
 			}));
 			const deliveryTarget =
 				(await loadState(scope)).sessions[record.targetTaskConversationSessionId] ?? startup.summary;
+			if (record.existingTargetSessionBinding)
+				assertTaskMainSessionHandoverExistingTargetBinding({
+					workspaceId: scope.workspaceId,
+					card: latestBeforeStart,
+					target: deliveryTarget,
+					binding: record.existingTargetSessionBinding,
+				});
 			const nativeIdentity = deliveryTarget?.agentNativeConversationSessionIdentity;
 			const reportRuntimeSessionIncarnationId = deliveryTarget?.runtimeSessionIncarnationId;
 			const reportWorkingDirectoryPath = deliveryTarget?.workspacePath;
@@ -901,26 +1182,40 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 				await setRecord(scope, taskId, record.handoverId, (current) => ({
 					...current,
 					reportNativeIdentityCaptureBinding: {
+						targetAgentId: resolveTaskMainSessionHandoverTargetAgentId(current.destination),
 						runtimeSessionIncarnationId: reportRuntimeSessionIncarnationId,
 						workingDirectoryPath: reportWorkingDirectoryPath,
-						codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
-							...deliveryTarget,
-							transcriptPath: nativeIdentity?.transcriptPath,
-						}),
+						codexConversationStorageHomeDirectoryPath:
+							deliveryTarget?.agentId === "codex"
+								? resolveRecordedCodexConversationHome({
+										...deliveryTarget,
+										transcriptPath: nativeIdentity?.transcriptPath,
+									})
+								: undefined,
 						preparedAt: Date.now(),
 					},
 				}));
-			if (nativeIdentity?.sourceAgentId !== "codex" && !deliveryTarget?.runtimeSessionIncarnationId)
+			if (
+				nativeIdentity?.sourceAgentId !== resolveTaskMainSessionHandoverTargetAgentId(record.destination) &&
+				!deliveryTarget?.runtimeSessionIncarnationId
+			)
 				throw new Error("接任会话尚无可靠原生身份或进程代际，等待机器证据后再提交汇报。");
-			if (nativeIdentity?.sourceAgentId === "codex" && deliveryTarget?.workspacePath) {
+			if (
+				nativeIdentity?.sourceAgentId === resolveTaskMainSessionHandoverTargetAgentId(record.destination) &&
+				deliveryTarget?.workspacePath
+			) {
 				const probe = {
+					targetAgentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 					nativeSessionId: nativeIdentity.nativeSessionId,
 					workingDirectoryPath: deliveryTarget.workspacePath,
 					transcriptPath: nativeIdentity.transcriptPath,
-					codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
-						...deliveryTarget,
-						transcriptPath: nativeIdentity.transcriptPath,
-					}),
+					codexConversationStorageHomeDirectoryPath:
+						deliveryTarget.agentId === "codex"
+							? resolveRecordedCodexConversationHome({
+									...deliveryTarget,
+									transcriptPath: nativeIdentity.transcriptPath,
+								})
+							: undefined,
 					nativeHistoryCursor: null,
 					transcriptHistoryCursor: null,
 					seenNativeHistoryCursors: [],
@@ -931,6 +1226,11 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					reportAcceptanceProbe: probe,
 				}));
 			}
+			if (
+				isConversationSessionWaitingBeforeHandover(deliveryTarget) &&
+				isTaskMainSessionHandoverExistingTarget(record.destination)
+			)
+				return;
 			const prompt = renderTaskMainSessionHandoverReportPrompt(record);
 			const hash = createHash("sha256").update(prompt).digest("hex");
 			const ledgerPath = getTaskMessageInjectionLedgerPath(state.statePath);
@@ -960,13 +1260,27 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 			if (!claimed) throw new Error("本次交接已有投递记录，未重复投递。请检查原回执。");
 			let reportDefinitelyNotSubmitted = true;
 			try {
-				const beforeReport = findCard((await loadState(scope)).board, taskId);
+				const beforeReportState = await loadState(scope);
+				const beforeReport = findCard(beforeReportState.board, taskId);
+				assertHandoverReportTargetExecutionEligibility({
+					workspaceId: scope.workspaceId,
+					card: beforeReport,
+					record,
+					summary: beforeReportState.sessions[record.targetTaskConversationSessionId],
+				});
 				if (
 					beforeReport.taskMainSessionHandover?.status !== "report_delivery_pending" ||
 					beforeReport.taskMainSessionHandover.handoverId !== record.handoverId ||
 					resolveMainTaskConversationSessionId(beforeReport) !== record.targetTaskConversationSessionId
 				)
 					throw new TaskMainSessionHandoverExecutionProhibitedError("交接已经停止或主绑定改变，未提交汇报。");
+				if (
+					isConversationSessionWaitingBeforeHandover(
+						beforeReportState.sessions[record.targetTaskConversationSessionId],
+					) &&
+					isTaskMainSessionHandoverExistingTarget(record.destination)
+				)
+					throw new Error("接任会话正在生成或等待未决交互，汇报未提交，稍后自动重验。");
 				await setRecord(scope, taskId, record.handoverId, (current) => ({
 					...current,
 					reportDeliveryStartedAt: Date.now(),
@@ -1112,7 +1426,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					: resolveMainTaskConversationSessionId(card) !== record.targetTaskConversationSessionId
 						? "主会话绑定已经改变。"
 						: isConversationSessionStillGenerating(target)
-							? "原 Codex 会话仍在生成，请等它停下后重试。"
+							? "原接任会话仍在生成，请等它停下后重试。"
 							: state.manager.hasPendingProgrammaticTaskChatInputDelivery?.(
 										record.targetTaskConversationSessionId,
 									)
@@ -1127,14 +1441,17 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					record?.status === "failed" &&
 					record.automaticRecovery?.classification !== "execution_prohibited" &&
 					isReportDefinitelyUndelivered(record, delivery),
-				canRecreateCodexSession: blockReason === null,
+				canRecreateCodexSession:
+					blockReason === null &&
+					(!record || resolveTaskMainSessionHandoverTargetAgentId(record.destination) === "codex"),
+				canRecreateAgentSession: blockReason === null,
 				terminalDeliveryFailureReason: delivery?.terminal_delivery_failure_reason ?? null,
 				blockReason,
 			},
 		};
 	}
 
-	async function recoverWithNewCodexSession(
+	async function recoverWithNewAgentSession(
 		scope: RuntimeTrpcWorkspaceScope,
 		input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 		evidence?: KanbanRequestOriginActorEvidence,
@@ -1172,7 +1489,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					throw new TRPCError({ code: "CONFLICT", message: "交接状态已经变化，请重新检查后确认恢复。" });
 				}
 				const availability = (await getStatus(scope, input)).recoveryAvailability;
-				if (!availability?.canRecreateCodexSession) {
+				if (!availability?.canRecreateAgentSession) {
 					throw new TRPCError({ code: "CONFLICT", message: availability?.blockReason ?? "当前不能重新交接。" });
 				}
 				const directory = join(record.materialDirectoryPath as string, "recovery-attempts");
@@ -1216,24 +1533,49 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					}
 				}
 				const previousTarget = state.sessions[record.targetTaskConversationSessionId];
-				let recoveryNativeFork: PreparedCodexMainSessionHandoverNativeFork | undefined;
-				if (
-					record.destination.kind === "new_codex_session" &&
-					record.destination.contextInheritanceMode === "fork_complete_native_conversation"
-				) {
+				let recoveryNativeFork:
+					| PreparedCodexMainSessionHandoverNativeFork
+					| Awaited<ReturnType<typeof prepareTaskMainSessionHandoverTranscriptNativeFork>>
+					| undefined;
+				if (isTaskMainSessionHandoverNativeForkRequested(record.destination)) {
 					if (!previousTarget || !record.nativeForkPreparationReceiptPath)
 						throw new TRPCError({
 							code: "CONFLICT",
 							message: "等待原接任身份与固定历史凭据，未改成全新上下文。",
 						});
-					recoveryNativeFork = await (
-						deps.prepareRecoveryNativeFork ?? prepareCodexMainSessionHandoverRecoveryNativeFork
-					)({
-						handoverId: record.handoverId,
-						sourceSummary: previousTarget,
-						frozenReceiptFilePath: record.nativeForkPreparationReceiptPath,
-						receiptFilePath: join(directory, `${input.requestId}-native-fork-preparation.json`),
-					});
+					const targetAgentId = resolveTaskMainSessionHandoverTargetAgentId(record.destination);
+					if (targetAgentId === "codex") {
+						recoveryNativeFork = await (
+							deps.prepareRecoveryNativeFork ?? prepareCodexMainSessionHandoverRecoveryNativeFork
+						)({
+							handoverId: record.handoverId,
+							sourceSummary: previousTarget,
+							frozenReceiptFilePath: record.nativeForkPreparationReceiptPath,
+							receiptFilePath: join(directory, `${input.requestId}-native-fork-preparation.json`),
+						});
+					} else {
+						const identity = previousTarget.agentNativeConversationSessionIdentity;
+						if (
+							(targetAgentId !== "claude" && targetAgentId !== "omp") ||
+							!identity?.transcriptPath ||
+							!previousTarget.workspacePath
+						)
+							throw new TaskMainSessionHandoverExecutionProhibitedError(
+								"等待原生固定历史，未降级为空白上下文。",
+							);
+						recoveryNativeFork = await (
+							deps.prepareTranscriptNativeFork ?? prepareTaskMainSessionHandoverTranscriptNativeFork
+						)({
+							handoverId: record.handoverId,
+							sourceAgentId: targetAgentId,
+							sourceTaskConversationSessionId: previousTarget.taskId,
+							sourceNativeSessionId: identity.nativeSessionId,
+							sourceTranscriptPath: identity.transcriptPath,
+							workingDirectoryPath: previousTarget.workspacePath,
+							frozenReceiptFilePath: record.nativeForkPreparationReceiptPath,
+							receiptFilePath: join(directory, `${input.requestId}-native-fork-preparation.json`),
+						});
+					}
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(scope);
 				await mutateWorkspaceState(scope.workspacePath, intent, (latest) => {
@@ -1261,7 +1603,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					}
 					const replacement = runtimeTaskSessionSummarySchema.parse({
 						taskId: targetId,
-						agentId: "codex",
+						agentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 						workspacePath: latestPreviousTarget?.workspacePath ?? null,
 						pid: null,
 						startedAt: null,
@@ -1274,7 +1616,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						...(recoveryNativeFork
 							? {
 									agentNativeConversationSessionIdentity: {
-										sourceAgentId: "codex",
+										sourceAgentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 										nativeSessionId: recoveryNativeFork.nativeSessionId,
 										transcriptPath: recoveryNativeFork.transcriptPath,
 										observedAt: Date.now(),
@@ -1313,15 +1655,18 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					return {
 						board: replaceCard(latest.board, input.taskId, (entry) => ({
 							...entry,
-							agentId: "codex",
+							agentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
 							mainTaskConversationSessionId: targetId,
 							taskMainSessionHandover: {
 								...record,
 								targetTaskConversationSessionId: targetId,
-								destination:
-									record.destination.kind === "new_codex_session"
-										? record.destination
-										: { kind: "new_codex_session" },
+								destination: !isTaskMainSessionHandoverExistingTarget(record.destination)
+									? record.destination
+									: {
+											kind: "new_agent_session",
+											agentId: resolveTaskMainSessionHandoverTargetAgentId(record.destination),
+										},
+								existingTargetSessionBinding: undefined,
 								status: "report_delivery_pending",
 								reportDeliveryStartedAt: null,
 								reportDeliveryAttempt: record.reportDeliveryAttempt + 1,
@@ -1329,6 +1674,8 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								automaticRecovery: undefined,
 								reportNativeIdentityCaptureBinding: undefined,
 								reportAcceptanceProbe: undefined,
+								inputAwaitingCorrelatedProcessingHook: undefined,
+								reportCorrelatedProcessingAcceptanceEvidence: undefined,
 								targetSessionStartupCompletedAt: undefined,
 								updatedAt: Date.now(),
 								recoveryReceipts: [
@@ -1356,7 +1703,17 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 	return {
 		prepare,
 		getStatus,
-		recoverWithNewCodexSession,
+		recoverWithNewAgentSession,
+		recoverWithNewCodexSession: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
+		) => {
+			const record = findCard((await loadState(scope)).board, input.taskId).taskMainSessionHandover;
+			if (record && resolveTaskMainSessionHandoverTargetAgentId(record.destination) !== "codex")
+				throw new TRPCError({ code: "BAD_REQUEST", message: "旧 Codex 恢复入口不能改变目标 Agent。" });
+			return await recoverWithNewAgentSession(scope, input, evidence);
+		},
 		pauseForExplicitStop: async (workspaceId: string, conversationSessionId: string) => {
 			const entry = (await listWorkspaceIndexEntries()).find((candidate) => candidate.workspaceId === workspaceId);
 			if (!entry) return;
@@ -1409,6 +1766,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 			input: TaskMainSessionHandoverRequest,
 			evidence?: KanbanRequestOriginActorEvidence,
 		) => {
+			input = taskMainSessionHandoverRequestSchema.parse(input);
 			const intent = evidence
 				? await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
 						taskMutationIntentKind: "runtime_request_task_main_session_handover",
@@ -1432,13 +1790,22 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					)
 						throw new TRPCError({ code: "CONFLICT", message: "Done 任务只允许阅读历史，不能发起主会话交接。" });
 					if (
-						input.destination.kind === "new_codex_session" &&
-						input.destination.contextInheritanceMode === "fork_complete_native_conversation" &&
-						source.agentId !== "codex"
+						isTaskMainSessionHandoverNativeForkRequested(input.destination) &&
+						!getTaskMainSessionHandoverNativeForkAvailability(
+							source,
+							resolveTaskMainSessionHandoverTargetAgentId(input.destination),
+						).available
 					)
-						throw new TRPCError({ code: "BAD_REQUEST", message: "完整原生复刻需要 Codex 来源会话。" });
-					if (input.destination.kind === "existing_codex_session")
-						validateExistingCodexTarget(card, current.sessions[input.destination.taskConversationSessionId]);
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: "完整原生复刻需要同一 Agent 的原生能力和可靠身份。",
+						});
+					if (isTaskMainSessionHandoverExistingTarget(input.destination))
+						validateExistingAgentTarget(
+							card,
+							current.sessions[input.destination.taskConversationSessionId],
+							resolveTaskMainSessionHandoverTargetAgentId(input.destination),
+						);
 					if (
 						card.taskMainSessionHandover &&
 						["waiting_for_sessions_to_stop", "report_delivery_pending"].includes(
@@ -1446,10 +1813,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						)
 					)
 						throw new TRPCError({ code: "CONFLICT", message: "该任务已有进行中的交接。" });
-					const targetId =
-						input.destination.kind === "new_codex_session"
-							? `task-conversation-session-${randomUUID()}`
-							: input.destination.taskConversationSessionId;
+					const targetId = !isTaskMainSessionHandoverExistingTarget(input.destination)
+						? `task-conversation-session-${randomUUID()}`
+						: input.destination.taskConversationSessionId;
 					if (card.taskMainSessionHandover?.materialDirectoryPath)
 						await lockedFileSystem.writeJsonFileAtomic(
 							join(
@@ -1464,6 +1830,13 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						sourceTaskConversationSessionId: input.expectedMainTaskConversationSessionId,
 						targetTaskConversationSessionId: targetId,
 						destination: input.destination,
+						existingTargetSessionBinding: isTaskMainSessionHandoverExistingTarget(input.destination)
+							? captureTaskMainSessionHandoverExistingTargetBinding(
+									scope.workspaceId,
+									card,
+									current.sessions[targetId],
+								)
+							: undefined,
 						status: "waiting_for_sessions_to_stop",
 						createdAt: Date.now(),
 						updatedAt: Date.now(),
@@ -1479,6 +1852,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 							...entry,
 							taskMainSessionHandover: record,
 						})),
+						sessions: isTaskMainSessionHandoverExistingTarget(input.destination)
+							? { ...state.sessions, [targetId]: current.sessions[targetId] }
+							: state.sessions,
 						value: null,
 					}));
 					await syncManager(scope);
@@ -1512,7 +1888,7 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					if (!isReportDefinitelyUndelivered(record, previous)) {
 						throw new TRPCError({
 							code: "CONFLICT",
-							message: "上次投递可能已经发生，未重复发送。请打开 Codex 检查并直接发消息继续。",
+							message: "上次投递可能已经发生，未重复发送。请打开接任会话检查并直接发消息继续。",
 						});
 					}
 					await setRecord(scope, input.taskId, record.handoverId, (current) => ({
@@ -1525,6 +1901,8 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						automaticRecovery: undefined,
 						reportNativeIdentityCaptureBinding: undefined,
 						reportAcceptanceProbe: undefined,
+						inputAwaitingCorrelatedProcessingHook: undefined,
+						reportCorrelatedProcessingAcceptanceEvidence: undefined,
 						reportDeliveryStartedAt: null,
 						reportDeliveryAttempt: current.reportDeliveryAttempt + 1,
 						updatedAt: Date.now(),

@@ -1,6 +1,6 @@
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { ChevronDown, ClipboardCheck, Minus, Pin, PinOff } from "lucide-react";
-import { type ReactElement, useEffect, useMemo, useState } from "react";
+import { type ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { showAppToast } from "@/components/app-toaster";
 import {
@@ -19,6 +19,7 @@ import {
 	formatDeployShaRange,
 	formatDeployTimestamp,
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
+import { PostDeployVerificationPanelExpansionStateContext } from "@/components/post-deploy-verification/post-deploy-verification-panel-expansion-state-context";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { spotlightElement } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { cn } from "@/components/ui/cn";
@@ -108,6 +109,20 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 	const [expandedHistoryDeploymentIds, setExpandedHistoryDeploymentIds] = useState<ReadonlySet<string>>(
 		() => new Set(),
 	);
+	const rememberedExpansionStateByKey = useMemo(() => new Map<string, unknown>(), []);
+	const scrollContainerRef = useRef<HTMLDivElement>(null);
+	const rememberedScrollTopRef = useRef(0);
+	const hasRenderableVerificationGroups = activeGroup !== null || historyGroups.length > 0;
+	useLayoutEffect(() => {
+		const scrollContainer = scrollContainerRef.current;
+		if (collapsed || !hasLoadedOnce || !hasRenderableVerificationGroups || !scrollContainer) return;
+		// 子组件在首次渲染就恢复展开状态，正文高度已确定；普通数据刷新不重放阅读位置。
+		scrollContainer.scrollTop = Math.max(
+			0,
+			Math.min(rememberedScrollTopRef.current, scrollContainer.scrollHeight - scrollContainer.clientHeight),
+		);
+		rememberedScrollTopRef.current = scrollContainer.scrollTop;
+	}, [collapsed, hasLoadedOnce, hasRenderableVerificationGroups]);
 	const taskEntryActions: PostDeployVerificationDeploymentGroupTaskEntryActions = {
 		completingTaskId,
 		onToggleChecklistItem,
@@ -270,7 +285,11 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 					<Tooltip content="折叠面板">
 						<button
 							type="button"
-							onClick={onToggleCollapsed}
+							onClick={() => {
+								if (scrollContainerRef.current)
+									rememberedScrollTopRef.current = scrollContainerRef.current.scrollTop;
+								onToggleCollapsed();
+							}}
 							aria-label="折叠 Post-Deploy Verification 面板"
 							className="cursor-pointer rounded-md p-1 text-text-tertiary transition-colors hover:bg-surface-3 hover:text-text-primary"
 						>
@@ -281,7 +300,13 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 			</div>
 
 			{/* 面板正文（滚动区） */}
-			<div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
+			<div
+				ref={scrollContainerRef}
+				onScroll={(event) => {
+					rememberedScrollTopRef.current = event.currentTarget.scrollTop;
+				}}
+				className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3"
+			>
 				{loadError ? (
 					<p className="m-0 rounded-md border border-status-red/30 bg-status-red/10 px-2 py-1.5 text-[12px] text-status-red">
 						{loadError}
@@ -305,16 +330,19 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 							</div>
 							<p className="m-0 mt-0.5 text-[11px] text-text-secondary">当前部署 · 待核对 {pendingCount}</p>
 						</div>
-						<PostDeployVerificationActiveDeploymentGroupZoneSections
-							group={activeGroup}
-							board={board}
-							realTaskCardRenderingInputs={realTaskCardRenderingInputs}
-							retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
-							taskEntryActions={taskEntryActions}
-							onRequestBatchClosureWithReasonsOfZoneTasks={onRequestBatchClosureWithReasonsOfZoneTasks}
-							isBatchClosureWithReasonsInFlight={isBatchClosureWithReasonsInFlight}
-							entryNavigationRequest={entryNavigationRequest}
-						/>
+						<PostDeployVerificationPanelExpansionStateContext.Provider value={rememberedExpansionStateByKey}>
+							<PostDeployVerificationActiveDeploymentGroupZoneSections
+								key={JSON.stringify([activeGroup.workspaceId, activeGroup.deploymentId])}
+								group={activeGroup}
+								board={board}
+								realTaskCardRenderingInputs={realTaskCardRenderingInputs}
+								retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
+								taskEntryActions={taskEntryActions}
+								onRequestBatchClosureWithReasonsOfZoneTasks={onRequestBatchClosureWithReasonsOfZoneTasks}
+								isBatchClosureWithReasonsInFlight={isBatchClosureWithReasonsInFlight}
+								entryNavigationRequest={entryNavigationRequest}
+							/>
+						</PostDeployVerificationPanelExpansionStateContext.Provider>
 					</section>
 				) : null}
 
@@ -365,14 +393,18 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 										</button>
 									</RadixCollapsible.Trigger>
 									<RadixCollapsible.Content className="border-t border-border px-2 py-2">
-										<PostDeployVerificationHistoryDeploymentGroupTaskEntries
-											group={group}
-											board={board}
-											realTaskCardRenderingInputs={realTaskCardRenderingInputs}
-											retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
-											taskEntryActions={taskEntryActions}
-											entryNavigationRequest={entryNavigationRequest}
-										/>
+										<PostDeployVerificationPanelExpansionStateContext.Provider
+											value={rememberedExpansionStateByKey}
+										>
+											<PostDeployVerificationHistoryDeploymentGroupTaskEntries
+												group={group}
+												board={board}
+												realTaskCardRenderingInputs={realTaskCardRenderingInputs}
+												retainedDeploymentGroupsByDeploymentId={retainedDeploymentGroupsByDeploymentId}
+												taskEntryActions={taskEntryActions}
+												entryNavigationRequest={entryNavigationRequest}
+											/>
+										</PostDeployVerificationPanelExpansionStateContext.Provider>
 									</RadixCollapsible.Content>
 								</RadixCollapsible.Root>
 							);

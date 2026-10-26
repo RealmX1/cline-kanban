@@ -24,6 +24,7 @@ import {
 	AlertCircle,
 	AlertTriangle,
 	Archive,
+	ArchiveRestore,
 	Check,
 	ClipboardCheck,
 	Clock,
@@ -54,6 +55,7 @@ import {
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
+import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
@@ -80,6 +82,7 @@ import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
 	WorktreeUncommittedChangeSummaryIndicator,
 } from "@/components/ui/worktree-uncommitted-change-summary-indicator";
+import { resolveBoardColumnTitle } from "@/data/board-data";
 import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } from "@/hooks/use-session-activity-dot-breathing-opacity-on-shared-fine-clock";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
@@ -94,7 +97,7 @@ import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cr
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
-import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
+import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
@@ -168,6 +171,7 @@ export interface TaskCardBusinessProps {
 	// Task Pinboard（置顶板）：请求置顶（由上层弹原因对话框，确认后才真正写盘）与直接取消置顶。
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	isMoveToTrashLoading?: boolean;
 	isMoveToValidationLoading?: boolean;
 	isMoveToReviewLoading?: boolean;
@@ -286,6 +290,8 @@ type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	taskCardOwnedByOtherProjectWorkspaceId?: string | null;
 	/** 当前项目展开卡的轮询复合键；普通看板卡继续只订阅推流 store。 */
 	taskCardWorkspaceIdForCrossProjectGitMetadataPolling?: string | null;
+	/** 完整关联预览只消费已核对创建时间的局部快照；null 或缺省均表示未知，不回退到共享 store。 */
+	relatedTaskPreviewWorktreeGitMetadataSnapshot?: ReviewTaskWorkspaceSnapshot | null;
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
@@ -344,6 +350,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		onCancelAutomaticAction,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
+		onSetTaskShelvingState,
 		isMoveToTrashLoading = false,
 		isMoveToValidationLoading = false,
 		isMoveToReviewLoading = false,
@@ -358,6 +365,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		onEditTaskPinboardPinReason,
 		taskCardOwnedByOtherProjectWorkspaceId = null,
 		taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
+		relatedTaskPreviewWorktreeGitMetadataSnapshot = null,
 		crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
 	} = presentation;
 
@@ -388,17 +396,22 @@ export const TaskCardBody = memo(function TaskCardBody(
 		taskCommentsDialog?.currentWorkspaceId;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
+	const usesIdentityBoundRelatedTaskPreviewGitMetadata = renderRole === "task_card_copy_in_related_task_preview";
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
-		isTaskCardOwnedByOtherProject ? null : card.id,
+		isTaskCardOwnedByOtherProject || usesIdentityBoundRelatedTaskPreviewGitMetadata ? null : card.id,
 	);
 	const polledReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
 		taskWorkspaceId ?? "",
 		card.id,
-		taskWorkspaceId != null && (isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
+		!usesIdentityBoundRelatedTaskPreviewGitMetadata &&
+			taskWorkspaceId != null &&
+			(isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
 	);
-	const reviewWorkspaceSnapshot = isTaskCardOwnedByOtherProject
-		? polledReviewWorkspaceSnapshot
-		: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
+	const reviewWorkspaceSnapshot = usesIdentityBoundRelatedTaskPreviewGitMetadata
+		? relatedTaskPreviewWorktreeGitMetadataSnapshot
+		: isTaskCardOwnedByOtherProject
+			? polledReviewWorkspaceSnapshot
+			: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
 	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(isTaskCardOwnedByOtherProject ? null : card.id, card.baseRef);
 	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,
@@ -905,7 +918,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
 				<span
 					role="status"
-					title="正在核验 harness 是否已接受输入；写入终端或前置 hook 放行不能证明提交成功。"
+					title={describePromptSubmissionAcceptance(sessionSummary.agentConversationPromptSubmissionAcceptance)}
 					className="inline-flex items-center gap-0.5 text-[10px] text-status-gold"
 				>
 					<Hourglass size={10} />
@@ -925,6 +938,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 	);
 	const pinnedMarkerOrTaskPinboardStageLabel = (
 		<>
+			{card.taskShelvingState?.isShelved ? (
+				<span className="text-xs text-text-secondary">{columnId ? resolveBoardColumnTitle(columnId) : ""}</span>
+			) : null}
 			{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
 				// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
 				<>
@@ -1462,6 +1478,21 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 
+					{onSetTaskShelvingState ? (
+						<Tooltip side="bottom" content={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}>
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={card.taskShelvingState?.isShelved ? <ArchiveRestore size={12} /> : <Archive size={12} />}
+								aria-label={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onSetTaskShelvingState(card.id, !card.taskShelvingState?.isShelved);
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					{taskPinboardToggle ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip(taskPinboardToggle.tooltip)}>
 							<Button
@@ -1558,7 +1589,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : null}
-					{columnId === "review" ? (
+					{columnId === "review" && !card.taskShelvingState?.isShelved ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to validation")}>
 							<Button
 								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
@@ -1577,6 +1608,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					{/* 仅终端 agent（claude/codex…，排除进程内 Cline SDK 与无会话）的 In Progress 卡：手动翻入 Review。
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
 					{columnId === "in_progress" &&
+					!card.taskShelvingState?.isShelved &&
 					sessionSummary?.agentId != null &&
 					!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary) ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
@@ -1594,7 +1626,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : null}
-					{columnId === "review" || columnId === "validation" ? (
+					{!card.taskShelvingState?.isShelved && (columnId === "review" || columnId === "validation") ? (
 						<TaskCardPrimaryActionWithQuickOptions
 							open={openedQuickActionMenu === "done"}
 							onOpenChange={(open) =>
@@ -1612,7 +1644,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							}}
 						/>
 					) : null}
-					{columnId === "trash" ? (
+					{columnId === "trash" && !card.taskShelvingState?.isShelved ? (
 						<Tooltip
 							side="bottom"
 							content={

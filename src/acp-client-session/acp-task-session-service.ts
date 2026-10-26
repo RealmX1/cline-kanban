@@ -92,6 +92,7 @@ export interface StartAcpTaskSessionRequest {
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
+	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
 	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
@@ -292,6 +293,10 @@ export class AcpTaskSessionService {
 		return this.registry.getSummary(taskId);
 	}
 
+	hasLiveTaskSession(taskId: string): boolean {
+		return this.connectionRuntime.getConnection(taskId) !== null;
+	}
+
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return this.registry.listSummaries();
 	}
@@ -311,7 +316,10 @@ export class AcpTaskSessionService {
 	async startTaskSession(request: StartAcpTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.registry.ensureEntry(request.taskId, request.agentId);
 		if (this.connectionRuntime.getConnection(request.taskId)) return cloneAcpSummary(entry.summary);
-		this.latestStartRequestByTaskId.set(request.taskId, { ...request });
+		this.latestStartRequestByTaskId.set(request.taskId, {
+			...request,
+			revalidateExistingMainSessionHandoverTargetBeforeLaunch: undefined,
+		});
 		const startedAt = now();
 		const runtimeSessionIncarnationId = randomUUID();
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
@@ -347,6 +355,9 @@ export class AcpTaskSessionService {
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
+				...(request.observedAgentNativeConversationSessionIdentity
+					? { agentNativeConversationSessionIdentity: request.observedAgentNativeConversationSessionIdentity }
+					: {}),
 				...(request.taskConversationSessionMetadata
 					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 					: {}),
@@ -381,6 +392,8 @@ export class AcpTaskSessionService {
 				);
 			}
 			const connection = await this.connectionRuntime.startTaskConnection({
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch:
+					request.revalidateExistingMainSessionHandoverTargetBeforeLaunch,
 				isRuntimeSessionIncarnationCurrent: () =>
 					this.registry.getEntry(request.taskId) === entry &&
 					entry.summary.runtimeSessionIncarnationId === runtimeSessionIncarnationId,

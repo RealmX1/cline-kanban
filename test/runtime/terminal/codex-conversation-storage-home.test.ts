@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, readlink, symlink, writeFile } from "node:fs/promises";
+import type * as FileSystemPromises from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,12 +11,37 @@ import {
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { createTempDir } from "../../utilities/temp-dir";
 
+const snapshotWriteInterception = vi.hoisted(() => ({
+	beforeExclusiveSnapshotWrite: null as ((pendingPath: string) => Promise<void>) | null,
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const fileSystem = await importOriginal<typeof FileSystemPromises>();
+	return {
+		...fileSystem,
+		writeFile: async (...arguments_: Parameters<typeof fileSystem.writeFile>) => {
+			const path = arguments_[0];
+			const options = arguments_[2];
+			if (
+				typeof path === "string" &&
+				path.endsWith("config.toml") &&
+				typeof options === "object" &&
+				options?.flag === "wx"
+			)
+				await snapshotWriteInterception.beforeExclusiveSnapshotWrite?.(path);
+			await fileSystem.writeFile(...arguments_);
+		},
+	};
+});
+
 let fixture: ReturnType<typeof createTempDir>;
-beforeEach(() => {
+beforeEach(async () => {
 	fixture = createTempDir("kanban-codex-storage-home-");
+	// 默认样本采用原生 home 身份；软链布局在对应回归中显式构造。
+	fixture.path = await realpath(fixture.path);
 	vi.stubEnv("HOME", fixture.path);
 });
 afterEach(() => {
+	snapshotWriteInterception.beforeExclusiveSnapshotWrite = null;
 	vi.unstubAllEnvs();
 	fixture.cleanup();
 });
@@ -125,17 +151,224 @@ describe("Codex 会话独立目录", () => {
 		});
 		expect(await readFile(join(original, "config.toml"), "utf8")).toBe(configuration);
 	});
-	it("刷新配置快照，拒绝混用另一套账号目录", async () => {
+	it("旧共享配置保持原值，拒绝混用另一套账号目录", async () => {
 		const original = join(fixture.path, ".codex");
 		await mkdir(original);
 		await writeFile(join(original, "config.toml"), 'model="first"');
 		const managed = await prepareManagedCodexConversationStorageHome(original);
 		await writeFile(join(original, "config.toml"), 'model="second"');
 		await prepareManagedCodexConversationStorageHome(original);
-		expect(await readFile(join(managed, "config.toml"), "utf8")).toContain("second");
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toContain("first");
 		await expect(prepareManagedCodexConversationStorageHome(join(fixture.path, "another-account"))).rejects.toThrow(
 			"不能混用账号",
 		);
+	});
+	it.for(["config.toml", "review.config.toml"])(
+		"%s 迁移用户文件信任键，连续刷新保留本目录确认及其他配置更新",
+		async (configurationFileName) => {
+			const original = join(fixture.path, ".codex");
+			await mkdir(original);
+			await writeFile(join(original, "hooks.json"), '{"hooks":{}}');
+			const originalFileKey = `${join(original, "hooks.json")}:stop:0:0`;
+			const originalInlineKey = `${join(original, configurationFileName)}:pre_tool_use:0:0`;
+			const pluginKey = "example@marketplace:hooks/hooks.json:stop:0:0";
+			const sourceConfiguration = {
+				model: "first-model",
+				hooks: {
+					state: {
+						[originalFileKey]: { trusted_hash: "sha256:original-file" },
+						[originalInlineKey]: { trusted_hash: "sha256:original-inline" },
+						[pluginKey]: { trusted_hash: "sha256:original-plugin" },
+					},
+				},
+			};
+			await writeFile(join(original, configurationFileName), stringify(sourceConfiguration));
+			const managed = await prepareManagedCodexConversationStorageHome(original);
+			const managedConfigurationPath = join(managed, configurationFileName);
+			const managedFileKey = `${join(managed, "hooks.json")}:stop:0:0`;
+			const managedInlineKey = `${managedConfigurationPath}:pre_tool_use:0:0`;
+			const configuration = parse(await readFile(managedConfigurationPath, "utf8"));
+			expect(configuration.hooks).toMatchObject({
+				state: {
+					[managedFileKey]: { trusted_hash: "sha256:original-file" },
+					[managedInlineKey]: { trusted_hash: "sha256:original-inline" },
+					[pluginKey]: { trusted_hash: "sha256:original-plugin" },
+				},
+			});
+			configuration.hooks = {
+				state: {
+					[managedFileKey]: { trusted_hash: "sha256:confirmed-in-managed-home" },
+					[managedInlineKey]: { enabled: false },
+					[pluginKey]: { trusted_hash: "sha256:confirmed-plugin" },
+					"only-confirmed-in-managed-home": { trusted_hash: "sha256:local" },
+				},
+			};
+			await writeFile(managedConfigurationPath, stringify(configuration));
+			sourceConfiguration.model = "second-model";
+			await writeFile(join(original, configurationFileName), stringify(sourceConfiguration));
+			await prepareManagedCodexConversationStorageHome(original);
+			expect(parse(await readFile(managedConfigurationPath, "utf8"))).toMatchObject({
+				model: "first-model",
+				hooks: {
+					state: {
+						[managedFileKey]: { trusted_hash: "sha256:confirmed-in-managed-home" },
+						[managedInlineKey]: { enabled: false },
+						[pluginKey]: { trusted_hash: "sha256:confirmed-plugin" },
+						"only-confirmed-in-managed-home": { trusted_hash: "sha256:local" },
+					},
+				},
+			});
+			// 原生保存留下的格式与注释也应保留；无变化的新 Task 不再触碰此配置。
+			const before = `${await readFile(managedConfigurationPath, "utf8")}\n# 原生 hooks 确认后保留的注释\n`;
+			await writeFile(managedConfigurationPath, before);
+			await Promise.all(Array.from({ length: 3 }, () => prepareManagedCodexConversationStorageHome(original)));
+			expect(await readFile(managedConfigurationPath, "utf8")).toBe(before);
+			expect(await readFile(join(original, configurationFileName), "utf8")).toBe(stringify(sourceConfiguration));
+		},
+	);
+	it.for(
+		["home_symlink", "home_parent_symlink", "runtime_home_parent_symlink"].flatMap((homePathLayout) =>
+			["config.toml", "review.config.toml"].map((configurationFileName) => ({
+				homePathLayout,
+				configurationFileName,
+			})),
+		),
+	)(
+		"$homePathLayout/$configurationFileName：按原生 home 身份继承信任，保持来源与账号边界",
+		async ({ homePathLayout, configurationFileName }) => {
+			const physicalSourceHomeParentDirectoryPath = join(fixture.path, "source-home-parent");
+			const physicalSourceHomeDirectoryPath = join(physicalSourceHomeParentDirectoryPath, ".codex");
+			await mkdir(physicalSourceHomeDirectoryPath, { recursive: true });
+			let original = physicalSourceHomeDirectoryPath;
+			if (homePathLayout === "home_symlink") {
+				original = join(fixture.path, ".codex");
+				await symlink(physicalSourceHomeDirectoryPath, original, "junction");
+			} else if (homePathLayout === "home_parent_symlink") {
+				const linkedSourceHomeParentDirectoryPath = join(fixture.path, "source-home-parent-symlink");
+				await symlink(physicalSourceHomeParentDirectoryPath, linkedSourceHomeParentDirectoryPath, "junction");
+				original = join(linkedSourceHomeParentDirectoryPath, ".codex");
+			} else {
+				const linkedRuntimeUserHomeDirectoryPath = join(fixture.path, "runtime-user-home-symlink");
+				await symlink(fixture.path, linkedRuntimeUserHomeDirectoryPath, "junction");
+				vi.stubEnv("HOME", linkedRuntimeUserHomeDirectoryPath);
+			}
+			await writeFile(join(original, "hooks.json"), '{"hooks":{}}');
+			const nativeSourceHomeDirectoryPath = await realpath(original);
+			const sourceTrustStates: Record<string, { trusted_hash: string; enabled?: boolean }> = {
+				[`${join(nativeSourceHomeDirectoryPath, "hooks.json")}:stop:0:0`]: {
+					trusted_hash: "sha256:shared-hook",
+					enabled: false,
+				},
+				[`${join(nativeSourceHomeDirectoryPath, configurationFileName)}:pre_tool_use:0:0`]: {
+					trusted_hash: "sha256:inline-hook",
+				},
+				[`${join(original, "other-hooks.json")}:post_tool_use:0:0`]: { trusted_hash: "sha256:unrelated-file" },
+			};
+			if (original !== nativeSourceHomeDirectoryPath)
+				sourceTrustStates[`${join(original, configurationFileName)}:post_tool_use:0:0`] = {
+					trusted_hash: "sha256:non-native-lexical-alias",
+				};
+			const sourceConfigurationText = stringify({
+				hooks: { state: sourceTrustStates },
+				profiles: { review: { hooks: { state: sourceTrustStates } } },
+			});
+			await writeFile(join(original, configurationFileName), sourceConfigurationText);
+			const managed = await prepareManagedCodexConversationStorageHome(original);
+			const nativeManagedHomeDirectoryPath = await realpath(managed);
+			const expectedTrustStates = {
+				...sourceTrustStates,
+				[`${join(nativeManagedHomeDirectoryPath, "hooks.json")}:stop:0:0`]: {
+					trusted_hash: "sha256:shared-hook",
+					enabled: false,
+				},
+				[`${join(nativeManagedHomeDirectoryPath, configurationFileName)}:pre_tool_use:0:0`]: {
+					trusted_hash: "sha256:inline-hook",
+				},
+			};
+			const snapshot = parse(await readFile(join(managed, configurationFileName), "utf8"));
+			expect(snapshot.hooks).toEqual({ state: expectedTrustStates });
+			expect(snapshot.profiles).toEqual({ review: { hooks: { state: expectedTrustStates } } });
+			expect(await readlink(join(managed, "hooks.json"))).toBe(join(original, "hooks.json"));
+			expect(await readFile(join(original, configurationFileName), "utf8")).toBe(sourceConfigurationText);
+			const otherSourceHomeDirectoryPath =
+				original === physicalSourceHomeDirectoryPath
+					? join(fixture.path, "another-account")
+					: physicalSourceHomeDirectoryPath;
+			await expect(prepareManagedCodexConversationStorageHome(otherSourceHomeDirectoryPath)).rejects.toThrow(
+				"不能混用账号",
+			);
+		},
+	);
+	it("旧共享目录不再刷新，原生重新启用和显式未信任决定保留", async () => {
+		const original = join(fixture.path, ".codex");
+		await mkdir(original);
+		await writeFile(join(original, "hooks.json"), '{"hooks":{}}');
+		const sourceKey = `${join(original, "hooks.json")}:stop:0:0`;
+		await writeFile(
+			join(original, "config.toml"),
+			stringify({ hooks: { state: { [sourceKey]: { enabled: false, trusted_hash: "sha256:source" } } } }),
+		);
+		const managed = await prepareManagedCodexConversationStorageHome(original);
+		const managedKey = `${join(managed, "hooks.json")}:stop:0:0`;
+		const managedConfigurationPath = join(managed, "config.toml");
+		await writeFile(
+			managedConfigurationPath,
+			stringify({ hooks: { state: { [managedKey]: { enabled: true }, "local-untrusted-hook": {} } } }),
+		);
+		await prepareManagedCodexConversationStorageHome(original);
+		const result = parse(await readFile(managedConfigurationPath, "utf8"));
+		expect(result.hooks).toMatchObject({ state: { [managedKey]: { enabled: true }, "local-untrusted-hook": {} } });
+		expect((result.hooks as { state: Record<string, unknown> }).state[managedKey]).not.toHaveProperty("trusted_hash");
+	});
+	it("旧内联 profile 的信任确认继续保留，项目路径和插件身份不跨范围映射", async () => {
+		const original = join(fixture.path, ".codex");
+		await mkdir(original);
+		const sourceKey = `${join(original, "config.toml")}:stop:0:0`;
+		const projectKey = `${join(fixture.path, "project", ".codex", "hooks.json")}:stop:0:0`;
+		await writeFile(
+			join(original, "config.toml"),
+			stringify({ profiles: { review: { hooks: { state: { [sourceKey]: { trusted_hash: "sha256:profile" } } } } } }),
+		);
+		const managed = await prepareManagedCodexConversationStorageHome(original);
+		const managedKey = `${join(managed, "config.toml")}:stop:0:0`;
+		await writeFile(
+			join(managed, "config.toml"),
+			stringify({
+				profiles: {
+					review: { hooks: { state: { [managedKey]: { trusted_hash: "sha256:confirmed" }, [projectKey]: {} } } },
+				},
+			}),
+		);
+		await prepareManagedCodexConversationStorageHome(original);
+		expect(parse(await readFile(join(managed, "config.toml"), "utf8"))).toMatchObject({
+			profiles: {
+				review: { hooks: { state: { [managedKey]: { trusted_hash: "sha256:confirmed" }, [projectKey]: {} } } },
+			},
+		});
+	});
+	it("无法解析的目标信任状态保留现场，不覆盖成来源快照", async () => {
+		const original = join(fixture.path, ".codex");
+		await mkdir(original);
+		await writeFile(join(original, "config.toml"), 'model="first"');
+		const managed = await prepareManagedCodexConversationStorageHome(original);
+		const invalidTargetConfiguration = 'model="keep"\n[hooks]\nstate="invalid"\n';
+		await writeFile(join(managed, "config.toml"), invalidTargetConfiguration);
+		await expect(prepareManagedCodexConversationStorageHome(original)).resolves.toBe(managed);
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(invalidTargetConfiguration);
+	});
+	it("初始化最终写入窗口中原生先保存配置时，排他创建保留原生决定", async () => {
+		const original = join(fixture.path, ".codex");
+		await mkdir(original);
+		await writeFile(join(original, "config.toml"), 'model="source"');
+		const nativeSaved = 'model="native"\n[hooks.state.native]\nenabled=false\n';
+		snapshotWriteInterception.beforeExclusiveSnapshotWrite = async (path) => {
+			if (path.startsWith(original)) return;
+			await writeFile(path, nativeSaved);
+		};
+		const managed = await prepareManagedCodexConversationStorageHome(original);
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(nativeSaved);
+		await prepareManagedCodexConversationStorageHome(original);
+		expect(await readFile(join(managed, "config.toml"), "utf8")).toBe(nativeSaved);
 	});
 	it("旧会话按已保存的转录目录续接，配置中的默认值变化不会把它移走", () => {
 		expect(

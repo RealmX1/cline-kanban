@@ -3506,3 +3506,45 @@ describe("可写协作会话启动", () => {
 		expect(JSON.stringify(launch)).toContain("task-conversation-session-independent");
 	});
 });
+
+describe("交接报告的空白准备与原生只读起步", () => {
+	const metadata = {
+		workspaceTaskId: "task",
+		taskConversationSessionRole: "main" as const,
+		taskConversationSessionRoleAtCreation: "task_collaborator" as const,
+		taskConversationSessionContextSource: "forked_from_main_current_turn" as const,
+		taskAutomationSuspendedForMainSessionHandover: true,
+		parentTaskConversationSessionId: "source",
+		mainSessionOriginTurnNumber: null,
+		mainSessionOriginUserMessagePreview: null,
+		latestUserMessagePreview: null,
+	};
+	it("Claude 已准备的 fork 首次接任仍以 Plan 启动，模型沿用原生会话", async () => {
+		const cwd = setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "target",
+			agentId: "claude",
+			args: [],
+			cwd,
+			prompt: "",
+			startInPlanMode: true,
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+			taskConversationSessionMetadata: metadata,
+		});
+		expect(launch.args).toContain("plan");
+		expect(launch.args).not.toContain("--model");
+	});
+	it("Kiro 的交接空启动不额外发送一次规划提问", async () => {
+		const cwd = setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "target",
+			agentId: "kiro",
+			args: [],
+			cwd,
+			prompt: "",
+			startInPlanMode: true,
+			taskConversationSessionMetadata: metadata,
+		});
+		expect(launch.args.join(" ")).not.toContain("Ask the user what they want planned");
+	});
+});

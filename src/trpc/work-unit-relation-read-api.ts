@@ -16,6 +16,7 @@ import { listConversationSessionOwnershipPeriodsOfWorkUnit } from "../inter-work
 import { assembleDirectlyRelatedTaskPreviewPage } from "../inter-work-unit-relation-ledger/directly-related-task-preview-page";
 import { InterWorkUnitRelationLedgerUnavailableError } from "../inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker-client";
 import {
+	buildInterWorkUnitRelationWorkUnitKey,
 	type KanbanBoardCardIdentityProjection,
 	listKanbanBoardCardIdentityProjectionsByBareTaskId,
 } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
@@ -68,6 +69,20 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 	projectionState: RecordedInterWorkUnitRelationProjectionState,
 	selector: WorkUnitSelectorForRelationRead,
 ): InterWorkUnitRelationWorkUnitReference {
+	if (selector.workUnitSelectorKind === "kanban_board_card_by_qualified_reference") {
+		const reference = selector.kanbanBoardCard;
+		// 项目迁移已登记的精确别名仍指向同一世；未知一世不能退回裸 ID 解析。
+		const candidate =
+			projectionState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.get(
+				buildInterWorkUnitRelationWorkUnitKey(reference),
+			);
+		if (!candidate)
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "关系账本中没有这一世任务，不能改为读取同 ID 的其他任务。",
+			});
+		return candidate.kanbanBoardCard;
+	}
 	if (selector.workUnitSelectorKind === "kanban_unmanaged_standalone_agent_conversation_session") {
 		return {
 			workUnitType: "kanban_unmanaged_standalone_agent_conversation_session",
@@ -78,7 +93,13 @@ export function resolveWorkUnitSelectorAgainstRecordedRelationProjection(
 	const candidates = listKanbanBoardCardIdentityProjectionsByBareTaskId(
 		projectionState.kanbanBoardCardIdentityProjectionState,
 		selector.bareTaskId,
-	).filter((projection) => !selector.workspaceId || projection.kanbanBoardCard.workspaceId === selector.workspaceId);
+	).filter(
+		(projection) =>
+			!selector.workspaceId ||
+			projection.kanbanBoardCard.workspaceId === selector.workspaceId ||
+			projection.currentWorkspaceId === selector.workspaceId ||
+			projection.workspaceIdsUsedByCard?.includes(selector.workspaceId),
+	);
 	if (candidates.length === 0) {
 		throw new TRPCError({
 			code: "NOT_FOUND",

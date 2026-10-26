@@ -1,3 +1,4 @@
+import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "@runtime-agent-catalog";
 import { ArrowRightLeft } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
@@ -7,12 +8,14 @@ import {
 	cancelTaskMainSessionHandover,
 	getTaskMainSessionHandoverStatus,
 	prepareTaskMainSessionHandover,
+	recoverTaskMainSessionHandoverWithNewAgentSession,
 	recoverTaskMainSessionHandoverWithNewCodexSession,
 	requestTaskMainSessionHandover,
 	retryTaskMainSessionHandover,
 } from "@/runtime/task-main-session-handover-query";
 import type {
 	RuntimeTaskSessionSummary,
+	TaskMainSessionHandoverAgentId,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverStatusResponse,
 } from "@/runtime/types";
@@ -21,8 +24,8 @@ import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-ra
 
 const handoverStatusLabels = {
 	waiting_for_sessions_to_stop: "正在等待相关会话停下，随后自动交接。",
-	report_delivery_pending: "Codex 正在接任并读取交接材料。",
-	awaiting_user_message: "Codex 已接任，汇报后等待你的下一条消息。",
+	report_delivery_pending: "新主会话正在接任并读取交接材料。",
+	awaiting_user_message: "新主会话已接任，汇报后等待你的下一条消息。",
 	failed: "交接暂未完成。",
 	cancelled: "已取消交接。",
 	completed: "主会话交接已完成。",
@@ -40,6 +43,7 @@ export function TaskMainSessionHandoverAction({
 	const [open, setOpen] = useState(false);
 	const [preview, setPreview] = useState<TaskMainSessionHandoverPrepareResponse | null>(null);
 	const [target, setTarget] = useState("new_codex_session");
+	const [targetAgentId, setTargetAgentId] = useState<TaskMainSessionHandoverAgentId>("codex");
 	const [contextInheritanceMode, setContextInheritanceMode] = useState<
 		"fresh_context_with_handover_material" | "fork_complete_native_conversation"
 	>("fresh_context_with_handover_material");
@@ -107,8 +111,34 @@ export function TaskMainSessionHandoverAction({
 	]);
 	const mainAgentId =
 		mainSessionSummary.agentId ?? taskCard.mostRecentlyLaunchedAgentSessionAgentId ?? taskCard.agentId;
-	const isSupportedHandoverSource = mainAgentId === "claude" || mainAgentId === "codex";
+	const isSupportedHandoverSource =
+		mainAgentId != null && mainAgentId !== "cline" && isRuntimeAgentLaunchSupported(mainAgentId);
 	if (!isSupportedHandoverSource && !record) return null;
+	const selectedTargetCapabilities = preview?.targetAgentCapabilities?.find(
+		(entry) => entry.agentId === targetAgentId,
+	);
+	const forkAvailability =
+		selectedTargetCapabilities?.completeNativeConversationForkAvailability ??
+		preview?.completeNativeConversationForkAvailability;
+	const existingPeerCandidates =
+		preview?.existingPeerCandidates ??
+		preview?.codexPeerTaskConversationSessionIds.map((id) => ({
+			taskConversationSessionId: id,
+			agentId: "codex" as const,
+			displayName: id,
+			available: true,
+			unavailableReason: null,
+		})) ??
+		[];
+	const selectedExistingPeer = existingPeerCandidates.find((entry) => entry.taskConversationSessionId === target);
+	const recordTargetAgentId =
+		record?.destination.kind === "new_agent_session" || record?.destination.kind === "existing_agent_session"
+			? record.destination.agentId
+			: "codex";
+	const recordTargetAgentLabel =
+		recordTargetAgentId === "codex"
+			? "Codex"
+			: (getRuntimeAgentCatalogEntry(recordTargetAgentId)?.label ?? recordTargetAgentId);
 	const inProgress =
 		record &&
 		["waiting_for_sessions_to_stop", "report_delivery_pending", "awaiting_user_message"].includes(record.status);
@@ -122,6 +152,7 @@ export function TaskMainSessionHandoverAction({
 		setError(null);
 		setPreview(null);
 		setTarget("new_codex_session");
+		setTargetAgentId("codex");
 		setContextInheritanceMode("fresh_context_with_handover_material");
 		setShowWaitChoice(false);
 		setNotes("");
@@ -138,6 +169,10 @@ export function TaskMainSessionHandoverAction({
 	}
 	async function submit() {
 		if (!preview) return;
+		if (target !== "new_codex_session" && !selectedExistingPeer?.available) {
+			setError(selectedExistingPeer?.unavailableReason ?? "所选会话已不可用，请重新打开交接预览。");
+			return;
+		}
 		const epoch = requestEpoch.current;
 		if (targetIsBusy && !showWaitChoice) {
 			setShowWaitChoice(true);
@@ -152,10 +187,24 @@ export function TaskMainSessionHandoverAction({
 				requestId: requestId.current,
 				destination:
 					target === "new_codex_session"
-						? contextInheritanceMode === "fork_complete_native_conversation"
-							? { kind: "new_codex_session", contextInheritanceMode }
-							: { kind: "new_codex_session" }
-						: { kind: "existing_codex_session", taskConversationSessionId: target },
+						? preview.targetAgentCapabilities
+							? {
+									kind: "new_agent_session",
+									agentId: targetAgentId,
+									...(contextInheritanceMode === "fork_complete_native_conversation"
+										? { contextInheritanceMode }
+										: {}),
+								}
+							: contextInheritanceMode === "fork_complete_native_conversation"
+								? { kind: "new_codex_session", contextInheritanceMode }
+								: { kind: "new_codex_session" }
+						: preview.existingPeerCandidates && selectedExistingPeer
+							? {
+									kind: "existing_agent_session",
+									agentId: selectedExistingPeer.agentId,
+									taskConversationSessionId: target,
+								}
+							: { kind: "existing_codex_session", taskConversationSessionId: target },
 				userContextNotes: notes,
 				additionalPlanReferencePaths: planPaths
 					.split("\n")
@@ -191,7 +240,11 @@ export function TaskMainSessionHandoverAction({
 		setBusy(true);
 		setError(null);
 		try {
-			const result = await recoverTaskMainSessionHandoverWithNewCodexSession(workspaceId, {
+			const recover =
+				recoveryAvailability?.canRecreateAgentSession !== undefined
+					? recoverTaskMainSessionHandoverWithNewAgentSession
+					: recoverTaskMainSessionHandoverWithNewCodexSession;
+			const result = await recover(workspaceId, {
 				taskId: taskCard.id,
 				expectedHandoverId: record.handoverId,
 				expectedReportDeliveryAttempt: record.reportDeliveryAttempt,
@@ -241,20 +294,21 @@ export function TaskMainSessionHandoverAction({
 							重试交接
 						</Button>
 					)}
-					{record.status === "failed" && recoveryAvailability?.canRecreateCodexSession && (
-						<Button
-							size="sm"
-							variant="ghost"
-							disabled={busy}
-							onClick={() => {
-								recoveryRequestId.current ??= createRandomUuidV4WithInsecureContextFallback();
-								setError(null);
-								setRecoveryConfirmationOpen(true);
-							}}
-						>
-							新建 Codex 并重新交接
-						</Button>
-					)}
+					{record.status === "failed" &&
+						(recoveryAvailability?.canRecreateAgentSession ?? recoveryAvailability?.canRecreateCodexSession) && (
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={busy}
+								onClick={() => {
+									recoveryRequestId.current ??= createRandomUuidV4WithInsecureContextFallback();
+									setError(null);
+									setRecoveryConfirmationOpen(true);
+								}}
+							>
+								新建 {recordTargetAgentLabel} 并重新交接
+							</Button>
+						)}
 					{record.status === "failed" && recoveryAvailability?.terminalDeliveryFailureReason && (
 						<p>
 							{recoveryAvailability.canRetryUndeliveredReport
@@ -279,7 +333,7 @@ export function TaskMainSessionHandoverAction({
 			)}
 			{!inProgress && isSupportedHandoverSource && (
 				<Button size="sm" variant="ghost" icon={<ArrowRightLeft size={14} />} onClick={() => void openPreview()}>
-					交接给 Codex
+					交接主会话
 				</Button>
 			)}
 			{error && !open && !recoveryConfirmationOpen && (
@@ -293,10 +347,12 @@ export function TaskMainSessionHandoverAction({
 					if (!busy) setRecoveryConfirmationOpen(value);
 				}}
 			>
-				<DialogHeader title="新建 Codex 接任会话" />
+				<DialogHeader title={`新建 ${recordTargetAgentLabel} 接任会话`} />
 				<DialogBody className="space-y-3 text-sm">
 					<DialogDescription>旧汇报的提交结果无法确认，重新交接可能重复汇报。</DialogDescription>
-					<p>原会话、旧 Codex、交接材料和失败记录都会保留。新 Codex 将读取原交接材料，汇报后等待你的消息。</p>
+					<p>
+						原会话、旧接任会话、交接材料和失败记录都会保留。新会话使用全新上下文读取原交接材料，汇报后等待你的消息。
+					</p>
 					{error && (
 						<p role="alert" className="break-words text-status-red">
 							{error}
@@ -319,7 +375,7 @@ export function TaskMainSessionHandoverAction({
 				}}
 				contentClassName="max-w-2xl"
 			>
-				<DialogHeader title={showWaitChoice ? "等待会话停下后交接" : "交接主会话给 Codex"} />
+				<DialogHeader title={showWaitChoice ? "等待会话停下后交接" : "交接主会话"} />
 				<DialogBody className="space-y-4 overflow-y-auto">
 					{busy && !preview && <p role="status">正在读取交接材料…</p>}
 					{error && (
@@ -330,8 +386,8 @@ export function TaskMainSessionHandoverAction({
 					{preview &&
 						(showWaitChoice ? (
 							<p>
-								原主会话或所选 Codex
-								仍在生成内容。选择等待后，会在两者都停下时自动交接；关闭浏览器后仍会继续等待。
+								原主会话或所选接任会话
+								仍在生成或等待未决交互处理。选择等待后，会在两者都可接任时自动交接；关闭浏览器后仍会继续等待。
 							</p>
 						) : (
 							<>
@@ -343,45 +399,78 @@ export function TaskMainSessionHandoverAction({
 										value={target}
 										onChange={(event) => setTarget(event.target.value)}
 									>
-										<option value="new_codex_session">新建 Codex 会话（默认）</option>
-										{preview.codexPeerTaskConversationSessionIds.map((id) => (
-											<option key={id} value={id}>
-												已有 Codex：{id}
+										<option value="new_codex_session">新建会话（默认）</option>
+										{existingPeerCandidates.map((entry) => (
+											<option
+												key={entry.taskConversationSessionId}
+												value={entry.taskConversationSessionId}
+												disabled={!entry.available}
+											>
+												已有 {getRuntimeAgentCatalogEntry(entry.agentId)?.label ?? entry.agentId}：
+												{entry.displayName}
+												{entry.unavailableReason ? `（${entry.unavailableReason}）` : ""}
 											</option>
 										))}
 									</select>
 								</label>
-								{target === "new_codex_session" && mainAgentId === "codex" && (
+								{target !== "new_codex_session" && (
+									<p className="text-sm">保留所选会话的历史、模型、权限与通道；原主会话保留为辅线。</p>
+								)}
+								{target === "new_codex_session" && preview.targetAgentCapabilities && (
 									<label className="block space-y-1 text-sm">
-										<span>上下文方式</span>
+										<span>目标 Agent</span>
 										<select
-											aria-label="上下文方式"
-											value={contextInheritanceMode}
+											aria-label="目标 Agent"
 											className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-text-primary"
-											onChange={(event) =>
-												setContextInheritanceMode(event.target.value as typeof contextInheritanceMode)
-											}
+											value={targetAgentId}
+											onChange={(event) => {
+												setTargetAgentId(event.target.value as TaskMainSessionHandoverAgentId);
+												setContextInheritanceMode("fresh_context_with_handover_material");
+											}}
 										>
-											<option value="fresh_context_with_handover_material">
-												全新上下文＋交接材料（默认）
-											</option>
-											<option
-												value="fork_complete_native_conversation"
-												disabled={!preview.completeNativeConversationForkAvailability?.available}
-											>
-												完整复刻原对话
-											</option>
+											{preview.targetAgentCapabilities.map((entry) => (
+												<option
+													key={entry.agentId}
+													value={entry.agentId}
+													disabled={entry.installationStatus === "not_installed"}
+												>
+													{entry.label}
+													{entry.installationStatus === "not_installed" ? "（未安装）" : ""}
+												</option>
+											))}
 										</select>
-										<p className="text-text-secondary">
-											{contextInheritanceMode === "fork_complete_native_conversation"
-												? "继承完整的已持久化对话，包括偏题内容；原会话仍可继续使用。"
-												: "新会话读取需求、计划与现状，便于重新聚焦；原会话保留为辅线。"}
-										</p>
-										{preview.completeNativeConversationForkAvailability?.unavailableReason && (
-											<p>{preview.completeNativeConversationForkAvailability.unavailableReason}</p>
-										)}
 									</label>
 								)}
+								{target === "new_codex_session" &&
+									(preview.targetAgentCapabilities || mainAgentId === "codex") && (
+										<label className="block space-y-1 text-sm">
+											<span>上下文方式</span>
+											<select
+												aria-label="上下文方式"
+												value={contextInheritanceMode}
+												className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-text-primary"
+												onChange={(event) =>
+													setContextInheritanceMode(event.target.value as typeof contextInheritanceMode)
+												}
+											>
+												<option value="fresh_context_with_handover_material">
+													全新上下文＋交接材料（默认）
+												</option>
+												<option
+													value="fork_complete_native_conversation"
+													disabled={!forkAvailability?.available}
+												>
+													完整复刻原对话
+												</option>
+											</select>
+											<p className="text-text-secondary">
+												{contextInheritanceMode === "fork_complete_native_conversation"
+													? "继承完整的已持久化对话，包括偏题内容；原会话仍可继续使用。"
+													: "新会话读取需求、计划与现状，便于重新聚焦；原会话保留为辅线。"}
+											</p>
+											{forkAvailability?.unavailableReason && <p>{forkAvailability.unavailableReason}</p>}
+										</label>
+									)}
 								<div className="space-y-2 text-sm">
 									<p className="font-medium text-text-primary">交接材料</p>
 									<p className="break-words">
@@ -435,7 +524,7 @@ export function TaskMainSessionHandoverAction({
 										onValueChange={setNotes}
 									/>
 								</label>
-								<p className="text-sm">Codex 会先汇报计划总览、已经实现和有待进行，然后等待你的消息。</p>
+								<p className="text-sm">新主会话会先汇报计划总览、已经实现和有待进行，然后等待你的消息。</p>
 							</>
 						))}
 				</DialogBody>
@@ -444,7 +533,14 @@ export function TaskMainSessionHandoverAction({
 						{showWaitChoice ? "暂不交接" : "取消"}
 					</Button>
 					<Button
-						disabled={busy || !preview || isPreparingNoteImages}
+						disabled={
+							busy ||
+							!preview ||
+							isPreparingNoteImages ||
+							(target !== "new_codex_session" && !selectedExistingPeer?.available) ||
+							(target === "new_codex_session" &&
+								selectedTargetCapabilities?.installationStatus === "not_installed")
+						}
 						autoFocus={showWaitChoice}
 						onClick={() => void submit()}
 					>

@@ -1,10 +1,11 @@
 import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import { resolveLastAgentConversationUserHandoffObservation } from "@runtime-agent-conversation-activity-observation";
 import {
 	resolveSessionFacets,
 	resolveTaskConversationSessionMainContextForkSelection,
 } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
@@ -187,9 +188,20 @@ export function TaskConversationSessionsPanel({
 			});
 	}, [workspaceId, draftIdentity, initialUserQuestion, contextSource, sessionRole, collaborationAgentId]);
 
-	const [readSessionUpdatedAtById, setReadSessionUpdatedAtById] = useState<Record<string, number>>(
-		readTaskConversationSessionReadReceipts,
-	);
+	const [readUserHandoffObservedAtMsBySessionId, setReadUserHandoffObservedAtMsBySessionId] = useState<
+		Record<string, number>
+	>(readTaskConversationSessionReadReceipts);
+	const markSessionUserHandoffAsRead = useCallback((summary: RuntimeTaskSessionSummary) => {
+		const handoffObservedAtMs = resolveLastAgentConversationUserHandoffObservation(summary)?.observedAtMs;
+		if (handoffObservedAtMs == null) return;
+		setReadUserHandoffObservedAtMsBySessionId((currentReadReceipts) => {
+			// 旧版存的是摘要更新时间，可能晚于交棒；保留较大值，避免升级后已读回答重新亮点。
+			if ((currentReadReceipts[summary.taskId] ?? 0) >= handoffObservedAtMs) return currentReadReceipts;
+			const nextReadReceipts = { ...currentReadReceipts, [summary.taskId]: handoffObservedAtMs };
+			writeLocalStorageItem(LocalStorageKey.TaskConversationSessionReadReceipts, JSON.stringify(nextReadReceipts));
+			return nextReadReceipts;
+		});
+	}, []);
 	const mainSessionTurnNumber = getMainSessionTurnNumber(mainSessionSummary);
 	const sideConversationSessions = useMemo(
 		() =>
@@ -214,26 +226,16 @@ export function TaskConversationSessionsPanel({
 
 	useEffect(() => {
 		const selectedSummary = taskSessions[selectedTaskConversationSessionId];
-		if (!selectedSummary || selectedTaskConversationSessionId === workspaceTaskId) {
+		if (!selectedSummary) {
 			return;
 		}
-		setReadSessionUpdatedAtById((currentReadReceipts) => {
-			if ((currentReadReceipts[selectedSummary.taskId] ?? 0) >= selectedSummary.updatedAt) {
-				return currentReadReceipts;
-			}
-			const nextReadReceipts = {
-				...currentReadReceipts,
-				[selectedSummary.taskId]: selectedSummary.updatedAt,
-			};
-			writeLocalStorageItem(LocalStorageKey.TaskConversationSessionReadReceipts, JSON.stringify(nextReadReceipts));
-			return nextReadReceipts;
-		});
-	}, [selectedTaskConversationSessionId, taskSessions, workspaceTaskId]);
+		markSessionUserHandoffAsRead(selectedSummary);
+	}, [selectedTaskConversationSessionId, taskSessions, markSessionUserHandoffAsRead]);
 
 	useEffect(() => {
 		const synchronizeReadReceiptsAcrossTabs = (event: StorageEvent) => {
 			if (event.key === LocalStorageKey.TaskConversationSessionReadReceipts) {
-				setReadSessionUpdatedAtById(readTaskConversationSessionReadReceipts());
+				setReadUserHandoffObservedAtMsBySessionId(readTaskConversationSessionReadReceipts());
 			}
 		};
 		window.addEventListener("storage", synchronizeReadReceiptsAcrossTabs);
@@ -241,11 +243,7 @@ export function TaskConversationSessionsPanel({
 	}, []);
 
 	const selectSession = (summary: RuntimeTaskSessionSummary) => {
-		setReadSessionUpdatedAtById((currentReadReceipts) => {
-			const nextReadReceipts = { ...currentReadReceipts, [summary.taskId]: summary.updatedAt };
-			writeLocalStorageItem(LocalStorageKey.TaskConversationSessionReadReceipts, JSON.stringify(nextReadReceipts));
-			return nextReadReceipts;
-		});
+		markSessionUserHandoffAsRead(summary);
 		onSelectTaskConversationSession(summary.taskId);
 	};
 
@@ -358,9 +356,12 @@ export function TaskConversationSessionsPanel({
 						return null;
 					}
 					const turnsAgo = Math.max(0, mainSessionTurnNumber - (metadata.mainSessionOriginTurnNumber ?? 0));
+					// PTY 重绘、恢复和元数据更新都会推进 updatedAt，只有真实交棒才能产生新的未读回答。
+					const handoffObservation = resolveLastAgentConversationUserHandoffObservation(summary);
 					const hasUnreadCompletion =
 						resolveSessionFacets(summary).turnOwner === "user" &&
-						(readSessionUpdatedAtById[summary.taskId] ?? 0) < summary.updatedAt &&
+						handoffObservation !== null &&
+						(readUserHandoffObservedAtMsBySessionId[summary.taskId] ?? 0) < handoffObservation.observedAtMs &&
 						selectedTaskConversationSessionId !== summary.taskId;
 					return (
 						// id 复制芯片是 button，不能嵌进这个整行可点的 button 里（嵌套 button 是无效 HTML），

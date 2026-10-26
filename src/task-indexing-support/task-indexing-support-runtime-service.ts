@@ -34,6 +34,7 @@ import {
 	triageIncomingWorkItemWithDurableOperation,
 } from "./incoming-work-item-triage-operation";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
+import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "./task-analysis-shared-prompt-prefix";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
 	readTaskIndexingSupportExecutorSettings,
@@ -41,6 +42,7 @@ import {
 	saveTaskIndexingSupportExecutorSettings,
 	taskIndexingSupportWorkspaceStoragePath,
 } from "./task-indexing-support-storage";
+import { analyzeTaskProjectAssignment } from "./task-project-assignment-analysis";
 
 const SUPPORT_COMPONENT_NAME = "task_indexing_support_relation_triage";
 export interface TaskIndexingSupportRuntimeDependencies {
@@ -246,7 +248,45 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 			},
 		});
 	};
+	const projectAnalysisRuns = new Map<
+		string,
+		{ fingerprint: string; result: ReturnType<typeof analyzeTaskProjectAssignment> }
+	>();
 	const service = {
+		getGlobalExecutorSettings: () => readTaskIndexingSupportExecutorSettings(null),
+		setGlobalExecutorSettings: (settings: TaskIndexingSupportExecutorSettings) =>
+			saveTaskIndexingSupportExecutorSettings(null, settings),
+		analyzeTaskProjectAssignment: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			request: { operationId: string; title: string; prompt: string },
+		) => {
+			const settings = await readTaskIndexingSupportExecutorSettings(scope.workspaceId);
+			const fingerprint = taskIndexingTextFingerprint(
+				JSON.stringify([scope.workspaceId, request.title, request.prompt, settings]),
+			);
+			const existing = projectAnalysisRuns.get(request.operationId);
+			if (existing) {
+				if (existing.fingerprint !== fingerprint) throw new Error("同一分析操作的输入已变化，请重新分析。");
+				return await existing.result;
+			}
+			const result = collect(scope.workspaceId).then((collected) =>
+				analyzeTaskProjectAssignment({
+					...request,
+					workspaceId: scope.workspaceId,
+					settings,
+					materials: collected.materials,
+					abortSignal: lifetime.signal,
+				}),
+			);
+			projectAnalysisRuns.set(request.operationId, { fingerprint, result });
+			if (projectAnalysisRuns.size > 128) projectAnalysisRuns.delete(projectAnalysisRuns.keys().next().value ?? "");
+			try {
+				return await result;
+			} catch (error) {
+				projectAnalysisRuns.delete(request.operationId);
+				throw error;
+			}
+		},
 		suggestReferenceRelationsForTaskModeling: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			request: ReferenceRelationModelingSuggestionsRequest,
@@ -321,7 +361,7 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 				workspaceId: scope.workspaceId,
 				materials: collected.materials,
 				settings: await readTaskIndexingSupportExecutorSettings(scope.workspaceId),
-				instructionVersion: "shared-task-indexing-context-v1",
+				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 				now: Date.now(),
 			});
 			context.contextCompleteness.push(...collected.missingContextParts);

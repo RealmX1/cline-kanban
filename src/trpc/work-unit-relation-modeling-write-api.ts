@@ -11,7 +11,10 @@ import {
 	normalizeRelationAssertionEvidenceAnchors,
 	readRelationEndpointPlanFingerprintsWithEndpointWorkUnitKeysFromKanbanBoardCardIdentityProjection,
 } from "../inter-work-unit-relation-ledger/inter-work-unit-relation-assertion-write-planning";
-import { buildInterWorkUnitRelationWorkUnitKey } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
+import {
+	buildInterWorkUnitRelationWorkUnitKey,
+	resolveCanonicalWorkUnitReferenceAfterProjectTransfer,
+} from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 import { planReferenceRelationModelingChanges } from "../inter-work-unit-relation-ledger/reference-relation-modeling-change-planning";
 import type { CreateWorkUnitRelationAssertionWriteApiDependencies } from "./work-unit-relation-assertion-write-api";
 import { resolveWorkUnitSelectorAgainstRecordedRelationProjection } from "./work-unit-relation-read-api";
@@ -22,6 +25,16 @@ export async function applyReferenceRelationModelingChanges(
 ): Promise<ApplyReferenceRelationModelingChangesResponse> {
 	return deps.readRecordedInterWorkUnitRelationProjection(async (reader) => {
 		const state = reader.projectionState;
+		input = {
+			...input,
+			referenceRelationDrafts: input.referenceRelationDrafts.map((draft) => ({
+				...draft,
+				counterpartWorkUnit: resolveCanonicalWorkUnitReferenceAfterProjectTransfer(
+					state.kanbanBoardCardIdentityProjectionState,
+					draft.counterpartWorkUnit,
+				),
+			})),
+		};
 		const root = resolveWorkUnitSelectorAgainstRecordedRelationProjection(state, input.workUnit);
 		const rootKey = buildInterWorkUnitRelationWorkUnitKey(root);
 		const fingerprint = createHash("sha256")

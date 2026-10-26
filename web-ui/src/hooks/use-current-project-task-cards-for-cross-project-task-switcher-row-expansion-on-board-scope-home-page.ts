@@ -27,6 +27,7 @@ export function useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansio
 	onEditTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onCancelAutomaticTaskAction,
 	moveToTrashLoadingById,
 }: {
@@ -47,6 +48,7 @@ export function useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansio
 	| "onEditTask"
 	| "onRequestPinToTaskPinboard"
 	| "onUnpinFromTaskPinboard"
+	| "onSetTaskShelvingState"
 	| "onCancelAutomaticTaskAction"
 	| "moveToTrashLoadingById"
 >): CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null {
@@ -69,6 +71,7 @@ export function useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansio
 							onEditTask,
 							onRequestPinToTaskPinboard,
 							onUnpinFromTaskPinboard,
+							onSetTaskShelvingState,
 							onCancelAutomaticTaskAction,
 							moveToTrashLoadingById,
 						},
@@ -91,6 +94,7 @@ export function useCurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansio
 			onSaveTitle,
 			onStartTask,
 			onUnpinFromTaskPinboard,
+			onSetTaskShelvingState,
 			resolveTaskWorkspaceAbsoluteDirectoryPath,
 		],
 	);

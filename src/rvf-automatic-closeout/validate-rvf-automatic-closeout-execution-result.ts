@@ -7,6 +7,7 @@ import type {
 } from "../core/rvf-automatic-closeout-contract";
 import { getGitStdout } from "../workspace/git-utils";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
+import { verifyBoundRvfSupplementalLandCompletionEvidence } from "./verify-rvf-supplemental-land-completion-evidence";
 
 export class RvfAutomaticCloseoutExecutionResultDeliveryPendingError extends Error {}
 
@@ -14,6 +15,102 @@ const landedCandidateEvidenceSchema = z.object({
 	subject: z.object({ head_oid: z.string(), worktree_realpath: z.string(), git_common_dir_realpath: z.string() }),
 	review: z.object({ run_id: z.string(), protocol_valid: z.literal(true) }),
 });
+
+export async function readBoundRvfLandCandidateEvidence(record: RvfAutomaticCloseoutRecord, commit: string) {
+	const git = (arguments_: string[]) =>
+		getGitStdout(["-c", "core.hooksPath=/dev/null", ...arguments_], record.receipt.worktree);
+	await git(["merge-base", "--is-ancestor", commit, "HEAD"]);
+	const path = await git([
+		"rev-parse",
+		"--path-format=absolute",
+		"--git-path",
+		"rvf/evidence/reviewed-task-candidate-evidence.json",
+	]);
+	if ((await lstat(path)).isSymbolicLink() || (await lstat(`${path}.sha256`)).isSymbolicLink())
+		throw new Error("land evidence 及摘要不能是符号链接。");
+	const bytes = await readFile(path);
+	const candidateEvidenceSha256 = computeRvfTextSha256(bytes);
+	if ((await readFile(`${path}.sha256`, "utf8")).trim() !== candidateEvidenceSha256)
+		throw new Error("land evidence 摘要不一致。");
+	const evidence = landedCandidateEvidenceSchema.parse(JSON.parse(bytes.toString("utf8")));
+	const gitCommonDirectoryRealpath = await realpath(
+		await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+	);
+	if (
+		evidence.subject.head_oid !== commit ||
+		evidence.review.run_id !== record.runId ||
+		(await realpath(evidence.subject.worktree_realpath)) !== (await realpath(record.receipt.worktree)) ||
+		(await realpath(evidence.subject.git_common_dir_realpath)) !== gitCommonDirectoryRealpath
+	)
+		throw new Error("land evidence 与提交、run 或工作区绑定不一致。");
+	return { candidateEvidenceSha256, gitCommonDirectoryRealpath };
+}
+
+export async function readBoundRvfLocalBaseRef(record: RvfAutomaticCloseoutRecord) {
+	if (!record.runDirectory) throw new Error("缺少绑定的 RVF run 目录。");
+	const scopeBytes = await readFile(join(record.runDirectory, "artifacts", "inputs", "scope.contract.json"));
+	if (
+		record.landExecutionResult?.verificationBasis === "verified_supplemental_land_completion" &&
+		computeRvfTextSha256(scopeBytes) !==
+			record.landExecutionResult.supplementalLandCompletionVerification?.scopeContractSha256
+	)
+		throw new Error("当前 base scope 与已接受补充证明中的冻结原件不符。");
+	const scopeContract = z
+		.object({ base_ref: z.string().nullable().optional() })
+		.parse(JSON.parse(scopeBytes.toString("utf8")));
+	const boundBaseRef = scopeContract.base_ref ?? record.receipt.comparison_base_ref;
+	if (!boundBaseRef || (boundBaseRef.startsWith("refs/") && !boundBaseRef.startsWith("refs/heads/")))
+		throw new Error("缺少已绑定的本地 base ref。");
+	const baseRef = boundBaseRef.startsWith("refs/heads/") ? boundBaseRef : `refs/heads/${boundBaseRef}`;
+	await getGitStdout(["-c", "core.hooksPath=/dev/null", "check-ref-format", baseRef], record.receipt.worktree);
+	return { baseRef, scopeContractSha256: computeRvfTextSha256(scopeBytes) };
+}
+
+async function readBoundRvfLandCompletionEvidence(record: RvfAutomaticCloseoutRecord, commitSha: string) {
+	const accepted = record.landExecutionResult;
+	if (accepted?.verificationBasis === "verified_supplemental_land_completion") {
+		if (!accepted.supplementalLandCompletionEvidence || accepted.commitSha !== commitSha)
+			throw new Error("已接受的历史 Land 缺少原补充证明引用。");
+		const verification = await verifyBoundRvfSupplementalLandCompletionEvidence(
+			record,
+			commitSha,
+			accepted.supplementalLandCompletionEvidence,
+		);
+		return {
+			gitCommonDirectoryRealpath: verification.gitCommonDirectoryRealpath,
+			supplementalLandCompletionEvidenceSha256: accepted.supplementalLandCompletionEvidence.evidenceSha256,
+		};
+	}
+	return readBoundRvfLandCandidateEvidence(record, commitSha);
+}
+
+// 证明本次观测到的等价整合状态，不证明历史上由谁、在哪次 handback 中执行。
+export async function readBoundRvfBaseIntegrationState(record: RvfAutomaticCloseoutRecord) {
+	const landCommitSha = record.landExecutionResult?.commitSha;
+	if (record.landExecutionResult?.outcome !== "completed" || !landCommitSha || !record.runId || !record.handoffSha256)
+		throw new Error("尚未确认 land 成功，不能核验 base 整合。");
+	if (record.receipt.kanban_task_id !== record.taskId) throw new Error("开审凭据的 task 归属不符。");
+	const [candidate, base] = await Promise.all([
+		readBoundRvfLandCompletionEvidence(record, landCommitSha),
+		readBoundRvfLocalBaseRef(record),
+	]);
+	const git = (arguments_: string[]) =>
+		getGitStdout(["-c", "core.hooksPath=/dev/null", ...arguments_], record.receipt.worktree);
+	const baseCommitSha = await git(["rev-parse", "--verify", `${base.baseRef}^{commit}`]);
+	await git(["merge-base", "--is-ancestor", landCommitSha, baseCommitSha]);
+	return {
+		source: "observed_local_base_ancestry" as const,
+		workspaceId: record.workspaceId,
+		taskId: record.taskId,
+		decisionToken: record.receipt.decision_token,
+		runId: record.runId,
+		handoffSha256: record.handoffSha256,
+		...candidate,
+		...base,
+		landCommitSha,
+		baseCommitSha,
+	};
+}
 
 export async function validateRvfAutomaticCloseoutExecutionResult(
 	record: RvfAutomaticCloseoutRecord,
@@ -31,38 +128,18 @@ export async function validateRvfAutomaticCloseoutExecutionResult(
 	await git(["cat-file", "-e", `${commit}^{commit}`]);
 	if (input.stage === "land") {
 		// 已提交候选可以复用开审前 HEAD，是否完成由当前 run 的 candidate evidence 证明。
-		await git(["merge-base", "--is-ancestor", commit, "HEAD"]);
-		const path = await git([
-			"rev-parse",
-			"--path-format=absolute",
-			"--git-path",
-			"rvf/evidence/reviewed-task-candidate-evidence.json",
-		]);
-		if ((await lstat(path)).isSymbolicLink() || (await lstat(`${path}.sha256`)).isSymbolicLink())
-			throw new Error("land evidence 及摘要不能是符号链接。");
-		const bytes = await readFile(path);
-		if ((await readFile(`${path}.sha256`, "utf8")).trim() !== computeRvfTextSha256(bytes))
-			throw new Error("land evidence 摘要不一致。");
-		const evidence = landedCandidateEvidenceSchema.parse(JSON.parse(bytes.toString("utf8")));
-		if (
-			evidence.subject.head_oid !== commit ||
-			evidence.review.run_id !== record.runId ||
-			(await realpath(evidence.subject.worktree_realpath)) !== (await realpath(record.receipt.worktree)) ||
-			(await realpath(evidence.subject.git_common_dir_realpath)) !==
-				(await realpath(await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])))
-		)
-			throw new Error("land evidence 与提交、run 或工作区绑定不一致。");
+		if (input.supplementalLandCompletionEvidence)
+			await verifyBoundRvfSupplementalLandCompletionEvidence(
+				record,
+				commit,
+				input.supplementalLandCompletionEvidence,
+			);
+		else await readBoundRvfLandCompletionEvidence(record, commit);
 	} else {
 		if (record.landExecutionResult?.outcome !== "completed" || !record.landExecutionResult.commitSha)
 			throw new Error("尚未确认 land 成功，不能登记 base 同步完成。");
 		const baseRef = input.baseRef;
-		if (!record.runDirectory) throw new Error("缺少绑定的 RVF run 目录。");
-		const scopeContract = z
-			.object({ base_ref: z.string().nullable().optional() })
-			.parse(
-				JSON.parse(await readFile(join(record.runDirectory, "artifacts", "inputs", "scope.contract.json"), "utf8")),
-			);
-		const boundBaseRef = scopeContract.base_ref ?? record.receipt.comparison_base_ref;
+		const { baseRef: boundBaseRef } = await readBoundRvfLocalBaseRef(record);
 		const normalizeLocalBaseRef = (value: string) => value.replace(/^refs\/heads\//u, "");
 		if (!baseRef || !boundBaseRef || normalizeLocalBaseRef(baseRef) !== normalizeLocalBaseRef(boundBaseRef))
 			throw new Error("base 同步结果与已绑定的本地 base ref 不一致。");

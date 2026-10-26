@@ -98,6 +98,7 @@ function expectedFormattedTaskRecord(column: string) {
 		title: "任务一",
 		prompt: "prompt",
 		column,
+		taskShelvingState: null,
 		baseRef: "main",
 		startInPlanMode: false,
 		taskAgentPermissionMode: "bypass_all_permission_prompts",

@@ -1,11 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import lockfile from "proper-lockfile";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
+import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
+import { getCodexConfigurationSyncDirectory } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { codexConfigurationWriterBindingSchema } from "../core/codex-configuration-sync-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { preserveCodexHookTrustDuringConfigurationRefresh } from "./preserve-codex-hook-trust-during-configuration-refresh";
 
 export function resolveUserCodexHomeDirectoryPath(environment: NodeJS.ProcessEnv = process.env, cwd = process.cwd()) {
 	return environment.CODEX_HOME?.trim()
@@ -48,14 +53,76 @@ export async function assertCodexStorageWritablePathInsideHome(home: string, des
 
 const canonicalUserCodexHomeMarkerSchema = z.object({ sourceHomeDirectoryPath: z.string().min(1) });
 
+function resolveVerifiedCodexWriterBridgeHistoryHome(inferredHome: string, recordedHome?: string | null) {
+	const writersDirectoryPath = join(getCodexConfigurationSyncDirectory(), "writers");
+	const lexicalRelativePathParts = relative(writersDirectoryPath, inferredHome).split(sep);
+	const isLexicalWriterHome =
+		lexicalRelativePathParts.length === 2 &&
+		lexicalRelativePathParts[1] === "configuration-home" &&
+		codexConfigurationWriterBindingSchema.shape.writerId.safeParse(lexicalRelativePathParts[0]).success;
+	let physicalInferredHome: string;
+	let physicalWritersDirectoryPath: string;
+	try {
+		physicalInferredHome = realpathSync(inferredHome);
+		physicalWritersDirectoryPath = realpathSync(writersDirectoryPath);
+	} catch (error) {
+		if (!isLexicalWriterHome && ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+			return undefined;
+		throw error;
+	}
+	const physicalRelativePathParts = relative(physicalWritersDirectoryPath, physicalInferredHome).split(sep);
+	if (
+		physicalRelativePathParts.length !== 2 ||
+		physicalRelativePathParts[1] !== "configuration-home" ||
+		!codexConfigurationWriterBindingSchema.shape.writerId.safeParse(physicalRelativePathParts[0]).success
+	) {
+		if (isLexicalWriterHome) throw new Error("Codex 配置写入者目录身份不符，未改写历史归属。");
+		return undefined;
+	}
+	const manifestPath = join(dirname(physicalInferredHome), "writer-binding.json");
+	if (!lstatSync(manifestPath).isFile()) throw new Error("Codex 历史桥接绑定不是普通文件。");
+	const binding = codexConfigurationWriterBindingSchema.parse(JSON.parse(readFileSync(manifestPath, "utf8")));
+	if (
+		binding.writerId !== physicalRelativePathParts[0] ||
+		binding.configurationHomeDirectoryPath !== physicalInferredHome
+	)
+		throw new Error("Codex 配置写入者清单目录身份不符，未改写历史归属。");
+	const physicalHistoryHome = realpathSync(binding.conversationStorageHomeDirectoryPath);
+	const historyMetadata = lstatSync(physicalHistoryHome, { bigint: true });
+	if (
+		!historyMetadata.isDirectory() ||
+		configurationDigest([physicalHistoryHome, `${historyMetadata.dev}`, `${historyMetadata.ino}`]) !==
+			binding.storageDirectoryIdentity ||
+		(recordedHome && realpathSync(recordedHome) !== physicalHistoryHome)
+	)
+		throw new Error("Codex 历史目录身份或保存的历史归属不符，等待原目录恢复。");
+	for (const name of ["sessions", "archived_sessions", "thread-writer-locks"]) {
+		const bridgePath = join(physicalInferredHome, name);
+		const historyDirectoryPath = join(physicalHistoryHome, name);
+		if (
+			!lstatSync(bridgePath).isSymbolicLink() ||
+			!lstatSync(historyDirectoryPath).isDirectory() ||
+			realpathSync(bridgePath) !== realpathSync(historyDirectoryPath)
+		)
+			throw new Error("Codex 历史或原生写锁桥接归属不符，等待原桥接恢复。");
+	}
+	return recordedHome ?? binding.conversationStorageHomeDirectoryPath;
+}
+
 export function resolveRecordedCodexConversationHome(input: {
 	codexConversationStorageHomeDirectoryPath?: string | null;
 	transcriptPath?: string | null;
 	environment?: NodeJS.ProcessEnv;
 	workingDirectoryPath?: string;
 }) {
+	const inferredHome = inferCodexHomeDirectoryPathFromTranscriptPath(input.transcriptPath);
+	// 同步接口供历史缓存与持久状态漏斗使用；仅对物理归属匹配的 writer 核验绑定与桥接。
+	const verifiedBridgeHistoryHome = inferredHome
+		? resolveVerifiedCodexWriterBridgeHistoryHome(inferredHome, input.codexConversationStorageHomeDirectoryPath)
+		: undefined;
 	return (
-		inferCodexHomeDirectoryPathFromTranscriptPath(input.transcriptPath) ??
+		verifiedBridgeHistoryHome ??
+		inferredHome ??
 		input.codexConversationStorageHomeDirectoryPath ??
 		resolveUserCodexHomeDirectoryPath(input.environment, input.workingDirectoryPath)
 	);
@@ -84,7 +151,7 @@ function isCodexConfigurationTable(value: unknown): value is TomlTable {
 	return typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date);
 }
 
-function preserveCodexConfigurationSourceFileResolution(
+export function preserveCodexConfigurationSourceFileResolution(
 	configuration: TomlTable,
 	sourceConfigurationDirectoryPath: string,
 ) {
@@ -112,13 +179,60 @@ function preserveCodexConfigurationSourceFileResolution(
 				preserveCodexConfigurationSourceFileResolution(profile, sourceConfigurationDirectoryPath);
 }
 
+async function readExistingCodexConfigurationText(configurationPath: string) {
+	try {
+		return await readFile(configurationPath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+		throw error;
+	}
+}
+
+async function refreshManagedCodexConfigurationSnapshot(input: {
+	sourceConfigurationPath: string;
+	targetHomeDirectoryPath: string;
+	configurationFileName: string;
+	relocatedHookSourceFilePaths: ReadonlyMap<string, string>;
+}) {
+	const { sourceConfigurationPath, targetHomeDirectoryPath, configurationFileName, relocatedHookSourceFilePaths } =
+		input;
+	const snapshotPath = join(targetHomeDirectoryPath, configurationFileName);
+	await assertCodexStorageWritablePathInsideHome(targetHomeDirectoryPath, snapshotPath);
+	// 旧目录可能仍有原生 writer；只做首次初始化，绝不刷新活配置。
+	try {
+		await lstat(snapshotPath);
+		return;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	const configuration = parse(await readExistingCodexConfigurationText(sourceConfigurationPath));
+	if (configuration.cli_auth_credentials_store === "keyring")
+		throw new Error("当前 Codex 使用 keyring 登录；专用会话目录尚不支持共享该认证方式，原有会话保持原目录。");
+	configuration.sqlite_home = targetHomeDirectoryPath;
+	preserveCodexConfigurationSourceFileResolution(configuration, dirname(sourceConfigurationPath));
+	preserveCodexHookTrustDuringConfigurationRefresh({
+		configuration,
+		persistedManagedConfiguration: {},
+		relocatedHookSourceFilePaths,
+	});
+	// 排他创建关闭了最后检查到 rename 的覆盖窗口；原生先创建时保留原生结果。
+	try {
+		await writeFile(snapshotPath, stringify(configuration), { mode: 0o600, flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+}
+
 export async function prepareManagedCodexConversationStorageHome(sourceHomeDirectoryPath: string) {
 	const target = getManagedCodexConversationStorageHomeDirectoryPath();
 	await mkdir(target, { recursive: true, mode: 0o700 });
 	if ((await lstat(target)).isSymbolicLink()) throw new Error("看板 Codex 专用目录是软链，未改写任何配置。");
 	if (resolve(sourceHomeDirectoryPath) === resolve(target)) return target;
+	const targetNativeHookSourceHomeDirectoryPath = await realpath(target);
+	let sourceNativeHookSourceHomeDirectoryPath = resolve(sourceHomeDirectoryPath);
 	try {
-		if ((await realpath(sourceHomeDirectoryPath)) === (await realpath(target)))
+		sourceNativeHookSourceHomeDirectoryPath = await realpath(sourceHomeDirectoryPath);
+		if (sourceNativeHookSourceHomeDirectoryPath === targetNativeHookSourceHomeDirectoryPath)
 			throw new Error("用户目录与看板 Codex 专用目录指向同一物理位置，未改写任何配置。");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -140,37 +254,11 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 		}
 		if (savedSource && savedSource !== resolve(sourceHomeDirectoryPath))
 			throw new Error("看板 Codex 专用目录绑定了另一套用户配置；保留原绑定，不能混用账号。");
-		let sourceConfig = "";
-		try {
-			sourceConfig = await readFile(join(sourceHomeDirectoryPath, "config.toml"), "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-		const configuration = parse(sourceConfig);
-		if (configuration.cli_auth_credentials_store === "keyring")
-			throw new Error("当前 Codex 使用 keyring 登录；专用会话目录尚不支持共享该认证方式，原有会话保持原目录。");
-		configuration.sqlite_home = target;
-		preserveCodexConfigurationSourceFileResolution(configuration, sourceHomeDirectoryPath);
-		const snapshot = stringify(configuration);
-		const snapshotPath = join(target, "config.toml");
-		await assertCodexStorageWritablePathInsideHome(target, snapshotPath);
-		const snapshotTemporaryPath = `${snapshotPath}.${randomUUID()}.pending-write`;
-		await writeFile(snapshotTemporaryPath, snapshot, { mode: 0o600 });
-		await rename(snapshotTemporaryPath, snapshotPath);
 		let sourceEntries: string[] = [];
 		try {
 			sourceEntries = await readdir(sourceHomeDirectoryPath);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-		for (const entry of sourceEntries.filter((name) => name.endsWith(".config.toml"))) {
-			await assertCodexStorageWritablePathInsideHome(target, join(target, entry));
-			const profile = parse(await readFile(join(sourceHomeDirectoryPath, entry), "utf8"));
-			profile.sqlite_home = target;
-			preserveCodexConfigurationSourceFileResolution(profile, sourceHomeDirectoryPath);
-			const pendingProfile = join(target, `${entry}.${randomUUID()}.pending-write`);
-			await writeFile(pendingProfile, stringify(profile), { mode: 0o600 });
-			await rename(pendingProfile, join(target, entry));
 		}
 		for (const name of [
 			"auth.json",
@@ -184,6 +272,21 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 			"marketplaces",
 		])
 			await linkExistingSharedCodexConfigurationEntry(join(sourceHomeDirectoryPath, name), join(target, name));
+		const configurationFileNames = ["config.toml", ...sourceEntries.filter((name) => name.endsWith(".config.toml"))];
+		// 原生来源键先规范化 home，再附加文件名；不能规范化共享文件软链本身或扩大账号绑定范围。
+		const relocatedHookSourceFilePaths = new Map(
+			[...configurationFileNames, ...(sourceEntries.includes("hooks.json") ? ["hooks.json"] : [])].map((name) => [
+				join(sourceNativeHookSourceHomeDirectoryPath, name),
+				join(targetNativeHookSourceHomeDirectoryPath, name),
+			]),
+		);
+		for (const configurationFileName of configurationFileNames)
+			await refreshManagedCodexConfigurationSnapshot({
+				sourceConfigurationPath: join(sourceHomeDirectoryPath, configurationFileName),
+				targetHomeDirectoryPath: target,
+				configurationFileName,
+				relocatedHookSourceFilePaths,
+			});
 		await writeFile(sourceMarkerPath, JSON.stringify({ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) }), {
 			mode: 0o600,
 		});

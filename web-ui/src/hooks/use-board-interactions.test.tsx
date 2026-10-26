@@ -123,6 +123,10 @@ function resetTaskCardActionQueryMocksToSucceed(): void {
 	taskCardActionQueryMocks.updateTaskCardFieldValuesInWorkspace.mockReset();
 	taskCardActionQueryMocks.setTaskPinboardPinStateOfTaskCardInWorkspace.mockReset();
 	taskCardActionQueryMocks.readTaskCardWithBoardColumnInWorkspace.mockReset();
+	taskCardActionQueryMocks.readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
+		taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
+		lookedUpTaskId: "task-1",
+	});
 }
 
 vi.mock("@/hooks/use-programmatic-card-moves", () => ({
@@ -2303,6 +2307,49 @@ describe("useBoardInteractions", () => {
 			expect(readColumnPlacementInitiator("task-ar")).toBe(
 				"web_ui_client_automation_session_facet_driven_column_autoflow",
 			);
+		});
+
+		it.each([true, false])("搁置或解除搁置不会重放旧的等待审查活动，当前搁置=%s", async (isShelved) => {
+			mockUnavailableProgrammaticCardMoves();
+			const initialBoard = createBoardWithTaskInColumn("task-shelving-autoflow", "in_progress");
+			const card = initialBoard.columns.flatMap((column) => column.cards)[0];
+			if (!card) throw new Error("缺少自动移列夹具");
+			card.taskShelvingState = { isShelved, lastChangedAt: 1000 };
+			const harness = await renderTrackingBoard(initialBoard, {
+				initialSessions: {
+					"task-shelving-autoflow": createRunningSession("task-shelving-autoflow", {
+						state: "awaiting_review",
+						reviewReason: "exit",
+						startedAt: 1,
+						updatedAt: 2000,
+					}),
+				},
+			});
+			expect(cardIdsIn(harness.readBoard(), "in_progress")).toEqual(["task-shelving-autoflow"]);
+		});
+
+		it("解除搁置之后的新交棒继续按既有规则自动移入 Review", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			const initialBoard = createBoardWithTaskInColumn("task-shelving-new-handoff", "in_progress");
+			const card = initialBoard.columns.flatMap((column) => column.cards)[0];
+			if (!card) throw new Error("缺少交棒夹具");
+			card.taskShelvingState = { isShelved: false, lastChangedAt: 1000 };
+			const harness = await renderTrackingBoard(initialBoard, {
+				initialSessions: {
+					"task-shelving-new-handoff": createRunningSession("task-shelving-new-handoff", {
+						state: "awaiting_review",
+						reviewReason: "exit",
+						startedAt: 1,
+						updatedAt: 2000,
+						lastAgentConversationUserHandoffObservation: {
+							observedAtMs: 2000,
+							signalConfidence: "harness_turn_complete",
+							turnSequence: 1,
+						},
+					}),
+				},
+			});
+			expect(cardIdsIn(harness.readBoard(), "review")).toEqual(["task-shelving-new-handoff"]);
 		});
 
 		it("tags the session-started backlog → in progress autoflow as session-facet-driven column autoflow", async () => {

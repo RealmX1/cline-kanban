@@ -25,7 +25,7 @@ export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	// Focus View 此刻对准的任务：当前项目里选中的卡，或跨项目跳转在途的目标。行高亮据此判断。
 	focusedTaskInProject: { workspaceId: string; taskId: string } | null;
 	// 同项目直接选中；跨项目先切 workspace，目标 board 加载出该任务后再打开（App 的 pendingCrossProjectTaskOpen）。
-	// 通用前台视图由独立任务接入；完整限定身份就是 Relations 的中心任务。
+	// 关联预览始终传被预览任务的完整一世身份，作为前台关系图的根。
 	onOpenRelationsVisualizationForTask?: (task: KanbanBoardCardWorkUnitQualifiedReference) => void;
 	onOpenTaskInProject: (workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
 	// backlog 卡没有详情页：点它在 Focus View 之上原地打开任意项目的编辑对话框，不切项目、焦点任务不动。

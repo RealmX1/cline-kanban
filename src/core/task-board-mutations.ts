@@ -22,9 +22,12 @@ import {
 } from "./backlog-task-description-last-updated-ordering";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "./task-agent-permission-mode";
 import { createUniqueTaskId } from "./task-id";
+import { isTaskCardShelved } from "./task-shelving-state";
 import { resolveTaskTitle } from "./task-title";
 
 // 前端经 `@runtime-task-state` 别名（指向本文件）复用这组函数，免得再加一个值别名（tsconfig/vite/vitest 三处同步）。
+export { isTaskCardShelved, setTaskCardShelvingState } from "./task-shelving-state";
+
 export {
 	hasTaskDescriptionContentChanged,
 	resolveTaskDescriptionLastUpdatedAt,
@@ -396,7 +399,7 @@ export function moveTaskToColumn(
 			fromColumnId: null,
 		};
 	}
-	if (found.columnId === targetColumnId) {
+	if (found.columnId === targetColumnId || isTaskCardShelved(found.task)) {
 		return {
 			moved: false,
 			board,
@@ -507,7 +510,7 @@ export function reorderTaskWithinBoardColumn(
 		return { reordered: false, board, task: null, boardColumnId: null };
 	}
 	const column = board.columns[found.columnIndex];
-	if (!column || found.columnId === "backlog") {
+	if (!column || found.columnId === "backlog" || isTaskCardShelved(found.task)) {
 		return { reordered: false, board, task: found.task, boardColumnId: found.columnId };
 	}
 	const remainingCards = column.cards.filter((_, index) => index !== found.taskIndex);

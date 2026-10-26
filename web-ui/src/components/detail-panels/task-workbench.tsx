@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import {
 	type FocusViewDesktopPanelArrangementPreference,
 	selectTaskWorkbenchModuleInSlot,
@@ -51,6 +52,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	queueNotice,
 	queueAnnouncement,
 	onOpenQueue,
+	mobileModuleLayout,
 }: {
 	modules: Record<Module, ReactNode>;
 	moduleLabels?: Record<Module, string>;
@@ -68,8 +70,20 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	queueNotice?: ReactNode;
 	queueAnnouncement?: string | null;
 	onOpenQueue?: () => void;
+	mobileModuleLayout?: { visibleModules: readonly Module[]; heightFillingModule: Module | null };
 }) {
+	const isMobileModuleLayout = mobileModuleLayout !== undefined;
 	const availableModules = Object.keys(moduleLabels) as Module[];
+	const foregroundView = useExpandedForegroundViewNavigation();
+	const foregroundModule = foregroundView?.ownerSurfaceId
+		? (
+				{
+					task_visualization: "task_visualizations",
+					task_relations: "cross_task_relations",
+					exploration_thread_graph: "exploration_map",
+				} as const
+			)[foregroundView.target?.viewKind ?? "task_visualization"]
+		: null;
 	const [slots, setSlots] = useState(() => loadModuleSlots(moduleLabels, defaultSlots, moduleSlotsStorageKey));
 	useEffect(() => {
 		if (moduleSelectionResetKey !== undefined)
@@ -112,7 +126,12 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 			aria-label={workbenchTitle}
 			className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-1"
 		>
-			<div className="flex min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs">
+			<div
+				className={cn(
+					"min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs",
+					isMobileModuleLayout ? "hidden" : "flex",
+				)}
+			>
 				<span className="font-medium">{workbenchTitle}</span>
 				<span className="sr-only" role="status" aria-live="polite">
 					{queueAnnouncement ?? ""}
@@ -149,30 +168,49 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 			<div
 				ref={rootRef}
 				data-task-workbench-slots=""
-				className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
+				className={cn("min-h-0 min-w-0 flex-1 overflow-hidden", isMobileModuleLayout ? "flex flex-col" : "grid")}
 				style={
-					isBelowAgent
-						? {
-								gridTemplateColumns: `minmax(0, ${slotRatio}fr) 1px minmax(0, ${1 - slotRatio}fr)`,
-								gridTemplateAreas: '"first divider second"',
-							}
-						: {
-								gridTemplateRows: `minmax(0, ${slotRatio}fr) 1px minmax(0, ${1 - slotRatio}fr)`,
-								gridTemplateAreas: '"first" "divider" "second"',
-							}
+					isMobileModuleLayout
+						? undefined
+						: isBelowAgent
+							? {
+									gridTemplateColumns: `minmax(0, ${slotRatio}fr) 1px minmax(0, ${1 - slotRatio}fr)`,
+									gridTemplateAreas: '"first divider second"',
+								}
+							: {
+									gridTemplateRows: `minmax(0, ${slotRatio}fr) 1px minmax(0, ${1 - slotRatio}fr)`,
+									gridTemplateAreas: '"first" "divider" "second"',
+								}
 				}
 			>
 				{availableModules.map((module) => {
 					const slot = slots.indexOf(module);
+					const isModuleVisible = mobileModuleLayout
+						? mobileModuleLayout.visibleModules.includes(module)
+						: slot !== -1 || module === foregroundModule;
 					return (
 						<div
 							key={module}
-							hidden={slot === -1}
+							hidden={!isModuleVisible}
 							data-task-workbench-module={module}
-							className={cn("min-h-0 min-w-0 overflow-hidden", slot !== -1 && "flex flex-col")}
-							style={{ gridArea: slot === 0 ? "first" : "second", display: slot === -1 ? "none" : undefined }}
+							className={cn(
+								"min-h-0 min-w-0 overflow-hidden",
+								isModuleVisible && "flex flex-col",
+								isMobileModuleLayout &&
+									(module === mobileModuleLayout.heightFillingModule ? "flex-1" : "shrink-0"),
+							)}
+							style={{
+								gridArea: slot === 0 ? "first" : "second",
+								order: mobileModuleLayout?.visibleModules.indexOf(module),
+								display: isModuleVisible ? undefined : "none",
+							}}
 						>
-							<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
+							<div
+								className={cn(
+									"h-8 shrink-0 items-center border-b border-border px-2",
+									isMobileModuleLayout ? "hidden" : "flex",
+								)}
+							>
 								<select
 									aria-label={`工作台格位 ${slot + 1}`}
 									className="h-6 max-w-full rounded-sm bg-surface-2 px-1 text-xs text-text-primary"
@@ -199,7 +237,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 				<ResizeHandle
 					orientation={isBelowAgent ? "vertical" : "horizontal"}
 					ariaLabel="调整任务工作台格位大小"
-					className="z-10"
+					className={cn("z-10", isMobileModuleLayout && "hidden")}
 					style={{ gridArea: "divider" }}
 					tabIndex={0}
 					ariaValueNow={Math.round(slotRatio * 100)}

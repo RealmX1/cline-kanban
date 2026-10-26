@@ -24,7 +24,12 @@ import {
 	preserveRuntimeOwnedMainSessionBindings,
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
+import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
+import {
+	assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot,
+	hasBoardSnapshotRemovedTaskTransferredIntoWorkspace,
+} from "./backlog-task-project-transfer";
 import { createParsedPersistedJsonFileReadCache } from "./parsed-persisted-json-file-read-cache";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
@@ -250,7 +255,7 @@ function getWorkspaceIndexLockRequest(): LockRequest {
 	};
 }
 
-function getWorkspaceDirectoryLockRequest(workspaceId: string): LockRequest {
+export function getWorkspaceDirectoryLockRequest(workspaceId: string): LockRequest {
 	return {
 		path: getWorkspaceDirectoryPath(workspaceId),
 		type: "directory",
@@ -748,8 +753,12 @@ function toWorkspaceStateResponse(
 export class WorkspaceStateConflictError extends Error {
 	readonly currentRevision: number;
 
-	constructor(expectedRevision: number, currentRevision: number) {
-		super(`Workspace state revision mismatch: expected ${expectedRevision}, current ${currentRevision}.`);
+	constructor(expectedRevision: number | undefined, currentRevision: number) {
+		super(
+			expectedRevision === undefined
+				? "未携带看板版本的整板快照不能删除迁入任务，请刷新看板后重试。"
+				: `Workspace state revision mismatch: expected ${expectedRevision}, current ${currentRevision}.`,
+		);
 		this.name = "WorkspaceStateConflictError";
 		this.currentRevision = currentRevision;
 	}
@@ -1042,6 +1051,16 @@ export async function saveWorkspaceState(
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
+		// 无版本的旧整板不能把客户端尚未见过的迁入卡当作删除；正式卡片动作在锁内改最新状态，不走此入口。
+		if (
+			expectedRevision === undefined &&
+			(await hasBoardSnapshotRemovedTaskTransferredIntoWorkspace(
+				context.workspaceId,
+				persistedBoard,
+				parsedPayload.board,
+			))
+		)
+			throw new WorkspaceStateConflictError(undefined, currentMeta.revision);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
 		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
 			context,
@@ -1068,10 +1087,15 @@ export async function saveWorkspaceState(
 			),
 			true,
 		);
+		// 先恢复 runtime 拥有的搁置事实，避免客户端伪造 isShelved 阻挡后续 Stage 回滚。
+		const incomingBoardWithPersistedTaskShelvingState = preservePersistedTaskShelvingAgainstIncomingBoardSnapshot(
+			persistedBoard,
+			parsedPayload.board,
+		);
 		const boardWithoutStartedTasksReenteringBacklog =
 			reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
 				persistedBoard,
-				parsedPayload.board,
+				incomingBoardWithPersistedTaskShelvingState,
 				sessions,
 			);
 		// Post-Deploy Verification 门禁兜底：整板保存不能把受门禁、未结案的卡带进 Done（正常入口走 taskCardAction 的门禁）。
@@ -1224,7 +1248,7 @@ async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<strin
 
 // Y-EVENT-2 第 1、2 步。账本不可用时抛出 InterWorkUnitRelationLedgerUnavailableError，本次写入随之失败——
 // 该实例的 board 只读，宁可拒写也不产生没有事件的 board 变更。
-async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+export async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
 	context: RuntimeWorkspaceContext,
 	persistedBoard: RuntimeBoardData,
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
@@ -1251,7 +1275,7 @@ async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock
 
 // Y-EVENT-2 第 4–6 步：事件先记为 pending，再写三个 JSON，最后提交。board 序列化只做一次，
 // 期望哈希与落盘字节逐字一致；悬挂批次在下一次漏斗通过时按盘上 board 哈希结算。
-async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents(input: {
+export async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents(input: {
 	context: RuntimeWorkspaceContext;
 	previousBoard: RuntimeBoardData;
 	previousSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -1261,6 +1285,12 @@ async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvent
 	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor;
 }): Promise<void> {
 	const { context } = input;
+	if (!input.taskMutationIntentWithResolvedActor.backlogTaskProjectTransfer)
+		await assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot(
+			context.workspaceId,
+			input.previousBoard,
+			input.nextBoard,
+		);
 	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
 	const serializedNextBoard = JSON.stringify(input.nextBoard, null, 2);
 	const nextBoardFileSha256 = createHash("sha256").update(serializedNextBoard, "utf8").digest("hex");

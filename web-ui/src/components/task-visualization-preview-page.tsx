@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
 
@@ -9,15 +8,6 @@ export function TaskVisualizationPreviewPage() {
 	const artifactId = query.get("visualizationArtifactId");
 	const requestedRevisionId = query.get("revisionId");
 	const controller = useTaskVisualizationArtifacts({ workspaceId, taskId, observeBrowser: false });
-	const selectedInitialArtifact = useRef(false);
-	useEffect(() => {
-		if (selectedInitialArtifact.current) return;
-		const artifact = controller.artifacts.find((entry) => entry.visualizationArtifactId === artifactId);
-		if (artifact) {
-			selectedInitialArtifact.current = true;
-			controller.selectArtifact({ ...artifact, revisionId: requestedRevisionId ?? artifact.revisionId });
-		}
-	}, [artifactId, requestedRevisionId, controller.artifacts, controller.selectArtifact]);
 	if (!workspaceId || !taskId)
 		return (
 			<p role="alert" className="p-4">
@@ -32,7 +22,16 @@ export function TaskVisualizationPreviewPage() {
 				</a>
 				<span>任务可视化</span>
 			</header>
-			<TaskVisualizationArtifactsPanel workspaceId={workspaceId} taskId={taskId} controller={controller} />
+			<TaskVisualizationArtifactsPanel
+				workspaceId={workspaceId}
+				taskId={taskId}
+				controller={controller}
+				initialSelection={
+					artifactId === null
+						? undefined
+						: { visualizationArtifactId: artifactId, revisionId: requestedRevisionId ?? undefined }
+				}
+			/>
 		</main>
 	);
 }

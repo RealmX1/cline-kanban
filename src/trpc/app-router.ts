@@ -228,6 +228,8 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	type RuntimeTaskCardActionSetShelvingStateRequest,
+	type RuntimeTaskCardActionSetShelvingStateResponse,
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
@@ -389,10 +391,14 @@ import {
 	runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema,
 	runtimeTaskCardActionRestoreFromDoneRequestSchema,
 	runtimeTaskCardActionRestoreFromDoneResponseSchema,
+	runtimeTaskCardActionSetShelvingStateRequestSchema,
+	runtimeTaskCardActionSetShelvingStateResponseSchema,
 	runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema,
 	runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema,
 	runtimeTaskCardActionStartAgentSessionRequestSchema,
 	runtimeTaskCardActionStartAgentSessionResponseSchema,
+	runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema,
+	runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema,
 	runtimeTaskCardActionUpdateFieldValuesRequestSchema,
 	runtimeTaskCardActionUpdateFieldValuesResponseSchema,
 	runtimeTaskChatAbortRequestSchema,
@@ -471,6 +477,14 @@ import {
 	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
 import {
+	type CodexConfigurationSyncApi,
+	codexConfigurationChangeMutationRequestSchema,
+	codexConfigurationResolveConflictRequestSchema,
+	codexConfigurationResolveTargetConflictRequestSchema,
+	codexConfigurationSynchronizeRequestSchema,
+	codexConfigurationSyncStateSchema,
+} from "../core/codex-configuration-sync-contract";
+import {
 	type RuntimeCodexConversationStorageOperationRequest,
 	type RuntimeCodexConversationStorageOperationResponse,
 	runtimeCodexConversationStorageOperationRequestSchema,
@@ -535,6 +549,8 @@ import {
 	incomingWorkItemTriageResponseSchema,
 	sharedTaskIndexingContextSchema,
 	taskIndexingSupportExecutorSettingsSchema,
+	taskProjectAssignmentAnalysisRequestSchema,
+	taskProjectAssignmentAnalysisResponseSchema,
 } from "../core/task-indexing-support-contract";
 import {
 	createTaskLookupConversationRequestSchema,
@@ -554,6 +570,7 @@ import type {
 import {
 	taskMainSessionHandoverPrepareRequestSchema,
 	taskMainSessionHandoverPrepareResponseSchema,
+	taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema,
 	taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema,
 	taskMainSessionHandoverRequestSchema,
 	taskMainSessionHandoverStatusResponseSchema,
@@ -657,6 +674,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	codexConfigurationSyncApi?: CodexConfigurationSyncApi;
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
 	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
 	taskLookupConversationApi?: TaskLookupConversationService;
@@ -675,6 +693,11 @@ export interface RuntimeTrpcContext {
 		getStatus: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
+		) => Promise<TaskMainSessionHandoverStatusResponse>;
+		recoverWithNewAgentSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
+			evidence?: KanbanRequestOriginActorEvidence,
 		) => Promise<TaskMainSessionHandoverStatusResponse>;
 		recoverWithNewCodexSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1058,6 +1081,11 @@ export interface RuntimeTrpcContext {
 	};
 	// 看板卡片 per-card 动作的唯一服务端实现（src/trpc/task-card-action-api.ts）。浏览器与 CLI 都调它。
 	taskCardActionApi: {
+		transferNeverStartedBacklogTaskToProject?: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<{ operationId: string; workspaceId: string; taskId: string }>;
 		readTaskCardWithBoardColumn: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest,
@@ -1103,6 +1131,11 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskCardActionUpdateFieldValuesRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskCardActionUpdateFieldValuesResponse>;
+		setTaskCardShelvingStateWithoutSessionSideEffects: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionSetShelvingStateRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionSetShelvingStateResponse>;
 		setTaskPinboardPinStateOfTaskCard: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionSetTaskPinboardPinStateRequest,
@@ -1560,6 +1593,26 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
 			}),
+		getGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(taskIndexingSupportExecutorSettingsSchema)
+			.query(({ ctx }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.getGlobalExecutorSettings();
+			}),
+		setGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskIndexingSupportExecutorSettingsSchema)
+			.output(taskIndexingSupportExecutorSettingsSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.setGlobalExecutorSettings(input);
+			}),
+		analyzeTaskProjectAssignment: workspaceProcedure
+			.input(taskProjectAssignmentAnalysisRequestSchema)
+			.output(taskProjectAssignmentAnalysisResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input);
+			}),
 		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
 			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 			return ctx.taskIndexingSupportApi.getExecutorSettings(ctx.workspaceScope);
@@ -1676,6 +1729,17 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
 			}),
+		recoverTaskMainSessionHandoverWithNewAgentSession: workspaceProcedure
+			.input(taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema)
+			.output(taskMainSessionHandoverStatusResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskMainSessionHandoverApi.recoverWithNewAgentSession(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
 		recoverTaskMainSessionHandoverWithNewCodexSession: workspaceProcedure
 			.input(taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema)
 			.output(taskMainSessionHandoverStatusResponseSchema)
@@ -1762,6 +1826,41 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConfigResponseSchema)
 			.query(async ({ ctx }) => {
 				return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
+			}),
+		getCodexConfigurationSyncState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(codexConfigurationSyncStateSchema)
+			.query(({ ctx }) => {
+				if (!ctx.codexConfigurationSyncApi)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Codex 配置同步服务未启用。" });
+				return ctx.codexConfigurationSyncApi.getState();
+			}),
+		synchronizeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(codexConfigurationSynchronizeRequestSchema)
+			.output(codexConfigurationSyncStateSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.codexConfigurationSyncApi.synchronize(input);
+			}),
+		resolveCodexConfigurationConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(codexConfigurationResolveConflictRequestSchema)
+			.output(codexConfigurationSyncStateSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.codexConfigurationSyncApi.resolveConflict(input);
+			}),
+		acknowledgeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(codexConfigurationChangeMutationRequestSchema)
+			.output(codexConfigurationSyncStateSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.codexConfigurationSyncApi.acknowledge(input);
+			}),
+		resolveCodexConfigurationTargetConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(codexConfigurationResolveTargetConflictRequestSchema)
+			.output(codexConfigurationSyncStateSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.codexConfigurationSyncApi.resolveTargetConflict(input);
 			}),
 		saveConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeConfigSaveRequestSchema)
@@ -2347,6 +2446,18 @@ export const runtimeAppRouter = t.router({
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
 	taskCardAction: t.router({
+		transferNeverStartedBacklogTaskToProject: workspaceProcedure
+			.input(runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema)
+			.output(runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject)
+					throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
 		appendTaskComment: workspaceProcedure
 			.input(appendTaskCommentRequestSchema)
 			.output(appendTaskCommentResponseSchema)
@@ -2446,6 +2557,16 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		setTaskCardShelvingStateWithoutSessionSideEffects: workspaceProcedure
+			.input(runtimeTaskCardActionSetShelvingStateRequestSchema)
+			.output(runtimeTaskCardActionSetShelvingStateResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.taskCardActionApi.setTaskCardShelvingStateWithoutSessionSideEffects(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
 		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
 			.input(runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema)
 			.output(runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema)

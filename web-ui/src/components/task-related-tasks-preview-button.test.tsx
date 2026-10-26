@@ -15,8 +15,8 @@ vi.mock("@/runtime/directly-related-task-preview-query", () => ({
 	}) => JSON.stringify(task),
 }));
 vi.mock("@/components/related-task-preview-full-task-card", () => ({
-	RelatedTaskPreviewFullTaskCard: ({ entry }: { entry: { task: { taskId: string } } }) => (
-		<div data-full-card-preview={entry.task.taskId}>完整卡片</div>
+	RelatedTaskPreviewFullTaskCard: ({ task }: { task: { taskId: string } }) => (
+		<div data-full-card-preview={task.taskId}>完整卡片</div>
 	),
 }));
 

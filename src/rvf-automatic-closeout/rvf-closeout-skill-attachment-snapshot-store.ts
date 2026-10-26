@@ -1,6 +1,7 @@
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
+import { captureCodexConfigurationExecutionClosure } from "../codex-configuration-sync/codex-configuration-execution-closure";
 import type { RvfAutomaticCloseoutRecord } from "../core/rvf-automatic-closeout-contract";
 import type { RvfCloseoutSkillInstallationVersionReference } from "../core/rvf-automatic-closeout-recovery-contract";
 import {
@@ -202,6 +203,7 @@ export async function captureRvfCloseoutExpectedSkillSnapshot(input: {
 			canonicalPath: selected.path,
 			realPath: path,
 			instructionText,
+			executionClosure: await captureCodexConfigurationExecutionClosure(path),
 		});
 	}
 	if (!skills.length) return null;

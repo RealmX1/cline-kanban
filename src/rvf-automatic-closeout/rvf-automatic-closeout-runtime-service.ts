@@ -1,10 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFile, realpath } from "node:fs/promises";
+import { statSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskChatSendRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { buildCodexNativeAgentTurnExecutionSemanticGuard } from "../core/codex-native-agent-turn-execution-observation";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../core/kanban-cli-invocation-environment-actor-claims";
 import {
 	type RvfAutomaticCloseoutRecord,
@@ -14,6 +17,7 @@ import {
 } from "../core/rvf-automatic-closeout-contract";
 import type { rvfCloseoutStageClaimRequestSchema } from "../core/rvf-automatic-closeout-recovery-contract";
 import { resolveSessionFacets } from "../core/session-activity";
+import type { TaskChatDeliveryWriteValidationPhase } from "../core/task-chat-delivery-write-validation";
 import {
 	projectConversationSessionMetadataForMainSessionBinding,
 	resolveMainTaskConversationSessionSummary,
@@ -50,8 +54,21 @@ import {
 	readCodexConversationTurns,
 	verifyRestoredCodexConversationPrefix,
 } from "./codex-native-conversation-prefix";
+import {
+	normalRvfCloseoutReconciliationContext,
+	readNormalRvfCloseoutSuppression,
+	reconcileSettledNormalRvfCloseoutMutations,
+	recordIndependentBackupRouteSuppressionObservation,
+	reserveNormalRvfCloseoutTerminalDelivery,
+	settleNormalRvfCloseoutTerminalDelivery,
+} from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { observeRvfReviewStartActiveBranch } from "./observe-rvf-review-start-active-branch";
+import {
+	collectPreReviewConversationRestoreIdleGateBlockers,
+	requirePreReviewConversationRestoreIdleGate,
+} from "./pre-review-conversation-restore-idle-gate-recovery";
+import { readPreReviewRestoreNativeMessageOwnership } from "./read-pre-review-restore-native-message-ownership";
 import {
 	reconcileRvfAutomaticCloseoutLateNativePromptAcceptance,
 	verifyRvfAutomaticCloseoutLateNativePromptAcceptance,
@@ -67,6 +84,7 @@ import {
 	getRvfAutomaticCloseoutStorePath,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
+	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
 import {
 	claimRvfCloseoutExecutionStage,
@@ -75,8 +93,13 @@ import {
 	reportRvfCloseoutExecutionResultWithIndependentEvidence,
 	resolveRvfCloseoutActiveDelivery,
 } from "./rvf-closeout-execution-stage-recovery";
+import { observeExistingRvfBaseIntegrationStateOnce } from "./rvf-closeout-existing-base-integration-observation";
+import { observeExistingRvfSupplementalLandCompletionOnce } from "./rvf-closeout-existing-supplemental-land-completion-observation";
 import { captureExpectedRvfCloseoutSkillEvidenceOnce } from "./rvf-closeout-expected-skill-snapshot-capture";
-import { advanceRvfCloseoutAutomaticRecovery, remainingRvfCloseoutStages } from "./rvf-closeout-recovery-supervisor";
+import {
+	advanceRvfCloseoutAutomaticRecovery,
+	remainingRvfCloseoutVerificationStages,
+} from "./rvf-closeout-recovery-supervisor";
 import { readRvfCloseoutSkillSnapshots } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
 
@@ -87,11 +110,14 @@ type RvfAutomaticCloseoutTerminalManager = Pick<
 	| "isTaskSessionAutomaticContinuationSuppressed"
 	| "getAwaitingDispatchedBackgroundWork"
 	| "resolveTaskTerminalInputBoxOccupancy"
+	| "getTaskTerminalInputSideMutationSnapshot"
 	| "forceStopTaskSession"
 	| "applyAgentNativeConversationSessionIdentity"
 	| "publishRvfAutomaticCloseoutPaused"
 > &
-	Partial<Pick<TerminalSessionManager, "publishRvfAutomaticCloseoutWaiting">>;
+	Partial<
+		Pick<TerminalSessionManager, "publishRvfAutomaticCloseoutWaiting" | "hasPendingProgrammaticTaskChatInputDelivery">
+	>;
 export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	taskCardActionPerTaskCommandSerializer?: TaskCardActionPerTaskCommandSerializer;
 	getManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<RvfAutomaticCloseoutTerminalManager>;
@@ -180,6 +206,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	async function validateCloseoutPromptDelivery(
 		scope: RuntimeTrpcWorkspaceScope,
 		input: Pick<RuntimeTaskChatSendRequest, "taskId" | "source" | "idempotencyKey">,
+		phase?: TaskChatDeliveryWriteValidationPhase,
 	) {
 		if (input.source !== "rvf_automatic_closeout") return;
 		const record = (await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))).find(
@@ -198,6 +225,29 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`)
 		)
 			throw new RvfAutomaticCloseoutPauseError("用户已停止会话或本轮收尾已暂停，不能继续投递。");
+		const newlyReserved =
+			(phase === "before_first_transport_write" || phase === "after_transport_write") &&
+			(await reserveNormalRvfCloseoutTerminalDelivery(
+				getRvfAutomaticCloseoutStorePath(scope.workspaceId),
+				record,
+				input.idempotencyKey ?? "",
+			));
+		const suppression = await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory);
+		if (suppression) {
+			if (phase === "before_first_transport_write" && newlyReserved)
+				await settleNormalRvfCloseoutTerminalDelivery(
+					record.receipt.worktree,
+					input.idempotencyKey ?? "",
+					"not_started",
+				);
+			await recordIndependentBackupRouteSuppressionObservation(
+				getRvfAutomaticCloseoutStorePath(scope.workspaceId),
+				record,
+				suppression.reason,
+				suppression.controlDirectory,
+			);
+			throw new RvfAutomaticCloseoutPauseError("独立备用路线已接管或消费原 run，不能继续投递旧收尾。");
+		}
 	}
 	async function cancelCloseoutPromptDelivery(scope: RuntimeTrpcWorkspaceScope, record: RvfAutomaticCloseoutRecord) {
 		try {
@@ -249,32 +299,86 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			throw new RvfAutomaticCloseoutPauseError("首版自动收尾需要已确认原生身份的 Codex 主会话。");
 		return { manager, summary, card };
 	}
-	function requireIdle(
+	async function requireIdle(
+		scope: RuntimeTrpcWorkspaceScope,
 		manager: RvfAutomaticCloseoutTerminalManager,
 		summary: RuntimeTaskSessionSummary,
-		identitySwitchAlreadyStarted = false,
+		record: RvfAutomaticCloseoutRecord,
+		save: (patch: Partial<RvfAutomaticCloseoutRecord>) => Promise<void>,
 	) {
-		if (!identitySwitchAlreadyStarted && manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId))
-			throw new RvfAutomaticCloseoutPauseError("会话已停止或被暂停，自动收尾不再续跑。");
-		const facets = resolveSessionFacets(summary);
-		const inputSubmission = summary.agentConversationPromptSubmissionAcceptance;
-		// CR 已清空输入账本，但原生接受确认前 facet 仍可能是 review，不能据此停止进程。
-		const hasUnconfirmedInputSubmissionForCurrentLiveProcess =
-			facets.liveness === "live" &&
-			inputSubmission != null &&
-			inputSubmission.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
-			inputSubmission.status !== "accepted";
-		if (
-			!["live", "exited"].includes(facets.liveness) ||
-			facets.turnOwner !== "user" ||
-			facets.userTurnKind !== "review" ||
-			hasUnconfirmedInputSubmissionForCurrentLiveProcess ||
-			manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked
-		)
-			throw new RvfAutomaticCloseoutWaitError(
-				"agent_turn_not_ready_for_closeout",
-				"等待 Agent 完成本轮并让出控制权。",
+		const assertCurrentGuards = async () => {
+			const { summary: latest } = await mainSummary(scope, record.taskId);
+			if (
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`) ||
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`) ||
+				record.explicitStopRequestedAt != null ||
+				(record.nativeIdentitySwitchStartedAt === null &&
+					manager.isTaskSessionAutomaticContinuationSuppressed(summary.taskId))
+			)
+				throw new RvfAutomaticCloseoutPauseError("会话已停止或被暂停，自动收尾不再续跑。");
+			if (
+				latest.taskId !== record.conversationSessionId ||
+				latest.workspacePath !== summary.workspacePath ||
+				latest.agentNativeConversationSessionIdentity?.nativeSessionId !== record.receipt.session_id
+			)
+				throw new RvfAutomaticCloseoutPauseError("主会话绑定或原生身份已经改变。");
+			const records = await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId));
+			const persistedCurrent = records.find(
+				(entry) => entry.receipt.decision_token === record.receipt.decision_token,
 			);
+			if (
+				!persistedCurrent ||
+				persistedCurrent.status === "paused" ||
+				persistedCurrent.status === "completed" ||
+				persistedCurrent.explicitStopRequestedAt != null
+			)
+				throw new RvfAutomaticCloseoutPauseError("持久停止或终态已生效，不能继续原生恢复。");
+			if (
+				records.some(
+					(entry) =>
+						entry.taskId === record.taskId &&
+						entry.receipt.decision_token !== record.receipt.decision_token &&
+						entry.createdAt >= record.createdAt,
+				)
+			)
+				throw new RvfAutomaticCloseoutPauseError("已有后继 RVF 开审分界，旧恢复让位。");
+			await requireNoPendingUserInput(scope, record);
+			return latest;
+		};
+		await assertCurrentGuards();
+		await requirePreReviewConversationRestoreIdleGate({
+			record,
+			summary,
+			save,
+			blockingConditions: collectPreReviewConversationRestoreIdleGateBlockers({
+				summary,
+				backgroundWorkParked: manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked,
+				programmaticDeliveryInFlight:
+					manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId) ?? false,
+			}),
+			readLedger: async () =>
+				(
+					await readTaskMessageInjectionLedger(
+						getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId)),
+					)
+				).filter((entry) => entry.task_id === record.taskId || entry.task_id === record.conversationSessionId),
+			assertCurrentGuards: async () => {
+				const latest = await assertCurrentGuards();
+				const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
+				if (
+					!occupancy ||
+					occupancy.hasUncommittedInput ||
+					!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition ||
+					manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked ||
+					manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId)
+				)
+					throw new RvfAutomaticCloseoutWaitError(
+						"agent_turn_not_ready_for_closeout",
+						"等待草稿、后台停放或在途投递解除。",
+					);
+				return manager.getSummary(latest.taskId) ?? latest;
+			},
+		});
 	}
 	async function requireNoPendingUserInput(scope: RuntimeTrpcWorkspaceScope, record: RvfAutomaticCloseoutRecord) {
 		const decisions = await readAgentRaisedPendingUserDecisions(scope.workspaceId);
@@ -305,6 +409,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	) {
 		if (record.runDirectory) await assertRvfCurrentCandidateNativeCloseoutQualification(record.runDirectory);
 		const { manager, summary, card } = await mainSummary(scope, record.taskId);
+		const restoreSemanticGuard = buildCodexNativeAgentTurnExecutionSemanticGuard(summary);
 		const launchSettings = summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 		if (
 			summary.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation === "task_collaborator" &&
@@ -318,6 +423,66 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			throw new RvfAutomaticCloseoutPauseError("主会话绑定或工作目录已经改变。");
 		await requireNoPendingUserInput(scope, record);
 		const currentId = summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+		const readNativeTranscriptMutationVersion = () => {
+			try {
+				const metadata = statSync(record.receipt.transcript_path, { bigint: true });
+				return [metadata.dev, metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs].join(":");
+			} catch {
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"原生转录版本暂不可读，等待重新补证。",
+				);
+			}
+		};
+		const initialTerminalInputMutationSnapshot = manager.getTaskTerminalInputSideMutationSnapshot(summary.taskId);
+		const assertImmediatelyBeforeNativeMutation = () => {
+			const current = manager.getSummary(summary.taskId);
+			const input = manager.getTaskTerminalInputSideMutationSnapshot(summary.taskId);
+			if (
+				!current ||
+				buildCodexNativeAgentTurnExecutionSemanticGuard(current) !== restoreSemanticGuard ||
+				JSON.stringify(input) !== JSON.stringify(initialTerminalInputMutationSnapshot) ||
+				(input !== null && input.runtimeSessionIncarnationId !== (current.runtimeSessionIncarnationId ?? null)) ||
+				input?.hasUncommittedInput ||
+				(resolveSessionFacets(current).liveness === "live" &&
+					!input?.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition) ||
+				readNativeTranscriptMutationVersion() !== initialNativeTranscriptMutationVersion ||
+				manager.getAwaitingDispatchedBackgroundWork(summary.taskId).parked ||
+				manager.hasPendingProgrammaticTaskChatInputDelivery?.(summary.taskId)
+			)
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"原生动作前输入、转录或会话已变化，保留草稿并等待重新补证。",
+				);
+			if (
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`) ||
+				explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.conversationSessionId}`)
+			)
+				throw new RvfAutomaticCloseoutPauseError("用户已停止会话。");
+		};
+		const revalidateBeforeNativeMutation = async () => {
+			const latest = manager.getSummary(summary.taskId);
+			if (!latest || buildCodexNativeAgentTurnExecutionSemanticGuard(latest) !== restoreSemanticGuard)
+				throw new RvfAutomaticCloseoutWaitError(
+					"agent_turn_not_ready_for_closeout",
+					"恢复期间回合、输入或身份发生变化，等待重新补证。",
+				);
+			if (currentId === record.receipt.session_id) await requireIdle(scope, manager, latest, record, save);
+			const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
+			if (
+				occupancy
+					? occupancy.hasUncommittedInput ||
+						!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition
+					: resolveSessionFacets(latest).liveness === "live"
+			)
+				throw new RvfAutomaticCloseoutWaitError(
+					"terminal_input_box_not_confirmed_empty",
+					"恢复前输入框尚未确认空白。",
+				);
+			await requireNoPendingUserInput(scope, record);
+			// 最后一次异步读之后核对持久 claim/Stop；保存完成后只做同步检查并立即发出原生动作。
+			await save({});
+		};
 		if (currentId !== record.receipt.session_id && currentId !== record.restoredNativeSessionId)
 			throw new RvfAutomaticCloseoutPauseError("原生主会话身份已改变。");
 		// 已切换身份但尚未投递时可等待恢复启动；不能把 app-server 只创建了 fork 误当成已切换。
@@ -335,8 +500,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			);
 			return;
 		}
-		if (currentId === record.receipt.session_id)
-			requireIdle(manager, summary, record.nativeIdentitySwitchStartedAt !== null);
+		const initialNativeTranscriptMutationVersion = readNativeTranscriptMutationVersion();
+		if (currentId === record.receipt.session_id) await requireIdle(scope, manager, summary, record, save);
 		const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
 		// Codex 尚无输入框读屏语法。连续跟踪的空账本可以判空，接管后重建的空账本则仍可能漏着旧草稿。
 		if (
@@ -385,10 +550,48 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 						)
 						.map((entry) => entry.prompt_sha256),
 				);
+				const independentlyVerifiedNativeMessageIdentities = new Set<string>();
+				const qualification = record.preReviewConversationRestoreIdleGateRecovery?.qualification;
+				if (qualification) {
+					// 独立资格绑定完整转录；逐条复验活动分支上的 ID 与正文，覆盖所有本 run 续跑而不改失败账本。
+					const ownership = await readPreReviewRestoreNativeMessageOwnership({
+						record,
+						summary,
+						turns: original,
+						ledger,
+					}).catch(() => {
+						throw new RvfAutomaticCloseoutWaitError(
+							"agent_turn_not_ready_for_closeout",
+							"活动分支消息归属暂未通过复验，等待重新补证。",
+						);
+					});
+					if (
+						ownership.transcriptSha256 !== qualification.transcriptSha256 ||
+						ownership.nativeUserMessageId !== qualification.acceptedNativeUserMessageId ||
+						ownership.nativeTurnId !== qualification.acceptedNativeTurnId ||
+						ownership.promptSha256 !== qualification.acceptedPromptSha256 ||
+						ownership.recordedAtMs !== qualification.acceptedMessageRecordedAtMs
+					)
+						throw new RvfAutomaticCloseoutWaitError(
+							"agent_turn_not_ready_for_closeout",
+							"原生接受补证快照已变化，等待重新取证。",
+						);
+					for (const message of ownership.verifiedNativeUserMessagesOnActiveBranch)
+						independentlyVerifiedNativeMessageIdentities.add(
+							JSON.stringify([message.nativeTurnId, message.nativeUserMessageId, message.promptSha256]),
+						);
+				}
 				for (const turn of original.slice(boundaryIndex + 1))
 					for (const item of turn.items.filter((item) => item.type === "userMessage")) {
 						const text = item.content?.map((part) => part.text ?? "").join("") ?? "";
-						if (!machineHashes.has(computeRvfTextSha256(text)) && !text.startsWith("<task-notification>"))
+						const promptSha256 = computeRvfTextSha256(text);
+						if (
+							!machineHashes.has(promptSha256) &&
+							!independentlyVerifiedNativeMessageIdentities.has(
+								JSON.stringify([turn.id, item.id, promptSha256]),
+							) &&
+							!text.startsWith("<task-notification>")
+						)
 							throw new RvfAutomaticCloseoutPauseError(
 								"RVF 开审后出现未登记的用户消息，保留当前会话供人工处理。",
 							);
@@ -422,8 +625,14 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 									restoredTranscriptPath: identity.transcriptPath,
 								});
 							},
+							revalidateBeforeNativeMutation,
+							assertImmediatelyBeforeNativeMutation,
 						);
 					} catch (error) {
+						if (error instanceof RvfAutomaticCloseoutWaitError) {
+							await save({ nativeForkAttemptStartedAt: null });
+							throw error;
+						}
 						throw new RvfAutomaticCloseoutPauseError(
 							`原生 fork 未确认：${error instanceof Error ? error.message : String(error)}`,
 						);
@@ -441,8 +650,7 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 			latest.agentNativeConversationSessionIdentity?.nativeSessionId !== currentId
 		)
 			throw new RvfAutomaticCloseoutPauseError("恢复过程中会话被替换。");
-		if (currentId === record.receipt.session_id)
-			requireIdle(manager, latest, record.nativeIdentitySwitchStartedAt !== null);
+		if (currentId === record.receipt.session_id) await requireIdle(scope, manager, latest, record, save);
 		const finalOccupancy = await manager.resolveTaskTerminalInputBoxOccupancy(summary.taskId);
 		if (
 			finalOccupancy
@@ -458,6 +666,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		if (explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`))
 			throw new RvfAutomaticCloseoutPauseError("用户已停止会话。");
 		await save({ nativeIdentitySwitchStartedAt: record.nativeIdentitySwitchStartedAt ?? Date.now() });
+		await revalidateBeforeNativeMutation();
+		assertImmediatelyBeforeNativeMutation();
 		await manager.forceStopTaskSession(summary.taskId);
 		await save({});
 		if (explicitlyStoppedTasks.has(`${scope.workspaceId}:${record.taskId}`))
@@ -663,6 +873,164 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 				),
 		};
 	}
+	async function reconcileUnknownNormalCloseoutOperations(
+		scope: RuntimeTrpcWorkspaceScope,
+		original: RvfAutomaticCloseoutRecord,
+	) {
+		const storePath = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
+		await withRvfAutomaticCloseoutRecordOperationLock(
+			storePath,
+			original.receipt.decision_token,
+			async (assertOwned) => {
+				const record = (await readRvfAutomaticCloseoutRecords(storePath)).find(
+					(entry) =>
+						entry.taskId === original.taskId && entry.receipt.decision_token === original.receipt.decision_token,
+				);
+				if (!record || !record.runId || !record.runDirectory || record.activeCoordinatorOperationClaimId) return;
+				const { manager, summary } = await mainSummary(scope, record.taskId);
+				const identityFingerprint = (target: RuntimeTaskSessionSummary = summary) =>
+					JSON.stringify([
+						target.taskId,
+						target.runtimeSessionIncarnationId,
+						target.startedAt,
+						target.agentNativeConversationSessionIdentity,
+						target.codexNativeSessionControlEndpoint,
+					]);
+				const beforeIdentity = identityFingerprint();
+				const transcript = await stat(summary.agentNativeConversationSessionIdentity?.transcriptPath ?? "").catch(
+					() => null,
+				);
+				const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(scope.workspaceId));
+				const fingerprint = JSON.stringify([
+					beforeIdentity,
+					resolveSessionFacets(summary),
+					record.runId,
+					record.handoffSha256,
+					transcript ? [transcript.ino, transcript.size, transcript.mtimeMs] : null,
+					computeRvfTextSha256(await readFile(ledgerPath).catch(() => Buffer.alloc(0))),
+				]);
+				await reconcileSettledNormalRvfCloseoutMutations(
+					record.receipt.worktree,
+					normalRvfCloseoutReconciliationContext(storePath, record),
+					fingerprint,
+					async (operationId) => {
+						const delivery = resolveRvfCloseoutActiveDelivery(record);
+						if (
+							summary.taskId !== delivery.conversationSessionId ||
+							summary.agentNativeConversationSessionIdentity?.nativeSessionId !== delivery.nativeSessionId ||
+							!summary.runtimeSessionIncarnationId ||
+							record.stageExecutionClaims?.some((claim) => claim.status === "claimed") ||
+							(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
+						)
+							return null;
+						if (
+							!manager.hasPendingProgrammaticTaskChatInputDelivery ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId)
+						)
+							return null;
+						const cancelled = await deps.runtimeApi.cancelTaskChatDelivery(scope, {
+							taskId: delivery.conversationSessionId,
+							idempotencyKey: delivery.idempotencyKey,
+						});
+						if (!cancelled.ok || !cancelled.cancelResult) return null;
+						const queued = await readWorkspaceQueuedTaskPromptDeliverySnapshot(scope.workspaceId);
+						if (
+							(queued.entriesByTaskId[delivery.conversationSessionId] ?? []).some(
+								(entry) =>
+									entry.programmaticInjectionLedgerReceiptLink?.injectionLedgerIdempotencyKey ===
+										delivery.idempotencyKey &&
+									["queued", "handed_to_transport"].includes(entry.deliveryState),
+							)
+						)
+							return null;
+						if (
+							!manager.hasPendingProgrammaticTaskChatInputDelivery ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId) ||
+							manager.getAwaitingDispatchedBackgroundWork(delivery.conversationSessionId).parked
+						)
+							return null;
+						const occupancy = await manager.resolveTaskTerminalInputBoxOccupancy(delivery.conversationSessionId);
+						if (
+							!occupancy ||
+							occupancy.hasUncommittedInput ||
+							!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition
+						)
+							return null;
+						const native = await readCodexNativeAgentTurnExecution({
+							workspaceId: scope.workspaceId,
+							summary,
+							observedAtMs: Date.now(),
+						});
+						if (
+							native?.executionStatus !== "finished" ||
+							native.threadStatus !== "idle" ||
+							native.canAcceptDirectInput !== true
+						)
+							return null;
+						assertOwned();
+						const latest = await mainSummary(scope, record.taskId);
+						if (
+							identityFingerprint(latest.summary) !== beforeIdentity ||
+							manager.hasPendingProgrammaticTaskChatInputDelivery(delivery.conversationSessionId)
+						)
+							return null;
+						const current = (await readRvfAutomaticCloseoutRecords(storePath)).find(
+							(entry) =>
+								entry.taskId === record.taskId &&
+								entry.receipt.decision_token === record.receipt.decision_token,
+						);
+						if (JSON.stringify(current) !== JSON.stringify(record)) return null;
+						const ledger = await readTaskMessageInjectionLedger(ledgerPath);
+						return {
+							schema: "kanban-normal-closeout-quiescence/v1",
+							operation_id: operationId,
+							observed_at: new Date().toISOString(),
+							workspace_id: record.workspaceId,
+							task_id: record.taskId,
+							decision_token: record.receipt.decision_token,
+							run_id: record.runId as string,
+							run_directory: record.runDirectory as string,
+							conversation_session_id: delivery.conversationSessionId,
+							native_session_id: delivery.nativeSessionId as string,
+							runtime_session_incarnation_id: summary.runtimeSessionIncarnationId as string,
+							delivery_idempotency_key: delivery.idempotencyKey,
+							queued_delivery_absent: true,
+							terminal_delivery_pending: false,
+							native_control_verified_idle: true,
+							native_turns_sha256: computeRvfTextSha256(
+								JSON.stringify([native.nativeTurnId, native.nativeTurnStatus]),
+							),
+							delivery_ledger_sha256: computeRvfTextSha256(JSON.stringify(ledger)),
+							native_execution_observation: native,
+						};
+					},
+				);
+			},
+		);
+	}
+	async function observeExistingCloseoutCompletion(
+		scope: RuntimeTrpcWorkspaceScope,
+		originalRecord: RvfAutomaticCloseoutRecord,
+		assertObservationStillOwned?: () => void,
+	) {
+		const recoveryDependencies = executionRecoveryDependencies(scope, originalRecord.taskId);
+		if (recoveryDependencies.isStopped(originalRecord)) return originalRecord;
+		const canonicalLandObserved = await observeExistingRvfLandExecutionResultOnce(
+			recoveryDependencies,
+			originalRecord,
+			assertObservationStillOwned,
+		);
+		const landObserved = await observeExistingRvfSupplementalLandCompletionOnce(
+			recoveryDependencies,
+			canonicalLandObserved,
+			assertObservationStillOwned,
+		);
+		return observeExistingRvfBaseIntegrationStateOnce(
+			recoveryDependencies,
+			landObserved,
+			assertObservationStillOwned,
+		);
+	}
 	// 调用方只持 workspace 串行队列；主会话队列与记录锁各进入一次，避免补证入口重入死锁。
 	async function recoverEligiblePausedCloseouts(
 		scope: RuntimeTrpcWorkspaceScope,
@@ -670,14 +1038,19 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 		trigger: AutomaticLateNativePromptAcceptanceRecoveryTrigger,
 	) {
 		for (const originalRecord of records) {
-			const record = await observeExistingRvfLandExecutionResultOnce(
-				executionRecoveryDependencies(scope, originalRecord.taskId),
-				originalRecord,
-			);
+			const recoveryDependencies = executionRecoveryDependencies(scope, originalRecord.taskId);
+			if (recoveryDependencies.isStopped(originalRecord)) continue;
+			const record = await observeExistingCloseoutCompletion(scope, originalRecord);
+			if (recoveryDependencies.isStopped(record) || record.status === "completed") continue;
+			try {
+				await reconcileUnknownNormalCloseoutOperations(scope, record);
+			} catch {
+				/* 机器补证缺失时保留 unknown，继续本轮不依赖它的核验。 */
+			}
 			const stopped = executionRecoveryDependencies(scope, record.taskId).isStopped;
 			if (stopped(record)) continue;
 			if (
-				remainingRvfCloseoutStages(record).length &&
+				remainingRvfCloseoutVerificationStages(record).length &&
 				isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery(record)
 			) {
 				try {
@@ -705,6 +1078,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					/* 保留机器待验；仍尝试规范结果等独立证据。 */
 				}
 			}
+			// 报告入口只补证；不能在校验这份结果前改换 active delivery 或派发续验。
+			if (trigger === "execution_report") continue;
 			try {
 				await serializeMainConversationOperation(scope, record.taskId, () =>
 					advanceRvfCloseoutAutomaticRecovery(
@@ -902,6 +1277,8 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 							throw new Error("RVF 完成证据与激活时绑定的 run 不一致。");
 						return completion;
 					},
+					observeExistingCompletionBeforeNativeAction: (record, assertOwned) =>
+						observeExistingCloseoutCompletion(scope, record, assertOwned),
 					restore: (record, save) =>
 						serializeMainConversationOperation(scope, record.taskId, () => restore(scope, record, save)),
 					enqueue: (record, assertOperationStillOwned) =>
@@ -932,6 +1309,30 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 	};
 	return {
 		validateCloseoutPromptDelivery,
+		settleCloseoutPromptTerminalDelivery: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: Pick<RuntimeTaskChatSendRequest, "taskId" | "source" | "idempotencyKey">,
+			confirmed: boolean,
+		) => {
+			if (input.source !== "rvf_automatic_closeout" || !input.idempotencyKey) return;
+			const record = (
+				await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))
+			).find(
+				(entry) =>
+					(entry.promptDeliveryIdempotencyKey === input.idempotencyKey &&
+						entry.conversationSessionId === input.taskId) ||
+					entry.promptDeliveryAttempts?.some(
+						(attempt) =>
+							attempt.idempotencyKey === input.idempotencyKey && attempt.conversationSessionId === input.taskId,
+					),
+			);
+			if (record)
+				await settleNormalRvfCloseoutTerminalDelivery(
+					record.receipt.worktree,
+					input.idempotencyKey,
+					confirmed ? "confirmed" : "unknown",
+				);
+		},
 		pauseForExplicitStop: async (workspaceId: string, taskId: string) => {
 			explicitlyStoppedTasks.set(`${workspaceId}:${taskId}`, ++explicitStopSequence);
 			let pendingRecords: RvfAutomaticCloseoutRecord[] = [];
@@ -1176,7 +1577,16 @@ export function createRvfAutomaticCloseoutRuntimeService(deps: {
 					} catch {
 						/* 自动补齐原生证据仍可推进。 */
 					}
-					if (!hasIndependentResult) await recoverEligiblePausedCloseouts(scope, targets, "execution_report");
+					const target = targets[0];
+					const priorStageResult =
+						input.stage === "land" ? target?.landExecutionResult : target?.baseBranchSyncExecutionResult;
+					if (
+						!hasIndependentResult &&
+						target &&
+						priorStageResult?.outcome !== "completed" &&
+						isRvfCloseoutEligibleForAutomaticLateNativeAcceptanceRecovery(target)
+					)
+						await recoverEligiblePausedCloseouts(scope, targets, "execution_report");
 				}
 				return serializeMainConversationOperation(scope, input.taskId, () =>
 					reportRvfCloseoutExecutionResultWithIndependentEvidence(

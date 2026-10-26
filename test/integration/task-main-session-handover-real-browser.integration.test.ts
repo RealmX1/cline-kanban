@@ -22,14 +22,21 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(!packagedCliPath).each([
-	{ mainAgentId: "claude", destinationKind: "new_codex_session" },
-	{ mainAgentId: "claude", destinationKind: "existing_codex_session" },
-	{ mainAgentId: "codex", destinationKind: "new_codex_session" },
-	{ mainAgentId: "codex", destinationKind: "existing_codex_session" },
+	{ mainAgentId: "claude", destinationKind: "new_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "claude", destinationKind: "existing_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "new_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "existing_codex_session", targetAgentId: "codex" },
+	{ mainAgentId: "codex", destinationKind: "new_agent_session", targetAgentId: "claude" },
+	{ mainAgentId: "codex", destinationKind: "existing_agent_session", targetAgentId: "claude" },
+	{ mainAgentId: "codex", destinationKind: "existing_agent_session", targetAgentId: "omp" },
 ] as const)(
 	"打包态 $mainAgentId 主会话交接 $destinationKind：真实浏览器、PTY、迟到 hook 与冷恢复",
-	async ({ mainAgentId, destinationKind }) => {
-		const collaborationAgentId = "codex";
+	async ({ mainAgentId, destinationKind, targetAgentId }) => {
+		const collaborationAgentId = targetAgentId;
+		const isExistingTarget =
+			destinationKind === "existing_codex_session" || destinationKind === "existing_agent_session";
+		const targetSessionTransport =
+			targetAgentId === "omp" ? ("acp_stdio_subprocess" as const) : ("pty_terminal" as const);
 
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
@@ -41,6 +48,11 @@ it.skipIf(!packagedCliPath).each([
 			codexTranscriptPath,
 			`${JSON.stringify({ type: "session_meta", payload: { id: nativeCodexId, source: "cli" } })}\n`,
 		);
+		const targetTranscriptPath =
+			targetAgentId === "codex"
+				? codexTranscriptPath
+				: join(fixture.isolatedHomeDirectoryPath, "claude-target.jsonl");
+		if (targetAgentId !== "codex") writeFileSync(targetTranscriptPath, "");
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "collaboration-browser" });
 		writeFileSync(join(repository.repositoryPath, "initial.txt"), "隔离协作测试\n");
 		repository.commitAllRepositoryFilesAtDate({
@@ -61,11 +73,27 @@ const fs = require('node:fs');
 const path = require('node:path');
 const agent = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
+if (agent === 'claude' && args[0] === 'agents' && args.includes('--json')) { process.stdout.write('[]\n'); process.exit(0); }
 if (args.includes('--version') || args.includes('--help') || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) {
   process.stdout.write(agent + ' 2.1.200\n'); process.exit(0);
 }
 const sessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID;
 fs.writeFileSync(path.join(process.cwd(), 'launch-' + sessionId + '.json'), JSON.stringify({ agent, args, pid: process.pid, cwd: process.cwd(), sessionId, workspaceTaskId: process.env.KANBAN_TASK_ID }));
+if (args.includes('acp')) {
+ const nativeId = '22222222-2222-4222-8222-222222222222';
+ const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
+ const notify = text => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: nativeId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } }) + '\n');
+ require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line); const params = message.params || {};
+  fs.appendFileSync(path.join(process.cwd(), 'acp-methods-' + sessionId + '.jsonl'), JSON.stringify({ method: message.method, sessionId: params.sessionId }) + '\n');
+  if (message.id === undefined) return;
+  if (message.method === 'initialize') reply(message.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { close: {} } } });
+  else if (message.method === 'session/new') reply(message.id, { sessionId: nativeId });
+  else if (message.method === 'session/load') { if (params.sessionId !== nativeId) throw new Error('恢复身份不符'); reply(message.id, {}); }
+  else if (message.method === 'session/prompt') { fs.appendFileSync(path.join(process.cwd(), 'input-' + sessionId + '.txt'), params.prompt.map(block => block.text || '').join('\n') + '\r'); notify('计划总览：核对材料。已经实现：保留 peer。有待进行：等待用户。'); reply(message.id, { stopReason: 'end_turn' }); }
+  else reply(message.id, {});
+ });
+} else {
 const firstFailedSessionFile = path.join(process.cwd(), 'codex-original-failure-session.txt');
 if (agent === 'codex' && sessionId !== process.env.KANBAN_TASK_ID && process.env.KANBAN_MAIN_SESSION_HANDOVER_TEST_RECOVERY_SCENARIO === '1' && !fs.existsSync(firstFailedSessionFile)) fs.writeFileSync(firstFailedSessionFile, sessionId);
 const simulatesUnconfirmedFirstReport = agent === 'codex' && fs.existsSync(firstFailedSessionFile) && fs.readFileSync(firstFailedSessionFile, 'utf8') === sessionId;
@@ -91,9 +119,10 @@ process.stdin.on('data', chunk => {
   const output = setInterval(() => { process.stdout.write('只读核对材料…\n'); if (++ticks >= 12) clearInterval(output); }, 150);
  } else process.stdout.write(chunk);
 });
+}
 setInterval(() => {}, 1000);
 `;
-		for (const agent of ["claude", "codex"]) {
+		for (const agent of ["claude", "codex", "omp"]) {
 			const binaryPath = join(fakeAgentBinaryDirectory, agent);
 			writeFileSync(binaryPath, fakeAgentProgram);
 			chmodSync(binaryPath, 0o755);
@@ -242,11 +271,12 @@ setInterval(() => {}, 1000);
 			});
 
 			const existingPeerId = "task-conversation-session-33333333-3333-4333-8333-333333333333";
-			if (destinationKind === "existing_codex_session") {
+			if (isExistingTarget) {
 				const started = await scoped.runtime.startTaskSession.mutate({
 					taskId: existingPeerId,
 					workspaceTaskId: taskId,
-					agentId: "codex",
+					agentId: targetAgentId,
+					requestedAgentSessionTransport: targetSessionTransport,
 					prompt: "既有协作工作",
 					baseRef: card.baseRef,
 					worktreeMode: "inplace",
@@ -267,9 +297,9 @@ setInterval(() => {}, 1000);
 					workspaceId,
 					event: "agent_conversation_session_identity_observed",
 					agentNativeConversationSessionIdentity: {
-						sourceAgentId: "codex",
+						sourceAgentId: targetAgentId,
 						nativeSessionId: nativeCodexId,
-						transcriptPath: codexTranscriptPath,
+						transcriptPath: targetTranscriptPath,
 						observedAt: Date.now(),
 					},
 				});
@@ -277,9 +307,12 @@ setInterval(() => {}, 1000);
 					taskId: existingPeerId,
 					workspaceId,
 					event: "to_review",
-					metadata: { source: "codex", hookEventName: "Stop" },
+					metadata: { source: targetAgentId, hookEventName: "Stop" },
 				});
 			}
+			const existingPeerLaunch = isExistingTarget
+				? readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8")
+				: null;
 			const requireFromWeb = createRequire(join(sourcePath, "web-ui/package.json"));
 			const { chromium } = requireFromWeb("playwright-core") as { chromium: BrowserType };
 			browser = await chromium.launch({ headless: true });
@@ -294,10 +327,10 @@ setInterval(() => {}, 1000);
 			await page.getByLabel("工作台格位 1").selectOption("task_sessions");
 			await page.screenshot({ path: join(evidenceDirectory, "sessions-before-handover.png") });
 			writeFileSync(join(evidenceDirectory, "sessions-before-handover.html"), await page.content());
-			await page.getByRole("button", { name: "交接给 Codex", exact: true }).click();
+			await page.getByRole("button", { name: "交接主会话", exact: true }).click();
 			await expect.poll(() => page.getByLabel("接收会话").inputValue()).toBe("new_codex_session");
-			if (destinationKind === "existing_codex_session")
-				await page.getByLabel("接收会话").selectOption(existingPeerId);
+			if (isExistingTarget) await page.getByLabel("接收会话").selectOption(existingPeerId);
+			else await page.getByLabel("目标 Agent").selectOption(targetAgentId);
 			await page.getByLabel("补充交接说明").fill("真实浏览器交接验收：只读报告后等待用户。");
 			await page.screenshot({ path: join(evidenceDirectory, "handover-material-preview.png") });
 			await page.getByRole("button", { name: "确认交接", exact: true }).click();
@@ -313,7 +346,18 @@ setInterval(() => {}, 1000);
 			if (!record) throw new Error("缺少已持久化的交接记录");
 			let targetId = record.targetTaskConversationSessionId;
 			let failedTargetId: string | undefined;
-			if (destinationKind === "existing_codex_session") expect(targetId).toBe(existingPeerId);
+			if (isExistingTarget) {
+				expect(targetId).toBe(existingPeerId);
+				expect(record.destination).toEqual({
+					kind: "existing_agent_session",
+					agentId: targetAgentId,
+					taskConversationSessionId: existingPeerId,
+				});
+				expect(readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8")).toBe(
+					existingPeerLaunch,
+				);
+				expect(record.existingTargetSessionBinding?.sessionTransport).toBe(targetSessionTransport);
+			}
 			await expect
 				.poll(() => existsSync(join(repository.repositoryPath, `launch-${targetId}.json`)), { timeout: 30_000 })
 				.toBe(true);
@@ -328,9 +372,9 @@ setInterval(() => {}, 1000);
 					workspaceId,
 					event: "agent_conversation_session_identity_observed",
 					agentNativeConversationSessionIdentity: {
-						sourceAgentId: "codex",
+						sourceAgentId: targetAgentId,
 						nativeSessionId: nativeCodexId,
-						transcriptPath: codexTranscriptPath,
+						transcriptPath: targetTranscriptPath,
 						observedAt: Date.now(),
 					},
 				});
@@ -412,7 +456,9 @@ setInterval(() => {}, 1000);
 				const input = stripVTControlCharacters(
 					readFileSync(join(repository.repositoryPath, `input-${targetId}.txt`), "utf8"),
 				);
-				const start = input.indexOf("/plan KANBAN_MAIN_SESSION_HANDOVER_REPORT:");
+				const start = input.indexOf(
+					`${targetAgentId === "codex" ? "/plan " : ""}KANBAN_MAIN_SESSION_HANDOVER_REPORT:`,
+				);
 				return start < 0 ? "" : input.slice(start);
 			};
 			await expect
@@ -423,12 +469,24 @@ setInterval(() => {}, 1000);
 			expect(readSubmittedReportInput().split("KANBAN_MAIN_SESSION_HANDOVER_REPORT:")).toHaveLength(2);
 
 			appendFileSync(
-				codexTranscriptPath,
-				`${JSON.stringify({
-					type: "event_msg",
-					timestamp: new Date().toISOString(),
-					payload: { type: "user_message", message: expectedPrompt.slice(6) },
-				})}\n`,
+				targetTranscriptPath,
+				`${JSON.stringify(
+					targetAgentId === "codex"
+						? {
+								type: "event_msg",
+								timestamp: new Date().toISOString(),
+								payload: { type: "user_message", message: expectedPrompt.slice(6) },
+							}
+						: {
+								type: "user",
+								promptSource: "typed",
+								uuid: "44444444-4444-4444-8444-444444444444",
+								sessionId: nativeCodexId,
+								cwd: repository.repositoryPath,
+								timestamp: new Date().toISOString(),
+								message: { role: "user", content: expectedPrompt },
+							},
+				)}\n`,
 			);
 
 			await scoped.hooks.ingest.mutate({
@@ -436,9 +494,9 @@ setInterval(() => {}, 1000);
 				workspaceId,
 				event: "agent_conversation_session_identity_observed",
 				agentNativeConversationSessionIdentity: {
-					sourceAgentId: "codex",
+					sourceAgentId: targetAgentId,
 					nativeSessionId: nativeCodexId,
-					transcriptPath: codexTranscriptPath,
+					transcriptPath: targetTranscriptPath,
 					observedAt: Date.now(),
 				},
 			});
@@ -446,15 +504,15 @@ setInterval(() => {}, 1000);
 				taskId: targetId,
 				workspaceId,
 				event: "to_in_progress",
-				submittedPromptText: expectedPrompt.slice(6),
-				metadata: { source: "codex", hookEventName: "UserPromptSubmit" },
+				submittedPromptText: targetAgentId === "codex" ? expectedPrompt.slice(6) : expectedPrompt,
+				metadata: { source: targetAgentId, hookEventName: "UserPromptSubmit" },
 			});
 			await scoped.hooks.ingest.mutate({
 				taskId: targetId,
 				workspaceId,
 				event: "to_review",
 				metadata: {
-					source: "codex",
+					source: targetAgentId,
 					hookEventName: "Stop",
 					finalMessage: "计划总览：核对原计划。已经实现：材料已读取。有待进行：等待用户。",
 				},
@@ -486,7 +544,7 @@ setInterval(() => {}, 1000);
 			});
 			const afterLateHook = await scoped.workspace.getState.query();
 			expect(columnOfTask(afterLateHook)).toBe(columnOfTask(beforeLateHook));
-			expect(afterLateHook.sessions[targetId].agentId).toBe("codex");
+			expect(afterLateHook.sessions[targetId].agentId).toBe(targetAgentId);
 			expect(afterLateHook.sessions[taskId].taskConversationSessionMetadata?.taskConversationSessionRole).toBe(
 				"task_collaborator",
 			);
@@ -509,13 +567,25 @@ setInterval(() => {}, 1000);
 			});
 			expect(restarted.ok, restarted.error).toBe(true);
 			expect(restarted.summary?.taskId).toBe(targetId);
-			expect(restarted.summary?.agentId).toBe("codex");
-			await expect
-				.poll(
-					() => JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${targetId}.json`), "utf8")).args,
-					{ timeout: 20_000 },
-				)
-				.toContain("22222222-2222-4222-8222-222222222222");
+			expect(restarted.summary?.agentId).toBe(targetAgentId);
+			if (targetSessionTransport === "acp_stdio_subprocess") {
+				const methods = readFileSync(join(repository.repositoryPath, `acp-methods-${targetId}.jsonl`), "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(methods.filter((entry) => entry.method === "session/load")).toEqual([
+					{ method: "session/load", sessionId: nativeCodexId },
+				]);
+				expect(methods.filter((entry) => entry.method === "session/fork")).toHaveLength(0);
+			} else {
+				await expect
+					.poll(
+						() =>
+							JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${targetId}.json`), "utf8")).args,
+						{ timeout: 20_000 },
+					)
+					.toContain("22222222-2222-4222-8222-222222222222");
+			}
 			expect(pageErrors).toEqual([]);
 			writeFileSync(
 				join(evidenceDirectory, "handover-result.json"),

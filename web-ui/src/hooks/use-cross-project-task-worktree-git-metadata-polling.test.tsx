@@ -2,13 +2,16 @@ import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-proj
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
 	selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll,
 	useCrossProjectTaskWorktreeGitMetadataPolling,
 } from "@/hooks/use-cross-project-task-worktree-git-metadata-polling";
 import type { RuntimeBoardColumnId, RuntimeCrossProjectTaskSwitcherEntry } from "@/runtime/types";
-import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
+import {
+	getCrossProjectTaskWorktreeGitMetadataPollObservation,
+	resetCrossProjectTaskWorktreeGitMetadataStore,
+} from "@/stores/cross-project-task-worktree-git-metadata-store";
+import { createRecentTaskWorktreeMetadataTestFixture } from "../../tests/recent-task-worktree-changes-filter-fixtures";
 
 const fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/cross-project-task-worktree-git-metadata-query", () => ({
@@ -50,9 +53,9 @@ describe("selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll", 
 		]);
 	});
 
-	it("每次最多请求 100 个（与服务端 schema 上限一致）", () => {
+	it("保留超过 100 个候选，由轮询按请求上限分批，不截断尾部任务", () => {
 		const entries = Array.from({ length: 130 }, (_, index) => entryInProject("other", `t${index}`));
-		expect(selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entries)).toHaveLength(100);
+		expect(selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entries)).toHaveLength(130);
 	});
 });
 
@@ -122,5 +125,95 @@ describe("useCrossProjectTaskWorktreeGitMetadataPolling", () => {
 			await vi.advanceTimersByTimeAsync(10_000);
 		});
 		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).not.toHaveBeenCalled();
+	});
+
+	it("每批最多 100 个，失败继续后续批次，下轮重试并恢复失败任务", async () => {
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockImplementation(
+			async (_projectId: string | null, { tasks }: { tasks: Array<{ workspaceId: string; taskId: string }> }) => ({
+				tasks: tasks.map(({ workspaceId, taskId }) => ({
+					workspaceId,
+					taskId,
+					availability: "available",
+					taskWorkspaceMetadata: createRecentTaskWorktreeMetadataTestFixture(taskId),
+				})),
+			}),
+		);
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockRejectedValueOnce(new Error("第一批请求失败"));
+		const entries = Array.from({ length: 230 }, (_, index) => entryInProject("other", `t${index}`));
+		await act(async () => root.render(<PollingHost entries={entries} />));
+		expect(
+			fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mock.calls.map(
+				([, request]) => request.tasks.length,
+			),
+		).toEqual([100, 100, 30]);
+		expect(getCrossProjectTaskWorktreeGitMetadataPollObservation("other", "t0")?.pollStatus).toBe("unavailable");
+		expect(getCrossProjectTaskWorktreeGitMetadataPollObservation("other", "t229")?.pollStatus).toBe("available");
+		await act(async () => vi.advanceTimersByTimeAsync(5_000));
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(6);
+		expect(getCrossProjectTaskWorktreeGitMetadataPollObservation("other", "t0")?.pollStatus).toBe("available");
+	});
+
+	it("请求在途时不重叠；候选变化后立即补查，响应遗漏的键标记失败而非永远加载", async () => {
+		let completeFirstRequest!: (response: { tasks: [] }) => void;
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockReturnValueOnce(
+			new Promise((resolve) => {
+				completeFirstRequest = resolve;
+			}),
+		);
+		await act(async () => root.render(<PollingHost entries={[entryInProject("other", "old")]} />));
+		await act(async () => vi.advanceTimersByTimeAsync(10_000));
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(1);
+		await act(async () => root.render(<PollingHost entries={[entryInProject("third", "new")]} />));
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(1);
+		await act(async () => completeFirstRequest({ tasks: [] }));
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(2);
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenLastCalledWith("current", {
+			tasks: [{ workspaceId: "third", taskId: "new" }],
+		});
+		expect(getCrossProjectTaskWorktreeGitMetadataPollObservation("third", "new")?.pollStatus).toBe("unavailable");
+	});
+
+	it("请求途中页面隐藏即停止剩余批次，再次可见立即完成整轮", async () => {
+		let completeFirstRequest!: (response: { tasks: [] }) => void;
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockReturnValueOnce(
+			new Promise((resolve) => {
+				completeFirstRequest = resolve;
+			}),
+		);
+		const entries = Array.from({ length: 130 }, (_, index) => entryInProject("other", `t${index}`));
+		await act(async () => root.render(<PollingHost entries={entries} />));
+		documentVisibilityState = "hidden";
+		await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+		await act(async () => completeFirstRequest({ tasks: [] }));
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(1);
+		documentVisibilityState = "visible";
+		await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+		expect(
+			fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mock.calls.map(
+				([, request]) => request.tasks.length,
+			),
+		).toEqual([100, 100, 30]);
+	});
+
+	it("轮询途中候选重排也先覆盖本轮尾部，再补查新集合", async () => {
+		let completeFirstRequest!: (response: { tasks: [] }) => void;
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockReturnValueOnce(
+			new Promise((resolve) => {
+				completeFirstRequest = resolve;
+			}),
+		);
+		const entries = Array.from({ length: 130 }, (_, index) => entryInProject("other", `t${index}`));
+		await act(async () => root.render(<PollingHost entries={entries} />));
+		await act(async () => root.render(<PollingHost entries={[...entries].reverse()} />));
+		await act(async () => completeFirstRequest({ tasks: [] }));
+		expect(
+			fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mock.calls.map(
+				([, request]) => request.tasks.length,
+			),
+		).toEqual([100, 30, 100, 30]);
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mock.calls[1]?.[1].tasks.at(-1)).toEqual({
+			workspaceId: "other",
+			taskId: "t129",
+		});
 	});
 });

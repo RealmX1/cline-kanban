@@ -2,7 +2,6 @@ import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from 
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, Play, RotateCcw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
@@ -22,9 +21,14 @@ import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-ca
 import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import { useStageHeaderPinLayout } from "@/hooks/use-stage-header-pin-layout";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
-import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
+import { isCardDropDisabled } from "@/state/drag-rules";
+import {
+	findTaskDisplayGroupId,
+	projectTaskBoardDisplayGroups,
+	resolveTaskCardOriginalStage,
+} from "@/state/task-board-display-groups";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
-import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
+import type { BoardCard as BoardCardModel, BoardDisplayGroup, BoardDisplayGroupId, CardSelection } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
@@ -51,6 +55,7 @@ function ColumnSection({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onCancelAutomaticTaskAction,
 	moveToTrashLoadingById,
 	activeDragSourceColumnId,
@@ -59,7 +64,7 @@ function ColumnSection({
 	defaultClineModelId,
 	defaultAgentId,
 }: {
-	column: BoardColumn;
+	column: BoardDisplayGroup;
 	selectedCardId: string;
 	/**
 	 * 折叠态由 `ColumnContextPanel` 经 `useFocusViewStageSectionExpansion` 集中持有（不是本组件的私有 state）：
@@ -84,9 +89,10 @@ function ColumnSection({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
-	activeDragSourceColumnId?: BoardColumnId | null;
+	activeDragSourceColumnId?: BoardDisplayGroupId | null;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultClineModelId?: string | null;
@@ -135,7 +141,7 @@ function ColumnSection({
 	const buildCardBusinessProps = (card: BoardCardModel): TaskCardBusinessProps =>
 		buildTaskCardBusinessProps({
 			card,
-			columnId: column.id,
+			columnId: resolveTaskCardOriginalStage(column, card),
 			sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
 			taskSessions,
 			selected: card.id === selectedCardId,
@@ -150,6 +156,7 @@ function ColumnSection({
 				onEditTask,
 				onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard,
+				onSetTaskShelvingState,
 				resolveTaskWorkspaceAbsoluteDirectoryPath,
 				onCancelAutomaticTaskAction,
 				moveToTrashLoadingById,
@@ -311,6 +318,7 @@ export function ColumnContextPanel({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onEditTaskPinboardPinReason,
 	onCancelAutomaticTaskAction,
 	moveToTrashLoadingById,
@@ -336,6 +344,7 @@ export function ColumnContextPanel({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -343,7 +352,7 @@ export function ColumnContextPanel({
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
-	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
+	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardDisplayGroupId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 	// 范围由顶栏项目切换器决定（Board Scope = All projects，见 use-selected-board-or-single-project-scope）；
 	// 没有宿主（单测里独立挂载）时只有 stage 列表。stage 列表在 Board Scope 下只隐藏不卸载：下面的钉住 rail /
@@ -352,7 +361,9 @@ export function ColumnContextPanel({
 	const showsCrossProjectRecentlyActiveTaskSwitcher =
 		crossProjectRecentlyActiveTaskSwitcherHost?.isBoardScopeAllProjectsSelected === true;
 
-	const columnIds = useMemo(() => selection.allColumns.map((column) => column.id), [selection.allColumns]);
+	const displayGroups = useMemo(() => projectTaskBoardDisplayGroups(selection.allColumns), [selection.allColumns]);
+	const focusedDisplayGroupId = selection.card.taskShelvingState?.isShelved ? "shelved" : selection.column.id;
+	const columnIds = useMemo(() => displayGroups.map((column) => column.id), [displayGroups]);
 
 	// stage 分段的展开态集中持有（Done 默认折叠，其余默认展开），行内卡头与钉住 rail 的孪生卡头共读同一份；
 	// rail 卡头发起的跳转 / 折叠 / 展开各自的滚动落点也由它决定。
@@ -365,9 +376,13 @@ export function ColumnContextPanel({
 	} = useFocusViewStageSectionExpansion({
 		scrollRootRef: scrollContainerRef,
 		orderedColumnIds: columnIds,
-		focusedColumnId: selection.column.id,
+		focusedColumnId: focusedDisplayGroupId,
 		focusedTaskId: selection.card.id,
 	});
+
+	useEffect(() => {
+		if (focusedDisplayGroupId === "shelved") expandStageSectionWithoutScrolling("shelved");
+	}, [focusedDisplayGroupId, selection.card.id, expandStageSectionWithoutScrolling]);
 
 	const activateCard = useCallback((card: BoardCardModel) => onCardSelect(card.id), [onCardSelect]);
 	const pinnedTasks = useMemo(
@@ -379,7 +394,7 @@ export function ColumnContextPanel({
 	// 再由控制器逐帧重试直到本体卡挂载、滚入视野并脉冲高亮。
 	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard({
 		prepareRevealTarget: (taskId) => {
-			const targetColumnId = findCardColumnId(selection.allColumns, taskId);
+			const targetColumnId = findTaskDisplayGroupId(selection.allColumns, taskId);
 			if (!targetColumnId) {
 				return;
 			}
@@ -399,6 +414,7 @@ export function ColumnContextPanel({
 		onEditTask,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
+		onSetTaskShelvingState,
 		onCancelAutomaticTaskAction,
 		moveToTrashLoadingById,
 	};
@@ -413,7 +429,7 @@ export function ColumnContextPanel({
 
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
-			setActiveDragSourceColumnId(findCardColumnId(selection.allColumns, start.draggableId));
+			setActiveDragSourceColumnId(findTaskDisplayGroupId(selection.allColumns, start.draggableId));
 		},
 		[selection.allColumns],
 	);
@@ -440,7 +456,7 @@ export function ColumnContextPanel({
 	const stageHeaderPinLayout = useStageHeaderPinLayout({
 		scrollRootRef: scrollContainerRef,
 		columnIds,
-		focusedColumnId: selection.column.id,
+		focusedColumnId: focusedDisplayGroupId,
 		focusedTaskId: selection.card.id,
 		focusedCardPinState: selectedCardPinState,
 		enabled: activeDragSourceColumnId == null,
@@ -553,7 +569,7 @@ export function ColumnContextPanel({
 									overflowAnchor: "none",
 								}}
 							>
-								{selection.allColumns.map((column) => (
+								{displayGroups.map((column) => (
 									<ColumnSection
 										key={column.id}
 										column={column}
@@ -564,13 +580,15 @@ export function ColumnContextPanel({
 										onCardClick={activateCard}
 										taskSessions={taskSessions}
 										onStartTask={
-											column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined
+											column.id === "backlog" || column.id === "in_progress" || column.id === "shelved"
+												? onStartTask
+												: undefined
 										}
 										onRequestStartAllReadyBacklogTasks={
 											column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
 										}
 										onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-										onEditTask={column.id === "backlog" ? onEditTask : undefined}
+										onEditTask={onEditTask}
 										onSaveTitle={onSaveTaskTitle}
 										onMoveToTrashTask={
 											column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
@@ -581,6 +599,7 @@ export function ColumnContextPanel({
 										onDeleteTask={onDeleteTask}
 										onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 										onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+										onSetTaskShelvingState={onSetTaskShelvingState}
 										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 										moveToTrashLoadingById={
 											column.id === "review" || column.id === "validation"
@@ -598,6 +617,8 @@ export function ColumnContextPanel({
 						</DragDropContext>
 						<StageHeaderRails
 							selection={selection}
+							displayGroups={displayGroups}
+							focusedDisplayGroupId={focusedDisplayGroupId}
 							topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
 							bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
 							focusedCardPinState={selectedCardPinState}

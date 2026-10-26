@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
+import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import type { RuntimeTaskImage } from "../core/api-contract";
 import type {
 	SharedTaskIndexingContext,
@@ -17,6 +18,7 @@ import {
 	StatelessTaskIndexingAgentExecutionError,
 	sanitizeStatelessAgentFailureDetail,
 } from "./stateless-task-indexing-agent-execution-diagnostics";
+import { TASK_ANALYSIS_SHARED_INSTRUCTIONS } from "./task-analysis-shared-prompt-prefix";
 
 export interface StatelessTaskIndexingAgentExecutionActivity {
 	eventKind: "agent_process_started" | "agent_response_received" | "agent_execution_completed" | "diagnostic_warning";
@@ -57,8 +59,8 @@ export function assembleStatelessTaskIndexingAgentPrompt(
 	request: Pick<StatelessTaskIndexingAgentRequest<unknown>, "instructionText" | "context" | "queryText">,
 ) {
 	return {
-		stablePrefix: `${request.instructionText}\n\nL1 看板任务目录（仅供查找候选）：\n${request.context.levelOneBoardTaskIndexText}\n\nL2 本项目任务 recap（不是完成证明）：\n${request.context.levelTwoProjectTaskRecapsText}`,
-		query: `L3 快照后追加变化（覆盖旧快照对应字段）：\n${request.context.levelThreeAppendedChangesText}\n\nL4 本次查询：\n${request.queryText}`,
+		stablePrefix: `${TASK_ANALYSIS_SHARED_INSTRUCTIONS}\n\nL1 看板任务目录（仅供查找候选）：\n${request.context.levelOneBoardTaskIndexText}\n\nL2 本项目任务 recap（不是完成证明）：\n${request.context.levelTwoProjectTaskRecapsText}`,
+		query: `L3 快照后追加变化（覆盖旧快照对应字段）：\n${request.context.levelThreeAppendedChangesText}\n\n本次分析指令：\n${request.instructionText}\n\nL4 本次查询：\n${request.queryText}`,
 	};
 }
 
@@ -350,8 +352,12 @@ export async function executeStatelessTaskIndexingAgent<T>(
 				"launch_argument_budget_exceeded",
 				"共享索引执行器单个启动参数超出保守系统限额。",
 			);
-		// 身份认证沿用原位置；不复制凭据，不修改 HOME/CODEX_HOME，也不继承宿主 task 行动者声明。
-		const environment = buildStatelessTaskIndexingAgentEnvironment(process.env);
+		// 认证与历史保持原归属；独立 Codex writer 使用自己的配置，不继承宿主 task 行动者声明。
+		const baseEnvironment = buildStatelessTaskIndexingAgentEnvironment(process.env);
+		const environment =
+			request.settings.agentId === "codex"
+				? await prepareAuxiliaryCodexConfigurationEnvironment(baseEnvironment, directory)
+				: baseEnvironment;
 		const output = await new Promise<string>((resolve, reject) => {
 			request.abortSignal?.throwIfAborted();
 			const child = spawn(request.settings.agentId, args, {

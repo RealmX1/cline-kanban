@@ -74,6 +74,424 @@ function claudeUser(uuid: string) {
 }
 
 describe("有界原生活动增量读取", () => {
+	it("已有可信前驱时完整读取超时，新回合首条用户输入仍由 summary 确认", async () => {
+		const target = summary("codex", "/isolated/native.jsonl");
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (method === "thread/read") return { thread: { id: "native", status: { type: "active" } } };
+			if (parameters.itemsView === "full") throw new Error("完整读取超时");
+			return {
+				data: [
+					{ id: "new", status: "inProgress", items: [{ id: "input", type: "userMessage" }] },
+					{ id: "before", status: "completed", items: [{ id: "old", type: "userMessage" }] },
+				],
+			};
+		});
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: {
+				transport: "codex_control",
+				predecessorTurnId: "before",
+				lastAcceptedUserInputItemId: "old",
+				seenEventIds: [],
+			},
+			observedAtMs: baselineAtMs,
+		});
+		expect(result?.events).toMatchObject([
+			{ eventId: "codex:native:new:input", activityKind: "accepted_user_input" },
+		]);
+		expect(result?.nativeActivityProjectionReadFailure).toContain("超时");
+	});
+	it.each([0, 800])("summary 后备保留旧前驱 steering 的完整水位，工具条目数=%s", async (toolCount) => {
+		const target = summary("codex", "/isolated/native.jsonl");
+		const previousTurn = {
+			id: "before",
+			status: "completed",
+			items: [
+				{ id: "old", type: "userMessage" },
+				...Array.from({ length: toolCount }, (_, index) => ({ id: `tool-${index}`, type: "commandExecution" })),
+			],
+		};
+		let turns = [previousTurn];
+		let fullReadFails = false;
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (parameters.itemsView === "full" && fullReadFails) throw new Error("完整读取超时");
+			return {
+				data: turns.slice(0, parameters.limit).map((turn) => ({
+					...turn,
+					items:
+						parameters.itemsView === "summary"
+							? turn.items.filter((item) => item.type === "userMessage").slice(0, 1)
+							: turn.items,
+				})),
+				nextCursor: null,
+			};
+		});
+		const read = (
+			cursor: Parameters<typeof readNativeAgentConversationActivity>[0]["cursor"],
+			observedAtMs: number,
+		) =>
+			readNativeAgentConversationActivity({
+				workspaceId: "workspace",
+				summary: target,
+				cursor,
+				observedAtMs,
+				shouldReadCodexNativeAgentTurnExecution: false,
+			});
+		const initial = await read(null, baselineAtMs);
+		previousTurn.items.push({ id: "steering", type: "userMessage" });
+		turns = [{ id: "after", status: "inProgress", items: [{ id: "new", type: "userMessage" }] }, previousTurn];
+		fullReadFails = true;
+		const fallback = await read(initial?.cursor ?? null, baselineAtMs + 1);
+		expect(fallback?.events.map((event) => event.eventId)).toEqual(["codex:native:after:new"]);
+		expect(fallback?.nativeActivityProjectionReadFailure).toContain("超时");
+		expect(fallback?.cursor).toMatchObject({ predecessorTurnId: "before", lastAcceptedUserInputItemId: "old" });
+		const repeatedFallback = await read(fallback?.cursor ?? null, baselineAtMs + 2);
+		expect(repeatedFallback?.events).toEqual([]);
+		fullReadFails = false;
+		const recovered = await read(repeatedFallback?.cursor ?? null, baselineAtMs + 3);
+		expect(recovered?.events.map((event) => event.eventId)).toEqual(["codex:native:before:steering"]);
+		expect(recovered?.cursor).toMatchObject({ predecessorTurnId: "after", lastAcceptedUserInputItemId: "new" });
+		const unchanged = await read(recovered?.cursor ?? null, baselineAtMs + 4);
+		expect(unchanged?.events).toEqual([]);
+	});
+	it.each([
+		{ fullReadFailsOnce: false, newHeadDuringRecovery: false },
+		{ fullReadFailsOnce: true, newHeadDuringRecovery: false },
+		{ fullReadFailsOnce: false, newHeadDuringRecovery: true },
+	])("跨多页自动补出旧前驱输入，恢复边界=%j", async ({ fullReadFailsOnce, newHeadDuringRecovery }) => {
+		const turns = [
+			...Array.from({ length: 5 }, (_, index) => ({
+				id: `turn-${5 - index}`,
+				status: "completed",
+				items: [{ id: `first-${5 - index}`, type: "userMessage" }],
+			})),
+			{
+				id: "before",
+				status: "completed",
+				items: [
+					{ id: "old", type: "userMessage" },
+					...Array.from({ length: 800 }, (_, index) => ({ id: `tool-${index}`, type: "commandExecution" })),
+					{ id: "steering", type: "userMessage" },
+				],
+			},
+		];
+		let fullPageFailureWasInjected = false;
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (
+				fullReadFailsOnce &&
+				!fullPageFailureWasInjected &&
+				parameters.itemsView === "full" &&
+				parameters.cursor === "4"
+			) {
+				fullPageFailureWasInjected = true;
+				throw new Error("完整页暂不可用");
+			}
+			const offset = parameters.cursor === null ? 0 : Number(parameters.cursor);
+			const page = turns.slice(offset, offset + Math.min(2, parameters.limit));
+			return {
+				data: page.map((turn) => ({
+					...turn,
+					items: parameters.itemsView === "summary" ? turn.items.slice(0, 1) : turn.items,
+				})),
+				nextCursor: offset + page.length < turns.length ? String(offset + page.length) : null,
+			};
+		});
+		let cursor: Parameters<typeof readNativeAgentConversationActivity>[0]["cursor"] = {
+			transport: "codex_control",
+			predecessorTurnId: "before",
+			lastAcceptedUserInputItemId: "old",
+			acceptedSummaryUserInputEventIdsPendingFullRead: ["codex:native:turn-5:first-5"],
+			seenEventIds: [],
+		};
+		const eventIds: Array<string | undefined> = [];
+		for (let readIndex = 0; readIndex < 12; readIndex += 1) {
+			if (newHeadDuringRecovery && readIndex === 3)
+				turns.unshift({ id: "turn-6", status: "completed", items: [{ id: "first-6", type: "userMessage" }] });
+			const result = await readNativeAgentConversationActivity({
+				workspaceId: "workspace",
+				summary: summary("codex", "/isolated/native.jsonl"),
+				cursor,
+				observedAtMs: baselineAtMs + readIndex,
+				shouldReadCodexNativeAgentTurnExecution: false,
+			});
+			eventIds.push(...(result?.events.map((event) => event.eventId) ?? []));
+			cursor = result?.cursor ?? null;
+			if (!result?.codexFullMessageReadContinuation) break;
+		}
+		const expectedEventIds = fullReadFailsOnce
+			? [
+					"codex:native:turn-1:first-1",
+					"codex:native:before:steering",
+					"codex:native:turn-2:first-2",
+					"codex:native:turn-3:first-3",
+					"codex:native:turn-4:first-4",
+				]
+			: [
+					"codex:native:before:steering",
+					"codex:native:turn-1:first-1",
+					"codex:native:turn-2:first-2",
+					"codex:native:turn-3:first-3",
+					"codex:native:turn-4:first-4",
+				];
+		if (newHeadDuringRecovery) expectedEventIds.push("codex:native:turn-6:first-6");
+		expect(eventIds).toEqual(expectedEventIds);
+		expect(cursor).toMatchObject({
+			predecessorTurnId: newHeadDuringRecovery ? "turn-6" : "turn-5",
+			lastAcceptedUserInputItemId: newHeadDuringRecovery ? "first-6" : "first-5",
+		});
+		expect(cursor).not.toHaveProperty("fullMessagePageReadRecovery");
+		expect(
+			request.mock.calls
+				.filter(([method, parameters]) => method === "thread/turns/list" && parameters.itemsView === "full")
+				.map(([, parameters]) => parameters.cursor),
+		).toEqual(fullReadFailsOnce || newHeadDuringRecovery ? ["4", "4", "2", null] : ["4", "2", null]);
+	});
+	it.each([true, false])("待补完整前驱离开当前页时，存在更早分页=%s", async (hasOlderPage) => {
+		const cursor = {
+			transport: "codex_control" as const,
+			predecessorTurnId: "before",
+			lastAcceptedUserInputItemId: "old",
+			acceptedSummaryUserInputEventIdsPendingFullRead: ["codex:native:after:new"],
+			seenEventIds: [],
+		};
+		request.mockImplementation(async (method) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			return {
+				data: [{ id: "after", status: "completed", items: [{ id: "new", type: "userMessage" }] }],
+				nextCursor: hasOlderPage ? "earlier-turns" : null,
+			};
+		});
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: summary("codex", "/isolated/native.jsonl"),
+			cursor,
+			observedAtMs: baselineAtMs,
+			shouldReadCodexNativeAgentTurnExecution: false,
+		});
+		expect(result?.events).toEqual([]);
+		if (hasOlderPage) {
+			expect(result?.cursor).toMatchObject({
+				...cursor,
+				fullMessagePageReadRecovery: { phase: "locating_predecessor", nextSummaryPageCursor: "earlier-turns" },
+			});
+			expect(result?.codexFullMessageReadContinuation?.madeProgress).toBe(true);
+			expect(request).not.toHaveBeenCalledWith("thread/turns/list", expect.objectContaining({ itemsView: "full" }));
+		} else {
+			// 完整 summary 列表已证明前驱被移除，按 Rewind 建立当前分支基线。
+			expect(result?.cursor).toMatchObject({ predecessorTurnId: "after", lastAcceptedUserInputItemId: "new" });
+			expect(result?.cursor).not.toHaveProperty("acceptedSummaryUserInputEventIdsPendingFullRead");
+		}
+	});
+	it.each([false, true])(
+		"跨页证明旧前驱已移除后只建 Rewind 基线，基线完整读取再次失败=%s",
+		async (baselineFailsOnce) => {
+			let baselineFailureWasInjected = false;
+			request.mockImplementation(async (method, parameters) => {
+				if (method === "thread/loaded/list") return { data: ["native"] };
+				if (parameters.itemsView === "full" && baselineFailsOnce && !baselineFailureWasInjected) {
+					baselineFailureWasInjected = true;
+					throw new Error("Rewind 基线暂不可读");
+				}
+				return parameters.cursor === null
+					? {
+							data: [{ id: "after", status: "completed", items: [{ id: "new", type: "userMessage" }] }],
+							nextCursor: "older",
+						}
+					: {
+							data: [
+								{
+									id: "historical",
+									status: "completed",
+									items: [{ id: "historical-input", type: "userMessage" }],
+								},
+							],
+							nextCursor: null,
+						};
+			});
+			let cursor: Parameters<typeof readNativeAgentConversationActivity>[0]["cursor"] = {
+				transport: "codex_control",
+				predecessorTurnId: "removed",
+				lastAcceptedUserInputItemId: "old",
+				acceptedSummaryUserInputEventIdsPendingFullRead: ["codex:native:after:new"],
+				seenEventIds: [],
+			};
+			for (let readIndex = 0; readIndex < 5; readIndex += 1) {
+				const result = await readNativeAgentConversationActivity({
+					workspaceId: "workspace",
+					summary: summary("codex", "/isolated/native.jsonl"),
+					cursor,
+					observedAtMs: baselineAtMs + readIndex,
+					shouldReadCodexNativeAgentTurnExecution: false,
+				});
+				expect(result?.events).toEqual([]);
+				cursor = result?.cursor ?? null;
+				if (!result?.codexFullMessageReadContinuation) break;
+			}
+			expect(cursor).toMatchObject({ predecessorTurnId: "after", lastAcceptedUserInputItemId: "new" });
+			expect(cursor).not.toHaveProperty("fullMessagePageReadRecovery");
+		},
+	);
+	it("原生分页循环保留已推进的书签并返回无进展，避免重读第一页或发布旧输入", async () => {
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			return {
+				data: [{ id: parameters.cursor === null ? "after" : "historical", status: "completed", items: [] }],
+				nextCursor: "older",
+			};
+		});
+		const input = {
+			workspaceId: "workspace",
+			summary: summary("codex", "/isolated/native.jsonl"),
+			observedAtMs: baselineAtMs,
+			shouldReadCodexNativeAgentTurnExecution: false,
+		};
+		const first = await readNativeAgentConversationActivity({
+			...input,
+			cursor: {
+				transport: "codex_control",
+				predecessorTurnId: "before",
+				lastAcceptedUserInputItemId: "old",
+				acceptedSummaryUserInputEventIdsPendingFullRead: [],
+				seenEventIds: [],
+			},
+		});
+		const looped = await readNativeAgentConversationActivity({ ...input, cursor: first?.cursor ?? null });
+		expect(looped?.events).toEqual([]);
+		expect(looped?.cursor).toEqual(first?.cursor);
+		expect(looped?.codexFullMessageReadContinuation?.madeProgress).toBe(false);
+		expect(looped?.nativeActivityProjectionReadFailure).toContain("分页没有向前推进");
+		expect(request).toHaveBeenLastCalledWith("thread/turns/list", expect.objectContaining({ cursor: "older" }));
+	});
+	it("full 页未覆盖前驱时保留恢复位置，补齐后仅报告尚未消费的 steering", async () => {
+		const previousTurn = {
+			id: "before",
+			status: "completed",
+			items: [
+				{ id: "old", type: "userMessage" },
+				{ id: "steering", type: "userMessage" },
+			],
+		};
+		const latestTurn = { id: "after", status: "inProgress", items: [{ id: "new", type: "userMessage" }] };
+		let fullPageIsIncomplete = true;
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (parameters.itemsView === "full")
+				return { data: fullPageIsIncomplete ? [latestTurn] : [latestTurn, previousTurn], nextCursor: "more" };
+			return { data: [latestTurn, { ...previousTurn, items: previousTurn.items.slice(0, 1) }], nextCursor: null };
+		});
+		const input = {
+			workspaceId: "workspace",
+			summary: summary("codex", "/isolated/native.jsonl"),
+			observedAtMs: baselineAtMs,
+			shouldReadCodexNativeAgentTurnExecution: false,
+		};
+		const incomplete = await readNativeAgentConversationActivity({
+			...input,
+			cursor: {
+				transport: "codex_control",
+				predecessorTurnId: "before",
+				lastAcceptedUserInputItemId: "old",
+				seenEventIds: [],
+			},
+		});
+		expect(incomplete?.events.map((event) => event.eventId)).toEqual(["codex:native:after:new"]);
+		expect(incomplete?.cursor).toMatchObject({ predecessorTurnId: "before", lastAcceptedUserInputItemId: "old" });
+		expect(incomplete?.nativeActivityProjectionReadFailure).toContain("保留恢复水位");
+		fullPageIsIncomplete = false;
+		const complete = await readNativeAgentConversationActivity({ ...input, cursor: incomplete?.cursor ?? null });
+		expect(complete?.events.map((event) => event.eventId)).toEqual(["codex:native:before:steering"]);
+		expect(complete?.cursor).toMatchObject({ predecessorTurnId: "after", lastAcceptedUserInputItemId: "new" });
+	});
+
+	it("原生进程已退出时仍从绑定转录补证历史接受，不查询或启动原生进程", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "kanban-offline-acceptance-"));
+		directories.push(directory);
+		const path = join(directory, "native.jsonl");
+		await writeFile(
+			path,
+			`${[
+				{ type: "session_meta", payload: { id: "native", cwd: "/isolated", source: "cli" } },
+				{
+					timestamp: new Date(baselineAtMs + 200).toISOString(),
+					type: "event_msg",
+					payload: {
+						type: "item_completed",
+						thread_id: "native",
+						turn_id: "ended",
+						item: { type: "UserMessage", id: "input", content: [{ type: "text", text: "继续" }] },
+					},
+				},
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		const target = {
+			...summary("codex", path),
+			codexNativeSessionControlEndpoint: null,
+			agentConversationPromptSubmissionAcceptance: {
+				status: "unconfirmed" as const,
+				attemptedAtMs: baselineAtMs,
+				runtimeSessionIncarnationId: "incarnation",
+			},
+		};
+		const result = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: null,
+			observedAtMs: baselineAtMs + 60_000,
+		});
+		expect(result?.events).toEqual([]);
+		expect(result?.promptSubmissionAcceptanceReconciliation?.accepted).toEqual({
+			eventId: "codex:native:ended:input",
+			acceptedAtMs: baselineAtMs + 200,
+		});
+		expect(request).not.toHaveBeenCalled();
+	});
+
+	it("单个回合超过 512 条工具记录后追加相同正文的新输入，独立水位只确认一次", async () => {
+		const target = summary("codex", "/isolated/native.jsonl");
+		const items = [
+			{ id: "first", type: "userMessage", content: [{ type: "text", text: "继续" }] },
+			...Array.from({ length: 800 }, (_, index) => ({ id: `tool-${index}`, type: "commandExecution" })),
+		];
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (method === "thread/read") return { thread: { id: "native", status: { type: "active" } } };
+			return {
+				data: [
+					{ id: "current", status: "inProgress", items: parameters.itemsView === "summary" ? [items[0]] : items },
+				],
+			};
+		});
+		const initial = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: null,
+			observedAtMs: baselineAtMs,
+		});
+		expect(initial?.events).toEqual([]);
+		expect(initial?.cursor).toMatchObject({ lastAcceptedUserInputItemId: "first" });
+		items.push({ id: "steering", type: "userMessage", content: [{ type: "text", text: "继续" }] });
+		const added = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: initial?.cursor ?? null,
+			observedAtMs: baselineAtMs + 1,
+		});
+		expect(added?.events).toMatchObject([{ eventId: "codex:native:current:steering", submittedPromptText: "继续" }]);
+		const unchanged = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: added?.cursor ?? null,
+			observedAtMs: baselineAtMs + 2,
+		});
+		expect(unchanged?.events).toEqual([]);
+	});
+
 	it("Codex 首次超预算的独立就绪结果不初始化活动基线，rewind 后只建立基线", async () => {
 		const target = {
 			...summary("codex", "/isolated/native.jsonl"),
@@ -134,7 +552,7 @@ describe("有界原生活动增量读取", () => {
 			{ activityKind: "accepted_user_input", eventId: "codex:native:new-turn:new-input" },
 		]);
 	});
-	it("活动游标超预算时仍可独立核验空闲，但不推进游标或重放接受", async () => {
+	it("旧活动游标超预算时建立独立接受水位，不重放历史接受", async () => {
 		const target = {
 			...summary("codex", "/isolated/native.jsonl"),
 			turnOwner: "user" as const,
@@ -167,7 +585,7 @@ describe("有界原生活动增量读取", () => {
 			observedAtMs: baselineAtMs,
 		});
 		expect(result?.events).toEqual([]);
-		expect(result?.cursor).toEqual(cursor);
+		expect(result?.cursor).toMatchObject({ predecessorTurnId: "current", lastAcceptedUserInputItemId: "512" });
 		expect(result?.codexNativeDirectInputReadiness).toBeDefined();
 	});
 	it.each([null, "rewound-predecessor", "current"])(
@@ -534,13 +952,13 @@ describe("有界原生活动增量读取", () => {
 			request.mock.calls.filter(
 				([method, parameters]) => method === "thread/turns/list" && parameters.itemsView === "summary",
 			),
-		).toHaveLength(2);
+		).toHaveLength(4);
 		expect(request).toHaveBeenCalledWith("thread/turns/list", {
 			threadId: "native",
 			cursor: null,
 			limit: MAX_RECENT_CODEX_NATIVE_ACTIVITY_TURNS,
 			sortDirection: "desc",
-			itemsView: "full",
+			itemsView: "summary",
 		});
 		const unchanged = await readNativeAgentConversationActivity({
 			workspaceId: "workspace",
@@ -586,9 +1004,9 @@ describe("有界原生活动增量读取", () => {
 	);
 	it.each([true, false])("跳过执行状态查询仍核验加载身份并读取消息接受：已加载=%s", async (isLoaded) => {
 		const target = summary("codex", "/isolated/native.jsonl");
-		request.mockImplementation(async (method, parameters) => {
+		request.mockImplementation(async (method) => {
 			if (method === "thread/loaded/list") return { data: isLoaded ? ["native"] : [] };
-			if (method === "thread/turns/list" && parameters.itemsView === "full")
+			if (method === "thread/turns/list")
 				return {
 					data: [
 						{
@@ -619,7 +1037,7 @@ describe("有界原生活动增量读取", () => {
 			expect(result?.codexNativeDirectInputReadiness).toBeUndefined();
 		} else expect(result).toBeNull();
 		expect(request.mock.calls.map(([method]) => method)).toEqual(
-			isLoaded ? ["thread/loaded/list", "thread/turns/list"] : ["thread/loaded/list"],
+			isLoaded ? ["thread/loaded/list", "thread/turns/list", "thread/turns/list"] : ["thread/loaded/list"],
 		);
 	});
 	it("Codex 首次确认的正文提取接受 text+skill，不把手册正文拼进投递正文", async () => {

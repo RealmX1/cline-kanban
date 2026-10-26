@@ -274,3 +274,23 @@ describe("跨浏览器 origin 共享的界面偏好", () => {
 		});
 	});
 });
+
+it("创建与编辑设置的逐项偏好在不同客户端交错更新时保留其他项", () => {
+	const empty = normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins({});
+	const first = mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(empty, {
+		taskEditorSettingPresentationBySettingKey: { permissions: "hidden" },
+	});
+	const second = mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(first, {
+		taskEditorSettingPresentationBySettingKey: { base_ref: "collapsed_in_group" },
+	});
+	const restored = normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(JSON.parse(JSON.stringify(second)));
+	expect(restored.taskEditorSettingPresentationBySettingKey).toEqual({
+		permissions: "hidden",
+		base_ref: "collapsed_in_group",
+	});
+	expect(
+		mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(restored, {
+			taskEditorSettingPresentationBySettingKey: { permissions: "expanded" },
+		}).taskEditorSettingPresentationBySettingKey,
+	).toEqual({ permissions: "expanded", base_ref: "collapsed_in_group" });
+});

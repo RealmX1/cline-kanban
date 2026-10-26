@@ -11,6 +11,7 @@ export function projectTaskBoardAfterAcceptedMainConversationInput(
 	const accepted = summary.agentConversationPromptSubmissionAcceptance;
 	if (
 		accepted?.status !== "accepted" ||
+		accepted.acceptedByHistoricalReconciliation === true ||
 		!accepted.eventId ||
 		accepted.confirmedAtMs === undefined ||
 		accepted.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
@@ -25,6 +26,7 @@ export function projectTaskBoardAfterAcceptedMainConversationInput(
 		if (!card) continue;
 		if (
 			(column.id !== "review" && column.id !== "validation") ||
+			(card.taskShelvingState?.lastChangedAt ?? 0) >= accepted.confirmedAtMs ||
 			resolveMainTaskConversationSessionId(card) !== summary.taskId ||
 			card.updatedAt > accepted.confirmedAtMs
 		)

@@ -1250,6 +1250,7 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 			reportDeliveryStartedAt: 2,
 			reportDeliveryAttempt: 0,
 		},
+		taskShelvingState: { isShelved: true, lastChangedAt: 5 },
 		title: "Every field populated",
 		prompt: "Carry every field through normalization",
 		startInPlanMode: true,

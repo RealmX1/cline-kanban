@@ -5,6 +5,7 @@ import {
 } from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
+import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
@@ -630,6 +631,7 @@ export function useRuntimeStateStream(
 				return;
 			}
 			socket.onopen = () => {
+				notifyCodexConfigurationSyncUpdated();
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
 					requestedWorkspaceForConnection,
 					(message) => {
@@ -652,6 +654,10 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "codex_configuration_sync_updated") {
+						notifyCodexConfigurationSyncUpdated();
+						return;
+					}
 					if (payload.type === "daily_work_progress_statistics_updated") {
 						observeDailyWorkProgressStatisticsUpdated();
 						return;

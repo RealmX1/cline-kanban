@@ -195,7 +195,7 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 				"打开 task def34 [workspace-other-project]",
 			),
 		);
-		expect(onOpenTaskInProject).toHaveBeenCalledWith(OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST, "def34");
+		expect(onOpenTaskInProject).toHaveBeenCalledWith(OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST, "def34", 1_000);
 
 		const tombstoneRow = findRelationRow("relation-subject-requirements-amended-by-tombstone");
 		expect(tombstoneRow.textContent).toContain("墓碑 · 已永久删除");

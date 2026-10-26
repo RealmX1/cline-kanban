@@ -16,6 +16,7 @@ import {
 	createInMemoryClineTaskSessionService,
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
+import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
@@ -23,7 +24,6 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
-	RuntimeTaskChatSendRequest,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -107,15 +107,13 @@ import {
 } from "../state/workspace-state";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
+import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
 	readTaskIndexingSupportExecutorSettings,
 } from "../task-indexing-support/task-indexing-support-storage";
-import {
-	createTaskLookupConversationService,
-	TASK_LOOKUP_INSTRUCTION_VERSION,
-} from "../task-indexing-support/task-lookup-conversation-service";
+import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -453,6 +451,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return Array.from(summariesByTaskId.values());
 	};
+	const codexConfigurationSyncService = createCodexConfigurationSyncService({
+		listSessions: () =>
+			deps.workspaceRegistry
+				.listManagedWorkspaces()
+				.flatMap(({ workspaceId, terminalManager }) =>
+					terminalManager.listSummaries().map((summary) => ({ workspaceId, summary })),
+				),
+		onUpdated: (revision) => deps.runtimeStateHub.broadcastCodexConfigurationSyncUpdated?.(revision),
+	});
+	codexConfigurationSyncService.start();
 	// 「停止生成响应后固定宽限期」回收调度器。放在这里是因为三种 transport 的服务持有者都在本作用域：
 	// listProjectRuntimeSessionSummaries 已经把三条 summary 流合并成一个查询面，正是陈旧定时器防护
 	// 需要的「当前这个 task 的 summary 到底长什么样」。
@@ -504,7 +512,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
 	let rvfAutomaticCloseoutPromptDeliveryValidator:
-		| ((scope: RuntimeTrpcWorkspaceScope, input: RuntimeTaskChatSendRequest) => Promise<void>)
+		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["validateCloseoutPromptDelivery"]
+		| undefined;
+	let settleRvfCloseoutPromptTerminalDelivery:
+		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["settleCloseoutPromptTerminalDelivery"]
 		| undefined;
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: findRuntimeSessionSummary,
@@ -532,7 +543,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					resolveClineTaskSessionLaunchConfig: async () =>
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-					onProgrammaticTerminalDeliverySettled,
+					onProgrammaticTerminalDeliverySettled: (outcome) => {
+						onProgrammaticTerminalDeliverySettled?.(outcome);
+						if (request.source === "rvf_automatic_closeout")
+							void settleRvfCloseoutPromptTerminalDelivery?.(
+								scope,
+								request,
+								outcome.status === "delivered_and_submit_confirmed",
+							).catch((error) => deps.warn(`收尾终端投递登记尚待对账：${String(error)}`));
+					},
 					programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
 					validateBeforeTerminalWrite:
@@ -542,7 +561,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 									if (request.source === "rvf_automatic_closeout") {
 										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
 											throw new Error("自动收尾投递门尚未就绪。");
-										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request);
+										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request, phase);
 									}
 								}
 							: undefined,
@@ -905,8 +924,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 	pauseAutomaticRvfCloseoutForStoppedTask = rvfAutomaticCloseoutApi.pauseForExplicitStop;
 	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
+	settleRvfCloseoutPromptTerminalDelivery = rvfAutomaticCloseoutApi.settleCloseoutPromptTerminalDelivery;
 
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
+		getAcpTaskSessionService: getScopedAcpTaskSessionService,
 		getTerminalManager: getScopedTerminalManager,
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 		startTaskSession: (scope, input) => runtimeApi.startTaskSession(scope, input),
@@ -948,7 +969,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				workspaceId,
 				materials,
 				settings,
-				instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
+				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 				now: Date.now(),
 				forModelRequest: true,
 			}),
@@ -973,6 +994,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
+			codexConfigurationSyncApi: codexConfigurationSyncService,
 			dailyWorkProgressStatisticsApi: dailyWorkProgressStatisticsService,
 			taskIndexingSupportApi,
 			taskLookupConversationApi,
@@ -1389,6 +1411,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const closeRuntimeServerResources = async (): Promise<void> => {
 		await taskVisualizationArtifactApi.stop();
 		await taskLookupConversationApi.close();
+		await codexConfigurationSyncService.close();
 		await taskIndexingSupportApi.close();
 		await taskMainSessionHandoverApi.close();
 		await rvfAutomaticCloseoutApi.stop();

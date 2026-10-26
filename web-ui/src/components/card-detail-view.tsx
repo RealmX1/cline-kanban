@@ -55,6 +55,8 @@ import {
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
+import type { ExpandedForegroundViewTarget } from "@/expanded-foreground-view/expanded-foreground-view-navigation";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
@@ -100,6 +102,7 @@ import type {
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
+import { projectTaskBoardDisplayGroups } from "@/state/task-board-display-groups";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
@@ -110,6 +113,7 @@ import {
 	type AgentInputShortcutInsertionFocusHandle,
 	shouldHandOffKeyboardFocusToAgentEntryNow,
 } from "@/utils/keyboard-focus-handoff-to-agent-entry";
+import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
 import { useWindowEvent } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
@@ -723,6 +727,7 @@ export function CardDetailView({
 	onCancelAutomaticTaskAction,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onEditTaskPinboardPinReason,
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
@@ -802,6 +807,7 @@ export function CardDetailView({
 	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
@@ -871,6 +877,12 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
+	const foregroundView = useExpandedForegroundViewNavigation();
+	const foregroundBelongsToThisTask =
+		foregroundView?.ownerSurfaceId !== null &&
+		foregroundView?.target?.workspaceId === currentProjectId &&
+		foregroundView.target.taskId === selection.card.id &&
+		foregroundView.target.taskIncarnationCreatedAtEpochMs === selection.card.createdAt;
 	const isDoneTaskReadOnly = selection.column.id === "trash";
 	const desktopArrangement = useFocusViewDesktopPanelArrangement();
 	const isWorkbenchBelowAgent = desktopArrangement.arrangement === "agent_above_workbench_below";
@@ -885,21 +897,49 @@ export function CardDetailView({
 	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
-	const [visualizationWorkbenchSelection, setVisualizationWorkbenchSelection] = useState<{
+	const [workbenchModuleSelectionRequest, setWorkbenchModuleSelectionRequest] = useState<{
 		slot: 0 | 1;
 		module: TaskWorkbenchModule;
 		requestKey: number;
 		persistSelection: boolean;
 	}>();
 	const [visualizationOverridesWorkspaceChanges, setVisualizationOverridesWorkspaceChanges] = useState(false);
-	const visualizationRequestSequence = useRef(0);
+	const workbenchModuleSelectionRequestSequence = useRef(0);
+	const foregroundResponsiveLayoutHandoff = useRef<{
+		viewKind: ExpandedForegroundViewTarget["viewKind"];
+		isMobile: boolean;
+	} | null>(null);
+	useEffect(() => {
+		const previousForegroundLayout = foregroundResponsiveLayoutHandoff.current;
+		// 后退可能先于 useIsMobile 的媒体事件到达，按当前视口补齐最后一次布局交接。
+		const viewportIsMobile = matchesMobileViewportNow();
+		const currentForegroundKind = foregroundBelongsToThisTask ? foregroundView?.target?.viewKind : undefined;
+		foregroundResponsiveLayoutHandoff.current = currentForegroundKind
+			? { viewKind: currentForegroundKind, isMobile: viewportIsMobile }
+			: null;
+		if (!previousForegroundLayout || previousForegroundLayout.isMobile === viewportIsMobile) return;
+		const foregroundKind = currentForegroundKind ?? previousForegroundLayout.viewKind;
+		if (viewportIsMobile) setMobileTab(foregroundKind === "task_visualization" ? "visualizations" : "sessions");
+		else
+			setWorkbenchModuleSelectionRequest({
+				slot: 1,
+				module:
+					foregroundKind === "task_visualization"
+						? "task_visualizations"
+						: foregroundKind === "task_relations"
+							? "cross_task_relations"
+							: "exploration_map",
+				requestKey: ++workbenchModuleSelectionRequestSequence.current,
+				persistSelection: false,
+			});
+	}, [isMobile, foregroundBelongsToThisTask, foregroundView?.target]);
 	const showAutomaticVisualizationPreview = useCallback(() => {
 		setMobileTab("visualizations");
 		setVisualizationOverridesWorkspaceChanges(true);
-		setVisualizationWorkbenchSelection({
+		setWorkbenchModuleSelectionRequest({
 			slot: 1,
 			module: "task_visualizations",
-			requestKey: ++visualizationRequestSequence.current,
+			requestKey: ++workbenchModuleSelectionRequestSequence.current,
 			persistSelection: false,
 		});
 	}, []);
@@ -907,21 +947,25 @@ export function CardDetailView({
 		workspaceId: currentProjectId,
 		taskId: selection.card.id,
 		observeBrowser: !taskLookupWorkbenchContent && !isDoneTaskReadOnly,
+		isAutomaticPreviewForegroundEligible:
+			!foregroundView?.target ||
+			(foregroundBelongsToThisTask && foregroundView.target.viewKind === "task_visualization"),
 		onAutomaticPreview: showAutomaticVisualizationPreview,
 	});
 	const taskVisualizationPanel = (
 		<TaskVisualizationArtifactsPanel
 			workspaceId={currentProjectId}
 			taskId={selection.card.id}
+			taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
 			controller={taskVisualizations}
 			onClosePreview={() => {
 				taskVisualizations.dismissAutomaticPreview();
 				setMobileTab("chat");
 				setVisualizationOverridesWorkspaceChanges(false);
-				setVisualizationWorkbenchSelection({
+				setWorkbenchModuleSelectionRequest({
 					slot: 1,
 					module: "prompt_tools",
-					requestKey: ++visualizationRequestSequence.current,
+					requestKey: ++workbenchModuleSelectionRequestSequence.current,
 					persistSelection: false,
 				});
 			}}
@@ -1074,8 +1118,10 @@ export function CardDetailView({
 
 	// In Progress no longer offers Move to Validation / Move to Done from the agent TUI — those
 	// shortcuts only make sense once a task is in Review (or, for Done, already in Validation).
-	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "validation";
-	const showMoveToValidationActions = selection.column.id === "review";
+	const showMoveToTrashActions =
+		!selection.card.taskShelvingState?.isShelved &&
+		(selection.column.id === "review" || selection.column.id === "validation");
+	const showMoveToValidationActions = !selection.card.taskShelvingState?.isShelved && selection.column.id === "review";
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
 	// 详情页分流回答的是「这个**既存**会话该渲染成什么面板」，所以兜底顺序是「运行时观测事实 → 用户意图」，
@@ -1177,7 +1223,10 @@ export function CardDetailView({
 		useCrossProjectRecentlyActiveTaskSwitcherHostContext()?.isBoardScopeAllProjectsSelected === true;
 	const handleSelectAdjacentCard = useCallback(
 		(step: number) => {
-			const cards = selection.column.cards;
+			const cards =
+				projectTaskBoardDisplayGroups(selection.allColumns).find(
+					(group) => group.id === (selection.card.taskShelvingState?.isShelved ? "shelved" : selection.column.id),
+				)?.cards ?? [];
 			const currentIndex = cards.findIndex((card) => card.id === selection.card.id);
 			if (currentIndex === -1) {
 				return;
@@ -1188,7 +1237,13 @@ export function CardDetailView({
 				onCardSelect(nextCard.id);
 			}
 		},
-		[onCardSelect, selection.card.id, selection.column.cards],
+		[
+			onCardSelect,
+			selection.card.id,
+			selection.card.taskShelvingState?.isShelved,
+			selection.column.id,
+			selection.allColumns,
+		],
 	);
 
 	useHotkeys(
@@ -1508,7 +1563,9 @@ export function CardDetailView({
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				workspaceId={currentProjectId}
 				explorationId={selection.card.id}
+				taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
 				data={explorationThreadGraph}
+				onRefresh={explorationThreadGraph.refresh}
 			/>
 		) : null;
 	const sessionFindingsSection =
@@ -1528,6 +1585,7 @@ export function CardDetailView({
 			initiallyExpanded={!isMobile}
 			workspaceId={currentProjectId}
 			kanbanBoardCardTaskId={selection.card.id}
+			taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
 		/>
 	);
 	const activeTaskConversationSessionMessages =
@@ -1749,361 +1807,232 @@ export function CardDetailView({
 		</div>
 	);
 
-	if (isMobile) {
-		const handleMobileTabChange = (tab: MobileTab) => {
-			if (tab !== "visualizations") taskVisualizations.dismissAutomaticPreview();
-			setMobileTab(tab);
-			if (isDetailUtilityTab(tab)) {
-				setDetailUtilityTab(tab);
-			}
-		};
-		const mobileDetailLayout = (
-			<div
-				ref={mobileFocusViewRootRef}
-				className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
-				data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
-			>
-				<MobileFocusedTaskCardHeader
-					onBackToBoard={onBackToBoard}
-					navigationAndToolsControls={mobileControls}
-					key={mobileFocusedTaskIdentity}
-					stageDisplayName={selection.column.title}
-					idleCollapseController={mobileFocusViewIdleCollapseController}
-					cardBusinessProps={buildTaskCardBusinessProps({
-						card: selection.card,
-						taskSessions,
-						columnId: selection.column.id,
-						sessionSummary:
-							resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ??
-							sessionSummary ??
-							undefined,
-						selected: true,
-						workspacePath,
-						defaultAgentId: selectedAgentId,
-						defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
-						handlers: {
-							onStartTask,
-							onEditTask,
-							onSaveTitle: onSaveTaskTitle,
-							onMoveToTrashTask: onMoveReviewCardToTrash,
-							onMoveToValidationTask: onMoveReviewCardToValidation,
-							onMoveToReviewTask: onMoveCardToReview,
-							onRestoreFromTrashTask: onRestoreTaskFromTrash,
-							onDeleteTask,
-							onCancelAutomaticTaskAction,
-							onRequestPinToTaskPinboard,
-							onUnpinFromTaskPinboard,
-							resolveTaskWorkspaceAbsoluteDirectoryPath,
-							moveToTrashLoadingById: moveToTrashLoadingById ?? {
-								[selection.card.id]: isMoveToTrashLoading ?? false,
-							},
-							moveToValidationLoadingById: { [selection.card.id]: isMoveToValidationLoading ?? false },
-							moveToReviewLoadingById,
-						},
-					})}
-				/>
-				<div
-					hidden={!mobileControls.upperNavigationAndToolsExpanded}
-					className="shrink-0"
-					data-mobile-focus-view-detail-tabs=""
-				>
-					<MobileDetailTabBar
-						activeTab={mobileTab}
-						onTabChange={handleMobileTabChange}
-						showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
-						queuedPromptTaskId={selectedTaskConversationSessionId}
-						queuedPromptCountIndicator={queuedPromptCountIndicator}
-					/>
-				</div>
-				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-						{/* Chat panel. 终端 agent 的阅读模式与虚拟按键条都由 AgentTerminalPanel 自己承载，
-						    不在这里另开 tab —— 否则读到 agent 的提问后还得切回本 tab 才能按方向键回答。 */}
-						<div
-							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: mobileTab === "chat" ? "flex" : "none" }}
-						>
-							{agentChatPanel}
-						</div>
-						<div
-							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: mobileTab === "visualizations" ? "flex" : "none" }}
-						>
-							{taskVisualizationPanel}
-						</div>
-						{/* Sessions panel + 本会话 findings（同位下方的独立可折叠 section） */}
-						<div
-							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: mobileTab === "sessions" ? "flex" : "none" }}
-						>
-							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
-							{explorationThreadGraphPanel}
-							{sessionFindingsSection}
-							{workUnitRelationNeighborhoodPanel}
-						</div>
-						{/* Prompts / Commands / Queue 工具面板 */}
-						<div
-							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: isDetailUtilityTab(mobileTab) ? "flex" : "none" }}
-						>
-							{detailUtilityPanel}
-						</div>
-						{/* Diff panel */}
-						{isTaskChangesSidebarOpen ? (
-							<div
-								className="min-h-0 min-w-0 flex-1 flex-col"
-								style={{ display: mobileTab === "diff" ? "flex" : "none" }}
-							>
-								<DiffToolbar
-									mode={diffMode}
-									onModeChange={setDiffMode}
-									isExpanded={false}
-									onToggleExpand={handleToggleDiffExpand}
-									hideExpand
-								/>
-								{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
-									<WorkspaceChangesStaleDataWarning
-										error={workspaceChangesError}
-										onRetry={() => void refreshWorkspaceChanges()}
-										isRequestInFlight={isWorkspaceChangesRequestInFlight}
-									/>
-								) : null}
-								<div className="flex min-h-0 flex-1">
-									{isWorkspaceChangesMissingScope ? (
-										<WorkspaceChangesUnavailablePanel isDoneTaskReadOnly={isDoneTaskReadOnly} />
-									) : isWorkspaceChangesInitialError && workspaceChangesError ? (
-										<WorkspaceChangesErrorPanel
-											error={workspaceChangesError}
-											onRetry={() => void refreshWorkspaceChanges()}
-											isRequestInFlight={isWorkspaceChangesRequestInFlight}
-										/>
-									) : isWorkspaceChangesInitialLoading ? (
-										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
-									) : hasNoWorkspaceFileChanges ? (
-										<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-									) : workspaceChanges !== null ? (
-										<DiffViewerPanel
-											workspaceFiles={runtimeFiles}
-											selectedPath={selectedPath}
-											selectedPathExpandToken={selectedPathExpandToken}
-											onSelectedPathChange={setSelectedPath}
-											viewMode="unified"
-											onAddToTerminal={
-												!isDoneTaskReadOnly && (onAddReviewComments || showClineAgentChatPanel)
-													? injectTextIntoActiveInput
-													: undefined
-											}
-											onSendToTerminal={
-												!isDoneTaskReadOnly && (onSendReviewComments || showClineAgentChatPanel)
-													? handleSendDiffComments
-													: undefined
-											}
-											comments={diffComments}
-											onCommentsChange={setDiffComments}
-										/>
-									) : (
-										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
-									)}
-								</div>
-							</div>
-						) : null}
-						{/* Files panel */}
-						{isTaskChangesSidebarOpen ? (
-							<div
-								className="min-h-0 min-w-0 flex-1 flex-col"
-								style={{ display: mobileTab === "files" ? "flex" : "none" }}
-							>
-								{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
-									<WorkspaceChangesStaleDataWarning
-										error={workspaceChangesError}
-										onRetry={() => void refreshWorkspaceChanges()}
-										isRequestInFlight={isWorkspaceChangesRequestInFlight}
-									/>
-								) : null}
-								<div className="flex min-h-0 flex-1">
-									{isWorkspaceChangesMissingScope ? (
-										<WorkspaceChangesUnavailablePanel isDoneTaskReadOnly={isDoneTaskReadOnly} />
-									) : isWorkspaceChangesInitialError && workspaceChangesError ? (
-										<WorkspaceChangesErrorPanel
-											error={workspaceChangesError}
-											onRetry={() => void refreshWorkspaceChanges()}
-											isRequestInFlight={isWorkspaceChangesRequestInFlight}
-										/>
-									) : isWorkspaceChangesInitialLoading ? (
-										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
-									) : workspaceChanges !== null ? (
-										<FileTreePanel
-											workspaceFiles={runtimeFiles}
-											selectedPath={selectedPath}
-											onSelectPath={(path: string) => {
-												handleExplicitSelectPath(path);
-												setMobileTab("diff");
-											}}
-											panelFlex="1 1 0"
-										/>
-									) : (
-										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
-									)}
-								</div>
-							</div>
-						) : null}
-					</div>
-					{/* Terminal panel — bottom overlay */}
-					{showBottomTerminal ? (
-						<div className="absolute bottom-0 left-0 right-0 z-20">
-							<BottomTerminalSection
-								taskId={bottomTerminalTaskId}
-								workspaceId={currentProjectId}
-								summary={bottomTerminalSummary}
-								onSummary={onSessionSummary}
-								onClose={onBottomTerminalClose}
-								subtitle={bottomTerminalSubtitle}
-								terminalThemeColors={terminalThemeColors}
-								onConnectionReady={onBottomTerminalConnectionReady}
-								agentCommand={bottomTerminalAgentCommand}
-								onSendAgentCommand={onBottomTerminalSendAgentCommand}
-								paneHeight={bottomTerminalPaneHeight}
-								onPaneHeightChange={onBottomTerminalPaneHeightChange}
-								onCollapse={onBottomTerminalCollapse}
-								isExpanded={isBottomTerminalExpanded}
-								onToggleExpand={onBottomTerminalToggleExpand}
-							/>
-						</div>
-					) : null}
-				</div>
-			</div>
-		);
-		return (
-			<MobileFocusViewIdleCollapseControllerProvider value={mobileFocusViewIdleCollapseController}>
-				<MobileFocusViewCollapsibleControlsProvider value={mobileControls}>
-					{taskLookupWorkbenchContent}
-					<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>{mobileDetailLayout}</div>
-				</MobileFocusViewCollapsibleControlsProvider>
-			</MobileFocusViewIdleCollapseControllerProvider>
-		);
-	}
+	const handleMobileTabChange = (tab: MobileTab) => {
+		if (tab !== "visualizations") taskVisualizations.dismissAutomaticPreview();
+		setMobileTab(tab);
+		if (isDetailUtilityTab(tab)) setDetailUtilityTab(tab);
+	};
+	const visibleMobileTab = foregroundBelongsToThisTask
+		? foregroundView?.target?.viewKind === "task_visualization"
+			? "visualizations"
+			: "sessions"
+		: mobileTab;
+	const mobileVisibleWorkbenchModules: TaskWorkbenchModule[] =
+		visibleMobileTab === "visualizations"
+			? ["task_visualizations"]
+			: visibleMobileTab === "sessions"
+				? ["task_sessions", "exploration_map", "cross_task_relations"]
+				: isDetailUtilityTab(visibleMobileTab)
+					? ["prompt_tools"]
+					: [];
 
+	// 断点只改变布局与可见性；Agent、工作台模块和 iframe 始终留在同一棵内容树。
 	return (
-		<div
-			ref={detailLayoutRef}
-			className="flex min-h-0 flex-1 overflow-hidden bg-surface-0"
-			// Post-Deploy Verification 引导定位锚点：guidance.anchor.view==="task_detail" 可指向此任务详情容器。
-			data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
-		>
-			{!isDiffExpanded || taskLookupWorkbenchContent ? (
-				<>
-					<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
-						<ColumnContextPanel
-							onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
-							selection={selection}
-							workspacePath={workspacePath}
-							resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
-							onCardSelect={onCardSelect}
-							taskSessions={taskSessions}
-							onTaskDragEnd={onTaskDragEnd}
-							onCreateTask={onCreateTask}
-							onStartTask={onStartTask}
-							onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
-							onClearTrash={onClearTrash}
-							onEditTask={onEditTask}
-							onSaveTaskTitle={onSaveTaskTitle}
-							onMoveToTrashTask={onMoveReviewCardToTrash}
-							onMoveToValidationTask={onMoveReviewCardToValidation}
-							onMoveToReviewTask={onMoveCardToReview}
-							onRestoreFromTrashTask={onRestoreTaskFromTrash}
-							onDeleteTask={onDeleteTask}
-							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
-							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
-							moveToTrashLoadingById={moveToTrashLoadingById}
-							panelWidth="100%"
-							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
-							defaultAgentId={selectedAgentId}
-						/>
-					</div>
-					<ResizeHandle
-						orientation="vertical"
-						ariaLabel="Resize task cards and detail panels"
-						onMouseDown={handleSeparatorMouseDown}
-						className="z-10"
-					/>
-				</>
-			) : null}
-			<div
-				className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-				style={{ width: isDiffExpanded && !taskLookupWorkbenchContent ? "100%" : detailContentPanelPercent }}
-			>
-				{taskLookupWorkbenchContent}
-				<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>
-					{gitHistoryPanel ? (
-						<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
-					) : (
+		<MobileFocusViewIdleCollapseControllerProvider value={isMobile ? mobileFocusViewIdleCollapseController : null}>
+			<MobileFocusViewCollapsibleControlsProvider value={isMobile ? mobileControls : null}>
+				<div
+					ref={mobileFocusViewRootRef}
+					className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
+					data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
+				>
+					{isMobile && !taskLookupWorkbenchContent ? (
 						<>
+							<MobileFocusedTaskCardHeader
+								onBackToBoard={onBackToBoard}
+								navigationAndToolsControls={mobileControls}
+								key={mobileFocusedTaskIdentity}
+								stageDisplayName={selection.column.title}
+								idleCollapseController={mobileFocusViewIdleCollapseController}
+								cardBusinessProps={buildTaskCardBusinessProps({
+									card: selection.card,
+									taskSessions,
+									columnId: selection.column.id,
+									sessionSummary:
+										resolveMainTaskConversationSessionSummary(selection.card, taskSessions) ??
+										sessionSummary ??
+										undefined,
+									selected: true,
+									workspacePath,
+									defaultAgentId: selectedAgentId,
+									defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
+									handlers: {
+										onStartTask,
+										onEditTask,
+										onSaveTitle: onSaveTaskTitle,
+										onMoveToTrashTask: onMoveReviewCardToTrash,
+										onMoveToValidationTask: onMoveReviewCardToValidation,
+										onMoveToReviewTask: onMoveCardToReview,
+										onRestoreFromTrashTask: onRestoreTaskFromTrash,
+										onDeleteTask,
+										onCancelAutomaticTaskAction,
+										onRequestPinToTaskPinboard,
+										onUnpinFromTaskPinboard,
+										onSetTaskShelvingState,
+										resolveTaskWorkspaceAbsoluteDirectoryPath,
+										moveToTrashLoadingById: moveToTrashLoadingById ?? {
+											[selection.card.id]: isMoveToTrashLoading ?? false,
+										},
+										moveToValidationLoadingById: { [selection.card.id]: isMoveToValidationLoading ?? false },
+										moveToReviewLoadingById,
+									},
+								})}
+							/>
 							<div
-								ref={mainRowRef}
-								data-focus-view-panel-arrangement={desktopArrangement.arrangement}
-								className={cn("flex min-h-0 flex-1 overflow-hidden", isWorkbenchBelowAgent && "flex-col")}
+								hidden={!mobileControls.upperNavigationAndToolsExpanded}
+								className="shrink-0"
+								data-mobile-focus-view-detail-tabs=""
 							>
-								<div className="min-h-0 min-w-0" style={agentPanelStyle}>
-									{agentChatPanel}
-								</div>
-								{!isDiffExpanded ? (
-									<ResizeHandle
-										orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
-										ariaLabel="Resize agent and diff panels"
-										onMouseDown={
-											isWorkbenchBelowAgent
-												? handleStackedAgentSeparatorMouseDown
-												: showClineAgentChatPanel
-													? handleAgentDiffSeparatorMouseDown
-													: handleTerminalDiffSeparatorMouseDown
-										}
-										className="z-10"
+								<MobileDetailTabBar
+									activeTab={mobileTab}
+									onTabChange={handleMobileTabChange}
+									showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
+									queuedPromptTaskId={selectedTaskConversationSessionId}
+									queuedPromptCountIndicator={queuedPromptCountIndicator}
+								/>
+							</div>
+						</>
+					) : null}
+					<div ref={detailLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+						{!isMobile && (!isDiffExpanded || taskLookupWorkbenchContent) ? (
+							<>
+								<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
+									<ColumnContextPanel
+										onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
+										selection={selection}
+										workspacePath={workspacePath}
+										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
+										onCardSelect={onCardSelect}
+										taskSessions={taskSessions}
+										onTaskDragEnd={onTaskDragEnd}
+										onCreateTask={onCreateTask}
+										onStartTask={onStartTask}
+										onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+										onClearTrash={onClearTrash}
+										onEditTask={onEditTask}
+										onSaveTaskTitle={onSaveTaskTitle}
+										onMoveToTrashTask={onMoveReviewCardToTrash}
+										onMoveToValidationTask={onMoveReviewCardToValidation}
+										onMoveToReviewTask={onMoveCardToReview}
+										onRestoreFromTrashTask={onRestoreTaskFromTrash}
+										onDeleteTask={onDeleteTask}
+										onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+										onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+										onSetTaskShelvingState={onSetTaskShelvingState}
+										onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
+										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
+										moveToTrashLoadingById={moveToTrashLoadingById}
+										panelWidth="100%"
+										defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
+										defaultAgentId={selectedAgentId}
 									/>
+								</div>
+								<ResizeHandle
+									orientation="vertical"
+									ariaLabel="Resize task cards and detail panels"
+									onMouseDown={handleSeparatorMouseDown}
+									className="z-10"
+								/>
+							</>
+						) : null}
+						<div
+							className="relative flex min-h-0 min-w-0 flex-col overflow-hidden"
+							style={{
+								width:
+									isMobile || (isDiffExpanded && !taskLookupWorkbenchContent)
+										? "100%"
+										: detailContentPanelPercent,
+							}}
+						>
+							{taskLookupWorkbenchContent}
+							<div style={{ display: taskLookupWorkbenchContent ? "none" : "contents" }}>
+								{gitHistoryPanel && !isMobile ? (
+									<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
 								) : null}
-								<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
-									{isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges ? (
-										<div className="flex min-h-0 flex-1 flex-col">
-											<div className="flex min-h-0 flex-1 flex-col">
-												<DiffToolbar
-													mode={diffMode}
-													onModeChange={setDiffMode}
-													isExpanded={isDiffExpanded}
-													onToggleExpand={handleToggleDiffExpand}
-												/>
-												{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
-													<WorkspaceChangesStaleDataWarning
-														error={workspaceChangesError}
-														onRetry={() => void refreshWorkspaceChanges()}
-														isRequestInFlight={isWorkspaceChangesRequestInFlight}
-													/>
-												) : null}
-												<div className="flex min-h-0 flex-1">
-													{isWorkspaceChangesMissingScope ? (
-														<WorkspaceChangesUnavailablePanel isDoneTaskReadOnly={isDoneTaskReadOnly} />
-													) : isWorkspaceChangesInitialError && workspaceChangesError ? (
-														<WorkspaceChangesErrorPanel
-															error={workspaceChangesError}
-															onRetry={() => void refreshWorkspaceChanges()}
-															isRequestInFlight={isWorkspaceChangesRequestInFlight}
+								<div
+									ref={mainRowRef}
+									data-focus-view-panel-arrangement={isMobile ? undefined : desktopArrangement.arrangement}
+									className={cn(
+										"flex min-h-0 flex-1 overflow-hidden",
+										(isMobile || isWorkbenchBelowAgent) && "flex-col",
+									)}
+									style={{ display: gitHistoryPanel && !isMobile ? "none" : undefined }}
+								>
+									<div
+										className="flex min-h-0 min-w-0 flex-col"
+										style={
+											isMobile
+												? { flex: "1 1 0", display: visibleMobileTab === "chat" ? "flex" : "none" }
+												: agentPanelStyle
+										}
+									>
+										{agentChatPanel}
+									</div>
+									{!isMobile && !isDiffExpanded ? (
+										<ResizeHandle
+											orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
+											ariaLabel="Resize agent and diff panels"
+											onMouseDown={
+												isWorkbenchBelowAgent
+													? handleStackedAgentSeparatorMouseDown
+													: showClineAgentChatPanel
+														? handleAgentDiffSeparatorMouseDown
+														: handleTerminalDiffSeparatorMouseDown
+											}
+											className="z-10"
+										/>
+									) : null}
+									<div
+										className="flex min-h-0 min-w-0 flex-col"
+										style={
+											isMobile
+												? { flex: "1 1 0", display: visibleMobileTab === "chat" ? "none" : "flex" }
+												: diffPanelStyle
+										}
+									>
+										{isMobile ? (
+											<>
+												{/* Diff panel */}
+												{isTaskChangesSidebarOpen ? (
+													<div
+														className="min-h-0 min-w-0 flex-1 flex-col"
+														style={{ display: mobileTab === "diff" ? "flex" : "none" }}
+													>
+														<DiffToolbar
+															mode={diffMode}
+															onModeChange={setDiffMode}
+															isExpanded={false}
+															onToggleExpand={handleToggleDiffExpand}
+															hideExpand
 														/>
-													) : isWorkspaceChangesInitialLoading ? (
-														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-													) : hasNoWorkspaceFileChanges ? (
-														<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-													) : workspaceChanges !== null ? (
-														<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
-															<div
-																className="flex min-h-0 min-w-0"
-																style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
-															>
+														{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+															<WorkspaceChangesStaleDataWarning
+																error={workspaceChangesError}
+																onRetry={() => void refreshWorkspaceChanges()}
+																isRequestInFlight={isWorkspaceChangesRequestInFlight}
+															/>
+														) : null}
+														<div className="flex min-h-0 flex-1">
+															{isWorkspaceChangesMissingScope ? (
+																<WorkspaceChangesUnavailablePanel
+																	isDoneTaskReadOnly={isDoneTaskReadOnly}
+																/>
+															) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+																<WorkspaceChangesErrorPanel
+																	error={workspaceChangesError}
+																	onRetry={() => void refreshWorkspaceChanges()}
+																	isRequestInFlight={isWorkspaceChangesRequestInFlight}
+																/>
+															) : isWorkspaceChangesInitialLoading ? (
+																<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+															) : hasNoWorkspaceFileChanges ? (
+																<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
+															) : workspaceChanges !== null ? (
 																<DiffViewerPanel
 																	workspaceFiles={runtimeFiles}
 																	selectedPath={selectedPath}
 																	selectedPathExpandToken={selectedPathExpandToken}
 																	onSelectedPathChange={setSelectedPath}
-																	viewMode={isDiffExpanded ? "split" : "unified"}
+																	viewMode="unified"
 																	onAddToTerminal={
 																		!isDoneTaskReadOnly &&
 																		(onAddReviewComments || showClineAgentChatPanel)
@@ -2119,110 +2048,243 @@ export function CardDetailView({
 																	comments={diffComments}
 																	onCommentsChange={setDiffComments}
 																/>
-															</div>
-															<ResizeHandle
-																orientation="vertical"
-																ariaLabel="Resize detail diff panels"
-																onMouseDown={handleDetailDiffSeparatorMouseDown}
-																className="z-10"
+															) : (
+																<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+															)}
+														</div>
+													</div>
+												) : null}
+												{/* Files panel */}
+												{isTaskChangesSidebarOpen ? (
+													<div
+														className="min-h-0 min-w-0 flex-1 flex-col"
+														style={{ display: mobileTab === "files" ? "flex" : "none" }}
+													>
+														{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+															<WorkspaceChangesStaleDataWarning
+																error={workspaceChangesError}
+																onRetry={() => void refreshWorkspaceChanges()}
+																isRequestInFlight={isWorkspaceChangesRequestInFlight}
 															/>
-															<div
-																className="flex min-h-0 min-w-0"
-																style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
-															>
+														) : null}
+														<div className="flex min-h-0 flex-1">
+															{isWorkspaceChangesMissingScope ? (
+																<WorkspaceChangesUnavailablePanel
+																	isDoneTaskReadOnly={isDoneTaskReadOnly}
+																/>
+															) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+																<WorkspaceChangesErrorPanel
+																	error={workspaceChangesError}
+																	onRetry={() => void refreshWorkspaceChanges()}
+																	isRequestInFlight={isWorkspaceChangesRequestInFlight}
+																/>
+															) : isWorkspaceChangesInitialLoading ? (
+																<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+															) : workspaceChanges !== null ? (
 																<FileTreePanel
 																	workspaceFiles={runtimeFiles}
 																	selectedPath={selectedPath}
-																	onSelectPath={handleExplicitSelectPath}
+																	onSelectPath={(path: string) => {
+																		handleExplicitSelectPath(path);
+																		setMobileTab("diff");
+																	}}
 																	panelFlex="1 1 0"
 																/>
+															) : (
+																<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+															)}
+														</div>
+													</div>
+												) : null}
+											</>
+										) : (
+											<>
+												{isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges ? (
+													<div className="flex min-h-0 flex-1 flex-col">
+														<div className="flex min-h-0 flex-1 flex-col">
+															<DiffToolbar
+																mode={diffMode}
+																onModeChange={setDiffMode}
+																isExpanded={isDiffExpanded}
+																onToggleExpand={handleToggleDiffExpand}
+															/>
+															{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+																<WorkspaceChangesStaleDataWarning
+																	error={workspaceChangesError}
+																	onRetry={() => void refreshWorkspaceChanges()}
+																	isRequestInFlight={isWorkspaceChangesRequestInFlight}
+																/>
+															) : null}
+															<div className="flex min-h-0 flex-1">
+																{isWorkspaceChangesMissingScope ? (
+																	<WorkspaceChangesUnavailablePanel
+																		isDoneTaskReadOnly={isDoneTaskReadOnly}
+																	/>
+																) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+																	<WorkspaceChangesErrorPanel
+																		error={workspaceChangesError}
+																		onRetry={() => void refreshWorkspaceChanges()}
+																		isRequestInFlight={isWorkspaceChangesRequestInFlight}
+																	/>
+																) : isWorkspaceChangesInitialLoading ? (
+																	<WorkspaceChangesLoadingPanel
+																		panelFlex={detailDiffFileTreePanelFlex}
+																	/>
+																) : hasNoWorkspaceFileChanges ? (
+																	<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
+																) : workspaceChanges !== null ? (
+																	<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
+																		<div
+																			className="flex min-h-0 min-w-0"
+																			style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
+																		>
+																			<DiffViewerPanel
+																				workspaceFiles={runtimeFiles}
+																				selectedPath={selectedPath}
+																				selectedPathExpandToken={selectedPathExpandToken}
+																				onSelectedPathChange={setSelectedPath}
+																				viewMode={isDiffExpanded ? "split" : "unified"}
+																				onAddToTerminal={
+																					!isDoneTaskReadOnly &&
+																					(onAddReviewComments || showClineAgentChatPanel)
+																						? injectTextIntoActiveInput
+																						: undefined
+																				}
+																				onSendToTerminal={
+																					!isDoneTaskReadOnly &&
+																					(onSendReviewComments || showClineAgentChatPanel)
+																						? handleSendDiffComments
+																						: undefined
+																				}
+																				comments={diffComments}
+																				onCommentsChange={setDiffComments}
+																			/>
+																		</div>
+																		<ResizeHandle
+																			orientation="vertical"
+																			ariaLabel="Resize detail diff panels"
+																			onMouseDown={handleDetailDiffSeparatorMouseDown}
+																			className="z-10"
+																		/>
+																		<div
+																			className="flex min-h-0 min-w-0"
+																			style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
+																		>
+																			<FileTreePanel
+																				workspaceFiles={runtimeFiles}
+																				selectedPath={selectedPath}
+																				onSelectPath={handleExplicitSelectPath}
+																				panelFlex="1 1 0"
+																			/>
+																		</div>
+																	</div>
+																) : (
+																	<WorkspaceChangesLoadingPanel
+																		panelFlex={detailDiffFileTreePanelFlex}
+																	/>
+																)}
 															</div>
 														</div>
-													) : (
-														<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-													)}
-												</div>
-											</div>
-										</div>
-									) : null}
-									<div
-										className="min-h-0 min-w-0 flex-1 flex-col"
-										style={{
-											display:
-												isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges
-													? "none"
-													: "flex",
-										}}
-									>
-										<TaskWorkbench
-											moduleSelectionResetKey={mobileFocusedTaskIdentity}
-											moduleSelectionRequest={visualizationWorkbenchSelection}
-											onModuleSelectionChange={(module) => {
-												if (module !== "task_visualizations") {
-													taskVisualizations.dismissAutomaticPreview();
-													setVisualizationOverridesWorkspaceChanges(false);
+													</div>
+												) : null}
+											</>
+										)}
+										<div
+											className="min-h-0 min-w-0 flex-1 flex-col"
+											style={{
+												display: isMobile
+													? mobileVisibleWorkbenchModules.length > 0
+														? "flex"
+														: "none"
+													: isTaskChangesSidebarOpen && !visualizationOverridesWorkspaceChanges
+														? "none"
+														: "flex",
+											}}
+										>
+											<TaskWorkbench
+												mobileModuleLayout={
+													isMobile
+														? {
+																visibleModules: mobileVisibleWorkbenchModules,
+																heightFillingModule: mobileVisibleWorkbenchModules[0] ?? null,
+															}
+														: undefined
 												}
-											}}
-											queueAnnouncement={queuedPromptRestartReminderAnnouncement}
-											onOpenQueue={() => handleDetailUtilityTabChange("queue")}
-											isBelowAgent={isWorkbenchBelowAgent}
-											arrangementPreference={desktopArrangement.preference}
-											onArrangementPreferenceChange={desktopArrangement.setPreference}
-											slotRatio={
-												isWorkbenchBelowAgent ? workbenchSideBySideSlotRatio : detailRightPromptRatio
-											}
-											onSlotRatioChange={
-												isWorkbenchBelowAgent ? setWorkbenchSideBySideSlotRatio : setDetailRightPromptRatio
-											}
-											queueNotice={
-												queuedPromptCountIndicator.pendingCount > 0 ||
-												queuedPromptCountIndicator.hasFailedEntries ? (
-													<span>
-														<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />{" "}
-														Queue
-													</span>
-												) : undefined
-											}
-											modules={{
-												task_sessions: taskConversationSessionsPanel,
-												cross_task_relations: workUnitRelationNeighborhoodPanel,
-												exploration_map:
-													explorationThreadGraphPanel || sessionFindingsSection ? (
-														<>
-															{explorationThreadGraphPanel}
-															{sessionFindingsSection}
-														</>
-													) : null,
-												prompt_tools: detailUtilityPanel,
-												task_visualizations: taskVisualizationPanel,
-											}}
-										/>
+												moduleSelectionResetKey={mobileFocusedTaskIdentity}
+												moduleSelectionRequest={workbenchModuleSelectionRequest}
+												onModuleSelectionChange={(module) => {
+													if (module !== "task_visualizations") {
+														taskVisualizations.dismissAutomaticPreview();
+														setVisualizationOverridesWorkspaceChanges(false);
+													}
+												}}
+												queueAnnouncement={queuedPromptRestartReminderAnnouncement}
+												onOpenQueue={() => handleDetailUtilityTabChange("queue")}
+												isBelowAgent={isWorkbenchBelowAgent}
+												arrangementPreference={desktopArrangement.preference}
+												onArrangementPreferenceChange={desktopArrangement.setPreference}
+												slotRatio={
+													isWorkbenchBelowAgent ? workbenchSideBySideSlotRatio : detailRightPromptRatio
+												}
+												onSlotRatioChange={
+													isWorkbenchBelowAgent
+														? setWorkbenchSideBySideSlotRatio
+														: setDetailRightPromptRatio
+												}
+												queueNotice={
+													queuedPromptCountIndicator.pendingCount > 0 ||
+													queuedPromptCountIndicator.hasFailedEntries ? (
+														<span>
+															<QueuedTaskPromptDeliveryCountBadge
+																indicator={queuedPromptCountIndicator}
+															/>{" "}
+															Queue
+														</span>
+													) : undefined
+												}
+												modules={{
+													task_sessions: taskConversationSessionsPanel,
+													cross_task_relations: workUnitRelationNeighborhoodPanel,
+													exploration_map:
+														explorationThreadGraphPanel || sessionFindingsSection ? (
+															<>
+																{explorationThreadGraphPanel}
+																{sessionFindingsSection}
+															</>
+														) : null,
+													prompt_tools: detailUtilityPanel,
+													task_visualizations: taskVisualizationPanel,
+												}}
+											/>
+										</div>
 									</div>
 								</div>
+								{bottomTerminalTaskId && (isMobile ? showBottomTerminal : bottomTerminalOpen) ? (
+									<div className={isMobile ? "absolute bottom-0 left-0 right-0 z-20" : "contents"}>
+										<BottomTerminalSection
+											taskId={bottomTerminalTaskId}
+											workspaceId={currentProjectId}
+											summary={bottomTerminalSummary}
+											onSummary={onSessionSummary}
+											onClose={onBottomTerminalClose}
+											subtitle={bottomTerminalSubtitle}
+											terminalThemeColors={terminalThemeColors}
+											onConnectionReady={onBottomTerminalConnectionReady}
+											agentCommand={bottomTerminalAgentCommand}
+											onSendAgentCommand={onBottomTerminalSendAgentCommand}
+											paneHeight={bottomTerminalPaneHeight}
+											onPaneHeightChange={onBottomTerminalPaneHeightChange}
+											onCollapse={onBottomTerminalCollapse}
+											isExpanded={isBottomTerminalExpanded}
+											onToggleExpand={onBottomTerminalToggleExpand}
+										/>
+									</div>
+								) : null}
 							</div>
-							{bottomTerminalOpen && bottomTerminalTaskId ? (
-								<BottomTerminalSection
-									taskId={bottomTerminalTaskId}
-									workspaceId={currentProjectId}
-									summary={bottomTerminalSummary}
-									onSummary={onSessionSummary}
-									onClose={onBottomTerminalClose}
-									subtitle={bottomTerminalSubtitle}
-									terminalThemeColors={terminalThemeColors}
-									onConnectionReady={onBottomTerminalConnectionReady}
-									agentCommand={bottomTerminalAgentCommand}
-									onSendAgentCommand={onBottomTerminalSendAgentCommand}
-									paneHeight={bottomTerminalPaneHeight}
-									onPaneHeightChange={onBottomTerminalPaneHeightChange}
-									onCollapse={onBottomTerminalCollapse}
-									isExpanded={isBottomTerminalExpanded}
-									onToggleExpand={onBottomTerminalToggleExpand}
-								/>
-							) : null}
-						</>
-					)}
+						</div>
+					</div>
 				</div>
-			</div>
-		</div>
+			</MobileFocusViewCollapsibleControlsProvider>
+		</MobileFocusViewIdleCollapseControllerProvider>
 	);
 }
