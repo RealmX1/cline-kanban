@@ -335,7 +335,7 @@ To look up a *different* task instead: Kanban lays task worktrees out as \`.clin
 
 # HTML 可视化交付
 
-生成 HTML 可视化后，使用 \`${kanbanCommand} task visualization publish --task-id ${quotedTaskId} --project-path <主仓库路径> --source-html-file <HTML绝对路径> --title <标题>\` 发布到当前任务。附属资源通过可重复的 \`--resource-mapping <包内相对路径=本机路径>\` 声明；需要保留入口目录层级时使用 \`--source-root-directory\`。运行时会持久保存文件，并把预览交给当前正在操作此任务的浏览器。仅当返回 \`status=published\` 时才说明发布成功；\`awaiting_runtime_acceptance\` 表示文件已保留、等待运行时恢复后接受。
+生成 HTML 可视化后，使用 \`${kanbanCommand} task visualization publish --task-id ${quotedTaskId} --project-path <主仓库路径> --source-html-file <HTML绝对路径> --title <标题>\` 发布到当前任务。任务 ID 与任务名由系统自动写入 HTML 和查看器，标题参数仍是图解标题。附属资源通过可重复的 \`--resource-mapping <包内相对路径=本机路径>\` 声明；需要保留入口目录层级时使用 \`--source-root-directory\`。运行时会持久保存文件，并把预览交给当前正在操作此任务的浏览器。仅当返回 \`status=published\` 时才说明发布成功；\`awaiting_runtime_acceptance\` 表示文件已保留、等待运行时恢复后接受。
 
 在 Kanban 会话中，打开可视化使用此发布入口或 \`task visualization request-preview\`，不调用宿主机的 \`open\`、\`xdg-open\` 或 \`webbrowser.open\`，因为浏览器可能在其他设备。使用 visualization-platform 时沿用它的自动发布协议。独立终端的本地文件用法不受影响。
 

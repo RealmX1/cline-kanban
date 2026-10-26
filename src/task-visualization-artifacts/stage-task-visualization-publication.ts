@@ -15,6 +15,7 @@ import {
 	pendingTaskVisualizationPublicationDirectory,
 	taskVisualizationPublicationStagingSequencePath,
 } from "./task-visualization-artifact-storage-paths";
+import { taskVisualizationPublicationMaximumFileSizeBytes } from "./task-visualization-publication-resource-limits";
 
 export const stagedTaskVisualizationPublicationSchema = z.object({
 	publicationRequestId: z.string().uuid(),
@@ -22,6 +23,7 @@ export const stagedTaskVisualizationPublicationSchema = z.object({
 	workspaceRepositoryPath: z.string().min(1),
 	taskId: z.string().min(1),
 	title: z.string().min(1).max(200),
+	taskTitleAtPublication: z.string().min(1).optional(),
 	visualizationArtifactId: taskVisualizationArtifactIdentifierSchema,
 	entryHtmlRelativePath: taskVisualizationRelativePathSchema,
 	revisionId: taskVisualizationArtifactIdentifierSchema,
@@ -47,6 +49,7 @@ export interface StageTaskVisualizationPublicationInput {
 	workspaceRepositoryPath: string;
 	taskId: string;
 	title: string;
+	taskTitleAtPublication?: string;
 	sourceHtmlFilePath: string;
 	sourceRootDirectoryPath?: string;
 	visualizationArtifactKey?: string;
@@ -108,7 +111,7 @@ export async function stageTaskVisualizationPublication(
 		if (!sourceStat.isFile()) throw new Error(`资源不是普通文件：${validPath}`);
 		if (seenPaths.has(validPath)) throw new Error(`资源映射重复：${validPath}`);
 		if (
-			sourceStat.size > 50 * 1024 * 1024 ||
+			sourceStat.size > taskVisualizationPublicationMaximumFileSizeBytes ||
 			totalBytes + sourceStat.size > 100 * 1024 * 1024 ||
 			files.length >= 10_000
 		)
@@ -162,6 +165,7 @@ export async function stageTaskVisualizationPublication(
 				workspaceRepositoryPath: resolve(input.workspaceRepositoryPath),
 				taskId: input.taskId,
 				title: input.title,
+				taskTitleAtPublication: input.taskTitleAtPublication,
 				visualizationArtifactId: hashTaskVisualizationIdentity(
 					input.visualizationArtifactKey ?? sourceHtmlFilePath,
 				),

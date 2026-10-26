@@ -75,6 +75,7 @@ export interface AtomicTextWriteOptions {
 	lock?: LockRequest | null;
 	executable?: boolean;
 	durable?: boolean;
+	fileMode?: number;
 }
 
 function safeLockErrorMessage(error: unknown): string {
@@ -224,7 +225,9 @@ export class LockedFileSystem {
 			await mkdir(dirname(path), { recursive: true });
 			const tempPath = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
 			try {
-				await writeFile(tempPath, content, "utf8");
+				await writeFile(tempPath, content, { encoding: "utf8", mode: options.fileMode });
+				// writeFile 的创建权限会被 umask 过滤，rename 前必须恢复显式权限。
+				if (options.fileMode !== undefined) await chmod(tempPath, options.fileMode);
 				if (options.executable) await chmod(tempPath, 0o755);
 				if (options.durable) await synchronizeFilesystemPath(tempPath);
 				await rename(tempPath, path);

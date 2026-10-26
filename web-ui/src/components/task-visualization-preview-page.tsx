@@ -9,6 +9,14 @@ export function TaskVisualizationPreviewPage() {
 	const artifactId = query.get("visualizationArtifactId");
 	const requestedRevisionId = query.get("revisionId");
 	const controller = useTaskVisualizationArtifacts({ workspaceId, taskId, observeBrowser: false });
+	const taskTitle = controller.taskAttribution?.taskTitle;
+	useEffect(() => {
+		const previousTitle = document.title;
+		document.title = `任务 ${taskId}${taskTitle ? ` · ${taskTitle}` : ""} · 可视化`;
+		return () => {
+			document.title = previousTitle;
+		};
+	}, [taskId, taskTitle]);
 	const selectedInitialArtifact = useRef(false);
 	useEffect(() => {
 		if (selectedInitialArtifact.current) return;

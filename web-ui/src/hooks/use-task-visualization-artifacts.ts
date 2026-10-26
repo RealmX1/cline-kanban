@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchTaskVisualizationArtifacts } from "@/runtime/task-visualization-query";
-import type { TaskVisualizationArtifact, TaskVisualizationPreviewRequestedMessage } from "@/runtime/types";
+import type {
+	TaskVisualizationArtifact,
+	TaskVisualizationPreviewRequestedMessage,
+	TaskVisualizationTaskAttribution,
+} from "@/runtime/types";
 import {
 	acknowledgeTaskVisualizationPreview,
 	declareTaskVisualizationBrowserContext,
@@ -31,14 +35,16 @@ export function useTaskVisualizationArtifacts({
 	const [state, setState] = useState<{
 		identity: string;
 		artifacts: TaskVisualizationArtifact[];
+		taskAttribution: TaskVisualizationTaskAttribution | null;
 		isLoading: boolean;
 		error: string | null;
-	}>({ identity, artifacts: [], isLoading: false, error: null });
+	}>({ identity, artifacts: [], taskAttribution: null, isLoading: false, error: null });
 	const [selectionState, setSelection] = useState<{ identity: string; selection: TaskVisualizationSelection | null }>({
 		identity,
 		selection: null,
 	});
 	const activeQuery = useRef<AbortController | null>(null);
+	const taskAttributionRetryAttemptCount = useRef(0);
 	const automaticPreview = useRef<TaskVisualizationPreviewRequestedMessage | null>(null);
 	const selectionRequestSequence = useRef(0);
 	const failedDeliveryAttemptIds = useRef(new Set<string>());
@@ -77,13 +83,20 @@ export function useTaskVisualizationArtifacts({
 		setState((current) => ({
 			identity,
 			artifacts: current.identity === identity ? current.artifacts : [],
+			taskAttribution: current.identity === identity ? current.taskAttribution : null,
 			isLoading: true,
 			error: null,
 		}));
 		try {
 			const result = await fetchTaskVisualizationArtifacts(workspaceId, taskId, query.signal);
 			if (!query.signal.aborted) {
-				setState({ identity, artifacts: result.artifacts, isLoading: false, error: null });
+				setState({
+					identity,
+					artifacts: result.artifacts,
+					taskAttribution: result.taskAttribution,
+					isLoading: false,
+					error: null,
+				});
 				if (result.latestPreviewRequest?.failedAtMs !== undefined)
 					setAutomaticPreviewError(
 						result.latestPreviewRequest.deliveryFailureReason ?? "自动预览未完成，请手动选择产物重试。",
@@ -98,6 +111,20 @@ export function useTaskVisualizationArtifacts({
 				}));
 		}
 	}, [workspaceId, taskId, identity]);
+	useEffect(() => {
+		taskAttributionRetryAttemptCount.current = 0;
+	}, [identity]);
+	useEffect(() => {
+		if (state.identity !== identity || state.isLoading || state.error || state.taskAttribution?.taskTitle !== null)
+			return;
+		const delay = [1000, 5000, 15_000][taskAttributionRetryAttemptCount.current];
+		if (delay === undefined) return;
+		const timer = setTimeout(() => {
+			taskAttributionRetryAttemptCount.current += 1;
+			void refreshArtifacts();
+		}, delay);
+		return () => clearTimeout(timer);
+	}, [identity, state.identity, state.isLoading, state.error, state.taskAttribution, refreshArtifacts]);
 	useEffect(() => {
 		automaticPreview.current = null;
 		setAutomaticPreviewError(null);
@@ -266,6 +293,7 @@ export function useTaskVisualizationArtifacts({
 	}, []);
 	return {
 		artifacts: state.identity === identity ? state.artifacts : [],
+		taskAttribution: state.identity === identity ? state.taskAttribution : null,
 		isLoading: state.identity !== identity || state.isLoading,
 		error: state.identity === identity ? state.error : null,
 		selection: selectionState.identity === identity ? selectionState.selection : null,

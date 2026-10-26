@@ -22,6 +22,7 @@ const service = () =>
 		store: new TaskVisualizationArtifactStore(runtimeHome),
 		resolveWorkspaceScope: async (workspaceId) => (workspaceId === scope.workspaceId ? scope : null),
 		assertTaskMayPublish: async () => {},
+		resolveTaskTitle: async () => "任务名",
 		onArtifactsUpdated: () => {},
 		warn: () => {},
 		now: () => observedTime,
@@ -101,6 +102,105 @@ async function registerPages(runtimeService: TaskVisualizationArtifactService, c
 }
 
 describe("任务可视化运行时服务", () => {
+	it("旧产物取得真实任务名，改名更新查看器而不改写旧修订", async () => {
+		const store = new TaskVisualizationArtifactStore(runtimeHome);
+		const pending = await stageTaskVisualizationPublication({
+			runtimeHomeDirectoryPath: runtimeHome,
+			workspaceId: scope.workspaceId,
+			workspaceRepositoryPath: scope.workspacePath,
+			taskId: "task-a",
+			title: "图表标题",
+			sourceHtmlFilePath: join(sourceDirectory, "chart.html"),
+		});
+		const legacy = await store.acceptPublication(
+			scope.workspaceId,
+			scope.workspacePath,
+			pending.publicationRequestId,
+		);
+		let taskTitle = "原任务名";
+		const runtimeService = new TaskVisualizationArtifactService({
+			store,
+			resolveWorkspaceScope: async () => scope,
+			assertTaskMayPublish: async () => {},
+			resolveTaskTitle: async (selectedScope) =>
+				selectedScope.workspaceId === scope.workspaceId ? taskTitle : "另一个项目",
+			onArtifactsUpdated: () => {},
+			warn: () => {},
+		});
+		expect((await runtimeService.list(scope, { taskId: "task-a" })).taskAttribution).toEqual({
+			workspaceId: scope.workspaceId,
+			taskId: "task-a",
+			taskTitle,
+		});
+		taskTitle = "改名后的任务";
+		const preview = await runtimeService.preparePreview(scope, {
+			taskId: "task-a",
+			visualizationArtifactId: legacy.artifact.visualizationArtifactId,
+		});
+		expect(preview.taskAttribution.taskTitle).toBe(taskTitle);
+		expect(preview.artifact.revisionId).toBe(pending.revisionId);
+		expect(await store.readRevisionFile(preview.artifact, "chart.html")).toMatchObject({
+			content: Buffer.from("<h1>可视化</h1>"),
+		});
+		expect(
+			(
+				await runtimeService.list(
+					{ workspaceId: "workspace-b", workspacePath: "/other-project" },
+					{ taskId: "task-a" },
+				)
+			).taskAttribution.taskTitle,
+		).toBe("另一个项目");
+	});
+
+	it("受理时自动补齐持久包署名；同内容重试不增加版本，任务改名仅影响后续发布", async () => {
+		const runtimeService = service();
+		const first = await publish(runtimeService);
+		expect(first.artifact.taskTitleAtPublication).toBe("任务名");
+		const firstHtml = await runtimeService.store.readRevisionFile(first.artifact, "chart.html");
+		expect(firstHtml.content.toString()).toContain('data-kanban-task-attribution="v1"');
+		expect(firstHtml.content.toString()).toContain("task-a");
+		expect((await publish(runtimeService)).artifact.versionNumber).toBe(1);
+		expect(await readFile(join(sourceDirectory, "chart.html"), "utf8")).toBe("<h1>可视化</h1>");
+	});
+
+	it("任务名暂不可读时保留待恢复包，重启补证后仅发布一次", async () => {
+		const resolveTaskTitle = vi
+			.fn<() => Promise<string | null>>()
+			.mockRejectedValueOnce(new Error("暂时读盘失败"))
+			.mockResolvedValue("恢复后的任务名");
+		const dependencies = {
+			store: new TaskVisualizationArtifactStore(runtimeHome),
+			resolveWorkspaceScope: async () => scope,
+			assertTaskMayPublish: async () => {},
+			resolveTaskTitle,
+			onArtifactsUpdated: () => {},
+			warn: () => {},
+			now: () => observedTime,
+		};
+		const pending = await stageTaskVisualizationPublication({
+			runtimeHomeDirectoryPath: runtimeHome,
+			workspaceId: scope.workspaceId,
+			workspaceRepositoryPath: scope.workspacePath,
+			taskId: "task-a",
+			title: "图表",
+			sourceHtmlFilePath: join(sourceDirectory, "chart.html"),
+		});
+		await new TaskVisualizationArtifactService(dependencies).recoverPendingPublications();
+		expect(await dependencies.store.list(scope.workspaceId, "task-a")).toHaveLength(0);
+		const restarted = new TaskVisualizationArtifactService(dependencies);
+		await restarted.recoverPendingPublications();
+		await restarted.recoverPendingPublications();
+		const artifacts = await dependencies.store.list(scope.workspaceId, "task-a");
+		expect(artifacts).toHaveLength(1);
+		expect(artifacts[0].taskTitleAtPublication).toBe("恢复后的任务名");
+		expect(
+			await readFile(
+				join(pending.pendingPublicationDirectoryPath, "latest-runtime-acceptance-failure.json"),
+				"utf8",
+			),
+		).toContain("暂时读盘失败");
+	});
+
 	it("新标签链接固定当前修订，旧链接仍选最新且无效修订不会回退", async () => {
 		const runtimeService = service();
 		const firstPublication = await publish(runtimeService);
@@ -123,7 +223,9 @@ describe("任务可视化运行时服务", () => {
 		});
 		expect(pinnedPreview.artifact).toEqual(firstPublication.artifact);
 		const pinnedToken = new URL(pinnedPreview.contentRelativeUrl, "http://test.invalid").pathname.split("/")[3];
-		expect((await runtimeService.readContent(pinnedToken, "chart.html")).content.toString()).toBe("<h1>可视化</h1>");
+		expect((await runtimeService.readContent(pinnedToken, "chart.html")).content.toString()).toContain(
+			"<h1>可视化</h1>",
+		);
 		const latestPreview = await runtimeService.preparePreview(scope, {
 			taskId: "task-a",
 			visualizationArtifactId: firstPublication.artifact.visualizationArtifactId,
@@ -545,6 +647,7 @@ describe("任务可视化运行时服务", () => {
 				store: new TaskVisualizationArtifactStore(runtimeHome),
 				resolveWorkspaceScope: async () => scope,
 				assertTaskMayPublish,
+				resolveTaskTitle: async () => "任务名",
 				onArtifactsUpdated: () => {},
 				warn: () => {},
 				now: () => observedTime,
@@ -594,6 +697,7 @@ describe("任务可视化运行时服务", () => {
 			store,
 			resolveWorkspaceScope: async () => scope,
 			assertTaskMayPublish: async () => {},
+			resolveTaskTitle: async () => "任务名",
 			onArtifactsUpdated: () => {},
 			warn: () => {},
 			now: () => observedTime,

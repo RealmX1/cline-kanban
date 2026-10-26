@@ -36,7 +36,10 @@ beforeEach(() => {
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
-	queries.list.mockReset().mockResolvedValue({ artifacts: [latestArtifact] });
+	queries.list.mockReset().mockResolvedValue({
+		artifacts: [latestArtifact],
+		taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "真实任务名称" },
+	});
 	queries.prepare
 		.mockReset()
 		.mockImplementation(async (_workspaceId: string, _taskId: string, _artifactId: string, revisionId?: string) => {
@@ -94,6 +97,8 @@ it("独立页遵循旧修订链接，加载最新版本后才切换内容及新�
 
 it("没有修订参数的旧链接打开最新版本", async () => {
 	await renderViewer();
+	expect(container.querySelector('[aria-label="可视化任务署名"]')?.textContent).toContain("真实任务名称");
+	expect(document.title).toContain("task-a · 真实任务名称");
 	expect(container.querySelector("iframe")?.getAttribute("src")).toBe(
 		`/content/${latestArtifact.revisionId}/chart.html`,
 	);

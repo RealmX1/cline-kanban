@@ -97,6 +97,28 @@ it("跨项目切换清空旧清单，不接收其他项目同号任务的自动�
 	await grant(offer());
 	expect(opened).not.toHaveBeenCalled();
 });
+it("任务名暂缺时自动补证，恢复后停止重试并显示真实名称", async () => {
+	vi.useFakeTimers();
+	try {
+		queries.list
+			.mockResolvedValueOnce({
+				artifacts: [artifact],
+				taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: null },
+			})
+			.mockResolvedValue({
+				artifacts: [artifact],
+				taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "恢复后的任务名" },
+			});
+		await act(async () => root.render(<Harness />));
+		expect(queries.list).toHaveBeenCalledTimes(1);
+		await act(async () => vi.advanceTimersByTimeAsync(1000));
+		expect(latest.taskAttribution?.taskTitle).toBe("恢复后的任务名");
+		await act(async () => vi.advanceTimersByTimeAsync(60_000));
+		expect(queries.list).toHaveBeenCalledTimes(2);
+	} finally {
+		vi.useRealTimers();
+	}
+});
 it("offer 只确认接受，匹配服务端 grant 后才挂载，错误页面和未请求 grant 不打开", async () => {
 	await act(async () => root.render(<Harness />));
 	const message = offer();
