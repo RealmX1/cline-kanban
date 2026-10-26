@@ -15,12 +15,12 @@ RVF entry: Post-Deploy Verification authoring
 
 RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
 
-RVF-PRE-REVIEW-BASE-SYNC-SKILL: sync-local-base-into-task-worktree-only
-
 - 查询本 Task 近期 RVF、完整完成事实与当前候选覆盖，使用 `kanban task rvf-history`（默认环境身份；显式指定时用 main checkout 的 `--project-path`）。结果语义与生产方契约见 `docs/task-rvf-history-query.md`；证据不足是 `unknown`，不能据此断言没有 RVF。
 
 - kanban 任务收尾 / 宣告完成 / 进入 review 前，**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：把只有部署后真实实例才验得到的断言注册成验证；fix 改变了可观察行为则以 **reconcile 模式**幂等重注册，不堆叠重复。
-- 上面两行是 **repo-通用机器可发现约定**。`RVF-PRE-REVIEW-BASE-SYNC-SKILL:` 从 local base 的 AGENTS.md 读取：旧 task worktree 先做严格单向同步再准备 RVF，不得反向写回 base。
+- `RVF-ENTRY-SKILL:` 是 repo 通用的机器可发现入口。
+- 默认自动流程为「计划 → 实现 → 固定候选 RVF → rvf-land → base-branch-sync」：仅在最终 `base-branch-sync` 或未来 GitHub PR 合并阶段吸收 base 并解决冲突；开工、计划草拟后、实现完成后与 RVF 准备阶段均不自动吸收 local `main`。计划与实现阶段可只读查看 base 差异、记录交互风险。
+- RVF 冻结本轮候选、HEAD 与比较基线 OID；local `main` 前移不重定向本轮比较 OID。真实 HEAD 或候选变化时拒绝复用旧快照，经既有恢复入口建立新候选和开审分界并保留原轮次记录。用户显式 Stop、不同步、不得推送或部署等限制及现有权限门禁继续有效。
 
 ---
 
@@ -64,6 +64,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **RVF 收尾恢复区分历史接受、执行资格与真实结果**：保留原失败账本，以事件时证据自动补证，或独立核验规范执行结果；机器缺证走有界恢复和受控续验，Stop 与身份门禁不放宽。`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
+- **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **Done 卡复用完整工作台但禁止执行**：历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。

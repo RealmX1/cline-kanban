@@ -569,11 +569,20 @@ describe("TerminalSessionManager", () => {
 			}
 		});
 
-		it("writeInput：换行(LF)同样触发 Codex 等待标记", () => {
+		it("writeInput：LF 只换行，后续提交 CR 才触发 Codex 等待标记", () => {
 			const manager = new TerminalSessionManager();
-			const { awaitingFlag } = injectCodexEntry(manager, { state: "awaiting_review", reviewReason: "attention" });
-			manager.writeInput("task-1", Buffer.from([10]));
+			const { awaitingFlag, writeSpy } = injectCodexEntry(manager, {
+				state: "awaiting_review",
+				reviewReason: "attention",
+			});
+			const lineFeedBytes = Buffer.from([10]);
+			manager.writeInput("task-1", lineFeedBytes);
+			expect(awaitingFlag()).toBe(false);
+			expect(writeSpy).toHaveBeenCalledExactlyOnceWith(lineFeedBytes);
+			const submissionCarriageReturnBytes = Buffer.from([13]);
+			manager.writeInput("task-1", submissionCarriageReturnBytes);
 			expect(awaitingFlag()).toBe(true);
+			expect(writeSpy).toHaveBeenNthCalledWith(2, submissionCarriageReturnBytes);
 		});
 
 		it("writeInput：reviewReason 不在白名单（exit）即便回车也不置位（保留 reviewReason 门控）", () => {

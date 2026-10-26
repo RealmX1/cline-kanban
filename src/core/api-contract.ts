@@ -395,9 +395,15 @@ export const runtimeTaskConversationModeSchema = z.enum([
 ]);
 export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversationModeSchema>;
 
+export const runtimeTaskShelvingStateSchema = z.object({
+	isShelved: z.boolean(),
+	lastChangedAt: z.number().finite().nonnegative(),
+});
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
+		taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
 		mainTaskConversationSessionId: z.string().min(1).optional(),
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
@@ -1546,6 +1552,22 @@ export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
 	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
 	taskSessionSummaryPersistedInWorkspaceSessionsFile: runtimeTaskSessionSummarySchema.nullable(),
 });
+export const runtimeTaskCardActionSetShelvingStateRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
+	isShelved: z.boolean(),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export const runtimeTaskCardActionSetShelvingStateResponseSchema = z.object({
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionSetShelvingStateRequest = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateRequestSchema
+>;
+export type RuntimeTaskCardActionSetShelvingStateResponse = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateResponseSchema
+>;
 export type RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries = z.infer<
 	typeof runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
 >;
@@ -1966,6 +1988,7 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 	taskConversationSessionActivityObservations: z
 		.array(runtimeTaskConversationSessionActivityObservationSchema)
 		.optional(),
@@ -3309,6 +3332,8 @@ export const runtimeCrossProjectTaskWorktreeGitMetadataSchema = z.discriminatedU
 		workspaceId: z.string(),
 		taskId: z.string(),
 		availability: z.literal("available"),
+		// 新运行时仅在探针前后核对同一世身份后提供；旧运行时缺省时不能用于完整身份预览。
+		taskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		// 与当前项目推流里的同名结构完全一致（同一个探针算出），浏览器用同一套展示规则。
 		taskWorkspaceMetadata: runtimeTaskWorkspaceMetadataSchema,
 	}),

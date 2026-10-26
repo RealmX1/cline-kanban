@@ -102,6 +102,7 @@ import type {
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
+import { projectTaskBoardDisplayGroups } from "@/state/task-board-display-groups";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
@@ -726,6 +727,7 @@ export function CardDetailView({
 	onCancelAutomaticTaskAction,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onEditTaskPinboardPinReason,
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
@@ -805,6 +807,7 @@ export function CardDetailView({
 	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
@@ -1115,8 +1118,10 @@ export function CardDetailView({
 
 	// In Progress no longer offers Move to Validation / Move to Done from the agent TUI — those
 	// shortcuts only make sense once a task is in Review (or, for Done, already in Validation).
-	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "validation";
-	const showMoveToValidationActions = selection.column.id === "review";
+	const showMoveToTrashActions =
+		!selection.card.taskShelvingState?.isShelved &&
+		(selection.column.id === "review" || selection.column.id === "validation");
+	const showMoveToValidationActions = !selection.card.taskShelvingState?.isShelved && selection.column.id === "review";
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
 	// 详情页分流回答的是「这个**既存**会话该渲染成什么面板」，所以兜底顺序是「运行时观测事实 → 用户意图」，
@@ -1218,7 +1223,10 @@ export function CardDetailView({
 		useCrossProjectRecentlyActiveTaskSwitcherHostContext()?.isBoardScopeAllProjectsSelected === true;
 	const handleSelectAdjacentCard = useCallback(
 		(step: number) => {
-			const cards = selection.column.cards;
+			const cards =
+				projectTaskBoardDisplayGroups(selection.allColumns).find(
+					(group) => group.id === (selection.card.taskShelvingState?.isShelved ? "shelved" : selection.column.id),
+				)?.cards ?? [];
 			const currentIndex = cards.findIndex((card) => card.id === selection.card.id);
 			if (currentIndex === -1) {
 				return;
@@ -1229,7 +1237,13 @@ export function CardDetailView({
 				onCardSelect(nextCard.id);
 			}
 		},
-		[onCardSelect, selection.card.id, selection.column.cards],
+		[
+			onCardSelect,
+			selection.card.id,
+			selection.card.taskShelvingState?.isShelved,
+			selection.column.id,
+			selection.allColumns,
+		],
 	);
 
 	useHotkeys(
@@ -1853,6 +1867,7 @@ export function CardDetailView({
 										onCancelAutomaticTaskAction,
 										onRequestPinToTaskPinboard,
 										onUnpinFromTaskPinboard,
+										onSetTaskShelvingState,
 										resolveTaskWorkspaceAbsoluteDirectoryPath,
 										moveToTrashLoadingById: moveToTrashLoadingById ?? {
 											[selection.card.id]: isMoveToTrashLoading ?? false,
@@ -1902,6 +1917,7 @@ export function CardDetailView({
 										onDeleteTask={onDeleteTask}
 										onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 										onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+										onSetTaskShelvingState={onSetTaskShelvingState}
 										onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 										moveToTrashLoadingById={moveToTrashLoadingById}

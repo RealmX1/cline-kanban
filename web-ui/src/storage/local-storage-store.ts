@@ -84,6 +84,8 @@ export enum LocalStorageKey {
 	LegacyFocusViewLeftColumnTaskListScopeMigratedIntoSelectedBoardOrSingleProjectScope = "kanban.focus-view-left-column-task-list-scope.v1",
 	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）、Pinned 区的折叠态（默认展开，
 	// 与 This project 置顶分段各自一个键）与剩余区的排序模式。
+	CrossProjectTaskSwitcherShelvedSectionExpanded = "kanban.cross-project-task-switcher-shelved-section-expanded.v1",
+	FocusViewShelvedSectionExpanded = "kanban.focus-view-shelved-section-expanded.v1",
 	CrossProjectTaskSwitcherRunningSectionExpanded = "kanban.cross-project-task-switcher-running-section-expanded.v1",
 	CrossProjectTaskSwitcherPinnedSectionCollapsed = "kanban.cross-project-task-switcher-pinned-section-collapsed.v1",
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode = "kanban.cross-project-task-switcher-remaining-section-ordering-mode.v1",

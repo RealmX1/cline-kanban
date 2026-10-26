@@ -155,7 +155,7 @@ export function useCrossProjectTaskOpenInProject({
 					showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
 					return;
 				}
-				if (selection?.column.id === "backlog") {
+				if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
 					openBacklogTaskEditorRef.current(selection.card);
 					return;
 				}
@@ -264,7 +264,7 @@ export function useCrossProjectTaskOpenInProject({
 			showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
 			return;
 		}
-		if (selection?.column.id === "backlog") {
+		if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
 			openBacklogTaskEditorRef.current(selection.card);
 			return;
 		}

@@ -24,6 +24,7 @@ import {
 	preserveRuntimeOwnedMainSessionBindings,
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
+import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
 import {
 	measureDailyWorkProgressSynchronousStage,
 	readUtf8FileWithDailyWorkProgressCostObservation,
@@ -1090,10 +1091,15 @@ export async function saveWorkspaceState(
 			),
 			true,
 		);
+		// 先恢复 runtime 拥有的搁置事实，避免客户端伪造 isShelved 阻挡后续 Stage 回滚。
+		const incomingBoardWithPersistedTaskShelvingState = preservePersistedTaskShelvingAgainstIncomingBoardSnapshot(
+			persistedBoard,
+			parsedPayload.board,
+		);
 		const boardWithoutStartedTasksReenteringBacklog =
 			reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
 				persistedBoard,
-				parsedPayload.board,
+				incomingBoardWithPersistedTaskShelvingState,
 				sessions,
 			);
 		// Post-Deploy Verification 门禁兜底：整板保存不能把受门禁、未结案的卡带进 Done（正常入口走 taskCardAction 的门禁）。

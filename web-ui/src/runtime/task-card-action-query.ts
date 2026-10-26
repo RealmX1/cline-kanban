@@ -1,5 +1,9 @@
 import type { RuntimeAppRouterInputs } from "@runtime-trpc";
 import { TRPCClientError } from "@trpc/client";
+import type {
+	RuntimeTaskCardActionSetShelvingStateRequest,
+	RuntimeTaskCardActionSetShelvingStateResponse,
+} from "@/runtime/types";
 // 看板卡片 per-card 动作（`taskCardAction.*`，唯一实现在 src/trpc/task-card-action-api.ts）的浏览器侧传输助手。
 // 只挡住 tRPC 细节；在途闸、overlay、失败提示的编排在 task-card-action-command-execution.ts。
 //
@@ -143,4 +147,13 @@ export function transferNeverStartedBacklogTaskToProjectInWorkspace(
 	request: RuntimeAppRouterInputs["taskCardAction"]["transferNeverStartedBacklogTaskToProject"],
 ) {
 	return getRuntimeTrpcClient(workspaceId).taskCardAction.transferNeverStartedBacklogTaskToProject.mutate(request);
+}
+
+export async function setTaskCardShelvingStateInWorkspace(
+	workspaceId: string,
+	request: RuntimeTaskCardActionSetShelvingStateRequest,
+): Promise<RuntimeTaskCardActionSetShelvingStateResponse> {
+	return await getRuntimeTrpcClient(
+		workspaceId,
+	).taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects.mutate(request);
 }

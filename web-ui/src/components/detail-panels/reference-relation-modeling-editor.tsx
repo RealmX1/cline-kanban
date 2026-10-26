@@ -6,6 +6,7 @@ import {
 	ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS,
 	ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY,
 } from "@runtime-inter-work-unit-asserted-relation-kind-registry-contract";
+import type { KanbanBoardCardWorkUnitQualifiedReference } from "@runtime-inter-work-unit-relation-ledger-event-contract";
 import isDeepEqual from "fast-deep-equal";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
@@ -14,13 +15,16 @@ import {
 	RELATION_PREVIEW_STATE_LABELS,
 	ReferenceRelationModelingGraph,
 } from "@/components/detail-panels/reference-relation-modeling-graph";
+import { RelationTaskCardPreviewLayout } from "@/components/detail-panels/relation-task-card-preview-layout";
 import { KindSpecificAttributeInput } from "@/components/detail-panels/work-unit-relation-add-reference-relation-dialog";
 import { WorkUnitRelationCounterpartKanbanBoardCardPicker } from "@/components/detail-panels/work-unit-relation-counterpart-kanban-board-card-picker";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
+import { buildRelationTaskCardPreviewTargetFromDisplayEntry } from "@/hooks/relation-task-card-preview-target";
 import type { ReferenceRelationModelingEditorController } from "@/hooks/use-reference-relation-modeling-editor";
+import { useRelationTaskCardPreview } from "@/hooks/use-relation-task-card-preview";
 import type { TaskEditorClipboardTaskSelectionRequest } from "@/hooks/use-task-editor-clipboard-task-reference";
 import {
 	type AddReferenceRelationDialogDraft,
@@ -79,8 +83,9 @@ export function ReferenceRelationModelingEditor({
 	const [formError, setFormError] = useState<string | null>(null);
 	const [resolving, setResolving] = useState(false);
 	const pendingCounterpartResolutionAttemptRef = useRef<symbol | null>(null);
+	const previewSeededCounterpartCanonicalIdentityRef = useRef<KanbanBoardCardWorkUnitQualifiedReference | null>(null);
 	const [narrowView, setNarrowView] = useState<"list" | "graph">(taskId ? "graph" : "list");
-	const [selectedKey, setSelectedKey] = useState<string | null>(null);
+	const taskCardPreview = useRelationTaskCardPreview();
 	useEffect(() => {
 		onUnstagedFormChange?.(formOpen);
 		return () => onUnstagedFormChange?.(false);
@@ -93,9 +98,18 @@ export function ReferenceRelationModelingEditor({
 		]) ?? [],
 	);
 	if (preview) labels.set(preview.rootWorkUnitKey, rootTitle);
-	const selected = preview?.workUnits.find((entry) => entry.workUnitKey === selectedKey);
+	const selected = preview?.workUnits.find(
+		(entry) => entry.workUnitKey === taskCardPreview.selection?.target.workUnitKey,
+	);
+	const previewTargetForWorkUnit = (key: string) =>
+		buildRelationTaskCardPreviewTargetFromDisplayEntry(
+			preview?.workUnits.find((entry) => entry.workUnitKey === key),
+			key,
+			labels.get(key) ?? key,
+		);
 	const resetForm = useCallback(() => {
 		pendingCounterpartResolutionAttemptRef.current = null;
+		previewSeededCounterpartCanonicalIdentityRef.current = null;
 		setResolving(false);
 		setForm(EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT);
 		setDirection(true);
@@ -201,12 +215,16 @@ export function ReferenceRelationModelingEditor({
 		const isCurrentCounterpartResolutionAttempt = () =>
 			pendingCounterpartResolutionAttemptRef.current === counterpartResolutionAttempt;
 		setResolving(true);
+		const expectedCounterpartCanonicalIdentity = previewSeededCounterpartCanonicalIdentityRef.current;
 		try {
 			const ref = await resolveRelationModelingCounterpart(
 				counterpart.counterpartKanbanBoardCardWorkspaceId,
 				counterpart.counterpartKanbanBoardCardTaskId,
 			);
 			if (!isCurrentCounterpartResolutionAttempt()) return;
+			if (expectedCounterpartCanonicalIdentity && !isDeepEqual(ref, expectedCounterpartCanonicalIdentity)) {
+				throw new Error("预览中的任务已删除并重建，请重新搜索并选择要关联的任务。");
+			}
 			const value = result.referenceRelationAssertionRequestWithoutClientCharacteristics;
 			const attributes = value.assertedRelationKindSpecificAttributes;
 			const currentTaskWorkUnit = preview?.workUnits.find(
@@ -265,7 +283,7 @@ export function ReferenceRelationModelingEditor({
 		}
 	}
 	const selectedKind = form.selectedReferenceRelationKind;
-	return (
+	const relationModelingContents = (
 		<section
 			aria-label="任务关系建模"
 			className="@container flex min-w-0 flex-col gap-3 py-3 text-xs text-text-primary"
@@ -340,9 +358,10 @@ export function ReferenceRelationModelingEditor({
 							subjectKanbanBoardCardWorkspaceId={workspaceId}
 							subjectKanbanBoardCardTaskId={taskId ?? ""}
 							selectedCounterpartKanbanBoardCard={form.selectedCounterpartKanbanBoardCard}
-							onSelectedCounterpartKanbanBoardCardChange={(value) =>
-								setForm((previous) => ({ ...previous, selectedCounterpartKanbanBoardCard: value }))
-							}
+							onSelectedCounterpartKanbanBoardCardChange={(value) => {
+								previewSeededCounterpartCanonicalIdentityRef.current = null;
+								setForm((previous) => ({ ...previous, selectedCounterpartKanbanBoardCard: value }));
+							}}
 							searchInputElementId={`${id}-search`}
 						/>
 						<label className="flex flex-col gap-1" htmlFor={`${id}-kind`}>
@@ -622,62 +641,24 @@ export function ReferenceRelationModelingEditor({
 								preview={preview}
 								rootTitle={rootTitle}
 								viewportResetKey={preview.rootWorkUnitKey}
-								onSelectWorkUnit={setSelectedKey}
+								onSelectWorkUnit={(key, trigger) => {
+									setNarrowView("graph");
+									taskCardPreview.pinPreview(previewTargetForWorkUnit(key), trigger);
+								}}
+								onHoverWorkUnit={(key, trigger) => {
+									setNarrowView("graph");
+									taskCardPreview.previewOnHover(previewTargetForWorkUnit(key), trigger);
+								}}
+								onLeaveWorkUnit={taskCardPreview.cancelPendingPreview}
+								onFocusWorkUnit={(key, trigger) => {
+									setNarrowView("graph");
+									taskCardPreview.previewOnFocus(previewTargetForWorkUnit(key), trigger);
+								}}
 								expanded={presentation === "foreground"}
 							/>
 							<p className="mt-2 text-text-secondary">
 								实线：已保存。虚线：待保存变更。路径仅表示连通，不代表直接关系。
 							</p>
-							{selected && selected.workUnitKey !== preview.rootWorkUnitKey ? (
-								<div className="mt-2 rounded-md bg-surface-2 p-2">
-									<p>{selected.workUnitDisplayLabel}</p>
-									<p className="mt-1 text-text-secondary">
-										{selected.kanbanBoardCardIdentity?.promptFirstParagraph}
-									</p>
-									{selected.workUnit.workUnitType === "kanban_board_card" ? (
-										<div className="flex flex-wrap gap-2">
-											{foregroundNavigation ? (
-												<Button
-													size="xs"
-													variant="ghost"
-													className="mt-2"
-													disabled={formOpen}
-													onClick={() => {
-														const ref = selected.workUnit;
-														if (ref.workUnitType === "kanban_board_card")
-															foregroundNavigation.open({ ...ref, viewKind: "task_relations" });
-													}}
-												>
-													以此任务为中心
-												</Button>
-											) : null}
-											<Button
-												size="xs"
-												className="mt-2"
-												disabled={readOnly}
-												onClick={() => {
-													const ref = selected.workUnit;
-													if (ref.workUnitType !== "kanban_board_card") return;
-													resetForm();
-													setForm({
-														...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
-														selectedCounterpartKanbanBoardCard: {
-															counterpartKanbanBoardCardWorkspaceId: ref.workspaceId,
-															counterpartKanbanBoardCardTaskId: ref.taskId,
-															counterpartKanbanBoardCardTitle:
-																selected.kanbanBoardCardIdentity?.currentTitle ?? ref.taskId,
-															counterpartKanbanProjectDisplayName: ref.workspaceId,
-														},
-													});
-													setFormOpen(true);
-												}}
-											>
-												与当前任务建立关系
-											</Button>
-										</div>
-									) : null}
-								</div>
-							) : null}
 						</div>
 					</div>
 				) : null}
@@ -794,5 +775,65 @@ export function ReferenceRelationModelingEditor({
 				) : null}
 			</fieldset>
 		</section>
+	);
+	return (
+		<RelationTaskCardPreviewLayout
+			controller={taskCardPreview}
+			previewActions={
+				selected && preview && selected.workUnitKey !== preview.rootWorkUnitKey ? (
+					<div>
+						{selected.workUnit.workUnitType === "kanban_board_card" ? (
+							<div className="flex flex-wrap gap-2">
+								{foregroundNavigation ? (
+									<Button
+										size="xs"
+										variant="ghost"
+										className="mt-2"
+										disabled={formOpen}
+										onClick={() => {
+											const ref = selected.kanbanBoardCardIdentity?.kanbanBoardCard ?? selected.workUnit;
+											if (ref.workUnitType === "kanban_board_card")
+												foregroundNavigation.open({ ...ref, viewKind: "task_relations" });
+										}}
+									>
+										以此任务为中心
+									</Button>
+								) : null}
+								<Button
+									size="xs"
+									className="mt-2"
+									disabled={
+										readOnly || selected.kanbanBoardCardIdentity?.permanentlyRemovedFromBoardAt != null
+									}
+									onClick={() => {
+										const canonicalRef = selected.workUnit;
+										if (canonicalRef.workUnitType !== "kanban_board_card") return;
+										const ref = selected.kanbanBoardCardIdentity?.kanbanBoardCard ?? canonicalRef;
+										resetForm();
+										// 表单按当前位置搜索；解析器返回 canonical 端点，用它核对同一世身份。
+										previewSeededCounterpartCanonicalIdentityRef.current = canonicalRef;
+										setForm({
+											...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
+											selectedCounterpartKanbanBoardCard: {
+												counterpartKanbanBoardCardWorkspaceId: ref.workspaceId,
+												counterpartKanbanBoardCardTaskId: ref.taskId,
+												counterpartKanbanBoardCardTitle:
+													selected.kanbanBoardCardIdentity?.currentTitle ?? ref.taskId,
+												counterpartKanbanProjectDisplayName: ref.workspaceId,
+											},
+										});
+										setFormOpen(true);
+									}}
+								>
+									与当前任务建立关系
+								</Button>
+							</div>
+						) : null}
+					</div>
+				) : null
+			}
+		>
+			{relationModelingContents}
+		</RelationTaskCardPreviewLayout>
 	);
 }

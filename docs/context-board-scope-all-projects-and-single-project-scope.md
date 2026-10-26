@@ -20,7 +20,7 @@ _Avoid_: repo view, workspace（歧义）
 
 **Board Scope Home Page Section Columns Board（All projects 首页分区列看板）**：
 Board Scope 下没有聚焦任务时的首页（`web-ui/src/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board.tsx`）。
-它把 Focus View 左栏切换面板的分区横排成列：Pinned（没有置顶时隐藏）| Running | Cache warm · your turn | Recent。列序与 Focus View 左栏的 All projects 分区一致。
+它把 Focus View 左栏切换面板的分区横排成列：Pinned（没有置顶时隐藏）| Running | Cache warm · your turn | Recent | Shelved（默认收起）。列序与 Focus View 左栏的 All projects 分区一致。
 - 各列独立滚动；
 - 行与 hover 原地展开的完整卡片和左栏同款，渲染代码也是同一份；
 - 页头写「All projects」和「N projects · X live · Y awaiting you」，右侧是「Create task (c)」。

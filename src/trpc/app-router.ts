@@ -228,6 +228,8 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	type RuntimeTaskCardActionSetShelvingStateRequest,
+	type RuntimeTaskCardActionSetShelvingStateResponse,
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
@@ -389,6 +391,8 @@ import {
 	runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema,
 	runtimeTaskCardActionRestoreFromDoneRequestSchema,
 	runtimeTaskCardActionRestoreFromDoneResponseSchema,
+	runtimeTaskCardActionSetShelvingStateRequestSchema,
+	runtimeTaskCardActionSetShelvingStateResponseSchema,
 	runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema,
 	runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema,
 	runtimeTaskCardActionStartAgentSessionRequestSchema,
@@ -1127,6 +1131,11 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskCardActionUpdateFieldValuesRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskCardActionUpdateFieldValuesResponse>;
+		setTaskCardShelvingStateWithoutSessionSideEffects: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionSetShelvingStateRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionSetShelvingStateResponse>;
 		setTaskPinboardPinStateOfTaskCard: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionSetTaskPinboardPinStateRequest,
@@ -2548,6 +2557,16 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		setTaskCardShelvingStateWithoutSessionSideEffects: workspaceProcedure
+			.input(runtimeTaskCardActionSetShelvingStateRequestSchema)
+			.output(runtimeTaskCardActionSetShelvingStateResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.taskCardActionApi.setTaskCardShelvingStateWithoutSessionSideEffects(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
 		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
 			.input(runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema)
 			.output(runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema)

@@ -9,7 +9,6 @@ import {
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-
 import { BoardColumn } from "@/components/board-column";
 import { BoardColumnCollapsedVerticalStrip } from "@/components/board-column-collapsed-vertical-strip";
 import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
@@ -22,10 +21,18 @@ import {
 	KANBAN_BOARD_COLUMN_MAX_CUSTOM_WIDTH_PX,
 	KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX,
 } from "@/state/kanban-board-column-collapse-and-width-preferences";
+import { findTaskDisplayGroupId, projectTaskBoardDisplayGroups } from "@/state/task-board-display-groups";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
-import type { BoardCard, BoardColumnId, BoardData } from "@/types";
+import type { BoardCard, BoardColumnId, BoardData, BoardDisplayGroupId } from "@/types";
 
-const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
+const BOARD_COLUMN_ORDER: BoardDisplayGroupId[] = [
+	"backlog",
+	"in_progress",
+	"review",
+	"validation",
+	"trash",
+	"shelved",
+];
 
 // sensors 数组与其中的 sensor 本体都放在模块级：写在 JSX 里的 `[programmaticSensor]` 字面量
 // 每次渲染都会新建数组。看板全应用只挂载一个，sensor 拿到的 api 用模块级 holder 承接即可。
@@ -62,6 +69,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	onEditTaskPinboardPinReason,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
@@ -90,6 +98,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
@@ -107,7 +116,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 	const programmaticCardMoveInFlightRef = useRef<ProgrammaticCardMoveInFlight | null>(null);
 	const [activeDragTaskId, setActiveDragTaskId] = useState<string | null>(null);
 
-	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
+	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardDisplayGroupId | null>(null);
 	const [programmaticCardMoveInFlight, setProgrammaticCardMoveInFlight] =
 		useState<ProgrammaticCardMoveInFlight | null>(null);
 	const activateCard = useCallback((card: BoardCard) => onCardSelect(card.id), [onCardSelect]);
@@ -118,6 +127,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 		[onCardSelect],
 	);
 	// 每次 board 变化都要重扫全盘卡片，memo 掉避免拖拽期间逐帧重排（拖拽会高频重渲 KanbanBoard）。
+	const displayGroups = useMemo(() => projectTaskBoardDisplayGroups(data.columns), [data.columns]);
 	const pinnedTasks = useMemo(() => collectTasksPinnedToTaskPinboard(data), [data]);
 	const columnCollapseAndWidthPreferences = useKanbanBoardColumnCollapseAndWidthPreferences({
 		orderedColumnIds: BOARD_COLUMN_ORDER,
@@ -131,7 +141,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 	// 本体卡所在列若被折叠（卡片不在 DOM 里），先展开它。
 	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard({
 		prepareRevealTarget: (taskId) => {
-			const columnIdOfTaskToReveal = findCardColumnId(latestDataRef.current.columns, taskId);
+			const columnIdOfTaskToReveal = findTaskDisplayGroupId(latestDataRef.current.columns, taskId);
 			if (columnIdOfTaskToReveal) {
 				expandColumn(columnIdOfTaskToReveal);
 			}
@@ -156,7 +166,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 			return false;
 		}
 		const sourceCardElement = boardElement.querySelector<HTMLElement>(`[data-task-id="${taskId}"]`);
-		const sourceColumnId = findCardColumnId(latestDataRef.current.columns, taskId);
+		const sourceColumnId = findTaskDisplayGroupId(latestDataRef.current.columns, taskId);
 		const sourceColumnElement = sourceColumnId
 			? boardElement.querySelector<HTMLElement>(`section[data-column-id="${sourceColumnId}"]`)
 			: null;
@@ -380,7 +390,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
 			setActiveDragTaskId(start.draggableId);
-			setActiveDragSourceColumnId(findCardColumnId(data.columns, start.draggableId));
+			setActiveDragSourceColumnId(findTaskDisplayGroupId(data.columns, start.draggableId));
 		},
 		[data],
 	);
@@ -427,6 +437,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 						onEditTask,
 						onRequestPinToTaskPinboard,
 						onUnpinFromTaskPinboard,
+						onSetTaskShelvingState,
 						resolveTaskWorkspaceAbsoluteDirectoryPath,
 						moveToTrashLoadingById,
 						moveToValidationLoadingById,
@@ -444,7 +455,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 					className="kb-board"
 					data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
 				>
-					{data.columns.map((column) =>
+					{displayGroups.map((column) =>
 						columnCollapseAndWidthPreferences.isColumnCollapsed(column.id) ? (
 							<BoardColumnCollapsedVerticalStrip
 								key={column.id}
@@ -463,13 +474,15 @@ export const KanbanBoard = memo(function KanbanBoard({
 									taskSessions={taskSessions}
 									onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
 									onStartTask={
-										column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined
+										column.id === "backlog" || column.id === "in_progress" || column.id === "shelved"
+											? onStartTask
+											: undefined
 									}
 									onRequestStartAllReadyBacklogTasks={
 										column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
 									}
 									onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-									onEditTask={column.id === "backlog" ? onEditTask : undefined}
+									onEditTask={onEditTask}
 									onSaveTitle={onSaveTaskTitle}
 									onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 									onMoveToTrashTask={
@@ -481,6 +494,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 									onDeleteTask={onDeleteTask}
 									onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 									onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+									onSetTaskShelvingState={onSetTaskShelvingState}
 									taskIdRequestedToReveal={taskIdRequestedToReveal}
 									moveToTrashLoadingById={
 										column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined

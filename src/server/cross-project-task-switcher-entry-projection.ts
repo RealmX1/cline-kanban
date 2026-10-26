@@ -31,6 +31,7 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 	return {
 		...buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(card, sessionFacts),
 		columnId,
+		taskShelvingState: card.taskShelvingState,
 		userTurnKind: sessionFacts?.userTurnKind ?? null,
 		isParkedAwaitingDispatchedBackgroundWork: sessionFacts?.isParkedAwaitingDispatchedBackgroundWork ?? false,
 		taskDescriptionLastUpdatedAt: resolveTaskDescriptionLastUpdatedAt(card),

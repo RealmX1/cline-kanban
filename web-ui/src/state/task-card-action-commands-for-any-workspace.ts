@@ -1,5 +1,6 @@
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@runtime-task-pinboard-pinning";
+import { setTaskCardShelvingState } from "@runtime-task-state";
 import {
 	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace,
 	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
@@ -7,6 +8,7 @@ import {
 	permanentlyDeleteTaskCardsWithFullResourceCleanupInWorkspace,
 	readTaskCardWithBoardColumnInWorkspace,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionInWorkspace,
+	setTaskCardShelvingStateInWorkspace,
 	setTaskPinboardPinStateOfTaskCardInWorkspace,
 	startTaskCardAgentSessionMovingItIntoInProgressInWorkspace,
 	transferNeverStartedBacklogTaskToProjectInWorkspace,
@@ -21,6 +23,7 @@ import type {
 	RuntimeTaskCardActionMoveIntoReviewResponse,
 	RuntimeTaskCardActionPermanentlyDeleteResponse,
 	RuntimeTaskCardActionRestoreFromDoneResponse,
+	RuntimeTaskCardActionSetShelvingStateResponse,
 	RuntimeTaskCardActionSetTaskPinboardPinStateResponse,
 	RuntimeTaskCardActionStartAgentSessionResponse,
 	RuntimeTaskCardActionUpdateFieldValuesResponse,
@@ -506,6 +509,45 @@ export async function setTaskPinboardPinStateOfTaskCardThroughRuntime(input: {
 							boardMutationInitiator,
 						},
 			),
+		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
+	});
+}
+
+export async function setTaskCardShelvingStateThroughRuntime(input: {
+	workspaceId: string;
+	taskId: string;
+	isShelved: boolean;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
+	currentProjectBoardForOptimisticOverlay?: BoardData;
+}): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionSetShelvingStateResponse>> {
+	const patch = input.currentProjectBoardForOptimisticOverlay
+		? buildTaskCardFieldPatchProducedByBoardTransformation(
+				input.currentProjectBoardForOptimisticOverlay,
+				input.taskId,
+				(board) => setTaskCardShelvingState(board, input.taskId, input.isShelved),
+				["taskShelvingState"],
+			)
+		: null;
+	return await executeTaskCardActionCommand({
+		workspaceId: input.workspaceId,
+		taskIds: [input.taskId],
+		commandKind: "set_task_card_shelving_state",
+		expectedBoardEffectByTaskId: expectedBoardEffectsForSingleTaskCard(
+			input.taskId,
+			patch
+				? {
+						pendingTaskCardCommandExpectedBoardEffectKind: "task_card_fields_patched",
+						taskCardFieldPatch: patch,
+					}
+				: null,
+		),
+		sendCommand: () =>
+			setTaskCardShelvingStateInWorkspace(input.workspaceId, {
+				taskId: input.taskId,
+				isShelved: input.isShelved,
+				expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs,
+				boardMutationInitiator: "web_ui_user_gesture",
+			}),
 		readTaskCardSnapshotsAfterAction: (response) => [response.taskCardSnapshotAfterAction],
 	});
 }

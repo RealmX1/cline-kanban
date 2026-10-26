@@ -19,7 +19,7 @@ import {
 //   - workspace-metadata-monitor 只为有浏览器连着的项目跑，推给那个项目的客户端；其他项目没人算。
 //   - 并入 projects_updated 广播：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
 //   - 新建订阅式 monitor：要管面板挂载计数与条目滑出窗口后的清理，生命周期复杂。
-// 按需轮询 + 这里按 (workspaceId, taskId) 缓存：多个标签页的请求在服务端去重；条目不再被请求就自然淘汰。
+// 按需轮询 + 这里按 (workspaceId, taskId, createdAt) 缓存：多个标签页的请求在服务端去重；条目不再被请求就自然淘汰。
 //
 // 每个键复用 workspace-metadata-monitor 的同一个探针（loadTaskWorkspaceMetadata）：先用 fs-stat 门控，token
 // 与 base tip 不变且未超兜底窗口（按卡片所在列与近期活跃度分热 / 冷两档）就 0 次 git spawn；真要跑 git 时走同一个
@@ -56,7 +56,8 @@ function indexBoardCardsByTaskId(
 	const cardsByTaskId = new Map<string, { card: RuntimeBoardCard; columnId: RuntimeBoardColumnId }>();
 	for (const column of board.columns) {
 		for (const card of column.cards) {
-			cardsByTaskId.set(card.id, { card, columnId: column.id });
+			// 固定本次读取的身份，异步探针期间看板对象的更新不能改变核验起点。
+			cardsByTaskId.set(card.id, { card: { ...card }, columnId: column.id });
 		}
 	}
 	return cardsByTaskId;
@@ -137,7 +138,8 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 				if (located.columnId === "backlog") {
 					return unavailable(taskId, "task_card_in_backlog_has_no_worktree");
 				}
-				const key = buildCrossProjectTaskSwitcherEntryKey(workspaceId, taskId);
+				// 同 ID 重建不能复用上一世的缓存或正在进行的探针。
+				const key = JSON.stringify([workspaceId, taskId, located.card.createdAt]);
 				const entry = cacheEntriesByKey.get(key) ?? {
 					cachedProbeResult: null,
 					lastRequestedAtMs: nowMs,
@@ -162,7 +164,17 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 						),
 					);
 					return probeResult
-						? { workspaceId, taskId, availability: "available", taskWorkspaceMetadata: probeResult.data }
+						? {
+								workspaceId,
+								taskId,
+								availability: "available",
+								// 旧持久快照没有创建时间证据，只保留原展示，不为其签发身份绑定。
+								...(probeResult.data.exists &&
+								probeResult.data.workspaceGitStatus.observationSource !== "persisted_final_snapshot"
+									? { taskIncarnationCreatedAtEpochMs: located.card.createdAt }
+									: {}),
+								taskWorkspaceMetadata: probeResult.data,
+							}
 						: unavailable(taskId, "git_metadata_probe_failed");
 				} catch {
 					return unavailable(taskId, "git_metadata_probe_failed");
@@ -177,14 +189,30 @@ export function createCrossProjectTaskWorktreeGitMetadataCache(
 			),
 		});
 		const enrichedByTaskId = new Map(enriched.map((metadata) => [metadata.taskId, metadata]));
-		return results.map((result) =>
-			result.availability === "available"
-				? {
-						...result,
-						taskWorkspaceMetadata: enrichedByTaskId.get(result.taskId) ?? result.taskWorkspaceMetadata,
-					}
-				: result,
-		);
+		if (!results.some((result) => result.availability === "available")) return results;
+		// 探针和部署覆盖补充都可能跨过删除重建；响应前再核对，无法确认时不声称绑定任何一世。
+		let currentCardsByTaskId: ReturnType<typeof indexBoardCardsByTaskId>;
+		try {
+			currentCardsByTaskId = indexBoardCardsByTaskId(await deps.loadWorkspaceBoardById(workspaceId));
+		} catch {
+			return results.map((result) =>
+				result.availability === "available" ? unavailable(result.taskId, "git_metadata_probe_failed") : result,
+			);
+		}
+		return results.map((result) => {
+			if (result.availability !== "available") return result;
+			const current = currentCardsByTaskId.get(result.taskId);
+			if (!current || current.card.createdAt !== cardsByTaskId.get(result.taskId)?.card.createdAt) {
+				return unavailable(result.taskId, "task_card_not_found");
+			}
+			if (current.columnId === "backlog") {
+				return unavailable(result.taskId, "task_card_in_backlog_has_no_worktree");
+			}
+			return {
+				...result,
+				taskWorkspaceMetadata: enrichedByTaskId.get(result.taskId) ?? result.taskWorkspaceMetadata,
+			};
+		});
 	};
 
 	return {

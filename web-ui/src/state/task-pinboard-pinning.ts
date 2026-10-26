@@ -23,7 +23,7 @@ export function collectTasksPinnedToTaskPinboard(board: BoardData): TaskPinnedTo
 	const pinnedTasks: TaskPinnedToTaskPinboard[] = [];
 	for (const column of board.columns) {
 		for (const card of column.cards) {
-			if (!isPinnedToTaskPinboard(card)) {
+			if (card.taskShelvingState?.isShelved || !isPinnedToTaskPinboard(card)) {
 				continue;
 			}
 			pinnedTasks.push({ card, columnId: column.id, columnTitle: column.title });

@@ -1,6 +1,6 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { type ReactElement, useRef } from "react";
+import { type ReactElement, useEffect, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectTaskSwitcherPinnedSectionBlock,
@@ -8,6 +8,7 @@ import {
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
 	CrossProjectTaskSwitcherRunningSectionBlock,
 	type CrossProjectTaskSwitcherSectionBlockProps,
+	CrossProjectTaskSwitcherShelvedSectionBlock,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-section-blocks";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
@@ -74,6 +75,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			onRevealFocusedTask={onRevealFocusedTask}
 		/>
 	);
+
+	useEffect(() => {
+		if (focusedTaskSourceSection === "shelved") sectionsModel.setIsShelvedSectionExpanded(true);
+	}, [focusedTaskSourceSection, focusedTaskEntryKey, sectionsModel.setIsShelvedSectionExpanded]);
 
 	const sectionBlockProps: CrossProjectTaskSwitcherSectionBlockProps = {
 		sectionBlockPresentation: "stacked_section_in_focus_view_left_column_panel",
@@ -149,6 +154,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				<CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherRemainingRecentSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherShelvedSectionBlock {...sectionBlockProps} />
 				{pinReasonDialogAndOtherProjectConfirmationDialogs}
 			</div>
 			{focusedTaskSelection && focusedTaskPinState !== "hidden" ? (

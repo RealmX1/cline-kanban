@@ -6,6 +6,7 @@ export interface ExpandedForegroundViewNavigationController {
 	ownerSurfaceId: string | null;
 	open: (target: ExpandedForegroundViewTarget, ownerSurfaceId?: string) => void;
 	close: () => void;
+	dismissForTaskNavigation: () => void;
 	registerSurface: (surfaceId: string, contentIdentity: string) => void;
 	releaseSurface: (surfaceId: string) => void;
 }

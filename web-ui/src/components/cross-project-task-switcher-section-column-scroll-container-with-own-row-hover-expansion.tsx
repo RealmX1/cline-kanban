@@ -6,6 +6,7 @@ import {
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
 	CrossProjectTaskSwitcherRunningSectionBlock,
 	type CrossProjectTaskSwitcherSectionBlockProps,
+	CrossProjectTaskSwitcherShelvedSectionBlock,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-section-blocks";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import { useCrossProjectTaskSwitcherRowHoverExpansionInPlace } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
@@ -68,6 +69,8 @@ export function CrossProjectTaskSwitcherSectionColumnScrollContainerWithOwnRowHo
 		},
 	};
 	switch (section) {
+		case "shelved":
+			return <CrossProjectTaskSwitcherShelvedSectionBlock {...sectionBlockProps} />;
 		case "pinned":
 			return <CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />;
 		case "running":

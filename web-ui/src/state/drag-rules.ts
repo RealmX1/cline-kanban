@@ -1,4 +1,4 @@
-import type { BoardColumn, BoardColumnId } from "@/types";
+import type { BoardColumn, BoardColumnId, BoardDisplayGroupId } from "@/types";
 
 export interface ProgrammaticCardMoveInFlight {
 	taskId: string;
@@ -75,8 +75,8 @@ export function findCardColumnId(columns: ReadonlyArray<BoardColumn>, taskId: st
 }
 
 export function isCardDropDisabled(
-	columnId: BoardColumnId,
-	activeDragSourceColumnId: BoardColumnId | null,
+	columnId: BoardDisplayGroupId,
+	activeDragSourceColumnId: BoardDisplayGroupId | null,
 	options?: {
 		activeDragTaskId?: string | null;
 		programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
@@ -85,6 +85,8 @@ export function isCardDropDisabled(
 	if (!activeDragSourceColumnId) {
 		return false;
 	}
+	if (columnId === "shelved") return activeDragSourceColumnId === "shelved";
+	if (activeDragSourceColumnId === "shelved") return false;
 	if (columnId === "review") {
 		return !isAllowedCrossColumnCardMove(activeDragSourceColumnId, columnId, {
 			taskId: options?.activeDragTaskId,

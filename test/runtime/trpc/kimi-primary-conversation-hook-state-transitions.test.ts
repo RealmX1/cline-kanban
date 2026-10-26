@@ -149,11 +149,14 @@ describe("Kimi 主会话 hook 驱动真实运行时 facet", () => {
 		["PreToolUse", "ExitPlanMode", "plan_review"],
 		["PermissionRequest", "Bash", "permission"],
 	] as const)("%s / %s 中断后，下一次提交待确认并由工具活动恢复工作", async (hookName, toolName, userTurnKind) => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const startedAtMs = Date.now();
 		const runtime = await createIsolatedPrimaryConversationHookRuntime();
 		await runtime.ingest(hookName, toolName);
 		const waiting = runtime.summary();
 		expect(waiting).toMatchObject({ turnOwner: "user", liveness: "live", userTurnKind });
 
+		vi.setSystemTime(startedAtMs + 10);
 		await runtime.ingest("Interrupt");
 		const interrupted = runtime.summary();
 		expect(interrupted).toMatchObject({
@@ -174,22 +177,30 @@ describe("Kimi 主会话 hook 驱动真实运行时 facet", () => {
 			waiting.agentConversationPromptSubmissionAcceptance,
 		);
 
+		vi.setSystemTime(startedAtMs + 20);
 		const nextPromptBytes = Buffer.from("继续隔离测试\r");
 		expect(runtime.manager.writeInput(runtime.taskId, nextPromptBytes)).not.toBeNull();
 		expect(runtime.writeTerminalInput).toHaveBeenLastCalledWith(nextPromptBytes);
 		const pendingSubmission = runtime.summary().agentConversationPromptSubmissionAcceptance;
-		expect(pendingSubmission?.status).toBe("pending");
+		// 原始输入只写入终端，收到提交 hook 前不创建可见候选。
+		expect(pendingSubmission).toEqual(interrupted.agentConversationPromptSubmissionAcceptance);
 		expect(runtime.summary()).toMatchObject({ turnOwner: "user", userTurnKind: "interrupted" });
 
+		vi.setSystemTime(startedAtMs + 30);
 		await runtime.ingest("UserPromptSubmit");
 		const submitted = runtime.summary();
 		expect(submitted).toMatchObject({ turnOwner: "user", liveness: "live", userTurnKind: "interrupted" });
-		expect(submitted.agentConversationPromptSubmissionAcceptance?.status).toBe("pending");
+		expect(submitted.agentConversationPromptSubmissionAcceptance).toMatchObject({
+			status: "pending",
+			submissionSource: "harness_submit_hook",
+			runtimeSessionIncarnationId: waiting.runtimeSessionIncarnationId,
+		});
 		expect(submitted.agentResponseGenerationTurnSequence).toBe(interrupted.agentResponseGenerationTurnSequence);
 		expect(submitted.lastEffectiveAgentConversationActivityObservation).toEqual(
 			interrupted.lastEffectiveAgentConversationActivityObservation,
 		);
 
+		vi.setSystemTime(startedAtMs + 40);
 		await runtime.ingest("PostToolUse", "Bash");
 		const resumed = runtime.summary();
 		expect(resumed).toMatchObject({

@@ -1,19 +1,19 @@
 import { Droppable } from "@hello-pangea/dnd";
-import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { FoldHorizontal, Play, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
-import { collectStableTaskConversationSessionActivityPresentationObservations } from "@/components/task-conversation-session-activity-presentation-observation-cache";
+import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import { resolveTaskCardOriginalStage } from "@/state/task-board-display-groups";
 import { readBoardColumnScrollOffset, writeBoardColumnScrollOffset } from "@/stores/board-column-scroll-offset-store";
-import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
+import type { BoardCard as BoardCardModel, BoardDisplayGroup as BoardColumnModel, BoardDisplayGroupId } from "@/types";
 
 // 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
 const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -36,6 +36,7 @@ export const BoardColumn = memo(function BoardColumn({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onSetTaskShelvingState,
 	taskIdRequestedToReveal,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
@@ -67,6 +68,7 @@ export const BoardColumn = memo(function BoardColumn({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	/**
 	 * 置顶板请求「跳回本体卡」的任务 id（全局唯一，非本列时本列忽略）。
 	 * 命中本列时把该卡的索引交给渐进渲染，保证它即便排在初始 cap 之后也已挂载，供 scrollIntoView 命中。
@@ -77,14 +79,14 @@ export const BoardColumn = memo(function BoardColumn({
 	moveToReviewLoadingById?: Record<string, boolean>;
 	onCardClick?: (card: BoardCardModel) => void;
 	activeDragTaskId?: string | null;
-	activeDragSourceColumnId?: BoardColumnId | null;
+	activeDragSourceColumnId?: BoardDisplayGroupId | null;
 	programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 	/** 主看板的列折叠入口；不传则不渲染折叠按钮。 */
-	onCollapseColumn?: (columnId: BoardColumnId) => void;
+	onCollapseColumn?: (columnId: BoardDisplayGroupId) => void;
 	/** 主看板列宽偏好算出的 flex 样式（自动填充或固定 flex-basis）；缺省为等分填充。 */
 	columnFlexStyle?: { flex: string };
 }): React.ReactElement {
@@ -257,35 +259,34 @@ export const BoardColumn = memo(function BoardColumn({
 									items.push(
 										<BoardCard
 											key={card.id}
-											card={card}
 											index={draggableIndex}
-											columnId={column.id}
-											taskConversationSessionActivityObservations={collectStableTaskConversationSessionActivityPresentationObservations(
+											{...buildTaskCardBusinessProps({
 												card,
-												Object.values(taskSessions),
-											)}
-											sessionSummary={
-												resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined
-											}
-											onStart={onStartTask}
-											onMoveToTrash={onMoveToTrashTask}
-											onMoveToValidation={onMoveToValidationTask}
-											onMoveToReview={onMoveToReviewTask}
-											onRestoreFromTrash={onRestoreFromTrashTask}
-											onDeleteTask={onDeleteTask}
-											onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-											onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-											onCancelAutomaticAction={onCancelAutomaticTaskAction}
-											isMoveToTrashLoading={moveToTrashLoadingById?.[card.id] ?? false}
-											isMoveToValidationLoading={moveToValidationLoadingById?.[card.id] ?? false}
-											isMoveToReviewLoading={moveToReviewLoadingById?.[card.id] ?? false}
-											workspacePath={workspacePath}
-											resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
-											defaultClineModelId={defaultClineModelId}
-											defaultAgentId={defaultAgentId}
-											onSaveTitle={onSaveTitle}
-											onOpenTaskEditor={column.id === "backlog" ? onEditTask : undefined}
-											onClick={column.id === "backlog" ? onEditTask : onCardClick}
+												columnId: resolveTaskCardOriginalStage(column, card),
+												taskSessions,
+												handlers: {
+													onStartTask,
+													onMoveToTrashTask,
+													onMoveToValidationTask,
+													onMoveToReviewTask,
+													onRestoreFromTrashTask,
+													onDeleteTask,
+													onRequestPinToTaskPinboard,
+													onUnpinFromTaskPinboard,
+													onSetTaskShelvingState,
+													onCancelAutomaticTaskAction,
+													onSaveTitle,
+													onEditTask,
+													moveToTrashLoadingById,
+													moveToValidationLoadingById,
+													moveToReviewLoadingById,
+													resolveTaskWorkspaceAbsoluteDirectoryPath,
+												},
+												onActivateCard: onCardClick,
+												workspacePath,
+												defaultClineModelId,
+												defaultAgentId,
+											})}
 										/>,
 									);
 									draggableIndex += 1;

@@ -176,6 +176,18 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		expect(ensureTerminalMock).not.toHaveBeenCalled();
 	});
 
+	it("搁置 Backlog 的搜索定位打开 Focus View，保留搁置状态", () => {
+		const board = makeBoard({ backlog: ["shelved-backlog"] });
+		const card = board.columns.flatMap((column) => column.cards)[0];
+		if (!card) throw new Error("缺少搁置 Backlog 夹具");
+		card.taskShelvingState = { isShelved: true, lastChangedAt: 10 };
+		render({ board });
+		act(() => latest?.handleOpenTaskInProject("project-a", "shelved-backlog"));
+		expect(setSelectedTaskId).toHaveBeenCalledWith("shelved-backlog");
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(card.taskShelvingState.isShelved).toBe(true);
+	});
+
 	it("同项目：非 backlog 直接选中，backlog 打开编辑对话框", () => {
 		render();
 		act(() => latest?.handleOpenTaskInProject("project-a", "a-review"));

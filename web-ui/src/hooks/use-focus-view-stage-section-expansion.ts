@@ -1,12 +1,13 @@
 import type { RefObject } from "react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-
 import {
 	computeScrollTopAfterCollapsingStageFromTopRail,
 	computeScrollTopForJumpingToStageBelowTopRail,
 } from "@/components/detail-panels/stage-header-rail-geometry";
-import type { BoardColumnId } from "@/types";
+import { LocalStorageKey } from "@/storage/local-storage-store";
+import type { BoardDisplayGroupId } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
+import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 /**
  * Focus View 左侧 stage 手风琴的折叠状态 + 由 stage 卡头发起的滚动（跳转 / 折叠 / 展开）。
@@ -26,8 +27,8 @@ import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-
  */
 
 /** 无显式操作时的默认展开态：Done（trash）默认折叠，其余默认展开。 */
-function isStageSectionExpandedByDefault(columnId: BoardColumnId): boolean {
-	return columnId !== "trash";
+function isStageSectionExpandedByDefault(columnId: BoardDisplayGroupId): boolean {
+	return columnId !== "trash" && columnId !== "shelved";
 }
 
 /** 折叠/展开按钮所在的 rail 沿，对应 `SelectedCardPinState` 的钉住方向。 */
@@ -36,7 +37,7 @@ export type StageHeaderRailEdge = "pinTop" | "pinBottom";
 type PendingScrollAdjustmentAfterStageSectionToggle =
 	| {
 			kind: "jump_to_stage_section_after_expanding_it_from_stage_header_rail";
-			columnId: BoardColumnId;
+			columnId: BoardDisplayGroupId;
 	  }
 	| {
 			kind: "keep_viewport_steady_after_collapsing_stage_section_from_top_rail";
@@ -52,22 +53,25 @@ export interface UseFocusViewStageSectionExpansionOptions {
 	/** 滚动容器（`.kb-detail-task-list-scroll`）的 ref：滚动落点的基准与被写方。 */
 	scrollRootRef: RefObject<HTMLElement | null>;
 	/** 全部 stage 的 columnId，按列表文档序（跳转落点按目标之上有几个 stage 计算顶 rail 高度）。 */
-	orderedColumnIds: readonly BoardColumnId[];
+	orderedColumnIds: readonly BoardDisplayGroupId[];
 	/** 焦点卡所在 stage：它在目标之上且焦点卡会钉顶时，顶 rail 多出一张焦点卡克隆的高度。 */
-	focusedColumnId: BoardColumnId;
+	focusedColumnId: BoardDisplayGroupId;
 	focusedTaskId: string;
 }
 
 export interface FocusViewStageSectionExpansionController {
-	isStageSectionExpanded: (columnId: BoardColumnId) => boolean;
+	isStageSectionExpanded: (columnId: BoardDisplayGroupId) => boolean;
 	/** 行内卡头：原地折叠/展开，不滚动。 */
-	toggleStageSectionExpandedFromInFlowHeader: (columnId: BoardColumnId) => void;
+	toggleStageSectionExpandedFromInFlowHeader: (columnId: BoardDisplayGroupId) => void;
 	/** rail 孪生卡头的折叠按钮：折叠/展开 + 按上面的策略调整滚动。 */
-	toggleStageSectionExpandedFromStageHeaderRail: (columnId: BoardColumnId, railEdge: StageHeaderRailEdge) => void;
+	toggleStageSectionExpandedFromStageHeaderRail: (
+		columnId: BoardDisplayGroupId,
+		railEdge: StageHeaderRailEdge,
+	) => void;
 	/** 只展开、不滚动（调用方自己负责随后的滚动，如置顶板「跳回本体卡」）。 */
-	expandStageSectionWithoutScrolling: (columnId: BoardColumnId) => void;
+	expandStageSectionWithoutScrolling: (columnId: BoardDisplayGroupId) => void;
 	/** rail 孪生卡头的标签：跳到该 stage，第一张卡完整露在顶 rail 之下。 */
-	jumpToStageSectionBelowTopRail: (columnId: BoardColumnId) => void;
+	jumpToStageSectionBelowTopRail: (columnId: BoardDisplayGroupId) => void;
 }
 
 export function useFocusViewStageSectionExpansion({
@@ -76,23 +80,33 @@ export function useFocusViewStageSectionExpansion({
 	focusedColumnId,
 	focusedTaskId,
 }: UseFocusViewStageSectionExpansionOptions): FocusViewStageSectionExpansionController {
+	const [isShelvedSectionExpanded, setIsShelvedSectionExpanded] = useBooleanLocalStorageValue(
+		LocalStorageKey.FocusViewShelvedSectionExpanded,
+		false,
+	);
 	const [explicitExpandedByColumnId, setExplicitExpandedByColumnId] = useState<
-		Partial<Record<BoardColumnId, boolean>>
+		Partial<Record<BoardDisplayGroupId, boolean>>
 	>({});
 	const pendingScrollAdjustmentRef = useRef<PendingScrollAdjustmentAfterStageSectionToggle | null>(null);
 
 	const isStageSectionExpanded = useCallback(
-		(columnId: BoardColumnId): boolean =>
-			explicitExpandedByColumnId[columnId] ?? isStageSectionExpandedByDefault(columnId),
-		[explicitExpandedByColumnId],
+		(columnId: BoardDisplayGroupId): boolean =>
+			columnId === "shelved"
+				? isShelvedSectionExpanded
+				: (explicitExpandedByColumnId[columnId] ?? isStageSectionExpandedByDefault(columnId)),
+		[explicitExpandedByColumnId, isShelvedSectionExpanded],
 	);
 
-	const setStageSectionExpanded = useCallback((columnId: BoardColumnId, isExpanded: boolean): void => {
-		setExplicitExpandedByColumnId((previous) => ({ ...previous, [columnId]: isExpanded }));
-	}, []);
+	const setStageSectionExpanded = useCallback(
+		(columnId: BoardDisplayGroupId, isExpanded: boolean): void => {
+			if (columnId === "shelved") setIsShelvedSectionExpanded(isExpanded);
+			setExplicitExpandedByColumnId((previous) => ({ ...previous, [columnId]: isExpanded }));
+		},
+		[setIsShelvedSectionExpanded],
+	);
 
 	const measureScrollTopForJumpingToStageBelowTopRail = useCallback(
-		(scrollRoot: HTMLElement, targetColumnId: BoardColumnId): number | null => {
+		(scrollRoot: HTMLElement, targetColumnId: BoardDisplayGroupId): number | null => {
 			const targetSection = scrollRoot.querySelector<HTMLElement>(
 				`[data-stage-section-id="${escapeCssAttributeSelectorValue(targetColumnId)}"]`,
 			);
@@ -119,7 +133,7 @@ export function useFocusViewStageSectionExpansion({
 	// 直接赋值 `scrollTop` 而非 `scrollIntoView`：不会牵动祖先滚动容器，且全局无 `scroll-behavior: smooth`，
 	// 与此前的瞬时跳转观感一致。
 	const jumpToStageSectionBelowTopRail = useCallback(
-		(columnId: BoardColumnId): void => {
+		(columnId: BoardDisplayGroupId): void => {
 			const scrollRoot = scrollRootRef.current;
 			if (!scrollRoot) {
 				return;
@@ -133,14 +147,14 @@ export function useFocusViewStageSectionExpansion({
 	);
 
 	const toggleStageSectionExpandedFromInFlowHeader = useCallback(
-		(columnId: BoardColumnId): void => {
+		(columnId: BoardDisplayGroupId): void => {
 			setStageSectionExpanded(columnId, !isStageSectionExpanded(columnId));
 		},
 		[isStageSectionExpanded, setStageSectionExpanded],
 	);
 
 	const toggleStageSectionExpandedFromStageHeaderRail = useCallback(
-		(columnId: BoardColumnId, railEdge: StageHeaderRailEdge): void => {
+		(columnId: BoardDisplayGroupId, railEdge: StageHeaderRailEdge): void => {
 			const isExpanding = !isStageSectionExpanded(columnId);
 			pendingScrollAdjustmentRef.current = isExpanding
 				? { kind: "jump_to_stage_section_after_expanding_it_from_stage_header_rail", columnId }
@@ -157,7 +171,7 @@ export function useFocusViewStageSectionExpansion({
 	);
 
 	const expandStageSectionWithoutScrolling = useCallback(
-		(columnId: BoardColumnId): void => setStageSectionExpanded(columnId, true),
+		(columnId: BoardDisplayGroupId): void => setStageSectionExpanded(columnId, true),
 		[setStageSectionExpanded],
 	);
 
@@ -206,10 +220,10 @@ export function useFocusViewStageSectionExpansion({
 
 function captureScrollAdjustmentForCollapsingStageSectionFromTopRail(
 	scrollRoot: HTMLElement | null,
-	columnId: BoardColumnId,
+	columnId: BoardDisplayGroupId,
 	measureScrollTopForJumpingToStageBelowTopRail: (
 		scrollRoot: HTMLElement,
-		targetColumnId: BoardColumnId,
+		targetColumnId: BoardDisplayGroupId,
 	) => number | null,
 ): PendingScrollAdjustmentAfterStageSectionToggle | null {
 	const stageSectionElement = scrollRoot?.querySelector<HTMLElement>(

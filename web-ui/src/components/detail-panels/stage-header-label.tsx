@@ -1,5 +1,5 @@
 import { ColumnIndicator } from "@/components/ui/column-indicator";
-import type { BoardColumnId } from "@/types";
+import type { BoardDisplayGroupId } from "@/types";
 
 /**
  * stage（看板列）卡头标签：阶段指示器图标 + 阶段标题 + 卡片计数。
@@ -11,7 +11,7 @@ export function StageHeaderLabel({
 	title,
 	count,
 }: {
-	columnId: BoardColumnId;
+	columnId: BoardDisplayGroupId;
 	title: string;
 	count: number;
 }): React.ReactElement {
