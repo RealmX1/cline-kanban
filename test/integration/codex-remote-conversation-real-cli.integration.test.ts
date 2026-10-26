@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { type IPty, spawn as spawnPty } from "node-pty";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 
@@ -26,7 +26,7 @@ afterEach(async () => {
 	vi.unstubAllEnvs();
 });
 
-describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
+describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
 	"真实 Codex 的远程恢复、只读 fork 与工具归属",
 	{ timeout: 180_000 },
 	() => {
@@ -191,7 +191,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 					KANBAN_TASK_ID: taskId,
 				});
 				const launch = await prepareCodexNativeSessionControlHostLaunch({
-					binary: process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					arguments: [
 						"--dangerously-bypass-hook-trust",
 						"--no-alt-screen",

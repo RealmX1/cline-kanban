@@ -36,7 +36,7 @@ import {
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
 describe("共享任务索引经 CLI、tRPC、API fixture、board 与关系账本的完整链路", { timeout: 60000 }, () => {
-	it("保守建卡、追加发现、未核验关系、重启重试和旧发现补查共用内核", async () => {
+	it("保守建卡、追加发现、未核验关系和显式重启重试共用内核，旧发现不再自动补查", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const previousPort = getKanbanRuntimePort();
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
@@ -225,24 +225,12 @@ describe("共享任务索引经 CLI、tRPC、API fixture、board 与关系账本
 			await service.close();
 			service = createTaskIndexingSupportRuntimeService(dependencies);
 			expect(await caller().support.triageIncomingWorkItem(work("partial", "部分重叠"))).toEqual(created);
-			const backfill = await service.backfillUntriagedRvfFindings(scope);
-			expect(backfill.results).toHaveLength(2);
-			expect(backfill.results).toEqual(
-				expect.arrayContaining([
-					{ taskId: "rvf01", status: "completed" },
-					{ taskId: noRelation.created_task_id, status: "already_completed" },
-				]),
-			);
-			expect(
-				(await service.backfillUntriagedRvfFindings(scope)).results.every(
-					(entry) => entry.status === "already_completed",
-				),
-			).toBe(true);
+			expect(service).not.toHaveProperty("backfillUntriagedRvfFindings");
 			const current = await loadWorkspaceBoardById(scope.workspaceId);
 			const cards = current.columns.flatMap((column) => column.cards);
 			expect(cards).toHaveLength(4);
 			expect(cards.find((card) => card.id === "rvf01")?.prompt).toBe(findingPrompt);
-			expect(cards.find((card) => card.id === "rvf01")?.taskCommentEntries).toHaveLength(1);
+			expect(cards.find((card) => card.id === "rvf01")?.taskCommentEntries ?? []).toHaveLength(0);
 			expect(cards.find((card) => card.id === created.created_task_id)).toMatchObject({
 				startInPlanMode: true,
 				autoReviewEnabled: false,
@@ -261,7 +249,7 @@ describe("共享任务索引经 CLI、tRPC、API fixture、board 与关系账本
 					workspaceId: scope.workspaceId,
 				},
 			});
-			expect(neighborhood.assertedRelations).toHaveLength(2);
+			expect(neighborhood.assertedRelations).toHaveLength(1);
 			for (const relation of neighborhood.assertedRelations)
 				expect(relation).toMatchObject({
 					relationAsserterActorKind: "kanban_runtime_system_component",
@@ -410,15 +398,14 @@ describe("共享任务索引经 CLI、tRPC、API fixture、board 与关系账本
 				temporarilyUnavailableRelationWrite.mockRestore();
 				process.exitCode = previousExitCode;
 			}
-			const recoveredByBackfill = await service.backfillUntriagedRvfFindings(scope);
-			expect(recoveredByBackfill.results.filter((entry) => entry.status === "completed")).toHaveLength(1);
+
 			const recovered = await caller().support.triageIncomingWorkItem(failureWorkItem);
 			expect(recovered.decision).toBe("created_task_with_possible_relations");
 			expect(
 				(await loadWorkspaceBoardById(scope.workspaceId)).columns.flatMap((column) => column.cards),
 			).toHaveLength(5);
 			const calls = auditCalls;
-			expect(calls).toHaveLength(8);
+			expect(calls).toHaveLength(7);
 			expect(calls[0].knownTaskIdentities.map((reference: { taskId: string }) => reference.taskId)).toEqual([
 				"old01",
 			]);

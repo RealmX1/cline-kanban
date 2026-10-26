@@ -131,6 +131,20 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		);
 	}
 
+	it("旧自动消息只作为历史显示，不能重排或重新投递", () => {
+		const controller = createControllerDouble([
+			projection("old-rvf", {
+				deliveryState: "queued",
+				isReadOnlyHistoricalDelivery: true,
+				programmaticInjectionSource: "rvf_automatic_closeout",
+			}),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("历史：等待投递");
+		expect(buttonsWithLabel(container, "重新排队")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Move queued prompt up")).toHaveLength(0);
+	});
+
 	it("时间不显示年份，尝试次数置于时间信息之外", () => {
 		const enqueuedAt = Date.parse("2026-10-24T12:00:00Z");
 		render(

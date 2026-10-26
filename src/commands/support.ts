@@ -89,25 +89,6 @@ export function registerSupportCommand(program: Command): void {
 					),
 				),
 		);
-	support
-		.command("backfill-untriaged-rvf-findings")
-		.description("异步串行补查 not_triaged 卡；用 get-backfill-status 查看持久结果。")
-		.requiredOption("--project-path <path>", "项目主仓路径。")
-		.action(
-			async (options: { projectPath: string }) =>
-				await withSupportRuntime(options.projectPath, (client) =>
-					client.support.scheduleRvfFindingsBackfill.mutate(),
-				),
-		);
-	support
-		.command("get-backfill-status")
-		.requiredOption("--project-path <path>", "项目主仓路径。")
-		.action(
-			async (options: { projectPath: string }) =>
-				await withSupportRuntime(options.projectPath, (client) =>
-					client.support.getRvfFindingsBackfillStatus.query(),
-				),
-		);
 	const task = program.commands.find((command) => command.name() === "task");
 	if (!task) throw new Error("应先注册 task 命令，再注册 support 与追加备注命令。");
 	task

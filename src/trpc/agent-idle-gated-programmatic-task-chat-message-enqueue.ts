@@ -1,4 +1,5 @@
 import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 // `kanban task message --deliver-when-agent-idle` 在 runtime 侧的两个入口：程序化入队、以及排队期间的取消。
 //
 // 跨仓契约：~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md
@@ -70,6 +71,8 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 ): Promise<RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse> {
 	const taskId = request.taskId.trim();
 	const source = request.source.trim();
+	if (isRetiredRvfAutomaticMessageSource(source))
+		return { ok: false, error: "旧 RVF 自动投递已退役，仅保留历史读取。" };
 	const idempotencyKey = request.idempotencyKey.trim();
 	if (!taskId || !source || !idempotencyKey) {
 		return { ok: false, error: "taskId, source and idempotencyKey are required." };
@@ -86,7 +89,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 	const { board, sessions } = await loadPersistedWorkspaceStateById(workspaceId);
 	const cards = board.columns.flatMap((column) => column.cards);
 	const addressedConversationSession = deps.getTaskSessionSummary?.(taskId) ?? sessions[taskId];
-	// 内部自动收尾沿用会话 ID 寻址；先核实真实宿主卡片，再保留调用方原有的账本键。
+	// 程序化消息沿用会话 ID 寻址；先核实真实宿主卡片，再保留调用方原有的账本键。
 	const card =
 		cards.find((candidate) => candidate.id === taskId) ??
 		cards.find(

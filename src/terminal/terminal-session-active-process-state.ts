@@ -4,7 +4,6 @@ import type {
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
 } from "../core/api-contract";
-import type { CodexRvfCloseoutCompactionAwareConfirmation } from "../core/codex-rvf-closeout-compaction-aware-confirmation";
 import type { AgentOutputSubstanceMemory } from "./agent-output-substance";
 import type { AgentOutputTransitionDetector, AgentOutputTransitionInspectionPredicate } from "./agent-session-adapters";
 import type { KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch } from "./cursor-agent-chat-launch-identity-orchestration";
@@ -21,10 +20,6 @@ import type { TerminalPtyProcessHandle } from "./terminal-pty-process-handle";
 // session-manager 里会继续加重这个已近 6000 行的文件，放在别处又会与它循环导入。
 
 export interface ActiveProcessState {
-	// 启动时实际配置成功才为 true；旧会话不会因 runtime 升级自动获得新 hook。
-	codexAutomaticCompactionPhaseHooksConfigured: boolean;
-	// 只含绑定与有界计时，不保存 callback 或额外正文；账本是跨进程 CAS 的主存储。
-	nativeCompactionAwareConfirmation: CodexRvfCloseoutCompactionAwareConfirmation | null;
 	session: TerminalPtyProcessHandle;
 	workspaceTrustBuffer: string | null;
 	cols: number;
@@ -88,12 +83,12 @@ export interface ActiveProcessState {
 	// 或 PreparedAgentLaunch.resumesPriorAgentConversation（--resume <sessionId> / fork 等其余续跑路径，
 	// 历史上只认前者、后者漏武装）。**不**按「该任务此前是否产出过」反推：崩溃后从原始 prompt 全新
 	// 重跑的 auto-restart 毫无重播，武装它只会把真实新产出误冻住。
-	// 清除条件仅认「用户真·继续」：writeInput（人工手敲，全 agent）、task-chat / RVF 的程序化已提交
+	// 清除条件仅认「用户真·继续」：writeInput（人工手敲，全 agent）、task-chat 的程序化已提交
 	// 用户轮投递、或源自 UserPromptSubmit / BeforeAgent 的 hook.to_in_progress（Gemini 走 paste 恢复、
 	// 不过 writeInput，必须靠该 hook 信号解除）。刻意不认重播里的 ⏺/● 前缀、不认 PostToolUse 映射的
 	// to_in_progress（自动续跑旧回合的中途活动）、也不认连接中断自动续跑注入，三者都非用户继续。仅内存态。
 	suppressSubstantiveOutputUntilContinues: boolean;
-	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
+	// 程序化「已提交用户轮」投递（后台任务消息 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
 	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
 	// Claude 恢复旧会话后，真人 UserPromptSubmit 会解除广义恢复守卫，使 agent 新一轮产出与连接

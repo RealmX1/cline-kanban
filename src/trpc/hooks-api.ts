@@ -337,28 +337,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						body.agentNativeConversationSessionIdentity.transcriptPath)
 			)
 				return respondAfterRememberingAppliedHookDelivery({ ok: true });
-			if (
-				isCompactionPhaseEvent &&
-				body.metadata?.source === "codex" &&
-				body.mainAgentConversationContextCompactionTriggerReportedByHarness ===
-					"automatic_context_window_compaction" &&
-				body.agentNativeConversationSessionIdentity?.sourceAgentId === "codex" &&
-				body.mainAgentConversationContextCompactionNativeTurnId &&
-				body.hookRuntimeSessionIncarnationId &&
-				hookEventObservedAtEpochMs !== null &&
-				hookEventDeliveryIdempotencyKey
-			) {
-				await manager.observeRvfCloseoutNativeCompactionPhase?.(taskId, {
-					workspaceId,
-					nativeSessionId: body.agentNativeConversationSessionIdentity.nativeSessionId,
-					nativeTurnId: body.mainAgentConversationContextCompactionNativeTurnId,
-					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
-					phase: event === "main_agent_conversation_context_compaction_started" ? "started" : "completed",
-					capturedAtEpochMs: hookEventObservedAtEpochMs,
-					receivedAtEpochMs: hookIngestReceivedAtEpochMs,
-					hookDeliveryId: hookEventDeliveryIdempotencyKey,
-				});
-			}
 			if (event === "main_agent_conversation_context_compaction_started")
 				return respondAfterRememberingAppliedHookDelivery({ ok: true });
 
@@ -705,7 +683,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			// parked 会话收到「用户重新提交了一个 prompt」（UserPromptSubmit → to_in_progress）即视为恢复：清 park。
 			// 仅认 UserPromptSubmit（真·新一轮提交），不认 PostToolUse / PostToolUseFailure 等同样映射到 to_in_progress
 			// 的中途活动——否则 parked 父在结束本轮前的任意工具调用会把 park 误清、随后的裸 Stop 又误报。
-			// submitTaskChatInputWhenReady 已覆盖 RVF 程序化 resume；本路径额外覆盖人工在终端手敲 followup 的恢复
+			// submitTaskChatInputWhenReady 已覆盖 程序化 resume；本路径额外覆盖人工在终端手敲 followup 的恢复
 			// （hookEventName 由 `kanban hooks` CLI 从 hook stdin 的 hook_event_name 抽出，见 normalizeHookMetadata）。
 			if (
 				event === "to_in_progress" &&

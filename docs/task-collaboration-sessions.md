@@ -30,7 +30,7 @@ PTY、ACP 和既有 SDK 通路均保留宿主与当前会话两个 ID。启动�
 
 单独停止或重启协作会话只影响该会话。停止宿主任务时，运行时枚举全部 transport，停止所有归属于该任务的会话。资源统计归属宿主；关系投影明确识别主会话，投影表版本提升到 2。
 
-RVF 的编辑归属仍按各会话记录；共享 worktree 的全部改动不会自动归入主会话。本功能不迁移跨 agent 历史，不聚合平级会话状态，也不实现完整 Task Force。
+编辑归属仍按各会话记录；共享 worktree 的全部改动不会自动归入主会话。本功能不迁移跨 agent 历史，不聚合平级会话状态，也不实现完整 Task Force。
 
 ## 跨 harness 主会话交接
 
@@ -58,7 +58,7 @@ Cursor 使用绑定原生 ID 及工作目录对应的 JSONL 导出，先核对 c
 
 来源或目标仍在生成、等待问答、权限或计划审批时，可暂不交接或等待双方可接任；等待跨浏览器关闭和运行时重启保留。完整复刻先固定完成回合、创建独立子身份并持久保存，再校验完整历史与工作目录，最后原子切主。准备过程不启动模型；已知子身份只复验，不重复创建。来源身份或固定边界变化则停止陈旧交接。
 
-首条汇报在 Codex 使用 TUI 原生 `/plan` 命令，其余目标使用各自 Plan 起步设置；共用长粘贴处理，要求只读汇报「计划总览、已经实现、有待进行」，随后等待真人消息。交接及等待期间暂停自动继续、排队投递和自动 RVF/收尾；只有真人输入的实际接受证明解除 hold。Plan 与权限轴独立。
+首条汇报在 Codex 使用 TUI 原生 `/plan` 命令，其余目标使用各自 Plan 起步设置；共用长粘贴处理，要求只读汇报「计划总览、已经实现、有待进行」，随后等待真人消息。交接及等待期间暂停自动继续与排队投递；只有真人输入的实际接受证明解除 hold。Plan 与权限轴独立。
 
 请求 ID、预留目标、投递 attempt 和账本保证幂等。报告提交前固定原生身份、目录和存储归属；接受未知时只读查询原生历史，控制端点不可用则读取可信持久记录，并保存分页进度。完整正文必须逐字一致，兼容原生 `/plan` 消费前缀；只有标记或截断正文不算接受。迟到证明独立于原失败账本保留，复核当前主绑定和原生身份后自动转入等用户，不自动重发模型回合。
 
@@ -95,4 +95,4 @@ Backlog 的门禁在服务端，卡片启动、直接 runtime 启动及首次建
 `test/integration/task-main-session-handover-coordinator.integration.test.ts` 覆盖持久等待、取消、重启恢复、已有 peer、并发互斥、材料缺失、启动重试与不确定回执。`test/integration/task-main-session-handover-real-browser.integration.test.ts` 验证打包态真实浏览器和 PTY 的新建/已有 Codex 接任、迟到 Claude hook 隔离及精确冷恢复。后者需设置 `KANBAN_MAIN_SESSION_HANDOVER_PACKAGED_CLI_PATH`，可用 `KANBAN_MAIN_SESSION_HANDOVER_BROWSER_EVIDENCE_DIRECTORY` 保存持久截图；隔离 HOME 下可通过 `PLAYWRIGHT_BROWSERS_PATH` 指定已安装的浏览器缓存。构建前须检查 `dist` 和 `web-ui/dist` 是否为共享符号链接；本任务测试使用独立构建目录。
 
 
-`test/integration/task-main-session-handover-native-codex.integration.test.ts` 使用真实 Codex 和隔离本地模型，验证两种上下文、Plan 首轮、完整原生接受证据、冷恢复及真人继续；设置 `KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY` 与上述打包 CLI 路径启用，可用 `KANBAN_MAIN_SESSION_HANDOVER_NATIVE_EVIDENCE_DIRECTORY` 保存原生分段与结果。不会访问外部模型或用户凭据。
+`test/integration/task-main-session-handover-native-codex.integration.test.ts` 使用真实 Codex 和隔离本地模型，验证两种上下文、Plan 首轮、完整原生接受证据、冷恢复及真人继续；设置 `KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY` 与上述打包 CLI 路径启用，可用 `KANBAN_MAIN_SESSION_HANDOVER_NATIVE_EVIDENCE_DIRECTORY` 保存原生分段与结果。不会访问外部模型或用户凭据。

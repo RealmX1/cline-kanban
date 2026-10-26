@@ -173,6 +173,7 @@ try {
 	);
 	// dereference：task worktree 的 `web-ui/dist` 是软链接，必须复制它指向的真实文件，不能把软链接本身放进产物。
 	await cp(builtWebUiDirectoryPath, join(stagingDirectoryPath, "web-ui"), { recursive: true, dereference: true });
+	await cp("docs/agent-guidance", join(stagingDirectoryPath, "agent-guidance"), { recursive: true });
 	await chmod(join(stagingDirectoryPath, "cli.js"), 0o755);
 	await chmod(join(stagingDirectoryPath, "kanban-agent-hook-cli.js"), 0o755);
 

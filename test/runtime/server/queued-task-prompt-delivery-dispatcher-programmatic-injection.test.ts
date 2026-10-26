@@ -14,7 +14,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import type { CodexNativeConversationTurn } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
+import { NativeIndependentUserTurnDeliveryError } from "../../../src/codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import type {
 	QueuedTaskPromptDeliveryEntry,
 	RuntimeTaskChatSendRequest,
@@ -26,8 +27,6 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
 import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
-import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
-import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import type { QueuedTaskPromptDeliveryDispatcherDependencies } from "../../../src/server/queued-task-prompt-delivery-dispatcher";
 import type {
 	TaskChatInputDeliveryOutcomeObserver,
@@ -324,7 +323,7 @@ function createHarness(
 			awaitDispatcherIdle = true,
 			idempotencyKey = KEY,
 			requiredNativeIndependentUserTurnSessionId?: string,
-			text = "RVF 决策点边界标记",
+			text = "后台工作完成通知",
 		) {
 			const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				{
@@ -336,7 +335,7 @@ function createHarness(
 				{
 					taskId: TASK_ID,
 					text,
-					source: "rvf-out-of-band-decision-point",
+					source: "background-work-completion",
 					idempotencyKey,
 					promptSha256: "sha-1",
 					maxWaitForAgentIdleMs,
@@ -890,8 +889,8 @@ describe("出队引擎 × 程序化排队投递", () => {
 		expect(subject.sends.map((send) => send.request)).toEqual([
 			{
 				taskId: TASK_ID,
-				text: "RVF 决策点边界标记",
-				source: "rvf-out-of-band-decision-point",
+				text: "后台工作完成通知",
+				source: "background-work-completion",
 				idempotencyKey: KEY,
 			},
 		]);
@@ -1126,7 +1125,7 @@ describe("出队引擎 × 程序化排队投递", () => {
 		subject.observe(generatingSummary(2));
 		subject.observe(stoppedSummary(2));
 		await subject.dispatcher.whenIdle();
-		expect(subject.sends.map((send) => send.request.text)).toEqual(["人排的下一步", "RVF 决策点边界标记"]);
+		expect(subject.sends.map((send) => send.request.text)).toEqual(["人排的下一步", "后台工作完成通知"]);
 	});
 });
 

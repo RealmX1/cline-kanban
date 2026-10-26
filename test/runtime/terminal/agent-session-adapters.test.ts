@@ -376,13 +376,11 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
-		expect(launch.args[appendPromptIndex + 1]).toContain("Kanban sidebar agent");
+		expect(launch.args[appendPromptIndex + 1]).toContain("看板管理助手");
 		expect(
 			launch.args[appendPromptIndex + 1].split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
 		).toHaveLength(2);
-		expect(launch.args[appendPromptIndex + 1]).toContain(
-			"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
-		);
+		expect(launch.args[appendPromptIndex + 1]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js'");
 	});
 
 	it("appends Kanban sidebar instructions for home Codex sessions", async () => {
@@ -399,11 +397,11 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
-		expect(developerInstructions[0]).toContain("Kanban sidebar agent");
+		expect(developerInstructions[0]).toContain("看板管理助手");
 		expect(
 			JSON.parse(developerInstructions[0]).split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
 		).toHaveLength(2);
-		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
+		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js'");
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
 
@@ -434,12 +432,12 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
 		expect(developerInstructions).toHaveLength(1);
-		expect(developerInstructions[0]).toContain("Kanban-managed task session");
+		expect(developerInstructions[0]).toContain("你负责在分配的工作区完成本任务");
 		const decodedInstructions: string = JSON.parse(developerInstructions[0]);
 		expect(decodedInstructions.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
 		expect(decodedInstructions).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(developerInstructions[0]).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(developerInstructions[0]).toContain("ask the user to confirm which workspace owns the work");
+		expect(developerInstructions[0]).toContain("先确认其编辑归属");
 	});
 
 	// 防回灌守卫：codex 默认必须跑原生 alt-screen（原地重绘），绝不能强制注入 --no-alt-screen。
@@ -541,11 +539,11 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
 		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
 		const appendedPrompt = launch.args[appendPromptIndex + 1];
-		expect(appendedPrompt).toContain("Kanban-managed task session");
+		expect(appendedPrompt).toContain("你负责在分配的工作区完成本任务");
 		expect(appendedPrompt.split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance())).toHaveLength(2);
 		expect(appendedPrompt).not.toContain("# CRITICAL: You are NOT a coding agent");
 		expect(appendedPrompt).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(appendedPrompt).toContain("ask the user to confirm which workspace owns the work");
+		expect(appendedPrompt).toContain("先确认其编辑归属");
 	});
 
 	it("exposes a Claude prompt-ready detector and inspection predicate", async () => {
@@ -1709,9 +1707,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		const prompt = launch.args.at(-1) ?? "";
-		expect(prompt).toContain("Kanban-managed task session");
+		expect(prompt).toContain("你负责在分配的工作区完成本任务");
 		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(prompt).toContain("ask the user to confirm which workspace owns the work");
+		expect(prompt).toContain("先确认其编辑归属");
 		expect(prompt).toContain("# Task\nImplement the task");
 	});
 
@@ -3547,4 +3545,19 @@ describe("交接报告的空白准备与原生只读起步", () => {
 		});
 		expect(launch.args.join(" ")).not.toContain("Ask the user what they want planned");
 	});
+});
+
+it("Droid 实际启动参数中角色流程与需求各出现一次", async () => {
+	setupTempHome();
+	const launch = await prepareAgentLaunch({
+		taskId: "unique-guidance-task",
+		agentId: "droid",
+		binary: "droid",
+		args: [],
+		cwd: "/workspace/unique-task",
+		prompt: "需求唯一哨兵",
+	});
+	const sent = [...launch.args, launch.deferredStartupPromptText ?? ""].join("\n");
+	expect(sent.split("需求唯一哨兵")).toHaveLength(2);
+	expect(sent.split("# Kanban Task Workspace")).toHaveLength(2);
 });

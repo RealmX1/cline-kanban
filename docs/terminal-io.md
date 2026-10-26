@@ -134,4 +134,4 @@ Ctrl+S 暂存语义。连续可信空框读数可以解除删除至空后残留�
 
 真实隔离回归见 `test/integration/codex-native-prompt-delivery-preserves-composer.integration.test.ts`：本地模拟
 模型、受管 Codex、长草稿、手动 Ctrl+G、Plan 模式、`UserPromptSubmit`、用户提问与权限确认在同一次闭环中验证。
-原生 CLI 实验通过 `KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY` 显式启用。
+原生 CLI 实验通过 `KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY` 显式启用。

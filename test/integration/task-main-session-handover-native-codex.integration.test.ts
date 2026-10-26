@@ -7,12 +7,12 @@ import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { loadTaskConversationHistoryPage } from "../../src/agent-session-history/task-conversation-history-page";
-import { type RuntimeTaskSessionSummary, runtimeBoardDataSchema } from "../../src/core/api-contract";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import {
 	assertCodexNativeConversationLoadedByCurrentHost,
 	readCodexConversationTurns,
-} from "../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+} from "../../src/codex-native-session-protocol/codex-native-conversation-history";
+import { type RuntimeTaskSessionSummary, runtimeBoardDataSchema } from "../../src/core/api-contract";
 import { renderTaskMainSessionHandoverReportPrompt } from "../../src/server/task-main-session-handover-coordinator";
 import { queryCodexMainSessionHandoverReportAcceptance } from "../../src/server/task-main-session-handover-report-acceptance";
 import { loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
@@ -26,7 +26,7 @@ import {
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const packagedCliPath = process.env.KANBAN_MAIN_SESSION_HANDOVER_PACKAGED_CLI_PATH;
-const nativeCodexBinary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY;
+const nativeCodexBinary = process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY;
 const evidenceRoot = process.env.KANBAN_MAIN_SESSION_HANDOVER_NATIVE_EVIDENCE_DIRECTORY;
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(async () => {

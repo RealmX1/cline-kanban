@@ -205,7 +205,7 @@ describe("enqueueAgentIdleGatedProgrammaticTaskChatMessage", () => {
 				await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 					deps,
 					WORKSPACE_ID,
-					request({ taskId: "independent-main", source: "rvf_automatic_closeout" }),
+					request({ taskId: "independent-main", source: "background-work-completion" }),
 				),
 			).toMatchObject({ ok: true });
 			expect(
@@ -258,7 +258,7 @@ describe("enqueueAgentIdleGatedProgrammaticTaskChatMessage", () => {
 			await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				deps,
 				WORKSPACE_ID,
-				request({ taskId: "independent-main", source: "rvf_automatic_closeout" }),
+				request({ taskId: "independent-main", source: "background-work-completion" }),
 			),
 		).toMatchObject({ ok: false });
 		expect(await readTaskMessageInjectionLedger(ledgerPath())).toEqual([]);

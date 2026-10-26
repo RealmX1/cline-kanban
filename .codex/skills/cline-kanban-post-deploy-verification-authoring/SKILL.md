@@ -1,13 +1,13 @@
 ---
 name: cline-kanban-post-deploy-verification-authoring
-description: Author Post-Deploy Verification for a Cline Kanban task as it enters the RVF (review/validate/fix) stage. Use in this project when a task's implementation is wrapping up (or you are about to declare it review-ready / done) to analyze which assertions can only be verified on the real running instance after deploy, then register them as automated-script or guided-manual verifications so they surface in the verification panel. Do NOT use for running verifications, ticking checklist items, deploying, or from inside an RVF fix sub-agent.
+description: 在 Cline Kanban 任务实现收尾时分析并注册部署后验证，区分自动脚本与引导人工项，让真实运行实例上的待验断言进入验证面板。仅编写和注册定义，不执行验证、不勾选、不部署、不移列。
 ---
 
 # Cline Kanban Post-Deploy Verification Authoring
 
 ## Core Rule
 
-部署前的现场测试（unit / integration / worktree dev server）只能证明「代码在测试环境里行为正确」。有一类断言**只有部署后的真实运行实例**才验得到——真实 PTY/agent 集成、跨重启持久化、server↔web 实时链路、CLI↔live server、dist 构建差异、真实 UI 交互层级。这个 skill 让你在任务进入 RVF 阶段时：**先分析**出这类断言，再把它们注册成**自动脚本型**（可程序化观察）或**引导人工型**（只能人眼/人手观察）验证，使它们在部署后自动出现在验证面板里，让用户/开发者无需记住整张清单。
+部署前的现场测试（unit / integration / worktree dev server）只能证明「代码在测试环境里行为正确」。有一类断言**只有部署后的真实运行实例**才验得到——真实 PTY/agent 集成、跨重启持久化、server↔web 实时链路、CLI↔live server、dist 构建差异、真实 UI 交互层级。这个 skill 让你在任务实现收尾时：**先分析**出这类断言，再把它们注册成**自动脚本型**（可程序化观察）或**引导人工型**（只能人眼/人手观察）验证，使它们在部署后自动出现在验证面板里，让用户/开发者无需记住整张清单。
 
 默认用用户偏好的主要语言回复；本项目要求中文，则用中文描述分析表、风险、注册结果和后续操作。
 
@@ -15,8 +15,8 @@ description: Author Post-Deploy Verification for a Cline Kanban task as it enter
 
 - 本 skill 只做**分析 + 注册验证定义**（写 definition JSON → `kanban verification register`）。它**不**运行验证、不勾选核对项、不部署、不移列。
 - 只在 kanban 任务实现收尾 / 宣告完成 / 进入 review 前调用；或用户显式要求「注册部署后验证」时调用。
-- 反触发：不要在「运行验证 / 点击运行按钮 / 勾选核对 / 执行部署 / RVF fix 子代理内部」的场景调用本 skill。
-- RVF fix 若改变了可观察行为，land 前以 **reconcile 模式**重入本 skill（对已注册定义只 diff、幂等重注册，不重复堆叠）。
+- 反触发：不要在「运行验证 / 点击运行按钮 / 勾选核对 / 执行部署」的场景调用本 skill。
+- 后续修复若改变了可观察行为，提交前以 **reconcile 模式**重入本 skill（对已注册定义只 diff、幂等重注册，不重复堆叠）。
 
 ## 前置（Failure Gate）
 
@@ -86,7 +86,7 @@ description: Author Post-Deploy Verification for a Cline Kanban task as it enter
 2. `kanban verification register --task-id <id> [--project-path <p>] --definition-file <path.json>` → 返回每条的 `verificationId` + `assetsDir`。把脚本 / fixture 落进返回的 `assetsDir`。
 3. **注册前 dry-run（automated 必做）**：在**旧运行实例**上把脚本手动跑一遍（`bash <assetsDir>/run.sh`）。**允许 fail**（旧版本本就没这行为），但**禁止 crash / 超时 / 留残留**。crash 或留垃圾即修脚本重来。
 4. 自查：`kanban verification list --task-id <id>` 与 `kanban deployment verification-state --active-only`（部署后）确认定义已挂载。
-5. **多轮 / rvf-reopen 幂等**：重入本 skill 时，对已注册的 verificationId 用同 id 重注册（`register` 按 verificationId upsert 替换），只 diff 变化项，不堆叠重复定义。
+5. **多轮修复 幂等**：重入本 skill 时，对已注册的 verificationId 用同 id 重注册（`register` 按 verificationId upsert 替换），只 diff 变化项，不堆叠重复定义。
 
 ## Step 6 — 清理规格
 

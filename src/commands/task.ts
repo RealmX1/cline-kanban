@@ -29,8 +29,6 @@ import {
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskWorktreeModeSchema,
-	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
-	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
 } from "../core/api-contract";
 import {
 	mergeAbortSignals,
@@ -44,7 +42,6 @@ import {
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
-import { rvfCloseoutStageClaimRequestSchema } from "../core/rvf-automatic-closeout-recovery-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
@@ -84,7 +81,6 @@ import {
 import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
-import { reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending } from "./report-rvf-closeout-execution-result-while-delivery-confirmation-pending";
 import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
 import {
 	resolveTaskCreateEffectiveSettings,
@@ -1704,26 +1700,8 @@ async function readTaskMessageStatusCommand(input: {
 	taskId: string;
 	projectPath?: string;
 	idempotencyKey: string;
-	reviewStartBoundaryObservationNonce?: string;
 }): Promise<JsonRecord> {
 	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, { autoCreateIfMissing: false });
-	if (input.reviewStartBoundaryObservationNonce) {
-		const boundary = await createRuntimeTrpcClient(workspace.workspaceId).runtime.observeRvfReviewStartBoundary.query(
-			{
-				taskId: input.taskId.trim(),
-				idempotencyKey: input.idempotencyKey.trim(),
-				requestNonce: input.reviewStartBoundaryObservationNonce,
-			},
-		);
-		const records = await readTaskMessageInjectionLedger(getTaskMessageInjectionLedgerPath(workspace.statePath));
-		const record = findTaskMessageInjectionRecord(records, input.taskId.trim(), input.idempotencyKey.trim());
-		return {
-			...(record
-				? toTaskMessageCommandResult(record)
-				: { ok: true, task_id: input.taskId.trim(), idempotency_key: input.idempotencyKey.trim() }),
-			...boundary,
-		};
-	}
 	const record = await readTaskMessageRecordOrThrow(
 		getTaskMessageInjectionLedgerPath(workspace.statePath),
 		input.taskId.trim(),
@@ -2240,130 +2218,6 @@ export function registerTaskCommand(program: Command): void {
 					}),
 			);
 		});
-
-	task
-		.command("capture-rvf-review-start-boundary")
-		.description("捕获并持久保存当前 Codex 主会话的独立 RVF 开审分界，等待真实 run 绑定后激活。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--task-id <id>", "任务 ID。")
-		.requiredOption("--decision-token <token>", "RVF 决策 token。")
-		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
-			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-				autoCreateIfMissing: false,
-			});
-			const captured = await createRuntimeTrpcClient(
-				workspace.workspaceId,
-			).runtime.captureRvfReviewStartBoundary.mutate({
-				taskId: options.taskId,
-				decisionToken: options.decisionToken,
-			});
-			printJson(captured);
-			if (captured.status !== "captured") process.exitCode = 12;
-		});
-	task
-		.command("activate-rvf-automatic-closeout-after-run-binding")
-		.description("核对已捕获分界与真实 RVF run 的双向绑定，激活默认自动收尾。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--task-id <id>", "任务 ID。")
-		.requiredOption("--decision-token <token>", "RVF 决策 token。")
-		.action(async (options: { projectPath: string; taskId: string; decisionToken: string }) => {
-			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-				autoCreateIfMissing: false,
-			});
-			printJson(
-				await createRuntimeTrpcClient(
-					workspace.workspaceId,
-				).runtime.activateRvfAutomaticCloseoutAfterRunBinding.mutate({
-					taskId: options.taskId,
-					decisionToken: options.decisionToken,
-				}),
-			);
-		});
-	task
-		.command("reconcile-rvf-automatic-closeout-late-native-prompt-acceptance")
-		.description("核验迟到的原生收尾正文，保留失败回执并恢复本轮收尾资格；不重投或回退会话。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--task-id <id>", "任务 ID。")
-		.requiredOption("--decision-token <token>", "本轮 RVF 决策 token。")
-		.requiredOption("--run-id <id>", "已登记的 RVF run ID。")
-		.requiredOption("--handoff-sha256 <sha256>", "已登记的 handoff SHA256。")
-		.option("--dry-run", "仅核验资格，不写入补证或改变收尾状态。")
-		.action(
-			async (options: {
-				projectPath: string;
-				taskId: string;
-				decisionToken: string;
-				runId: string;
-				handoffSha256: string;
-				dryRun?: boolean;
-			}) => {
-				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-					autoCreateIfMissing: false,
-				});
-				const request = rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema.parse({
-					taskId: options.taskId,
-					decisionToken: options.decisionToken,
-					runId: options.runId,
-					handoffSha256: options.handoffSha256,
-					dryRun: options.dryRun ?? false,
-				});
-				const result = await createRuntimeTrpcClient(
-					workspace.workspaceId,
-				).runtime.reconcileRvfAutomaticCloseoutLateNativePromptAcceptance.mutate(request);
-				printJson(result);
-				if (result.status === "unknown" || result.status === "blocked") process.exitCode = 12;
-			},
-		);
-	task
-		.command("claim-rvf-automatic-closeout-execution-stage")
-		.description("认领精确 run 的收尾阶段；已有结果直接复用，不能凭超时接管。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--task-id <id>", "任务 ID。")
-		.requiredOption("--decision-token <token>", "本轮 token。")
-		.requiredOption("--run-id <id>", "已绑定 run。")
-		.requiredOption("--handoff-sha256 <sha256>", "已绑定 handoff 摘要。")
-		.requiredOption("--stage <stage>", "land 或 base_branch_sync。")
-		.option("--delivery-attempt-id <id>", "当前投递尝试 ID。")
-		.action(
-			async (options: {
-				projectPath: string;
-				taskId: string;
-				decisionToken: string;
-				runId: string;
-				handoffSha256: string;
-				stage: string;
-				deliveryAttemptId?: string;
-			}) => {
-				const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-					autoCreateIfMissing: false,
-				});
-				const result = await createRuntimeTrpcClient(
-					workspace.workspaceId,
-				).runtime.claimRvfAutomaticCloseoutExecutionStage.mutate(rvfCloseoutStageClaimRequestSchema.parse(options));
-				printJson(result);
-				if (result.status === "waiting" || result.status === "blocked") process.exitCode = 12;
-			},
-		);
-	task
-		.command("report-rvf-automatic-closeout-execution-result")
-		.description("登记自动收尾的 land 或本地 base 同步结果；成功须由服务端核对真实 Git 与 run 证据。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--result-file <path>", "包含 task/token/run/handoff 绑定及阶段结果的 JSON 文件。")
-		.action(async (options: { projectPath: string; resultFile: string }) => {
-			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-				autoCreateIfMissing: false,
-			});
-			const result = rvfAutomaticCloseoutExecutionResultReportRequestSchema.parse(
-				JSON.parse(await readFile(options.resultFile, "utf8")),
-			);
-			printJson(
-				await reportRvfCloseoutExecutionResultWhileDeliveryConfirmationPending(() =>
-					createRuntimeTrpcClient(workspace.workspaceId).runtime.reportRvfAutomaticCloseoutExecutionResult.mutate(
-						result,
-					),
-				),
-			);
-		});
 	registerTaskRvfHistoryCommand(task, {
 		queryRuntime: (workspaceId, input, timeoutMs) =>
 			createRuntimeTrpcClient(workspaceId, {
@@ -2372,22 +2226,6 @@ export function registerTaskCommand(program: Command): void {
 			}).runtime.getTaskRvfHistory.query(input),
 		runTaskCommand,
 	});
-
-	task
-		.command("rvf-automatic-closeout-status")
-		.description("查询 RVF 自动恢复与收尾投递的持久状态。")
-		.requiredOption("--project-path <path>", "main checkout 路径。")
-		.requiredOption("--task-id <id>", "任务 ID。")
-		.action(async (options: { projectPath: string; taskId: string }) => {
-			const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
-				autoCreateIfMissing: false,
-			});
-			printJson(
-				await createRuntimeTrpcClient(workspace.workspaceId).runtime.rvfAutomaticCloseoutStatus.query({
-					taskId: options.taskId,
-				}),
-			);
-		});
 
 	task
 		.command("message")
@@ -2466,30 +2304,21 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("message-status")
-		.option("--review-start-boundary-observation-nonce <nonce>", "请求本次 RVF 独立开审分界的实时活动分支观测。")
 		.description("Read the honest delivery status of a previously injected task message.")
 		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
-		.action(
-			async (options: {
-				projectPath: string;
-				taskId: string;
-				idempotencyKey: string;
-				reviewStartBoundaryObservationNonce?: string;
-			}) => {
-				await runTaskCommand(
-					async () =>
-						await readTaskMessageStatusCommand({
-							cwd: process.cwd(),
-							projectPath: options.projectPath,
-							taskId: options.taskId,
-							idempotencyKey: options.idempotencyKey,
-							reviewStartBoundaryObservationNonce: options.reviewStartBoundaryObservationNonce,
-						}),
-				);
-			},
-		);
+		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
+			await runTaskCommand(
+				async () =>
+					await readTaskMessageStatusCommand({
+						cwd: process.cwd(),
+						projectPath: options.projectPath,
+						taskId: options.taskId,
+						idempotencyKey: options.idempotencyKey,
+					}),
+			);
+		});
 
 	task
 		.command("message-cancel")

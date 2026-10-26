@@ -2,7 +2,7 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import type { CodexAppServerRequestPort } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
 import {
 	buildCodexRemoteConversationResumeTuiArguments,
 	type CodexRemoteConversationLaunchPlan,

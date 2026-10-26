@@ -83,7 +83,7 @@ export const incomingWorkItemSchema = z.object({
 	work_item_key: z.string().trim().min(1).max(500),
 	title: z.string().trim().min(1).max(1000),
 	prompt: z.string().trim().min(1).max(200000),
-	origin: z.enum(["rvf_validated_out_of_scope_finding", "other"]).default("other"),
+	origin: z.string().min(1).default("other"),
 	evidence: z.array(z.string().max(10000)).max(50).default([]),
 	source_task: kanbanBoardCardWorkUnitQualifiedReferenceSchema.optional(),
 	existing_finding_task: kanbanBoardCardWorkUnitQualifiedReferenceSchema.optional(),

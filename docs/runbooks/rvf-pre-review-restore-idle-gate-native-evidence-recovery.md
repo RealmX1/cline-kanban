@@ -1,3 +1,5 @@
+> 历史归档：RVF 专属自动编排已退役。下文描述当时的实现与事故证据，命令和恢复步骤不再适用于当前版本；当前只读接口见 `../task-rvf-history-query.md`。
+
 # RVF 完成后空闲门禁的原生补证
 
 自动收尾进入 `restoring_pre_review_conversation` 后，原生回合可能已经完成，而 summary 的回合归属或本代输入接受仍是旧投影。

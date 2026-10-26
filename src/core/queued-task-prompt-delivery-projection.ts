@@ -1,3 +1,4 @@
+import { isRetiredRvfAutomaticQueuedDelivery } from "./retired-rvf-automatic-message-history";
 // 排队 prompt 的推流投影——**纯函数、零 IO**。
 //
 // 投影是前端能看到的全部队列信息：正文截断成预览（正文是易膨胀数据，不上热广播链路）、阻塞原因由
@@ -65,10 +66,14 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 	entry: QueuedTaskPromptDeliveryEntry,
 	input: Omit<BuildQueuedTaskPromptDeliveryProjectionsInput, "snapshot">,
 ): RuntimeQueuedTaskPromptDeliveryProjection {
+	const isReadOnlyHistoricalDelivery = isRetiredRvfAutomaticQueuedDelivery(entry);
 	const awaitingDispatch = isQueuedTaskPromptDeliveryAwaitingDispatch(entry, input.nowEpochMs);
 	// 读侧就地把「已过保质期但还没被哪次写入收敛」的 queued 显示成 expired：与出队判据同一口径，
 	// 于是 UI 永远不会显示一条「排队中」、而运行时其实已经不会再发它的条目。
-	const deliveryState = entry.deliveryState === "queued" && !awaitingDispatch ? "expired" : entry.deliveryState;
+	const deliveryState =
+		!isReadOnlyHistoricalDelivery && entry.deliveryState === "queued" && !awaitingDispatch
+			? "expired"
+			: entry.deliveryState;
 	return {
 		...(entry.nativeIndependentUserTurnSubmissionProgress
 			? { nativeIndependentUserTurnSubmissionProgress: entry.nativeIndependentUserTurnSubmissionProgress }
@@ -84,6 +89,7 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 					nativeIndependentUserTurnPreflightQueryRecovery: entry.nativeIndependentUserTurnPreflightQueryRecovery,
 				}
 			: {}),
+		...(isReadOnlyHistoricalDelivery ? { isReadOnlyHistoricalDelivery: true } : {}),
 		deliveryId: entry.queueEntryId,
 		managedDelivery: resolveManagedTaskPromptDeliveryMetadata(entry),
 		queueEntryId: entry.queueEntryId,
@@ -100,6 +106,7 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 					? input.resolveDispatchBlockReasonForQueuedEntry(entry)
 					: null,
 		awaitsHumanReconfirmationAfterRuntimeRestart:
+			!isReadOnlyHistoricalDelivery &&
 			isQueuedTaskPromptDeliveryAwaitingHumanReconfirmationAfterRuntimeRestart(entry),
 		deliveryAttemptCount: entry.deliveryAttemptCount,
 		lastAttemptedAt: entry.lastAttemptedAt,

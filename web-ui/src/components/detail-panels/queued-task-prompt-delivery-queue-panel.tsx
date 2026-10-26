@@ -679,6 +679,7 @@ function SettledQueuedPromptRow({
 							size="xs"
 							icon={<X size={12} />}
 							aria-label="Dismiss settled queued prompt"
+							disabled={projection.isReadOnlyHistoricalDelivery}
 							onClick={() => void controller.dismissSettledQueuedPromptDelivery(projection.queueEntryId)}
 						/>
 					</Tooltip>

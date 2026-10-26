@@ -13,12 +13,12 @@ import {
 } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { withStoppedCodexNativeThreadWriterLock } from "../../src/codex-conversation-storage/codex-native-thread-writer-lock";
-import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
-import type { CodexConfigurationWriterBinding } from "../../src/core/codex-configuration-sync-contract";
 import {
 	withCodexAppServerRequestConnection,
 	withRunningCodexAppServerControlSocketConnection,
-} from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+} from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
+import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
+import type { CodexConfigurationWriterBinding } from "../../src/core/codex-configuration-sync-contract";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,

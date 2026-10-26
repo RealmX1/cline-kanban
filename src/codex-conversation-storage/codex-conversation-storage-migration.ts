@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { parse } from "smol-toml";
 import { z } from "zod";
-import { withCodexAppServerRequestConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
-import { readCodexConversationTurns } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
+import { readCodexConversationTurns } from "../codex-native-session-protocol/codex-native-conversation-history";
 import {
 	assertCodexStorageWritablePathInsideHome,
 	getCodexConversationMigrationRecordPath,

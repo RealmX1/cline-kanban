@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
+import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
 import type {
 	CodexNativePromptAcceptanceHistoryQueryProgress,
 	CodexNativePromptDeliveryEvidence,
@@ -11,8 +13,6 @@ import type {
 	CodexNativePromptDeliveryJournal,
 	CodexNativePromptDeliveryJournalState,
 } from "../core/codex-native-prompt-delivery-journal";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
-import type { CodexAppServerRequestPort } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
 
 export type { CodexNativePromptDeliveryEvidence };
 

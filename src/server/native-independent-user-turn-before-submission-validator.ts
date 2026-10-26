@@ -1,15 +1,15 @@
 import { setTimeout as waitMilliseconds } from "node:timers/promises";
-import type { QueuedTaskPromptDeliveryEntry, WorkspaceQueuedTaskPromptDeliverySnapshot } from "../core/api-contract";
-import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
-import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
-import type { CodexNativeConversationTurn } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+import type { CodexNativeConversationTurn } from "../codex-native-session-protocol/codex-native-conversation-history";
 import {
 	assertIndependentUserTurnImmediatelyBeforeTerminalWrite,
 	NativeIndependentUserTurnDeliveryCancelledBeforeSubmission,
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
 	NativeIndependentUserTurnSubmissionRecoverySuspended,
-} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+} from "../codex-native-session-protocol/native-independent-user-turn-delivery-gate";
+import type { QueuedTaskPromptDeliveryEntry, WorkspaceQueuedTaskPromptDeliverySnapshot } from "../core/api-contract";
+import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 import {
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	settleExpiredQueuedTaskPromptDeliveries,

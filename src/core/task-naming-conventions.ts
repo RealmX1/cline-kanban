@@ -23,12 +23,8 @@ export const TASK_NAMING_CONVENTIONS_GUIDANCE = [
 	`推荐 tag：${Object.keys(SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY).join(", ")}；必要时允许具体子系统 tag。`,
 ].join("\n");
 
-export function renderTaskAgentNamingAndWorkPhaseGoalGuidance(commandPrefix: string): string {
-	return `# Task 命名与当前阶段目标
-${TASK_NAMING_CONVENTIONS_GUIDANCE}
-创建 Task 前先遵循上述约定，使用 ${commandPrefix} task create --title "[FIX,UI]修复 Backlog 名称编辑" --prompt "完整需求" --project-path <main repository path>。省略 title 时仅从 prompt 推导兜底，不会额外调用模型。
-仅当名称无法反映整个 Task 的稳定目标时，先核对持久保存的初始需求、批准计划与后续范围变化，再用 ${commandPrefix} task rename-current-task --title "新名称" --reason "核对范围后的改名原因"。这两个参数足够，目标由调用环境决定。
-Compaction 后若缺乏可验证的完整范围，保持 Task 名称，只更新当前阶段目标；不要因普通工具操作、Stop 或 compaction 自动改名。
-真实阶段切换时，用 ${commandPrefix} task set-current-work-phase-goal --goal "这一阶段要达成的具体结果"（最多 160 字）；阶段结束用 ${commandPrefix} task clear-current-work-phase-goal。阶段目标与 Task 名称分开，不必每个工具操作都更新，也不要求另建 To Do List。
-`;
+export function renderTaskAgentNamingAndWorkPhaseGoalGuidance(): string {
+	return `${TASK_NAMING_CONVENTIONS_GUIDANCE}
+名称只在核对原始需求与批准范围后确需变化时，用 task rename-current-task --title ... --reason ... 修改；Compaction 或工具操作不意味着改名。
+真实阶段变化用 task set-current-work-phase-goal --goal ...（最多160字），结束用 task clear-current-work-phase-goal；不必每步更新。`;
 }

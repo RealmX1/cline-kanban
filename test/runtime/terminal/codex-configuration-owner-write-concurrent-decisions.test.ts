@@ -17,9 +17,9 @@ import {
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
+import type { CodexAppServerRequestPort } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
-import type { CodexAppServerRequestPort } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { createTempDir } from "../../utilities/temp-dir";
 
 interface NativeRequestBarrier {

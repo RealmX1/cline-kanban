@@ -1,3 +1,4 @@
+import { isRetiredRvfAutomaticQueuedDelivery } from "./retired-rvf-automatic-message-history";
 // 排队 prompt 出队门控——**纯谓词、零 IO**。出队引擎（src/server/queued-task-prompt-delivery-dispatcher.ts）
 // 只负责编排与副作用，「此刻能不能发」这件事的全部判据都在这里，于是它可以被表格化单测钉死。
 //
@@ -43,6 +44,7 @@ export function isQueuedTaskPromptDeliveryAwaitingDispatch(
 	nowEpochMs: number,
 ): boolean {
 	return (
+		!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 		isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 		entry.deliveryState === "queued" &&
 		nowEpochMs < entry.expiresAt

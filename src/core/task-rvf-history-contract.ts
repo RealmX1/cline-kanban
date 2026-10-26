@@ -1,6 +1,16 @@
 import { z } from "zod";
-import { rvfAutomaticCloseoutExecutionStageResultSchema } from "./rvf-automatic-closeout-contract";
-import { existingCloseoutGoalCompletionReconciliationSchema } from "./rvf-closeout-goal-completion-contract";
+import { existingCloseoutGoalCompletionReconciliationSchema } from "./task-rvf-history-closeout-observation-contract";
+// 仅解析历史观察；不提供阶段资格或执行命令。未知字段原样保留。
+export const historicalRvfCloseoutExecutionResultSchema = z.looseObject({
+	outcome: z.enum(["completed", "blocked", "failed"]),
+	commitSha: z.string().optional(),
+	baseRef: z.string().optional(),
+	reason: z.string().optional(),
+	reportedAt: z.number().optional(),
+	verificationBasis: z.string().optional(),
+	supplementalLandCompletionEvidence: z.unknown().optional(),
+	supplementalLandCompletionVerification: z.unknown().optional(),
+});
 
 export const taskRvfHistoryRequestSchema = z.object({
 	taskId: z.string().trim().min(1),
@@ -38,8 +48,10 @@ export const taskRvfHistoryRunSchema = z.object({
 	recoveryCondition: z.string().nullable(),
 	currentCandidateReviewCoverage: taskRvfCurrentCandidateCoverageSchema,
 	automaticCloseoutStatus: z.string().nullable(),
-	landExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.nullable(),
-	baseBranchSyncExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.nullable(),
+	historicalCloseoutRecord: z.record(z.string(), z.unknown()).nullable().optional(),
+	historicalRunSummary: z.record(z.string(), z.unknown()).nullable().optional(),
+	landExecutionResult: historicalRvfCloseoutExecutionResultSchema.nullable(),
+	baseBranchSyncExecutionResult: historicalRvfCloseoutExecutionResultSchema.nullable(),
 	existingCloseoutGoalCompletionReconciliation: existingCloseoutGoalCompletionReconciliationSchema.optional(),
 });
 export const taskRvfHistoryResponseSchema = z.object({

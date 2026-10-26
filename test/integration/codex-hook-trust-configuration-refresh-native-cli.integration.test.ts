@@ -4,7 +4,7 @@ import { stringify, type TomlTable } from "smol-toml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { prepareManagedCodexConversationStorageHome } from "../../src/codex-conversation-storage/codex-conversation-storage-home";
-import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const nativeHooksListSchema = z.object({

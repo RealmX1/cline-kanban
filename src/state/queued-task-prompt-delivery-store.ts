@@ -14,13 +14,13 @@
 //     队列条目同样携带完整正文，且以**机器节拍**变更（认领 / 交付 / 落定），比看板改动频繁得多。
 //   - **sessions.json** —— 只在 graceful shutdown 与客户端 saveState 落盘，崩溃即丢；而「活过重启」正是
 //     本特性的核心承诺。何况每次边沿往上面写要重写 1.6 MB 并抢全局锁。
-//   - **task-message-injections.json** —— 那是**已发布的跨仓契约**（RVF），核心不变量是「唯一非终态必然
-//     有界收敛」。一条排队 prompt 可以合法地等几个小时，写进去等于亲手打破该不变量，RVF 的启动清扫会
+//   - **task-message-injections.json** —— 那是**通用程序化投递账本**，核心不变量是「唯一非终态必然
+//     有界收敛」。一条排队 prompt 可以合法地等几个小时，写进去等于亲手打破该不变量，账本的启动清扫会
 //     把它当成失败记录扫掉。两者分开，只用 dispatchIdempotencyKey 关联。
 //
 // ## 例外：程序化排队投递在账本里**另有**一条回执
 //
-// `kanban task message --deliver-when-agent-idle`（例：RVF 决策点边界标记）的调用方要的是跨仓契约那套四态回执，
+// `kanban task message --deliver-when-agent-idle`（通用后台任务消息）的调用方要的是跨仓契约那套四态回执，
 // 所以这种条目除了住在本文件，还在注入账本里有一条同 key 的 pending 记录（programmaticInjectionLedgerReceiptLink）。
 // 上面那条「不变量会被打破」靠两件事守住：调用方必须给等待上限（账本的有界收敛上界随之变成「截止 + 终端投递
 // 最坏预算」，启动清扫按它判超期），以及条目落定时把结论镜像回账本——镜像挂在下面唯一的持锁读-改-写上
@@ -64,15 +64,7 @@ import {
 	isNativeIndependentUserTurnSubmissionKnownNotStarted,
 	resolveNativeIndependentUserTurnPreflightRestartRecovery,
 } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
-import {
-	resolveRvfCloseoutCompactionAwareQueuedPromptRecovery,
-	settleQueuedRvfCloseoutFromExistingSubmission,
-} from "../core/rvf-closeout-compaction-aware-queued-prompt-recovery";
-import {
-	getTaskMessageInjectionLedgerPath,
-	readTaskMessageInjectionLedger,
-	type TaskMessageInjectionRecord,
-} from "../core/task-message-injection-ledger";
+import { isRetiredRvfAutomaticQueuedDelivery } from "../core/retired-rvf-automatic-message-history";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger } from "./mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import { getThisRuntimeProcessInstanceId } from "./runtime-process-instance-heartbeat-registry";
@@ -246,6 +238,7 @@ export function isQueuedTaskPromptDeliveryQueueFullForTask(
 	return (
 		getTaskEntries(snapshot, taskId).filter(
 			(entry) =>
+				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 				isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
 		).length >= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK
@@ -259,6 +252,7 @@ function countNonTerminalQueuedTaskPromptDeliveriesInWorkspace(
 	for (const entries of Object.values(snapshot.entriesByTaskId)) {
 		for (const entry of entries) {
 			if (
+				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 				isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
 			) {
@@ -324,6 +318,7 @@ export function withExpiredQueuedEntriesSettled(
 	const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 	for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
 		entriesByTaskId[taskId] = entries.map((entry) => {
+			if (isRetiredRvfAutomaticQueuedDelivery(entry)) return entry;
 			if (
 				(entry.deliveryState === "queued" || isNativeIndependentUserTurnSubmissionKnownNotStarted(entry)) &&
 				nowEpochMs >= entry.expiresAt
@@ -347,7 +342,11 @@ function withOldestTerminalEntriesDroppedDownToCap(
 		return [...entries];
 	}
 	const terminalEntriesOldestFirst = entries
-		.filter((entry) => !isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState))
+		.filter(
+			(entry) =>
+				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
+				!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
+		)
 		.map((entry) => ({ queueEntryId: entry.queueEntryId, settledAt: entry.settledAt ?? entry.enqueuedAt }))
 		.sort((left, right) => left.settledAt - right.settledAt);
 	const droppedQueueEntryIds = new Set(
@@ -370,7 +369,10 @@ export function withExpiredAndOverflowingEntriesPruned(
 		withExpiredQueuedEntriesSettled(snapshot, nowEpochMs).entriesByTaskId,
 	)) {
 		const retainedForTask = expiryResolved.filter((entry) => {
-			if (isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)) {
+			if (
+				isRetiredRvfAutomaticQueuedDelivery(entry) ||
+				isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
+			) {
 				return true;
 			}
 			const settledAt = entry.settledAt ?? entry.enqueuedAt;
@@ -414,7 +416,8 @@ export function withExpiredAndOverflowingEntriesPruned(
 	const allEntries = Object.values(entriesByTaskId).flat();
 	const immediateTerminalEntries = allEntries.filter(
 		(entry) =>
-			!isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+			!!isRetiredRvfAutomaticQueuedDelivery(entry) &&
+			isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 			!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
 	);
 	if (
@@ -428,6 +431,7 @@ export function withExpiredAndOverflowingEntriesPruned(
 	for (const [taskId, entries] of Object.entries(entriesByTaskId)) {
 		for (const entry of entries) {
 			if (
+				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 				isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 				!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)
 			) {
@@ -511,6 +515,13 @@ export function applyQueuedTaskPromptDeliveryMutation(
 	// 先把过期收敛进 durable 状态，后面每一条判断看到的都是与投影一致的状态（见 withExpiredQueuedEntriesSettled）。
 	const snapshot = withExpiredQueuedEntriesSettled(snapshotAsRead, nowEpochMs);
 	const entries = getTaskEntries(snapshot, mutation.taskId);
+	if (
+		"queueEntryId" in mutation &&
+		entries.some(
+			(entry) => entry.queueEntryId === mutation.queueEntryId && isRetiredRvfAutomaticQueuedDelivery(entry),
+		)
+	)
+		return snapshot;
 
 	if (mutation.kind === "enqueue_prompt_for_delivery_after_current_turn") {
 		// 幂等：同一个 queueEntryId 重发（网络重试 / 双击）不该排出两条。
@@ -550,7 +561,8 @@ export function applyQueuedTaskPromptDeliveryMutation(
 	if (mutation.kind === "reorder_queued_prompt_deliveries") {
 		// 「取交集 + 未知 id 追加到尾」：客户端算这份顺序时看到的列表，可能已经被另一个标签页或
 		// dispatcher 改过。按交集重排保证不凭空造出条目，追加到尾保证不吞掉客户端还没见过的新条目。
-		const entryById = new Map(entries.map((entry) => [entry.queueEntryId, entry]));
+		const activeEntries = entries.filter((entry) => !isRetiredRvfAutomaticQueuedDelivery(entry));
+		const entryById = new Map(activeEntries.map((entry) => [entry.queueEntryId, entry]));
 		const reordered: QueuedTaskPromptDeliveryEntry[] = [];
 		const consumedQueueEntryIds = new Set<string>();
 		for (const queueEntryId of mutation.orderedQueueEntryIds) {
@@ -560,12 +572,17 @@ export function applyQueuedTaskPromptDeliveryMutation(
 				consumedQueueEntryIds.add(queueEntryId);
 			}
 		}
-		for (const entry of entries) {
+		for (const entry of activeEntries) {
 			if (!consumedQueueEntryIds.has(entry.queueEntryId)) {
 				reordered.push(entry);
 			}
 		}
-		return withTaskEntries(snapshot, mutation.taskId, reordered);
+		let index = 0;
+		return withTaskEntries(
+			snapshot,
+			mutation.taskId,
+			entries.map((entry) => (isRetiredRvfAutomaticQueuedDelivery(entry) ? entry : reordered[index++])),
+		);
 	}
 
 	if (mutation.kind === "set_queued_prompt_delivery_merge_with_next") {
@@ -657,6 +674,7 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		snapshot,
 		mutation.taskId,
 		entries.map((entry) =>
+			!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 			reconfirmedQueueEntryIds.has(entry.queueEntryId) &&
 			entry.survivedRuntimeRestartAtEpochMs !== null &&
 			entry.humanReconfirmedAfterRuntimeRestartAtEpochMs === null
@@ -686,64 +704,25 @@ async function quarantineUnreadableQueueFileBeforeOverwrite(
 // 于是「锁内重读」这条不变量只需在一处成立——程序化条目的账本镜像也因此只需挂在这一处。
 export async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult>(
 	workspaceId: string,
-	transform: (
-		current: WorkspaceQueuedTaskPromptDeliverySnapshot,
-		compactionAwareCloseoutLedgerRecords: readonly TaskMessageInjectionRecord[],
-	) => {
+	transform: (current: WorkspaceQueuedTaskPromptDeliverySnapshot) => {
 		next: WorkspaceQueuedTaskPromptDeliverySnapshot;
 		result: TResult;
 	},
 	nowEpochMs: number,
 	quarantineDiscriminator: string,
-	options: { requireCompactionAwareCloseoutLedgerConsistency?: boolean } = {},
 ): Promise<{ snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot; result: TResult }> {
 	const queuePath = getWorkspaceQueuedTaskPromptDeliveriesPath(workspaceId);
-	const applyTransformAndPersistQueue = async (
-		currentRead: QueuedTaskPromptDeliveryFileReadResult,
-		ledgerRecords: readonly TaskMessageInjectionRecord[],
-	) => {
-		const { next, result } = transform(currentRead.snapshot, ledgerRecords);
-		if (next === currentRead.snapshot) {
-			return { before: currentRead.snapshot, after: currentRead.snapshot, result };
-		}
-		if (currentRead.filePresentButUnreadable) {
+	const { before, after, result } = await lockedFileSystem.withLock({ path: queuePath, type: "file" }, async () => {
+		const currentRead = await readWorkspaceQueuedTaskPromptDeliveryFile(workspaceId);
+		const { next, result } = transform(currentRead.snapshot);
+		if (next === currentRead.snapshot) return { before: currentRead.snapshot, after: currentRead.snapshot, result };
+		if (currentRead.filePresentButUnreadable)
 			await quarantineUnreadableQueueFileBeforeOverwrite(queuePath, nowEpochMs, quarantineDiscriminator);
-		}
 		await lockedFileSystem.writeJsonFileAtomic(queuePath, next satisfies WorkspaceQueuedTaskPromptDeliverySnapshot, {
 			lock: null,
 		});
 		return { before: currentRead.snapshot, after: next, result };
-	};
-	const queueOnlyRewrite = await lockedFileSystem.withLock({ path: queuePath, type: "file" }, async () => {
-		// 必须在锁内判断是否需要账本：等待队列锁期间，dispatcher 可能刚加入一条已提交的自动收尾。
-		const currentRead = await readWorkspaceQueuedTaskPromptDeliveryFile(workspaceId);
-		if (
-			options.requireCompactionAwareCloseoutLedgerConsistency &&
-			hasSubmittedRvfCloseoutQueuedPromptDeliveries(currentRead.snapshot)
-		)
-			return null;
-		return applyTransformAndPersistQueue(currentRead, []);
 	});
-	// 先释放单独队列锁，再按统一路径顺序取得两把锁；不能持队列锁后临时追加账本锁。
-	// 普通队列仍只用上面的单锁路径。跨存储清扫在联合锁内重读两份最新事实，并持锁到队列终态落盘，
-	// 防止已接受回执或合法截止在读取后被并发更新，旧快照却不可逆地写成失败。
-	const { before, after, result } =
-		queueOnlyRewrite ??
-		(await lockedFileSystem.withLocks(
-			[
-				{ path: queuePath, type: "file" },
-				{ path: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceId)), type: "file" },
-			],
-			async () => {
-				const currentRead = await readWorkspaceQueuedTaskPromptDeliveryFile(workspaceId);
-				const ledgerRecords = hasSubmittedRvfCloseoutQueuedPromptDeliveries(currentRead.snapshot)
-					? await readTaskMessageInjectionLedger(
-							getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceId)),
-						)
-					: [];
-				return applyTransformAndPersistQueue(currentRead, ledgerRecords);
-			},
-		));
 	// 程序化条目的落定镜像进注入账本——挂在这个唯一的写盘咽喉上，任何落定路径都逃不掉。锁释放之后做。
 	// 只镜像锁内已核验并落盘的终态；后续接管不能改写该历史结算，未获结算资格的 transport 回执不会进入镜像。
 	await mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger({ workspaceId, before, after, nowEpochMs });
@@ -826,6 +805,7 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 			if (
 				entries.some(
 					(entry) =>
+						!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 						isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 						entry.deliveryState !== "queued" &&
 						isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
@@ -845,6 +825,7 @@ export async function claimNextQueuedTaskPromptDeliveryRunForDispatch(input: {
 			const chainQueueEntryIds = new Set(chain.map((entry) => entry.queueEntryId));
 			const claimedEntries: QueuedTaskPromptDeliveryEntry[] = [];
 			const nextEntries = entries.map((entry) => {
+				if (isRetiredRvfAutomaticQueuedDelivery(entry)) return entry;
 				if (!chainQueueEntryIds.has(entry.queueEntryId)) {
 					return entry;
 				}
@@ -1025,7 +1006,7 @@ export async function settleQueuedTaskPromptDelivery(input: {
 						};
 					}
 					const retryBudgetExhausted = entry.deliveryAttemptCount >= MAX_QUEUED_TASK_PROMPT_DELIVERY_ATTEMPTS;
-					// 程序化条目一次定终身：已经交给终端投递了，就绝不回头再等 agent（与 RVF 的分工约定第 3 条）。
+					// 程序化条目一次定终身：已经交给终端投递了，就绝不回头再等 agent（通用投递幂等约定）。
 					// 调用方有自己的重试策略与新 key；这里再重投一次，等于替它多送一遍、还用着它已经认定落定的 key。
 					if (
 						input.settlement.outcome === "retryable_failure" &&
@@ -1113,25 +1094,13 @@ export async function settleQueuedTaskPromptDelivery(input: {
 //
 // ## 程序化条目不盖章，直接落定
 //
-// 「等人确认」是给人排的 prompt 设计的：人在重启后看一眼、决定还要不要。程序化条目（例：RVF 决策点）背后没有
+// 「等人确认」是给人排的 prompt 设计的：人在重启后看一眼、决定还要不要。程序化条目（例如后台任务消息）背后没有
 // 人在看 Queue tab，它的调用方要的是一条诚实的账本回执。托管实例一死，agent 进程也已经不在了，那份决策点的
 // 上下文随之过时——所以同一判据命中时它落 settled_failed，账本镜像为 runtime_restarted_before_confirmation，
 // 由调用方自己决定要不要重新排。判据（托管者是否还活着）与人排的条目完全相同，并存实例因此同样不会误伤它。
-// 唯一例外是已经持久提交、绑定正确的 Codex RVF 压缩确认：原生宿主可能仍活着，只读沿用单条截止；
-// 真实账本终态再收敛队列。它不回到 queued，也不转成人工重确认。
+// 已退役的 RVF 自动条目仅保留历史，跳过盖章、落定和账本镜像，不转成人工重确认。
 export const PROGRAMMATIC_INJECTION_SETTLED_BY_RUNTIME_RESTART_FAILURE_NOTE =
 	"Kanban restarted while this automated delivery was waiting for the agent to become idle. Automated deliveries do not survive a restart.";
-
-// 只在最新队列确有已提交自动收尾时，才让清扫取得账本锁；普通队列不增加账本 IO。
-function hasSubmittedRvfCloseoutQueuedPromptDeliveries(snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot): boolean {
-	return Object.values(snapshot.entriesByTaskId).some((entries) =>
-		entries.some(
-			(entry) =>
-				entry.deliveryState === "handed_to_transport" &&
-				entry.programmaticInjectionLedgerReceiptLink?.injectionSource === "rvf_automatic_closeout",
-		),
-	);
-}
 
 export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(input: {
 	workspaceId: string;
@@ -1155,24 +1124,14 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
 	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
 		input.workspaceId,
-		(current, ledgerRecords) => {
+		(current) => {
 			let stampedCount = 0;
 			let settledProgrammaticInjectionCount = 0;
 			let recoveredPreflightQueryCustodyCount = 0;
 			const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 			for (const [taskId, entries] of Object.entries(current.entriesByTaskId)) {
 				entriesByTaskId[taskId] = entries.map((entry) => {
-					const recovery = resolveRvfCloseoutCompactionAwareQueuedPromptRecovery({
-						workspaceId: input.workspaceId,
-						entry,
-						ledgerRecords,
-						nowEpochMs,
-					});
-					if (recovery?.kind === "waiting_for_existing_submission") return entry;
-					if (recovery?.kind === "settled_existing_submission") {
-						settledProgrammaticInjectionCount += 1;
-						return settleQueuedRvfCloseoutFromExistingSubmission(entry, recovery);
-					}
+					if (isRetiredRvfAutomaticQueuedDelivery(entry)) return entry;
 					const alreadyStampedByThisRuntimeProcess =
 						entry.survivedRuntimeRestartAtEpochMs !== null &&
 						entry.survivedRuntimeRestartAtEpochMs >= input.runtimeProcessStartedAtEpochMs;
@@ -1271,7 +1230,6 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 		},
 		nowEpochMs,
 		"restart-stamp",
-		{ requireCompactionAwareCloseoutLedgerConsistency: true },
 	);
 	return { snapshot, ...result };
 }
@@ -1307,24 +1265,15 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
 	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
 		input.workspaceId,
-		(current, ledgerRecords) => {
+		(current) => {
 			let releasedClaimCount = 0;
 			let failedStrandedDeliveryCount = 0;
-			let reconciledProgrammaticInjectionCount = 0;
+			const reconciledProgrammaticInjectionCount = 0;
 			let earliestYoungInFlightDeliveryBecomesStaleAtEpochMs: number | null = null;
 			const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 			for (const [taskId, entries] of Object.entries(current.entriesByTaskId)) {
 				entriesByTaskId[taskId] = entries.map((entry) => {
-					const recovery = resolveRvfCloseoutCompactionAwareQueuedPromptRecovery({
-						workspaceId: input.workspaceId,
-						entry,
-						ledgerRecords,
-						nowEpochMs,
-					});
-					if (recovery?.kind === "settled_existing_submission") {
-						reconciledProgrammaticInjectionCount += 1;
-						return settleQueuedRvfCloseoutFromExistingSubmission(entry, recovery);
-					}
+					if (isRetiredRvfAutomaticQueuedDelivery(entry)) return entry;
 					if (entry.deliveryState !== "claimed_for_dispatch" && entry.deliveryState !== "handed_to_transport")
 						return entry;
 					// 认领没有时间戳（认领刻意不写任何时间字段），所以拿 lastAttemptedAt 兜不住它；
@@ -1338,12 +1287,9 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 						entry.nativeIndependentUserTurnSubmissionProgress?.submissionMayHaveStartedAtEpochMs ??
 						entry.lastAttemptedAt ??
 						entry.enqueuedAt;
-					const becomesStaleAtEpochMs =
-						recovery?.kind === "waiting_for_existing_submission"
-							? recovery.becomesStaleAtEpochMs
-							: submissionKnownNotStarted
-								? entry.expiresAt
-								: inFlightSinceEpochMs + input.inFlightSettlementBudgetMs;
+					const becomesStaleAtEpochMs = submissionKnownNotStarted
+						? entry.expiresAt
+						: inFlightSinceEpochMs + input.inFlightSettlementBudgetMs;
 					if (nowEpochMs < becomesStaleAtEpochMs) {
 						earliestYoungInFlightDeliveryBecomesStaleAtEpochMs =
 							earliestYoungInFlightDeliveryBecomesStaleAtEpochMs === null
@@ -1397,7 +1343,6 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 		},
 		nowEpochMs,
 		"stranded-in-flight-sweep",
-		{ requireCompactionAwareCloseoutLedgerConsistency: true },
 	);
 	return { snapshot, ...result };
 }

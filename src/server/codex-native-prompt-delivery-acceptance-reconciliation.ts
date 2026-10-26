@@ -1,5 +1,6 @@
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { createCodexNativePromptDeliveryJournal } from "../core/codex-native-prompt-delivery-journal";
+import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import {
 	readTaskMessageInjectionLedger,
 	withTaskMessageInjectionLedgerLock,
@@ -24,6 +25,7 @@ export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(inp
 	)) {
 		const operation = record.codex_native_prompt_delivery_operation;
 		if (
+			isRetiredRvfAutomaticMessageSource(record.source) ||
 			!operation ||
 			operation.workspaceId !== input.workspaceId ||
 			operation.sendPhase === "registered" ||

@@ -9,6 +9,7 @@ import type {
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "../core/managed-task-prompt-delivery";
+import { isRetiredRvfAutomaticQueuedDelivery } from "../core/retired-rvf-automatic-message-history";
 import {
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
@@ -300,6 +301,7 @@ export async function reconcileManagedTaskPromptDeliveryReceipts(
 		.flat()
 		.filter(
 			(entry) =>
+				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 				!isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 				(isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState) ||
 					entry.deliveryState === "settled_failed"),

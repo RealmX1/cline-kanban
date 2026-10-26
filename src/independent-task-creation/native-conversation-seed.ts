@@ -6,12 +6,12 @@ import {
 	inferCodexHomeDirectoryPathFromTranscriptPath,
 	resolveRecordedCodexConversationHome,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
-import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "../core/api-contract";
-import { withCodexAppServerRequestConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
+import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import {
 	readCodexConversationTurns,
 	verifyRestoredCodexConversationPrefix,
-} from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+} from "../codex-native-session-protocol/codex-native-conversation-history";
+import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "../core/api-contract";
 
 /** 只复制原生历史，不发起模型回合；后续新任务再从这个不可变种子 fork。 */
 export async function freezeIndependentTaskConversationSeed(summary: RuntimeTaskSessionSummary): Promise<{

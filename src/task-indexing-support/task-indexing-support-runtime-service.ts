@@ -16,7 +16,6 @@ import {
 	type ReferenceRelationModelingSuggestionsRequest,
 	referenceRelationModelingDraftSchema,
 } from "../core/work-unit-relation-modeling-api-contract";
-import { lockedFileSystem } from "../fs/locked-file-system";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
@@ -28,22 +27,18 @@ import {
 	allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable,
 	buildTaskMutationIntentForKanbanRuntimeSystemComponent,
 } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
-import { loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
+import { mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import type { RuntimeTaskIndexingSupportReferenceAssertionWritePort } from "../trpc/work-unit-relation-assertion-write-api";
 import { appendTaskCommentThroughRuntimeBoardMutation } from "./append-task-comment-to-latest-task-card";
 import { collectTaskIndexingMaterials } from "./collect-task-indexing-materials";
 import { analyzeIncomingWorkItemRelations } from "./incoming-work-item-relation-analysis";
-import {
-	listDurableIncomingWorkItemTriageOperations,
-	triageIncomingWorkItemWithDurableOperation,
-} from "./incoming-work-item-triage-operation";
+import { triageIncomingWorkItemWithDurableOperation } from "./incoming-work-item-triage-operation";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
 import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "./task-analysis-shared-prompt-prefix";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
 	readTaskIndexingSupportExecutorSettings,
-	readTaskIndexingSupportJsonFile,
 	saveTaskIndexingSupportExecutorSettings,
 	taskIndexingSupportWorkspaceStoragePath,
 } from "./task-indexing-support-storage";
@@ -57,20 +52,8 @@ export interface TaskIndexingSupportRuntimeDependencies {
 	referenceAssertionWritePort: RuntimeTaskIndexingSupportReferenceAssertionWritePort;
 }
 
-export function isUntriagedRvfFindingTask(task: { title?: string; prompt: string }): boolean {
-	const lines = task.prompt.split(/\r?\n/u);
-	return (
-		(task.title ?? "").startsWith("[RVF 发现]") &&
-		lines[0] === "KANBAN_TASK_ORIGIN=rvf_validated_out_of_scope_finding" &&
-		lines[1] === "KANBAN_SUPPORT_AGENT_RELATION_TRIAGE_STATUS=not_triaged"
-	);
-}
-
 export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSupportRuntimeDependencies) {
 	const lifetime = new AbortController();
-	const backgroundRuns = new Map<string, Promise<void>>();
-	let automaticBackfillTimer: ReturnType<typeof setTimeout> | null = null;
-	let automaticBackfillRun: Promise<void> | null = null;
 	const collect = (workspaceId: string, includeRecapSources = true) =>
 		collectTaskIndexingMaterials({
 			workspaceId,
@@ -166,7 +149,6 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 										.mostRecentlyUsedTaskCreateBaseRefByProjectId[scope.workspaceId],
 								repository: state.git,
 							}).baseRef;
-							const rvf = item.origin === "rvf_validated_out_of_scope_finding";
 							const agentId: RuntimeAgentId | undefined = item.creation_settings.agent_id
 								? runtimeAgentIdSchema.parse(item.creation_settings.agent_id)
 								: undefined;
@@ -178,9 +160,8 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 									title: item.title,
 									prompt: item.prompt,
 									baseRef,
-									startInPlanMode: rvf
-										? true
-										: (item.creation_settings.start_in_plan_mode ?? config.newTaskStartInPlanModeByDefault),
+									startInPlanMode:
+										item.creation_settings.start_in_plan_mode ?? config.newTaskStartInPlanModeByDefault,
 									autoReviewEnabled: false,
 									agentId,
 									workspaceDefaultAgentIdForNewTasks: config.selectedAgentId,
@@ -402,126 +383,13 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 				abortSignal: lifetime.signal,
 			});
 		},
-		backfillUntriagedRvfFindings: async (scope: RuntimeTrpcWorkspaceScope) => {
-			const board = await loadWorkspaceBoardById(scope.workspaceId);
-			const recordedOperations = await listDurableIncomingWorkItemTriageOperations(
-				taskIndexingSupportWorkspaceStoragePath(scope.workspaceId, "incoming-work-item-triage-operations"),
-			);
-			const results: { taskId: string; status: "completed" | "already_completed" | "failed"; error?: string }[] = [];
-			for (const task of board.columns.flatMap((column) => column.cards).filter(isUntriagedRvfFindingTask)) {
-				if (lifetime.signal.aborted) break;
-				const key = `rvf-existing-finding:${task.id}:${task.createdAt}`;
-				const matchesFindingCard = (reference: KanbanBoardCardWorkUnitQualifiedReference | null | undefined) =>
-					reference?.workspaceId === scope.workspaceId &&
-					reference.taskId === task.id &&
-					reference.taskIncarnationCreatedAtEpochMs === task.createdAt;
-				const matchingOperations = recordedOperations.filter(
-					(operation) =>
-						matchesFindingCard(operation.allocatedTask) ||
-						matchesFindingCard(operation.incomingWorkItem.existing_finding_task),
-				);
-				if (matchingOperations.some((operation) => operation.completed)) {
-					results.push({ taskId: task.id, status: "already_completed" });
-					continue;
-				}
-				try {
-					await triageIncomingWorkItem(
-						scope,
-						matchingOperations[0]?.incomingWorkItem ??
-							incomingWorkItemSchema.parse({
-								schema_version: 1,
-								work_item_key: key,
-								title: task.title,
-								prompt: task.prompt,
-								origin: "rvf_validated_out_of_scope_finding",
-								existing_finding_task: {
-									workUnitType: "kanban_board_card",
-									workspaceId: scope.workspaceId,
-									taskId: task.id,
-									taskIncarnationCreatedAtEpochMs: task.createdAt,
-								},
-							}),
-					);
-					results.push({ taskId: task.id, status: "completed" });
-				} catch (error) {
-					results.push({
-						taskId: task.id,
-						status: "failed",
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
-			}
-			return { results };
-		},
 	};
-	const api = {
+	return {
 		...service,
-		readBackfillStatus: async (scope: RuntimeTrpcWorkspaceScope) =>
-			await readTaskIndexingSupportJsonFile(
-				taskIndexingSupportWorkspaceStoragePath(scope.workspaceId, "rvf-findings-backfill-status.json"),
-			),
-		scheduleBackfill: async (scope: RuntimeTrpcWorkspaceScope) => {
-			lifetime.signal.throwIfAborted();
-			if (backgroundRuns.has(scope.workspaceId)) return { scheduled: false, alreadyRunning: true };
-			const path = taskIndexingSupportWorkspaceStoragePath(scope.workspaceId, "rvf-findings-backfill-status.json");
-			const scheduledStatusPersisted = lockedFileSystem.writeJsonFileAtomic(path, {
-				state: "scheduled",
-				scheduledAt: Date.now(),
-			});
-			const run = (async () => {
-				try {
-					await scheduledStatusPersisted;
-					const result = await service.backfillUntriagedRvfFindings(scope);
-					await lockedFileSystem.writeJsonFileAtomic(path, {
-						state: lifetime.signal.aborted ? "interrupted" : "completed",
-						completedAt: Date.now(),
-						...result,
-					});
-				} catch (error) {
-					await lockedFileSystem.writeJsonFileAtomic(path, {
-						state: "failed",
-						error: error instanceof Error ? error.message : String(error),
-						completedAt: Date.now(),
-					});
-				}
-			})().finally(() => backgroundRuns.delete(scope.workspaceId));
-			backgroundRuns.set(scope.workspaceId, run);
-			void run.catch(() => {});
-			await scheduledStatusPersisted;
-			return { scheduled: true, alreadyRunning: false };
-		},
-		startAutomaticBackfill: (
-			listScopes: () => Promise<RuntimeTrpcWorkspaceScope[]>,
-			warn: (message: string) => void,
-		) => {
-			if (automaticBackfillTimer || automaticBackfillRun || lifetime.signal.aborted) return;
-			automaticBackfillTimer = setTimeout(() => {
-				automaticBackfillTimer = null;
-				automaticBackfillRun = (async () => {
-					for (const scope of await listScopes()) {
-						if (lifetime.signal.aborted) break;
-						await api.scheduleBackfill(scope);
-						await backgroundRuns.get(scope.workspaceId);
-					}
-				})().catch((error: unknown) => {
-					if (!lifetime.signal.aborted)
-						warn(
-							`范围外发现自动补查失败，可用 support 命令重试：${error instanceof Error ? error.message : String(error)}`,
-						);
-				});
-			}, 1000);
-			automaticBackfillTimer.unref();
-		},
 		close: async () => {
 			lifetime.abort();
-			if (automaticBackfillTimer) clearTimeout(automaticBackfillTimer);
-			await Promise.allSettled([
-				...backgroundRuns.values(),
-				...(automaticBackfillRun ? [automaticBackfillRun] : []),
-			]);
 		},
 	};
-	return api;
 }
 
 export type TaskIndexingSupportRuntimeService = ReturnType<typeof createTaskIndexingSupportRuntimeService>;
