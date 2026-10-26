@@ -50,6 +50,7 @@ vi.mock("@/components/board-card", () => ({
 // 置顶板分身都走这里。mock 忠实还原真实契约：只有 canonical 角色输出 data-task-id（保全局唯一），
 // 且 data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
 vi.mock("@/components/task-card-body", () => ({
+	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX: 12,
 	TaskCardBody: ({
 		card,
 		selected,

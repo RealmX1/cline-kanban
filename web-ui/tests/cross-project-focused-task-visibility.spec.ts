@@ -189,7 +189,7 @@ test("跨项目同号任务搜索在途只显示目标占位，取消可回原�
 });
 
 for (const interaction of ["hover_wait", "prompt_action"] as const) {
-	test(`焦点源行贴近底沿 hover 展开后，Sticky 保留交互边界：${interaction}`, async ({ page }) => {
+	test(`焦点源行贴近底沿悬浮展开，向上避让且不因占位增高触发 Sticky：${interaction}`, async ({ page }) => {
 		await page.mouse.move(1000, 700);
 		await page.locator(scrollContainerSelector).evaluate((root) => {
 			const anchor = root.querySelector<HTMLElement>("[data-cross-project-focused-task-scroll-anchor]")!;
@@ -209,10 +209,12 @@ for (const interaction of ["hover_wait", "prompt_action"] as const) {
 			"data-cross-project-task-switcher-row-in-place-expansion-state",
 			"expanded_in_place_by_hover",
 		);
-		const sticky = page.locator(stickySelector);
-		await expect(sticky).toHaveAttribute("data-cross-project-focused-task-sticky-edge", "bottom");
+		await expect(page.locator(stickySelector)).toHaveCount(0);
+		const sticky = source.locator("[data-cross-project-task-switcher-hover-floating-card]");
 		const stickyGeometry = await sticky.boundingBox();
-		expect(Math.abs(stickyGeometry!.y + stickyGeometry!.height - viewport!.y - viewport!.height)).toBeLessThan(2);
+		expect(stickyGeometry!.y + stickyGeometry!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height + 1);
+		expect(stickyGeometry!.y + 16).toBeLessThan(sourceBeforeHover!.y);
+		expect(await source.boundingBox()).toEqual(sourceBeforeHover);
 		await sticky.hover();
 		if (interaction === "hover_wait") {
 			// 超过离开面板后的 300ms 收起期限，副本内停留仍属于面板交互。

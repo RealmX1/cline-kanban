@@ -118,8 +118,8 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				onScroll={(event) =>
 					writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
 				}
-				// overflow-anchor: none —— hover 交接时列表顶边固定（见 use-cross-project-task-switcher-row-hover-expansion-in-place）；
-				// 浏览器自带的 scroll anchoring 会在面板滚动过时自己补 scrollTop，把指针上方的整列往下拖。
+				// overflow-anchor: none —— 浮层定位不调整列表滚动，异步快照也不应触发浏览器锚定补偿；
+				// 保持用户选择的滚动位置。
 				className="isolate flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
 				data-testid="cross-project-recently-active-task-switcher-panel"
 				data-cross-project-focused-task-pin-state={focusedTaskPinState}

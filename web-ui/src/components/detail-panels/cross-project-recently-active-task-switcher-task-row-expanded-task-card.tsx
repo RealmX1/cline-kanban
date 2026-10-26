@@ -83,7 +83,7 @@ function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 /**
  * 卡体还拿不到（其他项目的快照在读 / 读失败 / 卡已不在 board 上）时的兜底：先画与精简行同一个首行，提示放在下面，
  * 标题不整行消失；展开开关仍在右上角同一坐标；点它与点精简行同一结果。首行同时是「打开任务」的键盘入口
- * （Enter / Space），与卡体标题一致。快照到了换成卡体时，键盘焦点若在这里的开关上就交给卡体上的开关。
+ * （Enter / Space），与卡体标题一致。快照到了换成卡体时，键盘焦点若在这里的开关或首行上就交给卡体对应入口。
  */
 function ExpandedTaskCardUnavailableFallback({
 	entryInProject,
@@ -95,7 +95,7 @@ function ExpandedTaskCardUnavailableFallback({
 	children: ReactNode;
 }): ReactElement {
 	const fallbackElementRefHandingOffToggleKeyboardFocus =
-		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
+		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved(true);
 	return (
 		<div
 			ref={fallbackElementRefHandingOffToggleKeyboardFocus}
@@ -264,7 +264,7 @@ function OtherProjectExpandedTaskCard({
 }
 
 /**
- * All projects 面板里一行的完整卡片（hover 或用户固定展开后原地替换精简行）：与 This project
+ * All projects 面板里一行的完整卡片（hover 时悬浮、用户固定展开时替换精简行）：与 This project
  * 同一个紧凑 `TaskCardBody`、同一套 stage 门控（buildTaskCardBusinessProps）与同一组服务端卡片动作。
  * 当前项目读浏览器里的 board；其他项目按需读服务端。
  *
