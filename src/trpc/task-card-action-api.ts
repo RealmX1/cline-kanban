@@ -41,6 +41,7 @@ import {
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { buildTaskSessionStartRequestFromBoardCard } from "../core/task-session-start-request-from-board-card";
 import { isTaskCardShelved, setTaskCardShelvingState } from "../core/task-shelving-state";
+import { applyTaskStickerEntryMutationToTaskCard } from "../core/task-sticker-entry-mutation";
 import { buildTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import type {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
@@ -1533,6 +1534,45 @@ export function createTaskCardActionApi(
 			broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, update.saved);
 			return { taskCardSnapshotAfterAction: update.value };
 		},
+
+		applyTaskStickerEntryMutation: async (workspaceScope, input, evidence) =>
+			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const mutation = await mutateWorkspaceState(
+					workspaceScope.workspacePath,
+					await resolveIntent("apply_task_sticker_entry_mutation", evidence, input.boardMutationInitiator, [
+						input.taskId,
+					]),
+					(state) => {
+						const found = findTaskCardWithBoardColumnOrThrowNotFound(
+							state.board,
+							input.taskId,
+							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
+						);
+						const taskCard = applyTaskStickerEntryMutationToTaskCard(found.taskCard, input.mutation, Date.now());
+						const updated = taskCard !== found.taskCard;
+						return {
+							board: updated
+								? {
+										...state.board,
+										columns: state.board.columns.map((column) => ({
+											...column,
+											cards: column.cards.map((card) => (card === found.taskCard ? taskCard : card)),
+										})),
+									}
+								: state.board,
+							save: updated,
+							value: buildTaskCardSnapshot(
+								workspaceScope,
+								{ ...found, taskCard },
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
+							),
+						};
+					},
+				);
+				broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, mutation.saved);
+				return { boardWasSaved: mutation.saved, taskCardSnapshotAfterAction: mutation.value };
+			}),
 
 		setTaskCardShelvingStateWithoutSessionSideEffects: async (
 			workspaceScope,

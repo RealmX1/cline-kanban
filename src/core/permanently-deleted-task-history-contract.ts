@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "./inter-work-unit-relation-ledger-event-contract";
+import { runtimeTaskStickerEntrySchema } from "./task-sticker-entry-contract";
 
 export const retainedTaskPromptVersionSchema = z.discriminatedUnion("availability", [
 	z.object({ availability: z.literal("available"), text: z.string() }),
@@ -24,6 +25,8 @@ export const permanentlyDeletedTaskCardEntrySchema = z.object({
 	titleBeforePermanentRemoval: z.string().nullable(),
 	permanentlyRemovedFromBoardAt: z.number(),
 	promptPreview: z.string().nullable(),
+	// 只取删除前字段快照；缺省兼容尚未留存便签的历史记录。
+	taskStickerEntries: z.array(runtimeTaskStickerEntrySchema).optional(),
 	matchedPromptVersions: z.array(z.enum(["before_permanent_removal", "at_creation"])),
 });
 export const listPermanentlyDeletedTaskCardsResponseSchema = z.object({

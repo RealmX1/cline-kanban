@@ -25,6 +25,7 @@ import {
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
 import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
+import { preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot } from "../core/task-sticker-entry-mutation";
 import {
 	measureDailyWorkProgressSynchronousStage,
 	readUtf8FileWithDailyWorkProgressCostObservation,
@@ -1116,9 +1117,9 @@ export async function saveWorkspaceState(
 				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
 			});
 		}
-		const board = preserveRuntimeOwnedMainSessionBindings(
+		const board = preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot(
 			persistedBoard,
-			postDeployVerificationDoneEntryGuarded.board,
+			preserveRuntimeOwnedMainSessionBindings(persistedBoard, postDeployVerificationDoneEntryGuarded.board),
 		);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
