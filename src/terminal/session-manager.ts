@@ -32,6 +32,7 @@ import type {
 } from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
+	canAgentResumeByRecordedNativeConversationSessionId,
 	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
 	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
 	isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge,
@@ -237,6 +238,12 @@ import {
 } from "./output-reactions/network-interruption-continuation-instructions";
 import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
+import {
+	persistSideSessionResumeRequestWaitingForNativeIdentity,
+	readSideSessionNativeIdentityEvidenceFingerprint,
+	readSideSessionNativeIdentityFromOwnedCodexControl,
+	readSideSessionResumeRequestWaitingForNativeIdentity,
+} from "./side-session-native-identity-recovery";
 import {
 	deriveTaskSessionAutoRestartDecision,
 	describeTaskSessionAutoRestartCircuitBreak,
@@ -1354,6 +1361,160 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly pendingTerminalSessionAdoptionRecordPublicationTimersByTaskId = new Map<string, NodeJS.Timeout>();
 	private readonly kimiStartupWaitingReasonByActiveProcess = new WeakMap<ActiveProcessState, string>();
 	private readonly kimiOutputUtf8StreamDecoderByActiveProcess = new WeakMap<ActiveProcessState, StringDecoder>();
+	private readonly sideSessionNativeIdentityRecoveryInFlightByTaskId = new Map<string, Promise<void>>();
+	private sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = false;
+
+	private hasIndependentSideSessionNativeIdentity(entry: SessionEntry): boolean {
+		const identity = entry.summary.agentNativeConversationSessionIdentity;
+		return Boolean(
+			identity &&
+				identity.sourceAgentId === entry.summary.agentId &&
+				identity.nativeSessionId !==
+					entry.summary.taskConversationSessionNativeIdentityRecovery?.forkSourceNativeSessionId,
+		);
+	}
+
+	private async deferSideSessionResumeWaitingForNativeIdentity(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+	): Promise<boolean> {
+		const metadata = entry.summary.taskConversationSessionMetadata;
+		if (
+			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt) ||
+			!metadata ||
+			metadata.taskConversationSessionRole === "main" ||
+			!entry.summary.taskConversationSessionNativeIdentityRecovery ||
+			metadata.latestUserMessagePreview !== null ||
+			!entry.summary.runtimeSessionIncarnationId ||
+			!canAgentResumeByRecordedNativeConversationSessionId(request.agentId) ||
+			this.hasIndependentSideSessionNativeIdentity(entry)
+		)
+			return false;
+		const cancellationGenerationBeforePersistence = entry.autoRestartCancellationGeneration;
+		const incarnationBeforePersistence = entry.summary.runtimeSessionIncarnationId;
+		const activeBeforePersistence = entry.active;
+		const humanInputBeforePersistence = activeBeforePersistence?.lastUserInputAt;
+		await persistSideSessionResumeRequestWaitingForNativeIdentity(entry.summary, request);
+		if (
+			this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown ||
+			entry.autoRestartCancellationGeneration !== cancellationGenerationBeforePersistence ||
+			entry.summary.runtimeSessionIncarnationId !== incarnationBeforePersistence ||
+			entry.summary.taskConversationSessionMetadata !== metadata ||
+			entry.active !== activeBeforePersistence ||
+			entry.active?.lastUserInputAt !== humanInputBeforePersistence
+		)
+			return true;
+		const previous = entry.summary.taskConversationSessionNativeIdentityRecovery;
+		this.emitSummary(
+			updateSummary(entry, {
+				taskConversationSessionNativeIdentityRecovery: previous
+					? { ...previous, resumeRequestedAtMs: previous.resumeRequestedAtMs ?? now() }
+					: {
+							runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+							forkSourceNativeSessionId:
+								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							resumeRequestedAtMs: now(),
+							consecutiveUnchangedProbeCount: 0,
+							lastEvidenceFingerprint: null,
+							nextProbeAtMs: now(),
+						},
+				warningMessage:
+					"正在等待本侧会话的原生身份；仅暂停恢复操作，可信启动 hook 或独享原生控制面补证后会自动接续，无需发送占位消息。",
+			}),
+		);
+		this.ensureStallScanRunning();
+		void this.advanceSideSessionNativeIdentityRecovery(entry).catch(() => {});
+		return true;
+	}
+
+	private advanceSideSessionNativeIdentityRecovery(entry: SessionEntry): Promise<void> {
+		const taskId = entry.summary.taskId;
+		const existing = this.sideSessionNativeIdentityRecoveryInFlightByTaskId.get(taskId);
+		if (existing) return existing;
+		const operation = this.advanceSideSessionNativeIdentityRecoveryOnce(entry).finally(() => {
+			if (this.sideSessionNativeIdentityRecoveryInFlightByTaskId.get(taskId) === operation)
+				this.sideSessionNativeIdentityRecoveryInFlightByTaskId.delete(taskId);
+		});
+		this.sideSessionNativeIdentityRecoveryInFlightByTaskId.set(taskId, operation);
+		return operation;
+	}
+
+	private async advanceSideSessionNativeIdentityRecoveryOnce(entry: SessionEntry): Promise<void> {
+		const recovery = entry.summary.taskConversationSessionNativeIdentityRecovery;
+		if (!recovery || recovery.runtimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId) return;
+		const metadata = entry.summary.taskConversationSessionMetadata;
+		const stillCurrent = () =>
+			!this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown &&
+			this.entries.get(entry.summary.taskId) === entry &&
+			entry.summary.runtimeSessionIncarnationId === recovery.runtimeSessionIncarnationId &&
+			entry.summary.taskConversationSessionMetadata === metadata &&
+			entry.summary.taskConversationSessionNativeIdentityRecovery === recovery;
+		const fingerprint = await readSideSessionNativeIdentityEvidenceFingerprint(entry.summary, (request) =>
+			this.resolveTaskSessionRequestWithCodexConversationStorageHome(request, entry),
+		);
+		if (!stillCurrent()) return;
+		const evidenceChanged = fingerprint !== recovery.lastEvidenceFingerprint;
+		if (
+			!evidenceChanged &&
+			(recovery.consecutiveUnchangedProbeCount >= 3 ||
+				(recovery.nextProbeAtMs !== null && now() < recovery.nextProbeAtMs))
+		)
+			return;
+		if (!this.hasIndependentSideSessionNativeIdentity(entry)) {
+			const identity = await readSideSessionNativeIdentityFromOwnedCodexControl(entry.summary);
+			if (!stillCurrent()) return;
+			if (identity) this.applyAgentNativeConversationSessionIdentity(entry.summary.taskId, identity);
+			if (!this.hasIndependentSideSessionNativeIdentity(entry)) {
+				const count = evidenceChanged ? 1 : recovery.consecutiveUnchangedProbeCount + 1;
+				this.emitSummary(
+					updateSummary(entry, {
+						taskConversationSessionNativeIdentityRecovery: {
+							...recovery,
+							lastEvidenceFingerprint: fingerprint,
+							consecutiveUnchangedProbeCount: count,
+							nextProbeAtMs: count >= 3 ? null : now() + 15_000,
+						},
+					}),
+				);
+				return;
+			}
+		}
+		if (!stillCurrent()) return;
+		if (recovery.resumeRequestedAtMs === null) {
+			this.emitSummary(updateSummary(entry, { taskConversationSessionNativeIdentityRecovery: null }));
+			return;
+		}
+		try {
+			const request = await readSideSessionResumeRequestWaitingForNativeIdentity(entry.summary);
+			if (!stillCurrent()) return;
+			if (!request) throw new Error("等待与当前身份及启动快照匹配的恢复请求文件");
+			await this.runTaskSessionStartExclusivelyPerTask(request.taskId, async () => {
+				if (!stillCurrent() || resolveSessionFacets(entry.summary).turnOwner === "agent") return;
+				// 与正常刷新共用停止前预检；取消资格继续贯穿准备、spawn 和装载。
+				await this.refreshTaskTerminalHoldingPerTaskStartExclusivity(
+					request,
+					"durable_record_rebuilt_resume",
+					createTaskSessionStartRequestArrival(),
+					false,
+					stillCurrent,
+				);
+			});
+		} catch (error) {
+			if (!stillCurrent()) return;
+			const count = evidenceChanged ? 1 : Math.min(3, recovery.consecutiveUnchangedProbeCount + 1);
+			this.emitSummary(
+				updateSummary(entry, {
+					taskConversationSessionNativeIdentityRecovery: {
+						...recovery,
+						lastEvidenceFingerprint: fingerprint,
+						consecutiveUnchangedProbeCount: count,
+						nextProbeAtMs: count >= 3 ? null : now() + 15_000,
+					},
+					warningMessage: `侧会话恢复等待机器补证：${error instanceof Error ? error.message : String(error)}`,
+				}),
+			);
+		}
+	}
 
 	private async trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> {
 		const entry = this.entries.get(taskId);
@@ -1363,6 +1524,28 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		if (active.deferredStartupPromptText === null) {
 			return false;
+		}
+		const isCodexPlanModeInitialization =
+			entry.summary.agentId === "codex" && active.deferredStartupPromptText === "/plan";
+		if (isCodexPlanModeInitialization && active.submitConfirmTimer !== null) return false;
+		if (isCodexPlanModeInitialization && active.startupReadinessTimer === null) {
+			// 模式命令不进入消息接受链。沿用启动 timer 槽位有界重查就绪与输入争用。
+			active.startupReadinessDeadlineAt ??= now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
+			if (now() >= active.startupReadinessDeadlineAt) {
+				active.deferredStartupPromptText = null;
+				this.emitSummary(
+					updateSummary(entry, {
+						warningMessage: "Plan 模式初始化等待就绪或空输入框超时，可在原生界面手动切换模式。",
+					}),
+				);
+				return false;
+			}
+			active.startupReadinessTimer = setTimeout(() => {
+				active.startupReadinessTimer = null;
+				if (this.entries.get(taskId)?.active === active)
+					void this.trySubmitDeferredStartupPrompt(taskId).catch(() => {});
+			}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
+			active.startupReadinessTimer.unref?.();
 		}
 		if ((this.startupDeliveryRegistrationFailureCountByActiveProcess.get(active) ?? 0) >= 3) return false;
 		const trustPromptVisible =
@@ -1403,6 +1586,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 				return false;
 			}
 			this.kimiStartupWaitingReasonByActiveProcess.delete(active);
+		}
+		if (isCodexPlanModeInitialization) {
+			const humanInputAtRead = active.lastUserInputAt;
+			const contention = await this.resolveProgrammaticDeliveryInputBoxContentionForTask(taskId, active);
+			if (
+				this.entries.get(taskId)?.active !== active ||
+				active.deferredStartupPromptText !== "/plan" ||
+				active.lastUserInputAt !== humanInputAtRead ||
+				active.submitConfirmTimer !== null ||
+				contention?.verdict !== "input_box_clear_for_programmatic_delivery" ||
+				automaticPasteSubmissionReceiptByActiveProcess.has(active) ||
+				(active.programmaticDeliveryReceipt !== null &&
+					active.programmaticDeliveryReceipt.phase !== "awaiting_readiness") ||
+				resolveSessionFacets(entry.summary).turnOwner !== "user"
+			)
+				return false;
+			clearStartupReadinessTimer(active);
+			// 原生纯斜杠命令只改变模式，没有用户 prompt、模型回合或提交确认回执。
+			return this.writePasteSubmissionWithConfirm(taskId, active, "/plan", { isNativeModeInitializationOnly: true });
 		}
 		const deferredStartupPromptText = active.deferredStartupPromptText;
 		active.deferredStartupPromptText = null;
@@ -1535,6 +1737,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (active.outputReactionEngine !== null) {
 			this.processOutputReactionChunk(taskId, entry, strippedBatchText);
 		}
+	}
+
+	private cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry: SessionEntry): void {
+		const recovery = entry.summary.taskConversationSessionNativeIdentityRecovery;
+		if (recovery?.resumeRequestedAtMs == null) return;
+		this.emitSummary(
+			updateSummary(entry, {
+				taskConversationSessionNativeIdentityRecovery: { ...recovery, resumeRequestedAtMs: null },
+				warningMessage: null,
+			}),
+		);
 	}
 
 	// 实质输出分类器的唯一执行点（节流的 leading 边＝新攒批，trailing 边＝窗口末尾补分析，都走这里）。
@@ -1924,6 +2137,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return null;
 		}
 		const compactionPersistence = options?.rvfCloseoutCompactionConfirmationPersistence;
+		if (text.trim()) this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		if (
 			compactionPersistence &&
 			(compactionPersistence.promptText !== text ||
@@ -2898,6 +3112,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		options?: {
 			retainsProgrammaticDeliveryReceipt?: boolean;
 			waitsForStartupCompletion?: boolean;
+			isNativeModeInitializationOnly?: boolean;
 			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten?: () => void;
 		},
@@ -2906,6 +3121,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const workspaceId = entry?.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : undefined;
 		let automaticPasteSubmissionReceipt: PendingProgrammaticDeliveryReceipt | null = null;
 		if (
+			!options?.isNativeModeInitializationOnly &&
 			!options?.retainsProgrammaticDeliveryReceipt &&
 			this.terminalSessionManagerOptions.enableManagedTaskPromptDeliveryRecording &&
 			workspaceId
@@ -3015,6 +3231,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearSubmitConfirmTimer(active);
 		const generation = ++active.submitConfirmGeneration;
 		this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, {
+			nativeModeInitialization: options?.isNativeModeInitializationOnly
+				? {
+						lastHumanInputAt: active.lastUserInputAt,
+					}
+				: undefined,
 			promptText: text,
 			validateBeforeTerminalWrite: options?.validateBeforeTerminalWrite ?? null,
 			onFirstSubmitCarriageReturnWritten: options?.onFirstSubmitCarriageReturnWritten ?? null,
@@ -3034,6 +3255,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		active: ActiveProcessState,
 		generation: number,
 		ingestionWatch: {
+			nativeModeInitialization?: { lastHumanInputAt: number | null };
 			promptText: string;
 			validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten: (() => void) | null;
@@ -3054,6 +3276,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		generation: number,
 		ingestionWatch: {
+			nativeModeInitialization?: { lastHumanInputAt: number | null };
 			promptText: string;
 			validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten: (() => void) | null;
@@ -3077,6 +3300,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 			active.ptyOutputChunkArrivalSequenceNumber !== ingestionWatch.outputChunkArrivalSequenceNumberAtPasteWrite;
 		if (!pasteIngestionWitnessed && now() < ingestionWatch.ingestionEvidenceDeadlineAt) {
 			this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, ingestionWatch);
+			return;
+		}
+		if (ingestionWatch.nativeModeInitialization) {
+			if (
+				active.lastUserInputAt !== ingestionWatch.nativeModeInitialization.lastHumanInputAt ||
+				active.deferredStartupPromptText !== "/plan" ||
+				automaticPasteSubmissionReceiptByActiveProcess.has(active) ||
+				(active.programmaticDeliveryReceipt !== null &&
+					active.programmaticDeliveryReceipt.phase !== "awaiting_readiness")
+			)
+				return;
+			active.session.write(BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN);
+			active.deferredStartupPromptText = null;
 			return;
 		}
 		const receiptBeforeSubmit = resolveTerminalSubmissionProgrammaticDeliveryReceipt(active);
@@ -3806,6 +4042,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				lastStallLoggedAt: null,
 			});
 		}
+		if (Object.values(record).some((summary) => summary.taskConversationSessionNativeIdentityRecovery))
+			this.ensureStallScanRunning();
 	}
 
 	// 热重启接管：把 agent session PTY host 里仍在跑（或在 runtime 缺席期间刚退出）的会话装回本 manager。
@@ -5105,12 +5343,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
 		pendingUserDecisionKindBeforeProcessRestart?: RuntimeTaskSessionUserTurnKind | null,
+		isTaskSessionStartStillRequested?: () => boolean,
 	): Promise<RuntimeTaskSessionSummary> {
 		const { taskSessionStartRequestId, taskSessionStartRequestStartedAtIso } = arrival;
 		// 拿到闸门的时刻。与「请求到达时刻」分开记是有意的，见 PtySessionSpawnAttribution 上的注释：
 		// 到达时刻在闸门**之外**取，才看得见排队并发；闸门时刻在闸门**之内**取，才判得出互斥是否失效。
 		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
+		const isTaskSessionStartCancelled = () => isTaskSessionStartStillRequested?.() === false;
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		// 有别的路径要起会话了，在途的自动重启就没有意义了：让它跑完只会把刚起的会话顶掉。
 		// 自动重启自己走的是同一个私有方法，故按来源排除，否则它会把自己作废掉。
 		if (taskSessionStartOrigin !== "auto_restart_after_pty_exit") {
@@ -5165,10 +5406,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		//
 		// Cursor 续跑预检排在寻址解析之前：它可能把桶里唯一那段已建立的对话钉成身份，解析器随后就按 id 续跑。
 		request = await this.resolveTaskSessionRequestWithCodexConversationStorageHome(request, entry);
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
+		if (await this.deferSideSessionResumeWaitingForNativeIdentity(entry, request)) return cloneSummary(entry.summary);
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(entry, request);
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(entry, request);
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		// Claude 后台会话预检同样排在寻址解析之前：它可能沿 `continued-in` 链改钉身份。
 		await this.reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(entry, request);
+		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		const resumeAddressingResolvedBeforeAnyDestructiveStep = this.resolveResumeAddressingForTaskSessionStart(
 			request,
 			entry,
@@ -5233,7 +5480,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			request.taskConversationSessionMetadata ?? entry.summary.taskConversationSessionMetadata;
 		// 上面那道前置闸门已经把拒绝态排除干净，这里只剩「按 id」与「cwd-latest」两种。
 		const resumeAddressing = resumeAddressingResolvedBeforeAnyDestructiveStep;
-		let launch: PreparedAgentLaunch;
+		let launch: PreparedAgentLaunch | undefined;
+		const throwIfTaskSessionStartWasCancelled = () => {
+			if (isTaskSessionStartCancelled()) throw new Error("侧会话恢复请求已取消");
+		};
 		const runtimeSessionIncarnationId = randomUUID();
 		let codexConfigurationWriterBinding: CodexConfigurationWriterBinding | null = null;
 		const codexConversationStorageHomeDirectoryPath =
@@ -5245,8 +5495,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				executionWorkingDirectoryPath: request.cwd,
 				cursorAgentChatStoreEnvironmentOverrides: pickCursorAgentChatStoreEnvironmentOverrides(request.env),
 			});
+			throwIfTaskSessionStartWasCancelled();
 			kanbanAssignedAgentNativeConversationSessionIdForFreshStart =
 				await this.establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(entry, request);
+			throwIfTaskSessionStartWasCancelled();
 			if (
 				request.agentId === "codex" &&
 				request.workspaceId &&
@@ -5266,6 +5518,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					binary: request.binary,
 					environment: { ...process.env, ...request.env },
 				});
+				throwIfTaskSessionStartWasCancelled();
 				request = {
 					...request,
 					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
@@ -5309,18 +5562,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 					"forked_from_main_current_turn",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
+			throwIfTaskSessionStartWasCancelled();
 			if (codexConfigurationWriterBinding)
 				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
+			throwIfTaskSessionStartWasCancelled();
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
+			throwIfTaskSessionStartWasCancelled();
 			if (
 				!request.resumeFromTrash &&
 				!request.resumePriorAgentConversationWithoutResendingPrompt &&
 				resumeAddressing.kind !== "addressed_by_observed_agent_native_session_id"
 			) {
 				await request.revalidateTaskConversationSessionMainContextForkSource?.();
+				throwIfTaskSessionStartWasCancelled();
 			}
 		} catch (error) {
+			if (isTaskSessionStartCancelled()) {
+				terminalStateMirror.dispose();
+				await launch?.cleanup?.();
+				return cloneSummary(entry.summary);
+			}
 			const prepareFailureMessage = error instanceof Error ? error.message : String(error);
 			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
 				entry,
@@ -5359,6 +5621,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		} catch (error) {
 			await launch.cleanup?.();
+			if (isTaskSessionStartCancelled()) {
+				terminalStateMirror.dispose();
+				return cloneSummary(entry.summary);
+			}
 			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
 				entry,
 				request,
@@ -5374,6 +5640,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 				await hostCleanup();
 				await adapterCleanup?.();
 			};
+		}
+		if (isTaskSessionStartCancelled()) {
+			terminalStateMirror.dispose();
+			await launch.cleanup?.();
+			return cloneSummary(entry.summary);
 		}
 
 		// Adapters can wrap the configured agent binary when they need extra runtime wiring
@@ -5472,6 +5743,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					text: request.prompt ?? "",
 					runtimeSessionIncarnationId,
 				});
+			throwIfTaskSessionStartWasCancelled();
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
@@ -5535,6 +5807,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 					reason: "no_active_terminal_session",
 				});
 			}
+			if (isTaskSessionStartCancelled()) {
+				terminalStateMirror.dispose();
+				return cloneSummary(entry.summary);
+			}
 			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
 				entry,
 				request,
@@ -5549,6 +5825,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 注入时文件已存在可被 agent 读取。
 		const outputReactionEngine = this.resolveOutputReactionEngine(request);
 		const outputReactionSession = outputReactionEngine?.createSessionState(request.agentId) ?? null;
+		const hasInitialUserContent = Boolean(
+			request.prompt.trim() || request.images?.some((image) => image.data.trim()),
+		);
 		if (outputReactionEngine !== null) {
 			void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {
 				// 落盘失败不阻断续跑：注入体仍引用确定性路径，文件稍后可补写。
@@ -5607,6 +5886,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 让重播的旧 transcript 把卡片刷成「刚刚响应」。反过来，崩溃后从原始 prompt 全新重跑的
 			// auto-restart 不带任何续跑旗标 → 不武装，其真实新产出照常推进时间戳。
 			suppressSubstantiveOutputUntilContinues:
+				!hasInitialUserContent ||
 				request.resumeFromTrash === true ||
 				request.resumePriorAgentConversationWithoutResendingPrompt === true ||
 				launch.resumesPriorAgentConversation === true,
@@ -5641,8 +5921,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 闸门就位之后这一格打不中（唯二写这个槽位的就是 startTaskSession 与 startShellSession，两者
 		// 都排在同一条链上）。留着它是因为「静默产生一个再也停不掉的进程」这种缺陷，事后从现场倒推回
 		// 这里的代价极高，而 fail-closed 的成本只有一次对象比较。
-		if (entry.active !== activeSlotObservedBeforeSpawn) {
-			session.stop();
+		if (entry.active !== activeSlotObservedBeforeSpawn || isTaskSessionStartCancelled()) {
+			// hosted spawn 的 await 期间可能已 Stop、变更责任或关停；迟到活体不能再装载。
+			session.stop({ force: true });
 			terminalStateMirror.dispose();
 			if (launch.cleanup) {
 				void launch.cleanup().catch(() => {
@@ -5689,7 +5970,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		// 「本次启动没有新 prompt 被投出去」⇒ 开局回合归用户。垃圾桶恢复与通道切换重开都属此列。
 		const startsWithoutSendingNewPrompt = Boolean(
-			request.resumeFromTrash ||
+			!hasInitialUserContent ||
+				request.resumeFromTrash ||
 				request.resumePriorAgentConversationWithoutResendingPrompt ||
 				launch.resumesPriorAgentConversation === true,
 		);
@@ -5729,6 +6011,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
 			runtimeSessionIncarnationId,
 			codexNativeSessionControlEndpoint: codexControlHost?.endpoint ?? null,
+			taskConversationSessionNativeIdentityRecovery:
+				!hasInitialUserContent &&
+				taskConversationSessionMetadataForLaunch &&
+				taskConversationSessionMetadataForLaunch.taskConversationSessionRole !== "main" &&
+				canAgentResumeByRecordedNativeConversationSessionId(request.agentId) &&
+				!entry.summary.agentNativeConversationSessionIdentity
+					? {
+							runtimeSessionIncarnationId,
+							forkSourceNativeSessionId:
+								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							resumeRequestedAtMs: null,
+							consecutiveUnchangedProbeCount: 0,
+							lastEvidenceFingerprint: null,
+							nextProbeAtMs: now(),
+						}
+					: null,
 			codexConfigurationWriterBinding,
 			agentConversationPromptSubmissionAcceptance: null,
 			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath } : {}),
@@ -6392,6 +6690,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
 		}
+		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		if (
 			entry.summary.agentId === "kimi" &&
 			entry.active.deferredStartupPromptText !== null &&
@@ -6447,16 +6746,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.awaitingCodexPromptAfterEnter = true;
 		}
 		entry.active.session.write(data);
-		const submittedUserMessagePreview = data.includes(10) || data.includes(13) ? data.toString("utf8").trim() : "";
-		if (submittedUserMessagePreview && entry.summary.taskConversationSessionMetadata) {
-			const summary = updateSummary(entry, {
-				taskConversationSessionMetadata: {
-					...entry.summary.taskConversationSessionMetadata,
-					latestUserMessagePreview: submittedUserMessagePreview,
-				},
-			});
-			this.emitSummary(summary);
-		}
+		// 信任确认、菜单选择与换行都不是接受证据；侧会话预览只随原生接受的正文推进。
 		return cloneSummary(entry.summary);
 	}
 
@@ -7652,6 +7942,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				previous.runtimeSessionIncarnationId === input.runtimeSessionIncarnationId)
 		)
 			return cloneSummary(entry.summary);
+		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		const receipt = resolveTerminalSubmissionProgrammaticDeliveryReceipt(entry.active);
 		const capturedNativeCursor = receipt?.nativeConversationActivityCursorImmediatelyBeforeSubmit;
 		const isNewMessageAfterCapturedNativePredecessor =
@@ -7688,9 +7979,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				userHandoff !== undefined &&
 				userHandoff.observedAtMs >= (entry.summary.startedAt ?? 0) &&
 				userHandoff.observedAtMs >= input.observedAtMs);
+		const submittedUserMessagePreview = input.submittedPromptText?.trim();
 		const summary = updateSummary(
 			entry,
 			{
+				...(submittedUserMessagePreview && entry.summary.taskConversationSessionMetadata
+					? {
+							taskConversationSessionMetadata: {
+								...entry.summary.taskConversationSessionMetadata,
+								latestUserMessagePreview: submittedUserMessagePreview,
+							},
+						}
+					: {}),
 				...(!shouldPreserveCurrentTurnAfterAcceptedInput
 					? {
 							...buildTerminalFacetPatch(entry.summary, "running", {
@@ -7924,6 +8224,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		}
 		this.emitSummary(summary);
+		if (entry.summary.taskConversationSessionNativeIdentityRecovery)
+			void this.advanceSideSessionNativeIdentityRecovery(entry).catch(() => {});
 		return cloneSummary(summary);
 	}
 
@@ -7935,6 +8237,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) return null;
 		if (JSON.stringify(entry.summary.taskConversationSessionMetadata) === JSON.stringify(metadata))
 			return cloneSummary(entry.summary);
+		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		if (entry.restartRequest?.kind === "task") {
 			entry.restartRequest = {
 				...entry.restartRequest,
@@ -8010,6 +8313,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
 		// 那是最刺眼的一种不听话。
@@ -8041,11 +8345,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// Stop the PTY and wait until the process group has actually exited.
 	// Tries SIGTERM first; escalates to SIGKILL after the graceful window so
 	// a wedged TUI cannot block a user-initiated refresh.
-	async forceStopTaskSession(taskId: string, gracefulTimeoutMs = 2_000): Promise<void> {
+	async forceStopTaskSession(
+		taskId: string,
+		gracefulTimeoutMs = 2_000,
+		preservesPendingNativeIdentityRecovery = false,
+	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return;
 		}
+		if (!preservesPendingNativeIdentityRecovery) this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
 		this.cancelPendingAutoRestart(entry);
 		this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
@@ -8196,6 +8505,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
 		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: boolean,
+		isPendingNativeIdentityRecoveryStillCurrent?: () => boolean,
 	): Promise<RuntimeTaskSessionSummary> {
 		// 目录迁移与「预检、停旧、启动」共用同一把锁，避免预检通过后绑定再次变化。
 		return this.runTaskSessionOperationHoldingCodexConversationStorageExclusivity(request, () =>
@@ -8204,6 +8514,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				taskSessionStartOrigin,
 				arrival,
 				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+				isPendingNativeIdentityRecoveryStillCurrent,
 			),
 		);
 	}
@@ -8213,24 +8524,33 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
 		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: boolean,
+		isPendingNativeIdentityRecoveryStillCurrent?: () => boolean,
 	): Promise<RuntimeTaskSessionSummary> {
 		// 预检必须在 forceStopTaskSession **之前**：本方法是「停掉再起一条」，而拒绝的语义是「这次不动它」。
 		// 先停再让下游拒绝，等于用户点一次重启就把一条还活着的会话杀掉、还什么都没续上。
 		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
 		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
 		if (entryBeforeDestructiveRestart) {
+			const recoveryWasCancelled = () => isPendingNativeIdentityRecoveryStillCurrent?.() === false;
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
+			if (await this.deferSideSessionResumeWaitingForNativeIdentity(entryBeforeDestructiveRestart, request))
+				return cloneSummary(entryBeforeDestructiveRestart.summary);
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			request = await this.resolveTaskSessionRequestWithCodexConversationStorageHome(
 				request,
 				entryBeforeDestructiveRestart,
 			);
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			await this.refuseCodexResumeWithoutPersistedConversationBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,
 			);
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,
 			);
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			await this.reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,
@@ -8239,6 +8559,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
 				},
 			);
+			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			const resumeAddressing = this.resolveResumeAddressingForTaskSessionStart(
 				request,
 				entryBeforeDestructiveRestart,
@@ -8255,12 +8576,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const pendingUserDecisionKindBeforeProcessRestart = summaryBeforeProcessStop
 			? resolveSessionFacets(summaryBeforeProcessStop).userTurnKind
 			: undefined;
-		await this.forceStopTaskSession(request.taskId, 2_000);
+		await this.forceStopTaskSession(request.taskId, 2_000, isPendingNativeIdentityRecoveryStillCurrent !== undefined);
+		if (isPendingNativeIdentityRecoveryStillCurrent?.() === false)
+			return cloneSummary(this.ensureEntry(request.taskId).summary);
 		const summary = await this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 			request,
 			taskSessionStartOrigin,
 			arrival,
 			pendingUserDecisionKindBeforeProcessRestart,
+			isPendingNativeIdentityRecoveryStillCurrent,
 		);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
@@ -8354,6 +8678,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
+		this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = true;
 		// 先把**每一个** entry 的自动重启掐掉，再处理活会话——顺序与范围都要紧。
 		//
 		// 范围：在途的自动重启恰恰挂在 active 为 null 的 entry 上（上一条 PTY 已死、新的还没起），
@@ -8456,6 +8781,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private async scanEntriesForStalls(): Promise<void> {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
+			if (entry.summary.taskConversationSessionNativeIdentityRecovery)
+				void this.advanceSideSessionNativeIdentityRecovery(entry).catch(() => {});
 			if (entry.active && isCodexIdleStallNativeReconciliationCandidate(entry.summary)) {
 				await this.inspectCodexNativeTurnBeforeIdleStallSessionReclamation(taskId);
 			}
@@ -8566,6 +8893,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	dispose(): void {
+		this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = true;
 		this.nativeExecutionReadAbortController.abort();
 		this.nativeExecutionReadRetriesByConversationSessionId.clear();
 		if (this.stallScanInterval !== null) {
@@ -8771,6 +9099,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					const requestForRestart = cloneStartTaskSessionRequest(request);
 					if (requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId) {
+						if (
+							await this.deferSideSessionResumeWaitingForNativeIdentity(entry, {
+								...requestForRestart,
+								resumePriorAgentConversationWithoutResendingPrompt: true,
+							})
+						)
+							return;
 						const observedChildIdentity = entry.summary.agentNativeConversationSessionIdentity;
 						if (
 							!observedChildIdentity ||

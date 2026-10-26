@@ -21,6 +21,8 @@ vi.mock("../../src/terminal/agent-session-adapters", async (importOriginal) => (
 		binary: input.binary,
 		args: input.args,
 		env: input.env ?? {},
+		deferredStartupPromptText: input.startInPlanMode ? "/plan" : undefined,
+		resumesPriorAgentConversation: input.args.includes("fork"),
 	}),
 }));
 
@@ -28,7 +30,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 	"普通 Codex rewind 的原生状态校正（无 RVF、无外部模型）",
 	{ timeout: 180_000 },
 	() => {
-		it.for(["fresh_review", "restored_needs_input"])(
+		it.for(["fresh_review", "restored_needs_input", "fork_without_initial_prompt"])(
 			"%s：回退后不再发 prompt，同一进程状态与原生空闲事实一致",
 			async (mode, test) => {
 				vi.stubEnv("TMPDIR", "/tmp");
@@ -59,7 +61,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 							?.content?.map((part) => part.text ?? "")
 							.join("") ?? "";
 					// Codex 也会用同一 provider 后台生成标题；它不代表主对话收到新 prompt。
-					if (["ORDINARY_FIRST_PROMPT", "ORDINARY_SECOND_PROMPT"].includes(lastUserMessageText))
+					if (
+						["ORDINARY_FIRST_PROMPT", "ORDINARY_SECOND_PROMPT", "FIRST_INPUT_AFTER_EMPTY_FORK"].includes(
+							lastUserMessageText,
+						)
+					)
 						mainConversationRequestCount++;
 					modelRequestObservations.push({ path: request.url, method: request.method, lastUserMessageText });
 					const count = ++requestCount;
@@ -155,22 +161,25 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 				);
 				const environment = fixture.createIsolatedChildProcessEnvironment({
 					CODEX_HOME: codexHome,
+					CODEX_SQLITE_HOME: codexHome,
 					TERM: "xterm-256color",
 					CODEX_INTERNAL_ORIGINATOR_OVERRIDE: undefined,
 				});
 				const manager = new TerminalSessionManager({ prepareCodexNativeSessionControlHostLaunch });
-				const taskId = "ordinary-rewind-conversation";
+				let taskId = "ordinary-rewind-conversation";
 				let output = "";
 				const emittedSummaries: RuntimeTaskSessionSummary[] = [];
 				const unsubscribeSummary = manager.onSummary((summary) => emittedSummaries.push(summary));
-				manager.attach(taskId, {
-					onOutput: (chunk) => {
-						const text = chunk.toString();
-						output += text;
-						if (text.includes("\x1b[6n")) manager.writeInput(taskId, Buffer.from("\x1b[1;1R"));
-						if (text.includes("\x1b[c")) manager.writeInput(taskId, Buffer.from("\x1b[?1;2c"));
-					},
-				});
+				const attachTerminal = (conversationSessionId: string) =>
+					manager.attach(conversationSessionId, {
+						onOutput: (chunk) => {
+							const text = chunk.toString();
+							output += text;
+							if (text.includes("\x1b[6n")) manager.writeInput(conversationSessionId, Buffer.from("\x1b[1;1R"));
+							if (text.includes("\x1b[c")) manager.writeInput(conversationSessionId, Buffer.from("\x1b[?1;2c"));
+						},
+					});
+				attachTerminal(taskId);
 				const binary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex";
 				const start = (resumeFromTrash: boolean, nativeId?: string) =>
 					manager.startTaskSession({
@@ -192,8 +201,8 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 						resumeFromTrash,
 					});
 				const current = () => manager.getSummary(taskId) as RuntimeTaskSessionSummary;
-				const query = async () => {
-					const endpoint = current().codexNativeSessionControlEndpoint;
+				const query = async (conversationSessionId = taskId) => {
+					const endpoint = manager.getSummary(conversationSessionId)?.codexNativeSessionControlEndpoint;
 					if (!endpoint) throw new Error("缺少本代控制端点");
 					return withRunningCodexAppServerControlSocketConnection(
 						async (port) => {
@@ -280,10 +289,59 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 								output.slice(resumeOutputStart).includes("Ask Codex to do anything"),
 						);
 					}
+					const parentTaskId = taskId;
+					if (mode === "fork_without_initial_prompt") {
+						const requestCountBeforeFork = mainConversationRequestCount;
+						const forkOutputStart = output.length;
+						taskId = "task-conversation-session-empty-native-fork";
+						attachTerminal(taskId);
+						const emptyFork = await manager.startTaskSession({
+							taskId,
+							workspaceTaskId: parentTaskId,
+							agentId: "codex",
+							binary,
+							args: ["--no-alt-screen", "-C", repository.repositoryPath, "fork", first.id],
+							cwd: repository.repositoryPath,
+							prompt: "",
+							workspaceId: "isolated-rewind",
+							env: environment,
+							startInPlanMode: true,
+							cols: 140,
+							rows: 42,
+							taskConversationSessionMainContextForkSourceNativeSessionId: first.id,
+							taskConversationSessionMetadata: {
+								workspaceTaskId: parentTaskId,
+								taskConversationSessionRole: "task_collaborator",
+								taskConversationSessionContextSource: "forked_from_main_current_turn",
+								parentTaskConversationSessionId: parentTaskId,
+								mainSessionOriginTurnNumber: 2,
+								mainSessionOriginUserMessagePreview: "ORDINARY_SECOND_PROMPT",
+								latestUserMessagePreview: null,
+							},
+						});
+						expect(emptyFork.turnOwner).toBe("user");
+						await wait("无首发 fork 已加载独立历史并保持待输入", async () => {
+							const child = await query();
+							return Boolean(
+								child && child.id !== first.id && child.turns.length === 2 && child.canAcceptDirectInput,
+							);
+						});
+						await wait(
+							"fork 在首条输入前已补证原生子身份",
+							async () =>
+								current().agentNativeConversationSessionIdentity?.nativeSessionId === (await query())?.id,
+						);
+						expect(mainConversationRequestCount).toBe(requestCountBeforeFork);
+						expect(current().agentResponseGenerationTurnSequence ?? 0).toBe(0);
+						expect(current().lastAgentConversationUserHandoffObservation ?? null).toBeNull();
+						await wait("fork 的 TUI 已显示原生历史", async () =>
+							output.slice(forkOutputStart).includes("ORDINARY_SECOND_PROMPT"),
+						);
+					}
 					const beforeRewind = await query();
 					const nativeTurnBeforeRewind = beforeRewind?.turns[0]?.id;
 					const pidBeforeRewind = current().pid;
-					expect(current().userTurnKind).toBe(mode === "fresh_review" ? "review" : "needs_input");
+					expect(current().userTurnKind).toBe(mode === "restored_needs_input" ? "needs_input" : "review");
 					const requestsBeforeRewind = mainConversationRequestCount;
 					const rewindOutputStart = output.length;
 					manager.writeInput(taskId, Buffer.from("\x1b"));
@@ -323,6 +381,22 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 					] as const)
 						expect(current()[key]).toEqual(beforeCorrection[key]);
 					expect(emittedSummaries.at(-1)?.userTurnKind).toBe("review");
+					if (mode === "fork_without_initial_prompt") {
+						manager.writeInput(taskId, Buffer.from("\x15FIRST_INPUT_AFTER_EMPTY_FORK"));
+						await delay(250);
+						manager.writeInput(taskId, Buffer.from("\r"));
+						await wait(
+							"空 fork 经原生 Rewind 后首条真实输入只处理一次",
+							async () =>
+								mainConversationRequestCount === requestsBeforeRewind + 1 &&
+								(await query())?.status.type === "idle",
+						);
+						expect((await query(parentTaskId))?.id).toBe(first.id);
+						expect((await query(parentTaskId))?.turns).toHaveLength(2);
+						expect(
+							manager.getSummary(parentTaskId)?.agentNativeConversationSessionIdentity?.nativeSessionId,
+						).toBe(first.id);
+					}
 					const evidenceDirectory = process.env.KANBAN_CODEX_REWIND_RECONCILIATION_EVIDENCE_DIRECTORY;
 					if (evidenceDirectory) {
 						await mkdir(evidenceDirectory, { recursive: true });
