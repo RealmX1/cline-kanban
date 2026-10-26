@@ -34,11 +34,15 @@
 
 ## 单轮 AI 分析
 
-项目归属、查卡第一阶段和关系建议使用同一无工具 headless CLI 执行器，默认 Codex，可在 Settings 的“AI 任务分析”选择 Codex/Claude 和模型，并由统一 Save/Cancel 管理。旧项目执行器设置保留兼容读取；显式全局保存后以全局配置为准，文件位于 `~/.cline/kanban/task-analysis/executor-settings.json`。查卡原有答案阶段和历史保留。
+项目归属、查卡召回与解释、任务起名、关系建议和后台关系分诊统一使用无工具单轮 API。Settings 的“AI 任务分析”配置首选和备用 provider，沿用统一 Save/Cancel；模型、端点和凭据复用 provider 档案。默认首选 MiniMax、备用 DeepSeek，未配置 MiniMax 时直接使用 DeepSeek。旧 CLI 配置仅兼容读取历史，不再驱动新请求。详见 [API 主备路由](task-assistance-api-provider-routing.md)。
 
-共同指令和 L1/L2 Context 构成稳定前缀，用途指令与本次查询放在末尾；三种用途共用 `TASK_ANALYSIS_SHARED_CONTEXT_VERSION` 管理快照。日志记录真实前缀哈希与用量，不承诺跨 CLI 进程缓存命中。允许推理，但禁止工具和自主探索。
+项目归属与查卡共享安全指令，使用独立轻量 Context：完整注册项目名与路径、每项目最多三条非 Trash 相关标题；没有相关标题时按最近时间选择。新任务正文完整保留，不加载通知归档、会话 recap 或既有任务完整正文。查卡继续保留共享 L1–L3、两阶段查询、候选完整要求、历史问题和图片归属。日志记录真实 provider、请求与实际模型、操作和阶段、用量及前缀哈希；上游未返回的缓存用量保持未知。
 
-界面 Create/Save/Start 自动分析，也提供手动入口；CLI 和后台自动动作保持原语义。项目合适则继续，有建议时明确选择采纳或保留，失败时显示 toast 和保留原项目继续的入口。并发相同输入共用请求，批量创建逐项分析；关系保存失败不启动 Agent。
+“所属项目”区域的“自动分析项目归属”开关默认关闭。偏好使用全局 runtime config 的 `userInterfacePreferencesSharedAcrossBrowserOrigins.taskProjectAssignmentAutomaticAnalysisEnabled`，跨项目、创建与 Backlog 编辑共用；旧配置缺失或 `null` 都按关闭处理，成功保存后刷新与运行时重启均保留。浏览器按点击顺序保存，本页显式选择覆盖迟到响应；保存失败明确提示，保留当前页面选择，刷新后仍以服务端持久值为准。
+
+关闭时，界面 Create/Save/Start 沿用当前项目与分支，不发起自动分析，也不写入“已接受分析”缓存；“分析项目归属”手动入口始终保留。开启后提交与直接启动读取同一偏好，批量创建在每项开始时读取最新选择；已经开始的分析不因切换开关而取消。CLI 和后台自动动作保持原语义。
+
+项目合适则继续，有建议时明确选择采纳或保留，失败时显示 toast 和保留原项目继续的入口。并发相同输入共用请求；关系保存失败不启动 Agent。等待状态分别显示分析、保存或启动。
 
 后续 Backlog：`24b78` 评估 Decision Model；`8aa51` 建设警告与错误的持久观察入口。当前 toast 没有统一持久日志，后端专项诊断日志和任务通知历史不能当作全部错误历史。
 
@@ -47,6 +51,6 @@
 - Web 单元测试覆盖编辑器、草稿、显示偏好、剪贴板解析和分析失败选择。
 - `web-ui/playwright.task-editor-isolated.config.ts` 启动独占 Vite 端口，以受控接口验证桌面、手机、背景焦点、折叠隐藏和剪贴板关系预选。
 - `backlog-task-project-transfer-through-runtime.integration.test.ts` 使用 HOME 与 Git fixture 隔离，验证账本身份、往返迁移、旧快照门禁及中断恢复。
-- `task-project-assignment-single-turn-analysis.integration.test.ts` 使用受控 Codex CLI，核验单轮次数、禁工具参数、实际前缀字节及旧设置兼容。
+- `task-project-assignment-single-turn-analysis.integration.test.ts` 使用隔离 HTTP API fixture，核验单轮次数、零 CLI 启动、完整新正文、独立轻量 Context 及旧设置兼容。
 
 含原生账本的测试应使用与安装依赖相同的 Node；此工作区的共享原生依赖对应 Node 24，不在任务工作区重建共享 `node_modules`。构建前必须移开 `dist` 与 `web-ui/dist` 的共享软链，并指定隔离分发目录。

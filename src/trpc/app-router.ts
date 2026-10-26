@@ -379,6 +379,8 @@ import {
 	runtimeSlashCommandsResponseSchema,
 	runtimeTaskAgentUserDecisionResolveRequestSchema,
 	runtimeTaskAgentUserDecisionResolveResponseSchema,
+	runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema,
+	runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema,
 	runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema,
 	runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema,
 	runtimeTaskCardActionMoveIntoDoneRequestSchema,
@@ -541,6 +543,7 @@ import {
 	rvfCloseoutStageClaimRequestSchema,
 	rvfCloseoutStageClaimResponseSchema,
 } from "../core/rvf-automatic-closeout-recovery-contract";
+import { taskAssistanceModelProviderRoutingSettingsSchema } from "../core/task-assistance-model-provider-routing-contract";
 import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
@@ -778,6 +781,7 @@ export interface RuntimeTrpcContext {
 		suggestTaskNamesFromTaskDescription: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTaskNameSuggestionRequest,
+			abortSignal?: AbortSignal,
 		) => Promise<RuntimeTaskNameSuggestionResponse>;
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1081,6 +1085,11 @@ export interface RuntimeTrpcContext {
 	};
 	// 看板卡片 per-card 动作的唯一服务端实现（src/trpc/task-card-action-api.ts）。浏览器与 CLI 都调它。
 	taskCardActionApi: {
+		applyTaskStickerEntryMutation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema>>;
 		transferNeverStartedBacklogTaskToProject?: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema>,
@@ -1593,6 +1602,19 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
 			}),
+		getTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(taskAssistanceModelProviderRoutingSettingsSchema)
+			.query(({ ctx }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.getTaskAssistanceModelProviderRoutingSettings();
+			}),
+		setTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskAssistanceModelProviderRoutingSettingsSchema)
+			.output(taskAssistanceModelProviderRoutingSettingsSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.setTaskAssistanceModelProviderRoutingSettings(input);
+			}),
 		getGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(taskIndexingSupportExecutorSettingsSchema)
 			.query(({ ctx }) => {
@@ -1609,9 +1631,9 @@ export const runtimeAppRouter = t.router({
 		analyzeTaskProjectAssignment: workspaceProcedure
 			.input(taskProjectAssignmentAnalysisRequestSchema)
 			.output(taskProjectAssignmentAnalysisResponseSchema)
-			.mutation(({ ctx, input }) => {
+			.mutation(({ ctx, input, signal }) => {
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input);
+				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input, signal);
 			}),
 		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
 			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
@@ -1903,8 +1925,8 @@ export const runtimeAppRouter = t.router({
 		suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeTaskNameSuggestionRequestSchema)
 			.output(runtimeTaskNameSuggestionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input);
+			.mutation(async ({ ctx, input, signal }) => {
+				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
 			}),
 		startTaskSession: workspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)
@@ -2446,6 +2468,16 @@ export const runtimeAppRouter = t.router({
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
 	taskCardAction: t.router({
+		applyTaskStickerEntryMutation: workspaceProcedure
+			.input(runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema)
+			.output(runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.taskCardActionApi.applyTaskStickerEntryMutation(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
 		transferNeverStartedBacklogTaskToProject: workspaceProcedure
 			.input(runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema)
 			.output(runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema)

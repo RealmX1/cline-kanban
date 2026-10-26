@@ -22,6 +22,7 @@ import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
+import { taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import {
 	TaskAgentModelPicker,
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
@@ -71,7 +72,11 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
-import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import {
+	useTaskCreateDialogPrimaryStartActionPreference,
+	useTaskProjectAssignmentAutomaticAnalysisEnabledPreference,
+} from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import {
 	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
 	type TriggeringExplicitUserGestureEvent,
@@ -431,6 +436,9 @@ export function TaskEditorDialog({
 	const startInPlanModeId = useId();
 	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
+	const automaticProjectAssignmentAnalysisId = useId();
+	const [automaticProjectAssignmentAnalysisEnabled, setAutomaticProjectAssignmentAnalysisEnabled] =
+		useTaskProjectAssignmentAutomaticAnalysisEnabledPreference();
 	const [primaryStartAction, setPrimaryStartAction] = useTaskCreateDialogPrimaryStartActionPreference();
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 	const {
@@ -691,11 +699,13 @@ export function TaskEditorDialog({
 				processedFollowUpSeedInitializationId !==
 					postDeployVerificationFollowUpTaskCreationDraftSeed.initializationId));
 	const [isRelationAwareCreationInFlight, setIsRelationAwareCreationInFlight] = useState(false);
+	const [taskEditorOperationStatusText, setTaskEditorOperationStatusText] = useState<string | null>(null);
 	useEffect(() => {
 		submissionOperationTokenRef.current = null;
 		submissionInFlightRef.current = false;
 		setIsRelationAwareCreationInFlight(false);
 		setIsTaskEditorPersisting(false);
+		setTaskEditorOperationStatusText(null);
 	}, [open, editorSessionWorkspaceId, editingTaskId]);
 	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
 	const [relationAwareCreationError, setRelationAwareCreationError] = useState<string | null>(null);
@@ -816,24 +826,33 @@ export function TaskEditorDialog({
 			return false;
 		}
 		const operationToken = Symbol("task-editor-submission");
+		// 每项操作开始时读取最新偏好；批量后续项也跟随新选择，已发起的分析继续完成。
+		const automaticProjectAssignmentAnalysisEnabledForThisSubmission =
+			readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled") === true;
 		submissionOperationTokenRef.current = operationToken;
 		submissionInFlightRef.current = true;
 		setIsRelationAwareCreationInFlight(true);
 		setRelationAwareCreationError(null);
+		setTaskEditorOperationStatusText(
+			automaticProjectAssignmentAnalysisEnabledForThisSubmission ? "正在分析项目归属…" : "正在保存任务…",
+		);
 		try {
-			const assignment = await runTaskProjectAssignmentPreflight({
-				workspaceId: targetWorkspaceId,
-				title: submittingTitle,
-				prompt: submittingPrompt,
-				baseRef: branchRef,
-				isStillCurrent: () =>
-					latestSubmissionInputRef.current === inputSnapshot &&
-					JSON.stringify({
-						drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
-						revocations: relationModeling.readLatestDraft().relationRevocations,
-					}) === relationSnapshot,
-			});
+			const assignment = automaticProjectAssignmentAnalysisEnabledForThisSubmission
+				? await runTaskProjectAssignmentPreflight({
+						workspaceId: targetWorkspaceId,
+						title: submittingTitle,
+						prompt: submittingPrompt,
+						baseRef: branchRef,
+						isStillCurrent: () =>
+							latestSubmissionInputRef.current === inputSnapshot &&
+							JSON.stringify({
+								drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
+								revocations: relationModeling.readLatestDraft().relationRevocations,
+							}) === relationSnapshot,
+					})
+				: { workspaceId: targetWorkspaceId, baseRef: branchRef };
 			if (!assignment) return false;
+			setTaskEditorOperationStatusText("正在保存任务…");
 			if (taskEditorMode === "create")
 				await ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission(assignment.workspaceId);
 			if (latestSubmissionInputRef.current !== inputSnapshot) return false;
@@ -942,13 +961,15 @@ export function TaskEditorDialog({
 				await relationModeling.applyToTask(taskId, characteristics, assignment.workspaceId);
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("保存关系期间输入又有更改，新的草稿已保留，尚未启动任务。");
-			rememberTaskProjectAssignmentAnalysisAccepted(
-				assignment.workspaceId,
-				taskId,
-				submittingTitle,
-				submittingPrompt,
-			);
+			if (automaticProjectAssignmentAnalysisEnabledForThisSubmission)
+				rememberTaskProjectAssignmentAnalysisAccepted(
+					assignment.workspaceId,
+					taskId,
+					submittingTitle,
+					submittingPrompt,
+				);
 			if (action !== "create") {
+				setTaskEditorOperationStatusText("正在启动任务…");
 				const started = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId: assignment.workspaceId,
 					taskId,
@@ -986,6 +1007,7 @@ export function TaskEditorDialog({
 				submissionOperationTokenRef.current = null;
 				setIsRelationAwareCreationInFlight(false);
 				setIsTaskEditorPersisting(false);
+				setTaskEditorOperationStatusText(null);
 			}
 		}
 	};
@@ -1036,6 +1058,7 @@ export function TaskEditorDialog({
 		submissionOperationTokenRef.current = operationToken;
 		submissionInFlightRef.current = true;
 		setIsRelationAwareCreationInFlight(true);
+		setTaskEditorOperationStatusText("正在分析项目归属…");
 		try {
 			const result = await runTaskProjectAssignmentPreflight({
 				workspaceId: targetWorkspaceId,
@@ -1055,6 +1078,7 @@ export function TaskEditorDialog({
 				submissionInFlightRef.current = false;
 				submissionOperationTokenRef.current = null;
 				setIsRelationAwareCreationInFlight(false);
+				setTaskEditorOperationStatusText(null);
 			}
 		}
 	};
@@ -1423,6 +1447,31 @@ export function TaskEditorDialog({
 																/>
 															</div>
 														) : null}
+														<div className="mb-3">
+															<label
+																htmlFor={automaticProjectAssignmentAnalysisId}
+																className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-text-primary"
+															>
+																<RadixSwitch.Root
+																	id={automaticProjectAssignmentAnalysisId}
+																	data-verification-anchor={taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey()}
+																	aria-label="自动分析项目归属"
+																	aria-describedby={`${automaticProjectAssignmentAnalysisId}-description`}
+																	checked={automaticProjectAssignmentAnalysisEnabled}
+																	onCheckedChange={setAutomaticProjectAssignmentAnalysisEnabled}
+																	className="relative h-5 w-9 shrink-0 cursor-pointer rounded-full bg-surface-4 data-[state=checked]:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-1"
+																>
+																	<RadixSwitch.Thumb className="block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[18px] motion-reduce:transition-none" />
+																</RadixSwitch.Root>
+																<span>自动分析项目归属</span>
+															</label>
+															<p
+																id={`${automaticProjectAssignmentAnalysisId}-description`}
+																className="text-xs text-text-secondary"
+															>
+																开启后，创建、保存和启动前自动分析。所有项目共用。
+															</p>
+														</div>
 														<Button
 															size="sm"
 															disabled={!promptDraft.trim() || isRelationAwareCreationInFlight}
@@ -1754,9 +1803,9 @@ export function TaskEditorDialog({
 							{relationAwareCreationError}
 						</p>
 					) : null}
-					{isRelationAwareCreationInFlight ? (
+					{taskEditorOperationStatusText ? (
 						<p role="status" className="px-4 py-2 text-xs text-text-secondary">
-							正在分析项目归属或保存任务…
+							{taskEditorOperationStatusText}
 						</p>
 					) : null}
 					<DialogFooter>

@@ -9,6 +9,7 @@
 // 「这次没成」，而不是一个把业务流程打断的异常。调用方拿到 `unavailable` 自己决定怎么降级。
 
 import { z } from "zod";
+import type { RuntimeTaskImage } from "../core/api-contract";
 import { resolveKanbanChatCredential } from "./kanban-model-provider-settings";
 import {
 	type ModelProviderCredential,
@@ -28,7 +29,8 @@ export type ModelProviderRequestUnavailableReason =
 	/** 一家都没配、指定的那家没配、或配了多家却没指定默认值。 */
 	| "model_provider_not_configured"
 	/** 发出去了但没拿到可用结果：非 2xx、超时、断连、回包形状不对。 */
-	| "request_failed";
+	| "request_failed"
+	| "execution_cancelled";
 
 export type ModelProviderTextResult =
 	| { status: "completed"; messageContent: string }
@@ -52,10 +54,13 @@ export interface ModelProviderChatCompletionRequest {
 	 * 「Kanban 的哪个功能在发这次调用」。必填、没有默认值——它是用量日志唯一能把一次 HTTP 调用归因到
 	 * 功能上的钥匙，给了默认值就等于允许调用点悄悄不表态。
 	 */
-	modelUsagePurpose: Exclude<
-		ModelUsagePurpose,
-		"task_indexing_support_relation_analysis" | "task_lookup_conversation" | "task_project_assignment_analysis"
-	>;
+	modelUsagePurpose: ModelUsagePurpose;
+	operationId?: string;
+	stage?: string;
+	stablePromptPrefixSha256?: string;
+	fallbackReason?: string;
+	abortSignal?: AbortSignal;
+	questionImages?: RuntimeTaskImage[];
 	/** 交代角色与输出格式的那一段。 */
 	systemPrompt: string;
 	/** 这一次真正要处理的内容。调用方负责先裁到合理长度。 */
@@ -75,6 +80,7 @@ export interface ModelProviderChatCompletionRequest {
 }
 
 export interface ModelProviderRequestOptions {
+	abortSignal?: AbortSignal;
 	/** 单测用：不必污染进程环境就能覆盖各种配置组合。 */
 	environmentVariables?: NodeJS.ProcessEnv;
 	/** 单测用：不必真的联网。 */
@@ -84,18 +90,25 @@ export interface ModelProviderRequestOptions {
 		modelProviderId: string;
 		modelId: string;
 		elapsedMs: number;
+		resolvedModelId?: string;
 		httpStatusCode?: number;
 		promptTokenCount?: number;
 		completionTokenCount?: number;
+		cacheReadTokenCount?: number;
+		cacheWriteTokenCount?: number;
 		result: ModelProviderTextResult;
 	}) => Promise<void>;
 }
 
 const CHAT_COMPLETION_RESPONSE_SCHEMA = z.object({
+	model: z.string().optional(),
 	choices: z
 		.array(
 			z.object({
-				message: z.object({ content: z.string().nullish() }).optional(),
+				finish_reason: z.string().nullish(),
+				message: z
+					.object({ content: z.string().nullish(), tool_calls: z.array(z.unknown()).optional() })
+					.optional(),
 			}),
 		)
 		.optional(),
@@ -104,11 +117,18 @@ const CHAT_COMPLETION_RESPONSE_SCHEMA = z.object({
 			prompt_tokens: z.number().optional(),
 			completion_tokens: z.number().optional(),
 			total_tokens: z.number().optional(),
+			prompt_cache_hit_tokens: z.number().optional(),
+			cache_read_input_tokens: z.number().optional(),
+			cache_creation_input_tokens: z.number().optional(),
+			prompt_tokens_details: z.object({ cached_tokens: z.number().optional() }).optional(),
 		})
 		.optional(),
 });
 
 interface ChatCompletionAttemptOutcome {
+	resolvedModelId?: string;
+	cacheReadTokenCount?: number;
+	cacheWriteTokenCount?: number;
 	result: ModelProviderTextResult;
 	httpStatusCode?: number;
 	promptTokenCount?: number;
@@ -126,11 +146,11 @@ function unavailable(
 }
 
 function toFailureDetail(error: unknown): string {
-	if (error instanceof Error) {
-		// AbortSignal.timeout 抛的是 TimeoutError，名字本身就是最有用的那句话。
-		return error.name === "TimeoutError" ? "Request timed out." : error.message;
-	}
-	return String(error);
+	// response.json()、网络适配器和结果解读器的异常都可能回显正文、URL 或凭据。
+	// 在观察回调、路由 attempts 与持久化之前只输出可信分类，不能保留任何异常消息片段。
+	if (error instanceof Error && error.name === "TimeoutError") return "Request timed out.";
+	if (error instanceof SyntaxError) return "模型服务返回了无法解析的 JSON 响应。";
+	return "模型服务请求或结果处理失败；已省略上游错误详情。";
 }
 
 /**
@@ -154,17 +174,36 @@ function buildChatCompletionRequestBody(
 	responseFormat: { type: "json_object" } | undefined,
 ): string {
 	const disablesProviderSideThinking = (request.providerSideThinking ?? "disabled") === "disabled";
+	const isMiniMax = credential.modelProviderId === "minimax" || /\bminimax\.(?:io|chat)\b/u.test(credential.baseUrl);
+	const miniMaxModel = credential.modelId.toLowerCase();
 	const sendsThinkingExtensionField =
 		disablesProviderSideThinking &&
-		MODEL_PROVIDER_IDS_ACCEPTING_THINKING_EXTENSION_FIELD.has(credential.modelProviderId);
+		(MODEL_PROVIDER_IDS_ACCEPTING_THINKING_EXTENSION_FIELD.has(credential.modelProviderId) ||
+			/^https:\/\/api\.deepseek\.com(?:\/|$)/u.test(credential.baseUrl));
 	return JSON.stringify({
 		model: credential.modelId,
 		messages: [
 			{ role: "system", content: request.systemPrompt },
-			{ role: "user", content: request.userPrompt },
+			{
+				role: "user",
+				content: request.questionImages?.length
+					? [
+							{ type: "text", text: request.userPrompt },
+							...request.questionImages.map((image) => ({
+								type: "image_url",
+								image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+							})),
+						]
+					: request.userPrompt,
+			},
 		],
-		...(sendsThinkingExtensionField ? { thinking: { type: "disabled" } } : {}),
-		...(responseFormat ? { response_format: responseFormat } : {}),
+		...(sendsThinkingExtensionField || (isMiniMax && miniMaxModel === "minimax-m3" && disablesProviderSideThinking)
+			? { thinking: { type: "disabled" } }
+			: {}),
+		...(isMiniMax
+			? { reasoning_split: true, ...(miniMaxModel.startsWith("minimax-m3.1") ? { reasoning_effort: "low" } : {}) }
+			: {}),
+		...(responseFormat && !isMiniMax ? { response_format: responseFormat } : {}),
 		...(request.temperature === undefined ? {} : { temperature: request.temperature }),
 	});
 }
@@ -184,7 +223,10 @@ async function attemptChatCompletion(
 				Authorization: `Bearer ${credential.apiKey}`,
 			},
 			body: buildChatCompletionRequestBody(credential, request, responseFormat),
-			signal: AbortSignal.timeout(request.requestTimeoutMs ?? DEFAULT_MODEL_PROVIDER_REQUEST_TIMEOUT_MS),
+			signal: AbortSignal.any([
+				AbortSignal.timeout(request.requestTimeoutMs ?? DEFAULT_MODEL_PROVIDER_REQUEST_TIMEOUT_MS),
+				...(request.abortSignal ? [request.abortSignal] : []),
+			]),
 		});
 		if (!response.ok) {
 			return {
@@ -195,12 +237,31 @@ async function attemptChatCompletion(
 		const parsedCompletion = CHAT_COMPLETION_RESPONSE_SCHEMA.safeParse((await response.json()) as unknown);
 		const tokenCounts = parsedCompletion.success
 			? {
+					resolvedModelId: parsedCompletion.data.model,
+					cacheReadTokenCount:
+						parsedCompletion.data.usage?.prompt_tokens_details?.cached_tokens ??
+						parsedCompletion.data.usage?.prompt_cache_hit_tokens ??
+						parsedCompletion.data.usage?.cache_read_input_tokens,
+					cacheWriteTokenCount: parsedCompletion.data.usage?.cache_creation_input_tokens,
 					promptTokenCount: parsedCompletion.data.usage?.prompt_tokens,
 					completionTokenCount: parsedCompletion.data.usage?.completion_tokens,
 					totalTokenCount: parsedCompletion.data.usage?.total_tokens,
 				}
 			: {};
-		const messageContent = parsedCompletion.success ? parsedCompletion.data.choices?.[0]?.message?.content : null;
+		const choice = parsedCompletion.success ? parsedCompletion.data.choices?.[0] : undefined;
+		const rawContent = choice?.message?.content;
+		const messageContent =
+			typeof rawContent === "string" &&
+			(credential.modelProviderId === "minimax" || /\bminimax\.(?:io|chat)\b/u.test(credential.baseUrl))
+				? rawContent.replace(/^\s*(?:<think>[\s\S]*?<\/think>\s*)+/u, "")
+				: rawContent;
+		if (choice?.message?.tool_calls?.length || (choice?.finish_reason && choice.finish_reason !== "stop")) {
+			return {
+				result: unavailable("request_failed", "模型返回了工具调用或不完整结果。"),
+				httpStatusCode: response.status,
+				...tokenCounts,
+			};
+		}
 		if (typeof messageContent !== "string" || messageContent.trim().length === 0) {
 			return {
 				result: unavailable("request_failed", "Model provider returned an empty answer."),
@@ -210,7 +271,11 @@ async function attemptChatCompletion(
 		}
 		return { result: { status: "completed", messageContent }, httpStatusCode: response.status, ...tokenCounts };
 	} catch (error) {
-		return { result: unavailable("request_failed", toFailureDetail(error)) };
+		return {
+			result: request.abortSignal?.aborted
+				? unavailable("execution_cancelled", "分析已取消。")
+				: unavailable("request_failed", toFailureDetail(error)),
+		};
 	}
 }
 
@@ -242,6 +307,7 @@ async function requestChatCompletionAnswerInterpretedByCaller<TInterpretedAnswer
 	options: ModelProviderRequestOptions | undefined,
 	interpretMessageContent: (messageContent: string) => InterpretedChatCompletionAnswer<TInterpretedAnswer>,
 ): Promise<InterpretedChatCompletionAnswer<TInterpretedAnswer>> {
+	if (request.abortSignal?.aborted) return unavailable("execution_cancelled", "分析已取消。");
 	const environmentVariables = options?.environmentVariables;
 	const requestedModelProviderId = request.modelProviderId ?? resolveDefaultModelProviderId(environmentVariables);
 	let credential: ModelProviderCredential | null;
@@ -286,11 +352,20 @@ async function requestChatCompletionAnswerInterpretedByCaller<TInterpretedAnswer
 		modelId: credential.modelId,
 		elapsedMs,
 		...attemptOutcome,
+		result: interpretedAnswer.status === "completed" ? attemptOutcome.result : interpretedAnswer,
 	});
 	recordModelProviderUsage({
 		modelUsagePurpose: request.modelUsagePurpose,
 		modelProviderId: credential.modelProviderId,
-		modelId: credential.modelId,
+		modelId: attemptOutcome.resolvedModelId ?? credential.modelId,
+		requestedModelId: credential.modelId,
+		resolvedModelId: attemptOutcome.resolvedModelId,
+		operationId: request.operationId,
+		stage: request.stage,
+		stablePromptPrefixSha256: request.stablePromptPrefixSha256,
+		fallbackReason: request.fallbackReason,
+		cacheReadTokenCount: attemptOutcome.cacheReadTokenCount,
+		cacheWriteTokenCount: attemptOutcome.cacheWriteTokenCount,
 		outcome: interpretedAnswer.status === "completed" ? "completed" : "unavailable",
 		...(interpretedAnswer.status === "completed" ? {} : { unavailableReason: interpretedAnswer.unavailableReason }),
 		...(attemptOutcome.httpStatusCode === undefined ? {} : { httpStatusCode: attemptOutcome.httpStatusCode }),

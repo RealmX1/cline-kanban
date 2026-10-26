@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
+import * as taskCardActionQueries from "@/runtime/task-card-action-query";
 import type { ListPermanentlyDeletedTaskCardsResponse } from "@/runtime/types";
 
 const readHistory = vi.hoisted(() => vi.fn());
@@ -58,6 +59,7 @@ describe("已删除 Task 弹窗", () => {
 		if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
 		else Reflect.deleteProperty(navigator, "clipboard");
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 	const mount = async () => {
 		await act(async () => {
@@ -103,6 +105,37 @@ describe("已删除 Task 弹窗", () => {
 		await click("复制完整 Prompt");
 		expect(writeText).toHaveBeenLastCalledWith("最初版本");
 		expect(readHistory).toHaveBeenCalledWith({ workspaceId: "rvf", query: "", cursor: null });
+	});
+	it("删除前便签可只读展开，不查询或修改同 ID 活动卡，跨项目身份切换清理本地状态", async () => {
+		const readActiveCard = vi.spyOn(taskCardActionQueries, "readTaskCardWithBoardColumnInWorkspace");
+		const writeActiveCard = vi.spyOn(taskCardActionQueries, "applyTaskStickerEntryMutationInWorkspace");
+		const stickerText = "历史便签首行\n只能从删除前快照读取的正文";
+		const entry = {
+			...page.entries[0]!,
+			taskStickerEntries: [
+				{ taskStickerEntryId: "historical-sticker", stickerText, isCollapsed: true, createdAt: 10, updatedAt: 20 },
+			],
+		};
+		readHistory.mockResolvedValue({ ...page, entries: [entry] });
+		await mount();
+		await click("便签 1");
+		expect(document.querySelector("[data-task-sticker-overlay]")?.textContent).toContain("历史便签首行");
+		expect(document.querySelector('[aria-label="展开便签"]')).toBeTruthy();
+		await click("展开便签");
+		expect(document.querySelector("[data-task-sticker-overlay]")?.textContent).toContain(stickerText);
+		expect(document.querySelector('[aria-label="编辑便签"], [aria-label="删除便签"]')).toBeNull();
+		expect(document.body.textContent).not.toContain("添加便签");
+		await click("关闭便签");
+		readHistory.mockResolvedValue({
+			...page,
+			entries: [{ ...entry, kanbanBoardCard: { ...entry.kanbanBoardCard, workspaceId: "other-project" } }],
+		});
+		await click("刷新已删除 Task");
+		await click("便签 1");
+		expect(document.querySelector('[aria-label="展开便签"]')).toBeTruthy();
+		expect(readActiveCard).not.toHaveBeenCalled();
+		expect(writeActiveCard).not.toHaveBeenCalled();
+		expect(entry.taskStickerEntries[0]?.isCollapsed).toBe(true);
 	});
 	it("缺失删除前版本时不复制预览，允许主动切换到创建时版本", async () => {
 		readVersions.mockResolvedValue({

@@ -1,22 +1,34 @@
+import * as childProcess from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { loadWorkspaceContext } from "../../src/state/workspace-state";
-import { executeStatelessTaskIndexingAgent } from "../../src/task-indexing-support/stateless-task-indexing-agent-executor";
-import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../../src/task-indexing-support/task-analysis-shared-prompt-prefix";
+import * as heavyMaterialCollector from "../../src/task-indexing-support/collect-task-indexing-materials";
+import { executeTaskAnalysisApi } from "../../src/task-indexing-support/task-analysis-api-executor";
+import {
+	TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
+	TASK_ANALYSIS_SHARED_INSTRUCTIONS,
+} from "../../src/task-indexing-support/task-analysis-shared-prompt-prefix";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
-	readTaskIndexingSupportExecutorSettings,
 	saveTaskIndexingSupportExecutorSettings,
-	taskIndexingSupportWorkspaceStoragePath,
 } from "../../src/task-indexing-support/task-indexing-support-storage";
 import { analyzeTaskProjectAssignment } from "../../src/task-indexing-support/task-project-assignment-analysis";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import {
+	createTaskAssistanceOpenAiCompatibleHttpFixture,
+	readTaskAssistanceHttpFixtureUserPrompt,
+} from "../utilities/task-assistance-openai-compatible-http-fixture";
 
-describe("项目、召回与关系的单轮 CLI 分析", { timeout: 60000 }, () => {
-	it("默认 Codex，兼容旧项目设置，全局保存后统一，并共用真实前缀字节", async () => {
+vi.mock("node:child_process", { spy: true });
+vi.mock("../../src/task-indexing-support/collect-task-indexing-materials", { spy: true });
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+});
+
+describe("项目归属与共享分析的 API 单轮链路", { timeout: 60000 }, () => {
+	it("DeepSeek 单独可用，忽略旧 CLI 配置，归属保留完整新正文且不收集重材料", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 		const repository = fixture.createNonBareRepository({
@@ -24,72 +36,57 @@ describe("项目、召回与关系的单轮 CLI 分析", { timeout: 60000 }, () 
 			initialBranchName: "main",
 		});
 		const scope = await loadWorkspaceContext(repository.repositoryPath);
-		const executableDirectory = join(fixture.isolatedHomeDirectoryPath, "controlled-analysis-cli");
-		await mkdir(executableDirectory, { recursive: true });
-		const auditPath = join(executableDirectory, "model-calls.jsonl");
-		await writeFile(
-			join(executableDirectory, "codex"),
-			`#!${process.execPath}
-const fs=require('node:fs');let input='';process.stdin.on('data',part=>input+=part);process.stdin.on('end',()=>{
-const args=process.argv.slice(2);const setting=args.find(arg=>arg.startsWith('model_instructions_file='));const prefix=fs.readFileSync(JSON.parse(setting.slice(setting.indexOf('=')+1)),'utf8');
-fs.appendFileSync(${JSON.stringify(auditPath)},JSON.stringify({prefix,input,args})+'\\n');
-const schema=JSON.parse(fs.readFileSync(args[args.indexOf('--output-schema')+1],'utf8'));const output=schema.properties.suggestedWorkspaceId?{suggestedWorkspaceId:null,rationale:'当前项目合适',confidence:'high'}:{accepted:true};
-process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(output)}})+'\\n'+JSON.stringify({type:'turn.completed'})+'\\n');});`,
-			{ mode: 0o700 },
-		);
-		vi.stubEnv("PATH", `${executableDirectory}:${process.env.PATH ?? ""}`);
-		try {
-			expect(await readTaskIndexingSupportExecutorSettings(scope.workspaceId)).toEqual({
-				agentId: "codex",
-				modelId: null,
+		const model = await createTaskAssistanceOpenAiCompatibleHttpFixture({
+			isolatedHomeDirectoryPath: fixture.isolatedHomeDirectoryPath,
+			respond: (request) =>
+				String(request.messages[0]?.content).includes('"suggestedWorkspaceId"')
+					? { suggestedWorkspaceId: null, rationale: "当前项目合适", confidence: "high" }
+					: { accepted: true },
+		});
+		await saveTaskIndexingSupportExecutorSettings(null, { agentId: "claude", modelId: "obsolete-cli-model" });
+		vi.mocked(childProcess.spawn).mockClear();
+		const completePrompt = `完整需求${"实现并验证".repeat(8000)}结束标记`;
+		const analysis = await analyzeTaskProjectAssignment({
+			workspaceId: scope.workspaceId,
+			operationId: randomUUID(),
+			title: "任务",
+			prompt: completePrompt,
+			settings: { agentId: "claude", modelId: "obsolete-cli-model" },
+		});
+		const first = model.requests[0];
+		if (!first) throw new Error("模型未收到请求");
+		expect(
+			JSON.parse(readTaskAssistanceHttpFixtureUserPrompt(first).split("L4 本次查询：\n").at(-1) ?? "").task
+				.prompt === completePrompt,
+		).toBe(true);
+		expect(String(first.messages[0]?.content)).toContain(repository.repositoryPath);
+		expect(String(first.messages[0]?.content)).not.toContain("L2 本项目任务 recap");
+		expect(heavyMaterialCollector.collectTaskIndexingMaterials).not.toHaveBeenCalled();
+		expect(analysis.suggestedWorkspaceId).toBeNull();
+		const context = await loadAndAdvanceSharedTaskIndexingContext({
+			workspaceId: scope.workspaceId,
+			materials: [],
+			settings: { agentId: "codex", modelId: null },
+			instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
+			now: Date.now(),
+			forModelRequest: true,
+		});
+		for (const purpose of ["task_lookup_candidate_recall", "task_indexing_support_relation_analysis"] as const)
+			await executeTaskAnalysisApi({
+				context,
+				settings: { agentId: "codex", modelId: "ignored" },
+				modelUsagePurpose: purpose,
+				instructionText: "分析任务",
+				queryText: "完整问题",
+				outputSchema: z.object({ accepted: z.boolean() }),
 			});
-			const legacyPath = taskIndexingSupportWorkspaceStoragePath(scope.workspaceId, "executor-settings.json");
-			await mkdir(join(legacyPath, ".."), { recursive: true });
-			await writeFile(legacyPath, JSON.stringify({ agentId: "claude", modelId: "legacy-model" }));
-			expect((await readTaskIndexingSupportExecutorSettings(scope.workspaceId)).agentId).toBe("claude");
-			await saveTaskIndexingSupportExecutorSettings(null, { agentId: "codex", modelId: null });
-			expect((await readTaskIndexingSupportExecutorSettings(scope.workspaceId)).agentId).toBe("codex");
-			const analysis = await analyzeTaskProjectAssignment({
-				workspaceId: scope.workspaceId,
-				operationId: randomUUID(),
-				title: "任务",
-				prompt: "完整需求",
-				settings: { agentId: "codex", modelId: null },
-				materials: [],
-			});
-			const context = await loadAndAdvanceSharedTaskIndexingContext({
-				workspaceId: scope.workspaceId,
-				materials: [],
-				settings: { agentId: "codex", modelId: null },
-				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
-				now: Date.now(),
-				forModelRequest: true,
-			});
-			for (const instructionText of ["查卡第一阶段召回", "关系建议"])
-				await executeStatelessTaskIndexingAgent({
-					settings: { agentId: "codex", modelId: null },
-					context,
-					instructionText,
-					queryText: "本次任务",
-					outputSchema: z.object({ accepted: z.boolean() }),
-				});
-			const calls: Array<{ prefix: string; input: string; args: string[] }> = (await readFile(auditPath, "utf8"))
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
-			expect(calls).toHaveLength(3);
-			expect(new Set(calls.map((call) => call.prefix)).size).toBe(1);
-			expect(analysis.suggestedWorkspaceId).toBeNull();
-			expect(
-				calls.every(
-					(call) =>
-						call.args.includes("--ephemeral") &&
-						call.args.includes("features.shell_tool=false") &&
-						call.args.includes("mcp_servers={}"),
-				),
-			).toBe(true);
-		} finally {
-			vi.unstubAllEnvs();
-		}
+		expect(model.requests).toHaveLength(3);
+		expect(
+			model.requests.every((request) =>
+				String(request.messages[0]?.content).startsWith(TASK_ANALYSIS_SHARED_INSTRUCTIONS),
+			),
+		).toBe(true);
+		expect(model.requests.every((request) => request.model === "fixture-requested-model")).toBe(true);
+		expect(childProcess.spawn).not.toHaveBeenCalled();
 	});
 });

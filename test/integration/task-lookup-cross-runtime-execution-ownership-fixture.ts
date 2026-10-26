@@ -29,6 +29,11 @@ const service = createTaskLookupConversationService({
 		rebuildReason: null,
 	}),
 	executeAgent: async (request) => {
+		if (request.stage === "candidate_recall")
+			process.send?.({
+				event: "task_lookup_recall_model_execution_started",
+				operationId: request.operationId,
+			});
 		for (;;) {
 			request.abortSignal?.throwIfAborted();
 			try {

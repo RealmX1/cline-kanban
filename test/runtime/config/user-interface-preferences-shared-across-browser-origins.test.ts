@@ -9,6 +9,45 @@ import {
 import type { RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins } from "../../../src/core/api-contract";
 
 describe("跨浏览器 origin 共享的界面偏好", () => {
+	describe("项目归属自动分析偏好", () => {
+		it.each([undefined, null, "true"])("旧配置或坏值 %s 保持未设置", (value) => {
+			expect(
+				normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins({
+					taskProjectAssignmentAutomaticAnalysisEnabled: value,
+				}).taskProjectAssignmentAutomaticAnalysisEnabled,
+			).toBeNull();
+		});
+
+		it.each([true, false])("显式 %s 参与合并、比较和持久化判据", (enabled) => {
+			const preferences = normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: enabled,
+			});
+			expect(preferences.taskProjectAssignmentAutomaticAnalysisEnabled).toBe(enabled);
+			expect(hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(preferences)).toBe(false);
+			expect(
+				areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
+					preferences,
+					USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
+				),
+			).toBe(false);
+			expect(
+				mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(preferences, {
+					newTaskAutoReviewEnabled: true,
+				}).taskProjectAssignmentAutomaticAnalysisEnabled,
+			).toBe(enabled);
+			expect(
+				mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(preferences, {
+					taskProjectAssignmentAutomaticAnalysisEnabled: !enabled,
+				}).taskProjectAssignmentAutomaticAnalysisEnabled,
+			).toBe(!enabled);
+			expect(
+				mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(preferences, {
+					taskProjectAssignmentAutomaticAnalysisEnabled: null,
+				}).taskProjectAssignmentAutomaticAnalysisEnabled,
+			).toBeNull();
+		});
+	});
+
 	describe("规范化", () => {
 		it("非对象输入降级成「一条都没有」", () => {
 			for (const input of [undefined, null, 42, "x", []]) {

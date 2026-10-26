@@ -29,6 +29,7 @@ const failAutomaticPreview = vi.fn();
 const confirmationId = "11111111-1111-4111-8111-111111111111";
 const controller = {
 	artifacts: [artifact],
+	taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "真实任务名称" },
 	isLoading: false,
 	error: null,
 	selection: {
@@ -68,6 +69,35 @@ afterEach(async () => {
 	window.history.replaceState(null, "", "/");
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
+});
+it("任务署名在 iframe 外显示，任务名和图表标题独立且全屏保留", async () => {
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel workspaceId="workspace-a" taskId="task-a" controller={controller} />,
+		),
+	);
+	const attribution = container.querySelector('[aria-label="可视化任务署名"]');
+	expect(attribution?.textContent).toContain("task-a");
+	expect(attribution?.textContent).toContain("真实任务名称");
+	expect(attribution?.textContent).not.toContain(artifact.title);
+	const fullscreen = container.querySelector<HTMLButtonElement>('[aria-label="全屏预览"]');
+	await act(async () => fullscreen?.click());
+	expect(container.querySelector('[aria-label="可视化任务署名"]')?.textContent).toContain("真实任务名称");
+});
+
+it("来自另一个 workspace 的同号任务署名不会串入当前预览", async () => {
+	const mismatched = {
+		...controller,
+		taskAttribution: { workspaceId: "workspace-b", taskId: "task-a", taskTitle: "别的项目" },
+	};
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel workspaceId="workspace-a" taskId="task-a" controller={mismatched} />,
+		),
+	);
+	const attribution = container.querySelector('[aria-label="可视化任务署名"]');
+	expect(attribution?.textContent).not.toContain("别的项目");
+	expect(attribution?.textContent).toContain("任务名暂不可用");
 });
 it("404 错误文档触发 iframe load 时不写 displayed", async () => {
 	await act(async () =>
