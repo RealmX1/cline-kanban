@@ -8,6 +8,11 @@ import {
 } from "../core/rvf-automatic-closeout-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "../state/workspace-state";
+import {
+	boundRvfCloseoutGoalCompletion,
+	resolveRvfCloseoutSchedulingDecision,
+	sameRvfCloseoutObservationBinding,
+} from "./rvf-closeout-scheduling-decision";
 
 export class RvfAutomaticCloseoutRecordOperationClaimLostError extends Error {}
 
@@ -67,9 +72,74 @@ export async function updateRvfAutomaticCloseoutRecords<T>(
 		| Promise<{ records: RvfAutomaticCloseoutRecord[]; value: T }>,
 ): Promise<T> {
 	return lockedFileSystem.withLocks([{ path }], async () => {
-		const outcome = await operation(await readRvfAutomaticCloseoutRecords(path));
+		const before = await readRvfAutomaticCloseoutRecords(path);
+		const beforeText = JSON.stringify(before);
+		const outcome = await operation(structuredClone(before));
+		const originalValues = [...outcome.records];
+		// 所有写回漏斗共用单调保护；迟到的异步 patch 不能把可信完成事实降回待执行。
+		outcome.records = outcome.records.map((record) => {
+			const original = before.find((entry) => sameRvfCloseoutObservationBinding(entry, record));
+			if (!original) return record;
+			const accepted = boundRvfCloseoutGoalCompletion(original);
+			if (accepted && (accepted.verifiedStages.length || accepted.externalConsumption)) {
+				const next = boundRvfCloseoutGoalCompletion(record);
+				record = {
+					...record,
+					existingCloseoutGoalCompletionReconciliation: {
+						...(next ?? accepted),
+						verifiedStages: [
+							...accepted.verifiedStages,
+							...(next?.verifiedStages ?? []).filter(
+								(stage) => !accepted.verifiedStages.some((prior) => prior.stage === stage.stage),
+							),
+						],
+						...(accepted.externalConsumption ? { externalConsumption: accepted.externalConsumption } : {}),
+						...(accepted.verdict === "completed" ? { verdict: "completed" as const } : {}),
+					},
+				};
+			}
+			if (original.status === "completed") record = { ...record, status: "completed" };
+			const originalDecision = resolveRvfCloseoutSchedulingDecision(original);
+			if (originalDecision.completed || originalDecision.externallyConsumed) {
+				record = {
+					...record,
+					status: record.status === "completed" ? "completed" : original.status,
+					promptDeliveryAttempts: original.promptDeliveryAttempts,
+					stageExecutionClaims: record.stageExecutionClaims?.filter((claim) =>
+						original.stageExecutionClaims?.some(
+							(prior) => prior.stageExecutionClaimId === claim.stageExecutionClaimId,
+						),
+					),
+				};
+			}
+			for (const key of ["landExecutionResult", "baseBranchSyncExecutionResult"] as const)
+				if (original[key]?.outcome === "completed") record = { ...record, [key]: original[key] };
+			if (
+				resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling &&
+				record.automaticRecoveryProgress &&
+				record.explicitStopRequestedAt === undefined
+			)
+				record = {
+					...record,
+					automaticRecoveryProgress: {
+						...record.automaticRecoveryProgress,
+						kind: "settled",
+						nextAutomaticAction: "none",
+						reasonCode: "closeout_goal_completed_or_externally_consumed",
+					},
+				};
+			return record;
+		});
 		const parsed = z.array(rvfAutomaticCloseoutRecordSchema).parse(outcome.records);
-		await lockedFileSystem.writeJsonFileAtomic(path, parsed, { lock: null });
-		return outcome.value;
+		if (JSON.stringify(parsed) !== beforeText)
+			await lockedFileSystem.writeJsonFileAtomic(path, parsed, { lock: null });
+		const normalizedValue = (value: unknown) => {
+			const index = originalValues.indexOf(value as RvfAutomaticCloseoutRecord);
+			return index < 0 ? value : parsed[index];
+		};
+		const value = outcome.value;
+		if (value && typeof value === "object" && "record" in value)
+			return { ...value, record: normalizedValue(value.record) } as T;
+		return normalizedValue(value) as T;
 	});
 }

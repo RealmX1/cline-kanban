@@ -71,6 +71,7 @@ function historyFixture() {
 		finalPrompt: unknown,
 		incarnation = 1,
 		remove = true,
+		stickersBeforePermanentRemoval?: unknown,
 	) => {
 		const card: KanbanBoardCardWorkUnitQualifiedReference = {
 			workUnitType: "kanban_board_card",
@@ -82,12 +83,18 @@ function historyFixture() {
 		values.set(`${prefix}:initial`, initialPrompt);
 		values.set(`${prefix}:final`, finalPrompt);
 		values.set(`${prefix}:title`, "历史任务标题");
+		if (stickersBeforePermanentRemoval !== undefined)
+			values.set(`${prefix}:stickers`, stickersBeforePermanentRemoval);
 		append(card, "task_card_created_on_board", {
 			fieldValueSha256ByFieldNameAtCreation: { prompt: `${prefix}:initial` },
 		});
 		if (remove)
 			append(card, "task_card_permanently_removed_from_board", {
-				lastFieldValueSha256ByFieldNameBeforeRemoval: { title: `${prefix}:title`, prompt: `${prefix}:final` },
+				lastFieldValueSha256ByFieldNameBeforeRemoval: {
+					title: `${prefix}:title`,
+					prompt: `${prefix}:final`,
+					...(stickersBeforePermanentRemoval === undefined ? {} : { taskStickerEntries: `${prefix}:stickers` }),
+				},
 			});
 		return card;
 	};
@@ -113,6 +120,47 @@ function historyFixture() {
 }
 
 describe("永久删除 Task 的只读历史", () => {
+	it("只水合删除前便签快照，跨项目及同 ID 代际不串入，兼容旧快照和损坏正文", async () => {
+		const f = historyFixture();
+		const historicalStickers = [
+			{
+				taskStickerEntryId: "retained-sticker",
+				stickerText: "删除前首行\n完整便签正文",
+				isCollapsed: true,
+				createdAt: 10,
+				updatedAt: 20,
+			},
+		];
+		const removed = f.add("project-a", "same-id", "旧任务", "删除前正文", 1, true, historicalStickers);
+		f.values.set("late-stickers", [{ ...historicalStickers[0], stickerText: "晚到正文" }]);
+		f.append(removed, "task_card_field_value_changed", {
+			changedTaskCardFieldName: "taskStickerEntries",
+			fieldValueAfterSha256: "late-stickers",
+		});
+		f.add("project-a", "same-id", "同 ID 新活动任务", "活卡正文", 100, false);
+		const otherWorkspace = f.add("project-b", "same-id", "其他项目", "其他项目");
+		const legacy = f.add("project-a", "legacy", "旧快照", "旧快照");
+		const malformed = f.add("project-a", "bad-sticker", "损坏快照", "损坏快照", 1, true, [
+			{ stickerText: "不完整便签" },
+		]);
+		const missing = f.add("project-a", "missing", "正文缺失", "正文缺失", 1, true, historicalStickers);
+		f.values.delete("project-a:missing:1:stickers");
+		const page = await listPermanentlyDeletedTaskCards(f.reader, { query: "", cursor: null }, () => null);
+		expect(
+			page.entries.find((entry) => JSON.stringify(entry.kanbanBoardCard) === JSON.stringify(removed)),
+		).toMatchObject({
+			taskStickerEntries: historicalStickers,
+		});
+		for (const identity of [otherWorkspace, legacy, malformed, missing])
+			expect(
+				page.entries.find((entry) => JSON.stringify(entry.kanbanBoardCard) === JSON.stringify(identity)),
+			).toMatchObject({
+				taskStickerEntries: [],
+			});
+		expect(page.entries.some((entry) => entry.kanbanBoardCard.taskIncarnationCreatedAtEpochMs === 100)).toBe(false);
+		expect(f.readFieldValueHashes).toContain("project-a:same-id:1:stickers");
+		expect(f.readFieldValueHashes).not.toContain("late-stickers");
+	});
 	it.each(["3C487", "3c4"])("ID token %s 可与标题及两版 Prompt 逐 token AND", async (idToken) => {
 		const f = historyFixture();
 		const target = f.add("project-a", "3c487", "创建时需求 ÉCOLE", "删除前需求 最新");

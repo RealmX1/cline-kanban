@@ -13,6 +13,7 @@ import type {
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskRetainedCommittedLineChangeSummary,
+	RuntimeTaskStickerEntry,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
@@ -98,6 +99,8 @@ export interface BoardCard {
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	taskCommentEntries?: TaskCommentEntry[];
+	taskStickerEntries?: RuntimeTaskStickerEntry[];
+	taskStickerDeletedEntryIds?: string[];
 	// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序）。
 	// 同样受 normalizeCard 白名单约束——见下方 ompAgentSessionTransport 那段注释。
 	pinnedToTaskPinboardAt?: number;

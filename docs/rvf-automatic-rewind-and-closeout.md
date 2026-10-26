@@ -119,6 +119,8 @@ kanban task rvf-automatic-closeout-status --task-id <id> --project-path <main ch
 
 ## 交付与验证边界
 
+历史恢复先核验既有实际完成与备用消费。旧未分类 blocked 和缺少接受证据只进入后台补证，不通过 `inspect_existing_state` 唤醒 Agent；可信完成事实统一阻止恢复、认领和迟到投递。状态、历史展示、持久重试与消息取消规则见[既有收尾目标对账](runbooks/rvf-existing-closeout-goal-completion-reconciliation.md)。
+
 此能力需要 Kanban 与 RVF 生产方共同更新；仅部署一个仓库不能形成闭环。RVF 侧接口依据其独立消息契约与实际 verifier；两侧需分别部署。独立开审 gate（e9e12）和已完成 run marker 清理（f03b5）的现有职责不迁入宿主。
 
 部署前验证覆盖精确前缀、原历史与文件/暂存保留、真实 Codex app-server、持久队列、重入与人工介入。部署后自动验收读取真实运行实例新产生的绑定记录和投递账本；没有新样本时报告尚未观察到，不以旧 run 充数。

@@ -1,6 +1,27 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-async function openEditorHarness(page: Page) {
+async function expectCheckedSwitchThumbOnRight(checkedSwitch: Locator) {
+	await expect
+		.poll(async () => {
+			const trackBounds = await checkedSwitch.boundingBox();
+			const thumbBounds = await checkedSwitch.locator("span").boundingBox();
+			return trackBounds && thumbBounds ? Math.round(thumbBounds.x - trackBounds.x) : null;
+		})
+		.toBe(18);
+}
+
+async function mountEditorHarness(page: Page) {
+	await page.addScriptTag({
+		type: "module",
+		content:
+			"import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;",
+	});
+	await page.addScriptTag({ type: "module", url: "/tests/task-editor-floating-window-browser-harness.tsx" });
+	await expect(page.getByRole("dialog", { name: "创建任务" })).toBeVisible();
+}
+
+async function openEditorHarness(page: Page, options: { failAutomaticAnalysisPreferenceSaves?: boolean } = {}) {
+	const observations = { analysisRequestCount: 0, savedAutomaticAnalysisChoices: [] as boolean[] };
 	await page.addInitScript(() => {
 		Object.defineProperty(navigator, "clipboard", {
 			value: { readText: async () => document.body.dataset.controlledClipboardText ?? "" },
@@ -8,6 +29,7 @@ async function openEditorHarness(page: Page) {
 	});
 	await page.routeWebSocket("**/*", () => {});
 	let preferences = {
+		taskProjectAssignmentAutomaticAnalysisEnabled: null as boolean | null,
 		newTaskAutoReviewEnabled: null,
 		newTaskAutoReviewMode: null,
 		taskCreateDialogPrimaryStartAction: null,
@@ -26,6 +48,17 @@ async function openEditorHarness(page: Page) {
 			let value: unknown = null;
 			if (name === "runtime.getConfig" || name === "runtime.saveConfig") {
 				const patch = payload[index]?.userInterfacePreferencesSharedAcrossBrowserOrigins;
+				if (typeof patch?.taskProjectAssignmentAutomaticAnalysisEnabled === "boolean") {
+					if (options.failAutomaticAnalysisPreferenceSaves)
+						return {
+							error: {
+								message: "隔离测试模拟保存失败",
+								code: -32603,
+								data: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500 },
+							},
+						};
+					observations.savedAutomaticAnalysisChoices.push(patch.taskProjectAssignmentAutomaticAnalysisEnabled);
+				}
 				if (patch)
 					preferences = {
 						...preferences,
@@ -53,7 +86,10 @@ async function openEditorHarness(page: Page) {
 					],
 				};
 			else if (name === "workUnit.saveRelationModelingEditorDraft") value = { saved: true };
-			else if (name === "support.analyzeTaskProjectAssignment")
+			else if (name === "workspace.allocateTaskIdForNewWebUiTaskCard")
+				value = { allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry: "abcde" };
+			else if (name === "support.analyzeTaskProjectAssignment") {
+				observations.analysisRequestCount++;
 				value = {
 					operationId: payload[index]?.operationId,
 					currentWorkspaceId: "isolated-task-editor-project",
@@ -64,6 +100,7 @@ async function openEditorHarness(page: Page) {
 					confidence: "high",
 					stablePromptPrefixSha256: "controlled",
 				};
+			}
 			return { result: { data: value } };
 		});
 		await route.fulfill({ json: results });
@@ -75,14 +112,46 @@ async function openEditorHarness(page: Page) {
 		}),
 	);
 	await page.goto("/isolated-task-editor-floating-window");
-	await page.addScriptTag({
-		type: "module",
-		content:
-			"import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;",
-	});
-	await page.addScriptTag({ type: "module", url: "/tests/task-editor-floating-window-browser-harness.tsx" });
-	await expect(page.getByRole("dialog", { name: "创建任务" })).toBeVisible();
+	await mountEditorHarness(page);
+	return observations;
 }
+
+test("自动归属开关默认关闭，手动分析可用，键盘切换后刷新恢复全局偏好", async ({ page }) => {
+	await page.setViewportSize({ width: 1440, height: 1000 });
+	const observations = await openEditorHarness(page);
+	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
+	await expect(automaticAnalysisSwitch).not.toBeChecked();
+	await page.getByRole("button", { name: "创建任务", exact: true }).click();
+	await expect(page.locator("body")).toHaveAttribute("data-task-editor-submission-count", "1");
+	expect(observations.analysisRequestCount).toBe(0);
+	await page.getByRole("button", { name: "分析项目归属", exact: true }).click();
+	await expect.poll(() => observations.analysisRequestCount).toBe(1);
+	await expect(page.getByRole("button", { name: "分析项目归属", exact: true })).toBeEnabled();
+	await automaticAnalysisSwitch.focus();
+	await page.keyboard.press("Space");
+	await expect(automaticAnalysisSwitch).toBeChecked();
+	await page.getByRole("button", { name: "创建任务", exact: true }).click();
+	await expect(page.locator("body")).toHaveAttribute("data-task-editor-submission-count", "2");
+	expect(observations.analysisRequestCount).toBe(2);
+	await automaticAnalysisSwitch.focus();
+	await page.keyboard.press("Enter");
+	await expect(automaticAnalysisSwitch).not.toBeChecked();
+	await page.keyboard.press("Space");
+	await expect.poll(() => observations.savedAutomaticAnalysisChoices).toEqual([true, false, true]);
+	await page.reload();
+	await mountEditorHarness(page);
+	await expect(page.getByRole("switch", { name: "自动分析项目归属" })).toBeChecked();
+	await expectCheckedSwitchThumbOnRight(page.getByRole("switch", { name: "自动分析项目归属" }));
+	await page.screenshot({ path: test.info().outputPath("desktop-automatic-project-assignment-analysis.png") });
+});
+
+test("自动分析偏好保存失败明确提示并保留当前选择", async ({ page }) => {
+	await openEditorHarness(page, { failAutomaticAnalysisPreferenceSaves: true });
+	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
+	await automaticAnalysisSwitch.click();
+	await expect(page.getByText(/“自动分析项目归属”偏好尚未保存到运行时/)).toBeVisible();
+	await expect(automaticAnalysisSwitch).toBeChecked();
+});
 
 test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷键归属正确", async ({ page }) => {
 	await page.setViewportSize({ width: 1440, height: 1000 });
@@ -142,6 +211,12 @@ test("手机浮窗保留背景入口并避免横向溢出", async ({ page }) => 
 	await openEditorHarness(page);
 	const bounds = await page.getByRole("dialog", { name: "创建任务" }).boundingBox();
 	expect(bounds?.width).toBeLessThan(390);
+	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
+	await automaticAnalysisSwitch.scrollIntoViewIfNeeded();
+	await expect(automaticAnalysisSwitch).not.toBeChecked();
+	await automaticAnalysisSwitch.click();
+	await expect(automaticAnalysisSwitch).toBeChecked();
+	await expectCheckedSwitchThumbOnRight(automaticAnalysisSwitch);
 	await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
 	await page.getByRole("button", { name: "操作背景 0" }).click();
 	await page.getByRole("button", { name: "展开任务编辑器", exact: true }).click();

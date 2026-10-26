@@ -14,6 +14,7 @@ import {
 	updateRvfAutomaticCloseoutRecords,
 	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
+import { resolveRvfCloseoutSchedulingDecision } from "./rvf-closeout-scheduling-decision";
 
 export class RvfAutomaticCloseoutWaitError extends Error {
 	constructor(
@@ -55,6 +56,8 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 			const current = records.find((entry) => entry.receipt.decision_token === token);
 			if (
 				!current ||
+				resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(current).requiresBackgroundReconciliationOnly ||
 				current.promptDeliveryAttempts?.length ||
 				current.status === "captured_review_start_boundary" ||
 				current.status === "paused" ||
@@ -79,7 +82,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					const current = records.find((entry) => entry.receipt.decision_token === token);
 					if (current?.activeCoordinatorOperationClaimId !== claimId)
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError("自动收尾记录已被其他运行时认领。");
-					if (current.status === "paused" || current.status === "completed") {
+					if (current.status === "paused" || resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling) {
 						record = current;
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError(
 							current.status === "completed"
@@ -106,7 +109,11 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 				assertOperationLockStillOwned();
 				if (record.activeCoordinatorOperationClaimId !== claimId)
 					throw new RvfAutomaticCloseoutRecordOperationClaimLostError("既有结果观察期间操作认领已改变。");
-				return record.status === "completed" || record.status === "paused";
+				return (
+					record.status === "paused" ||
+					resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+					resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly
+				);
 			};
 			try {
 				if (record.status === "awaiting_rvf_completion") {
@@ -183,6 +190,8 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 	async function run() {
 		for (const record of await readRvfAutomaticCloseoutRecords(deps.storePath)) {
 			if (
+				resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly ||
 				["captured_review_start_boundary", "paused", "closeout_prompt_submitted", "completed"].includes(
 					record.status,
 				)
