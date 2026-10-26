@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
@@ -29,9 +29,13 @@ import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-ro
 import { createWorkUnitRelationAssertionWriteApi } from "../../src/trpc/work-unit-relation-assertion-write-api";
 import { createWorkUnitRelationReadApi } from "../../src/trpc/work-unit-relation-read-api";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import {
+	createTaskAssistanceOpenAiCompatibleHttpFixture,
+	readTaskAssistanceHttpFixtureUserPrompt,
+} from "../utilities/task-assistance-openai-compatible-http-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
-describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账本的完整链路", { timeout: 60000 }, () => {
+describe("共享任务索引经 CLI、tRPC、API fixture、board 与关系账本的完整链路", { timeout: 60000 }, () => {
 	it("保守建卡、追加发现、未核验关系、重启重试和旧发现补查共用内核", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const previousPort = getKanbanRuntimePort();
@@ -41,14 +45,44 @@ describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账�
 		mkdirSync(projectPath, { recursive: true });
 		mkdirSync(executableDirectory, { recursive: true });
 		fixture.createNonBareRepositoryAtOwnedPath({ repositoryPath: projectPath, initialBranchName: "main" });
-		const auditPath = join(executableDirectory, "calls.jsonl");
-		const fakeClaudePath = join(executableDirectory, "claude");
-		await writeFile(
-			fakeClaudePath,
-			`#!${process.execPath}\nconst fs = require('node:fs');let text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>{const query=JSON.parse(text.split('L4 本次查询：\\n').at(-1));const ref=query.knownTaskIdentities.find(ref=>ref.taskId==='old01');const noRelation=query.incomingWorkItem.title.includes('无关');const partial=query.incomingWorkItem.title.includes('部分');const candidates=noRelation?[]:[{task_reference:ref,relation_kind:'reference_concerns_behavior_or_state_of',confidence:'high',coverage:partial?'partial_overlap':'fully_covers_incoming_work',rationale:'当前任务明确承担该问题',evidence:['src/example.ts:1'],cross_project:false}];if(query.incomingWorkItem.existing_finding_task&&['interactive-relation-suggestion','strict-self-validation'].includes(query.incomingWorkItem.work_item_key))candidates.unshift({...candidates[0],task_reference:query.incomingWorkItem.existing_finding_task});fs.appendFileSync(${JSON.stringify(auditPath)},JSON.stringify({title:query.incomingWorkItem.title,knownTaskIdentities:query.knownTaskIdentities,hasHostTaskEnvironment:!!process.env.KANBAN_TASK_ID,argv:process.argv.slice(2)})+'\\n');process.stdout.write(JSON.stringify({type:'result',subtype:'success',structured_output:{relation_candidates:candidates},usage:{input_tokens:100,cache_read_input_tokens:1000,output_tokens:20}})+'\\n');});`,
-		);
-		await chmod(fakeClaudePath, 0o700);
-		vi.stubEnv("PATH", `${executableDirectory}:${process.env.PATH ?? ""}`);
+		const auditCalls: Array<{ title: string; knownTaskIdentities: Array<{ taskId: string }>; apiModel: string }> = [];
+		await createTaskAssistanceOpenAiCompatibleHttpFixture({
+			isolatedHomeDirectoryPath: fixture.isolatedHomeDirectoryPath,
+			respond: (request) => {
+				const query = JSON.parse(
+					readTaskAssistanceHttpFixtureUserPrompt(request).split("L4 本次查询：\n").at(-1) ?? "",
+				);
+				const reference = query.knownTaskIdentities.find((ref: { taskId: string }) => ref.taskId === "old01");
+				const candidates = query.incomingWorkItem.title.includes("无关")
+					? []
+					: [
+							{
+								task_reference: reference,
+								relation_kind: "reference_concerns_behavior_or_state_of",
+								confidence: "high",
+								coverage: query.incomingWorkItem.title.includes("部分")
+									? "partial_overlap"
+									: "fully_covers_incoming_work",
+								rationale: "当前任务明确承担该问题",
+								evidence: ["src/example.ts:1"],
+								cross_project: false,
+							},
+						];
+				if (
+					query.incomingWorkItem.existing_finding_task &&
+					["interactive-relation-suggestion", "strict-self-validation"].includes(
+						query.incomingWorkItem.work_item_key,
+					)
+				)
+					candidates.unshift({ ...candidates[0], task_reference: query.incomingWorkItem.existing_finding_task });
+				auditCalls.push({
+					title: query.incomingWorkItem.title,
+					knownTaskIdentities: query.knownTaskIdentities,
+					apiModel: request.model,
+				});
+				return { relation_candidates: candidates };
+			},
+		});
 		const createCard = (id: string, title: string, prompt: string, createdAt: number): RuntimeBoardCard => ({
 			id,
 			title,
@@ -178,7 +212,7 @@ describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账�
 						taskIncarnationCreatedAtEpochMs: 2,
 					},
 				}),
-			).rejects.toThrow("发现卡自身");
+			).rejects.toThrow("JSON in an unexpected shape");
 			const linked = await caller().support.triageIncomingWorkItem(work("linked", "完全覆盖"));
 			expect(linked).toMatchObject({ decision: "linked_to_existing_task", linked_task_id: "old01" });
 			const created = await caller().support.triageIncomingWorkItem(work("partial", "部分重叠"));
@@ -383,10 +417,7 @@ describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账�
 			expect(
 				(await loadWorkspaceBoardById(scope.workspaceId)).columns.flatMap((column) => column.cards),
 			).toHaveLength(5);
-			const calls = (await readFile(auditPath, "utf8"))
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
+			const calls = auditCalls;
 			expect(calls).toHaveLength(8);
 			expect(calls[0].knownTaskIdentities.map((reference: { taskId: string }) => reference.taskId)).toEqual([
 				"old01",
@@ -395,7 +426,7 @@ describe("共享任务索引经 CLI、tRPC、headless 桩、board 与关系账�
 				"old01",
 				"rvf01",
 			]);
-			expect(calls.every((call) => !call.hasHostTaskEnvironment && call.argv.includes("--safe-mode"))).toBe(true);
+			expect(calls.every((call) => call.apiModel === "fixture-requested-model")).toBe(true);
 		} finally {
 			await service.close();
 			await new Promise<void>((resolve) => server.close(() => resolve()));

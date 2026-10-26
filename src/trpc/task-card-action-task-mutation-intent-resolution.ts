@@ -19,6 +19,7 @@ import type { TaskMutationIntentWithResolvedActor } from "../state/workspace-boa
 // 时才采信标注（CLI 声明头优先，永远不记为用户）；这里对 CLI 请求干脆不附标注，免得读者误以为它会生效。
 
 export type TaskCardActionTaskMutationIntentSubject =
+	| "apply_task_sticker_entry_mutation"
 	| "set_task_card_shelving_state"
 	| "start_agent_session_moving_task_card_into_in_progress"
 	| "move_task_card_into_review_handing_agent_turn_to_user"
@@ -32,6 +33,7 @@ export type TaskCardActionTaskMutationIntentSubject =
 	| "unpin_task_card_from_task_pinboard";
 
 const KANBAN_CLI_TASK_MUTATION_INTENT_KIND_BY_TASK_CARD_ACTION_SUBJECT = {
+	apply_task_sticker_entry_mutation: "kanban_cli_task_card_action_apply_task_sticker_entry_mutation",
 	set_task_card_shelving_state: "kanban_cli_task_card_action_set_shelving_state",
 	start_agent_session_moving_task_card_into_in_progress: "kanban_cli_task_start_move_to_in_progress",
 	move_task_card_into_review_handing_agent_turn_to_user: "kanban_cli_task_card_action_move_into_review",
@@ -48,6 +50,7 @@ const KANBAN_CLI_TASK_MUTATION_INTENT_KIND_BY_TASK_CARD_ACTION_SUBJECT = {
 } as const satisfies Record<TaskCardActionTaskMutationIntentSubject, string>;
 
 const WEB_UI_TASK_MUTATION_INTENT_KIND_BY_TASK_CARD_ACTION_SUBJECT = {
+	apply_task_sticker_entry_mutation: "web_ui_task_card_action_apply_task_sticker_entry_mutation",
 	set_task_card_shelving_state: "web_ui_task_card_action_set_shelving_state",
 	start_agent_session_moving_task_card_into_in_progress:
 		"web_ui_task_card_action_start_agent_session_moving_into_in_progress",

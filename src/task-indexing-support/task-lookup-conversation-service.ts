@@ -6,8 +6,8 @@ import { splitAgentPromptImageAttachmentReferences } from "../core/agent-prompt-
 import type { RuntimeTaskImage } from "../core/api-contract";
 import type {
 	SharedTaskIndexingContext,
+	TaskAnalysisContextSettings,
 	TaskIndexingMaterial,
-	TaskIndexingSupportExecutorSettings,
 } from "../core/task-indexing-support-contract";
 import {
 	createTaskLookupConversationRequestSchema,
@@ -21,6 +21,7 @@ import {
 	taskLookupModelAnswerSchema,
 } from "../core/task-lookup-conversation-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { readTaskAssistanceModelProviderRoutingSettings } from "../model-provider-access/kanban-model-provider-settings";
 import { readPersistentAgentPromptImageAttachments } from "../state/persistent-agent-prompt-image-attachments";
 import {
 	getThisRuntimeProcessInstanceId,
@@ -32,11 +33,11 @@ import {
 	sanitizeStatelessAgentFailureDetail,
 } from "./stateless-task-indexing-agent-execution-diagnostics";
 import {
-	assembleStatelessTaskIndexingAgentPrompt,
-	type StatelessTaskIndexingAgentExecutionActivity,
-	type StatelessTaskIndexingAgentRequest,
-	type StatelessTaskIndexingAgentResult,
-} from "./stateless-task-indexing-agent-executor";
+	assembleTaskAnalysisApiPrompt,
+	type TaskAnalysisApiExecutionActivity,
+	type TaskAnalysisApiRequest,
+	type TaskAnalysisApiResult,
+} from "./task-analysis-api-executor";
 import {
 	appendTaskLookupExecutionActivities,
 	awaitTaskLookupOperationOrCancellation,
@@ -62,15 +63,13 @@ export interface TaskLookupConversationDependencies {
 	collectMaterials: (
 		workspaceId: string,
 	) => Promise<{ materials: TaskIndexingMaterial[]; missingContextParts: string[] }>;
-	getExecutorSettings: (workspaceId: string) => Promise<TaskIndexingSupportExecutorSettings>;
+	getExecutorSettings: (workspaceId: string) => Promise<TaskAnalysisContextSettings>;
 	getContext: (
 		workspaceId: string,
 		materials: TaskIndexingMaterial[],
-		settings: TaskIndexingSupportExecutorSettings,
+		settings: TaskAnalysisContextSettings,
 	) => Promise<SharedTaskIndexingContext>;
-	executeAgent: (
-		request: StatelessTaskIndexingAgentRequest<unknown>,
-	) => Promise<StatelessTaskIndexingAgentResult<unknown>>;
+	executeAgent: (request: TaskAnalysisApiRequest<unknown>) => Promise<TaskAnalysisApiResult<unknown>>;
 	onConversationUpdated?: (conversationId: string, revision: number) => void;
 }
 const identityKey = (reference: TaskIndexingMaterial["taskReference"]) =>
@@ -357,7 +356,11 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 			await setPhase("preparing_context");
 			const settings = await cancellable(() => deps.getExecutorSettings(conversation.contextWorkspaceId));
 			await updateTurn((current) => {
-				current.executorSettings = settings;
+				if ("agentId" in settings) current.executorSettings = settings;
+			});
+			const providerRoutingSettings = await cancellable(readTaskAssistanceModelProviderRoutingSettings);
+			await updateTurn((current) => {
+				current.providerRoutingSettings = providerRoutingSettings;
 			});
 			const context = await cancellable(() =>
 				deps.getContext(conversation.contextWorkspaceId, collected.materials, settings),
@@ -410,9 +413,30 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 					queryText: JSON.stringify(query),
 					outputSchema,
 					abortSignal: controller.signal,
-					modelUsagePurpose: "task_lookup_conversation" as const,
+					operationId: `${conversationId}/${turnId}`,
+					stage: executionPhase === "recall" ? "candidate_recall" : "candidate_explanation",
+					modelUsagePurpose:
+						executionPhase === "recall"
+							? ("task_lookup_candidate_recall" as const)
+							: ("task_lookup_candidate_explanation" as const),
+					validateOutput: (value: unknown) => {
+						const references =
+							executionPhase === "recall"
+								? recallSchema.parse(value).candidateTaskReferences
+								: taskLookupModelAnswerSchema
+										.parse(value)
+										.candidates.map((candidate) => candidate.taskReference);
+						const allowed = executionPhase === "recall" ? identities : selected;
+						const seen = new Set<string>();
+						for (const reference of references) {
+							const key = identityKey(reference);
+							if (!allowed.has(key) || seen.has(key))
+								throw new Error("模型返回范围外、身份无效或重复的候选，未采用结果。");
+							seen.add(key);
+						}
+					},
 					questionImages,
-					onExecutionActivity: (activity: StatelessTaskIndexingAgentExecutionActivity) => {
+					onExecutionActivity: (activity: TaskAnalysisApiExecutionActivity) => {
 						if (controller.signal.aborted) return;
 						pendingActivities.push({
 							occurredAtEpochMs: activity.occurredAtEpochMs,
@@ -430,10 +454,10 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 							}, 1000);
 					},
 				};
-				const prompt = assembleStatelessTaskIndexingAgentPrompt(request);
+				const prompt = assembleTaskAnalysisApiPrompt(request);
 				await updateTurn((current) => {
 					current.inputByteCount = Buffer.byteLength(prompt.stablePrefix + prompt.query);
-					current.modelExecutionTimeoutMs = 180_000;
+					current.modelExecutionTimeoutMs = 60_000;
 				});
 				// 保存实际输入与材料版本，历史留档不依赖可覆盖的 Context 缓存或临时 CLI 文件。
 				await lockedFileSystem.writeJsonFileAtomic(
@@ -441,6 +465,7 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 					{
 						instructionVersion: TASK_LOOKUP_INSTRUCTION_VERSION,
 						settings,
+						providerRoutingSettings,
 						instructionText: request.instructionText,
 						context,
 						queryText: request.queryText,
@@ -457,6 +482,9 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 						...result.usage,
 					}),
 				);
+				await updateTurn((current) => {
+					current.providerAttempts = [...(current.providerAttempts ?? []), ...(result.attempts ?? [])];
+				});
 				return result.value;
 			};
 			await setPhase("recalling_candidates");
@@ -520,6 +548,8 @@ export function createTaskLookupConversationService(deps: TaskLookupConversation
 			await flushActivities().catch(() => undefined);
 			await updateTurn((current) => {
 				current.status = controller.signal.aborted ? (closed ? "interrupted" : "cancelled") : "failed";
+				if (error instanceof StatelessTaskIndexingAgentExecutionError)
+					current.providerAttempts = [...(current.providerAttempts ?? []), ...(error.providerAttempts ?? [])];
 				appendTaskLookupExecutionActivities(current, [
 					{
 						occurredAtEpochMs: Date.now(),

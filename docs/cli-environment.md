@@ -58,9 +58,9 @@ Under `fullscreen`, Claude Code keeps its history inside the alternate screen bu
 
 ## Model providers (credentials Kanban itself calls out with)
 
-A registry of model-provider credentials, addressed **by provider**, that anything inside Kanban can draw on. Today one consumer exists — task naming in the New task dialog — but the shape is deliberately plural: several providers can be configured side by side, and future consumers (other in-app conveniences, other agents' keys) address them by id rather than getting their own bespoke variables.
+Kanban 按 provider 管理档案与凭据，供任务辅助、通知判断等用途复用。项目归属、查卡两阶段、任务起名和关系分析使用 [任务辅助 API 主备路由](task-assistance-api-provider-routing.md)：默认 MiniMax 优先、DeepSeek 备用，MiniMax 未配置时直接使用 DeepSeek。该路由不受 `KANBAN_DEFAULT_MODEL_PROVIDER_ID` 或旧 CLI 配置驱动。
 
-Read from the **runtime process** environment on every request, so a running Kanban server picks up changes only after a restart. Every endpoint is treated as OpenAI-compatible (`POST {base_url}/chat/completions`), so pointing a provider entry at an aggregating gateway (LiteLLM, OpenRouter, …) works with no code change. The request body stays inside the standard chat-completions schema for exactly that reason: a vendor extension is sent only to providers listed as accepting it (`MODEL_PROVIDER_IDS_ACCEPTING_THINKING_EXTENSION_FIELD` in `src/model-provider-access/request-model-provider-chat-completion.ts` — today `deepseek`, whose thinking mode Kanban turns off to keep these short interactive requests fast). An endpoint that rejects unknown fields with HTTP 400 therefore still works with nothing but the three variables below.
+环境凭据由运行时进程读取，修改进程外的环境变量后需重启；设置页保存的 provider 档案与主备路由对新请求生效。OpenAI 兼容端点使用 `POST {base_url}/chat/completions`。DeepSeek 关闭思考并使用 JSON 模式；MiniMax 按实际型号适配推理参数，以 schema 指令和最终正文校验约束 JSON；未知网关只接收标准协议字段。
 
 ### Per-provider variables
 
@@ -89,7 +89,7 @@ export KANBAN_MODEL_PROVIDER_DEEPSEEK_API_KEY="sk-..."
 
 ### Usage metadata
 
-Every call carries a required `modelUsagePurpose` — the role the call plays inside Kanban (`task_name_suggestion` today) — and each call appends one record to the `model-provider-usage` channel of the rotating JSONL journal under `~/.cline/kanban/diagnostic-event-journals/`: purpose, provider id, model id, outcome, failure reason, HTTP status, elapsed ms, prompt character count, and token counts when the provider reports them. Attempts that never reach the network (nothing configured) are recorded too, so "never configured" is distinguishable from "never used" in later analysis.
+每次外部模型请求必须携带 `modelUsagePurpose`，并在 `~/.cline/kanban/diagnostic-event-journals/model-provider-usage.jsonl` 记录用途、provider、请求与实际模型、操作与阶段、结果、耗时及上游返回的用量。辅助模型的尝试、未配置和冷却跳过另记在 `task-assistance-routing.jsonl`，缺失的缓存字段保持未知。
 
 Purpose is metadata on the call, not part of the variable name, precisely so one key serves many purposes and renaming a feature is not an environment migration.
 

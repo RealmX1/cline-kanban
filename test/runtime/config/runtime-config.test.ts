@@ -575,6 +575,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				const reloaded = await loadRuntimeConfig(tempProject);
 				expect(reloaded.selectedAgentId).toBe("codex");
 				expect(reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins).toEqual({
+					taskProjectAssignmentAutomaticAnalysisEnabled: null,
 					newTaskAutoReviewEnabled: true,
 					newTaskAutoReviewMode: null,
 					taskCreateDialogPrimaryStartAction: null,
@@ -626,6 +627,53 @@ describe.sequential("runtime-config auto agent selection", () => {
 		} finally {
 			cleanupProject();
 			cleanupHome();
+		}
+	});
+
+	it("项目归属自动分析默认未设置，跨项目重新加载保留开关且无关更新不覆盖", async () => {
+		const { path: isolatedHomeDirectory, cleanup: cleanupHomeDirectory } = createTempDir(
+			"kanban-home-project-assignment-preference-",
+		);
+		const { path: isolatedProjectDirectory, cleanup: cleanupProjectDirectory } = createTempDir(
+			"kanban-project-assignment-preference-",
+		);
+		try {
+			await withTemporaryEnv({ home: isolatedHomeDirectory }, async () => {
+				expect(
+					(await loadRuntimeConfig(isolatedProjectDirectory)).userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskProjectAssignmentAutomaticAnalysisEnabled,
+				).toBeNull();
+				await updateRuntimeConfig(isolatedProjectDirectory, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						taskProjectAssignmentAutomaticAnalysisEnabled: true,
+					},
+				});
+				const otherProjectDirectory = join(isolatedProjectDirectory, "other-project");
+				mkdirSync(otherProjectDirectory);
+				await updateRuntimeConfig(otherProjectDirectory, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: { newTaskAutoReviewEnabled: true },
+				});
+				expect(
+					(await loadRuntimeConfig(otherProjectDirectory)).userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskProjectAssignmentAutomaticAnalysisEnabled,
+				).toBe(true);
+				await updateRuntimeConfig(otherProjectDirectory, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						taskProjectAssignmentAutomaticAnalysisEnabled: false,
+					},
+				});
+				expect(
+					(await loadGlobalRuntimeConfig()).userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskProjectAssignmentAutomaticAnalysisEnabled,
+				).toBe(false);
+				expect(
+					JSON.parse(readFileSync(join(isolatedHomeDirectory, ".cline", "kanban", "config.json"), "utf8"))
+						.userInterfacePreferencesSharedAcrossBrowserOrigins.taskProjectAssignmentAutomaticAnalysisEnabled,
+				).toBe(false);
+			});
+		} finally {
+			cleanupProjectDirectory();
+			cleanupHomeDirectory();
 		}
 	});
 

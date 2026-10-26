@@ -121,6 +121,48 @@ function createCard(taskId: string, overrides: Partial<RuntimeBoardCard> = {}): 
 	};
 }
 
+describe("多便签卡片动作", () => {
+	it("串行写入保留并发创建，返回完整快照，重试不重复广播或推进任务时间", async () => {
+		seedWorkspace(createBoard({ backlog: [createCard("sticker-task")] }));
+		const { api, broadcastRuntimeWorkspaceStateUpdated, runtimeApi } = createApiForTest();
+		const create = (id: string) =>
+			api.applyTaskStickerEntryMutation(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "sticker-task",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					mutation: { operation: "create", taskStickerEntryId: id, stickerText: `正文 ${id}` },
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+			);
+		await Promise.all([create("first"), create("second")]);
+		const retry = await create("first");
+		expect(retry.boardWasSaved).toBe(false);
+		expect(
+			retry.taskCardSnapshotAfterAction.taskCard.taskStickerEntries?.map((entry) => entry.taskStickerEntryId),
+		).toEqual(["first", "second"]);
+		expect(retry.taskCardSnapshotAfterAction.taskCard.updatedAt).toBe(1);
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledTimes(2);
+		expect(runtimeApi.startTaskSession).not.toHaveBeenCalled();
+	});
+	it("任务删除后同 ID 重建拒绝旧请求", async () => {
+		seedWorkspace(createBoard({ backlog: [createCard("sticker-task", { createdAt: 2 })] }));
+		const { api } = createApiForTest();
+		await expect(
+			api.applyTaskStickerEntryMutation(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "sticker-task",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					mutation: { operation: "create", taskStickerEntryId: "old", stickerText: "旧代际" },
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(readBoard().columns[0]?.cards[0]?.taskStickerEntries).toBeUndefined();
+	});
+});
+
 function createBoard(cardsByColumnId: Partial<Record<RuntimeBoardColumnId, RuntimeBoardCard[]>>): RuntimeBoardData {
 	return {
 		columns: [

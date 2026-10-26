@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { runtimeTaskImageSchema } from "./api-contract";
 import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "./inter-work-unit-relation-ledger-event-contract";
+import {
+	taskAssistanceModelProviderAttemptSchema,
+	taskAssistanceModelProviderRoutingSettingsSchema,
+} from "./task-assistance-model-provider-routing-contract";
 import { taskIndexingSupportExecutorSettingsSchema } from "./task-indexing-support-contract";
 
 export const taskLookupExecutionPhaseSchema = z.enum([
@@ -18,6 +22,7 @@ export const taskLookupExecutionActivitySchema = z.object({
 	eventKind: z.enum([
 		"phase_started",
 		"agent_process_started",
+		"api_request_started",
 		"agent_response_received",
 		"agent_execution_completed",
 		"diagnostic_warning",
@@ -81,6 +86,8 @@ export const taskLookupTurnSchema = z.object({
 	executionActivityTimeline: z.array(taskLookupExecutionActivitySchema).max(200).optional(),
 	omittedExecutionActivityCount: z.number().int().nonnegative().optional(),
 	executorSettings: taskIndexingSupportExecutorSettingsSchema.optional(),
+	providerRoutingSettings: taskAssistanceModelProviderRoutingSettingsSchema.optional(),
+	providerAttempts: z.array(taskAssistanceModelProviderAttemptSchema).optional(),
 	inputByteCount: z.number().optional(),
 	modelExecutionTimeoutMs: z.number().optional(),
 	executionFailureDiagnostic: taskLookupExecutionFailureDiagnosticSchema.optional(),
@@ -97,6 +104,9 @@ export const taskLookupTurnSchema = z.object({
 			cacheReadTokens: z.number().optional(),
 			stablePromptPrefixSha256: z.string(),
 			resolvedModelId: z.string().nullable(),
+			requestedModelId: z.string().nullable().optional(),
+			modelProviderId: z.string().optional(),
+			cacheWriteTokens: z.number().optional(),
 		}),
 	),
 });

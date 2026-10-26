@@ -63,6 +63,7 @@ import {
 	taskMainSessionHandoverExistingTargetBindingSchema,
 	taskMainSessionHandoverRecordSchema,
 } from "./task-main-session-handover-contract";
+import { runtimeTaskStickerEntrySchema } from "./task-sticker-entry-contract.js";
 import { resolveTaskTitle } from "./task-title.js";
 
 export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
@@ -84,6 +85,7 @@ export type {
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 export * from "./task-rvf-history-contract.js";
+export * from "./task-sticker-entry-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -317,6 +319,23 @@ export const runtimeTaskCommentEntrySchema = z.object({
 });
 export type RuntimeTaskCommentEntry = z.infer<typeof runtimeTaskCommentEntrySchema>;
 
+export const runtimeTaskStickerEntryMutationSchema = z.discriminatedUnion("operation", [
+	z.object({
+		operation: z.literal("create"),
+		taskStickerEntryId: z.string().min(1),
+		stickerText: z.string().trim().min(1),
+	}),
+	z.object({
+		operation: z.literal("update_text"),
+		taskStickerEntryId: z.string().min(1),
+		expectedStickerText: z.string(),
+		stickerText: z.string().trim().min(1),
+	}),
+	z.object({ operation: z.literal("delete"), taskStickerEntryId: z.string().min(1), expectedStickerText: z.string() }),
+	z.object({ operation: z.literal("set_collapsed"), taskStickerEntryId: z.string().min(1), isCollapsed: z.boolean() }),
+]);
+export type RuntimeTaskStickerEntryMutation = z.infer<typeof runtimeTaskStickerEntryMutationSchema>;
+
 const runtimeLegacyTaskClineReasoningEffortSchema = z.enum(["default", "low", "medium", "high", "xhigh"]);
 
 function normalizeRuntimeTaskClineSettings(input: {
@@ -419,6 +438,9 @@ export const runtimeBoardCardSchema = z
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
+		taskStickerEntries: z.array(runtimeTaskStickerEntrySchema).optional(),
+		// 只保留已删除条目的 ID，让迟到的创建重试在重启后也不能复活便签，不保留已删除正文。
+		taskStickerDeletedEntryIds: z.array(z.string().min(1)).optional(),
 		// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序，最近置顶的在前）。
 		// 与本文件里另外两处 "pin" 语义（模型 pinned_version、建卡固化会话通道）无关，也与 Focus View 的
 		// sticky 卡头几何无关——那些都不落盘。置顶态跟着卡片走，卡片被永久删除时字段一并消失，无孤儿可清。
@@ -1552,6 +1574,22 @@ export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
 	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
 	taskSessionSummaryPersistedInWorkspaceSessionsFile: runtimeTaskSessionSummarySchema.nullable(),
 });
+export const runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite(),
+	mutation: runtimeTaskStickerEntryMutationSchema,
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export const runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema = z.object({
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionApplyTaskStickerEntryMutationRequest = z.infer<
+	typeof runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema
+>;
+export type RuntimeTaskCardActionApplyTaskStickerEntryMutationResponse = z.infer<
+	typeof runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema
+>;
 export const runtimeTaskCardActionSetShelvingStateRequestSchema = z.object({
 	taskId: z.string().min(1),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
@@ -3983,6 +4021,8 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	// 创建、Backlog 保存和直接启动共享；旧配置缺失或 null 时均默认关闭。
+	taskProjectAssignmentAutomaticAnalysisEnabled: z.boolean().nullable().optional(),
 	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
 	taskEditorSettingPresentationBySettingKey: z
 		.record(z.string().max(100), z.enum(["expanded", "collapsed_in_group", "hidden"]))

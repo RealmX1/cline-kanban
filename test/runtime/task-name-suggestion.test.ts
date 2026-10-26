@@ -72,47 +72,24 @@ describe("suggestTaskNamesFromTaskDescription", () => {
 		expect(fetchImplementation).not.toHaveBeenCalled();
 	});
 
-	// 「一家都没配」与「配了却没有可用的默认」共用同一个 reason（契约 enum 不为后者加成员），所以后者
-	// 必须靠 unavailableDetail 把「该声明哪个变量」说出来——否则界面只会让用户去配一个早就配好的 key。
-	it("names the default-provider variable when several providers are configured but none is the default", async () => {
-		const fetchImplementation = vi.fn();
-		const response = await suggestTaskNamesFromTaskDescription(
-			{ taskDescription: "Fix the login bug" },
-			{
-				environmentVariables: {
-					[getModelProviderApiKeyEnvironmentVariableName("deepseek")]: "sk-a",
-					[getModelProviderApiKeyEnvironmentVariableName("openrouter")]: "sk-b",
-				},
-				fetchImplementation,
-			},
-		);
-		expect(response).toMatchObject({ status: "unavailable", unavailableReason: "api_key_not_configured" });
-		const unavailableDetail = (response as { unavailableDetail?: string }).unavailableDetail ?? "";
-		expect(unavailableDetail).toContain(DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME);
-		// 可操作的前提是用户知道有哪几家可填。
-		expect(unavailableDetail).toContain("deepseek");
-		expect(unavailableDetail).toContain("openrouter");
-		expect(fetchImplementation).not.toHaveBeenCalled();
-	});
-
-	it("names the default-provider variable when the explicit default points at an unconfigured provider", async () => {
-		const fetchImplementation = vi.fn();
-		const response = await suggestTaskNamesFromTaskDescription(
-			{ taskDescription: "Fix the login bug" },
-			{
-				environmentVariables: {
-					[getModelProviderApiKeyEnvironmentVariableName("deepseek")]: "sk-a",
-					[DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME]: "openrouter",
-				},
-				fetchImplementation,
-			},
-		);
-		expect(response).toMatchObject({ status: "unavailable", unavailableReason: "api_key_not_configured" });
-		expect((response as { unavailableDetail?: string }).unavailableDetail ?? "").toContain(
-			DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME,
-		);
-		// 显式默认指向没配的那家时绝不能改发给 deepseek。
-		expect(fetchImplementation).not.toHaveBeenCalled();
+	it("辅助起名默认路由不受旧默认 provider 或多家环境配置干扰", async () => {
+		for (const extraEnvironment of [
+			{ [getModelProviderApiKeyEnvironmentVariableName("openrouter")]: "sk-other" },
+			{ [DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME]: "unconfigured" },
+		]) {
+			const fetchImplementation = vi
+				.fn()
+				.mockResolvedValue(
+					suggestedTaskNamesResponse({ taskCategoryTags: ["FIX"], taskNameWithoutCategoryTags: "修复登录" }),
+				);
+			const result = await suggestTaskNamesFromTaskDescription(
+				{ taskDescription: "登录故障" },
+				{ environmentVariables: { ...ENVIRONMENT_WITH_API_KEY_ONLY, ...extraEnvironment }, fetchImplementation },
+			);
+			expect(result.status).toBe("suggested");
+			expect(fetchImplementation).toHaveBeenCalledTimes(1);
+			expect(fetchImplementation.mock.calls[0]?.[0]).toContain("deepseek");
+		}
 	});
 
 	it("wraps the description as data in the user prompt and joins category tags and name into the titles", async () => {
@@ -296,7 +273,7 @@ describe("suggestTaskNamesFromTaskDescription", () => {
 		expect(response).toEqual({
 			status: "unavailable",
 			unavailableReason: "request_failed",
-			unavailableDetail: "Model provider returned no usable names.",
+			unavailableDetail: "Model provider returned JSON in an unexpected shape.",
 		});
 	});
 

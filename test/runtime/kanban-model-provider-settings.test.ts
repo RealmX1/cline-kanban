@@ -27,6 +27,27 @@ vi.mock("@napi-rs/keyring", () => ({
 	},
 }));
 describe("统一 BYOK 凭据来源", () => {
+	it("历史起名绑定不再受用途保存校验约束，保存后仍保留原字段", async () => {
+		const legacyProfile = {
+			modelProviderId: "legacy-task-name-provider",
+			displayName: "历史起名服务",
+			providerProtocol: "alibaba" as const,
+			credentialSource: "environment" as const,
+			alibabaRegion: "beijing" as const,
+		};
+		await saveKanbanModelProviderProfile({ profile: legacyProfile });
+		const legacyBinding = { modelProviderId: legacyProfile.modelProviderId, modelId: "legacy-name-model" };
+		await saveNotificationIntelligenceSettings(
+			notificationIntelligenceSettingsSchema.parse({
+				taskNameSuggestionBinding: legacyBinding,
+				fallbackAfterMinutes: 25,
+			}),
+		);
+		expect((await getNotificationIntelligenceSettings()).settings).toMatchObject({
+			taskNameSuggestionBinding: legacyBinding,
+			fallbackAfterMinutes: 25,
+		});
+	});
 	it("保存密钥只返回状态；起名使用绑定模型；删除后不悄悄使用环境密钥", async () => {
 		const profile = {
 			modelProviderId: "test-provider",
@@ -81,7 +102,7 @@ describe("统一 BYOK 凭据来源", () => {
 		const textBinding = { modelProviderId: textProfile.modelProviderId, modelId: "text-model" };
 		await saveNotificationIntelligenceSettings(
 			notificationIntelligenceSettingsSchema.parse({
-				taskNameSuggestionBinding: textBinding,
+				independentTaskCreationDraftGenerationBinding: textBinding,
 				notificationAssessmentBinding: textBinding,
 			}),
 		);
@@ -89,7 +110,7 @@ describe("统一 BYOK 凭据来源", () => {
 		await saveKanbanModelProviderProfile({ profile: { ...textProfile, providerProtocol: "alibaba" } });
 		await saveNotificationIntelligenceSettings(
 			notificationIntelligenceSettingsSchema.parse({
-				taskNameSuggestionBinding: textBinding,
+				independentTaskCreationDraftGenerationBinding: textBinding,
 				notificationAssessmentBinding: textBinding,
 				speechMode: "summary",
 				speechProvider: "browser",
@@ -98,14 +119,21 @@ describe("统一 BYOK 凭据来源", () => {
 		expect((await getNotificationIntelligenceSettings()).settings.speechMode).toBe("summary");
 		const ttsProfile = { ...textProfile, modelProviderId: "tts-only-provider", providerProtocol: "alibaba" as const };
 		await saveKanbanModelProviderProfile({ profile: ttsProfile });
-		await expect(
-			saveNotificationIntelligenceSettings(
-				notificationIntelligenceSettingsSchema.parse({
-					taskNameSuggestionBinding: { modelProviderId: ttsProfile.modelProviderId, modelId: "text-model" },
-					notificationAssessmentBinding: textBinding,
-				}),
-			),
-		).rejects.toThrow(/任务起名.*tts-only-provider.*阿里百炼 TTS/u);
+		for (const bindingKey of [
+			"notificationAssessmentBinding",
+			"independentTaskCreationDraftGenerationBinding",
+		] as const) {
+			const purpose = bindingKey === "notificationAssessmentBinding" ? "通知判断与摘要" : "分出独立任务草稿";
+			await expect(
+				saveNotificationIntelligenceSettings(
+					notificationIntelligenceSettingsSchema.parse({
+						independentTaskCreationDraftGenerationBinding: textBinding,
+						notificationAssessmentBinding: textBinding,
+						[bindingKey]: { modelProviderId: ttsProfile.modelProviderId, modelId: "text-model" },
+					}),
+				),
+			).rejects.toThrow(`「${purpose}」绑定的 provider tts-only-provider 服务类型为阿里百炼 TTS`);
+		}
 	});
 	it("已落盘的语音配置因档案变动失效时，不阻止保存无关字段；改动语音字段仍做完整校验", async () => {
 		const speechProfile = {

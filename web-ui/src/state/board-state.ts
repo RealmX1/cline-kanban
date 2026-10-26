@@ -35,6 +35,7 @@ import {
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskConversationModeSchema,
+	runtimeTaskStickerEntrySchema,
 	taskMainSessionHandoverRecordSchema,
 } from "../../../src/core/api-contract";
 
@@ -261,6 +262,8 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	autoReviewMode: true,
 	images: true,
 	taskCommentEntries: true,
+	taskStickerEntries: true,
+	taskStickerDeletedEntryIds: true,
 	pinnedToTaskPinboardAt: true,
 	taskShelvingState: true,
 	taskPinboardPinReason: true,
@@ -411,6 +414,15 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
+		taskStickerEntries: Array.isArray(card.taskStickerEntries)
+			? card.taskStickerEntries.flatMap((entry) => {
+					const parsed = runtimeTaskStickerEntrySchema.safeParse(entry);
+					return parsed.success ? [parsed.data] : [];
+				})
+			: undefined,
+		taskStickerDeletedEntryIds: Array.isArray(card.taskStickerDeletedEntryIds)
+			? card.taskStickerDeletedEntryIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+			: undefined,
 		...(pinnedToTaskPinboardAt !== undefined ? { pinnedToTaskPinboardAt } : {}),
 		...(typeof card.taskShelvingState === "object" &&
 		card.taskShelvingState !== null &&
