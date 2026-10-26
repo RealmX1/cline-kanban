@@ -1,6 +1,10 @@
-import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { runtimeDailyWorkProgressMetricSchema } from "../core/api-contract";
+import {
+	measureDailyWorkProgressAsynchronousStage,
+	measureDailyWorkProgressSynchronousStage,
+	readUtf8FileWithDailyWorkProgressCostObservation,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { taskUserPromptStatisticsCursorSchema } from "./task-user-prompt-statistics-transcript-reader";
 
@@ -61,7 +65,13 @@ export function createEmptyDailyWorkProgressStatisticsStore(now: number): DailyW
 }
 export async function readDailyWorkProgressStatisticsStore(path: string): Promise<DailyWorkProgressStatisticsStore> {
 	try {
-		return dailyWorkProgressStatisticsStoreSchema.parse(JSON.parse(await readFile(path, "utf8")));
+		const raw = await measureDailyWorkProgressAsynchronousStage("statistics_read", async () => {
+			const text = await readUtf8FileWithDailyWorkProgressCostObservation(path);
+			return text;
+		});
+		return measureDailyWorkProgressSynchronousStage("statistics_parse", () =>
+			dailyWorkProgressStatisticsStoreSchema.parse(JSON.parse(raw)),
+		);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT")
 			return createEmptyDailyWorkProgressStatisticsStore(Date.now());
@@ -73,11 +83,30 @@ export async function mutateDailyWorkProgressStatisticsStore<T>(
 	path: string,
 	operation: (state: DailyWorkProgressStatisticsStore) => Promise<T>,
 ): Promise<{ state: DailyWorkProgressStatisticsStore; result: T }> {
-	return lockedFileSystem.withLock({ path, type: "file" }, async () => {
-		const state = await readDailyWorkProgressStatisticsStore(path);
-		const before = JSON.stringify(state);
-		const result = await operation(state);
-		if (JSON.stringify(state) !== before) await lockedFileSystem.writeJsonFileAtomic(path, state, { lock: null });
-		return { state, result };
+	let stopLockWait: (() => void) | undefined;
+	const enteredLock = new Promise<void>((resolve) => {
+		stopLockWait = resolve;
 	});
+	const lockWait = measureDailyWorkProgressAsynchronousStage("statistics_lock_wait", () => enteredLock);
+	try {
+		return await lockedFileSystem.withLock({ path, type: "file" }, async () => {
+			stopLockWait?.();
+			const state = await readDailyWorkProgressStatisticsStore(path);
+			// EXPERIMENT_NODE: 仅当序列化成为主要成本时，再评估覆盖全部持久状态的变更标记。
+			const before = measureDailyWorkProgressSynchronousStage("statistics_stringify", () => JSON.stringify(state));
+			const result = await operation(state);
+			if (measureDailyWorkProgressSynchronousStage("statistics_stringify", () => JSON.stringify(state)) !== before) {
+				const serialized = measureDailyWorkProgressSynchronousStage("statistics_stringify", () =>
+					JSON.stringify(state, null, 2),
+				);
+				await measureDailyWorkProgressAsynchronousStage("statistics_write", () =>
+					lockedFileSystem.writeTextFileAtomic(path, serialized, { lock: null }),
+				);
+			}
+			return { state, result };
+		});
+	} finally {
+		stopLockWait?.();
+		await lockWait;
+	}
 }
