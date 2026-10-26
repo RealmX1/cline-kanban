@@ -177,6 +177,16 @@ export const rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema = rvfRev
 	handoffSha256: z.string().regex(/^[a-f0-9]{64}$/u),
 	dryRun: z.boolean().default(false),
 });
+export const rvfLateNativeCloseoutRecoverableDeliveryFailureReasonSchema = z.enum([
+	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
+]);
+export const rvfLateNativeCloseoutSubmissionIdentitySchema = z.object({
+	source: z.enum(["native_delivery_operation", "compaction_confirmation_snapshot"]),
+	clientUserMessageId: z.string().min(1),
+	returnedNativeTurnId: z.string().nullable(),
+	previousNativeTurnId: z.string().nullable(),
+});
 export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema = z.object({
 	schema: z.literal("rvf-late-native-closeout-prompt-acceptance-recovery/v1"),
 	workspaceId: z.string(),
@@ -199,6 +209,7 @@ export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema = z.obje
 	observedAt: z.number(),
 	previousPauseReason: z.string(),
 	previousPauseUpdatedAt: z.number(),
+	nativeSubmissionIdentity: rvfLateNativeCloseoutSubmissionIdentitySchema.optional(),
 	originalDeliveryFailure: z.object({
 		taskId: z.string(),
 		attemptId: z.string().optional(),
@@ -207,7 +218,7 @@ export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema = z.obje
 		promptSha256: z.string(),
 		messageId: z.string(),
 		status: z.literal("delivery_failed"),
-		failureReason: z.literal("submit_confirmation_budget_exhausted"),
+		failureReason: rvfLateNativeCloseoutRecoverableDeliveryFailureReasonSchema,
 		createdAt: z.string().datetime(),
 		statusUpdatedAt: z.string().datetime(),
 	}),
@@ -225,6 +236,8 @@ export const rvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCodeSchema = z.e
 	"delivery_failure_not_eligible",
 	"native_control_unavailable",
 	"native_prompt_acceptance_not_proven",
+	"native_submission_identity_not_proven",
+	"native_submission_binding_mismatch",
 	"native_message_not_on_active_branch",
 	"record_operation_busy",
 	"record_changed",
@@ -335,6 +348,7 @@ export const rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema = z.dis
 		status: z.enum(["unknown", "blocked"]),
 		reasonCode: rvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCodeSchema,
 		reason: z.string(),
+		failedNativeTurnHistoryPageReadCursor: z.string().nullable().optional(),
 	}),
 ]);
 export type RvfLateNativeCloseoutPromptAcceptanceRecoveryResponse = z.infer<

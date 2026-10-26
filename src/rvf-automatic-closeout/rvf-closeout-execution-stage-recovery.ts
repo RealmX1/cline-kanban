@@ -633,10 +633,28 @@ export async function claimRvfCloseoutExecutionStage(
 	deps: ExecutionRecoveryDependencies,
 	input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
 ): Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>> {
+	let response: z.infer<typeof rvfCloseoutStageClaimResponseSchema> = {
+		status: "waiting",
+		reason: "本轮操作锁由另一执行者持有，等待其完成后重验。",
+	};
+	await withRvfAutomaticCloseoutRecordOperationLock(
+		getRvfAutomaticCloseoutStorePath(deps.workspaceId),
+		input.decisionToken,
+		async (assertOwned) => {
+			response = await claimRvfCloseoutExecutionStageWhileOperationOwned(deps, input, assertOwned);
+		},
+	);
+	return response;
+}
+async function claimRvfCloseoutExecutionStageWhileOperationOwned(
+	deps: ExecutionRecoveryDependencies,
+	input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
+	assertOwned: () => void,
+): Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>> {
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
 	let record = (await readRvfAutomaticCloseoutRecords(storePath)).find((entry) => sameBinding(entry, input));
 	if (!record) return { status: "blocked", reason: "阶段认领与 run 绑定不一致。" };
-	record = await reconcileExistingCloseoutGoalCompletionOnce(deps, record);
+	record = await reconcileExistingCloseoutGoalCompletionOnce(deps, record, assertOwned);
 	const completedStage = completedRvfCloseoutStage(record, input.stage);
 	if (completedStage?.commitSha) return { status: "already_completed", commitSha: completedStage.commitSha };
 	if (
@@ -658,36 +676,40 @@ export async function claimRvfCloseoutExecutionStage(
 		reason: string,
 		requireReadOnlyInspection = false,
 	): Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>> => {
-		await updateRvfAutomaticCloseoutRecords(storePath, (records) => ({
-			records: records.map((current) =>
-				sameBinding(current, input) &&
-				!deps.isStopped(current) &&
-				!resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling
-					? {
-							...current,
-							automaticRecoveryProgress: {
-								evidenceFingerprint: "",
-								verificationAttemptCount: 0,
-								nextVerificationAtMs: 0,
-								...current.automaticRecoveryProgress,
-								kind: "machine_waiting" as const,
-								reasonCode: "native_prompt_acceptance_not_proven",
-								nextAutomaticAction: "collect_native_acceptance_evidence" as const,
-							},
-							...(requireReadOnlyInspection
-								? {
-										promptDeliveryAttempts: current.promptDeliveryAttempts?.map((attempt) =>
-											attempt.deliveryAttemptId === delivery.deliveryAttemptId
-												? { ...attempt, executionRequiresReadOnlyInspection: true }
-												: attempt,
-										),
-									}
-								: {}),
-						}
-					: current,
-			),
-			value: undefined,
-		}));
+		assertOwned();
+		await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
+			assertOwned();
+			return {
+				records: records.map((current) =>
+					sameBinding(current, input) &&
+					!deps.isStopped(current) &&
+					!resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling
+						? {
+								...current,
+								automaticRecoveryProgress: {
+									evidenceFingerprint: "",
+									verificationAttemptCount: 0,
+									nextVerificationAtMs: 0,
+									...current.automaticRecoveryProgress,
+									kind: "machine_waiting" as const,
+									reasonCode: "native_prompt_acceptance_not_proven",
+									nextAutomaticAction: "collect_native_acceptance_evidence" as const,
+								},
+								...(requireReadOnlyInspection
+									? {
+											promptDeliveryAttempts: current.promptDeliveryAttempts?.map((attempt) =>
+												attempt.deliveryAttemptId === delivery.deliveryAttemptId
+													? { ...attempt, executionRequiresReadOnlyInspection: true }
+													: attempt,
+											),
+										}
+									: {}),
+							}
+						: current,
+				),
+				value: undefined,
+			};
+		});
 		return { status: "waiting", reason };
 	};
 	if (
@@ -775,11 +797,14 @@ export async function claimRvfCloseoutExecutionStage(
 	return updateRvfAutomaticCloseoutRecords<z.infer<typeof rvfCloseoutStageClaimResponseSchema>>(
 		storePath,
 		async (records) => {
+			assertOwned();
 			const current = records.find((entry) => sameBinding(entry, input));
 			const latestSummary = await deps.getMainSummary();
 			if (
 				!current ||
 				!sameRvfCloseoutObservationBinding(current, record) ||
+				JSON.stringify(current.lateNativePromptAcceptanceRecoveryReceipt) !==
+					JSON.stringify(record.lateNativePromptAcceptanceRecoveryReceipt) ||
 				deps.isStopped(current) ||
 				latestSummary.taskId !== summary.taskId ||
 				latestSummary.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
@@ -882,8 +907,21 @@ export async function claimRvfCloseoutExecutionStage(
 					: {}),
 			};
 			// 配置闭包检查包含异步 I/O，最后再核对 Stop 与接管，不凭早先判断追加认领。
+			const finalDelivery = findTaskMessageInjectionRecord(
+				await readTaskMessageInjectionLedger(
+					getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(deps.workspaceId)),
+				),
+				delivery.conversationSessionId,
+				delivery.idempotencyKey,
+			);
+			const suppressedAtFinalCheck = await readNormalRvfCloseoutSuppression(
+				current.receipt.worktree,
+				current.runDirectory,
+			);
 			const finalSummary = await deps.getMainSummary();
+			assertOwned();
 			if (
+				JSON.stringify(finalDelivery) !== JSON.stringify(injected) ||
 				finalSummary.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
 				finalSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== delivery.nativeSessionId ||
 				finalSummary.taskId !== summary.taskId ||
@@ -891,7 +929,7 @@ export async function claimRvfCloseoutExecutionStage(
 				resolveSessionFacets(finalSummary).liveness !== "live" ||
 				deps.isStopped(current) ||
 				resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
-				(await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory))
+				suppressedAtFinalCheck
 			)
 				return { records, value: { status: "blocked" as const, reason: "最终认领检查期间收尾已停止或被接管。" } };
 			return {
