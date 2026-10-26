@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { rvfAutomaticCloseoutExecutionStageResultSchema } from "./rvf-automatic-closeout-contract";
+import { existingCloseoutGoalCompletionReconciliationSchema } from "./rvf-closeout-goal-completion-contract";
 
 export const taskRvfHistoryRequestSchema = z.object({
 	taskId: z.string().trim().min(1),
@@ -39,6 +40,7 @@ export const taskRvfHistoryRunSchema = z.object({
 	automaticCloseoutStatus: z.string().nullable(),
 	landExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.nullable(),
 	baseBranchSyncExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.nullable(),
+	existingCloseoutGoalCompletionReconciliation: existingCloseoutGoalCompletionReconciliationSchema.optional(),
 });
 export const taskRvfHistoryResponseSchema = z.object({
 	schemaVersion: z.literal("kanban-task-rvf-history/v1"),

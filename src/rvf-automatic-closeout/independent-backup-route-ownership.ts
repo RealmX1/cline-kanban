@@ -408,7 +408,11 @@ export async function recordIndependentBackupRouteSuppressionObservation(
 		records: records.map((entry) =>
 			entry.taskId === record.taskId &&
 			entry.receipt.decision_token === record.receipt.decision_token &&
-			entry.runDirectory === record.runDirectory
+			entry.runDirectory === record.runDirectory &&
+			!(
+				entry.independentBackupRouteSuppressionObservation?.reason === reason &&
+				entry.independentBackupRouteSuppressionObservation.controlDirectory === controlDirectory
+			)
 				? {
 						...entry,
 						independentBackupRouteSuppressionObservation: {

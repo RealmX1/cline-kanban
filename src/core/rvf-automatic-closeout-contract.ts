@@ -8,6 +8,10 @@ import {
 	rvfCloseoutSkillInstallationVersionReferenceSchema,
 	rvfCloseoutStageExecutionClaimSchema,
 } from "./rvf-automatic-closeout-recovery-contract";
+import {
+	existingCloseoutGoalCompletionReconciliationSchema,
+	rvfCloseoutSuppressedDeliveryReconciliationSchema,
+} from "./rvf-closeout-goal-completion-contract";
 import { rvfPreReviewConversationRestoreIdleGateRecoverySchema } from "./rvf-pre-review-conversation-restore-idle-gate-recovery-contract";
 
 export const rvfReviewStartBoundaryRequestSchema = z.object({
@@ -274,6 +278,8 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 	waitingNotificationSentAt: z.number().nullable().optional(),
 	landExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
 	baseBranchSyncExecutionResult: rvfAutomaticCloseoutExecutionStageResultSchema.optional(),
+	existingCloseoutGoalCompletionReconciliation: existingCloseoutGoalCompletionReconciliationSchema.optional(),
+	suppressedDeliveryReconciliation: rvfCloseoutSuppressedDeliveryReconciliationSchema.optional(),
 	executionResultReportHistory: z
 		.array(rvfAutomaticCloseoutExecutionStageResultSchema.extend({ stage: z.enum(["land", "base_branch_sync"]) }))
 		.optional(),
