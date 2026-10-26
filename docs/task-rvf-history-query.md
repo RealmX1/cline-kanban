@@ -29,6 +29,8 @@ kanban task rvf-history --task-id <id> --project-path <main-checkout> --cursor <
 
 查询不会触发恢复、finalize、验证执行、提交或同步；不会使用全局 latest。执行后续操作时仍使用查询返回的精确 run/handoff，并核对该操作自己的门禁。
 
+每轮可选的 `existingCloseoutGoalCompletionReconciliation` 独立展示实际收尾完成或备用路线消费事实。原 `landExecutionResult` / `baseBranchSyncExecutionResult` 的拒绝和失败继续保留；这项观察不会把 `hasVerifiedCompletedRvf` 或当前覆盖改成通过。证据适配、恢复预算和投递抑制见[既有收尾目标对账](runbooks/rvf-existing-closeout-goal-completion-reconciliation.md)。
+
 ## 生产方与恢复
 
 需要 RVF 同时提供 `rvf inspect storage-paths --json` 和 `rvf inspect run-review-evidence --project-path <main-checkout> --run-dir <run> [--run-dir <run>…] [--current-worktree <path>] --json`。响应 schema 分别为 `rvf-storage-paths/v1` 与 `rvf-run-review-evidence/v1`。生产方使用自己的存储根 resolver，Kanban 不固化个人路径、插件版本或 Python 路径。

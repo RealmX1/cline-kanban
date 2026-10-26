@@ -702,3 +702,72 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(response.recentRuns[0].recoveryCondition).toBeTruthy();
 	});
 });
+
+it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会被改写为通过", async () => {
+	const fixture = await setup();
+	const directory = await fixture.addRun("manual-closeout", undefined, "unknown", "unknown");
+	const observation = {
+		schema: "kanban-existing-closeout-goal-completion/v1" as const,
+		binding: {
+			workspaceId: fixture.scope.workspaceId,
+			taskId: "task",
+			decisionToken: "manual-token",
+			runId: "manual-closeout",
+			runDirectory: directory,
+			handoffSha256: "a".repeat(64),
+			receiptSha256: "b".repeat(64),
+		},
+		verdict: "completed" as const,
+		verifiedStages: [
+			{
+				stage: "land" as const,
+				commitSha: "c".repeat(40),
+				source: "historical_manual_execution" as const,
+				evidenceSha256s: [],
+				observedAt: 30,
+			},
+			{
+				stage: "base_branch_sync" as const,
+				commitSha: "d".repeat(40),
+				source: "historical_manual_execution" as const,
+				evidenceSha256s: [],
+				observedAt: 31,
+				baseRef: "refs/heads/main",
+			},
+		],
+		evidenceReferences: [],
+		verificationGaps: [],
+		observedAt: 31,
+		recovery: {
+			fingerprint: "observed",
+			verificationAttemptCount: 1,
+			nextVerificationAtMs: 0,
+			nextCapabilityProbeAtMs: 0,
+			discoveryAfterPath: null,
+			discoveryComplete: true,
+		},
+	};
+	fixture.context.boundRuns.push({
+		runDirectory: directory,
+		runId: "manual-closeout",
+		decisionToken: "manual-token",
+		record: {
+			createdAt: 10,
+			status: "paused",
+			handoffPath: join(directory, "artifacts", "handoff.md"),
+			handoffSha256: "a".repeat(64),
+			receipt: { session_id: "manual-session" },
+			landExecutionResult: { outcome: "blocked", reason: "原正式拒绝", reportedAt: 20 },
+			baseBranchSyncExecutionResult: { outcome: "blocked", reason: "原前置阻塞", reportedAt: 21 },
+			existingCloseoutGoalCompletionReconciliation: observation,
+		},
+	});
+	const response = await fixture.query(fixture.scope, { taskId: "task" });
+	expect(response.hasVerifiedCompletedRvf).toBeNull();
+	expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
+	const run = response.recentRuns.find((entry) => entry.runId === "manual-closeout");
+	expect(run?.existingCloseoutGoalCompletionReconciliation).toEqual(observation);
+	expect(run?.landExecutionResult?.outcome).toBe("blocked");
+	expect(run?.baseBranchSyncExecutionResult?.outcome).toBe("blocked");
+	expect(run?.completionStatus).toBe("unknown");
+});

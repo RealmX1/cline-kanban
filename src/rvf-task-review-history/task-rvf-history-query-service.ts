@@ -84,7 +84,13 @@ interface BoundTaskRvfRun {
 	decisionToken: string | null;
 	record?: Pick<
 		RvfAutomaticCloseoutRecord,
-		"createdAt" | "status" | "handoffPath" | "handoffSha256" | "landExecutionResult" | "baseBranchSyncExecutionResult"
+		| "createdAt"
+		| "status"
+		| "handoffPath"
+		| "handoffSha256"
+		| "landExecutionResult"
+		| "baseBranchSyncExecutionResult"
+		| "existingCloseoutGoalCompletionReconciliation"
 	> & {
 		receipt: Pick<RvfAutomaticCloseoutRecord["receipt"], "session_id"> &
 			Partial<Pick<RvfAutomaticCloseoutRecord["receipt"], "worktree" | "kanban_task_id" | "decision_token">>;
@@ -803,6 +809,9 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 				automaticCloseoutStatus: record?.status ?? null,
 				landExecutionResult: record?.landExecutionResult ?? null,
 				baseBranchSyncExecutionResult: record?.baseBranchSyncExecutionResult ?? null,
+				...(record?.existingCloseoutGoalCompletionReconciliation
+					? { existingCloseoutGoalCompletionReconciliation: record.existingCloseoutGoalCompletionReconciliation }
+					: {}),
 			};
 		});
 		const completed = runs.filter((run) => run.completionStatus === "completed");

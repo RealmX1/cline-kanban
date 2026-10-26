@@ -7,6 +7,7 @@ import type {
 } from "../core/rvf-automatic-closeout-contract";
 import { getGitStdout } from "../workspace/git-utils";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
+import { boundRvfCloseoutGoalCompletion, completedRvfCloseoutStage } from "./rvf-closeout-scheduling-decision";
 import { verifyBoundRvfSupplementalLandCompletionEvidence } from "./verify-rvf-supplemental-land-completion-evidence";
 
 export class RvfAutomaticCloseoutExecutionResultDeliveryPendingError extends Error {}
@@ -66,8 +67,44 @@ export async function readBoundRvfLocalBaseRef(record: RvfAutomaticCloseoutRecor
 	return { baseRef, scopeContractSha256: computeRvfTextSha256(scopeBytes) };
 }
 
-async function readBoundRvfLandCompletionEvidence(record: RvfAutomaticCloseoutRecord, commitSha: string) {
+async function readBoundRvfLandCompletionEvidence(
+	record: RvfAutomaticCloseoutRecord,
+	commitSha: string,
+	options: { reuseIndependentLandCompletionForBaseIntegration?: boolean } = {},
+) {
 	const accepted = record.landExecutionResult;
+	if (
+		(accepted?.outcome === "completed" && accepted.commitSha === commitSha) ||
+		(options.reuseIndependentLandCompletionForBaseIntegration &&
+			completedRvfCloseoutStage(record, "land")?.commitSha === commitSha)
+	) {
+		// 这是服务端已接受的历史阶段；当前候选是可替换指针，不能撤销旧 run 的接受事实。
+		const independentObservation =
+			accepted?.outcome === "completed" ? undefined : boundRvfCloseoutGoalCompletion(record);
+		const gitCommonDirectoryRealpath = await realpath(
+			await getGitStdout(["rev-parse", "--path-format=absolute", "--git-common-dir"], record.receipt.worktree),
+		);
+		await getGitStdout(["cat-file", "-e", `${commitSha}^{commit}`], record.receipt.worktree);
+		const expectedCommonDirectory = independentObservation
+			? independentObservation.binding.gitCommonDirectoryRealpath
+			: accepted?.supplementalLandCompletionVerification?.gitCommonDirectoryRealpath;
+		if (
+			independentObservation &&
+			(!expectedCommonDirectory ||
+				independentObservation.binding.worktreeRealpath !== (await realpath(record.receipt.worktree)))
+		)
+			throw new Error("独立 Land 完成观察缺少可信的 Git 或工作区归属。");
+		if (expectedCommonDirectory && expectedCommonDirectory !== gitCommonDirectoryRealpath)
+			throw new Error("历史 Land 的 Git common-dir 归属改变。");
+		return {
+			gitCommonDirectoryRealpath,
+			...(accepted?.supplementalLandCompletionEvidence
+				? {
+						supplementalLandCompletionEvidenceSha256: accepted.supplementalLandCompletionEvidence.evidenceSha256,
+					}
+				: {}),
+		};
+	}
 	if (accepted?.verificationBasis === "verified_supplemental_land_completion") {
 		if (!accepted.supplementalLandCompletionEvidence || accepted.commitSha !== commitSha)
 			throw new Error("已接受的历史 Land 缺少原补充证明引用。");
@@ -86,12 +123,14 @@ async function readBoundRvfLandCompletionEvidence(record: RvfAutomaticCloseoutRe
 
 // 证明本次观测到的等价整合状态，不证明历史上由谁、在哪次 handback 中执行。
 export async function readBoundRvfBaseIntegrationState(record: RvfAutomaticCloseoutRecord) {
-	const landCommitSha = record.landExecutionResult?.commitSha;
-	if (record.landExecutionResult?.outcome !== "completed" || !landCommitSha || !record.runId || !record.handoffSha256)
+	const landCommitSha = completedRvfCloseoutStage(record, "land")?.commitSha;
+	if (!landCommitSha || !record.runId || !record.handoffSha256)
 		throw new Error("尚未确认 land 成功，不能核验 base 整合。");
 	if (record.receipt.kanban_task_id !== record.taskId) throw new Error("开审凭据的 task 归属不符。");
 	const [candidate, base] = await Promise.all([
-		readBoundRvfLandCompletionEvidence(record, landCommitSha),
+		readBoundRvfLandCompletionEvidence(record, landCommitSha, {
+			reuseIndependentLandCompletionForBaseIntegration: true,
+		}),
 		readBoundRvfLocalBaseRef(record),
 	]);
 	const git = (arguments_: string[]) =>
@@ -136,8 +175,11 @@ export async function validateRvfAutomaticCloseoutExecutionResult(
 			);
 		else await readBoundRvfLandCompletionEvidence(record, commit);
 	} else {
-		if (record.landExecutionResult?.outcome !== "completed" || !record.landExecutionResult.commitSha)
-			throw new Error("尚未确认 land 成功，不能登记 base 同步完成。");
+		const landCommitSha = completedRvfCloseoutStage(record, "land")?.commitSha;
+		if (!landCommitSha) throw new Error("尚未确认 land 成功，不能登记 base 同步完成。");
+		await readBoundRvfLandCompletionEvidence(record, landCommitSha, {
+			reuseIndependentLandCompletionForBaseIntegration: true,
+		});
 		const baseRef = input.baseRef;
 		const { baseRef: boundBaseRef } = await readBoundRvfLocalBaseRef(record);
 		const normalizeLocalBaseRef = (value: string) => value.replace(/^refs\/heads\//u, "");
@@ -145,7 +187,7 @@ export async function validateRvfAutomaticCloseoutExecutionResult(
 			throw new Error("base 同步结果与已绑定的本地 base ref 不一致。");
 		const fullRef = baseRef.startsWith("refs/heads/") ? baseRef : `refs/heads/${baseRef}`;
 		await git(["check-ref-format", fullRef]);
-		await git(["merge-base", "--is-ancestor", record.landExecutionResult.commitSha, commit]);
+		await git(["merge-base", "--is-ancestor", landCommitSha, commit]);
 		await git(["merge-base", "--is-ancestor", commit, fullRef]);
 	}
 }
