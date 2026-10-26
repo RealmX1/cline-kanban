@@ -14,7 +14,10 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../../src/core/task-message-injection-ledger";
 import { computeRvfTextSha256 } from "../../src/rvf-automatic-closeout/capture-rvf-review-start-boundary";
-import { reconcileRvfAutomaticCloseoutLateNativePromptAcceptance } from "../../src/rvf-automatic-closeout/reconcile-rvf-automatic-closeout-late-native-prompt-acceptance";
+import {
+	reconcileRvfAutomaticCloseoutLateNativePromptAcceptance,
+	verifyRvfAutomaticCloseoutLateNativePromptAcceptance,
+} from "../../src/rvf-automatic-closeout/reconcile-rvf-automatic-closeout-late-native-prompt-acceptance";
 import { buildRvfAutomaticCloseoutPrompt } from "../../src/rvf-automatic-closeout/rvf-automatic-closeout-prompt";
 import {
 	getRvfAutomaticCloseoutStorePath,
@@ -43,6 +46,13 @@ const timeout = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
 	cliChildProcessSpawns: { cliChildProcessSpawnCount: 9, cliChildProcessExitTwoTierDeadline: cliExitDeadline },
 });
 const messageShapes = ["pure_text", "text_with_skill"] as const;
+const recoveryFailureReasons = [
+	"submit_confirmation_budget_exhausted",
+	"codex_native_prompt_delivery_unconfirmed",
+] as const;
+const recoveryScenarios = recoveryFailureReasons.flatMap((failureReason) =>
+	messageShapes.map((messageShape) => ({ failureReason, messageShape })),
+);
 
 afterEach(async () => {
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
@@ -50,9 +60,14 @@ afterEach(async () => {
 });
 
 describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与持久重入", { timeout }, () => {
-	it.for(messageShapes)("%s：CLI 补证与持久重入", async (messageShape, testContext) => {
+	it.for(recoveryScenarios)("$failureReason / $messageShape", async (scenario, testContext) => {
+		const { failureReason, messageShape } = scenario;
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+		const codexHome = join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration-and-storage");
+		await mkdir(codexHome, { recursive: true });
+		vi.stubEnv("CODEX_HOME", codexHome);
+		vi.stubEnv("CODEX_SQLITE_HOME", codexHome);
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "late-native-acceptance" });
 		await writeFile(join(repository.repositoryPath, "implementation.txt"), "保留实现与未提交内容\n");
 		const head = repository.commitAllRepositoryFilesAtDate({
@@ -115,7 +130,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			restoreWorkspaceStateSha256: null,
 			nativeIdentitySwitchStartedAt: epoch - 1000,
 			nativeForkAttemptStartedAt: epoch - 2000,
-			pauseReason: "收尾投递失败：submit_confirmation_budget_exhausted",
+			pauseReason: `收尾投递失败：${failureReason}`,
 			promptDeliveryIdempotencyKey: `rvf-automatic-closeout-${token}`,
 		};
 		const storePath = getRvfAutomaticCloseoutStorePath(scope.workspaceId);
@@ -176,6 +191,23 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 						nowIso: iso(0),
 					}),
 					agent_idle_gate_passed_at: iso(31),
+					...(failureReason === "codex_native_prompt_delivery_unconfirmed"
+						? {
+								codex_native_prompt_delivery_operation: {
+									workspaceId: scope.workspaceId,
+									conversationSessionId: taskId,
+									nativeSessionId: "restored-native",
+									workingDirectoryPath: repository.repositoryPath,
+									promptSha256: computeRvfTextSha256(text),
+									clientUserMessageId: "original-client-message",
+									returnedTurnId: "closeout-turn",
+									previousTurnId: "implementation-turn",
+									sendPhase: "native_accepted" as const,
+									actualSendAttemptCount: 1,
+									updatedAtIso: iso(121_575),
+								},
+							}
+						: {}),
 					agent_idle_wait_deadline_at: iso(60_000),
 				},
 			],
@@ -186,7 +218,7 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 			taskId,
 			idempotencyKey: record.promptDeliveryIdempotencyKey,
 			status: "delivery_failed",
-			failureReason: "submit_confirmation_budget_exhausted",
+			failureReason,
 			nowIso: iso(16_419),
 		});
 		const nativeRecords = [
@@ -322,18 +354,16 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 							rvfHome,
 							getMainSummary: async () => summary,
 							isStopped: () => false,
-							verifyLateAcceptance: async () => {
-								const checked = await reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
+							verifyLateAcceptance: async (record) =>
+								verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 									{
 										workspaceId: scope.workspaceId,
 										rvfHome,
 										getMainSummary: async () => summary,
 										isExplicitlyStopped: () => false,
 									},
-									{ ...input, dryRun: true },
-								);
-								if (checked.status !== "already_recovered") throw new Error("接受证据未通过重验。");
-							},
+									record,
+								),
 						},
 						input,
 					),
@@ -393,6 +423,8 @@ describe("迟到接受补证的真实 CLI、HTTP/tRPC、Unix 原生控制面与�
 						env: fixture.createIsolatedChildProcessEnvironment({
 							KANBAN_RUNTIME_PORT: String(runtimePort),
 							RVF_HOME: rvfHome,
+							CODEX_HOME: codexHome,
+							CODEX_SQLITE_HOME: codexHome,
 						}),
 					},
 				),

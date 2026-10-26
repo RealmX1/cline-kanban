@@ -8,12 +8,15 @@ import {
 	type RvfLateNativeCloseoutPromptAcceptanceRecoveryResponse,
 	rvfLateNativeCloseoutPromptAcceptanceRecoveryReceiptSchema,
 	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
+	rvfLateNativeCloseoutRecoverableDeliveryFailureReasonSchema,
+	rvfLateNativeCloseoutSubmissionIdentitySchema,
 } from "../core/rvf-automatic-closeout-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
+	type TaskMessageInjectionRecord,
 } from "../core/task-message-injection-ledger";
 import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
@@ -27,6 +30,7 @@ import {
 	assertCodexNativeConversationLoadedByCurrentHost,
 	readCodexConversationTurns,
 } from "./codex-native-conversation-prefix";
+import { readNormalRvfCloseoutSuppression } from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import { readCodexNativeCloseoutPromptAcceptanceEvidence } from "./read-codex-native-closeout-prompt-acceptance-evidence";
 import {
@@ -40,14 +44,15 @@ import {
 	captureRvfCloseoutAcceptedSkillSnapshot,
 	readRvfCloseoutSkillSnapshots,
 } from "./rvf-closeout-skill-attachment-snapshot-store";
+import { isRvfCloseoutEligibleForLateNativeAcceptanceVerification } from "./rvf-late-native-closeout-acceptance-recovery-eligibility";
 import { verifyCodexNativeCloseoutSkillAttachmentEvidence } from "./verify-codex-native-closeout-skill-attachment-evidence";
 
-const eligiblePauseReason = "收尾投递失败：submit_confirmation_budget_exhausted";
 class LateNativePromptAcceptanceRecoveryError extends Error {
 	constructor(
 		public readonly status: "unknown" | "blocked",
 		public readonly reasonCode: RvfLateNativeCloseoutPromptAcceptanceRecoveryReasonCode,
 		message: string,
+		public readonly failedNativeTurnHistoryPageReadCursor?: string | null,
 	) {
 		super(message);
 	}
@@ -79,14 +84,129 @@ function summaryIdentitySnapshot(summary: RuntimeTaskSessionSummary) {
 		summary.agentNativeConversationSessionIdentity?.nativeSessionId,
 		summary.agentNativeConversationSessionIdentity?.transcriptPath,
 		summary.codexNativeSessionControlEndpoint,
+		resolveSessionFacets(summary).liveness,
 	]);
 }
 
-export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
+async function verifyOriginalNativeSubmissionIdentity(
+	record: RvfAutomaticCloseoutRecord,
+	delivery: TaskMessageInjectionRecord,
+	evidence: Awaited<ReturnType<typeof readCodexNativeCloseoutPromptAcceptanceEvidence>>,
+) {
+	if (delivery.terminal_delivery_failure_reason !== "codex_native_prompt_delivery_unconfirmed") return;
+	const operation = delivery.codex_native_prompt_delivery_operation;
+	const confirmation = delivery.nativeCompactionAwareConfirmation;
+	const conflict = () => {
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"native_submission_binding_mismatch",
+			"原发送的 client ID、会话、正文或提交响应回合与接受事件不符。",
+		);
+	};
+	let identity: z.infer<typeof rvfLateNativeCloseoutSubmissionIdentitySchema>;
+	if (operation) {
+		if (
+			operation.workspaceId !== record.workspaceId ||
+			operation.conversationSessionId !== record.conversationSessionId ||
+			operation.nativeSessionId !== record.restoredNativeSessionId ||
+			operation.promptSha256 !== delivery.prompt_sha256 ||
+			(await realpath(operation.workingDirectoryPath)) !== (await realpath(record.receipt.worktree)) ||
+			operation.actualSendAttemptCount < 1 ||
+			!["request_intent_persisted", "request_invoked", "native_accepted"].includes(operation.sendPhase)
+		)
+			conflict();
+		const cached = operation.historicalAcceptanceEvidence;
+		if (
+			cached &&
+			(cached.clientUserMessageId !== operation.clientUserMessageId ||
+				cached.nativeSessionId !== record.restoredNativeSessionId ||
+				cached.nativeTurnId !== evidence.nativeTurnId ||
+				cached.nativeUserMessageId !== evidence.nativeUserMessageId)
+		)
+			conflict();
+		identity = rvfLateNativeCloseoutSubmissionIdentitySchema.parse({
+			source: "native_delivery_operation",
+			clientUserMessageId: operation.clientUserMessageId,
+			returnedNativeTurnId: operation.returnedTurnId,
+			previousNativeTurnId: operation.previousTurnId,
+		});
+	} else if (confirmation) {
+		const binding = confirmation.binding;
+		if (
+			confirmation.submissionTransport !== "codex_native_request" ||
+			binding.workspaceId !== record.workspaceId ||
+			binding.taskId !== record.taskId ||
+			binding.conversationSessionId !== record.conversationSessionId ||
+			binding.decisionToken !== record.receipt.decision_token ||
+			binding.runId !== record.runId ||
+			binding.handoffSha256 !== record.handoffSha256 ||
+			binding.idempotencyKey !== delivery.idempotency_key ||
+			binding.promptSha256 !== delivery.prompt_sha256 ||
+			binding.nativeSessionId !== record.restoredNativeSessionId ||
+			confirmation.firstSubmissionAtEpochMs < Date.parse(delivery.created_at) ||
+			confirmation.firstSubmissionAtEpochMs > Date.parse(evidence.nativeUserMessageRecordedAt)
+		)
+			conflict();
+		if (!confirmation.clientUserMessageId)
+			throw new LateNativePromptAcceptanceRecoveryError(
+				"unknown",
+				"native_submission_identity_not_proven",
+				"同次确认快照缺少 client ID，等待原发送证据恢复。",
+			);
+		identity = rvfLateNativeCloseoutSubmissionIdentitySchema.parse({
+			source: "compaction_confirmation_snapshot",
+			clientUserMessageId: confirmation.clientUserMessageId,
+			returnedNativeTurnId: confirmation.nativeTurnIdReturnedBySubmissionRequest ?? null,
+			previousNativeTurnId: confirmation.predecessorNativeTurnId,
+		});
+	} else {
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"unknown",
+			"native_submission_identity_not_proven",
+			"缺少原生发送操作与绑定同次提交的确认快照，等待发送身份补证。",
+		);
+	}
+	if (
+		operation &&
+		confirmation &&
+		(confirmation.clientUserMessageId !== operation.clientUserMessageId ||
+			confirmation.binding.workspaceId !== operation.workspaceId ||
+			confirmation.binding.conversationSessionId !== operation.conversationSessionId ||
+			confirmation.binding.nativeSessionId !== operation.nativeSessionId ||
+			confirmation.binding.promptSha256 !== operation.promptSha256 ||
+			(confirmation.nativeTurnIdReturnedBySubmissionRequest !== undefined &&
+				confirmation.nativeTurnIdReturnedBySubmissionRequest !== operation.returnedTurnId))
+	)
+		conflict();
+	if (
+		identity.previousNativeTurnId === evidence.nativeTurnId ||
+		(identity.returnedNativeTurnId !== null && identity.returnedNativeTurnId !== evidence.nativeTurnId)
+	)
+		conflict();
+	// 原生服务端可能分配新的 item ID；此时只接受同次提交响应给出的非前驱回合。
+	if (
+		identity.clientUserMessageId !== evidence.nativeUserMessageId &&
+		identity.returnedNativeTurnId !== evidence.nativeTurnId
+	)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"unknown",
+			"native_submission_identity_not_proven",
+			"精确正文尚不能关联原发送 client ID 或提交响应回合。",
+		);
+	return identity;
+}
+
+export async function readRvfAutomaticCloseoutHistoricalNativePromptAcceptance(
 	deps: NativePromptAcceptanceVerificationDependencies,
 	record: RvfAutomaticCloseoutRecord,
-): Promise<RvfLateNativeCloseoutPromptAcceptanceRecoveryReceipt> {
+) {
 	assertNotExplicitlyStopped(deps, record);
+	if (record.workspaceId !== deps.workspaceId || !record.restoredNativeSessionId || !record.restoredTranscriptPath)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"binding_mismatch",
+			"历史接受缺少绑定的工作区或恢复原生身份。",
+		);
 	let completion: Awaited<ReturnType<typeof inspectRvfCompletionEvidence>>;
 	try {
 		completion = await inspectRvfCompletionEvidence(record, deps.rvfHome);
@@ -120,7 +240,8 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 		!delivery ||
 		delivery.source !== "rvf_automatic_closeout" ||
 		delivery.terminal_delivery_status !== "delivery_failed" ||
-		delivery.terminal_delivery_failure_reason !== "submit_confirmation_budget_exhausted" ||
+		!rvfLateNativeCloseoutRecoverableDeliveryFailureReasonSchema.safeParse(delivery.terminal_delivery_failure_reason)
+			.success ||
 		(delivery.attempt_id !== undefined && delivery.attempt_id !== record.conversationSessionId) ||
 		!delivery.agent_idle_gate_passed_at ||
 		!Number.isFinite(Date.parse(delivery.agent_idle_gate_passed_at)) ||
@@ -130,7 +251,7 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 		throw new LateNativePromptAcceptanceRecoveryError(
 			"blocked",
 			"delivery_failure_not_eligible",
-			"缺少本轮确认预算耗尽且已经通过空闲门的原始投递账本。",
+			"缺少本轮可恢复失败且已经通过空闲门的原始投递账本。",
 		);
 	const originalDeliveryFailure = {
 		taskId: delivery.task_id,
@@ -140,10 +261,20 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 		promptSha256: delivery.prompt_sha256,
 		messageId: delivery.message_id,
 		status: "delivery_failed" as const,
-		failureReason: "submit_confirmation_budget_exhausted" as const,
+		failureReason: rvfLateNativeCloseoutRecoverableDeliveryFailureReasonSchema.parse(
+			delivery.terminal_delivery_failure_reason,
+		),
 		createdAt: delivery.created_at,
 		statusUpdatedAt: delivery.terminal_delivery_status_updated_at,
 	};
+	const expectedPauseReason =
+		record.lateNativePromptAcceptanceRecoveryReceipt?.previousPauseReason ?? record.pauseReason;
+	if (expectedPauseReason !== `收尾投递失败：${originalDeliveryFailure.failureReason}`)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"delivery_failure_not_eligible",
+			"原失败码与本轮暂停快照不一致。",
+		);
 	const prior = record.lateNativePromptAcceptanceRecoveryReceipt;
 	if (
 		prior &&
@@ -160,35 +291,6 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 			"blocked",
 			"binding_mismatch",
 			"已保存补证凭据与当前绑定或原始失败账本不符。",
-		);
-	const summary = await deps.getMainSummary();
-	const summaryIdentityBeforeObservation = summaryIdentitySnapshot(summary);
-	if (
-		summary.taskId !== record.conversationSessionId ||
-		!record.restoredNativeSessionId ||
-		!record.restoredTranscriptPath ||
-		summary.agentId !== "codex" ||
-		summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.restoredNativeSessionId ||
-		(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
-	)
-		throw new LateNativePromptAcceptanceRecoveryError(
-			"blocked",
-			"session_binding_changed",
-			"当前主会话、恢复身份或工作区已经改变。",
-		);
-	const endpoint = summary.codexNativeSessionControlEndpoint ? { ...summary.codexNativeSessionControlEndpoint } : null;
-	if (
-		resolveSessionFacets(summary).liveness !== "live" ||
-		!summary.runtimeSessionIncarnationId ||
-		!endpoint ||
-		endpoint.workspaceId !== deps.workspaceId ||
-		endpoint.conversationSessionId !== summary.taskId ||
-		endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId
-	)
-		throw new LateNativePromptAcceptanceRecoveryError(
-			"unknown",
-			"native_control_unavailable",
-			"当前恢复会话没有有效的本代原生控制面；须先恢复同一原生会话再核验。",
 		);
 	let evidence: Awaited<ReturnType<typeof readCodexNativeCloseoutPromptAcceptanceEvidence>>;
 	try {
@@ -226,6 +328,69 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 			"binding_mismatch",
 			"原生接受事件与首次补证不一致。",
 		);
+	const observedSubmissionIdentity = await verifyOriginalNativeSubmissionIdentity(record, delivery, evidence);
+	if (
+		prior?.nativeSubmissionIdentity &&
+		JSON.stringify([
+			prior.nativeSubmissionIdentity.clientUserMessageId,
+			prior.nativeSubmissionIdentity.returnedNativeTurnId,
+			prior.nativeSubmissionIdentity.previousNativeTurnId,
+		]) !==
+			JSON.stringify([
+				observedSubmissionIdentity?.clientUserMessageId,
+				observedSubmissionIdentity?.returnedNativeTurnId,
+				observedSubmissionIdentity?.previousNativeTurnId,
+			])
+	)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"native_submission_binding_mismatch",
+			"原发送身份与首次补证不一致。",
+		);
+	// 同次 operation 后来恢复不撤销已由确认快照证明的历史来源。
+	const nativeSubmissionIdentity = prior?.nativeSubmissionIdentity ?? observedSubmissionIdentity;
+	return { completion, delivery, originalDeliveryFailure, evidence, nativeSubmissionIdentity };
+}
+
+export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
+	deps: NativePromptAcceptanceVerificationDependencies,
+	record: RvfAutomaticCloseoutRecord,
+): Promise<RvfLateNativeCloseoutPromptAcceptanceRecoveryReceipt> {
+	const { completion, delivery, originalDeliveryFailure, evidence, nativeSubmissionIdentity } =
+		await readRvfAutomaticCloseoutHistoricalNativePromptAcceptance(deps, record);
+	const prior = record.lateNativePromptAcceptanceRecoveryReceipt;
+	const summary = await deps.getMainSummary();
+	const summaryIdentityBeforeObservation = summaryIdentitySnapshot(summary);
+	if (
+		summary.taskId !== record.conversationSessionId ||
+		!record.restoredNativeSessionId ||
+		!record.restoredTranscriptPath ||
+		summary.agentId !== "codex" ||
+		summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.restoredNativeSessionId ||
+		(await realpath(summary.agentNativeConversationSessionIdentity?.transcriptPath ?? "")) !==
+			(await realpath(record.restoredTranscriptPath ?? "")) ||
+		(await realpath(summary.workspacePath ?? "")) !== (await realpath(record.receipt.worktree))
+	)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"session_binding_changed",
+			"当前主会话、恢复身份或工作区已经改变。",
+		);
+	const endpoint = summary.codexNativeSessionControlEndpoint ? { ...summary.codexNativeSessionControlEndpoint } : null;
+	if (
+		resolveSessionFacets(summary).liveness !== "live" ||
+		!summary.runtimeSessionIncarnationId ||
+		!endpoint ||
+		endpoint.workspaceId !== deps.workspaceId ||
+		endpoint.conversationSessionId !== summary.taskId ||
+		endpoint.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId
+	)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"unknown",
+			"native_control_unavailable",
+			"当前恢复会话没有有效的本代原生控制面；须先恢复同一原生会话再核验。",
+		);
+	let failedNativeTurnHistoryPageReadCursor: string | null | undefined;
 	try {
 		await withRunningCodexAppServerControlSocketConnection(
 			async (port) => {
@@ -259,7 +424,11 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 						);
 					}
 				}
-				const turns = await readCodexConversationTurns(port, record.restoredNativeSessionId ?? "");
+				const turns = await readCodexConversationTurns(port, record.restoredNativeSessionId ?? "", {
+					onNativeTurnHistoryPageReadFailure: async (cursor) => {
+						failedNativeTurnHistoryPageReadCursor = cursor;
+					},
+				});
 				const matches = turns.flatMap((turn) =>
 					turn.items
 						.filter((item) => item.type === "userMessage")
@@ -321,8 +490,19 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 			"unknown",
 			"native_control_unavailable",
 			`当前原生活动分支不能完整核验：${error instanceof Error ? error.message : String(error)}`,
+			failedNativeTurnHistoryPageReadCursor,
 		);
 	}
+	const refreshed = await readRvfAutomaticCloseoutHistoricalNativePromptAcceptance(deps, record);
+	if (
+		JSON.stringify(refreshed.originalDeliveryFailure) !== JSON.stringify(originalDeliveryFailure) ||
+		JSON.stringify(refreshed.nativeSubmissionIdentity) !== JSON.stringify(nativeSubmissionIdentity)
+	)
+		throw new LateNativePromptAcceptanceRecoveryError(
+			"blocked",
+			"record_changed",
+			"核验期间原投递失败快照或发送身份改变。",
+		);
 	const latest = await deps.getMainSummary();
 	assertNotExplicitlyStopped(deps, record);
 	if (summaryIdentitySnapshot(latest) !== summaryIdentityBeforeObservation)
@@ -355,6 +535,7 @@ export async function verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 		previousPauseReason: record.pauseReason,
 		previousPauseUpdatedAt: record.updatedAt,
 		originalDeliveryFailure,
+		...(nativeSubmissionIdentity ? { nativeSubmissionIdentity } : {}),
 	});
 }
 
@@ -386,27 +567,14 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 					"补证请求与已登记的 task/token/run/handoff 绑定不一致。",
 				);
 			assertNotExplicitlyStopped(deps, record);
-			if (
-				record.lateNativePromptAcceptanceRecoveryReceipt
-					? !["closeout_prompt_submitted", "completed"].includes(record.status) &&
-						!(
-							(record.promptDeliveryAttempts?.[0]?.purpose === "inspect_existing_state" ||
-								record.promptDeliveryAttempts?.[0]?.executionRequiresReadOnlyInspection) &&
-							record.status === "submitting_closeout_prompt"
-						)
-					: (record.status !== "paused" &&
-							!(
-								(record.promptDeliveryAttempts?.[0]?.purpose === "inspect_existing_state" ||
-									record.promptDeliveryAttempts?.[0]?.executionRequiresReadOnlyInspection) &&
-								["submitting_closeout_prompt", "closeout_prompt_submitted"].includes(record.status)
-							)) ||
-						record.pauseReason !== eligiblePauseReason
-			)
+			if (!isRvfCloseoutEligibleForLateNativeAcceptanceVerification(record))
 				throw new LateNativePromptAcceptanceRecoveryError(
 					"blocked",
 					"pause_reason_not_eligible",
-					"本轮并非确认预算耗尽暂停，不能通过此入口恢复。",
+					"本轮并非可恢复的原生收尾确认失败，不能通过此入口恢复。",
 				);
+			const suppressionBefore = await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory);
+			const summaryBeforeVerification = summaryIdentitySnapshot(await deps.getMainSummary());
 			const receipt = await verifyRvfAutomaticCloseoutLateNativePromptAcceptance(
 				request.dryRun ? { ...deps, persistSkillEvidenceDiagnostics: false } : deps,
 				record,
@@ -438,7 +606,45 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 					);
 				}
 			}
-			assertOwned();
+			const latestSummary = await deps.getMainSummary();
+			assertNotExplicitlyStopped(deps, record);
+			if (
+				summaryIdentitySnapshot(latestSummary) !== summaryBeforeVerification ||
+				latestSummary.taskId !== record.conversationSessionId ||
+				latestSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.restoredNativeSessionId ||
+				resolveSessionFacets(latestSummary).liveness !== "live"
+			)
+				throw new LateNativePromptAcceptanceRecoveryError(
+					"blocked",
+					"session_binding_changed",
+					"补证保存前本代会话身份改变。",
+				);
+			const refreshedEvidence = await readRvfAutomaticCloseoutHistoricalNativePromptAcceptance(deps, record);
+			if (
+				JSON.stringify(refreshedEvidence.originalDeliveryFailure) !==
+					JSON.stringify(receipt.originalDeliveryFailure) ||
+				JSON.stringify(refreshedEvidence.nativeSubmissionIdentity) !==
+					JSON.stringify(receipt.nativeSubmissionIdentity) ||
+				JSON.stringify(await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory)) !==
+					JSON.stringify(suppressionBefore)
+			)
+				throw new LateNativePromptAcceptanceRecoveryError(
+					"blocked",
+					"record_changed",
+					"补证保存前原投递或接管状态改变。",
+				);
+			const assertCurrentSessionAndOperation = async () => {
+				const currentSummary = await deps.getMainSummary();
+				assertNotExplicitlyStopped(deps, record);
+				assertOwned();
+				if (summaryIdentitySnapshot(currentSummary) !== summaryBeforeVerification)
+					throw new LateNativePromptAcceptanceRecoveryError(
+						"blocked",
+						"session_binding_changed",
+						"补证最终写入前会话身份改变。",
+					);
+			};
+			await assertCurrentSessionAndOperation();
 			const current = (await readRvfAutomaticCloseoutRecords(storePath)).find(
 				(entry) => entry.taskId === request.taskId && entry.receipt.decision_token === request.decisionToken,
 			);
@@ -448,9 +654,12 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 					"record_changed",
 					"核验期间自动收尾记录已改变，请重新核对。",
 				);
+			assertNotExplicitlyStopped(deps, record);
+			assertOwned();
 			if (record.lateNativePromptAcceptanceRecoveryReceipt || request.dryRun) {
 				const savedRecord = skillEvidenceReference
-					? await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
+					? await updateRvfAutomaticCloseoutRecords(storePath, async (records) => {
+							await assertCurrentSessionAndOperation();
 							assertOwned();
 							const latest = records.find(
 								(entry) =>
@@ -473,7 +682,8 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 				};
 				return;
 			}
-			const saved = await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
+			const saved = await updateRvfAutomaticCloseoutRecords(storePath, async (records) => {
+				await assertCurrentSessionAndOperation();
 				assertOwned();
 				const latest = records.find(
 					(entry) => entry.taskId === request.taskId && entry.receipt.decision_token === request.decisionToken,
@@ -505,7 +715,14 @@ export async function reconcileRvfAutomaticCloseoutLateNativePromptAcceptance(
 		});
 	} catch (error) {
 		if (error instanceof LateNativePromptAcceptanceRecoveryError)
-			return { status: error.status, reasonCode: error.reasonCode, reason: error.message };
+			return {
+				status: error.status,
+				reasonCode: error.reasonCode,
+				reason: error.message,
+				...(error.failedNativeTurnHistoryPageReadCursor !== undefined
+					? { failedNativeTurnHistoryPageReadCursor: error.failedNativeTurnHistoryPageReadCursor }
+					: {}),
+			};
 		return {
 			status: "unknown",
 			reasonCode: "native_prompt_acceptance_not_proven",

@@ -10,6 +10,10 @@ import {
 	readTaskMessageInjectionLedger,
 } from "../core/task-message-injection-ledger";
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
+import {
+	readRvfCloseoutNativeSessionRestoreEvidenceFingerprint,
+	readRvfLateNativeCloseoutRecoveryEvidenceFingerprint,
+} from "./automatic-late-native-closeout-prompt-acceptance-recovery";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
 import { readCodexNativeCloseoutCandidateText } from "./codex-native-closeout-user-message-content";
@@ -21,6 +25,7 @@ import {
 	withNormalRvfCloseoutMutation,
 } from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
+import { readRvfAutomaticCloseoutHistoricalNativePromptAcceptance } from "./reconcile-rvf-automatic-closeout-late-native-prompt-acceptance";
 import {
 	getRvfAutomaticCloseoutStorePath,
 	readRvfAutomaticCloseoutRecords,
@@ -41,6 +46,7 @@ import {
 	captureRvfCloseoutAcceptedSkillSnapshot,
 } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
+import { isRvfCloseoutEligibleForLateNativeAcceptanceVerification } from "./rvf-late-native-closeout-acceptance-recovery-eligibility";
 import { verifyRvfCloseoutContinuationNativeAcceptance } from "./verify-rvf-closeout-continuation-native-acceptance";
 
 interface RecoverySupervisorDependencies {
@@ -276,16 +282,80 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 				injected?.terminal_delivery_status === "delivered_and_submit_confirmed" ||
 				Boolean(record.lateNativePromptAcceptanceRecoveryReceipt) ||
 				delivery.continuation?.status === "confirmed";
-			if (!acceptedDelivery || delivery.continuation?.purpose === "inspect_existing_state") return;
+			let historicalAcceptanceProvenForSessionRestore = false;
+			if (
+				!acceptedDelivery &&
+				!delivery.continuation &&
+				["none", "exited"].includes(facets.liveness) &&
+				isRvfCloseoutEligibleForLateNativeAcceptanceVerification(record)
+			) {
+				const fingerprint = await readRvfLateNativeCloseoutRecoveryEvidenceFingerprint(record, summary);
+				const previous = record.automaticRecoveryProgress?.historicalNativeAcceptanceObservationBudget;
+				const same = previous?.fingerprint === fingerprint;
+				if (same && (previous.count >= 3 || previous.nextAttemptAtMs > Date.now())) return;
+				await progress("historical_acceptance_verification_pending", "collect_native_acceptance_evidence");
+				await save({
+					automaticRecoveryProgress: {
+						evidenceFingerprint: "",
+						verificationAttemptCount: 0,
+						nextVerificationAtMs: 0,
+						kind: "machine_waiting",
+						reasonCode: "historical_acceptance_verification_pending",
+						nextAutomaticAction: "collect_native_acceptance_evidence",
+						...record.automaticRecoveryProgress,
+						historicalNativeAcceptanceObservationBudget: {
+							fingerprint,
+							count: same ? previous.count + 1 : 1,
+							nextAttemptAtMs: Date.now() + 15_000,
+						},
+					},
+				});
+				try {
+					await readRvfAutomaticCloseoutHistoricalNativePromptAcceptance(
+						{
+							workspaceId: deps.workspaceId,
+							rvfHome: deps.rvfHome,
+							getMainSummary: deps.getMainSummary,
+							isExplicitlyStopped: () => !record || deps.isStopped(record),
+						},
+						record,
+					);
+					// 成功观察不累计失败预算；后续待答或排队门禁解除后仍须严格重验。
+					const successfulObservationProgress = record.automaticRecoveryProgress;
+					if (successfulObservationProgress)
+						await save({
+							automaticRecoveryProgress: {
+								...successfulObservationProgress,
+								historicalNativeAcceptanceObservationBudget: { fingerprint, count: 0, nextAttemptAtMs: 0 },
+							},
+						});
+					historicalAcceptanceProvenForSessionRestore = true;
+				} catch {
+					await progress("historical_acceptance_not_proven", "await_changed_evidence");
+					return;
+				}
+			}
+			if (
+				(!acceptedDelivery && !historicalAcceptanceProvenForSessionRestore) ||
+				delivery.continuation?.purpose === "inspect_existing_state"
+			)
+				return;
 			if (facets.userTurnKind && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind)) {
 				await progress("pending_user_decision", "await_changed_evidence", "human_decision_pending");
 				return;
 			}
 			await deps.assertNoPendingUserInput(record);
 			if (facets.liveness !== "live" || !summary.codexNativeSessionControlEndpoint) {
+				const restoreEvidenceFingerprint = await readRvfCloseoutNativeSessionRestoreEvidenceFingerprint(
+					record,
+					summary,
+				);
 				const restoreAttemptCount =
-					record.automaticRecoveryProgress?.nativeSessionRestoreAttemptCount ??
-					(record.automaticRecoveryProgress?.nativeSessionRestoreAttempted ? 1 : 0);
+					record.automaticRecoveryProgress?.nativeSessionRestoreEvidenceFingerprint &&
+					record.automaticRecoveryProgress.nativeSessionRestoreEvidenceFingerprint !== restoreEvidenceFingerprint
+						? 0
+						: (record.automaticRecoveryProgress?.nativeSessionRestoreAttemptCount ??
+							(record.automaticRecoveryProgress?.nativeSessionRestoreAttempted ? 1 : 0));
 				if (
 					["none", "exited"].includes(facets.liveness) &&
 					restoreAttemptCount < 3 &&
@@ -302,6 +372,7 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 							nextAutomaticAction: "restore_same_native_session",
 							...record.automaticRecoveryProgress,
 							nativeSessionRestoreAttempted: true,
+							nativeSessionRestoreEvidenceFingerprint: restoreEvidenceFingerprint,
 							nativeSessionRestoreAttemptCount: restoreAttemptCount + 1,
 							nextNativeSessionRestoreAttemptAtMs: Date.now() + 15_000,
 						},
@@ -311,8 +382,11 @@ async function advanceNormalRvfCloseoutAutomaticRecovery(
 				}
 				if (restoreAttemptCount >= 3)
 					await progress("native_control_restore_budget_exhausted", "await_changed_evidence");
+				else if (facets.liveness === "live" && record.lateNativePromptAcceptanceRecoveryReceipt)
+					await progress("native_control_unavailable", "await_changed_evidence");
 				return;
 			}
+			if (!acceptedDelivery) return;
 			const endpoint = summary.codexNativeSessionControlEndpoint;
 			if (
 				endpoint.workspaceId !== deps.workspaceId ||
