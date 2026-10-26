@@ -15,12 +15,12 @@ RVF entry: Post-Deploy Verification authoring
 
 RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
 
-RVF-PRE-REVIEW-BASE-SYNC-SKILL: sync-local-base-into-task-worktree-only
-
 - 查询本 Task 近期 RVF、完整完成事实与当前候选覆盖，使用 `kanban task rvf-history`（默认环境身份；显式指定时用 main checkout 的 `--project-path`）。结果语义与生产方契约见 `docs/task-rvf-history-query.md`；证据不足是 `unknown`，不能据此断言没有 RVF。
 
 - kanban 任务收尾 / 宣告完成 / 进入 review 前，**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：把只有部署后真实实例才验得到的断言注册成验证；fix 改变了可观察行为则以 **reconcile 模式**幂等重注册，不堆叠重复。
-- 上面两行是 **repo-通用机器可发现约定**。`RVF-PRE-REVIEW-BASE-SYNC-SKILL:` 从 local base 的 AGENTS.md 读取：旧 task worktree 先做严格单向同步再准备 RVF，不得反向写回 base。
+- `RVF-ENTRY-SKILL:` 是 repo 通用的机器可发现入口。
+- 默认自动流程为「计划 → 实现 → 固定候选 RVF → rvf-land → base-branch-sync」：仅在最终 `base-branch-sync` 或未来 GitHub PR 合并阶段吸收 base 并解决冲突；开工、计划草拟后、实现完成后与 RVF 准备阶段均不自动吸收 local `main`。计划与实现阶段可只读查看 base 差异、记录交互风险。
+- RVF 冻结本轮候选、HEAD 与比较基线 OID；local `main` 前移不重定向本轮比较 OID。真实 HEAD 或候选变化时拒绝复用旧快照，经既有恢复入口建立新候选和开审分界并保留原轮次记录。用户显式 Stop、不同步、不得推送或部署等限制及现有权限门禁继续有效。
 
 ---
 
