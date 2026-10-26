@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
 
@@ -8,6 +9,14 @@ export function TaskVisualizationPreviewPage() {
 	const artifactId = query.get("visualizationArtifactId");
 	const requestedRevisionId = query.get("revisionId");
 	const controller = useTaskVisualizationArtifacts({ workspaceId, taskId, observeBrowser: false });
+	const taskTitle = controller.taskAttribution?.taskTitle;
+	useEffect(() => {
+		const previousTitle = document.title;
+		document.title = `任务 ${taskId}${taskTitle ? ` · ${taskTitle}` : ""} · 可视化`;
+		return () => {
+			document.title = previousTitle;
+		};
+	}, [taskId, taskTitle]);
 	if (!workspaceId || !taskId)
 		return (
 			<p role="alert" className="p-4">

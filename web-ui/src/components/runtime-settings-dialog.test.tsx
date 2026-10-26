@@ -547,18 +547,18 @@ describe("RuntimeSettingsDialog", () => {
 		notificationSettingsMocks.getSettings.mockResolvedValue({
 			settings: {
 				...savedNotificationSettings,
-				taskNameSuggestionBinding: { modelProviderId: "saved-tts", modelId: "text-model" },
+				notificationAssessmentBinding: { modelProviderId: "saved-tts", modelId: "text-model" },
 			},
 			providers: savedNotificationProviders,
 		});
 		await renderSettings(true, onOpenChange);
 		const taskNameBinding = document.querySelector<HTMLSelectElement>(
-			"#notification-intelligence-selection-4-taskNameSuggestionBinding",
+			"#notification-intelligence-selection-4-notificationAssessmentBinding",
 		);
 		expect(taskNameBinding?.value).toBe("saved-tts");
 		expect(taskNameBinding?.selectedOptions[0]?.textContent).toContain("已失效");
 		expect(document.body.textContent).toContain(
-			"「任务起名」绑定的 provider saved-tts 服务类型为DeepInfra TTS，需为 OpenAI 兼容文本模型",
+			"「通知判断与摘要」绑定的 provider saved-tts 服务类型为DeepInfra TTS，需为 OpenAI 兼容文本模型",
 		);
 		await changeInput("延期兜底", "25");
 		await act(async () => findButtonByText(document.body, "Save")?.click());
@@ -572,7 +572,7 @@ describe("RuntimeSettingsDialog", () => {
 		notificationSettingsMocks.getSettings.mockResolvedValue({
 			settings: {
 				...savedNotificationSettings,
-				taskNameSuggestionBinding: { modelProviderId: "provider-3", modelId: "text-model" },
+				notificationAssessmentBinding: { modelProviderId: "provider-3", modelId: "text-model" },
 			},
 			providers: savedNotificationProviders,
 		});
@@ -591,29 +591,59 @@ describe("RuntimeSettingsDialog", () => {
 		);
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
-	it("清空被文本用途引用的 Provider Base URL 时，Save 在写入前拒绝，一个请求都不发", async () => {
+	it("隐藏的历史起名绑定不阻止清空 Provider Base URL，且保存其它字段时保留历史绑定", async () => {
 		const onOpenChange = vi.fn();
+		const legacyBinding = { modelProviderId: "saved-text", modelId: "legacy-name-model" };
 		notificationSettingsMocks.getSettings.mockResolvedValue({
-			settings: {
-				...savedNotificationSettings,
-				taskNameSuggestionBinding: { modelProviderId: "saved-text", modelId: "text-model" },
-			},
+			settings: { ...savedNotificationSettings, taskNameSuggestionBinding: legacyBinding },
 			providers: [
 				{ ...savedNotificationProviders[0], baseUrl: "https://example.invalid" },
 				savedNotificationProviders[1],
 			],
 		});
 		await renderSettings(true, onOpenChange);
-		await selectValue("编辑语言模型 provider", "0");
+		expect(document.querySelector("#notification-intelligence-selection-4-taskNameSuggestionBinding")).toBeNull();
 		await changeInput("Base URL", "", "语言模型");
-		expect(document.body.textContent).toContain("「任务起名」绑定的 provider saved-text 缺少 Base URL");
+		await changeInput("延期兜底", "25");
 		await act(async () => findButtonByText(document.body, "Save")?.click());
-		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
-		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
-		expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
-		expect(onOpenChange).not.toHaveBeenCalled();
-		expect(document.body.textContent).toContain("保存未完成");
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledWith(
+			expect.objectContaining({
+				profile: expect.objectContaining({ modelProviderId: "saved-text", baseUrl: undefined }),
+			}),
+		);
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ taskNameSuggestionBinding: legacyBinding, fallbackAfterMinutes: 25 }),
+		);
+		expect(document.body.textContent).not.toContain("「任务起名」绑定的 provider");
+		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
+	it.each(["notificationAssessmentBinding", "independentTaskCreationDraftGenerationBinding"] as const)(
+		"清空被活动用途 %s 引用的 Provider Base URL 时，Save 在写入前拒绝，一个请求都不发",
+		async (bindingKey) => {
+			const onOpenChange = vi.fn();
+			notificationSettingsMocks.getSettings.mockResolvedValue({
+				settings: {
+					...savedNotificationSettings,
+					[bindingKey]: { modelProviderId: "saved-text", modelId: "text-model" },
+				},
+				providers: [
+					{ ...savedNotificationProviders[0], baseUrl: "https://example.invalid" },
+					savedNotificationProviders[1],
+				],
+			});
+			await renderSettings(true, onOpenChange);
+			await selectValue("编辑语言模型 provider", "0");
+			await changeInput("Base URL", "", "语言模型");
+			const purpose = bindingKey === "notificationAssessmentBinding" ? "通知判断与摘要" : "分出独立任务草稿";
+			expect(document.body.textContent).toContain(`「${purpose}」绑定的 provider saved-text 缺少 Base URL`);
+			await act(async () => findButtonByText(document.body, "Save")?.click());
+			expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+			expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
+			expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
+			expect(onOpenChange).not.toHaveBeenCalled();
+			expect(document.body.textContent).toContain("保存未完成");
+		},
+	);
 	it("保存失败保留密钥草稿和对话框，重试后才关闭", async () => {
 		const onOpenChange = vi.fn();
 		await renderSettings(true, onOpenChange);

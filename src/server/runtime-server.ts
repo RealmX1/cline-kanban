@@ -72,6 +72,7 @@ import {
 	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
 } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
+import { readTaskAssistanceModelProviderRoutingSettings } from "../model-provider-access/kanban-model-provider-settings";
 import { createRvfAutomaticCloseoutRuntimeService } from "../rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	checkRateLimit,
@@ -106,13 +107,10 @@ import {
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
-import { executeStatelessTaskIndexingAgent } from "../task-indexing-support/stateless-task-indexing-agent-executor";
+import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
 import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
-import {
-	loadAndAdvanceSharedTaskIndexingContext,
-	readTaskIndexingSupportExecutorSettings,
-} from "../task-indexing-support/task-indexing-support-storage";
+import { loadAndAdvanceSharedTaskIndexingContext } from "../task-indexing-support/task-indexing-support-storage";
 import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
@@ -321,6 +319,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			if (!column) throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在，只允许读取已有可视化。" });
 			if (column.id === "trash")
 				throw new TRPCError({ code: "FORBIDDEN", message: "任务已结束，只允许读取已有可视化。" });
+		},
+		resolveTaskTitle: async (scope, taskId) => {
+			const board = await loadWorkspaceBoardById(scope.workspaceId);
+			return board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId)?.title ?? null;
 		},
 		onArtifactsUpdated: (workspaceId, taskId) =>
 			deps.runtimeStateHub.broadcastTaskVisualizationArtifactsUpdated?.(workspaceId, taskId),
@@ -967,7 +969,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
 		collectMaterials: (workspaceId) =>
 			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
-		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
+		getExecutorSettings: readTaskAssistanceModelProviderRoutingSettings,
 		getContext: (workspaceId, materials, settings) =>
 			loadAndAdvanceSharedTaskIndexingContext({
 				workspaceId,
@@ -977,7 +979,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				now: Date.now(),
 				forModelRequest: true,
 			}),
-		executeAgent: executeStatelessTaskIndexingAgent,
+		executeAgent: executeTaskAnalysisApi,
 		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
 	});
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {

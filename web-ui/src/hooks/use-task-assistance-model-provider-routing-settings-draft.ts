@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import {
-	readGlobalTaskAnalysisExecutorSettings,
-	saveGlobalTaskAnalysisExecutorSettings,
-	type TaskAnalysisExecutorSettings,
+	readGlobalTaskAssistanceModelProviderRoutingSettings,
+	saveGlobalTaskAssistanceModelProviderRoutingSettings,
+	type TaskAssistanceModelProviderRoutingSettings,
 } from "@/runtime/task-analysis-query";
 
-export function useTaskAnalysisExecutorSettingsDraft(open: boolean) {
-	const [settings, setSettings] = useState<TaskAnalysisExecutorSettings | null>(null);
-	const [savedSettings, setSavedSettings] = useState<TaskAnalysisExecutorSettings | null>(null);
+export function useTaskAssistanceModelProviderRoutingSettingsDraft(open: boolean) {
+	const [settings, setSettings] = useState<TaskAssistanceModelProviderRoutingSettings | null>(null);
+	const [savedSettings, setSavedSettings] = useState<TaskAssistanceModelProviderRoutingSettings | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	useEffect(() => {
 		setSettings(null);
@@ -15,7 +15,7 @@ export function useTaskAnalysisExecutorSettingsDraft(open: boolean) {
 		setLoadError(null);
 		if (!open) return;
 		let superseded = false;
-		void readGlobalTaskAnalysisExecutorSettings()
+		void readGlobalTaskAssistanceModelProviderRoutingSettings()
 			.then((result) => {
 				if (!superseded) {
 					setSettings(result);
@@ -37,7 +37,7 @@ export function useTaskAnalysisExecutorSettingsDraft(open: boolean) {
 		hasUnsavedChanges,
 		save: async () => {
 			if (!settings) return;
-			const saved = await saveGlobalTaskAnalysisExecutorSettings(settings);
+			const saved = await saveGlobalTaskAssistanceModelProviderRoutingSettings(settings);
 			setSettings(saved);
 			setSavedSettings(saved);
 		},

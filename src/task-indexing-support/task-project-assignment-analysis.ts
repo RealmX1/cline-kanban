@@ -1,11 +1,8 @@
 import { z } from "zod";
-import type { TaskIndexingMaterial, TaskIndexingSupportExecutorSettings } from "../core/task-indexing-support-contract";
-import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
-import { listWorkspaceIndexEntries } from "../state/workspace-state";
+import type { TaskAnalysisContextSettings, TaskIndexingMaterial } from "../core/task-indexing-support-contract";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
-import { executeStatelessTaskIndexingAgent } from "./stateless-task-indexing-agent-executor";
-import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "./task-analysis-shared-prompt-prefix";
-import { loadAndAdvanceSharedTaskIndexingContext } from "./task-indexing-support-storage";
+import { executeTaskAnalysisApi } from "./task-analysis-api-executor";
+import { collectProjectAssignmentLightweightContext } from "./task-project-assignment-lightweight-context";
 
 const projectAssignmentModelOutputSchema = z.object({
 	suggestedWorkspaceId: z.string().nullable(),
@@ -18,38 +15,37 @@ export async function analyzeTaskProjectAssignment(input: {
 	operationId: string;
 	title: string;
 	prompt: string;
-	settings: TaskIndexingSupportExecutorSettings;
-	materials: TaskIndexingMaterial[];
+	settings: TaskAnalysisContextSettings;
+	/** 兼容旧调用；项目归属不再消费这些重型材料。 */
+	materials?: TaskIndexingMaterial[];
 	abortSignal?: AbortSignal;
 }) {
-	const projects = (await listWorkspaceIndexEntries()).map((entry) => ({
-		workspaceId: entry.workspaceId,
-		name: deriveProjectDisplayNameFromRepoPath(entry.repoPath),
-		repositoryPath: entry.repoPath,
-	}));
+	const { projects, contextCompleteness } = await collectProjectAssignmentLightweightContext(
+		`${input.title}\n${input.prompt}`,
+	);
 	if (!projects.some((project) => project.workspaceId === input.workspaceId))
 		throw new Error("任务所属项目已失效，请重新选择。");
-	const context = await loadAndAdvanceSharedTaskIndexingContext({
-		workspaceId: input.workspaceId,
-		settings: input.settings,
-		materials: input.materials,
-		instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
-		now: Date.now(),
-		forModelRequest: true,
-	});
-	const result = await executeStatelessTaskIndexingAgent({
+	const result = await executeTaskAnalysisApi({
 		settings: input.settings,
 		modelUsagePurpose: "task_project_assignment_analysis",
-		context,
+		operationId: input.operationId,
+		stage: "project_assignment",
+		stableContextText: `已注册项目完整目录及标题示例（仅辅助判断）：\n${JSON.stringify(projects)}\n材料限制：${JSON.stringify(contextCompleteness)}`,
 		abortSignal: input.abortSignal,
 		instructionText:
 			"判断本次任务是否适合当前项目。只有其他已注册项目明显更合适时才提出变更；信息不足、通用工作或当前项目合适时 suggestedWorkspaceId 返回 null。不得创建或修改项目、卡片或关系。说明依据。",
 		queryText: JSON.stringify({
 			currentWorkspaceId: input.workspaceId,
-			projects,
 			task: { title: input.title, prompt: input.prompt },
 		}),
 		outputSchema: projectAssignmentModelOutputSchema,
+		validateOutput: (value) => {
+			if (
+				value.suggestedWorkspaceId &&
+				!projects.some((project) => project.workspaceId === value.suggestedWorkspaceId)
+			)
+				throw new Error("AI 返回了未注册项目，未采用建议。");
+		},
 	});
 	const suggested = result.value.suggestedWorkspaceId;
 	const project = suggested ? projects.find((entry) => entry.workspaceId === suggested) : null;

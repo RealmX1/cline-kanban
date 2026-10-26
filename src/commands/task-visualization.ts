@@ -1,9 +1,11 @@
 import { TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
 import { taskVisualizationPublicationRejectionCodeSchema } from "../core/task-visualization-artifact-contract";
-import { loadWorkspaceContext } from "../state/workspace-state";
+import { loadWorkspaceBoardById, loadWorkspaceContext } from "../state/workspace-state";
 import { stageTaskVisualizationPublication } from "../task-visualization-artifacts/stage-task-visualization-publication";
 import { TaskVisualizationArtifactStore } from "../task-visualization-artifacts/task-visualization-artifact-store";
+import { applyTaskAttributionToHtmlFile } from "../task-visualization-artifacts/task-visualization-html-task-attribution";
+import { TaskVisualizationPublicationFileSizeLimitError } from "../task-visualization-artifacts/task-visualization-publication-resource-limits";
 import { createRuntimeTrpcClient, printJson } from "./task";
 
 interface TaskVisualizationCommandOptions {
@@ -41,6 +43,28 @@ export function registerTaskVisualizationCommand(taskCommand: Command): void {
 			process.exitCode = 1;
 		}
 	};
+	const applyAttribution = async (workspace: { workspaceId: string }, taskId: string, filePath: string) => {
+		const board = await loadWorkspaceBoardById(workspace.workspaceId);
+		const task = board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId);
+		if (!task?.title) throw new Error("已注册项目中尚未找到任务名，HTML 已保留等待重试。");
+		return await applyTaskAttributionToHtmlFile(filePath, {
+			workspaceId: workspace.workspaceId,
+			taskId,
+			taskTitle: task.title,
+		});
+	};
+	addScopeOptions(
+		visualization
+			.command("apply-task-attribution-to-html")
+			.description("从任务记录解析身份并幂等写入本地 HTML 署名，不发布预览。"),
+	)
+		.requiredOption("--source-html-file <path>", "本机 HTML 入口文件。")
+		.action(async (options: TaskVisualizationCommandOptions) =>
+			run(options, async (workspace, taskId) => {
+				if (!options.sourceHtmlFile) throw new Error("缺少 HTML 入口。");
+				return { ok: true, ...(await applyAttribution(workspace, taskId, options.sourceHtmlFile)) };
+			}),
+		);
 	addScopeOptions(
 		visualization
 			.command("publish")
@@ -61,6 +85,16 @@ export function registerTaskVisualizationCommand(taskCommand: Command): void {
 		.action(async (options: TaskVisualizationCommandOptions) =>
 			run(options, async (workspace, taskId) => {
 				if (!options.sourceHtmlFile || !options.title) throw new Error("缺少 HTML 入口或标题。");
+				let taskTitleAtPublication: string | undefined;
+				let lastLocalTaskAttributionError: string | undefined;
+				try {
+					const attributed = await applyAttribution(workspace, taskId, options.sourceHtmlFile);
+					taskTitleAtPublication = attributed.taskAttribution.taskTitle ?? undefined;
+				} catch (error) {
+					if (error instanceof TaskVisualizationPublicationFileSizeLimitError) throw error;
+					// 本地缺证不丢弃发布源；运行时接受时会独立核验身份并补齐持久包署名。
+					lastLocalTaskAttributionError = error instanceof Error ? error.message : String(error);
+				}
 				const resourceMappings = (options.resourceMapping ?? []).map((mapping) => {
 					const separator = mapping.indexOf("=");
 					if (separator <= 0 || separator === mapping.length - 1)
@@ -72,6 +106,7 @@ export function registerTaskVisualizationCommand(taskCommand: Command): void {
 					workspaceRepositoryPath: workspace.repoPath,
 					taskId,
 					title: options.title,
+					taskTitleAtPublication,
 					sourceHtmlFilePath: options.sourceHtmlFile,
 					sourceRootDirectoryPath: options.sourceRootDirectory,
 					visualizationArtifactKey: options.visualizationArtifactKey,
@@ -91,6 +126,8 @@ export function registerTaskVisualizationCommand(taskCommand: Command): void {
 					return {
 						ok: true,
 						status: published.wasSupersededByNewerPublication ? "superseded_by_newer_publication" : "published",
+						localTaskAttributionStatus: taskTitleAtPublication ? "applied" : "pending",
+						lastLocalTaskAttributionError,
 						publicationRequestId: pending.publicationRequestId,
 						...published,
 					};
@@ -117,6 +154,8 @@ export function registerTaskVisualizationCommand(taskCommand: Command): void {
 					return {
 						ok: true,
 						status: "awaiting_runtime_acceptance",
+						localTaskAttributionStatus: taskTitleAtPublication ? "applied" : "pending",
+						lastLocalTaskAttributionError,
 						publicationRequestId: pending.publicationRequestId,
 						pendingPublicationDirectoryPath: pending.pendingPublicationDirectoryPath,
 						lastRuntimeAcceptanceError: error instanceof Error ? error.message : String(error),

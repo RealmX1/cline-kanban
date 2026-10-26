@@ -668,6 +668,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			}
 			response.sessions[summary.taskId] = summary;
 		}
+		// 冷恢复后的 ACP 活体不在终端管理器中。首帧须与增量推流一致，避免旧 interrupted 投影触发误移列。
+		for (const summary of deps.listConversationTaskSessionSummariesForWorkspace?.(workspaceId) ?? []) {
+			response.sessions[summary.taskId] = summary;
+		}
 		return response;
 	};
 

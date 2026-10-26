@@ -1319,7 +1319,8 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
 				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
 					"forked_from_main_current_turn" &&
-					input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover),
+					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
+						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
 		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
@@ -1614,7 +1615,8 @@ const codexAdapter: AgentSessionAdapter = {
 				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
 				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
 					"forked_from_main_current_turn" &&
-					input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover),
+					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
+						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
 		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
@@ -2384,6 +2386,14 @@ const kiroAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
+		const trimmedPrompt = input.prompt.trim();
+		const initialPlanModeGuidance = input.startInPlanMode
+			? [
+					"First, inspect the codebase and produce a clear implementation plan only.",
+					"Do not modify files, do not use write tools, and do not implement anything yet.",
+					"After you present the plan, ask for approval before making changes.",
+				].join(" ")
+			: null;
 
 		// kiro 的 plan 起步是纯 prompt 注入，与 --trust-all-tools 天然正交。
 		if (
@@ -2398,7 +2408,11 @@ const kiroAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
-		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
+		// 留空创建只设置后续输入的指导，不能为模式初始化合成用户提问。
+		const appendedSystemPrompt = combineAppendSystemPrompts(
+			resolveAgentAppendSystemPrompt(input),
+			!trimmedPrompt ? initialPlanModeGuidance : null,
+		);
 		let carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv = false;
 		if (hooks || appendedSystemPrompt) {
 			const configPath = getKiroAgentConfigPath();
@@ -2412,7 +2426,7 @@ const kiroAdapter: AgentSessionAdapter = {
 				config.hooks = {
 					agentSpawn: [
 						{
-							command: buildHookCommand("to_in_progress", {
+							command: buildHookCommand("agent_conversation_session_identity_observed", {
 								source: "kiro",
 								hookEventName: "agentSpawn",
 							}),
@@ -2481,19 +2495,9 @@ const kiroAdapter: AgentSessionAdapter = {
 			}
 		}
 
-		const trimmedPrompt = input.prompt.trim();
-		// 交接先空白启动，再投递完整只读报告；不能为这次空启动另造一轮提问。
 		const planPrompt =
-			input.startInPlanMode &&
-			!(input.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover && !trimmedPrompt)
-				? [
-						"First, inspect the codebase and produce a clear implementation plan only.",
-						"Do not modify files, do not use write tools, and do not implement anything yet.",
-						"After you present the plan, ask for approval before making changes.",
-						trimmedPrompt
-							? `\n\nTask:\n${trimmedPrompt}`
-							: " Ask the user what they want planned if the task is unclear.",
-					].join(" ")
+			initialPlanModeGuidance && trimmedPrompt
+				? `${initialPlanModeGuidance}\n\nTask:\n${trimmedPrompt}`
 				: input.prompt;
 		const withPromptLaunch = withPrompt(args, planPrompt, "append");
 		return {

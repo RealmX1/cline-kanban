@@ -1,6 +1,20 @@
-# RVF 收尾指令确认超时后的原生接受补证
+# RVF 收尾指令确认失败后的原生接受补证
 
 此入口恢复已经发生、后来才取得可信证据的收尾接受事实。补证入口本身不改变首次确认预算；后续新增的[压缩感知确认策略](codex-rvf-closeout-compaction-aware-confirmation.md)独立处理新会话的首次过早超时。原失败账本继续保留；成功补证不代表 land、base 同步或部署已经完成。 本入口不把所有首次确认超时都归于压缩。
+
+## 已接受的原生请求恢复 Land 认领（任务 e6881）
+
+显式补证与后台扫描共同支持 `submit_confirmation_budget_exhausted` 和 `codex_native_prompt_delivery_unconfirmed`。receipt 仍为 `rvf-late-native-closeout-prompt-acceptance-recovery/v1`；`originalDeliveryFailure` 保留原失败码、时间、消息标识及幂等键，旧 receipt 继续有效。原终态不改写为送达成功。
+
+原生请求未确认这一类还必须关联原发送 client ID：优先核验 `codex_native_prompt_delivery_operation` 的 workspace、会话、目录、正文摘要和实际发送意图；operation 缺失时，使用绑定相同 task/token/run/handoff/幂等键的 `nativeCompactionAwareConfirmation`。原生 item ID 可由服务端重新分配，此时必须由同次提交响应返回的非前驱回合建立关联。压缩 hook 的回合、缓存 `native_accepted`、历史接受缓存及 `currentExecutionQualification` 均不能独立放行；矛盾返回 `native_submission_binding_mismatch`，缺发送身份返回 `native_submission_identity_not_proven`，保持 unknown 并等待证据恢复。
+
+精确正文、唯一原生消息、事件时 Skill 引用与展开、本代完整活动分支仍须全部通过。只有历史证据且进程已退出时，可在原 Stop、身份和输入门禁下有界恢复同一原生会话，使用空 prompt 和 `resumePriorAgentConversationWithoutResendingPrompt=true`；这一步不签发 receipt、不 fork、不 rewind。存活进程端点暂不可用时保持等待，端点恢复后才完整重验。
+
+`automaticRecoveryProgress` 持久保存核验、历史接受观察及同会话恢复的独立预算：同证据失败或启动尝试最多三次、间隔至少 15 秒，service 重建不刷新。严格历史接受观察成功后清空该观察的失败计数，待答或排队门禁解除后自动重新核验。接受核验指纹包含原发送身份与失败快照、转录、handoff、端点代际及历史 Skill 材料可用性；启动预算使用独立指纹，忽略自身启动产生的代际、startedAt、端点、转录增长及实际展开快照，保留原绑定、失败快照、handoff、启动配置及历史 Skill 材料等外部恢复条件。控制面失败耗尽后每 60 秒只探测原端点及失败的历史分页能力；能力从不可用恢复后建立新的能力证据代际，再重开完整核验。不会因扫描次数或机器重启重发原正文。
+
+补证和认领在同一记录操作锁下单飞；异步核验后、写入前再次检查 Stop、会话绑定、锁归属、接管状态及原失败快照。稳定接管之前的历史接受事实可以补记，但不授予旧路线执行权。认领沿原 receipt 重验流程消费，只有 `claimed` 才可写入；同代重放返回同一认领，新代不能超时抢占。Land 实际完成前 base 保持 waiting。输入框未确认空闲仍独立阻止受控续验。
+
+`f2e33` 对应的已核验历史样本为 token `241b180f6afa9e54`、run `rvf-review-start-241b180f6afa9e54`、handoff SHA256 `467946f9dee75871eab1fab4d7d04acb37d98f80dcab6e0d9fc401a7533abbd4`。恢复条件是修复版本已生效、严格补证通过、当前执行门禁满足且 Land 认领实际返回 `claimed`；本修复不改写其真实账本，不代替其提交、同步或部署。持久报告位于 `~/.cline/kanban/task-cross-task-handoff-artifacts/e6881/rvf-native-prompt-acceptance-land-stage-claim-recovery/`。
 
 ## 自动补证（任务 b1b63）
 

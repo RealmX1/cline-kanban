@@ -61,7 +61,8 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 				});
 			}
 			if (procedure === "support.readAgentPromptImageAttachments") response = savedImages;
-			if (procedure === "support.getExecutorSettings") response = { agentId: "codex", modelId: null };
+			if (procedure === "support.getTaskAssistanceModelProviderRoutingSettings")
+				response = { preferredModelProviderId: "minimax", fallbackModelProviderId: "deepseek" };
 			if (procedure === "projects.getAllProjectsTaskSearchIndex") response = { projects: [] };
 			if (procedure === "support.listTaskLookupConversations") response = conversation ? [conversation] : [];
 			if (procedure === "support.getTaskLookupConversation") response = conversation;

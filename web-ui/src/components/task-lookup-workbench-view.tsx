@@ -46,8 +46,8 @@ function TaskLookupExecutorSettings({ controller }: { controller: TaskLookupWork
 	return (
 		<div className="space-y-3 border-t border-border pt-3">
 			<p className="text-xs text-text-secondary">
-				AI 任务分析共用全局设置：{controller.executorSettings?.agentId ?? "codex"} /{" "}
-				{controller.executorSettings?.modelId ?? "默认模型"}
+				API 首选：{controller.executorSettings?.preferredModelProviderId ?? "minimax"} · 备用：{" "}
+				{controller.executorSettings?.fallbackModelProviderId ?? "不使用备用"}
 			</p>
 			<Button onClick={() => window.dispatchEvent(new Event("kanban-open-task-analysis-settings"))}>
 				打开全局分析设置

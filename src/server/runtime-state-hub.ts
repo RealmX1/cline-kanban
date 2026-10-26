@@ -124,7 +124,7 @@ export interface RuntimeStateHub {
 		service: ConversationTaskSessionSubscriptionSource,
 	) => void;
 	broadcastTaskChatCleared: (workspaceId: string, taskId: string) => void;
-	// 本 hub 订阅着的 Cline SDK / ACP 会话的最新 summary。workspace-registry 拼跨项目视图时用它补齐
+	// 本 hub 订阅着的 Cline SDK / ACP 服务当前仍持有的 summary。workspace-registry 拼跨项目视图时用它补齐
 	// TerminalSessionManager 看不到的两种 transport。
 	listTrackedConversationTaskSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
 	handleUpgrade: (
@@ -321,6 +321,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	// `${workspaceId}::${sourceKind}` 复合键登记订阅，避免二者互相顶掉。
 	const conversationSummaryUnsubscribeBySubscriptionKey = new Map<string, () => void>();
 	const conversationMessageUnsubscribeBySubscriptionKey = new Map<string, () => void>();
+	const conversationSessionSourcesBySubscriptionKey = new Map<string, ConversationTaskSessionSubscriptionSource>();
 	const conversationPreviousSummariesBySubscriptionKey = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	const buildConversationSubscriptionKey = (workspaceId: string, sourceKind: ConversationTaskSessionSourceKind) =>
 		`${workspaceId}::${sourceKind}`;
@@ -329,8 +330,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			buildConversationSubscriptionKey(workspaceId, sourceKind),
 		);
 	const collectTrackedConversationSummaries = (workspaceId: string): RuntimeTaskSessionSummary[] =>
-		listConversationSubscriptionKeys(workspaceId).flatMap((key) =>
-			Array.from(conversationPreviousSummariesBySubscriptionKey.get(key)?.values() ?? []),
+		listConversationSubscriptionKeys(workspaceId).flatMap(
+			(key) =>
+				// 边沿缓存含已弃置条目；只有服务当前持有的账本条目才有资格覆盖整板快照。
+				conversationSessionSourcesBySubscriptionKey.get(key)?.listSummaries() ?? [],
 		);
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	// 三 transport 共用的「停止生成响应」边沿观察器（见 queueTaskSessionSummaryBroadcast 的挂载点注释）。
@@ -678,6 +681,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		if (conversationSummaryUnsubscribeBySubscriptionKey.has(subscriptionKey)) {
 			return;
 		}
+		conversationSessionSourcesBySubscriptionKey.set(subscriptionKey, service);
 		const previousSummariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
 		conversationPreviousSummariesBySubscriptionKey.set(subscriptionKey, previousSummariesByTaskId);
 		for (const summary of service.listSummaries()) {
@@ -819,6 +823,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				unsubscribeMap.delete(subscriptionKey);
 			}
 			conversationPreviousSummariesBySubscriptionKey.delete(subscriptionKey);
+			conversationSessionSourcesBySubscriptionKey.delete(subscriptionKey);
 		}
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
@@ -1463,6 +1468,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			conversationSummaryUnsubscribeBySubscriptionKey.clear();
 			conversationPreviousSummariesBySubscriptionKey.clear();
+			conversationSessionSourcesBySubscriptionKey.clear();
 			for (const unsubscribe of conversationMessageUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();

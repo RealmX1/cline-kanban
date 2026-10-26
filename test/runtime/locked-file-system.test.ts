@@ -1,6 +1,9 @@
+import { execFile } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -26,6 +29,8 @@ type LockOptionsShape = {
 	retries?: unknown;
 };
 
+const executeFileAsync = promisify(execFile);
+
 describe("LockedFileSystem", () => {
 	beforeEach(() => {
 		lockfileMocks.release.mockReset();
@@ -37,6 +42,76 @@ describe("LockedFileSystem", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"严格 umask 下原子替换保留显式权限，并沿用默认权限与 executable 优先级",
+		async () => {
+			const directory = createTempDir("kanban-atomic-write-file-mode-");
+			const parentProcessUmask = process.umask();
+			const childProcessAbortController = new AbortController();
+			onTestFinished(() => childProcessAbortController.abort());
+			const filesystemModuleUrl = new URL("../../src/fs/locked-file-system.ts", import.meta.url);
+			const childProcessSource = `
+import { chmod, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { LockedFileSystem } from ${JSON.stringify(filesystemModuleUrl.href)};
+
+process.umask(0o077);
+const directoryPath = ${JSON.stringify(directory.path)};
+const filesystem = new LockedFileSystem();
+const fileWriteCases = [
+	{ name: "explicit-0644", options: { fileMode: 0o644 } },
+	{ name: "explicit-0640-durable-without-lock", options: { fileMode: 0o640, durable: true, lock: null } },
+	{ name: "default-mode", options: {} },
+	{ name: "explicit-mode-with-executable", options: { fileMode: 0o640, executable: true } },
+	{ name: "default-mode-with-executable", options: { executable: true } },
+];
+const results = [];
+for (const fileWriteCase of fileWriteCases) {
+	const filePath = join(directoryPath, fileWriteCase.name);
+	await writeFile(filePath, "original");
+	await chmod(filePath, fileWriteCase.options.fileMode ?? 0o644);
+	await filesystem.writeTextFileAtomic(filePath, "rewritten", fileWriteCase.options);
+	results.push({
+		name: fileWriteCase.name,
+		mode: (await stat(filePath)).mode & 0o777,
+		content: await readFile(filePath, "utf8"),
+	});
+}
+process.stdout.write(JSON.stringify({ results, remainingFiles: (await readdir(directoryPath)).sort() }));
+`;
+			try {
+				const { stdout } = await executeFileAsync(
+					process.execPath,
+					["--import", "tsx", "--input-type=module", "--eval", childProcessSource],
+					{
+						cwd: fileURLToPath(new URL("../../", import.meta.url)),
+						env: { PATH: process.env.PATH, HOME: directory.path },
+						signal: childProcessAbortController.signal,
+					},
+				);
+				expect(JSON.parse(stdout)).toEqual({
+					results: [
+						{ name: "explicit-0644", mode: 0o644, content: "rewritten" },
+						{ name: "explicit-0640-durable-without-lock", mode: 0o640, content: "rewritten" },
+						{ name: "default-mode", mode: 0o600, content: "rewritten" },
+						{ name: "explicit-mode-with-executable", mode: 0o755, content: "rewritten" },
+						{ name: "default-mode-with-executable", mode: 0o755, content: "rewritten" },
+					],
+					remainingFiles: [
+						"default-mode",
+						"default-mode-with-executable",
+						"explicit-0640-durable-without-lock",
+						"explicit-0644",
+						"explicit-mode-with-executable",
+					],
+				});
+				expect(process.umask()).toBe(parentProcessUmask);
+			} finally {
+				directory.cleanup();
+			}
+		},
+	);
 
 	it("installs a non-throwing default onCompromised when no handler is provided", async () => {
 		const tempDir = createTempDir("kanban-locked-fs-");

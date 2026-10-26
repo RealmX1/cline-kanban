@@ -6,7 +6,6 @@ import type {
 } from "./notification-intelligence-settings-contract";
 
 export type NotificationIntelligencePurposeBindingKey =
-	| "taskNameSuggestionBinding"
 	| "independentTaskCreationDraftGenerationBinding"
 	| "notificationAssessmentBinding"
 	| "notificationSpeechBinding";
@@ -33,7 +32,6 @@ type ProviderProfileFieldsRelevantToPurposeBinding = {
 
 type SettingsFieldsRelevantToPurposeBinding = Pick<
 	NotificationIntelligenceSettings,
-	| "taskNameSuggestionBinding"
 	| "independentTaskCreationDraftGenerationBinding"
 	| "notificationAssessmentBinding"
 	| "notificationSpeechBinding"
@@ -41,14 +39,13 @@ type SettingsFieldsRelevantToPurposeBinding = Pick<
 	| "speechProvider"
 >;
 
-const TEXT_PURPOSE_BINDING_KEYS = [
-	"taskNameSuggestionBinding",
+// 任务起名已走辅助 API 主备路由；历史起名绑定仍兼容读写，但不参与活动用途校验。
+const ACTIVE_TEXT_PURPOSE_BINDING_KEYS = [
 	"notificationAssessmentBinding",
 	"independentTaskCreationDraftGenerationBinding",
 ] as const;
 
 const PURPOSE_BINDING_DISPLAY_NAMES: Record<NotificationIntelligencePurposeBindingKey, string> = {
-	taskNameSuggestionBinding: "任务起名",
 	independentTaskCreationDraftGenerationBinding: "分出独立任务草稿",
 	notificationAssessmentBinding: "通知判断与摘要",
 	notificationSpeechBinding: "语音合成",
@@ -65,7 +62,7 @@ export function findNotificationIntelligencePurposeBindingProblems(
 	profiles: readonly ProviderProfileFieldsRelevantToPurposeBinding[],
 ): NotificationIntelligencePurposeBindingProblem[] {
 	const problems: NotificationIntelligencePurposeBindingProblem[] = [];
-	for (const purposeBindingKey of TEXT_PURPOSE_BINDING_KEYS) {
+	for (const purposeBindingKey of ACTIVE_TEXT_PURPOSE_BINDING_KEYS) {
 		const binding = settings[purposeBindingKey];
 		if (!binding) continue;
 		const profile = profiles.find((candidate) => candidate.modelProviderId === binding.modelProviderId);
