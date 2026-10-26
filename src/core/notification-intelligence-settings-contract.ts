@@ -10,6 +10,7 @@ export const kanbanModelProviderProfileSchema = z.object({
 	credentialSource: z.enum(["environment", "system_credential_store"]),
 	baseUrl: z.string().url().optional(),
 	defaultModelId: z.string().max(200).optional(),
+	supportsImageInput: z.boolean().optional(),
 	alibabaRegion: z.enum(["beijing", "singapore"]).default("beijing"),
 	alibabaWorkspaceId: z
 		.string()

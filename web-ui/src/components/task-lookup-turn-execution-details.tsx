@@ -53,6 +53,8 @@ export function TaskLookupTurnExecutionDetails({
 			phaseStartedAt: turn.phaseStartedAt,
 			lastExecutionActivityAt: turn.lastExecutionActivityAt,
 			executorSettings: turn.executorSettings,
+			providerRoutingSettings: turn.providerRoutingSettings,
+			providerAttempts: turn.providerAttempts,
 			inputByteCount: turn.inputByteCount,
 			modelExecutionTimeoutMs: turn.modelExecutionTimeoutMs,
 			executionOwnershipWarning: turn.executionOwnershipWarning,
@@ -99,8 +101,9 @@ export function TaskLookupTurnExecutionDetails({
 				<summary className="cursor-pointer">检索记录与诊断</summary>
 				<div className="mt-2 space-y-2 break-words">
 					<p>
-						执行 Agent：{turn.executorSettings?.agentId ?? "历史未记录"} · 请求模型：
-						{turn.executorSettings ? (turn.executorSettings.modelId ?? "Agent 默认模型") : "历史未记录"}
+						{turn.providerRoutingSettings
+							? `API 首选：${turn.providerRoutingSettings.preferredModelProviderId} · 备用：${turn.providerRoutingSettings.fallbackModelProviderId ?? "无"}`
+							: `历史执行 Agent：${turn.executorSettings?.agentId ?? "未记录"} · 请求模型：${turn.executorSettings?.modelId ?? "Agent 默认模型"}`}
 					</p>
 					<p>
 						最近模型输入：
@@ -113,6 +116,16 @@ export function TaskLookupTurnExecutionDetails({
 							{execution.phase === "recall" ? "候选召回" : "候选解释"} · {execution.elapsedMs}ms · 实际模型{" "}
 							{execution.resolvedModelId ?? "未返回"} · 输入 {execution.inputTokens ?? "未知"} / 输出{" "}
 							{execution.outputTokens ?? "未知"} tokens · 缓存读取 {execution.cacheReadTokens ?? "未知"}
+						</p>
+					))}
+					{turn.providerAttempts?.map((attempt, index) => (
+						<p key={`${attempt.stage}-${attempt.modelProviderId}-${index}`}>
+							{attempt.stage} · {attempt.modelProviderId} · 请求 {attempt.requestedModelId ?? "未配置"} / 实际{" "}
+							{attempt.resolvedModelId ?? "未知"} · {attempt.elapsedMs}ms · {attempt.outcome} · 输入{" "}
+							{attempt.inputTokens ?? "未知"} / 输出 {attempt.outputTokens ?? "未知"} · 缓存读取{" "}
+							{attempt.cacheReadTokens ?? "未知"} / 写入 {attempt.cacheWriteTokens ?? "未知"}
+							{attempt.fallbackReason ? ` · 切换原因：${attempt.fallbackReason}` : ""}
+							{attempt.failureReason ? ` · ${attempt.failureReason}` : ""}
 						</p>
 					))}
 					{turn.executionActivityTimeline?.length ? (

@@ -3,12 +3,12 @@ import type {
 	IncomingWorkItem,
 	IncomingWorkItemRelationAnalysis,
 	IncomingWorkItemRelationCandidate,
+	TaskAnalysisContextSettings,
 	TaskIndexingMaterial,
-	TaskIndexingSupportExecutorSettings,
 } from "../core/task-indexing-support-contract";
 import { incomingWorkItemRelationAnalysisSchema } from "../core/task-indexing-support-contract";
 import { taskIndexingTextFingerprint } from "./shared-task-indexing-context";
-import { executeStatelessTaskIndexingAgent } from "./stateless-task-indexing-agent-executor";
+import { executeTaskAnalysisApi } from "./task-analysis-api-executor";
 import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "./task-analysis-shared-prompt-prefix";
 import { loadAndAdvanceSharedTaskIndexingContext } from "./task-indexing-support-storage";
 
@@ -116,10 +116,10 @@ export async function analyzeIncomingWorkItemRelations(input: {
 	workspaceId: string;
 	item: IncomingWorkItem;
 	materials: readonly TaskIndexingMaterial[];
-	settings: TaskIndexingSupportExecutorSettings;
+	settings: TaskAnalysisContextSettings;
 	missingContextParts?: readonly string[];
 	excludeExistingFindingTaskFromRelationSuggestions?: boolean;
-	executeAgent?: typeof executeStatelessTaskIndexingAgent;
+	executeAgent?: typeof executeTaskAnalysisApi;
 	abortSignal?: AbortSignal;
 }) {
 	const fullRequirements = selectIncomingWorkItemFullRequirementCandidates(
@@ -136,7 +136,9 @@ export async function analyzeIncomingWorkItemRelations(input: {
 		forModelRequest: true,
 	});
 	context.contextCompleteness.push(...(input.missingContextParts ?? []));
-	const result = await (input.executeAgent ?? executeStatelessTaskIndexingAgent)({
+	const result = await (input.executeAgent ?? executeTaskAnalysisApi)({
+		operationId: input.item.work_item_key,
+		stage: "relation_analysis",
 		settings: input.settings,
 		context,
 		instructionText: INCOMING_WORK_ITEM_RELATION_INSTRUCTIONS,
@@ -159,6 +161,9 @@ export async function analyzeIncomingWorkItemRelations(input: {
 			contextCompleteness: context.contextCompleteness,
 		}),
 		outputSchema: incomingWorkItemRelationAnalysisSchema,
+		validateOutput: (value) => {
+			validateIncomingWorkItemRelationCandidates({ ...input, analysis: value, fullRequirements });
+		},
 		abortSignal: input.abortSignal,
 	});
 	// INTEGRATION-POINT(Task Force fork relation consultation)：未来仅在预算允许的中置信有效任务上补问；当前关闭且不 fork。

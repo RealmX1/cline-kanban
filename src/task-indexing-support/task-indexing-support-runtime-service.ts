@@ -3,6 +3,7 @@ import type { RuntimeConfigState } from "../config/runtime-config";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { runtimeAgentIdSchema } from "../core/api-contract";
 import type { KanbanBoardCardWorkUnitQualifiedReference } from "../core/inter-work-unit-relation-ledger-event-contract";
+import type { TaskAssistanceModelProviderRoutingSettings } from "../core/task-assistance-model-provider-routing-contract";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
 import type {
@@ -19,6 +20,10 @@ import { lockedFileSystem } from "../fs/locked-file-system";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import {
+	readTaskAssistanceModelProviderRoutingSettings,
+	saveTaskAssistanceModelProviderRoutingSettings,
+} from "../model-provider-access/kanban-model-provider-settings";
 import {
 	allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable,
 	buildTaskMutationIntentForKanbanRuntimeSystemComponent,
@@ -135,7 +140,7 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 							workspaceId: scope.workspaceId,
 							item,
 							...collected,
-							settings: await readTaskIndexingSupportExecutorSettings(scope.workspaceId),
+							settings: await readTaskAssistanceModelProviderRoutingSettings(),
 							abortSignal: lifetime.signal,
 						})
 					).analysis;
@@ -253,14 +258,18 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 		{ fingerprint: string; result: ReturnType<typeof analyzeTaskProjectAssignment> }
 	>();
 	const service = {
+		getTaskAssistanceModelProviderRoutingSettings: readTaskAssistanceModelProviderRoutingSettings,
+		setTaskAssistanceModelProviderRoutingSettings: (settings: TaskAssistanceModelProviderRoutingSettings) =>
+			saveTaskAssistanceModelProviderRoutingSettings(settings),
 		getGlobalExecutorSettings: () => readTaskIndexingSupportExecutorSettings(null),
 		setGlobalExecutorSettings: (settings: TaskIndexingSupportExecutorSettings) =>
 			saveTaskIndexingSupportExecutorSettings(null, settings),
 		analyzeTaskProjectAssignment: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			request: { operationId: string; title: string; prompt: string },
+			abortSignal?: AbortSignal,
 		) => {
-			const settings = await readTaskIndexingSupportExecutorSettings(scope.workspaceId);
+			const settings = await readTaskAssistanceModelProviderRoutingSettings();
 			const fingerprint = taskIndexingTextFingerprint(
 				JSON.stringify([scope.workspaceId, request.title, request.prompt, settings]),
 			);
@@ -269,15 +278,12 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 				if (existing.fingerprint !== fingerprint) throw new Error("同一分析操作的输入已变化，请重新分析。");
 				return await existing.result;
 			}
-			const result = collect(scope.workspaceId).then((collected) =>
-				analyzeTaskProjectAssignment({
-					...request,
-					workspaceId: scope.workspaceId,
-					settings,
-					materials: collected.materials,
-					abortSignal: lifetime.signal,
-				}),
-			);
+			const result = analyzeTaskProjectAssignment({
+				...request,
+				workspaceId: scope.workspaceId,
+				settings,
+				abortSignal: AbortSignal.any([lifetime.signal, ...(abortSignal ? [abortSignal] : [])]),
+			});
 			projectAnalysisRuns.set(request.operationId, { fingerprint, result });
 			if (projectAnalysisRuns.size > 128) projectAnalysisRuns.delete(projectAnalysisRuns.keys().next().value ?? "");
 			try {
@@ -323,7 +329,7 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 				item,
 				...collected,
 				excludeExistingFindingTaskFromRelationSuggestions: true,
-				settings: await readTaskIndexingSupportExecutorSettings(scope.workspaceId),
+				settings: await readTaskAssistanceModelProviderRoutingSettings(),
 				abortSignal: lifetime.signal,
 			});
 			return {
@@ -360,7 +366,7 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 			const context = await loadAndAdvanceSharedTaskIndexingContext({
 				workspaceId: scope.workspaceId,
 				materials: collected.materials,
-				settings: await readTaskIndexingSupportExecutorSettings(scope.workspaceId),
+				settings: await readTaskAssistanceModelProviderRoutingSettings(),
 				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
 				now: Date.now(),
 			});
@@ -392,7 +398,7 @@ export function createTaskIndexingSupportRuntimeService(deps: TaskIndexingSuppor
 				workspaceId: scope.workspaceId,
 				item,
 				...collected,
-				settings: await readTaskIndexingSupportExecutorSettings(scope.workspaceId),
+				settings: await readTaskAssistanceModelProviderRoutingSettings(),
 				abortSignal: lifetime.signal,
 			});
 		},

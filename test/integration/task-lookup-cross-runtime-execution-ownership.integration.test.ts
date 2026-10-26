@@ -43,17 +43,32 @@ it("两个独立进程共用隔离 HOME 时不误中断；归属崩溃后保留�
 		let ownerId = "";
 		let sequence = 0;
 		const replies = new Map<number, { value?: unknown; error?: string }>();
+		const startedRecallModelExecutionOperationIds = new Set<string>();
 		child.on(
 			"message",
-			(message: { event?: string; ownerId?: string; requestId?: number; value?: unknown; error?: string }) => {
+			(message: {
+				event?: string;
+				ownerId?: string;
+				requestId?: number;
+				value?: unknown;
+				error?: string;
+				operationId?: string;
+			}) => {
 				if (message.event === "ready") ownerId = message.ownerId ?? "";
 				if (message.requestId !== undefined) replies.set(message.requestId, message);
+				if (message.event === "task_lookup_recall_model_execution_started" && message.operationId)
+					startedRecallModelExecutionOperationIds.add(message.operationId);
 			},
 		);
 		await waitUntil("隔离查卡进程启动", () => ownerId.length > 0);
 		return {
 			child,
 			ownerId,
+			waitForRecallModelExecutionToStart: async (conversationId: string, turnId: string) => {
+				await waitUntil("指定查卡轮次已开始模型召回", () =>
+					startedRecallModelExecutionOperationIds.has(`${conversationId}/${turnId}`),
+				);
+			},
 			request: async (operation: string, input?: unknown) => {
 				const requestId = ++sequence;
 				child.send({ requestId, operation, input });
@@ -68,12 +83,14 @@ it("两个独立进程共用隔离 HOME 时不误中断；归属崩溃后保留�
 	const releasePath = join(runtimeHome, "allow-task-lookup-model-execution-to-complete");
 	const first = await startRuntime();
 	const conversation = await first.request("create");
-	await first.request("submit", {
+	const firstSubmission = await first.request("submit", {
 		conversationId: conversation.conversationId,
 		requestId: "first",
 		questionText: "第一轮",
 	});
+	await first.waitForRecallModelExecutionToStart(conversation.conversationId, firstSubmission.turns[0].turnId);
 	const second = await startRuntime();
+	expect(second.ownerId).not.toBe(first.ownerId);
 	expect((await second.request("get", conversation.conversationId)).turns[0]?.status).toBe("running");
 	await writeFile(releasePath, "complete");
 	await waitUntil(
@@ -81,12 +98,15 @@ it("两个独立进程共用隔离 HOME 时不误中断；归属崩溃后保留�
 		async () => (await second.request("get", conversation.conversationId)).turns[0]?.status === "completed",
 	);
 	await rm(releasePath);
-	await first.request("submit", {
+	const crashedSubmission = await first.request("submit", {
 		conversationId: conversation.conversationId,
 		requestId: "crashed",
 		questionText: "会崩溃的第二轮",
 	});
+	// submit 只确认受理；等模型开始后才崩溃，避免随机杀在阶段持久化的会话写锁中。
+	await first.waitForRecallModelExecutionToStart(conversation.conversationId, crashedSubmission.turns[1].turnId);
 	expect(await sigkillChildProcessAndWaitForExit(first.child)).toBe(true);
+	expect(first.child.signalCode).toBe("SIGKILL");
 	expect((await second.request("get", conversation.conversationId)).turns[1]?.status).toBe("running");
 	// 已确认进程退出；推进该隔离心跳的年龄，无须在测试里空等两分钟宽限期。
 	const heartbeatPath = join(runtimeHome, "runtime-process-instance-heartbeats", `${first.ownerId}.json`);
@@ -103,9 +123,11 @@ it("两个独立进程共用隔离 HOME 时不误中断；归属崩溃后保留�
 		"后继进程完成显式重新提问",
 		async () => (await second.request("get", conversation.conversationId)).turns[2]?.status === "completed",
 	);
-	expect((await second.request("get", conversation.conversationId)).turns.map((turn) => turn.status)).toEqual([
-		"completed",
-		"interrupted",
-		"completed",
+	const finalConversation = await second.request("get", conversation.conversationId);
+	expect(finalConversation.turns.map((turn) => turn.status)).toEqual(["completed", "interrupted", "completed"]);
+	expect(finalConversation.turns.map((turn) => [turn.requestId, turn.owningRuntimeProcessInstanceId])).toEqual([
+		["first", first.ownerId],
+		["crashed", first.ownerId],
+		["explicit-retry", second.ownerId],
 	]);
 });

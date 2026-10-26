@@ -840,8 +840,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return { ok: true, summary: updated };
 		},
 
-		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input) => {
-			return await suggestTaskNamesFromTaskDescription(input);
+		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input, abortSignal) => {
+			return await suggestTaskNamesFromTaskDescription(input, { abortSignal });
 		},
 		startTaskSession: async (workspaceScope, input) => {
 			const startRequestReceivedAt = Date.now();

@@ -54,6 +54,7 @@ export type DiagnosticEventJournalChannel =
 	// 与上面那些「排障绊线」不同，这一条是为**事后统计**而留的：哪些功能在烧钱、哪家 provider 在超时、
 	// 某个用途的 token 量级是多少，事后 `jq` 就能算，不必再去翻各功能自己的日志。
 	| "model-provider-usage"
+	| "task-assistance-routing"
 	// 按 task 归因的资源占用采集（见 task-attributed-process-tree-resource-sampler.ts）。同属「事后统计」
 	// 而非排障绊线：每个被归因的进程在消失时写一条生命周期记录（观测到的峰值 RSS、累计 CPU、存活
 	// 时长、是否活过了会话根），每个活会话每 5 分钟写一条按分类聚合的快照。

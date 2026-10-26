@@ -40,7 +40,7 @@ import {
 	type RuntimeShortcutIconOption,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
-import { TaskAnalysisExecutorSettingsSection } from "@/components/task-analysis-executor-settings-section";
+import { TaskAssistanceModelProviderRoutingSettingsSection } from "@/components/task-assistance-model-provider-routing-settings-section";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -50,7 +50,7 @@ import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-act
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
-import { useTaskAnalysisExecutorSettingsDraft } from "@/hooks/use-task-analysis-executor-settings-draft";
+import { useTaskAssistanceModelProviderRoutingSettingsDraft } from "@/hooks/use-task-assistance-model-provider-routing-settings-draft";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
@@ -445,7 +445,7 @@ export function RuntimeSettingsDialog({
 	const isScrollingProgrammatically = useRef(false);
 	const [activeSection, setActiveSection] = useState<SettingsNavId>("general");
 	const notificationSettings = useNotificationIntelligenceSettingsDraft(open);
-	const taskAnalysisSettings = useTaskAnalysisExecutorSettingsDraft(open);
+	const taskAnalysisSettings = useTaskAssistanceModelProviderRoutingSettingsDraft(open);
 	const [isSavingAllSettings, setIsSavingAllSettings] = useState(false);
 	const controlsDisabled = isLoading || isSaving || isSavingAllSettings || config === null;
 	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
@@ -1186,7 +1186,11 @@ export function RuntimeSettingsDialog({
 					</div>
 
 					<div data-settings-section="task-analysis" />
-					<TaskAnalysisExecutorSettingsSection draft={taskAnalysisSettings} disabled={controlsDisabled} />
+					<TaskAssistanceModelProviderRoutingSettingsSection
+						draft={taskAnalysisSettings}
+						disabled={controlsDisabled}
+						providers={notificationSettings.providers}
+					/>
 					<NotificationIntelligenceSettingsSection draft={notificationSettings} disabled={controlsDisabled} />
 
 					{/* ---- 终端 agent 可靠性 ---- */}

@@ -541,6 +541,7 @@ import {
 	rvfCloseoutStageClaimRequestSchema,
 	rvfCloseoutStageClaimResponseSchema,
 } from "../core/rvf-automatic-closeout-recovery-contract";
+import { taskAssistanceModelProviderRoutingSettingsSchema } from "../core/task-assistance-model-provider-routing-contract";
 import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
@@ -778,6 +779,7 @@ export interface RuntimeTrpcContext {
 		suggestTaskNamesFromTaskDescription: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTaskNameSuggestionRequest,
+			abortSignal?: AbortSignal,
 		) => Promise<RuntimeTaskNameSuggestionResponse>;
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1593,6 +1595,19 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
 			}),
+		getTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(taskAssistanceModelProviderRoutingSettingsSchema)
+			.query(({ ctx }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.getTaskAssistanceModelProviderRoutingSettings();
+			}),
+		setTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(taskAssistanceModelProviderRoutingSettingsSchema)
+			.output(taskAssistanceModelProviderRoutingSettingsSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskIndexingSupportApi.setTaskAssistanceModelProviderRoutingSettings(input);
+			}),
 		getGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(taskIndexingSupportExecutorSettingsSchema)
 			.query(({ ctx }) => {
@@ -1609,9 +1624,9 @@ export const runtimeAppRouter = t.router({
 		analyzeTaskProjectAssignment: workspaceProcedure
 			.input(taskProjectAssignmentAnalysisRequestSchema)
 			.output(taskProjectAssignmentAnalysisResponseSchema)
-			.mutation(({ ctx, input }) => {
+			.mutation(({ ctx, input, signal }) => {
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input);
+				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input, signal);
 			}),
 		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
 			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
@@ -1903,8 +1918,8 @@ export const runtimeAppRouter = t.router({
 		suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeTaskNameSuggestionRequestSchema)
 			.output(runtimeTaskNameSuggestionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input);
+			.mutation(async ({ ctx, input, signal }) => {
+				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
 			}),
 		startTaskSession: workspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)

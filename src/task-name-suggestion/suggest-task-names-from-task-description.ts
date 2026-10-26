@@ -6,6 +6,7 @@
 //
 // 全条链路尽力而为、绝不抛：起名失败不该挡住建卡，建卡界面本来就有「留空 = 用正则从描述里推导」的兜底。
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import type { RuntimeTaskNameSuggestionRequest, RuntimeTaskNameSuggestionResponse } from "../core/api-contract";
@@ -17,15 +18,8 @@ import {
 export { SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY } from "../core/task-naming-conventions";
 
 import { DEFAULT_TASK_TITLE_MAX_CHARS } from "../core/task-title";
-import {
-	DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME,
-	readConfiguredModelProviderIds,
-	resolveDefaultModelProviderId,
-} from "../model-provider-access/model-provider-credentials-from-environment";
-import {
-	type ModelProviderRequestOptions,
-	requestModelProviderJsonObject,
-} from "../model-provider-access/request-model-provider-chat-completion";
+import type { ModelProviderRequestOptions } from "../model-provider-access/request-model-provider-chat-completion";
+import { requestTaskAssistanceJsonObject } from "../model-provider-access/task-assistance-model-provider-routing";
 
 /** 一次要几个候选。用户可以反复按按钮追加轮次，所以单轮不必给多。 */
 export const TASK_NAME_SUGGESTION_COUNT_PER_ROUND = 3;
@@ -231,30 +225,6 @@ function readSuggestedTaskNameFromModelItem(modelItem: unknown): string | null {
 	return `${taskCategoryTagsPrefix}${nameWithoutCategoryTags}`;
 }
 
-/**
- * 「配了 provider，却没有一家能当默认」时给一句可操作的说明；其余情形返回 `undefined`。
- *
- * 为什么在本文件里回读一次环境：共享层的 `model_provider_not_configured` 是一个刻意粗的原因，
- * 「一家都没配」与「配了却没有可用的默认」在它眼里同形，而这两件事要用户做的动作完全相反——前者去配一把
- * API key，后者去声明 `KANBAN_DEFAULT_MODEL_PROVIDER_ID`（key 早就配好了）。本功能对外的契约 enum 不为
- * 后者加成员（那个 enum 已在界面文案与测试里生根），于是差异走契约里那个已有的 `unavailableDetail`。
- *
- * 只在后者返回句子：前者不带 detail，界面照旧显示「去配一把 key」那条，语义不变。
- */
-function describeConfiguredModelProvidersWithoutUsableDefault(
-	environmentVariables: NodeJS.ProcessEnv | undefined,
-): string | undefined {
-	if (resolveDefaultModelProviderId(environmentVariables) !== null) {
-		return undefined;
-	}
-	const configuredModelProviderIds = readConfiguredModelProviderIds(environmentVariables);
-	if (configuredModelProviderIds.length === 0) {
-		return undefined;
-	}
-	// 列出已配置的几家：没有它们，用户知道该写哪个变量、却仍不知道该往里写什么值。
-	return `no default model provider is selected. Set ${DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME} to one of the configured providers (${configuredModelProviderIds.join(", ")}) for the Kanban runtime process.`;
-}
-
 export async function suggestTaskNamesFromTaskDescription(
 	request: RuntimeTaskNameSuggestionRequest,
 	options?: ModelProviderRequestOptions,
@@ -263,8 +233,11 @@ export async function suggestTaskNamesFromTaskDescription(
 	if (taskDescription.length === 0) {
 		return { status: "unavailable", unavailableReason: "task_description_empty" };
 	}
-	const result = await requestModelProviderJsonObject(
+	const result = await requestTaskAssistanceJsonObject(
 		{
+			operationId: randomUUID(),
+			stage: "task_naming",
+			abortSignal: options?.abortSignal,
 			// 用量日志靠它把这次调用归因到「建卡起名」这个功能上。
 			modelUsagePurpose: "task_name_suggestion",
 			systemPrompt: TASK_NAME_SUGGESTION_SYSTEM_PROMPT,
@@ -275,7 +248,13 @@ export async function suggestTaskNamesFromTaskDescription(
 			temperature: 0.7,
 		},
 		SUGGESTED_TASK_NAMES_JSON_SCHEMA,
-		options,
+		{
+			...options,
+			validateParsedJsonObject: (value) => {
+				if (!value.suggestedTaskNames.some((item) => readSuggestedTaskNameFromModelItem(item) !== null))
+					throw new Error("模型未返回可用任务名。");
+			},
+		},
 	);
 	if (result.status === "unavailable") {
 		// 共享层说的是 provider 词汇（`model_provider_not_configured`），本功能对外的契约用的是更早定下的
@@ -285,11 +264,7 @@ export async function suggestTaskNamesFromTaskDescription(
 			result.unavailableReason === "model_provider_not_configured" ? "api_key_not_configured" : "request_failed";
 		// 但「配了却没有可用的默认」不是「没配 key」，得靠 detail 把它从上面那条里分出来。共享层若已经就这次
 		// 失败给了更具体的一句话，以它为准。
-		const unavailableDetail =
-			result.unavailableDetail ??
-			(result.unavailableReason === "model_provider_not_configured"
-				? describeConfiguredModelProvidersWithoutUsableDefault(options?.environmentVariables)
-				: undefined);
+		const unavailableDetail = result.unavailableDetail;
 		return unavailableDetail
 			? { status: "unavailable", unavailableReason, unavailableDetail }
 			: { status: "unavailable", unavailableReason };

@@ -180,6 +180,16 @@ function NotificationProviderCredentialsEditor({
 									onChange={(event) => setProfile({ ...profile, defaultModelId: event.target.value })}
 								/>
 							</label>
+							<label className="flex items-center gap-2">
+								<input
+									type="checkbox"
+									checked={
+										profile.supportsImageInput ?? /^MiniMax-M3(?:\.|$)/iu.test(profile.defaultModelId ?? "")
+									}
+									onChange={(event) => setProfile({ ...profile, supportsImageInput: event.target.checked })}
+								/>
+								支持查卡图片输入
+							</label>
 						</>
 					)}
 					{profile.providerProtocol === "alibaba" && (
@@ -309,76 +319,70 @@ export function NotificationIntelligenceSettingsSection({
 					disabled={busy || disabled}
 				/>
 				<h4 className="border-t border-border pt-4 font-medium">语言模型用途</h4>
-				{(
-					[
-						"taskNameSuggestionBinding",
-						"notificationAssessmentBinding",
-						"independentTaskCreationDraftGenerationBinding",
-					] as const
-				).map((bindingKey) => (
-					<div key={bindingKey} className="space-y-1">
-						<label className="block" htmlFor={`notification-intelligence-selection-4-${bindingKey}`}>
-							{bindingKey === "taskNameSuggestionBinding"
-								? "任务起名 provider"
-								: bindingKey === "independentTaskCreationDraftGenerationBinding"
+				{(["notificationAssessmentBinding", "independentTaskCreationDraftGenerationBinding"] as const).map(
+					(bindingKey) => (
+						<div key={bindingKey} className="space-y-1">
+							<label className="block" htmlFor={`notification-intelligence-selection-4-${bindingKey}`}>
+								{bindingKey === "independentTaskCreationDraftGenerationBinding"
 									? "分出独立任务 provider"
 									: "通知判断与摘要 provider"}
-							<NativeSelect
-								id={`notification-intelligence-selection-4-${bindingKey}`}
-								value={settings[bindingKey]?.modelProviderId ?? ""}
-								onChange={(event) =>
-									patch({
-										[bindingKey]: event.target.value
-											? {
-													modelProviderId: event.target.value,
-													modelId:
-														chatProviders.find(
-															(candidate) => candidate.modelProviderId === event.target.value,
-														)?.defaultModelId ?? "",
-												}
-											: null,
-									})
-								}
-							>
-								<option value="">沿用环境变量默认配置</option>
-								{chatProviders.map((candidate) => (
-									<option key={candidate.modelProviderId} value={candidate.modelProviderId}>
-										{candidate.displayName}
-									</option>
-								))}
-								{/* 失效的当前绑定必须照实显示，不能落到空值选项上伪装成「沿用环境变量默认配置」。 */}
-								{settings[bindingKey] &&
-									!chatProviders.some(
-										(candidate) => candidate.modelProviderId === settings[bindingKey]?.modelProviderId,
-									) && (
-										<option value={settings[bindingKey].modelProviderId}>
-											{settings[bindingKey].modelProviderId}（已失效）
-										</option>
-									)}
-							</NativeSelect>
-						</label>
-						<PurposeBindingProblemAlerts
-							problems={purposeBindingProblems.filter((problem) => problem.purposeBindingKey === bindingKey)}
-						/>
-						{settings[bindingKey] && (
-							<label className="block">
-								模型 ID
-								<input
-									className={inputClassName}
-									value={settings[bindingKey]?.modelId ?? ""}
+								<NativeSelect
+									id={`notification-intelligence-selection-4-${bindingKey}`}
+									value={settings[bindingKey]?.modelProviderId ?? ""}
 									onChange={(event) =>
 										patch({
-											[bindingKey]: {
-												modelProviderId: settings[bindingKey]?.modelProviderId ?? "",
-												modelId: event.target.value,
-											},
+											[bindingKey]: event.target.value
+												? {
+														modelProviderId: event.target.value,
+														modelId:
+															chatProviders.find(
+																(candidate) => candidate.modelProviderId === event.target.value,
+															)?.defaultModelId ?? "",
+													}
+												: null,
 										})
 									}
-								/>
+								>
+									<option value="">沿用环境变量默认配置</option>
+									{chatProviders.map((candidate) => (
+										<option key={candidate.modelProviderId} value={candidate.modelProviderId}>
+											{candidate.displayName}
+										</option>
+									))}
+									{/* 失效的当前绑定必须照实显示，不能落到空值选项上伪装成「沿用环境变量默认配置」。 */}
+									{settings[bindingKey] &&
+										!chatProviders.some(
+											(candidate) => candidate.modelProviderId === settings[bindingKey]?.modelProviderId,
+										) && (
+											<option value={settings[bindingKey].modelProviderId}>
+												{settings[bindingKey].modelProviderId}（已失效）
+											</option>
+										)}
+								</NativeSelect>
 							</label>
-						)}
-					</div>
-				))}
+							<PurposeBindingProblemAlerts
+								problems={purposeBindingProblems.filter((problem) => problem.purposeBindingKey === bindingKey)}
+							/>
+							{settings[bindingKey] && (
+								<label className="block">
+									模型 ID
+									<input
+										className={inputClassName}
+										value={settings[bindingKey]?.modelId ?? ""}
+										onChange={(event) =>
+											patch({
+												[bindingKey]: {
+													modelProviderId: settings[bindingKey]?.modelProviderId ?? "",
+													modelId: event.target.value,
+												},
+											})
+										}
+									/>
+								</label>
+							)}
+						</div>
+					),
+				)}
 				<label className="flex items-center gap-2">
 					<input
 						type="checkbox"
