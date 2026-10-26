@@ -1477,6 +1477,114 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(settings.hooks?.UserPromptSubmit?.[0]?.hooks?.[0]?.command).toContain("to_in_progress");
 	});
 
+	it.each(
+		(["claude", "codex", "cursor", "droid", "kiro", "kimi", "omp"] as const).flatMap((agentId) =>
+			[false, true].map((startInPlanMode) => ({ agentId, startInPlanMode })),
+		),
+	)("$agentId 空创建 Plan=$startInPlanMode 保持待输入，启动横幅不生成回答", async ({ agentId, startInPlanMode }) => {
+		const isolatedHome = setupTempHome();
+		vi.stubEnv("CODEX_HOME", join(isolatedHome, ".codex"));
+		const spawnRequests: HostedTerminalPtyProcessSpawnRequest[] = [];
+		const write = vi.fn();
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: {
+				spawnHostedTerminalPtyProcess: async (request) => {
+					spawnRequests.push(request);
+					return {
+						pid: 42,
+						write,
+						resize: vi.fn(),
+						pause: vi.fn(),
+						resume: vi.fn(),
+						stop: vi.fn(),
+						hasExited: () => false,
+						wasInterrupted: () => false,
+					};
+				},
+			},
+		});
+		try {
+			const summary = await manager.startTaskSession({
+				taskId: "empty-collaborator",
+				agentId,
+				binary: "fixture-agent",
+				args: agentId === "kiro" ? ["chat"] : [],
+				cwd: isolatedHome,
+				prompt: " \n\t",
+				startInPlanMode,
+			});
+			expect(summary).toMatchObject({ turnOwner: "user", liveness: "live", userTurnKind: "review" });
+			vi.useFakeTimers();
+			spawnRequests[0].onData(Buffer.from("启动横幅：历史与配置正在加载\r\n"));
+			await vi.advanceTimersByTimeAsync(100);
+			expect(manager.getSummary(summary.taskId)?.agentResponseGenerationTurnSequence ?? 0).toBe(0);
+			expect(manager.getSummary(summary.taskId)?.lastAgentConversationUserHandoffObservation ?? null).toBeNull();
+			expect(
+				manager.getSummary(summary.taskId)?.lastEffectiveAgentConversationActivityObservation ?? null,
+			).toBeNull();
+			expect(write).not.toHaveBeenCalled();
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it("没有文字但带图片的启动仍属于真实首发输入", async () => {
+		const isolatedHome = setupTempHome();
+		const spawnRequests: HostedTerminalPtyProcessSpawnRequest[] = [];
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: {
+				spawnHostedTerminalPtyProcess: async (request) => {
+					spawnRequests.push(request);
+					return {
+						pid: 42,
+						write: vi.fn(),
+						resize: vi.fn(),
+						pause: vi.fn(),
+						resume: vi.fn(),
+						stop: vi.fn(),
+						hasExited: () => false,
+						wasInterrupted: () => false,
+					};
+				},
+			},
+		});
+		try {
+			const summary = await manager.startTaskSession({
+				taskId: "image-only-first-input",
+				agentId: "codex",
+				binary: "fixture-agent",
+				args: [],
+				cwd: isolatedHome,
+				prompt: "",
+				images: [{ id: "reference-image", name: "reference.png", mimeType: "image/png", data: "aW1hZ2U=" }],
+			});
+			expect(summary.turnOwner).toBe("agent");
+			expect(spawnRequests[0].args.join(" ")).toContain("Attached reference images:");
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it.each([false, true])("Kiro 空启动不合成提问，Plan=%s 的指导留在托管配置", async (startInPlanMode) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kiro-empty",
+			agentId: "kiro",
+			args: ["chat"],
+			cwd: "/tmp",
+			prompt: " \n\t",
+			startInPlanMode,
+			workspaceId: "workspace-1",
+			taskAgentPermissionMode: "ask_for_every_tool_use",
+		});
+		expect(launch.args).toEqual(["chat", "--agent", "kanban"]);
+		expect(launch.deferredStartupPromptText).toBeUndefined();
+		const configuration = JSON.parse(readFileSync(join(homedir(), ".kiro/agents/kanban.json"), "utf8")) as {
+			prompt: string;
+		};
+		expect(configuration.prompt.includes("Do not modify files")).toBe(startInPlanMode);
+	});
+
 	it("writes Kiro agent hooks and uses a Kanban-managed soft planning prompt", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -1506,7 +1614,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			hooks?: Record<string, Array<{ command?: string }>>;
 		};
 		expect(config.tools).toEqual(["*"]);
-		expect(config.hooks?.agentSpawn?.[0]?.command).toContain("to_in_progress");
+		expect(config.hooks?.agentSpawn?.[0]?.command).toContain("agent_conversation_session_identity_observed");
 		expect(config.hooks?.userPromptSubmit?.[0]?.command).toContain("to_in_progress");
 		expect(config.hooks?.preToolUse?.[0]?.command).toContain("activity");
 		expect(config.hooks?.preToolUse?.[1]?.command).toContain("to_in_progress");
@@ -3480,6 +3588,42 @@ describe("Codex 当前任务目录最近会话隔离", () => {
 });
 
 describe("可写协作会话启动", () => {
+	it.each(["claude", "codex"] as const)("%s 在首条消息前恢复协作 fork 时保留子会话模型", async (agentId) => {
+		setupTempHome();
+		for (const modelId of [undefined, "explicit-child-model"]) {
+			const launch = await prepareAgentLaunch({
+				taskId: "empty-fork-child",
+				agentId,
+				args: ["--model", "stale-default"],
+				cwd: "/tmp/collaboration-worktree",
+				prompt: "",
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: agentId,
+					sourceSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+				terminalAgentModelOverrideSettings: modelId ? { agentId, modelId } : undefined,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "owner-task",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "owner-task",
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			});
+			expect(launch.args).toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+			expect(launch.args).not.toContain("stale-default");
+			expect(launch.args).not.toContain("default");
+			if (modelId) expect(launch.args[launch.args.indexOf("--model") + 1]).toBe(modelId);
+			else expect(launch.args).not.toContain("--model");
+			expect(launch.args).not.toContain("fork");
+			expect(launch.args).not.toContain("--fork-session");
+		}
+	});
+
 	it.each(["claude", "codex"] as const)("%s 保留写权限并声明两个 ID，不 fork 主会话", async (agentId) => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

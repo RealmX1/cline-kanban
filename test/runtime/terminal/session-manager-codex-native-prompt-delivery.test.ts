@@ -96,10 +96,157 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 		},
 	};
 	(manager as unknown as { entries: Map<string, unknown> }).entries.set("conversation-1", entry);
-	return { entry, active, tracker, write };
+	return {
+		entry,
+		active,
+		tracker,
+		write,
+		setDraft: (value: string) => {
+			draft = value;
+		},
+	};
 }
 
 describe("session manager 的 Codex 原生投递", () => {
+	it.each(["claude", "codex"] as const)("%s 的原始按键不充当空侧会话的用户消息接受证据", (agentId) => {
+		for (const role of ["by_the_way", "task_collaborator"] as const) {
+			for (const rawInput of ["y\r", "1\r", "\r", "\n", "尚未被接受的真实正文\r"]) {
+				const manager = new TerminalSessionManager();
+				const { entry, write } = installSession(manager, "");
+				entry.summary.agentId = agentId;
+				entry.summary.agentNativeConversationSessionIdentity = null;
+				entry.summary.taskConversationSessionMetadata = {
+					workspaceTaskId: "host-task",
+					taskConversationSessionRole: role,
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				};
+				entry.summary.taskConversationSessionNativeIdentityRecovery = {
+					runtimeSessionIncarnationId: INCARNATION,
+					forkSourceNativeSessionId: null,
+					resumeRequestedAtMs: Date.now(),
+					consecutiveUnchangedProbeCount: 0,
+					lastEvidenceFingerprint: null,
+					nextProbeAtMs: 0,
+				};
+				manager.writeInput("conversation-1", Buffer.from(rawInput));
+				const summary = manager.getSummary("conversation-1");
+				expect(summary?.taskConversationSessionMetadata?.latestUserMessagePreview).toBeNull();
+				expect(summary?.agentConversationPromptSubmissionAcceptance ?? null).toBeNull();
+				expect(summary?.taskConversationSessionNativeIdentityRecovery).toMatchObject({
+					runtimeSessionIncarnationId: INCARNATION,
+					resumeRequestedAtMs: null,
+				});
+				expect(write).toHaveBeenCalledExactlyOnceWith(Buffer.from(rawInput));
+			}
+		}
+	});
+
+	it.each(["claude", "codex"] as const)("%s 的空侧会话在首次真实接受后显示用户原文预览", (agentId) => {
+		for (const role of ["by_the_way", "task_collaborator"] as const) {
+			const manager = new TerminalSessionManager();
+			const { entry } = installSession(manager, "");
+			entry.summary.agentId = agentId;
+			if (entry.summary.agentNativeConversationSessionIdentity)
+				entry.summary.agentNativeConversationSessionIdentity.sourceAgentId = agentId;
+			entry.summary.taskConversationSessionMetadata = {
+				workspaceTaskId: "host-task",
+				taskConversationSessionRole: role,
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+			};
+			const acceptedInput = {
+				observedAtMs: Date.now(),
+				eventId: "first-real-user-input",
+				nativeSessionId: "thread-1",
+				runtimeSessionIncarnationId: INCARNATION,
+				submittedPromptText: "  首次真实消息  ",
+			};
+			manager.confirmAcceptedAgentConversationInput("conversation-1", {
+				...acceptedInput,
+				runtimeSessionIncarnationId: "stale-incarnation",
+			});
+			expect(
+				manager.getSummary("conversation-1")?.taskConversationSessionMetadata?.latestUserMessagePreview,
+			).toBeNull();
+			manager.confirmAcceptedAgentConversationInput("conversation-1", acceptedInput);
+			expect(manager.getSummary("conversation-1")?.taskConversationSessionMetadata?.latestUserMessagePreview).toBe(
+				"首次真实消息",
+			);
+		}
+	});
+
+	it("纯 /plan 只初始化模式，不登记投递、不记接受、不增加回合", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { active, write } = installSession(manager, "");
+		Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "/plan" });
+		const summaryBefore = manager.getSummary("conversation-1");
+		expect(
+			await (
+				manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1"),
+		).toBe(true);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(write.mock.calls).toEqual([["\x1b[200~/plan\x1b[201~"], ["\r"]]);
+		expect(managedRecording.begin).not.toHaveBeenCalled();
+		expect(readNativeActivity).not.toHaveBeenCalled();
+		expect(manager.getSummary("conversation-1")).toEqual(summaryBefore);
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(false);
+	});
+
+	it("已受理但尚未写入的首条消息等待 Plan 初始化，不形成互相等待", async () => {
+		const manager = new TerminalSessionManager({ enableManagedTaskPromptDeliveryRecording: true });
+		const { active, write } = installSession(manager, "");
+		const observer = vi.fn();
+		const queuedFirstPrompt: PendingProgrammaticDeliveryReceipt = {
+			idempotencyKey: "first-input",
+			phase: "awaiting_readiness",
+			promptText: "首条真实消息",
+			outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
+			queuedBehindActiveAgentTurn: false,
+			settled: false,
+			observer,
+		};
+		Object.assign(active, {
+			workspaceTrustBuffer: null,
+			deferredStartupPromptText: "/plan",
+			programmaticDeliveryReceipt: queuedFirstPrompt,
+		});
+		expect(
+			await (
+				manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1"),
+		).toBe(true);
+		expect(active.deferredStartupPromptText).toBe("/plan");
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(active.deferredStartupPromptText).toBeNull();
+		expect(active.programmaticDeliveryReceipt).toBe(queuedFirstPrompt);
+		expect(write.mock.calls).toEqual([["\x1b[200~/plan\x1b[201~"], ["\r"]]);
+		expect(observer).not.toHaveBeenCalled();
+		expect(managedRecording.begin).not.toHaveBeenCalled();
+	});
+
+	it("输入框有草稿时纯 /plan 等待，随后只初始化一次", async () => {
+		const manager = new TerminalSessionManager();
+		const { active, write, tracker, setDraft } = installSession(manager, "草稿");
+		Object.assign(active, { workspaceTrustBuffer: null, deferredStartupPromptText: "/plan" });
+		const tryInitialize = () =>
+			(
+				manager as unknown as { trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> }
+			).trySubmitDeferredStartupPrompt("conversation-1");
+		expect(await tryInitialize()).toBe(false);
+		expect(write).not.toHaveBeenCalled();
+		Object.assign(tracker, createTerminalInputBoxOccupancyTrackerState());
+		setDraft("");
+		expect(await tryInitialize()).toBe(true);
+		expect(await tryInitialize()).toBe(false);
+	});
 	beforeEach(() => {
 		managedRecording.begin.mockReset();
 		managedRecording.settle.mockReset();

@@ -1263,6 +1263,18 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 空侧会话的身份补证与等待恢复。预算跨重启保留；证据变化或可信 hook 到达后自动重验。
+	taskConversationSessionNativeIdentityRecovery: z
+		.object({
+			runtimeSessionIncarnationId: z.string().min(1),
+			forkSourceNativeSessionId: z.string().nullable(),
+			resumeRequestedAtMs: z.number().nullable(),
+			consecutiveUnchangedProbeCount: z.number().int().min(0).max(3),
+			lastEvidenceFingerprint: z.string().nullable(),
+			nextProbeAtMs: z.number().nullable(),
+		})
+		.nullable()
+		.optional(),
 	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
 	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
 	codexConfigurationWriterBinding: codexConfigurationWriterBindingSchema.nullable().optional(),

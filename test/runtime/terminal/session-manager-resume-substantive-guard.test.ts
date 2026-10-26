@@ -113,7 +113,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 				binary: "claude",
 				args: [],
 				cwd: "/isolated",
-				prompt: "",
+				prompt: "先建立真实回合，再验证待答决策的恢复",
 			};
 			await manager.startTaskSession(request);
 			manager.transitionToReview(request.taskId, "hook", userTurnKind);

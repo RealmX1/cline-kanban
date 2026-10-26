@@ -316,6 +316,46 @@ describe("useTaskSessions", () => {
 		expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('error="response transport closed"'));
 	});
 
+	it.each(
+		(["by_the_way", "task_collaborator"] as const).flatMap((sessionRole) =>
+			(["started_from_scratch", "forked_from_main_current_turn"] as const).flatMap((contextSource) =>
+				["", " \n\t "].map((initialUserQuestion) => ({ sessionRole, contextSource, initialUserQuestion })),
+			),
+		),
+	)("$sessionRole/$contextSource 允许空首条消息并保存空预览", async (input) => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			const result = await latestSnapshot?.createTaskConversationSession({
+				...input,
+				task: createTask(),
+				agentId: "codex",
+				mainSessionOriginTurnNumber: 4,
+				mainSessionOriginUserMessagePreview: "主任务",
+			});
+			expect(result?.ok).toBe(true);
+		});
+		expect(startTaskSessionMutateMock).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({
+				prompt: "",
+				taskTitle: input.sessionRole === "task_collaborator" ? "协作会话" : "By the way",
+				taskConversationSessionMetadata: expect.objectContaining({
+					taskConversationSessionRole: input.sessionRole,
+					taskConversationSessionContextSource: input.contextSource,
+					latestUserMessagePreview: null,
+				}),
+			}),
+		);
+	});
+
 	it("creates a read-only By the way session related to the current main turn", async () => {
 		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
 		let latestSnapshot: HookSnapshot | null = null;
