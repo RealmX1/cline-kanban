@@ -297,6 +297,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const promptDraftUsageService = createPromptDraftUsageService({ warn: deps.warn });
 	const dailyWorkProgressStatisticsService = createDailyWorkProgressStatisticsService({
+		readCostRecorderRuntimeIdentity: () => ({
+			runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+			runtimeOrigin: getKanbanRuntimeOrigin(),
+		}),
 		storageFilePath: join(
 			getRuntimeHomePath(),
 			"daily-work-progress-statistics",

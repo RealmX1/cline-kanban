@@ -17,8 +17,11 @@
 // 启动清扫的「超期」判据据此放宽（见 resolvePendingRecordBecomesStaleAtEpochMs）。两种记录同一把锁、同一套
 // 写一次即定，只差这一个上界。
 
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+	measureDailyWorkProgressSynchronousStage,
+	readUtf8FileWithDailyWorkProgressCostObservation,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { type FileLockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import {
 	type CodexNativePromptDeliveryEvidence,
@@ -237,18 +240,20 @@ function hasRequiredRecordFields(value: unknown): value is Record<string, unknow
 export async function readTaskMessageInjectionLedger(ledgerPath: string): Promise<TaskMessageInjectionRecord[]> {
 	let raw: string;
 	try {
-		raw = await readFile(ledgerPath, "utf8");
+		raw = await readUtf8FileWithDailyWorkProgressCostObservation(ledgerPath);
 	} catch (error) {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
 			return [];
 		}
 		throw error;
 	}
-	const parsed = JSON.parse(raw) as unknown;
-	if (!Array.isArray(parsed) || !parsed.every(hasRequiredRecordFields)) {
-		throw new Error(`Invalid ${TASK_MESSAGE_INJECTION_LEDGER_FILENAME}. Fix or remove the file before retrying.`);
-	}
-	return parsed.map((record) => normalizeLegacyRecord(record));
+	return measureDailyWorkProgressSynchronousStage("injection_ledger_parse_and_normalize", () => {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed) || !parsed.every(hasRequiredRecordFields)) {
+			throw new Error(`Invalid ${TASK_MESSAGE_INJECTION_LEDGER_FILENAME}. Fix or remove the file before retrying.`);
+		}
+		return parsed.map((record) => normalizeLegacyRecord(record));
+	});
 }
 
 async function writeTaskMessageInjectionLedger(

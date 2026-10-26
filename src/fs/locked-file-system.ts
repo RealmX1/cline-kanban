@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { LockOptions } from "proper-lockfile";
 import * as lockfile from "proper-lockfile";
+import {
+	readUtf8FileWithDailyWorkProgressCostObservation,
+	recordDailyWorkProgressFileWrite,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { logFileLockError, logFileLockWarning } from "./lock-diagnostics-logger";
 
 // proper-lockfile 每 stale/2 刷新一次锁的 mtime；一旦刷新定时器因事件循环停摆而错过、锁即被判 stale
@@ -119,7 +123,8 @@ function createLockOptions(request: LockRequest, lockfilePath: string): LockOpti
 
 async function readFileIfExists(path: string): Promise<string | null> {
 	try {
-		return await readFile(path, "utf8");
+		const content = await readUtf8FileWithDailyWorkProgressCostObservation(path);
+		return content;
 	} catch (error) {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
 			return null;
@@ -225,6 +230,7 @@ export class LockedFileSystem {
 			const tempPath = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
 			try {
 				await writeFile(tempPath, content, "utf8");
+				recordDailyWorkProgressFileWrite(content);
 				if (options.executable) await chmod(tempPath, 0o755);
 				if (options.durable) await synchronizeFilesystemPath(tempPath);
 				await rename(tempPath, path);

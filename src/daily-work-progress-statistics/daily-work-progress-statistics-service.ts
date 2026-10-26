@@ -4,6 +4,10 @@ import type {
 	RuntimeDailyWorkProgressRequest,
 	RuntimeDailyWorkProgressSummary,
 } from "../core/api-contract";
+import {
+	createDailyWorkProgressCollectionCostRecorder,
+	measureDailyWorkProgressSynchronousStage,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import type { DailyWorkProgressCollector } from "./daily-work-progress-statistics-collector";
 import {
 	buildDailyWorkProgressSummary,
@@ -79,12 +83,17 @@ function statisticsSignature(state: DailyWorkProgressStatisticsStore): string {
 
 export function createDailyWorkProgressStatisticsService(deps: {
 	storageFilePath: string;
+	costRecorder?: ReturnType<typeof createDailyWorkProgressCollectionCostRecorder>;
+	readCostRecorderRuntimeIdentity?: () => { runtimeProcessInstanceId: string; runtimeOrigin: string };
 	collect: DailyWorkProgressCollector;
 	onUpdated?: (revision: number) => void;
 	now?: () => number;
 	warn: (message: string) => void;
 }): DailyWorkProgressStatisticsService {
 	const now = deps.now ?? Date.now;
+	const costRecorder =
+		deps.costRecorder ??
+		createDailyWorkProgressCollectionCostRecorder({ readRuntimeIdentity: deps.readCostRecorderRuntimeIdentity });
 	let state = createEmptyDailyWorkProgressStatisticsStore(now());
 	let projects: RuntimeDailyWorkProgressSummary["projects"] = [];
 	let initialized = false;
@@ -105,13 +114,15 @@ export function createDailyWorkProgressStatisticsService(deps: {
 		const key = JSON.stringify(request);
 		let summary = summaryCache.get(key);
 		if (!summary) {
-			summary = buildDailyWorkProgressSummary({
-				facts: Object.values(state.factsByEventId),
-				coverage: buildCoverage(state, projects),
-				projects,
-				request,
-				revision: state.revision,
-			});
+			summary = measureDailyWorkProgressSynchronousStage("statistics_summary_projection", () =>
+				buildDailyWorkProgressSummary({
+					facts: Object.values(state.factsByEventId),
+					coverage: buildCoverage(state, projects),
+					projects,
+					request,
+					revision: state.revision,
+				}),
+			);
 			summaryCache.set(key, summary);
 		}
 		return {
@@ -128,63 +139,68 @@ export function createDailyWorkProgressStatisticsService(deps: {
 	async function refresh(): Promise<void> {
 		if (closed) return;
 		if (!refreshInFlight)
-			refreshInFlight = serialize(async () => {
-				const mutation = await mutateDailyWorkProgressStatisticsStore(deps.storageFilePath, async (current) => {
-					const before = statisticsSignature(current);
-					const precedingFactIds = new Set(Object.keys(current.factsByEventId));
-					const collected = await deps.collect(current);
-					const liveIds = new Set(collected.liveFactEventIds);
-					const historicalFacts = Object.values(current.factsByEventId).filter(
-						(fact) => !precedingFactIds.has(fact.eventId) && !liveIds.has(fact.eventId),
-					);
-					const projectSetChanged = JSON.stringify(projects) !== JSON.stringify(collected.projects);
-					projects = collected.projects;
-					hasPendingHistoricalReads = collected.hasPendingHistoricalReads;
-					const changed = before !== statisticsSignature(current) || projectSetChanged;
-					if (changed) current.revision++;
-					state = current;
-					if (changed) summaryCache.clear();
-					for (const view of changed ? views.values() : []) {
-						const summary = project(view.request);
-						const liveMetrics = new Set(
-							collected.liveFactEventIds.flatMap((id) => {
-								const fact = current.factsByEventId[id];
-								return fact &&
-									(view.request.workspaceId === null || view.request.workspaceId === fact.workspaceId)
-									? [fact.metric]
-									: [];
-							}),
+			refreshInFlight = serialize(() =>
+				costRecorder.run("refresh", async () => {
+					const mutation = await mutateDailyWorkProgressStatisticsStore(deps.storageFilePath, async (current) => {
+						const before = statisticsSignature(current);
+						const precedingFactIds = new Set(Object.keys(current.factsByEventId));
+						const collected = await deps.collect(current);
+						const liveIds = new Set(collected.liveFactEventIds);
+						const historicalFacts = Object.values(current.factsByEventId).filter(
+							(fact) => !precedingFactIds.has(fact.eventId) && !liveIds.has(fact.eventId),
 						);
-						const quietlyBackfilledMetrics = new Set(
-							historicalFacts
-								.filter(
-									(fact) => view.request.workspaceId === null || view.request.workspaceId === fact.workspaceId,
+						const projectSetChanged = JSON.stringify(projects) !== JSON.stringify(collected.projects);
+						projects = collected.projects;
+						hasPendingHistoricalReads = collected.hasPendingHistoricalReads;
+						const changed = before !== statisticsSignature(current) || projectSetChanged;
+						if (changed) current.revision++;
+						state = current;
+						if (changed) summaryCache.clear();
+						for (const view of changed ? views.values() : []) {
+							const summary = project(view.request);
+							const liveMetrics = new Set(
+								collected.liveFactEventIds.flatMap((id) => {
+									const fact = current.factsByEventId[id];
+									return fact &&
+										(view.request.workspaceId === null || view.request.workspaceId === fact.workspaceId)
+										? [fact.metric]
+										: [];
+								}),
+							);
+							const quietlyBackfilledMetrics = new Set(
+								historicalFacts
+									.filter(
+										(fact) =>
+											view.request.workspaceId === null || view.request.workspaceId === fact.workspaceId,
+									)
+									.map((fact) => fact.metric),
+							);
+							for (const achievement of summary.achievements) {
+								if (
+									!projectSetChanged &&
+									!view.achievementIds.has(achievement.achievementId) &&
+									liveMetrics.has(achievement.metric) &&
+									!quietlyBackfilledMetrics.has(achievement.metric)
 								)
-								.map((fact) => fact.metric),
-						);
-						for (const achievement of summary.achievements) {
-							if (
-								!projectSetChanged &&
-								!view.achievementIds.has(achievement.achievementId) &&
-								liveMetrics.has(achievement.metric) &&
-								!quietlyBackfilledMetrics.has(achievement.metric)
-							)
-								current.eligibleAchievementIds[achievement.achievementId] = now();
+									current.eligibleAchievementIds[achievement.achievementId] = now();
+							}
+							view.achievementIds = new Set(
+								summary.achievements.map((achievement) => achievement.achievementId),
+							);
 						}
-						view.achievementIds = new Set(summary.achievements.map((achievement) => achievement.achievementId));
-					}
-					// 过期领取仅用于避免重复反馈；历史成果事实保留，供今后的日纪录比较。
-					for (const records of [current.eligibleAchievementIds, current.claimedAchievementIds])
-						for (const [id, timestamp] of Object.entries(records))
-							if (now() - timestamp > 14 * 86_400_000) delete records[id];
-					return changed;
-				});
-				state = mutation.state;
-				initialized = true;
-				const recovered = lastRefreshFailed;
-				lastRefreshFailed = false;
-				if (mutation.result || recovered) deps.onUpdated?.(state.revision);
-			})
+						// 过期领取仅用于避免重复反馈；历史成果事实保留，供今后的日纪录比较。
+						for (const records of [current.eligibleAchievementIds, current.claimedAchievementIds])
+							for (const [id, timestamp] of Object.entries(records))
+								if (now() - timestamp > 14 * 86_400_000) delete records[id];
+						return changed;
+					});
+					state = mutation.state;
+					initialized = true;
+					const recovered = lastRefreshFailed;
+					lastRefreshFailed = false;
+					if (mutation.result || recovered) deps.onUpdated?.(state.revision);
+				}),
+			)
 				.catch((error: unknown) => {
 					if (!lastRefreshFailed) {
 						lastRefreshFailed = true;
@@ -236,24 +252,27 @@ export function createDailyWorkProgressStatisticsService(deps: {
 		async claimCelebrations(request) {
 			if (!initialized) await refresh();
 			if (lastRefreshFailed) throw new Error("统计持久记录暂时不可读，暂不领取庆祝");
-			return serialize(async () => {
-				const result = await mutateDailyWorkProgressStatisticsStore(deps.storageFilePath, async (current) => {
-					state = current;
-					summaryCache.clear();
-					const summary = project(request);
-					const requested = new Set(request.achievementIds);
-					const achievements = summary.achievements.filter(
-						(achievement) =>
-							requested.has(achievement.achievementId) &&
-							current.eligibleAchievementIds[achievement.achievementId] !== undefined &&
-							current.claimedAchievementIds[achievement.achievementId] === undefined,
-					);
-					for (const achievement of achievements) current.claimedAchievementIds[achievement.achievementId] = now();
-					return { achievements };
-				});
-				state = result.state;
-				return result.result;
-			});
+			return serialize(() =>
+				costRecorder.run("celebration_claim", async () => {
+					const result = await mutateDailyWorkProgressStatisticsStore(deps.storageFilePath, async (current) => {
+						state = current;
+						summaryCache.clear();
+						const summary = project(request);
+						const requested = new Set(request.achievementIds);
+						const achievements = summary.achievements.filter(
+							(achievement) =>
+								requested.has(achievement.achievementId) &&
+								current.eligibleAchievementIds[achievement.achievementId] !== undefined &&
+								current.claimedAchievementIds[achievement.achievementId] === undefined,
+						);
+						for (const achievement of achievements)
+							current.claimedAchievementIds[achievement.achievementId] = now();
+						return { achievements };
+					});
+					state = result.state;
+					return result.result;
+				}),
+			);
 		},
 		refresh,
 		start() {
@@ -264,6 +283,7 @@ export function createDailyWorkProgressStatisticsService(deps: {
 			if (timer !== null) clearTimeout(timer);
 			timer = null;
 			await serializationTail;
+			costRecorder.close();
 		},
 	};
 }

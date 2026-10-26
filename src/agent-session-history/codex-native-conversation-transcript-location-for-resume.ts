@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 // stream-json 的 CommonJS 导出挂在函数对象上，原生 ESM 不能静态识别其 parser 命名导出。
 import streamJson from "stream-json";
+import { countDailyWorkProgressCollectionCost } from "../diagnostics/daily-work-progress-collection-cost-recorder";
 
 // 只枚举文件名；正文读取严格限定到已知原生 ID，不按 cwd 或更新时间猜对话。
 export async function listKnownCodexTranscriptSegmentPaths(root: string, sessionId: string): Promise<string[]> {
@@ -14,6 +15,7 @@ export async function listKnownCodexTranscriptSegmentPaths(root: string, session
 		const directory = directories.pop();
 		if (!directory) break;
 		try {
+			countDailyWorkProgressCollectionCost("codex_directory_enumerations");
 			for (const entry of await readdir(directory, { withFileTypes: true })) {
 				const path = join(directory, entry.name);
 				if (entry.isDirectory()) directories.push(path);

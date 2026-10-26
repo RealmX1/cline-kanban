@@ -25,6 +25,10 @@ import {
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
 import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
+import {
+	measureDailyWorkProgressSynchronousStage,
+	readUtf8FileWithDailyWorkProgressCostObservation,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import {
 	assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot,
@@ -269,10 +273,10 @@ function isNodeErrorWithCode(error: unknown, code: string): boolean {
 
 async function readJsonFile(path: string, options: { requireCompleteRead?: boolean } = {}): Promise<unknown | null> {
 	try {
-		const raw = await readFile(path, "utf8");
+		const raw = await readUtf8FileWithDailyWorkProgressCostObservation(path);
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(raw) as unknown;
+			parsed = measureDailyWorkProgressSynchronousStage("workspace_json_parse", () => JSON.parse(raw) as unknown);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(`Malformed JSON in ${path}. ${message}`);
@@ -319,7 +323,7 @@ function parsePersistedStateFile<T>(
 	if (raw === null) {
 		return defaultValue;
 	}
-	const parsed = schema.safeParse(raw);
+	const parsed = measureDailyWorkProgressSynchronousStage("workspace_schema_validation", () => schema.safeParse(raw));
 	if (!parsed.success) {
 		throw new Error(
 			`Invalid ${fileLabel} file at ${filePath}. ` +

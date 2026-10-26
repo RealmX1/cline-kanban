@@ -49,3 +49,40 @@ Done 的 canonical 列 id 沿用 trash，对应 task_card_moved_to_trash_column�
 领域测试覆盖日界、夏令时、任务世代、重复流转、零活动日、历史不足、双表示和持久化领取。隔离 HOME 的集成测试贯通真实移列账本、原生转录、HTTP 和重启恢复。浏览器测试覆盖桌面与手机的 overlay 展开、工作区位置和尺寸不变、短视口内部滚动、8 秒收起、手动保持、焦点、切换范围与成果导航。
 
 真实部署后的 PTY/hook 来源、运行时与浏览器的实际推流、自然工作中的计数及视觉表现，另通过本任务注册的部署后验证观察。
+
+## 采集成本与读取复用
+
+`daily-work-progress-collection-cost-window-sample` 诊断通道按 60 秒聚合，沿用诊断日志的大小轮转与保留上限。
+阶段字段记录调用、失败、经过时间、同步计算经过时间、实际读取字节与写盘次数；计数器记录回执比较及 Codex 目录枚举。
+异步阶段包含 I/O 等待和嵌套阶段，阶段时间不能相加，也不能作为该阶段的进程 CPU。日志不保存 prompt、文件路径或逐条转录，
+运行时实例 UUID、origin、journal 写入进程及启动时间用于跨实例、跨重启归属。
+
+回执读取复用现有 `ParsedPersistedJsonFileReadCache`：每次检查 dev/ino/size/mtimeNs/ctimeNs，读取前后指纹一致才保留派生索引。
+索引先按任务及首次绑定的实际目标会话分组，再按正文哈希保存排序后的确认时间，只对原生候选输入二分查询。
+原有 ±5 秒闭区间、`delivery_failed` 排除、旧回执目标回退和同文后续真人输入规则不变。
+缓存只保留哈希与时间，最多 32 个项目、262,144 条回执；超限按最近使用顺序淘汰，下一次重新读取。
+
+Codex 缓存每个 collector 独享，最多保留 1,024 个已验证分段头、2,048 个目录和 65,536 个目录项。
+每轮检查分段 dev/ino/size/mtimeNs/ctimeNs，也检查已发现的每一级目录，深层日期目录变化会局部重新枚举。
+稳定文件跳过正文和分段前缀，稳定目录跳过 `readdir`；父段仍逐轮核对身份、字节边界、累计 ordinal 和唯一性。
+替换、截断、同尺寸重写、歧义或验证失败触发失效并重新核验；缓存不落盘，重启后重新验证。
+不含可确认 `session_meta` 的旧 Codex 文件继续走原读取路径。
+
+以下独立开关均在运行时进程启动时设置为 `1` 后关闭对应功能；未设置时启用：
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `KANBAN_DAILY_WORK_PROGRESS_COST_RECORDING_DISABLED` | 关闭成本刻度及窗口定时器 |
+| `KANBAN_DAILY_WORK_PROGRESS_RECEIPT_LEDGER_CACHE_DISABLED` | 每轮重新读取并构建回执索引 |
+| `KANBAN_DAILY_WORK_PROGRESS_RECEIPT_INDEX_DISABLED` | 恢复原逐条过滤回执路径，独立保留回执文件读取缓存 |
+| `KANBAN_DAILY_WORK_PROGRESS_CODEX_HISTORY_CACHE_DISABLED` | 恢复原 Codex 目录枚举及前缀读取路径 |
+| `KANBAN_DAILY_WORK_PROGRESS_CANONICAL_RECORD_PERSISTENCE_DISABLED` | 恢复原事实来源扩展字段及来源对象键顺序，便于独立回退规范化写入 |
+
+统计持久 schemaVersion 仍为 1；每轮继续在文件锁内重读、解析并校验统计文件，内容无变化不写盘。
+事实仅写既有持久契约字段，来源对象键顺序与 schema 一致，避免后续发现周期仅为清理扩展字段或重排键而写盘。
+单飞、历史 200 ms / 稳态 2 秒调度、256 KiB 读取预算、账本分页预算和来源公平轮换保持原有约束。
+
+可复现实验入口是 `scripts/daily-work-progress-performance-experiment.ts`（经 `node --import tsx`），
+`generate` 生成持久语料与 SHA-256 清单，`run` 在独立 HOME、真实账本 worker 和只读 HTTP 采集宿主中记录历史追平及完整稳态窗口。
+`scripts/run-daily-work-progress-performance-pairs.mjs` 对冻结模块执行五对交替 AB/BA，保存每次 argv、模块摘要、退出码、原始日志和失败。
+该采集宿主隔离测量服务成本，完整运行时的 HTTP/tRPC 接线另由集成测试覆盖；真实部署的自然负载仍需 PDV 观测。

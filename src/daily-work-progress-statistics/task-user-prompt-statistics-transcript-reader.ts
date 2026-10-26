@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { readAppendedCompleteJsonLines } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import { z } from "zod";
 import {
 	parseTranscriptJsonRecord,
@@ -12,8 +11,20 @@ import {
 	extractSubmittedUserPromptFromTranscriptRecord,
 	isAcceptedNativeUserInputWithOnlyAttachments,
 } from "../agent-session-history/submitted-user-prompt-transcript-record-parser";
+import {
+	countDailyWorkProgressCollectionCost,
+	measureDailyWorkProgressAsynchronousStage,
+	measureDailyWorkProgressSynchronousStage,
+} from "../diagnostics/daily-work-progress-collection-cost-recorder";
+import type { CodexStatisticsVerifiedHistoryReadCache } from "./codex-statistics-verified-history-read-cache";
+import {
+	createProgrammaticPromptReceiptTimeIndex,
+	type ProgrammaticPromptReceiptTimeIndex,
+} from "./programmatic-prompt-receipt-time-index";
+import { readCountedTaskUserPromptStatisticsJsonLines as readAppendedCompleteJsonLines } from "./task-user-prompt-statistics-counted-json-lines-reader";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const EMPTY_PROGRAMMATIC_PROMPT_SHA256S: ReadonlySet<string> = new Set();
 // EXPERIMENT_NODE: 原生提交标识可用时，用它替代正文与回执时间窗口的关联。
 const PROGRAMMATIC_PROMPT_RECEIPT_MATCH_MAXIMUM_TIMESTAMP_DISTANCE_MS = 5_000;
 const MAXIMUM_TRANSCRIPT_INCREMENT_BYTES = 256 * 1024;
@@ -67,6 +78,7 @@ export function foldTaskUserPromptStatisticsRecord(input: {
 	serializedRecord: string;
 	cursor: z.infer<typeof taskUserPromptStatisticsRecordFoldCursorSchema>;
 	programmaticPromptSha256s: ReadonlySet<string>;
+	matchesProgrammaticPromptSha256AtRecordTimestamp?: (promptSha256: string) => boolean;
 }): ConfirmedTaskUserPromptStatisticsSubmission | null {
 	const { sourceAgentId, record, cursor } = input;
 	const payload = readTranscriptRecord(record.payload);
@@ -89,16 +101,17 @@ export function foldTaskUserPromptStatisticsRecord(input: {
 		text.trimStart().startsWith("<environment_context>")
 	)
 		return null;
-	if (input.programmaticPromptSha256s.has(sha256(text))) return null;
+	const textSha256 = sha256(text);
+	if (input.programmaticPromptSha256s.has(textSha256)) return null;
 	// 程序化投递会附上来源块；只识别该显式机器来源，不把普通谈论此术语的正文排除。
 	if (
 		/^\s*<kanban[^>]*(?:programmatic|injection)/u.test(text) ||
 		/^\s*<[^>]*provenance[^>]*>[\s\S]*?context_only_never_quote_as_user_statement/u.test(text)
 	)
 		return null;
+	if (input.matchesProgrammaticPromptSha256AtRecordTimestamp?.(textSha256)) return null;
 	if (sourceAgentId === "codex") {
 		const kind = String(record.type);
-		const textSha256 = sha256(text);
 		const previous = cursor.pendingCodexRepresentation;
 		if (
 			previous &&
@@ -123,6 +136,9 @@ interface TaskUserPromptStatisticsTranscriptIncrementInput {
 	transcriptPath: string;
 	cursor: TaskUserPromptStatisticsCursor;
 	programmaticSubmissionReceipts: readonly { promptSha256: string; confirmedAtEpochMs: number }[];
+	programmaticReceiptTimeIndex?: ProgrammaticPromptReceiptTimeIndex;
+	codexHistoryReadCache?: CodexStatisticsVerifiedHistoryReadCache;
+	codexTranscriptPathsRewrittenWithoutAppend?: ReadonlySet<string>;
 }
 interface TaskUserPromptStatisticsTranscriptIncrementResult {
 	cursor: TaskUserPromptStatisticsCursor;
@@ -135,22 +151,40 @@ function foldTaskUserPromptStatisticsParsedRecord(
 	record: Record<string, unknown>,
 	serializedRecord: string,
 ): ConfirmedTaskUserPromptStatisticsSubmission | null {
+	countDailyWorkProgressCollectionCost("transcript_records");
 	const timestamp = record.timestamp ?? record.createdAt;
 	const recordTimestamp = typeof timestamp === "string" ? Date.parse(timestamp) : timestamp;
 	// 同文的后续真人输入仍需计数，不能把正文哈希做成永久黑名单。
-	const programmaticPromptSha256s = new Set(
-		input.programmaticSubmissionReceipts
-			.filter(
-				(receipt) =>
-					typeof recordTimestamp === "number" &&
-					Math.abs(receipt.confirmedAtEpochMs - recordTimestamp) <=
-						PROGRAMMATIC_PROMPT_RECEIPT_MATCH_MAXIMUM_TIMESTAMP_DISTANCE_MS,
-			)
-			.map((receipt) => receipt.promptSha256),
-	);
+	const receiptTimeIndex = input.programmaticReceiptTimeIndex;
+	const programmaticPromptSha256s = receiptTimeIndex
+		? EMPTY_PROGRAMMATIC_PROMPT_SHA256S
+		: measureDailyWorkProgressSynchronousStage("receipt_match", () => {
+				countDailyWorkProgressCollectionCost("receipt_comparisons", input.programmaticSubmissionReceipts.length);
+				return new Set(
+					input.programmaticSubmissionReceipts
+						.filter(
+							(receipt) =>
+								typeof recordTimestamp === "number" &&
+								Math.abs(receipt.confirmedAtEpochMs - recordTimestamp) <=
+									PROGRAMMATIC_PROMPT_RECEIPT_MATCH_MAXIMUM_TIMESTAMP_DISTANCE_MS,
+						)
+						.map((receipt) => receipt.promptSha256),
+				);
+			});
 	const submission = foldTaskUserPromptStatisticsRecord({
 		...input,
 		programmaticPromptSha256s,
+		matchesProgrammaticPromptSha256AtRecordTimestamp:
+			receiptTimeIndex && typeof recordTimestamp === "number"
+				? (promptSha256) =>
+						measureDailyWorkProgressSynchronousStage("receipt_match", () =>
+							receiptTimeIndex.containsWithinTimestampWindow(
+								promptSha256,
+								recordTimestamp,
+								PROGRAMMATIC_PROMPT_RECEIPT_MATCH_MAXIMUM_TIMESTAMP_DISTANCE_MS,
+							),
+						)
+				: undefined,
 		record,
 		serializedRecord,
 		cursor,
@@ -186,6 +220,8 @@ interface CodexTaskUserPromptHistorySegment {
 	transcriptPath: string;
 	fileIdentity: string;
 	fileModifiedAtMilliseconds: number;
+	fileSizeBytes: number;
+	rewrittenWithoutAppend: boolean;
 	endByteOffset: number;
 	expectedLocalRecordCount: number | null;
 }
@@ -200,9 +236,11 @@ async function readCodexTaskUserPromptHistoryIncrement(
 		codexHistoryConfirmedSubmissionIds: [...input.cursor.codexHistoryConfirmedSubmissionIds],
 	};
 	const submissions: ConfirmedTaskUserPromptStatisticsSubmission[] = [];
-	const segmentPaths = await listKnownCodexTranscriptSegmentPaths(
-		codexSessionsDirectoryForKnownTranscript(input.transcriptPath),
-		input.nativeSessionId,
+	const segmentPaths = await measureDailyWorkProgressAsynchronousStage("codex_directory_discovery", () =>
+		(
+			input.codexHistoryReadCache?.listSegmentPaths.bind(input.codexHistoryReadCache) ??
+			listKnownCodexTranscriptSegmentPaths
+		)(codexSessionsDirectoryForKnownTranscript(input.transcriptPath), input.nativeSessionId),
 	);
 	const segments: CodexTaskUserPromptHistorySegment[] = [];
 	const visitedPaths = new Set<string>();
@@ -216,8 +254,15 @@ async function readCodexTaskUserPromptHistoryIncrement(
 			throw new Error("Codex 历史分段有循环或超过续接预算");
 		visitedPaths.add(path);
 		const metadata = await stat(path);
-		const prefix = await readAppendedCompleteJsonLines(path, 0, MAXIMUM_TRANSCRIPT_INCREMENT_BYTES);
-		const first = prefix.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null;
+		const cachedHeader = input.codexHistoryReadCache
+			? await input.codexHistoryReadCache.readPrefix(path, input.nativeSessionId, MAXIMUM_TRANSCRIPT_INCREMENT_BYTES)
+			: null;
+		const prefix = cachedHeader
+			? null
+			: await readAppendedCompleteJsonLines(path, 0, MAXIMUM_TRANSCRIPT_INCREMENT_BYTES, "codex_prefix_validation");
+		const first =
+			cachedHeader?.firstRecord ??
+			(prefix?.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null);
 		const payload = readTranscriptRecord(first?.payload);
 		if (
 			first?.type !== "session_meta" ||
@@ -259,6 +304,10 @@ async function readCodexTaskUserPromptHistoryIncrement(
 			transcriptPath: path,
 			fileIdentity: `${String(metadata.dev)}:${String(metadata.ino)}`,
 			fileModifiedAtMilliseconds: metadata.mtimeMs,
+			fileSizeBytes: metadata.size,
+			rewrittenWithoutAppend:
+				cachedHeader?.rewrittenWithoutAppend === true ||
+				input.codexTranscriptPathsRewrittenWithoutAppend?.has(path) === true,
 			endByteOffset: byteBoundary,
 			expectedLocalRecordCount,
 		});
@@ -278,6 +327,12 @@ async function readCodexTaskUserPromptHistoryIncrement(
 		const segmentCursor: z.infer<typeof codexHistorySegmentCursorSchema> =
 			previous &&
 			previous.fileIdentity === segment.fileIdentity &&
+			!segment.rewrittenWithoutAppend &&
+			!(
+				previous.complete &&
+				previous.fileModifiedAtMilliseconds !== segment.fileModifiedAtMilliseconds &&
+				segment.fileSizeBytes <= previous.nextByteOffset
+			) &&
 			previous.nextByteOffset <= segment.endByteOffset &&
 			previous.boundedPrefixEndByteOffset === boundedPrefixEndByteOffset &&
 			previous.boundedPrefixRecordCount === segment.expectedLocalRecordCount &&
@@ -320,7 +375,9 @@ async function readCodexTaskUserPromptHistoryIncrement(
 					else delete cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath];
 					return { cursor, submissions, warning: "原生会话身份与转录不匹配" };
 				} else {
-					const submission = foldTaskUserPromptStatisticsParsedRecord(input, segmentCursor, record, line);
+					const submission = measureDailyWorkProgressSynchronousStage("transcript_record_fold", () =>
+						foldTaskUserPromptStatisticsParsedRecord(input, segmentCursor, record, line),
+					);
 					if (submission) segmentCursor.stagedSubmissions.push(submission);
 				}
 			}
@@ -379,21 +436,46 @@ async function readCodexTaskUserPromptHistoryIncrement(
 export async function readTaskUserPromptStatisticsTranscriptIncrement(
 	input: TaskUserPromptStatisticsTranscriptIncrementInput,
 ): Promise<TaskUserPromptStatisticsTranscriptIncrementResult> {
+	if (!input.programmaticReceiptTimeIndex && process.env.KANBAN_DAILY_WORK_PROGRESS_RECEIPT_INDEX_DISABLED !== "1")
+		input = {
+			...input,
+			programmaticReceiptTimeIndex: createProgrammaticPromptReceiptTimeIndex(input.programmaticSubmissionReceipts),
+		};
 	let cursor = { ...input.cursor };
 	const submissions: ConfirmedTaskUserPromptStatisticsSubmission[] = [];
 	try {
 		if (input.sourceAgentId === "codex") {
-			const prefix = await readAppendedCompleteJsonLines(
-				input.transcriptPath,
-				0,
-				MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
-			);
-			const first = prefix.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null;
+			const cachedHeader = input.codexHistoryReadCache
+				? await input.codexHistoryReadCache.readPrefix(
+						input.transcriptPath,
+						input.nativeSessionId,
+						MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
+					)
+				: null;
+			const prefix = cachedHeader
+				? null
+				: await readAppendedCompleteJsonLines(
+						input.transcriptPath,
+						0,
+						MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
+						"codex_prefix_validation",
+					);
+			const first =
+				cachedHeader?.firstRecord ??
+				(prefix?.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null);
+			if (cachedHeader?.rewrittenWithoutAppend) {
+				input = { ...input, codexTranscriptPathsRewrittenWithoutAppend: new Set([resolve(input.transcriptPath)]) };
+				if (Object.keys(cursor.codexHistorySegmentCursorsByTranscriptPath).length === 0)
+					cursor = createEmptyTaskUserPromptStatisticsCursor();
+			}
 			if (
 				(first?.type === "session_meta" && readTranscriptRecord(first.payload)?.history_base != null) ||
 				Object.keys(cursor.codexHistorySegmentCursorsByTranscriptPath).length > 0
-			)
-				return await readCodexTaskUserPromptHistoryIncrement(input);
+			) {
+				const result = await readCodexTaskUserPromptHistoryIncrement(input);
+				if (result.warning) input.codexHistoryReadCache?.invalidateSession(input.nativeSessionId);
+				return result;
+			}
 		}
 		const metadata = await stat(input.transcriptPath);
 		const fileIdentity = `${String(metadata.dev)}:${String(metadata.ino)}`;
@@ -420,7 +502,9 @@ export async function readTaskUserPromptStatisticsTranscriptIncrement(
 			) {
 				return { cursor: input.cursor, submissions: [], warning: "原生会话身份与转录不匹配" };
 			}
-			const submission = foldTaskUserPromptStatisticsParsedRecord(input, cursor, record, line);
+			const submission = measureDailyWorkProgressSynchronousStage("transcript_record_fold", () =>
+				foldTaskUserPromptStatisticsParsedRecord(input, cursor, record, line),
+			);
 			if (submission) submissions.push(submission);
 		}
 		cursor.nextByteOffset = chunk.nextByteOffset;
@@ -439,6 +523,7 @@ export async function readTaskUserPromptStatisticsTranscriptIncrement(
 						: null),
 		};
 	} catch {
+		input.codexHistoryReadCache?.invalidateSession(input.nativeSessionId);
 		cursor.complete = false;
 		return { cursor, submissions: [], warning: "部分任务转录暂时不可读" };
 	}
