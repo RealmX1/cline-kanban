@@ -10,6 +10,7 @@ import {
 	type TaskVisualizationPreviewAcknowledgmentMessage,
 	type TaskVisualizationPreviewRequest,
 	type TaskVisualizationPreviewRequestedMessage,
+	type TaskVisualizationTaskAttribution,
 	taskVisualizationArtifactSchema,
 	taskVisualizationPublicationRejectionCodeSchema,
 } from "../core/task-visualization-artifact-contract";
@@ -29,6 +30,7 @@ interface TaskVisualizationServiceDependencies {
 	store?: TaskVisualizationArtifactStore;
 	resolveWorkspaceScope: (workspaceId: string) => Promise<TaskVisualizationWorkspaceScope | null>;
 	assertTaskMayPublish: (scope: TaskVisualizationWorkspaceScope, taskId: string) => Promise<void>;
+	resolveTaskTitle: (scope: TaskVisualizationWorkspaceScope, taskId: string) => Promise<string | null>;
 	onArtifactsUpdated: (workspaceId: string, taskId: string) => void;
 	warn: (message: string) => void;
 	now?: () => number;
@@ -104,10 +106,13 @@ export class TaskVisualizationArtifactService {
 			if (pending.taskId !== input.taskId)
 				throw new TRPCError({ code: "BAD_REQUEST", message: "可视化发布包任务归属不匹配。" });
 			await this.dependencies.assertTaskMayPublish(scope, input.taskId);
+			const taskTitle = await this.dependencies.resolveTaskTitle(scope, input.taskId);
+			if (!taskTitle) throw new Error("任务名暂不可用，保留发布包等待自动恢复。");
 			const outcome = await this.store.acceptPublication(
 				scope.workspaceId,
 				scope.workspacePath,
 				input.publicationRequestId,
+				taskTitle,
 			);
 			if (outcome.isNewRevision) this.dependencies.onArtifactsUpdated(scope.workspaceId, input.taskId);
 			await this.dispatchTaskPreviews(scope.workspaceId, input.taskId);
@@ -125,12 +130,28 @@ export class TaskVisualizationArtifactService {
 	}
 
 	async list(scope: TaskVisualizationWorkspaceScope, input: { taskId: string }) {
+		const artifacts = await this.store.list(scope.workspaceId, input.taskId);
 		return {
-			artifacts: await this.store.list(scope.workspaceId, input.taskId),
+			artifacts,
+			taskAttribution: await this.resolveTaskAttribution(scope, input.taskId, artifacts[0]?.taskTitleAtPublication),
 			latestPreviewRequest:
 				(await this.store.readRegistry(scope.workspaceId, input.taskId)).previewRequests.at(-1) ?? null,
 			visualizationPublicationProtocolVersion: TASK_VISUALIZATION_PUBLICATION_PROTOCOL_VERSION,
 		};
+	}
+
+	private async resolveTaskAttribution(
+		scope: TaskVisualizationWorkspaceScope,
+		taskId: string,
+		titleSnapshot?: string,
+	): Promise<TaskVisualizationTaskAttribution> {
+		let taskTitle: string | null = null;
+		try {
+			taskTitle = await this.dependencies.resolveTaskTitle(scope, taskId);
+		} catch (error) {
+			this.dependencies.warn(`可视化任务名暂不可用：${String(error)}`);
+		}
+		return { workspaceId: scope.workspaceId, taskId, taskTitle: taskTitle || titleSnapshot || null };
 	}
 
 	private async selectedArtifact(
@@ -167,6 +188,7 @@ export class TaskVisualizationArtifactService {
 		const entryPath = artifact.entryHtmlRelativePath.split("/").map(encodeURIComponent).join("/");
 		return {
 			artifact,
+			taskAttribution: await this.resolveTaskAttribution(scope, input.taskId, artifact.taskTitleAtPublication),
 			contentAccessExpiresAtMs,
 			contentLoadConfirmationId,
 			viewerRelativeUrl: taskVisualizationViewerRelativeUrl(artifact),

@@ -320,6 +320,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			if (column.id === "trash")
 				throw new TRPCError({ code: "FORBIDDEN", message: "任务已结束，只允许读取已有可视化。" });
 		},
+		resolveTaskTitle: async (scope, taskId) => {
+			const board = await loadWorkspaceBoardById(scope.workspaceId);
+			return board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId)?.title ?? null;
+		},
 		onArtifactsUpdated: (workspaceId, taskId) =>
 			deps.runtimeStateHub.broadcastTaskVisualizationArtifactsUpdated?.(workspaceId, taskId),
 		warn: deps.warn,
