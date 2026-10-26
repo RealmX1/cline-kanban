@@ -109,8 +109,8 @@ function CrossProjectTaskSwitcherSectionFrame({
 					onPointerEnter={sectionColumnScrollContainerBinding?.onSectionColumnPointerEnter}
 					onPointerLeave={sectionColumnScrollContainerBinding?.onSectionColumnPointerLeave}
 					onPointerDownCapture={sectionColumnScrollContainerBinding?.onSectionColumnPointerDownCapture}
-					// overflow-anchor: none —— 与 Focus View 左栏面板同理：hover 交接时列表顶边固定，浏览器自带的 scroll
-					// anchoring 会在列滚动过时自己补 scrollTop。这个容器的顶边也是 hook 判断「交接是否把新行顶边带出可视区」的基准。
+					// overflow-anchor: none —— 与 Focus View 左栏同理，异步快照不触发浏览器滚动锚定补偿。
+					// 这个容器的可视区也是悬浮卡片定位、向上避让与内部滚动的边界。
 					className={cn(
 						"flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-1 pb-1.5 [overflow-anchor:none]",
 						isSectionColumnCollapsed && "hidden",

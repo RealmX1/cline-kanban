@@ -709,7 +709,11 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 
 			const card = (taskId: string) => page.locator(`[data-task-id="${taskId}"]`).first();
 			const clickCardAction = async (taskId: string, action: string) => {
-				await card(taskId).hover();
+				// 服务端已移列不代表上一个命令的响应已回到浏览器；在途闸尚未释放时下一次点击会被正确拒绝。
+				await observeUntil(async () => pendingTaskCardActionRequests.size === 0, "前一个卡片动作请求完成");
+				// 上个动作的 tooltip 可能覆盖卡片中心；先离开，再从卡片左上角进入，保留真实命中检查。
+				await page.mouse.move(1500, 950);
+				await card(taskId).hover({ position: { x: 4, y: 4 } });
 				await card(taskId).getByRole("button", { name: action, exact: true }).click();
 			};
 			const taskState = async (taskId: string, workspaceId = alphaWorkspaceId) => {
@@ -921,9 +925,9 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				return {
 					row: await measureRect(compactRow),
 					title: await measureRect(compactRow.locator("[data-cross-project-task-switcher-row-title]")),
-					toggle: await measureRect(compactRow.getByTestId(inListExpansionToggleTestId)),
+					toggle: await measureRect(compactRow.getByTestId(inListExpansionToggleTestId).filter({ visible: true })),
 					hoverActionGroupBottomPx: await measureHoverActionGroupBottomPx(
-						compactRow.getByTestId(inListExpansionToggleTestId),
+						compactRow.getByTestId(inListExpansionToggleTestId).filter({ visible: true }),
 					),
 					leadingActivityIndicator: await compactRow
 						.locator("[data-cross-project-task-switcher-row-leading-activity-indicator]")
@@ -935,13 +939,13 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			const measureExpandedRow = async (expandedRow: ReturnType<typeof page.locator>) => ({
 				row: await measureRect(expandedRow),
 				title: await measureRect(expandedRow.locator("[data-task-card-title]")),
-				toggle: await measureRect(expandedRow.getByTestId(inListExpansionToggleTestId)),
+				toggle: await measureRect(expandedRow.getByTestId(inListExpansionToggleTestId).filter({ visible: true })),
 				hoverActionGroupBottomPx: await measureHoverActionGroupBottomPx(
-					expandedRow.getByTestId(inListExpansionToggleTestId),
+					expandedRow.getByTestId(inListExpansionToggleTestId).filter({ visible: true }),
 				),
 			});
 			const hoverRowUntilExpandedInPlace = async (taskId: string, title: string) => {
-				await row(taskId).locator("button").first().hover();
+				await row(taskId).locator("button:visible").first().hover();
 				await rowInPlaceExpandedByHover(taskId)
 					.locator("[data-task-card-title]")
 					.filter({ hasText: title })
@@ -975,7 +979,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const toggleTestId = ${JSON.stringify(inListExpansionToggleTestId)};
 				return [...document.querySelectorAll('[data-testid^="cross-project-task-switcher-section-"]')].flatMap((sectionElement) => {
 					const firstRow = sectionElement.querySelector("[data-cross-project-task-switcher-task-id]");
-					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]');
+					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]:not([inert] *)');
 					const hoverActionGroup = inListExpansionToggle?.parentElement;
 					if (!hoverActionGroup) return [];
 					const sectionHeader = sectionElement.firstElementChild;
@@ -1059,7 +1063,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 					const toggleTestId = ${JSON.stringify(inListExpansionToggleTestId)};
 					const sectionElement = document.querySelector('[data-testid="' + ${JSON.stringify(sectionTestId)} + '"]');
 					const firstRow = sectionElement.querySelector("[data-cross-project-task-switcher-task-id]");
-					const inListExpansionToggle = firstRow.querySelector('[data-testid="' + toggleTestId + '"]');
+					const inListExpansionToggle = firstRow.querySelector('[data-testid="' + toggleTestId + '"]:not([inert] *)');
 					const hoverActionGroup = inListExpansionToggle.parentElement;
 					const sectionHeader = sectionElement.firstElementChild;
 					const toggleRect = inListExpansionToggle.getBoundingClientRect();
@@ -1114,13 +1118,14 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 					.locator(`[data-testid="${sectionTestId}"] [data-cross-project-task-switcher-task-id]`)
 					.first();
 				await page.mouse.move(1500, 950);
-				await sectionFirstRow.locator("button").first().hover();
+				await sectionFirstRow.locator("button:visible").first().hover();
 				firstRowHoverActionGroupHitTestingEvidence.push(
 					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
 				);
 				await sectionFirstRow
 					.and(page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`))
 					.getByTestId(inListExpansionToggleTestId)
+					.filter({ visible: true })
 					.waitFor();
 				firstRowHoverActionGroupHitTestingEvidence.push(
 					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
@@ -1181,13 +1186,13 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				await row(taskId).waitFor();
 				const compactRowGeometry = await measureCompactRow(taskId);
 				const expandedRowGeometry = await measureExpandedRow(await hoverRowUntilExpandedInPlace(taskId, title));
-				// 原地展开：行的上沿与左沿不动，只向下长。
+				// 悬浮展开：行的占位、上沿与左沿均不动，卡片覆盖相邻内容。
 				expectSamePlacementWithinOnePixel(
 					expandedRowGeometry.row,
 					compactRowGeometry.row,
 					`${geometryCaseLabel} 行`,
 				);
-				expect(expandedRowGeometry.row.height).toBeGreaterThan(compactRowGeometry.row.height);
+				expect(expandedRowGeometry.row.height).toBe(compactRowGeometry.row.height);
 				expectSamePlacementWithinOnePixel(
 					expandedRowGeometry.title,
 					compactRowGeometry.title,
@@ -1204,23 +1209,18 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				await leavePanelAndWaitForHoverExpansionToCollapse();
 			}
 
-			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接。列表顶边固定（经典手风琴，用户 2026-10-08
-			// 选定）：收起的行在上方，新行跟着上移那一行多出的高度；不补 scrollTop、不垫面板顶部空白，上方的内容不动。
-			// 之后指针静止，不得再有任何展开 / 收起（指针可能落到新行下沿之外，同坐标事件不得连锁展开再下一行）。
-			// 量的是「一个滚动容器自持一个 hover 原地展开」：阶段 6 是 Focus View 左栏面板（整个面板一个滚动容器），
-			// 阶段 7 是 All projects 首页的 Recent 列（列的内容容器自己滚动）。
+			// 两处宿主共用同一量法：展开、收起与切换均保持列表占位和滚动尺寸。
+			// 浮层可能遮住下一行，先移出卡片让遮蔽解除，再进入下一行。
+
 			type CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost = {
 				scrollContainer: ReturnType<typeof page.locator>;
 				remainingSectionSelector: string;
-				expansionStateChangeObservationRootSelector: string;
 				leaveScrollContainerAndWaitForHoverExpansionToCollapse: () => Promise<void>;
 			};
 			const focusViewLeftColumnPanelHandOffMeasurementScrollContainerHost: CrossProjectTaskSwitcherHandOffMeasurementScrollContainerHost =
 				{
 					scrollContainer: panel,
 					remainingSectionSelector: '[data-testid="cross-project-task-switcher-section-remaining"]',
-					expansionStateChangeObservationRootSelector:
-						'[data-testid="cross-project-recently-active-task-switcher-panel"]',
 					leaveScrollContainerAndWaitForHoverExpansionToCollapse: leavePanelAndWaitForHoverExpansionToCollapse,
 				};
 			const measureHandOffToNextRowBelow = async (
@@ -1230,144 +1230,72 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const {
 					scrollContainer,
 					remainingSectionSelector,
-					expansionStateChangeObservationRootSelector,
 					leaveScrollContainerAndWaitForHoverExpansionToCollapse,
 				} = handOffMeasurementScrollContainerHost;
-				const remainingRowTaskIds = await page
-					.locator(`${remainingSectionSelector} [data-cross-project-task-switcher-task-id]`)
-					.evaluateAll((rows) =>
-						rows.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")),
-					);
-				const upperTaskId = remainingRowTaskIds.at(-2);
-				const lowerTaskId = remainingRowTaskIds.at(-1);
-				if (!upperTaskId || !lowerTaskId) throw new Error("Recent 区不足两行，无法验证交接");
-				// 同一个任务可能也在 Pinned：只认 Recent 区里的那两行。
-				const remainingRow = (taskId: string) =>
-					page.locator(remainingSectionSelector).locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
-				const remainingRowExpandedByHover = (taskId: string) =>
-					remainingRow(taskId).and(
-						page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`),
-					);
-				const readPanelScrollState = () =>
+				const remainingRows = page.locator(
+					`${remainingSectionSelector} [data-cross-project-task-switcher-task-id]`,
+				);
+				const upperRow = remainingRows.nth(-2);
+				const lowerRow = remainingRows.last();
+				await leaveScrollContainerAndWaitForHoverExpansionToCollapse();
+				await scrollContainer.evaluate((element) => {
+					element.scrollTop = element.scrollHeight;
+				});
+				const readScrollState = () =>
 					scrollContainer.evaluate((element) => ({
 						scrollTop: element.scrollTop,
-						maxScrollTop: element.scrollHeight - element.clientHeight,
+						scrollHeight: element.scrollHeight,
 						paddingTop: element.style.paddingTop,
 					}));
-				await scrollContainer.evaluate((element) => {
-					element.scrollTop = element.scrollHeight;
-				});
-				const upperRowCompactHeight = (await measureRect(remainingRow(upperTaskId))).height;
-				await remainingRow(upperTaskId).locator("button").first().hover();
-				// 等卡体真的读到（不是加载兜底）再量：交接时收起的是这个高度。
-				await remainingRowExpandedByHover(upperTaskId).locator("[data-task-card-title]").waitFor();
-				const upperRowGrowthPx = (await measureRect(remainingRow(upperTaskId))).height - upperRowCompactHeight;
-				// 展开后内容变高：再滚到底，让下一行进入视野。
-				await scrollContainer.evaluate((element) => {
-					element.scrollTop = element.scrollHeight;
-				});
-				const panelScrollStateBeforeHandOff = await readPanelScrollState();
-				const upperRowTopBeforeHandOffPx = (await measureRect(remainingRow(upperTaskId))).top;
-				const lowerRowCompactGeometry = await measureCompactRow(lowerTaskId, remainingRow(lowerTaskId));
-				// 根 tsconfig 不带 DOM lib：浏览器端脚本以字符串交给页面执行。
-				await page.evaluate(`(() => {
-					const attributeName = ${JSON.stringify(rowInPlaceExpansionStateAttribute)};
-					const recordedExpansionStateChanges = [];
-					window.recordedExpansionStateChanges = recordedExpansionStateChanges;
-					new MutationObserver((mutations) => {
-						for (const mutation of mutations) {
-							recordedExpansionStateChanges.push(
-								mutation.target.getAttribute("data-cross-project-task-switcher-task-id") + ":" + mutation.target.getAttribute(attributeName),
-							);
-						}
-					}).observe(document.querySelector(${JSON.stringify(expansionStateChangeObservationRootSelector)}), {
-						subtree: true,
-						attributes: true,
-						attributeFilter: [attributeName],
-					});
-				})()`);
-				const pointerX = lowerRowCompactGeometry.row.left + lowerRowCompactGeometry.row.width * 0.4;
-				const pointerY = lowerRowCompactGeometry.row.top + 6;
-				await page.mouse.move(pointerX, pointerY, { steps: 4 });
-				await remainingRowExpandedByHover(lowerTaskId).waitFor();
-				const lowerRowExpandedGeometry = await measureExpandedRow(remainingRowExpandedByHover(lowerTaskId));
-				const panelScrollStateAfterHandOff = await readPanelScrollState();
-				const upperRowTopAfterHandOffPx = (await measureRect(remainingRow(upperTaskId))).top;
-				// 指针静止 1.2s：布局位移不得引发连锁展开 / 收起。
-				await waitForNextObservation(1200);
-				const recordedExpansionStateChanges = (await page.evaluate(
-					"window.recordedExpansionStateChanges",
-				)) as string[];
-				// 滚到底时内容变矮，浏览器会把 scrollTop 夹到新的最大值——这是唯一允许的 scrollTop 变化（不是补偿）。
-				const panelScrollTopClampedByBrowserPx = Math.max(
-					0,
-					panelScrollStateBeforeHandOff.scrollTop - panelScrollStateAfterHandOff.maxScrollTop,
+				const scrollStateBeforeExpansion = await readScrollState();
+				const upperRowBeforeExpansion = await measureRect(upperRow);
+				const lowerRowBeforeExpansion = await measureRect(lowerRow);
+				const hoverFloatingCard = (targetRow: ReturnType<typeof page.locator>) =>
+					targetRow.locator("[data-cross-project-task-switcher-hover-floating-card]");
+				await upperRow.locator("button:visible").first().hover();
+				await hoverFloatingCard(upperRow).locator("[data-task-card-title]").waitFor();
+				expect(await readScrollState(), `${handOffCaseLabel} 展开不改变滚动尺寸`).toEqual(
+					scrollStateBeforeExpansion,
 				);
-				// 唯一的例外：交接把新行顶边（连同伸出顶边 12px 的 hover 动作组，见
-				// CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX）带出面板可视区上沿时，
-				// 回滚到刚好露出，最多回滚它被带上去的距离。按交接前量到的几何预测这一项，本夹具里一般为 0。
-				const panelViewportTopPx = (await measureRect(scrollContainer)).top;
-				const lowerRowCarriedUpwardByHandOffPx = upperRowGrowthPx - panelScrollTopClampedByBrowserPx;
-				const panelScrollTopScrolledBackToRevealLowerRowTopEdgePx = Math.max(
-					0,
-					Math.min(
-						lowerRowCarriedUpwardByHandOffPx,
-						panelViewportTopPx + 12 - (lowerRowCompactGeometry.row.top - lowerRowCarriedUpwardByHandOffPx),
-					),
-				);
-				const panelContentShiftedDownByHandOffPx =
-					panelScrollTopClampedByBrowserPx + panelScrollTopScrolledBackToRevealLowerRowTopEdgePx;
-				const lowerRowTitleShiftPx = lowerRowExpandedGeometry.title.top - lowerRowCompactGeometry.title.top;
-				const isPointerStillInsideLowerRowAfterHandOff =
-					pointerY >= lowerRowExpandedGeometry.row.top &&
-					pointerY < lowerRowExpandedGeometry.row.top + lowerRowExpandedGeometry.row.height;
-				titleAndToggleGeometryEvidence[handOffCaseLabel] = {
-					upperTaskId,
-					lowerTaskId,
-					upperRowGrowthPx,
-					panelScrollStateBeforeHandOff,
-					panelScrollStateAfterHandOff,
-					panelScrollTopClampedByBrowserPx,
-					panelViewportTopPx,
-					panelScrollTopScrolledBackToRevealLowerRowTopEdgePx,
-					upperRowTopBeforeHandOffPx,
-					upperRowTopAfterHandOffPx,
-					lowerRowTitleShiftPx,
-					pointerY,
-					isPointerStillInsideLowerRowAfterHandOff,
-					lowerRowExpandedGeometry,
-					recordedExpansionStateChanges,
-				};
-				expect(panelScrollStateAfterHandOff.paddingTop, `${handOffCaseLabel} 不垫顶部空白`).toBe("");
-				expect(
-					Math.abs(
-						panelScrollStateAfterHandOff.scrollTop -
-							(panelScrollStateBeforeHandOff.scrollTop - panelContentShiftedDownByHandOffPx),
-					),
-					`${handOffCaseLabel} 不补 scrollTop`,
-				).toBeLessThanOrEqual(1);
-				// 上方的行（收起的那一行）顶边在列表内容里不动：视口坐标只随浏览器夹 scrollTop（与露出顶边的回滚）平移。
-				expect(
-					Math.abs(upperRowTopAfterHandOffPx - (upperRowTopBeforeHandOffPx + panelContentShiftedDownByHandOffPx)),
-					`${handOffCaseLabel} 上方的行不被往下拖`,
-				).toBeLessThanOrEqual(1);
-				// 新行跟着上移那一行多出的高度。
-				expect(
-					Math.abs(lowerRowTitleShiftPx - (panelContentShiftedDownByHandOffPx - upperRowGrowthPx)),
-					`${handOffCaseLabel} 新行上移上一行多出的高度`,
-				).toBeLessThanOrEqual(1.5);
-				expect(recordedExpansionStateChanges.sort(), `${handOffCaseLabel} 只交接一次、不连锁`).toEqual(
-					[`${lowerTaskId}:expanded_in_place_by_hover`, `${upperTaskId}:compact_row`].sort(),
-				);
+				expect(await measureRect(upperRow)).toEqual(upperRowBeforeExpansion);
+				expect(await measureRect(lowerRow)).toEqual(lowerRowBeforeExpansion);
 				await leaveScrollContainerAndWaitForHoverExpansionToCollapse();
-				expect((await readPanelScrollState()).paddingTop).toBe("");
+				expect(await readScrollState(), `${handOffCaseLabel} 收起不改变滚动尺寸`).toEqual(
+					scrollStateBeforeExpansion,
+				);
+				await lowerRow.locator("button:visible").first().hover();
+				await hoverFloatingCard(lowerRow).locator("[data-task-card-title]").waitFor();
+				await waitForNextObservation(700);
+				const lowerFloatingCard = await measureRect(hoverFloatingCard(lowerRow));
+				const scrollViewport = await measureRect(scrollContainer);
+				expect(await upperRow.getAttribute(rowInPlaceExpansionStateAttribute)).toBe("compact_row");
+				expect(await lowerRow.getAttribute(rowInPlaceExpansionStateAttribute)).toBe("expanded_in_place_by_hover");
+				expect(await measureRect(upperRow)).toEqual(upperRowBeforeExpansion);
+				expect(await measureRect(lowerRow)).toEqual(lowerRowBeforeExpansion);
+				expect(await readScrollState(), `${handOffCaseLabel} 切换不改变滚动尺寸`).toEqual(
+					scrollStateBeforeExpansion,
+				);
+				expect(lowerFloatingCard.top).toBeGreaterThanOrEqual(scrollViewport.top - 1);
+				expect(lowerFloatingCard.top + lowerFloatingCard.height).toBeLessThanOrEqual(
+					scrollViewport.top + scrollViewport.height + 1,
+				);
+				titleAndToggleGeometryEvidence[handOffCaseLabel] = {
+					scrollStateBeforeExpansion,
+					upperRowBeforeExpansion,
+					lowerRowBeforeExpansion,
+					lowerFloatingCard,
+					scrollViewport,
+				};
+				await leaveScrollContainerAndWaitForHoverExpansionToCollapse();
+				expect(await readScrollState()).toEqual(scrollStateBeforeExpansion);
 				await scrollContainer.evaluate((element) => {
 					element.scrollTop = 0;
 				});
 			};
-			// 面板不可滚（scrollTop 0）：以前这里会垫顶部空白，现在列表顶边固定。
+
+			// 高视口与矮视口都保持占位和滚动尺寸。
 			await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_1000px");
-			// 矮视口：面板可滚，也不补 scrollTop（不把指针上方的整列往下拖）。
+			// 矮视口覆盖滚到底和向上避让。
 			await page.setViewportSize({ width: 1600, height: 420 });
 			await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_420px_scrollable");
 			await page.setViewportSize({ width: 1600, height: 1000 });
@@ -1401,23 +1329,26 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			);
 			// 开关命中区用伪元素向上、向右扩到 24×24，按钮盒子不动：点按钮外右上角 2px 处也命中开关。
 			expect(
-				await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).evaluate((element) => {
-					const bounds = element.getBoundingClientRect();
-					return element.contains(element.ownerDocument.elementFromPoint(bounds.right + 2, bounds.top - 2));
-				}),
+				await currentProjectExpandedRow
+					.getByTestId(inListExpansionToggleTestId)
+					.filter({ visible: true })
+					.evaluate((element) => {
+						const bounds = element.getBoundingClientRect();
+						return element.contains(element.ownerDocument.elementFromPoint(bounds.right + 2, bounds.top - 2));
+					}),
 			).toBe(true);
 			// 展开发生在静止的光标下：开关第一帧就可见、可点（不必先晃一下鼠标）。
 			await page.screenshot({
 				path: join(evidenceOutputDirectory, "cross-project-row-2-expanded-in-place-by-hover.png"),
 				clip: panelBoundingBox,
 			});
-			await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).click();
+			await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).filter({ visible: true }).click();
 			const expandedCard = row(dragStartId).locator("[data-task-directory]");
 			await expandedCard.waitFor();
 			expect(await expandedCard.textContent()).toContain("+1");
 			expect(await expandedCard.locator(".lucide-arrow-up").count()).toBe(1);
 			expect(await row(dragStartId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe("kept_expanded_in_list");
-			const keptExpandedToggle = row(dragStartId).getByTestId(inListExpansionToggleTestId);
+			const keptExpandedToggle = row(dragStartId).getByTestId(inListExpansionToggleTestId).filter({ visible: true });
 			expect(
 				await keptExpandedToggle.getAttribute(
 					"data-cross-project-task-switcher-full-task-card-in-list-expansion-state",
@@ -1436,10 +1367,10 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			);
 			expectHoverActionGroupAboveFirstLine(currentProjectHoverExpandedGeometry, "current_project_review hover 展开");
 			expectHoverActionGroupAboveFirstLine(currentProjectKeptExpandedGeometry, "current_project_review 固定展开");
-			// hover 展开 → 固定展开：高度不变，下方的行不动。
-			expect(
-				Math.abs(currentProjectKeptExpandedGeometry.row.height - currentProjectHoverExpandedGeometry.row.height),
-			).toBeLessThanOrEqual(1);
+			// 固定展开恢复完整高度占位。
+			expect(currentProjectKeptExpandedGeometry.row.height).toBeGreaterThan(
+				currentProjectHoverExpandedGeometry.row.height,
+			);
 			titleAndToggleGeometryEvidence.current_project_review = {
 				compactRowGeometry: currentProjectCompactRowGeometry,
 				hoverExpandedGeometry: currentProjectHoverExpandedGeometry,
@@ -1460,9 +1391,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			recordCheck(
 				"阶段 6 精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标、hover 动作组叠在首行上方不压字（In progress 与 Review、当前与其他项目）",
 			);
-			recordCheck(
-				"阶段 6 往下挪到下一行：交接一次、不连锁；列表顶边固定（不补 scrollTop、不垫顶部空白，上方的行不被往下拖），新行上移上一行多出的高度",
-			);
+			recordCheck("阶段 6 往下挪到下一行：交接一次、不连锁；列表占位、行坐标、scrollTop 与 scrollHeight 保持不变");
 			const betaExpandedRow = await hoverRowUntilExpandedInPlace(betaId, "别的项目任务");
 			await betaExpandedRow.getByRole("button", { name: "Move task to validation", exact: true }).click();
 			await assertColumn(betaId, "validation", betaWorkspaceId);
@@ -1507,8 +1436,11 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			const createdByKeyboardId = await createOtherProjectTaskViaDialog("c 键往另一个项目建卡");
 			if (!createdByKeyboardId) throw new Error("缺创建结果");
 			recordCheck("Board Scope c 键往别的项目建卡不切项目");
-			await row(createdByKeyboardId).locator("button").first().hover();
-			await rowInPlaceExpandedByHover(createdByKeyboardId).getByTestId(inListExpansionToggleTestId).click();
+			await row(createdByKeyboardId).locator("button:visible").first().hover();
+			await rowInPlaceExpandedByHover(createdByKeyboardId)
+				.getByTestId(inListExpansionToggleTestId)
+				.filter({ visible: true })
+				.click();
 			expect(await row(createdByKeyboardId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe(
 				"kept_expanded_in_list",
 			);
@@ -1611,7 +1543,11 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const keptExpandedRowCountBeforeCollapse = await keptExpandedRowsOnHomePage.count();
 				// 动作组（含开关）只在指针停在卡上时才开放 pointer-events：先把指针移到这一行上，再点开关。
 				await keptExpandedRowsOnHomePage.first().hover();
-				await keptExpandedRowsOnHomePage.first().getByTestId(inListExpansionToggleTestId).click();
+				await keptExpandedRowsOnHomePage
+					.first()
+					.getByTestId(inListExpansionToggleTestId)
+					.filter({ visible: true })
+					.click();
 				await observeUntil(
 					async () => (await keptExpandedRowsOnHomePage.count()) < keptExpandedRowCountBeforeCollapse,
 					"首页收起固定展开的卡",
@@ -1637,6 +1573,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				"cross-project-task-switcher-section-running",
 				"cross-project-task-switcher-section-prompt-cache-warm",
 				"cross-project-task-switcher-section-remaining",
+				"cross-project-task-switcher-section-shelved",
 			]);
 			expect(
 				await page.getByTestId("toggle-board-scope-all-projects-button").getAttribute("aria-pressed"),
@@ -1655,9 +1592,9 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				const boardScopeHomePage = document.querySelector(${JSON.stringify(boardScopeHomePageSelector)});
 				return [...boardScopeHomePage.querySelectorAll('section[data-testid^="cross-project-task-switcher-section-"]')].flatMap((sectionColumn) => {
 					const sectionHeader = sectionColumn.children[0];
-					const sectionColumnScrollContainer = sectionColumn.children[1];
+					const sectionColumnScrollContainer = sectionColumn.querySelector('[data-testid^="cross-project-task-switcher-section-column-scroll-container-"]');
 					const firstRow = sectionColumnScrollContainer.querySelector("[data-cross-project-task-switcher-task-id]");
-					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]');
+					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]:not([inert] *)');
 					const hoverActionGroup = inListExpansionToggle?.parentElement;
 					if (!hoverActionGroup) return [];
 					return [{
@@ -1733,13 +1670,14 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 					)
 					.first();
 				await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
-				await sectionColumnFirstRow.locator("button").first().hover();
+				await sectionColumnFirstRow.locator("button:visible").first().hover();
 				homePageSectionColumnFirstRowHitTestingEvidence.push(
 					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
 				);
 				await sectionColumnFirstRow
 					.and(page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`))
 					.getByTestId(inListExpansionToggleTestId)
+					.filter({ visible: true })
 					.waitFor();
 				homePageSectionColumnFirstRowHitTestingEvidence.push(
 					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
@@ -1789,7 +1727,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				betaInProgressGeometryAnchorId,
 				homePageRow("remaining", betaInProgressGeometryAnchorId),
 			);
-			await homePageRow("remaining", betaInProgressGeometryAnchorId).locator("button").first().hover();
+			await homePageRow("remaining", betaInProgressGeometryAnchorId).locator("button:visible").first().hover();
 			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "expanded_in_place_by_hover")
 				.locator("[data-task-card-title]")
 				.filter({ hasText: "进行中几何锚点" })
@@ -1799,6 +1737,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			);
 			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "expanded_in_place_by_hover")
 				.getByTestId(inListExpansionToggleTestId)
+				.filter({ visible: true })
 				.click();
 			await homePageRowInExpansionState(
 				"remaining",
@@ -1838,6 +1777,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				};
 			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "kept_expanded_in_list")
 				.getByTestId(inListExpansionToggleTestId)
+				.filter({ visible: true })
 				.click();
 			await homePageRowInExpansionState("remaining", betaInProgressGeometryAnchorId, "compact_row").waitFor();
 			await leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse();
@@ -1847,7 +1787,6 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				{
 					scrollContainer: homePageSectionColumnScrollContainer("remaining"),
 					remainingSectionSelector: homePageSectionColumnSelector("remaining"),
-					expansionStateChangeObservationRootSelector: boardScopeHomePageSelector,
 					leaveScrollContainerAndWaitForHoverExpansionToCollapse:
 						leaveHomePageSectionColumnsAndWaitForHoverExpansionToCollapse,
 				};
@@ -1861,7 +1800,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				boardScopeHomePageRecentColumnHandOffMeasurementScrollContainerHost,
 			);
 			recordCheck(
-				"阶段 7 列内往下挪到下一行：交接一次、不连锁；列表顶边固定（不补 scrollTop、不垫顶部空白，上方的行不被往下拖）",
+				"阶段 7 列内往下挪到下一行：交接一次、不连锁；列表占位、行坐标、scrollTop 与 scrollHeight 保持不变",
 			);
 			// 点行进 Focus View（首页被卸载），Back 回首页：Recent 列的滚动位置原样还原。矮视口下 Recent 列可滚。
 			const homePageRecentColumnScrollContainer = homePageSectionColumnScrollContainer("remaining");
@@ -1873,7 +1812,7 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				(element) => element.scrollTop,
 			);
 			expect(homePageRecentColumnScrollTopBeforeOpeningTaskPx, "矮视口下 Recent 列可滚").toBeGreaterThan(0);
-			await homePageRow("pinned", focusId).locator("button").first().click();
+			await homePageRow("pinned", focusId).locator("button:visible").first().click();
 			await observeUntil(async () => page.url().includes(`task=${focusId}`), "首页点行进 Focus View");
 			await boardScopeHomePage.waitFor({ state: "detached" });
 			await page.getByRole("button", { name: "Back to board", exact: true }).click();
