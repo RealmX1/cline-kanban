@@ -65,6 +65,14 @@ function useUserInterfacePreference<TFieldName extends UserInterfacePreferenceFi
 	return [value, setValue];
 }
 
+/** 创建、Backlog 编辑与直接启动共用，未设置时默认关闭。 */
+export function useTaskProjectAssignmentAutomaticAnalysisEnabledPreference(): [
+	boolean,
+	Dispatch<SetStateAction<boolean>>,
+] {
+	return useUserInterfacePreference("taskProjectAssignmentAutomaticAnalysisEnabled", false);
+}
+
 /** 新建任务时「自动评审」默认是否开启。 */
 export function useNewTaskAutoReviewEnabledPreference(): [boolean, Dispatch<SetStateAction<boolean>>] {
 	return useUserInterfacePreference("newTaskAutoReviewEnabled", false);
