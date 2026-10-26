@@ -138,6 +138,16 @@ export function ExpandedForegroundViewProvider({ children }: { children: ReactNo
 	const registerSurface = useCallback((surfaceId: string, contentIdentity: string) => {
 		registeredSurfaceContentIdentitiesRef.current.set(surfaceId, contentIdentity);
 	}, []);
+	const dismissForTaskNavigation = useCallback(() => {
+		// 任务导航自己接管 URL；不能再异步 back，否则 popstate 会覆盖刚打开的目标任务。
+		returnFocusRef.current = null;
+		const state = { ...window.history.state };
+		delete state.kanbanExpandedForegroundView;
+		window.history.replaceState(state, "", removeExpandedForegroundViewFromUrl(window.location.href));
+		const dismissedRoute = { target: null, error: null, ownerSurfaceId: null };
+		routeRef.current = dismissedRoute;
+		setRoute(dismissedRoute);
+	}, []);
 	const releaseSurface = useCallback((surfaceId: string) => {
 		registeredSurfaceContentIdentitiesRef.current.delete(surfaceId);
 		if (routeRef.current.ownerSurfaceId !== surfaceId) return;
@@ -156,10 +166,11 @@ export function ExpandedForegroundViewProvider({ children }: { children: ReactNo
 			ownerSurfaceId: route.ownerSurfaceId,
 			open,
 			close,
+			dismissForTaskNavigation,
 			registerSurface,
 			releaseSurface,
 		}),
-		[route.target, route.ownerSurfaceId, open, close, registerSurface, releaseSurface],
+		[route.target, route.ownerSurfaceId, open, close, dismissForTaskNavigation, registerSurface, releaseSurface],
 	);
 	return (
 		<ExpandedForegroundViewContext.Provider value={navigation}>

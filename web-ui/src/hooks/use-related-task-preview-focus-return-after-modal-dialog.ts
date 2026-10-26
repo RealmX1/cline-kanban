@@ -1,16 +1,19 @@
 import { type RefObject, useCallback, useEffect, useRef } from "react";
 
-export function hasOpenModalDialogOutsideRelatedTaskPreview(): boolean {
+export function hasOpenModalDialogOutsideRelatedTaskPreview(previewElement?: HTMLElement | null): boolean {
 	return [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].some(
 		(dialog) =>
-			!dialog.hasAttribute("data-related-tasks-preview-dialog") && dialog.getAttribute("data-state") !== "closed",
+			!dialog.hasAttribute("data-related-tasks-preview-dialog") &&
+			dialog.getAttribute("aria-modal") !== "false" &&
+			dialog.getAttribute("data-state") !== "closed" &&
+			!(previewElement && dialog.contains(previewElement)),
 	);
 }
 
 // 卡片操作的确认框属于 App，Portal 不在预览 DOM 内；返回焦点不能依赖 Dialog.Trigger 的父子关系。
 export function useRelatedTaskPreviewFocusReturnAfterModalDialog(
 	isOpen: boolean,
-	popoverContentRef: RefObject<HTMLDivElement | null>,
+	popoverContentRef: RefObject<HTMLElement | null>,
 ) {
 	const lastInteractionTarget = useRef<HTMLElement | null>(null);
 	const rememberInteractionTarget = useCallback(
@@ -27,7 +30,7 @@ export function useRelatedTaskPreviewFocusReturnAfterModalDialog(
 		let focusReturnTimer: ReturnType<typeof setTimeout> | null = null;
 		let focusReturnFrame: number | null = null;
 		const observeDialogOwnership = () => {
-			if (hasOpenModalDialogOutsideRelatedTaskPreview()) {
+			if (hasOpenModalDialogOutsideRelatedTaskPreview(popoverContentRef.current)) {
 				observedModalDialog = true;
 				return;
 			}
@@ -39,7 +42,7 @@ export function useRelatedTaskPreviewFocusReturnAfterModalDialog(
 					const content = popoverContentRef.current;
 					if (
 						!content ||
-						hasOpenModalDialogOutsideRelatedTaskPreview() ||
+						hasOpenModalDialogOutsideRelatedTaskPreview(content) ||
 						content.contains(document.activeElement)
 					)
 						return;

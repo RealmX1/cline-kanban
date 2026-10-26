@@ -88,6 +88,16 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.setViewportSize({ width: 1440, height: 1000 });
 	await openEditorHarness(page);
 	const dialog = page.getByRole("dialog", { name: "创建任务" });
+	await expect(dialog).toHaveAttribute("aria-modal", "false");
+	await expect(dialog.locator("textarea").first()).toBeFocused();
+	const focusableControls = dialog.locator(
+		'button:visible:not(:disabled), input:visible:not(:disabled), textarea:visible:not(:disabled), select:visible:not(:disabled), [tabindex="0"]:visible',
+	);
+	await focusableControls.last().focus();
+	await page.keyboard.press("Tab");
+	await expect(focusableControls.first()).toBeFocused();
+	await page.keyboard.press("Shift+Tab");
+	await expect(focusableControls.last()).toBeFocused();
 	const before = await dialog.boundingBox();
 	expect(before?.width).toBeGreaterThan(1000);
 	const header = page.getByRole("heading", { name: "创建任务" });
@@ -104,6 +114,9 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.getByLabel("背景输入").fill("背景仍可输入");
 	await page.getByLabel("背景输入").press("Control+Enter");
 	await expect(dialog).toBeVisible();
+	await page.getByLabel("背景输入").press("Escape");
+	await expect(dialog).toBeVisible();
+	await expect(page.getByLabel("背景输入")).toBeFocused();
 	await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
 	await expect(page.getByRole("textbox", { name: "Task name" })).toBeHidden();
 	await page.getByRole("button", { name: "展开任务编辑器", exact: true }).click();
@@ -116,6 +129,11 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.getByRole("button", { name: /管理隐藏设置/ }).click();
 	await page.getByRole("button", { name: "显示Plan Mode", exact: true }).click();
 	await expect(page.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeChecked();
+	await page.setViewportSize({ width: 820, height: 700 });
+	const resized = await dialog.boundingBox();
+	expect(resized!.x).toBeGreaterThanOrEqual(8);
+	expect(resized!.x + resized!.width).toBeLessThanOrEqual(820);
+	expect(resized!.y).toBeLessThanOrEqual(636);
 	await page.screenshot({ path: test.info().outputPath("desktop-task-editor.png") });
 });
 

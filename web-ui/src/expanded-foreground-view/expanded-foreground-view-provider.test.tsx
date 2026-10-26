@@ -45,6 +45,15 @@ function SourcePanel({ sourceTarget = target }: { sourceTarget?: ExpandedForegro
 				打开跨项目关系图
 			</button>
 			<ExpandedForegroundViewSurface controller={surface} title="来源面板">
+				<button
+					type="button"
+					onClick={() => {
+						navigation?.dismissForTaskNavigation();
+						window.history.replaceState({ taskNavigation: true }, "", "/other-project?task=destination");
+					}}
+				>
+					打开目标任务
+				</button>
 				<button type="button" onClick={surface.open}>
 					展开来源面板
 				</button>
@@ -105,6 +114,26 @@ describe("前台宿主生命周期与浏览器历史", () => {
 		if (!found) throw new Error(`没有按钮：${text}`);
 		return found;
 	}
+	it("任务导航同步退出展开层，不调用异步 back，也不覆盖后续任务导航 URL", async () => {
+		const back = vi.spyOn(window.history, "back");
+		await act(async () =>
+			root.render(
+				<ExpandedForegroundViewProvider>
+					<SourcePanel />
+				</ExpandedForegroundViewProvider>,
+			),
+		);
+		await act(async () => button("展开来源面板").click());
+		expect(container.querySelector('[data-expanded-foreground-view="active"]')).not.toBeNull();
+		await act(async () => button("打开目标任务").click());
+		expect(container.querySelector('[data-expanded-foreground-view="active"]')).toBeNull();
+		expect(back).not.toHaveBeenCalled();
+		expect(window.location.pathname + window.location.search).toBe("/other-project?task=destination");
+		expect(window.history.state.kanbanExpandedForegroundView).toBeUndefined();
+		await act(async () => window.dispatchEvent(new PopStateEvent("popstate")));
+		expect(window.location.pathname + window.location.search).toBe("/other-project?task=destination");
+		expect(container.querySelector("[data-detached-target]")).toBeNull();
+	});
 	const expandedForegroundContentSwitchCases = [
 		{
 			name: "可视化版本",

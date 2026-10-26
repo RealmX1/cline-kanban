@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { type MouseEventHandler, type ReactElement, type ReactNode, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
+import { RelationTaskCardPreviewLayout } from "@/components/detail-panels/relation-task-card-preview-layout";
 import { WorkUnitRelationAddReferenceRelationDialog } from "@/components/detail-panels/work-unit-relation-add-reference-relation-dialog";
 import { WorkUnitRelationAssertedRelationsSection } from "@/components/detail-panels/work-unit-relation-asserted-relations-section";
 import {
@@ -36,6 +37,7 @@ import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { ExpandedForegroundViewSurface } from "@/expanded-foreground-view/expanded-foreground-view-surface";
 import { useExpandedForegroundViewSurface } from "@/expanded-foreground-view/use-expanded-foreground-view-surface";
+import { useRelationTaskCardPreview } from "@/hooks/use-relation-task-card-preview";
 import {
 	useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard,
 	type WorkUnitRelationNeighborhoodPanelController,
@@ -393,6 +395,9 @@ export function WorkUnitRelationNeighborhoodPanel({
 	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(initiallyExpanded);
 	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
 	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(detachedForeground);
+	const summaryTaskCardPreview = useRelationTaskCardPreview(
+		isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen,
+	);
 	const modeling = useReferenceRelationModelingEditor({
 		workspaceId,
 		taskId: kanbanBoardCardTaskId,
@@ -534,27 +539,29 @@ export function WorkUnitRelationNeighborhoodPanel({
 				</div>
 			) : null}
 			{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
-				<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
-					{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
-						<div className="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary">
-							<Spinner size={12} />
-							正在读取关系…
-						</div>
-					) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_read_failed" ? (
-						<RelationNeighborhoodReadFailureBody
-							readFailure={readState.relationNeighborhoodReadFailure}
-							onRetry={controller.refetchRelationNeighborhood}
-						/>
-					) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded" ? (
-						<LoadedRelationNeighborhoodBody
-							presentation={readState.relationNeighborhoodPanelPresentation}
-							assertedRelationNeighborhoodPresentation={readState.assertedRelationNeighborhoodPresentation}
-							controller={controller}
-						/>
-					) : (
-						<div className="px-3 py-2 text-xs text-text-tertiary">没有可读取关系的任务卡。</div>
-					)}
-				</div>
+				<RelationTaskCardPreviewLayout controller={summaryTaskCardPreview}>
+					<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
+						{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
+							<div className="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary">
+								<Spinner size={12} />
+								正在读取关系…
+							</div>
+						) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_read_failed" ? (
+							<RelationNeighborhoodReadFailureBody
+								readFailure={readState.relationNeighborhoodReadFailure}
+								onRetry={controller.refetchRelationNeighborhood}
+							/>
+						) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded" ? (
+							<LoadedRelationNeighborhoodBody
+								presentation={readState.relationNeighborhoodPanelPresentation}
+								assertedRelationNeighborhoodPresentation={readState.assertedRelationNeighborhoodPresentation}
+								controller={controller}
+							/>
+						) : (
+							<div className="px-3 py-2 text-xs text-text-tertiary">没有可读取关系的任务卡。</div>
+						)}
+					</div>
+				</RelationTaskCardPreviewLayout>
 			) : null}
 		</ExpandedForegroundViewSurface>
 	);

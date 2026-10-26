@@ -282,7 +282,8 @@ function RelatedTasksPreviewContents({
 					) : (
 						<RelatedTaskPreviewFullTaskCard
 							key={selectedKey}
-							entry={selectedTask}
+							task={selectedTask.task}
+							workspaceRepositoryPath={selectedTask.workspaceRepositoryPath}
 							onCurrentMetadataChanged={rememberCurrentCardMetadata}
 							onOpen={() => onNavigate(selectedTask)}
 						/>

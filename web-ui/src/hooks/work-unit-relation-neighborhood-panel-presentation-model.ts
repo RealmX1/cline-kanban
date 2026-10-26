@@ -46,6 +46,8 @@ export type WorkUnitRelationNeighborPresentation =
 			neighborWorkUnitDisplayLabel: string;
 			neighborKanbanBoardCardWorkspaceId: string;
 			neighborKanbanBoardCardTaskId: string;
+			neighborKanbanBoardCardTaskIncarnationCreatedAtEpochMs: number;
+			neighborKanbanBoardCardWorkspaceRepositoryPath: string | null;
 			neighborKanbanBoardCardCurrentTitle: string | null;
 			neighborKanbanBoardCardWorkspaceDisplayName: string;
 			isNeighborKanbanBoardCardInCurrentKanbanProject: boolean;
@@ -206,6 +208,8 @@ export function buildWorkUnitRelationNeighborPresentation(input: {
 		};
 	}
 	const kanbanBoardCardIdentity = neighborDisplayEntry?.kanbanBoardCardIdentity ?? null;
+	// 账本端点和 key 保留 canonical 身份；读卡、项目可用性和导航使用任务当前位置。
+	const currentKanbanBoardCardReference = kanbanBoardCardIdentity?.kanbanBoardCard ?? neighborWorkUnit;
 	const neighborKanbanBoardCardPresenceOnBoardStatus =
 		resolveNeighborKanbanBoardCardPresenceOnBoardStatus(kanbanBoardCardIdentity);
 	return {
@@ -216,19 +220,22 @@ export function buildWorkUnitRelationNeighborPresentation(input: {
 		neighborWorkUnitDisplayLabel:
 			neighborDisplayEntry?.workUnitDisplayLabel ??
 			`task ${neighborWorkUnit.taskId} [${neighborWorkUnit.workspaceId}]`,
-		neighborKanbanBoardCardWorkspaceId: neighborWorkUnit.workspaceId,
-		neighborKanbanBoardCardTaskId: neighborWorkUnit.taskId,
+		neighborKanbanBoardCardWorkspaceId: currentKanbanBoardCardReference.workspaceId,
+		neighborKanbanBoardCardTaskId: currentKanbanBoardCardReference.taskId,
+		neighborKanbanBoardCardTaskIncarnationCreatedAtEpochMs:
+			currentKanbanBoardCardReference.taskIncarnationCreatedAtEpochMs,
+		neighborKanbanBoardCardWorkspaceRepositoryPath: kanbanBoardCardIdentity?.workspaceRepositoryPath ?? null,
 		neighborKanbanBoardCardCurrentTitle: kanbanBoardCardIdentity?.currentTitle ?? null,
 		neighborKanbanBoardCardWorkspaceDisplayName:
-			input.knownKanbanProjectByWorkspaceId?.get(neighborWorkUnit.workspaceId)?.kanbanProjectName ??
+			input.knownKanbanProjectByWorkspaceId?.get(currentKanbanBoardCardReference.workspaceId)?.kanbanProjectName ??
 			readLastPathSegmentOfRepositoryPath(kanbanBoardCardIdentity?.workspaceRepositoryPath ?? null) ??
-			neighborWorkUnit.workspaceId,
+			currentKanbanBoardCardReference.workspaceId,
 		isNeighborKanbanBoardCardInCurrentKanbanProject:
 			input.currentKanbanProjectWorkspaceId !== null &&
-			neighborWorkUnit.workspaceId === input.currentKanbanProjectWorkspaceId,
+			currentKanbanBoardCardReference.workspaceId === input.currentKanbanProjectWorkspaceId,
 		neighborKanbanBoardCardPresenceOnBoardStatus,
 		neighborKanbanBoardCardOpenInProjectAvailability: resolveNeighborKanbanBoardCardOpenInProjectAvailability({
-			neighborKanbanBoardCardWorkspaceId: neighborWorkUnit.workspaceId,
+			neighborKanbanBoardCardWorkspaceId: currentKanbanBoardCardReference.workspaceId,
 			neighborKanbanBoardCardPresenceOnBoardStatus,
 			knownKanbanProjectByWorkspaceId: input.knownKanbanProjectByWorkspaceId,
 		}),
