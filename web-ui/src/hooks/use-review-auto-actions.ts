@@ -1,8 +1,13 @@
 import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
-import { isTaskMainSessionHandoverSuspendingAutomaticActions } from "@runtime-session-activity";
+import {
+	isTaskMainSessionHandoverSuspendingAutomaticActions,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
+	resolveMainTaskConversationSessionSummary,
+} from "@runtime-session-activity";
 import { useCallback, useEffect, useRef } from "react";
-
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
+import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardSelection } from "@/state/board-state";
 import { getTaskWorkspaceSnapshot, subscribeToAnyTaskMetadata } from "@/stores/workspace-metadata-store";
 import type { BoardCard, BoardColumnId, BoardData, TaskAutoReviewMode } from "@/types";
@@ -10,8 +15,23 @@ import { resolveTaskAutoReviewMode } from "@/types";
 
 const AUTO_REVIEW_ACTION_DELAY_MS = 500;
 
-function isTaskAutoReviewEnabled(task: BoardCard): boolean {
-	return task.autoReviewEnabled === true && !isTaskMainSessionHandoverSuspendingAutomaticActions(task);
+function isTaskAutoReviewEnabled(task: BoardCard, sessions?: Record<string, RuntimeTaskSessionSummary>): boolean {
+	const summary = sessions ? resolveMainTaskConversationSessionSummary(task, sessions) : null;
+	if (
+		task.taskShelvingState &&
+		!task.taskShelvingState.isShelved &&
+		Math.max(
+			resolveLastEffectiveAgentConversationActivityObservation(summary ?? {})?.observedAtMs ?? 0,
+			resolveLastAgentConversationUserHandoffObservation(summary ?? {})?.observedAtMs ?? 0,
+			task.updatedAt,
+		) <= task.taskShelvingState.lastChangedAt
+	)
+		return false;
+	return (
+		!task.taskShelvingState?.isShelved &&
+		task.autoReviewEnabled === true &&
+		!isTaskMainSessionHandoverSuspendingAutomaticActions(task)
+	);
 }
 
 interface TaskGitActionLoadingStateLike {
@@ -35,6 +55,7 @@ export function resolveWebUiBoardMutationInitiatorForAutoReviewCompletionMoveToD
 
 interface UseReviewAutoActionsOptions {
 	board: BoardData;
+	sessions?: Record<string, RuntimeTaskSessionSummary>;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
 	requestMoveTaskToTrash: (
@@ -47,12 +68,15 @@ interface UseReviewAutoActionsOptions {
 
 export function useReviewAutoActions({
 	board,
+	sessions,
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
 	requestMoveTaskToTrash,
 	resetKey,
 }: UseReviewAutoActionsOptions): void {
 	const boardRef = useRef<BoardData>(board);
+	const sessionsRef = useRef(sessions);
+	sessionsRef.current = sessions;
 	const runAutoReviewGitActionRef = useRef(runAutoReviewGitAction);
 	const requestMoveTaskToTrashRef = useRef(requestMoveTaskToTrash);
 	const awaitingCleanActionByTaskIdRef = useRef<Record<string, TaskGitAction>>({});
@@ -158,7 +182,7 @@ export function useReviewAutoActions({
 			}
 
 			for (const reviewTask of reviewCardsForAutomation) {
-				const autoReviewEnabled = isTaskAutoReviewEnabled(reviewTask);
+				const autoReviewEnabled = isTaskAutoReviewEnabled(reviewTask, sessionsRef.current);
 				if (!autoReviewEnabled) {
 					delete awaitingCleanActionByTaskIdRef.current[reviewTask.id];
 					clearAutoReviewTimer(reviewTask.id);
@@ -191,7 +215,7 @@ export function useReviewAutoActions({
 							if (!latestSelection || latestSelection.column.id !== "review") {
 								return;
 							}
-							if (!isTaskAutoReviewEnabled(latestSelection.card)) {
+							if (!isTaskAutoReviewEnabled(latestSelection.card, sessionsRef.current)) {
 								return;
 							}
 							const latestMode = resolveTaskAutoReviewMode(latestSelection.card.autoReviewMode);
@@ -229,7 +253,7 @@ export function useReviewAutoActions({
 					if (!latestSelection || latestSelection.column.id !== "review") {
 						return;
 					}
-					if (!isTaskAutoReviewEnabled(latestSelection.card)) {
+					if (!isTaskAutoReviewEnabled(latestSelection.card, sessionsRef.current)) {
 						return;
 					}
 					const latestMode = resolveTaskAutoReviewMode(latestSelection.card.autoReviewMode);
@@ -252,7 +276,7 @@ export function useReviewAutoActions({
 		evaluateAutoReview({
 			source: "board_or_loading_change",
 		});
-	}, [board, evaluateAutoReview, taskGitActionLoadingByTaskId]);
+	}, [board, sessions, evaluateAutoReview, taskGitActionLoadingByTaskId]);
 
 	useEffect(() => {
 		return subscribeToAnyTaskMetadata((taskId) => {

@@ -32,7 +32,12 @@ interface PendingStartAllReadyBacklogTasksConfirmation {
 
 // 过渡语义（dd2db 1a）：任务连线已退役、等待门（阶段 3）尚未落地，backlog 里的卡全部视为可启动。
 export function getStartableBacklogTaskIds(board: BoardData): string[] {
-	return board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
+	return (
+		board.columns
+			.find((column) => column.id === "backlog")
+			?.cards.filter((card) => !card.taskShelvingState?.isShelved)
+			.map((card) => card.id) ?? []
+	);
 }
 
 export function useTaskStartActions({

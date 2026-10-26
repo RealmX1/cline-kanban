@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 
 // 在途命令的种类：UI 据此决定哪个按钮转圈。名字与服务端 procedure 一一对应。
 export type TaskCardActionCommandKind =
+	| "set_task_card_shelving_state"
 	| "start_task_card_agent_session_moving_it_into_in_progress"
 	| "move_task_card_into_review_by_handing_turn_to_user"
 	| "move_task_card_between_non_trash_columns_without_session_side_effects"

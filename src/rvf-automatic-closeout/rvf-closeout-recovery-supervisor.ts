@@ -14,6 +14,12 @@ import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
 import { withRunningCodexAppServerControlSocketConnection } from "./codex-app-server-request-connection";
 import { readCodexNativeCloseoutCandidateText } from "./codex-native-closeout-user-message-content";
 import { readCodexConversationTurns } from "./codex-native-conversation-prefix";
+import {
+	normalRvfCloseoutReconciliationContext,
+	readNormalRvfCloseoutSuppression,
+	recordIndependentBackupRouteSuppressionObservation,
+	withNormalRvfCloseoutMutation,
+} from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
 import {
 	getRvfAutomaticCloseoutStorePath,
@@ -25,6 +31,11 @@ import {
 	hasRvfCloseoutStageResultBlockingAutomaticExecution,
 	resolveRvfCloseoutActiveDelivery,
 } from "./rvf-closeout-execution-stage-recovery";
+import {
+	completedRvfCloseoutStage,
+	resolveRvfCloseoutSchedulingDecision,
+	sameRvfCloseoutObservationBinding,
+} from "./rvf-closeout-scheduling-decision";
 import {
 	appendRvfCloseoutSkillEvidence,
 	captureRvfCloseoutAcceptedSkillSnapshot,
@@ -41,7 +52,11 @@ interface RecoverySupervisorDependencies {
 	hasBackgroundWork: (summary: RuntimeTaskSessionSummary) => Promise<boolean>;
 	assertNoPendingUserInput: (record: RvfAutomaticCloseoutRecord) => Promise<void>;
 	isInputBoxEmpty: (summary: RuntimeTaskSessionSummary) => Promise<boolean>;
-	restoreSameNativeSession: (record: RvfAutomaticCloseoutRecord, summary: RuntimeTaskSessionSummary) => Promise<void>;
+	restoreSameNativeSession: (
+		record: RvfAutomaticCloseoutRecord,
+		summary: RuntimeTaskSessionSummary,
+		guard: () => Promise<void>,
+	) => Promise<void>;
 	enqueueContinuation: (
 		record: RvfAutomaticCloseoutRecord,
 		attempt: RvfCloseoutDeliveryAttempt,
@@ -51,7 +66,16 @@ interface RecoverySupervisorDependencies {
 export function remainingRvfCloseoutStages(record: RvfAutomaticCloseoutRecord) {
 	return (["land", "base_branch_sync"] as const).filter((stage) => {
 		const result = stage === "land" ? record.landExecutionResult : record.baseBranchSyncExecutionResult;
-		return result?.outcome !== "completed" && !hasRvfCloseoutStageResultBlockingAutomaticExecution(result);
+		return !completedRvfCloseoutStage(record, stage) && !hasRvfCloseoutStageResultBlockingAutomaticExecution(result);
+	});
+}
+export function remainingRvfCloseoutVerificationStages(record: RvfAutomaticCloseoutRecord) {
+	return (["land", "base_branch_sync"] as const).filter((stage) => {
+		const result = stage === "land" ? record.landExecutionResult : record.baseBranchSyncExecutionResult;
+		return (
+			!completedRvfCloseoutStage(record, stage) &&
+			(!hasRvfCloseoutStageResultBlockingAutomaticExecution(result) || result?.blockedReasonKind === undefined)
+		);
 	});
 }
 export async function advanceRvfCloseoutAutomaticRecovery(
@@ -62,10 +86,30 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 		!original.runId ||
 		!original.runDirectory ||
 		!original.handoffSha256 ||
+		resolveRvfCloseoutSchedulingDecision(original).suppressAllScheduling ||
+		resolveRvfCloseoutSchedulingDecision(original).requiresBackgroundReconciliationOnly ||
 		original.automaticCloseoutIneligibleReason ||
 		["captured_review_start_boundary", "awaiting_rvf_completion", "completed"].includes(original.status)
 	)
 		return;
+	return withNormalRvfCloseoutMutation(
+		original.receipt.worktree,
+		original.runDirectory,
+		() => advanceNormalRvfCloseoutAutomaticRecovery(deps, original),
+		(reason, controlDirectory) =>
+			recordIndependentBackupRouteSuppressionObservation(
+				getRvfAutomaticCloseoutStorePath(deps.workspaceId),
+				original,
+				reason,
+				controlDirectory,
+			),
+		normalRvfCloseoutReconciliationContext(getRvfAutomaticCloseoutStorePath(deps.workspaceId), original),
+	);
+}
+async function advanceNormalRvfCloseoutAutomaticRecovery(
+	deps: RecoverySupervisorDependencies,
+	original: RvfAutomaticCloseoutRecord,
+) {
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
 	await withRvfAutomaticCloseoutRecordOperationLock(
 		storePath,
@@ -75,20 +119,38 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 				(entry) =>
 					entry.taskId === original.taskId && entry.receipt.decision_token === original.receipt.decision_token,
 			);
-			if (!record || deps.isStopped(record)) return;
+			if (
+				!record ||
+				deps.isStopped(record) ||
+				resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly
+			)
+				return;
 			const refresh = async () => {
 				const current = (await readRvfAutomaticCloseoutRecords(storePath)).find(
 					(entry) =>
 						entry.taskId === original.taskId && entry.receipt.decision_token === original.receipt.decision_token,
 				);
-				if (!current || current.runId !== original.runId || current.handoffSha256 !== original.handoffSha256)
+				if (!current || !sameRvfCloseoutObservationBinding(current, original))
 					throw new Error("自动恢复绑定已改变。");
 				record = current;
 				return current;
 			};
 			const guard = async () => {
 				assertOwned();
-				if (deps.isStopped(await refresh())) throw new Error("自动恢复被明确停止。");
+				const current = await refresh();
+				if (
+					deps.isStopped(current) ||
+					resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
+					resolveRvfCloseoutSchedulingDecision(current).requiresBackgroundReconciliationOnly
+				)
+					throw new Error("自动恢复已停止、完成、被消费或须后台补证。");
+				if (await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory))
+					throw new Error("独立备用路线已接管，停止自动恢复。");
+				const refreshed = await refresh();
+				assertOwned();
+				if (deps.isStopped(refreshed) || resolveRvfCloseoutSchedulingDecision(refreshed).suppressAllScheduling)
+					throw new Error("异步检查期间收尾已停止或完成。");
 			};
 			const save = async (patch: Partial<RvfAutomaticCloseoutRecord>) => {
 				await guard();
@@ -102,6 +164,7 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 					if (
 						!current ||
 						deps.isStopped(current) ||
+						resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
 						current.runId !== original.runId ||
 						current.handoffSha256 !== original.handoffSha256
 					)
@@ -131,7 +194,7 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 					},
 				});
 			};
-			if (!remainingRvfCloseoutStages(record).length) {
+			if (!remainingRvfCloseoutVerificationStages(record).length) {
 				if (record.automaticRecoveryProgress?.kind === "machine_waiting")
 					await progress("no_remaining_authorized_stage", "none", "settled");
 				return;
@@ -209,6 +272,11 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 				return;
 			if (await deps.isContinuationSuppressed(summary)) return;
 			const facets = resolveSessionFacets(summary);
+			const acceptedDelivery =
+				injected?.terminal_delivery_status === "delivered_and_submit_confirmed" ||
+				Boolean(record.lateNativePromptAcceptanceRecoveryReceipt) ||
+				delivery.continuation?.status === "confirmed";
+			if (!acceptedDelivery || delivery.continuation?.purpose === "inspect_existing_state") return;
 			if (facets.userTurnKind && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind)) {
 				await progress("pending_user_decision", "await_changed_evidence", "human_decision_pending");
 				return;
@@ -239,7 +307,7 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 						},
 					});
 					await guard();
-					await deps.restoreSameNativeSession(record, summary);
+					await deps.restoreSameNativeSession(record, summary, guard);
 				}
 				if (restoreAttemptCount >= 3)
 					await progress("native_control_restore_budget_exhausted", "await_changed_evidence");
@@ -276,6 +344,7 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 			};
 			if (delivery.continuation) {
 				if (delivery.continuation.status === "prepared") {
+					if (!resolveRvfCloseoutSchedulingDecision(record).recoveryExecutionAllowed) return;
 					const fingerprint = await readContinuationEnqueueEvidenceFingerprint();
 					const previous = delivery.continuation.observationBudget;
 					const same = previous?.fingerprint === fingerprint;
@@ -358,23 +427,9 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 							(result) => result?.blockedReasonKind === "machine_precondition",
 						)),
 			);
-			if (
-				!resumeVerifiedAcceptedStages &&
-				(!record.automaticRecoveryProgress ||
-					record.automaticRecoveryProgress.verificationAttemptCount < 3 ||
-					record.automaticRecoveryProgress.nextVerificationAtMs > Date.now())
-			)
+			if (!resumeVerifiedAcceptedStages || !resolveRvfCloseoutSchedulingDecision(record).recoveryExecutionAllowed)
 				return;
-			if (
-				!resumeVerifiedAcceptedStages &&
-				!["native_prompt_acceptance_not_proven", "native_control_unavailable"].includes(
-					acceptanceVerificationReasonCode ?? "",
-				)
-			)
-				return;
-			const preparationFingerprint = resumeVerifiedAcceptedStages
-				? `verified-accepted:${await readContinuationEnqueueEvidenceFingerprint()}`
-				: (record.automaticRecoveryProgress?.evidenceFingerprint ?? "");
+			const preparationFingerprint = `verified-accepted:${await readContinuationEnqueueEvidenceFingerprint()}`;
 			// 旧版仅有一次性指纹时折算为已尝试一次，不把它继续当成永久完成标记。
 			const previousPreparationBudget =
 				record.automaticRecoveryProgress?.continuationPreparationObservationBudget ??
@@ -423,6 +478,7 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 				return null;
 			});
 			if (!turns) return;
+			await guard();
 			if (turns.some((turn) => !["completed", "interrupted", "failed"].includes(turn.status))) return;
 			const originalMatches = turns.flatMap((turn) =>
 				turn.items.filter(
@@ -439,9 +495,13 @@ export async function advanceRvfCloseoutAutomaticRecovery(
 			const unchanged =
 				record.restoreWorkspaceStateSha256 !== null &&
 				(await readRvfCloseoutWorkspaceStateDigest(record.receipt.worktree)) === record.restoreWorkspaceStateSha256;
-			const purpose = unchanged ? ("execute_remaining_stages" as const) : ("inspect_existing_state" as const);
+			if (!unchanged && !completedRvfCloseoutStage(record, "land")) {
+				await progress("candidate_changed_requires_background_reconciliation", "await_changed_evidence");
+				return;
+			}
+			const purpose = "execute_remaining_stages" as const;
 			const deliveryAttemptId = randomUUID();
-			const promptText = `这是同一 RVF run 的受控续验，来源为 Kanban 自动恢复，不是人类新授权。\nRVF_AUTOMATIC_CLOSEOUT_TOKEN=${record.receipt.decision_token}\n${record.handoffPath}\nrun_id=${record.runId}\nhandoff_sha256=${record.handoffSha256}\ndelivery_attempt_id=${deliveryAttemptId}\n先核验既有 Land 规范产物并报告真实结果，保留原投递与阶段历史，分别登记接受与完成事实。当前模式=${purpose}；仅处理 ${remainingRvfCloseoutStages(record).join("、")}。不要重做已完成阶段，不开启新 RVF，不部署，不移动 Done。先读取当前用户限制；用户禁止的阶段须报告 blocked、blockedReasonKind=user_restriction。任何写入前调用 kanban task claim-rvf-automatic-closeout-execution-stage，绑定 task=${record.taskId}、token/run/handoff 和本 deliveryAttemptId；只有 claimed 才可使用相应 $rvf-land 或 $base-branch-sync，已有 completed 直接复用。inspect_existing_state 模式先只读补证，原收尾资格或规范结果足以恢复后才可认领；不能凭本消息扩大授权。按原阶段结果报告命令登记，并附 deliveryAttemptId 和 stageExecutionClaimId。`;
+			const promptText = `这是同一 RVF run 的受控续验，来源为 Kanban 自动恢复，不是人类新授权。\nRVF_AUTOMATIC_CLOSEOUT_TOKEN=${record.receipt.decision_token}\n${record.handoffPath}\nrun_id=${record.runId}\nhandoff_sha256=${record.handoffSha256}\ndelivery_attempt_id=${deliveryAttemptId}\n先核验既有 Land 与 base 规范产物并报告真实结果，保留原投递与阶段历史，分别登记接受与完成事实。当前模式=${purpose}；待核验阶段=${remainingRvfCloseoutVerificationStages(record).join("、")}；允许申请执行的阶段=${remainingRvfCloseoutStages(record).join("、") || "无"}。旧未分类 blocked 只允许读取原报告、原生记录和当前用户限制，附明确来源报告分类；原因仍未知时保留待验与恢复条件，不能猜测为机器故障或用户禁止。不要重做已完成阶段，不开启新 RVF，不部署，不移动 Done。先读取当前用户限制；用户禁止的阶段须报告 blocked、blockedReasonKind=user_restriction。任何写入前调用 kanban task claim-rvf-automatic-closeout-execution-stage，绑定 task=${record.taskId}、token/run/handoff 和本 deliveryAttemptId；只有 claimed 才可使用相应 $rvf-land 或 $base-branch-sync，已有 completed 直接复用。inspect_existing_state 模式先只读补证，原收尾资格或规范结果足以恢复后才可认领；不能凭本消息扩大授权。按原阶段结果报告命令登记，并附 deliveryAttemptId 和 stageExecutionClaimId。`;
 			const attempt: RvfCloseoutDeliveryAttempt = {
 				deliveryAttemptId,
 				idempotencyKey: `rvf-automatic-closeout-${record.receipt.decision_token}-continuation`,

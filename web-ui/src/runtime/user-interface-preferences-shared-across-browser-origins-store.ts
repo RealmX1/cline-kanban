@@ -1,3 +1,4 @@
+import { notifyError } from "@/components/app-toaster";
 // 跨浏览器 origin 共享的界面偏好：浏览器侧的单例外部 store。
 //
 // ## 为什么是外部 store 而不是 React context
@@ -53,6 +54,8 @@ export type UserInterfacePreferenceFieldName = keyof RuntimeUserInterfacePrefere
  */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		taskProjectAssignmentAutomaticAnalysisEnabled: null,
+		taskEditorSettingPresentationBySettingKey: {},
 		newTaskAutoReviewEnabled: null,
 		newTaskAutoReviewMode: null,
 		taskCreateDialogPrimaryStartAction: null,
@@ -128,6 +131,9 @@ const BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD: Record<
 	UserInterfacePreferenceFieldName,
 	BrowserLocalStorageMirrorPolicy
 > = {
+	taskProjectAssignmentAutomaticAnalysisEnabled:
+		PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
+	taskEditorSettingPresentationBySettingKey: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	newTaskAutoReviewEnabled: defineMirrorCodec<"newTaskAutoReviewEnabled">({
 		localStorageMirrorKey: LocalStorageKey.TaskAutoReviewEnabled,
 		// 升级前是 useBooleanLocalStorageValue：serializer 为 String(value)、deserializer 为 value === "true"。
@@ -231,6 +237,15 @@ const STORE_STATE_BEFORE_FIRST_LOAD: UserInterfacePreferencesSharedAcrossBrowser
 let storeState: UserInterfacePreferencesSharedAcrossBrowserOriginsStoreState = STORE_STATE_BEFORE_FIRST_LOAD;
 const storeListeners = new Set<() => void>();
 let hasStartedLoadingFromServer = false;
+// 本页显式选择持续覆盖服务端快照，包括保存成功后才到达的旧读取或其他偏好的响应。
+// 刷新后重新以服务端持久值为准；保存失败时只保留当前页面选择并明确提示。
+let taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession: boolean | null | undefined;
+const pendingTaskEditorSettingPresentations = new Map<
+	string,
+	{ revision: number; value: "expanded" | "collapsed_in_group" | "hidden" }
+>();
+let taskEditorSettingSaveRevision = 0;
+let taskEditorPreferenceSaveSerialTail: Promise<void> = Promise.resolve();
 
 function publishStoreState(nextStoreState: UserInterfacePreferencesSharedAcrossBrowserOriginsStoreState): void {
 	storeState = nextStoreState;
@@ -262,6 +277,18 @@ export function getUserInterfacePreferencesSharedAcrossBrowserOriginsStoreState(
 export function readEffectiveUserInterfacePreferenceValue<TFieldName extends UserInterfacePreferenceFieldName>(
 	fieldName: TFieldName,
 ): RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName] | null {
+	if (
+		fieldName === "taskProjectAssignmentAutomaticAnalysisEnabled" &&
+		taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession !== undefined
+	) {
+		return taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName];
+	}
+	if (fieldName === "taskEditorSettingPresentationBySettingKey" && pendingTaskEditorSettingPresentations.size) {
+		return {
+			...storeState.preferencesLoadedFromServer?.taskEditorSettingPresentationBySettingKey,
+			...Object.fromEntries([...pendingTaskEditorSettingPresentations].map(([key, entry]) => [key, entry.value])),
+		} as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName];
+	}
 	const serverValue = storeState.preferencesLoadedFromServer?.[fieldName] ?? null;
 	if (serverValue !== null) {
 		return serverValue;
@@ -294,7 +321,14 @@ function publishOptimisticPreferenceUpdate(
 	if (storeState.preferencesLoadedFromServer !== null) {
 		publishStoreState({
 			...storeState,
-			preferencesLoadedFromServer: { ...storeState.preferencesLoadedFromServer, ...update },
+			preferencesLoadedFromServer: {
+				...storeState.preferencesLoadedFromServer,
+				...update,
+				taskEditorSettingPresentationBySettingKey: {
+					...storeState.preferencesLoadedFromServer.taskEditorSettingPresentationBySettingKey,
+					...update.taskEditorSettingPresentationBySettingKey,
+				},
+			},
 		});
 		return;
 	}
@@ -309,17 +343,37 @@ function publishOptimisticPreferenceUpdate(
  * （迁移采纳意图正是这样），只有响应里那份才是合并后的事实。
  */
 function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeConfigSaveRequest): void {
-	// 全局作用域（workspaceId = null）——这些偏好本就落在全局 config.json 里，与当前项目无关。
-	void saveRuntimeConfig(null, saveRequest)
-		.then((savedConfig) => {
+	const taskProjectAssignmentAutomaticAnalysisEnabledUpdate =
+		saveRequest.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskProjectAssignmentAutomaticAnalysisEnabled;
+	const patch =
+		saveRequest.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskEditorSettingPresentationBySettingKey;
+	const revision = ++taskEditorSettingSaveRevision;
+	if (patch) {
+		for (const [key, value] of Object.entries(patch))
+			pendingTaskEditorSettingPresentations.set(key, { revision, value });
+		publishStoreState({ ...storeState });
+	}
+	const saveAndAdopt = async () => {
+		try {
+			const savedConfig = await saveRuntimeConfig(null, saveRequest);
+			if (patch)
+				for (const key of Object.keys(patch))
+					if (pendingTaskEditorSettingPresentations.get(key)?.revision === revision)
+						pendingTaskEditorSettingPresentations.delete(key);
 			publishStoreState({
 				...storeState,
 				preferencesLoadedFromServer: savedConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 			});
-		})
-		.catch(() => {
-			// 静默：值已在镜像里，界面已经反映了这次修改，弹一个 toast 只会在离线时刷屏。
-		});
+		} catch {
+			if (patch) notifyError("任务设置的收起与隐藏偏好尚未保存到运行时，请在连接恢复后重试。当前表单值已保留。");
+			if (taskProjectAssignmentAutomaticAnalysisEnabledUpdate !== undefined)
+				notifyError("“自动分析项目归属”偏好尚未保存到运行时，当前选择已保留。请在连接恢复后重新切换以保存。");
+		}
+	};
+	// 同一客户端按点击次序保存；跨客户端的不同设置键仍由运行时配置锁逐键合并。
+	if (patch || taskProjectAssignmentAutomaticAnalysisEnabledUpdate !== undefined)
+		taskEditorPreferenceSaveSerialTail = taskEditorPreferenceSaveSerialTail.then(saveAndAdopt, saveAndAdopt);
+	else void saveAndAdopt();
 }
 
 /**
@@ -337,6 +391,9 @@ function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeCon
 export function saveUserInterfacePreferencesSharedAcrossBrowserOrigins(
 	update: Partial<RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins>,
 ): void {
+	if (update.taskProjectAssignmentAutomaticAnalysisEnabled !== undefined)
+		taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession =
+			update.taskProjectAssignmentAutomaticAnalysisEnabled;
 	writeUpdateToBrowserLocalStorageMirrors(update);
 	publishOptimisticPreferenceUpdate(update);
 	sendPreferenceSaveRequestAndAdoptServerResponse({ userInterfacePreferencesSharedAcrossBrowserOrigins: update });
@@ -410,5 +467,9 @@ export function startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins()
 export function resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests(): void {
 	storeState = STORE_STATE_BEFORE_FIRST_LOAD;
 	hasStartedLoadingFromServer = false;
+	taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession = undefined;
+	pendingTaskEditorSettingPresentations.clear();
+	taskEditorSettingSaveRevision = 0;
+	taskEditorPreferenceSaveSerialTail = Promise.resolve();
 	storeListeners.clear();
 }

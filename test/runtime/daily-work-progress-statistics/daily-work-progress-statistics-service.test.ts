@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,10 @@ import {
 	dailyWorkProgressStatisticsStoreSchema,
 } from "../../../src/daily-work-progress-statistics/daily-work-progress-statistics-store";
 import { createEmptyTaskUserPromptStatisticsCursor } from "../../../src/daily-work-progress-statistics/task-user-prompt-statistics-transcript-reader";
+import {
+	createDailyWorkProgressCollectionCostRecorder,
+	type DailyWorkProgressCollectionCostWindow,
+} from "../../../src/diagnostics/daily-work-progress-collection-cost-recorder";
 
 const collectorWorkspaceReads = vi.hoisted(() => ({
 	getWorkspaceDirectoryPath: vi.fn(),
@@ -46,6 +50,132 @@ afterEach(async () => {
 describe("人工 prompt 历史覆盖证据", () => {
 	const timestamp = Date.parse("2026-10-23T12:00:00Z");
 	const request = { workspaceId: "project", dateKey: "2026-10-23", timeZone: "UTC" };
+	it.each([false, true])("末批人工输入和发现轮次持久化稳定，独立回退为 %s", async (disabled) => {
+		vi.stubEnv("KANBAN_DAILY_WORK_PROGRESS_CANONICAL_RECORD_PERSISTENCE_DISABLED", disabled ? "1" : undefined);
+		const directory = await mkdtemp(join(tmpdir(), "daily-progress-persisted-fact-convergence-"));
+		directories.push(directory);
+		collectorWorkspaceReads.getWorkspaceDirectoryPath.mockReturnValue(directory);
+		const transcriptPath = join(directory, "native.jsonl");
+		await writeFile(
+			transcriptPath,
+			`${JSON.stringify({ type: "session_meta", payload: { id: "native" } })}\n${JSON.stringify({
+				type: "event_msg",
+				timestamp: new Date(timestamp).toISOString(),
+				payload: { type: "user_message", message: "最后一批确认的人工输入" },
+			})}\n`,
+		);
+		collectorWorkspaceReads.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ cards: [{ id: "task", createdAt: timestamp - 1, title: "持久事实" }] }],
+		});
+		collectorWorkspaceReads.loadPersistedWorkspaceSessionsById.mockResolvedValue({
+			task: {
+				taskId: "task",
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId: "native",
+					transcriptPath,
+				},
+			},
+		});
+		let observationTime = timestamp;
+		const windows: DailyWorkProgressCollectionCostWindow[] = [];
+		const recorder = createDailyWorkProgressCollectionCostRecorder({ writeWindow: (window) => windows.push(window) });
+		const storageFilePath = join(directory, "statistics.json");
+		const service = createDailyWorkProgressStatisticsService({
+			storageFilePath,
+			costRecorder: recorder,
+			now: () => observationTime,
+			warn: () => {},
+			collect: createDailyWorkProgressStatisticsCollector({ now: () => observationTime }),
+		});
+		try {
+			await service.getSummary(request);
+			await appendFile(
+				transcriptPath,
+				`${JSON.stringify({
+					type: "event_msg",
+					timestamp: new Date(timestamp + 1_000).toISOString(),
+					payload: { type: "user_message", message: "项目发现之间追加的最后一批人工输入" },
+				})}\n`,
+			);
+			observationTime += 1_000;
+			await service.refresh();
+			const persisted = await readFile(storageFilePath, "utf8");
+			const raw = JSON.parse(persisted);
+			expect(Object.keys(raw.factsByEventId)).toHaveLength(2);
+			if (!disabled)
+				expect(raw.factsByEventId).toEqual(dailyWorkProgressStatisticsStoreSchema.parse(raw).factsByEventId);
+			recorder.flush();
+			for (let round = 0; round < 3; round++) {
+				observationTime += 10_000;
+				await service.refresh();
+			}
+			recorder.flush();
+			expect(windows[1]?.stages.statistics_write?.writeOperations ?? 0).toBe(disabled ? 1 : 0);
+			if (!disabled) expect(await readFile(storageFilePath, "utf8")).toBe(persisted);
+		} finally {
+			await service.close();
+			vi.unstubAllEnvs();
+		}
+	});
+	it("主会话交接给 peer 和接受水位补证不重复产生人工输入事实", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "daily-progress-main-peer-handover-"));
+		directories.push(directory);
+		collectorWorkspaceReads.getWorkspaceDirectoryPath.mockReturnValue(directory);
+		const transcriptPath = join(directory, "native.jsonl");
+		await writeFile(
+			transcriptPath,
+			`${[
+				{ type: "session_meta", payload: { id: "native", thread_source: "user" } },
+				{
+					type: "event_msg",
+					timestamp: new Date(timestamp).toISOString(),
+					payload: { type: "user_message", message: "原生接受的需求" },
+				},
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		let observationTime = timestamp;
+		const collector = createDailyWorkProgressStatisticsCollector({ now: () => observationTime });
+		const state = createEmptyDailyWorkProgressStatisticsStore(timestamp);
+		const card = {
+			id: "owning-task",
+			createdAt: timestamp - 1,
+			title: "交接后的同一任务",
+			mainTaskConversationSessionId: "original-main",
+		};
+		const summary = {
+			taskId: "original-main",
+			taskConversationSessionMetadata: { workspaceTaskId: card.id },
+			agentNativeConversationSessionIdentity: { sourceAgentId: "codex", nativeSessionId: "native", transcriptPath },
+		};
+		collectorWorkspaceReads.loadWorkspaceBoardById.mockResolvedValue({ columns: [{ cards: [card] }] });
+		collectorWorkspaceReads.loadPersistedWorkspaceSessionsById.mockResolvedValue({ "original-main": summary });
+		await collector(state);
+		const before = Object.keys(state.factsByEventId);
+		expect(before).toHaveLength(1);
+		observationTime += 10_000;
+		collectorWorkspaceReads.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ cards: [{ ...card, mainTaskConversationSessionId: "peer-main" }] }],
+		});
+		collectorWorkspaceReads.loadPersistedWorkspaceSessionsById.mockResolvedValue({
+			"peer-main": {
+				...summary,
+				taskId: "peer-main",
+				agentConversationPromptSubmissionAcceptance: {
+					status: "accepted",
+					eventId: "historical-acceptance-reconciliation",
+					nativeSessionId: "native",
+					attemptedAtMs: timestamp,
+					confirmedAtMs: observationTime,
+				},
+			},
+		});
+		await collector(state);
+		expect(Object.keys(state.factsByEventId)).toEqual(before);
+		expect(Object.values(state.nativeSourcesByIdentityKey)[0]?.kanbanConversationSessionId).toBe("peer-main");
+	});
 	async function createCoverageService(collect: DailyWorkProgressCollector) {
 		const directory = await mkdtemp(join(tmpdir(), "work-progress-coverage-evidence-"));
 		directories.push(directory);

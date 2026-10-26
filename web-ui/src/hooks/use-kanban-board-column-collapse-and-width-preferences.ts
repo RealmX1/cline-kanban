@@ -19,30 +19,30 @@ import {
 	toggleKanbanBoardColumnCollapsedOverride,
 } from "@/state/kanban-board-column-collapse-and-width-preferences";
 import { LocalStorageKey } from "@/storage/local-storage-store";
-import type { BoardColumnId } from "@/types";
+import type { BoardDisplayGroupId } from "@/types";
 import { useJsonLocalStorageValue } from "@/utils/react-use";
 
 export interface KanbanBoardColumnCollapseAndWidthPreferences {
-	isColumnCollapsed: (columnId: BoardColumnId) => boolean;
-	toggleColumnCollapsed: (columnId: BoardColumnId) => void;
-	expandColumn: (columnId: BoardColumnId) => void;
-	getExpandedColumnFlexStyle: (columnId: BoardColumnId) => { flex: string };
+	isColumnCollapsed: (columnId: BoardDisplayGroupId) => boolean;
+	toggleColumnCollapsed: (columnId: BoardDisplayGroupId) => void;
+	expandColumn: (columnId: BoardDisplayGroupId) => void;
+	getExpandedColumnFlexStyle: (columnId: BoardDisplayGroupId) => { flex: string };
 	/** 拖列宽 handle：普通拖只改这一列；按住 Shift 起拖则所有展开列统一成同一宽度。 */
-	startColumnWidthResizeDrag: (event: ReactMouseEvent, columnId: BoardColumnId) => void;
+	startColumnWidthResizeDrag: (event: ReactMouseEvent, columnId: BoardDisplayGroupId) => void;
 	/** 双击列宽 handle：该列恢复自动填充；Shift+双击则全部列恢复。 */
-	resetColumnWidthFromHandleDoubleClick: (event: ReactMouseEvent, columnId: BoardColumnId) => void;
+	resetColumnWidthFromHandleDoubleClick: (event: ReactMouseEvent, columnId: BoardDisplayGroupId) => void;
 	/**
 	 * 列宽 handle 的键盘入口（与鼠标语义一一对应，Shift 一律作用于所有展开列）：
 	 * ←/→ 每次 ±KANBAN_BOARD_COLUMN_KEYBOARD_RESIZE_STEP_PX；Home/End 设到最小/最大宽度；Enter/Delete/Backspace 恢复自动填充。
 	 */
-	handleColumnWidthResizeHandleKeyDown: (event: ReactKeyboardEvent, columnId: BoardColumnId) => void;
+	handleColumnWidthResizeHandleKeyDown: (event: ReactKeyboardEvent, columnId: BoardDisplayGroupId) => void;
 	/** 该列已持久化的自定义宽度（px）；未自定义（自动填充）时为 undefined，供 handle 的 aria-valuenow 使用。 */
-	getColumnCustomWidthPx: (columnId: BoardColumnId) => number | undefined;
+	getColumnCustomWidthPx: (columnId: BoardDisplayGroupId) => number | undefined;
 }
 
 export const KANBAN_BOARD_COLUMN_KEYBOARD_RESIZE_STEP_PX = 16;
 
-function findKanbanBoardColumnSection(boardElement: HTMLElement, columnId: BoardColumnId): HTMLElement | null {
+function findKanbanBoardColumnSection(boardElement: HTMLElement, columnId: BoardDisplayGroupId): HTMLElement | null {
 	return boardElement.querySelector<HTMLElement>(`:scope > section[data-column-id="${columnId}"]`);
 }
 
@@ -54,7 +54,7 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 	orderedColumnIds,
 	boardRef,
 }: {
-	orderedColumnIds: readonly BoardColumnId[];
+	orderedColumnIds: readonly BoardDisplayGroupId[];
 	boardRef: RefObject<HTMLElement | null>;
 }): KanbanBoardColumnCollapseAndWidthPreferences {
 	const [storedCollapsedOverrides, setStoredCollapsedOverrides] = useJsonLocalStorageValue<unknown>(
@@ -79,19 +79,19 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 	const { startDrag } = useResizeDrag();
 
 	const isColumnCollapsed = useCallback(
-		(columnId: BoardColumnId) => resolveKanbanBoardColumnCollapsed(collapsedOverrides, columnId),
+		(columnId: BoardDisplayGroupId) => resolveKanbanBoardColumnCollapsed(collapsedOverrides, columnId),
 		[collapsedOverrides],
 	);
 
 	const toggleColumnCollapsed = useCallback(
-		(columnId: BoardColumnId) => {
+		(columnId: BoardDisplayGroupId) => {
 			setStoredCollapsedOverrides(toggleKanbanBoardColumnCollapsedOverride(collapsedOverrides, columnId));
 		},
 		[collapsedOverrides, setStoredCollapsedOverrides],
 	);
 
 	const expandColumn = useCallback(
-		(columnId: BoardColumnId) => {
+		(columnId: BoardDisplayGroupId) => {
 			const nextOverrides = setKanbanBoardColumnCollapsedOverride(collapsedOverrides, columnId, false);
 			if (nextOverrides !== collapsedOverrides) {
 				setStoredCollapsedOverrides(nextOverrides);
@@ -101,14 +101,14 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 	);
 
 	const getExpandedColumnFlexStyle = useCallback(
-		(columnId: BoardColumnId) => resolveKanbanBoardExpandedColumnFlexStyle(customWidthsPx, columnId),
+		(columnId: BoardDisplayGroupId) => resolveKanbanBoardExpandedColumnFlexStyle(customWidthsPx, columnId),
 		[customWidthsPx],
 	);
 
 	const latestCustomWidthsPxDuringActiveDragRef = useRef<KanbanBoardColumnCustomWidthsPx | null>(null);
 
 	const startColumnWidthResizeDrag = useCallback(
-		(event: ReactMouseEvent, columnId: BoardColumnId) => {
+		(event: ReactMouseEvent, columnId: BoardDisplayGroupId) => {
 			const boardElement = boardRef.current;
 			const draggedColumnElement = boardElement ? findKanbanBoardColumnSection(boardElement, columnId) : null;
 			if (!boardElement || !draggedColumnElement) {
@@ -166,7 +166,7 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 	);
 
 	const resetColumnWidthFromHandleDoubleClick = useCallback(
-		(event: ReactMouseEvent, columnId: BoardColumnId) => {
+		(event: ReactMouseEvent, columnId: BoardDisplayGroupId) => {
 			setStoredCustomWidthsPx(
 				event.shiftKey
 					? clearAllKanbanBoardColumnCustomWidths()
@@ -177,7 +177,7 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 	);
 
 	const handleColumnWidthResizeHandleKeyDown = useCallback(
-		(event: ReactKeyboardEvent, columnId: BoardColumnId) => {
+		(event: ReactKeyboardEvent, columnId: BoardDisplayGroupId) => {
 			const appliesToAllExpandedColumns = event.shiftKey;
 			if (event.key === "Enter" || event.key === "Delete" || event.key === "Backspace") {
 				event.preventDefault();
@@ -229,7 +229,10 @@ export function useKanbanBoardColumnCollapseAndWidthPreferences({
 		[boardRef, collapsedOverrides, orderedColumnIds, persistedCustomWidthsPx, setStoredCustomWidthsPx],
 	);
 
-	const getColumnCustomWidthPx = useCallback((columnId: BoardColumnId) => customWidthsPx[columnId], [customWidthsPx]);
+	const getColumnCustomWidthPx = useCallback(
+		(columnId: BoardDisplayGroupId) => customWidthsPx[columnId],
+		[customWidthsPx],
+	);
 
 	useLayoutResetEffect(() => {
 		setStoredCollapsedOverrides({});

@@ -26,10 +26,28 @@ import { type RuntimeAppRouter, type RuntimeTrpcContext, runtimeAppRouter } from
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
-it("程序化回执按任务卡与实际目标会话过滤，同文人工输入及其它会话仍计数", async () => {
+it.each(
+	Array.from({ length: 8 }, (_, combination) => ({
+		receiptLedgerReadCacheDisabled: Boolean(combination & 1),
+		receiptTimeIndexDisabled: Boolean(combination & 2),
+		codexVerifiedHistoryReadCacheDisabled: Boolean(combination & 4),
+	})),
+)("三项回退组合 %j：程序化回执按任务与实际目标过滤，同文人工输入及其它会话仍计数", async (configuration) => {
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 	try {
+		vi.stubEnv(
+			"KANBAN_DAILY_WORK_PROGRESS_RECEIPT_LEDGER_CACHE_DISABLED",
+			configuration.receiptLedgerReadCacheDisabled ? "1" : undefined,
+		);
+		vi.stubEnv(
+			"KANBAN_DAILY_WORK_PROGRESS_RECEIPT_INDEX_DISABLED",
+			configuration.receiptTimeIndexDisabled ? "1" : undefined,
+		);
+		vi.stubEnv(
+			"KANBAN_DAILY_WORK_PROGRESS_CODEX_HISTORY_CACHE_DISABLED",
+			configuration.codexVerifiedHistoryReadCacheDisabled ? "1" : undefined,
+		);
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "programmatic-prompt-targets" });
 		await saveWorkspaceState(repository.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 			board: { columns: [{ id: "backlog", title: "Backlog", cards: [] }] },
@@ -92,14 +110,13 @@ it("程序化回执按任务卡与实际目标会话过滤，同文人工输入�
 		}));
 		await createDailyWorkProgressStatisticsCollector({ now: () => timestamp + 120_000 })(state);
 		for (const [index, target] of targets.entries()) {
-			const transcriptPath = join(fixture.isolatedHomeDirectoryPath, `native-session-${index}.jsonl`);
 			const cursorKey = JSON.stringify([workspace.workspaceId, "codex", `native-session-${index}`]);
 			expect(state.transcriptCursorsByIdentityKey[cursorKey]?.firstPromptAtEpochMs).toBe(
 				timestamp + (target.expectedCount === 1 ? 60_000 : 0),
 			);
 			expect(
-				Object.values(state.factsByEventId).filter(
-					(fact) => "transcriptPath" in fact && fact.transcriptPath === transcriptPath,
+				Object.values(state.factsByEventId).filter((fact) =>
+					fact.eventId.startsWith(`prompt:codex:native-session-${index}:`),
 				),
 			).toHaveLength(target.expectedCount);
 		}

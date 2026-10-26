@@ -18,7 +18,11 @@ import {
 
 export * from "./task-visualization-artifact-contract";
 
+import { codexConfigurationWriterBindingSchema } from "./codex-configuration-sync-contract";
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
+
+export * from "./codex-configuration-sync-contract";
+
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
 
 export * from "./independent-task-creation-contract.js";
@@ -55,7 +59,11 @@ import {
 	runtimePostDeployVerificationUncheckedChecklistItemClosureReasonSchema,
 } from "./post-deploy-verification-done-entry-closure-contract.js";
 import { projectLegacyState } from "./session-activity.js";
-import { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
+import {
+	taskMainSessionHandoverExistingTargetBindingSchema,
+	taskMainSessionHandoverRecordSchema,
+} from "./task-main-session-handover-contract";
+import { runtimeTaskStickerEntrySchema } from "./task-sticker-entry-contract.js";
 import { resolveTaskTitle } from "./task-title.js";
 
 export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
@@ -66,15 +74,18 @@ export * from "./post-deploy-verification-done-entry-closure-contract.js";
 export * from "./rvf-automatic-closeout-contract.js";
 export * from "./rvf-automatic-closeout-recovery-contract.js";
 export type {
+	TaskMainSessionHandoverAgentId,
 	TaskMainSessionHandoverMaterial,
 	TaskMainSessionHandoverPrepareResponse,
 	TaskMainSessionHandoverRecord,
+	TaskMainSessionHandoverRecoverWithNewAgentSessionRequest,
 	TaskMainSessionHandoverRecoverWithNewCodexSessionRequest,
 	TaskMainSessionHandoverRequest,
 	TaskMainSessionHandoverStatusResponse,
 } from "./task-main-session-handover-contract";
 export { taskMainSessionHandoverRecordSchema } from "./task-main-session-handover-contract";
 export * from "./task-rvf-history-contract.js";
+export * from "./task-sticker-entry-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -308,6 +319,23 @@ export const runtimeTaskCommentEntrySchema = z.object({
 });
 export type RuntimeTaskCommentEntry = z.infer<typeof runtimeTaskCommentEntrySchema>;
 
+export const runtimeTaskStickerEntryMutationSchema = z.discriminatedUnion("operation", [
+	z.object({
+		operation: z.literal("create"),
+		taskStickerEntryId: z.string().min(1),
+		stickerText: z.string().trim().min(1),
+	}),
+	z.object({
+		operation: z.literal("update_text"),
+		taskStickerEntryId: z.string().min(1),
+		expectedStickerText: z.string(),
+		stickerText: z.string().trim().min(1),
+	}),
+	z.object({ operation: z.literal("delete"), taskStickerEntryId: z.string().min(1), expectedStickerText: z.string() }),
+	z.object({ operation: z.literal("set_collapsed"), taskStickerEntryId: z.string().min(1), isCollapsed: z.boolean() }),
+]);
+export type RuntimeTaskStickerEntryMutation = z.infer<typeof runtimeTaskStickerEntryMutationSchema>;
+
 const runtimeLegacyTaskClineReasoningEffortSchema = z.enum(["default", "low", "medium", "high", "xhigh"]);
 
 function normalizeRuntimeTaskClineSettings(input: {
@@ -386,9 +414,15 @@ export const runtimeTaskConversationModeSchema = z.enum([
 ]);
 export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversationModeSchema>;
 
+export const runtimeTaskShelvingStateSchema = z.object({
+	isShelved: z.boolean(),
+	lastChangedAt: z.number().finite().nonnegative(),
+});
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
+		taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
 		mainTaskConversationSessionId: z.string().min(1).optional(),
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
@@ -404,6 +438,9 @@ export const runtimeBoardCardSchema = z
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
+		taskStickerEntries: z.array(runtimeTaskStickerEntrySchema).optional(),
+		// 只保留已删除条目的 ID，让迟到的创建重试在重启后也不能复活便签，不保留已删除正文。
+		taskStickerDeletedEntryIds: z.array(z.string().min(1)).optional(),
 		// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序，最近置顶的在前）。
 		// 与本文件里另外两处 "pin" 语义（模型 pinned_version、建卡固化会话通道）无关，也与 Focus View 的
 		// sticky 卡头几何无关——那些都不落盘。置顶态跟着卡片走，卡片被永久删除时字段一并消失，无孤儿可清。
@@ -1055,6 +1092,46 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	eventId: z.string().min(1).optional(),
 	nativeSessionId: z.string().min(1).optional(),
 	runtimeSessionIncarnationId: z.string().min(1),
+	submissionId: z.string().min(1).optional(),
+	acceptedByHistoricalReconciliation: z.boolean().optional(),
+	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
+	submittedPromptSha256: z.string().optional(),
+	predecessorAcceptedEventId: z.string().optional(),
+	verification: z
+		.object({
+			checkedAtMs: z.number(),
+			nextCheckAtMs: z.number().nullable(),
+			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
+			reason: z.enum([
+				"scanning_native_transcript",
+				"native_evidence_unavailable",
+				"no_matching_native_message",
+				"ambiguous_native_messages",
+				"native_acceptance_verified",
+				"native_identity_changed",
+			]),
+			transcriptCursor: z
+				.object({
+					fileIdentity: z.string(),
+					nextByteOffset: z.number().int().nonnegative(),
+					lastObservedFileSize: z.number().int().nonnegative(),
+					verifiedSessionMetadata: z.boolean(),
+					skippingOversizedRecord: z.boolean(),
+				})
+				.optional(),
+			matchingNativeMessages: z
+				.array(
+					z.object({
+						eventId: z.string(),
+						nativeTurnId: z.string(),
+						nativeItemId: z.string(),
+						acceptedAtMs: z.number(),
+					}),
+				)
+				.max(2)
+				.optional(),
+		})
+		.optional(),
 });
 export type RuntimeAgentConversationPromptSubmissionAcceptance = z.infer<
 	typeof runtimeAgentConversationPromptSubmissionAcceptanceSchema
@@ -1188,6 +1265,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
 	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
 	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
+	codexConfigurationWriterBinding: codexConfigurationWriterBindingSchema.nullable().optional(),
 	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
 	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
@@ -1490,11 +1568,44 @@ export type RuntimeAgentTerminalGeometryForTaskSessionSpawn = z.infer<
 // 两份摘要分开给：盘上那份是 board 锁内读到的 sessions.json（CLI 的 JSON 输出一直用它）；活的那份是 runtime 内存里
 // 三种 transport 合并后的当前摘要（未加载过该项目的终端管理器时为 null）。浏览器取「活的 ?? 盘上的」。
 export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema = z.object({
+	workspaceId: z.string().optional(),
 	taskCard: runtimeBoardCardSchema,
 	boardColumnIdContainingTaskCard: runtimeBoardColumnIdSchema,
 	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
 	taskSessionSummaryPersistedInWorkspaceSessionsFile: runtimeTaskSessionSummarySchema.nullable(),
 });
+export const runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite(),
+	mutation: runtimeTaskStickerEntryMutationSchema,
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export const runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema = z.object({
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionApplyTaskStickerEntryMutationRequest = z.infer<
+	typeof runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema
+>;
+export type RuntimeTaskCardActionApplyTaskStickerEntryMutationResponse = z.infer<
+	typeof runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema
+>;
+export const runtimeTaskCardActionSetShelvingStateRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
+	isShelved: z.boolean(),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export const runtimeTaskCardActionSetShelvingStateResponseSchema = z.object({
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionSetShelvingStateRequest = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateRequestSchema
+>;
+export type RuntimeTaskCardActionSetShelvingStateResponse = z.infer<
+	typeof runtimeTaskCardActionSetShelvingStateResponseSchema
+>;
 export type RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries = z.infer<
 	typeof runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
 >;
@@ -1508,10 +1619,24 @@ export type RuntimeTaskWorktreeDeletionResultOfTaskCardAction = z.infer<
 	typeof runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema
 >;
 
+export const runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema = z.object({
+	operationId: z.string().uuid(),
+	taskId: z.string().min(1),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	targetWorkspaceId: z.string().regex(/^[a-zA-Z0-9_-]+$/u),
+	targetBaseRef: z.string().min(1),
+});
+export const runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema = z.object({
+	operationId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+});
+
 // --- readTaskCardWithBoardColumn（query，只读）---
 // 供浏览器在**非当前项目**上打开编辑器、看原始 prompt、展开跨项目行。
 export const runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 });
 export type RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest = z.infer<
 	typeof runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema
@@ -1538,6 +1663,7 @@ export type RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse = z.infer<
 // 「backlog 单向」：启动失败后卡留在 in_progress，让会话状态与错误保持可见）。会话已在 agent 回合时不重复启动。
 export const runtimeTaskCardActionStartAgentSessionRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
 	// 拖放进 in_progress 的落点；缺省 = 列顶。卡片本来就在 in_progress 时忽略。
@@ -1575,6 +1701,7 @@ export type RuntimeTaskCardActionStartAgentSessionResponse = z.infer<
 // 跨项目时没有浏览器在跑列自动流转（Rule A），不能指望它把卡挪过去。翻回合失败则不移列。
 export const runtimeTaskCardActionMoveIntoReviewRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 });
 export type RuntimeTaskCardActionMoveIntoReviewRequest = z.infer<
@@ -1601,6 +1728,7 @@ export type RuntimeTaskCardActionMoveIntoReviewResponse = z.infer<
 // src/core/task-card-action-board-column-transitions.ts；有会话副作用的移列必须走各自的 procedure。
 export const runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	targetBoardColumnId: runtimeBoardColumnIdSchema,
 	// 拖放落点（目标列里插入后的下标）；缺省 = 列顶。同列重排时必填，否则视为原位不动。
 	insertAtIndexWithinTargetBoardColumn: z.number().int().nonnegative().optional(),
@@ -1624,6 +1752,7 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 // 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	// 评论与移列在同一次保存里生效；稳定 ID 供网络重试去重，时间由服务端填写。
 	taskCommentToAppendWhenMovingIntoDone: z
 		.object({
@@ -1657,6 +1786,7 @@ export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTa
 // 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
 export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
 	// 从 Done 拖回 review 的落点；缺省 = 列顶。恢复失败移回 Done 时不用它（回到 Done 列顶）。
@@ -1702,6 +1832,7 @@ export type RuntimePermanentlyDeletedTaskCardSelection = z.infer<
 // 收尾链顺序固定：board 删卡 → 清编辑草稿 → 清排队 prompt（并通知出队引擎重读）→ 停会话 → 删 worktree →
 // **最后**批删 turn checkpoint ref。按 task id 选中而有一张不在 board 上时整批 NOT_FOUND、什么都不删。
 export const runtimeTaskCardActionPermanentlyDeleteRequestSchema = z.object({
+	expectedTaskIncarnationCreatedAtEpochMsByTaskId: z.record(z.string(), z.number().finite()).optional(),
 	permanentlyDeletedTaskCardSelection: runtimePermanentlyDeletedTaskCardSelectionSchema,
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 });
@@ -1791,6 +1922,7 @@ export type RuntimeTaskCardFieldUpdate = z.infer<typeof runtimeTaskCardFieldUpda
 
 export const runtimeTaskCardActionUpdateFieldValuesRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	taskCardFieldUpdate: runtimeTaskCardFieldUpdateSchema,
 	// 异步 AI 回填锁内检查，防止顶掉并发名称或描述编辑。
 	expectedTaskTitleAndPromptForAiNameBackfill: z.object({ title: z.string(), prompt: z.string() }).optional(),
@@ -1894,6 +2026,7 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 	taskConversationSessionActivityObservations: z
 		.array(runtimeTaskConversationSessionActivityObservationSchema)
 		.optional(),
@@ -3073,6 +3206,7 @@ export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema =
 	revision: z.number().int().nonnegative(),
 });
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	z.object({ type: z.literal("codex_configuration_sync_updated"), revision: z.number().int().nonnegative() }),
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
 	taskVisualizationPreviewRequestedMessageSchema,
@@ -3236,6 +3370,8 @@ export const runtimeCrossProjectTaskWorktreeGitMetadataSchema = z.discriminatedU
 		workspaceId: z.string(),
 		taskId: z.string(),
 		availability: z.literal("available"),
+		// 新运行时仅在探针前后核对同一世身份后提供；旧运行时缺省时不能用于完整身份预览。
+		taskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		// 与当前项目推流里的同名结构完全一致（同一个探针算出），浏览器用同一套展示规则。
 		taskWorkspaceMetadata: runtimeTaskWorkspaceMetadataSchema,
 	}),
@@ -3262,12 +3398,14 @@ export const runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema = z.discr
 	z.object({
 		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
 		taskId: z.string().min(1),
+		expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		taskPinboardPinReason: z.string().nullable(),
 		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
 	}),
 	z.object({
 		taskPinboardPinAction: z.literal("unpin_task_card"),
 		taskId: z.string().min(1),
+		expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
 	}),
 ]);
@@ -3883,6 +4021,12 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	// 创建、Backlog 保存和直接启动共享；旧配置缺失或 null 时均默认关闭。
+	taskProjectAssignmentAutomaticAnalysisEnabled: z.boolean().nullable().optional(),
+	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
+	taskEditorSettingPresentationBySettingKey: z
+		.record(z.string().max(100), z.enum(["expanded", "collapsed_in_group", "hidden"]))
+		.optional(),
 	newTaskAutoReviewEnabled: z.boolean().nullable(),
 	newTaskAutoReviewMode: runtimeTaskAutoReviewModeSchema.nullable(),
 	taskCreateDialogPrimaryStartAction: runtimeTaskCreateDialogPrimaryStartActionSchema.nullable(),
@@ -4037,6 +4181,7 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
+		expectedExistingMainSessionHandoverTargetBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -4759,6 +4904,7 @@ export const runtimeTaskEditDraftSchema = z.object({
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),
+	taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 	startInPlanMode: z.boolean(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 	autoReviewEnabled: z.boolean(),

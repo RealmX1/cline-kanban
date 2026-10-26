@@ -1,9 +1,16 @@
-import { hostname, userInfo } from "node:os";
+import type * as OperatingSystemModule from "node:os";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 
 const commandDiscoveryMocks = vi.hoisted(() => ({
 	isBinaryAvailableOnPath: vi.fn(),
+}));
+
+const runtimeHostOperatingSystemIdentityMocks = vi.hoisted(() => ({ userInfo: vi.fn(), hostname: vi.fn() }));
+
+vi.mock("node:os", async (importOriginal) => ({
+	...(await importOriginal<typeof OperatingSystemModule>()),
+	...runtimeHostOperatingSystemIdentityMocks,
 }));
 
 vi.mock("../../../src/terminal/command-discovery.js", () => ({
@@ -44,6 +51,14 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 }
 
 beforeEach(() => {
+	runtimeHostOperatingSystemIdentityMocks.userInfo.mockReset().mockReturnValue({
+		username: "runtime-host-account",
+		uid: 1000,
+		gid: 1000,
+		homedir: "/home/runtime-host-account",
+		shell: "/bin/sh",
+	});
+	runtimeHostOperatingSystemIdentityMocks.hostname.mockReset().mockReturnValue("runtime-host");
 	commandDiscoveryMocks.isBinaryAvailableOnPath.mockReset();
 	commandDiscoveryMocks.isBinaryAvailableOnPath.mockReturnValue(false);
 	delete process.env.KANBAN_DEBUG_MODE;
@@ -186,7 +201,11 @@ describe("buildRuntimeConfigResponse", () => {
 		expect(response.debugModeEnabled).toBe(true);
 	});
 
-	it("broadcasts the runtime host's account and hostname for Remote-SSH deep links from other devices", () => {
+	it.each([false, true])("宿主账号查询不可用为 %s 时仍广播账号和主机名", (accountLookupUnavailable) => {
+		if (accountLookupUnavailable)
+			runtimeHostOperatingSystemIdentityMocks.userInfo.mockImplementation(() => {
+				throw new Error("系统账号查询不可用");
+			});
 		const response = buildRuntimeConfigResponse(createRuntimeConfigState(), {
 			providerId: null,
 			modelId: null,
@@ -199,8 +218,8 @@ describe("buildRuntimeConfigResponse", () => {
 			oauthExpiresAt: null,
 		});
 		expect(response.runtimeHostRemoteEditorAccessIdentity).toEqual({
-			operatingSystemAccountUsername: userInfo().username,
-			operatingSystemHostname: hostname(),
+			operatingSystemAccountUsername: accountLookupUnavailable ? null : "runtime-host-account",
+			operatingSystemHostname: "runtime-host",
 		});
 	});
 });

@@ -11,6 +11,7 @@ export interface CrossProjectTaskSwitcherFocusViewSectionVisibility {
 	isRunningSectionExpanded: boolean;
 	isPromptCacheWarmSectionExpanded: boolean;
 	isRecentSectionExpanded: boolean;
+	isShelvedSectionExpanded?: boolean;
 }
 
 export interface CrossProjectTaskSwitcherFocusedTaskRowToKeepMounted {
@@ -28,6 +29,7 @@ export function findCrossProjectTaskSwitcherFocusedTaskSourceSection(
 	const matches = ({ workspaceId, entry }: CrossProjectTaskSwitcherEntryInProject) =>
 		buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskEntryKey;
 	// 主分组优先于 Pinned 副本，导航和焦点卡几何共用同一定位源。
+	if (sections.shelvedEntries.some(matches)) return "shelved";
 	if (sections.runningEntries.some(matches)) return "running";
 	if (sections.promptCacheWarmAwaitingUserEntries.some(matches)) return "prompt_cache_warm";
 	if (sections.remainingSection.entries.some(matches)) return "remaining";
@@ -60,6 +62,8 @@ export function collectVisibleCrossProjectTaskSwitcherSectionEntries<T extends C
 				return !isFocusViewLeftColumnPresentation || visibility.isRunningSectionExpanded || isFocusedRow;
 			case "prompt_cache_warm":
 				return visibility.isPromptCacheWarmSectionExpanded || isFocusedRow;
+			case "shelved":
+				return visibility.isShelvedSectionExpanded === true || isFocusedRow;
 			case "remaining":
 				return visibility.isRecentSectionExpanded || isFocusedRow;
 			default:
@@ -91,6 +95,7 @@ export function collectAllProjectsFocusViewAdjacentTaskNavigationCandidates({
 		...visibleEntries(sections.runningEntries, "running"),
 		...visibleEntries(sections.promptCacheWarmAwaitingUserEntries, "prompt_cache_warm"),
 		...visibleEntries(sections.remainingSection.entries, "remaining"),
+		...visibleEntries(sections.shelvedEntries, "shelved"),
 	];
 	const mainSectionEntryKeys = new Set(
 		mainSectionEntries.map(({ workspaceId, entry }) =>
@@ -103,5 +108,5 @@ export function collectAllProjectsFocusViewAdjacentTaskNavigationCandidates({
 				!mainSectionEntryKeys.has(buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId)),
 		),
 		...mainSectionEntries,
-	].filter(({ entry }) => entry.columnId !== "backlog");
+	].filter(({ entry }) => entry.columnId !== "backlog" || entry.taskShelvingState?.isShelved);
 }

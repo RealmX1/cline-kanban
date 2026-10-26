@@ -83,10 +83,12 @@ export function TaskNameInputWithAiSuggestions({
 	const isComponentStillMountedRef = useRef(true);
 	// 每按一次「起名」自增一格，resolve 回调只认自己发起时的那一格；过期的整份丢弃。
 	const latestSuggestionRequestGenerationNumberRef = useRef(0);
+	const suggestionRequestAbortControllerRef = useRef<AbortController | null>(null);
 	useEffect(() => {
 		isComponentStillMountedRef.current = true;
 		return () => {
 			isComponentStillMountedRef.current = false;
+			suggestionRequestAbortControllerRef.current?.abort();
 		};
 	}, []);
 
@@ -123,9 +125,14 @@ export function TaskNameInputWithAiSuggestions({
 			latestSuggestionRequestGenerationNumberRef.current === suggestionRequestGenerationNumberOfThisRound;
 		setIsSuggestionRequestInFlight(true);
 		setSuggestionUnavailableNotice(null);
+		const controller = new AbortController();
+		suggestionRequestAbortControllerRef.current = controller;
 		void (async () => {
 			try {
-				const response = await suggestTaskNamesFromTaskDescription(taskDescriptionThisRoundWasNamedFrom);
+				const response = await suggestTaskNamesFromTaskDescription(
+					taskDescriptionThisRoundWasNamedFrom,
+					controller.signal,
+				);
 				if (!isThisRoundStillTheLiveSuggestionRequest()) {
 					return;
 				}

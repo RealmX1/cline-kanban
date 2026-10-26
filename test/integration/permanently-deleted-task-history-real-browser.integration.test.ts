@@ -61,6 +61,8 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 		);
 		Object.assign(environment, {
 			PATH: `${stubExecutables}:${dirname(process.execPath)}:/usr/bin:/bin`,
+			CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"),
+			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-databases"),
 			KANBAN_RUNTIME_PORT: String(runtimePort),
 			NODE_ENV: "development",
 		});
@@ -155,6 +157,33 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 				sessions: state.sessions,
 				expectedRevision: state.revision,
 			});
+			const stickerIdentity = {
+				taskId: deletedId,
+				expectedTaskIncarnationCreatedAtEpochMs: deleted.createdAt,
+			};
+			const retainedStickerText = "删除前便签首行\n真实账本保留的完整便签正文";
+			for (const taskStickerEntryId of ["retained-sticker", "removed-sticker"])
+				await client(alphaId).taskCardAction.applyTaskStickerEntryMutation.mutate({
+					...stickerIdentity,
+					mutation: { operation: "create", taskStickerEntryId, stickerText: "最初便签" },
+				});
+			await client(alphaId).taskCardAction.applyTaskStickerEntryMutation.mutate({
+				...stickerIdentity,
+				mutation: {
+					operation: "update_text",
+					taskStickerEntryId: "retained-sticker",
+					expectedStickerText: "最初便签",
+					stickerText: retainedStickerText,
+				},
+			});
+			await client(alphaId).taskCardAction.applyTaskStickerEntryMutation.mutate({
+				...stickerIdentity,
+				mutation: { operation: "set_collapsed", taskStickerEntryId: "retained-sticker", isCollapsed: true },
+			});
+			await client(alphaId).taskCardAction.applyTaskStickerEntryMutation.mutate({
+				...stickerIdentity,
+				mutation: { operation: "delete", taskStickerEntryId: "removed-sticker", expectedStickerText: "最初便签" },
+			});
 			for (const [workspaceId, taskId] of [
 				[alphaId, deletedId],
 				[betaId, otherDeletedId],
@@ -175,6 +204,23 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 			});
 			expect(versions.beforePermanentRemoval.text).toBe(finalPrompt);
 			expect(versions.atCreation.text).toBe(createdPrompt);
+			const retainedHistoryPage = await client().workUnit.listPermanentlyDeletedTaskCards.query({
+				workspaceId: alphaId,
+				query: deletedId,
+				cursor: null,
+			});
+			expect(retainedHistoryPage.entries).toMatchObject([
+				{
+					kanbanBoardCard: {
+						workspaceId: alphaId,
+						taskId: deletedId,
+						taskIncarnationCreatedAtEpochMs: deleted.createdAt,
+					},
+					taskStickerEntries: [
+						{ taskStickerEntryId: "retained-sticker", stickerText: retainedStickerText, isCollapsed: true },
+					],
+				},
+			]);
 			const configurationPath = join(fixture.fixtureRootDirectoryPath, "deleted-task-history-vite.config.mts");
 			writeFileSync(
 				configurationPath,
@@ -229,6 +275,16 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 					.get() as { count: number };
 			};
 			const eventCountBeforeQueries = countCommittedEvents();
+			await history.getByRole("button", { name: "便签 1", exact: true }).click();
+			const stickerOverlay = page.locator("[data-task-sticker-overlay]");
+			await stickerOverlay.getByText("删除前便签首行", { exact: true }).waitFor();
+			expect(await stickerOverlay.getByRole("button", { name: "编辑便签" }).count()).toBe(0);
+			expect(await stickerOverlay.getByRole("button", { name: "删除便签" }).count()).toBe(0);
+			expect(await stickerOverlay.getByRole("button", { name: "添加便签" }).count()).toBe(0);
+			await stickerOverlay.getByRole("button", { name: "展开便签", exact: true }).click();
+			await stickerOverlay.getByText(retainedStickerText, { exact: true }).waitFor();
+			await page.screenshot({ animations: "disabled", path: join(evidence, "deleted-task-sticker-desktop.png") });
+			await stickerOverlay.getByRole("button", { name: "关闭便签", exact: true }).click();
 			await history.getByLabel("已删除 Task 的项目范围").selectOption("");
 			await history.getByText("历史目标 Beta", { exact: true }).waitFor();
 			await history.getByRole("textbox", { name: "搜索已删除 Task" }).fill(deletedId);
@@ -286,6 +342,7 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 			});
 			await page.keyboard.press("Escape");
 			await page.setViewportSize({ width: 390, height: 844 });
+			await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).click();
 			await page.getByRole("button", { name: "查看已删除 Task", exact: true }).click();
 			await history.getByText("历史目标 Alpha", { exact: true }).waitFor();
 			expect(
@@ -298,6 +355,10 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 				}),
 			).toBe(true);
 			await page.screenshot({ animations: "disabled", path: join(evidence, "deleted-task-history-mobile.png") });
+			await history.getByRole("button", { name: "便签 1", exact: true }).click();
+			await stickerOverlay.getByRole("button", { name: "展开便签", exact: true }).click();
+			await stickerOverlay.getByText(retainedStickerText, { exact: true }).waitFor();
+			await page.screenshot({ animations: "disabled", path: join(evidence, "deleted-task-sticker-mobile.png") });
 			expect(requests.some((url) => url.includes(":3484/"))).toBe(false);
 			expect(requests.some((url) => url.includes("taskCardAction."))).toBe(false);
 			expect(pageErrors).toEqual([]);
@@ -311,6 +372,8 @@ it.skipIf(process.env.KANBAN_RUN_ISOLATED_DELETED_TASK_HISTORY_BROWSER_CHECK !==
 						otherDeletedId,
 						checks: [
 							"真实永久删除后可查询",
+							"删除前账本便签进入历史 API 与卡片，只读展开不写服务端",
+							"已删除便签不复活",
 							"跨项目范围",
 							"完整 Prompt 逐字复制",
 							"创建时与删除前版本",

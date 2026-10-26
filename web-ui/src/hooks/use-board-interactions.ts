@@ -6,6 +6,8 @@ import {
 	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
 	isTaskMainSessionHandoverSuspendingAutomaticActions,
+	resolveLastAgentConversationUserHandoffObservation,
+	resolveLastEffectiveAgentConversationActivityObservation,
 	resolveMainTaskConversationSessionSummary,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
@@ -55,6 +57,7 @@ import {
 	moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime,
 	permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime,
+	setTaskCardShelvingStateThroughRuntime,
 	setTaskPinboardPinStateOfTaskCardThroughRuntime,
 	startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime,
 	updateTaskCardFieldValuesThroughRuntime,
@@ -185,6 +188,7 @@ export interface UseBoardInteractionsResult {
 	handleCancelTaskPinboardPinReason: () => void;
 	handleConfirmTaskPinboardPinReason: (taskId: string, pinReason: string) => void;
 	handleUnpinTaskFromTaskPinboard: (taskId: string) => void;
+	handleSetTaskShelvingState: (taskId: string, isShelved: boolean) => void;
 	taskPinboardPinReasonRequest: TaskPinboardPinReasonDialogRequest | null;
 	handleOpenClearTrash: () => void;
 	handleConfirmClearTrash: () => void;
@@ -478,6 +482,7 @@ export function useBoardInteractions({
 				const result = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId: currentProjectId,
 					taskId: task.id,
+					expectedTaskIncarnationCreatedAtEpochMs: task.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(task.id),
 					currentProjectBoardForOptimisticOverlay: latestBoardInteractionStateRef.current.board,
 					...(options?.insertAtIndexWithinInProgressBoardColumn !== undefined
@@ -504,7 +509,10 @@ export function useBoardInteractions({
 						timeout: 7000,
 					});
 				}
-				if (latestBoardInteractionStateRef.current.selectedTaskId === task.id) {
+				if (
+					(response.taskCardSnapshotAfterAction.workspaceId ?? currentProjectId) === currentProjectId &&
+					latestBoardInteractionStateRef.current.selectedTaskId === task.id
+				) {
 					const infoAfterStart = await fetchTaskWorkspaceInfo(task);
 					if (infoAfterStart) {
 						setTaskWorkspaceInfo(infoAfterStart);
@@ -542,7 +550,7 @@ export function useBoardInteractions({
 
 	const startBacklogTaskWithAnimation = useCallback(
 		async (task: BoardCard): Promise<boolean> => {
-			if (selectedCard) {
+			if (selectedCard || task.taskShelvingState?.isShelved) {
 				return startBacklogTaskImmediately(task);
 			}
 
@@ -634,14 +642,27 @@ export function useBoardInteractions({
 					continue;
 				}
 				let columnId = getTaskColumnId(nextBoard, taskId);
-				const taskCardUpdatedAtMs = findCardSelection(nextBoard, taskId)?.card.updatedAt;
+				const taskCard = findCardSelection(nextBoard, taskId)?.card;
+				const taskCardUpdatedAtMs = taskCard?.updatedAt;
+				const facets = resolveSessionFacets(summary);
+				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
+				if (taskCard?.taskShelvingState?.isShelved) continue;
+				if (
+					taskCard?.taskShelvingState &&
+					Math.max(
+						resolveLastEffectiveAgentConversationActivityObservation(summary)?.observedAtMs ?? 0,
+						resolveLastAgentConversationUserHandoffObservation(summary)?.observedAtMs ?? 0,
+						previousFacets && previousFacets.liveness !== "interrupted" && facets.liveness === "interrupted"
+							? summary.updatedAt
+							: 0,
+					) <= taskCard.taskShelvingState.lastChangedAt
+				)
+					continue;
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
 				// 折叠，故进程已退却仍等人审的会话照旧自动落位 review，不偷渡 distinction ②）、
 				// turnOwner==="agent" ⟺ running、liveness==="interrupted" ⟺ interrupted。
-				const facets = resolveSessionFacets(summary);
-				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
 				if (columnId === "backlog" && summary.startedAt != null) {
 					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
@@ -912,6 +933,7 @@ export function useBoardInteractions({
 
 	useReviewAutoActions({
 		board,
+		sessions,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
 		requestMoveTaskToTrash: requestMoveTaskToTrashWithAnimationSkippingPostDeployVerificationGatedTaskCards,
@@ -964,6 +986,26 @@ export function useBoardInteractions({
 	//     overlay，不改会被保存的 board；
 	//   - 浏览器端列自动流转（会话 facet 驱动、会话中断进 Done）与列内重排：仍在浏览器改 board、整板保存——
 	//     自动流转不搬服务端（计划「明确不做」），中断进 Done 刻意不停会话、不删 worktree（保留供恢复）。
+	const handleSetTaskShelvingState = useCallback(
+		(taskId: string, isShelved: boolean) => {
+			if (!currentProjectId) return;
+			const board = latestBoardInteractionStateRef.current.board;
+			const card = findCardSelection(board, taskId)?.card;
+			if (!card) return;
+			void setTaskCardShelvingStateThroughRuntime({
+				workspaceId: currentProjectId,
+				taskId,
+				isShelved,
+				expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
+				currentProjectBoardForOptimisticOverlay: board,
+			}).then((result) => {
+				if (result.taskCardActionCommandExecutionOutcome === "command_failed")
+					notifyError(`无法更新搁置状态：${result.commandFailureMessage}`);
+			});
+		},
+		[currentProjectId],
+	);
+
 	const handleDragEnd = useCallback(
 		(result: DropResult, options?: { selectDroppedTask?: boolean }) => {
 			const { board } = latestBoardInteractionStateRef.current;
@@ -987,6 +1029,11 @@ export function useBoardInteractions({
 			if (drop.taskCardDropKind === "no_effective_task_card_drop" || isTaskCardAwaitingTaskCardActionCommand) {
 				resolvePendingProgrammaticStartMove(result.draggableId, false);
 				resolvePendingProgrammaticTrashMove(result.draggableId);
+				return;
+			}
+
+			if (drop.taskCardDropKind === "task_card_shelving_state_changed") {
+				handleSetTaskShelvingState(drop.taskId, drop.isShelved);
 				return;
 			}
 
@@ -1144,6 +1191,7 @@ export function useBoardInteractions({
 		},
 		[
 			consumeProgrammaticCardMove,
+			handleSetTaskShelvingState,
 			currentProjectId,
 			maybeRequestNotificationPermissionForTaskStart,
 			openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone,
@@ -1204,7 +1252,12 @@ export function useBoardInteractions({
 		(taskIds?: string[]) => {
 			const { board } = latestBoardInteractionStateRef.current;
 			const requestedTaskIds =
-				taskIds ?? board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
+				taskIds ??
+				board.columns
+					.find((column) => column.id === "backlog")
+					?.cards.filter((card) => !card.taskShelvingState?.isShelved)
+					.map((card) => card.id) ??
+				[];
 			if (requestedTaskIds.length === 0) {
 				return;
 			}
@@ -1216,7 +1269,7 @@ export function useBoardInteractions({
 					continue;
 				}
 				const selection = findCardSelection(board, taskId);
-				if (!selection || selection.column.id !== "backlog") {
+				if (!selection || selection.column.id !== "backlog" || selection.card.taskShelvingState?.isShelved) {
 					continue;
 				}
 				pendingStarts.push(selection.card);
@@ -1885,7 +1938,11 @@ export function useBoardInteractions({
 	// 清空 Done：同一个永久删除命令按「整列」选择，服务端只删取得串行权的卡（RVF-004），收尾链与单卡删除相同。
 	const handleConfirmClearTrash = useCallback(() => {
 		const { board } = latestBoardInteractionStateRef.current;
-		const taskIds = board.columns.find((column) => column.id === "trash")?.cards.map((card) => card.id) ?? [];
+		const taskIds =
+			board.columns
+				.find((column) => column.id === "trash")
+				?.cards.filter((card) => !card.taskShelvingState?.isShelved)
+				.map((card) => card.id) ?? [];
 		setIsClearTrashDialogOpen(false);
 		if (!currentProjectId || taskIds.length === 0) {
 			return;
@@ -1982,6 +2039,7 @@ export function useBoardInteractions({
 		handleCancelTaskPinboardPinReason,
 		handleConfirmTaskPinboardPinReason,
 		handleUnpinTaskFromTaskPinboard,
+		handleSetTaskShelvingState,
 		taskPinboardPinReasonRequest,
 		handleOpenClearTrash,
 		handleConfirmClearTrash,

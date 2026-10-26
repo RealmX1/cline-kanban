@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { TaskMainSessionHandoverReportAcceptanceProbe } from "../../../src/core/task-main-session-handover-contract";
-import { queryCodexMainSessionHandoverReportAcceptanceWithPort } from "../../../src/server/task-main-session-handover-report-acceptance";
+import {
+	queryCodexMainSessionHandoverReportAcceptanceWithPort,
+	queryTaskMainSessionHandoverReportAcceptance,
+} from "../../../src/server/task-main-session-handover-report-acceptance";
 
 const probe: TaskMainSessionHandoverReportAcceptanceProbe = {
 	nativeSessionId: "target-native",
@@ -13,6 +17,61 @@ const probe: TaskMainSessionHandoverReportAcceptanceProbe = {
 	historicalAcceptanceEvidence: null,
 };
 describe("交接报告原生接受只读补证", () => {
+	it.each(["pending", "other-accepted-turn", "report-accepted"])(
+		"ACP 只接受与本次投递绑定的协议证明：%s",
+		async (scenario) => {
+			const expectedReportDeliveryKey = "handover:report:0";
+			const summary = runtimeTaskSessionSummarySchema.parse({
+				taskId: "task",
+				agentId: "omp",
+				sessionTransport: "acp_stdio_subprocess",
+				workspacePath: "/task",
+				runtimeSessionIncarnationId: "incarnation",
+				pid: null,
+				startedAt: 1,
+				updatedAt: 1,
+				lastOutputAt: null,
+				reviewReason: null,
+				exitCode: null,
+				lastHookAt: null,
+				latestHookActivity: null,
+				turnOwner: null,
+				liveness: "none",
+				userTurnKind: null,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "omp",
+					nativeSessionId: "target-native",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+				agentConversationPromptSubmissionAcceptance: {
+					status: scenario === "pending" ? "pending" : "accepted",
+					eventId: scenario === "other-accepted-turn" ? "other-turn" : expectedReportDeliveryKey,
+					attemptedAtMs: 1,
+					confirmedAtMs: 2,
+					nativeSessionId: "target-native",
+					runtimeSessionIncarnationId: "incarnation",
+				},
+			});
+			const result = await queryTaskMainSessionHandoverReportAcceptance({
+				summary,
+				probe: { ...probe, targetAgentId: "omp" },
+				workspaceId: "project",
+				card: {
+					id: "task",
+					title: "交接任务",
+					prompt: "需求",
+					baseRef: "main",
+					startInPlanMode: false,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+				prompt: "完整交接报告",
+				expectedReportDeliveryKey,
+			});
+			expect(result.historicalAcceptanceEvidence !== null).toBe(scenario === "report-accepted");
+		},
+	);
 	it("分页进度可持久保存，重入沿原生身份查找斜杠命令处理后的完整正文", async () => {
 		const text = "/plan KANBAN_MAIN_SESSION_HANDOVER_REPORT:handover:report:0\n只读汇报";
 		const request = vi.fn(async (method: string, parameters: Record<string, unknown>) => {

@@ -4,11 +4,17 @@ import type {
 	RvfAutomaticCloseoutWaitingReasonCode,
 } from "../core/rvf-automatic-closeout-contract";
 import {
+	normalRvfCloseoutReconciliationContext,
+	recordIndependentBackupRouteSuppressionObservation,
+	withNormalRvfCloseoutMutation,
+} from "./independent-backup-route-ownership";
+import {
 	RvfAutomaticCloseoutRecordOperationClaimLostError,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
 	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
+import { resolveRvfCloseoutSchedulingDecision } from "./rvf-closeout-scheduling-decision";
 
 export class RvfAutomaticCloseoutWaitError extends Error {
 	constructor(
@@ -26,6 +32,10 @@ export type RvfCompletionEvidence = Pick<
 export function createRvfAutomaticCloseoutCoordinator(deps: {
 	storePath: string;
 	inspectCompletion: (record: RvfAutomaticCloseoutRecord) => Promise<RvfCompletionEvidence | null>;
+	observeExistingCompletionBeforeNativeAction?: (
+		record: RvfAutomaticCloseoutRecord,
+		assertOperationLockStillOwned: () => void,
+	) => Promise<RvfAutomaticCloseoutRecord>;
 	restore: (
 		record: RvfAutomaticCloseoutRecord,
 		save: (patch: Partial<RvfAutomaticCloseoutRecord>) => Promise<void>,
@@ -46,6 +56,8 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 			const current = records.find((entry) => entry.receipt.decision_token === token);
 			if (
 				!current ||
+				resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(current).requiresBackgroundReconciliationOnly ||
 				current.promptDeliveryAttempts?.length ||
 				current.status === "captured_review_start_boundary" ||
 				current.status === "paused" ||
@@ -70,7 +82,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					const current = records.find((entry) => entry.receipt.decision_token === token);
 					if (current?.activeCoordinatorOperationClaimId !== claimId)
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError("自动收尾记录已被其他运行时认领。");
-					if (current.status === "paused" || current.status === "completed") {
+					if (current.status === "paused" || resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling) {
 						record = current;
 						throw new RvfAutomaticCloseoutRecordOperationClaimLostError(
 							current.status === "completed"
@@ -90,6 +102,19 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					};
 				});
 			};
+			const completedOrPausedAfterExistingResultObservation = async () => {
+				if (!deps.observeExistingCompletionBeforeNativeAction) return false;
+				// 复用当前操作锁，覆盖刚绑定完成凭据和恢复后尚未投递的持久 checkpoint。
+				record = await deps.observeExistingCompletionBeforeNativeAction(record, assertOperationLockStillOwned);
+				assertOperationLockStillOwned();
+				if (record.activeCoordinatorOperationClaimId !== claimId)
+					throw new RvfAutomaticCloseoutRecordOperationClaimLostError("既有结果观察期间操作认领已改变。");
+				return (
+					record.status === "paused" ||
+					resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+					resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly
+				);
+			};
 			try {
 				if (record.status === "awaiting_rvf_completion") {
 					let completion: RvfCompletionEvidence | null;
@@ -102,6 +127,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					await save({ ...completion, status: "restoring_pre_review_conversation" });
 				}
 				if (record.status === "restoring_pre_review_conversation") {
+					if (await completedOrPausedAfterExistingResultObservation()) return;
 					await deps.restore(record, save);
 					await save({
 						status: "restored_pre_review_conversation",
@@ -115,6 +141,7 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					record.status === "restored_pre_review_conversation" ||
 					record.status === "submitting_closeout_prompt"
 				) {
+					if (await completedOrPausedAfterExistingResultObservation()) return;
 					await save({ status: "submitting_closeout_prompt" });
 					// 同一持久幂等键贯穿重启；投递账本不确定时不能生成新键绕过它。
 					await deps.enqueue(record, () => save({}));
@@ -163,6 +190,8 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 	async function run() {
 		for (const record of await readRvfAutomaticCloseoutRecords(deps.storePath)) {
 			if (
+				resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly ||
 				["captured_review_start_boundary", "paused", "closeout_prompt_submitted", "completed"].includes(
 					record.status,
 				)
@@ -173,10 +202,23 @@ export function createRvfAutomaticCloseoutCoordinator(deps: {
 					deps.storePath,
 					record.receipt.decision_token,
 					(assertOwned) =>
-						processRecord(
-							record.receipt.decision_token,
-							record.activeCoordinatorOperationClaimId ?? null,
-							assertOwned,
+						withNormalRvfCloseoutMutation(
+							record.receipt.worktree,
+							record.runDirectory,
+							() =>
+								processRecord(
+									record.receipt.decision_token,
+									record.activeCoordinatorOperationClaimId ?? null,
+									assertOwned,
+								),
+							(reason, controlDirectory) =>
+								recordIndependentBackupRouteSuppressionObservation(
+									deps.storePath,
+									record,
+									reason,
+									controlDirectory,
+								),
+							normalRvfCloseoutReconciliationContext(deps.storePath, record),
 						),
 				);
 			} catch (error) {

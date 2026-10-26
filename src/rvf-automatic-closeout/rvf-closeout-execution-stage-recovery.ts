@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { z } from "zod";
+import { verifyCodexConfigurationExecutionClosure } from "../codex-configuration-sync/codex-configuration-execution-closure";
+import {
+	configurationDigest,
+	projectCodexConfigurationFields,
+} from "../codex-configuration-sync/codex-configuration-field-projection";
+import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { assertCodexConfigurationWriterBindingIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type RvfAutomaticCloseoutExecutionResultReportRequest,
@@ -22,24 +29,39 @@ import {
 import { getWorkspaceDirectoryPath } from "../state/workspace-state";
 import { getGitStdout } from "../workspace/git-utils";
 import { computeRvfTextSha256 } from "./capture-rvf-review-start-boundary";
+import {
+	normalRvfCloseoutReconciliationContext,
+	readNormalRvfCloseoutSuppression,
+	withNormalRvfCloseoutMutation,
+} from "./independent-backup-route-ownership";
 import { inspectRvfCompletionEvidence } from "./inspect-rvf-completion-evidence";
+import { reconcileExistingCloseoutGoalCompletionOnce } from "./reconcile-existing-closeout-goal-completion";
 import {
 	getRvfAutomaticCloseoutStorePath,
 	readRvfAutomaticCloseoutRecords,
 	updateRvfAutomaticCloseoutRecords,
+	withRvfAutomaticCloseoutRecordOperationLock,
 } from "./rvf-automatic-closeout-store";
+import {
+	completedRvfCloseoutStage,
+	resolveRvfCloseoutSchedulingDecision,
+	sameRvfCloseoutObservationBinding,
+} from "./rvf-closeout-scheduling-decision";
 import {
 	appendRvfCloseoutSkillEvidence,
 	captureRvfCloseoutAcceptedSkillSnapshot,
+	readRvfCloseoutSkillSnapshots,
 } from "./rvf-closeout-skill-attachment-snapshot-store";
 import { readRvfCloseoutWorkspaceStateDigest } from "./rvf-closeout-workspace-state-digest";
 import {
 	RvfAutomaticCloseoutExecutionResultDeliveryPendingError,
+	readBoundRvfBaseIntegrationState,
 	validateRvfAutomaticCloseoutExecutionResult,
 } from "./validate-rvf-automatic-closeout-execution-result";
 import { verifyRvfCloseoutContinuationNativeAcceptance } from "./verify-rvf-closeout-continuation-native-acceptance";
+import { verifyBoundRvfSupplementalLandCompletionEvidence } from "./verify-rvf-supplemental-land-completion-evidence";
 
-interface ExecutionRecoveryDependencies {
+export interface ExecutionRecoveryDependencies {
 	workspaceId: string;
 	rvfHome: string;
 	getMainSummary: () => Promise<RuntimeTaskSessionSummary>;
@@ -119,16 +141,40 @@ export async function readBoundRvfLandExecutionResult(record: RvfAutomaticCloseo
 export async function observeExistingRvfLandExecutionResultOnce(
 	deps: ExecutionRecoveryDependencies,
 	original: RvfAutomaticCloseoutRecord,
+	assertObservationStillOwned?: () => void,
 ) {
 	if (
-		original.landExecutionResult?.outcome === "completed" ||
+		completedRvfCloseoutStage(original, "land") ||
+		deps.isStopped(original) ||
+		original.workspaceId !== deps.workspaceId ||
 		!original.runDirectory ||
-		original.automaticCloseoutIneligibleReason ||
-		!["submitting_closeout_prompt", "closeout_prompt_submitted", "paused"].includes(original.status)
+		!isRvfCloseoutRecordEligibleForExistingCompletionObservation(original)
 	)
 		return original;
+	if (
+		!assertObservationStillOwned &&
+		["restoring_pre_review_conversation", "restored_pre_review_conversation"].includes(original.status)
+	) {
+		// 恢复阶段的后台观察不能与另一运行时的 coordinator 并行；已持锁的调用直接复用断言。
+		let observed = original;
+		await withRvfAutomaticCloseoutRecordOperationLock(
+			getRvfAutomaticCloseoutStorePath(deps.workspaceId),
+			original.receipt.decision_token,
+			async (assertOwned) => {
+				observed = await observeExistingRvfLandExecutionResultOnce(deps, original, assertOwned);
+			},
+		);
+		return observed;
+	}
 	let record = original;
 	try {
+		if (await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory)) return record;
+		if (
+			!assertObservationStillOwned &&
+			record.independentLandResultObservationBudget?.count === 3 &&
+			(record.independentLandResultObservationBudget.nextCapabilityProbeAtMs ?? 0) > Date.now()
+		)
+			return record;
 		const canonicalPath = join(original.runDirectory, "artifacts", "rvf-land-commit-result.json");
 		if ((await lstat(canonicalPath)).isSymbolicLink()) return record;
 		const canonicalSha256 = computeRvfTextSha256(await readFile(canonicalPath));
@@ -163,6 +209,7 @@ export async function observeExistingRvfLandExecutionResultOnce(
 		const reservation = await updateRvfAutomaticCloseoutRecords(
 			getRvfAutomaticCloseoutStorePath(deps.workspaceId),
 			(records) => {
+				assertObservationStillOwned?.();
 				const current = records.find((entry) =>
 					sameBinding(entry, {
 						taskId: original.taskId,
@@ -172,19 +219,35 @@ export async function observeExistingRvfLandExecutionResultOnce(
 					}),
 				);
 				if (!current) return { records, value: { record, verify: false } };
+				if (deps.isStopped(current) || current.workspaceId !== deps.workspaceId)
+					return { records, value: { record: current, verify: false } };
 				const previous = current.independentLandResultObservationBudget;
 				const same = previous?.fingerprint === fingerprint;
 				if (
 					current.landExecutionResult?.outcome === "completed" ||
 					(same && (previous.count >= 3 || previous.nextAttemptAtMs > Date.now()))
 				)
-					return { records, value: { record: current, verify: false } };
+					return {
+						records: records.map((entry) =>
+							entry === current && same && previous.count >= 3
+								? {
+										...entry,
+										independentLandResultObservationBudget: {
+											...previous,
+											nextCapabilityProbeAtMs: Date.now() + 60_000,
+										},
+									}
+								: entry,
+						),
+						value: { record: current, verify: false },
+					};
 				const updated = {
 					...current,
 					independentLandResultObservationBudget: {
 						fingerprint,
 						count: same ? previous.count + 1 : 1,
 						nextAttemptAtMs: Date.now() + 15_000,
+						nextCapabilityProbeAtMs: Date.now() + 60_000,
 					},
 				};
 				return {
@@ -197,19 +260,39 @@ export async function observeExistingRvfLandExecutionResultOnce(
 		if (!reservation.verify) return record;
 		const actual = await readBoundRvfLandExecutionResult(record);
 		return (
-			await reportRvfCloseoutExecutionResultWithIndependentEvidence(deps, {
-				taskId: record.taskId,
-				decisionToken: record.receipt.decision_token,
-				runId: record.runId ?? "",
-				handoffSha256: record.handoffSha256 ?? "",
-				stage: "land",
-				outcome: "completed",
-				commitSha: actual.commitSha,
-			})
+			await reportRvfCloseoutExecutionResultWithIndependentEvidence(
+				deps,
+				{
+					taskId: record.taskId,
+					decisionToken: record.receipt.decision_token,
+					runId: record.runId ?? "",
+					handoffSha256: record.handoffSha256 ?? "",
+					stage: "land",
+					outcome: "completed",
+					commitSha: actual.commitSha,
+				},
+				{ automaticObservation: true, assertObservationStillOwned },
+			)
 		).record;
 	} catch {
 		return record;
 	}
+}
+export function isRvfCloseoutRecordEligibleForExistingCompletionObservation(record: RvfAutomaticCloseoutRecord) {
+	return Boolean(
+		record.runId &&
+			record.runDirectory &&
+			record.handoffPath &&
+			record.handoffSha256 &&
+			!record.automaticCloseoutIneligibleReason &&
+			[
+				"restoring_pre_review_conversation",
+				"restored_pre_review_conversation",
+				"submitting_closeout_prompt",
+				"closeout_prompt_submitted",
+				"paused",
+			].includes(record.status),
+	);
 }
 async function assertActivatedCompletion(deps: ExecutionRecoveryDependencies, record: RvfAutomaticCloseoutRecord) {
 	if (["captured_review_start_boundary", "awaiting_rvf_completion"].includes(record.status))
@@ -242,7 +325,11 @@ function sameReportedResult(
 	const prior = input.stage === "land" ? record.landExecutionResult : record.baseBranchSyncExecutionResult;
 	if (!prior) return false;
 	if (prior.outcome === "completed") {
-		if (input.outcome === "completed" && prior.commitSha === input.commitSha && prior.baseRef === input.baseRef)
+		if (
+			input.outcome === "completed" &&
+			prior.commitSha === input.commitSha &&
+			prior.baseRef?.replace(/^refs\/heads\//u, "") === input.baseRef?.replace(/^refs\/heads\//u, "")
+		)
 			return true;
 		throw new Error("已确认的执行结果不能被另一份报告覆盖。");
 	}
@@ -268,6 +355,7 @@ export function hasRvfCloseoutStageResultBlockingAutomaticExecution(
 export async function reportRvfCloseoutExecutionResultWithIndependentEvidence(
 	deps: ExecutionRecoveryDependencies,
 	input: RvfAutomaticCloseoutExecutionResultReportRequest,
+	options: { automaticObservation?: boolean; assertObservationStillOwned?: () => void } = {},
 ) {
 	const report = rvfAutomaticCloseoutExecutionResultReportRequestSchema.parse(input);
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
@@ -275,7 +363,15 @@ export async function reportRvfCloseoutExecutionResultWithIndependentEvidence(
 	if (!record || record.workspaceId !== deps.workspaceId)
 		throw new Error("执行报告与 task/token/run/handoff 绑定不一致。");
 	if (sameReportedResult(record, report)) return { record };
-	if (!["submitting_closeout_prompt", "closeout_prompt_submitted", "completed", "paused"].includes(record.status))
+	const observingCompletionBeforeNativeActions =
+		options.automaticObservation === true &&
+		report.outcome === "completed" &&
+		isRvfCloseoutRecordEligibleForExistingCompletionObservation(record) &&
+		["restoring_pre_review_conversation", "restored_pre_review_conversation"].includes(record.status);
+	if (
+		!observingCompletionBeforeNativeActions &&
+		!["submitting_closeout_prompt", "closeout_prompt_submitted", "completed", "paused"].includes(record.status)
+	)
 		throw new Error("本轮尚未进入收尾，不能登记执行结果。");
 	const delivery = resolveRvfCloseoutActiveDelivery(record);
 	if (report.deliveryAttemptId && report.deliveryAttemptId !== delivery.deliveryAttemptId)
@@ -288,25 +384,57 @@ export async function reportRvfCloseoutExecutionResultWithIndependentEvidence(
 		(!claim || claim.stage !== report.stage || claim.deliveryAttemptId !== delivery.deliveryAttemptId)
 	)
 		throw new Error("执行报告的阶段认领不符。");
-	let verificationBasis: "native_prompt_acceptance" | "verified_stage_execution" | undefined;
+	let verificationBasis:
+		| "native_prompt_acceptance"
+		| "verified_stage_execution"
+		| "verified_base_integration_state"
+		| "verified_supplemental_land_completion"
+		| undefined;
 	let executionEvidenceSha256: string | undefined;
+	let baseIntegrationState: Awaited<ReturnType<typeof readBoundRvfBaseIntegrationState>> | undefined;
+	let supplementalVerification:
+		| Awaited<ReturnType<typeof verifyBoundRvfSupplementalLandCompletionEvidence>>
+		| undefined;
 	if (report.outcome === "completed") {
-		await assertActivatedCompletion(deps, record);
+		if (report.supplementalLandCompletionEvidence && report.commitSha) {
+			supplementalVerification = await verifyBoundRvfSupplementalLandCompletionEvidence(
+				record,
+				report.commitSha,
+				report.supplementalLandCompletionEvidence,
+			);
+			verificationBasis = "verified_supplemental_land_completion";
+			executionEvidenceSha256 = report.supplementalLandCompletionEvidence.evidenceSha256;
+		} else if (record.landExecutionResult?.verificationBasis !== "verified_supplemental_land_completion") {
+			await assertActivatedCompletion(deps, record);
+		}
+		if (
+			report.stage === "base_branch_sync" &&
+			(options.automaticObservation ||
+				record.landExecutionResult?.verificationBasis === "verified_supplemental_land_completion")
+		) {
+			baseIntegrationState = await readBoundRvfBaseIntegrationState(record);
+			verificationBasis = "verified_base_integration_state";
+			executionEvidenceSha256 = computeRvfTextSha256(JSON.stringify(baseIntegrationState));
+		}
 		let existing: Awaited<ReturnType<typeof readBoundRvfLandExecutionResult>> | undefined;
 		try {
 			existing = await readBoundRvfLandExecutionResult(record);
 		} catch {
 			/* 仍可使用严格原生接受路径。 */
 		}
-		if (existing) {
+		if (existing && !verificationBasis) {
 			if (
 				(report.stage === "land" && existing.commitSha !== report.commitSha) ||
-				(report.stage === "base_branch_sync" && existing.commitSha !== record.landExecutionResult?.commitSha)
+				(report.stage === "base_branch_sync" &&
+					existing.commitSha !== completedRvfCloseoutStage(record, "land")?.commitSha)
 			)
 				throw new Error("报告中的 Land 提交与规范执行结果不符。");
 			verificationBasis = "verified_stage_execution";
 			executionEvidenceSha256 = existing.executionResultSha256;
 		}
+		// 恢复前只允许独立证明既有结果；原生接受不能让客户端提前跨入执行阶段。
+		if (observingCompletionBeforeNativeActions && !verificationBasis)
+			throw new Error("恢复前缺少可独立核验的既有完成结果。");
 		const ledger = verificationBasis
 			? []
 			: await readTaskMessageInjectionLedger(
@@ -354,7 +482,10 @@ export async function reportRvfCloseoutExecutionResultWithIndependentEvidence(
 				const actual = await readBoundRvfLandExecutionResult(record);
 				if (report.stage === "land" && actual.commitSha !== report.commitSha)
 					throw new Error("Land 提交与规范执行结果不符。");
-				if (report.stage === "base_branch_sync" && actual.commitSha !== record.landExecutionResult?.commitSha)
+				if (
+					report.stage === "base_branch_sync" &&
+					actual.commitSha !== completedRvfCloseoutStage(record, "land")?.commitSha
+				)
 					throw new Error("base 同步前的 Land 提交与规范执行结果不符。");
 				verificationBasis = "verified_stage_execution";
 				executionEvidenceSha256 = actual.executionResultSha256;
@@ -392,59 +523,110 @@ export async function reportRvfCloseoutExecutionResultWithIndependentEvidence(
 		...(report.stageExecutionClaimId ? { stageExecutionClaimId: report.stageExecutionClaimId } : {}),
 		...(verificationBasis ? { verificationBasis } : {}),
 		...(executionEvidenceSha256 ? { executionEvidenceSha256 } : {}),
+		...(baseIntegrationState
+			? { baseIntegrationObservation: { ...baseIntegrationState, observedAt: Date.now() } }
+			: {}),
+		...(supplementalVerification
+			? {
+					supplementalLandCompletionEvidence: report.supplementalLandCompletionEvidence,
+					supplementalLandCompletionVerification: { ...supplementalVerification, observedAt: Date.now() },
+				}
+			: {}),
+		...(report.blockedReasonKind ? { blockedReasonClassificationSource: "bound_agent_report" as const } : {}),
 		reportedAt: Date.now(),
 	};
-	const saved = await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
-		const current = records.find((entry) => sameBinding(entry, report));
-		if (
-			!current ||
-			current.conversationSessionId !== record.conversationSessionId ||
-			current.restoredNativeSessionId !== record.restoredNativeSessionId ||
-			current.handoffPath !== record.handoffPath
-		)
-			throw new Error("报告期间运行绑定已改变。");
-		if (sameReportedResult(current, report)) return { records, value: current };
-		if (
-			verificationBasis === "native_prompt_acceptance" &&
-			(deps.isStopped(current) ||
-				JSON.stringify(current.lateNativePromptAcceptanceRecoveryReceipt) !==
-					JSON.stringify(record.lateNativePromptAcceptanceRecoveryReceipt))
-		)
-			throw new Error("报告期间自动收尾被停止或接受凭据已改变。");
-		const history = current.executionResultReportHistory ?? [
-			...(current.landExecutionResult ? [{ stage: "land" as const, ...current.landExecutionResult }] : []),
-			...(current.baseBranchSyncExecutionResult
-				? [{ stage: "base_branch_sync" as const, ...current.baseBranchSyncExecutionResult }]
-				: []),
-		];
-		const updated: RvfAutomaticCloseoutRecord = {
-			...current,
-			[report.stage === "land" ? "landExecutionResult" : "baseBranchSyncExecutionResult"]: result,
-			executionResultReportHistory: [...history, { stage: report.stage, ...result }],
-			stageExecutionClaims: current.stageExecutionClaims?.map((entry) =>
-				(report.outcome === "completed" && entry.stage === report.stage) ||
-				entry.stageExecutionClaimId === report.stageExecutionClaimId
-					? { ...entry, status: report.outcome === "completed" ? ("completed" as const) : ("released" as const) }
-					: entry,
-			),
-			updatedAt: result.reportedAt,
-		};
-		if (
-			updated.landExecutionResult?.outcome === "completed" &&
-			updated.baseBranchSyncExecutionResult?.outcome === "completed" &&
-			!deps.isStopped(current)
-		) {
-			updated.status = "completed";
-			if (updated.automaticRecoveryProgress)
-				updated.automaticRecoveryProgress = {
-					...updated.automaticRecoveryProgress,
-					kind: "settled",
-					nextAutomaticAction: "none",
-					reasonCode: "all_closeout_stages_completed",
+	const saved = await withNormalRvfCloseoutMutation(
+		record.receipt.worktree,
+		record.runDirectory,
+		() =>
+			updateRvfAutomaticCloseoutRecords(storePath, async (records) => {
+				options.assertObservationStillOwned?.();
+				const current = records.find((entry) => sameBinding(entry, report));
+				if (
+					!current ||
+					current.conversationSessionId !== record.conversationSessionId ||
+					current.restoredNativeSessionId !== record.restoredNativeSessionId ||
+					current.handoffPath !== record.handoffPath ||
+					current.workspaceId !== record.workspaceId ||
+					current.runDirectory !== record.runDirectory ||
+					JSON.stringify(current.receipt) !== JSON.stringify(record.receipt)
+				)
+					throw new Error("报告期间运行绑定已改变。");
+				if (sameReportedResult(current, report)) return { records, value: current };
+				if (options.automaticObservation && deps.isStopped(current)) throw new Error("自动结果观察被明确停止。");
+				if (report.outcome === "completed") {
+					// 短写锁内重验实际结果和固定 OID，不能把检查期间的 ref 漂移写成成功。
+					if (
+						!supplementalVerification &&
+						current.landExecutionResult?.verificationBasis !== "verified_supplemental_land_completion"
+					)
+						await assertActivatedCompletion(deps, current);
+					await validateRvfAutomaticCloseoutExecutionResult(current, report);
+					if (
+						verificationBasis === "verified_stage_execution" &&
+						(await readBoundRvfLandExecutionResult(current)).executionResultSha256 !== executionEvidenceSha256
+					)
+						throw new Error("Land 规范结果在登记前改变，等待下一次核验。");
+					if (
+						baseIntegrationState &&
+						JSON.stringify(await readBoundRvfBaseIntegrationState(current)) !==
+							JSON.stringify(baseIntegrationState)
+					)
+						throw new Error("base 整合证据在登记前改变，等待下一次核验。");
+					if (await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory))
+						throw new Error("独立备用路线已接管或消费原 run，不能登记普通收尾回执。");
+				}
+				// 异步重验期间可能收到 Stop 或失去操作锁，保存结果和阶段认领前必须再次确认。
+				options.assertObservationStillOwned?.();
+				if (options.automaticObservation && deps.isStopped(current)) throw new Error("自动结果观察被明确停止。");
+				if (
+					verificationBasis === "native_prompt_acceptance" &&
+					(deps.isStopped(current) ||
+						JSON.stringify(current.lateNativePromptAcceptanceRecoveryReceipt) !==
+							JSON.stringify(record.lateNativePromptAcceptanceRecoveryReceipt))
+				)
+					throw new Error("报告期间自动收尾被停止或接受凭据已改变。");
+				const history = current.executionResultReportHistory ?? [
+					...(current.landExecutionResult ? [{ stage: "land" as const, ...current.landExecutionResult }] : []),
+					...(current.baseBranchSyncExecutionResult
+						? [{ stage: "base_branch_sync" as const, ...current.baseBranchSyncExecutionResult }]
+						: []),
+				];
+				const updated: RvfAutomaticCloseoutRecord = {
+					...current,
+					[report.stage === "land" ? "landExecutionResult" : "baseBranchSyncExecutionResult"]: result,
+					executionResultReportHistory: [...history, { stage: report.stage, ...result }],
+					stageExecutionClaims: current.stageExecutionClaims?.map((entry) =>
+						(report.outcome === "completed" && entry.stage === report.stage) ||
+						entry.stageExecutionClaimId === report.stageExecutionClaimId
+							? {
+									...entry,
+									status: report.outcome === "completed" ? ("completed" as const) : ("released" as const),
+								}
+							: entry,
+					),
+					updatedAt: result.reportedAt,
 				};
-		}
-		return { records: records.map((entry) => (entry === current ? updated : entry)), value: updated };
-	});
+				if (
+					completedRvfCloseoutStage(updated, "land") &&
+					completedRvfCloseoutStage(updated, "base_branch_sync") &&
+					!deps.isStopped(current)
+				) {
+					updated.status = "completed";
+					if (updated.automaticRecoveryProgress)
+						updated.automaticRecoveryProgress = {
+							...updated.automaticRecoveryProgress,
+							kind: "settled",
+							nextAutomaticAction: "none",
+							reasonCode: "all_closeout_stages_completed",
+						};
+				}
+				return { records: records.map((entry) => (entry === current ? updated : entry)), value: updated };
+			}),
+		undefined,
+		normalRvfCloseoutReconciliationContext(storePath, record),
+	);
+	if (!saved) throw new Error("独立备用路线已接管或消费原 run，不能登记普通收尾回执。");
 	return { record: saved };
 }
 export async function claimRvfCloseoutExecutionStage(
@@ -452,8 +634,17 @@ export async function claimRvfCloseoutExecutionStage(
 	input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
 ): Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>> {
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
-	const record = (await readRvfAutomaticCloseoutRecords(storePath)).find((entry) => sameBinding(entry, input));
+	let record = (await readRvfAutomaticCloseoutRecords(storePath)).find((entry) => sameBinding(entry, input));
 	if (!record) return { status: "blocked", reason: "阶段认领与 run 绑定不一致。" };
+	record = await reconcileExistingCloseoutGoalCompletionOnce(deps, record);
+	const completedStage = completedRvfCloseoutStage(record, input.stage);
+	if (completedStage?.commitSha) return { status: "already_completed", commitSha: completedStage.commitSha };
+	if (
+		resolveRvfCloseoutSchedulingDecision(record).suppressAllScheduling ||
+		resolveRvfCloseoutSchedulingDecision(record).requiresBackgroundReconciliationOnly ||
+		(await readNormalRvfCloseoutSuppression(record.receipt.worktree, record.runDirectory))
+	)
+		return { status: "blocked", reason: "旧收尾已完成、被接管或等待后台补证，不能认领执行。" };
 	if (record.automaticCloseoutIneligibleReason)
 		return { status: "blocked", reason: record.automaticCloseoutIneligibleReason };
 	if (deps.isStopped(record)) return { status: "blocked", reason: "用户已明确停止本轮收尾。" };
@@ -461,13 +652,17 @@ export async function claimRvfCloseoutExecutionStage(
 	const delivery = resolveRvfCloseoutActiveDelivery(record);
 	if (input.deliveryAttemptId && input.deliveryAttemptId !== delivery.deliveryAttemptId)
 		return { status: "blocked", reason: "投递尝试已改变。" };
+	if (delivery.continuation && !resolveRvfCloseoutSchedulingDecision(record).recoveryExecutionAllowed)
+		return { status: "waiting", reason: "本续接缺少明确可恢复的机器前置条件，继续后台对账。" };
 	const waitForNativeAcceptanceEvidence = async (
 		reason: string,
 		requireReadOnlyInspection = false,
 	): Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>> => {
 		await updateRvfAutomaticCloseoutRecords(storePath, (records) => ({
 			records: records.map((current) =>
-				sameBinding(current, input) && !deps.isStopped(current) && current.status !== "completed"
+				sameBinding(current, input) &&
+				!deps.isStopped(current) &&
+				!resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling
 					? {
 							...current,
 							automaticRecoveryProgress: {
@@ -498,7 +693,7 @@ export async function claimRvfCloseoutExecutionStage(
 	if (
 		(delivery.continuation?.purpose === "inspect_existing_state" ||
 			delivery.continuation?.executionRequiresReadOnlyInspection) &&
-		record.landExecutionResult?.outcome !== "completed"
+		!completedRvfCloseoutStage(record, "land")
 	) {
 		if (!record.lateNativePromptAcceptanceRecoveryReceipt)
 			return waitForNativeAcceptanceEvidence("先补齐原生接受证据或核验规范结果，不能直接执行。");
@@ -513,7 +708,7 @@ export async function claimRvfCloseoutExecutionStage(
 		return { status: "already_completed", commitSha: prior.commitSha };
 	if (hasRvfCloseoutStageResultBlockingAutomaticExecution(prior))
 		return { status: "blocked", reason: "该阶段已有用户限制或尚未分类的阻塞，不能自动重做。" };
-	if (input.stage === "base_branch_sync" && record.landExecutionResult?.outcome !== "completed")
+	if (input.stage === "base_branch_sync" && !completedRvfCloseoutStage(record, "land"))
 		return { status: "waiting", reason: "先核验 Land 实际完成。" };
 	const summary = await deps.getMainSummary();
 	if (
@@ -568,17 +763,14 @@ export async function claimRvfCloseoutExecutionStage(
 	}
 	if (
 		delivery.continuation?.purpose === "execute_remaining_stages" &&
-		record.landExecutionResult?.outcome !== "completed" &&
+		!completedRvfCloseoutStage(record, "land") &&
 		(!record.restoreWorkspaceStateSha256 ||
 			(await readRvfCloseoutWorkspaceStateDigest(record.receipt.worktree)) !== record.restoreWorkspaceStateSha256)
 	) {
-		if (!record.lateNativePromptAcceptanceRecoveryReceipt)
-			return waitForNativeAcceptanceEvidence("续验排队后冻结工作区已改变，先只读补证原资格或规范结果。", true);
-		try {
-			await deps.verifyLateAcceptance(record);
-		} catch {
-			return waitForNativeAcceptanceEvidence("冻结工作区已改变且原资格暂不能重验，先只读补证。", true);
-		}
+		return waitForNativeAcceptanceEvidence(
+			"续接排队后冻结工作区已改变，等待后台核验当前候选或既有完成；原生接受不证明新内容的执行资格。",
+			true,
+		);
 	}
 	return updateRvfAutomaticCloseoutRecords<z.infer<typeof rvfCloseoutStageClaimResponseSchema>>(
 		storePath,
@@ -587,6 +779,7 @@ export async function claimRvfCloseoutExecutionStage(
 			const latestSummary = await deps.getMainSummary();
 			if (
 				!current ||
+				!sameRvfCloseoutObservationBinding(current, record) ||
 				deps.isStopped(current) ||
 				latestSummary.taskId !== summary.taskId ||
 				latestSummary.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
@@ -596,6 +789,18 @@ export async function claimRvfCloseoutExecutionStage(
 				resolveRvfCloseoutActiveDelivery(current).idempotencyKey !== delivery.idempotencyKey
 			)
 				return { records, value: { status: "blocked" as const, reason: "认领期间收尾被停止或绑定改变。" } };
+			const observedCompletion = completedRvfCloseoutStage(current, input.stage);
+			if (observedCompletion?.commitSha)
+				return {
+					records,
+					value: { status: "already_completed" as const, commitSha: observedCompletion.commitSha },
+				};
+			if (
+				resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
+				resolveRvfCloseoutSchedulingDecision(current).requiresBackgroundReconciliationOnly ||
+				(await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory))
+			)
+				return { records, value: { status: "blocked" as const, reason: "认领前已完成、被接管或须后台补证。" } };
 			const latestTurnKind = resolveSessionFacets(latestSummary).userTurnKind;
 			if (latestTurnKind && MODAL_USER_DECISION_TURN_KINDS.has(latestTurnKind))
 				return {
@@ -629,7 +834,66 @@ export async function claimRvfCloseoutExecutionStage(
 				runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? "",
 				claimedAt: Date.now(),
 				status: "claimed" as const,
+				...(summary.codexConfigurationWriterBinding
+					? {
+							codexConfigurationExecutionBinding: await (async () => {
+								const binding = summary.codexConfigurationWriterBinding;
+								if (!binding) throw new Error("阶段配置绑定发生变化，等待原绑定恢复。");
+								await assertCodexConfigurationWriterBindingIdentity(binding);
+								const writer = (await readCodexConfigurationSyncStore()).writers[binding.writerId];
+								if (!writer) throw new Error("阶段配置 writer 记录缺失，等待原绑定恢复。");
+								const snapshots = await readRvfCloseoutSkillSnapshots(current);
+								const stageSkillName = input.stage === "land" ? "rvf-land" : "base-branch-sync";
+								const executionClosureSkillPaths: string[] = [];
+								for (const snapshot of snapshots)
+									for (const skill of snapshot.skills) {
+										if (
+											skill.executionClosure &&
+											(skill.referenceName === stageSkillName ||
+												skill.canonicalName.endsWith(`:${stageSkillName}`))
+										)
+											executionClosureSkillPaths.push(
+												await verifyCodexConfigurationExecutionClosure(skill.executionClosure),
+											);
+									}
+								return {
+									writerId: binding.writerId,
+									sharedVersionAtLaunch: binding.launchSharedVersion,
+									nativeBinaryVersion: writer.nativeBinaryVersion,
+									nativeExecutableRealPath: writer.nativeExecutableRealPath,
+									nativeExecutableIdentityDigest: writer.nativeExecutableIdentityDigest,
+									executionClosureSkillPaths: [...new Set(executionClosureSkillPaths)],
+									configurationDigest: configurationDigest(
+										await projectCodexConfigurationFields({
+											home: binding.configurationHomeDirectoryPath,
+											sourceHome: await realpath(binding.sourceHomeDirectoryPath),
+											fileNames: writer.fileNames,
+											onHookDefinitionObservationProblem: () => {
+												throw new Error("阶段配置的 hook 定义暂不可核验，等待定义恢复后重验摘要。");
+											},
+										}),
+									),
+									skillSnapshotSha256s: (current.skillAttachmentEvidenceHistory ?? []).map(
+										(reference) => reference.snapshotSha256,
+									),
+								};
+							})(),
+						}
+					: {}),
 			};
+			// 配置闭包检查包含异步 I/O，最后再核对 Stop 与接管，不凭早先判断追加认领。
+			const finalSummary = await deps.getMainSummary();
+			if (
+				finalSummary.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
+				finalSummary.agentNativeConversationSessionIdentity?.nativeSessionId !== delivery.nativeSessionId ||
+				finalSummary.taskId !== summary.taskId ||
+				finalSummary.workspacePath !== summary.workspacePath ||
+				resolveSessionFacets(finalSummary).liveness !== "live" ||
+				deps.isStopped(current) ||
+				resolveRvfCloseoutSchedulingDecision(current).suppressAllScheduling ||
+				(await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory))
+			)
+				return { records, value: { status: "blocked" as const, reason: "最终认领检查期间收尾已停止或被接管。" } };
 			return {
 				records: records.map((entry) =>
 					entry === current

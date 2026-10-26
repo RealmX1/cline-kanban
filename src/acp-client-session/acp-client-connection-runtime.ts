@@ -60,6 +60,7 @@ export interface AcpTaskConnectionStartInput {
 	observedAgentNativeSessionId?: string;
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
+	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	// 连接完成前任务可能已停止或重开；拒绝旧连接注册和迟到事件。
 	isRuntimeSessionIncarnationCurrent?: () => boolean;
 	env?: Record<string, string | undefined>;
@@ -144,6 +145,7 @@ export class AcpClientConnectionRuntime {
 			);
 		}
 
+		await input.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 		const child = spawn(spawnCommand.binary, spawnCommand.args, {
 			cwd: input.cwd,
 			env: { ...process.env, ...input.env, ...spawnCommand.env },
@@ -201,6 +203,8 @@ export class AcpClientConnectionRuntime {
 					input.taskConversationSessionMainContextForkSourceNativeSessionId,
 				revalidateTaskConversationSessionMainContextForkSource:
 					input.revalidateTaskConversationSessionMainContextForkSource,
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch:
+					input.revalidateExistingMainSessionHandoverTargetBeforeLaunch,
 				agentId: input.agentId,
 				resumePriorAgentConversationWithoutResendingPrompt: Boolean(
 					input.resumePriorAgentConversationWithoutResendingPrompt,
@@ -298,10 +302,12 @@ export class AcpClientConnectionRuntime {
 			observedAgentNativeSessionId?: string;
 			taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 			revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
+			revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 		},
 	) {
 		const openSession = async () => {
 			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
+				await input.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 				return input.observedAgentNativeSessionId
 					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
 					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);

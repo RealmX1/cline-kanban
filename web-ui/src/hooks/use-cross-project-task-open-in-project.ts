@@ -11,6 +11,7 @@ import type { BoardCard, BoardData } from "@/types";
 export interface PendingCrossProjectTaskOpen {
 	repoId: string;
 	taskId: string;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	// 发起时 Focus View 正开着：在途期间渲染 FocusViewCrossProjectTaskOpenInTransitShell，左栏不闪退成看板。
 	originatedFromFocusView: boolean;
 	// 发起那一刻 Focus View 里打开着的任务。过渡外壳上的 Cancel 回到这里；连点多次跨项目打开时保留最早那个。
@@ -58,7 +59,7 @@ export function useCrossProjectTaskOpenInProject({
 	openBacklogTaskEditor: (card: BoardCard) => void;
 }): {
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
-	handleOpenTaskInProject: (repoId: string, taskId: string) => void;
+	handleOpenTaskInProject: (repoId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
 	handleNavigateToProjectBoard: (repoId: string) => Promise<void>;
 	// 外壳上的 Cancel：回到发起时打开着的任务（必要时反向再切一次项目）。
 	cancelPendingCrossProjectTaskOpenReturningToOriginTask: () => void;
@@ -136,7 +137,7 @@ export function useCrossProjectTaskOpenInProject({
 	openBacklogTaskEditorRef.current = openBacklogTaskEditor;
 
 	const handleOpenTaskInProject = useCallback(
-		(repoId: string, taskId: string) => {
+		(repoId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => {
 			// 刻意不改范围：All projects 首页点进任务时仍留在 Board Scope，从 detail 返回（handleBack 清 selectedTaskId）
 			// 即回到首页（Focus View 打开时首页被卸载，列滚动位置由 continuity store 补回）——与 Post-Deploy Verification
 			// 面板点 task 后返回回到面板的行为一致（避免「从首页点进去、返回却落到单项目看板」的困惑）。
@@ -146,7 +147,15 @@ export function useCrossProjectTaskOpenInProject({
 				// 不在途时是 no-op），否则导航仍会落到在途目标项目、刚选中的详情随即被切项目关掉。
 				handleSelectProject(repoId);
 				const selection = findCardSelection(latestBoardRef.current, taskId);
-				if (selection?.column.id === "backlog") {
+				if (
+					selection &&
+					expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+					selection.card.createdAt !== expectedTaskIncarnationCreatedAtEpochMs
+				) {
+					showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
+					return;
+				}
+				if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
 					openBacklogTaskEditorRef.current(selection.card);
 					return;
 				}
@@ -163,6 +172,9 @@ export function useCrossProjectTaskOpenInProject({
 			setPendingCrossProjectTaskOpen((previous) => ({
 				repoId,
 				taskId,
+				...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
 				// 连点两个跨项目任务时，第二次发起那一刻 detail 已因切项目被关掉，但用户仍在过渡外壳里。
 				originatedFromFocusView: isDetailViewOpenRef.current || (previous?.originatedFromFocusView ?? false),
 				originFocusedTaskInProject:
@@ -185,7 +197,12 @@ export function useCrossProjectTaskOpenInProject({
 		if (!pendingCrossProjectTaskOpen) return;
 		let isTerminalPrewarmReadCancelledByTaskNavigation = false;
 		const { repoId, taskId } = pendingCrossProjectTaskOpen;
-		void readTaskCardWithBoardColumnInWorkspace(repoId, taskId)
+		const expectedCreatedAt = pendingCrossProjectTaskOpen.expectedTaskIncarnationCreatedAtEpochMs;
+		void (
+			expectedCreatedAt === undefined
+				? readTaskCardWithBoardColumnInWorkspace(repoId, taskId)
+				: readTaskCardWithBoardColumnInWorkspace(repoId, taskId, expectedCreatedAt)
+		)
 			.then((response) => {
 				if (
 					isTerminalPrewarmReadCancelledByTaskNavigation ||
@@ -193,6 +210,11 @@ export function useCrossProjectTaskOpenInProject({
 				)
 					return;
 				const taskCardSnapshotReadForTerminalPrewarm = response.taskCardSnapshot;
+				if (
+					expectedCreatedAt !== undefined &&
+					taskCardSnapshotReadForTerminalPrewarm.taskCard.createdAt !== expectedCreatedAt
+				)
+					return;
 				if (taskCardSnapshotReadForTerminalPrewarm.boardColumnIdContainingTaskCard === "backlog") return;
 				const existingTaskSessionSummaryForTerminalPrewarm =
 					taskCardSnapshotReadForTerminalPrewarm.taskSessionSummaryLiveInRuntimeProcessMemory ??
@@ -234,7 +256,15 @@ export function useCrossProjectTaskOpenInProject({
 		}
 		const selection = findCardSelection(board, pendingCrossProjectTaskOpen.taskId);
 		setPendingCrossProjectTaskOpen(null);
-		if (selection?.column.id === "backlog") {
+		if (
+			selection &&
+			pendingCrossProjectTaskOpen.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+			selection.card.createdAt !== pendingCrossProjectTaskOpen.expectedTaskIncarnationCreatedAtEpochMs
+		) {
+			showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
+			return;
+		}
+		if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
 			openBacklogTaskEditorRef.current(selection.card);
 			return;
 		}

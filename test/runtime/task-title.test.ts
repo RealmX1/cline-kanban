@@ -7,6 +7,18 @@ import {
 } from "../../src/core/task-title.js";
 
 describe("task title helpers", () => {
+	it.each(["## TLDR\n\n修复任务来源标记\n\n<task-initial-prompt>", "\n  ## TLDR  \r\n\r\n修复任务来源标记"])(
+		"兜底标题跳过最前面的 TLDR 标题，显式标题仍优先：%s",
+		(prompt) => {
+			expect(deriveTaskTitleFromPrompt(prompt)).toBe("修复任务来源标记");
+			expect(resolveTaskTitle("[FIX,AGENT]保留任务来源", prompt)).toBe("[FIX,AGENT]保留任务来源");
+		},
+	);
+	it("只有 TLDR 标题时不把它当成任务名，其它正文标题仍按既有规则保留", () => {
+		expect(deriveTaskTitleFromPrompt("## TLDR\n\n")).toBe("");
+		expect(deriveTaskTitleFromPrompt("## 用户自定标题\n正文")).toBe("## 用户自定标题");
+		expect(deriveTaskTitleFromPrompt("TLDR 是待调查的字符串\n正文")).toBe("TLDR 是待调查的字符串");
+	});
 	it("结构化任务正文继续从首个有内容的行生成兜底标题，显式标题保持优先", () => {
 		const prompt = [
 			'<task-initial-prompt schema-version="1">',

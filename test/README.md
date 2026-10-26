@@ -25,6 +25,8 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 
 `npm test`、`npm run test:precommit`、`npm run test:integration` 与 `npm run test:watch` 都通过 invoking-repository mutation canary 启动 Vitest。canary 在测试前后比较 worktree/git-dir/common-dir、symbolic HEAD、HEAD OID、local config、index、porcelain v2 status 与 dirty/untracked 内容 hash。检测到漂移时 fail closed，保存脱敏报告，绝不自动恢复宿主仓库。
 
+tracked 内容证据使用 `git diff --binary --full-index HEAD --` 的完整 OID，避免对象库增长引起的缩写长度变化被误判为内容漂移；tracked / untracked 的真实内容变化仍通过内容 hash 检出。
+
 ## 派生真实 runtime / CLI 的 integration 测试必须收口子进程
 
 启动 helper 超时后只 reject 不 kill，晚到 banner 的 runtime 会变成 ppid=1 的长寿孤儿（单个约 350 MB）。共享收口在 `test/integration/runtime-integration-test-spawned-child-process-lifecycle.ts`：

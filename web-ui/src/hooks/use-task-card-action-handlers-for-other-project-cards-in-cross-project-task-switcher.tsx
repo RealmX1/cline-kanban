@@ -9,6 +9,7 @@ import { PostDeployVerificationReviewBeforeMoveIntoDoneWithWorkspaceReadModel } 
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
+import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
 import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
 import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
@@ -25,6 +26,8 @@ import {
 	moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime,
 	permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime,
 	restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime,
+	setTaskCardShelvingStateThroughRuntime,
+	setTaskPinboardPinStateOfTaskCardThroughRuntime,
 	startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime,
 	updateTaskCardFieldValuesThroughRuntime,
 } from "@/state/task-card-action-commands-for-any-workspace";
@@ -54,6 +57,7 @@ interface OtherProjectMoveIntoDoneFlowIdentity {
 	workspaceId: string;
 	taskId: string;
 	flowGeneration: number;
+	expectedTaskIncarnationCreatedAtEpochMs: number;
 }
 
 interface PendingOtherProjectTaskCardConfirmation {
@@ -83,9 +87,14 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 	onRequestPinTaskCardInOtherProjectToTaskPinboard?: (workspaceId: string, taskCard: BoardCard) => void;
 	onUnpinTaskCardInOtherProjectFromTaskPinboard?: (workspaceId: string, taskId: string) => void;
 	onRequestEditBacklogTaskCardInOtherProject?: (workspaceId: string, taskCard: BoardCard) => void;
-	onOpenTaskInProject?: (workspaceId: string, taskId: string) => void;
+	onOpenTaskInProject?: (
+		workspaceId: string,
+		taskId: string,
+		expectedTaskIncarnationCreatedAtEpochMs?: number,
+	) => void;
 	onNavigateToProjectBoard?: (workspaceId: string) => Promise<void>;
 }): TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher {
+	const [pendingPinReason, setPendingPinReason] = useState<{ workspaceId: string; taskCard: BoardCard } | null>(null);
 	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
 	const {
 		open: openTaskComment,
@@ -123,7 +132,12 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			if (activeDoneEntryFlowIdentityRef.current !== doneEntryFlowIdentity) return;
 			const board = normalizeBoardData(workspaceState.board);
 			const selection = board ? findCardSelection(board, taskId) : null;
-			if (!selection || selection.column.id === "trash") throw new Error("任务已不在待结案的看板列，请刷新后重试");
+			if (
+				!selection ||
+				selection.card.createdAt !== doneEntryFlowIdentity.expectedTaskIncarnationCreatedAtEpochMs ||
+				selection.column.id === "trash"
+			)
+				throw new Error("任务已不在待结案的看板列，请刷新后重试");
 			if (comment) suspendTaskComment(taskId, comment.taskCommentEntryId);
 			setPendingVerificationReview((previous) => ({
 				doneEntryFlowIdentity,
@@ -151,6 +165,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			void moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime({
 				workspaceId,
 				taskId,
+				expectedTaskIncarnationCreatedAtEpochMs: doneEntryFlowIdentity.expectedTaskIncarnationCreatedAtEpochMs,
 				taskCommentToAppendWhenMovingIntoDone,
 				postDeployVerificationDoneEntryClosure,
 			})
@@ -227,6 +242,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			const doneEntryFlowIdentity: OtherProjectMoveIntoDoneFlowIdentity = {
 				workspaceId,
 				taskId: taskCard.id,
+				expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 				flowGeneration: ++doneEntryFlowGenerationRef.current,
 			};
 			activeDoneEntryFlowIdentityRef.current = doneEntryFlowIdentity;
@@ -288,6 +304,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				void startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId,
 					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
 				}).then((result) => reportTaskCardActionCommandFailure("start the task", result));
 			},
@@ -306,18 +323,22 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
 					workspaceId,
 					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					targetBoardColumnId: "validation",
 				}).then((result) => reportTaskCardActionCommandFailure("move the task to Validation", result));
 			},
 			onMoveToReviewTask: (taskId) => {
-				void moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime({ workspaceId, taskId }).then((result) =>
-					reportTaskCardActionCommandFailure("move the task to Review", result),
-				);
+				void moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime({
+					workspaceId,
+					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+				}).then((result) => reportTaskCardActionCommandFailure("move the task to Review", result));
 			},
 			onRestoreFromTrashTask: (taskId) => {
 				void restoreTaskCardFromDoneIntoReviewResumingAgentSessionThroughRuntime({
 					workspaceId,
 					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
 				}).then((result) => reportTaskCardActionCommandFailure("restore the task from Done", result));
 			},
@@ -326,6 +347,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				void updateTaskCardFieldValuesThroughRuntime({
 					workspaceId,
 					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					taskCardFieldValuePatch: { autoReviewEnabled: false },
 				}).then((result) => reportTaskCardActionCommandFailure("cancel the automatic action", result));
 			},
@@ -333,14 +355,34 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				void updateTaskCardFieldValuesThroughRuntime({
 					workspaceId,
 					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					taskCardFieldValuePatch: { title: title.trim() === "" ? null : title },
 				}).then((result) => reportTaskCardActionCommandFailure("rename the task", result));
 			},
 			onEditTask: onRequestEditBacklogTaskCardInOtherProject
 				? (card) => onRequestEditBacklogTaskCardInOtherProject(workspaceId, card)
 				: undefined,
-			onRequestPinToTaskPinboard: () => onRequestPinTaskCardInOtherProjectToTaskPinboard?.(workspaceId, taskCard),
-			onUnpinFromTaskPinboard: (taskId) => onUnpinTaskCardInOtherProjectFromTaskPinboard?.(workspaceId, taskId),
+			onRequestPinToTaskPinboard: () =>
+				onRequestPinTaskCardInOtherProjectToTaskPinboard
+					? onRequestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard)
+					: setPendingPinReason({ workspaceId, taskCard }),
+			onSetTaskShelvingState: (taskId, isShelved) => {
+				void setTaskCardShelvingStateThroughRuntime({
+					workspaceId,
+					taskId,
+					isShelved,
+					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+				}).then((result) => reportTaskCardActionCommandFailure("更新搁置状态", result));
+			},
+			onUnpinFromTaskPinboard: (taskId) =>
+				onUnpinTaskCardInOtherProjectFromTaskPinboard
+					? onUnpinTaskCardInOtherProjectFromTaskPinboard(workspaceId, taskId)
+					: void setTaskPinboardPinStateOfTaskCardThroughRuntime({
+							workspaceId,
+							taskId,
+							expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+							taskPinboardPinChange: { taskPinboardPinAction: "unpin_task_card" },
+						}).then((result) => reportTaskCardActionCommandFailure("更新置顶状态", result)),
 			moveToTrashLoadingById: {
 				[taskCard.id]:
 					taskCardActionCommandKindInFlight === "move_task_card_into_done_stopping_sessions_and_deleting_worktree",
@@ -373,7 +415,11 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					if (!request) return;
 					const comment = prepareTaskComment(text);
 					if (!comment) return;
-					void readTaskCardWithBoardColumnInWorkspace(request.workspaceId, request.taskId)
+					void readTaskCardWithBoardColumnInWorkspace(
+						request.workspaceId,
+						request.taskId,
+						request.expectedTaskIncarnationCreatedAtEpochMs,
+					)
 						.then((snapshot) => {
 							if (snapshot.taskCardLookupOutcome !== "task_card_found_on_workspace_board") {
 								returnToEditingTaskComment(request.taskId, "任务已移动或已删除，未提交评论。");
@@ -475,7 +521,11 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 						await onNavigateToProjectBoard(pendingVerificationReview.workspaceId);
 					}}
 					onSelectTask={() =>
-						onOpenTaskInProject?.(pendingVerificationReview.workspaceId, pendingVerificationReview.taskId)
+						onOpenTaskInProject?.(
+							pendingVerificationReview.workspaceId,
+							pendingVerificationReview.taskId,
+							pendingVerificationReview.doneEntryFlowIdentity.expectedTaskIncarnationCreatedAtEpochMs,
+						)
 					}
 				/>
 			) : null}
@@ -491,6 +541,9 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					}
 					void permanentlyDeleteTaskCardsWithFullResourceCleanupThroughRuntime({
 						workspaceId: confirmation.workspaceId,
+						expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
+							[confirmation.taskCard.id]: confirmation.taskCard.createdAt,
+						},
 						permanentlyDeletedTaskCardSelection: {
 							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
 							selectedTaskIds: [confirmation.taskCard.id],
@@ -515,6 +568,33 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 							confirmation.taskCommentToAppendWhenMovingIntoDone,
 						);
 					}
+				}}
+			/>
+			<TaskPinboardPinReasonDialog
+				request={
+					pendingPinReason
+						? {
+								taskId: pendingPinReason.taskCard.id,
+								taskTitle: pendingPinReason.taskCard.title,
+								initialPinReason: pendingPinReason.taskCard.taskPinboardPinReason ?? "",
+								isEditingExistingPin: pendingPinReason.taskCard.pinnedToTaskPinboardAt != null,
+							}
+						: null
+				}
+				onCancel={() => setPendingPinReason(null)}
+				onConfirm={(_taskId, reason) => {
+					if (!pendingPinReason) return;
+					const { workspaceId, taskCard } = pendingPinReason;
+					setPendingPinReason(null);
+					void setTaskPinboardPinStateOfTaskCardThroughRuntime({
+						workspaceId,
+						taskId: taskCard.id,
+						expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+						taskPinboardPinChange: {
+							taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+							taskPinboardPinReason: reason || null,
+						},
+					}).then((result) => reportTaskCardActionCommandFailure("更新置顶状态", result));
 				}}
 			/>
 		</>

@@ -19,15 +19,27 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 export async function fetchWorkUnitRelationNeighborhoodSummaryOfKanbanBoardCard(input: {
 	workspaceId: string;
 	kanbanBoardCardTaskId: string;
+	taskIncarnationCreatedAtEpochMs?: number;
 }): Promise<GetRelationNeighborhoodSummaryResponse> {
 	const trpcClient = getRuntimeTrpcClient(input.workspaceId);
 	return await trpcClient.workUnit.getRelationNeighborhoodSummary.query({
-		workUnit: {
-			workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-			bareTaskId: input.kanbanBoardCardTaskId,
-			// 显式带 workspaceId：裸 id 跨 project 会撞号，带上就不会落进 CONFLICT。
-			workspaceId: input.workspaceId,
-		},
+		workUnit:
+			input.taskIncarnationCreatedAtEpochMs !== undefined
+				? {
+						workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+						kanbanBoardCard: {
+							workUnitType: "kanban_board_card",
+							workspaceId: input.workspaceId,
+							taskId: input.kanbanBoardCardTaskId,
+							taskIncarnationCreatedAtEpochMs: input.taskIncarnationCreatedAtEpochMs,
+						},
+					}
+				: {
+						workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+						bareTaskId: input.kanbanBoardCardTaskId,
+						// 显式带 workspaceId：裸 id 跨 project 会撞号，带上就不会落进 CONFLICT。
+						workspaceId: input.workspaceId,
+					},
 	});
 }
 

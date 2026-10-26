@@ -29,6 +29,7 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CodexConfigurationSyncSettings } from "@/components/codex-configuration-sync";
 import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
 import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
 import { ClineSetupSection } from "@/components/shared/cline-setup-section";
@@ -39,6 +40,7 @@ import {
 	type RuntimeShortcutIconOption,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
+import { TaskAssistanceModelProviderRoutingSettingsSection } from "@/components/task-assistance-model-provider-routing-settings-section";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -48,6 +50,7 @@ import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-act
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
+import { useTaskAssistanceModelProviderRoutingSettingsDraft } from "@/hooks/use-task-assistance-model-provider-routing-settings-draft";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
@@ -119,7 +122,7 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 	{ value: "pr", label: "Make PR" },
 ];
 
-export type RuntimeSettingsSection = "shortcuts";
+export type RuntimeSettingsSection = "shortcuts" | "codex-configuration-sync";
 
 const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
 
@@ -128,7 +131,9 @@ type SettingsNavId =
 	| "cline"
 	| "git-prompts"
 	| "notifications"
+	| "task-analysis"
 	| "agent-reliability"
+	| "codex-configuration-sync"
 	| "appearance"
 	| "project";
 
@@ -142,7 +147,9 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	{ id: "cline", label: "Cline", icon: <Bot size={16} />, clineOnly: true },
 	{ id: "git-prompts", label: "Git Prompts", icon: <GitCommit size={16} /> },
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
+	{ id: "task-analysis", label: "AI 任务分析", icon: <Bot size={16} /> },
 	{ id: "agent-reliability", label: "可靠性", icon: <PlugZap size={16} /> },
+	{ id: "codex-configuration-sync", label: "Codex 配置同步", icon: <Bot size={16} /> },
 	{ id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
 	{ id: "project", label: "Project", icon: <FolderOpen size={16} /> },
 ];
@@ -438,6 +445,7 @@ export function RuntimeSettingsDialog({
 	const isScrollingProgrammatically = useRef(false);
 	const [activeSection, setActiveSection] = useState<SettingsNavId>("general");
 	const notificationSettings = useNotificationIntelligenceSettingsDraft(open);
+	const taskAnalysisSettings = useTaskAssistanceModelProviderRoutingSettingsDraft(open);
 	const [isSavingAllSettings, setIsSavingAllSettings] = useState(false);
 	const controlsDisabled = isLoading || isSaving || isSavingAllSettings || config === null;
 	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
@@ -559,7 +567,7 @@ export function RuntimeSettingsDialog({
 		if (postDeployVerificationForceCompleteEnabled !== initialPostDeployVerificationForceCompleteEnabled) {
 			return true;
 		}
-		if (notificationSettings.hasUnsavedChanges) return true;
+		if (notificationSettings.hasUnsavedChanges || taskAnalysisSettings.hasUnsavedChanges) return true;
 		if (clineSettings.hasUnsavedChanges) {
 			return true;
 		}
@@ -590,6 +598,7 @@ export function RuntimeSettingsDialog({
 		clineMcpSettings.hasUnsavedChanges,
 		clineSettings.hasUnsavedChanges,
 		notificationSettings.hasUnsavedChanges,
+		taskAnalysisSettings.hasUnsavedChanges,
 		commitPromptTemplate,
 		config,
 		draftThemeId,
@@ -671,11 +680,16 @@ export function RuntimeSettingsDialog({
 	useWindowEvent("focus", open ? refreshNotificationPermission : null);
 
 	useEffect(() => {
-		if (!open || initialSection !== "shortcuts") {
+		if (!open || !initialSection) {
 			return;
 		}
 		const timeout = window.setTimeout(() => {
-			shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+			if (initialSection === "shortcuts")
+				shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+			else
+				bodyRef.current
+					?.querySelector('[data-settings-section="codex-configuration-sync"]')
+					?.scrollIntoView({ block: "start" });
 		}, 500);
 		return () => {
 			window.clearTimeout(timeout);
@@ -821,6 +835,7 @@ export function RuntimeSettingsDialog({
 			}
 		}
 		await notificationSettings.save();
+		await taskAnalysisSettings.save();
 		const saved = await save({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
@@ -1170,9 +1185,17 @@ export function RuntimeSettingsDialog({
 						</div>
 					</div>
 
+					<div data-settings-section="task-analysis" />
+					<TaskAssistanceModelProviderRoutingSettingsSection
+						draft={taskAnalysisSettings}
+						disabled={controlsDisabled}
+						providers={notificationSettings.providers}
+					/>
 					<NotificationIntelligenceSettingsSection draft={notificationSettings} disabled={controlsDisabled} />
 
 					{/* ---- 终端 agent 可靠性 ---- */}
+					<div data-settings-section="codex-configuration-sync" />
+					<CodexConfigurationSyncSettings workspaceId={workspaceId} enabled={open} />
 					<div data-settings-section="agent-reliability" />
 					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
 						<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">

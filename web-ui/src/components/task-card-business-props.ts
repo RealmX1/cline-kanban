@@ -30,6 +30,7 @@ export interface TaskCardActionHandlerBundle {
 	onEditTask?: (card: BoardCard) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: TaskCardBusinessProps["resolveTaskWorkspaceAbsoluteDirectoryPath"];
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
@@ -64,6 +65,7 @@ export function buildTaskCardBusinessProps({
 	defaultClineModelId = null,
 	defaultAgentId = null,
 }: BuildTaskCardBusinessPropsInput): TaskCardBusinessProps {
+	const isShelved = card.taskShelvingState?.isShelved === true;
 	const isBacklog = columnId === "backlog";
 	const isInProgress = columnId === "in_progress";
 	const isReview = columnId === "review";
@@ -86,18 +88,19 @@ export function buildTaskCardBusinessProps({
 			),
 		selected,
 		// backlog 与 in_progress 两列可启动；「in_progress 且已有活会话时不显示启动按钮」由卡体自己再判一层。
-		onStart: isBacklog || isInProgress ? handlers.onStartTask : undefined,
-		onMoveToTrash: isArchivableIntoDone ? handlers.onMoveToTrashTask : undefined,
-		onMoveToValidation: isReview ? handlers.onMoveToValidationTask : undefined,
+		onStart: isBacklog || (isInProgress && !isShelved) ? handlers.onStartTask : undefined,
+		onMoveToTrash: !isShelved && isArchivableIntoDone ? handlers.onMoveToTrashTask : undefined,
+		onMoveToValidation: !isShelved && isReview ? handlers.onMoveToValidationTask : undefined,
 		// 手动把 In Progress 卡翻入 Review：卡死/空闲会话拖不进 Review 时的兜底入口。
-		onMoveToReview: isInProgress ? handlers.onMoveToReviewTask : undefined,
-		onRestoreFromTrash: isTrash ? handlers.onRestoreFromTrashTask : undefined,
+		onMoveToReview: !isShelved && isInProgress ? handlers.onMoveToReviewTask : undefined,
+		onRestoreFromTrash: !isShelved && isTrash ? handlers.onRestoreFromTrashTask : undefined,
 		onDeleteTask: handlers.onDeleteTask,
 		onCancelAutomaticAction: handlers.onCancelAutomaticTaskAction,
 		onSaveTitle: handlers.onSaveTitle,
 		onOpenTaskEditor: isBacklog ? handlers.onEditTask : undefined,
 		onRequestPinToTaskPinboard: handlers.onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard: handlers.onUnpinFromTaskPinboard,
+		onSetTaskShelvingState: handlers.onSetTaskShelvingState,
 		isMoveToTrashLoading: isArchivableIntoDone ? (handlers.moveToTrashLoadingById?.[card.id] ?? false) : false,
 		isMoveToValidationLoading: isReview ? (handlers.moveToValidationLoadingById?.[card.id] ?? false) : false,
 		isMoveToReviewLoading: isInProgress ? (handlers.moveToReviewLoadingById?.[card.id] ?? false) : false,

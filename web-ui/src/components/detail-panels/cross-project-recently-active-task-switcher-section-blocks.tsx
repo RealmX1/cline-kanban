@@ -410,6 +410,10 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 		setIsRecentSectionExpanded,
 		selectedRecentTaskStageFilters,
 		setSelectedRecentTaskStageFilters,
+		showsOnlyRecentTasksWithWorktreeChanges,
+		setShowsOnlyRecentTasksWithWorktreeChanges,
+		recentTaskWorktreeChangesFilterPendingCount,
+		recentTaskWorktreeChangesFilterUnavailableCount,
 		extendedActivityHorizonLoadState,
 		requestEntriesWithinExtendedActivityHorizon,
 	} = sectionsModel;
@@ -508,11 +512,39 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 								);
 							})}
 						</div>
+						<div className="flex flex-wrap items-center gap-2">
+							<button
+								type="button"
+								aria-pressed={showsOnlyRecentTasksWithWorktreeChanges}
+								title="仅显示工作树有未提交改动，或相对任务本地 base 有独有提交的任务；任一条件成立即可。"
+								onClick={() =>
+									setShowsOnlyRecentTasksWithWorktreeChanges(!showsOnlyRecentTasksWithWorktreeChanges)
+								}
+								className={filterButtonClassName(showsOnlyRecentTasksWithWorktreeChanges)}
+							>
+								未提交改动 / 独有提交
+							</button>
+							{showsOnlyRecentTasksWithWorktreeChanges &&
+							(recentTaskWorktreeChangesFilterPendingCount > 0 ||
+								recentTaskWorktreeChangesFilterUnavailableCount > 0) ? (
+								<span role="status" className="text-xs text-text-secondary">
+									{recentTaskWorktreeChangesFilterPendingCount > 0
+										? `正在检查 ${recentTaskWorktreeChangesFilterPendingCount} 个任务的工作树状态。`
+										: null}
+									{recentTaskWorktreeChangesFilterUnavailableCount > 0
+										? `${recentTaskWorktreeChangesFilterUnavailableCount} 个任务的工作树状态暂不可用，将自动重试。`
+										: null}
+								</span>
+							) : null}
+						</div>
 					</div>
 				) : null
 			}
 		>
-			{isRecentSectionExpanded && entries.length === 0 ? (
+			{isRecentSectionExpanded &&
+			entries.length === 0 &&
+			recentTaskWorktreeChangesFilterPendingCount === 0 &&
+			recentTaskWorktreeChangesFilterUnavailableCount === 0 ? (
 				<div className="px-2 py-1.5 text-xs text-text-tertiary">No recent tasks match these filters.</div>
 			) : (
 				collectVisibleCrossProjectTaskSwitcherSectionEntries(
@@ -536,6 +568,48 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 						: "Show older (last 30 days)"}
 				</button>
 			)}
+		</CrossProjectTaskSwitcherSectionFrame>
+	);
+}
+
+/** 搁置优先于其他归属，默认收起；定位到该组时仍保留唯一焦点卡。 */
+export function CrossProjectTaskSwitcherShelvedSectionBlock({
+	sectionBlockPresentation,
+	sectionsModel,
+	renderRowInHostingScrollContainer,
+	sectionColumnScrollContainerBinding,
+	focusedTaskRowToKeepMounted,
+}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
+	const { sections, isShelvedSectionExpanded, setIsShelvedSectionExpanded } = sectionsModel;
+	const isSectionColumnCollapsed =
+		sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page" && !isShelvedSectionExpanded;
+	const entries = collectVisibleCrossProjectTaskSwitcherSectionEntries(
+		sections.shelvedEntries,
+		"shelved",
+		sectionsModel,
+		focusedTaskRowToKeepMounted,
+		true,
+	);
+	return (
+		<CrossProjectTaskSwitcherSectionFrame
+			testIdSuffix="shelved"
+			sectionBlockPresentation={sectionBlockPresentation}
+			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
+			isSectionColumnCollapsed={isSectionColumnCollapsed}
+			header={
+				<CrossProjectTaskSwitcherSectionExpansionButton
+					title="Shelved"
+					count={sections.shelvedEntries.length}
+					isExpanded={isShelvedSectionExpanded}
+					setIsExpanded={setIsShelvedSectionExpanded}
+					isSectionColumnCollapsed={isSectionColumnCollapsed}
+				/>
+			}
+		>
+			{entries.map((entryInProject) => renderRowInHostingScrollContainer(entryInProject, "shelved"))}
+			{isShelvedSectionExpanded && entries.length === 0 ? (
+				<div className="px-2 py-1.5 text-xs text-text-secondary">没有搁置任务。</div>
+			) : null}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }

@@ -22,12 +22,20 @@ export type ModelUsagePurpose =
 	| "task_name_suggestion"
 	| "notification_assessment"
 	| "task_indexing_support_relation_analysis"
+	| "task_project_assignment_analysis"
 	| "task_lookup_conversation"
+	| "task_lookup_candidate_recall"
+	| "task_lookup_candidate_explanation"
 	| "independent_task_creation_draft_generation";
 
 export type ModelProviderCallOutcome = "completed" | "unavailable";
 
 export interface ModelProviderUsageRecord {
+	operationId?: string;
+	stage?: string;
+	requestedModelId?: string;
+	resolvedModelId?: string;
+	fallbackReason?: string;
 	modelUsagePurpose: ModelUsagePurpose;
 	/** 没解析出 provider（一家都没配）时为 null——那种失败同样要记，否则「从没配过」看起来像「从没用过」。 */
 	modelProviderId: string | null;

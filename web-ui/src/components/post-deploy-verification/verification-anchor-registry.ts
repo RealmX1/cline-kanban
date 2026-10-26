@@ -62,6 +62,11 @@ export function verificationPanelTaskAnchorKey(taskId: string): string {
 	return `verification-panel-task:${taskId}`;
 }
 
+// 创建与 Backlog 共用编辑器的全局归属分析偏好，供真实实例重启后的持久化核验定位。
+export function taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey(): string {
+	return "task-editor-project-assignment-automatic-analysis-switch";
+}
+
 // 顶栏里打开任务 Spotlight 搜索的常驻入口。单例、不带 id：全局同时只存在一个。
 // 它的真机可达性（窄屏是否被顶栏左区裁掉、触控目标是否够大）只有真实设备才验得到，
 // 因此这个锚点由引导人工型验证消费。

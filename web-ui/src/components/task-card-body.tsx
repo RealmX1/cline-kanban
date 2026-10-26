@@ -24,6 +24,7 @@ import {
 	AlertCircle,
 	AlertTriangle,
 	Archive,
+	ArchiveRestore,
 	Check,
 	ClipboardCheck,
 	Clock,
@@ -38,6 +39,7 @@ import {
 	PinOff,
 	Play,
 	RotateCcw,
+	StickyNote,
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
@@ -54,13 +56,16 @@ import {
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
+import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
+import { TaskCardStickers } from "@/components/task-card-stickers";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { TaskRelatedTasksPreviewButton } from "@/components/task-related-tasks-preview-button";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -79,9 +84,11 @@ import {
 	shouldDisplayWorktreeUncommittedChangeSummary,
 	WorktreeUncommittedChangeSummaryIndicator,
 } from "@/components/ui/worktree-uncommitted-change-summary-indicator";
+import { resolveBoardColumnTitle } from "@/data/board-data";
 import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } from "@/hooks/use-session-activity-dot-breathing-opacity-on-shared-fine-clock";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
+import { resolveTaskStickerOverlayExplicitActivationSource, useTaskCardStickers } from "@/hooks/use-task-card-stickers";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type {
 	PermanentlyDeletedTaskCardEntry,
@@ -93,7 +100,7 @@ import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cr
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
-import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
+import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
@@ -167,6 +174,7 @@ export interface TaskCardBusinessProps {
 	// Task Pinboard（置顶板）：请求置顶（由上层弹原因对话框，确认后才真正写盘）与直接取消置顶。
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onSetTaskShelvingState?: (taskId: string, isShelved: boolean) => void;
 	isMoveToTrashLoading?: boolean;
 	isMoveToValidationLoading?: boolean;
 	isMoveToReviewLoading?: boolean;
@@ -219,6 +227,8 @@ export type TaskCardBodyRenderRole =
 	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡也可点开。
 	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
 	| "task_card_copy_in_post_deploy_verification_panel_entry"
+	// 关联列表旁的完整可操作副本：无本体身份、无拖拽，也不递归打开关联预览。
+	| "task_card_copy_in_related_task_preview"
 	| "permanently_deleted_task_history_card";
 
 /**
@@ -283,6 +293,8 @@ type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	taskCardOwnedByOtherProjectWorkspaceId?: string | null;
 	/** 当前项目展开卡的轮询复合键；普通看板卡继续只订阅推流 store。 */
 	taskCardWorkspaceIdForCrossProjectGitMetadataPolling?: string | null;
+	/** 完整关联预览只消费已核对创建时间的局部快照；null 或缺省均表示未知，不回退到共享 store。 */
+	relatedTaskPreviewWorktreeGitMetadataSnapshot?: ReviewTaskWorkspaceSnapshot | null;
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
@@ -313,6 +325,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					id: historicalSnapshot.kanbanBoardCard.taskId,
 					title: historicalSnapshot.titleBeforePermanentRemoval ?? "标题未留存",
 					prompt: historicalSnapshot.promptPreview ?? "",
+					taskStickerEntries: historicalSnapshot.taskStickerEntries,
 					createdAt: historicalSnapshot.kanbanBoardCard.taskIncarnationCreatedAtEpochMs,
 					updatedAt: historicalSnapshot.permanentlyRemovedFromBoardAt,
 					startInPlanMode: false,
@@ -341,6 +354,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		onCancelAutomaticAction,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
+		onSetTaskShelvingState,
 		isMoveToTrashLoading = false,
 		isMoveToValidationLoading = false,
 		isMoveToReviewLoading = false,
@@ -355,6 +369,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		onEditTaskPinboardPinReason,
 		taskCardOwnedByOtherProjectWorkspaceId = null,
 		taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
+		relatedTaskPreviewWorktreeGitMetadataSnapshot = null,
 		crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
 	} = presentation;
 
@@ -385,17 +400,22 @@ export const TaskCardBody = memo(function TaskCardBody(
 		taskCommentsDialog?.currentWorkspaceId;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
+	const usesIdentityBoundRelatedTaskPreviewGitMetadata = renderRole === "task_card_copy_in_related_task_preview";
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
-		isTaskCardOwnedByOtherProject ? null : card.id,
+		isTaskCardOwnedByOtherProject || usesIdentityBoundRelatedTaskPreviewGitMetadata ? null : card.id,
 	);
 	const polledReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
 		taskWorkspaceId ?? "",
 		card.id,
-		taskWorkspaceId != null && (isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
+		!usesIdentityBoundRelatedTaskPreviewGitMetadata &&
+			taskWorkspaceId != null &&
+			(isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
 	);
-	const reviewWorkspaceSnapshot = isTaskCardOwnedByOtherProject
-		? polledReviewWorkspaceSnapshot
-		: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
+	const reviewWorkspaceSnapshot = usesIdentityBoundRelatedTaskPreviewGitMetadata
+		? relatedTaskPreviewWorktreeGitMetadataSnapshot
+		: isTaskCardOwnedByOtherProject
+			? polledReviewWorkspaceSnapshot
+			: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
 	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(isTaskCardOwnedByOtherProject ? null : card.id, card.baseRef);
 	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,
@@ -414,6 +434,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
+	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
+	const usesInFlowActionToolbar = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy;
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
 		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
@@ -423,7 +445,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
 	// 嵌套，也不改标题几何。其他角色不变。
 	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
-		(isCrossProjectTaskSwitcherRowCopy || historicalSnapshot != null) && onClick != null;
+		(isCrossProjectTaskSwitcherRowCopy || isRelatedTaskPreviewCopy || historicalSnapshot != null) && onClick != null;
 	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
 	const isHoverPresentationShown =
 		historicalSnapshot != null ||
@@ -438,12 +460,22 @@ export const TaskCardBody = memo(function TaskCardBody(
 	const isInlineTitleEditEnabled =
 		!isPassiveFocusedTaskCardCopy &&
 		!isCrossProjectTaskSwitcherRowCopy &&
+		!isRelatedTaskPreviewCopy &&
 		onSaveTitle != null &&
 		(isNavigatingColumn || isTrashCard);
-	const delaysSingleClickActivationForDoubleClickTitleEdit = isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy;
+	const delaysSingleClickActivationForDoubleClickTitleEdit =
+		isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy && !isRelatedTaskPreviewCopy;
 	const clickActivationTimerRef = useRef<number | null>(null);
-	const cardDragBindings = isMobileDetailHeaderCopy ? null : drag;
+	const cardDragBindings = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy ? null : drag;
 	const isDragging = cardDragBindings?.isDragging ?? false;
+	const taskStickers = useTaskCardStickers({
+		card,
+		workspaceId:
+			historicalSnapshot?.kanbanBoardCard.workspaceId ?? taskWorkspaceId ?? taskCommentsWorkspaceId ?? null,
+		readOnly: Boolean(historicalContext),
+		isDragging: Boolean(cardDragBindings?.isDragging),
+	});
+
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
@@ -898,7 +930,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
 				<span
 					role="status"
-					title="正在核验 harness 是否已接受输入；写入终端或前置 hook 放行不能证明提交成功。"
+					title={describePromptSubmissionAcceptance(sessionSummary.agentConversationPromptSubmissionAcceptance)}
 					className="inline-flex items-center gap-0.5 text-[10px] text-status-gold"
 				>
 					<Hourglass size={10} />
@@ -918,6 +950,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 	);
 	const pinnedMarkerOrTaskPinboardStageLabel = (
 		<>
+			{card.taskShelvingState?.isShelved ? (
+				<span className="text-xs text-text-secondary">{columnId ? resolveBoardColumnTitle(columnId) : ""}</span>
+			) : null}
 			{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
 				// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
 				<>
@@ -1042,6 +1077,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 		shouldDisplayTaskRetainedCommittedLineChangeSummary(
 			reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary,
 		);
+	const relatedTasksPreviewShortcut =
+		!historicalContext && !isRelatedTaskPreviewCopy ? (
+			<TaskRelatedTasksPreviewButton
+				workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+				taskId={card.id}
+				taskIncarnationCreatedAtEpochMs={card.createdAt}
+			/>
+		) : null;
 	const postDeployVerificationEntryNavigationShortcut = !historicalContext ? (
 		<PostDeployVerificationEntryNavigationButton
 			taskId={card.id}
@@ -1097,6 +1140,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				) : null}
 				{postDeployVerificationEntryNavigationShortcut}
 			</span>
+			{relatedTasksPreviewShortcut}
 			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
 				<span
 					data-task-card-line-change-statistics-group=""
@@ -1145,12 +1189,16 @@ export const TaskCardBody = memo(function TaskCardBody(
 
 	const cardShell = (
 		<div
-			ref={cardDragBindings?.innerRef}
+			ref={(element) => {
+				taskStickers.cardElementRef.current = element;
+				cardDragBindings?.innerRef(element);
+			}}
 			{...(cardDragBindings?.draggableProps ?? {})}
 			{...(cardDragBindings?.dragHandleProps ?? {})}
 			className={cn(
-				"kb-board-card-shell",
+				"kb-board-card-shell relative",
 				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
+				isRelatedTaskPreviewCopy && "max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11",
 			)}
 			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
 			data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
@@ -1236,6 +1284,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 			}}
 			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}
+			onPointerEnter={(event) => {
+				if (event.pointerType !== "mouse" || !event.currentTarget.contains(event.target as Node)) return;
+				taskStickers.pointerEnter();
+				if (taskStickers.entries.length > 0) taskStickers.activate();
+			}}
+			onPointerLeave={taskStickers.pointerLeave}
 		>
 			{/* 为右下角复制叠层留出横向空间，编辑动作与时长药丸仍可独立命中。 */}
 			<div
@@ -1373,7 +1427,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</span>
 							</button>
 						) : null}
-						{showTitleEditButton && !isCompactRowInFocusViewLeftColumn && !isMobileDetailHeaderCopy ? (
+						{showTitleEditButton &&
+						!isCompactRowInFocusViewLeftColumn &&
+						!isMobileDetailHeaderCopy &&
+						!isRelatedTaskPreviewCopy ? (
 							<TaskCardTitleRowHoverActions>
 								<Tooltip
 									side="bottom"
@@ -1402,7 +1459,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				</div>
 				<div
 					className={cn(
-						isMobileDetailHeaderCopy
+						usesInFlowActionToolbar
 							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
 							: cn(
 									// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
@@ -1418,7 +1475,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 								),
 					)}
 				>
-					{showTitleEditButton && (isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy) ? (
+					{showTitleEditButton &&
+					(isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy) ? (
 						<Tooltip
 							side="bottom"
 							content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
@@ -1441,6 +1499,21 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 
+					{onSetTaskShelvingState ? (
+						<Tooltip side="bottom" content={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}>
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={card.taskShelvingState?.isShelved ? <ArchiveRestore size={12} /> : <Archive size={12} />}
+								aria-label={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onSetTaskShelvingState(card.id, !card.taskShelvingState?.isShelved);
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					{taskPinboardToggle ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip(taskPinboardToggle.tooltip)}>
 							<Button
@@ -1457,6 +1530,25 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : null}
+					{!taskStickers.readOnly ? (
+						<Tooltip content={revealHoverActionTooltip("添加便签")}>
+							<Button
+								aria-label="添加便签"
+								variant="ghost"
+								size="xs"
+								icon={<StickyNote size={12} />}
+								onMouseDown={stopEvent}
+								onPointerDown={(event) => event.stopPropagation()}
+								onClick={(event) => {
+									stopEvent(event);
+									taskStickers.startNew(
+										event.currentTarget,
+										resolveTaskStickerOverlayExplicitActivationSource(event),
+									);
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					{taskCommentsDialog && taskCommentsWorkspaceId && !historicalContext ? (
 						<Tooltip content={revealHoverActionTooltip("任务评论")}>
 							<Button
@@ -1467,7 +1559,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);
-									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id);
+									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id, card.createdAt);
 								}}
 							/>
 						</Tooltip>
@@ -1537,7 +1629,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : null}
-					{columnId === "review" ? (
+					{columnId === "review" && !card.taskShelvingState?.isShelved ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to validation")}>
 							<Button
 								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
@@ -1556,6 +1648,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					{/* 仅终端 agent（claude/codex…，排除进程内 Cline SDK 与无会话）的 In Progress 卡：手动翻入 Review。
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
 					{columnId === "in_progress" &&
+					!card.taskShelvingState?.isShelved &&
 					sessionSummary?.agentId != null &&
 					!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary) ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
@@ -1573,7 +1666,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : null}
-					{columnId === "review" || columnId === "validation" ? (
+					{!card.taskShelvingState?.isShelved && (columnId === "review" || columnId === "validation") ? (
 						<TaskCardPrimaryActionWithQuickOptions
 							open={openedQuickActionMenu === "done"}
 							onOpenChange={(open) =>
@@ -1591,7 +1684,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							}}
 						/>
 					) : null}
-					{columnId === "trash" ? (
+					{columnId === "trash" && !card.taskShelvingState?.isShelved ? (
 						<Tooltip
 							side="bottom"
 							content={
@@ -1747,7 +1840,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</span>
 							</span>
 						) : null}
-						{showDirectoryRow ? taskDirectoryRow : postDeployVerificationEntryNavigationShortcut}
+						{showDirectoryRow ? (
+							taskDirectoryRow
+						) : (
+							<>
+								{postDeployVerificationEntryNavigationShortcut}
+								{relatedTasksPreviewShortcut}
+							</>
+						)}
 						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
 							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
 								{machineWaitingBadgeElement}
@@ -1775,7 +1875,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : (
 					<>
-						{showDirectoryRow ? taskDirectoryRow : postDeployVerificationEntryNavigationShortcut}
+						{showDirectoryRow ? (
+							taskDirectoryRow
+						) : (
+							<>
+								{postDeployVerificationEntryNavigationShortcut}
+								{relatedTasksPreviewShortcut}
+							</>
+						)}
 						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
 							<Button
 								size="sm"
@@ -1805,6 +1912,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : null}
 			</div>
+			<TaskCardStickers controller={taskStickers} />
 		</div>
 	);
 

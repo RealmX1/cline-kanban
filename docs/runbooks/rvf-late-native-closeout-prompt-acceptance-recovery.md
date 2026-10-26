@@ -94,3 +94,36 @@ kanban task reconcile-rvf-automatic-closeout-late-native-prompt-acceptance \
 本轮实际直接分析的成功样本为 38fd3。9c9c1、df81c、30555 仅作为协调报告背景，本卡没有独立重跑它们，也不把引用等同于已完成回归。
 
 持久交接目录：`~/.cline/kanban/cross-task-handoff-artifacts/task-7e075-rvf-late-native-closeout-acceptance-recovery/`。其中 `analyze-native-closeout-compaction-preconditions.py` 可重建四样本 ancestry 用量观察，`native-compaction-preconditions-observation.json` 保存来源边界与摘要；最终交接附实际检查、提交及逐样本命令。消费者正式恢复由 646eb 协调，本任务不修改它们的账本，不替它们 commit/base-sync，不部署。
+
+## 历史 Land 与本地 base 整合状态的自动对账
+
+恢复器在原生接受补证、会话恢复及续验投递前，先观察规范 Land 工件，再核验已验收 Land 提交是否位于绑定的本地 base ref 的祖先链。核验复用 run/handoff、候选摘要、真实 worktree 与 Git common-dir 身份；固定观察到的 base OID，在短写锁内重新检查后经原结果漏斗追加登记。
+
+完整 run/handoff 绑定已持久化时，`restoring_pre_review_conversation` 与 `restored_pre_review_conversation` 也执行同一只读对账。coordinator 在刚绑定完成凭据后、恢复会话前和投递前复用当前记录操作锁观察；两阶段已独立证明完成就直接追加收口，不再恢复或投递。原生动作前重新探测证据指纹，以发现冷却期间迟到的完成事实；相同指纹仍遵守原有退避与全面核验次数。即使 Land 复用开审前同一 HEAD、工作区从未变化，也不依赖候选漂移暂停兜底。恢复阶段的普通客户端报告仍不得跳阶段；提前登记只接受服务端独立证明，不能借用原生接受记录授予执行资格。结果未知时继续原有已授权恢复流程。
+
+`baseBranchSyncExecutionResult.verificationBasis=verified_base_integration_state` 表示本次独立观察到的等价完成状态。`baseIntegrationObservation` 保存来源 `observed_local_base_ancestry`、workspace/task/token/run/handoff、common-dir、本地 ref、Land/base OID、候选及 scope 摘要和观察时间；`executionEvidenceSha256` 是不含观察时间的证据对象摘要。它不证明某次历史 handback 的执行者、时间或执行过程。原 failed/blocked 报告、投递账本和 pauseReason 保留；已接受完成结果不会被迟到失败覆盖，同一 ref 的 `main` / `refs/heads/main` 报告重放等价。
+
+base 观察预算保存在 `independentBaseIntegrationObservationBudget`：同一证据指纹最多三次全面核验，间隔十五秒；耗尽后每六十秒只探测相关 ref、文件身份及凭据是否改变。变化后重开该指纹的预算，重启不清空计数。失败原因与机器恢复条件保存在同一预算中。规范 Land 的既有预算也增加六十秒能力探测间隔。
+
+待核验阶段与可执行阶段分开。缺少 `blockedReasonKind` 的历史 blocked 进入只读续验；它仍阻止阶段认领，不能自动解释成机器故障或用户禁止。续验必须读取原报告、原生记录和当前用户限制，明确分类的报告追加 `blockedReasonClassificationSource=bound_agent_report` 及历史；未知则继续待验。报告入口补证不会在校验该报告前改换 active delivery。真实写入继续走原生接受、身份及阶段认领门禁。
+
+显式 Stop 不被观察器解除，也不恢复会话、投递消息或认领执行。备用路线的 active/consumed 互斥继续有效；普通结果登记使用同一 normal mutation reservation，不把备用结果冒充普通回执。
+
+跨仓 `review-validate-fix/abc87` 已发布 version 1 历史补充完成证明。缺少规范 Land 回执时，恢复器只读查找原 run 的 `artifacts/supplemental-land-completion-evidence/<sha256>.json`，按精确 task/token/run/handoff/完整提交、实际 Git common-dir、HEAD 祖先和证明及 sidecar 摘要调用 `rvf land supplemental-completion verify`。同 run 出现多个不同目标时保持未知，等待带具体证明引用的执行报告，不选择 latest。消费者不调用 `record`、补审、提交、seal 或 base 整合，也不另建评审资格引擎。
+
+成功追加 `landExecutionResult.verificationBasis=verified_supplemental_land_completion`，`supplementalLandCompletionEvidence` 保存具体 `evidencePath/evidenceSha256`，`supplementalLandCompletionVerification` 保存核验绑定、目标 tree、当前执行资格与观察时间。`doesNotAttestPrecommitReview=true`、`doesNotAuthorizeFollowupExecution=true` 明确这是后来补充的历史验收，不能冒充提交前评审或普通 candidate evidence。完成报告也可在原 `report-rvf-automatic-closeout-execution-result` 接口提供该引用；仅允许 Land/completed，服务端独立重放核验。
+
+已验收的补充 Land 可以供只读 base 祖先观察复用，base 结果保存 `supplementalLandCompletionEvidenceSha256`，不伪造 `candidateEvidenceSha256` 或打开 base-branch-sync 快路径。核验记录另存证明中冻结 scope 原件的 `scopeContractSha256`；当前 run 的 scope 必须与该原件同摘要，不能改指另一条已含 Land 的 ref 后补登成功。`rvf-history` 单列来源 `kanban_server_verified_supplemental_land_completion`，即使 base 尚未整合也保留已接受的历史完成；当前候选覆盖仍须重新鉴证。以后工具安装或缓存变化不撤销已接受事实。
+
+`supplementalLandCompletionObservationBudget` 持久保存同指纹三次、十五秒退避及耗尽后六十秒轻量探测，包含失败原因和恢复条件。证明、bundle、sidecar、handoff、目标 HEAD 或核验程序变化后自动重验；`awaiting_machine_evidence`、`invalid_evidence`、`execution_prohibited`、无效响应或未安装能力均不能登记成功。写入仍沿用记录操作锁、normal mutation reservation 和结果漏斗，落盘前复查证明、绑定、Stop 与备用 active/consumed 状态。Stop 样本不触发核验或唤醒。
+
+只读程序沿用 `rvf-history` 的 `KANBAN_RVF_INSPECTION_EXECUTABLE_PATH`；未设置时使用用户 home 的 `.rvf/bin/rvf`，`RVF_HOME` 仅作数据根。生产方未部署时可把覆盖项指向正式发布 checkout 的只读 wrapper；消费端不猜测生产方源码路径或安装新插件。
+
+正式生产方导出的合成夹具可通过以下 guarded 链路消费，正例要求历史完成与精确引用匹配，负例覆盖错误 task、摘要与重新签摘要后仍遗漏的同路径差异。夹具不用于真实任务记账，真实 `8bd3c` 的 Stop 保留。
+
+```sh
+KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY=<正式 RVF checkout> \
+KANBAN_RVF_SUPPLEMENTAL_CONSUMER_CONTRACT_FIXTURES_FILE=<正式导出清单绝对路径> \
+npm run test:guarded -- --project runtime-integration \
+  test/integration/rvf-supplemental-completion-consumer-contract.integration.test.ts
+```

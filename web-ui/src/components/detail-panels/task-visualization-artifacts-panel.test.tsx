@@ -1,12 +1,16 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
+import { ExpandedForegroundViewProvider } from "@/expanded-foreground-view/expanded-foreground-view-provider";
 import type { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
 import type { TaskVisualizationArtifact } from "@/runtime/types";
 
 const queries = vi.hoisted(() => ({ prepare: vi.fn() }));
 vi.mock("@/runtime/task-visualization-query", () => ({ prepareTaskVisualizationPreview: queries.prepare }));
+vi.mock("@/expanded-foreground-view/expanded-foreground-view-detached-content", () => ({
+	ExpandedForegroundViewDetachedContent: () => null,
+}));
 const artifact: TaskVisualizationArtifact = {
 	workspaceId: "workspace-a",
 	taskId: "task-a",
@@ -37,12 +41,15 @@ const controller = {
 	failAutomaticPreview,
 	refreshArtifacts: vi.fn(),
 	selectArtifact: vi.fn(),
+	ensureDefaultSelection: vi.fn(),
+	retryDefaultSelection: vi.fn(),
 	acknowledgeRenderedPreview,
 	dismissAutomaticPreview: vi.fn(),
 } satisfies ReturnType<typeof useTaskVisualizationArtifacts>;
 beforeEach(() => {
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 	vi.stubGlobal("IntersectionObserver", undefined);
+	vi.spyOn(document, "hasFocus").mockReturnValue(true);
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
@@ -59,7 +66,9 @@ beforeEach(() => {
 afterEach(async () => {
 	await act(async () => root.unmount());
 	container.remove();
+	window.history.replaceState(null, "", "/");
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 it("任务署名在 iframe 外显示，任务名和图表标题独立且全屏保留", async () => {
 	await act(async () =>
@@ -186,4 +195,58 @@ it("旧 frame 的迟到证明不能确认新 frame，即使产物和修订相同
 		),
 	);
 	expect(acknowledgeRenderedPreview).not.toHaveBeenCalled();
+});
+
+it("返回普通面板选择其他产物后，浏览器前进仍恢复展开链接指定的产物", async () => {
+	const otherArtifact = { ...artifact, visualizationArtifactId: "c".repeat(64), title: "另一张图表" };
+	function SelectablePanel() {
+		const [selection, setSelection] = useState(controller.selection);
+		return (
+			<TaskVisualizationArtifactsPanel
+				workspaceId="workspace-a"
+				taskId="task-a"
+				taskIncarnationCreatedAtEpochMs={1}
+				controller={{
+					...controller,
+					artifacts: [artifact, otherArtifact],
+					selection,
+					selectArtifact: (selected) =>
+						setSelection({
+							visualizationArtifactId: selected.visualizationArtifactId,
+							revisionId: selected.revisionId,
+							selectionRequestKey: selection.selectionRequestKey + 1,
+						}),
+				}}
+			/>
+		);
+	}
+	window.history.replaceState(null, "", "/workspace-a?task=task-a");
+	await act(async () =>
+		root.render(
+			<ExpandedForegroundViewProvider>
+				<SelectablePanel />
+			</ExpandedForegroundViewProvider>,
+		),
+	);
+	await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="全屏预览"]')?.click());
+	const back = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+	await act(async () => {
+		window.history.back();
+		await back;
+	});
+	const selector = container.querySelector("select");
+	await act(async () => {
+		if (selector) selector.value = otherArtifact.visualizationArtifactId;
+		selector?.dispatchEvent(new Event("change", { bubbles: true }));
+	});
+	expect(selector?.value).toBe(otherArtifact.visualizationArtifactId);
+	const forward = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+	await act(async () => {
+		window.history.forward();
+		await forward;
+	});
+	expect(selector?.value).toBe(artifact.visualizationArtifactId);
+	expect(new URLSearchParams(window.location.search).get("expandedVisualizationArtifactId")).toBe(
+		artifact.visualizationArtifactId,
+	);
 });

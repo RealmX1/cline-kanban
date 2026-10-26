@@ -65,6 +65,14 @@ function useUserInterfacePreference<TFieldName extends UserInterfacePreferenceFi
 	return [value, setValue];
 }
 
+/** 创建、Backlog 编辑与直接启动共用，未设置时默认关闭。 */
+export function useTaskProjectAssignmentAutomaticAnalysisEnabledPreference(): [
+	boolean,
+	Dispatch<SetStateAction<boolean>>,
+] {
+	return useUserInterfacePreference("taskProjectAssignmentAutomaticAnalysisEnabled", false);
+}
+
 /** 新建任务时「自动评审」默认是否开启。 */
 export function useNewTaskAutoReviewEnabledPreference(): [boolean, Dispatch<SetStateAction<boolean>>] {
 	return useUserInterfacePreference("newTaskAutoReviewEnabled", false);
@@ -140,4 +148,19 @@ export function useTaskPromptPseudoHtmlBlockRecentlyUsedCustomNamesPreference():
 /** 迁移时两边都有值且不一致的字段（服务端胜出）。空数组表示无冲突。 */
 export function useUserInterfacePreferenceFieldsWhereServerAndBrowserDisagree(): readonly string[] {
 	return useUserInterfacePreferenceStoreState().fieldsWhereServerAndBrowserDisagree;
+}
+
+/** 创建与 Backlog 编辑共享；只发送本次修改的字段，避免不同客户端覆盖其他设置。 */
+export function useTaskEditorSettingPresentationPreference(): [
+	Record<string, "expanded" | "collapsed_in_group" | "hidden">,
+	(key: string, value: "expanded" | "collapsed_in_group" | "hidden") => void,
+] {
+	useUserInterfacePreferenceStoreState();
+	const preferences = readEffectiveUserInterfacePreferenceValue("taskEditorSettingPresentationBySettingKey") ?? {};
+	const setPresentation = useCallback((key: string, value: "expanded" | "collapsed_in_group" | "hidden") => {
+		saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+			taskEditorSettingPresentationBySettingKey: { [key]: value },
+		});
+	}, []);
+	return [preferences, setPresentation];
 }

@@ -40,6 +40,8 @@ import {
 } from "../core/task-main-conversation-session-binding";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { buildTaskSessionStartRequestFromBoardCard } from "../core/task-session-start-request-from-board-card";
+import { isTaskCardShelved, setTaskCardShelvingState } from "../core/task-shelving-state";
+import { applyTaskStickerEntryMutationToTaskCard } from "../core/task-sticker-entry-mutation";
 import { buildTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import type {
 	authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
@@ -51,6 +53,11 @@ import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
 } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import {
+	recoverPendingBacklogTaskProjectTransfers,
+	transferNeverStartedBacklogTaskToProject,
+} from "../state/backlog-task-project-transfer";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
@@ -109,6 +116,11 @@ export interface TaskCardActionPostDeployVerificationDoneEntryGate {
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed: typeof revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed;
 }
 
+function assertTaskCardUnshelvedBeforeStageAction(card: RuntimeBoardCard): void {
+	if (isTaskCardShelved(card))
+		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请先取消搁置，再移动任务 Stage。" });
+}
+
 interface TaskCardFoundWithBoardColumn {
 	taskCard: RuntimeBoardCard;
 	boardColumnId: RuntimeBoardColumnId;
@@ -164,15 +176,29 @@ function createTaskCardNotFoundOnWorkspaceBoardError(taskId: string, workspacePa
 	});
 }
 
+function assertTaskCardIncarnationMatchesExpected(
+	taskCard: RuntimeBoardCard,
+	expectedCreatedAt: number | undefined,
+): void {
+	if (expectedCreatedAt !== undefined && taskCard.createdAt !== expectedCreatedAt) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: "这张任务卡已被删除并重建；原关联引用不能操作新的同 ID 任务，请刷新后重试。",
+		});
+	}
+}
+
 function findTaskCardWithBoardColumnOrThrowNotFound(
 	board: RuntimeBoardData,
 	taskId: string,
 	workspacePath: string,
+	expectedCreatedAt?: number,
 ): TaskCardFoundWithBoardColumn {
 	const found = findTaskCardWithBoardColumn(board, taskId);
 	if (!found) {
 		throw createTaskCardNotFoundOnWorkspaceBoardError(taskId, workspacePath);
 	}
+	assertTaskCardIncarnationMatchesExpected(found.taskCard, expectedCreatedAt);
 	return found;
 }
 
@@ -265,6 +291,7 @@ export function createTaskCardActionApi(
 	const readTaskCardWithPersistedSessionSummaryOutsideBoardLock = async (
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskId: string,
+		expectedCreatedAt?: number,
 	): Promise<
 		TaskCardFoundWithBoardColumn & {
 			taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
@@ -275,6 +302,7 @@ export function createTaskCardActionApi(
 			persistedWorkspaceState.board,
 			taskId,
 			workspaceScope.workspacePath,
+			expectedCreatedAt,
 		);
 		return {
 			...found,
@@ -371,16 +399,18 @@ export function createTaskCardActionApi(
 		}
 	};
 
-	const runSeriallyForTaskCards = <TResult>(
+	const runSeriallyForTaskCards = async <TResult>(
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskIds: readonly string[],
 		taskCardActionCommand: () => Promise<TResult>,
-	): Promise<TResult> =>
-		deps.taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
+	): Promise<TResult> => {
+		await recoverPendingBacklogTaskProjectTransfers(workspaceScope.workspaceId);
+		return deps.taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
 			workspaceScope.workspaceId,
 			taskIds,
 			taskCardActionCommand,
 		);
+	};
 
 	// 恢复失败的回滚：卡片仍在 review（没被别处挪走）才移回 Done，并发挪走的尊重对方。
 	// 恢复时若关掉过自动 review，在移回 Done 的同一次写盘里还原成恢复前的开关值：浏览器旧路径 resumeTaskFromTrash
@@ -460,7 +490,13 @@ export function createTaskCardActionApi(
 			return false;
 		}
 		const persistedBoard = (await loadPersistedWorkspaceStateById(workspaceScope.workspaceId)).board;
-		const boardColumnIdBeforeMove = findTaskCardWithBoardColumn(persistedBoard, input.taskId)?.boardColumnId;
+		const foundBeforeAuthorization = findTaskCardWithBoardColumn(persistedBoard, input.taskId);
+		if (foundBeforeAuthorization)
+			assertTaskCardIncarnationMatchesExpected(
+				foundBeforeAuthorization.taskCard,
+				input.expectedTaskIncarnationCreatedAtEpochMs,
+			);
+		const boardColumnIdBeforeMove = foundBeforeAuthorization?.boardColumnId;
 		if (boardColumnIdBeforeMove === undefined) {
 			// 卡不在看板：交给移列本身报 NOT_FOUND。
 			return false;
@@ -526,9 +562,11 @@ export function createTaskCardActionApi(
 					state.board,
 					input.taskId,
 					workspaceScope.workspacePath,
+					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
 				const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 					resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
+				assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 				const completionComment = input.taskCommentToAppendWhenMovingIntoDone;
 				const existingCompletionComment = completionComment
 					? found.taskCard.taskCommentEntries?.find(
@@ -589,12 +627,29 @@ export function createTaskCardActionApi(
 		);
 
 	return {
+		transferNeverStartedBacklogTaskToProject: async (scope, input, evidence) => {
+			const live = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(scope.workspaceId, input.taskId);
+			if (live?.startedAt != null)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "任务已有启动会话，不能迁移项目。" });
+			const intent = await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+				taskMutationIntentKind: "backlog_task_project_transferred",
+				kanbanRequestOriginActorEvidence: evidence,
+				kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+			});
+			const result = await transferNeverStartedBacklogTaskToProject(scope.workspaceId, input, intent);
+			const target = await loadWorkspaceContextById(result.workspaceId);
+			await deps.broadcastRuntimeWorkspaceStateUpdated(scope.workspaceId, scope.workspacePath);
+			if (target) await deps.broadcastRuntimeWorkspaceStateUpdated(target.workspaceId, target.repoPath);
+			await deps.broadcastRuntimeProjectsUpdated(null);
+			return result;
+		},
 		readTaskCardWithBoardColumn: async (workspaceScope, input) => {
 			const persistedWorkspaceState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
 			const found = findTaskCardWithBoardColumn(persistedWorkspaceState.board, input.taskId);
 			if (!found) {
 				return { taskCardLookupOutcome: "task_card_not_found_on_workspace_board", lookedUpTaskId: input.taskId };
 			}
+			assertTaskCardIncarnationMatchesExpected(found.taskCard, input.expectedTaskIncarnationCreatedAtEpochMs);
 			return {
 				taskCardLookupOutcome: "task_card_found_on_workspace_board",
 				taskCardSnapshot: buildTaskCardSnapshot(
@@ -646,6 +701,7 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					if (found.boardColumnId !== "backlog" && found.boardColumnId !== "in_progress") {
 						throw createTaskCardInBoardColumnNotAllowingActionError(
@@ -655,6 +711,7 @@ export function createTaskCardActionApi(
 					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
 					if (found.boardColumnId === "in_progress") {
+						assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 						// 本来就在 in_progress：没有卡片级变化，不写盘、不产生空事件批次。
 						return {
 							board: state.board,
@@ -666,7 +723,8 @@ export function createTaskCardActionApi(
 							save: false,
 						};
 					}
-					const moved = moveTaskToColumn(state.board, input.taskId, "in_progress", undefined, {
+					const boardAfterUnshelvingBacklog = setTaskCardShelvingState(state.board, input.taskId, false).board;
+					const moved = moveTaskToColumn(boardAfterUnshelvingBacklog, input.taskId, "in_progress", undefined, {
 						insertAtIndex: input.insertAtIndexWithinInProgressBoardColumn,
 					});
 					if (!moved.moved || !moved.task) {
@@ -775,7 +833,9 @@ export function createTaskCardActionApi(
 				const foundBeforeHandoff = await readTaskCardWithPersistedSessionSummaryOutsideBoardLock(
 					workspaceScope,
 					input.taskId,
+					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
+				assertTaskCardUnshelvedBeforeStageAction(foundBeforeHandoff.taskCard);
 				if (foundBeforeHandoff.boardColumnId !== "in_progress") {
 					throw createTaskCardInBoardColumnNotAllowingActionError(
 						`Task "${input.taskId}" is in "${foundBeforeHandoff.boardColumnId}" and can only be moved to review from in_progress.`,
@@ -815,6 +875,7 @@ export function createTaskCardActionApi(
 							state.board,
 							input.taskId,
 							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
 						);
 						const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 							resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);
@@ -879,7 +940,9 @@ export function createTaskCardActionApi(
 							state.board,
 							input.taskId,
 							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
 						);
+						assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 						if (
 							!isTaskCardBoardPlacementChangeAllowedWithoutSessionSideEffects(
 								found.boardColumnId,
@@ -1057,7 +1120,9 @@ export function createTaskCardActionApi(
 								state.board,
 								input.taskId,
 								workspaceScope.workspacePath,
+								input.expectedTaskIncarnationCreatedAtEpochMs,
 							);
+							assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 							if (found.boardColumnId !== "trash") {
 								throw createTaskCardInBoardColumnNotAllowingActionError(
 									`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be restored from done.`,
@@ -1196,7 +1261,8 @@ export function createTaskCardActionApi(
 					? [...new Set(selection.selectedTaskIds)]
 					: ((await loadWorkspaceBoardById(workspaceScope.workspaceId)).columns
 							.find((column) => column.id === selection.selectedBoardColumnId)
-							?.cards.map((taskCard) => taskCard.id) ?? []);
+							?.cards.filter((taskCard) => !isTaskCardShelved(taskCard))
+							.map((taskCard) => taskCard.id) ?? []);
 			const subjectTaskIdSetHoldingPerTaskCommandSerialization = new Set(subjectTaskIdsOfTaskCardAction);
 			return await runSeriallyForTaskCards(
 				workspaceScope,
@@ -1224,14 +1290,17 @@ export function createTaskCardActionApi(
 												state.board,
 												taskId,
 												workspaceScope.workspacePath,
+												input.expectedTaskIncarnationCreatedAtEpochMsByTaskId?.[taskId],
 											),
 										)
 									: (
 											state.board.columns.find((column) => column.id === selection.selectedBoardColumnId)
 												?.cards ?? []
 										)
-											.filter((taskCard) =>
-												subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id),
+											.filter(
+												(taskCard) =>
+													subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id) &&
+													!isTaskCardShelved(taskCard),
 											)
 											.map((taskCard) => ({ taskCard, boardColumnId: selection.selectedBoardColumnId }));
 							const deleted = deleteTasksFromBoard(
@@ -1402,6 +1471,7 @@ export function createTaskCardActionApi(
 		// 排在一次慢启动（建 worktree 可达十几秒）后面只会让改名、置顶显得卡顿。
 		// EXPERIMENT_NODE: 改字段 / 置顶是否也进按卡串行器（换「启动途中改的 prompt 不会被这次启动读到」的确定性，代价是编辑卡顿）。
 		updateTaskCardFieldValues: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			await recoverPendingBacklogTaskProjectTransfers(workspaceScope.workspaceId);
 			const update = await mutateWorkspaceState<RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries>(
 				workspaceScope.workspacePath,
 				await resolveIntent(
@@ -1415,7 +1485,13 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
+					if (
+						input.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+						found.taskCard.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs
+					)
+						throw new TRPCError({ code: "CONFLICT", message: "任务身份已变化，未写入编辑内容。" });
 					const expected = input.expectedTaskTitleAndPromptForAiNameBackfill;
 					if (expected && (found.taskCard.title !== expected.title || found.taskCard.prompt !== expected.prompt)) {
 						return {
@@ -1459,6 +1535,83 @@ export function createTaskCardActionApi(
 			return { taskCardSnapshotAfterAction: update.value };
 		},
 
+		applyTaskStickerEntryMutation: async (workspaceScope, input, evidence) =>
+			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const mutation = await mutateWorkspaceState(
+					workspaceScope.workspacePath,
+					await resolveIntent("apply_task_sticker_entry_mutation", evidence, input.boardMutationInitiator, [
+						input.taskId,
+					]),
+					(state) => {
+						const found = findTaskCardWithBoardColumnOrThrowNotFound(
+							state.board,
+							input.taskId,
+							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
+						);
+						const taskCard = applyTaskStickerEntryMutationToTaskCard(found.taskCard, input.mutation, Date.now());
+						const updated = taskCard !== found.taskCard;
+						return {
+							board: updated
+								? {
+										...state.board,
+										columns: state.board.columns.map((column) => ({
+											...column,
+											cards: column.cards.map((card) => (card === found.taskCard ? taskCard : card)),
+										})),
+									}
+								: state.board,
+							save: updated,
+							value: buildTaskCardSnapshot(
+								workspaceScope,
+								{ ...found, taskCard },
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
+							),
+						};
+					},
+				);
+				broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, mutation.saved);
+				return { boardWasSaved: mutation.saved, taskCardSnapshotAfterAction: mutation.value };
+			}),
+
+		setTaskCardShelvingStateWithoutSessionSideEffects: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) =>
+			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
+				const shelving = await mutateWorkspaceState(
+					workspaceScope.workspacePath,
+					await resolveIntent(
+						"set_task_card_shelving_state",
+						kanbanRequestOriginActorEvidence,
+						input.boardMutationInitiator,
+						[input.taskId],
+					),
+					(state) => {
+						const found = findTaskCardWithBoardColumnOrThrowNotFound(
+							state.board,
+							input.taskId,
+							workspaceScope.workspacePath,
+							input.expectedTaskIncarnationCreatedAtEpochMs,
+						);
+						const mutation = setTaskCardShelvingState(state.board, input.taskId, input.isShelved);
+						const updatedFound = findTaskCardWithBoardColumn(mutation.board, input.taskId) ?? found;
+						return {
+							board: mutation.board,
+							save: mutation.updated,
+							value: buildTaskCardSnapshot(
+								workspaceScope,
+								updatedFound,
+								resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId),
+							),
+						};
+					},
+				);
+				broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, shelving.saved);
+				return { boardWasSaved: shelving.saved, taskCardSnapshotAfterAction: shelving.value };
+			}),
+
 		// 同 updateTaskCardFieldValues，不进按卡串行器。与浏览器 setBoard 用同一组纯函数（src/core/task-pinboard-pinning.ts）。
 		setTaskPinboardPinStateOfTaskCard: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			const pinning = await mutateWorkspaceState<RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries>(
@@ -1476,6 +1629,7 @@ export function createTaskCardActionApi(
 						state.board,
 						input.taskId,
 						workspaceScope.workspacePath,
+						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					const taskSessionSummaryPersistedInWorkspaceSessionsFile =
 						resolveMainTaskConversationSessionSummaryForTaskId(state.board, state.sessions, input.taskId);

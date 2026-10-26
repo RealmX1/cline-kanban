@@ -3,10 +3,11 @@ import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createCodexStatisticsVerifiedHistoryReadCache } from "../../../src/daily-work-progress-statistics/codex-statistics-verified-history-read-cache";
 import {
 	createEmptyTaskUserPromptStatisticsCursor,
 	foldTaskUserPromptStatisticsRecord,
-	readTaskUserPromptStatisticsTranscriptIncrement,
+	readTaskUserPromptStatisticsTranscriptIncrement as readNativeStatisticsIncrement,
 	taskUserPromptStatisticsCursorSchema,
 } from "../../../src/daily-work-progress-statistics/task-user-prompt-statistics-transcript-reader";
 
@@ -45,7 +46,11 @@ function codexSegmentMetadata(historyBase: unknown = null, nativeSessionId = seg
 function transcriptJsonLines(records: Record<string, unknown>[]) {
 	return `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 }
-describe("人工 prompt 统计的原生证据", () => {
+describe.each([false, true])("人工 prompt 统计的原生证据，缓存=%s", (cacheEnabled) => {
+	const codexHistoryReadCache = cacheEnabled ? createCodexStatisticsVerifiedHistoryReadCache() : undefined;
+	const readTaskUserPromptStatisticsTranscriptIncrement = (
+		input: Parameters<typeof readNativeStatisticsIncrement>[0],
+	) => readNativeStatisticsIncrement({ ...input, codexHistoryReadCache });
 	it("旧持久游标自动补齐分段字段", () => {
 		const parsed = taskUserPromptStatisticsCursorSchema.parse({
 			nextByteOffset: 0,

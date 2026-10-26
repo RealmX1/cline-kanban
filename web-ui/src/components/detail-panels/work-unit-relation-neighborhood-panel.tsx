@@ -10,9 +10,20 @@ import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relati
 // work-unit-relation-add-reference-relation-dialog；两者的决策调用同样只绑在按钮 onClick 上。
 
 import type { InterWorkUnitRelationAssertionWriteResponse } from "@runtime-work-unit-relation-assertion-write-api-contract";
-import { Bell, BellOff, ChevronDown, ChevronRight, Plus, RefreshCw, TriangleAlert, Waypoints } from "lucide-react";
+import {
+	Bell,
+	BellOff,
+	ChevronDown,
+	ChevronRight,
+	Maximize2,
+	Plus,
+	RefreshCw,
+	TriangleAlert,
+	Waypoints,
+} from "lucide-react";
 import { type MouseEventHandler, type ReactElement, type ReactNode, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
+import { RelationTaskCardPreviewLayout } from "@/components/detail-panels/relation-task-card-preview-layout";
 import { WorkUnitRelationAddReferenceRelationDialog } from "@/components/detail-panels/work-unit-relation-add-reference-relation-dialog";
 import { WorkUnitRelationAssertedRelationsSection } from "@/components/detail-panels/work-unit-relation-asserted-relations-section";
 import {
@@ -24,6 +35,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
+import { ExpandedForegroundViewSurface } from "@/expanded-foreground-view/expanded-foreground-view-surface";
+import { useExpandedForegroundViewSurface } from "@/expanded-foreground-view/use-expanded-foreground-view-surface";
+import { useRelationTaskCardPreview } from "@/hooks/use-relation-task-card-preview";
 import {
 	useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard,
 	type WorkUnitRelationNeighborhoodPanelController,
@@ -353,21 +367,48 @@ export function WorkUnitRelationNeighborhoodPanel({
 	workspaceId,
 	kanbanBoardCardTaskId,
 	initiallyExpanded = false,
+	taskIncarnationCreatedAtEpochMs,
+	detachedForeground = false,
 }: {
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string;
 	initiallyExpanded?: boolean;
+	taskIncarnationCreatedAtEpochMs?: number;
+	detachedForeground?: boolean;
 }): ReactElement {
-	const controller = useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard({ workspaceId, kanbanBoardCardTaskId });
+	const surface = useExpandedForegroundViewSurface(
+		workspaceId && taskIncarnationCreatedAtEpochMs !== undefined
+			? {
+					viewKind: "task_relations",
+					workspaceId,
+					taskId: kanbanBoardCardTaskId,
+					taskIncarnationCreatedAtEpochMs,
+				}
+			: null,
+		detachedForeground,
+	);
+	const controller = useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard({
+		workspaceId,
+		kanbanBoardCardTaskId,
+		taskIncarnationCreatedAtEpochMs,
+	});
 	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(initiallyExpanded);
 	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
-	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(false);
+	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(detachedForeground);
+	const summaryTaskCardPreview = useRelationTaskCardPreview(
+		isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen,
+	);
 	const modeling = useReferenceRelationModelingEditor({
 		workspaceId,
 		taskId: kanbanBoardCardTaskId,
+		taskIncarnationCreatedAtEpochMs,
 		active: isRelationNeighborhoodPanelExpanded && isModelingEditorOpen,
 	});
 	const readState = controller.relationNeighborhoodReadState;
+	const rootIdentity = modeling.preview?.workUnits.find(
+		(entry) => entry.workUnitKey === modeling.preview?.rootWorkUnitKey,
+	)?.kanbanBoardCardIdentity;
+	const isHistoricalRoot = rootIdentity?.permanentlyRemovedFromBoardAt != null;
 	const handleReferenceRelationAssertionWriteSucceeded = (
 		writeResponse: InterWorkUnitRelationAssertionWriteResponse,
 	) => {
@@ -380,12 +421,14 @@ export function WorkUnitRelationNeighborhoodPanel({
 	};
 
 	return (
-		<section
+		<ExpandedForegroundViewSurface
+			controller={surface}
+			title="Relations"
+			as="section"
 			className={cn(
 				"flex flex-col border-t border-border bg-surface-1",
 				isModelingEditorOpen ? "min-h-0 shrink" : "shrink-0",
 			)}
-			aria-label="Relations"
 		>
 			<div className="flex h-8 shrink-0 items-center hover:bg-surface-3">
 				<button
@@ -410,6 +453,21 @@ export function WorkUnitRelationNeighborhoodPanel({
 					<span className="text-xs font-medium text-text-primary">Relations</span>
 					<RelationNeighborhoodHeaderSummaryBadge controller={controller} />
 				</button>
+				{!surface.isExpanded ? (
+					<Button
+						variant="ghost"
+						size="sm"
+						aria-label="展开关系图"
+						className="max-md:min-h-11 max-md:min-w-11"
+						onClick={() => {
+							setIsRelationNeighborhoodPanelExpanded(true);
+							setIsModelingEditorOpen(true);
+							surface.open();
+						}}
+					>
+						<Maximize2 size={14} />
+					</Button>
+				) : null}
 				{isRelationNeighborhoodPanelExpanded && workspaceId ? (
 					<Button
 						size="xs"
@@ -422,7 +480,7 @@ export function WorkUnitRelationNeighborhoodPanel({
 						{isModelingEditorOpen ? "查看关系摘要" : "关系图与建模"}
 					</Button>
 				) : null}
-				{isRelationNeighborhoodPanelExpanded && workspaceId && !isModelingEditorOpen ? (
+				{isRelationNeighborhoodPanelExpanded && workspaceId && !isModelingEditorOpen && !isHistoricalRoot ? (
 					<Button
 						variant="ghost"
 						size="xs"
@@ -458,7 +516,12 @@ export function WorkUnitRelationNeighborhoodPanel({
 				/>
 			) : null}
 			{isRelationNeighborhoodPanelExpanded && isModelingEditorOpen && workspaceId ? (
-				<div className="max-h-[65vh] min-h-0 overflow-y-auto border-t border-border px-3">
+				<div
+					className={cn(
+						"min-h-0 overflow-y-auto border-t border-border px-3",
+						surface.isExpanded ? "flex-1" : "max-h-[65vh]",
+					)}
+				>
 					<ReferenceRelationModelingEditor
 						key={`${workspaceId}:${kanbanBoardCardTaskId}`}
 						controller={modeling}
@@ -470,32 +533,36 @@ export function WorkUnitRelationNeighborhoodPanel({
 								(entry) => entry.workUnitKey === modeling.preview?.rootWorkUnitKey,
 							)?.kanbanBoardCardIdentity?.currentTitle ?? `任务 ${kanbanBoardCardTaskId}`
 						}
+						presentation={surface.isExpanded ? "foreground" : "embedded"}
+						readOnly={isHistoricalRoot}
 					/>
 				</div>
 			) : null}
 			{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
-				<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
-					{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
-						<div className="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary">
-							<Spinner size={12} />
-							正在读取关系…
-						</div>
-					) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_read_failed" ? (
-						<RelationNeighborhoodReadFailureBody
-							readFailure={readState.relationNeighborhoodReadFailure}
-							onRetry={controller.refetchRelationNeighborhood}
-						/>
-					) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded" ? (
-						<LoadedRelationNeighborhoodBody
-							presentation={readState.relationNeighborhoodPanelPresentation}
-							assertedRelationNeighborhoodPresentation={readState.assertedRelationNeighborhoodPresentation}
-							controller={controller}
-						/>
-					) : (
-						<div className="px-3 py-2 text-xs text-text-tertiary">没有可读取关系的任务卡。</div>
-					)}
-				</div>
+				<RelationTaskCardPreviewLayout controller={summaryTaskCardPreview}>
+					<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
+						{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
+							<div className="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary">
+								<Spinner size={12} />
+								正在读取关系…
+							</div>
+						) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_read_failed" ? (
+							<RelationNeighborhoodReadFailureBody
+								readFailure={readState.relationNeighborhoodReadFailure}
+								onRetry={controller.refetchRelationNeighborhood}
+							/>
+						) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded" ? (
+							<LoadedRelationNeighborhoodBody
+								presentation={readState.relationNeighborhoodPanelPresentation}
+								assertedRelationNeighborhoodPresentation={readState.assertedRelationNeighborhoodPresentation}
+								controller={controller}
+							/>
+						) : (
+							<div className="px-3 py-2 text-xs text-text-tertiary">没有可读取关系的任务卡。</div>
+						)}
+					</div>
+				</RelationTaskCardPreviewLayout>
 			) : null}
-		</section>
+		</ExpandedForegroundViewSurface>
 	);
 }

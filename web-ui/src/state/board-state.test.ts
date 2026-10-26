@@ -1222,6 +1222,10 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	// 服务端卡片 schema 的每个字段都填上非缺省值。新增字段时 typecheck 会先在
 	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
+		taskStickerEntries: [
+			{ taskStickerEntryId: "sticker-1", stickerText: "便签正文", isCollapsed: true, createdAt: 10, updatedAt: 11 },
+		],
+		taskStickerDeletedEntryIds: ["deleted-sticker"],
 		independentTaskCreationProvenance: {
 			creationRequestId: "11111111-1111-4111-8111-111111111111",
 			sourceWorkspaceId: "source-workspace",
@@ -1250,6 +1254,7 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 			reportDeliveryStartedAt: 2,
 			reportDeliveryAttempt: 0,
 		},
+		taskShelvingState: { isShelved: true, lastChangedAt: 5 },
 		title: "Every field populated",
 		prompt: "Carry every field through normalization",
 		startInPlanMode: true,

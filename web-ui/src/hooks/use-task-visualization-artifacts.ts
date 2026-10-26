@@ -25,20 +25,24 @@ export function useTaskVisualizationArtifacts({
 	taskId,
 	observeBrowser = true,
 	onAutomaticPreview,
+	isAutomaticPreviewForegroundEligible = true,
 }: {
 	workspaceId: string | null;
 	taskId: string;
 	observeBrowser?: boolean;
 	onAutomaticPreview?: () => void;
+	isAutomaticPreviewForegroundEligible?: boolean;
 }) {
 	const identity = JSON.stringify([workspaceId, taskId]);
+	const activeIdentity = useRef(identity);
+	activeIdentity.current = identity;
 	const [state, setState] = useState<{
 		identity: string;
 		artifacts: TaskVisualizationArtifact[];
 		taskAttribution: TaskVisualizationTaskAttribution | null;
 		isLoading: boolean;
 		error: string | null;
-	}>({ identity, artifacts: [], taskAttribution: null, isLoading: false, error: null });
+	}>({ identity, artifacts: [], taskAttribution: null, isLoading: true, error: null });
 	const [selectionState, setSelection] = useState<{ identity: string; selection: TaskVisualizationSelection | null }>({
 		identity,
 		selection: null,
@@ -46,7 +50,12 @@ export function useTaskVisualizationArtifacts({
 	const activeQuery = useRef<AbortController | null>(null);
 	const taskAttributionRetryAttemptCount = useRef(0);
 	const automaticPreview = useRef<TaskVisualizationPreviewRequestedMessage | null>(null);
+	const observeBrowserRef = useRef(observeBrowser);
+	observeBrowserRef.current = observeBrowser;
+	const automaticPreviewForegroundEligibleRef = useRef(isAutomaticPreviewForegroundEligible);
+	automaticPreviewForegroundEligibleRef.current = isAutomaticPreviewForegroundEligible;
 	const selectionRequestSequence = useRef(0);
+	const isDefaultSelectionSuppressed = useRef(false);
 	const failedDeliveryAttemptIds = useRef(new Set<string>());
 	const pendingFailure = useRef<{ message: TaskVisualizationPreviewRequestedMessage; reason: string } | null>(null);
 	const [automaticPreviewError, setAutomaticPreviewError] = useState<string | null>(null);
@@ -54,11 +63,13 @@ export function useTaskVisualizationArtifacts({
 		(selectionRequestKey: number | undefined, reason: string) => {
 			const message = automaticPreview.current;
 			if (
+				activeIdentity.current !== identity ||
 				!message ||
 				(selectionRequestKey !== undefined && selectionRequestKey !== selectionRequestSequence.current)
 			)
 				return;
 			failedDeliveryAttemptIds.current.add(message.deliveryAttemptId);
+			isDefaultSelectionSuppressed.current = true;
 			pendingFailure.current = { message, reason };
 			automaticPreview.current = null;
 			setAutomaticPreviewError(reason);
@@ -68,16 +79,31 @@ export function useTaskVisualizationArtifacts({
 	);
 	// passive effect 在旧 iframe 从 DOM 移除后才释放接受权，改派不会与旧页面并存。
 	useEffect(() => {
-		if (selectionState.selection !== null || !pendingFailure.current) return;
+		if ((selectionState.identity === identity && selectionState.selection !== null) || !pendingFailure.current)
+			return;
 		const failure = pendingFailure.current;
 		pendingFailure.current = null;
 		acknowledgeTaskVisualizationPreview(failure.message, "failed", failure.reason);
-	}, [selectionState]);
+	}, [identity, selectionState]);
 	const onAutomaticPreviewRef = useRef(onAutomaticPreview);
 	onAutomaticPreviewRef.current = onAutomaticPreview;
+	useEffect(() => {
+		if (!workspaceId || !observeBrowser) return;
+		declareTaskVisualizationBrowserContext(
+			workspaceId,
+			taskId,
+			isAutomaticPreviewForegroundEligible && document.visibilityState === "visible" && document.hasFocus(),
+		);
+		if (!isAutomaticPreviewForegroundEligible && automaticPreview.current)
+			failAutomaticPreview(undefined, "已切换到其他前台视图，自动预览已取消。");
+	}, [workspaceId, taskId, observeBrowser, isAutomaticPreviewForegroundEligible, failAutomaticPreview]);
 	const refreshArtifacts = useCallback(async () => {
-		if (!workspaceId) return;
+		if (activeIdentity.current !== identity) return;
 		activeQuery.current?.abort();
+		if (!workspaceId) {
+			setState({ identity, artifacts: [], taskAttribution: null, isLoading: false, error: null });
+			return;
+		}
 		const query = new AbortController();
 		activeQuery.current = query;
 		setState((current) => ({
@@ -127,8 +153,12 @@ export function useTaskVisualizationArtifacts({
 	}, [identity, state.identity, state.isLoading, state.error, state.taskAttribution, refreshArtifacts]);
 	useEffect(() => {
 		automaticPreview.current = null;
+		failedDeliveryAttemptIds.current.clear();
+		isDefaultSelectionSuppressed.current = false;
 		setAutomaticPreviewError(null);
 		setSelection({ identity, selection: null });
+	}, [identity]);
+	useEffect(() => {
 		void refreshArtifacts();
 		const unsubscribe = subscribeToTaskVisualizationBrowserEvents((message) => {
 			if (message.workspaceId !== workspaceId) return;
@@ -170,7 +200,11 @@ export function useTaskVisualizationArtifacts({
 					acknowledgeTaskVisualizationPreview(currentDelivery, "accepted");
 					return;
 				}
-				if (document.visibilityState !== "visible" || !document.hasFocus()) {
+				if (
+					!automaticPreviewForegroundEligibleRef.current ||
+					document.visibilityState !== "visible" ||
+					!document.hasFocus()
+				) {
 					acknowledgeTaskVisualizationPreview(message, "declined");
 					return;
 				}
@@ -197,6 +231,7 @@ export function useTaskVisualizationArtifacts({
 				return;
 			}
 			setAutomaticPreviewError(null);
+			isDefaultSelectionSuppressed.current = false;
 			setSelection({
 				identity,
 				selection: {
@@ -217,7 +252,9 @@ export function useTaskVisualizationArtifacts({
 			declareTaskVisualizationBrowserContext(
 				workspaceId,
 				taskId,
-				document.visibilityState === "visible" && document.hasFocus(),
+				automaticPreviewForegroundEligibleRef.current &&
+					document.visibilityState === "visible" &&
+					document.hasFocus(),
 				hasInteraction,
 			);
 		const onInteraction = () => declare(true);
@@ -232,8 +269,16 @@ export function useTaskVisualizationArtifacts({
 		return () => {
 			unsubscribe();
 			if (automaticPreview.current) {
-				acknowledgeTaskVisualizationPreview(automaticPreview.current, "failed", "页面已离开当前任务，已卸载预览。");
-				automaticPreview.current = null;
+				if (activeIdentity.current === identity && observeBrowserRef.current !== observeBrowser)
+					failAutomaticPreview(undefined, "页面已停止接收自动预览，请手动重试。");
+				else {
+					acknowledgeTaskVisualizationPreview(
+						automaticPreview.current,
+						"failed",
+						"页面已离开当前任务，已卸载预览。",
+					);
+					automaticPreview.current = null;
+				}
 			}
 			activeQuery.current?.abort();
 			window.clearInterval(heartbeat);
@@ -247,8 +292,11 @@ export function useTaskVisualizationArtifacts({
 	}, [workspaceId, taskId, identity, observeBrowser, refreshArtifacts, failAutomaticPreview]);
 	const selectArtifact = useCallback(
 		(artifact: TaskVisualizationArtifact) => {
+			if (activeIdentity.current !== identity || artifact.workspaceId !== workspaceId || artifact.taskId !== taskId)
+				return;
 			if (automaticPreview.current) acknowledgeTaskVisualizationPreview(automaticPreview.current, "dismissed");
 			automaticPreview.current = null;
+			isDefaultSelectionSuppressed.current = false;
 			setAutomaticPreviewError(null);
 			setSelection({
 				identity,
@@ -259,8 +307,49 @@ export function useTaskVisualizationArtifacts({
 				},
 			});
 		},
-		[identity],
+		[identity, workspaceId, taskId],
 	);
+	const ensureDefaultSelection = useCallback(() => {
+		if (
+			activeIdentity.current !== identity ||
+			state.identity !== identity ||
+			state.isLoading ||
+			state.error ||
+			isDefaultSelectionSuppressed.current ||
+			automaticPreview.current ||
+			pendingFailure.current
+		)
+			return;
+		const newestArtifact = [...state.artifacts].sort(
+			(left, right) =>
+				right.publishedAtMs - left.publishedAtMs ||
+				left.visualizationArtifactId.localeCompare(right.visualizationArtifactId),
+		)[0];
+		if (!newestArtifact) return;
+		setSelection((current) => {
+			if (
+				current.identity === identity &&
+				state.artifacts.some(
+					(artifact) => artifact.visualizationArtifactId === current.selection?.visualizationArtifactId,
+				)
+			)
+				return current;
+			return {
+				identity,
+				selection: {
+					visualizationArtifactId: newestArtifact.visualizationArtifactId,
+					revisionId: newestArtifact.revisionId,
+					selectionRequestKey: ++selectionRequestSequence.current,
+				},
+			};
+		});
+	}, [identity, state]);
+	const retryDefaultSelection = useCallback(() => {
+		if (activeIdentity.current !== identity) return;
+		isDefaultSelectionSuppressed.current = false;
+		setAutomaticPreviewError(null);
+		ensureDefaultSelection();
+	}, [identity, ensureDefaultSelection]);
 	const acknowledgeRenderedPreview = useCallback(
 		(artifact: TaskVisualizationArtifact, selectionRequestKey: number) => {
 			if (
@@ -277,7 +366,11 @@ export function useTaskVisualizationArtifacts({
 				artifact.revisionId !== request.previewRequest.revisionId
 			)
 				return;
-			if (document.visibilityState !== "visible" || !document.hasFocus()) {
+			if (
+				!automaticPreviewForegroundEligibleRef.current ||
+				document.visibilityState !== "visible" ||
+				!document.hasFocus()
+			) {
 				failAutomaticPreview(selectionRequestKey, "页面已转入后台，已取消自动预览。");
 				return;
 			}
@@ -299,6 +392,8 @@ export function useTaskVisualizationArtifacts({
 		selection: selectionState.identity === identity ? selectionState.selection : null,
 		refreshArtifacts,
 		selectArtifact,
+		ensureDefaultSelection,
+		retryDefaultSelection,
 		acknowledgeRenderedPreview,
 		failAutomaticPreview,
 		automaticPreviewError,

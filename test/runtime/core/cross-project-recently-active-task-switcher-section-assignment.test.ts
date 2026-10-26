@@ -900,3 +900,30 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 		expect(remainingTaskIds(expired)).toEqual(["a"]);
 	});
 });
+
+describe("Shelved 的跨项目唯一归属", () => {
+	it("优先于 Pinned、Running、Cache warm 和 Recent，保留 workspace 与 task 组合身份", () => {
+		const sections = assignCrossProjectTaskSwitcherSections({
+			entriesInProjects: [
+				inProject(
+					"alpha",
+					makeEntry("same-id", {
+						...AGENT_RUNNING,
+						pinnedToTaskPinboardAt: 100,
+						taskShelvingState: { isShelved: true, lastChangedAt: 10 },
+					}),
+				),
+				inProject("beta", makeEntry("same-id", { taskShelvingState: { isShelved: true, lastChangedAt: 20 } })),
+			],
+			nowMs: NOW_MS,
+			remainingSectionActivityHorizonMs: DAY_MS,
+			remainingSectionOrderingMode:
+				"most_recently_touched_by_conversation_progress_or_user_open_or_description_edit",
+		});
+		expect(sections.shelvedEntries.map((item) => item.workspaceId)).toEqual(["beta", "alpha"]);
+		expect(sections.pinnedEntries).toEqual([]);
+		expect(sections.runningEntries).toEqual([]);
+		expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+		expect(sections.remainingSection.entries).toEqual([]);
+	});
+});

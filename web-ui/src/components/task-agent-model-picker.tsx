@@ -5,7 +5,7 @@ import {
 	KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
 } from "@runtime-agent-catalog";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getAgentVisual } from "@/components/agent-visual";
@@ -466,6 +466,7 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTas
 // ---------------------------------------------------------------------------
 
 export function TaskAgentModelPicker({
+	renderControls,
 	agentId,
 	onAgentIdChange,
 	clineSettings,
@@ -488,6 +489,7 @@ export function TaskAgentModelPicker({
 	defaultReasoningEffort,
 	providerDefaultModels,
 }: {
+	renderControls?: (controls: { agentSelection: ReactNode; modelSelection: ReactNode }) => ReactNode;
 	agentId: RuntimeAgentId | undefined;
 	onAgentIdChange: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
@@ -792,8 +794,8 @@ export function TaskAgentModelPicker({
 		}
 	}, [clineModelId, isLoadingModels, modelPickerOptions.options, updateTaskClineSettings]);
 
-	return (
-		<div className="flex flex-col gap-2">
+	const agentSelection = (
+		<>
 			<div className="flex flex-col gap-1">
 				<span className="text-[11px] text-text-secondary">Agent</span>
 				<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Agent">
@@ -850,7 +852,11 @@ export function TaskAgentModelPicker({
 						);
 					})}
 				</div>
-			</div>
+			</div>{" "}
+		</>
+	);
+	const modelSelection = (
+		<>
 			{showClineProviderPicker ? (
 				<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 					<div className="min-w-0">
@@ -1006,7 +1012,19 @@ export function TaskAgentModelPicker({
 						</Collapsible.Root>
 					) : null}
 				</div>
-			) : null}
-		</div>
+			) : null}{" "}
+		</>
+	);
+	return (
+		<>
+			{renderControls ? (
+				renderControls({ agentSelection, modelSelection })
+			) : (
+				<div className="flex flex-col gap-2">
+					{agentSelection}
+					{modelSelection}
+				</div>
+			)}
+		</>
 	);
 }

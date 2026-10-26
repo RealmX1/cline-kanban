@@ -10,6 +10,8 @@
 
 自动收尾因 summary、工作目录或原生身份尚未恢复而等待时，保存 `waitingReasonCode`、`waitingReason`、`waitingSince`；条件恢复后继续。相同原因持续 30 秒只通知一次，重启不重复通知。用户明确停止、身份确实改变及 fork 结果未知继续保留暂停保护，历史暂停记录不批量复活。
 
+RVF 已完成而空闲投影或本代输入接受滞留时，`preReviewConversationRestoreIdleGateRecovery` 独立记录各阻塞项及恢复资格，经同代原生完成与精确消息归属补证后自动接续。三次补证预算、跨重启健康探测及 fork/停止前竞态门禁见[空闲门禁原生补证 runbook](runbooks/rvf-pre-review-restore-idle-gate-native-evidence-recovery.md)。
+
 自动指令送达后，收尾 Agent 逐阶段通过 `kanban task report-rvf-automatic-closeout-execution-result --project-path <main checkout> --result-file <JSON>` 上报 `land` 和 `base_branch_sync`。报告绑定 task/token/run/handoff；成功必须提供实际提交，base 同步还需本地 base ref。服务端核对恢复会话、真实投递账本、land evidence 摘要及 Git 祖先关系。只有两阶段都完成才写 `completed`，`closeout_prompt_submitted` 仍只表示指令已提交。受阻或失败保存具体原因，不能用自然语言自述替代成功证据。
 
 Codex 主会话通过独立的 RVF 决策回合开审时，Kanban 先持久捕获非活跃分界；具备完整开审前会话前缀时，生产方成功绑定真实 run 后再显式激活默认自动收尾，不需要任务开关或用户点击。已激活的 RVF 完成时，宿主创建开审前原生历史的分支，保留原 RVF 历史，切换当前主会话的原生身份，再自动投递 `$rvf-land` 与 `$base-branch-sync`。不部署、不移入 Done；原任务明确的不提交、不回 base、停止要求继续生效。
@@ -116,6 +118,8 @@ kanban task rvf-automatic-closeout-status --task-id <id> --project-path <main ch
 ```
 
 ## 交付与验证边界
+
+历史恢复先核验既有实际完成与备用消费。旧未分类 blocked 和缺少接受证据只进入后台补证，不通过 `inspect_existing_state` 唤醒 Agent；可信完成事实统一阻止恢复、认领和迟到投递。状态、历史展示、持久重试与消息取消规则见[既有收尾目标对账](runbooks/rvf-existing-closeout-goal-completion-reconciliation.md)。
 
 此能力需要 Kanban 与 RVF 生产方共同更新；仅部署一个仓库不能形成闭环。RVF 侧接口依据其独立消息契约与实际 verifier；两侧需分别部署。独立开审 gate（e9e12）和已完成 run marker 清理（f03b5）的现有职责不迁入宿主。
 

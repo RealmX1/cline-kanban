@@ -35,6 +35,7 @@ import {
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskConversationModeSchema,
+	runtimeTaskStickerEntrySchema,
 	taskMainSessionHandoverRecordSchema,
 } from "../../../src/core/api-contract";
 
@@ -70,15 +71,6 @@ export interface TaskMoveEvent {
 	taskId: string;
 	fromColumnId: BoardColumnId;
 	toColumnId: BoardColumnId;
-}
-
-function reorder<T>(list: T[], startIndex: number, endIndex: number): T[] {
-	const result = Array.from(list);
-	const [removed] = result.splice(startIndex, 1);
-	if (removed !== undefined) {
-		result.splice(endIndex, 0, removed);
-	}
-	return result;
 }
 
 function updateTaskTimestamp(task: BoardCard): BoardCard {
@@ -270,7 +262,10 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	autoReviewMode: true,
 	images: true,
 	taskCommentEntries: true,
+	taskStickerEntries: true,
+	taskStickerDeletedEntryIds: true,
 	pinnedToTaskPinboardAt: true,
+	taskShelvingState: true,
 	taskPinboardPinReason: true,
 	agentId: true,
 	ompAgentSessionTransport: true,
@@ -419,7 +414,30 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
+		taskStickerEntries: Array.isArray(card.taskStickerEntries)
+			? card.taskStickerEntries.flatMap((entry) => {
+					const parsed = runtimeTaskStickerEntrySchema.safeParse(entry);
+					return parsed.success ? [parsed.data] : [];
+				})
+			: undefined,
+		taskStickerDeletedEntryIds: Array.isArray(card.taskStickerDeletedEntryIds)
+			? card.taskStickerDeletedEntryIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+			: undefined,
 		...(pinnedToTaskPinboardAt !== undefined ? { pinnedToTaskPinboardAt } : {}),
+		...(typeof card.taskShelvingState === "object" &&
+		card.taskShelvingState !== null &&
+		"isShelved" in card.taskShelvingState &&
+		typeof card.taskShelvingState.isShelved === "boolean" &&
+		"lastChangedAt" in card.taskShelvingState &&
+		typeof card.taskShelvingState.lastChangedAt === "number" &&
+		Number.isFinite(card.taskShelvingState.lastChangedAt)
+			? {
+					taskShelvingState: {
+						isShelved: card.taskShelvingState.isShelved,
+						lastChangedAt: card.taskShelvingState.lastChangedAt,
+					},
+				}
+			: {}),
 		...(taskPinboardPinReason !== undefined ? { taskPinboardPinReason } : {}),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
@@ -553,85 +571,37 @@ export function applyDragResult(
 	result: DropResult,
 	options?: { programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null },
 ): { board: BoardData; moveEvent?: TaskMoveEvent } {
-	const { source, destination, type } = result;
-
-	if (!destination) {
-		return { board };
-	}
-
-	if (source.droppableId === destination.droppableId && source.index === destination.index) {
-		return { board };
-	}
-
-	if (type === "COLUMN") {
-		return { board };
-	}
-
-	const sourceColumnIndex = board.columns.findIndex((column) => column.id === source.droppableId);
-	const destinationColumnIndex = board.columns.findIndex((column) => column.id === destination.droppableId);
-	const sourceColumn = board.columns[sourceColumnIndex];
-	const destinationColumn = board.columns[destinationColumnIndex];
-
-	if (!sourceColumn || !destinationColumn) {
-		return { board };
-	}
-
-	if (sourceColumn.id === destinationColumn.id) {
-		// Backlog 按 Description 最后更新时间排序，列内手动重排会被下一次排序立刻覆盖——drag-rules 已禁止
-		// 往 backlog 放卡，这里再兜一层，免得误导性的临时顺序被落盘。
-		if (sourceColumn.id === "backlog") {
-			return { board };
-		}
-		const movedCards = reorder(sourceColumn.cards, source.index, destination.index);
-		const columns = Array.from(board.columns);
-		columns[sourceColumnIndex] = {
-			...sourceColumn,
-			cards: movedCards,
+	const drop = resolveTaskCardDropFromDragResultByTaskId(board, result, options);
+	if (drop.taskCardDropKind === "task_card_reordered_within_board_column") {
+		return {
+			board: placeTaskCardIntoBoardColumnAtIndexByTaskId(
+				board,
+				drop.taskId,
+				drop.boardColumnId,
+				drop.destinationIndex,
+			).board,
 		};
-		return { board: withUpdatedColumns(board, columns) };
 	}
-
-	const isAllowedCrossColumnMove = isAllowedCrossColumnCardMove(sourceColumn.id, destinationColumn.id, {
-		taskId: result.draggableId,
-		programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,
-	});
-	if (!isAllowedCrossColumnMove) {
-		return { board };
-	}
-
-	const sourceCards = Array.from(sourceColumn.cards);
-	const [movedCard] = sourceCards.splice(source.index, 1);
-	if (!movedCard) {
-		return { board };
-	}
-
-	const destinationCards = Array.from(destinationColumn.cards);
-	const destinationInsertIndex = options?.programmaticCardMoveInFlight?.insertAtTop ? 0 : destination.index;
-	destinationCards.splice(destinationInsertIndex, 0, updateTaskTimestamp(movedCard));
-
-	const columns = Array.from(board.columns);
-	columns[sourceColumnIndex] = {
-		...sourceColumn,
-		cards: sourceCards,
-	};
-	columns[destinationColumnIndex] = {
-		...destinationColumn,
-		cards: destinationCards,
-	};
-
-	return {
-		board: withUpdatedColumns(board, columns),
-		moveEvent: {
-			taskId: movedCard.id,
-			fromColumnId: sourceColumn.id,
-			toColumnId: destinationColumn.id,
-		},
-	};
+	if (drop.taskCardDropKind !== "task_card_moved_between_board_columns") return { board };
+	const placed = placeTaskCardIntoBoardColumnAtIndexByTaskId(
+		board,
+		drop.taskId,
+		drop.toColumnId,
+		drop.destinationIndex,
+	);
+	return placed.placed
+		? {
+				board: placed.board,
+				moveEvent: { taskId: drop.taskId, fromColumnId: drop.fromColumnId, toColumnId: drop.toColumnId },
+			}
+		: { board };
 }
+
 // 拖放落点按 taskId 解出，不信任 `source.index`：看板显示的是叠了卡片动作 overlay 的 displayedBoard，命令在途时
 // 它的下标与内存里那份会被保存的 board 不一定一致，按下标从内存 board 里取卡可能取到另一张。判据与 applyDragResult
 // 一致（drag-rules 的跨列白名单、backlog 不重排、程序化移动的「插到列顶」）。
 export type TaskCardDropResolvedByTaskId =
+	| { taskCardDropKind: "task_card_shelving_state_changed"; taskId: string; isShelved: boolean }
 	| { taskCardDropKind: "no_effective_task_card_drop" }
 	| {
 			taskCardDropKind: "task_card_reordered_within_board_column";
@@ -657,14 +627,36 @@ export function resolveTaskCardDropFromDragResultByTaskId(
 		return { taskCardDropKind: "no_effective_task_card_drop" };
 	}
 	const selection = findCardSelection(board, result.draggableId);
+	if (selection && destination.droppableId === "shelved") {
+		return selection.card.taskShelvingState?.isShelved
+			? { taskCardDropKind: "no_effective_task_card_drop" }
+			: { taskCardDropKind: "task_card_shelving_state_changed", taskId: selection.card.id, isShelved: true };
+	}
+	if (selection?.card.taskShelvingState?.isShelved) {
+		if (destination.droppableId === selection.column.id)
+			return { taskCardDropKind: "task_card_shelving_state_changed", taskId: selection.card.id, isShelved: false };
+		if (selection.column.id !== "backlog" || destination.droppableId !== "in_progress")
+			return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
 	const toColumnId = board.columns.find((column) => column.id === destination.droppableId)?.id;
 	if (!selection || !toColumnId) {
 		return { taskCardDropKind: "no_effective_task_card_drop" };
 	}
 	const fromColumnId = selection.column.id;
+	const destinationCards =
+		board.columns.find((column) => column.id === toColumnId)?.cards.filter((card) => card.id !== selection.card.id) ??
+		[];
+	const visibleDestinationCards = destinationCards.filter((card) => !card.taskShelvingState?.isShelved);
+	const destinationAnchor = visibleDestinationCards[destination.index];
+	const destinationIndexWithinFullBoard = destinationAnchor
+		? destinationCards.findIndex((card) => card.id === destinationAnchor.id)
+		: destinationCards.length;
 	if (fromColumnId === toColumnId) {
 		const isDroppedOntoOwnPosition =
-			source.droppableId === destination.droppableId && source.index === destination.index;
+			source.droppableId === destination.droppableId &&
+			selection.column.cards
+				.filter((card) => !card.taskShelvingState?.isShelved)
+				.findIndex((card) => card.id === selection.card.id) === destination.index;
 		// Backlog 按 Description 最后更新时间排序，手动重排会被下一次排序立刻覆盖（同 applyDragResult）。
 		if (isDroppedOntoOwnPosition || fromColumnId === "backlog") {
 			return { taskCardDropKind: "no_effective_task_card_drop" };
@@ -673,7 +665,7 @@ export function resolveTaskCardDropFromDragResultByTaskId(
 			taskCardDropKind: "task_card_reordered_within_board_column",
 			taskId: result.draggableId,
 			boardColumnId: fromColumnId,
-			destinationIndex: destination.index,
+			destinationIndex: destinationIndexWithinFullBoard,
 		};
 	}
 	if (
@@ -689,7 +681,7 @@ export function resolveTaskCardDropFromDragResultByTaskId(
 		taskId: result.draggableId,
 		fromColumnId,
 		toColumnId,
-		destinationIndex: options?.programmaticCardMoveInFlight?.insertAtTop ? 0 : destination.index,
+		destinationIndex: options?.programmaticCardMoveInFlight?.insertAtTop ? 0 : destinationIndexWithinFullBoard,
 	};
 }
 
@@ -703,7 +695,7 @@ export function placeTaskCardIntoBoardColumnAtIndexByTaskId(
 ): { board: BoardData; placed: boolean } {
 	const selection = findCardSelection(board, taskId);
 	const targetColumn = board.columns.find((column) => column.id === targetColumnId);
-	if (!selection || !targetColumn) {
+	if (!selection || !targetColumn || selection.card.taskShelvingState?.isShelved) {
 		return { board, placed: false };
 	}
 	const isReorderWithinColumn = selection.column.id === targetColumnId;

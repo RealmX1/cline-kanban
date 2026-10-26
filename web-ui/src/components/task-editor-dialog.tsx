@@ -11,18 +11,18 @@ import {
 	CornerDownLeft,
 	List,
 	Option,
-	PencilLine,
 	Plus,
 	X,
 } from "lucide-react";
 import type { Dispatch, ReactElement, SetStateAction } from "react";
 import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
+import { taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import {
 	TaskAgentModelPicker,
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
@@ -39,14 +39,28 @@ import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
 } from "@/components/task-edit-draft-recovery-notice";
+import { TaskEditorFloatingWindow } from "@/components/task-editor-floating-window";
+import {
+	TaskEditorHiddenSettingsManager,
+	TaskEditorSettingGroup,
+	TaskEditorSettingPresentationProvider,
+} from "@/components/task-editor-setting-groups";
 import { TaskNameInputWithAiSuggestions } from "@/components/task-name-input-with-ai-suggestions";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import { useGitRepositoryInfoOfOtherProjectForTaskEditorDialog } from "@/hooks/use-git-repository-info-of-other-project-for-task-editor-dialog";
 import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
+import { useTaskEditorClipboardTaskReference } from "@/hooks/use-task-editor-clipboard-task-reference";
+import { ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
+import {
+	readTaskCardWithBoardColumnInWorkspace,
+	transferNeverStartedBacklogTaskToProjectInWorkspace,
+	updateTaskCardFieldValuesInWorkspace,
+} from "@/runtime/task-card-action-query";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -58,7 +72,11 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
-import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import {
+	useTaskCreateDialogPrimaryStartActionPreference,
+	useTaskProjectAssignmentAutomaticAnalysisEnabledPreference,
+} from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import {
 	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
 	type TriggeringExplicitUserGestureEvent,
@@ -66,8 +84,13 @@ import {
 import { ensureRelationModelingCreatedTaskCardPersisted } from "@/runtime/work-unit-relation-modeling-query";
 import { waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import { startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
+import {
+	rememberTaskProjectAssignmentAnalysisAccepted,
+	runTaskProjectAssignmentPreflight,
+} from "@/state/task-project-assignment-preflight";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
@@ -104,6 +127,8 @@ export interface TaskCreateFormSnapshot {
 	agentId: RuntimeAgentId | undefined;
 	clineSettings: RuntimeTaskClineSettings | undefined;
 	terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	projectWorkspaceId?: string | null;
 }
 
 function isSameClineSettings(
@@ -133,6 +158,9 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.autoReviewMode !== baseline.autoReviewMode ||
 		current.branchRef !== baseline.branchRef ||
 		current.worktreeMode !== baseline.worktreeMode ||
+		current.projectWorkspaceId !== baseline.projectWorkspaceId ||
+		JSON.stringify(current.taskAgentSessionInitialization) !==
+			JSON.stringify(baseline.taskAgentSessionInitialization) ||
 		current.agentId !== baseline.agentId ||
 		!isSameClineSettings(current.clineSettings, baseline.clineSettings) ||
 		!isSameTerminalAgentModelOverrideSettings(
@@ -200,6 +228,8 @@ function parseListItems(text: string): string[] {
 }
 
 export function TaskEditorDialog({
+	suspendedTaskEditorTitle,
+	onResumeSuspendedTaskEditor,
 	open,
 	onOpenChange,
 	prompt,
@@ -208,7 +238,7 @@ export function TaskEditorDialog({
 	onImagesChange,
 	onCreate,
 	onCreateAndStart,
-	onCreateMultiple,
+	onCreateMultiple: _onCreateMultiple,
 	onCreateAndStartMultiple,
 	onCreateStartAndOpen,
 	startInPlanMode,
@@ -244,6 +274,9 @@ export function TaskEditorDialog({
 	defaultModelId,
 	defaultReasoningEffort,
 	taskEditorMode = "create",
+	creatingTaskName,
+	onCreatingTaskNameChange,
+	editorSessionWorkspaceId = workspaceId,
 	editingTaskName = "",
 	onEditingTaskNameChange,
 	taskAgentSessionInitialization,
@@ -256,6 +289,8 @@ export function TaskEditorDialog({
 	onOpenCreatedTaskWithRelations,
 	postDeployVerificationFollowUpTaskCreationDraftSeed,
 }: {
+	suspendedTaskEditorTitle?: string | null;
+	onResumeSuspendedTaskEditor?: () => void;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	prompt: string;
@@ -318,6 +353,10 @@ export function TaskEditorDialog({
 	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
 	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 	taskEditorMode?: "create" | "edit";
+	creatingTaskName?: string;
+	onCreatingTaskNameChange?: (value: string) => void;
+	/** 本次打开时固定的草稿归属，不随目标选择或迁移后的物理位置变化。 */
+	editorSessionWorkspaceId?: string | null;
 	editingTaskName?: string;
 	onEditingTaskNameChange?: (value: string) => void;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
@@ -382,9 +421,10 @@ export function TaskEditorDialog({
 		[open, promptDraft, propagatePromptDraft],
 	);
 
-	// 名字与候选名一样只在这一次建卡期间有意义，所以留在对话框本地，不上抛到 App 根节点；
-	// 提交时经 `taskNameOverride` 一次性交给处理方（与 promptDraft 同一套交接方式）。
-	const [newTaskName, setNewTaskName] = useState("");
+	// 宿主保存创建名称，挂起后可与正文、设置一起恢复；独立调用方仍可使用本地状态。
+	const [localNewTaskName, setLocalNewTaskName] = useState("");
+	const newTaskName = creatingTaskName ?? localNewTaskName;
+	const setNewTaskName = onCreatingTaskNameChange ?? setLocalNewTaskName;
 	const taskName = taskEditorMode === "edit" ? editingTaskName : newTaskName;
 	const setTaskName = taskEditorMode === "edit" ? (onEditingTaskNameChange ?? setNewTaskName) : setNewTaskName;
 	const [mode, setMode] = useState<"single" | "multi">("single");
@@ -396,6 +436,9 @@ export function TaskEditorDialog({
 	const startInPlanModeId = useId();
 	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
+	const automaticProjectAssignmentAnalysisId = useId();
+	const [automaticProjectAssignmentAnalysisEnabled, setAutomaticProjectAssignmentAnalysisEnabled] =
+		useTaskProjectAssignmentAutomaticAnalysisEnabledPreference();
 	const [primaryStartAction, setPrimaryStartAction] = useTaskCreateDialogPrimaryStartActionPreference();
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 	const {
@@ -460,7 +503,7 @@ export function TaskEditorDialog({
 	// Reset state when dialog closes
 	useEffect(() => {
 		if (!open) {
-			setNewTaskName("");
+			setLocalNewTaskName("");
 			setMode("single");
 			setCreateMore(false);
 			setComposerResetKey(0);
@@ -547,12 +590,98 @@ export function TaskEditorDialog({
 		setComposerResetKey((current) => current + 1);
 	}, [onImagesChange, propagatePromptDraft]);
 
-	const relationModeling = useReferenceRelationModelingEditor({
+	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
+	const revealAndFocusRelations = useCallback(() => {
+		setTemporarilyRevealedSettingKeys(new Set(["relations"]));
+		requestAnimationFrame(() => {
+			const section = document.querySelector<HTMLElement>('[data-task-editor-setting="relations"]');
+			section?.scrollIntoView({ block: "nearest" });
+			section?.querySelector<HTMLElement>("button, input")?.focus({ preventScroll: true });
+		});
+	}, []);
+	const clipboardTaskReference = useTaskEditorClipboardTaskReference({
+		open,
 		workspaceId,
-		taskId: null,
+		taskId: taskEditorMode === "edit" ? editingTaskId : null,
+		onRecognized: revealAndFocusRelations,
+	});
+
+	const [localSelectedTargetWorkspaceId, setLocalSelectedTargetWorkspaceId] = useState<string | null>(workspaceId);
+	const selectableTargetProjectField =
+		taskCreationTargetProjectField?.taskCreationTargetProjectFieldPresentation ===
+		"target_project_selectable_in_board_scope"
+			? taskCreationTargetProjectField
+			: null;
+	useEffect(() => {
+		if (!selectableTargetProjectField) setLocalSelectedTargetWorkspaceId(workspaceId);
+	}, [workspaceId, editingTaskId, open, selectableTargetProjectField]);
+	const targetWorkspaceId =
+		selectableTargetProjectField?.selectedTargetWorkspaceId ?? localSelectedTargetWorkspaceId ?? workspaceId;
+	const setSelectedTargetWorkspaceId = (nextWorkspaceId: string) => {
+		if (selectableTargetProjectField) selectableTargetProjectField.onSelectTargetWorkspaceId(nextWorkspaceId);
+		else setLocalSelectedTargetWorkspaceId(nextWorkspaceId);
+	};
+	const { gitRepositoryInfoOfOtherProject: selectedTargetGit } = useGitRepositoryInfoOfOtherProjectForTaskEditorDialog(
+		targetWorkspaceId !== workspaceId ? targetWorkspaceId : null,
+	);
+	const effectiveBranchOptions = selectedTargetGit
+		? selectedTargetGit.branches.map((branch) => ({ value: branch.name, label: branch.name }))
+		: branchOptions;
+	const effectiveProjectField: TaskCreationTargetProjectField | undefined =
+		taskCreationTargetProjectField?.taskCreationTargetProjectFieldPresentation ===
+		"target_project_selectable_in_board_scope"
+			? {
+					...taskCreationTargetProjectField,
+					selectedTargetWorkspaceId: targetWorkspaceId,
+					onSelectTargetWorkspaceId: setSelectedTargetWorkspaceId,
+				}
+			: taskCreationTargetProjectField;
+	useEffect(() => {
+		if (
+			!selectableTargetProjectField &&
+			selectedTargetGit &&
+			!selectedTargetGit.branches.some((branch) => branch.name === branchRef)
+		) {
+			onBranchRefChange(selectedTargetGit.defaultBranch ?? selectedTargetGit.branches[0]?.name ?? "");
+		}
+	}, [selectableTargetProjectField, selectedTargetGit, branchRef, onBranchRefChange]);
+	const submissionInFlightRef = useRef(false);
+	const submissionOperationTokenRef = useRef<symbol | null>(null);
+	const [isTaskEditorPersisting, setIsTaskEditorPersisting] = useState(false);
+
+	const submissionImagesRevisionRef = useRef({ images, revision: 0 });
+	if (submissionImagesRevisionRef.current.images !== images)
+		submissionImagesRevisionRef.current = { images, revision: submissionImagesRevisionRef.current.revision + 1 };
+	const latestSubmissionInputRef = useRef("");
+	latestSubmissionInputRef.current = JSON.stringify({
+		open,
+		editorIdentity: editingTaskId,
+		taskEditorMode,
+		workspaceId: targetWorkspaceId,
+		prompt: promptDraft,
+		title: taskName,
+		branchRef,
+		imagesRevision: submissionImagesRevisionRef.current.revision,
+		startInPlanMode,
+		taskAgentPermissionMode,
+		taskConversationMode,
+		autoReviewEnabled,
+		autoReviewMode,
+		worktreeMode,
+		agentId,
+		clineSettings,
+		terminalAgentModelOverrideSettings,
+		taskAgentSessionInitialization,
+		mode,
+		taskPrompts,
+	});
+
+	const relationModeling = useReferenceRelationModelingEditor({
+		workspaceId: editorSessionWorkspaceId,
+		taskId: taskEditorMode === "edit" ? editingTaskId : null,
 		draftTaskTitle: taskName || "待创建任务",
 		draftTaskPrompt: promptDraft,
-		active: open && taskEditorMode === "create" && mode === "single",
+		active: open && mode === "single",
 	});
 	const [processedFollowUpSeedInitializationId, setProcessedFollowUpSeedInitializationId] = useState<string | null>(
 		null,
@@ -564,11 +693,20 @@ export function TaskEditorDialog({
 	}, [open]);
 	const isTaskCreationWaitingForRelationDraftHydration =
 		taskEditorMode === "create" &&
+		mode === "single" &&
 		(!relationModeling.ready ||
 			(!!postDeployVerificationFollowUpTaskCreationDraftSeed &&
 				processedFollowUpSeedInitializationId !==
 					postDeployVerificationFollowUpTaskCreationDraftSeed.initializationId));
 	const [isRelationAwareCreationInFlight, setIsRelationAwareCreationInFlight] = useState(false);
+	const [taskEditorOperationStatusText, setTaskEditorOperationStatusText] = useState<string | null>(null);
+	useEffect(() => {
+		submissionOperationTokenRef.current = null;
+		submissionInFlightRef.current = false;
+		setIsRelationAwareCreationInFlight(false);
+		setIsTaskEditorPersisting(false);
+		setTaskEditorOperationStatusText(null);
+	}, [open, editorSessionWorkspaceId, editingTaskId]);
 	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
 	const [relationAwareCreationError, setRelationAwareCreationError] = useState<string | null>(null);
 	const lastCreationGestureRef = useRef<{ event: TriggeringExplicitUserGestureEvent; observedAt: number } | null>(
@@ -579,9 +717,9 @@ export function TaskEditorDialog({
 		if (
 			relationModeling.ready &&
 			relationModeling.draft.creationPrompt &&
-			relationRecoveryAppliedRef.current !== workspaceId
+			relationRecoveryAppliedRef.current !== editorSessionWorkspaceId
 		) {
-			relationRecoveryAppliedRef.current = workspaceId;
+			relationRecoveryAppliedRef.current = editorSessionWorkspaceId;
 			setPromptDraft(relationModeling.draft.creationPrompt);
 			setTaskName(relationModeling.draft.creationTitle);
 		}
@@ -589,7 +727,7 @@ export function TaskEditorDialog({
 		relationModeling.ready,
 		relationModeling.draft.creationPrompt,
 		relationModeling.draft.creationTitle,
-		workspaceId,
+		editorSessionWorkspaceId,
 	]);
 	const updateRelationDraft = relationModeling.updateDraft;
 	const initializeFollowUpTaskCreationDraft = useCallback(
@@ -647,112 +785,240 @@ export function TaskEditorDialog({
 		processedFollowUpSeedInitializationId,
 		initializeFollowUpTaskCreationDraft,
 	]);
-	const handleRelationAwareCreation = (action: "create" | "start" | "start_and_open"): boolean => {
-		// 当前 scope 水合前，旧草稿和空初值都不能决定建卡身份或关系提交路径。
-		if (isTaskCreationWaitingForRelationDraftHydration) return true;
-		if (taskEditorMode === "create" && hasUnstagedRelationForm) {
-			setRelationAwareCreationError("请先将当前关系加入草稿，或取消关系编辑，再创建任务。");
-			return true;
-		}
-		if (taskEditorMode !== "create" || (!relationModeling.hasChanges && !relationModeling.draft.createdTaskId))
+
+	const submitSingleTask = async (
+		action: "create" | "start" | "start_and_open",
+		promptOverride?: string,
+		keepOpenOverride?: boolean,
+	) => {
+		if (
+			submissionInFlightRef.current ||
+			isTaskCreationWaitingForRelationDraftHydration ||
+			!targetWorkspaceId ||
+			!branchRef
+		)
 			return false;
-		if (isRelationAwareCreationInFlight || !workspaceId) return true;
-		const gesture = lastCreationGestureRef.current;
-		if (!gesture || performance.now() - gesture.observedAt > 1000) {
-			setRelationAwareCreationError("请点击创建按钮或使用快捷键提交关系。 ");
-			return true;
+		if (hasUnstagedRelationForm) {
+			setRelationAwareCreationError("请先将当前关系加入草稿，或取消关系编辑，再提交任务。");
+			revealAndFocusRelations();
+			return false;
 		}
-		const characteristics = collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(
-			gesture.event,
-		);
+		const submittingPrompt = promptOverride ?? promptDraft;
+		const submittingTitle = promptOverride ? "" : taskName;
+		if (!submittingPrompt.trim()) return false;
+		const inputSnapshot = latestSubmissionInputRef.current;
+		let acceptedAssignmentInputSnapshot = inputSnapshot;
+		const isSubmittedInputStillCurrent = () =>
+			latestSubmissionInputRef.current === inputSnapshot ||
+			latestSubmissionInputRef.current === acceptedAssignmentInputSnapshot;
+		const relationSnapshot = JSON.stringify({
+			drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
+			revocations: relationModeling.readLatestDraft().relationRevocations,
+		});
+		const gesture = lastCreationGestureRef.current;
+		// 在用户动作发生时读取来源证据，分析耗时不能伪造新的用户手势。
+		const characteristics =
+			gesture && performance.now() - gesture.observedAt <= 1000
+				? collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(gesture.event)
+				: null;
+		if (relationModeling.hasChanges && !characteristics) {
+			setRelationAwareCreationError("请点击提交按钮或使用快捷键保存关系。");
+			return false;
+		}
+		const operationToken = Symbol("task-editor-submission");
+		// 每项操作开始时读取最新偏好；批量后续项也跟随新选择，已发起的分析继续完成。
+		const automaticProjectAssignmentAnalysisEnabledForThisSubmission =
+			readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled") === true;
+		submissionOperationTokenRef.current = operationToken;
+		submissionInFlightRef.current = true;
 		setIsRelationAwareCreationInFlight(true);
 		setRelationAwareCreationError(null);
-		void (async () => {
-			try {
-				relationModeling.updateDraft({ creationPrompt: promptDraft, creationTitle: taskName });
-				await relationModeling.persistDraftNow();
-				const taskId =
-					relationModeling.draft.createdTaskId ??
-					onCreate({
+		setTaskEditorOperationStatusText(
+			automaticProjectAssignmentAnalysisEnabledForThisSubmission ? "正在分析项目归属…" : "正在保存任务…",
+		);
+		try {
+			const assignment = automaticProjectAssignmentAnalysisEnabledForThisSubmission
+				? await runTaskProjectAssignmentPreflight({
+						workspaceId: targetWorkspaceId,
+						title: submittingTitle,
+						prompt: submittingPrompt,
+						baseRef: branchRef,
+						isStillCurrent: () =>
+							latestSubmissionInputRef.current === inputSnapshot &&
+							JSON.stringify({
+								drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
+								revocations: relationModeling.readLatestDraft().relationRevocations,
+							}) === relationSnapshot,
+					})
+				: { workspaceId: targetWorkspaceId, baseRef: branchRef };
+			if (!assignment) return false;
+			setTaskEditorOperationStatusText("正在保存任务…");
+			if (taskEditorMode === "create")
+				await ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission(assignment.workspaceId);
+			if (latestSubmissionInputRef.current !== inputSnapshot) return false;
+			acceptedAssignmentInputSnapshot = JSON.stringify({
+				...(JSON.parse(inputSnapshot) as Record<string, unknown>),
+				workspaceId: assignment.workspaceId,
+				branchRef: assignment.baseRef,
+			});
+			setIsTaskEditorPersisting(true);
+			setSelectedTargetWorkspaceId(assignment.workspaceId);
+			onBranchRefChange(assignment.baseRef);
+			let persistence: Promise<boolean> | null = null;
+			const recoveredTaskId =
+				taskEditorMode === "create" && !promptOverride ? relationModeling.draft.createdTaskId : null;
+			const taskId = recoveredTaskId
+				? recoveredTaskId
+				: onCreate({
 						keepDialogOpen: true,
 						preserveFormUntilCreationConfirmed: true,
-						promptOverride: promptDraft,
-						taskNameOverride: taskName,
-						onTaskCardAllocatedForRelationModeling: (card) =>
-							relationModeling.updateDraft({ createdTaskId: card.id, createdTaskCardSnapshot: card }),
+						promptOverride: submittingPrompt,
+						taskNameOverride: submittingTitle,
+						targetWorkspaceIdOverride: assignment.workspaceId,
+						baseRefOverride: assignment.baseRef,
+						onTaskPersistenceRequested: (requested) => {
+							persistence = requested;
+						},
+						onTaskCardAllocatedForRelationModeling: (card) => {
+							if (!promptOverride)
+								relationModeling.updateDraft({
+									createdTaskId: card.id,
+									createdTaskWorkspaceId: assignment.workspaceId,
+									createdTaskCardSnapshot: card,
+									creationPrompt: submittingPrompt,
+									creationTitle: taskName,
+								});
+						},
 					});
-				if (!taskId) return;
-				relationModeling.updateDraft({ createdTaskId: taskId });
+			if (!taskId) return false;
+			if (recoveredTaskId) {
+				const draft = relationModeling.readLatestDraft();
+				const sourceWorkspaceId = draft.createdTaskWorkspaceId ?? workspaceId;
+				if (!sourceWorkspaceId) throw new Error("恢复草稿缺少所属项目，请重新选择该任务。");
+				let recoveredSnapshot = draft.createdTaskCardSnapshot;
+				if (!recoveredSnapshot) {
+					const existing = await readTaskCardWithBoardColumnInWorkspace(sourceWorkspaceId, taskId);
+					if (existing.taskCardLookupOutcome !== "task_card_found_on_workspace_board")
+						throw new Error("恢复草稿对应的任务尚未确认存在，未创建重复任务。");
+					recoveredSnapshot = existing.taskCardSnapshot.taskCard;
+				} else await ensureRelationModelingCreatedTaskCardPersisted(sourceWorkspaceId, recoveredSnapshot);
+
+				await updateTaskCardFieldValuesInWorkspace(sourceWorkspaceId, {
+					taskId,
+					expectedTaskIncarnationCreatedAtEpochMs: recoveredSnapshot.createdAt,
+					taskCardFieldUpdate: {
+						taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+						taskCardFieldValuePatch: {
+							title: taskName.trim() || null,
+							prompt: submittingPrompt,
+							images,
+							startInPlanMode,
+							taskAgentPermissionMode,
+							taskConversationMode,
+							autoReviewEnabled,
+							autoReviewMode,
+							worktreeMode,
+							baseRef: assignment.baseRef,
+							agentId: agentId ?? null,
+							clineSettings: clineSettings ?? null,
+							terminalAgentModelOverrideSettings: terminalAgentModelOverrideSettings ?? null,
+							taskAgentSessionInitialization: taskAgentSessionInitialization ?? null,
+						},
+					},
+					boardMutationInitiator: "web_ui_user_gesture",
+				});
+				if (sourceWorkspaceId !== assignment.workspaceId)
+					await transferNeverStartedBacklogTaskToProjectInWorkspace(sourceWorkspaceId, {
+						operationId: createRandomUuidV4WithInsecureContextFallback(),
+						taskId,
+						taskIncarnationCreatedAtEpochMs: recoveredSnapshot.createdAt,
+						targetWorkspaceId: assignment.workspaceId,
+						targetBaseRef: assignment.baseRef,
+					});
+				relationModeling.updateDraft({
+					createdTaskWorkspaceId: assignment.workspaceId,
+					creationPrompt: submittingPrompt,
+					creationTitle: taskName,
+				});
 				await relationModeling.persistDraftNow();
+			}
+			if (taskEditorMode === "edit") {
+				if (persistence && !(await persistence)) throw new Error("任务更改尚未保存，草稿已保留。");
+			} else {
 				const persisted = await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
-					workspaceId,
+					workspaceId: assignment.workspaceId,
 					taskId,
 				});
-				if (!persisted.ok || relationModeling.draft.createdTaskId) {
+				if (!persisted.ok) {
 					const snapshot = relationModeling.readLatestDraft().createdTaskCardSnapshot;
-					if (snapshot) await ensureRelationModelingCreatedTaskCardPersisted(workspaceId, snapshot);
-					else if (!persisted.ok) throw new Error(`任务尚未确认保存：${persisted.message}`);
+					if (snapshot) await ensureRelationModelingCreatedTaskCardPersisted(assignment.workspaceId, snapshot);
+					else throw new Error(`任务尚未确认保存：${persisted.message}`);
 				}
-				await relationModeling.applyToTask(taskId, characteristics);
-				if (action !== "create") {
-					const started = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
-						workspaceId,
-						taskId,
-						agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
-					});
-					if (started.taskCardActionCommandExecutionOutcome === "command_failed")
-						throw new Error(started.commandFailureMessage);
-					if (action === "start_and_open") onOpenCreatedTaskWithRelations?.(workspaceId, taskId);
-				}
-				relationModeling.discard();
-				if (createMore) {
-					resetForCreateMore();
-					propagatePromptDraft("");
-					onImagesChange([]);
-				} else onOpenChange(false);
-			} catch (failure) {
-				setRelationAwareCreationError(failure instanceof Error ? failure.message : String(failure));
-			} finally {
-				setIsRelationAwareCreationInFlight(false);
 			}
-		})();
-		return true;
+			if (!isSubmittedInputStillCurrent())
+				throw new Error("提交期间输入又有更改，新的草稿已保留，请核对后再次保存。");
+			if (relationModeling.hasChanges && characteristics)
+				await relationModeling.applyToTask(taskId, characteristics, assignment.workspaceId);
+			if (!isSubmittedInputStillCurrent())
+				throw new Error("保存关系期间输入又有更改，新的草稿已保留，尚未启动任务。");
+			if (automaticProjectAssignmentAnalysisEnabledForThisSubmission)
+				rememberTaskProjectAssignmentAnalysisAccepted(
+					assignment.workspaceId,
+					taskId,
+					submittingTitle,
+					submittingPrompt,
+				);
+			if (action !== "create") {
+				setTaskEditorOperationStatusText("正在启动任务…");
+				const started = await startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
+					workspaceId: assignment.workspaceId,
+					taskId,
+					skipTaskProjectAssignmentPreflight: true,
+					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
+				});
+				if (started.taskCardActionCommandExecutionOutcome === "command_failed")
+					throw new Error(started.commandFailureMessage);
+				if (started.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime")
+					throw new Error("任务仍有其他操作在执行，请稍后重试启动。");
+				if (started.response.ensuredTaskWorktreeWarningMessage)
+					showAppToast({ intent: "warning", message: started.response.ensuredTaskWorktreeWarningMessage });
+				if (
+					started.response.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
+					started.response.agentSessionStartOutcome === "agent_session_start_failed"
+				)
+					throw new Error(started.response.agentSessionStartFailureMessage ?? "任务已保存，但 Agent 启动失败。");
+				if (action === "start_and_open") onOpenCreatedTaskWithRelations?.(assignment.workspaceId, taskId);
+			}
+			relationModeling.discard();
+			if (!isSubmittedInputStillCurrent()) return true;
+			if (!(keepOpenOverride ?? (createMore && taskEditorMode === "create"))) onOpenChange(false);
+			else if (!promptOverride) resetForCreateMore();
+			return true;
+		} catch (failure) {
+			const message = failure instanceof Error ? failure.message : String(failure);
+			if (submissionOperationTokenRef.current === operationToken) {
+				setRelationAwareCreationError(message);
+				notifyError(message);
+			}
+			return false;
+		} finally {
+			if (submissionOperationTokenRef.current === operationToken) {
+				submissionInFlightRef.current = false;
+				submissionOperationTokenRef.current = null;
+				setIsRelationAwareCreationInFlight(false);
+				setIsTaskEditorPersisting(false);
+				setTaskEditorOperationStatusText(null);
+			}
+		}
 	};
-
 	const handleCreateSingle = () => {
-		if (handleRelationAwareCreation("create")) return;
-		const createdTaskId = onCreate({
-			keepDialogOpen: createMore,
-			promptOverride: promptDraft,
-			taskNameOverride: taskName,
-		});
-		if (createMore && createdTaskId) {
-			resetForCreateMore();
-		}
+		void submitSingleTask("create");
 	};
-
 	const handleCreateAndStartSingle = () => {
-		if (handleRelationAwareCreation("start")) return;
-		const createdTaskId = onCreateAndStart?.({
-			keepDialogOpen: createMore,
-			promptOverride: promptDraft,
-			taskNameOverride: taskName,
-		});
-		if (createMore && createdTaskId) {
-			resetForCreateMore();
-		}
+		void submitSingleTask("start");
 	};
-
 	const handleCreateStartAndOpenSingle = () => {
-		if (handleRelationAwareCreation("start_and_open")) return;
-		const createdTaskId = onCreateStartAndOpen?.({
-			keepDialogOpen: createMore,
-			promptOverride: promptDraft,
-			taskNameOverride: taskName,
-		});
-		if (createMore && createdTaskId) {
-			resetForCreateMore();
-		}
+		void submitSingleTask("start_and_open");
 	};
 
 	const handleRunSingleStartAction = useCallback(
@@ -767,27 +1033,55 @@ export function TaskEditorDialog({
 		[handleCreateAndStartSingle, handleCreateStartAndOpenSingle, setPrimaryStartAction],
 	);
 
-	const handleCreateAll = useCallback(() => {
-		const validPrompts = getValidPrompts();
-		if (validPrompts.length === 0) {
-			return;
+	const submitMultipleTasks = async (action: "create" | "start") => {
+		const prompts = getValidPrompts();
+		for (let index = 0; index < prompts.length; index++) {
+			if (!(await submitSingleTask(action, prompts[index], true))) {
+				setTaskPrompts(prompts.slice(index));
+				return;
+			}
 		}
-		const createdTaskIds = onCreateMultiple(validPrompts, { keepDialogOpen: createMore });
-		if (createMore && createdTaskIds.length > 0) {
-			resetForCreateMore();
-		}
-	}, [createMore, getValidPrompts, onCreateMultiple, resetForCreateMore]);
+		if (createMore) resetForCreateMore();
+		else onOpenChange(false);
+	};
+	const handleCreateAll = () => {
+		void submitMultipleTasks("create");
+	};
+	const handleCreateAndStartAll = () => {
+		void submitMultipleTasks("start");
+	};
 
-	const handleCreateAndStartAll = useCallback(() => {
-		const validPrompts = getValidPrompts();
-		if (validPrompts.length === 0) {
-			return;
+	const handleAnalyzeProject = async () => {
+		if (!targetWorkspaceId || !promptDraft.trim() || submissionInFlightRef.current) return;
+		const snapshot = latestSubmissionInputRef.current;
+		const operationToken = Symbol("manual-task-project-analysis");
+		submissionOperationTokenRef.current = operationToken;
+		submissionInFlightRef.current = true;
+		setIsRelationAwareCreationInFlight(true);
+		setTaskEditorOperationStatusText("正在分析项目归属…");
+		try {
+			const result = await runTaskProjectAssignmentPreflight({
+				workspaceId: targetWorkspaceId,
+				title: taskName,
+				prompt: promptDraft,
+				baseRef: branchRef,
+				isStillCurrent: () => latestSubmissionInputRef.current === snapshot,
+			});
+			if (result) {
+				setSelectedTargetWorkspaceId(result.workspaceId);
+				onBranchRefChange(result.baseRef);
+			}
+		} catch (failure) {
+			notifyError(failure instanceof Error ? failure.message : String(failure));
+		} finally {
+			if (submissionOperationTokenRef.current === operationToken) {
+				submissionInFlightRef.current = false;
+				submissionOperationTokenRef.current = null;
+				setIsRelationAwareCreationInFlight(false);
+				setTaskEditorOperationStatusText(null);
+			}
 		}
-		const createdTaskIds = onCreateAndStartMultiple?.(validPrompts, { keepDialogOpen: createMore }) ?? [];
-		if (createMore && createdTaskIds.length > 0) {
-			resetForCreateMore();
-		}
-	}, [createMore, getValidPrompts, onCreateAndStartMultiple, resetForCreateMore]);
+	};
 
 	const handleInputKeyDown = useCallback(
 		(index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -821,69 +1115,23 @@ export function TaskEditorDialog({
 		inputRefs.current[index] = el;
 	}, []);
 
-	// Cmd/Ctrl+Enter (and Cmd/Ctrl+Shift+Enter) from anywhere in the dialog.
-	useHotkeys(
-		"mod+enter, mod+shift+enter",
-		(event) => {
+	const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+		if (isKeyboardEventEmittedDuringImeComposition(event) || event.defaultPrevented || event.key !== "Enter") return;
+		if (!branchRef || !hasPromptDraftContent || isRelationAwareCreationInFlight) return;
+		if (event.altKey && event.shiftKey && onCreateStartAndOpen && mode === "single") {
+			event.preventDefault();
+			handleRunSingleStartAction("start_and_open");
+		} else if (event.metaKey || event.ctrlKey) {
+			event.preventDefault();
 			if (mode === "multi") {
-				if (event.shiftKey) {
-					handleCreateAndStartAll();
-					return;
-				}
-				handleCreateAll();
-				return;
-			}
-			if (event.shiftKey) {
-				handleRunSingleStartAction("start");
-				return;
-			}
-			handleCreateSingle();
-		},
-		{
-			enabled: open,
-			enableOnFormTags: true,
-			enableOnContentEditable: true,
-			ignoreEventWhen: (event) => {
-				// 组字期间按键归输入法，这条 document 级热键必须整体让开。判据放在 ignoreEventWhen
-				// 而不是回调首行：react-hotkeys-hook 先查 ignoreEventWhen 再执行 preventDefault，
-				// 只有在这里短路才是真的不插手。输入框各自的局部守卫拦不住它——那些守卫早退时不再
-				// preventDefault，下面这条 defaultPrevented 判据反而会把事件放行过来。
-				if (isKeyboardEventEmittedDuringImeComposition(event)) return true;
-				if (!event.defaultPrevented) return false;
-				// Only skip when a textarea or input already handled the shortcut.
-				// Radix checkbox also calls preventDefault() on Enter, but that
-				// should not block the dialog-level shortcut.
-				const tag = (event.target as HTMLElement).tagName?.toLowerCase();
-				return tag === "textarea" || tag === "input";
-			},
-			preventDefault: true,
-		},
-		[open, mode, handleCreateAll, handleCreateAndStartAll, handleCreateSingle, handleRunSingleStartAction],
-	);
+				if (event.shiftKey) handleCreateAndStartAll();
+				else handleCreateAll();
+			} else if (event.shiftKey) handleRunSingleStartAction("start");
+			else handleCreateSingle();
+		}
+	};
 
-	// Alt/Opt+Shift+Enter → Start & Open (single mode only)
-	useHotkeys(
-		"alt+shift+enter",
-		() => {
-			if (mode === "single") {
-				handleRunSingleStartAction("start_and_open");
-			}
-		},
-		{
-			enabled: open && Boolean(onCreateStartAndOpen),
-			enableOnFormTags: true,
-			enableOnContentEditable: true,
-			// 同上：组字期间整体让开，且必须在 preventDefault 之前短路。
-			ignoreEventWhen: (event) => isKeyboardEventEmittedDuringImeComposition(event),
-			preventDefault: true,
-		},
-		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
-	);
-
-	// 关闭守卫仅在 create 模式启用：edit 模式关闭走 handleCancelEditTask，草稿
-	// （编辑期间去抖落盘的崩溃恢复副本）随关闭一并清除，不应弹「放弃」二次确认。
-	const isCreateMode = taskEditorMode === "create";
-
+	// 创建与编辑在显式关闭时共用未保存更改守卫。
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
 		prompt: promptDraft,
@@ -903,6 +1151,8 @@ export function TaskEditorDialog({
 		agentId,
 		clineSettings,
 		terminalAgentModelOverrideSettings,
+		taskAgentSessionInitialization,
+		projectWorkspaceId: targetWorkspaceId,
 	};
 	const latestFormSnapshotRef = useRef(currentFormSnapshot);
 	latestFormSnapshotRef.current = currentFormSnapshot;
@@ -938,13 +1188,13 @@ export function TaskEditorDialog({
 				onOpenChange(true);
 				return;
 			}
-			if (isCreateMode) {
+			if (open) {
 				handleCloseRequest();
 				return;
 			}
 			onOpenChange(false);
 		},
-		[handleCloseRequest, isCreateMode, onOpenChange],
+		[handleCloseRequest, open, onOpenChange],
 	);
 
 	const handleConfirmDiscard = useCallback(() => {
@@ -980,10 +1230,10 @@ export function TaskEditorDialog({
 
 	const dialogTitle =
 		taskEditorMode === "edit"
-			? "Edit backlog task"
+			? "编辑 Backlog 任务"
 			: mode === "multi"
 				? `New tasks${validTaskCount > 0 ? ` (${validTaskCount})` : ""}`
-				: "New task";
+				: "创建任务";
 
 	const taskCountLabel = validTaskCount === 1 ? "task" : "tasks";
 	const primaryStartLabel =
@@ -1000,504 +1250,700 @@ export function TaskEditorDialog({
 
 	return (
 		<>
-			<Dialog
+			<TaskEditorFloatingWindow
+				open={open}
+				onOpenChange={handleDialogOpenChange}
+				title={dialogTitle}
 				onClickCapture={(event) => {
 					lastCreationGestureRef.current = { event: event.nativeEvent, observedAt: performance.now() };
 				}}
 				onKeyDownCapture={(event) => {
 					lastCreationGestureRef.current = { event: event.nativeEvent, observedAt: performance.now() };
 				}}
-				open={open}
-				onOpenChange={handleDialogOpenChange}
-				contentClassName={relationModeling.hasChanges ? "max-w-5xl!" : "max-w-2xl"}
-				onEscapeKeyDown={
-					isCreateMode
-						? (event) => {
-								event.preventDefault();
-								if (!isDiscardConfirmOpen) handleCloseRequest();
-							}
-						: undefined
-				}
-				onPointerDownOutside={
-					isCreateMode
-						? (event) => {
-								event.preventDefault();
-								if (!isDiscardConfirmOpen) handleCloseRequest();
-							}
-						: undefined
-				}
+				onKeyDown={handleEditorKeyDown}
+				onFocusCapture={(event) => {
+					if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+						clipboardTaskReference.checkClipboard();
+				}}
+				onPasteCapture={(event) => {
+					void clipboardTaskReference.processPastedText(event.clipboardData.getData("text/plain"));
+				}}
 			>
-				<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
-				<DialogBody>
-					{taskCreationTargetProjectField ? (
-						<div className="mb-4">
-							<TaskCreationTargetProjectFieldControl
-								taskCreationTargetProjectField={taskCreationTargetProjectField}
-							/>
-						</div>
-					) : null}
-					{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
-					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
-					{taskEditorMode === "edit" && editingTaskId !== null ? (
-						<TaskEditDraftRecoveryNotice
-							workspaceId={workspaceId}
-							taskId={editingTaskId}
-							seededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
-							currentFormValues={
-								{
-									// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
-									// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
-									taskTitleOverride: taskName,
-									prompt: promptDraft,
-									images,
-									startInPlanMode,
-									taskAgentPermissionMode,
-									autoReviewEnabled,
-									autoReviewMode,
-									branchRef,
-									worktreeMode,
-									agentId,
-									clineSettings,
-									terminalAgentModelOverrideSettings,
-									taskAgentSessionInitialization,
-								} satisfies TaskEditDraftComparableValues
-							}
-							onRevertToSavedTaskContent={() => onRevertEditTaskFormToSavedTaskContent?.()}
-							onSupersededCopyPromotedToCurrentDraft={(promotedDraft) =>
-								onAdoptPromotedTaskEditDraft?.(promotedDraft)
-							}
-						/>
-					) : null}
-					{mode === "single" ? (
-						<div>
-							<TaskNameInputWithAiSuggestions
-								key={`task-name-input-${editingTaskId ?? composerResetKey}`}
-								taskName={taskName}
-								onTaskNameChange={setTaskName}
-								taskDescription={promptDraft}
-								preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
-							/>
-
-							<TaskPromptComposer
-								key={`task-prompt-composer-${composerResetKey}`}
-								value={promptDraft}
-								onValueChange={setPromptDraft}
-								onValueBlur={() => propagatePromptDraft(promptDraft)}
-								images={images}
-								onImagesChange={onImagesChange}
-								onSubmit={handleCreateSingle}
-								onSubmitAndStart={() => handleRunSingleStartAction("start")}
-								placeholder="Describe the task..."
-								autoFocus
-								workspaceId={workspaceId}
-								showAttachImageButton
-								showPseudoHtmlBlockInsertButton
-							/>
-							<div className="flex items-center justify-between mt-1.5">
-								<p className="text-[11px] text-text-tertiary">
-									Use <code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">@file</code> to
-									reference files. Drag and drop or{" "}
-									<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
-										{pasteShortcutLabel}
-									</code>{" "}
-									also adds images.
-								</p>
-								{taskEditorMode === "create" && detectedItems.length >= 2 ? (
-									<button
-										type="button"
-										onClick={handleSplitIntoTasks}
-										disabled={
-											isTaskCreationWaitingForRelationDraftHydration ||
-											relationModeling.hasChanges ||
-											Boolean(relationModeling.draft.createdTaskId) ||
-											hasUnstagedRelationForm ||
-											isRelationAwareCreationInFlight
-										}
-										title={
-											relationModeling.hasChanges ||
-											relationModeling.draft.createdTaskId ||
-											hasUnstagedRelationForm
-												? "请先完成或放弃关系草稿，再拆分为多个任务。"
-												: undefined
-										}
-										className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-default"
-									>
-										<List size={12} />
-										Split into {detectedItems.length} tasks
-									</button>
-								) : null}
-							</div>
-						</div>
-					) : (
-						<div>
-							<div className="flex flex-col gap-1.5">
-								{taskPrompts.map((taskPrompt, index) => (
-									<div key={index} className="flex items-center gap-1.5">
-										<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
-											{index + 1}.
-										</span>
-										<input
-											ref={(el) => setInputRef(index, el)}
-											type="text"
-											value={taskPrompt}
-											onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
-											onKeyDown={(e) => handleInputKeyDown(index, e)}
-											placeholder="Describe the task..."
-											className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-										/>
-										<Button
-											variant="ghost"
-											size="sm"
-											icon={<X size={14} />}
-											onClick={() => handleRemoveTask(index)}
-											aria-label={`Remove task ${index + 1}`}
-										/>
-									</div>
-								))}
-							</div>
-							<div className="flex items-center justify-between mt-3">
-								<button
-									type="button"
-									onClick={() => handleAddTask()}
-									className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-								>
-									<Plus size={12} />
-									Add task
-								</button>
-								<button
-									type="button"
-									onClick={handleBackToSingle}
-									className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-								>
-									<ArrowLeft size={12} />
-									Back to single prompt
-								</button>
-							</div>
-						</div>
-					)}
-
-					<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
-						<label
-							htmlFor={startInPlanModeId}
-							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-						>
-							<RadixCheckbox.Root
-								id={startInPlanModeId}
-								checked={startInPlanMode}
-								onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
-								disabled={startInPlanModeDisabled}
-								className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
-							>
-								<RadixCheckbox.Indicator>
-									<Check size={10} className="text-white" />
-								</RadixCheckbox.Indicator>
-							</RadixCheckbox.Root>
-							Start in plan mode
-						</label>
-
-						<div>
-							{/* 会话模式声明（蓝图 §A.1）：探索会话的结构与结论本身是资产——默认展开
-							    session map 面板、agent 经指令文件维护 map。快照语义：只影响下一次启动，
-							    活会话不热切换。与「Start in plan mode」/权限档位都是正交轴。 */}
-							<span className="text-[11px] text-text-secondary block mb-1">Session mode</span>
-							<TaskConversationModeControl
-								value={taskConversationMode}
-								onChange={onTaskConversationModeChange}
-								idPrefix="task-editor-conversation-mode"
-							/>
-							{taskConversationMode === "exploratory" ? (
-								<p className="text-[11px] text-text-tertiary mt-1">
-									For research and exploration — the agent keeps a session map of milestones and findings.
-									Applies to the next session start.
-								</p>
+				<TaskEditorSettingPresentationProvider
+					temporarilyRevealedKeys={temporarilyRevealedSettingKeys}
+					onUserPresentationChange={(key) =>
+						setTemporarilyRevealedSettingKeys((previous) => {
+							const next = new Set(previous);
+							next.delete(key);
+							return next;
+						})
+					}
+				>
+					<DialogBody>
+						<fieldset disabled={isTaskEditorPersisting} className="min-w-0">
+							{suspendedTaskEditorTitle && onResumeSuspendedTaskEditor ? (
+								<Button size="sm" onClick={onResumeSuspendedTaskEditor} className="mb-3 max-w-full truncate">
+									返回草稿：{suspendedTaskEditorTitle}
+								</Button>
 							) : null}
-						</div>
+							<div className="grid min-w-0 gap-5 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+								<div className="min-w-0 space-y-3">
+									{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
+					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
+									{taskEditorMode === "edit" && editingTaskId !== null ? (
+										<TaskEditDraftRecoveryNotice
+											workspaceId={workspaceId}
+											taskId={editingTaskId}
+											seededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
+											currentFormValues={
+												{
+													// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
+													// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
+													taskTitleOverride: taskName,
+													prompt: promptDraft,
+													images,
+													startInPlanMode,
+													taskAgentPermissionMode,
+													autoReviewEnabled,
+													autoReviewMode,
+													branchRef,
+													worktreeMode,
+													agentId,
+													clineSettings,
+													terminalAgentModelOverrideSettings,
+													taskAgentSessionInitialization,
+												} satisfies TaskEditDraftComparableValues
+											}
+											onRevertToSavedTaskContent={() => onRevertEditTaskFormToSavedTaskContent?.()}
+											onSupersededCopyPromotedToCurrentDraft={(promotedDraft) =>
+												onAdoptPromotedTaskEditDraft?.(promotedDraft)
+											}
+										/>
+									) : null}
+									{mode === "single" ? (
+										<div>
+											<TaskNameInputWithAiSuggestions
+												key={`task-name-input-${editingTaskId ?? composerResetKey}`}
+												taskName={taskName}
+												onTaskNameChange={setTaskName}
+												taskDescription={promptDraft}
+												preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
+											/>
 
-						<div>
-							{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
-							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
-							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
-							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
-							<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
-							<TaskAgentPermissionModeControl
-								value={taskAgentPermissionMode}
-								onChange={onTaskAgentPermissionModeChange}
-								selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
-								selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
-								startInPlanMode={startInPlanMode}
-								idPrefix="task-create-agent-permission-mode"
-							/>
-						</div>
-
-						<div>
-							<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
-							<TaskWorktreeModeControl
-								value={worktreeMode}
-								onChange={onWorktreeModeChange}
-								idPrefix="task-create-worktree-mode"
-							/>
-						</div>
-
-						<div>
-							<span className="text-[11px] text-text-secondary block mb-1">
-								{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
-							</span>
-							<BranchSelectDropdown
-								options={branchOptions}
-								selectedValue={branchRef}
-								onSelect={onBranchRefChange}
-								fill
-								size="sm"
-								emptyText="No branches detected"
-							/>
-							{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
+											<TaskPromptComposer
+												key={`task-prompt-composer-${composerResetKey}`}
+												value={promptDraft}
+												onValueChange={setPromptDraft}
+												onValueBlur={() => propagatePromptDraft(promptDraft)}
+												images={images}
+												onImagesChange={onImagesChange}
+												onSubmit={handleCreateSingle}
+												onSubmitAndStart={() => handleRunSingleStartAction("start")}
+												placeholder="Describe the task..."
+												autoFocus
+												workspaceId={targetWorkspaceId}
+												showAttachImageButton
+												showPseudoHtmlBlockInsertButton
+											/>
+											<div className="flex items-center justify-between mt-1.5">
+												<p className="text-[11px] text-text-tertiary">
+													Use{" "}
+													<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
+														@file
+													</code>{" "}
+													to reference files. Drag and drop or{" "}
+													<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
+														{pasteShortcutLabel}
+													</code>{" "}
+													also adds images.
+												</p>
+												{taskEditorMode === "create" && detectedItems.length >= 2 ? (
+													<button
+														type="button"
+														onClick={handleSplitIntoTasks}
+														disabled={
+															isTaskCreationWaitingForRelationDraftHydration ||
+															relationModeling.hasChanges ||
+															Boolean(relationModeling.draft.createdTaskId) ||
+															hasUnstagedRelationForm ||
+															isRelationAwareCreationInFlight
+														}
+														title={
+															relationModeling.hasChanges ||
+															relationModeling.draft.createdTaskId ||
+															hasUnstagedRelationForm
+																? "请先完成或放弃关系草稿，再拆分为多个任务。"
+																: undefined
+														}
+														className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-default"
+													>
+														<List size={12} />
+														Split into {detectedItems.length} tasks
+													</button>
+												) : null}
+											</div>
+										</div>
+									) : (
+										<div>
+											<div className="flex flex-col gap-1.5">
+												{taskPrompts.map((taskPrompt, index) => (
+													<div key={index} className="flex items-center gap-1.5">
+														<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
+															{index + 1}.
+														</span>
+														<input
+															ref={(el) => setInputRef(index, el)}
+															type="text"
+															value={taskPrompt}
+															onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
+															onKeyDown={(e) => handleInputKeyDown(index, e)}
+															placeholder="Describe the task..."
+															className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+														/>
+														<Button
+															variant="ghost"
+															size="sm"
+															icon={<X size={14} />}
+															onClick={() => handleRemoveTask(index)}
+															aria-label={`Remove task ${index + 1}`}
+														/>
+													</div>
+												))}
+											</div>
+											<div className="flex items-center justify-between mt-3">
+												<button
+													type="button"
+													onClick={() => handleAddTask()}
+													className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
+												>
+													<Plus size={12} />
+													Add task
+												</button>
+												<button
+													type="button"
+													onClick={handleBackToSingle}
+													className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
+												>
+													<ArrowLeft size={12} />
+													Back to single prompt
+												</button>
+											</div>
+										</div>
+									)}
+								</div>
+								<div className="min-w-0 space-y-5">
+									<TaskEditorSettingGroup
+										title="项目与 Git"
+										settings={[
+											{
+												key: "project",
+												label: "所属项目",
+												content: (
+													<>
+														{taskCreationTargetProjectField ? (
+															<div className="mb-4">
+																<TaskCreationTargetProjectFieldControl
+																	taskCreationTargetProjectField={effectiveProjectField!}
+																/>
+															</div>
+														) : null}
+														<div className="mb-3">
+															<label
+																htmlFor={automaticProjectAssignmentAnalysisId}
+																className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-text-primary"
+															>
+																<RadixSwitch.Root
+																	id={automaticProjectAssignmentAnalysisId}
+																	data-verification-anchor={taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey()}
+																	aria-label="自动分析项目归属"
+																	aria-describedby={`${automaticProjectAssignmentAnalysisId}-description`}
+																	checked={automaticProjectAssignmentAnalysisEnabled}
+																	onCheckedChange={setAutomaticProjectAssignmentAnalysisEnabled}
+																	className="relative h-5 w-9 shrink-0 cursor-pointer rounded-full bg-surface-4 data-[state=checked]:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-1"
+																>
+																	<RadixSwitch.Thumb className="block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[18px] motion-reduce:transition-none" />
+																</RadixSwitch.Root>
+																<span>自动分析项目归属</span>
+															</label>
+															<p
+																id={`${automaticProjectAssignmentAnalysisId}-description`}
+																className="text-xs text-text-secondary"
+															>
+																开启后，创建、保存和启动前自动分析。所有项目共用。
+															</p>
+														</div>
+														<Button
+															size="sm"
+															disabled={!promptDraft.trim() || isRelationAwareCreationInFlight}
+															onClick={() => void handleAnalyzeProject()}
+														>
+															分析项目归属
+														</Button>
+														{selectedTargetGit && targetWorkspaceId !== workspaceId ? (
+															<p className="mt-2 text-xs text-text-secondary">
+																已按目标项目校验基础分支：{branchRef}
+															</p>
+														) : null}
+													</>
+												),
+											},
+											{
+												key: "worktree_mode",
+												label: "任务工作区",
+												summary: worktreeMode,
+												content: (
+													<>
+														<div>
+															<span className="text-[11px] text-text-secondary block mb-1">
+																Task workspace
+															</span>
+															<TaskWorktreeModeControl
+																value={worktreeMode}
+																onChange={onWorktreeModeChange}
+																idPrefix="task-create-worktree-mode"
+															/>
+														</div>
+													</>
+												),
+											},
+											{
+												key: "base_ref",
+												label: "基础分支",
+												summary: branchRef,
+												content: (
+													<>
+														<div>
+															<span className="text-[11px] text-text-secondary block mb-1">
+																{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
+															</span>
+															<BranchSelectDropdown
+																options={effectiveBranchOptions}
+																selectedValue={branchRef}
+																onSelect={onBranchRefChange}
+																fill
+																size="sm"
+																emptyText="No branches detected"
+															/>
+															{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
 							    被记住这件事必须看得见，而且要能一键退出。两条提示都只在**建卡**模式、且下拉框
 							    当前显示的正是那个自动解析出来的值时才成立；编辑既有卡片显示的是那张卡自己的
 							    baseRef、用户手动改过之后显示的是他自己的选择，那两种情况下把它说成
 							    「记住的 / 回落的结果」都是在撒谎。 */}
-							{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
-								<p className="text-[11px] text-text-tertiary mt-1">
-									Last used{" "}
-									<code className="text-text-secondary">
-										{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
-									</code>{" "}
-									for this project, but that branch no longer exists — fell back to{" "}
-									<code className="text-text-secondary">{branchRef}</code>.
-								</p>
-							) : isShowingRememberedTaskCreateBaseRefHint ? (
-								<p className="text-[11px] text-text-tertiary mt-1">
-									Remembered from the last task you created in this project.{" "}
-									<button
-										type="button"
-										className="underline underline-offset-2 hover:text-text-secondary"
-										onClick={() => onBranchRefChange(repositoryDefaultBranchRef ?? "")}
-									>
-										Use {repositoryDefaultBranchRef} instead
-									</button>
-								</p>
-							) : null}
-						</div>
-
-						<div className="flex items-center gap-2 flex-wrap">
-							<label
-								htmlFor={autoReviewEnabledId}
-								className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-							>
-								<RadixCheckbox.Root
-									id={autoReviewEnabledId}
-									checked={autoReviewEnabled}
-									onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
-									className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
-								>
-									<RadixCheckbox.Indicator>
-										<Check size={10} className="text-white" />
-									</RadixCheckbox.Indicator>
-								</RadixCheckbox.Root>
-								Automatically
-							</label>
-							<NativeSelect
-								size="sm"
-								value={autoReviewMode}
-								onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
-								style={{ width: "16ch", maxWidth: "100%" }}
-							>
-								{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
-									<option key={option.value} value={option.value}>
-										{option.label}
-									</option>
-								))}
-							</NativeSelect>
-						</div>
-
-						{onAgentIdChange && onClineSettingsChange ? (
-							<>
-								<TaskAgentModelPicker
-									agentId={agentId}
-									onAgentIdChange={onAgentIdChange}
-									clineSettings={clineSettings}
-									onClineSettingsChange={onClineSettingsChange}
-									terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-									onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-									agentOptions={agentOptions}
-									clineProviderOptions={clineProviderOptions}
-									clineModelOptions={clineModelOptions}
-									terminalAgentModelOptions={terminalAgentModelOptions}
-									terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-									effectiveDefaultModelId={effectiveDefaultModelId}
-									providerModels={providerModels}
-									isLoadingProviders={isLoadingProviders}
-									isLoadingModels={isLoadingModels}
-									isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-									defaultAgentId={defaultAgentId}
-									defaultProviderId={defaultProviderId}
-									defaultReasoningEffort={defaultReasoningEffort}
-									providerDefaultModels={providerDefaultModels}
-								/>
-								{mode === "single" && onTaskAgentSessionInitializationChange ? (
-									<TaskAgentSessionInitializationControl
-										agentId={agentId}
-										defaultAgentId={defaultAgentId}
-										workspaceId={workspaceId}
-										value={taskAgentSessionInitialization}
-										onChange={onTaskAgentSessionInitializationChange}
-										onAgentIdChange={onAgentIdChange}
+															{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
+																<p className="text-[11px] text-text-tertiary mt-1">
+																	Last used{" "}
+																	<code className="text-text-secondary">
+																		{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
+																	</code>{" "}
+																	for this project, but that branch no longer exists — fell back to{" "}
+																	<code className="text-text-secondary">{branchRef}</code>.
+																</p>
+															) : isShowingRememberedTaskCreateBaseRefHint ? (
+																<p className="text-[11px] text-text-tertiary mt-1">
+																	Remembered from the last task you created in this project.{" "}
+																	<button
+																		type="button"
+																		className="underline underline-offset-2 hover:text-text-secondary"
+																		onClick={() =>
+																			onBranchRefChange(repositoryDefaultBranchRef ?? "")
+																		}
+																	>
+																		Use {repositoryDefaultBranchRef} instead
+																	</button>
+																</p>
+															) : null}
+														</div>
+													</>
+												),
+											},
+										]}
 									/>
-								) : null}
-							</>
-						) : null}
-					</div>
-					{taskEditorMode === "create" && mode === "single" && workspaceId ? (
-						<div className="mt-4 border-t border-border">
-							<ReferenceRelationModelingEditor
-								key={workspaceId}
-								controller={relationModeling}
-								workspaceId={workspaceId}
-								taskId={null}
-								rootTitle={taskName || "待创建任务"}
-								onUnstagedFormChange={setHasUnstagedRelationForm}
-								creationInFlight={isRelationAwareCreationInFlight}
-							/>
-						</div>
-					) : null}
-				</DialogBody>
-
-				{relationAwareCreationError ? (
-					<p role="alert" className="px-4 py-2 text-xs text-status-orange">
-						{relationAwareCreationError}
-					</p>
-				) : null}
-				<DialogFooter>
-					{taskEditorMode === "create" ? (
-						<label
-							htmlFor={createMoreId}
-							className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-						>
-							<RadixSwitch.Root
-								id={createMoreId}
-								checked={createMore}
-								onCheckedChange={setCreateMore}
-								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
-							>
-								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
-							</RadixSwitch.Root>
-							<span>Create more</span>
-						</label>
-					) : (
-						<span className="mr-auto" />
-					)}
-					{mode === "single" ? (
-						<>
-							<Button
-								size="sm"
-								onClick={handleCreateSingle}
-								disabled={
-									!hasPromptDraftContent ||
-									!branchRef ||
-									isTaskCreationWaitingForRelationDraftHydration ||
-									isRelationAwareCreationInFlight
-								}
-							>
-								<span className="inline-flex items-center">
-									{taskEditorMode === "edit" ? "Save changes" : "Create"}
-									<ButtonShortcut />
-								</span>
-							</Button>
-							{onCreateAndStart ? (
-								<DropdownMenu.Root>
-									<div className="inline-flex items-center">
-										<Button
-											variant="primary"
-											size="sm"
-											onClick={() => handleRunSingleStartAction(primaryStartAction)}
-											disabled={
-												!hasPromptDraftContent ||
-												!branchRef ||
-												isTaskCreationWaitingForRelationDraftHydration ||
-												isRelationAwareCreationInFlight
-											}
-											className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
-										>
-											<span className="inline-flex items-center">
-												{primaryStartLabel}
-												<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
-											</span>
-										</Button>
-										{onCreateStartAndOpen ? (
-											<DropdownMenu.Trigger asChild>
-												<Button
-													variant="primary"
-													size="sm"
-													disabled={
-														!hasPromptDraftContent ||
-														!branchRef ||
-														isTaskCreationWaitingForRelationDraftHydration ||
-														isRelationAwareCreationInFlight
-													}
-													className="rounded-l-none border-l border-white/20 px-1"
-													aria-label="More start options"
-												>
-													<ChevronDown size={12} />
-												</Button>
-											</DropdownMenu.Trigger>
-										) : null}
-									</div>
-									<DropdownMenu.Portal>
-										<DropdownMenu.Content
-											side="bottom"
-											align="end"
-											sideOffset={4}
-											className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
-											onCloseAutoFocus={(event) => event.preventDefault()}
-										>
-											<DropdownMenu.Item
-												className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
-												onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
-											>
-												{secondaryStartLabel}
-												<span className="inline-flex items-center gap-0.5 text-text-tertiary" aria-hidden>
-													{secondaryStartShortcutModifier === "alt" ? (
-														isMacPlatform ? (
-															<Option size={10} />
-														) : (
-															<span className="text-[10px] font-medium leading-none">Alt</span>
-														)
-													) : (
-														<Command size={10} />
-													)}
-													<ArrowBigUp size={10} />
-													<CornerDownLeft size={10} />
-												</span>
-											</DropdownMenu.Item>
-										</DropdownMenu.Content>
-									</DropdownMenu.Portal>
-								</DropdownMenu.Root>
+									{onAgentIdChange && onClineSettingsChange ? (
+										<TaskAgentModelPicker
+											renderControls={({ agentSelection, modelSelection }) => (
+												<TaskEditorSettingGroup
+													title="Agent 与上下文"
+													settings={[
+														{
+															key: "agent",
+															label: "Agent",
+															summary: agentId ?? defaultAgentId ?? "默认",
+															content: agentSelection,
+														},
+														{
+															key: "model",
+															label: "模型与参数",
+															summary: terminalAgentModelOverrideSettings?.modelId ?? "默认",
+															content: modelSelection,
+														},
+														{
+															key: "session_initialization",
+															label: "会话上下文",
+															content: (
+																<>
+																	{mode === "single" && onTaskAgentSessionInitializationChange ? (
+																		<TaskAgentSessionInitializationControl
+																			agentId={agentId}
+																			defaultAgentId={defaultAgentId}
+																			workspaceId={targetWorkspaceId}
+																			value={taskAgentSessionInitialization}
+																			onChange={onTaskAgentSessionInitializationChange}
+																			onAgentIdChange={onAgentIdChange}
+																		/>
+																	) : null}
+																</>
+															),
+														},
+													]}
+												/>
+											)}
+											agentId={agentId}
+											onAgentIdChange={onAgentIdChange}
+											clineSettings={clineSettings}
+											onClineSettingsChange={onClineSettingsChange}
+											terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+											onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+											agentOptions={agentOptions}
+											clineProviderOptions={clineProviderOptions}
+											clineModelOptions={clineModelOptions}
+											terminalAgentModelOptions={terminalAgentModelOptions}
+											terminalAgentDefaultModelId={terminalAgentDefaultModelId}
+											effectiveDefaultModelId={effectiveDefaultModelId}
+											providerModels={providerModels}
+											isLoadingProviders={isLoadingProviders}
+											isLoadingModels={isLoadingModels}
+											isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+											defaultAgentId={defaultAgentId}
+											defaultProviderId={defaultProviderId}
+											defaultReasoningEffort={defaultReasoningEffort}
+											providerDefaultModels={providerDefaultModels}
+										/>
+									) : null}
+									<TaskEditorSettingGroup
+										title="运行方式"
+										settings={[
+											{
+												key: "plan_mode",
+												label: "Plan Mode",
+												summary: startInPlanMode ? "开启" : "关闭",
+												content: (
+													<>
+														<label
+															htmlFor={startInPlanModeId}
+															className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+														>
+															<RadixCheckbox.Root
+																id={startInPlanModeId}
+																checked={startInPlanMode}
+																onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
+																disabled={startInPlanModeDisabled}
+																className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
+															>
+																<RadixCheckbox.Indicator>
+																	<Check size={10} className="text-white" />
+																</RadixCheckbox.Indicator>
+															</RadixCheckbox.Root>
+															Start in plan mode
+														</label>
+													</>
+												),
+											},
+											{
+												key: "conversation_mode",
+												label: "会话模式",
+												summary: taskConversationMode,
+												content: (
+													<>
+														<div>
+															{/* 会话模式声明（蓝图 §A.1）：探索会话的结构与结论本身是资产——默认展开
+							    session map 面板、agent 经指令文件维护 map。快照语义：只影响下一次启动，
+							    活会话不热切换。与「Start in plan mode」/权限档位都是正交轴。 */}
+															<span className="text-[11px] text-text-secondary block mb-1">
+																Session mode
+															</span>
+															<TaskConversationModeControl
+																value={taskConversationMode}
+																onChange={onTaskConversationModeChange}
+																idPrefix="task-editor-conversation-mode"
+															/>
+															{taskConversationMode === "exploratory" ? (
+																<p className="text-[11px] text-text-tertiary mt-1">
+																	For research and exploration — the agent keeps a session map of
+																	milestones and findings. Applies to the next session start.
+																</p>
+															) : null}
+														</div>
+													</>
+												),
+											},
+											{
+												key: "permissions",
+												label: "Agent 权限",
+												summary: taskAgentPermissionMode,
+												content: (
+													<>
+														<div>
+															{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
+							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
+							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
+							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
+															<span className="text-[11px] text-text-secondary block mb-1">
+																Agent permissions
+															</span>
+															<TaskAgentPermissionModeControl
+																value={taskAgentPermissionMode}
+																onChange={onTaskAgentPermissionModeChange}
+																selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
+																selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
+																startInPlanMode={startInPlanMode}
+																idPrefix="task-create-agent-permission-mode"
+															/>
+														</div>
+													</>
+												),
+											},
+										]}
+									/>
+									<TaskEditorSettingGroup
+										title="自动评审"
+										settings={[
+											{
+												key: "auto_review_enabled",
+												label: "自动评审",
+												summary: autoReviewEnabled ? "开启" : "关闭",
+												content: (
+													<label
+														htmlFor={autoReviewEnabledId}
+														className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+													>
+														<RadixCheckbox.Root
+															id={autoReviewEnabledId}
+															checked={autoReviewEnabled}
+															onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
+															className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
+														>
+															<RadixCheckbox.Indicator>
+																<Check size={10} className="text-white" />
+															</RadixCheckbox.Indicator>
+														</RadixCheckbox.Root>
+														Automatically
+													</label>
+												),
+											},
+											{
+												key: "auto_review_mode",
+												label: "收尾方式",
+												summary: autoReviewMode,
+												content: (
+													<NativeSelect
+														size="sm"
+														value={autoReviewMode}
+														onChange={(e) =>
+															onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)
+														}
+														style={{ width: "16ch", maxWidth: "100%" }}
+													>
+														{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
+															<option key={option.value} value={option.value}>
+																{option.label}
+															</option>
+														))}
+													</NativeSelect>
+												),
+											},
+										]}
+									/>
+								</div>
+							</div>
+							{mode === "single" && workspaceId ? (
+								<TaskEditorSettingGroup
+									className="mt-5"
+									title="任务关系"
+									settings={[
+										{
+											key: "relations",
+											label: "关系建模",
+											content: (
+												<ReferenceRelationModelingEditor
+													key={workspaceId}
+													controller={relationModeling}
+													clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
+													workspaceId={workspaceId}
+													taskId={taskEditorMode === "edit" ? editingTaskId : null}
+													rootTitle={taskName || "待创建任务"}
+													onUnstagedFormChange={setHasUnstagedRelationForm}
+													creationInFlight={isRelationAwareCreationInFlight}
+												/>
+											),
+										},
+									]}
+								/>
 							) : null}
-						</>
-					) : (
-						<>
-							<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
-								<span className="inline-flex items-center">
-									Create {validTaskCount} {taskCountLabel}
-									<ButtonShortcut />
-								</span>
-							</Button>
-							{onCreateAndStartMultiple ? (
+							<TaskEditorHiddenSettingsManager
+								settings={[
+									{ key: "project", label: "所属项目" },
+									{ key: "worktree_mode", label: "任务工作区" },
+									{ key: "base_ref", label: "基础分支" },
+									{ key: "agent", label: "Agent" },
+									{ key: "model", label: "模型与参数" },
+									{ key: "session_initialization", label: "会话上下文" },
+									{ key: "plan_mode", label: "Plan Mode" },
+									{ key: "conversation_mode", label: "会话模式" },
+									{ key: "permissions", label: "Agent 权限" },
+									{ key: "auto_review_enabled", label: "自动评审" },
+									{ key: "auto_review_mode", label: "收尾方式" },
+									{ key: "relations", label: "关系建模" },
+								]}
+							/>
+						</fieldset>
+					</DialogBody>
+
+					{relationAwareCreationError ? (
+						<p role="alert" className="px-4 py-2 text-xs text-status-orange">
+							{relationAwareCreationError}
+						</p>
+					) : null}
+					{taskEditorOperationStatusText ? (
+						<p role="status" className="px-4 py-2 text-xs text-text-secondary">
+							{taskEditorOperationStatusText}
+						</p>
+					) : null}
+					<DialogFooter>
+						{taskEditorMode === "create" ? (
+							<label
+								htmlFor={createMoreId}
+								className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+							>
+								<RadixSwitch.Root
+									id={createMoreId}
+									checked={createMore}
+									onCheckedChange={setCreateMore}
+									className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+								>
+									<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+								</RadixSwitch.Root>
+								<span>Create more</span>
+							</label>
+						) : (
+							<span className="mr-auto" />
+						)}
+						{mode === "single" ? (
+							<>
 								<Button
-									variant="primary"
 									size="sm"
-									onClick={handleCreateAndStartAll}
-									disabled={validTaskCount === 0 || !branchRef}
+									onClick={handleCreateSingle}
+									disabled={
+										!hasPromptDraftContent ||
+										!branchRef ||
+										isTaskCreationWaitingForRelationDraftHydration ||
+										isRelationAwareCreationInFlight
+									}
 								>
 									<span className="inline-flex items-center">
-										Start {validTaskCount} {taskCountLabel}
-										<ButtonShortcut includeShift />
+										{taskEditorMode === "edit" ? "保存更改" : "创建任务"}
+										<ButtonShortcut />
 									</span>
 								</Button>
-							) : null}
-						</>
-					)}
-				</DialogFooter>
-			</Dialog>
+								{onCreateAndStart ? (
+									<DropdownMenu.Root>
+										<div className="inline-flex items-center">
+											<Button
+												variant="primary"
+												size="sm"
+												onClick={() => handleRunSingleStartAction(primaryStartAction)}
+												disabled={
+													!hasPromptDraftContent ||
+													!branchRef ||
+													isTaskCreationWaitingForRelationDraftHydration ||
+													isRelationAwareCreationInFlight
+												}
+												className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
+											>
+												<span className="inline-flex items-center">
+													{primaryStartLabel}
+													<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
+												</span>
+											</Button>
+											{onCreateStartAndOpen ? (
+												<DropdownMenu.Trigger asChild>
+													<Button
+														variant="primary"
+														size="sm"
+														disabled={
+															!hasPromptDraftContent ||
+															!branchRef ||
+															isTaskCreationWaitingForRelationDraftHydration ||
+															isRelationAwareCreationInFlight
+														}
+														className="rounded-l-none border-l border-white/20 px-1"
+														aria-label="More start options"
+													>
+														<ChevronDown size={12} />
+													</Button>
+												</DropdownMenu.Trigger>
+											) : null}
+										</div>
+										<DropdownMenu.Portal>
+											<DropdownMenu.Content
+												side="bottom"
+												align="end"
+												sideOffset={4}
+												className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
+												onCloseAutoFocus={(event) => event.preventDefault()}
+											>
+												<DropdownMenu.Item
+													className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
+													onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
+												>
+													{secondaryStartLabel}
+													<span
+														className="inline-flex items-center gap-0.5 text-text-tertiary"
+														aria-hidden
+													>
+														{secondaryStartShortcutModifier === "alt" ? (
+															isMacPlatform ? (
+																<Option size={10} />
+															) : (
+																<span className="text-[10px] font-medium leading-none">Alt</span>
+															)
+														) : (
+															<Command size={10} />
+														)}
+														<ArrowBigUp size={10} />
+														<CornerDownLeft size={10} />
+													</span>
+												</DropdownMenu.Item>
+											</DropdownMenu.Content>
+										</DropdownMenu.Portal>
+									</DropdownMenu.Root>
+								) : null}
+							</>
+						) : (
+							<>
+								<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+									<span className="inline-flex items-center">
+										Create {validTaskCount} {taskCountLabel}
+										<ButtonShortcut />
+									</span>
+								</Button>
+								{onCreateAndStartMultiple ? (
+									<Button
+										variant="primary"
+										size="sm"
+										onClick={handleCreateAndStartAll}
+										disabled={validTaskCount === 0 || !branchRef}
+									>
+										<span className="inline-flex items-center">
+											Start {validTaskCount} {taskCountLabel}
+											<ButtonShortcut includeShift />
+										</span>
+									</Button>
+								) : null}
+							</>
+						)}
+					</DialogFooter>
+				</TaskEditorSettingPresentationProvider>
+			</TaskEditorFloatingWindow>
 			<DiscardTaskCreateConfirmDialog
 				open={isDiscardConfirmOpen}
 				alreadyCreatedTaskId={relationModeling.draft.createdTaskId}

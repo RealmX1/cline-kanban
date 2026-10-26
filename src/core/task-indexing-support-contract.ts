@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { runtimeAgentIdSchema, runtimeTaskCommentEntrySchema } from "./api-contract";
 import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "./inter-work-unit-relation-ledger-event-contract";
+import type { TaskAssistanceModelProviderRoutingSettings } from "./task-assistance-model-provider-routing-contract";
 
 export const appendTaskCommentRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -20,6 +21,26 @@ export const taskIndexingSupportExecutorSettingsSchema = z.object({
 	modelId: z.string().trim().min(1).max(200).nullable().default(null),
 });
 export type TaskIndexingSupportExecutorSettings = z.infer<typeof taskIndexingSupportExecutorSettingsSchema>;
+/** 旧执行器配置仅用于读取历史快照；当前快照绑定 API 路由。 */
+export type TaskAnalysisContextSettings =
+	| TaskAssistanceModelProviderRoutingSettings
+	| TaskIndexingSupportExecutorSettings;
+
+export const taskProjectAssignmentAnalysisRequestSchema = z.object({
+	operationId: z.string().uuid(),
+	title: z.string().max(1000),
+	prompt: z.string().min(1).max(200000),
+});
+export const taskProjectAssignmentAnalysisResponseSchema = z.object({
+	operationId: z.string().uuid(),
+	inputFingerprint: z.string(),
+	currentWorkspaceId: z.string(),
+	suggestedWorkspaceId: z.string().nullable(),
+	suggestedProjectName: z.string().nullable(),
+	rationale: z.string().min(1).max(4000),
+	confidence: z.enum(["high", "medium", "low"]),
+	stablePromptPrefixSha256: z.string(),
+});
 
 export const taskIndexingMaterialSchema = z.object({
 	taskReference: kanbanBoardCardWorkUnitQualifiedReferenceSchema,

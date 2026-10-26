@@ -19,6 +19,7 @@ import {
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 import { runTaskRetainedCommittedLineChangeRealBrowserCheck } from "./task-retained-committed-line-change-real-browser-check";
 import { runTaskSessionConnectionRetryGroupingRealBrowserCheck } from "./task-session-connection-retry-grouping-real-browser-check";
+import { runTaskShelvingRealBrowserCheck } from "./task-shelving-real-browser-check";
 
 // 显式启用真实浏览器检查，普通根套件不依赖 Chromium 安装；所有实体、PTY、账本都在 fixture HOME 内。
 const runRelationModelingBrowserCheck =
@@ -28,7 +29,9 @@ const runPostDeployVerificationFollowUpBrowserCheck =
 const runAllProjectsRecentBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PROJECTS_RECENT_BROWSER_CHECK === "1";
 const runConnectionRetryGroupingBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_CONNECTION_RETRY_GROUPING_BROWSER_CHECK === "1";
+const runTaskShelvingBrowserCheck = process.env.KANBAN_RUN_ISOLATED_TASK_SHELVING_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
+	runTaskShelvingBrowserCheck ||
 	runConnectionRetryGroupingBrowserCheck ||
 	runAllProjectsRecentBrowserCheck ||
 	process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1" ||
@@ -331,6 +334,63 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "Close", exact: true })
 				.click({ timeout: 10000 });
+			if (runTaskShelvingBrowserCheck) {
+				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+					taskId: focusId,
+					taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+					taskPinboardPinReason: null,
+				});
+				const olderShelvingFixtureState = await runtimeClient(betaWorkspaceId).workspace.getState.query();
+				const olderShelvingFixtureCard = olderShelvingFixtureState.board.columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === betaId);
+				if (!olderShelvingFixtureCard) throw new Error("缺少旧搁置任务夹具");
+				olderShelvingFixtureCard.updatedAt = olderShelvingFixtureCard.taskDescriptionLastUpdatedAt = 1;
+				await runtimeClient(betaWorkspaceId).workspace.saveState.mutate({
+					board: olderShelvingFixtureState.board,
+					sessions: olderShelvingFixtureState.sessions,
+					expectedRevision: olderShelvingFixtureState.revision,
+				});
+				await runTaskShelvingRealBrowserCheck({
+					page,
+					webUiOrigin,
+					workspaceId: alphaWorkspaceId,
+					otherWorkspaceId: betaWorkspaceId,
+					focusTaskId: focusId,
+					backlogTaskId: singleStartId,
+					additionalFocusNavigationTaskId: retryId,
+					otherTaskId: betaId,
+					evidenceOutputDirectory,
+					observeUntil,
+					readBoard: async (workspaceId) => (await runtimeClient(workspaceId).workspace.getState.query()).board,
+					queryAllProjectsShelved: () =>
+						runCli(["task", "list", "--all-projects", "--group", "shelved"], firstProject.repositoryPath),
+					runCli: (workspaceId, arguments_) => {
+						const projectPath =
+							workspaceId === alphaWorkspaceId ? firstProject.repositoryPath : secondProject.repositoryPath;
+						return runCli([...arguments_, "--project-path", projectPath], projectPath);
+					},
+					restartRuntime: async () => {
+						initialRuntimeProcess.send({ type: "kanban.shutdown" });
+						await observeUntil(async () => hasChildProcessExited(initialRuntimeProcess), "隔离 runtime 停止");
+						startOwnedProcess(
+							"isolated-runtime-restarted",
+							process.execPath,
+							[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+							firstProject.repositoryPath,
+						);
+						await observeUntil(
+							async () =>
+								fetch(`${runtimeOrigin}/api/trpc/projects.list`)
+									.then((response) => response.ok)
+									.catch(() => false),
+							"隔离 runtime 重启",
+						);
+					},
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
 			if (process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1") {
 				const client = runtimeClient(alphaWorkspaceId);
 				await runTaskRetainedCommittedLineChangeRealBrowserCheck({

@@ -101,6 +101,21 @@ function render(props: Partial<HarnessProps> = {}): void {
 }
 
 describe("useCrossProjectTaskOpenInProject", () => {
+	it("关联引用的一世与当前项目同 ID 新卡不符时不打开编辑器或详情", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-a", "a-backlog", 42));
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(showAppToastMock).toHaveBeenCalledWith(expect.objectContaining({ intent: "warning" }));
+	});
+	it("跨项目在途保留一世身份，落定后拒绝打开重建卡", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "a-review", 42));
+		expect(latest?.pendingCrossProjectTaskOpen).toMatchObject({ expectedTaskIncarnationCreatedAtEpochMs: 42 });
+		render({ currentProjectId: "project-b", board: makeBoard({ review: ["a-review"] }) });
+		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+	});
 	it.each(["pty_terminal", "acp_stdio_subprocess", "in_process_cline_sdk", undefined])(
 		"在途仅预热已知 PTY 会话；通道=%s，跨项目同号卡仍保持身份",
 		async (sessionTransport) => {
@@ -159,6 +174,18 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		render();
 		await act(async () => latest?.handleOpenTaskInProject("project-b", "b-backlog"));
 		expect(ensureTerminalMock).not.toHaveBeenCalled();
+	});
+
+	it("搁置 Backlog 的搜索定位打开 Focus View，保留搁置状态", () => {
+		const board = makeBoard({ backlog: ["shelved-backlog"] });
+		const card = board.columns.flatMap((column) => column.cards)[0];
+		if (!card) throw new Error("缺少搁置 Backlog 夹具");
+		card.taskShelvingState = { isShelved: true, lastChangedAt: 10 };
+		render({ board });
+		act(() => latest?.handleOpenTaskInProject("project-a", "shelved-backlog"));
+		expect(setSelectedTaskId).toHaveBeenCalledWith("shelved-backlog");
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(card.taskShelvingState.isShelved).toBe(true);
 	});
 
 	it("同项目：非 backlog 直接选中，backlog 打开编辑对话框", () => {

@@ -7,8 +7,8 @@ import {
 	doesTaskMessageInjectionRecordMatchRequestedConversationSession,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
-	type TaskMessageInjectionRecord,
 } from "../core/task-message-injection-ledger";
+import { measureDailyWorkProgressAsynchronousStage } from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { readKanbanBoardCardReferenceFromLedgerPayloadValue } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 import { runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import {
@@ -17,7 +17,13 @@ import {
 	loadPersistedWorkspaceSessionsById,
 	loadWorkspaceBoardById,
 } from "../state/workspace-state";
+import { createCodexStatisticsVerifiedHistoryReadCache } from "./codex-statistics-verified-history-read-cache";
 import type { DailyWorkProgressStatisticsStore } from "./daily-work-progress-statistics-store";
+import { createProgrammaticPromptReceiptTimeIndex } from "./programmatic-prompt-receipt-time-index";
+import {
+	createProgrammaticPromptReceiptWorkspaceReadCache,
+	groupProgrammaticPromptReceiptsByTaskAndTargetSession,
+} from "./programmatic-prompt-receipt-workspace-read-cache";
 import {
 	createEmptyTaskUserPromptStatisticsCursor,
 	readTaskUserPromptStatisticsTranscriptIncrement,
@@ -126,6 +132,27 @@ export function createDailyWorkProgressStatisticsCollector(
 	options: { now?: () => number } = {},
 ): DailyWorkProgressCollector {
 	const now = options.now ?? Date.now;
+	const canonicalRecordPersistenceEnabled =
+		process.env.KANBAN_DAILY_WORK_PROGRESS_CANONICAL_RECORD_PERSISTENCE_DISABLED !== "1";
+	const codexHistoryReadCache =
+		process.env.KANBAN_DAILY_WORK_PROGRESS_CODEX_HISTORY_CACHE_DISABLED === "1"
+			? undefined
+			: createCodexStatisticsVerifiedHistoryReadCache();
+	const receiptIndexEnabled = process.env.KANBAN_DAILY_WORK_PROGRESS_RECEIPT_INDEX_DISABLED !== "1";
+	const receiptLedgerCacheEnabled = process.env.KANBAN_DAILY_WORK_PROGRESS_RECEIPT_LEDGER_CACHE_DISABLED !== "1";
+	const receiptReadCache = createProgrammaticPromptReceiptWorkspaceReadCache({
+		createTimeIndexes: receiptIndexEnabled,
+	});
+	const emptyReceiptTimeIndex = createProgrammaticPromptReceiptTimeIndex([]);
+	async function readWorkspaceReceipts(path: string) {
+		if (!receiptIndexEnabled && !receiptLedgerCacheEnabled) return readTaskMessageInjectionLedger(path);
+		return receiptLedgerCacheEnabled
+			? receiptReadCache.read(path)
+			: groupProgrammaticPromptReceiptsByTaskAndTargetSession(
+					await readTaskMessageInjectionLedger(path),
+					receiptIndexEnabled,
+				);
+	}
 	const startedAt = now();
 	let projects: RuntimeDailyWorkProgressSummary["projects"] = [];
 	let lastWorkspaceDiscoveryAt = -Infinity;
@@ -133,11 +160,13 @@ export function createDailyWorkProgressStatisticsCollector(
 	let activeIdentityKeys = new Set<string>();
 	const temporarilyUnreadableSourceKeys = new Set<string>();
 	return async (state) => {
-		const programmaticReceiptsByWorkspace = new Map<string, TaskMessageInjectionRecord[]>();
+		const programmaticReceiptsByWorkspace = new Map<string, Awaited<ReturnType<typeof readWorkspaceReceipts>>>();
 		const liveFactEventIds: string[] = [];
 		let hasPendingHistoricalReads = false;
 		if (now() - lastWorkspaceDiscoveryAt >= 10_000) {
-			const entries = await listWorkspaceIndexEntries();
+			const entries = await measureDailyWorkProgressAsynchronousStage("project_discovery", () =>
+				listWorkspaceIndexEntries(),
+			);
 			projects = entries.map((entry) => ({ workspaceId: entry.workspaceId, projectName: basename(entry.repoPath) }));
 			activeIdentityKeys = new Set();
 			for (const entry of entries) {
@@ -145,10 +174,16 @@ export function createDailyWorkProgressStatisticsCollector(
 				state.workspacePromptSourceInventoryDiscoveryCompleted[entry.workspaceId] = false;
 				try {
 					const [board, summaries, injections] = await Promise.all([
-						loadWorkspaceBoardById(entry.workspaceId),
-						loadPersistedWorkspaceSessionsById(entry.workspaceId),
-						readTaskMessageInjectionLedger(
-							getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(entry.workspaceId)),
+						measureDailyWorkProgressAsynchronousStage("workspace_board_read", () =>
+							loadWorkspaceBoardById(entry.workspaceId),
+						),
+						measureDailyWorkProgressAsynchronousStage("workspace_sessions_read", () =>
+							loadPersistedWorkspaceSessionsById(entry.workspaceId),
+						),
+						measureDailyWorkProgressAsynchronousStage("injection_ledger_read", () =>
+							readWorkspaceReceipts(
+								getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(entry.workspaceId)),
+							),
 						),
 					]);
 					programmaticReceiptsByWorkspace.set(entry.workspaceId, injections);
@@ -184,13 +219,23 @@ export function createDailyWorkProgressStatisticsCollector(
 							continue;
 						}
 						const key = JSON.stringify([entry.workspaceId, identity.sourceAgentId, identity.nativeSessionId]);
-						state.nativeSourcesByIdentityKey[key] = {
-							...task,
+						const sourceNativeConversationIdentityFields = {
 							sourceAgentId: identity.sourceAgentId,
 							nativeSessionId: identity.nativeSessionId,
 							transcriptPath: identity.transcriptPath,
-							kanbanConversationSessionId: summary.taskId,
 						};
+						// 与持久 schema 的键顺序一致，避免发现轮次仅因对象键重排而写盘。
+						state.nativeSourcesByIdentityKey[key] = canonicalRecordPersistenceEnabled
+							? {
+									...task,
+									kanbanConversationSessionId: summary.taskId,
+									...sourceNativeConversationIdentityFields,
+								}
+							: {
+									...task,
+									...sourceNativeConversationIdentityFields,
+									kanbanConversationSessionId: summary.taskId,
+								};
 						if (summary.liveness === "live") activeIdentityKeys.add(key);
 					}
 					state.workspacePromptSourceInventoryDiscoveryCompleted[entry.workspaceId] = true;
@@ -203,23 +248,25 @@ export function createDailyWorkProgressStatisticsCollector(
 			lastWorkspaceDiscoveryAt = now();
 		}
 		try {
-			await runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture(async (client) => {
-				for (let page = 0; page < 4; page++) {
-					const events = await client.listCommittedEvents({
-						afterGlobalCommittedEventSequence: state.ledgerCursor,
-						limit: 500,
-					});
-					for (const event of events) {
-						const eventId = applyCommittedLedgerEventToDailyWorkProgressStatistics(state, event);
-						if (eventId && event.occurredAt >= startedAt) liveFactEventIds.push(eventId);
-						state.ledgerCursor = event.globalCommittedEventSequence;
+			await measureDailyWorkProgressAsynchronousStage("relation_ledger_catch_up", () =>
+				runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture(async (client) => {
+					for (let page = 0; page < 4; page++) {
+						const events = await client.listCommittedEvents({
+							afterGlobalCommittedEventSequence: state.ledgerCursor,
+							limit: 500,
+						});
+						for (const event of events) {
+							const eventId = applyCommittedLedgerEventToDailyWorkProgressStatistics(state, event);
+							if (eventId && event.occurredAt >= startedAt) liveFactEventIds.push(eventId);
+							state.ledgerCursor = event.globalCommittedEventSequence;
+						}
+						state.ledgerCaughtUp = events.length < 500;
+						if (state.ledgerCaughtUp) break;
+						hasPendingHistoricalReads = true;
+						await setImmediate();
 					}
-					state.ledgerCaughtUp = events.length < 500;
-					if (state.ledgerCaughtUp) break;
-					hasPendingHistoricalReads = true;
-					await setImmediate();
-				}
-			});
+				}),
+			);
 		} catch {
 			state.ledgerCaughtUp = false;
 			for (const project of projects)
@@ -260,8 +307,10 @@ export function createDailyWorkProgressStatisticsCollector(
 				try {
 					programmaticReceiptsByWorkspace.set(
 						source.workspaceId,
-						await readTaskMessageInjectionLedger(
-							getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(source.workspaceId)),
+						await measureDailyWorkProgressAsynchronousStage("injection_ledger_read", () =>
+							readWorkspaceReceipts(
+								getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(source.workspaceId)),
+							),
 						),
 					);
 				} catch {
@@ -271,25 +320,45 @@ export function createDailyWorkProgressStatisticsCollector(
 					continue;
 				}
 			}
-			const programmaticSubmissionReceipts = (programmaticReceiptsByWorkspace.get(source.workspaceId) ?? [])
-				.filter(
-					(receipt) =>
-						receipt.task_id === source.taskId &&
-						doesTaskMessageInjectionRecordMatchRequestedConversationSession(
-							receipt,
+			const workspaceReceipts = programmaticReceiptsByWorkspace.get(source.workspaceId);
+			const programmaticReceiptTimeIndex =
+				receiptIndexEnabled && workspaceReceipts && !Array.isArray(workspaceReceipts)
+					? (receiptReadCache.find(
+							workspaceReceipts,
+							source.taskId,
 							source.kanbanConversationSessionId ?? source.taskId,
-						) &&
-						receipt.terminal_delivery_status !== "delivery_failed",
-				)
-				.map((receipt) => ({
-					promptSha256: receipt.prompt_sha256,
-					confirmedAtEpochMs: Date.parse(receipt.terminal_delivery_status_updated_at),
-				}));
-			const result = await readTaskUserPromptStatisticsTranscriptIncrement({
-				...source,
-				cursor: state.transcriptCursorsByIdentityKey[key] ?? createEmptyTaskUserPromptStatisticsCursor(),
-				programmaticSubmissionReceipts,
-			});
+						) ?? emptyReceiptTimeIndex)
+					: undefined;
+			const programmaticSubmissionReceipts =
+				workspaceReceipts && !Array.isArray(workspaceReceipts)
+					? receiptReadCache.findReceipts(
+							workspaceReceipts,
+							source.taskId,
+							source.kanbanConversationSessionId ?? source.taskId,
+						)
+					: (Array.isArray(workspaceReceipts) ? workspaceReceipts : [])
+							.filter(
+								(receipt) =>
+									receipt.task_id === source.taskId &&
+									doesTaskMessageInjectionRecordMatchRequestedConversationSession(
+										receipt,
+										source.kanbanConversationSessionId ?? source.taskId,
+									) &&
+									receipt.terminal_delivery_status !== "delivery_failed",
+							)
+							.map((receipt) => ({
+								promptSha256: receipt.prompt_sha256,
+								confirmedAtEpochMs: Date.parse(receipt.terminal_delivery_status_updated_at),
+							}));
+			const result = await measureDailyWorkProgressAsynchronousStage("transcript_increment", () =>
+				readTaskUserPromptStatisticsTranscriptIncrement({
+					...source,
+					cursor: state.transcriptCursorsByIdentityKey[key] ?? createEmptyTaskUserPromptStatisticsCursor(),
+					programmaticSubmissionReceipts,
+					programmaticReceiptTimeIndex,
+					codexHistoryReadCache,
+				}),
+			);
 			const excludedDescendantSession = result.cursor.rejectedDescendantSession;
 			if (result.warning && !excludedDescendantSession) temporarilyUnreadableSourceKeys.add(key);
 			else temporarilyUnreadableSourceKeys.delete(key);
@@ -304,7 +373,15 @@ export function createDailyWorkProgressStatisticsCollector(
 				const eventId = `prompt:${submission.submissionId}`;
 				if (state.factsByEventId[eventId]) continue;
 				state.factsByEventId[eventId] = {
-					...source,
+					// 事实只写持久契约字段；来源扩展字段会在下轮校验被剥离，导致迟到的清理写入。
+					...(canonicalRecordPersistenceEnabled
+						? {
+								workspaceId: source.workspaceId,
+								taskId: source.taskId,
+								taskIncarnationCreatedAtEpochMs: source.taskIncarnationCreatedAtEpochMs,
+								taskTitle: source.taskTitle,
+							}
+						: source),
 					eventId,
 					metric: "human_prompt",
 					occurredAtEpochMs: submission.submittedAtEpochMs,

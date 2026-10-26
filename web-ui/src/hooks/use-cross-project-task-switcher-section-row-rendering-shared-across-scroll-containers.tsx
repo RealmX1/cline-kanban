@@ -281,6 +281,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 				onEditTask: localHandlers.onEditTask,
 				onRequestPinToTaskPinboard: localHandlers.onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard: localHandlers.onUnpinFromTaskPinboard,
+				onSetTaskShelvingState: localHandlers.onSetTaskShelvingState,
 			};
 		};
 	const projectPathByWorkspaceId = useMemo(
@@ -288,12 +289,13 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		[host.projects],
 	);
 	// 其他项目行的 git 元数据（ahead/behind、未提交改动）只在呈现面挂载且页面可见时轮询；当前项目的行读推流 store。
-	const entriesShownInSections = useMemo(
-		() => collectEntriesShownInCrossProjectTaskSwitcherSections(sections),
-		[sections],
+	const entriesNeedingWorktreeGitMetadataPolling = useMemo(
+		() =>
+			collectEntriesShownInCrossProjectTaskSwitcherSections(sectionsModel.sectionsBeforeRecentWorktreeChangesFilter),
+		[sectionsModel.sectionsBeforeRecentWorktreeChangesFilter],
 	);
 	useCrossProjectTaskWorktreeGitMetadataPolling({
-		entriesInProjects: entriesShownInSections,
+		entriesInProjects: entriesNeedingWorktreeGitMetadataPolling,
 		currentProjectId: host.currentProjectId,
 	});
 
@@ -340,7 +342,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		const { workspaceId, entry } = entryInProject;
 		// 已经点了：待发的 hover 意图作废。已经 hover 展开的行不收起——收起会让列表在指针下移动。
 		rowHoverExpansionOfHostingScrollContainer.cancelPendingHoverIntent();
-		if (entry.columnId === "backlog" && onOpenBacklogTaskEditorInProject) {
+		if (entry.columnId === "backlog" && !entry.taskShelvingState?.isShelved && onOpenBacklogTaskEditorInProject) {
 			onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
 			return;
 		}

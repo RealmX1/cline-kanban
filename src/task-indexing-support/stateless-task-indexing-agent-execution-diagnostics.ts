@@ -1,3 +1,5 @@
+import type { TaskAssistanceModelProviderAttempt } from "../core/task-assistance-model-provider-routing-contract";
+
 /** 诊断只保留限长、脱敏后的错误，不留输入材料和推理正文。 */
 export function sanitizeStatelessAgentFailureDetail(text: string, inputMaterialTexts: readonly string[] = []): string {
 	let sanitized = text;
@@ -27,6 +29,7 @@ export function sanitizeStatelessAgentFailureDetail(text: string, inputMaterialT
 }
 
 export class StatelessTaskIndexingAgentExecutionError extends Error {
+	providerAttempts?: TaskAssistanceModelProviderAttempt[];
 	exitCode: number | null = null;
 	signal: string | null = null;
 	stderrTail: string | null = null;

@@ -15,6 +15,8 @@ import {
 /** 全 null / 全空字典：表示「服务端一条偏好都没有」，也是首次读取时的形态。 */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		taskProjectAssignmentAutomaticAnalysisEnabled: null,
+		taskEditorSettingPresentationBySettingKey: {},
 		newTaskAutoReviewEnabled: null,
 		newTaskAutoReviewMode: null,
 		taskCreateDialogPrimaryStartAction: null,
@@ -68,6 +70,9 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		return parsed.success ? (parsed.data as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TField]) : null;
 	};
 	return {
+		taskProjectAssignmentAutomaticAnalysisEnabled:
+			parseNullableField("taskProjectAssignmentAutomaticAnalysisEnabled") ?? null,
+		taskEditorSettingPresentationBySettingKey: parseNullableField("taskEditorSettingPresentationBySettingKey") ?? {},
 		newTaskAutoReviewEnabled: parseNullableField("newTaskAutoReviewEnabled"),
 		newTaskAutoReviewMode: parseNullableField("newTaskAutoReviewMode"),
 		taskCreateDialogPrimaryStartAction: parseNullableField("taskCreateDialogPrimaryStartAction"),
@@ -92,6 +97,8 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 	preferences: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		preferences.taskProjectAssignmentAutomaticAnalysisEnabled == null &&
+		Object.keys(preferences.taskEditorSettingPresentationBySettingKey ?? {}).length === 0 &&
 		preferences.newTaskAutoReviewEnabled === null &&
 		preferences.newTaskAutoReviewMode === null &&
 		preferences.taskCreateDialogPrimaryStartAction === null &&
@@ -121,6 +128,12 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 	right: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		(left.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) ===
+			(right.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) &&
+		areStringKeyedStringRecordsEqual(
+			left.taskEditorSettingPresentationBySettingKey ?? {},
+			right.taskEditorSettingPresentationBySettingKey ?? {},
+		) &&
 		left.newTaskAutoReviewEnabled === right.newTaskAutoReviewEnabled &&
 		left.newTaskAutoReviewMode === right.newTaskAutoReviewMode &&
 		left.taskCreateDialogPrimaryStartAction === right.taskCreateDialogPrimaryStartAction &&
@@ -188,6 +201,14 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 		return current;
 	}
 	const replaced: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = {
+		taskProjectAssignmentAutomaticAnalysisEnabled:
+			updates?.taskProjectAssignmentAutomaticAnalysisEnabled === undefined
+				? (current.taskProjectAssignmentAutomaticAnalysisEnabled ?? null)
+				: updates.taskProjectAssignmentAutomaticAnalysisEnabled,
+		taskEditorSettingPresentationBySettingKey: {
+			...current.taskEditorSettingPresentationBySettingKey,
+			...updates?.taskEditorSettingPresentationBySettingKey,
+		},
 		newTaskAutoReviewEnabled:
 			updates?.newTaskAutoReviewEnabled === undefined
 				? current.newTaskAutoReviewEnabled

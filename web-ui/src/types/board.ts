@@ -13,6 +13,7 @@ import type {
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskRetainedCommittedLineChangeSummary,
+	RuntimeTaskStickerEntry,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
@@ -20,6 +21,15 @@ import type {
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
+
+/** 展示归属与真实 Stage 分开，Shelved 永远不进入持久看板。 */
+export type BoardDisplayGroupId = BoardColumnId | "shelved";
+export interface BoardDisplayGroup {
+	id: BoardDisplayGroupId;
+	title: string;
+	cards: BoardCard[];
+	originalStageByTaskId?: ReadonlyMap<string, BoardColumnId>;
+}
 
 export type TaskAutoReviewMode = RuntimeTaskAutoReviewMode;
 export type TaskImage = RuntimeTaskImage;
@@ -41,6 +51,9 @@ export type TaskCommentEntry = RuntimeTaskCommentEntry;
  * 处理方据此还会去异步取一个 AI 名字回填。
  */
 export interface TaskEditorSubmitOptions {
+	onTaskPersistenceRequested?: (persistence: Promise<boolean>) => void;
+	targetWorkspaceIdOverride?: string;
+	baseRefOverride?: string;
 	preserveFormUntilCreationConfirmed?: boolean;
 	onTaskCardAllocatedForRelationModeling?: (card: BoardCard) => void;
 	keepDialogOpen?: boolean;
@@ -86,9 +99,12 @@ export interface BoardCard {
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	taskCommentEntries?: TaskCommentEntry[];
+	taskStickerEntries?: RuntimeTaskStickerEntry[];
+	taskStickerDeletedEntryIds?: string[];
 	// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序）。
 	// 同样受 normalizeCard 白名单约束——见下方 ompAgentSessionTransport 那段注释。
 	pinnedToTaskPinboardAt?: number;
+	taskShelvingState?: { isShelved: boolean; lastChangedAt: number };
 	// 置顶时填的一句原因，可留空（留空时不写字段）。
 	taskPinboardPinReason?: string;
 	agentId?: RuntimeAgentId;

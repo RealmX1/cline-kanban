@@ -10,8 +10,8 @@ import {
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
-// 四个区自上而下：Pinned → Running → Cache warm · your turn → Recent。
-// Pinned 允许与主分组重复；主分组按 Running > Cache warm > Recent 互斥归属。
+// 五个区自上而下：Pinned → Running → Cache warm · your turn → Recent → Shelved。
+// Shelved 优先且独占归属；其余任务的 Pinned 允许与主分组重复，主分组按 Running > Cache warm > Recent 互斥归属。
 // Running 只看可信 Agent 回合、进程存活或明确后台等待，不读 PTY 输出新鲜度。
 // Recent 包含所有阶段，统一按最近触达截取 7 / 30 天，再应用阶段多选与排序。
 // Cache warm 继续只收 In progress / Review，避免提醒用户接续已交付验证或完成的对话。
@@ -80,6 +80,7 @@ export interface CrossProjectTaskSwitcherRemainingSection {
 
 export interface CrossProjectTaskSwitcherSections {
 	pinnedEntries: CrossProjectTaskSwitcherEntryInProject[];
+	shelvedEntries: CrossProjectTaskSwitcherEntryInProject[];
 	runningEntries: CrossProjectTaskSwitcherEntryInProject[];
 	promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[];
 	remainingSection: CrossProjectTaskSwitcherRemainingSection;
@@ -302,6 +303,7 @@ export function resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(
 export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
+		| "taskShelvingState"
 		| "pinnedToTaskPinboardAt"
 		| "columnId"
 		| "turnOwner"
@@ -314,7 +316,7 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	>,
 	activityHorizonStartAt: number,
 ): boolean {
-	if (entry.pinnedToTaskPinboardAt !== null) {
+	if (entry.taskShelvingState?.isShelved || entry.pinnedToTaskPinboardAt !== null) {
 		return true;
 	}
 	if (entry.turnOwner === "agent") {
@@ -386,12 +388,17 @@ function assignRemainingSection(
 export function assignCrossProjectTaskSwitcherSections(
 	input: AssignCrossProjectTaskSwitcherSectionsInput,
 ): CrossProjectTaskSwitcherSections {
+	const shelvedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const pinnedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const runningEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[] = [];
 	const remainingCandidates: CrossProjectTaskSwitcherEntryInProject[] = [];
 	for (const entryInProject of input.entriesInProjects) {
 		const { entry } = entryInProject;
+		if (entry.taskShelvingState?.isShelved) {
+			shelvedEntries.push(entryInProject);
+			continue;
+		}
 		if (entry.pinnedToTaskPinboardAt !== null) {
 			pinnedEntries.push(entryInProject);
 		}
@@ -433,7 +440,15 @@ export function assignCrossProjectTaskSwitcherSections(
 				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
 			),
 	);
+	shelvedEntries.sort(
+		(left, right) =>
+			(right.entry.taskShelvingState?.lastChangedAt ?? 0) - (left.entry.taskShelvingState?.lastChangedAt ?? 0) ||
+			buildCrossProjectTaskSwitcherEntryKey(left.workspaceId, left.entry.taskId).localeCompare(
+				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
+			),
+	);
 	return {
+		shelvedEntries,
 		pinnedEntries,
 		runningEntries,
 		promptCacheWarmAwaitingUserEntries,
