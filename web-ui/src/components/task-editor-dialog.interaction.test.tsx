@@ -6,6 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import * as relationModelingHooks from "@/hooks/use-reference-relation-modeling-editor";
 import * as taskCardActionQueries from "@/runtime/task-card-action-query";
+import {
+	resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests,
+	saveUserInterfacePreferencesSharedAcrossBrowserOrigins,
+} from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import * as relationModelingQueries from "@/runtime/work-unit-relation-modeling-query";
 import * as taskCardActionCommands from "@/state/task-card-action-commands-for-any-workspace";
 import * as taskProjectAssignmentPreflight from "@/state/task-project-assignment-preflight";
@@ -25,6 +29,8 @@ vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-c
 	ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission: vi.fn(async () => undefined),
 }));
 beforeEach(() => {
+	resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
+	vi.mocked(taskProjectAssignmentPreflight.rememberTaskProjectAssignmentAnalysisAccepted).mockClear();
 	vi.mocked(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight)
 		.mockReset()
 		.mockImplementation(async ({ workspaceId, baseRef }) => ({ workspaceId, baseRef }));
@@ -190,6 +196,83 @@ describe("TaskEditorDialog interactions", () => {
 			root.render(<TaskEditorDialog {...props} />);
 		});
 	}
+
+	it.each([
+		["create", "创建任务"],
+		["create", "Start task"],
+		["edit", "保存更改"],
+		["edit", "Save and start"],
+	] as const)("默认关闭时 %s 的 %s 沿用项目与分支且不接受分析缓存", async (taskEditorMode, actionLabel) => {
+		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+		mockSuccessfulTaskStart();
+		const props = makeProps({
+			taskEditorMode,
+			editingTaskId: taskEditorMode === "edit" ? "abcde" : undefined,
+			prompt: "关闭自动分析后提交任务",
+			onCreate: vi.fn((options) => {
+				options?.onTaskPersistenceRequested?.(Promise.resolve(true));
+				return "abcde";
+			}),
+			onCreateAndStart: vi.fn(() => null),
+		});
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		expect(
+			document.querySelector('[role="switch"][aria-label="自动分析项目归属"]')?.getAttribute("aria-checked"),
+		).toBe("false");
+		await act(async () => findButtonByText(actionLabel)?.click());
+		expect(props.onCreate).toHaveBeenCalledWith(
+			expect.objectContaining({ targetWorkspaceIdOverride: "project-1", baseRefOverride: "main" }),
+		);
+		expect(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight).not.toHaveBeenCalled();
+		expect(taskProjectAssignmentPreflight.rememberTaskProjectAssignmentAnalysisAccepted).not.toHaveBeenCalled();
+	});
+
+	it("默认关闭仍能手动分析，开关跨项目与编辑模式共享", async () => {
+		vi.spyOn(relationModelingQueries, "readRelationModelingEditorDraft").mockResolvedValue(null);
+		vi.spyOn(relationModelingQueries, "persistRelationModelingEditorDraft").mockResolvedValue({ saved: true });
+		const props = makeProps({ prompt: "手动分析" });
+		await render(props);
+		await act(async () => findButtonByText("分析项目归属")?.click());
+		expect(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight).toHaveBeenCalledTimes(1);
+		expect(props.onCreate).not.toHaveBeenCalled();
+		await act(async () =>
+			document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动分析项目归属"]')?.click(),
+		);
+		await render(makeProps({ taskEditorMode: "edit", editingTaskId: "bcdef", workspaceId: "project-2" }));
+		expect(
+			document.querySelector('[role="switch"][aria-label="自动分析项目归属"]')?.getAttribute("aria-checked"),
+		).toBe("true");
+	});
+
+	it("开启后提交分析，分析开始后关闭开关仍完成本轮提交", async () => {
+		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+		let completeAnalysis!: (result: { workspaceId: string; baseRef: string }) => void;
+		vi.mocked(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight).mockReturnValueOnce(
+			new Promise((resolve) => {
+				completeAnalysis = resolve;
+			}),
+		);
+		const props = makeProps({ prompt: "需要分析的任务", onCreate: vi.fn(() => "abcde") });
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		await act(async () =>
+			document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动分析项目归属"]')?.click(),
+		);
+		await act(async () => findButtonByText("创建任务")?.click());
+		expect(Array.from(document.querySelectorAll('[role="status"]')).map((status) => status.textContent)).toContain(
+			"正在分析项目归属…",
+		);
+		await act(async () =>
+			document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动分析项目归属"]')?.click(),
+		);
+		await act(async () => completeAnalysis({ workspaceId: "project-1", baseRef: "main" }));
+		expect(props.onCreate).toHaveBeenCalledTimes(1);
+		expect(taskProjectAssignmentPreflight.rememberTaskProjectAssignmentAnalysisAccepted).toHaveBeenCalledTimes(1);
+		expect(
+			document.querySelector('[role="switch"][aria-label="自动分析项目归属"]')?.getAttribute("aria-checked"),
+		).toBe("false");
+	});
 
 	it("项目分组与单条和批量任务正文并列，初始焦点仍在原输入框", async () => {
 		vi.spyOn(relationModelingQueries, "readRelationModelingEditorDraft").mockResolvedValue(null);
@@ -429,6 +512,8 @@ describe("TaskEditorDialog interactions", () => {
 		]);
 		expect(applyChanges).not.toHaveBeenCalled();
 		expect(startTask).toHaveBeenCalledTimes(action === "start" ? 2 : 0);
+		expect(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight).not.toHaveBeenCalled();
+		expect(taskProjectAssignmentPreflight.rememberTaskProjectAssignmentAnalysisAccepted).not.toHaveBeenCalled();
 		expect(props.onOpenChange).toHaveBeenCalledWith(false);
 	});
 
@@ -492,6 +577,7 @@ describe("TaskEditorDialog interactions", () => {
 	});
 
 	it("采纳其他项目后关系保存成功但启动失败，重试保留目标项目和同一世身份", async () => {
+		saveUserInterfacePreferencesSharedAcrossBrowserOrigins({ taskProjectAssignmentAutomaticAnalysisEnabled: true });
 		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
 		vi.spyOn(taskProjectAssignmentPreflight, "runTaskProjectAssignmentPreflight").mockResolvedValue({
 			workspaceId: "target-project",

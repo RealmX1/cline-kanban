@@ -4021,6 +4021,8 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	// 创建、Backlog 保存和直接启动共享；旧配置缺失或 null 时均默认关闭。
+	taskProjectAssignmentAutomaticAnalysisEnabled: z.boolean().nullable().optional(),
 	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
 	taskEditorSettingPresentationBySettingKey: z
 		.record(z.string().max(100), z.enum(["expanded", "collapsed_in_group", "hidden"]))

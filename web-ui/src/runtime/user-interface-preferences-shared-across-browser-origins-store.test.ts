@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { notifyError } from "@/components/app-toaster";
 
 import type {
 	RuntimeConfigResponse,
@@ -13,6 +14,7 @@ vi.mock("@/runtime/runtime-config-query", () => ({
 	fetchRuntimeConfig: (...args: unknown[]) => fetchRuntimeConfigMock(...args),
 	saveRuntimeConfig: (...args: unknown[]) => saveRuntimeConfigMock(...args),
 }));
+vi.mock("@/components/app-toaster", () => ({ notifyError: vi.fn() }));
 
 const {
 	readAllUserInterfacePreferenceValuesFromBrowserLocalStorage,
@@ -37,6 +39,7 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 
 	beforeEach(() => {
 		localStorage.clear();
+		vi.mocked(notifyError).mockClear();
 		fetchRuntimeConfigMock.mockReset();
 		saveRuntimeConfigMock.mockReset();
 		preferencesHeldByFakeServer = { ...USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET };
@@ -69,6 +72,106 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 
 	afterEach(() => {
 		resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
+	});
+
+	describe("项目归属自动分析", () => {
+		it("未设置时默认关闭，成功保存后重新加载恢复全局选择", async () => {
+			expect(
+				readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled") ?? false,
+			).toBe(false);
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: true,
+			});
+			expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(true);
+			await vi.waitFor(() =>
+				expect(preferencesHeldByFakeServer.taskProjectAssignmentAutomaticAnalysisEnabled).toBe(true),
+			);
+			expect(saveRuntimeConfigMock).toHaveBeenCalledWith(null, {
+				userInterfacePreferencesSharedAcrossBrowserOrigins: { taskProjectAssignmentAutomaticAnalysisEnabled: true },
+			});
+			expect(localStorage.length).toBe(0);
+			resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
+			startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
+			await vi.waitFor(() =>
+				expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(
+					true,
+				),
+			);
+		});
+
+		it("快速切换按点击顺序落盘，较早保存和无关配置的迟到响应不覆盖最新选择", async () => {
+			const completeSaves: Array<(response: RuntimeConfigResponse) => void> = [];
+			saveRuntimeConfigMock.mockImplementation(
+				() => new Promise<RuntimeConfigResponse>((resolve) => completeSaves.push(resolve)),
+			);
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({ newTaskAutoReviewMode: "pr" });
+			await vi.waitFor(() => expect(completeSaves).toHaveLength(1));
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: true,
+			});
+			await vi.waitFor(() => expect(completeSaves).toHaveLength(2));
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: false,
+			});
+			expect(completeSaves).toHaveLength(2);
+			expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(false);
+			completeSaves[1]?.(
+				buildConfigResponseWithPreferences({
+					...preferencesHeldByFakeServer,
+					taskProjectAssignmentAutomaticAnalysisEnabled: true,
+				}),
+			);
+			await vi.waitFor(() => expect(completeSaves).toHaveLength(3));
+			expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(false);
+			completeSaves[2]?.(
+				buildConfigResponseWithPreferences({
+					...preferencesHeldByFakeServer,
+					taskProjectAssignmentAutomaticAnalysisEnabled: false,
+				}),
+			);
+			await Promise.resolve();
+			completeSaves[0]?.(
+				buildConfigResponseWithPreferences({
+					...preferencesHeldByFakeServer,
+					taskProjectAssignmentAutomaticAnalysisEnabled: true,
+				}),
+			);
+			await Promise.resolve();
+			expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(false);
+			expect(
+				saveRuntimeConfigMock.mock.calls
+					.slice(1)
+					.map(
+						([, request]) =>
+							request.userInterfacePreferencesSharedAcrossBrowserOrigins
+								.taskProjectAssignmentAutomaticAnalysisEnabled,
+					),
+			).toEqual([true, false]);
+		});
+
+		it("首次读取晚于切换时仍保留选择，保存失败提示且不阻塞下次保存", async () => {
+			let completeLoad!: (response: RuntimeConfigResponse) => void;
+			fetchRuntimeConfigMock.mockReturnValueOnce(
+				new Promise<RuntimeConfigResponse>((resolve) => {
+					completeLoad = resolve;
+				}),
+			);
+			startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
+			saveRuntimeConfigMock.mockRejectedValueOnce(new Error("offline"));
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: true,
+			});
+			await vi.waitFor(() => expect(notifyError).toHaveBeenCalledWith(expect.stringContaining("自动分析项目归属")));
+			completeLoad(buildConfigResponseWithPreferences(preferencesHeldByFakeServer));
+			await Promise.resolve();
+			expect(readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled")).toBe(true);
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskProjectAssignmentAutomaticAnalysisEnabled: false,
+			});
+			await vi.waitFor(() =>
+				expect(preferencesHeldByFakeServer.taskProjectAssignmentAutomaticAnalysisEnabled).toBe(false),
+			);
+		});
 	});
 
 	describe("本地镜像沿用升级前的编码——否则读不出用户已经攒下的那份", () => {

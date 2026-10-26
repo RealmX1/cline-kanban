@@ -29,6 +29,7 @@ import type {
 	RuntimeTaskCardActionUpdateFieldValuesResponse,
 	RuntimeTaskCardFieldValuePatch,
 } from "@/runtime/types";
+import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { findCardSelection } from "@/state/board-state";
 import type { PendingTaskCardCommandExpectedBoardEffect } from "@/state/pending-task-card-command-board-overlay";
 import {
@@ -197,6 +198,7 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 	const originalWorkspaceId = input.workspaceId;
 	if (
 		!input.skipTaskProjectAssignmentPreflight &&
+		readEffectiveUserInterfacePreferenceValue("taskProjectAssignmentAutomaticAnalysisEnabled") === true &&
 		(!input.boardMutationInitiator || input.boardMutationInitiator === "web_ui_user_gesture")
 	) {
 		try {

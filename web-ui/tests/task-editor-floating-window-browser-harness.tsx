@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Toaster } from "sonner";
 import { TaskEditorDialog } from "../src/components/task-editor-dialog";
 import { TaskProjectAssignmentPreflightHost } from "../src/components/task-project-assignment-preflight-host";
 import { TooltipProvider } from "../src/components/ui/tooltip";
@@ -17,7 +18,8 @@ function Harness() {
 		<input aria-label="背景输入" className="fixed bottom-2 right-2 w-36 bg-surface-3 p-3" />
 		{!open ? <button type="button" onClick={() => setOpen(true)}>重新打开编辑器</button> : null}
 		<TaskProjectAssignmentPreflightHost />
-		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => null} onCreateMultiple={() => []}
+		<Toaster />
+		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateMultiple={() => []}
 			startInPlanMode={plan} onStartInPlanModeChange={setPlan} taskAgentPermissionMode="ask_for_every_tool_use" onTaskAgentPermissionModeChange={() => {}}
 			taskConversationMode="operational" onTaskConversationModeChange={() => {}} autoReviewEnabled={false} onAutoReviewEnabledChange={() => {}} autoReviewMode="commit" onAutoReviewModeChange={() => {}}
 			workspaceId="isolated-task-editor-project" branchRef="main" branchOptions={[{value:"main",label:"main"}]} onBranchRefChange={() => {}} worktreeMode="branch" onWorktreeModeChange={() => {}}

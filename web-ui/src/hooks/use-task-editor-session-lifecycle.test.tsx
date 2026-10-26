@@ -10,7 +10,10 @@ import * as taskCardQueries from "@/runtime/task-card-action-query";
 import { resetTaskEditDraftStoreForTests } from "@/runtime/task-edit-draft-store";
 import * as taskDraftQueries from "@/runtime/task-edit-drafts-query";
 import type { WorkspaceTaskEditDraftsSnapshot } from "@/runtime/types";
-import { resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import {
+	resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests,
+	saveUserInterfacePreferencesSharedAcrossBrowserOrigins,
+} from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import * as relationQueries from "@/runtime/work-unit-relation-modeling-query";
 import * as assignmentPreflight from "@/state/task-project-assignment-preflight";
 import { resetPendingTaskCardCommandBoardOverlayStore } from "@/stores/pending-task-card-command-board-overlay-store";
@@ -560,6 +563,7 @@ describe("任务编辑会话的挂起、目标与迁移生命周期", () => {
 	});
 
 	it("本轮明确接受的归属分析可调整目标与分支，不被输入失效保护误拒", async () => {
+		saveUserInterfacePreferencesSharedAcrossBrowserOrigins({ taskProjectAssignmentAutomaticAnalysisEnabled: true });
 		vi.mocked(assignmentPreflight.runTaskProjectAssignmentPreflight).mockResolvedValueOnce({
 			workspaceId: "target-project",
 			baseRef: "master",
