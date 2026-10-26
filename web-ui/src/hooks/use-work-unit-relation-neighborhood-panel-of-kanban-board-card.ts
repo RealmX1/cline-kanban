@@ -57,7 +57,9 @@ export interface WorkUnitRelationNeighborhoodPanelController {
 	isRelationNeighborhoodRefetchInFlight: boolean;
 	refetchRelationNeighborhood: () => void;
 	// null = 没有跨项目打开宿主（单测 / 独立挂载）：邻居只展示。
-	openNeighborKanbanBoardCardInItsProject: ((workspaceId: string, taskId: string) => void) | null;
+	openNeighborKanbanBoardCardInItsProject:
+		| ((workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void)
+		| null;
 	relationIdsWithPresentationMuteToggleInFlight: ReadonlySet<string>;
 	// 只能绑在按钮的 onClick 上（见文件头）。
 	createRecordedRelationMuteToggleButtonClickHandler: (

@@ -3309,6 +3309,8 @@ export const runtimeCrossProjectTaskWorktreeGitMetadataSchema = z.discriminatedU
 		workspaceId: z.string(),
 		taskId: z.string(),
 		availability: z.literal("available"),
+		// 新运行时仅在探针前后核对同一世身份后提供；旧运行时缺省时不能用于完整身份预览。
+		taskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 		// 与当前项目推流里的同名结构完全一致（同一个探针算出），浏览器用同一套展示规则。
 		taskWorkspaceMetadata: runtimeTaskWorkspaceMetadataSchema,
 	}),

@@ -1,7 +1,7 @@
 import dagre from "@dagrejs/dagre";
 import type { RelationModelingPreviewResponse } from "@runtime-work-unit-relation-modeling-api-contract";
 import { Background, Controls, type Edge, MarkerType, type Node, Position, ReactFlow } from "@xyflow/react";
-import { useMemo, useRef } from "react";
+import { type MouseEvent, useMemo, useRef } from "react";
 import { cn } from "@/components/ui/cn";
 import { useMeasure } from "@/utils/react-use";
 import "@xyflow/react/dist/style.css";
@@ -21,15 +21,24 @@ export function ReferenceRelationModelingGraph({
 	preview,
 	rootTitle,
 	onSelectWorkUnit,
+	onHoverWorkUnit,
+	onLeaveWorkUnit,
+	onFocusWorkUnit,
 	viewportResetKey,
 	expanded = false,
 }: {
 	preview: RelationModelingPreviewResponse;
 	rootTitle: string;
-	onSelectWorkUnit: (key: string) => void;
+	onSelectWorkUnit: (key: string, trigger: HTMLElement | null) => void;
+	onHoverWorkUnit?: (key: string, trigger: HTMLElement | null) => void;
+	onLeaveWorkUnit?: () => void;
+	onFocusWorkUnit?: (key: string, trigger: HTMLElement | null) => void;
 	viewportResetKey: string;
 	expanded?: boolean;
 }) {
+	const nodeReceivingPointerFocus = useRef<string | null>(null);
+	const nodeTrigger = (event: MouseEvent): HTMLElement | null =>
+		event.target instanceof Element ? event.target.closest<HTMLElement>(".react-flow__node") : null;
 	const [measureGraphContainer, { width: graphContainerWidth, height: graphContainerHeight }] =
 		useMeasure<HTMLDivElement>();
 	const layoutOrientation = useRef<{ rootKey: string; vertical: boolean } | null>(null);
@@ -56,6 +65,7 @@ export function ReferenceRelationModelingGraph({
 		dagre.layout(layout);
 		const nodes: Node[] = [...keys].map((key) => {
 			const entry = entries.get(key);
+			const currentWorkUnitReference = entry?.kanbanBoardCardIdentity?.kanbanBoardCard ?? entry?.workUnit;
 			const isRoot = key === preview.rootWorkUnitKey;
 			const title = isRoot
 				? rootTitle
@@ -75,8 +85,8 @@ export function ReferenceRelationModelingGraph({
 							<div className="mt-1 truncate text-[11px]">
 								{isRoot
 									? "当前任务"
-									: entry?.workUnit.workUnitType === "kanban_board_card"
-										? `${entry.workUnit.workspaceId} · ${entry.workUnit.taskId}`
+									: currentWorkUnitReference?.workUnitType === "kanban_board_card"
+										? `${currentWorkUnitReference.workspaceId} · ${currentWorkUnitReference.taskId}`
 										: "独立会话"}
 							</div>
 						</div>
@@ -124,6 +134,34 @@ export function ReferenceRelationModelingGraph({
 			)}
 			role="group"
 			aria-label="任务多跳关系图"
+			onPointerDownCapture={(event) => {
+				const node = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__node");
+				nodeReceivingPointerFocus.current = node?.dataset.id ?? null;
+				// 点击产生的 focus 不能先改变布局，否则 Dialog 滚动后 pointerup 会错过原节点。
+				onLeaveWorkUnit?.();
+			}}
+			onPointerUpCapture={() => {
+				nodeReceivingPointerFocus.current = null;
+			}}
+			onPointerCancel={() => {
+				nodeReceivingPointerFocus.current = null;
+			}}
+			onPointerLeave={() => {
+				nodeReceivingPointerFocus.current = null;
+			}}
+			onFocusCapture={(event) => {
+				const node = event.target.closest<HTMLElement>(".react-flow__node");
+				if (node?.dataset.id && nodeReceivingPointerFocus.current !== node.dataset.id)
+					onFocusWorkUnit?.(node.dataset.id, node);
+			}}
+			onKeyDownCapture={(event) => {
+				if (event.key !== "Enter" && event.key !== " ") return;
+				const node = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__node");
+				if (!node?.dataset.id) return;
+				event.preventDefault();
+				event.stopPropagation();
+				onSelectWorkUnit(node.dataset.id, node);
+			}}
 		>
 			{hasInitializedCurrentRootLayout && (
 				<ReactFlow
@@ -135,7 +173,11 @@ export function ReferenceRelationModelingGraph({
 					nodesDraggable={false}
 					nodesConnectable={false}
 					edgesReconnectable={false}
-					onNodeClick={(_event, node) => onSelectWorkUnit(node.id)}
+					onNodeClick={(event, node) => onSelectWorkUnit(node.id, nodeTrigger(event))}
+					onNodeMouseEnter={(event, node) => {
+						if (!nodeReceivingPointerFocus.current) onHoverWorkUnit?.(node.id, nodeTrigger(event));
+					}}
+					onNodeMouseLeave={onLeaveWorkUnit}
 					minZoom={0.2}
 					maxZoom={1.8}
 					colorMode="dark"

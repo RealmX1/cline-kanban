@@ -95,7 +95,7 @@ import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cr
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
-import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
+import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
@@ -287,6 +287,8 @@ type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	taskCardOwnedByOtherProjectWorkspaceId?: string | null;
 	/** 当前项目展开卡的轮询复合键；普通看板卡继续只订阅推流 store。 */
 	taskCardWorkspaceIdForCrossProjectGitMetadataPolling?: string | null;
+	/** 完整关联预览只消费已核对创建时间的局部快照；null 或缺省均表示未知，不回退到共享 store。 */
+	relatedTaskPreviewWorktreeGitMetadataSnapshot?: ReviewTaskWorkspaceSnapshot | null;
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
@@ -359,6 +361,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		onEditTaskPinboardPinReason,
 		taskCardOwnedByOtherProjectWorkspaceId = null,
 		taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
+		relatedTaskPreviewWorktreeGitMetadataSnapshot = null,
 		crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
 	} = presentation;
 
@@ -389,17 +392,22 @@ export const TaskCardBody = memo(function TaskCardBody(
 		taskCommentsDialog?.currentWorkspaceId;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
+	const usesIdentityBoundRelatedTaskPreviewGitMetadata = renderRole === "task_card_copy_in_related_task_preview";
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
-		isTaskCardOwnedByOtherProject ? null : card.id,
+		isTaskCardOwnedByOtherProject || usesIdentityBoundRelatedTaskPreviewGitMetadata ? null : card.id,
 	);
 	const polledReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
 		taskWorkspaceId ?? "",
 		card.id,
-		taskWorkspaceId != null && (isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
+		!usesIdentityBoundRelatedTaskPreviewGitMetadata &&
+			taskWorkspaceId != null &&
+			(isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
 	);
-	const reviewWorkspaceSnapshot = isTaskCardOwnedByOtherProject
-		? polledReviewWorkspaceSnapshot
-		: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
+	const reviewWorkspaceSnapshot = usesIdentityBoundRelatedTaskPreviewGitMetadata
+		? relatedTaskPreviewWorktreeGitMetadataSnapshot
+		: isTaskCardOwnedByOtherProject
+			? polledReviewWorkspaceSnapshot
+			: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
 	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(isTaskCardOwnedByOtherProject ? null : card.id, card.baseRef);
 	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,

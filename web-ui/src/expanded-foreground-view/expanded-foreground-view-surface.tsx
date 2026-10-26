@@ -55,7 +55,7 @@ export function ExpandedForegroundViewSurface({
 			if (event.key !== "Escape" || event.defaultPrevented) return;
 			if (
 				document.querySelector(
-					'[data-state="open"][role="dialog"], [data-state="open"][role="alertdialog"], [data-state="open"][role="menu"], [data-state="open"][role="listbox"]',
+					'[data-state="open"][role="dialog"]:not([aria-modal="false"]), [data-state="open"][role="alertdialog"], [data-state="open"][role="menu"], [data-state="open"][role="listbox"]',
 				)
 			)
 				return;
@@ -97,7 +97,7 @@ export function ExpandedForegroundViewSurface({
 						if (
 							event.defaultPrevented ||
 							document.querySelector(
-								'[data-state="open"][role="dialog"], [data-state="open"][role="alertdialog"], [data-state="open"][role="menu"], [data-state="open"][role="listbox"]',
+								'[data-state="open"][role="dialog"]:not([aria-modal="false"]), [data-state="open"][role="alertdialog"], [data-state="open"][role="menu"], [data-state="open"][role="listbox"]',
 							)
 						)
 							return;

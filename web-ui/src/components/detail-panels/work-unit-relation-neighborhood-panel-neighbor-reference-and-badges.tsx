@@ -4,6 +4,9 @@
 import { ArrowUpRight } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 import { cn } from "@/components/ui/cn";
+import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
+import { buildRelationTaskCardPreviewTargetFromNeighbor } from "@/hooks/relation-task-card-preview-target";
+import { useRelationTaskCardPreviewContext } from "@/hooks/use-relation-task-card-preview";
 import type { WorkUnitRelationNeighborPresentation } from "@/hooks/work-unit-relation-neighborhood-panel-presentation-model";
 
 export function formatEpochMsAsUtcMinuteForRelationTooltip(epochMs: number): string {
@@ -24,10 +27,33 @@ export function RelationNeighborWorkUnitReference({
 }: {
 	neighbor: WorkUnitRelationNeighborPresentation;
 	// null = 没有跨项目打开宿主（单测 / 独立挂载）：邻居只展示。
-	openNeighborKanbanBoardCardInItsProject: ((workspaceId: string, taskId: string) => void) | null;
+	openNeighborKanbanBoardCardInItsProject:
+		| ((workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void)
+		| null;
 }): ReactElement {
+	const preview = useRelationTaskCardPreviewContext();
+	const navigation = useExpandedForegroundViewNavigation();
+	const target = buildRelationTaskCardPreviewTargetFromNeighbor(neighbor);
+	const previewButton = preview ? (
+		<button
+			type="button"
+			className="min-w-0 rounded text-left text-text-primary underline-offset-2 hover:text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+			aria-label={`预览 ${neighbor.neighborWorkUnitDisplayLabel}`}
+			aria-pressed={
+				preview.selection?.target.workUnitKey === neighbor.neighborWorkUnitKey && preview.selection.pinned
+			}
+			onPointerEnter={(event) => {
+				if (event.pointerType !== "touch") preview.previewOnHover(target, event.currentTarget);
+			}}
+			onPointerLeave={preview.cancelPendingPreview}
+			onFocus={(event) => preview.previewOnFocus(target, event.currentTarget)}
+			onClick={(event) => preview.pinPreview(target, event.currentTarget)}
+		>
+			<span className="break-words">{target.title}</span>
+		</button>
+	) : null;
 	if (neighbor.neighborWorkUnitType === "kanban_unmanaged_standalone_agent_conversation_session") {
-		return <span className="text-text-primary">{neighbor.neighborWorkUnitDisplayLabel}</span>;
+		return previewButton ?? <span className="text-text-primary">{neighbor.neighborWorkUnitDisplayLabel}</span>;
 	}
 	const neighborTitle =
 		neighbor.neighborKanbanBoardCardCurrentTitle ?? `task ${neighbor.neighborKanbanBoardCardTaskId}`;
@@ -37,23 +63,27 @@ export function RelationNeighborWorkUnitReference({
 		: null;
 	return (
 		<span className="inline-flex max-w-full flex-wrap items-center gap-1 align-middle">
+			{previewButton}
 			{openThisNeighborKanbanBoardCardInItsProject ? (
 				<button
 					type="button"
 					className="inline-flex min-w-0 items-center gap-0.5 text-left text-text-primary underline-offset-2 hover:text-accent hover:underline"
 					title={`打开 ${neighbor.neighborWorkUnitDisplayLabel}`}
 					aria-label={`打开 ${neighbor.neighborWorkUnitDisplayLabel}`}
-					onClick={() =>
+					onClick={() => {
+						navigation?.dismissForTaskNavigation();
+						preview?.closePreview();
 						openThisNeighborKanbanBoardCardInItsProject(
 							neighbor.neighborKanbanBoardCardWorkspaceId,
 							neighbor.neighborKanbanBoardCardTaskId,
-						)
-					}
+							neighbor.neighborKanbanBoardCardTaskIncarnationCreatedAtEpochMs,
+						);
+					}}
 				>
-					<span className="min-w-0 break-words">{neighborTitle}</span>
+					{!preview ? <span className="min-w-0 break-words">{neighborTitle}</span> : null}
 					<ArrowUpRight size={11} className="shrink-0" />
 				</button>
-			) : (
+			) : !preview ? (
 				<span
 					className="min-w-0 break-words text-text-primary"
 					title={
@@ -64,7 +94,7 @@ export function RelationNeighborWorkUnitReference({
 				>
 					{neighborTitle}
 				</span>
-			)}
+			) : null}
 			<RelationStatusBadge className="bg-surface-3 font-normal text-text-secondary">
 				<span title={neighbor.neighborKanbanBoardCardWorkspaceId}>
 					{neighbor.neighborKanbanBoardCardWorkspaceDisplayName}
