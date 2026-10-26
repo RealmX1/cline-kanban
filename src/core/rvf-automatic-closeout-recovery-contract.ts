@@ -84,6 +84,19 @@ export const rvfCloseoutRecoveryProgressSchema = z.object({
 	nativeSessionRestoreAttempted: z.boolean().optional(),
 	nativeSessionRestoreAttemptCount: z.number().int().min(0).max(3).optional(),
 	nextNativeSessionRestoreAttemptAtMs: z.number().optional(),
+	nativeSessionRestoreEvidenceFingerprint: z.string().optional(),
+	historicalNativeAcceptanceObservationBudget: z
+		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })
+		.optional(),
+	nativeControlCapabilityProbe: z
+		.object({
+			evidenceFingerprint: z.string(),
+			nextProbeAtMs: z.number(),
+			status: z.enum(["unavailable", "ready"]),
+			recoveryGeneration: z.number().int().nonnegative(),
+			failedNativeTurnHistoryPageReadCursor: z.string().nullable().optional(),
+		})
+		.optional(),
 	continuationPreparationEvidenceFingerprint: z.string().optional(),
 	continuationPreparationObservationBudget: z
 		.object({ fingerprint: z.string(), count: z.number().int().min(0).max(3), nextAttemptAtMs: z.number() })
