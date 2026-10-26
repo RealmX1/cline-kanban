@@ -157,3 +157,10 @@ export async function setTaskCardShelvingStateInWorkspace(
 		workspaceId,
 	).taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects.mutate(request);
 }
+
+export async function applyTaskStickerEntryMutationInWorkspace(
+	workspaceId: string,
+	request: RuntimeAppRouterInputs["taskCardAction"]["applyTaskStickerEntryMutation"],
+) {
+	return await getRuntimeTrpcClient(workspaceId).taskCardAction.applyTaskStickerEntryMutation.mutate(request);
+}

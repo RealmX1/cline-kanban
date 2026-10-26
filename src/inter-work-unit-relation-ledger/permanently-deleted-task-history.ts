@@ -6,11 +6,14 @@ import type {
 	PermanentlyDeletedTaskPromptVersionsResponse,
 	RetainedTaskPromptVersion,
 } from "../core/permanently-deleted-task-history-contract";
+import { runtimeTaskStickerEntrySchema } from "../core/task-sticker-entry-contract";
 import {
 	buildInterWorkUnitRelationWorkUnitKey,
 	type KanbanBoardCardIdentityProjection,
 } from "./kanban-board-card-identity-projection-from-ledger-events";
 import type { RecordedInterWorkUnitRelationProjectionReader } from "./recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
+
+const retainedTaskStickerEntriesSchema = runtimeTaskStickerEntrySchema.array();
 
 function resolveRetainedTaskPromptVersionAvailability(
 	values: Map<string, unknown>,
@@ -145,6 +148,7 @@ export async function listPermanentlyDeletedTaskCards(
 	const pageHashes = page.flatMap(({ projection }) => [
 		projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.title,
 		projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.prompt,
+		projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.taskStickerEntries,
 	]);
 	const values = await reader.readRetainedTaskCardFieldValuesBySha256([
 		...new Set(pageHashes.filter((hash): hash is string => !!hash)),
@@ -153,12 +157,19 @@ export async function listPermanentlyDeletedTaskCards(
 		const value = hash ? values.get(hash) : null;
 		return typeof value === "string" ? value : null;
 	};
+	const readStickerEntries = (hash: string | undefined) => {
+		const parsed = retainedTaskStickerEntriesSchema.safeParse(hash ? values.get(hash) : undefined);
+		return parsed.success ? parsed.data : [];
+	};
 	const entries = page.map(({ projection, matchedPromptVersions }) => ({
 		kanbanBoardCard: projection.kanbanBoardCard,
 		workspaceRepositoryPath: workspacePath(projection.kanbanBoardCard.workspaceId),
 		titleBeforePermanentRemoval: readText(projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.title),
 		permanentlyRemovedFromBoardAt: projection.permanentlyRemovedFromBoardAt as number,
 		promptPreview: readText(projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.prompt)?.slice(0, 240) ?? null,
+		taskStickerEntries: readStickerEntries(
+			projection.lastFieldValueSha256ByFieldNameBeforeRemoval?.taskStickerEntries,
+		),
 		matchedPromptVersions,
 	}));
 	const last = entries.at(-1);

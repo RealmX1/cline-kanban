@@ -39,6 +39,7 @@ import {
 	PinOff,
 	Play,
 	RotateCcw,
+	StickyNote,
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
@@ -60,6 +61,7 @@ import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
+import { TaskCardStickers } from "@/components/task-card-stickers";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
@@ -86,6 +88,7 @@ import { resolveBoardColumnTitle } from "@/data/board-data";
 import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } from "@/hooks/use-session-activity-dot-breathing-opacity-on-shared-fine-clock";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
+import { resolveTaskStickerOverlayExplicitActivationSource, useTaskCardStickers } from "@/hooks/use-task-card-stickers";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type {
 	PermanentlyDeletedTaskCardEntry,
@@ -322,6 +325,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					id: historicalSnapshot.kanbanBoardCard.taskId,
 					title: historicalSnapshot.titleBeforePermanentRemoval ?? "标题未留存",
 					prompt: historicalSnapshot.promptPreview ?? "",
+					taskStickerEntries: historicalSnapshot.taskStickerEntries,
 					createdAt: historicalSnapshot.kanbanBoardCard.taskIncarnationCreatedAtEpochMs,
 					updatedAt: historicalSnapshot.permanentlyRemovedFromBoardAt,
 					startInPlanMode: false,
@@ -464,6 +468,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 	const clickActivationTimerRef = useRef<number | null>(null);
 	const cardDragBindings = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy ? null : drag;
 	const isDragging = cardDragBindings?.isDragging ?? false;
+	const taskStickers = useTaskCardStickers({
+		card,
+		workspaceId:
+			historicalSnapshot?.kanbanBoardCard.workspaceId ?? taskWorkspaceId ?? taskCommentsWorkspaceId ?? null,
+		readOnly: Boolean(historicalContext),
+		isDragging: Boolean(cardDragBindings?.isDragging),
+	});
+
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
@@ -1177,11 +1189,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 
 	const cardShell = (
 		<div
-			ref={cardDragBindings?.innerRef}
+			ref={(element) => {
+				taskStickers.cardElementRef.current = element;
+				cardDragBindings?.innerRef(element);
+			}}
 			{...(cardDragBindings?.draggableProps ?? {})}
 			{...(cardDragBindings?.dragHandleProps ?? {})}
 			className={cn(
-				"kb-board-card-shell",
+				"kb-board-card-shell relative",
 				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
 				isRelatedTaskPreviewCopy && "max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11",
 			)}
@@ -1269,6 +1284,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 			}}
 			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}
+			onPointerEnter={(event) => {
+				if (event.pointerType !== "mouse" || !event.currentTarget.contains(event.target as Node)) return;
+				taskStickers.pointerEnter();
+				if (taskStickers.entries.length > 0) taskStickers.activate();
+			}}
+			onPointerLeave={taskStickers.pointerLeave}
 		>
 			{/* 为右下角复制叠层留出横向空间，编辑动作与时长药丸仍可独立命中。 */}
 			<div
@@ -1505,6 +1526,25 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onClick={(event) => {
 									stopEvent(event);
 									taskPinboardToggle.activate();
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{!taskStickers.readOnly ? (
+						<Tooltip content={revealHoverActionTooltip("添加便签")}>
+							<Button
+								aria-label="添加便签"
+								variant="ghost"
+								size="xs"
+								icon={<StickyNote size={12} />}
+								onMouseDown={stopEvent}
+								onPointerDown={(event) => event.stopPropagation()}
+								onClick={(event) => {
+									stopEvent(event);
+									taskStickers.startNew(
+										event.currentTarget,
+										resolveTaskStickerOverlayExplicitActivationSource(event),
+									);
 								}}
 							/>
 						</Tooltip>
@@ -1872,6 +1912,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : null}
 			</div>
+			<TaskCardStickers controller={taskStickers} />
 		</div>
 	);
 
