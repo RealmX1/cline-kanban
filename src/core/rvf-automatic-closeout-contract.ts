@@ -59,6 +59,13 @@ export const rvfAutomaticCloseoutWaitingReasonCodeSchema = z.enum([
 	"closeout_delivery_confirmation_pending",
 ]);
 export type RvfAutomaticCloseoutWaitingReasonCode = z.infer<typeof rvfAutomaticCloseoutWaitingReasonCodeSchema>;
+export const rvfSupplementalLandCompletionEvidenceReferenceSchema = z.object({
+	evidencePath: z.string().min(1),
+	evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+});
+export type RvfSupplementalLandCompletionEvidenceReference = z.infer<
+	typeof rvfSupplementalLandCompletionEvidenceReferenceSchema
+>;
 export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 	outcome: z.enum(["completed", "blocked", "failed"]),
 	commitSha: z
@@ -71,7 +78,31 @@ export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 	deliveryAttemptId: z.string().optional(),
 	stageExecutionClaimId: z.string().optional(),
 	verificationBasis: z
-		.enum(["native_prompt_acceptance", "verified_stage_execution", "verified_base_integration_state"])
+		.enum([
+			"native_prompt_acceptance",
+			"verified_stage_execution",
+			"verified_base_integration_state",
+			"verified_supplemental_land_completion",
+		])
+		.optional(),
+	supplementalLandCompletionEvidence: rvfSupplementalLandCompletionEvidenceReferenceSchema.optional(),
+	supplementalLandCompletionVerification: z
+		.object({
+			source: z.literal("historical_supplemental_completion"),
+			workspaceId: z.string(),
+			taskId: z.string(),
+			decisionToken: z.string(),
+			runId: z.string(),
+			handoffSha256: z.string(),
+			gitCommonDirectoryRealpath: z.string(),
+			targetCommitSha: z.string(),
+			targetTreeSha: z.string(),
+			scopeContractSha256: z.string(),
+			doesNotAttestPrecommitReview: z.literal(true),
+			doesNotAuthorizeFollowupExecution: z.literal(true),
+			currentExecutionEligibility: z.enum(["requires_current_authorization_check", "execution_prohibited"]),
+			observedAt: z.number(),
+		})
 		.optional(),
 	baseIntegrationObservation: z
 		.object({
@@ -85,7 +116,8 @@ export const rvfAutomaticCloseoutExecutionStageResultSchema = z.object({
 			landCommitSha: z.string(),
 			baseRef: z.string(),
 			baseCommitSha: z.string(),
-			candidateEvidenceSha256: z.string(),
+			candidateEvidenceSha256: z.string().optional(),
+			supplementalLandCompletionEvidenceSha256: z.string().optional(),
 			scopeContractSha256: z.string(),
 			observedAt: z.number(),
 		})
@@ -110,10 +142,13 @@ export const rvfAutomaticCloseoutExecutionResultReportRequestSchema = rvfReviewS
 			verificationBasis: true,
 			executionEvidenceSha256: true,
 			baseIntegrationObservation: true,
+			supplementalLandCompletionVerification: true,
 			blockedReasonClassificationSource: true,
 		}).shape,
 	)
 	.superRefine((value, context) => {
+		if (value.supplementalLandCompletionEvidence && (value.stage !== "land" || value.outcome !== "completed"))
+			context.addIssue({ code: "custom", message: "补充完成证明仅用于登记 Land 的历史完成事实。" });
 		if (
 			value.blockedReasonKind === "agent_assessed_not_ready_for_base_sync" &&
 			(value.stage !== "base_branch_sync" ||
@@ -255,6 +290,16 @@ export const rvfAutomaticCloseoutRecordSchema = z.object({
 		})
 		.optional(),
 	independentBaseIntegrationObservationBudget: z
+		.object({
+			fingerprint: z.string(),
+			count: z.number().int().min(0).max(3),
+			nextAttemptAtMs: z.number(),
+			nextCapabilityProbeAtMs: z.number(),
+			reason: z.string().optional(),
+			recoveryCondition: z.string(),
+		})
+		.optional(),
+	supplementalLandCompletionObservationBudget: z
 		.object({
 			fingerprint: z.string(),
 			count: z.number().int().min(0).max(3),

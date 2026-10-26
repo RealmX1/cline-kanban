@@ -11,9 +11,11 @@ import {
 } from "./rvf-automatic-closeout-store";
 import {
 	type ExecutionRecoveryDependencies,
+	isRvfCloseoutRecordEligibleForExistingCompletionObservation,
 	reportRvfCloseoutExecutionResultWithIndependentEvidence,
 } from "./rvf-closeout-execution-stage-recovery";
 import { readBoundRvfBaseIntegrationState } from "./validate-rvf-automatic-closeout-execution-result";
+import { readRvfSupplementalCompletionCapabilityFingerprint } from "./verify-rvf-supplemental-land-completion-evidence";
 
 function sameObservationBinding(current: RvfAutomaticCloseoutRecord, original: RvfAutomaticCloseoutRecord) {
 	return (
@@ -80,102 +82,106 @@ async function readBaseIntegrationCapabilityFingerprint(record: RvfAutomaticClos
 		await git(["rev-parse", "--verify", "HEAD"]),
 		await git(["rev-parse", "--verify", localBaseRef]),
 		await git(["rev-parse", "--git-common-dir"]),
+		record.landExecutionResult?.verificationBasis === "verified_supplemental_land_completion"
+			? await readRvfSupplementalCompletionCapabilityFingerprint(record)
+			: null,
 	]);
 }
 
 export async function observeExistingRvfBaseIntegrationStateOnce(
 	deps: ExecutionRecoveryDependencies,
 	original: RvfAutomaticCloseoutRecord,
+	assertObservationStillOwned?: () => void,
 ): Promise<RvfAutomaticCloseoutRecord> {
 	if (
 		deps.isStopped(original) ||
 		original.workspaceId !== deps.workspaceId ||
-		original.automaticCloseoutIneligibleReason ||
 		original.baseBranchSyncExecutionResult?.outcome === "completed" ||
 		original.landExecutionResult?.outcome !== "completed" ||
-		!original.runDirectory ||
-		!["paused", "submitting_closeout_prompt", "closeout_prompt_submitted"].includes(original.status)
+		!isRvfCloseoutRecordEligibleForExistingCompletionObservation(original)
 	)
 		return original;
 	const storePath = getRvfAutomaticCloseoutStorePath(deps.workspaceId);
 	let observed = original;
-	await withRvfAutomaticCloseoutRecordOperationLock(
-		storePath,
-		original.receipt.decision_token,
-		async (assertOwned) => {
-			const current = (await readRvfAutomaticCloseoutRecords(storePath)).find((entry) =>
-				sameObservationBinding(entry, original),
-			);
-			if (!current || deps.isStopped(current) || current.baseBranchSyncExecutionResult?.outcome === "completed")
-				return;
-			observed = current;
-			if (await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory)) return;
-			const previous = current.independentBaseIntegrationObservationBudget;
-			if (
-				previous &&
-				(previous.count >= 3 ? previous.nextCapabilityProbeAtMs : previous.nextAttemptAtMs) > Date.now()
-			)
-				return;
-			const fingerprint = await readBaseIntegrationCapabilityFingerprint(current, deps.rvfHome);
-			const same = previous?.fingerprint === fingerprint;
-			const verify = !same || previous.count < 3;
+	const observeUnderOperationLock = async (assertOwned: () => void) => {
+		const current = (await readRvfAutomaticCloseoutRecords(storePath)).find((entry) =>
+			sameObservationBinding(entry, original),
+		);
+		if (!current || deps.isStopped(current) || current.baseBranchSyncExecutionResult?.outcome === "completed") return;
+		observed = current;
+		if (await readNormalRvfCloseoutSuppression(current.receipt.worktree, current.runDirectory)) return;
+		const previous = current.independentBaseIntegrationObservationBudget;
+		const budgetStillWaiting =
+			previous && (previous.count >= 3 ? previous.nextCapabilityProbeAtMs : previous.nextAttemptAtMs) > Date.now();
+		if (budgetStillWaiting && !assertObservationStillOwned) return;
+		const fingerprint = await readBaseIntegrationCapabilityFingerprint(current, deps.rvfHome);
+		const same = previous?.fingerprint === fingerprint;
+		if (same && budgetStillWaiting) return;
+		const verify = !same || previous.count < 3;
+		observed = await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
+			assertOwned();
+			const latest = records.find((entry) => sameObservationBinding(entry, current));
+			if (!latest || deps.isStopped(latest) || latest.baseBranchSyncExecutionResult?.outcome === "completed")
+				return { records, value: latest ?? current };
+			const updated = {
+				...latest,
+				independentBaseIntegrationObservationBudget: {
+					...(same ? previous : {}),
+					fingerprint,
+					count: same ? Math.min(3, previous.count + (verify ? 1 : 0)) : 1,
+					nextAttemptAtMs: Date.now() + 15_000,
+					nextCapabilityProbeAtMs: Date.now() + 60_000,
+					recoveryCondition: "本地 base ref、候选、handoff、run 完成凭据或核验能力变化后自动重验。",
+				},
+			};
+			return { records: records.map((entry) => (entry === latest ? updated : entry)), value: updated };
+		});
+		if (!verify || deps.isStopped(observed) || observed.baseBranchSyncExecutionResult?.outcome === "completed")
+			return;
+		try {
+			const actual = await readBoundRvfBaseIntegrationState(observed);
+			assertOwned();
+			observed = (
+				await reportRvfCloseoutExecutionResultWithIndependentEvidence(
+					deps,
+					{
+						taskId: observed.taskId,
+						decisionToken: observed.receipt.decision_token,
+						runId: observed.runId ?? "",
+						handoffSha256: observed.handoffSha256 ?? "",
+						stage: "base_branch_sync",
+						outcome: "completed",
+						commitSha: actual.baseCommitSha,
+						baseRef: actual.baseRef,
+					},
+					{ automaticObservation: true, assertObservationStillOwned: assertOwned },
+				)
+			).record;
+		} catch (error) {
 			observed = await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
 				assertOwned();
-				const latest = records.find((entry) => sameObservationBinding(entry, current));
+				const latest = records.find((entry) => sameObservationBinding(entry, observed));
 				if (!latest || deps.isStopped(latest) || latest.baseBranchSyncExecutionResult?.outcome === "completed")
-					return { records, value: latest ?? current };
+					return { records, value: latest ?? observed };
 				const updated = {
 					...latest,
 					independentBaseIntegrationObservationBudget: {
-						fingerprint,
-						count: same ? Math.min(3, previous.count + (verify ? 1 : 0)) : 1,
-						nextAttemptAtMs: Date.now() + 15_000,
-						nextCapabilityProbeAtMs: Date.now() + 60_000,
-						recoveryCondition: "本地 base ref、候选、handoff、run 完成凭据或核验能力变化后自动重验。",
+						...(observed.independentBaseIntegrationObservationBudget as NonNullable<
+							RvfAutomaticCloseoutRecord["independentBaseIntegrationObservationBudget"]
+						>),
+						reason: error instanceof Error ? error.message : "base 整合证据暂不可核验。",
 					},
 				};
 				return { records: records.map((entry) => (entry === latest ? updated : entry)), value: updated };
 			});
-			if (!verify || deps.isStopped(observed) || observed.baseBranchSyncExecutionResult?.outcome === "completed")
-				return;
-			try {
-				const actual = await readBoundRvfBaseIntegrationState(observed);
-				assertOwned();
-				observed = (
-					await reportRvfCloseoutExecutionResultWithIndependentEvidence(
-						deps,
-						{
-							taskId: observed.taskId,
-							decisionToken: observed.receipt.decision_token,
-							runId: observed.runId ?? "",
-							handoffSha256: observed.handoffSha256 ?? "",
-							stage: "base_branch_sync",
-							outcome: "completed",
-							commitSha: actual.baseCommitSha,
-							baseRef: actual.baseRef,
-						},
-						{ automaticObservation: true, assertObservationStillOwned: assertOwned },
-					)
-				).record;
-			} catch (error) {
-				observed = await updateRvfAutomaticCloseoutRecords(storePath, (records) => {
-					assertOwned();
-					const latest = records.find((entry) => sameObservationBinding(entry, observed));
-					if (!latest || deps.isStopped(latest) || latest.baseBranchSyncExecutionResult?.outcome === "completed")
-						return { records, value: latest ?? observed };
-					const updated = {
-						...latest,
-						independentBaseIntegrationObservationBudget: {
-							...(observed.independentBaseIntegrationObservationBudget as NonNullable<
-								RvfAutomaticCloseoutRecord["independentBaseIntegrationObservationBudget"]
-							>),
-							reason: error instanceof Error ? error.message : "base 整合证据暂不可核验。",
-						},
-					};
-					return { records: records.map((entry) => (entry === latest ? updated : entry)), value: updated };
-				});
-			}
-		},
-	);
+		}
+	};
+	if (assertObservationStillOwned) await observeUnderOperationLock(assertObservationStillOwned);
+	else
+		await withRvfAutomaticCloseoutRecordOperationLock(
+			storePath,
+			original.receipt.decision_token,
+			observeUnderOperationLock,
+		);
 	return observed;
 }
