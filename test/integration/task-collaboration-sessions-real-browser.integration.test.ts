@@ -23,15 +23,43 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(!packagedCliPath).each([
-	["claude", "codex", "pty_terminal"],
-	["codex", "claude", "pty_terminal"],
-	["claude", "claude", "pty_terminal"],
-	["codex", "codex", "pty_terminal"],
-	["omp", "omp", "pty_terminal"],
-	["omp", "omp", "acp_stdio_subprocess"],
-] as const)(
-	"打包态 %s → %s/%s：可写协作、上下文复刻和独立恢复",
-	async (mainAgentId, collaborationAgentId, sessionTransport) => {
+	...(
+		[
+			["claude", "codex", "pty_terminal"],
+			["codex", "claude", "pty_terminal"],
+			["claude", "claude", "pty_terminal"],
+			["codex", "codex", "pty_terminal"],
+			["omp", "omp", "pty_terminal"],
+			["omp", "omp", "acp_stdio_subprocess"],
+		] as const
+	).flatMap(([mainAgentId, collaborationAgentId, sessionTransport]) =>
+		[false, true].map(
+			(withoutInitialUserMessage) =>
+				[
+					mainAgentId,
+					collaborationAgentId,
+					sessionTransport,
+					withoutInitialUserMessage,
+					"task_collaborator",
+					undefined,
+				] as const,
+		),
+	),
+	...(["claude", "codex"] as const).flatMap((agentId) =>
+		(["started_from_scratch", "forked_from_main_current_turn"] as const).map(
+			(contextSource) => [agentId, agentId, "pty_terminal", true, "by_the_way", contextSource] as const,
+		),
+	),
+])(
+	"打包态 %s → %s/%s，空首发=%s，角色=%s，上下文=%s：独立恢复",
+	async (
+		mainAgentId,
+		collaborationAgentId,
+		sessionTransport,
+		withoutInitialUserMessage,
+		sessionRole,
+		explicitContextSource,
+	) => {
 		if (!packagedCliPath) throw new Error("缺少隔离构建的 CLI 路径");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const writeCodexNativeConversationTranscriptFixture = (
@@ -59,7 +87,7 @@ it.skipIf(!packagedCliPath).each([
 		const evidenceDirectory = join(
 			process.env.KANBAN_COLLABORATION_SESSION_BROWSER_EVIDENCE_DIRECTORY ??
 				join(fixture.fixtureRootDirectoryPath, "browser-evidence"),
-			`${mainAgentId}-to-${collaborationAgentId}-${sessionTransport}`,
+			`${mainAgentId}-to-${collaborationAgentId}-${sessionTransport}-${withoutInitialUserMessage ? "empty" : "message"}-${sessionRole}-${explicitContextSource ?? "default"}`,
 		);
 		mkdirSync(evidenceDirectory, { recursive: true });
 		const fakeAgentBinaryDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-binaries");
@@ -82,7 +110,7 @@ const launch = { agent, args, pid: process.pid, cwd: process.cwd(), sessionId, w
 const saveLaunch = record => { Object.assign(launch, record); fs.writeFileSync(launchPath, JSON.stringify(launch)); };
 const markPromptSent = () => { if (isCollaborator) fs.writeFileSync(path.join(process.cwd(), 'collaboration-write-proof.txt'), sessionId); };
 const freshNative = () => ({ nativeSessionId: randomUUID(), model: 'source-model-after-switch', history: ['主会话已有上下文'], promptCount: 0 });
-const forkNative = id => { const record = { ...readNative(id), nativeSessionId: randomUUID(), forkSourceNativeSessionId: id }; saveNative(record); return record; };
+const forkNative = id => { const record = { ...readNative(id), nativeSessionId: randomUUID(), forkSourceNativeSessionId: id, promptCount: 0 }; saveNative(record); return record; };
 saveLaunch({});
 if (args.includes('acp')) {
  let active;
@@ -122,7 +150,7 @@ if (args.includes('acp')) {
     if (isCollaborator) pendingPrompt = { id: message.id, promptCount: active.promptCount };
     saveLaunch({ ...active, pendingAcpPromptCount: pendingPrompt?.promptCount ?? null });
     markPromptSent(); notify(active.nativeSessionId, '正在处理协作请求');
-    if (!isCollaborator) reply(message.id, { stopReason: 'end_turn' });
+    // 主会话持续工作，侧会话的请求由测试控制命令显式结束。
     break;
    default: reply(message.id, {});
   }
@@ -133,9 +161,26 @@ if (args.includes('acp')) {
  const shouldFork = args.includes('--fork') || args.includes('fork') || args.includes('--fork-session');
  const record = shouldFork ? forkNative(sourceId) : (args.includes('--resume') || args.includes('resume')) ? readNative(args[args.indexOf(args.includes('resume') ? 'resume' : '--resume') + 1]) : freshNative();
  const modelIndex = args.indexOf('--model'); if (modelIndex >= 0) record.model = args[modelIndex + 1];
- saveNative(record); saveLaunch(record); markPromptSent();
- process.stdout.write('Claude Code · OpenAI Codex\n❯ ');
- process.stdin.resume(); process.stdin.on('data', chunk => process.stdout.write(chunk));
+ const acceptPrompt = text => {
+  const submittedText = text.trim();
+  if (!submittedText || submittedText === '/plan') return;
+  record.promptCount++; record.receivedUserPrompts = [...(record.receivedUserPrompts || []), submittedText];
+  saveNative(record); saveLaunch(record); markPromptSent();
+ };
+ saveNative(record); saveLaunch(record);
+ const initialPrompt = args.find(argument => argument.includes('主会话工作') || argument.includes('实现协作部分'));
+ if (initialPrompt) acceptPrompt(initialPrompt);
+ process.stdout.write(agent === 'codex' ? 'OpenAI Codex\n› \x1b[2mAsk Codex to do anything\x1b[0m\r\x1b[2C' : 'Claude Code\n❯ ');
+ if (process.stdin.isTTY) process.stdin.setRawMode(true);
+ let input = '';
+ process.stdin.resume(); process.stdin.on('data', chunk => {
+  const text = String(chunk); process.stdout.write(text);
+  input += text.replace(/\x1b\[(?:200|201)~/g, '');
+  if (/[\r\n]/.test(input)) {
+   const messages = input.split(/[\r\n]/); input = messages.pop();
+   for (const message of messages) acceptPrompt(message);
+  }
+ });
 }
 setInterval(() => {}, 1000);
 `;
@@ -251,7 +296,7 @@ setInterval(() => {}, 1000);
 				sessions: state.sessions,
 				expectedRevision: state.revision,
 			});
-			const mainStarted = await scoped.runtime.startTaskSession.mutate({
+			let mainStarted = await scoped.runtime.startTaskSession.mutate({
 				taskId,
 				agentId: mainAgentId,
 				prompt: "主会话工作",
@@ -328,8 +373,11 @@ setInterval(() => {}, 1000);
 				}
 			};
 			const mainSessionButton = page.getByRole("button", { name: /^Main session/ });
-			const collaborationSessionButton = page.getByRole("button", { name: /^协作会话/ });
-			const unreadAnswerIndicator = collaborationSessionButton.getByRole("img", {
+			const sessionLabel = sessionRole === "task_collaborator" ? "协作会话" : "By the way";
+			const createdSideSessionButton = page.getByRole("button", {
+				name: sessionRole === "task_collaborator" ? /^协作会话/ : /^By the way/,
+			});
+			const unreadAnswerIndicator = createdSideSessionButton.getByRole("img", {
 				name: "Unread answer",
 				exact: true,
 			});
@@ -352,19 +400,41 @@ setInterval(() => {}, 1000);
 				});
 			expect(await page.locator("#task-conversation-session-role").inputValue()).toBe("task_collaborator");
 			await page.locator("#task-conversation-session-agent").selectOption(collaborationAgentId);
-			expect(await page.locator("#task-conversation-context-source").inputValue()).toBe(
-				mainAgentId === collaborationAgentId ? "forked_from_main_current_turn" : "started_from_scratch",
-			);
-			await page.locator("#task-conversation-initial-question").fill("实现协作部分");
+			await page.locator("#task-conversation-session-role").selectOption(sessionRole);
+			if (explicitContextSource)
+				await page.locator("#task-conversation-context-source").selectOption(explicitContextSource);
+			const expectedContextSource =
+				explicitContextSource ??
+				(mainAgentId === collaborationAgentId ? "forked_from_main_current_turn" : "started_from_scratch");
+			expect(await page.locator("#task-conversation-context-source").inputValue()).toBe(expectedContextSource);
+			await page
+				.locator("#task-conversation-initial-question")
+				.fill(withoutInitialUserMessage ? " \n\t " : "实现协作部分");
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-create-form.png") });
 			await page.getByRole("button", { name: "Create session", exact: true }).click();
 			await expect
-				.poll(() => existsSync(join(repository.repositoryPath, "collaboration-write-proof.txt")), {
-					timeout: 20_000,
-				})
+				.poll(
+					async () =>
+						Object.values((await scoped.workspace.getState.query()).sessions).some(
+							(summary) => summary.taskConversationSessionMetadata?.taskConversationSessionRole === sessionRole,
+						),
+					{ timeout: 20_000 },
+				)
 				.toBe(true);
-			const sideSessionId = readFileSync(join(repository.repositoryPath, "collaboration-write-proof.txt"), "utf8");
-			const sideLaunch = JSON.parse(
+			const sideSessionId = Object.values((await scoped.workspace.getState.query()).sessions).find(
+				(summary) => summary.taskConversationSessionMetadata?.taskConversationSessionRole === sessionRole,
+			)?.taskId;
+			if (!sideSessionId) throw new Error("创建后没有持久化协作会话");
+			const sideLaunchPath = join(repository.repositoryPath, `launch-${sideSessionId}.json`);
+			await expect
+				.poll(
+					() =>
+						existsSync(sideLaunchPath) &&
+						Boolean(JSON.parse(readFileSync(sideLaunchPath, "utf8")).nativeSessionId),
+					{ timeout: 20_000 },
+				)
+				.toBe(true);
+			let sideLaunch = JSON.parse(
 				readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"),
 			) as {
 				agent: string;
@@ -406,12 +476,14 @@ setInterval(() => {}, 1000);
 					.toBe(sequence);
 			};
 			expect(sideLaunch).toMatchObject({ agent: collaborationAgentId, workspaceTaskId: taskId });
-			expect(sideLaunch.args).not.toContain("read-only");
-			if (mainAgentId === collaborationAgentId) {
+			if (sessionRole === "task_collaborator") expect(sideLaunch.args).not.toContain("read-only");
+			else if (collaborationAgentId === "codex") expect(sideLaunch.args).toContain("read-only");
+			else expect(sideLaunch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
+			if (expectedContextSource === "forked_from_main_current_turn") {
 				expect(sideLaunch.nativeSessionId).not.toBe(mainLaunch.nativeSessionId);
 				expect(sideLaunch.forkSourceNativeSessionId).toBe(mainLaunch.nativeSessionId);
 				expect(sideLaunch.history).toContain("主会话已有上下文");
-				expect(sideLaunch.model).toBe("source-model-after-switch");
+				if (sessionRole === "task_collaborator") expect(sideLaunch.model).toBe("source-model-after-switch");
 			}
 			if (sessionTransport === "pty_terminal") {
 				// 写入证明只说明假进程已启动；等运行时完成启动后再发 hook，跨 agent 时身份才会归属正确。
@@ -444,6 +516,83 @@ setInterval(() => {}, 1000);
 				});
 				expect(capturedIdentity.ok).toBe(true);
 			}
+			const modelBeforeFirstInputAndRestoration = sideLaunch.model;
+			if (withoutInitialUserMessage) {
+				expect(sideLaunch.promptCount).toBe(0);
+				expect(existsSync(join(repository.repositoryPath, "collaboration-write-proof.txt"))).toBe(false);
+				await expect.poll(readSideSessionSummary).toMatchObject({
+					turnOwner: "user",
+					taskConversationSessionMetadata: { latestUserMessagePreview: null },
+				});
+				expect((await readSideSessionSummary())?.agentResponseGenerationTurnSequence ?? 0).toBe(0);
+				expect((await readSideSessionSummary())?.lastAgentConversationUserHandoffObservation ?? null).toBeNull();
+				await expect.poll(() => createdSideSessionButton.textContent()).toContain("尚未发送消息");
+				expect(await createdSideSessionButton.textContent()).toContain("Ready");
+				expect(await createdSideSessionButton.locator("..").getAttribute("class")).toContain("bg-surface-3");
+				await page.reload();
+				await openSessionsModule();
+				await expect.poll(() => createdSideSessionButton.textContent()).toContain("尚未发送消息");
+				await scoped.runtime.stopTaskSession.mutate({ taskId: sideSessionId });
+				await page.goto("about:blank");
+				runtime.kill("SIGINT");
+				expect(await waitForChildProcessExit(runtime, 15_000)).toBe(true);
+				runtime = await startRuntime();
+				const persistedBeforeFirstInput = (await scoped.workspace.getState.query()).sessions[sideSessionId];
+				expect(persistedBeforeFirstInput?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+					identity.nativeSessionId,
+				);
+				mainStarted = await scoped.runtime.startTaskSession.mutate({
+					taskId,
+					agentId: mainAgentId,
+					prompt: "",
+					baseRef: card.baseRef,
+					worktreeMode: "inplace",
+					requestedAgentSessionTransport: sessionTransport,
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				});
+				expect(mainStarted.ok, JSON.stringify(mainStarted)).toBe(true);
+				const resumed = await scoped.runtime.startTaskSession.mutate({
+					taskId: sideSessionId,
+					workspaceTaskId: taskId,
+					agentId: collaborationAgentId,
+					prompt: "",
+					baseRef: card.baseRef,
+					worktreeMode: "inplace",
+					requestedAgentSessionTransport: sessionTransport,
+					taskConversationSessionMetadata: persistedBeforeFirstInput?.taskConversationSessionMetadata,
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				});
+				expect(resumed.ok, JSON.stringify(resumed)).toBe(true);
+				await expect
+					.poll(() => JSON.parse(readFileSync(sideLaunchPath, "utf8")).pid, { timeout: 20_000 })
+					.not.toBe(sideLaunch.pid);
+				sideLaunch = JSON.parse(readFileSync(sideLaunchPath, "utf8"));
+				expect(sideLaunch.nativeSessionId).toBe(identity.nativeSessionId);
+				expect(sideLaunch.model).toBe(modelBeforeFirstInputAndRestoration);
+				expect(sideLaunch.promptCount).toBe(0);
+				expect(sideLaunch.args).not.toContain("--fork-session");
+				expect(sideLaunch.args).not.toContain("fork");
+				expect(sideLaunch.args).not.toContain("--fork");
+				await page.goto(`${origin}/${workspaceId}?task=${taskId}`);
+				await openSessionsModule();
+				await createdSideSessionButton.click();
+				const firstInput = await scoped.runtime.sendTaskChatMessage.mutate({
+					taskId: sideSessionId,
+					text: "实现协作部分",
+				});
+				expect(firstInput.ok, JSON.stringify(firstInput)).toBe(true);
+			}
+			await expect
+				.poll(() => existsSync(join(repository.repositoryPath, "collaboration-write-proof.txt")), {
+					timeout: 20_000,
+				})
+				.toBe(true);
+			await expect.poll(() => JSON.parse(readFileSync(sideLaunchPath, "utf8")).promptCount).toBe(1);
+			sideLaunch = JSON.parse(readFileSync(sideLaunchPath, "utf8"));
+
+			const mainStageBeforeSideCompletion = (await scoped.workspace.getState.query()).board.columns.find((column) =>
+				column.cards.some((candidate) => candidate.id === taskId),
+			)?.id;
 			await mainSessionButton.click();
 			if (sessionTransport === "acp_stdio_subprocess") {
 				// 协作会话未选中时才结束原生请求，避免创建后的自动选中把首轮答复立即标为已读。
@@ -480,16 +629,18 @@ setInterval(() => {}, 1000);
 					{ timeout: 15_000 },
 				)
 				.toBeGreaterThan(0);
+			if (withoutInitialUserMessage)
+				await expect.poll(() => createdSideSessionButton.textContent()).not.toContain("尚未发送消息");
 			const afterSideCompletion = await scoped.workspace.getState.query();
 			expect(
 				afterSideCompletion.board.columns.find((column) =>
 					column.cards.some((candidate) => candidate.id === taskId),
 				)?.id,
-			).toBe("in_progress");
+			).toBe(mainStageBeforeSideCompletion);
 			const completedAnswerHandoff = (await readSideSessionSummary())?.lastAgentConversationUserHandoffObservation;
 			expect(completedAnswerHandoff?.observedAtMs).toBeGreaterThan(0);
 			await expect.poll(() => unreadAnswerIndicator.isVisible()).toBe(true);
-			await collaborationSessionButton.click();
+			await createdSideSessionButton.click();
 			await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			await expect
 				.poll(() =>
@@ -534,7 +685,7 @@ setInterval(() => {}, 1000);
 					.click();
 				await page.locator(`[data-task-id="${taskId}"] [data-task-card-title]`).click();
 				await openSessionsModule();
-				await expect.poll(() => collaborationSessionButton.isVisible()).toBe(true);
+				await expect.poll(() => createdSideSessionButton.isVisible()).toBe(true);
 				await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			};
 			await refocusTaskAndExpectNoUnreadAnswer();
@@ -586,7 +737,7 @@ setInterval(() => {}, 1000);
 			const nextAnswerHandoff = (await readSideSessionSummary())?.lastAgentConversationUserHandoffObservation;
 			expect(nextAnswerHandoff?.turnSequence).toBeGreaterThan(completedAnswerHandoff?.turnSequence ?? 0);
 			await expect.poll(() => unreadAnswerIndicator.isVisible()).toBe(true);
-			await collaborationSessionButton.click();
+			await createdSideSessionButton.click();
 			await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			await expect
 				.poll(() =>
@@ -633,17 +784,17 @@ setInterval(() => {}, 1000);
 			expect((await scoped.workspace.getState.query()).sessions[taskId]?.pid).toBe(mainPid);
 			await page.reload();
 			await openSessionsModule();
-			await expect.poll(() => page.getByText("协作会话", { exact: true }).count(), { timeout: 15_000 }).toBe(1);
+			await expect.poll(() => page.getByText(sessionLabel, { exact: true }).count(), { timeout: 15_000 }).toBe(1);
 			await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-desktop.png") });
 			await page.setViewportSize({ width: 390, height: 844 });
 			await openSessionsModule();
-			await expect.poll(() => page.getByText("协作会话", { exact: true }).count()).toBe(1);
+			await expect.poll(() => page.getByText(sessionLabel, { exact: true }).count()).toBe(1);
 			await refocusTaskAndExpectNoUnreadAnswer();
 			await refocusTaskAndExpectNoUnreadAnswer();
 			await page.reload();
 			await openSessionsModule();
-			await expect.poll(() => collaborationSessionButton.isVisible()).toBe(true);
+			await expect.poll(() => createdSideSessionButton.isVisible()).toBe(true);
 			await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-mobile.png") });
 			expect(pageErrors).toEqual([]);
@@ -661,11 +812,15 @@ setInterval(() => {}, 1000);
 				agentNativeConversationSessionIdentity: { nativeSessionId: identity.nativeSessionId },
 				taskConversationSessionMetadata: {
 					workspaceTaskId: taskId,
-					taskConversationSessionRole: "task_collaborator",
-					taskConversationSessionLaunchSettings: {
-						sessionTransport,
-						taskAgentPermissionMode: "bypass_all_permission_prompts",
-					},
+					taskConversationSessionRole: sessionRole,
+					...(sessionRole === "task_collaborator"
+						? {
+								taskConversationSessionLaunchSettings: {
+									sessionTransport,
+									taskAgentPermissionMode: "bypass_all_permission_prompts",
+								},
+							}
+						: {}),
 				},
 			});
 			const coldRestarted = await restartSideSession();
@@ -691,6 +846,9 @@ setInterval(() => {}, 1000);
 					{
 						taskId,
 						sideSessionId,
+						withoutInitialUserMessage,
+						sessionRole,
+						expectedContextSource,
 						pageErrors,
 						sideLaunch,
 						completedAnswerHandoff,

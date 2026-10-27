@@ -45,7 +45,8 @@ async function createIsolatedPrimaryConversationHookRuntime(agentId: "kimi" | "c
 		binary: agentId,
 		args: ["--model", "isolated-model"],
 		cwd: directory.path,
-		prompt: "",
+		// 这些工具 hook 来自已开始的模型回合；空启动现在应保持 Ready。
+		prompt: "验证真实模型回合中的工具 hook 状态迁移。",
 		autoContinueOnConnectionDropEnabled: false,
 	});
 	const broadcastTaskReadyForReview = vi.fn();

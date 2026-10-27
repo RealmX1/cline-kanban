@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { type RawData, WebSocket } from "ws";
 import { z } from "zod";
+import type { CodexConfigurationWriterBinding } from "../core/codex-configuration-sync-contract";
+import { recordKnownCodexConfigurationNativeRequest } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
 import type { CodexAppServerRequestPort } from "./codex-native-conversation-history";
 
 type ControlSocketRequestOutcome =
@@ -66,6 +68,7 @@ export interface CodexAppServerControlSocketConnectionInput {
 	requestTimeoutMs?: number;
 	signal?: AbortSignal;
 	onDiagnostic?: (diagnostic: CodexNativeControlSocketRequestDiagnostic) => void | Promise<void>;
+	writerBinding?: CodexConfigurationWriterBinding;
 }
 
 export class CodexAppServerControlSocketRequestError extends Error {
@@ -300,6 +303,13 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 						return;
 					}
 					const id = ++sequence;
+					recordKnownCodexConfigurationNativeRequest({
+						requestId: `${connectionId}:${id}`,
+						method,
+						purpose: input?.clientName ?? "kanban_rvf_review_boundary_observer",
+						endpointSha256,
+						writerBinding: input?.writerBinding,
+					});
 					const diagnosticMethod = diagnosticRequestMethods.has(method) ? method : "other";
 					const requestStartedAt = performance.now();
 					const timer = setTimeout(() => {

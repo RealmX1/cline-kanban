@@ -306,9 +306,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			const sessionRole = input.sessionRole ?? "by_the_way";
 			const isTaskCollaborator = sessionRole === "task_collaborator";
 			const initialUserQuestion = input.initialUserQuestion.trim();
-			if (!initialUserQuestion) {
-				return { ok: false, message: "Enter a question for the new session." };
-			}
+			const sessionTitle = isTaskCollaborator ? "协作会话" : "By the way";
 			const taskConversationSessionId = `task-conversation-session-${createRandomUuidV4WithInsecureContextFallback()}`;
 			try {
 				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(taskConversationSessionId);
@@ -317,7 +315,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					taskId: taskConversationSessionId,
 					workspaceTaskId: input.task.id,
 					prompt: initialUserQuestion,
-					taskTitle: `${isTaskCollaborator ? "协作会话" : "By the way"}: ${initialUserQuestion.slice(0, 80)}`,
+					taskTitle: initialUserQuestion ? `${sessionTitle}: ${initialUserQuestion.slice(0, 80)}` : sessionTitle,
 					baseRef: input.task.baseRef,
 					cols: geometry.cols,
 					rows: geometry.rows,
@@ -346,7 +344,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 								: null,
 						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,
 						mainSessionOriginUserMessagePreview: input.mainSessionOriginUserMessagePreview,
-						latestUserMessagePreview: initialUserQuestion,
+						latestUserMessagePreview: initialUserQuestion || null,
 					},
 				});
 				if (!payload.ok || !payload.summary) {

@@ -133,6 +133,7 @@ interface AcpPromptTurnAwaitingProtocolEvidence {
 }
 
 export class AcpTaskSessionService {
+	private readonly connectionsWithStartupGuidanceAlreadyAccepted = new WeakSet<AcpTaskConnection>();
 	private readonly inFlightPromptCancellationNotificationCountByConnection = new WeakMap<AcpTaskConnection, number>();
 	private readonly promptTurnAwaitingProtocolEvidenceByTaskId = new Map<
 		string,
@@ -490,10 +491,7 @@ export class AcpTaskSessionService {
 				void this.runPromptTurn(
 					request.taskId,
 					connection,
-					buildAcpPromptBlocks(
-						`${resolveTaskSessionAppendSystemPrompt(request.workspaceTaskId ?? request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator" ? renderTaskCollaborationSessionResponsibilityGuidance(request.workspaceTaskId ?? request.taskId, request.taskId) : ""}\n\n${request.prompt}`,
-						request.images,
-					),
+					buildAcpPromptBlocks(request.prompt, request.images),
 					request.prompt,
 				);
 			}
@@ -946,7 +944,28 @@ export class AcpTaskSessionService {
 					),
 				);
 			}
-			const response = await connection.prompt(promptBlocks);
+			let blocksForProtocolRequest = promptBlocks;
+			if (!this.connectionsWithStartupGuidanceAlreadyAccepted.has(connection)) {
+				const workspaceTaskId = entry.summary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId;
+				const startupGuidance = [
+					resolveTaskSessionAppendSystemPrompt(workspaceTaskId, entry.summary.workspacePath ?? "") ??
+						resolveHomeAgentAppendSystemPrompt(taskId),
+					entry.summary.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator"
+						? renderTaskCollaborationSessionResponsibilityGuidance(workspaceTaskId, taskId)
+						: null,
+				]
+					.filter(Boolean)
+					.join("\n\n");
+				// ACP 没有 system prompt；每次连接的首个真实请求携带指导，显示和幂等仍用用户原文。
+				if (startupGuidance) {
+					const [firstBlock, ...remainingBlocks] = promptBlocks;
+					blocksForProtocolRequest =
+						firstBlock?.type === "text"
+							? [{ ...firstBlock, text: `${startupGuidance}\n\n${firstBlock.text}` }, ...remainingBlocks]
+							: [{ type: "text", text: startupGuidance }, ...promptBlocks];
+				}
+			}
+			const response = await connection.prompt(blocksForProtocolRequest);
 			if (pending.cancellationRequested || !this.isPromptTurnStillCurrent(taskId, pending)) return;
 			this.confirmPromptAcceptedFromProtocolEvidence(taskId);
 			if (!this.isPromptTurnStillCurrent(taskId, pending)) return;
@@ -993,6 +1012,7 @@ export class AcpTaskSessionService {
 		)
 			return;
 		pending.accepted = true;
+		this.connectionsWithStartupGuidanceAlreadyAccepted.add(pending.connection);
 		if (pending.confirmationTimeout) clearTimeout(pending.confirmationTimeout);
 		pending.confirmationTimeout = null;
 		const confirmedAtMs = now();
@@ -1005,6 +1025,14 @@ export class AcpTaskSessionService {
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				reviewReason: null,
 				agentCurrentWorkPhaseGoalInvalidatedAt: confirmedAtMs,
+				...(pending.entry.summary.taskConversationSessionMetadata
+					? {
+							taskConversationSessionMetadata: {
+								...pending.entry.summary.taskConversationSessionMetadata,
+								latestUserMessagePreview: pending.originalSubmittedPromptText.trim() || null,
+							},
+						}
+					: {}),
 				agentConversationPromptSubmissionAcceptance: {
 					status: "accepted",
 					attemptedAtMs: pending.attemptedAtMs,

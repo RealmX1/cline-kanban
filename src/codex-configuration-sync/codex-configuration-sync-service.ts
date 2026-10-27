@@ -5,8 +5,11 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
+import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
+	type CodexConfigurationBatchActionRequest,
+	type CodexConfigurationBatchActionResult,
 	type CodexConfigurationResolveConflictRequest,
 	type CodexConfigurationResolveTargetConflictRequest,
 	type CodexConfigurationSynchronizeRequest,
@@ -14,6 +17,11 @@ import {
 	codexConfigurationSyncStateSchema,
 } from "../core/codex-configuration-sync-contract";
 import { resolveSessionFacets } from "../core/session-activity";
+import {
+	createCodexConfigurationTargetObservationMonitor,
+	listRuntimeCodexConfigurationTraceTargets,
+	waitForCodexConfigurationRequestWriterOwnershipVerifications,
+} from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -28,6 +36,14 @@ import {
 	mergeObservedCodexConfigurationWriter,
 	reconcileCodexConfigurationUserSourceFields,
 } from "./codex-configuration-incremental-merge";
+import { describeCodexConfigurationSettingDifferences } from "./codex-configuration-observation-records";
+import {
+	approveStoredCodexConfigurationProposal,
+	CodexConfigurationApprovalError,
+	isCodexConfigurationChangeApprovedForPropagation,
+	isCodexConfigurationSourceObservationStillCurrent,
+	prepareCodexConfigurationProposalIdentityVolumeObservations,
+} from "./codex-configuration-proposal-approval";
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
@@ -37,7 +53,7 @@ import {
 } from "./codex-configuration-sync-store";
 import {
 	assertCodexConfigurationWriterBindingIdentity,
-	codexDirectoryIdentity,
+	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
 
 type SessionTarget = { workspaceId: string; summary: RuntimeTaskSessionSummary };
@@ -50,10 +66,22 @@ interface CodexConfigurationSyncServiceDependencies {
 	) => Promise<T>;
 }
 
-function publicState(store: CodexConfigurationSyncStore, sessions: SessionTarget[]): CodexConfigurationSyncState {
+function publicState(
+	store: CodexConfigurationSyncStore,
+	sessions: SessionTarget[],
+	diagnosticCoverage?: CodexConfigurationSyncState["diagnosticCoverage"],
+): CodexConfigurationSyncState {
 	return codexConfigurationSyncStateSchema.parse({
 		revision: store.revision,
 		observationProblem: store.observationProblem,
+		diagnosticCoverage,
+		sourceObservations: [...store.sourceObservations].reverse().map((observation) => ({
+			...observation,
+			detectedLocations: observation.detectedWriterIds.map((writerId) => ({
+				workspaceId: store.writers[writerId]?.binding.workspaceId ?? "",
+				conversationSessionId: store.writers[writerId]?.binding.conversationSessionId ?? "用户全局配置",
+			})),
+		})),
 		changes: [...store.changes].reverse().map((change) => {
 			const writer = store.writers[change.sourceWriterId];
 			const { fileName, keyPath } = configurationFieldAddress(change.fieldKey);
@@ -69,6 +97,10 @@ function publicState(store: CodexConfigurationSyncStore, sessions: SessionTarget
 				previousValueSummary: summarizeConfigurationField(change.fieldKey, change.previous),
 				valueSummary: summarizeConfigurationField(change.fieldKey, change.value),
 				observedAt: change.observedAt,
+				recordKind: change.recordKind ?? "historical_record",
+				approvalStatus: change.approvalStatus ?? "historical",
+				decidedAt: change.decidedAt ?? null,
+				settingDifferences: describeCodexConfigurationSettingDifferences(change.previous, change.value),
 				mergeStatus:
 					change.mergeStatus === "shared_default_updated" &&
 					!sameConfigurationField(store.sources[change.sourceIdentity]?.fields[change.fieldKey], change.value)
@@ -95,6 +127,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 	let recovering: Promise<void> | null = null;
 	let lastPublishedRevision = -1;
 	const watchers = new Map<string, FSWatcher>();
+	const traceMonitor = createCodexConfigurationTargetObservationMonitor({
+		listTargetPaths: listRuntimeCodexConfigurationTraceTargets,
+	});
 	const publish = async () => {
 		const revision = (await readCodexConfigurationSyncStore()).revision;
 		if (lastPublishedRevision !== revision) {
@@ -109,13 +144,25 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				socketPath: summary.codexNativeSessionControlEndpoint?.socketPath ?? "",
 				clientName: "kanban_configuration_sync",
 				requestTimeoutMs: 5_000,
+				writerBinding: summary.codexConfigurationWriterBinding ?? undefined,
 			}));
 	const observe = async () => {
+		const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
+		await prepareCodexDirectoryVolumeObservations([
+			...Object.values(preflightStoreSnapshot.sources).map((source) => source.home),
+			...Object.values(preflightStoreSnapshot.writers)
+				.filter((writer) => writer.binding.purpose === "native_session" && !writer.retiredAt)
+				.flatMap(({ binding }) => [
+					binding.sourceHomeDirectoryPath,
+					binding.conversationStorageHomeDirectoryPath,
+					binding.sqliteHomeDirectoryPath,
+				]),
+		]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			let problem: string | null = null;
 			for (const [sourceIdentity, source] of Object.entries(store.sources)) {
 				try {
-					if ((await codexDirectoryIdentity(source.home)) !== sourceIdentity) throw new Error("来源身份已变化");
+					await resolveVerifiedCodexConfigurationSourceIdentity(source.home, store, sourceIdentity);
 					const fileNames = [
 						"config.toml",
 						...(await readdir(source.home)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
@@ -221,6 +268,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const store = await readCodexConfigurationSyncStore();
 		for (const change of store.changes)
 			for (const target of change.targets) {
+				if (!isCodexConfigurationChangeApprovedForPropagation(change)) continue;
 				if (target.status !== "pending_next_start") continue;
 				const summary = deps
 					.listSessions()
@@ -351,6 +399,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const target = change?.targets.find((item) => item.writerId === writerId);
 		const writer = store.writers[writerId];
 		if (!change || !target || !writer || ["applied", "conflict", "not_applicable"].includes(target.status)) return;
+		if (!isCodexConfigurationChangeApprovedForPropagation(change)) return;
 		const summary = deps
 			.listSessions()
 			.find(
@@ -362,16 +411,20 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			mutateCodexConfigurationSyncStore((latest) => {
 				const latestChange = latest.changes.find((item) => item.changeId === changeId);
 				const latestTarget = latestChange?.targets.find((item) => item.writerId === writerId);
-				const sourceDecisionIsCurrent = sameConfigurationField(
-					latest.sources[change.sourceIdentity]?.fields[change.fieldKey],
-					change.value,
-				);
+				const sourceDecisionIsCurrent =
+					Boolean(
+						latestChange &&
+							isCodexConfigurationChangeApprovedForPropagation(latestChange) &&
+							isCodexConfigurationSourceObservationStillCurrent(latest, latestChange),
+					) &&
+					sameConfigurationField(latest.sources[change.sourceIdentity]?.fields[change.fieldKey], change.value);
 				const guardedPatch: Partial<typeof target> = sourceDecisionIsCurrent
 					? patch
 					: {
 							...patch,
 							status: "conflict",
-							reason: "共享默认已有较新决定，旧操作已停止传播；已确认的保存事实继续保留。",
+							reason:
+								"来源观测或共享默认已有更新，旧操作已停止传播；已确认的保存事实继续保留。新观测仍须单独审批。",
 							recoveryCondition: null,
 						};
 				if (
@@ -385,10 +438,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				}
 				return Boolean(latestTarget && sourceDecisionIsCurrent);
 			});
-		if (!sameConfigurationField(store.sources[change.sourceIdentity]?.fields[change.fieldKey], change.value)) {
+		if (
+			!isCodexConfigurationSourceObservationStillCurrent(store, change) ||
+			!sameConfigurationField(store.sources[change.sourceIdentity]?.fields[change.fieldKey], change.value)
+		) {
 			await update({
 				status: "conflict",
-				reason: "共享默认已有较新决定，旧操作已停止传播。",
+				reason: "来源观测或共享默认已有更新，旧操作已停止传播。",
 				recoveryCondition: null,
 			});
 			return;
@@ -756,6 +812,85 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		return scanning;
 	};
+	const batchAction = async (
+		input: CodexConfigurationBatchActionRequest,
+	): Promise<CodexConfigurationBatchActionResult> => {
+		await observe();
+		if (input.action === "approve")
+			await prepareCodexConfigurationProposalIdentityVolumeObservations(
+				input.items.filter((item) => item.entryKind === "settings_proposal").map((item) => item.changeId),
+			);
+		const results: CodexConfigurationBatchActionResult["results"] = [];
+		// 每项独立持久化并释放锁，其他可靠来源的启动不必等待整批文件核验。
+		for (const item of input.items) {
+			const result = await mutateCodexConfigurationSyncStore(
+				async (store): Promise<CodexConfigurationBatchActionResult["results"][number]> => {
+					const requestDigest = configurationDigest(["batch_action", input.action, item]);
+					const receipt = store.mutationReceipts[item.idempotencyKey];
+					if (receipt) {
+						return {
+							changeId: item.changeId,
+							status: receipt.requestDigest === requestDigest ? "replayed" : "idempotency_conflict",
+							message:
+								receipt.requestDigest === requestDigest
+									? "此操作已完成，未重复执行。"
+									: "幂等身份已用于其他操作。",
+						};
+					}
+					const entry =
+						item.entryKind === "source_observation"
+							? store.sourceObservations.find((entry) => entry.observationId === item.changeId)
+							: store.changes.find((entry) => entry.changeId === item.changeId);
+					if (!entry || entry.version !== item.expectedVersion) {
+						return {
+							changeId: item.changeId,
+							status: entry ? "stale_version" : "not_found",
+							message: "条目或版本已变化，请刷新后重试。",
+						};
+					}
+					try {
+						if ("observationId" in entry) {
+							if (input.action !== "defer" && input.action !== "confirm_source")
+								throw new CodexConfigurationApprovalError("not_approvable", "来源提示只支持确认或稍后。");
+							entry.acknowledgedAt = Date.now();
+							entry.reminderDisposition = input.action === "defer" ? "deferred" : "confirmed";
+							entry.version = ++store.revision;
+						} else {
+							if (entry.recordKind !== "settings_proposal" || entry.approvalStatus !== "pending")
+								throw new CodexConfigurationApprovalError("not_approvable", "此记录不是待审批设置提案。");
+							if (input.action === "approve") await approveStoredCodexConfigurationProposal(store, entry);
+							else if (input.action === "reject" || input.action === "defer") {
+								entry.acknowledgedAt = Date.now();
+								if (input.action === "reject") {
+									entry.approvalStatus = "rejected";
+									entry.decidedAt = Date.now();
+									entry.mergeStatus = "kept_shared_value";
+								}
+								entry.version = ++store.revision;
+							} else
+								throw new CodexConfigurationApprovalError("not_approvable", "设置提案需要通过、拒绝或稍后。");
+						}
+						store.mutationReceipts[item.idempotencyKey] = { requestDigest, changeId: item.changeId };
+						return {
+							changeId: item.changeId,
+							status: "applied",
+							message:
+								input.action === "approve" ? "已更新未来看板会话默认；来源会话保留本地配置。" : "已保存操作。",
+						};
+					} catch (error) {
+						if (!(error instanceof CodexConfigurationApprovalError)) throw error;
+						return { changeId: item.changeId, status: error.status, message: error.message };
+					}
+				},
+			);
+			results.push(result);
+		}
+		await publish();
+		return {
+			results,
+			state: publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage()),
+		};
+	};
 	const mutateChange = async (
 		input:
 			| CodexConfigurationSynchronizeRequest
@@ -764,7 +899,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		kind: "synchronize" | "resolve_conflict" | "acknowledge",
 	) => {
 		await observe();
-		await mutateCodexConfigurationSyncStore((store) => {
+		if (kind === "resolve_conflict" && "resolution" in input && input.resolution === "use_session_value")
+			await prepareCodexConfigurationProposalIdentityVolumeObservations([input.changeId]);
+		await mutateCodexConfigurationSyncStore(async (store) => {
 			const requestDigest = configurationDigest([kind, input]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
 			if (receipt) {
@@ -775,20 +912,24 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			if (!change || change.version !== input.expectedVersion)
 				throw new Error("配置决定版本已变化，请刷新后重新选择。");
 			const source = store.sources[change.sourceIdentity];
+			if (kind === "synchronize" && !isCodexConfigurationChangeApprovedForPropagation(change))
+				throw new Error("此设置尚未通过审批或不是可传播的设置决定。");
+			if (kind === "synchronize" && !isCodexConfigurationSourceObservationStillCurrent(store, change))
+				throw new Error("检测位置已有新设置或来源定义，旧决定不能继续同步；新提案仍须审批。");
 			if (kind === "resolve_conflict" && "resolution" in input) {
+				if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
+					throw new Error("此记录不是待审批提案。");
 				if (change.mergeStatus !== "conflict") throw new Error("此配置变更已不处于冲突状态。");
 				if (!sameConfigurationField(source.fields[change.fieldKey], change.sharedValueAtConflict))
 					throw new Error("共享值已有更新，不能用旧冲突覆盖新决定。");
 				if (input.resolution === "use_session_value") {
-					if (change.value === undefined) delete source.fields[change.fieldKey];
-					else source.fields[change.fieldKey] = change.value;
-					const writer = store.writers[change.sourceWriterId];
-					if (writer) {
-						if (change.value === undefined) delete writer.mergeBaselineFields[change.fieldKey];
-						else writer.mergeBaselineFields[change.fieldKey] = change.value;
-					}
-					change.mergeStatus = "shared_default_updated";
-				} else change.mergeStatus = "kept_shared_value";
+					await approveStoredCodexConfigurationProposal(store, change, true);
+				} else {
+					change.mergeStatus = "kept_shared_value";
+					change.approvalStatus = "rejected";
+					change.decidedAt = Date.now();
+					change.acknowledgedAt = Date.now();
+				}
 				change.version = ++store.revision;
 				source.version = store.revision;
 			}
@@ -825,10 +966,17 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions());
+		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
 	};
 	const resolveTargetConflict = async (input: CodexConfigurationResolveTargetConflictRequest) => {
 		await observe();
+		const preflightWriterBinding = (await readCodexConfigurationSyncStore()).writers[input.targetWriterId]?.binding;
+		if (preflightWriterBinding)
+			await prepareCodexDirectoryVolumeObservations([
+				preflightWriterBinding.sourceHomeDirectoryPath,
+				preflightWriterBinding.conversationStorageHomeDirectoryPath,
+				preflightWriterBinding.sqliteHomeDirectoryPath,
+			]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			const requestDigest = configurationDigest(["resolve_target_conflict", input]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
@@ -841,6 +989,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			const writer = store.writers[input.targetWriterId];
 			if (!change || change.version !== input.expectedVersion || !target || target.status !== "conflict" || !writer)
 				throw new Error("目标冲突版本已变化。");
+			if (!isCodexConfigurationChangeApprovedForPropagation(change))
+				throw new Error("来源设置尚未审批，不能处理目标同步冲突。");
 			await assertCodexConfigurationWriterBindingIdentity(writer.binding);
 			const current = await projectCodexConfigurationFields({
 				home: writer.binding.configurationHomeDirectoryPath,
@@ -854,6 +1004,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			if (configurationDigest(current[change.fieldKey] ?? null) !== input.expectedTargetValueDigest)
 				throw new Error("目标会话已有新决定，请刷新后处理。");
 			if (input.resolution === "use_source_change") {
+				if (!isCodexConfigurationSourceObservationStillCurrent(store, change))
+					throw new Error("检测位置已有新设置或来源定义，旧决定不能继续同步；新提案仍须审批。");
 				if (!sameConfigurationField(store.sources[change.sourceIdentity].fields[change.fieldKey], change.value))
 					throw new Error("来源决定已被较新默认取代。");
 				if (current[change.fieldKey] === undefined) delete writer.mergeBaselineFields[change.fieldKey];
@@ -889,13 +1041,14 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions());
+		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
 	};
 	return {
 		getState: async () => {
 			await scan();
-			return publicState(await readCodexConfigurationSyncStore(), deps.listSessions());
+			return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
 		},
+		batchAction,
 		scan,
 		synchronize: (input: CodexConfigurationSynchronizeRequest) => mutateChange(input, "synchronize"),
 		resolveConflict: (input: CodexConfigurationResolveConflictRequest) => mutateChange(input, "resolve_conflict"),
@@ -903,6 +1056,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		acknowledge: (input: { changeId: string; expectedVersion: number; idempotencyKey: string }) =>
 			mutateChange(input, "acknowledge"),
 		start: () => {
+			void traceMonitor.start();
 			timer = setInterval(() => {
 				void scan().catch(() => {});
 			}, 5_000);
@@ -915,7 +1069,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			clearTimeout(debounce);
 			for (const watcher of watchers.values()) watcher.close();
 			watchers.clear();
-			await Promise.all([scanning, recovering]);
+			await Promise.all([scanning, recovering, traceMonitor.close()]);
+			await waitForCodexConfigurationRequestWriterOwnershipVerifications();
 		},
 	};
 }

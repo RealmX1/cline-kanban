@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import {
@@ -6,6 +7,7 @@ import {
 	resolveMigratedCodexConversationHome,
 	withCodexConversationStorageOperationLock,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
+import { recordKnownCodexConfigurationNativeRequest } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
 import { createCodexAppServerLfDelimitedUtf8ResponseDecoder } from "./codex-app-server-lf-delimited-utf8-response-decoder";
 import type { CodexAppServerRequestPort } from "./codex-native-conversation-history";
 
@@ -61,6 +63,7 @@ export async function withCodexAppServerRequestConnection<T>(
 		{ method: string; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 	>();
 	let sequence = 0;
+	const connectionIdentity = randomUUID();
 	let closed = false;
 	const rejectPending = (error: Error) => {
 		closed = true;
@@ -127,6 +130,13 @@ export async function withCodexAppServerRequestConnection<T>(
 					return;
 				}
 				const id = ++sequence;
+				recordKnownCodexConfigurationNativeRequest({
+					requestId: `${connectionIdentity}:${id}`,
+					method,
+					purpose: "kanban_auxiliary_native_history_request",
+					targetProcessId: child.pid,
+					configurationHomeDirectoryPath: environment.CODEX_HOME,
+				});
 				const timer = setTimeout(() => {
 					pending.delete(id);
 					rejectRequest(new Error(`Codex 原生请求超时：${method}`));

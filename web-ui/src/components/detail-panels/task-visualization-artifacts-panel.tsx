@@ -284,6 +284,9 @@ export function TaskVisualizationArtifactsPanel({
 			: null;
 	const hasNewRevision =
 		validPrepared && selectedArtifact && validPrepared.artifact.revisionId !== selectedArtifact.revisionId;
+	const attribution = controller.taskAttribution ?? validPrepared?.taskAttribution;
+	const taskTitle =
+		attribution?.workspaceId === workspaceId && attribution.taskId === taskId ? attribution.taskTitle : null;
 	const selectArtifactFromPanel = (artifact: (typeof controller.artifacts)[number]) => {
 		setAlignedInitialSelectionKey(initialSelectionKey);
 		setHasAlignedExpandedSelection(isExpanded);
@@ -295,6 +298,17 @@ export function TaskVisualizationArtifactsPanel({
 			title="任务可视化"
 			className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-1"
 		>
+			<div
+				role="note"
+				aria-label="可视化任务署名"
+				data-verification-anchor={`task-visualization-task-attribution:${workspaceId}:${taskId}`}
+				className="flex shrink-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-border px-3 py-2 text-xs"
+			>
+				<span className="shrink-0 text-text-secondary">
+					任务 <code className="select-text text-text-primary">{taskId}</code>
+				</span>
+				<span className="min-w-0 break-words text-text-primary">{taskTitle ?? "任务名暂不可用"}</span>
+			</div>
 			<div className="flex min-h-9 shrink-0 flex-wrap items-center gap-1.5 border-b border-border px-2 py-1">
 				<select
 					ref={selectorRef}
@@ -322,9 +336,10 @@ export function TaskVisualizationArtifactsPanel({
 					size="sm"
 					className="h-7 px-2"
 					aria-label={selectedArtifact ? "重新加载可视化" : "刷新可视化清单"}
-					onClick={() =>
-						selectedArtifact ? selectArtifactFromPanel(selectedArtifact) : void controller.refreshArtifacts()
-					}
+					onClick={() => {
+						void controller.refreshArtifacts();
+						if (selectedArtifact) selectArtifactFromPanel(selectedArtifact);
+					}}
 				>
 					<RefreshCw size={14} />
 				</Button>

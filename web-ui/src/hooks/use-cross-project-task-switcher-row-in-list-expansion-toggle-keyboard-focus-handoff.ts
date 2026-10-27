@@ -9,8 +9,9 @@ const CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR =
 const CROSS_PROJECT_TASK_SWITCHER_ROW_ROOT_ELEMENT_SELECTOR =
 	"[data-cross-project-task-switcher-row-in-place-expansion-state]";
 
-function handOffKeyboardFocusFromInListExpansionToggleInsideElementAboutToBeRemoved(
+function handOffKeyboardFocusFromSupportedEntryInsideElementAboutToBeRemoved(
 	elementAboutToBeRemoved: HTMLElement,
+	alsoHandOffFallbackOpenTaskKeyboardEntry: boolean,
 ): void {
 	const ownerDocument = elementAboutToBeRemoved.ownerDocument;
 	const focusedElement = ownerDocument.activeElement;
@@ -19,10 +20,15 @@ function handOffKeyboardFocusFromInListExpansionToggleInsideElementAboutToBeRemo
 	}
 	// 只接力键盘焦点。鼠标点开关时 Chrome 也会把焦点给按钮（但不 :focus-visible）：那种焦点照旧随卸载丢掉，
 	// 否则新形态 hover 动作组的 focus-within 会让它在指针离开后仍常显。
-	if (
-		!focusedElement.matches(CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR) ||
-		!focusedElement.matches(":focus-visible")
-	) {
+	const isFocusedExpansionToggle = focusedElement.matches(
+		CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR,
+	);
+	const isFocusedFallbackOpenTaskEntry =
+		alsoHandOffFallbackOpenTaskKeyboardEntry &&
+		focusedElement.matches(
+			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback-open-task-keyboard-entry]",
+		);
+	if ((!isFocusedExpansionToggle && !isFocusedFallbackOpenTaskEntry) || !focusedElement.matches(":focus-visible")) {
 		return;
 	}
 	const rowRootElement = elementAboutToBeRemoved.closest<HTMLElement>(
@@ -42,33 +48,41 @@ function handOffKeyboardFocusFromInListExpansionToggleInsideElementAboutToBeRemo
 			return;
 		}
 		// 精简行 hover 意图期间完整卡片隐藏挂载（hidden），里面的开关不算。
-		const inListExpansionToggleInNewRowState = [
+		const matchingKeyboardEntryInNewRowState = [
 			...rowRootElement.querySelectorAll<HTMLElement>(
-				CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR,
+				isFocusedExpansionToggle
+					? CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR
+					: "[data-task-card-title][role=button]",
 			),
-		].find((inListExpansionToggle) => inListExpansionToggle.closest("[hidden]") === null);
-		inListExpansionToggleInNewRowState?.focus();
+		].find((keyboardEntry) => keyboardEntry.closest("[hidden], [inert]") === null);
+		matchingKeyboardEntryInNewRowState?.focus({ preventScroll: true });
 	});
 }
 
 /**
  * All projects 切换面板一行里「会随形态切换整块卸载」的元素（精简行、完整卡片外框、卡快照兜底）挂这个 callback ref：
  * 它卸载时若键盘焦点正在它里面的展开开关上，提交后把焦点交给同一行新形态下的开关（同一坐标），而不是落到 body。
- * 只在本面板的行里用，主看板与 This project 的卡不受影响。
+ * 兜底可额外启用首行到卡体标题的接力；只在本面板的行里用，主看板与 This project 的卡不受影响。
  */
-export function useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved(): (
-	element: HTMLElement | null,
-) => void {
+export function useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved(
+	alsoHandOffFallbackOpenTaskKeyboardEntry = false,
+): (element: HTMLElement | null) => void {
 	const attachedElementRef = useRef<HTMLElement | null>(null);
-	return useCallback((element: HTMLElement | null) => {
-		if (element) {
-			attachedElementRef.current = element;
-			return;
-		}
-		const detachedElement = attachedElementRef.current;
-		attachedElementRef.current = null;
-		if (detachedElement) {
-			handOffKeyboardFocusFromInListExpansionToggleInsideElementAboutToBeRemoved(detachedElement);
-		}
-	}, []);
+	return useCallback(
+		(element: HTMLElement | null) => {
+			if (element) {
+				attachedElementRef.current = element;
+				return;
+			}
+			const detachedElement = attachedElementRef.current;
+			attachedElementRef.current = null;
+			if (detachedElement) {
+				handOffKeyboardFocusFromSupportedEntryInsideElementAboutToBeRemoved(
+					detachedElement,
+					alsoHandOffFallbackOpenTaskKeyboardEntry,
+				);
+			}
+		},
+		[alsoHandOffFallbackOpenTaskKeyboardEntry],
+	);
 }

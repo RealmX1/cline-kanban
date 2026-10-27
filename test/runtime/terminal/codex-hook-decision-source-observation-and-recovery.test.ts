@@ -17,6 +17,7 @@ import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-confi
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
+import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixture: ReturnType<typeof createTempDir>;
@@ -96,7 +97,9 @@ async function decideHook(
 	await writeFile(filePath, stringify(configuration));
 }
 function service() {
-	const instance = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+	const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
+		createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} }),
+	);
 	services.push(instance);
 	return instance;
 }
@@ -139,45 +142,47 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		const configurationPath = join(target.configurationHomeDirectoryPath, "config.toml");
 		let invalidateDefinitionDuringNextOwnerRead = true;
 		let batchWriteCount = 0;
-		const instance = createCodexConfigurationSyncService({
-			listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
-			onUpdated: () => {},
-			withOwnerConnection: async (_summary, operation) =>
-				operation({
-					request: async (method, parameters) => {
-						if (method === "thread/loaded/list") return { data: [nativeSessionId] };
-						const text = await readFile(configurationPath, "utf8");
-						if (method === "config/read") {
-							if (invalidateDefinitionDuringNextOwnerRead) {
-								invalidateDefinitionDuringNextOwnerRead = false;
-								await writeFile(definitionPath, "{broken-json");
+		const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
+			createCodexConfigurationSyncService({
+				listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
+				onUpdated: () => {},
+				withOwnerConnection: async (_summary, operation) =>
+					operation({
+						request: async (method, parameters) => {
+							if (method === "thread/loaded/list") return { data: [nativeSessionId] };
+							const text = await readFile(configurationPath, "utf8");
+							if (method === "config/read") {
+								if (invalidateDefinitionDuringNextOwnerRead) {
+									invalidateDefinitionDuringNextOwnerRead = false;
+									await writeFile(definitionPath, "{broken-json");
+								}
+								return {
+									config: parse(text),
+									layers: [
+										{ name: { type: "user", file: configurationPath }, version: configurationDigest(text) },
+									],
+								};
 							}
-							return {
-								config: parse(text),
-								layers: [
-									{ name: { type: "user", file: configurationPath }, version: configurationDigest(text) },
-								],
-							};
-						}
-						if (method !== "config/batchWrite") throw new Error(`意外原生请求 ${method}`);
-						batchWriteCount++;
-						expect(parameters.expectedVersion).toBe(configurationDigest(text));
-						const configuration = parse(text);
-						for (const edit of parameters.edits as Array<{ keyPath: string; value: unknown }>) {
-							const keys = [...edit.keyPath.matchAll(/"(?:\\.|[^"\\])*"/g)].map(
-								([key]) => JSON.parse(key) as string,
-							);
-							setConfigurationField(
-								configuration,
-								keys,
-								edit.value === null ? undefined : { value: edit.value },
-							);
-						}
-						await writeFile(configurationPath, stringify(configuration));
-						return { status: "ok", filePath: configurationPath, version: configurationDigest(configuration) };
-					},
-				}),
-		});
+							if (method !== "config/batchWrite") throw new Error(`意外原生请求 ${method}`);
+							batchWriteCount++;
+							expect(parameters.expectedVersion).toBe(configurationDigest(text));
+							const configuration = parse(text);
+							for (const edit of parameters.edits as Array<{ keyPath: string; value: unknown }>) {
+								const keys = [...edit.keyPath.matchAll(/"(?:\\.|[^"\\])*"/g)].map(
+									([key]) => JSON.parse(key) as string,
+								);
+								setConfigurationField(
+									configuration,
+									keys,
+									edit.value === null ? undefined : { value: edit.value },
+								);
+							}
+							await writeFile(configurationPath, stringify(configuration));
+							return { status: "ok", filePath: configurationPath, version: configurationDigest(configuration) };
+						},
+					}),
+			}),
+		);
 		services.push(instance);
 		await decideHook(origin, selection, { enabled: false });
 		const change = (await instance.getState()).changes.find((item) => item.sourceWriterId === origin.writerId);
@@ -233,14 +238,16 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			},
 		});
 		let ownerConnectionAttempts = 0;
-		const instance = createCodexConfigurationSyncService({
-			listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
-			onUpdated: () => {},
-			withOwnerConnection: async () => {
-				ownerConnectionAttempts++;
-				throw new Error("原所有者暂不可达");
-			},
-		});
+		const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
+			createCodexConfigurationSyncService({
+				listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
+				onUpdated: () => {},
+				withOwnerConnection: async () => {
+					ownerConnectionAttempts++;
+					throw new Error("原所有者暂不可达");
+				},
+			}),
+		);
 		services.push(instance);
 		await decideHook(origin, selection, { enabled: false });
 		const change = (await instance.getState()).changes.find((item) => item.sourceWriterId === origin.writerId);
@@ -281,7 +288,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		expect(ownerConnectionAttempts).toBe(beforeDefinitionMismatch);
 	});
 	it.each(["user_file", "main_configuration", "inline_profile", "external_profile", "plugin"])(
-		"%s 的禁用、撤销、删除与重新信任进入默认且供后续 writer 采用",
+		"%s 的禁用、撤销、删除与重新信任经审批进入默认且供后续 writer 采用",
 		async (kind) => {
 			const selection = await configureHookSource(kind);
 			const origin = await writer();

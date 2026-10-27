@@ -340,7 +340,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
 	) => {
 		const { workspaceId, entry } = entryInProject;
-		// 已经点了：待发的 hover 意图作废。已经 hover 展开的行不收起——收起会让列表在指针下移动。
+		// 已经点了：待发的 hover 意图作废。已经 hover 展开的行保留，让卡体及其打开的弹窗继续交互。
 		rowHoverExpansionOfHostingScrollContainer.cancelPendingHoverIntent();
 		if (entry.columnId === "backlog" && !entry.taskShelvingState?.isShelved && onOpenBacklogTaskEditorInProject) {
 			onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
@@ -356,8 +356,8 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
 	) => {
 		rowHoverExpansionOfHostingScrollContainer.cancelPendingHoverIntent();
-		// 正是 hover 展开的那一行：转成固定展开，形态不变、不移动；hover 记录清掉，免得之后收起时又落回 hover 展开。
-		// 别的行的 hover 展开留着（现在收它会让列表在指针下移动），等交接或指针离开滚动容器时再收。
+		// 正是 hover 展开的那一行：转成完整高度占位，hover 记录清掉，免得之后收起时又落回 hover 展开。
+		// 其他行的 hover 展开仍按指针离开与焦点保留规则收起。
 		if (rowHoverExpansionOfHostingScrollContainer.rowExpandedInPlaceByHover?.rowIdentity.entryKey === entryKey) {
 			rowHoverExpansionOfHostingScrollContainer.forgetHoverExpansionOfRowNowKeptExpandedInList();
 		}
@@ -463,6 +463,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 					rowIdentity,
 					isKeptExpandedInListAsFullTaskCardByUser ? "kept_expanded_in_list" : "compact_row",
 				)}
+				hoverExpansionScrollContainerRef={rowHoverExpansionOfHostingScrollContainer.panelScrollContainerRef}
 				onOpen={() => activateRow(entryInProject, section, rowHoverExpansionOfHostingScrollContainer)}
 				onTogglePinnedToTaskPinboard={() => togglePinnedToTaskPinboard(entryInProject)}
 				onEditTaskPinboardPinReason={

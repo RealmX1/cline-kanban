@@ -259,7 +259,7 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
  */
 export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME =
 	"-top-3";
-// 上面那个类名伸出行顶边的距离（-top-3 = 12px）：面板把一行的顶边滚回可视区时，连动作组一起露出来。
+// 上面那个类名伸出行顶边的距离（-top-3 = 12px）：悬浮定位时连动作组命中区域一起计入可视区边界。
 export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX = 12;
 /**
  * 行根节点是分区内容容器的第一个子节点时（紧挨分区 header 的第一行）上方留出 16px（mt-4）=

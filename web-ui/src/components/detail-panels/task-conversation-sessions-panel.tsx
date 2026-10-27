@@ -5,7 +5,7 @@ import {
 	resolveTaskConversationSessionMainContextForkSelection,
 } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
@@ -170,6 +170,7 @@ export function TaskConversationSessionsPanel({
 	);
 	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
 	const [isCreating, setIsCreating] = useState(false);
+	const isCreatingRef = useRef(false);
 	const [isPreparingQuestionImages, setIsPreparingQuestionImages] = useState(false);
 	const [creationError, setCreationError] = useState<string | null>(null);
 	const isByTheWaySessionCreationSupported = byTheWaySessionSupportedAgentIds.has(effectiveAgentId);
@@ -248,9 +249,15 @@ export function TaskConversationSessionsPanel({
 	};
 
 	const createSession = async () => {
-		if (isTaskAgentExecutionDisabled || !isSessionCreationSupported || !initialUserQuestion.trim() || isCreating) {
+		if (
+			isTaskAgentExecutionDisabled ||
+			!isSessionCreationSupported ||
+			isPreparingQuestionImages ||
+			isCreatingRef.current
+		) {
 			return;
 		}
+		isCreatingRef.current = true;
 		setCreationError(null);
 		setIsCreating(true);
 
@@ -270,6 +277,7 @@ export function TaskConversationSessionsPanel({
 		} catch (cause: unknown) {
 			setCreationError(cause instanceof Error ? cause.message : String(cause));
 		} finally {
+			isCreatingRef.current = false;
 			setIsCreating(false);
 		}
 	};
@@ -399,7 +407,11 @@ export function TaskConversationSessionsPanel({
 									</span>
 								</div>
 								<p className="mt-1 line-clamp-2 text-xs text-text-secondary">
-									{metadata.latestUserMessagePreview ?? "No question yet"}
+									{metadata.latestUserMessagePreview?.trim() ||
+										(summary.agentConversationPromptSubmissionAcceptance?.status === "accepted" ||
+										(summary.agentResponseGenerationTurnSequence ?? 0) > 0
+											? "已发送消息"
+											: "尚未发送消息")}
 								</p>
 								<p className="mt-1 text-[11px] text-text-tertiary">
 									{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
@@ -533,14 +545,16 @@ export function TaskConversationSessionsPanel({
 							className="mb-1 block text-xs font-medium text-text-secondary"
 							htmlFor="task-conversation-initial-question"
 						>
-							{sessionRole === "task_collaborator" ? "首条消息" : "Question"}
+							首条消息（可选）
 						</label>
 						<TaskPromptComposer
 							id="task-conversation-initial-question"
 							workspaceId={workspaceId}
 							minimumTextareaHeight={96}
 							placeholder={
-								sessionRole === "task_collaborator" ? "描述要交给这个会话的工作…" : "Ask a side question…"
+								resolvedContextSource === "forked_from_main_current_turn"
+									? "可留空，先查看历史或 Rewind，再输入消息…"
+									: "可留空，创建后再输入消息…"
 							}
 							value={initialUserQuestion}
 							onImagePreparationPendingChange={setIsPreparingQuestionImages}
@@ -562,8 +576,8 @@ export function TaskConversationSessionsPanel({
 							fill
 							className="mt-3"
 							disabled={
+								isTaskAgentExecutionDisabled ||
 								!isSessionCreationSupported ||
-								!initialUserQuestion.trim() ||
 								isCreating ||
 								isPreparingQuestionImages
 							}

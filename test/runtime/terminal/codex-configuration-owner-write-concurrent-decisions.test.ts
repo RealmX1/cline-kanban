@@ -20,6 +20,7 @@ import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-c
 import type { CodexAppServerRequestPort } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
+import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
 import { createTempDir } from "../../utilities/temp-dir";
 
 interface NativeRequestBarrier {
@@ -226,11 +227,13 @@ function createNativeOwnerHarness(input: { barrier?: NativeRequestBarrier; loseF
 	};
 }
 function createConfigurationService(owner?: ReturnType<typeof createNativeOwnerHarness>) {
-	const service = createCodexConfigurationSyncService({
-		listSessions: () => sessionTargets,
-		onUpdated: () => {},
-		withOwnerConnection: owner?.connect,
-	});
+	const service = withExplicitApprovalOfObservedCodexConfigurationProposals(
+		createCodexConfigurationSyncService({
+			listSessions: () => sessionTargets,
+			onUpdated: () => {},
+			withOwnerConnection: owner?.connect,
+		}),
+	);
 	configurationServices.push(service);
 	return service;
 }
@@ -313,8 +316,11 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(result.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("applied");
 		const store = await readCodexConfigurationSyncStore();
 		expect(store.sources[sourceWriter.sourceIdentity].fields[JSON.stringify(["config.toml", "model"])].value).toBe(
-			"new-source-model",
+			"initial-model",
 		);
+		expect(result.changes.find((item) => item.fieldLabel.endsWith(" · model"))).toMatchObject({
+			approvalStatus: "pending",
+		});
 	});
 	it("目标在预检期间已经保存同一决定时只补原所有者重载", async () => {
 		const barrier = createNativeRequestBarrier("hooks/list");
@@ -345,7 +351,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(owner.batchWriteRequests).toHaveLength(0);
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, originalHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "superseded",
+			mergeStatus: "shared_default_updated",
 			targets: [{ status: "conflict", diskSavedAt: null, ownerReloadedAt: null }],
 		});
 	});
@@ -363,7 +369,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(owner.batchWriteRequests).toHaveLength(1);
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, propagatedHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "superseded",
+			mergeStatus: "shared_default_updated",
 			targets: [{ status: "conflict", diskSavedAt: expect.any(Number), ownerReloadedAt: expect.any(Number) }],
 		});
 	});
@@ -404,7 +410,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		const result = await synchronization;
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, propagatedHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "superseded",
+			mergeStatus: "shared_default_updated",
 			targets: [{ status: "conflict", diskSavedAt: expect.any(Number), ownerReloadedAt: null }],
 		});
 		await service.close();

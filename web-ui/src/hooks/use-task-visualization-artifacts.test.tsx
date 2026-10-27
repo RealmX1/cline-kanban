@@ -136,6 +136,28 @@ it("空归属停止加载，恢复与跨项目切换清空旧清单，不接收�
 	await grant(offer());
 	expect(opened).not.toHaveBeenCalled();
 });
+it("任务名暂缺时自动补证，恢复后停止重试并显示真实名称", async () => {
+	vi.useFakeTimers();
+	try {
+		queries.list
+			.mockResolvedValueOnce({
+				artifacts: [artifact],
+				taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: null },
+			})
+			.mockResolvedValue({
+				artifacts: [artifact],
+				taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "恢复后的任务名" },
+			});
+		await act(async () => root.render(<Harness />));
+		expect(queries.list).toHaveBeenCalledTimes(1);
+		await act(async () => vi.advanceTimersByTimeAsync(1000));
+		expect(latest.taskAttribution?.taskTitle).toBe("恢复后的任务名");
+		await act(async () => vi.advanceTimersByTimeAsync(60_000));
+		expect(queries.list).toHaveBeenCalledTimes(2);
+	} finally {
+		vi.useRealTimers();
+	}
+});
 it("默认选最新产物并按 ID 打破同时间平局，重复调用和更新保留当前修订", async () => {
 	const newestArtifact = { ...artifact, visualizationArtifactId: "c".repeat(64), publishedAtMs: 2 };
 	queries.list.mockResolvedValue({

@@ -468,6 +468,8 @@ import {
 } from "../core/api-contract";
 import {
 	type CodexConfigurationSyncApi,
+	codexConfigurationBatchActionRequestSchema,
+	codexConfigurationBatchActionResultSchema,
 	codexConfigurationChangeMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
 	codexConfigurationResolveTargetConflictRequestSchema,
@@ -1739,6 +1741,13 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.codexConfigurationSyncApi)
 					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Codex 配置同步服务未启用。" });
 				return ctx.codexConfigurationSyncApi.getState();
+			}),
+		batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(codexConfigurationBatchActionRequestSchema)
+			.output(codexConfigurationBatchActionResultSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.codexConfigurationSyncApi.batchAction(input);
 			}),
 		synchronizeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(codexConfigurationSynchronizeRequestSchema)

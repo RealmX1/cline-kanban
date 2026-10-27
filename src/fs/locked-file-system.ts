@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { platform } from "node:os";
 import { dirname, join } from "node:path";
 import type { LockOptions } from "proper-lockfile";
 import * as lockfile from "proper-lockfile";
@@ -79,6 +80,7 @@ export interface AtomicTextWriteOptions {
 	lock?: LockRequest | null;
 	executable?: boolean;
 	durable?: boolean;
+	fileMode?: number;
 }
 
 function safeLockErrorMessage(error: unknown): string {
@@ -133,8 +135,11 @@ async function readFileIfExists(path: string): Promise<string | null> {
 	}
 }
 
-async function synchronizeFilesystemPath(path: string): Promise<void> {
-	const handle = await open(path, "r");
+async function synchronizeFilesystemPath(path: string, filesystemPathKind: "file" | "directory"): Promise<void> {
+	const isWindows = platform() === "win32";
+	// Windows 沿用不执行目录 fsync 的平台契约；文件 FlushFileBuffers 必须取得可写句柄。
+	if (isWindows && filesystemPathKind === "directory") return;
+	const handle = await open(path, isWindows ? "r+" : "r");
 	try {
 		await handle.sync();
 	} finally {
@@ -221,20 +226,22 @@ export class LockedFileSystem {
 				}
 				if (options.durable) {
 					// 上次可能已 rename，但目录 fsync 失败；同内容重试仍须完成持久化。
-					await synchronizeFilesystemPath(path);
-					await synchronizeFilesystemPath(dirname(path));
+					await synchronizeFilesystemPath(path, "file");
+					await synchronizeFilesystemPath(dirname(path), "directory");
 				}
 				return;
 			}
 			await mkdir(dirname(path), { recursive: true });
 			const tempPath = `${path}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
 			try {
-				await writeFile(tempPath, content, "utf8");
+				await writeFile(tempPath, content, { encoding: "utf8", mode: options.fileMode });
 				recordDailyWorkProgressFileWrite(content);
+				// writeFile 的创建权限会被 umask 过滤，rename 前必须恢复显式权限。
+				if (options.fileMode !== undefined) await chmod(tempPath, options.fileMode);
 				if (options.executable) await chmod(tempPath, 0o755);
-				if (options.durable) await synchronizeFilesystemPath(tempPath);
+				if (options.durable) await synchronizeFilesystemPath(tempPath, "file");
 				await rename(tempPath, path);
-				if (options.durable) await synchronizeFilesystemPath(dirname(path));
+				if (options.durable) await synchronizeFilesystemPath(dirname(path), "directory");
 			} finally {
 				await rm(tempPath, { force: true });
 			}

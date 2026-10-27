@@ -4,7 +4,7 @@ import {
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Pin, PinOff } from "lucide-react";
-import type { ReactElement, ReactNode } from "react";
+import { type ReactElement, type ReactNode, type RefObject, useCallback, useLayoutEffect, useRef } from "react";
 import { CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
 import { CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { resolveBoardColumnTitle } from "@/data/board-data";
+import { useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition } from "@/hooks/use-cross-project-task-switcher-hover-floating-card-viewport-position";
 import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 
@@ -33,7 +34,7 @@ export type CrossProjectTaskSwitcherTaskRowSection =
 	| "shelved";
 
 /**
- * 一行在列表里的形态。hover 展开是临时的（指针挪到别的行停够、或离开面板就收回，见
+ * 一行在列表里的形态。hover 展开是临时的（离开卡片延时收回，焦点与弹窗可保留，见
  * use-cross-project-task-switcher-row-hover-expansion-in-place）；固定展开由用户点右上角开关决定，按任务记。
  */
 export type CrossProjectTaskSwitcherRowInPlaceExpansionState =
@@ -43,12 +44,12 @@ export type CrossProjectTaskSwitcherRowInPlaceExpansionState =
 
 /**
  * 跨项目切换面板的一行。默认态是精简行（只用 projects 广播里的条目）；指针停够 hover 意图（触屏长按）后，这一行在列表里
- * **原地**换成完整卡片、把下面的行往下推；点右上角「Keep expanded in list」后固定展开，收起开关在卡片自己的 hover 动作组里。
+ * 保留精简行占位，完整卡片绝对定位覆盖相邻内容；点右上角「Keep expanded in list」后固定展开，收起开关在卡片自己的 hover 动作组里。
  * 完整卡片（`fullTaskCard`）由面板按「当前项目读浏览器 board / 其他项目读服务端」备好。
  *
- * 三种形态共用同一个根节点（hover 交接后检查顶边是否还在可视区的就是它），精简行与完整卡片的首行同一套度量、
+ * 三种形态共用行根节点，精简行与完整卡片的首行同一套度量、
  * 同一个左上角起点，hover 动作组同一个坐标（叠在首行上方）（见 cross-project-recently-active-task-switcher-task-row-first-line.tsx）：
- * 三态之间标题一像素不动、开关不挪位，多出来的内容只向下长。
+ * 空间充足时卡体左上角对齐原行；底部不足时只有悬浮卡片向上避让。
  *
  * 精简行的结构是「主按钮 + 叠在右上角的 hover 动作组」而不是一整个按钮：按钮里不能嵌按钮。
  */
@@ -66,6 +67,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	focusedTaskScrollAnchorKey,
 	onKeepExpandedInListAsFullTaskCard,
 	rowHoverExpansionTriggerProps,
+	hoverExpansionScrollContainerRef,
 	onOpen,
 	onTogglePinnedToTaskPinboard,
 	onEditTaskPinboardPinReason,
@@ -85,6 +87,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	focusedTaskScrollAnchorKey?: string;
 	onKeepExpandedInListAsFullTaskCard?: () => void;
 	rowHoverExpansionTriggerProps?: CrossProjectTaskSwitcherRowHoverExpansionTriggerProps;
+	hoverExpansionScrollContainerRef?: RefObject<HTMLElement | null>;
 	onOpen: () => void;
 	onTogglePinnedToTaskPinboard: () => void;
 	onEditTaskPinboardPinReason?: () => void;
@@ -103,35 +106,78 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	};
 
 	const showsFullTaskCard = inPlaceExpansionState !== "compact_row" && fullTaskCard !== undefined;
+	const isHoverFloatingCardVisible = showsFullTaskCard && inPlaceExpansionState === "expanded_in_place_by_hover";
+	const { rowElementRef, fullTaskCardContentElementRef, floatingCardViewportStyle, requiresInternalScrolling } =
+		useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
+			isFloatingCardVisible: isHoverFloatingCardVisible,
+			hostingScrollContainerRef: hoverExpansionScrollContainerRef,
+		});
+	const compactRowPlaceholderRef = useRef<HTMLDivElement | null>(null);
+	useLayoutEffect(() => {
+		if (!isHoverFloatingCardVisible) return;
+		const activeElement = document.activeElement;
+		if (
+			activeElement instanceof HTMLElement &&
+			compactRowPlaceholderRef.current?.contains(activeElement) &&
+			activeElement.matches(":focus-visible")
+		) {
+			const targetSelector = activeElement.hasAttribute(
+				"data-cross-project-task-switcher-full-task-card-in-list-expansion-state",
+			)
+				? '[data-testid="cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button"]'
+				: "[data-task-card-title], [data-cross-project-task-switcher-full-task-card-unavailable-fallback-open-task-keyboard-entry]";
+			fullTaskCardContentElementRef.current
+				?.querySelector<HTMLElement>(targetSelector)
+				?.focus({ preventScroll: true });
+		}
+	}, [isHoverFloatingCardVisible, fullTaskCardContentElementRef]);
 	// 键盘按展开开关切换形态时，旧形态（连同它的开关）整块卸载：把焦点交给新形态下同一坐标的开关，不落到 body。
 	const compactRowElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
+	const attachCompactRowPlaceholder = useCallback(
+		(element: HTMLDivElement | null) => {
+			compactRowPlaceholderRef.current = element;
+			compactRowElementRefHandingOffToggleKeyboardFocus(element);
+		},
+		[compactRowElementRefHandingOffToggleKeyboardFocus],
+	);
 	const fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
 
 	return (
 		<div
+			ref={rowElementRef}
 			className={cn(
-				"relative flex min-w-0 flex-col",
+				"relative flex min-w-0 shrink-0 flex-col",
 				// 分区第一行给伸出行顶边的 hover 动作组（连同展开开关向上扩的命中区）让出 header 下方的空间（不压 header 的折叠按钮 / 排序下拉框）。
 				CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
-				showsFullTaskCard ? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME : "rounded-md",
-				isFocused && "bg-surface-3 ring-1 ring-border-focus",
-				!isFocused && inPlaceExpansionState === "expanded_in_place_by_hover" && "bg-surface-2 ring-border",
+				inPlaceExpansionState === "kept_expanded_in_list"
+					? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME
+					: "rounded-md",
+				isHoverFloatingCardVisible && "z-20",
+				isFocused && !isHoverFloatingCardVisible && "bg-surface-3 ring-1 ring-border-focus",
 				!isFocused && inPlaceExpansionState === "kept_expanded_in_list" && "ring-border/60",
 			)}
 			{...rowContainerAttributes}
 			{...rowHoverExpansionTriggerProps}
 		>
-			{/* 放在持续挂载的行外框上：展开、收起及读取快照期间角标不移动，也不重复出现。 */}
-			<TaskCardCornerStatusIndicators
-				isAgentRunning={entry.columnId !== "trash" && isCrossProjectTaskSwitcherEntryRunning(entry, nowMs)}
-				hasUnreadHandoffNotification={isUnreadHandoff}
-			/>
-			{showsFullTaskCard ? null : (
+			{/* 普通形态角标跟随行，悬浮形态跟随浮层卡体。 */}
+			{!isHoverFloatingCardVisible ? (
+				<TaskCardCornerStatusIndicators
+					isAgentRunning={entry.columnId !== "trash" && isCrossProjectTaskSwitcherEntryRunning(entry, nowMs)}
+					hasUnreadHandoffNotification={isUnreadHandoff}
+				/>
+			) : null}
+			{inPlaceExpansionState === "kept_expanded_in_list" ? null : (
 				<div
-					ref={compactRowElementRefHandingOffToggleKeyboardFocus}
-					className="group relative flex min-w-0 rounded-md hover:bg-surface-3"
+					ref={attachCompactRowPlaceholder}
+					data-cross-project-task-switcher-compact-row-placeholder=""
+					aria-hidden={isHoverFloatingCardVisible || undefined}
+					{...{ inert: isHoverFloatingCardVisible ? "" : undefined }}
+					className={cn(
+						"group relative flex min-w-0 rounded-md hover:bg-surface-3",
+						isHoverFloatingCardVisible && "invisible pointer-events-none",
+					)}
 				>
 					<div className="relative flex min-w-0 flex-1 flex-col gap-0.5 py-1.5 pl-2 pr-2 text-left">
 						<button
@@ -250,9 +296,33 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 				<div
 					ref={fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus}
 					hidden={!showsFullTaskCard}
-					className="min-w-0"
+					data-cross-project-task-switcher-hover-floating-card={isHoverFloatingCardVisible ? "" : undefined}
+					style={floatingCardViewportStyle}
+					className={cn(
+						"min-w-0",
+						isHoverFloatingCardVisible && "absolute inset-x-0 z-20",
+						isHoverFloatingCardVisible && requiresInternalScrolling && "overflow-y-auto overscroll-contain",
+					)}
 				>
-					{fullTaskCard}
+					<div
+						ref={fullTaskCardContentElementRef}
+						className={cn(
+							"relative min-w-0",
+							isHoverFloatingCardVisible && CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME,
+							isHoverFloatingCardVisible &&
+								(isFocused ? "bg-surface-3 ring-border-focus" : "bg-surface-2 ring-border"),
+						)}
+					>
+						{isHoverFloatingCardVisible ? (
+							<TaskCardCornerStatusIndicators
+								isAgentRunning={
+									entry.columnId !== "trash" && isCrossProjectTaskSwitcherEntryRunning(entry, nowMs)
+								}
+								hasUnreadHandoffNotification={isUnreadHandoff}
+							/>
+						) : null}
+						{fullTaskCard}
+					</div>
 				</div>
 			) : null}
 		</div>

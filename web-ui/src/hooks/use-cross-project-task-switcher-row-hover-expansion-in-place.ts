@@ -1,21 +1,20 @@
 import {
+	type FocusEvent as ReactFocusEvent,
 	type MouseEvent as ReactMouseEvent,
 	type PointerEvent as ReactPointerEvent,
 	type RefObject,
 	useCallback,
 	useEffect,
-	useLayoutEffect,
 	useRef,
 	useState,
 } from "react";
 
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
-import { CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX } from "@/components/task-card-body";
 
-// EXPERIMENT_NODE: 指针在一行上停多久才原地展开（350ms）；太短扫过列表时会一路展开、整列跟着动，太长又像没反应
+// EXPERIMENT_NODE: 指针在一行上停多久才悬浮展开（350ms）；太短会在扫过时频繁遮蔽，太长又像没反应
 const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_INTENT_EXPANSION_DELAY_MS = 350;
-// EXPERIMENT_NODE: 指针离开整个面板后多久收起原地展开的那一行（300ms）；太短擦边而过就收，太长移去右侧读详情时左栏还撑着
-const CROSS_PROJECT_TASK_SWITCHER_PANEL_POINTER_EXIT_COLLAPSE_DELAY_MS = 300;
+// EXPERIMENT_NODE: 指针离开展开卡片后多久收起（300ms）；保留擦边返回与进入弹窗的时间
+const CROSS_PROJECT_TASK_SWITCHER_EXPANDED_ROW_POINTER_EXIT_COLLAPSE_DELAY_MS = 300;
 // 触屏没有 hover，改用长按。
 const CROSS_PROJECT_TASK_SWITCHER_ROW_TOUCH_LONG_PRESS_EXPANSION_DELAY_MS = 500;
 // 长按期间手指挪动超过这么远就算滚动，不展开。
@@ -38,6 +37,7 @@ export function isSameCrossProjectTaskSwitcherRow(
 export type CrossProjectTaskSwitcherRowExpansionStateBeforeHover = "compact_row" | "kept_expanded_in_list";
 
 export interface CrossProjectTaskSwitcherRowHoverExpansionTriggerProps {
+	onPointerEnter: (event: ReactPointerEvent<HTMLElement>) => void;
 	onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
 	onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => void;
 	onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -45,6 +45,8 @@ export interface CrossProjectTaskSwitcherRowHoverExpansionTriggerProps {
 	onPointerCancel: () => void;
 	onClickCapture: (event: ReactMouseEvent<HTMLElement>) => void;
 	onContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
+	onFocusCapture: (event: ReactFocusEvent<HTMLElement>) => void;
+	onBlurCapture: () => void;
 }
 
 export interface CrossProjectTaskSwitcherRowExpandedInPlaceByHover {
@@ -54,34 +56,17 @@ export interface CrossProjectTaskSwitcherRowExpandedInPlaceByHover {
 }
 
 /**
- * All projects 面板的行：指针停够 hover 意图的时长（触屏长按）后，这一行在列表里**原地**展开成完整卡片，把下面的行
- * 往下推（不做浮层：浮层会盖住下一行，往下挪鼠标切到下一个任务不直观）。同一时刻只有一行因 hover 展开。
- *
- * 原地展开要避开的跳动（都在这里处理）：
- * - **交接，不在离开时收起**：指针离开展开的那一行时不收起；等下一行停够意图时长，旧行收起与新行展开在同一次提交里
- *   完成。若离开即收起，往下挪向下一行时，上一行一收、整列在指针移动途中上移几十像素，指针脚下换成了更下面的行。
- *   指针离开整个面板（延时）、Esc（键盘焦点在弹窗里时归弹窗，按事件目标判断）、在面板外按下指针（按 React 子树
- *   判断，卡上弹出的 portal 弹窗算面板内），才收起。
- * - **列表顶边固定（经典手风琴，用户 2026-10-08 选定）**：收起的行在新行上方时，新行随之上移那一行多出的高度，
- *   指针一般落在新行的下半部；上一张卡比这张高时指针会落到再下一行（新行显示在指针上方，手再动才去展开那一行）。
- *   不再补 scrollTop、不垫顶部空白：那样指针下的行不动，代价是指针上方的整列往下拖、滚到顶时顶部露出空白，
- *   且每往下交接一次空白就累加一次（用户否掉）。面板容器关掉浏览器自带的 scroll anchoring（overflow-anchor: none），
- *   否则面板滚动过时浏览器会自己补 scrollTop，又变回「整列往下拖」。唯一的例外是新行的顶边被这次收起带出了可视区
- *   （面板滚过、上一张卡的上半截已在可视区之外）：回滚到刚好露出新行的顶边（最多回滚它被带上去的距离），
- *   不然这张卡的标题看不见。
- * - **只认真实移动**：意图只由坐标真的变了的 pointermove 发起。布局变化 / 滚动把别的行换到静止的光标下时，浏览器
- *   可能补发同坐标的指针事件——不理它们，否则一次交接引起的位移会接着触发下一行展开，连锁下去。
- *
- * 展开是顶边不动、只向下长，展开的那一行不会把自己挤离指针，所以不会出现「展开→挤走指针→收起→回到指针下→再展开」的循环。
- *
- * 另两处主动不展开：在行上按下指针就取消待发的意图（按下与抬起之间行变成卡片，click 会落到公共祖先上丢失）；
- * 用户刚把固定展开的卡收起（`suppressHoverExpansionUntilPointerLeavesRow`），指针离开这一行之前不再 hover 展开。
+ * 每个宿主滚动容器维护一个悬浮展开：350ms 真实移动意图、500ms 触屏长按、离开卡片 300ms 收起。
+ * 几何定位由浮层 hook 负责，缩略行始终保留占位，交接与收起不调整 scrollTop。
+ * 卡片里的键盘焦点与 Portal 弹窗保留交互；Esc 先交给弹窗或菜单，外部按下按 React 子树判断。
+ * 点击固定展开后的主动收起会抑制同一行的 hover，直到指针离开。
  */
 export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	panelScrollContainerRef,
 }: {
 	panelScrollContainerRef: RefObject<HTMLElement | null>;
 }): {
+	panelScrollContainerRef: RefObject<HTMLElement | null>;
 	rowExpandedInPlaceByHover: CrossProjectTaskSwitcherRowExpandedInPlaceByHover | null;
 	// 意图计时中的那一行：面板借此提前挂载（隐藏的）完整卡片，其他项目的卡在展开前就开始读。
 	rowWithPendingHoverIntent: CrossProjectTaskSwitcherRowIdentity | null;
@@ -115,6 +100,10 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	const rowWithPendingHoverIntentRef = useRef<CrossProjectTaskSwitcherRowIdentity | null>(null);
 	const hoverIntentTimeoutIdRef = useRef<number | null>(null);
 	const panelPointerExitCollapseTimeoutIdRef = useRef<number | null>(null);
+	const focusedInteractionInsideRowRef = useRef<{
+		rowIdentity: CrossProjectTaskSwitcherRowIdentity;
+		element: HTMLElement;
+	} | null>(null);
 	const touchLongPressRef = useRef<{ timeoutId: number; startX: number; startY: number } | null>(null);
 	// 长按展开后，抬手那一下会接着派发 click：吞掉它，否则行被当成「打开任务」。只作用于本次长按手势，
 	// 下一次 pointerdown（新手势）与收起时作废，不能留着吞掉之后第一次点行。
@@ -125,12 +114,21 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	// 最近一次沿面板 React 子树传播的 pointerdown 原生事件（含卡上弹出、DOM 挂在 body 下的 portal 弹窗）。
 	// 「面板外按下」按事件对象身份对照它，不留滞后的布尔标记。
 	const lastPointerDownNativeEventDispatchedThroughPanelReactTreeRef = useRef<Event | null>(null);
-	// 交接时指针停在的那一行（新展开的行，或停在固定展开的行上时的那一行）与它提交前的顶边；提交后检查交接是否把它的
-	// 顶边带出了可视区。
-	const rowWhoseTopEdgeMustStayVisibleAfterHandOffRef = useRef<{
-		anchorRowElement: HTMLElement;
-		anchorRowTopBeforeHandOffPx: number;
-	} | null>(null);
+	const isExpandedRowRetainedByKeyboardFocusOrPopup = useCallback(() => {
+		const focusedInteraction = focusedInteractionInsideRowRef.current;
+		return Boolean(
+			focusedInteraction &&
+				isSameCrossProjectTaskSwitcherRow(
+					focusedInteraction.rowIdentity,
+					rowExpandedInPlaceByHoverRef.current?.rowIdentity ?? null,
+				) &&
+				document.activeElement === focusedInteraction.element &&
+				(focusedInteraction.element.matches(":focus-visible") ||
+					focusedInteraction.element.closest(
+						"[role='dialog'], [role='alertdialog'], [role='menu'], [role='listbox']",
+					)),
+		);
+	}, []);
 
 	const cancelPendingHoverIntent = useCallback(() => {
 		if (hoverIntentTimeoutIdRef.current !== null) {
@@ -154,6 +152,19 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			touchLongPressRef.current = null;
 		}
 	}, []);
+	const scheduleExpandedRowPointerExitCollapse = useCallback(() => {
+		clearPanelPointerExitCollapseTimeout();
+		panelPointerExitCollapseTimeoutIdRef.current = window.setTimeout(() => {
+			panelPointerExitCollapseTimeoutIdRef.current = null;
+			if (!isExpandedRowRetainedByKeyboardFocusOrPopup()) {
+				setRowExpandedInPlaceByHover(null);
+			}
+		}, CROSS_PROJECT_TASK_SWITCHER_EXPANDED_ROW_POINTER_EXIT_COLLAPSE_DELAY_MS);
+	}, [
+		clearPanelPointerExitCollapseTimeout,
+		isExpandedRowRetainedByKeyboardFocusOrPopup,
+		setRowExpandedInPlaceByHover,
+	]);
 
 	const collapseRowExpandedInPlaceByHover = useCallback(() => {
 		cancelPendingHoverIntent();
@@ -171,9 +182,8 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	]);
 
 	// 把 hover 展开交给 `rowIdentity`（null = 只收起当前那一行，用于停在固定展开的行上）。
-	// `anchorRowElement` 是指针停在的那一行，提交后它的顶边若被这次交接带出可视区就回滚到刚好露出。
 	const handOffHoverExpansion = useCallback(
-		(rowIdentity: CrossProjectTaskSwitcherRowIdentity | null, anchorRowElement: HTMLElement) => {
+		(rowIdentity: CrossProjectTaskSwitcherRowIdentity | null) => {
 			const currentRowExpandedInPlaceByHover = rowExpandedInPlaceByHoverRef.current;
 			if (
 				(rowIdentity === null && currentRowExpandedInPlaceByHover === null) ||
@@ -181,37 +191,12 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			) {
 				return;
 			}
-			rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current = {
-				anchorRowElement,
-				anchorRowTopBeforeHandOffPx: anchorRowElement.getBoundingClientRect().top,
-			};
+			if (isExpandedRowRetainedByKeyboardFocusOrPopup()) return;
+			clearPanelPointerExitCollapseTimeout();
 			setRowExpandedInPlaceByHover(rowIdentity ? { rowIdentity, isPointerOverRow: true } : null);
 		},
-		[setRowExpandedInPlaceByHover],
+		[setRowExpandedInPlaceByHover, clearPanelPointerExitCollapseTimeout, isExpandedRowRetainedByKeyboardFocusOrPopup],
 	);
-
-	useLayoutEffect(() => {
-		const rowWhoseTopEdgeMustStayVisible = rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current;
-		rowWhoseTopEdgeMustStayVisibleAfterHandOffRef.current = null;
-		const panelScrollContainer = panelScrollContainerRef.current;
-		if (!rowWhoseTopEdgeMustStayVisible?.anchorRowElement.isConnected || !panelScrollContainer) {
-			return;
-		}
-		// 顶边固定：一般什么都不用做。只有这次交接把这一行往上带、顶边（连同叠在首行上方、伸出顶边的 hover 动作组）
-		// 因此落到面板可视区上沿之外，才往回滚，且最多回滚它被带上去的距离——交接前就因用户自己滚动而露不全的部分不管，
-		// 那是用户的滚动位置，回滚就成了在静止的光标下拖动列表。在 layout effect 里改，浏览器绘制前就到位。
-		const anchorRowTopAfterHandOffPx = rowWhoseTopEdgeMustStayVisible.anchorRowElement.getBoundingClientRect().top;
-		const anchorRowCarriedUpwardByHandOffPx =
-			rowWhoseTopEdgeMustStayVisible.anchorRowTopBeforeHandOffPx - anchorRowTopAfterHandOffPx;
-		const rowTopEdgeHiddenAbovePanelViewportPx =
-			panelScrollContainer.getBoundingClientRect().top +
-			CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX -
-			anchorRowTopAfterHandOffPx;
-		const scrollBackPx = Math.min(anchorRowCarriedUpwardByHandOffPx, rowTopEdgeHiddenAbovePanelViewportPx);
-		if (scrollBackPx > 0) {
-			panelScrollContainer.scrollTop = Math.max(0, panelScrollContainer.scrollTop - scrollBackPx);
-		}
-	}, [panelScrollContainerRef, rowExpandedInPlaceByHover]);
 
 	const suppressHoverExpansionUntilPointerLeavesRow = useCallback(
 		(entryKey: string) => {
@@ -226,6 +211,14 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			rowIdentity: CrossProjectTaskSwitcherRowIdentity,
 			rowExpansionStateBeforeHover: CrossProjectTaskSwitcherRowExpansionStateBeforeHover,
 		): CrossProjectTaskSwitcherRowHoverExpansionTriggerProps => ({
+			onPointerEnter: (event) => {
+				if (event.pointerType === "touch") return;
+				const currentRow = rowExpandedInPlaceByHoverRef.current;
+				if (currentRow && isSameCrossProjectTaskSwitcherRow(currentRow.rowIdentity, rowIdentity)) {
+					clearPanelPointerExitCollapseTimeout();
+					setRowExpandedInPlaceByHover({ ...currentRow, isPointerOverRow: true });
+				}
+			},
 			onPointerMove: (event) => {
 				if (event.pointerType === "touch") {
 					const touchLongPress = touchLongPressRef.current;
@@ -247,7 +240,6 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					return;
 				}
 				lastObservedPointerClientPositionRef.current = { clientX: event.clientX, clientY: event.clientY };
-				clearPanelPointerExitCollapseTimeout();
 				const suppressedEntryKey = entryKeyWithHoverExpansionSuppressedUntilPointerLeavesRowRef.current;
 				if (suppressedEntryKey !== null) {
 					if (suppressedEntryKey === rowIdentity.entryKey) {
@@ -257,6 +249,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 				}
 				const currentRowExpandedInPlaceByHover = rowExpandedInPlaceByHoverRef.current;
 				if (isSameCrossProjectTaskSwitcherRow(currentRowExpandedInPlaceByHover?.rowIdentity ?? null, rowIdentity)) {
+					clearPanelPointerExitCollapseTimeout();
 					// 回到 / 停在展开的那一行：别的行的待发意图作废。
 					cancelPendingHoverIntent();
 					if (currentRowExpandedInPlaceByHover && !currentRowExpandedInPlaceByHover.isPointerOverRow) {
@@ -272,7 +265,6 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 				if (rowExpansionStateBeforeHover === "kept_expanded_in_list" && currentRowExpandedInPlaceByHover === null) {
 					return;
 				}
-				const anchorRowElement = event.currentTarget;
 				if (rowExpansionStateBeforeHover === "compact_row") {
 					rowWithPendingHoverIntentRef.current = rowIdentity;
 					setRowWithPendingHoverIntentState(rowIdentity);
@@ -281,10 +273,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					hoverIntentTimeoutIdRef.current = null;
 					rowWithPendingHoverIntentRef.current = null;
 					setRowWithPendingHoverIntentState(null);
-					handOffHoverExpansion(
-						rowExpansionStateBeforeHover === "compact_row" ? rowIdentity : null,
-						anchorRowElement,
-					);
+					handOffHoverExpansion(rowExpansionStateBeforeHover === "compact_row" ? rowIdentity : null);
 				}, CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_INTENT_EXPANSION_DELAY_MS);
 			},
 			onPointerLeave: (event) => {
@@ -302,8 +291,8 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					currentRowExpandedInPlaceByHover?.isPointerOverRow &&
 					isSameCrossProjectTaskSwitcherRow(currentRowExpandedInPlaceByHover.rowIdentity, rowIdentity)
 				) {
-					// 不收起（交接见 hook 注释），只是不再以 hover 态呈现。
 					setRowExpandedInPlaceByHover({ ...currentRowExpandedInPlaceByHover, isPointerOverRow: false });
+					scheduleExpandedRowPointerExitCollapse();
 				}
 			},
 			onPointerDown: (event) => {
@@ -315,17 +304,13 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					return;
 				}
 				clearTouchLongPress();
-				const anchorRowElement = event.currentTarget;
 				touchLongPressRef.current = {
 					startX: event.clientX,
 					startY: event.clientY,
 					timeoutId: window.setTimeout(() => {
 						touchLongPressRef.current = null;
 						suppressNextRowClickAfterTouchLongPressRef.current = true;
-						handOffHoverExpansion(
-							rowExpansionStateBeforeHover === "compact_row" ? rowIdentity : null,
-							anchorRowElement,
-						);
+						handOffHoverExpansion(rowExpansionStateBeforeHover === "compact_row" ? rowIdentity : null);
 					}, CROSS_PROJECT_TASK_SWITCHER_ROW_TOUCH_LONG_PRESS_EXPANSION_DELAY_MS),
 				};
 			},
@@ -345,6 +330,24 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					event.preventDefault();
 				}
 			},
+			onFocusCapture: (event) => {
+				focusedInteractionInsideRowRef.current = { rowIdentity, element: event.target };
+				if (isExpandedRowRetainedByKeyboardFocusOrPopup()) clearPanelPointerExitCollapseTimeout();
+			},
+			onBlurCapture: () => {
+				// Portal 的下一个 focus 也会经过这里的 React 子树；等它更新归属后再判断。
+				queueMicrotask(() => {
+					if (
+						isSameCrossProjectTaskSwitcherRow(
+							rowExpandedInPlaceByHoverRef.current?.rowIdentity ?? null,
+							rowIdentity,
+						) &&
+						!rowExpandedInPlaceByHoverRef.current?.isPointerOverRow &&
+						!isExpandedRowRetainedByKeyboardFocusOrPopup()
+					)
+						scheduleExpandedRowPointerExitCollapse();
+				});
+			},
 		}),
 		[
 			cancelPendingHoverIntent,
@@ -352,21 +355,21 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			clearTouchLongPress,
 			handOffHoverExpansion,
 			setRowExpandedInPlaceByHover,
+			isExpandedRowRetainedByKeyboardFocusOrPopup,
+			scheduleExpandedRowPointerExitCollapse,
 		],
 	);
 
 	const panelPointerHandlers = {
-		onPointerEnter: clearPanelPointerExitCollapseTimeout,
+		onPointerEnter: () => {
+			if (rowExpandedInPlaceByHoverRef.current?.isPointerOverRow) clearPanelPointerExitCollapseTimeout();
+		},
 		onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => {
 			if (event.pointerType === "touch") {
 				return;
 			}
 			cancelPendingHoverIntent();
-			clearPanelPointerExitCollapseTimeout();
-			panelPointerExitCollapseTimeoutIdRef.current = window.setTimeout(() => {
-				panelPointerExitCollapseTimeoutIdRef.current = null;
-				setRowExpandedInPlaceByHover(null);
-			}, CROSS_PROJECT_TASK_SWITCHER_PANEL_POINTER_EXIT_COLLAPSE_DELAY_MS);
+			scheduleExpandedRowPointerExitCollapse();
 		},
 		onPointerDownCapture: (event: ReactPointerEvent<HTMLElement>) => {
 			lastPointerDownNativeEventDispatchedThroughPanelReactTreeRef.current = event.nativeEvent;
@@ -384,7 +387,8 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		// 弹窗即便已被 Radix 的 capture 监听关掉、从 DOM 摘下，target 的祖先链仍在摘下的子树里，closest 照样命中。
 		const collapseOnEscapeOutsideDialog = (event: KeyboardEvent) => {
 			const isEscapeKeydownInsideDialog =
-				event.target instanceof Element && event.target.closest("[role='dialog']") !== null;
+				event.target instanceof Element &&
+				event.target.closest("[role='dialog'], [role='alertdialog'], [role='menu'], [role='listbox']") !== null;
 			if (event.key === "Escape" && !isEscapeKeydownInsideDialog) {
 				collapseRowExpandedInPlaceByHover();
 			}
@@ -425,7 +429,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		[clearPanelPointerExitCollapseTimeout, clearTouchLongPress],
 	);
 
-	// 用户把正在 hover 展开的那一行固定展开：形态不变，只清掉 hover 记录（免得之后收起时又落回 hover 展开）。
+	// 用户把悬浮卡片固定展开：恢复自然高度占位，清掉 hover 记录，免得主动收起后又落回悬浮展开。
 	const forgetHoverExpansionOfRowNowKeptExpandedInList = useCallback(() => {
 		cancelPendingHoverIntent();
 		if (rowExpandedInPlaceByHoverRef.current !== null) {
@@ -434,6 +438,7 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 	}, [cancelPendingHoverIntent, setRowExpandedInPlaceByHover]);
 
 	return {
+		panelScrollContainerRef,
 		rowExpandedInPlaceByHover,
 		rowWithPendingHoverIntent,
 		buildRowHoverExpansionTriggerProps,

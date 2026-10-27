@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stageTaskVisualizationPublication } from "../../src/task-visualization-artifacts/stage-task-visualization-publication";
@@ -294,7 +295,10 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 			const firstPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 			const secondPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 			const pageErrors: string[] = [];
-			const browserDeclarations = new Map<Page, { taskId: string | null; isForeground: boolean }>();
+			const browserDeclarations = new Map<
+				Page,
+				{ taskId: string | null; isForeground: boolean; interactionSequence: number }
+			>();
 			for (const page of [firstPage, secondPage]) {
 				page.setDefaultTimeout(20_000);
 				page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -357,6 +361,14 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 			try {
 				const published = await runCli(publicationArguments);
 				expect(published.status).toBe("published");
+				const attributedSource = await readFile(sourceHtmlFile, "utf8");
+				expect(attributedSource).toContain(`data-task-id="${taskId}"`);
+				expect(attributedSource).toContain("远端可视化验收");
+				expect((await client.taskVisualizationArtifacts.list.query({ taskId })).taskAttribution).toEqual({
+					workspaceId,
+					taskId,
+					taskTitle: "远端可视化验收",
+				});
 				await vi.waitFor(() => expect(initialEntryHasBeenRequested).toBe(true), { timeout: 20_000 });
 				const pending = (await client.taskVisualizationArtifacts.list.query({ taskId })).latestPreviewRequest;
 				expect(pending?.acceptedByBrowserPageId).toBeDefined();
@@ -532,6 +544,8 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 				{ timeout: 20_000 },
 			);
 			expect((await fetch(immutableContentUrl)).status).toBe(200);
+			await firstPage.close();
+			await secondPage.close();
 			const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 			phone.on("pageerror", (error) => pageErrors.push(error.message));
 			phone.on("websocket", (socket) =>
@@ -606,14 +620,79 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 					.split("\n")
 					.at(-1);
 				if (!createdPage) throw new Error("未创建隔离 skill 页面。");
+				expect(await readFile(createdPage, "utf8")).toContain(`data-task-id="${taskId}"`);
+				expect(await readFile(createdPage, "utf8")).toContain("远端可视化验收");
+				const previousInteractionSequence = browserDeclarations.get(phone)?.interactionSequence ?? 0;
+				await phone.keyboard.press("Shift");
+				await vi.waitFor(
+					() =>
+						expect(browserDeclarations.get(phone)?.interactionSequence).toBeGreaterThan(
+							previousInteractionSequence,
+						),
+					{ timeout: 20_000 },
+				);
 				const output = await runVisualizationPlatform(
 					["--append", createdPage, "--type", "mermaid", "--title", "远端图解"],
-					"flowchart TD\n A[任务生成] --> B[当前浏览器预览]\n",
+					"flowchart TD\n A[任务生成<br/>自动署名]:::artifact --> B[当前浏览器预览]\n classDef artifact fill:#374151,stroke:#c9d1d9,color:#f9fafb\n",
 				);
 				expect(output).toContain("KANBAN_PUBLICATION_STATUS: published");
-				await phone.frameLocator('iframe[title*="Skill 自动发布"]').locator("svg").first().waitFor();
+				try {
+					await phone.frameLocator('iframe[title*="Skill 自动发布"]').locator("svg").first().waitFor();
+				} catch (error) {
+					if (browserEvidenceDirectory) {
+						await phone.screenshot({ path: join(browserEvidenceDirectory, "skill-preview-failure.png") });
+						const frames = await Promise.all(
+							phone.frames().map(async (frame) => ({
+								name: frame.name(),
+								text: await frame
+									.locator("body")
+									.innerText()
+									.catch(() => "frame 已卸载"),
+								svgCount: await frame.locator("svg").count(),
+							})),
+						);
+						await writeFile(
+							join(browserEvidenceDirectory, "skill-preview-failure.json"),
+							JSON.stringify(
+								{
+									pageErrors,
+									output,
+									frames,
+									latestPreviewRequest: (await client.taskVisualizationArtifacts.list.query({ taskId }))
+										.latestPreviewRequest,
+									declarations: [...browserDeclarations.values()],
+								},
+								null,
+								2,
+							),
+						);
+					}
+					throw error;
+				}
+				expect(await phone.getByLabel("可视化任务署名", { exact: true }).textContent()).toContain(taskId);
+				expect(await phone.getByLabel("可视化任务署名", { exact: true }).textContent()).toContain("远端可视化验收");
 				if (browserEvidenceDirectory)
 					await phone.screenshot({ path: join(browserEvidenceDirectory, "mobile-skill-mermaid-preview.png") });
+				const localPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+				await localPage.goto(pathToFileURL(createdPage).href);
+				expect(await localPage.getByLabel("可视化任务署名", { exact: true }).textContent()).toContain(taskId);
+				await localPage.locator("svg").first().waitFor();
+				if (browserEvidenceDirectory)
+					await localPage.screenshot({ path: join(browserEvidenceDirectory, "local-html-task-attribution.png") });
+				await localPage.close();
+				const viewerPath = await phone.getByRole("link", { name: "新标签", exact: true }).getAttribute("href");
+				if (!viewerPath) throw new Error("没有取得独立查看器地址。");
+				const independentViewer = await browser.newPage();
+				await independentViewer.goto(`${origin}${viewerPath}`);
+				await independentViewer
+					.getByLabel("可视化任务署名", { exact: true })
+					.getByText("远端可视化验收", { exact: true })
+					.waitFor();
+				await independentViewer.close();
+				await phone.bringToFront();
+				await phone.getByRole("button", { name: "全屏预览", exact: true }).click();
+				expect(await phone.getByLabel("可视化任务署名", { exact: true }).textContent()).toContain("远端可视化验收");
+				await phone.getByRole("button", { name: "退出全屏预览", exact: true }).click();
 			}
 			expect(pageErrors).toEqual([]);
 		} finally {

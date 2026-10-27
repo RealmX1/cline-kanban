@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { agentPromptImageAttachmentQueries } from "@/runtime/agent-prompt-image-attachments-query";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
@@ -197,6 +198,33 @@ describe("TaskConversationSessionsPanel", () => {
 			);
 		});
 	}
+
+	it.each([
+		[false, 0, "尚未发送消息"],
+		[true, 0, "已发送消息"],
+		[false, 1, "已发送消息"],
+	] as const)(
+		"无预览时根据真实接受或回答回合显示状态：accepted=%s，turn=%s",
+		async (accepted, turnSequence, expectedText) => {
+			const side = createSideSessionWithCompletedAnswer();
+			if (side.taskConversationSessionMetadata) side.taskConversationSessionMetadata.latestUserMessagePreview = null;
+			side.lastAgentConversationUserHandoffObservation = null;
+			side.agentResponseGenerationTurnSequence = turnSequence;
+			side.agentConversationPromptSubmissionAcceptance = accepted
+				? {
+						status: "accepted",
+						attemptedAtMs: 1,
+						confirmedAtMs: 2,
+						eventId: "accepted-message",
+						nativeSessionId: "side-native-id",
+						runtimeSessionIncarnationId: "side-incarnation",
+					}
+				: null;
+			await renderSessionsPanelForUnreadAnswerAssertion(side);
+			expect(container.textContent).toContain(expectedText);
+			if (expectedText === "已发送消息") expect(container.textContent).not.toContain("尚未发送消息");
+		},
+	);
 
 	it.each([
 		["协作会话", "task_collaborator", false],
@@ -491,6 +519,145 @@ describe("TaskConversationSessionsPanel", () => {
 		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
 		await renderSessionsPanelForUnreadAnswerAssertion({ ...sideSessionSummary, updatedAt: 60 });
 		expect(container.querySelector('[aria-label="Unread answer"]')).toBeNull();
+	});
+
+	it.each(
+		(["by_the_way", "task_collaborator"] as const).flatMap((sessionRole) =>
+			(["started_from_scratch", "forked_from_main_current_turn"] as const).flatMap((contextSource) =>
+				["", " \n\t "].map((initialUserQuestion) => ({ sessionRole, contextSource, initialUserQuestion })),
+			),
+		),
+	)("$sessionRole/$contextSource 空消息可创建，失败保留选择且阻止重复点击", async (input) => {
+		const main = createSessionSummary("task-optional-message", {
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "main-native-id",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const onCreate = vi.fn(async () => ({ ok: false, message: "隔离启动失败" }));
+		await act(async () =>
+			root.render(
+				<TaskConversationSessionsPanel
+					workspaceTaskId={main.taskId}
+					mainSessionSummary={main}
+					mainSessionUserMessagePreview="主任务"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+					effectiveAgentId="codex"
+					taskSessions={{ [main.taskId]: main }}
+					selectedTaskConversationSessionId={main.taskId}
+					onSelectTaskConversationSession={() => {}}
+					onCreateTaskConversationSession={onCreate}
+				/>,
+			),
+		);
+		await act(async () =>
+			Array.from(document.body.querySelectorAll("button"))
+				.find((button) => button.textContent?.includes("新建会话"))
+				?.click(),
+		);
+		await act(async () => {
+			const role = document.body.querySelector<HTMLSelectElement>("#task-conversation-session-role");
+			if (role) {
+				role.value = input.sessionRole;
+				role.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+		});
+		await act(async () => {
+			const context = document.body.querySelector<HTMLSelectElement>("#task-conversation-context-source");
+			if (context) {
+				context.value = input.contextSource;
+				context.dispatchEvent(new Event("change", { bubbles: true }));
+			}
+			const textarea = document.body.querySelector("textarea");
+			Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
+				textarea,
+				input.initialUserQuestion,
+			);
+			textarea?.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		expect(document.body.textContent).toContain("首条消息（可选）");
+		const submit = Array.from(document.body.querySelectorAll("button")).find(
+			(button) => button.textContent === "Create session",
+		);
+		expect(submit?.disabled).toBe(false);
+		await act(async () => {
+			submit?.click();
+			submit?.click();
+		});
+		expect(onCreate).toHaveBeenCalledExactlyOnceWith({ agentId: "codex", ...input });
+		expect(document.body.textContent).toContain("隔离启动失败");
+		expect(document.body.querySelector("textarea")?.value).toBe(input.initialUserQuestion);
+		expect(document.body.querySelector<HTMLSelectElement>("#task-conversation-context-source")?.value).toBe(
+			input.contextSource,
+		);
+	});
+
+	it("空消息上传图片时保留创建门禁，附件准备完成后可以创建", async () => {
+		let completeImagePreparation!: (
+			references: Awaited<ReturnType<typeof agentPromptImageAttachmentQueries.save>>,
+		) => void;
+		const save = vi.spyOn(agentPromptImageAttachmentQueries, "save").mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					completeImagePreparation = resolve;
+				}),
+		);
+		const onCreate = vi.fn(async () => ({ ok: true }));
+		try {
+			await act(async () =>
+				root.render(
+					<TaskConversationSessionsPanel
+						workspaceTaskId="task-image-preparation"
+						mainSessionSummary={createSessionSummary("task-image-preparation")}
+						mainSessionUserMessagePreview="主任务"
+						mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+						effectiveAgentId="codex"
+						taskSessions={{}}
+						selectedTaskConversationSessionId="task-image-preparation"
+						onSelectTaskConversationSession={() => {}}
+						onCreateTaskConversationSession={onCreate}
+					/>,
+				),
+			);
+			await act(async () =>
+				Array.from(document.body.querySelectorAll("button"))
+					.find((button) => button.textContent?.includes("新建会话"))
+					?.click(),
+			);
+			const fileInput = document.body.querySelector<HTMLInputElement>('input[type="file"]');
+			expect(fileInput).not.toBeNull();
+			Object.defineProperty(fileInput, "files", {
+				configurable: true,
+				value: [new File(["隔离图片"], "reference.png", { type: "image/png" })],
+			});
+			await act(async () => {
+				fileInput?.dispatchEvent(new Event("change", { bubbles: true }));
+				await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+			});
+			const submit = Array.from(document.body.querySelectorAll("button")).find(
+				(button) => button.textContent === "Create session",
+			);
+			expect(submit?.disabled).toBe(true);
+			await act(async () => submit?.click());
+			expect(onCreate).not.toHaveBeenCalled();
+			await act(async () =>
+				completeImagePreparation([
+					{
+						imageAttachmentId: "a".repeat(64),
+						imageFilePath: "/isolated/reference.png",
+						imageMimeType: "image/png",
+						imageDisplayName: "reference.png",
+					},
+				]),
+			);
+			expect(submit?.disabled).toBe(false);
+			await act(async () => submit?.click());
+			expect(onCreate).toHaveBeenCalledOnce();
+		} finally {
+			save.mockRestore();
+		}
 	});
 
 	it("creates a fork of the current main session from the 新建会话 form", async () => {

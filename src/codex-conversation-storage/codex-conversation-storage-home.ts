@@ -6,10 +6,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import lockfile from "proper-lockfile";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
-import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { getCodexConfigurationSyncDirectory } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { codexConfigurationWriterBindingSchema } from "../core/codex-configuration-sync-contract";
+import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { resolveCodexPersistentDirectoryIdentity } from "./codex-persistent-directory-identity";
 import { preserveCodexHookTrustDuringConfigurationRefresh } from "./preserve-codex-hook-trust-during-configuration-refresh";
 
 export function resolveUserCodexHomeDirectoryPath(environment: NodeJS.ProcessEnv = process.env, cwd = process.cwd()) {
@@ -89,13 +90,17 @@ function resolveVerifiedCodexWriterBridgeHistoryHome(inferredHome: string, recor
 		throw new Error("Codex 配置写入者清单目录身份不符，未改写历史归属。");
 	const physicalHistoryHome = realpathSync(binding.conversationStorageHomeDirectoryPath);
 	const historyMetadata = lstatSync(physicalHistoryHome, { bigint: true });
-	if (
-		!historyMetadata.isDirectory() ||
-		configurationDigest([physicalHistoryHome, `${historyMetadata.dev}`, `${historyMetadata.ino}`]) !==
-			binding.storageDirectoryIdentity ||
-		(recordedHome && realpathSync(recordedHome) !== physicalHistoryHome)
-	)
+	if (!historyMetadata.isDirectory() || (recordedHome && realpathSync(recordedHome) !== physicalHistoryHome))
 		throw new Error("Codex 历史目录身份或保存的历史归属不符，等待原目录恢复。");
+	resolveCodexPersistentDirectoryIdentity(
+		physicalHistoryHome,
+		{
+			expectedIdentity: binding.storageDirectoryIdentity,
+			boundAtMs: binding.createdAt,
+			legacyBindingManifestPath: manifestPath,
+		},
+		false,
+	);
 	for (const name of ["sessions", "archived_sessions", "thread-writer-locks"]) {
 		const bridgePath = join(physicalInferredHome, name);
 		const historyDirectoryPath = join(physicalHistoryHome, name);
@@ -287,9 +292,12 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 				configurationFileName,
 				relocatedHookSourceFilePaths,
 			});
-		await writeFile(sourceMarkerPath, JSON.stringify({ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) }), {
-			mode: 0o600,
-		});
+		// 原子发布避免并发 reader 读到截断正文；同内容重试仍须补齐文件与父目录 fsync。
+		await lockedFileSystem.writeJsonFileAtomic(
+			sourceMarkerPath,
+			{ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) },
+			{ lock: null, durable: true, fileMode: 0o600 },
+		);
 		return target;
 	} finally {
 		await release();

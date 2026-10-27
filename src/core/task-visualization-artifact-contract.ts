@@ -2,6 +2,13 @@ import { z } from "zod";
 
 export const TASK_VISUALIZATION_PUBLICATION_PROTOCOL_VERSION = "task-visualization-artifacts/v1" as const;
 
+export const taskVisualizationTaskAttributionSchema = z.object({
+	workspaceId: z.string(),
+	taskId: z.string(),
+	taskTitle: z.string().nullable(),
+});
+export type TaskVisualizationTaskAttribution = z.infer<typeof taskVisualizationTaskAttributionSchema>;
+
 export const taskVisualizationArtifactIdentifierSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 export const taskVisualizationPublicationRequestIdSchema = z.string().uuid();
 export const taskVisualizationPublicationRejectionCodeSchema = z.enum(["BAD_REQUEST", "NOT_FOUND", "FORBIDDEN"]);
@@ -26,6 +33,7 @@ export const taskVisualizationArtifactSchema = z.object({
 	taskId: z.string(),
 	visualizationArtifactId: taskVisualizationArtifactIdentifierSchema,
 	title: z.string().min(1).max(200),
+	taskTitleAtPublication: z.string().min(1).optional(),
 	entryHtmlRelativePath: taskVisualizationRelativePathSchema,
 	revisionId: taskVisualizationArtifactIdentifierSchema,
 	versionNumber: z.number().int().positive(),
@@ -66,6 +74,7 @@ export const taskVisualizationPublishResponseSchema = z.object({
 export const taskVisualizationListRequestSchema = z.object({ taskId: z.string().min(1) });
 export const taskVisualizationListResponseSchema = z.object({
 	artifacts: z.array(taskVisualizationArtifactSchema),
+	taskAttribution: taskVisualizationTaskAttributionSchema,
 	latestPreviewRequest: taskVisualizationPreviewRequestSchema.nullable().optional(),
 	visualizationPublicationProtocolVersion: z.literal(TASK_VISUALIZATION_PUBLICATION_PROTOCOL_VERSION),
 });
@@ -76,6 +85,7 @@ export const taskVisualizationSelectArtifactRequestSchema = z.object({
 });
 export const taskVisualizationPreparePreviewResponseSchema = z.object({
 	artifact: taskVisualizationArtifactSchema,
+	taskAttribution: taskVisualizationTaskAttributionSchema,
 	contentRelativeUrl: z.string(),
 	viewerRelativeUrl: z.string(),
 	contentAccessExpiresAtMs: z.number(),

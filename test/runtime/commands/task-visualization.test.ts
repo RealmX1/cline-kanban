@@ -1,10 +1,19 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TRPCClientError } from "@trpc/client";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerTaskVisualizationCommand } from "../../../src/commands/task-visualization";
+import { taskVisualizationPublicationMaximumFileSizeBytes } from "../../../src/task-visualization-artifacts/task-visualization-publication-resource-limits";
+
+vi.mock(
+	"../../../src/task-visualization-artifacts/task-visualization-publication-resource-limits",
+	async (original) => ({
+		...(await original<Record<string, unknown>>()),
+		taskVisualizationPublicationMaximumFileSizeBytes: 2048,
+	}),
+);
 
 const runtimeMocks = vi.hoisted(() => ({
 	runtimeHomeDirectoryPath: "",
@@ -13,6 +22,7 @@ const runtimeMocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../src/state/workspace-state", () => ({
 	loadWorkspaceContext: async () => ({ workspaceId: "workspace-a", repoPath: "/registered-project" }),
+	loadWorkspaceBoardById: async () => ({ columns: [{ cards: [{ id: "task-a", title: "真实任务名称 <&>" }] }] }),
 }));
 vi.mock("../../../src/state/runtime-home-path", () => ({
 	getRuntimeHomePath: () => runtimeMocks.runtimeHomeDirectoryPath,
@@ -65,6 +75,46 @@ function apiError(code: string, message: string) {
 }
 
 describe("可视化 CLI 区分确定性拒绝与等待恢复", () => {
+	it("入口加署名后将超限时发布立即失败，不改原文、不发送不可接受的包", async () => {
+		const original = `<!--${"a".repeat(taskVisualizationPublicationMaximumFileSizeBytes - 7)}-->`;
+		await writeFile(join(rootDirectoryPath, "chart.html"), original);
+		const result = await runPublish();
+		expect(process.exitCode).toBe(1);
+		expect(result).toMatchObject({ ok: false, error: expect.stringContaining("50MB") });
+		expect(runtimeMocks.publish).not.toHaveBeenCalled();
+		expect(await readFile(join(rootDirectoryPath, "chart.html"), "utf8")).toBe(original);
+		await expect(stat(runtimeMocks.runtimeHomeDirectoryPath)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("仅署名命令从任务记录取名，重复执行不请求运行时发布", async () => {
+		const runAttribution = async () => {
+			const program = new Command();
+			registerTaskVisualizationCommand(program.command("task"));
+			await program.parseAsync(
+				[
+					"task",
+					"visualization",
+					"apply-task-attribution-to-html",
+					"--task-id",
+					"task-a",
+					"--project-path",
+					"/registered-project",
+					"--source-html-file",
+					join(rootDirectoryPath, "chart.html"),
+				],
+				{ from: "user" },
+			);
+			return runtimeMocks.printJson.mock.calls.at(-1)?.[0];
+		};
+		expect(await runAttribution()).toMatchObject({
+			ok: true,
+			didUpdateHtml: true,
+			taskAttribution: { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "真实任务名称 <&>" },
+		});
+		expect(await runAttribution()).toMatchObject({ ok: true, didUpdateHtml: false });
+		expect(runtimeMocks.publish).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		["NOT_FOUND", "任务不存在"],
 		["FORBIDDEN", "Done 任务只允许读取"],
@@ -95,6 +145,8 @@ describe("可视化 CLI 区分确定性拒绝与等待恢复", () => {
 		const result = await runPublish();
 		expect(process.exitCode).toBeUndefined();
 		expect(result).toMatchObject({ ok: true, status: "awaiting_runtime_acceptance" });
+		expect(result.localTaskAttributionStatus).toBe("applied");
+		expect(await readFile(join(rootDirectoryPath, "chart.html"), "utf8")).toContain("真实任务名称 &lt;&amp;&gt;");
 		const publicationDirectory = result.pendingPublicationDirectoryPath;
 		expect(await readFile(join(publicationDirectory, "publication.json"), "utf8")).toContain(
 			result.publicationRequestId,

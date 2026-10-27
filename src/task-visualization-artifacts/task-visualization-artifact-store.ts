@@ -21,6 +21,8 @@ import {
 	pendingTaskVisualizationPublicationDirectory,
 	taskVisualizationTaskStorageDirectory,
 } from "./task-visualization-artifact-storage-paths";
+import { renderHtmlWithTaskAttribution } from "./task-visualization-html-task-attribution";
+import { TaskVisualizationPublicationFileSizeLimitError } from "./task-visualization-publication-resource-limits";
 
 const taskVisualizationRegistrySchema = z.object({
 	artifacts: z.array(taskVisualizationArtifactSchema),
@@ -195,12 +197,14 @@ export class TaskVisualizationArtifactStore {
 		workspaceId: string,
 		workspaceRepositoryPath: string,
 		publicationRequestId: string,
+		taskTitleAtPublication?: string,
 	): Promise<{
 		artifact: TaskVisualizationArtifact;
 		isNewRevision: boolean;
 		wasSupersededByNewerPublication: boolean;
 	}> {
-		const publication = await this.readPendingPublication(publicationRequestId);
+		const stagedPublication = await this.readPendingPublication(publicationRequestId);
+		let publication = stagedPublication;
 		if (
 			publication.publicationRequestId !== publicationRequestId ||
 			publication.workspaceId !== workspaceId ||
@@ -227,6 +231,54 @@ export class TaskVisualizationArtifactStore {
 				};
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			let attributedEntryHtml: Buffer | undefined;
+			if (
+				hashTaskVisualizationIdentity(
+					JSON.stringify({ entryHtmlRelativePath: publication.entryHtmlRelativePath, files: publication.files }),
+				) !== publication.revisionId
+			)
+				throw new Error("发布包目录校验失败。");
+			if (taskTitleAtPublication !== undefined) {
+				const originalEntry = publication.files.find(
+					(file) => file.bundleRelativePath === publication.entryHtmlRelativePath,
+				);
+				const original = await readFile(
+					join(publicationDirectory, "files", ...publication.entryHtmlRelativePath.split("/")),
+				);
+				if (
+					!originalEntry ||
+					original.length !== originalEntry.sizeBytes ||
+					hashTaskVisualizationIdentity(original) !== originalEntry.sha256
+				)
+					throw new Error("发布包入口校验失败。");
+				let attributedHtml: string;
+				try {
+					attributedHtml = renderHtmlWithTaskAttribution(original.toString("utf8"), {
+						workspaceId,
+						taskId: publication.taskId,
+						taskTitle: taskTitleAtPublication,
+					});
+				} catch (error) {
+					if (error instanceof TaskVisualizationPublicationFileSizeLimitError)
+						throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });
+					throw error;
+				}
+				const attributed = Buffer.from(attributedHtml);
+				attributedEntryHtml = attributed;
+				const files = publication.files.map((file) =>
+					file === originalEntry
+						? { ...file, sha256: hashTaskVisualizationIdentity(attributed), sizeBytes: attributed.length }
+						: file,
+				);
+				publication = {
+					...publication,
+					files,
+					taskTitleAtPublication,
+					revisionId: hashTaskVisualizationIdentity(
+						JSON.stringify({ entryHtmlRelativePath: publication.entryHtmlRelativePath, files }),
+					),
+				};
 			}
 			const registry = await this.readRegistry(workspaceId, publication.taskId);
 			const previous = registry.artifacts.find(
@@ -274,6 +326,7 @@ export class TaskVisualizationArtifactStore {
 				taskId: publication.taskId,
 				visualizationArtifactId: publication.visualizationArtifactId,
 				title: publication.title,
+				taskTitleAtPublication: publication.taskTitleAtPublication,
 				entryHtmlRelativePath: publication.entryHtmlRelativePath,
 				revisionId: publication.revisionId,
 				versionNumber: (previous?.versionNumber ?? 0) + 1,
@@ -295,7 +348,7 @@ export class TaskVisualizationArtifactStore {
 			await rm(acceptingDirectory, { recursive: true, force: true });
 			await mkdir(join(acceptingDirectory, "files"), { recursive: true, mode: 0o700 });
 			try {
-				for (const file of publication.files) {
+				for (const file of stagedPublication.files) {
 					const content = await readFile(
 						join(publicationDirectory, "files", ...file.bundleRelativePath.split("/")),
 					);
@@ -303,7 +356,13 @@ export class TaskVisualizationArtifactStore {
 						throw new Error(`发布包资源校验失败：${file.bundleRelativePath}`);
 					const destination = join(acceptingDirectory, "files", ...file.bundleRelativePath.split("/"));
 					await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-					await writeFile(destination, content, { mode: 0o600 });
+					await writeFile(
+						destination,
+						file.bundleRelativePath === publication.entryHtmlRelativePath
+							? (attributedEntryHtml ?? content)
+							: content,
+						{ mode: 0o600 },
+					);
 				}
 				await lockedFileSystem.writeJsonFileAtomic(join(acceptingDirectory, "publication.json"), publication, {
 					lock: null,

@@ -31,6 +31,7 @@ import {
 import type { CodexAppServerRequestPort } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
+import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixture: ReturnType<typeof createTempDir>;
@@ -43,6 +44,8 @@ beforeEach(async () => {
 	fixture.path = await realpath(fixture.path);
 	vi.stubEnv("HOME", fixture.path);
 	sourceHome = join(fixture.path, ".codex");
+	vi.stubEnv("CODEX_HOME", sourceHome);
+	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, "isolated-sqlite"));
 	await mkdir(sourceHome);
 	await writeFile(
 		join(sourceHome, "hooks.json"),
@@ -133,11 +136,13 @@ function service(
 		operation: (port: CodexAppServerRequestPort) => Promise<T>,
 	) => Promise<T>,
 ) {
-	const instance = createCodexConfigurationSyncService({
-		listSessions: () => sessions,
-		onUpdated: () => {},
-		withOwnerConnection,
-	});
+	const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
+		createCodexConfigurationSyncService({
+			listSessions: () => sessions,
+			onUpdated: () => {},
+			withOwnerConnection,
+		}),
+	);
 	services.push(instance);
 	return instance;
 }

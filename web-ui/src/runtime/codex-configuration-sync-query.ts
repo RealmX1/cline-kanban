@@ -1,9 +1,15 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	CodexConfigurationBatchActionRequest,
 	CodexConfigurationResolveConflictRequest,
 	CodexConfigurationResolveTargetConflictRequest,
 	CodexConfigurationSynchronizeRequest,
 } from "@/runtime/types";
+
+export const batchCodexConfigurationAction = (
+	workspaceId: string | null,
+	input: CodexConfigurationBatchActionRequest,
+) => getRuntimeTrpcClient(workspaceId).runtime.batchCodexConfigurationAction.mutate(input);
 
 const invalidationListeners = new Set<() => void>();
 export function notifyCodexConfigurationSyncUpdated() {

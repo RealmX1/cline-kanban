@@ -59,6 +59,18 @@ kanban task visualization request-preview --task-id <任务ID> --project-path <�
 ```
 
 入口默认按文件名放入包内；需要保留 `sessions/<文件名>.html` 等层级时，声明 `--source-root-directory`。
+
+`publish` 从已注册项目的任务记录自动解析任务名，在本地 HTML 与持久包中写入任务 ID、任务名。
+可视化标题仍由 `--title` 指定，不会被任务名替代。单独生成本地页面时可使用
+`kanban task visualization apply-task-attribution-to-html --task-id <任务ID> --project-path <主仓库> --source-html-file <HTML绝对路径>`，
+该命令幂等更新唯一署名区，不请求预览，成功回执含 `taskAttribution` 与 `didUpdateHtml`。
+署名固定显示在页面右下方，不参与原页面的 grid/flex 排版，指针事件穿透到原页面。
+HTML 入口的单文件 50MiB 限额包含署名，按最终 UTF-8 字节数在本地写入前检查；超限则保留原文件并明确失败，
+不会先写大文件再卡在打包或重试。离线固化的包如在运行时补署名后超限，以 `BAD_REQUEST` 明确拒绝并保留包证据。
+任务改名后，查看器读取当前任务名，本地文件在下次生成或发布时更新。
+旧托管产物无需重新发布即可在查看器显示署名，历史修订摘要不被改写。
+本地任务名暂不可读时保留发布源，`localTaskAttributionStatus=pending` 明确表示本地尚未完整署名；
+服务端独立校验身份并在受理时补齐持久包，暂时失败沿用现有等待恢复流程。
 `--no-preview` 只发布，`--request-preview` 则在更新版本时也请求预览。普通更新只提示加载新版本。
 只读清单返回 `visualizationPublicationProtocolVersion=task-visualization-artifacts/v1`；skill 的 `--help` 声明同一协议，便于部署后检查两仓安装状态。
 
@@ -69,3 +81,6 @@ kanban task visualization request-preview --task-id <任务ID> --project-path <�
 `KANBAN_TASK_VISUALIZATION_PACKAGED_CLI_PATH` 指定隔离构建的 CLI；`PLAYWRIGHT_BROWSERS_PATH` 指定现有浏览器缓存。
 额外设置 `KANBAN_TASK_VISUALIZATION_PLATFORM_SCRIPT_PATH` 可联合验证另一个仓库中的 skill；截图目录用
 `KANBAN_TASK_VISUALIZATION_BROWSER_EVIDENCE_DIRECTORY` 指向持久位置。
+只检查署名对 grid/flex 布局与交互的影响时，可设置 `KANBAN_RUN_HTML_TASK_ATTRIBUTION_LAYOUT_BROWSER_CHECK=1` 与
+`PLAYWRIGHT_BROWSERS_PATH`，经 guarded `runtime-integration` 入口运行
+`test/integration/task-visualization-html-task-attribution-layout-real-browser.integration.test.ts`，不启动运行时。

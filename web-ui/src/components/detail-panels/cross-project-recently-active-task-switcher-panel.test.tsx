@@ -265,7 +265,11 @@ const IN_LIST_EXPANSION_TOGGLE_SELECTOR =
 	'[data-testid="cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button"]';
 
 function queryInListExpansionToggle(scope: ParentNode | null | undefined): HTMLButtonElement | null {
-	return scope?.querySelector<HTMLButtonElement>(IN_LIST_EXPANSION_TOGGLE_SELECTOR) ?? null;
+	return (
+		[...(scope?.querySelectorAll<HTMLButtonElement>(IN_LIST_EXPANSION_TOGGLE_SELECTOR) ?? [])].find(
+			(toggle) => toggle.closest("[hidden], [inert]") === null,
+		) ?? null
+	);
 }
 
 // 指针移出一行、也移出面板（relatedTarget 是 body）。
@@ -1055,7 +1059,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 	});
 
-	it("其他项目的行 hover：意图期间就隐藏挂载完整卡片、预取服务端快照；停够后这一行在列表里原地换成同一个紧凑卡体（不是浮层），行级信息并进卡体；右上角开关固定展开 / 收起，动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
+	it("其他项目的行 hover：复用预取卡体作为悬浮层，精简行隐藏且不可交互但保留占位；固定展开与卡片动作沿用原链路", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
 			taskCardLookupOutcome: "task_card_found_on_workspace_board",
@@ -1100,9 +1104,17 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		const expandedRow = queryRecentRow();
 		expect(rowInPlaceExpansionState(expandedRow)).toBe("expanded_in_place_by_hover");
-		// 原地：完整卡片就在这一行里（推下方的行），不是 portal 出去的浮层；精简行的首行换掉了。
+		// 精简行保留自然高度，但不再展示、命中或参与键盘导航。
 		expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-		expect(expandedRow?.querySelector("[data-cross-project-task-switcher-row-title]")).toBeNull();
+		const placeholder = expandedRow?.querySelector("[data-cross-project-task-switcher-compact-row-placeholder]");
+		expect(placeholder?.hasAttribute("inert")).toBe(true);
+		expect(placeholder?.classList.contains("invisible")).toBe(true);
+		expect(placeholder?.querySelector("[data-cross-project-task-switcher-row-title]")).not.toBeNull();
+		expect(
+			expandedRow
+				?.querySelector("[data-cross-project-task-switcher-hover-floating-card]")
+				?.classList.contains("absolute"),
+		).toBe(true);
 		expect(
 			expandedRow?.querySelector('[data-testid="cross-project-task-switcher-full-task-card"]')?.closest("[hidden]"),
 		).toBeNull();
@@ -1176,7 +1188,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
 	});
 
-	it("交接：指针从展开的行挪到下一行时它不收起，下一行停够意图时长后两行在同一次提交里换过来；坐标没变的指针事件不发起意图；离开面板（延时）与 Esc 收起", async () => {
+	it("离开浮层 300ms 后收起，下一行停够 350ms 再展开；同坐标事件不发起意图，返回与 Esc 沿用现有语义", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
 		const host = makeHost({
@@ -1193,8 +1205,8 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		await act(async () => {
 			vi.advanceTimersByTime(300);
 		});
-		// 离开展开的行不收起：否则它一收、整列上移，指针脚下换成更下面的行。
-		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("expanded_in_place_by_hover");
+		// 离开卡片后 300ms 收起；下一行的 350ms 意图仍在计时。
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
 		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
 		await act(async () => {
 			vi.advanceTimersByTime(100);
@@ -1235,101 +1247,43 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
 	});
 
-	it.each([
-		// 新行顶边在可视区里（面板上沿 0 + 动作组伸出的 12px 之下）：列表顶边固定，scrollTop 不动、不垫空白。
-		{
-			handOffCase: "new_row_top_edge_still_visible",
-			panelScrollTopBeforeHandOffPx: 200,
-			panelViewportTopPx: 0,
-			secondRowTopBeforeHandOffPx: 300,
-			secondRowTopAfterHandOffPx: 240,
-			expectedScrollTopPx: 200,
-		},
-		// 面板滚过、上方那一行收起把新行顶边带到可视区上沿（100）之外：只回滚到刚好露出顶边与叠在首行上方的动作组
-		//（新行顶边 40 → 要到 112，回滚 72）。
-		{
-			handOffCase: "new_row_top_edge_hidden_above_scrolled_panel",
-			panelScrollTopBeforeHandOffPx: 200,
-			panelViewportTopPx: 100,
-			secondRowTopBeforeHandOffPx: 300,
-			secondRowTopAfterHandOffPx: 40,
-			expectedScrollTopPx: 128,
-		},
-		// 同上但 scrollTop 不够回滚：停在 0，不垫空白。
-		{
-			handOffCase: "new_row_top_edge_hidden_but_panel_nearly_at_top",
-			panelScrollTopBeforeHandOffPx: 30,
-			panelViewportTopPx: 100,
-			secondRowTopBeforeHandOffPx: 300,
-			secondRowTopAfterHandOffPx: 40,
-			expectedScrollTopPx: 0,
-		},
-		// 交接前顶边就已露不全（用户自己滚的，50 < 112），交接又带上去 20：只回滚这 20，不替用户改滚动位置。
-		// 第一次展开 first 时（jsdom 量到的顶边恒为 0、前后不动）同理不回滚，各用例的 scrollTop 都依赖这一点。
-		{
-			handOffCase: "new_row_top_edge_partly_hidden_before_hand_off_scrolls_back_only_hand_off_drift",
-			panelScrollTopBeforeHandOffPx: 200,
-			panelViewportTopPx: 100,
-			secondRowTopBeforeHandOffPx: 50,
-			secondRowTopAfterHandOffPx: 30,
-			expectedScrollTopPx: 180,
-		},
-	])(
-		"交接时列表顶边固定（经典手风琴）：上方的行收起后新行跟着上移，不补 scrollTop、不垫面板顶部空白；只有新行顶边被带出可视区时回滚到刚好露出（$handOffCase）",
-		async ({
-			panelScrollTopBeforeHandOffPx,
-			panelViewportTopPx,
-			secondRowTopBeforeHandOffPx,
-			secondRowTopAfterHandOffPx,
-			expectedScrollTopPx,
-		}) => {
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
-			const host = makeHost({
-				projects: [
-					makeProject("project-a", []),
-					makeProject("project-b", [makeEntry("first"), makeEntry("second")]),
-				],
-			});
-			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
-			const queryRow = (taskId: string) =>
-				section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
-			const panel = container.querySelector<HTMLElement>(
-				'[data-testid="cross-project-recently-active-task-switcher-panel"]',
-			);
-			if (!panel) {
-				throw new Error("panel not rendered");
-			}
-			// 自带 scroll anchoring 关掉：否则面板滚过时浏览器自己补 scrollTop，指针上方的整列又被往下拖。
-			expect(panel.className).toContain("[overflow-anchor:none]");
-			let panelScrollTopPx = panelScrollTopBeforeHandOffPx;
-			Object.defineProperty(panel, "scrollTop", {
-				configurable: true,
-				get: () => panelScrollTopPx,
-				set: (nextScrollTopPx: number) => {
-					panelScrollTopPx = Math.max(0, nextScrollTopPx);
-				},
-			});
-			panel.getBoundingClientRect = () => ({ top: panelViewportTopPx }) as DOMRect;
-			await hoverRowUntilExpandedInPlace(queryRow("first"));
-			const secondRow = queryRow("second");
-			if (!secondRow) {
-				throw new Error("second row not rendered");
-			}
-			secondRow.getBoundingClientRect = vi
-				.fn<() => DOMRect>()
-				.mockReturnValueOnce({ top: secondRowTopBeforeHandOffPx } as DOMRect)
-				.mockReturnValue({ top: secondRowTopAfterHandOffPx } as DOMRect);
-			await movePointerFromRowToRow(queryRow("first"), secondRow);
-			await act(async () => {
-				vi.advanceTimersByTime(400);
-			});
-			expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
-			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
-			expect(panelScrollTopPx).toBe(expectedScrollTopPx);
-			expect(panel.style.paddingTop).toBe("");
-		},
-	);
+	it("悬浮卡片交接与收起不写宿主 scrollTop，不垫顶部空白", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		act(() =>
+			root.render(
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={makeHost({
+						projects: [
+							makeProject("project-a", []),
+							makeProject("project-b", [makeEntry("first"), makeEntry("second")]),
+						],
+					})}
+				/>,
+			),
+		);
+		const queryRow = (taskId: string) =>
+			section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+		const panel = container.querySelector<HTMLElement>(
+			'[data-testid="cross-project-recently-active-task-switcher-panel"]',
+		)!;
+		const setScrollTop = vi.fn();
+		Object.defineProperty(panel, "scrollTop", { configurable: true, get: () => 200, set: setScrollTop });
+		await hoverRowUntilExpandedInPlace(queryRow("first"));
+		await movePointerFromRowToRow(queryRow("first"), queryRow("second"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+		await movePointerOutOfRow(queryRow("second"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
+		expect(setScrollTop).not.toHaveBeenCalled();
+		expect(panel.style.paddingTop).toBe("");
+	});
 
 	it("精简行右上角的展开开关常驻 DOM（键盘 Tab 得到），点它不等 hover 意图直接原地固定展开；卡快照未到时完整卡先画同一个首行", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -1389,6 +1343,66 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		);
 		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
 	});
+
+	it.each(["键盘焦点", "用户已移走焦点", "非 focus-visible 焦点"])(
+		"慢速快照升级卡体时保留打开任务入口：%s",
+		async (focusCase) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			let resolveSnapshot: (snapshot: unknown) => void = () => {};
+			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(
+				new Promise((resolve) => {
+					resolveSnapshot = resolve;
+				}),
+			);
+			const host = makeHost();
+			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+			const row = section("remaining").querySelector<HTMLElement>(
+				'[data-cross-project-task-switcher-task-id="recent"]',
+			);
+			const compactEntry = row?.querySelector<HTMLButtonElement>('button[aria-label="打开任务：Title recent"]');
+			act(() => compactEntry?.focus());
+			await hoverRowUntilExpandedInPlace(row);
+			const fallbackEntry = row?.querySelector<HTMLElement>(
+				"[data-cross-project-task-switcher-full-task-card-unavailable-fallback-open-task-keyboard-entry]",
+			);
+			expect(document.activeElement).toBe(fallbackEntry);
+			const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+			const externalButton = document.createElement("button");
+			document.body.appendChild(externalButton);
+			let matchesSpy: ReturnType<typeof vi.spyOn> | undefined;
+			if (focusCase === "用户已移走焦点") externalButton.focus();
+			if (focusCase === "非 focus-visible 焦点" && fallbackEntry) {
+				const originalMatches = fallbackEntry.matches.bind(fallbackEntry);
+				matchesSpy = vi
+					.spyOn(fallbackEntry, "matches")
+					.mockImplementation((selector) => (selector === ":focus-visible" ? false : originalMatches(selector)));
+			}
+			focusSpy.mockClear();
+			await act(async () => {
+				resolveSnapshot(makeOtherProjectTaskCardSnapshot("recent", "review"));
+			});
+			await act(async () => {
+				await Promise.resolve();
+			});
+			const title = row?.querySelector<HTMLElement>("[data-task-card-title]");
+			expect(title).not.toBeNull();
+			if (focusCase === "键盘焦点") {
+				expect(document.activeElement).toBe(title);
+				expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+				for (const key of ["Enter", " "]) {
+					act(() => title?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
+				}
+				expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
+				expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "recent");
+			} else {
+				expect(document.activeElement).toBe(focusCase === "用户已移走焦点" ? externalButton : document.body);
+				expect(focusSpy).not.toHaveBeenCalled();
+			}
+			matchesSpy?.mockRestore();
+			focusSpy.mockRestore();
+			externalButton.remove();
+		},
+	);
 
 	it("键盘按展开开关切换形态后焦点交给触发那一行新形态下的开关（含卡快照到达后兜底换成卡体），不落到 body；展开态的首行 / 卡体标题是可聚焦、Enter / Space 打开任务的键盘入口", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

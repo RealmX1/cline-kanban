@@ -78,7 +78,8 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 			binary: "claude",
 			args: [],
 			cwd: WORKSPACE_PATH,
-			prompt: "",
+			// Stop 对应已有模型回合的结束，不能用保持 Ready 的空启动替代。
+			prompt: "验证模型回合完成后的迟到 hook。",
 		});
 		recordAgentRaisedPendingUserDecision = vi.fn(async () => undefined);
 		broadcastTaskReadyForReview = vi.fn<Parameters<typeof createHooksApi>[0]["broadcastTaskReadyForReview"]>();

@@ -131,9 +131,10 @@ describe("Codex 转录缺失与轮换后的自动补证恢复", { timeout: 60_00
 		target.state.nowMs += 10_000;
 		await target.exhaustOrdinaryRetries();
 		await appendFile(target.transcriptPath, target.acceptedLine);
+		// 目录观察不可用时会由 15 秒元数据轮询恢复，测试等待须覆盖该既有回退周期。
 		await vi.waitFor(
 			() => expect(target.state.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted"),
-			{ timeout: 3_000, interval: 50 },
+			{ timeout: 25_000, interval: 50 },
 		);
 		expect(target.onAccepted).not.toHaveBeenCalled();
 	});

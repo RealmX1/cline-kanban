@@ -140,6 +140,117 @@ afterEach(async () => {
 });
 
 describe("ACP 提交只在可靠协议活动后确认接受", () => {
+	it.each([false, true])(
+		"空创建 Plan=%s 不发请求，随后首个真实请求包含指导且原文只显示一次",
+		async (startInPlanMode) => {
+			const { service, connection, turn } = await startAwaitingUserSession({ initialPromptText: "" });
+			service.disposeAllTaskSessions();
+			runtime.state.connectionForStart = connection;
+			await service.startTaskSession({
+				taskId: TASK_ID,
+				workspaceTaskId: "host-task",
+				agentId: "omp",
+				cwd: "/workspace/task",
+				prompt: " \n\t ",
+				startInPlanMode,
+				permissionMode: "ask_for_every_tool_use",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "host-task",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			});
+			expect(connection.prompt).not.toHaveBeenCalled();
+			expect(service.listMessages(TASK_ID).filter((message) => message.role === "user")).toEqual([]);
+			expect(service.getSummary(TASK_ID)).toMatchObject({
+				turnOwner: "user",
+				liveness: "live",
+				agentNativeConversationSessionIdentity: { nativeSessionId: "native-session" },
+			});
+			expect(service.getSummary(TASK_ID)?.agentResponseGenerationTurnSequence ?? 0).toBe(0);
+			expect(service.getSummary(TASK_ID)?.lastAgentConversationUserHandoffObservation ?? null).toBeNull();
+			const firstText = "  第一条真实输入  ";
+			service.sendTaskSessionInput(TASK_ID, firstText);
+			expect(connection.prompt).toHaveBeenCalledExactlyOnceWith([
+				{ type: "text", text: expect.stringContaining("协作会话的责任边界") },
+			]);
+			expect(vi.mocked(connection.prompt).mock.calls[0][0][0]).toMatchObject({
+				text: expect.stringContaining(firstText),
+			});
+			expect(
+				service
+					.listMessages(TASK_ID)
+					.filter((message) => message.role === "user")
+					.map((message) => message.content),
+			).toEqual([firstText]);
+			turn.resolve({ stopReason: "end_turn" });
+			await vi.waitFor(() =>
+				expect(service.getSummary(TASK_ID)?.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted"),
+			);
+			service.sendTaskSessionInput(TASK_ID, "第二条真实输入");
+			expect(connection.prompt).toHaveBeenLastCalledWith([{ type: "text", text: "第二条真实输入" }]);
+			service.disposeAllTaskSessions();
+		},
+	);
+	it.each([false, true])(
+		"首请求协议接受=%s 后失败，后续真实输入只在指导尚未被接受时补带",
+		async (firstPromptAccepted) => {
+			const { service, connection, listener, turn } = await startAwaitingUserSession();
+			service.applyTaskConversationSessionMetadata(TASK_ID, {
+				workspaceTaskId: "host-task",
+				taskConversationSessionRole: "task_collaborator",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+			});
+			try {
+				const firstText = "  首条真实输入  ";
+				const firstAcceptance = vi.fn();
+				await service.sendTaskSessionInput(TASK_ID, firstText, undefined, firstAcceptance, "first-real-input");
+				expect(connection.prompt).toHaveBeenCalledExactlyOnceWith([
+					{ type: "text", text: expect.stringContaining("协作会话的责任边界") },
+				]);
+				if (firstPromptAccepted)
+					notify({ sessionUpdate: "tool_call", toolCallId: "accepted-before-failure", title: "处理首条输入" });
+				turn.reject(new Error("provider rejected prompt"));
+				await vi.waitFor(() =>
+					expect(service.getSummary(TASK_ID)?.warningMessage).toBe("provider rejected prompt"),
+				);
+				expect(firstAcceptance).toHaveBeenCalledExactlyOnceWith(firstPromptAccepted);
+				const nextTurn = deferredPrompt();
+				vi.mocked(connection.prompt).mockReturnValueOnce(nextTurn.promise);
+				const nextText = "  下一条真实输入  ";
+				await service.sendTaskSessionInput(TASK_ID, nextText, undefined, undefined, "next-real-input");
+				const expectedNextText = firstPromptAccepted ? nextText : expect.stringContaining("协作会话的责任边界");
+				expect(connection.prompt).toHaveBeenLastCalledWith([{ type: "text", text: expectedNextText }]);
+				expect(vi.mocked(connection.prompt).mock.calls[1][0][0]).toMatchObject({
+					text: expect.stringContaining(nextText),
+				});
+				await service.sendTaskSessionInput(TASK_ID, nextText, undefined, undefined, "next-real-input");
+				expect(connection.prompt).toHaveBeenCalledTimes(2);
+				expect(
+					service
+						.listMessages(TASK_ID)
+						.filter((message) => message.role === "user")
+						.map((message) => message.content),
+				).toEqual([firstText, nextText]);
+				notify({ sessionUpdate: "tool_call", toolCallId: "next-accepted-input", title: "处理下一条输入" });
+				expect(listener).toHaveBeenLastCalledWith(TASK_ID, nextText);
+				expect(service.getSummary(TASK_ID)?.taskConversationSessionMetadata?.latestUserMessagePreview).toBe(
+					nextText.trim(),
+				);
+				nextTurn.resolve({ stopReason: "end_turn" });
+			} finally {
+				service.disposeAllTaskSessions();
+			}
+		},
+	);
 	it.each(["cancelTaskTurn", "abortTaskSession"] as const)(
 		"首发登记等待期间 %s 后不发协议请求，且仅持久化一次明确取消",
 		async (cancelMethod) => {
