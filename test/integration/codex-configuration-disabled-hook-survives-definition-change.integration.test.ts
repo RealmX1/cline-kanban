@@ -10,7 +10,7 @@ import {
 	prepareCodexConfigurationWriterBinding,
 } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../src/codex-conversation-storage/codex-conversation-storage-home";
-import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 afterEach(() => vi.unstubAllEnvs());

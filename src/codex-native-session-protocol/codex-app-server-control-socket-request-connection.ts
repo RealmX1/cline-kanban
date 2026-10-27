@@ -306,7 +306,7 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 					recordKnownCodexConfigurationNativeRequest({
 						requestId: `${connectionId}:${id}`,
 						method,
-						purpose: input?.clientName ?? "kanban_rvf_review_boundary_observer",
+						purpose: input?.clientName ?? "kanban_native_session_observer",
 						endpointSha256,
 						writerBinding: input?.writerBinding,
 					});

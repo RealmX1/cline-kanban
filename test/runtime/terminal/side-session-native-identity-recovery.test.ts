@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CodexAppServerRequestPort } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
-import type { CodexAppServerRequestPort } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
 import { readSideSessionNativeIdentityFromOwnedCodexControl } from "../../../src/terminal/side-session-native-identity-recovery";
 
 const controlConnection = vi.hoisted(() =>
 	vi.fn<(operation: (port: CodexAppServerRequestPort) => Promise<unknown>) => Promise<unknown>>(),
 );
-vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection", () => ({
+vi.mock("../../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection", () => ({
 	withRunningCodexAppServerControlSocketConnection: controlConnection,
 }));
 

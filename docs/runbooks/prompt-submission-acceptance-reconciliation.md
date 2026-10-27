@@ -33,7 +33,7 @@ Codex 先读取最近回合的 `summary`，再读取从前驱到最新回合的 
 根项目通过 `npm run test:guarded` 运行接受读取、恢复、observer、输入解析和交接回归；Web UI 运行两个卡片活动显示测试。真实 Codex 集成只使用隔离 HOME、Git fixture 和本地 HTTP 模型桩：
 
 ```sh
-KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY=/absolute/path/to/codex \
+KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \
 KANBAN_CODEX_PROMPT_ACCEPTANCE_EVIDENCE_DIRECTORY=/absolute/persistent/evidence \
 npm run test:guarded -- --project runtime-integration test/integration/codex-prompt-submission-acceptance-reconciliation.integration.test.ts
 ```

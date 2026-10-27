@@ -42,7 +42,7 @@ export const existingCloseoutGoalCompletionReconciliationSchema = z.looseObject(
 	verdict: z.enum(["completed", "partially_completed", "externally_consumed", "machine_waiting", "evidence_conflict"]),
 	verifiedStages: z.array(rvfCloseoutGoalCompletedStageSchema),
 	externalConsumption: z
-		.object({ operationId: z.string(), evidenceSha256: z.string(), observedAt: z.number() })
+		.looseObject({ operationId: z.string(), evidenceSha256: z.string(), observedAt: z.number() })
 		.optional(),
 	evidenceReferences: z.array(rvfCloseoutGoalCompletionEvidenceReferenceSchema),
 	verificationGaps: z.array(

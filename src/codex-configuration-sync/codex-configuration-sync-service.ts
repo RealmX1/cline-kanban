@@ -3,9 +3,9 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
-import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type CodexConfigurationBatchActionRequest,

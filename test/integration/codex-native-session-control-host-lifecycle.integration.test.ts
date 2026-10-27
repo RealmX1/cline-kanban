@@ -123,7 +123,7 @@ describe.skipIf(process.platform === "win32")("独享原生控制宿主生命周
 			"--sandbox",
 			"read-only",
 			"--ask-for-approval",
-			"untrusted",
+			"on-request",
 			"fork",
 			"source-native-id",
 			"只回答问题",
@@ -136,6 +136,8 @@ describe.skipIf(process.platform === "win32")("独享原生控制宿主生命周
 			.split("\n")
 			.map((line) => JSON.parse(line));
 		const tui = observations.find((record) => record.kind === "tui");
+		const server = observations.find((record) => record.kind === "server");
+		expect(server.args).toEqual(expect.arrayContaining(['approval_policy="on-request"', 'sandbox_mode="read-only"']));
 		expect(tui.args.slice(-3)).toEqual(["resume", "fork-source-native-id", "只回答问题"]);
 		expect(tui.args).not.toContain("--ask-for-approval");
 		const requests = (await readFile(join(context.fixture.fixtureRootDirectoryPath, "native-requests.jsonl"), "utf8"))
@@ -143,11 +145,28 @@ describe.skipIf(process.platform === "win32")("独享原生控制宿主生命周
 			.split("\n")
 			.map((line) => JSON.parse(line));
 		expect(requests.find((record) => record.method === "thread/fork")?.params).toMatchObject({
-			approvalPolicy: "untrusted",
+			approvalPolicy: "on-request",
 			sandbox: "read-only",
 			deferGoalContinuation: true,
 		});
 		expect(requests.some((record) => record.method === "turn/start")).toBe(false);
+	});
+	it("只读 fork 的 untrusted 默认审批策略在创建宿主前明确拒绝", async () => {
+		const context = await createFixture();
+		await expect(
+			start(context, "task-unsupported-untrusted-fork", undefined, [
+				"--sandbox",
+				"read-only",
+				"--ask-for-approval",
+				"untrusted",
+				"fork",
+				"source-native-id",
+				"只回答问题",
+			]),
+		).rejects.toThrow("无法为受管宿主提供 untrusted 默认审批策略");
+		await expect(
+			stat(join(context.fixture.fixtureRootDirectoryPath, "process-observations.jsonl")),
+		).rejects.toMatchObject({ code: "ENOENT" });
 	});
 	it("latest 遇到原生 provider 为 null 时按 openai 选会话并启动 TUI", async (test) => {
 		const context = await createFixture();

@@ -745,6 +745,12 @@ it("实际收尾完成独立展示，嵌套扩展字段原样保留，原协议�
 		],
 		evidenceReferences: [],
 		verificationGaps: [],
+		externalConsumption: {
+			operationId: "external-op",
+			evidenceSha256: "e".repeat(64),
+			observedAt: 32,
+			additionalHistoricalConsumption: "原外部消费事实",
+		},
 		observedAt: 31,
 		recovery: {
 			fingerprint: "observed",

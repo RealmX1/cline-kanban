@@ -162,7 +162,10 @@ function QueuedPromptDeliveryMetadata({
 		handed_to_transport: "到期时间",
 	}[projection.deliveryState];
 	const resultTimestamp =
-		projection.deliveryState === "expired" || !isQueuedTaskPromptDeliveryTerminal(projection)
+		projection.deliveryState === "expired" ||
+		projection.deliveryState === "queued" ||
+		projection.deliveryState === "claimed_for_dispatch" ||
+		projection.deliveryState === "handed_to_transport"
 			? projection.expiresAt
 			: projection.settledAt;
 	return (
