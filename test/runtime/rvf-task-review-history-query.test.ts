@@ -168,7 +168,11 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 				handoffPath: join(fixture.currentDirectory, "artifacts", "handoff.md"),
 			});
 			expect(response.hasVerifiedCompletedRvf).toBe(true);
-			expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
+			expect(response.currentCandidateReviewCoverage).toMatchObject({
+				status: "unknown",
+				reasonCode: "historical_records_do_not_attest_current_candidate",
+				recoveryCondition: "当前候选评审由独立评审流程提供，不从历史记录推定",
+			});
 			expect(response.issues).toEqual([]);
 			expect(await readFile(scopePath)).toEqual(originalScope);
 			expect(JSON.stringify(fixture.source.record)).toBe(originalRecord);
@@ -191,7 +195,11 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(fixture.inspected).toEqual([fixture.currentDirectory]);
 		expect(response.recentRuns).toHaveLength(1);
 		expect(response.recentRuns[0].completionEvidenceSource).toBe("kanban_server_accepted_closeout_record");
-		expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
+		expect(response.currentCandidateReviewCoverage).toMatchObject({
+			status: "unknown",
+			reasonCode: "coverage_evidence_incomplete",
+			recoveryCondition: "缺失证据或查询能力恢复后重新查询",
+		});
 		expect(response.issues.some((issue) => issue.reasonCode === "producer_run_identity_invalid")).toBe(true);
 	});
 	it("不同 runId 即使目录名复用也不归并历史收尾绑定", async () => {
@@ -787,6 +795,15 @@ it("旧历史的覆盖记录不推定当前候选资格", async () => {
 	await fixture.addRun("historical-covered");
 	const result = await fixture.query(fixture.scope, { taskId: "task" });
 	expect(result.hasVerifiedCompletedRvf).toBe(true);
-	expect(result.currentCandidateReviewCoverage.status).toBe("unknown");
-	expect(result.recentRuns[0].currentCandidateReviewCoverage.status).toBe("unknown");
+	expect(result.discoveryStatus).toBe("complete");
+	expect(result.issues).toEqual([]);
+	expect(result.currentCandidateReviewCoverage).toMatchObject({
+		status: "unknown",
+		reasonCode: "historical_records_do_not_attest_current_candidate",
+		recoveryCondition: "当前候选评审由独立评审流程提供，不从历史记录推定",
+	});
+	expect(result.recentRuns[0].currentCandidateReviewCoverage).toMatchObject({
+		status: "unknown",
+		reasonCode: "historical_records_do_not_attest_current_candidate",
+	});
 });

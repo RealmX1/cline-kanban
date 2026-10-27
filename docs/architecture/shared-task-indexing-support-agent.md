@@ -12,9 +12,9 @@ kanban support get-executor-settings --project-path /path/to/main-repository
 kanban support configure-executor --project-path /path/to/main-repository --agent-id claude --model-id <model>
 kanban support triage-incoming-work-item --project-path /path/to/main-repository --work-item-file /persistent/path/finding.json
 kanban task append-comment --project-path /path/to/main-repository --task-id abc12 --comment-file /persistent/path/comment.txt --comment-id finding-reference-123
-kanban support backfill-untriaged-rvf-findings --project-path /path/to/main-repository
-kanban support get-backfill-status --project-path /path/to/main-repository
 ```
+
+`backfill-untriaged-rvf-findings` 与 `get-backfill-status` 已随 RVF findings 自动补查删除，不再是现行命令。既有发现卡仍是普通任务；新工作项继续用 `triage-incoming-work-item`。
 
 执行器支持 `codex`、`claude`，未配置时默认 `codex`；显式保存的执行器选择保持不变，省略 model 时使用该 harness 的默认。执行器设置独立保存，和新卡将来运行的 agent 无关。CLI 等待大 Context 完整刷入 stdout 后才返回，避免管道截断。
 
@@ -93,7 +93,7 @@ Claude 使用 safe mode、替换系统指令、空工具、严格空 MCP、禁 s
 
 备注在 board 锁内追加到最新卡片，显式/确定性 id 防止重复；原 prompt 不改，不关闭、停止或删除已有任务。即使不建卡，完整发现也留在备注及幂等的账本处置事件中；来源 task 可解析时再写参照关系。
 
-runtime 上线后异步串行扫描既有 `[RVF 发现]` 卡，要求 prompt 前两行精确匹配 origin 与 `not_triaged`。补查排除自身，复用原卡，完全覆盖时原发现卡也保留；不改 marker，按卡的限定身份查找完成回执，连已由新接口建出的卡也不会再次分诊。回执保存原始工作项，补查可恢复已经建卡但后续步骤未完成的原操作。命令可显式重试，状态文件报告每卡结果。
+运行时不再异步扫描既有 `[RVF 发现]` 卡，也不再提供补查或补查状态命令。既有发现卡作为普通任务保留；新工作项仍经 `triage-incoming-work-item` 分诊。
 
 关系编辑器只在用户点击「获取关系建议」时调用模型。加载、不可用、零候选与失败分开显示；选择候选才加入草稿，最终写入仍经过原有用户确认保存流程。RVF Python 侧的 `INTEGRATION-POINT(kanban dedicated support agent finding-relation triage)` 调用接入仍由另一仓任务完成。
 
@@ -107,7 +107,7 @@ Claude 初次请求返回 OAuth session expired；用户随后确认 Claude Acco
 
 ## 本轮 RVF 修复
 
-已有卡的关系建议会跳过自身候选，保留其它合法候选；分诊/补查仍严格拒绝自身。证据先 trim 并过滤空白，完全覆盖选择器也检查有效证据，空字符串或空数组不能抑制建卡。
+已有卡的关系建议会跳过自身候选，保留其它合法候选；分诊仍严格拒绝自身。自动补查已删除。证据先 trim 并过滤空白，完全覆盖选择器也检查有效证据，空字符串或空数组不能抑制建卡。
 
 headless stdout 使用流式 UTF-8 解码，并按原始字节计算输出预算，避免跨 chunk 的中文理由或证据损坏。
 

@@ -338,19 +338,17 @@ function withOldestTerminalEntriesDroppedDownToCap(
 	entries: readonly QueuedTaskPromptDeliveryEntry[],
 	cap: number,
 ): QueuedTaskPromptDeliveryEntry[] {
-	if (entries.length <= cap) {
+	// 退役自动消息只读保留：不占上限，也不进入可删除集合，避免把普通终态历史挤掉。
+	const countableEntries = entries.filter((entry) => !isRetiredRvfAutomaticQueuedDelivery(entry));
+	if (countableEntries.length <= cap) {
 		return [...entries];
 	}
-	const terminalEntriesOldestFirst = entries
-		.filter(
-			(entry) =>
-				!isRetiredRvfAutomaticQueuedDelivery(entry) &&
-				!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
-		)
+	const terminalEntriesOldestFirst = countableEntries
+		.filter((entry) => !isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState))
 		.map((entry) => ({ queueEntryId: entry.queueEntryId, settledAt: entry.settledAt ?? entry.enqueuedAt }))
 		.sort((left, right) => left.settledAt - right.settledAt);
 	const droppedQueueEntryIds = new Set(
-		terminalEntriesOldestFirst.slice(0, entries.length - cap).map((candidate) => candidate.queueEntryId),
+		terminalEntriesOldestFirst.slice(0, countableEntries.length - cap).map((candidate) => candidate.queueEntryId),
 	);
 	return entries.filter((entry) => !droppedQueueEntryIds.has(entry.queueEntryId));
 }
@@ -401,8 +399,11 @@ export function withExpiredAndOverflowingEntriesPruned(
 				...withOldestTerminalEntriesDroppedDownToCap(
 					immediateEntries,
 					MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK +
-						immediateEntries.filter((entry) => isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState))
-							.length,
+						immediateEntries.filter(
+							(entry) =>
+								!isRetiredRvfAutomaticQueuedDelivery(entry) &&
+								isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
+						).length,
 				),
 			].map((entry) => entry.queueEntryId),
 		);
@@ -410,14 +411,18 @@ export function withExpiredAndOverflowingEntriesPruned(
 		if (cappedForTask.length === 0) {
 			continue;
 		}
-		retainedWorkspaceEntryCount += cappedForTask.filter(isManagedTaskPromptDeliveryScheduledAfterAgentTurn).length;
+		retainedWorkspaceEntryCount += cappedForTask.filter(
+			(entry) =>
+				!isRetiredRvfAutomaticQueuedDelivery(entry) && isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry),
+		).length;
 		entriesByTaskId[taskId] = cappedForTask;
 	}
 	const allEntries = Object.values(entriesByTaskId).flat();
+	// 即时终态仍是「非等待回合且已终态」。退役历史不在此列，也不能代替这组上限。
 	const immediateTerminalEntries = allEntries.filter(
 		(entry) =>
-			!!isRetiredRvfAutomaticQueuedDelivery(entry) &&
-			isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
+			!isRetiredRvfAutomaticQueuedDelivery(entry) &&
+			!isManagedTaskPromptDeliveryScheduledAfterAgentTurn(entry) &&
 			!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState),
 	);
 	if (

@@ -776,8 +776,21 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 		);
 		const historyUnknown = issues.length > 0 || runs.some((run) => run.completionStatus === "unknown");
 		const covered = completed.find((run) => run.currentCandidateReviewCoverage.status === "covered");
+		// 每轮覆盖固定为「历史不核验当前候选」。这是政策 unknown，不能当成缺证后可恢复。
+		const completedRunsDoNotAttestCurrentCandidate =
+			completed.length > 0 &&
+			completed.every(
+				(run) =>
+					run.currentCandidateReviewCoverage.status === "unknown" &&
+					run.currentCandidateReviewCoverage.reasonCode === "historical_records_do_not_attest_current_candidate",
+			);
 		const coverageUnknown =
-			historyUnknown || completed.some((run) => run.currentCandidateReviewCoverage.status === "unknown");
+			historyUnknown ||
+			completed.some(
+				(run) =>
+					run.currentCandidateReviewCoverage.status === "unknown" &&
+					run.currentCandidateReviewCoverage.reasonCode !== "historical_records_do_not_attest_current_candidate",
+			);
 		let offset = 0;
 		if (input.cursor) {
 			const cursor = z
@@ -810,10 +823,16 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 				status: "unknown",
 				reasonCode: coverageUnknown
 					? "coverage_evidence_incomplete"
-					: completed.length
-						? "candidate_not_covered_by_completed_runs"
-						: "no_verified_completed_rvf",
-				recoveryCondition: coverageUnknown ? "缺失证据或查询能力恢复后重新查询" : null,
+					: completedRunsDoNotAttestCurrentCandidate
+						? "historical_records_do_not_attest_current_candidate"
+						: completed.length
+							? "candidate_not_covered_by_completed_runs"
+							: "no_verified_completed_rvf",
+				recoveryCondition: coverageUnknown
+					? "缺失证据或查询能力恢复后重新查询"
+					: completedRunsDoNotAttestCurrentCandidate
+						? "当前候选评审由独立评审流程提供，不从历史记录推定"
+						: null,
 			},
 			recentRuns,
 			nextCursor:

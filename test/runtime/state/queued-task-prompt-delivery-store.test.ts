@@ -48,6 +48,7 @@ const {
 	settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart,
 	settleQueuedTaskPromptDelivery,
 	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
+	withExpiredAndOverflowingEntriesPruned,
 } = await import("../../../src/state/queued-task-prompt-delivery-store");
 
 const WORKSPACE_ID = "workspace-alpha";
@@ -532,6 +533,94 @@ describe("queued-task-prompt-delivery-store — 过期与上限裁剪", () => {
 		expect(next.entriesByTaskId["task-live"].map((entry) => entry.queueEntryId)).toEqual(["live-1", "live-2"]);
 		// 最老的终态先走：task-0 的那批必然先被裁。
 		expect(next.entriesByTaskId["task-0"] ?? []).toHaveLength(0);
+	});
+
+	it("退役 RVF 终态不占上限也不被删除，普通即时终态仍受 workspace 200 条约束", () => {
+		const template = seedSnapshot([{ queueEntryId: "seed", text: "x" }]).entriesByTaskId[TASK_ID][0];
+		const retiredEntry = (
+			taskId: string,
+			queueEntryId: string,
+			settledAt: number,
+		): QueuedTaskPromptDeliveryEntry => ({
+			...template,
+			taskId,
+			queueEntryId,
+			deliveryState: "settled_delivered",
+			settledAt,
+			programmaticInjectionLedgerReceiptLink: {
+				injectionLedgerIdempotencyKey: queueEntryId,
+				injectionSource: "rvf_automatic_closeout",
+				settledTerminalDeliveryReceipt: null,
+			},
+		});
+		const retired = Array.from({ length: 205 }, (_unused, index) =>
+			retiredEntry("retired-task", `retired-${index}`, NOW + index),
+		);
+		const ordinary = Array.from({ length: 5 }, (_unused, index) => ({
+			...template,
+			taskId: "ordinary-task",
+			queueEntryId: `ordinary-${index}`,
+			deliveryState: "settled_delivered" as const,
+			settledAt: NOW + 10_000 + index,
+		}));
+		const kept = withExpiredAndOverflowingEntriesPruned(
+			{ entriesByTaskId: { "retired-task": retired, "ordinary-task": ordinary } },
+			NOW + 20_000,
+		);
+		expect(kept.entriesByTaskId["retired-task"]).toHaveLength(205);
+		expect(kept.entriesByTaskId["ordinary-task"]?.map((entry) => entry.queueEntryId)).toEqual(
+			ordinary.map((entry) => entry.queueEntryId),
+		);
+
+		const crowdedRetired = Array.from({ length: 25 }, (_unused, index) =>
+			retiredEntry("crowded", `crowded-retired-${index}`, NOW + index),
+		);
+		const crowdedOrdinary = Array.from({ length: 25 }, (_unused, index) => ({
+			...template,
+			taskId: "crowded",
+			queueEntryId: `crowded-${index}`,
+			deliveryState: "settled_delivered" as const,
+			settledAt: NOW + 1_000 + index,
+		}));
+		const perTask = withExpiredAndOverflowingEntriesPruned(
+			{ entriesByTaskId: { crowded: [...crowdedRetired, ...crowdedOrdinary] } },
+			NOW + 2_000,
+		);
+		const perTaskIds = (perTask.entriesByTaskId.crowded ?? []).map((entry) => entry.queueEntryId);
+		expect(perTaskIds.filter((id) => id.startsWith("crowded-retired-"))).toHaveLength(25);
+		expect(perTaskIds.filter((id) => /^crowded-\d+$/u.test(id))).toHaveLength(
+			MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK,
+		);
+		expect(perTaskIds).not.toContain("crowded-0");
+		expect(perTaskIds).toContain(`crowded-${MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK + 4}`);
+
+		const immediateByTask: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
+		for (let taskIndex = 0; taskIndex < 15; taskIndex += 1) {
+			immediateByTask[`immediate-${taskIndex}`] = Array.from({ length: 20 }, (_unused, entryIndex) => ({
+				...template,
+				taskId: `immediate-${taskIndex}`,
+				queueEntryId: `i${taskIndex}-e${entryIndex}`,
+				deliveryState: "settled_delivered" as const,
+				settledAt: NOW + taskIndex * 100 + entryIndex,
+				managedDelivery: {
+					messageType: "human_message" as const,
+					deliveryStrategy: "immediate" as const,
+					sourceLabel: null,
+					imageAttachmentCount: 0,
+					terminalDeliveryReceipt: null,
+				},
+			}));
+		}
+		const immediatePruned = withExpiredAndOverflowingEntriesPruned(
+			{ entriesByTaskId: immediateByTask },
+			NOW + 20_000,
+		);
+		const immediateRetained = Object.values(immediatePruned.entriesByTaskId).reduce(
+			(sum, list) => sum + list.length,
+			0,
+		);
+		expect(immediateRetained).toBe(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE);
+		expect(immediatePruned.entriesByTaskId["immediate-0"] ?? []).toHaveLength(0);
 	});
 });
 
