@@ -8,6 +8,7 @@ import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
 import { getCodexConfigurationSyncDirectory } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { codexConfigurationWriterBindingSchema } from "../core/codex-configuration-sync-contract";
+import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import { resolveCodexPersistentDirectoryIdentity } from "./codex-persistent-directory-identity";
 import { preserveCodexHookTrustDuringConfigurationRefresh } from "./preserve-codex-hook-trust-during-configuration-refresh";
@@ -291,9 +292,12 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 				configurationFileName,
 				relocatedHookSourceFilePaths,
 			});
-		await writeFile(sourceMarkerPath, JSON.stringify({ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) }), {
-			mode: 0o600,
-		});
+		// 原子发布避免并发 reader 读到截断正文；同内容重试仍须补齐文件与父目录 fsync。
+		await lockedFileSystem.writeJsonFileAtomic(
+			sourceMarkerPath,
+			{ sourceHomeDirectoryPath: resolve(sourceHomeDirectoryPath) },
+			{ lock: null, durable: true, fileMode: 0o600 },
+		);
 		return target;
 	} finally {
 		await release();
