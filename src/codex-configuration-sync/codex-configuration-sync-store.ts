@@ -6,12 +6,15 @@ import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
 	type CodexConfigurationPropagationTarget,
+	type CodexConfigurationSourceObservation,
 	type CodexConfigurationWriterBinding,
 	codexConfigurationPropagationTargetSchema,
+	codexConfigurationSourceObservationSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
+import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
 
 export interface StoredCodexConfigurationWriter {
 	binding: CodexConfigurationWriterBinding;
@@ -41,7 +44,12 @@ export interface StoredCodexConfigurationChange {
 	value?: CodexConfigurationFieldValue;
 	sharedValueAtConflict?: CodexConfigurationFieldValue;
 	observedAt: number;
+	recordKind?: "settings_proposal" | "source_observation" | "historical_record";
+	approvalStatus?: "pending" | "approved" | "rejected" | "historical" | "not_required";
+	decidedAt?: number | null;
+	sharedValueAtProposal?: CodexConfigurationFieldValue;
 	mergeStatus:
+		| "pending_approval"
 		| "shared_default_updated"
 		| "conflict"
 		| "kept_shared_value"
@@ -59,12 +67,19 @@ export interface StoredCodexConfigurationChange {
 		}
 	>;
 }
+export interface StoredCodexConfigurationSourceObservation extends CodexConfigurationSourceObservation {
+	sourceIdentity: string;
+	sourceKey: string;
+	rawChangeIds: string[];
+	detectedWriterIds: string[];
+}
 export interface CodexConfigurationSyncStore {
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
 	revision: number;
 	sources: Record<string, StoredCodexConfigurationSource>;
 	writers: Record<string, StoredCodexConfigurationWriter>;
 	changes: StoredCodexConfigurationChange[];
+	sourceObservations: StoredCodexConfigurationSourceObservation[];
 	mutationReceipts: Record<string, { requestDigest: string; changeId: string }>;
 	observationProblem: string | null;
 }
@@ -72,7 +87,7 @@ export interface CodexConfigurationSyncStore {
 const fieldSchema = z.object({ value: z.unknown(), definitionDigest: z.string().optional() });
 const fieldsSchema = z.record(z.string(), fieldSchema);
 const storeSchema = z.object({
-	schemaVersion: z.literal(1),
+	schemaVersion: z.union([z.literal(1), z.literal(2)]),
 	revision: z.number().int().nonnegative(),
 	sources: z.record(
 		z.string(),
@@ -104,7 +119,12 @@ const storeSchema = z.object({
 			value: fieldSchema.optional(),
 			sharedValueAtConflict: fieldSchema.optional(),
 			observedAt: z.number(),
+			recordKind: z.enum(["settings_proposal", "source_observation", "historical_record"]).optional(),
+			approvalStatus: z.enum(["pending", "approved", "rejected", "historical", "not_required"]).optional(),
+			decidedAt: z.number().nullable().optional(),
+			sharedValueAtProposal: fieldSchema.optional(),
 			mergeStatus: z.enum([
+				"pending_approval",
 				"shared_default_updated",
 				"conflict",
 				"kept_shared_value",
@@ -132,6 +152,16 @@ const storeSchema = z.object({
 			),
 		}),
 	),
+	sourceObservations: z
+		.array(
+			codexConfigurationSourceObservationSchema.extend({
+				sourceIdentity: z.string(),
+				sourceKey: z.string(),
+				rawChangeIds: z.array(z.string()),
+				detectedWriterIds: z.array(z.string()),
+			}),
+		)
+		.default([]),
 	mutationReceipts: z.record(z.string(), z.object({ requestDigest: z.string(), changeId: z.string() })),
 	observationProblem: z.string().nullable(),
 });
@@ -140,19 +170,22 @@ export const getCodexConfigurationSyncDirectory = () =>
 
 export async function readCodexConfigurationSyncStore(): Promise<CodexConfigurationSyncStore> {
 	try {
-		return storeSchema.parse(
+		const store = storeSchema.parse(
 			JSON.parse(
 				await readFile(join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json"), "utf8"),
 			),
 		);
+		migrateCodexConfigurationApprovalRecords(store);
+		return store;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		return {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			revision: 0,
 			sources: {},
 			writers: {},
 			changes: [],
+			sourceObservations: [],
 			mutationReceipts: {},
 			observationProblem: null,
 		};

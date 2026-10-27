@@ -15,7 +15,11 @@ import {
 	type OwnedCodexNativeSessionControlHostDirectory,
 	removeOwnedCodexNativeSessionControlHostDirectories,
 } from "./codex-native-session-control-host-launch-specification";
-import { prepareCodexRemoteConversationLaunchPlan } from "./codex-remote-conversation-launch-plan";
+import {
+	isCodexPermissionConfigurationOverrideArgument,
+	prepareCodexRemoteConversationLaunchPlan,
+	resolveCodexPermissionDefaultsForOwnedAppServer,
+} from "./codex-remote-conversation-launch-plan";
 
 const execFileAsync = promisify(execFile);
 const FAILED_CODEX_CONTROL_HOST_CAPABILITY_PROBE_RETRY_DELAY_MS = 30_000;
@@ -25,7 +29,7 @@ interface CachedCodexControlHostCapabilityProbe {
 }
 const capabilityProbes = new Map<string, CachedCodexControlHostCapabilityProbe>();
 
-// 新建会话只复制配置层；恢复/fork 的权限由后续启动计划交给原生 RPC。
+// 新建与恢复/fork 共用宿主权限默认；显式会话权限仍交给原生 TUI/RPC。
 export function inspectCodexNativeSessionControlHostArguments(arguments_: readonly string[]) {
 	const appServerRootArguments: string[] = [];
 	for (let index = 0; index < arguments_.length; index += 1) {
@@ -46,10 +50,14 @@ export function inspectCodexNativeSessionControlHostArguments(arguments_: readon
 		if (["-c", "--config", "--enable", "--disable"].includes(argument)) {
 			const value = arguments_[++index];
 			if (value === undefined) throw new Error(`Codex ${argument} 缺少值。`);
-			appServerRootArguments.push(argument, value);
+			if (!["-c", "--config"].includes(argument) || !isCodexPermissionConfigurationOverrideArgument(value))
+				appServerRootArguments.push(argument, value);
+		} else if (argument.startsWith("--config=") || (argument.startsWith("-c") && argument.length > 2)) {
+			const value = argument.startsWith("--config=")
+				? argument.slice("--config=".length)
+				: argument.slice("-c".length).replace(/^=/u, "");
+			if (!isCodexPermissionConfigurationOverrideArgument(value)) appServerRootArguments.push(argument);
 		} else if (
-			argument.startsWith("--config=") ||
-			(argument.startsWith("-c") && argument.length > 2) ||
 			argument.startsWith("--enable=") ||
 			argument.startsWith("--disable=") ||
 			argument === "--strict-config"
@@ -59,7 +67,14 @@ export function inspectCodexNativeSessionControlHostArguments(arguments_: readon
 			index += 1;
 		}
 	}
-	return { managesOwnHost: true, appServerRootArguments };
+	const permissionDefaults = resolveCodexPermissionDefaultsForOwnedAppServer(arguments_);
+	return {
+		managesOwnHost: permissionDefaults.supportsSelectedApprovalPolicyAsAppServerDefault,
+		...(permissionDefaults.supportsSelectedApprovalPolicyAsAppServerDefault
+			? {}
+			: { unsupportedAppServerDefaultApprovalPolicy: "untrusted" as const }),
+		appServerRootArguments: [...appServerRootArguments, ...permissionDefaults.appServerRootArguments],
+	};
 }
 
 async function supportsCodexUnixControlHost(binary: string, environment: NodeJS.ProcessEnv) {
@@ -110,6 +125,10 @@ export async function prepareCodexNativeSessionControlHostLaunch(input: {
 	runtimeSessionIncarnationId: string;
 }): Promise<PreparedCodexNativeSessionControlHostLaunch | null> {
 	const inspected = inspectCodexNativeSessionControlHostArguments(input.arguments);
+	if ("unsupportedAppServerDefaultApprovalPolicy" in inspected)
+		throw new Error(
+			"当前 Codex 无法为受管宿主提供 untrusted 默认审批策略，已拒绝启动，避免新 thread 继承更宽松的全局权限。",
+		);
 	if (
 		process.platform === "win32" ||
 		!inspected.managesOwnHost ||

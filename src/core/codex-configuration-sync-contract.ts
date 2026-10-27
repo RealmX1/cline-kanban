@@ -47,7 +47,12 @@ export const codexConfigurationChangeSchema = z.object({
 	previousValueSummary: z.string(),
 	valueSummary: z.string(),
 	observedAt: z.number(),
+	recordKind: z.enum(["settings_proposal", "source_observation", "historical_record"]),
+	approvalStatus: z.enum(["pending", "approved", "rejected", "historical", "not_required"]),
+	decidedAt: z.number().nullable(),
+	settingDifferences: z.array(z.object({ label: z.string(), previous: z.string(), current: z.string() })),
 	mergeStatus: z.enum([
+		"pending_approval",
 		"shared_default_updated",
 		"conflict",
 		"kept_shared_value",
@@ -59,10 +64,32 @@ export const codexConfigurationChangeSchema = z.object({
 	eligibleTargetCount: z.number().int().nonnegative(),
 	targets: z.array(codexConfigurationPropagationTargetSchema),
 });
+export const codexConfigurationSourceObservationSchema = z.object({
+	observationId: z.string(),
+	version: z.number().int().positive(),
+	sourceLabel: z.string(),
+	firstObservedAt: z.number(),
+	observedAt: z.number(),
+	observationCount: z.number().int().positive(),
+	detectedLocationCount: z.number().int().positive(),
+	acknowledgedAt: z.number().nullable(),
+	reminderDisposition: z.enum(["unread", "confirmed", "deferred"]),
+	detectedLocations: z.array(z.object({ workspaceId: z.string(), conversationSessionId: z.string() })).optional(),
+});
+export type CodexConfigurationSourceObservation = z.infer<typeof codexConfigurationSourceObservationSchema>;
 export const codexConfigurationSyncStateSchema = z.object({
 	revision: z.number().int().nonnegative(),
 	changes: z.array(codexConfigurationChangeSchema),
+	sourceObservations: z.array(codexConfigurationSourceObservationSchema),
 	observationProblem: z.string().nullable(),
+	diagnosticCoverage: z
+		.object({
+			fileObservation: z.enum(["starting", "active"]),
+			targetCount: z.number(),
+			coverageGapCount: z.number(),
+			systemWriterEvidence: z.literal("not_collected_by_runtime"),
+		})
+		.optional(),
 });
 export type CodexConfigurationSyncState = z.infer<typeof codexConfigurationSyncStateSchema>;
 export type CodexConfigurationChange = z.infer<typeof codexConfigurationChangeSchema>;
@@ -72,6 +99,38 @@ export const codexConfigurationChangeMutationRequestSchema = z.object({
 	expectedVersion: z.number().int().positive(),
 	idempotencyKey: z.string().min(1).max(200),
 });
+export const codexConfigurationBatchActionRequestSchema = z.object({
+	action: z.enum(["approve", "reject", "defer", "confirm_source"]),
+	items: z
+		.array(
+			codexConfigurationChangeMutationRequestSchema.extend({
+				entryKind: z.enum(["settings_proposal", "source_observation"]),
+			}),
+		)
+		.min(1)
+		.max(200),
+});
+export type CodexConfigurationBatchActionRequest = z.infer<typeof codexConfigurationBatchActionRequestSchema>;
+export const codexConfigurationBatchActionResultSchema = z.object({
+	results: z.array(
+		z.object({
+			changeId: z.string(),
+			status: z.enum([
+				"applied",
+				"replayed",
+				"stale_version",
+				"conflict",
+				"source_unverifiable",
+				"not_found",
+				"not_approvable",
+				"idempotency_conflict",
+			]),
+			message: z.string(),
+		}),
+	),
+	state: codexConfigurationSyncStateSchema,
+});
+export type CodexConfigurationBatchActionResult = z.infer<typeof codexConfigurationBatchActionResultSchema>;
 export const codexConfigurationSynchronizeRequestSchema = codexConfigurationChangeMutationRequestSchema.extend({
 	synchronizeExistingSessions: z.boolean().default(false),
 });
@@ -93,6 +152,7 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
 	getState: () => Promise<CodexConfigurationSyncState>;
+	batchAction: (input: CodexConfigurationBatchActionRequest) => Promise<CodexConfigurationBatchActionResult>;
 	synchronize: (input: CodexConfigurationSynchronizeRequest) => Promise<CodexConfigurationSyncState>;
 	resolveConflict: (input: CodexConfigurationResolveConflictRequest) => Promise<CodexConfigurationSyncState>;
 	resolveTargetConflict: (

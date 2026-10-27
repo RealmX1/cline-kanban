@@ -5,7 +5,7 @@ import {
 } from "../../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 
 describe("Codex 独享控制宿主的配置与原生 argv 边界", () => {
-	it("只向 server 复制配置层，保留模型/权限和 resume 的原生语义", () => {
+	it("宿主默认与会话请求共同保持选择的权限，保留模型和 resume 的原生语义", () => {
 		const arguments_ = [
 			"-c",
 			"hooks.UserPromptSubmit=[]",
@@ -30,6 +30,10 @@ describe("Codex 独享控制宿主的配置与原生 argv 边界", () => {
 				'--config=developer_instructions="原始逐字指令"',
 				"--enable",
 				"hooks",
+				"-c",
+				'sandbox_mode="read-only"',
+				"-c",
+				'approval_policy="never"',
 			],
 		});
 		expect(arguments_).toEqual(original);

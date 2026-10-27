@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { type CodexConfigurationFields, sameConfigurationField } from "./codex-configuration-field-projection";
+import {
+	hasOnlyCodexConfigurationDefinitionChange,
+	recordCodexConfigurationSourceObservation,
+} from "./codex-configuration-observation-records";
 import type { CodexConfigurationSyncStore, StoredCodexConfigurationWriter } from "./codex-configuration-sync-store";
 
 export function mergeObservedCodexConfigurationWriter(
@@ -17,7 +21,7 @@ export function mergeObservedCodexConfigurationWriter(
 		const shared = source.fields[fieldKey];
 		const conflict = !sameConfigurationField(shared, baseline) && !sameConfigurationField(shared, value);
 		store.revision++;
-		store.changes.push({
+		const change = {
 			changeId: randomUUID(),
 			version: store.revision,
 			sourceWriterId: writer.binding.writerId,
@@ -25,24 +29,22 @@ export function mergeObservedCodexConfigurationWriter(
 			fieldKey,
 			previous: writer.lastObservedFields[fieldKey],
 			value,
+			sharedValueAtProposal: shared,
 			sharedValueAtConflict: conflict ? shared : undefined,
 			observedAt: Date.now(),
-			mergeStatus: conflict ? "conflict" : "shared_default_updated",
+			mergeStatus: conflict ? ("conflict" as const) : ("pending_approval" as const),
+			recordKind: "settings_proposal" as const,
+			approvalStatus: "pending" as const,
+			decidedAt: null,
 			acknowledgedAt: null,
 			targets: [],
-		});
-		if (!conflict) {
-			if (value === undefined) delete source.fields[fieldKey];
-			else source.fields[fieldKey] = value;
-			source.version = store.revision;
-			if (value === undefined) delete writer.mergeBaselineFields[fieldKey];
-			else writer.mergeBaselineFields[fieldKey] = value;
-		}
+		};
+		registerObservedChange(store, change);
 	}
 	writer.lastObservedFields = observed;
 }
 
-// 用户全局文件仍由用户自己的 Codex 管理；这里只吸收没有与内部明确决定冲突的来源变化。
+// 全局来源也只登记提案；已有默认值必须等看板审批，绝不写回全局文件。
 export function reconcileCodexConfigurationUserSourceFields(
 	store: CodexConfigurationSyncStore,
 	sourceIdentity: string,
@@ -57,7 +59,7 @@ export function reconcileCodexConfigurationUserSourceFields(
 			!sameConfigurationField(shared, source.observedUserFields[key]) &&
 			!sameConfigurationField(shared, current[key]);
 		store.revision++;
-		store.changes.push({
+		const change = {
 			changeId: randomUUID(),
 			version: store.revision,
 			sourceWriterId: `user-source:${sourceIdentity}`,
@@ -65,17 +67,29 @@ export function reconcileCodexConfigurationUserSourceFields(
 			fieldKey: key,
 			previous: source.observedUserFields[key],
 			value: current[key],
+			sharedValueAtProposal: shared,
 			sharedValueAtConflict: conflict ? shared : undefined,
-			mergeStatus: conflict ? "conflict" : "shared_default_updated",
+			mergeStatus: conflict ? ("conflict" as const) : ("pending_approval" as const),
+			recordKind: "settings_proposal" as const,
+			approvalStatus: "pending" as const,
+			decidedAt: null,
 			observedAt: Date.now(),
 			acknowledgedAt: null,
 			targets: [],
-		});
-		if (!conflict) {
-			if (current[key] === undefined) delete source.fields[key];
-			else source.fields[key] = current[key];
-			source.version = store.revision;
-		}
+		};
+		registerObservedChange(store, change);
 	}
 	source.observedUserFields = current;
+}
+
+function registerObservedChange(
+	store: CodexConfigurationSyncStore,
+	change: CodexConfigurationSyncStore["changes"][number],
+) {
+	if (hasOnlyCodexConfigurationDefinitionChange(change)) {
+		change.recordKind = "source_observation";
+		change.approvalStatus = "not_required";
+		recordCodexConfigurationSourceObservation(store, change);
+	}
+	store.changes.push(change);
 }

@@ -42,6 +42,8 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 			const codexHome = join(fixture.fixtureRootDirectoryPath, "codex-home");
 			await mkdir(codexHome);
+			vi.stubEnv("CODEX_HOME", codexHome);
+			vi.stubEnv("CODEX_SQLITE_HOME", codexHome);
 			const hookObservationsPath = join(fixture.fixtureRootDirectoryPath, "native-hook-observations.jsonl");
 			const hook = join(fixture.fixtureRootDirectoryPath, "record-native-hook.cjs");
 			await writeFile(
@@ -182,11 +184,12 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 			if (!address || typeof address === "string") throw new Error("隔离模型端口分配失败");
 			await writeFile(
 				join(codexHome, "config.toml"),
-				`model="gpt-5.4"\nmodel_provider="isolated_loopback"\ncheck_for_update_on_startup=false\n[features]\nhooks=true\n[model_providers.isolated_loopback]\nname="隔离回环模型"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[projects.${JSON.stringify(repository.repositoryPath)}]\ntrust_level="trusted"\n`,
+				`model="gpt-5.4"\nmodel_provider="isolated_loopback"\napproval_policy="never"\nsandbox_mode="danger-full-access"\ncheck_for_update_on_startup=false\n[features]\nhooks=true\n[model_providers.isolated_loopback]\nname="隔离回环模型"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[projects.${JSON.stringify(repository.repositoryPath)}]\ntrust_level="trusted"\n`,
 			);
 			const start = async (taskId: string, arguments_: string[]) => {
 				const environment = fixture.createIsolatedChildProcessEnvironment({
 					CODEX_HOME: codexHome,
+					CODEX_SQLITE_HOME: codexHome,
 					TERM: "xterm-256color",
 					KANBAN_TASK_ID: taskId,
 				});
@@ -256,10 +259,12 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 			if (!sourceId) throw new Error("原生 hook 未记录源会话身份");
 			await stopHost(original);
 			nativeHosts.splice(nativeHosts.indexOf(original), 1);
+			await expect(
+				start("native-untrusted-rejected", ["-a", "untrusted", "-s", "read-only", "resume", "--last"]),
+			).rejects.toThrow("无法为受管宿主提供 untrusted 默认审批策略");
 			const additionalWritableDirectory = join(fixture.fixtureRootDirectoryPath, "additional-writable-directory");
 			await mkdir(additionalWritableDirectory);
 			for (const [approvalPolicy, sandbox, effectiveSandboxType] of [
-				["untrusted", "read-only", "readOnly"],
 				["on-request", "workspace-write", "workspaceWrite"],
 			] as const) {
 				const restricted = await start(`native-${approvalPolicy}`, [
@@ -313,6 +318,40 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 			);
 			expect(await readFile(join(repository.repositoryPath, "resumed-tool.txt"), "utf8")).toBe(
 				"NATIVE_TOOL_SUCCESS",
+			);
+			const resumedReceipt = JSON.parse(await readFile(receiptPath, "utf8")) as { nativeTranscriptPath: string };
+			const resumedTurnContexts = (await readFile(resumedReceipt.nativeTranscriptPath, "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { type: string; payload: unknown })
+				.filter((row) => row.type === "turn_context");
+			expect(resumedTurnContexts.at(-1)?.payload).toMatchObject({
+				approval_policy: "never",
+				sandbox_policy: { type: "danger-full-access" },
+			});
+			await withRunningCodexAppServerControlSocketConnection(
+				async (port) => {
+					// 逐 thread RPC 的兼容能力不能代替宿主为未来新 thread 提供默认值的资格。
+					const explicitLegacyPolicyThread = await port.request("thread/start", {
+						cwd: repository.repositoryPath,
+						ephemeral: true,
+						approvalPolicy: "untrusted",
+						sandbox: "read-only",
+					});
+					expect(explicitLegacyPolicyThread).toMatchObject({
+						approvalPolicy: "untrusted",
+						sandbox: { type: "readOnly" },
+					});
+					const freshImplementationThread = await port.request("thread/start", {
+						cwd: repository.repositoryPath,
+						ephemeral: true,
+					});
+					expect(freshImplementationThread).toMatchObject({
+						approvalPolicy: "never",
+						sandbox: { type: "dangerFullAccess" },
+					});
+				},
+				{ socketPath: resumed.launch.endpoint.socketPath },
 			);
 			const forked = await start("native-read-only-fork", [
 				"--sandbox",

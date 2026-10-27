@@ -40,7 +40,12 @@ describe("Codex 远程恢复的原生权限与 TUI 参数分流", () => {
 				nativeThreadRequestOverrides: { sandbox: "read-only", approvalPolicy: "never" },
 			});
 			expect(plan.tuiArgumentsWithoutSessionSelection).toEqual(optionArguments);
-			expect(plan.appServerRootArguments).toEqual([]);
+			expect(plan.appServerRootArguments).toEqual([
+				"-c",
+				'sandbox_mode="read-only"',
+				"-c",
+				'approval_policy="never"',
+			]);
 			expect(buildCodexRemoteConversationResumeTuiArguments(plan, "confirmed-id")).toEqual([
 				...optionArguments,
 				"resume",
@@ -110,7 +115,7 @@ describe("Codex 远程恢复的原生权限与 TUI 参数分流", () => {
 			"只回答这个问题",
 		]);
 	});
-	it("权限 TOML 覆盖只经 RPC 消费，保留严格 untrusted 与其他配置", () => {
+	it("权限 TOML 覆盖经 RPC 与受支持的宿主配置消费，保留严格 untrusted 与其他配置", () => {
 		const plan = prepareCodexRemoteConversationLaunchPlan(
 			[
 				"-capproval_policy='untrusted'",
@@ -129,7 +134,14 @@ describe("Codex 远程恢复的原生权限与 TUI 参数分流", () => {
 			selectsLatestConversation: true,
 			includeNonInteractiveConversations: true,
 			nativeThreadRequestOverrides: { approvalPolicy: "untrusted", sandbox: "read-only" },
-			appServerRootArguments: ["-c", 'model_reasoning_effort="high"'],
+			appServerRootArguments: [
+				"-c",
+				'model_reasoning_effort="high"',
+				"-c",
+				'sandbox_mode="read-only"',
+				"-c",
+				'sandbox_workspace_write.writable_roots=["/extra"]',
+			],
 		});
 		if (!plan) throw new Error("应生成最近会话恢复计划");
 		expect(buildCodexRemoteConversationResumeTuiArguments(plan, "selected-id")).toEqual([
@@ -139,7 +151,7 @@ describe("Codex 远程恢复的原生权限与 TUI 参数分流", () => {
 			"selected-id",
 		]);
 	});
-	it.each(["resume", "fork"])("%s 的旧版合法权限配置按原生兼容语义规范化，且不转发给 TUI", (operation) => {
+	it.each(["resume", "fork"])("%s 的旧版合法权限配置按原生兼容语义规范化，且同步受支持的宿主默认", (operation) => {
 		for (const [configuration, expectedOverrides] of [
 			['approval_policy="on-failure"', { approvalPolicy: "on-request" }],
 			['approvals_reviewer="guardian_subagent"', { approvalsReviewer: "auto_review" }],
@@ -147,7 +159,11 @@ describe("Codex 远程恢复的原生权限与 TUI 参数分流", () => {
 			const plan = prepareCodexRemoteConversationLaunchPlan(["-c", configuration, operation, "source-id"], "/work");
 			if (!plan) throw new Error("应生成原生恢复或分叉计划");
 			expect(plan.nativeThreadRequestOverrides).toEqual(expectedOverrides);
-			expect(plan.appServerRootArguments).toEqual([]);
+			expect(plan.appServerRootArguments).toEqual(
+				configuration.startsWith("approval_policy")
+					? ["-c", 'approval_policy="on-request"']
+					: ["-c", 'approvals_reviewer="auto_review"'],
+			);
 			expect(buildCodexRemoteConversationResumeTuiArguments(plan, "confirmed-id")).toEqual([
 				"resume",
 				"confirmed-id",

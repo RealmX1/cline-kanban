@@ -22,6 +22,7 @@ import {
 import {
 	configurationDigest,
 	configurationFieldAddress,
+	configurationTable,
 	projectCodexConfigurationFields,
 	relocateCodexHookStateSourcePaths,
 	sameConfigurationField,
@@ -358,7 +359,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			previousFields: previous?.lastObservedFields ?? store.sources[sourceIdentity].fields,
 			onHookDefinitionObservationProblem,
 		});
-		// 来源相同但定义已变时丢弃共享的信任记录，让原生审查重新决定。
+		// 定义变化时移除过期信任；明确禁用仍保留，避免原生缺省重新启用。
 		for (const [fieldKey, field] of Object.entries(store.sources[sourceIdentity].fields)) {
 			if (
 				!field.definitionDigest ||
@@ -371,7 +372,13 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			const filePath = join(configurationHome, address.fileName);
 			const configuration = parse(await readFile(filePath, "utf8"));
 			relocateCodexHookStateSourcePaths(configuration, await realpath(configurationHome), canonicalSourceHome);
-			setConfigurationField(configuration, address.keyPath, undefined);
+			setConfigurationField(
+				configuration,
+				address.keyPath,
+				configurationTable(field.value) && field.value.enabled === false
+					? { value: { enabled: false } }
+					: undefined,
+			);
 			relocateCodexHookStateSourcePaths(configuration, canonicalSourceHome, await realpath(configurationHome));
 			await writeFile(filePath, stringify(configuration), { mode: 0o600 });
 		}

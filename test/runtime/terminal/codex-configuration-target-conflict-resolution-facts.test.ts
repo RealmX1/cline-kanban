@@ -20,6 +20,7 @@ import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-c
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
 import type { CodexAppServerRequestPort } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixtureDirectory: ReturnType<typeof createTempDir>;
@@ -142,11 +143,13 @@ function createNativeOwnerHarness() {
 	return owner;
 }
 function createConfigurationService(owner: ReturnType<typeof createNativeOwnerHarness>) {
-	const service = createCodexConfigurationSyncService({
-		listSessions: () => sessionTargets,
-		onUpdated: () => {},
-		withOwnerConnection: owner.connect,
-	});
+	const service = withExplicitApprovalOfObservedCodexConfigurationProposals(
+		createCodexConfigurationSyncService({
+			listSessions: () => sessionTargets,
+			onUpdated: () => {},
+			withOwnerConnection: owner.connect,
+		}),
+	);
 	configurationServices.push(service);
 	return service;
 }

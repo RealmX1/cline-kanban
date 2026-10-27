@@ -1,12 +1,14 @@
 import type * as ChildProcess from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import type * as FileSystem from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import type * as OperatingSystem from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodexConfigurationSyncService } from "../../../src/codex-configuration-sync/codex-configuration-sync-service";
 import {
+	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
@@ -21,6 +23,14 @@ import {
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type * as PersistentDirectoryIdentityModule from "../../../src/codex-conversation-storage/codex-persistent-directory-identity";
 import { resolveCodexPersistentDirectoryIdentity } from "../../../src/codex-conversation-storage/codex-persistent-directory-identity";
+import {
+	recordKnownCodexConfigurationNativeRequest,
+	waitForCodexConfigurationRequestWriterOwnershipVerifications,
+} from "../../../src/diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
+import {
+	getDiagnosticEventJournalDirectoryPath,
+	waitForPendingDiagnosticEventJournalWrites,
+} from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { createTempDir } from "../../utilities/temp-dir";
 
 const remount = vi.hoisted(() => ({
@@ -34,6 +44,14 @@ const remount = vi.hoisted(() => ({
 	deviceNodeReadCount: 0,
 	replaceDeviceNodeOnRead: 0,
 	platform: "darwin",
+	secondaryVolumeRootPath: "",
+	secondaryVolumeDevice: 16780000n,
+	secondaryVolumeUuid: "47A26899-D62C-41D6-920C-460C5BF6DB5B",
+	volumeQueryOccurredWhileStoreLocked: false,
+	secondaryVolumeQueryFails: false,
+	secondaryVolumeQueryCount: 0,
+	deferSecondaryVolumeQueries: false,
+	pendingSecondaryVolumeQueryCallbacks: [] as Array<() => void>,
 }));
 vi.mock("node:os", async (original) => ({
 	...(await original<typeof OperatingSystem>()),
@@ -44,12 +62,13 @@ vi.mock("node:fs", async (original) => {
 	return {
 		...filesystem,
 		lstatSync: (...parameters: Parameters<typeof filesystem.lstatSync>) => {
-			if (parameters[0] === "/dev/fixture-disk") {
+			if (parameters[0] === "/dev/fixture-disk" || parameters[0] === "/dev/fixture-secondary-disk") {
 				remount.deviceNodeReadCount++;
 				if (remount.deviceNodeReadCount === remount.replaceDeviceNodeOnRead) remount.deviceNodeInode++;
 				const metadata = filesystem.lstatSync(sourceHome, { bigint: true });
 				const deviceNodeInode = remount.deviceNodeInode;
-				const deviceNodeNumber = remount.device;
+				const deviceNodeNumber =
+					parameters[0] === "/dev/fixture-secondary-disk" ? remount.secondaryVolumeDevice : remount.device;
 				return new Proxy(metadata, {
 					get: (target, key) => {
 						if (key === "isBlockDevice") return () => true;
@@ -62,7 +81,12 @@ vi.mock("node:fs", async (original) => {
 			const metadata = filesystem.lstatSync(...parameters);
 			if (!metadata || typeof metadata.dev !== "bigint") return metadata;
 			return new Proxy(metadata, {
-				get: (target, key) => (key === "dev" ? remount.device : Reflect.get(target, key)),
+				get: (target, key) =>
+					key === "dev"
+						? remount.secondaryVolumeRootPath && String(parameters[0]).startsWith(remount.secondaryVolumeRootPath)
+							? remount.secondaryVolumeDevice
+							: remount.device
+						: Reflect.get(target, key),
 			});
 		},
 	};
@@ -83,17 +107,31 @@ vi.mock("node:child_process", async (original) => {
 			}
 			if (["/bin/df", "/usr/sbin/diskutil"].includes(binary)) {
 				remount.volumeQueryCount++;
-				queueMicrotask(() => {
+				if (existsSync(`${getCodexConfigurationSyncDirectory()}.lock`))
+					remount.volumeQueryOccurredWhileStoreLocked = true;
+				const secondaryVolume =
+					arguments_.includes("/dev/fixture-secondary-disk") ||
+					Boolean(
+						remount.secondaryVolumeRootPath &&
+							String(arguments_.at(-1)).startsWith(remount.secondaryVolumeRootPath),
+					);
+				if (secondaryVolume) remount.secondaryVolumeQueryCount++;
+				const respond = () => {
 					if (binary === "/usr/sbin/diskutil" && remount.changeDeviceNodeDuringVolumeQuery)
 						remount.deviceNodeInode++;
 					callback(
-						remount.volumeQueryFails ? new Error("fixture-volume-query-unavailable") : null,
+						remount.volumeQueryFails || (secondaryVolume && remount.secondaryVolumeQueryFails)
+							? new Error("fixture-volume-query-unavailable")
+							: null,
 						binary === "/bin/df"
-							? "Filesystem Mounted on\n/dev/fixture-disk /fixture-mount\n"
-							: `<plist><dict><key>VolumeUUID</key><string>${remount.volumeUuid}</string></dict></plist>`,
+							? `Filesystem Mounted on\n${secondaryVolume ? "/dev/fixture-secondary-disk" : "/dev/fixture-disk"} /fixture-mount\n`
+							: `<plist><dict><key>VolumeUUID</key><string>${secondaryVolume ? remount.secondaryVolumeUuid : remount.volumeUuid}</string></dict></plist>`,
 						"",
 					);
-				});
+				};
+				if (secondaryVolume && remount.deferSecondaryVolumeQueries)
+					remount.pendingSecondaryVolumeQueryCallbacks.push(respond);
+				else queueMicrotask(respond);
 				return;
 			}
 			return childProcess.execFile(binary, arguments_, options, callback);
@@ -117,6 +155,13 @@ beforeEach(async () => {
 	remount.changeDeviceNodeDuringVolumeQuery = false;
 	remount.deviceNodeReadCount = 0;
 	remount.replaceDeviceNodeOnRead = 0;
+	remount.secondaryVolumeRootPath = "";
+	remount.secondaryVolumeDevice += 32n;
+	remount.volumeQueryOccurredWhileStoreLocked = false;
+	remount.secondaryVolumeQueryFails = false;
+	remount.secondaryVolumeQueryCount = 0;
+	remount.deferSecondaryVolumeQueries = false;
+	remount.pendingSecondaryVolumeQueryCallbacks = [];
 	sourceHome = join(fixture.path, ".codex");
 	await mkdir(sourceHome);
 	await writeFile(join(sourceHome, "config.toml"), 'model="fixture-model"\n');
@@ -138,6 +183,246 @@ const createWriter = () =>
 	});
 
 describe("Codex 目录跨设备号变化的持久身份", () => {
+	it("事务发出的诊断在独立上下文锁外补证，慢卷不会阻塞业务事务或可靠 writer", async () => {
+		remount.secondaryVolumeRootPath = join(fixture.path, "diagnostic-sqlite-on-secondary-volume");
+		await mkdir(remount.secondaryVolumeRootPath);
+		const binding = await prepareCodexConfigurationWriterBinding({
+			purpose: "native_session",
+			storageHome,
+			sqliteHome: remount.secondaryVolumeRootPath,
+			runtimeSessionIncarnationId: randomUUID(),
+		});
+		remount.secondaryVolumeDevice -= 4n;
+		remount.deferSecondaryVolumeQueries = true;
+		const requestId = randomUUID();
+		try {
+			await mutateCodexConfigurationSyncStore(() => {
+				recordKnownCodexConfigurationNativeRequest({
+					requestId,
+					method: "config/read",
+					purpose: "fixture-business-request",
+					writerBinding: binding,
+				});
+			});
+			await vi.waitFor(() => expect(remount.pendingSecondaryVolumeQueryCallbacks.length).toBeGreaterThan(0));
+			expect(existsSync(`${getCodexConfigurationSyncDirectory()}.lock`)).toBe(false);
+			expect((await createWriter()).sourceIdentity).toBe(binding.sourceIdentity);
+		} finally {
+			remount.deferSecondaryVolumeQueries = false;
+			for (const callback of remount.pendingSecondaryVolumeQueryCallbacks.splice(0)) callback();
+			await waitForCodexConfigurationRequestWriterOwnershipVerifications();
+			await waitForPendingDiagnosticEventJournalWrites();
+		}
+		const journal = await readFile(
+			join(getDiagnosticEventJournalDirectoryPath(), "codex-configuration-and-plugin-cache-initiator-trace.jsonl"),
+			"utf8",
+		);
+		expect(journal).toContain('"event":"native_request_writer_ownership_verified"');
+		expect(journal).toContain(requestId);
+	});
+	it("慢卷预取期间可靠来源仍可启动，批量审批不占着全局 store 锁等待系统查询", { timeout: 15000 }, async () => {
+		remount.secondaryVolumeRootPath = join(fixture.path, "slow-retired-sqlite-volume");
+		await mkdir(remount.secondaryVolumeRootPath);
+		const binding = await prepareCodexConfigurationWriterBinding({
+			purpose: "native_session",
+			storageHome,
+			sqliteHome: remount.secondaryVolumeRootPath,
+			runtimeSessionIncarnationId: randomUUID(),
+		});
+		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="slow-source-choice"\n');
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			const state = await service.getState();
+			const proposal = state.changes.find(
+				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
+			);
+			if (!proposal) throw new Error("缺少慢卷提案");
+			await mutateCodexConfigurationSyncStore((store) => {
+				store.writers[binding.writerId].retiredAt = Date.now();
+			});
+			remount.secondaryVolumeDevice -= 4n;
+			remount.deferSecondaryVolumeQueries = true;
+			const pendingApproval = service.batchAction({
+				action: "approve",
+				items: [
+					{
+						entryKind: "settings_proposal",
+						changeId: proposal.changeId,
+						expectedVersion: proposal.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			});
+			let result: Awaited<typeof pendingApproval>;
+			try {
+				await vi.waitFor(() => expect(remount.pendingSecondaryVolumeQueryCallbacks.length).toBeGreaterThan(0));
+				expect(existsSync(`${getCodexConfigurationSyncDirectory()}.lock`)).toBe(false);
+				const reliableWriter = await createWriter();
+				expect(reliableWriter.sourceIdentity).toBe(binding.sourceIdentity);
+				expect(remount.deferSecondaryVolumeQueries).toBe(true);
+			} finally {
+				remount.deferSecondaryVolumeQueries = false;
+				for (const callback of remount.pendingSecondaryVolumeQueryCallbacks.splice(0)) callback();
+				result = await pendingApproval;
+			}
+			expect(result.results[0]?.status).toBe("applied");
+		} finally {
+			await service.close();
+		}
+	});
+	it("source-only 提案只核验来源资格，退休 writer 的坏历史桥接和不可用 SQLite 卷不制造额外审批", async () => {
+		remount.secondaryVolumeRootPath = join(fixture.path, "unavailable-retired-sqlite-volume");
+		await mkdir(remount.secondaryVolumeRootPath);
+		const binding = await prepareCodexConfigurationWriterBinding({
+			purpose: "native_session",
+			storageHome,
+			sqliteHome: remount.secondaryVolumeRootPath,
+			runtimeSessionIncarnationId: randomUUID(),
+		});
+		await mutateCodexConfigurationSyncStore((store) => {
+			store.writers[binding.writerId].retiredAt = Date.now();
+		});
+		await rm(join(binding.configurationHomeDirectoryPath, "sessions"));
+		remount.secondaryVolumeDevice -= 4n;
+		remount.secondaryVolumeQueryFails = true;
+		const queriesBeforeSourceChange = remount.secondaryVolumeQueryCount;
+		await writeFile(join(sourceHome, "config.toml"), 'model="global-source-approved-choice"\n');
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			const state = await service.getState();
+			const proposal = state.changes.find(
+				(change) => change.sourceWriterId.startsWith("user-source:") && change.approvalStatus === "pending",
+			);
+			if (!proposal) throw new Error("缺少全局来源提案");
+			const result = await service.batchAction({
+				action: "approve",
+				items: [
+					{
+						entryKind: "settings_proposal",
+						changeId: proposal.changeId,
+						expectedVersion: proposal.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			});
+			expect(result.results[0]?.status).toBe("applied");
+			expect(result.state.sourceObservations).toHaveLength(0);
+			expect(remount.secondaryVolumeQueryCount).toBe(queriesBeforeSourceChange);
+			expect(
+				(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[
+					JSON.stringify(["config.toml", "model"])
+				].value,
+			).toBe("global-source-approved-choice");
+		} finally {
+			await service.close();
+		}
+	});
+	it("退休 writer 的独立 SQLite 卷变更在审批锁外补证，保留原来源和提案身份", async () => {
+		remount.secondaryVolumeRootPath = join(fixture.path, "retired-writer-sqlite-on-secondary-volume");
+		await mkdir(remount.secondaryVolumeRootPath);
+		const binding = await prepareCodexConfigurationWriterBinding({
+			purpose: "native_session",
+			storageHome,
+			sqliteHome: remount.secondaryVolumeRootPath,
+			workspaceId: "fixture-workspace",
+			conversationSessionId: "retired-source",
+			runtimeSessionIncarnationId: randomUUID(),
+		});
+		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="retired-local-choice"\n');
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			const state = await service.getState();
+			const proposal = state.changes.find(
+				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
+			);
+			if (!proposal) throw new Error("退休前缺少已观测的设置提案");
+			await mutateCodexConfigurationSyncStore((store) => {
+				store.writers[binding.writerId].retiredAt = Date.now();
+			});
+			remount.secondaryVolumeDevice -= 4n;
+			const request = {
+				action: "approve" as const,
+				items: [
+					{
+						entryKind: "settings_proposal" as const,
+						changeId: proposal.changeId,
+						expectedVersion: proposal.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			};
+			const result = await service.batchAction(request);
+			expect(result.results[0]?.status).toBe("applied");
+			expect(remount.volumeQueryOccurredWhileStoreLocked).toBe(false);
+			expect((await readCodexConfigurationSyncStore()).writers[binding.writerId].binding).toEqual(binding);
+		} finally {
+			await service.close();
+		}
+	});
+	it("同路径两个历史来源并存时，审批精确采用来源 B，不把裸摘要 A 当成 B 身份失效", async () => {
+		const firstBinding = await createWriter();
+		const firstStore = await readCodexConfigurationSyncStore();
+		await rm(evidenceRoot(), { recursive: true });
+		await mutateCodexConfigurationSyncStore((store) => {
+			store.sources = {};
+			store.writers = {};
+		});
+		remount.device -= 4n;
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(Date.now() + 1000);
+		const secondBinding = await createWriter();
+		await mutateCodexConfigurationSyncStore((store) => {
+			Object.assign(store.sources, firstStore.sources);
+			Object.assign(store.writers, firstStore.writers);
+		});
+		remount.device -= 4n;
+		await writeFile(
+			join(secondBinding.configurationHomeDirectoryPath, "config.toml"),
+			'model="source-b-approved-choice"\n',
+		);
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			const observed = await service.getState();
+			const proposal = observed.changes.find(
+				(change) => change.sourceWriterId === secondBinding.writerId && change.approvalStatus === "pending",
+			);
+			if (!proposal) throw new Error("来源 B 缺少待审批提案");
+			expect(await codexDirectoryIdentity(sourceHome)).toBe(firstBinding.sourceIdentity);
+			expect(firstBinding.sourceIdentity).not.toBe(secondBinding.sourceIdentity);
+			expect(observed.sourceObservations).toHaveLength(0);
+			const modelFieldKey = JSON.stringify(["config.toml", "model"]);
+			expect(
+				(await readCodexConfigurationSyncStore()).sources[secondBinding.sourceIdentity].fields[modelFieldKey].value,
+			).toBe("fixture-model");
+			const approved = await service.batchAction({
+				action: "approve",
+				items: [
+					{
+						entryKind: "settings_proposal",
+						changeId: proposal.changeId,
+						expectedVersion: proposal.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			});
+			expect(approved.results[0]?.status).toBe("applied");
+			const store = await readCodexConfigurationSyncStore();
+			expect(store.sources[firstBinding.sourceIdentity].fields[modelFieldKey].value).toBe("fixture-model");
+			expect(store.sources[secondBinding.sourceIdentity].fields[modelFieldKey].value).toBe(
+				"source-b-approved-choice",
+			);
+			const futureFromSecond = await prepareCodexConfigurationWriterBinding({
+				purpose: "native_session",
+				storageHome,
+				previousBinding: secondBinding,
+				runtimeSessionIncarnationId: randomUUID(),
+			});
+			expect(futureFromSecond.sourceIdentity).toBe(secondBinding.sourceIdentity);
+			expect(futureFromSecond.launchSharedVersion).toBe(store.sources[secondBinding.sourceIdentity].version);
+		} finally {
+			await service.close();
+		}
+	});
 	it.each(["previous_binding", "writer_home_parent"] as const)(
 		"多个有效旧来源存在时 %s 续跑保持 parent 来源及独立决定，新 Task 保持默认旧来源",
 		async (parentSelection) => {

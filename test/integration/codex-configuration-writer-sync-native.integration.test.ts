@@ -20,6 +20,7 @@ import {
 	withRunningCodexAppServerControlSocketConnection,
 } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../utilities/explicitly-approve-observed-codex-configuration-proposals";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	sigkillChildProcessAndWaitForExit,
@@ -240,7 +241,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			};
 			const origin = await startWriter("origin"),
 				target = await startWriter("target");
-			const sync = createCodexConfigurationSyncService({ listSessions: () => sessions, onUpdated: () => {} });
+			const sync = withExplicitApprovalOfObservedCodexConfigurationProposals(
+				createCodexConfigurationSyncService({ listSessions: () => sessions, onUpdated: () => {} }),
+			);
 			onTestFinished(() => sync.close());
 			const observations = async () => {
 				try {

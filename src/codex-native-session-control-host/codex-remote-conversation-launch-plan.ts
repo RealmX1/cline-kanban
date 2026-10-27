@@ -60,6 +60,97 @@ function isPermissionConfigurationKey(key: string) {
 	);
 }
 
+export function isCodexPermissionConfigurationOverrideArgument(argument: string) {
+	const equals = argument.indexOf("=");
+	return equals > 0 && isPermissionConfigurationKey(argument.slice(0, equals).trim());
+}
+
+function buildSupportedCodexAppServerPermissionConfigurationArguments(key: string, value: unknown) {
+	const normalizedValue =
+		key === "approval_policy" && value === "on-failure"
+			? "on-request"
+			: key === "approvals_reviewer" && value === "guardian_subagent"
+				? "auto_review"
+				: value;
+	// 0.164.0 的配置加载器已拒绝 untrusted；新宿主资格另设门禁，不把旧 thread RPC 能力当默认配置能力。
+	if (key === "approval_policy" && normalizedValue === "untrusted") return [];
+	const tomlValue =
+		typeof normalizedValue === "object" && normalizedValue !== null && "granular" in normalizedValue
+			? `{ granular = { ${Object.entries(
+					codexNativeApprovalPolicySchema.parse(normalizedValue) as { granular: Record<string, boolean> },
+				)
+					.flatMap(([, values]) =>
+						Object.entries(values).map(([name, allowed]) => `${JSON.stringify(name)} = ${allowed}`),
+					)
+					.join(", ")} } }`
+			: JSON.stringify(normalizedValue);
+	return ["-c", `${key}=${tomlValue}`];
+}
+
+// 原生 TUI 的计划转实施会在同一宿主中创建新 thread；仅设置旧 thread 的权限不足以约束新 thread 默认。
+export function resolveCodexPermissionDefaultsForOwnedAppServer(arguments_: readonly string[]) {
+	const permissionConfigurationArguments: string[] = [];
+	const flagPermissions: Record<string, unknown> = {};
+	let configuredApprovalPolicy: unknown;
+	let bypassRequested = false;
+	for (let index = 0; index < arguments_.length; index++) {
+		const argument = arguments_[index];
+		if (argument === "--") break;
+		if (argument === "--dangerously-bypass-approvals-and-sandbox") {
+			bypassRequested = true;
+			continue;
+		}
+		if (argument === "--full-auto" || argument === "--approve-for-me") {
+			flagPermissions.approval_policy = "on-request";
+			flagPermissions.sandbox_mode = "workspace-write";
+			if (argument === "--approve-for-me") flagPermissions.approvals_reviewer = "auto_review";
+			continue;
+		}
+		const attachedShortOption = ["-c", "-a", "-s"].find(
+			(option) => argument.startsWith(option) && argument.length > option.length,
+		);
+		const equalsIndex = argument.startsWith("--") ? argument.indexOf("=") : -1;
+		const option = attachedShortOption ?? (equalsIndex > 0 ? argument.slice(0, equalsIndex) : argument);
+		if (["-c", "--config", "-a", "--ask-for-approval", "-s", "--sandbox"].includes(option)) {
+			const value = attachedShortOption
+				? argument.slice(attachedShortOption.length).replace(/^=/u, "")
+				: equalsIndex > 0
+					? argument.slice(equalsIndex + 1)
+					: arguments_[++index];
+			if (value === undefined) throw new Error(`Codex ${option} 缺少值。`);
+			if (option === "-c" || option === "--config") {
+				if (!value.includes("=")) continue;
+				const entry = readConfigOverride(value);
+				if (entry.key === "approval_policy") configuredApprovalPolicy = entry.value;
+				else if (entry.key.startsWith("approval_policy.")) configuredApprovalPolicy = undefined;
+				if (["approval_policy", "sandbox_mode", "approvals_reviewer"].includes(entry.key))
+					permissionConfigurationArguments.push(
+						...buildSupportedCodexAppServerPermissionConfigurationArguments(entry.key, entry.value),
+					);
+				else if (isPermissionConfigurationKey(entry.key)) permissionConfigurationArguments.push("-c", value);
+			} else
+				flagPermissions[option === "-a" || option === "--ask-for-approval" ? "approval_policy" : "sandbox_mode"] =
+					value;
+		} else if (CODEX_REMOTE_CONVERSATION_LAUNCH_OPTIONS_WITH_VALUES.has(argument)) index++;
+	}
+	if (bypassRequested) {
+		flagPermissions.approval_policy = "never";
+		flagPermissions.sandbox_mode = "danger-full-access";
+	}
+	return {
+		// 历史 thread RPC 接受旧策略，不代表宿主能为未来所有新 thread 提供同样的默认值。
+		supportsSelectedApprovalPolicyAsAppServerDefault:
+			(flagPermissions.approval_policy ?? configuredApprovalPolicy) !== "untrusted",
+		appServerRootArguments: [
+			// 配置覆盖按原始顺序应用，避免整体表覆盖掉较晚的点路径权限限制。
+			...permissionConfigurationArguments,
+			...Object.entries(flagPermissions).flatMap(([key, value]) =>
+				buildSupportedCodexAppServerPermissionConfigurationArguments(key, value),
+			),
+		],
+	};
+}
+
 function findConversationSubcommandIndex(arguments_: readonly string[]) {
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index];
@@ -198,7 +289,10 @@ export function prepareCodexRemoteConversationLaunchPlan(
 			positionalArguments.length && positionalArgumentsUseTerminator
 				? ["--", ...positionalArguments]
 				: positionalArguments,
-		appServerRootArguments: serverArguments,
+		appServerRootArguments: [
+			...serverArguments,
+			...resolveCodexPermissionDefaultsForOwnedAppServer(arguments_).appServerRootArguments,
+		],
 		additionalWritableDirectoryPaths: writableDirectories.map((path) => resolve(executionDirectory, path)),
 		// 原生专用旗标优先于配置覆盖，不随 argv 中二者的先后顺序改变。
 		nativeThreadRequestOverrides: { ...configuredPermissions, ...overrides },

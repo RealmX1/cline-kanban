@@ -11,11 +11,13 @@ const queries = vi.hoisted(() => ({
 	acknowledge: vi.fn(),
 	resolve: vi.fn(),
 	resolveTarget: vi.fn(),
+	batch: vi.fn(),
 }));
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
 			getCodexConfigurationSyncState: { query: queries.fetch },
+			batchCodexConfigurationAction: { mutate: queries.batch },
 			synchronizeCodexConfigurationChange: { mutate: queries.synchronize },
 			acknowledgeCodexConfigurationChange: { mutate: queries.acknowledge },
 			resolveCodexConfigurationConflict: { mutate: queries.resolve },
@@ -34,12 +36,14 @@ const flush = async () => {
 const button = (label: string) =>
 	[...container.querySelectorAll("button")].find((element) => element.textContent === label) as HTMLButtonElement;
 beforeEach(() => {
+	localStorage.clear();
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
 	state = {
 		revision: 1,
 		observationProblem: null,
+		sourceObservations: [],
 		changes: [
 			{
 				changeId: "change-first",
@@ -51,6 +55,10 @@ beforeEach(() => {
 				previousValueSummary: "已启用",
 				valueSummary: "已禁用",
 				observedAt: 1,
+				recordKind: "settings_proposal",
+				approvalStatus: "approved",
+				decidedAt: 1,
+				settingDifferences: [{ label: "启用状态", previous: "开启", current: "关闭" }],
 				mergeStatus: "shared_default_updated",
 				acknowledgedAt: null,
 				eligibleTargetCount: 2,
@@ -76,6 +84,84 @@ afterEach(async () => {
 });
 
 describe("Codex 配置同步提示和设置", () => {
+	it("收起只改变显示，跨项目与刷新及新条目保持收起，并保留选择", async () => {
+		state.changes[0]!.approvalStatus = "pending";
+		state.changes[0]!.mergeStatus = "pending_approval";
+		await act(async () =>
+			root.render(<CodexConfigurationSyncNotice workspaceId="workspace" onOpenSettings={() => {}} />),
+		);
+		await flush();
+		await act(async () => button("收起").click());
+		expect(queries.acknowledge).not.toHaveBeenCalled();
+		expect(queries.batch).not.toHaveBeenCalled();
+		expect(button("展开").getAttribute("aria-expanded")).toBe("false");
+		state = {
+			...state,
+			revision: 2,
+			changes: [...state.changes, { ...state.changes[0]!, changeId: "new-change", version: 2 }],
+		};
+		await act(async () => notifyCodexConfigurationSyncUpdated());
+		await flush();
+		expect(button("展开")).toBeDefined();
+		await act(async () =>
+			root.render(<CodexConfigurationSyncNotice workspaceId="another-project" onOpenSettings={() => {}} />),
+		);
+		await flush();
+		expect(button("展开")).toBeDefined();
+		await act(async () => root.unmount());
+		root = createRoot(container);
+		await act(async () =>
+			root.render(<CodexConfigurationSyncNotice workspaceId="workspace" onOpenSettings={() => {}} />),
+		);
+		await flush();
+		expect(button("展开")).toBeDefined();
+	});
+	it("来源更新不显示审批或相同设置箭头，设置支持当前筛选全选与批量部分失败", async () => {
+		state.sourceObservations = [
+			{
+				observationId: "source",
+				version: 3,
+				sourceLabel: "fixture@market",
+				firstObservedAt: 1,
+				observedAt: 3,
+				observationCount: 60,
+				detectedLocationCount: 10,
+				acknowledgedAt: null,
+				reminderDisposition: "unread",
+			},
+		];
+		state.changes[0]!.approvalStatus = "pending";
+		state.changes[0]!.mergeStatus = "pending_approval";
+		queries.batch.mockResolvedValue({
+			state,
+			results: [{ changeId: "change-first", status: "source_unverifiable", message: "来源暂不可核验" }],
+		});
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await flush();
+		const source = container.querySelector('[aria-label="来源更新 fixture@market"]');
+		if (!source) throw new Error("缺少来源提示");
+		expect(source.textContent).not.toContain("→");
+		expect(source.textContent).not.toContain("通过");
+		expect(source.textContent).toContain("确认");
+		await act(async () =>
+			(container.querySelector('[aria-label="全选当前筛选结果中的设置"]') as HTMLInputElement).click(),
+		);
+		await act(async () => button("批量通过").click());
+		expect(queries.batch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: "approve",
+				items: [
+					expect.objectContaining({
+						entryKind: "settings_proposal",
+						changeId: "change-first",
+						expectedVersion: 1,
+					}),
+				],
+			}),
+		);
+		expect(container.textContent).toContain("来源暂不可核验");
+	});
+
 	it("非模态提示展示范围，toggle 默认关闭，只提交本次变更", async () => {
 		await act(async () =>
 			root.render(<CodexConfigurationSyncNotice workspaceId="workspace" onOpenSettings={() => {}} />),
@@ -134,7 +220,7 @@ describe("Codex 配置同步提示和设置", () => {
 		expect(container.textContent).toBe("");
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 		await flush();
-		expect(container.textContent).toContain("已禁用");
+		expect(container.textContent).toContain("开启 → 关闭");
 		expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
 	});
 	it("逐项显示目标进度和冲突选择，携带目标值摘要防止覆盖后来的决定", async () => {
