@@ -3,6 +3,7 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type CodexConfigurationResolveConflictRequest,
@@ -37,7 +38,7 @@ import {
 } from "./codex-configuration-sync-store";
 import {
 	assertCodexConfigurationWriterBindingIdentity,
-	codexDirectoryIdentity,
+	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
 
 type SessionTarget = { workspaceId: string; summary: RuntimeTaskSessionSummary };
@@ -111,11 +112,22 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				requestTimeoutMs: 5_000,
 			}));
 	const observe = async () => {
+		const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
+		await prepareCodexDirectoryVolumeObservations([
+			...Object.values(preflightStoreSnapshot.sources).map((source) => source.home),
+			...Object.values(preflightStoreSnapshot.writers)
+				.filter((writer) => writer.binding.purpose === "native_session" && !writer.retiredAt)
+				.flatMap(({ binding }) => [
+					binding.sourceHomeDirectoryPath,
+					binding.conversationStorageHomeDirectoryPath,
+					binding.sqliteHomeDirectoryPath,
+				]),
+		]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			let problem: string | null = null;
 			for (const [sourceIdentity, source] of Object.entries(store.sources)) {
 				try {
-					if ((await codexDirectoryIdentity(source.home)) !== sourceIdentity) throw new Error("来源身份已变化");
+					await resolveVerifiedCodexConfigurationSourceIdentity(source.home, store, sourceIdentity);
 					const fileNames = [
 						"config.toml",
 						...(await readdir(source.home)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
@@ -829,6 +841,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 	};
 	const resolveTargetConflict = async (input: CodexConfigurationResolveTargetConflictRequest) => {
 		await observe();
+		const preflightWriterBinding = (await readCodexConfigurationSyncStore()).writers[input.targetWriterId]?.binding;
+		if (preflightWriterBinding)
+			await prepareCodexDirectoryVolumeObservations([
+				preflightWriterBinding.sourceHomeDirectoryPath,
+				preflightWriterBinding.conversationStorageHomeDirectoryPath,
+				preflightWriterBinding.sqliteHomeDirectoryPath,
+			]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			const requestDigest = configurationDigest(["resolve_target_conflict", input]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];

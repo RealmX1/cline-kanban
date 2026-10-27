@@ -11,6 +11,11 @@ import {
 	resolveUserCodexHomeDirectoryPath,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import {
+	type CodexDirectoryIdentityExpectation,
+	prepareCodexDirectoryVolumeObservations,
+	prepareCodexPersistentDirectoryIdentity,
+} from "../codex-conversation-storage/codex-persistent-directory-identity";
+import {
 	type CodexConfigurationWriterBinding,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
@@ -27,17 +32,15 @@ import {
 	reconcileCodexConfigurationUserSourceFields,
 } from "./codex-configuration-incremental-merge";
 import {
+	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "./codex-configuration-sync-store";
 
 const execFileAsync = promisify(execFile);
-export async function codexDirectoryIdentity(path: string) {
-	const physicalPath = await realpath(path);
-	const metadata = await lstat(physicalPath, { bigint: true });
-	if (!metadata.isDirectory()) throw new Error("Codex 目录归属不再是目录。");
-	return configurationDigest([physicalPath, `${metadata.dev}`, `${metadata.ino}`]);
+export async function codexDirectoryIdentity(path: string, expectation?: CodexDirectoryIdentityExpectation) {
+	return prepareCodexPersistentDirectoryIdentity(path, expectation);
 }
 
 async function linkVerifiedDirectoryBridge(source: string, destination: string, directory: boolean) {
@@ -53,25 +56,57 @@ async function linkVerifiedDirectoryBridge(source: string, destination: string, 
 	await symlink(source, destination, directory ? "junction" : "file");
 }
 
-export async function assertCodexConfigurationWriterBindingIdentity(binding: CodexConfigurationWriterBinding) {
+async function assertCodexConfigurationWriterBindingManifest(binding: CodexConfigurationWriterBinding) {
 	codexConfigurationWriterBindingSchema.parse(binding);
 	const expectedHome = await realpath(
 		join(getCodexConfigurationSyncDirectory(), "writers", binding.writerId, "configuration-home"),
 	);
 	if (binding.configurationHomeDirectoryPath !== expectedHome || (await lstat(expectedHome)).isSymbolicLink())
 		throw new Error("Codex 配置写入者目录身份不符，未写入配置。");
-	if (
-		(await codexDirectoryIdentity(binding.sourceHomeDirectoryPath)) !== binding.sourceIdentity ||
-		(await codexDirectoryIdentity(binding.conversationStorageHomeDirectoryPath)) !==
-			binding.storageDirectoryIdentity ||
-		(await codexDirectoryIdentity(binding.sqliteHomeDirectoryPath)) !== binding.sqliteDirectoryIdentity
-	)
-		throw new Error("Codex 配置来源或历史目录已被替换，等待原归属恢复。");
-	const manifest = codexConfigurationWriterBindingSchema.parse(
-		JSON.parse(await readFile(join(dirname(expectedHome), "writer-binding.json"), "utf8")),
-	);
+	const manifestPath = join(dirname(expectedHome), "writer-binding.json");
+	if (!(await lstat(manifestPath)).isFile()) throw new Error("Codex 配置写入者清单不是普通文件。");
+	const manifest = codexConfigurationWriterBindingSchema.parse(JSON.parse(await readFile(manifestPath, "utf8")));
 	if (configurationDigest(manifest) !== configurationDigest(binding))
 		throw new Error("Codex 配置写入者清单与会话绑定不符。");
+	return { expectedHome, manifestPath };
+}
+
+export async function resolveVerifiedCodexConfigurationSourceIdentity(
+	sourceHome: string,
+	store: Pick<CodexConfigurationSyncStore, "sources" | "writers">,
+	expectedSourceIdentity?: string,
+) {
+	const canonicalSourceHome = await realpath(sourceHome);
+	const registeredSourceIdentities = Object.entries(store.sources)
+		.filter(([identity, source]) =>
+			expectedSourceIdentity ? identity === expectedSourceIdentity : source.home === canonicalSourceHome,
+		)
+		.map(([identity]) => identity);
+	if (!registeredSourceIdentities.length && !expectedSourceIdentity) return codexDirectoryIdentity(sourceHome);
+	// 来源归属只依赖原清单和来源指纹；退休、辅助 writer 或无关的旧历史桥接均不改变来源资格。
+	const candidates = Object.values(store.writers)
+		.map((writer) => writer.binding)
+		.filter((binding) => registeredSourceIdentities.includes(binding.sourceIdentity))
+		.sort((left, right) => left.createdAt - right.createdAt);
+	for (const binding of candidates) {
+		try {
+			if ((await realpath(binding.sourceHomeDirectoryPath)) !== canonicalSourceHome) continue;
+			if (store.sources[binding.sourceIdentity]?.home !== canonicalSourceHome) continue;
+			const { manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
+			return await codexDirectoryIdentity(sourceHome, {
+				expectedIdentity: binding.sourceIdentity,
+				boundAtMs: binding.createdAt,
+				legacyBindingManifestPath: manifestPath,
+			});
+		} catch {
+			// 一份旧 writer 损坏不否定其他可独立核验的同来源绑定。
+		}
+	}
+	throw new Error("Codex 配置来源缺少可核验的原绑定证据，恢复原清单或目录后自动重试。");
+}
+
+export async function assertCodexConfigurationWriterBindingIdentity(binding: CodexConfigurationWriterBinding) {
+	const { expectedHome, manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
 	if (!(await lstat(join(expectedHome, "config.toml"))).isFile())
 		throw new Error("Codex 主配置暂不可读，等待原生所有者恢复；未把缺失文件当作明确删除。");
 	for (const name of (await readdir(expectedHome)).filter(
@@ -88,6 +123,17 @@ export async function assertCodexConfigurationWriterBindingIdentity(binding: Cod
 		)
 			throw new Error("Codex 历史或原生写锁桥接被替换，保留现场。");
 	}
+	// 清单和桥接先通过核验，设备号漂移才有资格追加身份补证。
+	for (const [path, expectedIdentity] of [
+		[binding.sourceHomeDirectoryPath, binding.sourceIdentity],
+		[binding.conversationStorageHomeDirectoryPath, binding.storageDirectoryIdentity],
+		[binding.sqliteHomeDirectoryPath, binding.sqliteDirectoryIdentity],
+	] as const)
+		await codexDirectoryIdentity(path, {
+			expectedIdentity,
+			boundAtMs: binding.createdAt,
+			legacyBindingManifestPath: manifestPath,
+		});
 }
 
 export async function prepareCodexConfigurationWriterBinding(input: {
@@ -102,6 +148,58 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	environment?: NodeJS.ProcessEnv;
 	launchArguments?: string[];
 }): Promise<CodexConfigurationWriterBinding> {
+	const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
+	const preflightParentBinding =
+		input.previousBinding ??
+		Object.values(preflightStoreSnapshot.writers).find(
+			(writer) => writer.binding.configurationHomeDirectoryPath === resolve(input.storageHome),
+		)?.binding;
+	if (preflightParentBinding) await assertCodexConfigurationWriterBindingIdentity(preflightParentBinding);
+	const preflightHistoryHome = preflightParentBinding?.conversationStorageHomeDirectoryPath ?? input.storageHome;
+	await mkdir(preflightHistoryHome, { recursive: true, mode: 0o700 });
+	const preflightSourceHome =
+		preflightParentBinding?.sourceHomeDirectoryPath ??
+		(await resolveCanonicalUserCodexHomeForManagedStorage(preflightHistoryHome));
+	await mkdir(preflightSourceHome, { recursive: true, mode: 0o700 });
+	const preflightSqliteHome =
+		preflightParentBinding?.sqliteHomeDirectoryPath ?? input.sqliteHome ?? preflightHistoryHome;
+	await mkdir(preflightSqliteHome, { recursive: true, mode: 0o700 });
+	await prepareCodexDirectoryVolumeObservations([preflightSourceHome, preflightHistoryHome, preflightSqliteHome]);
+	let nativeBinaryVersion: string | null = null;
+	let nativeExecutableRealPath: string | null = null;
+	let nativeExecutableIdentityDigest: string | null = null;
+	if (input.binary)
+		try {
+			const environment = input.environment ?? process.env;
+			for (const candidate of isAbsolute(input.binary)
+				? [input.binary]
+				: (environment.PATH ?? "").split(delimiter).map((directory) => join(directory, input.binary ?? "codex"))) {
+				try {
+					nativeExecutableRealPath = await realpath(candidate);
+					const metadata = await lstat(nativeExecutableRealPath, { bigint: true });
+					nativeExecutableIdentityDigest = configurationDigest([
+						nativeExecutableRealPath,
+						`${metadata.dev}`,
+						`${metadata.ino}`,
+						`${metadata.size}`,
+						`${metadata.mtimeNs}`,
+					]);
+					break;
+				} catch {
+					/* 继续显式 PATH 查找，不启动交互 shell。 */
+				}
+			}
+			nativeBinaryVersion = (
+				await execFileAsync(input.binary, ["--version"], {
+					env: input.environment,
+					timeout: 3_000,
+					maxBuffer: 4_096,
+				})
+			).stdout.trim();
+		} catch {
+			/* 未核验版本不声明原生重载。 */
+		}
+	// 锁外预取只提供观察；下方持锁后重新选择 parent，并完整重核验当前归属。
 	return mutateCodexConfigurationSyncStore(async (store) => {
 		const parent =
 			input.previousBinding ??
@@ -114,7 +212,11 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		const sourceHome =
 			parent?.sourceHomeDirectoryPath ?? (await resolveCanonicalUserCodexHomeForManagedStorage(historyHome));
 		await mkdir(sourceHome, { recursive: true, mode: 0o700 });
-		const sourceIdentity = await codexDirectoryIdentity(sourceHome);
+		const sourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
+			sourceHome,
+			store,
+			parent?.sourceIdentity,
+		);
 		const canonicalSourceHome = await realpath(sourceHome);
 		const onHookDefinitionObservationProblem = () => {
 			store.observationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
@@ -302,42 +404,6 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			mode: 0o600,
 			flag: "wx",
 		});
-		let nativeBinaryVersion: string | null = null;
-		let nativeExecutableRealPath: string | null = null;
-		let nativeExecutableIdentityDigest: string | null = null;
-		if (input.binary)
-			try {
-				const environment = input.environment ?? process.env;
-				for (const candidate of isAbsolute(input.binary)
-					? [input.binary]
-					: (environment.PATH ?? "")
-							.split(delimiter)
-							.map((directory) => join(directory, input.binary ?? "codex"))) {
-					try {
-						nativeExecutableRealPath = await realpath(candidate);
-						const metadata = await lstat(nativeExecutableRealPath, { bigint: true });
-						nativeExecutableIdentityDigest = configurationDigest([
-							nativeExecutableRealPath,
-							`${metadata.dev}`,
-							`${metadata.ino}`,
-							`${metadata.size}`,
-							`${metadata.mtimeNs}`,
-						]);
-						break;
-					} catch {
-						/* 继续显式 PATH 查找，不启动交互 shell。 */
-					}
-				}
-				nativeBinaryVersion = (
-					await execFileAsync(input.binary, ["--version"], {
-						env: input.environment,
-						timeout: 3_000,
-						maxBuffer: 4_096,
-					})
-				).stdout.trim();
-			} catch {
-				/* 未核验版本不声明原生重载。 */
-			}
 		store.writers[writerId] = {
 			binding,
 			fileNames,

@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { z } from "zod";
+import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
 	type CodexConfigurationPropagationTarget,
 	type CodexConfigurationWriterBinding,
@@ -172,7 +173,7 @@ export async function mutateCodexConfigurationSyncStore<T>(
 	const pendingPath = join(directory, `${randomUUID()}.pending-configuration-sync-state.json`);
 	try {
 		const store = await readCodexConfigurationSyncStore();
-		const result = await operation(store);
+		const result = await runWithCodexDirectoryVolumeSystemQueriesDisabled(() => operation(store));
 		const pendingFile = await open(pendingPath, "wx", 0o600);
 		try {
 			await pendingFile.writeFile(JSON.stringify(store));
