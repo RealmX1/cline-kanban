@@ -74,7 +74,10 @@ import { subscribeToPromptLibraryChanges } from "../state/prompt-library-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import type { TerminalSessionManager } from "../terminal/session-manager";
-import { moveTaskCardIntoInProgressAfterAcceptedMainConversationInput } from "../trpc/task-card-action-api";
+import {
+	moveTaskCardIntoInProgressAfterAcceptedMainConversationInput,
+	moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification,
+} from "../trpc/task-card-action-api";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createNativeAgentConversationActivityObserver } from "./native-agent-conversation-activity-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
@@ -223,10 +226,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		| null = null;
 	const nativeActivityObserver = createNativeAgentConversationActivityObserver({
 		cooldownMs: 1_000,
-		onCodexNativeAgentTurnExecution: (observation, summaryBeforeRead) => {
-			terminalManagersByWorkspaceId
+		onCodexNativeAgentTurnExecution: async (observation, summaryBeforeRead) => {
+			await terminalManagersByWorkspaceId
 				.get(observation.workspaceId)
-				?.reconcileCodexIdleStallWithNativeAgentTurnExecution(
+				?.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
 					observation.conversationSessionId,
 					summaryBeforeRead,
 					observation,
@@ -800,6 +803,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 		}
 		terminalSummaryUnsubscribeByWorkspaceId.delete(workspaceId);
+		terminalManagersByWorkspaceId.get(workspaceId)?.setCodexReviewMisclassificationPersistenceHandler(null);
 		terminalManagersByWorkspaceId.delete(workspaceId);
 		nativeActivityObserver.forgetWorkspace(workspaceId);
 		for (const key of acceptedEdgeBySession.keys())
@@ -1332,6 +1336,24 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				return;
 			}
 			terminalManagersByWorkspaceId.set(workspaceId, manager);
+			manager.setCodexReviewMisclassificationPersistenceHandler(async (before, observation, applyCorrection) => {
+				const getCurrentSummary = () =>
+					terminalManagersByWorkspaceId.get(workspaceId) === manager
+						? manager.getSummary(observation.conversationSessionId)
+						: null;
+				const result = await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification({
+					workspaceId,
+					summaryBeforeRead: before,
+					observation,
+					getCurrentSummary,
+				});
+				const corrected = result.sessionCorrectionAllowed && getCurrentSummary() ? applyCorrection() : null;
+				if (result.saved) {
+					await broadcastRuntimeWorkspaceStateUpdated(workspaceId, result.workspacePath);
+					await broadcastRuntimeProjectsUpdated(null);
+				}
+				return corrected;
+			});
 			const unsubscribe = manager.onSummary((summary) => {
 				void nativeActivityObserver.observeTaskSessionSummary(workspaceId, summary, () =>
 					manager.getSummary(summary.taskId),
@@ -1452,6 +1474,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			// 关停后在途探测的回调不得再写 summary（会写进一个正在被拆掉的管理器）。
 			persistedAgentTranscriptConversationProgressObserver.dispose();
 			nativeActivityObserver.dispose();
+			for (const manager of terminalManagersByWorkspaceId.values())
+				manager.setCodexReviewMisclassificationPersistenceHandler(null);
 			terminalManagersByWorkspaceId.clear();
 			acceptedEdgeBySession.clear();
 			pendingAttemptBySession.clear();

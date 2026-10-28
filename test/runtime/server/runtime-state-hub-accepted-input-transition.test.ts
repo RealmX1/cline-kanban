@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type { CodexNativeAgentTurnExecutionObservation } from "../../../src/core/codex-native-agent-turn-execution-observation";
 import type { CreateNativeAgentConversationActivityObserverOptions } from "../../../src/server/native-agent-conversation-activity-observer";
 import {
 	type CreateRuntimeStateHubDependencies,
@@ -7,12 +8,16 @@ import {
 	type RuntimeStateHub,
 } from "../../../src/server/runtime-state-hub";
 import type * as WorkspaceState from "../../../src/state/workspace-state";
-import type { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import type {
+	CodexReviewMisclassificationPersistenceHandler,
+	TerminalSessionManager,
+} from "../../../src/terminal/session-manager";
 import type { moveTaskCardIntoInProgressAfterAcceptedMainConversationInput } from "../../../src/trpc/task-card-action-api";
 import { createTempDir } from "../../utilities/temp-dir";
 
 const mockedDependencies = vi.hoisted(() => ({
 	moveAcceptedInput: vi.fn<typeof moveTaskCardIntoInProgressAfterAcceptedMainConversationInput>(),
+	moveCorrectedReview: vi.fn(),
 	observeNativeSummary: vi.fn().mockResolvedValue(undefined),
 	wakeNativeSubmission: vi.fn(),
 	forgetNativeWorkspace: vi.fn(),
@@ -32,6 +37,7 @@ vi.mock("../../../src/state/complete-task-main-session-handover-after-user-messa
 
 vi.mock("../../../src/trpc/task-card-action-api", () => ({
 	moveTaskCardIntoInProgressAfterAcceptedMainConversationInput: mockedDependencies.moveAcceptedInput,
+	moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification: mockedDependencies.moveCorrectedReview,
 }));
 vi.mock("../../../src/server/native-agent-conversation-activity-observer", () => ({
 	createNativeAgentConversationActivityObserver: (options: CreateNativeAgentConversationActivityObserverOptions) => {
@@ -117,12 +123,21 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 	const recordEffectiveActivity = vi.fn();
 	const reconcileNativeDirectInputReadiness = vi.fn();
 	const confirmAcceptedInput = vi.fn<TerminalSessionManager["confirmAcceptedAgentConversationInput"]>();
+	let correctionPersistenceHandler: CodexReviewMisclassificationPersistenceHandler | null = null;
+	const reconcileNativeExecution =
+		vi.fn<TerminalSessionManager["reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution"]>();
 	const manager = {
 		listSummaries: () => [...currentByTaskId.values()],
 		getSummary: (taskId: string) => currentByTaskId.get(taskId) ?? null,
 		recordEffectiveAgentConversationActivity: recordEffectiveActivity,
 		reconcileCodexNeedsInputWithNativeDirectInputReadiness: reconcileNativeDirectInputReadiness,
 		confirmAcceptedAgentConversationInput: confirmAcceptedInput,
+		setCodexReviewMisclassificationPersistenceHandler: (
+			handler: CodexReviewMisclassificationPersistenceHandler | null,
+		) => {
+			correctionPersistenceHandler = handler;
+		},
+		reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution: reconcileNativeExecution,
 		onSummary: (onSummary: (summary: RuntimeTaskSessionSummary) => void) => {
 			listener = onSummary;
 			return () => {
@@ -137,6 +152,8 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 		recordEffectiveActivity,
 		reconcileNativeDirectInputReadiness,
 		confirmAcceptedInput,
+		reconcileNativeExecution,
+		getCorrectionPersistenceHandler: () => correctionPersistenceHandler,
 		emit(summary: RuntimeTaskSessionSummary) {
 			currentByTaskId.set(summary.taskId, summary);
 			if (!listener) throw new Error("没有存活的 summary 订阅");
@@ -175,6 +192,11 @@ describe("runtime-state-hub 服务端输入接受边沿", () => {
 		vi.clearAllMocks();
 		mockedDependencies.moveAcceptedInput.mockReset();
 		mockedDependencies.moveAcceptedInput.mockResolvedValue({ saved: false, workspacePath: null });
+		mockedDependencies.moveCorrectedReview.mockReset();
+		mockedDependencies.moveCorrectedReview.mockResolvedValue({
+			saved: false,
+			workspacePath: "/isolated/accepted-input-worktree",
+		});
 		mockedDependencies.observerOptions = null;
 	});
 	afterEach(async () => {
@@ -266,6 +288,79 @@ describe("runtime-state-hub 服务端输入接受边沿", () => {
 		expect(tracked.reconcileNativeDirectInputReadiness).toHaveBeenCalledWith(TASK_ID, snapshot, observation);
 		expect(tracked.recordEffectiveActivity).not.toHaveBeenCalled();
 		expect(mockedDependencies.moveAcceptedInput).not.toHaveBeenCalled();
+	});
+	it("原生执行纠偏从观察器路由至 manager，无浏览器也先持久化再撤销派生状态", async () => {
+		const before = makeSummary("accepted");
+		const tracked = trackedHub([before]);
+		const observation: CodexNativeAgentTurnExecutionObservation = {
+			workspaceId: WORKSPACE_ID,
+			conversationSessionId: TASK_ID,
+			runtimeSessionIncarnationId: "first-process",
+			nativeSessionId: "native",
+			nativeTurnId: "turn",
+			nativeTurnStartedAtMs: NOW_MS - 100,
+			observedAtMs: NOW_MS,
+			threadStatus: "active",
+			nativeTurnStatus: "inProgress",
+			activeFlags: [],
+			canAcceptDirectInput: true,
+			executionStatus: "running",
+		};
+		const corrected = { ...before, updatedAt: NOW_MS + 1 };
+		const applyCorrection = vi.fn(() => {
+			expect(mockedDependencies.moveCorrectedReview).toHaveBeenCalledOnce();
+			tracked.emit(corrected);
+			return corrected;
+		});
+		tracked.reconcileNativeExecution.mockImplementation(async () => {
+			const handler = tracked.getCorrectionPersistenceHandler();
+			if (!handler) throw new Error("未绑定看板持久化处理器");
+			return handler(before, observation, applyCorrection);
+		});
+		mockedDependencies.moveCorrectedReview.mockResolvedValue({
+			saved: true,
+			sessionCorrectionAllowed: true,
+			workspacePath: "/isolated/accepted-input-worktree",
+		});
+		await mockedDependencies.observerOptions?.onCodexNativeAgentTurnExecution?.(observation, before);
+		expect(tracked.reconcileNativeExecution).toHaveBeenCalledWith(TASK_ID, before, observation);
+		expect(applyCorrection).toHaveBeenCalledOnce();
+		expect(mockedDependencies.moveCorrectedReview.mock.calls[0]?.[0].getCurrentSummary()).toBe(corrected);
+		expect(mockedDependencies.moveAcceptedInput).not.toHaveBeenCalled();
+	});
+	it("纠偏持久化失败时不撤销原状态，观察器收到失败以便重试", async () => {
+		const before = makeSummary("accepted");
+		const tracked = trackedHub([before]);
+		const applyCorrection = vi.fn();
+		mockedDependencies.moveCorrectedReview.mockRejectedValueOnce(new Error("暂时无法写盘"));
+		const handler = tracked.getCorrectionPersistenceHandler();
+		if (!handler) throw new Error("未绑定看板持久化处理器");
+		await expect(handler(before, {} as CodexNativeAgentTurnExecutionObservation, applyCorrection)).rejects.toThrow(
+			"暂时无法写盘",
+		);
+		expect(applyCorrection).not.toHaveBeenCalled();
+	});
+	it("持久恢复尚未完成时不消费会话锚点，下一次核验可以继续", async () => {
+		const before = makeSummary("accepted");
+		const tracked = trackedHub([before]);
+		const applyCorrection = vi.fn(() => before);
+		const handler = tracked.getCorrectionPersistenceHandler();
+		if (!handler) throw new Error("未绑定看板持久化处理器");
+		const observation = { conversationSessionId: TASK_ID } as CodexNativeAgentTurnExecutionObservation;
+		mockedDependencies.moveCorrectedReview.mockResolvedValueOnce({
+			saved: false,
+			sessionCorrectionAllowed: false,
+			workspacePath: "/isolated/accepted-input-worktree",
+		});
+		expect(await handler(before, observation, applyCorrection)).toBeNull();
+		expect(applyCorrection).not.toHaveBeenCalled();
+		mockedDependencies.moveCorrectedReview.mockResolvedValueOnce({
+			saved: true,
+			sessionCorrectionAllowed: true,
+			workspacePath: "/isolated/accepted-input-worktree",
+		});
+		await handler(before, observation, applyCorrection);
+		expect(applyCorrection).toHaveBeenCalledOnce();
 	});
 
 	it("只将本代原生响应携带的专用缓存证据传给活动写点，换代及普通接受不能冒领", () => {
