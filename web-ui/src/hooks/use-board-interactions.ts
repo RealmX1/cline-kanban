@@ -12,6 +12,7 @@ import {
 	resolveSessionFacets,
 } from "@runtime-session-activity";
 import { classifyTaskCardBoardColumnTransitionRequestedByUserGesture } from "@runtime-task-card-action-board-column-transitions";
+import type { TaskClosureRequest } from "@runtime-task-closure-contract";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -127,7 +128,7 @@ interface UseBoardInteractionsInput {
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
 	// All projects Focus View 的分组导航：操作前捕获，成功后调用；null 才回退到普通 Review 列顺序。
 	captureCacheWarmTaskFocusNavigationAfterValidationMove?: (taskId: string) => (() => void) | null;
-	// Post-Deploy Verification「移入 Done」门禁的客户端预检数据：当前项目的活跃部署组（App 持有的唯一
+	// Post-Deploy Verification「结案」门禁的客户端预检数据：当前项目的活跃部署组（App 持有的唯一
 	// usePostDeployVerification 实例）。缺省 = 不预检，全靠服务端拒绝后的兜底。
 	postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck?: RuntimePostDeployVerificationDeploymentGroup | null;
 	// 服务端以门禁拒绝（预检数据过期）后立即重拉 PDV 读模型，让原因对话框列出服务端看到的未勾项。
@@ -150,11 +151,11 @@ export interface UseBoardInteractionsResult {
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: TaskCardMoveIntoDoneRequestHandler;
 	taskCommentBeforeMoveIntoDone: TaskCommentBeforeMoveIntoDoneController;
-	confirmTaskCommentBeforeMoveIntoDone: (commentText: string) => void;
+	confirmTaskCommentBeforeMoveIntoDone: (commentText: string, closure?: TaskClosureRequest) => void;
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
-	// Post-Deploy Verification 面板的移入 Done 入口：语义等价 performMoveToTrash（直接移入 trash/Done，
+	// Post-Deploy Verification 面板的结案 入口：语义等价 performMoveToTrash（直接移入 trash/Done，
 	// 绕过 requestMoveToTrash 对 review/in_progress 的 SkipValidationConfirmDialog 与看板级原因对话框——PDV 面板有自己的
 	// 对话框），但**可 await 且返回成败**，供调用方在移列确实成功后才写 boardMovedToDoneAt。fromColumnId 取任务的当前实际列
 	// （getTaskColumnId），非快照。带 closure（逐项原因 / 确认项）时不走动画：动画路径的完成 Promise 不传播失败，而带原因的
@@ -163,6 +164,7 @@ export interface UseBoardInteractionsResult {
 		taskId: string,
 		fromColumnId: BoardColumnId,
 		postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest,
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
 	) => Promise<PostDeployVerificationMoveIntoDoneCompletionResult>;
 	// 看板入口（按钮 / 拖拽 / 服务端拒绝兜底）撞上 PDV 门禁时的原因对话框；null = 未打开。
 	postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone: PostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone | null;
@@ -265,7 +267,7 @@ export function useBoardInteractions({
 	const [moveToTrashLoadingById, setMoveToTrashLoadingById] = useState<Record<string, boolean>>({});
 	// 「移至 Review」按钮的 per-task in-flight 态（端点 await 期间显 Spinner）。
 	const [moveToReviewLoadingById, setMoveToReviewLoadingById] = useState<Record<string, boolean>>({});
-	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
+	// Pending "结案任务" awaiting confirmation. Set whenever a move would skip the manual
 	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
 	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
 	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
@@ -800,7 +802,7 @@ export function useBoardInteractions({
 		tryProgrammaticCardMove,
 	]);
 
-	// 移入 Done 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree：服务端移列、停 agent 会话与
+	// 结案 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree：服务端移列、停 agent 会话与
 	// 详情 shell 终端、删 worktree。浏览器只叠 overlay、把焦点挪到下一张卡。失败时抛错，让可 await 的调用方（PDV 完成）
 	// 拿到失败；动画路径的完成 Promise 照旧不传播失败（与改动前一致）。
 	// 服务端以 Post-Deploy Verification 门禁拒绝（PRECONDITION_FAILED，客户端预检数据过期时才会发生）时不弹通用错误，
@@ -872,7 +874,7 @@ export function useBoardInteractions({
 				throw new Error(result.commandFailureMessage);
 			}
 			if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
-				notifyError(`Could not move the task to Done: ${result.commandFailureMessage}`);
+				notifyError(`Could not 结案任务: ${result.commandFailureMessage}`);
 				throw new Error(result.commandFailureMessage);
 			}
 			if (
@@ -908,7 +910,7 @@ export function useBoardInteractions({
 		setRequestMoveTaskToTrashHandler(requestMoveTaskToTrash);
 	}, [requestMoveTaskToTrash, setRequestMoveTaskToTrashHandler]);
 
-	// 自动 review 完成后的自动移入 Done：受 PDV 门禁（有未勾项）的卡不发起（连动画都不放），只提示一次；
+	// 自动 review 完成后的自动结案：受 PDV 门禁（有未勾项）的卡不发起（连动画都不放），只提示一次；
 	// 自动 review 每次只尝试一次（见 use-review-auto-actions 的在途登记），因此不会重试刷屏。
 	const requestMoveTaskToTrashWithAnimationSkippingPostDeployVerificationGatedTaskCards = useCallback(
 		async (
@@ -1083,6 +1085,16 @@ export function useBoardInteractions({
 			const boardMutationInitiatorForCommand = boardMutationInitiatorForThisDrop ?? undefined;
 			switch (columnTransitionClassification) {
 				case "board_column_transition_into_done_stopping_sessions_and_deleting_worktree": {
+					if (
+						boardMutationInitiatorForCommand === "web_ui_user_gesture" &&
+						!programmaticCardMoveInFlight &&
+						currentProjectId
+					) {
+						const card = findCardSelection(board, drop.taskId)?.card;
+						if (card) openTaskCommentBeforeMoveIntoDone(currentProjectId, card, drop.destinationIndex);
+						resolvePendingProgrammaticTrashMove(drop.taskId);
+						return;
+					}
 					// Post-Deploy Verification 门禁预检：有未勾项的卡先核对，再决定是否填写原因。board 没被改过（只有命令才叠 overlay），
 					// 卡片自然弹回原列；用户手势打开核对与结案流程（记住落点），浏览器端自动化只提示一次。
 					if (
@@ -1190,6 +1202,7 @@ export function useBoardInteractions({
 			}
 		},
 		[
+			openTaskCommentBeforeMoveIntoDone,
 			consumeProgrammaticCardMove,
 			handleSetTaskShelvingState,
 			currentProjectId,
@@ -1322,6 +1335,8 @@ export function useBoardInteractions({
 			if (taskCommentToAppendWhenMovingIntoDone) {
 				void requestMoveTaskToTrash(taskId, fromColumnId, {
 					boardMutationInitiator: "web_ui_user_gesture",
+					insertAtIndexWithinDoneBoardColumn:
+						taskCommentToAppendWhenMovingIntoDone.insertAtIndexWithinDoneBoardColumn,
 					taskCommentToAppendWhenMovingIntoDone,
 				})
 					.then(() =>
@@ -1372,17 +1387,19 @@ export function useBoardInteractions({
 			taskId: string,
 			fromColumnId: BoardColumnId,
 			postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest,
+			taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone,
 		): Promise<PostDeployVerificationMoveIntoDoneCompletionResult> => {
 			// 同任务移列已在途：不重复触发，报失败让调用方不写完成标记。
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
-				return { ok: false, moveIntoDoneFailureMessage: "该任务的移入 Done 已在进行中" };
+				return { ok: false, moveIntoDoneFailureMessage: "该任务的结案 已在进行中" };
 			}
 			setTaskMoveToTrashLoading(taskId, true);
 			try {
-				if (postDeployVerificationDoneEntryClosure) {
+				if (postDeployVerificationDoneEntryClosure || taskCommentToAppendWhenMovingIntoDone) {
 					await requestMoveTaskToTrash(taskId, fromColumnId, {
 						boardMutationInitiator: "web_ui_user_gesture_post_deploy_verification_panel_completion",
 						postDeployVerificationDoneEntryClosure,
+						taskCommentToAppendWhenMovingIntoDone,
 					});
 				} else {
 					await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
@@ -1450,7 +1467,7 @@ export function useBoardInteractions({
 						showAppToast({
 							intent: "warning",
 							icon: "warning-sign",
-							message: "这张卡另有操作仍在进行中，暂未移入 Done：等它结束后再点确认（已填的原因保留）。",
+							message: "这张卡另有操作仍在进行中，暂未结案：等它结束后再点确认（已填的原因保留）。",
 							timeout: 7000,
 						});
 						return;
@@ -1509,7 +1526,7 @@ export function useBoardInteractions({
 		isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 	]);
 
-	// Single entry point for every "Move to Done" trigger (board card, detail sidebar card, agent
+	// Single entry point for every "结案任务" trigger (board card, detail sidebar card, agent
 	// TUI bottom button). Moving straight to Done from Review / In Progress skips the manual
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
 	// 受 Post-Deploy Verification 门禁（有未勾项）的卡先进入核对阶段：跳过 Validation 的确认是它的条件段落，不叠两层。
@@ -1535,7 +1552,8 @@ export function useBoardInteractions({
 				openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
 					taskCommentToAppendWhenMovingIntoDone,
 					taskId,
-					insertAtIndexWithinDoneBoardColumn: undefined,
+					insertAtIndexWithinDoneBoardColumn:
+						taskCommentToAppendWhenMovingIntoDone?.insertAtIndexWithinDoneBoardColumn,
 					runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
 				});
 				return;
@@ -1559,14 +1577,14 @@ export function useBoardInteractions({
 		if (!selectedCard) {
 			return;
 		}
-		requestMoveToTrash(selectedCard.card.id, selectedCard.column.id);
-	}, [requestMoveToTrash, selectedCard]);
+		if (currentProjectId) openTaskCommentBeforeMoveIntoDone(currentProjectId, selectedCard.card);
+	}, [currentProjectId, openTaskCommentBeforeMoveIntoDone, selectedCard]);
 
 	const handleMoveReviewCardToTrash = useCallback<TaskCardMoveIntoDoneRequestHandler>(
-		(taskId, options) => {
+		(taskId) => {
 			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
-			if (options?.requestTaskCommentBeforeMovingIntoDone) {
+			if (selection) {
 				if (currentProjectId && selection) openTaskCommentBeforeMoveIntoDone(currentProjectId, selection.card);
 				return;
 			}
@@ -1576,7 +1594,7 @@ export function useBoardInteractions({
 	);
 
 	const confirmTaskCommentBeforeMoveIntoDone = useCallback(
-		(commentText: string) => {
+		(commentText: string, closure?: TaskClosureRequest) => {
 			const request = taskCommentBeforeMoveIntoDone.request;
 			if (!request) return;
 			const selection = findCardSelection(latestBoardInteractionStateRef.current.board, request.taskId);
@@ -1584,7 +1602,7 @@ export function useBoardInteractions({
 				returnToEditingTaskCommentBeforeMoveIntoDone(request.taskId, "任务已移动或当前项目已切换，未提交评论。");
 				return;
 			}
-			const comment = prepareTaskCommentBeforeMoveIntoDone(commentText);
+			const comment = prepareTaskCommentBeforeMoveIntoDone(commentText, closure);
 			if (!comment) return;
 			if (selection.column.id === "trash") {
 				// 响应可能在写盘后丢失；仅用广播中已保存的同 ID、同正文评论结算原草稿。

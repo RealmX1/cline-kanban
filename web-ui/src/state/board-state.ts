@@ -36,6 +36,8 @@ import {
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskConversationModeSchema,
 	runtimeTaskStickerEntrySchema,
+	taskClosureOperationProgressSchema,
+	taskClosureRecordSchema,
 	taskMainSessionHandoverRecordSchema,
 } from "../../../src/core/api-contract";
 
@@ -266,6 +268,8 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	taskStickerDeletedEntryIds: true,
 	pinnedToTaskPinboardAt: true,
 	taskShelvingState: true,
+	taskClosureSummary: true,
+	taskClosureOperationProgress: true,
 	taskPinboardPinReason: true,
 	agentId: true,
 	ompAgentSessionTransport: true,
@@ -414,6 +418,9 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
+		taskClosureSummary: taskClosureRecordSchema.safeParse(card.taskClosureSummary).data,
+		taskClosureOperationProgress: taskClosureOperationProgressSchema.safeParse(card.taskClosureOperationProgress)
+			.data,
 		taskStickerEntries: Array.isArray(card.taskStickerEntries)
 			? card.taskStickerEntries.flatMap((entry) => {
 					const parsed = runtimeTaskStickerEntrySchema.safeParse(entry);

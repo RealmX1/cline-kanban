@@ -28,6 +28,14 @@ const turnCheckpointMocks = vi.hoisted(() => ({
 	captureTaskTurnCheckpoint: vi.fn(),
 }));
 
+vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
+	withTaskClosureLifecycleLocks: async (
+		_workspaceId: string,
+		_ids: readonly string[],
+		action: () => Promise<unknown>,
+	) => await action(),
+}));
+
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
 	mutateWorkspaceState: vi.fn(),

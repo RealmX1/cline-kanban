@@ -43,6 +43,8 @@ import {
 	saveWorkspaceState,
 	WorkspaceStateConflictError,
 } from "../state/workspace-state";
+import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import { assertTaskWorktreeCleanupHasCurrentVerifiedArchive } from "../task-closure/task-worktree-verified-archive-cleanup-guard";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
 	createEmptyWorkspaceChangesResponse,
@@ -508,58 +510,83 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
-			// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
-			// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
-			// 拿不到 live 快照的原因留到删除成功后记成族 3 事实（Y-PHASE-3）：1c 的落地判据据此知道「最后一份快照不新鲜」。
-			let finalTaskCommitIntegrationProbeFailureReason: string | null = null;
-			try {
-				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-				const card = board.columns
+			return await withTaskClosureLifecycleLocks(workspaceScope.workspaceId, [body.taskId], async () => {
+				// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
+				// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
+				// 拿不到 live 快照的原因留到删除成功后记成族 3 事实（Y-PHASE-3）：1c 的落地判据据此知道「最后一份快照不新鲜」。
+				let finalTaskCommitIntegrationProbeFailureReason: string | null = null;
+				try {
+					const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const card = board.columns
+						.flatMap((column) => column.cards)
+						.find((candidate) => candidate.id === body.taskId);
+					if (card) {
+						const pathInfo = await getTaskWorkspacePathInfo({
+							cwd: workspaceScope.workspacePath,
+							taskId: body.taskId,
+							baseRef: card.baseRef,
+							worktreeMode: body.worktreeMode,
+						});
+						const finalWorkspaceGitStatus = await probeAndRefreshTaskCommitIntegrationProvenance({
+							workspaceId: workspaceScope.workspaceId,
+							taskId: body.taskId,
+							repoPath: workspaceScope.workspacePath,
+							worktreePath: pathInfo.path,
+							baseRef: card.baseRef,
+							worktreeMode: body.worktreeMode,
+							worktreeExists: pathInfo.exists,
+						});
+						if (finalWorkspaceGitStatus.observationSource !== "live_worktree") {
+							finalTaskCommitIntegrationProbeFailureReason = `final_probe_observation_source_was_${finalWorkspaceGitStatus.observationSource}`;
+						}
+					} else {
+						finalTaskCommitIntegrationProbeFailureReason = "task_card_not_found_on_board_at_worktree_deletion";
+					}
+				} catch (error) {
+					// best effort，真正的保护由另一个 Done-stage guard task 实现。
+					finalTaskCommitIntegrationProbeFailureReason = `final_probe_threw:${error instanceof Error ? error.message : String(error)}`;
+				}
+				const cleanupBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const cleanupCard = cleanupBoard.columns
 					.flatMap((column) => column.cards)
-					.find((candidate) => candidate.id === body.taskId);
-				if (card) {
-					const pathInfo = await getTaskWorkspacePathInfo({
-						cwd: workspaceScope.workspacePath,
-						taskId: body.taskId,
-						baseRef: card.baseRef,
-						worktreeMode: body.worktreeMode,
-					});
-					const finalWorkspaceGitStatus = await probeAndRefreshTaskCommitIntegrationProvenance({
+					.find((card) => card.id === body.taskId);
+				const cleanupPath = await getTaskWorkspacePathInfo({
+					cwd: workspaceScope.workspacePath,
+					taskId: body.taskId,
+					baseRef: cleanupCard?.baseRef ?? "HEAD",
+					worktreeMode: body.worktreeMode,
+				});
+				const assertCleanupStillAuthorizedBeforeRemoval = async () => {
+					await assertTaskWorktreeCleanupHasCurrentVerifiedArchive({
 						workspaceId: workspaceScope.workspaceId,
 						taskId: body.taskId,
-						repoPath: workspaceScope.workspacePath,
-						worktreePath: pathInfo.path,
-						baseRef: card.baseRef,
-						worktreeMode: body.worktreeMode,
-						worktreeExists: pathInfo.exists,
+						worktreePath: cleanupPath.path,
+						board: await loadWorkspaceBoardById(workspaceScope.workspaceId),
+						credential: body.taskClosureArchiveCleanupCredential,
 					});
-					if (finalWorkspaceGitStatus.observationSource !== "live_worktree") {
-						finalTaskCommitIntegrationProbeFailureReason = `final_probe_observation_source_was_${finalWorkspaceGitStatus.observationSource}`;
-					}
-				} else {
-					finalTaskCommitIntegrationProbeFailureReason = "task_card_not_found_on_board_at_worktree_deletion";
-				}
-			} catch (error) {
-				// best effort，真正的保护由另一个 Done-stage guard task 实现。
-				finalTaskCommitIntegrationProbeFailureReason = `final_probe_threw:${error instanceof Error ? error.message : String(error)}`;
-			}
-			const deletionResult = await deleteTaskWorktree({
-				repoPath: workspaceScope.workspacePath,
-				taskId: body.taskId,
-				worktreeMode: body.worktreeMode,
-			});
-			// 删 worktree 不再连带删除 task commit provenance（落地数据保全，Y-PHASE-3）：1c 的共享落地判据要读这份数据。
-			if (deletionResult.removed && finalTaskCommitIntegrationProbeFailureReason !== null) {
-				recordFactObservedByActiveKanbanRuntimeWithoutBlocking({
-					observedFactKind: "task_commit_integration_final_snapshot_unavailable_at_worktree_deletion",
-					observingKanbanRuntimeSystemComponentName: "workspace_api_task_worktree_deletion",
-					subjectWorkspaceId: workspaceScope.workspaceId,
-					subjectTaskId: body.taskId,
-					eventPayload: { finalTaskCommitIntegrationProbeFailureReason },
+				};
+				if (cleanupPath.exists && body.worktreeMode !== "inplace")
+					await assertCleanupStillAuthorizedBeforeRemoval();
+				const deletionResult = await deleteTaskWorktree({
+					repoPath: workspaceScope.workspacePath,
+					assertCleanupStillAuthorizedBeforeRemoval,
+					taskId: body.taskId,
+					worktreeMode: body.worktreeMode,
 				});
-			}
-			return deletionResult;
+				// 删 worktree 不再连带删除 task commit provenance（落地数据保全，Y-PHASE-3）：1c 的共享落地判据要读这份数据。
+				if (deletionResult.removed && finalTaskCommitIntegrationProbeFailureReason !== null) {
+					recordFactObservedByActiveKanbanRuntimeWithoutBlocking({
+						observedFactKind: "task_commit_integration_final_snapshot_unavailable_at_worktree_deletion",
+						observingKanbanRuntimeSystemComponentName: "workspace_api_task_worktree_deletion",
+						subjectWorkspaceId: workspaceScope.workspaceId,
+						subjectTaskId: body.taskId,
+						eventPayload: { finalTaskCommitIntegrationProbeFailureReason },
+					});
+				}
+				return deletionResult;
+			});
 		},
+
 		loadTaskWorkspaceGitStatuses: async (workspaceScope): Promise<RuntimeTaskWorkspaceGitStatusesResponse> => {
 			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 			const cards = board.columns.flatMap((column) => column.cards);

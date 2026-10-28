@@ -134,7 +134,7 @@ function runtimeBoardSnapshotRenderingInputsFor(
 }
 
 function findMoveToDoneButtonOnCardCopy(): HTMLButtonElement | null {
-	return container.querySelector<HTMLButtonElement>('.kb-board-card-shell button[aria-label="Move task to done"]');
+	return container.querySelector<HTMLButtonElement>('.kb-board-card-shell button[aria-label="结案任务"]');
 }
 
 function findButtonOnCardCopyByAriaLabel(ariaLabel: string): HTMLButtonElement | null {
@@ -165,6 +165,8 @@ function createRunningTerminalAgentSessionSummary(taskId: string): RuntimeTaskSe
 const CARD_COPY_BUTTON_ARIA_LABELS_WITH_LOCAL_BEHAVIOR_NOT_ROUTED_THROUGH_TASK_CARD_ACTIONS = new Set([
 	"View original prompt",
 	"Copy directory path",
+	"添加便签",
+	"查看关联任务",
 ]);
 
 const UNCHECKED_GUIDED_ITEM: RuntimePostDeployVerificationTask["checklist"][number] = {
@@ -202,7 +204,7 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		expect(document.body.querySelectorAll("[data-task-id]").length).toBe(0);
 	});
 
-	it("卡体动作按钮与本体一致：Review 卡的「移入 Done」走看板同一个 handler", () => {
+	it("卡体动作按钮与本体一致：Review 卡的「结案」走看板同一个 handler", () => {
 		const card = createCard("task-1", "Review 卡");
 		const board = boardWithCardInColumn(card, "review");
 		const onMoveToTrashTask = vi.fn();
@@ -217,7 +219,7 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		expect(onMoveToTrashTask).toHaveBeenCalledWith("task-1");
 	});
 
-	it("有未勾项时完成区是「带原因移入 Done」，清单标题显示已核对计数", () => {
+	it("有未勾项时完成区是「带原因结案」，清单标题显示已核对计数", () => {
 		const card = createCard("task-1", "有未勾项的任务");
 		const board = boardWithCardInColumn(card, "validation");
 		const onRequestComplete = vi.fn();
@@ -232,7 +234,7 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		});
 		expect(container.textContent).toContain("0/1 已核对");
 		const completeButton = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("带原因移入 Done"),
+			button.textContent?.includes("带原因结案"),
 		);
 		expect(completeButton).toBeTruthy();
 		act(() => completeButton?.click());
@@ -339,7 +341,7 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 			caseDescription: "Done 卡的 Restore",
 			columnId: "trash",
 			taskSessionsFromRuntimeBoardSnapshot: {},
-			buttonAriaLabel: "Restore task from done",
+			buttonAriaLabel: "重新打开已结案任务",
 		},
 	])("runtime 快照卡体：$caseDescription 按钮改为在所属项目打开该任务", (testCase) => {
 		const card = createCard("task-1", "快照里按列画出动作按钮的卡");
@@ -405,7 +407,8 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 			.map((button) => button.getAttribute("aria-label") ?? "")
 			.filter(
 				(ariaLabel) =>
-					!CARD_COPY_BUTTON_ARIA_LABELS_WITH_LOCAL_BEHAVIOR_NOT_ROUTED_THROUGH_TASK_CARD_ACTIONS.has(ariaLabel),
+					!CARD_COPY_BUTTON_ARIA_LABELS_WITH_LOCAL_BEHAVIOR_NOT_ROUTED_THROUGH_TASK_CARD_ACTIONS.has(ariaLabel) &&
+					!ariaLabel.startsWith("查看结案历史："),
 			);
 		expect(taskCardActionButtonAriaLabels.length).toBeGreaterThan(0);
 		for (const ariaLabel of taskCardActionButtonAriaLabels) {

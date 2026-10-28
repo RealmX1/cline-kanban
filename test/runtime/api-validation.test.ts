@@ -38,6 +38,15 @@ describe("parseWorkspaceFileSearchRequest", () => {
 });
 
 describe("parseWorktreeDeleteRequest", () => {
+	it("保留完整归档凭据，不在规范化 taskId 时丢失清理授权", () => {
+		const credential = {
+			closureRequestId: "11111111-1111-4111-8111-111111111111",
+			taskIncarnationCreatedAtEpochMs: 1,
+		};
+		expect(
+			parseWorktreeDeleteRequest({ taskId: " task-1 ", taskClosureArchiveCleanupCredential: credential }),
+		).toEqual({ taskId: "task-1", taskClosureArchiveCleanupCredential: credential });
+	});
 	it("不再接受「删 worktree 后清 commit integration provenance」的旧标记（落地数据保全，dd2db Y-PHASE-3）", () => {
 		expect(
 			parseWorktreeDeleteRequest({

@@ -448,10 +448,10 @@ export function PostDeployVerificationTaskEntryChecklistAndClosureSection({
 						onClick={onRequestComplete}
 					>
 						{areAllChecklistItemsChecked
-							? "完成核对并移入 Done"
+							? "完成核对并结案"
 							: completionActionRendering === "review_before_move_into_done"
 								? "继续填写未完成原因"
-								: "带原因移入 Done"}
+								: "带原因结案"}
 					</Button>
 					<p className="m-0 mt-1 text-center text-[11px] text-text-tertiary">
 						{areAllChecklistItemsChecked

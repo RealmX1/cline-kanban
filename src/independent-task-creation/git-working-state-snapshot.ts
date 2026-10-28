@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
@@ -15,6 +15,7 @@ const snapshotSchema = z.object({
 	sharedIndexName: z.string().nullable(),
 	objectPackHash: z.string().optional(),
 	sourceHadUncommittedChanges: z.boolean().default(false),
+	selectedArtifactRelativePaths: z.array(z.string()).default([]),
 	entries: z.array(
 		z.object({ path: z.string(), kind: z.enum(["file", "symlink", "absent"]), hash: z.string(), mode: z.number() }),
 	),
@@ -138,8 +139,35 @@ async function readSnapshotIdentity(sourcePath: string) {
 	return { head: head.trim(), common: common.trim(), indexPath: indexPath.trim(), shared: shared.trim(), paths };
 }
 
-export async function captureSourceGitWorkingState(sourcePath: string, artifactDirectory: string) {
+async function collectExplicitArtifactFilePaths(root: string, selectedPaths: string[]): Promise<string[]> {
+	const files: string[] = [];
+	for (const path of selectedPaths) {
+		const absolutePath = await assertSafeParentDirectories(root, path);
+		const info = await lstat(absolutePath);
+		if (info.isDirectory() && !info.isSymbolicLink()) {
+			files.push(
+				...(await collectExplicitArtifactFilePaths(
+					root,
+					(await readdir(absolutePath)).map((entry) => join(path, entry)),
+				)),
+			);
+		} else files.push(path);
+	}
+	return files;
+}
+
+export async function captureSourceGitWorkingState(
+	sourcePath: string,
+	artifactDirectory: string,
+	selectedArtifactRelativePaths: string[] = [],
+) {
 	const identity = await readSnapshotIdentity(sourcePath);
+	identity.paths = [
+		...new Set([
+			...identity.paths,
+			...(await collectExplicitArtifactFilePaths(sourcePath, selectedArtifactRelativePaths)),
+		]),
+	].sort();
 	const index = await readFile(identity.indexPath);
 	await mkdir(join(artifactDirectory, "working-files"), { recursive: true });
 	const entries: SourceGitWorkingStateSnapshot["entries"] = [];
@@ -163,6 +191,12 @@ export async function captureSourceGitWorkingState(sourcePath: string, artifactD
 	const objectPackPath = join(artifactDirectory, "source-git-objects.pack");
 	await transferGitObjectPack(sourcePath, objectPackPath, [identity.head, ...new Set(stagedObjects)]);
 	const after = await readSnapshotIdentity(sourcePath);
+	after.paths = [
+		...new Set([
+			...after.paths,
+			...(await collectExplicitArtifactFilePaths(sourcePath, selectedArtifactRelativePaths)),
+		]),
+	].sort();
 	if (
 		identity.head !== after.head ||
 		JSON.stringify(identity.paths) !== JSON.stringify(after.paths) ||
@@ -183,10 +217,35 @@ export async function captureSourceGitWorkingState(sourcePath: string, artifactD
 		sharedIndexName: identity.shared ? basename(identity.shared) : null,
 		objectPackHash: await fingerprintFile(objectPackPath),
 		sourceHadUncommittedChanges: Boolean((await git(sourcePath, ["status", "--porcelain=v1"])).trim()),
+		selectedArtifactRelativePaths,
 		entries,
 	};
 	await writeFile(join(artifactDirectory, "git-working-state.json"), JSON.stringify(snapshot));
 	return snapshot;
+}
+
+/** 清理与恢复共用同一比对，包含 ignored 成果和原始 index，任何未知都不放行删除。 */
+export async function assertSourceGitWorkingStateMatchesSnapshot(sourcePath: string, artifactDirectory: string) {
+	const snapshot = await readSourceGitWorkingStateSnapshot(artifactDirectory);
+	const identity = await readSnapshotIdentity(sourcePath);
+	const paths = [
+		...new Set([
+			...identity.paths,
+			...(await collectExplicitArtifactFilePaths(sourcePath, snapshot.selectedArtifactRelativePaths)),
+		]),
+	].sort();
+	if (
+		identity.head !== snapshot.headCommit ||
+		identity.common !== snapshot.gitCommonDirectory ||
+		fingerprint(await readFile(identity.indexPath)) !== snapshot.indexHash ||
+		JSON.stringify(paths) !== JSON.stringify(snapshot.entries.map((entry) => entry.path))
+	)
+		throw new Error("来源 Git 状态发生变化，归档不再覆盖当前工作树。");
+	for (const entry of snapshot.entries) {
+		const current = await inspectEntry(sourcePath, entry.path);
+		if (current.hash !== entry.hash || current.kind !== entry.kind || current.mode !== entry.mode)
+			throw new Error(`来源文件发生变化：${entry.path}`);
+	}
 }
 
 export async function readSourceGitWorkingStateSnapshot(artifactDirectory: string) {

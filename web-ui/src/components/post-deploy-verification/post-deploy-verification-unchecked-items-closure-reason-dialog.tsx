@@ -34,7 +34,7 @@ import type {
 	RuntimePostDeployVerificationUncheckedChecklistItemClosureReasonCode,
 } from "@/runtime/types";
 
-// 「带原因移入 Done」对话框：PDV 面板（单任务完成 / 分区批量结案）与看板入口（按钮、拖拽、服务端拒绝兜底）共用。
+// 「带原因结案」对话框：PDV 面板（单任务完成 / 分区批量结案）与看板入口（按钮、拖拽、服务端拒绝兜底）共用。
 // 吸收了原先的两层确认框（跳过 Validation + in_progress 会话可能仍在跑）：它们现在是本对话框的条件段落，
 // 不再先后弹两个框。判定逻辑全在 ...-draft-and-closure-request-resolution.ts，这里只渲染。
 
@@ -349,7 +349,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 			<DialogBody className="space-y-3 text-[13px] text-text-secondary">
 				{hasAnyUncheckedItemOrInvisibleUncheckedItem ? (
 					<p className="m-0">
-						未全部勾选也可以移入 Done，但每个未勾项都要给出原因；结案记录为「带原因结案」，不算「核对通过」。
+						未全部勾选也可以结案，但每个未勾项都要给出原因；结案记录为「带原因结案」，不算「核对通过」。
 					</p>
 				) : null}
 
@@ -429,8 +429,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 							{isBatchSelection
 								? `其中 ${selectedTaskEntriesSkippingValidation.length} 个任务不在 Validation 列：`
 								: "该任务不在 Validation 列："}
-							移入 Done 将<span className="text-status-orange">跳过 Validation 列</span>，同时停止会话、清理
-							worktree。
+							结案将<span className="text-status-orange">跳过 Validation 列</span>，同时停止会话、清理 worktree。
 						</p>
 						{selectedTaskEntriesSkippingValidation
 							.filter((entry) => entry.agentResponsePreviewShownWithSkipValidationAcknowledgement !== null)
@@ -465,7 +464,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 							<span>
 								我已了解{isBatchSelection ? `这 ${selectedTaskEntriesLeavingInProgress.length} 个` : "该"}
 								任务仍在 In Progress，其 agent <span className="text-status-red">会话可能仍在运行</span>
-								；移入 Done 会立即停止会话并清理 worktree，未提交的进行中改动可能丢失。
+								；结案会立即停止会话并清理 worktree，未提交的进行中改动可能丢失。
 							</span>
 						</div>
 					</ClosureDialogNoticeBox>
@@ -494,7 +493,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 					icon={isSubmittingClosure ? <Spinner size={14} /> : undefined}
 					onClick={confirmClosure}
 				>
-					{isBatchSelection ? `结案并移入 Done（${selectedTaskEntries.length} 个任务）` : "确认移入 Done"}
+					{isBatchSelection ? `结案（${selectedTaskEntries.length} 个任务）` : "确认结案"}
 				</Button>
 			</DialogFooter>
 		</Dialog>

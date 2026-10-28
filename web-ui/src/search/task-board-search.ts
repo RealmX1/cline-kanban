@@ -1,3 +1,4 @@
+import { resolveTaskClosureOutcomeForBoardColumn, type TaskClosureOutcome } from "@runtime-task-closure-contract";
 import { Fzf, type FzfResultItem } from "fzf";
 
 import type { RuntimeAgentId } from "@/runtime/types";
@@ -43,6 +44,7 @@ export interface TaskBoardSearchProjectContext {
 }
 
 export interface TaskBoardSearchDocument {
+	closureOutcome?: TaskClosureOutcome;
 	projectId: string;
 	projectName: string;
 	taskId: string;
@@ -138,6 +140,7 @@ export function deriveMatchSourcesFromPositions(
 
 /** 从单个任务的原始字段装配一篇搜索文档（当前项目 board 卡与跨项目索引条目共用，避免偏移/归一逻辑漂移）。 */
 export function buildTaskBoardSearchDocument(params: {
+	closureOutcome?: TaskClosureOutcome;
 	projectId: string;
 	projectName: string;
 	taskId: string;
@@ -158,6 +161,7 @@ export function buildTaskBoardSearchDocument(params: {
 	const promptSubjectStartIndex = title.length > 0 && prompt.length > 0 ? title.length + 1 : 0;
 	const promptSubjectEndIndex = promptSubjectStartIndex + prompt.length;
 	return {
+		closureOutcome: params.closureOutcome,
 		projectId: params.projectId,
 		projectName: params.projectName,
 		taskId: params.taskId,
@@ -191,6 +195,7 @@ export function buildTaskBoardSearchDocuments(
 					projectId: projectContext.projectId,
 					projectName: projectContext.projectName,
 					taskId: card.id,
+					closureOutcome: resolveTaskClosureOutcomeForBoardColumn(column.id, card.taskClosureSummary) ?? undefined,
 					columnId: column.id,
 					title: card.title,
 					prompt: card.prompt,

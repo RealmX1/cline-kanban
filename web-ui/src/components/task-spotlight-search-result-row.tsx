@@ -1,3 +1,4 @@
+import { TASK_CLOSURE_OUTCOME_LABELS } from "@runtime-task-closure-contract";
 import { Activity, Clock, PencilLine } from "lucide-react";
 import type { CSSProperties } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
@@ -157,6 +158,11 @@ export function TaskSpotlightSearchResultRow({
 		>
 			<span className="mt-0.5 inline-flex shrink-0 items-center">
 				<ColumnIndicator columnId={document.columnId} size={14} />
+				{document.closureOutcome ? (
+					<span className="text-xs text-text-secondary">
+						{TASK_CLOSURE_OUTCOME_LABELS[document.closureOutcome]}
+					</span>
+				) : null}
 			</span>
 			<span className="min-w-0 flex-1">
 				<span className="flex items-center gap-2">

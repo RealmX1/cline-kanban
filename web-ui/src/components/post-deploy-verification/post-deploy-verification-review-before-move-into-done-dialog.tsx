@@ -126,7 +126,7 @@ export function PostDeployVerificationReviewBeforeMoveIntoDoneDialog(
 				}}
 				contentClassName="!max-w-2xl"
 			>
-				<DialogHeader title="移入 Done 前核对" icon={<ClipboardCheck size={16} />} />
+				<DialogHeader title="结案前核对" icon={<ClipboardCheck size={16} />} />
 				<DialogBody className="space-y-3">
 					{task && deploymentId ? (
 						<PostDeployVerificationTaskEntryWrappingRealTaskCard
@@ -176,7 +176,7 @@ export function PostDeployVerificationReviewBeforeMoveIntoDoneDialog(
 					)}
 					{getTaskColumnId(board, taskId) === "review" || getTaskColumnId(board, taskId) === "in_progress" ? (
 						<p className="text-xs text-status-orange">
-							该任务不在 Validation 列；移入 Done 将跳过 Validation 列，同时停止会话、清理 worktree。
+							该任务不在 Validation 列；结案将跳过 Validation 列，同时停止会话、清理 worktree。
 						</p>
 					) : null}
 					{getTaskColumnId(board, taskId) === "in_progress" ? (
@@ -187,7 +187,7 @@ export function PostDeployVerificationReviewBeforeMoveIntoDoneDialog(
 								disabled={isBusy}
 								onChange={(event) => review.setInProgressSessionStopAcknowledged(event.target.checked)}
 							/>
-							我已了解 In Progress 任务的会话可能仍在运行，移入 Done 会停止会话并清理 worktree。
+							我已了解 In Progress 任务的会话可能仍在运行，结案会停止会话并清理 worktree。
 						</label>
 					) : null}
 					{guidanceNavigationError || review.completionError || verification.loadError ? (
@@ -217,7 +217,7 @@ export function PostDeployVerificationReviewBeforeMoveIntoDoneDialog(
 			{review.hasVisitedClosureReasons ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog
 					open={review.phase === "closure_reasons"}
-					dialogTitle="带原因移入 Done"
+					dialogTitle="带原因结案"
 					taskEntries={review.taskEntries}
 					taskEntrySelectionMode="single_task_entry_always_included"
 					isSubmittingClosure={isBusy}

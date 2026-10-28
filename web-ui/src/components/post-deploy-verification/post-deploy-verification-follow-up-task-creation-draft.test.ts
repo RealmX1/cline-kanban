@@ -163,7 +163,7 @@ describe("从 PDV 核对项生成新任务上下文", () => {
 		for (const item of checklist) expect(seed.prompt).toContain(`核对项 ID：${item.id}；`);
 		expect(seed.prompt).toContain("摘要");
 		expect(seed.prompt).toContain("## 目标与验收");
-		expect(seed.prompt).toContain("本任务不自动将它标成通过或移入 Done");
+		expect(seed.prompt).toContain("本任务不自动将它标成通过或结案");
 	});
 	it.each([0, 1])("正文在真实 schema 上限加 %i 字符时保留全文或明确摘要", (extraCharacters) => {
 		const maximumPromptCharacters =

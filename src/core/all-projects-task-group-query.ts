@@ -4,6 +4,7 @@ import {
 	buildCrossProjectTaskSwitcherEntryKey,
 	type CrossProjectTaskSwitcherEntryInProject,
 } from "./cross-project-recently-active-task-switcher-section-assignment";
+import { resolveTaskClosureOutcomeForBoardColumn, type TaskClosureOutcome } from "./task-closure-contract";
 
 export const ALL_PROJECTS_TASK_QUERY_GROUPS = [
 	"pinned",
@@ -15,6 +16,7 @@ export const ALL_PROJECTS_TASK_QUERY_GROUPS = [
 export type AllProjectsTaskQueryGroup = (typeof ALL_PROJECTS_TASK_QUERY_GROUPS)[number];
 
 export interface AllProjectsTaskGroupQueryFilters {
+	closureOutcome?: TaskClosureOutcome;
 	group?: AllProjectsTaskQueryGroup;
 	query?: string;
 	column?: RuntimeBoardColumnId;
@@ -55,6 +57,10 @@ export function buildAllProjectsTaskGroupQueryResult(
 				.filter(
 					({ entry }) =>
 						(!filters.column || entry.columnId === filters.column) &&
+						(!filters.closureOutcome ||
+							(entry.columnId === "trash" &&
+								resolveTaskClosureOutcomeForBoardColumn(entry.columnId, entry.taskClosureSummary) ===
+									filters.closureOutcome)) &&
 						(!normalizedQuery ||
 							entry.taskId.toLowerCase().includes(normalizedQuery) ||
 							entry.title.toLowerCase().includes(normalizedQuery)),

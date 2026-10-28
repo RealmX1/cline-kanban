@@ -180,7 +180,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 						await openVerificationReview(doneEntryFlowIdentity, taskCommentToAppendWhenMovingIntoDone);
 						return;
 					}
-					reportTaskCardActionCommandFailure("move the task to Done", result);
+					reportTaskCardActionCommandFailure("结案任务", result);
 					if (result.taskCardActionCommandExecutionOutcome !== "command_completed_by_runtime") {
 						if (taskCommentToAppendWhenMovingIntoDone)
 							setPendingVerificationReview((current) =>
@@ -284,7 +284,6 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 		({
 			workspaceId,
 			taskCard,
-			boardColumnIdContainingTaskCard,
 			taskCardActionCommandKindInFlight,
 		}: {
 			workspaceId: string;
@@ -308,17 +307,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
 				}).then((result) => reportTaskCardActionCommandFailure("start the task", result));
 			},
-			onMoveToTrashTask: (_taskId, options) => {
-				if (options?.requestTaskCommentBeforeMovingIntoDone) {
-					openTaskComment(workspaceId, taskCard);
-					return;
-				}
-				void requestOtherProjectDoneWithVerificationPrecheck(
-					workspaceId,
-					taskCard,
-					boardColumnIdContainingTaskCard,
-				);
-			},
+			onMoveToTrashTask: () => openTaskComment(workspaceId, taskCard),
 			onMoveToValidationTask: (taskId) => {
 				void moveTaskCardBetweenNonTrashColumnsThroughRuntime({
 					workspaceId,
@@ -340,7 +329,7 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 					taskId,
 					expectedTaskIncarnationCreatedAtEpochMs: taskCard.createdAt,
 					agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
-				}).then((result) => reportTaskCardActionCommandFailure("restore the task from Done", result));
+				}).then((result) => reportTaskCardActionCommandFailure("重新打开已结案任务", result));
 			},
 			onDeleteTask: () => setPendingDeleteConfirmation({ workspaceId, taskCard }),
 			onCancelAutomaticTaskAction: (taskId) => {
@@ -410,10 +399,10 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 		<>
 			<TaskCommentBeforeMoveIntoDoneDialog
 				controller={taskCommentBeforeMoveIntoDone}
-				onSubmit={(text) => {
+				onSubmit={(text, closure) => {
 					const request = taskCommentBeforeMoveIntoDone.request;
 					if (!request) return;
-					const comment = prepareTaskComment(text);
+					const comment = prepareTaskComment(text, closure);
 					if (!comment) return;
 					void readTaskCardWithBoardColumnInWorkspace(
 						request.workspaceId,

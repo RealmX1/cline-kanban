@@ -727,7 +727,7 @@ function ProjectRow({
 		},
 		{
 			id: "trash",
-			title: "Done",
+			title: "已结案",
 			shortLabel: "D",
 			toneClassName: "bg-status-red/20 text-status-red",
 			count: project.taskCounts.trash,

@@ -1,3 +1,4 @@
+import type { TaskClosureOperationProgress, TaskClosureRecord } from "@runtime-task-closure-contract";
 import type {
 	IndependentTaskCreationProvenance,
 	RuntimeAgentId,
@@ -104,6 +105,8 @@ export interface BoardCard {
 	// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序）。
 	// 同样受 normalizeCard 白名单约束——见下方 ompAgentSessionTransport 那段注释。
 	pinnedToTaskPinboardAt?: number;
+	taskClosureSummary?: TaskClosureRecord;
+	taskClosureOperationProgress?: TaskClosureOperationProgress;
 	taskShelvingState?: { isShelved: boolean; lastChangedAt: number };
 	// 置顶时填的一句原因，可留空（留空时不写字段）。
 	taskPinboardPinReason?: string;

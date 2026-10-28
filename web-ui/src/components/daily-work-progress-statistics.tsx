@@ -21,7 +21,7 @@ const METRIC_PRESENTATION = {
 		color: "text-status-purple",
 		priority: 2,
 	},
-	entered_done: { label: "进入 Done", shortLabel: "Done", icon: CheckCheck, color: "text-status-green", priority: 3 },
+	entered_done: { label: "结案", shortLabel: "已结案", icon: CheckCheck, color: "text-status-green", priority: 3 },
 	human_prompt: {
 		label: "人工 prompt",
 		shortLabel: "Prompt",
@@ -51,7 +51,7 @@ export function describeDailyWorkProgressAchievement(achievement: RuntimeDailyWo
 		(achievement.metric === "human_prompt"
 			? " 次人工 prompt"
 			: achievement.metric === "entered_done"
-				? " 个任务进入 Done"
+				? " 个任务结案"
 				: " 个任务进入 Validation")
 	);
 }

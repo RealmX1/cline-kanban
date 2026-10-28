@@ -1,3 +1,4 @@
+import type { TaskClosureOutcome } from "@runtime-task-closure-contract";
 import type { RuntimeAgentId } from "@/runtime/types";
 import {
 	resolveTaskLastModifiedFilterWindowDurationMs,
@@ -11,6 +12,7 @@ import type { BoardColumnId } from "@/types";
  * 概览行……）投影成这个形状，过滤本身因此不依赖任何具体界面的数据结构。
  */
 export interface FilterableTaskDescriptor {
+	closureOutcome?: TaskClosureOutcome;
 	projectId: string;
 	columnId: BoardColumnId;
 	/** 该任务此刻的有效 agent；未知为 null（例如跨项目行既没有活会话、卡片也没设 per-task 覆盖）。 */
@@ -44,6 +46,11 @@ function matchesTaskFilterSelectionExceptSessionActivity(
 	selection: TaskFilterSelection,
 	nowEpochMs: number,
 ): boolean {
+	if (
+		selection.selectedClosureOutcomes?.size &&
+		(!descriptor.closureOutcome || !selection.selectedClosureOutcomes.has(descriptor.closureOutcome))
+	)
+		return false;
 	if (selection.selectedStageColumnIds.size > 0 && !selection.selectedStageColumnIds.has(descriptor.columnId)) {
 		return false;
 	}

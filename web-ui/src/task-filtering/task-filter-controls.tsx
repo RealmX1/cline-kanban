@@ -1,4 +1,5 @@
 import * as RadixPopover from "@radix-ui/react-popover";
+import { TASK_CLOSURE_OUTCOME_LABELS } from "@runtime-task-closure-contract";
 import { ListFilter } from "lucide-react";
 
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
@@ -176,6 +177,20 @@ export function TaskFilterControls({
 					sideOffset={5}
 					collisionPadding={8}
 				>
+					<TaskFilterDimensionSection title="结案结果">
+						{Object.entries(TASK_CLOSURE_OUTCOME_LABELS).map(([value, label]) => (
+							<TaskFilterChip
+								key={value}
+								label={label}
+								isSelected={
+									selection.selectedClosureOutcomes?.has(value as keyof typeof TASK_CLOSURE_OUTCOME_LABELS) ??
+									false
+								}
+								shouldUseMobileMinimumTouchTarget={shouldUseMobileMinimumTouchTarget}
+								onClick={() => toggleSetMember("selectedClosureOutcomes", value)}
+							/>
+						))}
+					</TaskFilterDimensionSection>
 					<TaskFilterDimensionSection title="Stage">
 						{availableValues.stageColumnIds.map((stage) => (
 							<TaskFilterChip

@@ -3,6 +3,7 @@ import {
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
+import type { TaskClosureOutcome } from "@runtime-task-closure-contract";
 
 import { isCardCreditLimitError } from "@/components/board-card-session-activity";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -20,6 +21,7 @@ import type { BoardColumnId } from "@/types";
  * 「一个结果都不要」不是有用的状态，不值得为它保留一条相反的约定。
  */
 export interface TaskFilterSelection {
+	selectedClosureOutcomes?: ReadonlySet<TaskClosureOutcome>;
 	/** 空 = 不按 stage 收窄。 */
 	selectedStageColumnIds: ReadonlySet<BoardColumnId>;
 	/** 空 = 不按项目收窄。跨项目搜索关闭时这一维度只有当前项目一个可选值，控件应自行隐藏。 */
@@ -131,6 +133,7 @@ const EMPTY_SESSION_ACTIVITY_CATEGORIES: ReadonlySet<TaskSessionActivityFilterCa
 
 /** 全维度都不设约束。 */
 export const EMPTY_TASK_FILTER_SELECTION: TaskFilterSelection = {
+	selectedClosureOutcomes: new Set<TaskClosureOutcome>(),
 	selectedStageColumnIds: EMPTY_STAGE_COLUMN_IDS,
 	selectedProjectIds: EMPTY_PROJECT_IDS,
 	selectedAgentIds: EMPTY_AGENT_IDS,
@@ -140,6 +143,7 @@ export const EMPTY_TASK_FILTER_SELECTION: TaskFilterSelection = {
 
 export function isEmptyTaskFilterSelection(selection: TaskFilterSelection): boolean {
 	return (
+		(selection.selectedClosureOutcomes?.size ?? 0) === 0 &&
 		selection.selectedStageColumnIds.size === 0 &&
 		selection.selectedProjectIds.size === 0 &&
 		selection.selectedAgentIds.size === 0 &&
@@ -149,7 +153,7 @@ export function isEmptyTaskFilterSelection(selection: TaskFilterSelection): bool
 }
 
 export function countActiveTaskFilterDimensions(selection: TaskFilterSelection): number {
-	let activeDimensionCount = 0;
+	let activeDimensionCount = (selection.selectedClosureOutcomes?.size ?? 0) > 0 ? 1 : 0;
 	if (selection.selectedStageColumnIds.size > 0) {
 		activeDimensionCount += 1;
 	}
@@ -170,6 +174,7 @@ export function countActiveTaskFilterDimensions(selection: TaskFilterSelection):
 
 /** 四个集合维度的字段名。时间窗维度不在其中——它是单选枚举，不参与「切换成员」。 */
 export type TaskFilterSetDimensionKey =
+	| "selectedClosureOutcomes"
 	| "selectedStageColumnIds"
 	| "selectedProjectIds"
 	| "selectedAgentIds"
@@ -182,7 +187,7 @@ export function toggleTaskFilterSelectionSetMember(
 	member: string,
 ): TaskFilterSelection {
 	const currentMembers = selection[dimension] as ReadonlySet<string>;
-	const nextMembers = new Set(currentMembers);
+	const nextMembers = new Set(currentMembers ?? []);
 	if (nextMembers.has(member)) {
 		nextMembers.delete(member);
 	} else {

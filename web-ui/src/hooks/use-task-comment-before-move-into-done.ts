@@ -1,6 +1,8 @@
+import type { TaskClosureRequest } from "@runtime-task-closure-contract";
 import { useCallback, useRef, useState } from "react";
 import type { BoardCard } from "@/types";
 import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 import { createTaskCommentEntryId } from "@/utils/create-task-comment-entry-id";
 
 interface TaskCommentBeforeMoveIntoDoneRequest {
@@ -8,8 +10,12 @@ interface TaskCommentBeforeMoveIntoDoneRequest {
 	taskId: string;
 	expectedTaskIncarnationCreatedAtEpochMs: number;
 	taskTitle: string;
+	insertAtIndexWithinDoneBoardColumn?: number;
+	closureRequestId: string;
+	expectedTaskUpdatedAtEpochMs: number;
 	taskCommentEntryId: string;
 	commentText: string;
+	closure?: TaskClosureRequest;
 	phase: "editing" | "submitting" | "awaiting_confirmation";
 	errorMessage: string | null;
 }
@@ -23,13 +29,16 @@ export function useTaskCommentBeforeMoveIntoDone() {
 		setRequest(next);
 	}, []);
 	const open = useCallback(
-		(workspaceId: string, card: BoardCard) => {
+		(workspaceId: string, card: BoardCard, insertAtIndexWithinDoneBoardColumn?: number) => {
 			if (requestRef.current) return;
 			replaceRequest({
 				workspaceId,
 				taskId: card.id,
 				expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
 				taskTitle: card.title,
+				insertAtIndexWithinDoneBoardColumn,
+				closureRequestId: createRandomUuidV4WithInsecureContextFallback(),
+				expectedTaskUpdatedAtEpochMs: card.updatedAt,
 				taskCommentEntryId: createTaskCommentEntryId(),
 				commentText: "",
 				phase: "editing",
@@ -39,9 +48,9 @@ export function useTaskCommentBeforeMoveIntoDone() {
 		[replaceRequest],
 	);
 	const prepareSubmission = useCallback(
-		(commentText: string): TaskCommentToAppendWhenMovingIntoDone | null => {
+		(commentText: string, closure?: TaskClosureRequest): TaskCommentToAppendWhenMovingIntoDone | null => {
 			const current = requestRef.current;
-			const trimmed = commentText.trim();
+			const trimmed = commentText.trim() || closure?.details.reason || (closure ? "记录任务结案结果" : "");
 			if (!current || current.phase !== "editing" || !trimmed) return null;
 			const taskCommentEntryId =
 				current.commentText && current.commentText !== trimmed
@@ -51,10 +60,16 @@ export function useTaskCommentBeforeMoveIntoDone() {
 				...current,
 				taskCommentEntryId,
 				commentText: trimmed,
+				closure,
 				phase: "submitting",
 				errorMessage: null,
 			});
-			return { taskCommentEntryId, commentText: trimmed };
+			return {
+				taskCommentEntryId,
+				commentText: trimmed,
+				closure,
+				insertAtIndexWithinDoneBoardColumn: current.insertAtIndexWithinDoneBoardColumn,
+			};
 		},
 		[replaceRequest],
 	);
