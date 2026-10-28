@@ -25,6 +25,7 @@ export function parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork(input: {
 	entry: AcpTaskSessionEntry | null;
 	hasLiveAcpConnection: boolean;
 	label?: string;
+	owningCommandExecutionId?: string;
 }): AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult {
 	if (!input.entry || !input.hasLiveAcpConnection) {
 		return { ok: false, error: `Task "${input.taskId}" has no active agent session to park.` };
@@ -33,21 +34,49 @@ export function parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork(input: {
 		return { ok: false, error: `Task "${input.taskId}" is not in an agent turn and cannot be parked.` };
 	}
 	const label = input.label?.trim() || undefined;
+	const previousPark = input.entry.summary.awaitingDispatchedBackgroundWork;
+	if (input.owningCommandExecutionId && previousPark && !previousPark.owningCommandExecutionIds)
+		return { ok: false, error: "会话已有其他后台等待，不能转移其所有权。" };
+	const owningCommandExecutionIds = input.owningCommandExecutionId
+		? [...new Set([...(previousPark?.owningCommandExecutionIds ?? []), input.owningCommandExecutionId])]
+		: previousPark?.owningCommandExecutionIds;
 	const sinceMs = input.entry.summary.awaitingDispatchedBackgroundWork?.sinceMs ?? now();
 	return {
 		ok: true,
 		summary: updateAcpSummary(input.entry, {
-			awaitingDispatchedBackgroundWork: { sinceMs, ...(label ? { label } : {}) },
+			awaitingDispatchedBackgroundWork: {
+				sinceMs,
+				...((!input.owningCommandExecutionId && previousPark?.owningCommandExecutionIds?.length) ||
+				previousPark?.hasUnownedBackgroundWorkWait
+					? { hasUnownedBackgroundWorkWait: true }
+					: {}),
+				...(label ? { label } : {}),
+				...(owningCommandExecutionIds ? { owningCommandExecutionIds } : {}),
+			},
 		}),
 	};
 }
 
 // 显式清 park（编排方兜底、unpark procedure）。未 parked 返回 null，调用方据此不重复广播。
-export function unparkAcpTaskSessionEntry(entry: AcpTaskSessionEntry): RuntimeTaskSessionSummary | null {
+export function unparkAcpTaskSessionEntry(
+	entry: AcpTaskSessionEntry,
+	owningCommandExecutionId?: string,
+): RuntimeTaskSessionSummary | null {
 	if (!isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 		return null;
 	}
-	return updateAcpSummary(entry, ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK);
+	const previousPark = entry.summary.awaitingDispatchedBackgroundWork;
+	if (owningCommandExecutionId && !previousPark?.owningCommandExecutionIds?.includes(owningCommandExecutionId))
+		return null;
+	const remainingOwners = previousPark?.owningCommandExecutionIds?.filter((id) => id !== owningCommandExecutionId);
+	return updateAcpSummary(entry, {
+		awaitingDispatchedBackgroundWork:
+			previousPark &&
+			owningCommandExecutionId &&
+			(remainingOwners?.length || previousPark.hasUnownedBackgroundWorkWait)
+				? { ...previousPark, owningCommandExecutionIds: remainingOwners }
+				: null,
+	});
 }
 
 export function describeAcpTaskSessionAwaitingDispatchedBackgroundWork(entry: AcpTaskSessionEntry | null): {

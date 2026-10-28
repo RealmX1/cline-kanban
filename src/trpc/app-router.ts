@@ -531,6 +531,11 @@ import {
 } from "../core/project-visual-identity";
 import { taskAssistanceModelProviderRoutingSettingsSchema } from "../core/task-assistance-model-provider-routing-contract";
 import {
+	taskCommandExecutionIdentityRequestSchema,
+	taskCommandExecutionResponseSchema,
+	taskCommandExecutionStartRequestSchema,
+} from "../core/task-command-execution-contract";
+import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
 	IncomingWorkItemTriageOperationError,
@@ -652,6 +657,7 @@ import {
 	savePersistentAgentPromptImageAttachments,
 } from "../state/persistent-agent-prompt-image-attachments";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { TaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
@@ -662,6 +668,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskCommandExecutionApi?: TaskCommandExecutionService;
 	codexConfigurationSyncApi?: CodexConfigurationSyncApi;
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
 	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
@@ -1360,6 +1367,41 @@ const gitSyncActionInputSchema = z.object({
 });
 
 export const runtimeAppRouter = t.router({
+	taskCommandExecution: t.router({
+		start: workspaceProcedure
+			.input(taskCommandExecutionStartRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.start(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+		inspect: workspaceProcedure
+			.input(taskCommandExecutionIdentityRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.inspect(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+		cancel: workspaceProcedure
+			.input(taskCommandExecutionIdentityRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.cancel(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+	}),
 	dailyWorkProgressStatistics: t.router({
 		getSummary: t.procedure
 			.input(runtimeDailyWorkProgressRequestSchema)

@@ -140,6 +140,36 @@ afterEach(async () => {
 });
 
 describe("ACP 提交只在可靠协议活动后确认接受", () => {
+	it("park 保持相同 facet 时，协议请求完成仍提供真实可写状态变化", async () => {
+		const { service, turn } = await startAwaitingUserSession();
+		expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false);
+		await service.sendTaskSessionInput(TASK_ID, "执行原始工作", undefined, undefined, "parked-original-prompt");
+		notify({ sessionUpdate: "tool_call", toolCallId: "accepted-under-park", title: "开始处理" });
+		service.parkTaskSessionAwaitingDispatchedBackgroundWork(TASK_ID, {
+			owningCommandExecutionId: "3f2ee3e7-47b5-4a86-b55a-333f92c99cd9",
+		});
+		const busy = service.getTaskSessionInputSubmissionReadiness(TASK_ID);
+		expect(busy.isBusy).toBe(true);
+		turn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		expect(service.getSummary(TASK_ID)).toMatchObject({ turnOwner: "agent", liveness: "live", userTurnKind: null });
+		expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).observationSequenceNumber).toBeGreaterThan(
+			busy.observationSequenceNumber,
+		);
+		service.disposeAllTaskSessions();
+	});
+	it("忙碌拒绝在注册新 prompt 前提供明确未派发事实", async () => {
+		const { service, connection } = await startAwaitingUserSession();
+		await service.sendTaskSessionInput(TASK_ID, "第一条输入", undefined, undefined, "first-input");
+		const notStarted = vi.fn();
+		await expect(
+			service.sendTaskSessionInput(TASK_ID, "第二条输入", undefined, undefined, "second-input", notStarted),
+		).rejects.toThrow("正在处理");
+		expect(notStarted).toHaveBeenCalledExactlyOnceWith("request_busy");
+		expect(connection.prompt).toHaveBeenCalledTimes(1);
+		expect(service.getSummary(TASK_ID)?.agentConversationPromptSubmissionAcceptance?.eventId).toBe("first-input");
+		service.disposeAllTaskSessions();
+	});
 	it.each([false, true])(
 		"空创建 Plan=%s 不发请求，随后首个真实请求包含指导且原文只显示一次",
 		async (startInPlanMode) => {

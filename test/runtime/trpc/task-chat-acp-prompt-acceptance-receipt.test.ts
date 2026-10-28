@@ -29,6 +29,46 @@ const pendingSummary: RuntimeTaskSessionSummary = {
 };
 
 describe("ACP 统一发送出口使用真实接受回执", () => {
+	it("提交前忙碌拒绝与回执超时分别提供证据，不用失败状态猜测未提交", async () => {
+		const summary = {
+			...pendingSummary,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "omp",
+				nativeSessionId: "native-session",
+				observedAt: 1,
+			},
+		} as RuntimeTaskSessionSummary;
+		const service = {
+			getSummary: () => summary,
+			sendTaskSessionInput: vi.fn(async (...args: Parameters<AcpTaskSessionService["sendTaskSessionInput"]>) => {
+				args[5]?.("request_busy");
+				throw new Error("当前 ACP 请求正在处理");
+			}),
+		} as unknown as AcpTaskSessionService;
+		const outcome = vi.fn();
+		const response = await sendTaskChatMessageAcrossSessionTransports(
+			{
+				getScopedAcpTaskSessionService: async () => service,
+				getScopedTerminalManager: vi.fn(),
+				getScopedClineTaskSessionService: vi.fn(),
+				loadScopedRuntimeConfig: vi.fn(),
+				resolveClineTaskSessionLaunchConfig: vi.fn(),
+				programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
+				programmaticSubmissionAttemptId: "write-attempt",
+				onProgrammaticTerminalDeliverySettled: outcome,
+			},
+			{ workspaceId: "workspace" } as RuntimeTrpcWorkspaceScope,
+			{ taskId: "task-1", text: "结果", idempotencyKey: "stable-result-id" },
+		);
+		expect(response.terminalDelivery?.nativePromptSubmissionNotStartedEvidence).toEqual({
+			source: "acp_input_rejected_before_prompt_registration",
+			clientUserMessageId: "stable-result-id",
+			submissionAttemptId: "write-attempt",
+			nativeSessionId: "native-session",
+			reason: "request_busy",
+		});
+		expect(outcome).toHaveBeenCalledTimes(1);
+	});
 	it.each([true, false])("返回 pending 后，仅由协议核验结算结果 accepted=%s", async (accepted) => {
 		let settleAcceptance: ((accepted: boolean) => void) | undefined;
 		const service = {

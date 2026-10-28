@@ -889,7 +889,19 @@ export type RuntimeTaskTerminalDeliveryContention = z.infer<typeof runtimeTaskTe
 //     session-manager 共用的唯一谓词）；置 / 清标经 TerminalSessionManager 的 park / unpark 走 updateSummary
 //     metadata-only 漏斗，不携带 facet / state，故 {turnOwner:"agent", liveness:"live", userTurnKind:null} 三元组
 //     与下方 superRefine 护栏从不被触碰（parked 主 agent 的真相就是普通 running 三元组）。
+export {
+	type TaskCommandExecutionRecord,
+	type TaskCommandExecutionSpecification,
+	taskCommandExecutionIdentityRequestSchema,
+	taskCommandExecutionRecordSchema,
+	taskCommandExecutionResponseSchema,
+	taskCommandExecutionSpecificationSchema,
+	taskCommandExecutionStartRequestSchema,
+} from "./task-command-execution-contract";
+
 export const runtimeTaskAwaitingDispatchedBackgroundWorkSchema = z.object({
+	owningCommandExecutionIds: z.array(z.string().uuid()).optional(),
+	hasUnownedBackgroundWorkWait: z.boolean().optional(),
 	// park 起始时刻（epoch ms）。用于 UI 展示与（自研 Kanban 继承时）潜在的 park 超时兜底。
 	sinceMs: z.number(),
 	// 可选的人类可读标签（例：被派发的子任务 id / 简述），仅用于 UI 与诊断。
@@ -2706,11 +2718,20 @@ export const codexNativePromptDeliveryOperationSchema = z.object({
 });
 export type CodexNativePromptDeliveryOperation = z.infer<typeof codexNativePromptDeliveryOperationSchema>;
 
+export const nativePromptSubmissionNotStartedEvidenceSchema = z.object({
+	source: z.literal("acp_input_rejected_before_prompt_registration"),
+	clientUserMessageId: z.string().min(1),
+	submissionAttemptId: z.string().min(1),
+	nativeSessionId: z.string().min(1),
+	reason: z.enum(["connection_unavailable", "request_busy"]),
+});
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2733,6 +2754,7 @@ export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 

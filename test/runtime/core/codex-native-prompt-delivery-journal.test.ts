@@ -13,6 +13,51 @@ import {
 } from "../../../src/core/task-message-injection-ledger";
 
 describe("原生投递持久意图与接受历史", () => {
+	it("PTY 备用路径首帧前持久化可能提交意图，失败后不能借 RPC 次数为零重投", async () => {
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+			records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
+			result: undefined,
+		}));
+		const journal = createCodexNativePromptDeliveryJournal(binding());
+		await journal.prepare(identity);
+		await journal.recordTerminalPtyWriteIntent();
+		const operation = (await readTaskMessageInjectionLedger(ledgerPath))[0].codex_native_prompt_delivery_operation;
+		expect(operation?.sendPhase).toBe("request_intent_persisted");
+		expect(operation?.actualSendAttemptCount).toBe(0);
+		await recordTaskMessageTerminalDeliveryOutcome({
+			...binding(),
+			taskId: "card",
+			status: "delivery_failed",
+			failureReason: "human_terminal_contention_timeout",
+			nowIso: new Date().toISOString(),
+		});
+		expect((await createCodexNativePromptDeliveryJournal(binding()).prepare(identity)).requestMayHaveBeenSent).toBe(
+			true,
+		);
+		await expect(journal.recordTerminalPtyWriteIntent()).rejects.toThrow("只允许补证");
+	});
+	it.each([
+		"submit_confirmation_budget_exhausted",
+		"codex_native_prompt_delivery_unconfirmed",
+		"runtime_restarted_before_confirmation",
+	] as const)("原生 RPC 未发送但 %s 无法排除 PTY 已提交时只补证", async (failureReason) => {
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+			records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
+			result: undefined,
+		}));
+		const journal = createCodexNativePromptDeliveryJournal(binding());
+		await journal.prepare(identity);
+		await recordTaskMessageTerminalDeliveryOutcome({
+			...binding(),
+			taskId: "card",
+			status: "delivery_failed",
+			failureReason,
+			nowIso: new Date().toISOString(),
+		});
+		expect((await createCodexNativePromptDeliveryJournal(binding()).prepare(identity)).requestMayHaveBeenSent).toBe(
+			true,
+		);
+	});
 	let directory: string;
 	let ledgerPath: string;
 	const text = "独立程序化消息\n中文😀";
@@ -93,6 +138,29 @@ describe("原生投递持久意图与接受历史", () => {
 		);
 	});
 
+	it("所属结果仅在登记未发送且非取消时可恢复，保留历史失败", async () => {
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+			records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
+			result: undefined,
+		}));
+		const journal = createCodexNativePromptDeliveryJournal(binding());
+		await journal.prepare(identity);
+		await recordTaskMessageTerminalDeliveryOutcome({
+			...binding(),
+			taskId: "card",
+			status: "delivery_failed",
+			failureReason: "human_terminal_contention_timeout",
+			nowIso: new Date().toISOString(),
+		});
+		const restarted = createCodexNativePromptDeliveryJournal(binding());
+		expect((await restarted.prepare(identity)).requestMayHaveBeenSent).toBe(false);
+		await restarted.recordRequestIntent(null);
+		await restarted.recordRequestInvoked();
+		expect((await restarted.prepare(identity)).requestMayHaveBeenSent).toBe(true);
+		expect((await readTaskMessageInjectionLedger(ledgerPath))[0]?.terminal_delivery_status).toBe("delivery_failed");
+		await expect(restarted.recordRequestIntent(null)).rejects.toThrow("只允许补证");
+	});
+
 	it("并发登记只产生一个稳定消息身份", async () => {
 		const results = await Promise.all(
 			["proposal-a", "proposal-b"].map(async (clientUserMessageId) =>
@@ -131,17 +199,24 @@ describe("原生投递持久意图与接受历史", () => {
 		).toBe(0);
 	});
 
-	it("明确取消终止发送资格；普通回合结束不修改已登记授权", async () => {
-		const journal = createCodexNativePromptDeliveryJournal(binding());
-		await journal.prepare(identity);
-		await recordTaskMessageTerminalDeliveryOutcome({
-			...binding(),
-			taskId: "card",
-			status: "delivery_failed",
-			failureReason: "cancelled_before_delivery",
-			nowIso: new Date().toISOString(),
-		});
-		await expect(journal.recordRequestIntent(null)).rejects.toThrow("只允许补证");
-		expect((await journal.prepare(identity)).requestMayHaveBeenSent).toBe(true);
-	});
+	it.each(["rvf", "owned_command_execution_result"])(
+		"明确取消终止 %s 发送资格；普通回合结束不修改已登记授权",
+		async (source) => {
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+				records: records.map((record) => ({ ...record, source })),
+				result: undefined,
+			}));
+			const journal = createCodexNativePromptDeliveryJournal(binding());
+			await journal.prepare(identity);
+			await recordTaskMessageTerminalDeliveryOutcome({
+				...binding(),
+				taskId: "card",
+				status: "delivery_failed",
+				failureReason: "cancelled_before_delivery",
+				nowIso: new Date().toISOString(),
+			});
+			await expect(journal.recordRequestIntent(null)).rejects.toThrow("只允许补证");
+			expect((await journal.prepare(identity)).requestMayHaveBeenSent).toBe(true);
+		},
+	);
 });

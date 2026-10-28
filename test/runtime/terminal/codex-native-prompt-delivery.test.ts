@@ -171,6 +171,48 @@ describe("Codex 原生投递保留 composer", () => {
 		expect(input.onRequestAttempted).toHaveBeenCalledOnce();
 	});
 
+	it("所属结果发送前失败后恢复控制端会实际发起一次原生请求", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "owned-result-native-retry-"));
+		const ledgerPath = getTaskMessageInjectionLedgerPath(directory);
+		const binding = { ledgerPath, ledgerTaskId: "card", idempotencyKey: CLIENT_MESSAGE_ID };
+		try {
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({
+				records: [
+					createPendingTaskMessageInjectionRecord({
+						taskId: "card",
+						attemptId: "conversation-1",
+						source: "owned_command_execution_result",
+						idempotencyKey: CLIENT_MESSAGE_ID,
+						promptSha256: createHash("sha256").update(PROMPT).digest("hex"),
+						nowIso: new Date().toISOString(),
+					}),
+				],
+				result: undefined,
+			}));
+			const journal = createCodexNativePromptDeliveryJournal(binding);
+			const unavailable = createInput({ deliveryJournal: journal });
+			delete unavailable.summary.codexNativeSessionControlEndpoint;
+			expect((await deliverCodexNativePromptWithoutChangingComposer(unavailable)).status).toBe("unavailable");
+			await recordTaskMessageTerminalDeliveryOutcome({
+				...binding,
+				taskId: "card",
+				status: "delivery_failed",
+				failureReason: "human_terminal_contention_timeout",
+				nowIso: new Date().toISOString(),
+			});
+			const restored = createInput({ deliveryJournal: createCodexNativePromptDeliveryJournal(binding) });
+			expect((await deliverCodexNativePromptWithoutChangingComposer(restored)).status).toBe("confirmed");
+			expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+			expect(restored.beforeSubmit).toHaveBeenCalledOnce();
+			const operation = (await readTaskMessageInjectionLedger(ledgerPath))[0]
+				?.codex_native_prompt_delivery_operation;
+			expect(operation?.actualSendAttemptCount).toBe(1);
+			expect(operation?.sendPhase).toBe("native_accepted");
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("text 与 input_text 分片拼接后精确匹配时确认且只提交一次", async () => {
 		installNativeResponses({
 			nativeMessageContent: [
@@ -196,6 +238,7 @@ describe("Codex 原生投递保留 composer", () => {
 				persisted = true;
 				requestMayHaveBeenSent = true;
 			}),
+			recordTerminalPtyWriteIntent: vi.fn(async () => {}),
 			recordRequestInvoked: vi.fn(async () => {}),
 			recordReturnedTurn: vi.fn(async () => {}),
 			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
@@ -262,6 +305,7 @@ describe("Codex 原生投递保留 composer", () => {
 			recordRequestIntent: vi.fn(async () => {
 				throw new Error("磁盘写入失败");
 			}),
+			recordTerminalPtyWriteIntent: vi.fn(async () => {}),
 			recordRequestInvoked: vi.fn(async () => {}),
 			recordReturnedTurn: vi.fn(async () => {}),
 			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
@@ -429,6 +473,7 @@ describe("Codex 原生投递保留 composer", () => {
 						returnedTurnId: null,
 					})),
 					recordRequestIntent: vi.fn(async () => {}),
+					recordTerminalPtyWriteIntent: vi.fn(async () => {}),
 					recordRequestInvoked: vi.fn(async () => {}),
 					recordReturnedTurn: vi.fn(async () => {}),
 					recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
@@ -482,6 +527,7 @@ describe("Codex 原生投递保留 composer", () => {
 					returnedTurnId: null,
 				})),
 				recordRequestIntent: vi.fn(async () => {}),
+				recordTerminalPtyWriteIntent: vi.fn(async () => {}),
 				recordRequestInvoked: vi.fn(async () => {}),
 				recordReturnedTurn: vi.fn(async () => {}),
 				recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),

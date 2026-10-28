@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import * as nativeDeliveryJournal from "../../../src/core/codex-native-prompt-delivery-journal";
 import type {
 	CodexNativePromptDeliveryInput,
 	CodexNativePromptDeliveryResult,
@@ -105,6 +106,105 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 }
 
 describe("session manager 的 Codex 原生投递", () => {
+	it("所属结果让位于在途 PTY 回执，自己的写前核验可以排除自己的回执", () => {
+		const manager = new TerminalSessionManager();
+		const { active } = installSession(manager, "");
+		const firstOutcome = vi.fn();
+		manager.submitTaskChatInputWhenReady("conversation-1", "FIRST", {
+			idempotencyKey: "first-result",
+			owningCommandExecutionId: "first-execution",
+			onDeliveryOutcome: firstOutcome,
+		});
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1")).toBe(true);
+		expect(manager.hasPendingProgrammaticTaskChatInputDelivery("conversation-1", "first-result")).toBe(false);
+		expect(
+			manager.submitTaskChatInputWhenReady("conversation-1", "SECOND", {
+				idempotencyKey: "second-result",
+				owningCommandExecutionId: "second-execution",
+				onDeliveryOutcome: vi.fn(),
+			}),
+		).toBeNull();
+		expect(firstOutcome).not.toHaveBeenCalled();
+		expect(active.programmaticDeliveryReceipt?.idempotencyKey).toBe("first-result");
+	});
+	it("所属结果只解除自己的等待", () => {
+		const manager = new TerminalSessionManager();
+		installSession(manager, "");
+		const unpark = vi.spyOn(manager, "unparkTaskSession");
+		manager.submitTaskChatInputWhenReady("conversation-1", "RESULT", {
+			owningCommandExecutionId: "execution",
+			onDeliveryOutcome: vi.fn(),
+		});
+		expect(unpark).toHaveBeenCalledExactlyOnceWith("conversation-1", "execution");
+	});
+	it.each(["human_input", "persistent_revocation"] as const)(
+		"持久化 PTY 意图期间 %s 不会被备用投递覆盖",
+		async (interruption) => {
+			let markEntered!: () => void;
+			let release!: () => void;
+			const entered = new Promise<void>((resolve) => {
+				markEntered = resolve;
+			});
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const createOriginal = nativeDeliveryJournal.createCodexNativePromptDeliveryJournal;
+			const journal = vi
+				.spyOn(nativeDeliveryJournal, "createCodexNativePromptDeliveryJournal")
+				.mockImplementation((binding) => ({
+					...createOriginal(binding),
+					recordTerminalPtyWriteIntent: async () => {
+						markEntered();
+						await gate;
+					},
+				}));
+			try {
+				const native = vi.fn(async (): Promise<CodexNativePromptDeliveryResult> => ({ status: "unavailable" }));
+				const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
+				const { write } = installSession(manager, "");
+				let revoked = false;
+				manager.submitTaskChatInputWhenReady("conversation-1", "INJECTION", {
+					idempotencyKey: "owned-result",
+					validateBeforeTerminalWrite: async () => {
+						if (revoked) throw new Error("所属执行已有持久撤销意图");
+					},
+					codexNativeDeliveryLedgerBinding: {
+						ledgerPath: "/isolated-unused-ledger",
+						ledgerTaskId: "card",
+						idempotencyKey: "owned-result",
+					},
+					onDeliveryOutcome: vi.fn(),
+				});
+				await vi.advanceTimersByTimeAsync(1100);
+				await entered;
+				if (interruption === "human_input") manager.writeInput("conversation-1", Buffer.from("人工草稿"));
+				else revoked = true;
+				release();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(write.mock.calls.some(([text]) => String(text).includes("INJECTION"))).toBe(false);
+			} finally {
+				release();
+				journal.mockRestore();
+			}
+		},
+	);
+	it("Stop 持久撤销等待期间，后续人工输入保持字节顺序", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const manager = new TerminalSessionManager({ beforeUserTerminalInterrupt: async () => gate });
+		const { write } = installSession(manager, "");
+		manager.writeInput("conversation-1", Buffer.from([0x03]));
+		manager.writeInput("conversation-1", Buffer.from("后续输入\r"));
+		expect(write).not.toHaveBeenCalled();
+		release();
+		await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+		expect(write.mock.calls.map(([bytes]) => bytes.toString("hex"))).toEqual([
+			"03",
+			Buffer.from("后续输入\r").toString("hex"),
+		]);
+	});
 	it.each(["claude", "codex"] as const)("%s 的原始按键不充当空侧会话的用户消息接受证据", (agentId) => {
 		for (const role of ["by_the_way", "task_collaborator"] as const) {
 			for (const rawInput of ["y\r", "1\r", "\r", "\n", "尚未被接受的真实正文\r"]) {

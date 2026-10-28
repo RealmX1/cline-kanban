@@ -1737,6 +1737,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			undefined,
 			undefined,
 			undefined,
+			expect.any(Function),
 		);
 		expect(clineService.startTaskSession).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
@@ -4519,6 +4520,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			undefined,
 			expect.any(Function),
 			"rvf-acp-1",
+			expect.any(Function),
 		);
 		expect(response.terminalDelivery).toEqual({
 			status: "accepted_pending_submit_confirmation",

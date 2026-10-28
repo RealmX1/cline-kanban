@@ -2807,6 +2807,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		cancelTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatCancelRequest(input);
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId);
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const acpSummary = await acpTaskSessionService.cancelTaskTurn(body.taskId);
 				if (acpSummary) {
