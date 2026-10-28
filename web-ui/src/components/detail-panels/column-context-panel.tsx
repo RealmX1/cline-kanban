@@ -228,8 +228,8 @@ function ColumnSection({
 							}
 						}}
 						disabled={!latestTrashCard}
-						aria-label="Restore most recent done task"
-						title={latestTrashCard ? "Restore most recent done task" : "Done is empty"}
+						aria-label="重新打开最近结案的任务"
+						title={latestTrashCard ? "重新打开最近结案的任务" : "暂无已结案任务"}
 						style={{ marginRight: 4 }}
 					/>
 				) : null}
@@ -242,7 +242,7 @@ function ColumnSection({
 						onClick={onClearTrash}
 						disabled={column.cards.length === 0}
 						aria-label="Clear done"
-						title={column.cards.length > 0 ? "Clear done items permanently" : "Done is empty"}
+						title={column.cards.length > 0 ? "永久删除已结案任务" : "暂无已结案任务"}
 						style={{ marginRight: 4 }}
 					/>
 				) : null}

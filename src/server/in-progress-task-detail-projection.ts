@@ -143,6 +143,8 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 ): RuntimeInProgressTaskDetail {
 	return {
 		taskId: card.id,
+		taskClosureSummary: card.taskClosureSummary,
+		taskClosureOperationProgress: card.taskClosureOperationProgress,
 		title: card.title,
 		...(sessionFacts?.lastEffectiveAgentConversationActivityObservation !== undefined
 			? {

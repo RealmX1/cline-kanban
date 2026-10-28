@@ -38,7 +38,7 @@ const STAGE_LABELS: Record<string, string> = {
 	in_progress: "In Progress",
 	review: "Review",
 	validation: "Validation",
-	trash: "Done",
+	trash: "已结案",
 };
 const conversationScrollPositions = new Map<string, number>();
 

@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
+import { setTimeout as waitForLockContentionObservation } from "node:timers/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import type {
@@ -8,10 +10,14 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../../../src/core/api-contract";
 import { addTaskToColumn } from "../../../src/core/task-board-mutations";
+import { withTaskClosureLifecycleLocks } from "../../../src/task-closure/task-closure-operation-store";
+import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
+	deleteTaskWorktree: vi.fn(),
+	getTaskWorkspacePathInfo: vi.fn(),
 }));
 
 const workspaceChangesMocks = vi.hoisted(() => ({
@@ -78,7 +84,8 @@ vi.mock("../../../src/workspace/task-worktree.js", async (importOriginal) => {
 	return {
 		TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
 		TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
-		deleteTaskWorktree: vi.fn(),
+		deleteTaskWorktree: workspaceTaskWorktreeMocks.deleteTaskWorktree,
+		getTaskWorkspacePathInfo: workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo,
 		ensureTaskWorktreeIfDoesntExist: ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist,
 		getTaskWorkspaceInfo: vi.fn(),
 		resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
@@ -782,6 +789,50 @@ describe("createWorkspaceApi addBacklogTask", () => {
 				},
 			}),
 			expect.any(Function),
+		);
+	});
+});
+
+describe("deleteWorktree 生命周期锁的任务身份", () => {
+	afterEach(() => vi.unstubAllEnvs());
+	it("带首尾空白的合法 ID 与重开持有同一把锁，释放前不进入删除", async () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+		vi.stubEnv("CODEX_HOME", join(fixture.isolatedHomeDirectoryPath, ".codex"));
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoard());
+		workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo.mockResolvedValue({
+			path: "/unused-worktree",
+			exists: false,
+		});
+		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockReset();
+		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockResolvedValue({ ok: true, removed: false });
+		let markEntered = () => {};
+		const entered = new Promise<void>((resolve) => {
+			markEntered = resolve;
+		});
+		let releaseLock = () => {};
+		const released = new Promise<void>((resolve) => {
+			releaseLock = resolve;
+		});
+		const holding = withTaskClosureLifecycleLocks("workspace-lock", ["abc12"], async () => {
+			markEntered();
+			await released;
+		});
+		await entered;
+		const deleting = createWorkspaceApiForTest().deleteWorktree(
+			{ workspaceId: "workspace-lock", workspacePath: "/unused-repo" },
+			{ taskId: " abc12 " },
+		);
+		try {
+			await waitForLockContentionObservation(80);
+			expect(workspaceTaskWorktreeMocks.deleteTaskWorktree).not.toHaveBeenCalled();
+		} finally {
+			releaseLock();
+			await holding;
+		}
+		await deleting;
+		expect(workspaceTaskWorktreeMocks.deleteTaskWorktree).toHaveBeenCalledWith(
+			expect.objectContaining({ taskId: "abc12" }),
 		);
 	});
 });

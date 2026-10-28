@@ -1318,10 +1318,10 @@ describe("ClineAgentChatPanel", () => {
 
 		expect(container.textContent).not.toContain("Commit");
 		expect(container.textContent).not.toContain("Open PR");
-		expect(container.textContent).toContain("Move Card To Done");
+		expect(container.textContent).toContain("结案任务");
 	});
 
-	it("renders Move Card To Validation above Move Card To Done for review/in-progress", async () => {
+	it("renders Move Card To Validation above 结案任务 for review/in-progress", async () => {
 		const onMoveToValidation = vi.fn();
 		const onMoveToTrash = vi.fn();
 
@@ -1344,7 +1344,7 @@ describe("ClineAgentChatPanel", () => {
 
 		const buttons = Array.from(container.querySelectorAll("button"));
 		const validationButton = buttons.find((button) => button.textContent?.includes("Move Card To Validation"));
-		const doneButton = buttons.find((button) => button.textContent?.includes("Move Card To Done"));
+		const doneButton = buttons.find((button) => button.textContent?.includes("结案任务"));
 		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
 		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
 		if (!(validationButton instanceof HTMLButtonElement) || !(doneButton instanceof HTMLButtonElement)) {
@@ -1360,7 +1360,7 @@ describe("ClineAgentChatPanel", () => {
 		expect(onMoveToTrash).not.toHaveBeenCalled();
 	});
 
-	it("shows only Move Card To Done (no Validation) for validation-column cards", async () => {
+	it("shows only 结案任务 (no Validation) for validation-column cards", async () => {
 		await act(async () => {
 			renderPanel(
 				root,
@@ -1378,7 +1378,7 @@ describe("ClineAgentChatPanel", () => {
 			await Promise.resolve();
 		});
 
-		expect(container.textContent).toContain("Move Card To Done");
+		expect(container.textContent).toContain("结案任务");
 		expect(container.textContent).not.toContain("Move Card To Validation");
 	});
 

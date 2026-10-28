@@ -39,8 +39,8 @@ vi.mock("@/stores/workspace-metadata-store", () => ({
 }));
 vi.mock("@hello-pangea/dnd", () => ({
 	DragDropContext: ({ children }: { children: ReactNode }) => children,
-	Droppable: ({ children }: { children: (provided: object) => ReactNode }) =>
-		children({ innerRef: () => {}, droppableProps: {}, placeholder: null }),
+	Droppable: ({ children }: { children: (provided: object, snapshot: object) => ReactNode }) =>
+		children({ innerRef: () => {}, droppableProps: {}, placeholder: null }, { isDraggingOver: false }),
 	Draggable: ({ children }: { children: (provided: object, snapshot: object) => ReactNode }) =>
 		children({ innerRef: () => {}, draggableProps: {}, dragHandleProps: {} }, { isDragging: false }),
 }));

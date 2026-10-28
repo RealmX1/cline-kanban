@@ -99,7 +99,7 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 		showAppToast({
 			intent: "warning",
 			icon: "warning-sign",
-			message: `「${resolveTaskTitleForPostDeployVerificationPanel(latestBoardForNoticeTaskTitleRef.current, taskId)}」的 Post-Deploy Verification 还有未勾项，没有自动移入 Done：请先核对 PDV 验证项，再移入 Done。`,
+			message: `「${resolveTaskTitleForPostDeployVerificationPanel(latestBoardForNoticeTaskTitleRef.current, taskId)}」的 Post-Deploy Verification 还有未勾项，没有自动结案：请先核对 PDV 验证项，再结案。`,
 			timeout: 7000,
 		});
 	}, []);

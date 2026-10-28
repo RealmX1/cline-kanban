@@ -35,6 +35,7 @@ import { PostDeployVerificationController } from "@/components/post-deploy-verif
 import { PostDeployVerificationEntryNavigationHostProvider } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
+import { PostDeployVerificationTaskClosureFormHost } from "@/components/post-deploy-verification-task-closure-form-host";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
@@ -1107,7 +1108,7 @@ export default function App(): ReactElement {
 	// 派生待核对数、并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
 	// 单项目范围绑定当前项目；All projects 下不跟随当前项目，绑定有部署组的项目（见 hook）。
-	// 它也是看板「移入 Done」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
+	// 它也是看板「结案」门禁预检的数据源（useBoardInteractions 读活跃组），所以必须在 useBoardInteractions 之前。
 	const postDeployVerificationEntryNavigation = usePostDeployVerificationEntryNavigation({
 		projects,
 		currentWorkspaceId: projectRuntimeWorkspaceId,
@@ -1252,7 +1253,7 @@ export default function App(): ReactElement {
 		if (postDeployVerification.collapsed) postDeployVerificationEntryNavigation.clearNavigation();
 	}, [postDeployVerification.collapsed, postDeployVerificationEntryNavigation.clearNavigation]);
 	// PDV 面板条目上半部分是真实任务卡体：面板读浏览器里当前项目的 board 时，数据与动作和主看板同一份（条目上的
-	// 「移入 Done」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
+	// 「结案」因此同样过门禁）；All projects 下读 runtime 快照时卡体只做展示（见 hook）。
 	const {
 		boardShownInPostDeployVerificationPanel,
 		completePostDeployVerificationMoveToDone: completePostDeployVerificationMoveToDoneForPanelBoardSource,
@@ -2371,6 +2372,7 @@ export default function App(): ReactElement {
 
 					<UpdateNotificationController />
 
+					<PostDeployVerificationTaskClosureFormHost />
 					<TaskCommentBeforeMoveIntoDoneDialog
 						controller={taskCommentBeforeMoveIntoDone}
 						onSubmit={confirmTaskCommentBeforeMoveIntoDone}

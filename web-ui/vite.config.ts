@@ -80,6 +80,7 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-task-closure-contract": resolve(__dirname, "../src/core/task-closure-contract.ts"),
 			"@runtime-agent-prompt-image-attachment-reference": resolve(
 				__dirname,
 				"../src/core/agent-prompt-image-attachment-reference.ts",

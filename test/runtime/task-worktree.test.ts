@@ -49,6 +49,7 @@ vi.mock("node:child_process", () => ({
 vi.mock("../../src/fs/locked-file-system.js", () => ({
 	lockedFileSystem: {
 		withLock: lockedFileSystemMocks.withLock,
+		withLocks: async (_locks: unknown, action: () => Promise<unknown>) => await action(),
 		writeTextFileAtomic: lockedFileSystemMocks.writeTextFileAtomic,
 	},
 }));

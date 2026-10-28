@@ -5,7 +5,7 @@ const columnOrder: Array<{ id: BoardColumnId; title: string }> = [
 	{ id: "in_progress", title: "In Progress" },
 	{ id: "review", title: "Review" },
 	{ id: "validation", title: "Validation" },
-	{ id: "trash", title: "Done" },
+	{ id: "trash", title: "已结案" },
 ];
 
 // 列 id → 用户可见的 stage 名（trash 显示为 Done）。跨项目视图拿不到别的项目的 board 列对象时用它。

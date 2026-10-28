@@ -46,7 +46,7 @@ describe("UnavailableProjectRuntimeState", () => {
 		expect(container.textContent).toContain("/projects/cline-kanban");
 		expect(container.textContent).toContain("Git work tree could not be verified");
 		expect(container.textContent).toContain("Kanban data retained; no cleanup performed");
-		for (const expectedCount of ["Backlog 7", "In Progress 4", "Review 19", "Validation 29", "Done 55"]) {
+		for (const expectedCount of ["Backlog 7", "In Progress 4", "Review 19", "Validation 29", "已结案 55"]) {
 			expect(container.textContent).toContain(expectedCount);
 		}
 	});

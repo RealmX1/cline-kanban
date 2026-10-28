@@ -1,4 +1,3 @@
-import { POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX } from "@runtime-post-deploy-verification-done-entry-closure-contract";
 import { act, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
@@ -65,61 +64,43 @@ function buttonWithText(text: string): HTMLButtonElement {
 	return button;
 }
 
-it.each(
-	["另一任务", "另一项目同号任务", "同任务新核对代次"].flatMap((nextFlowKind) =>
-		["成功", "PDV 门禁拒绝"].map((oldRequestOutcome) => ({ nextFlowKind, oldRequestOutcome })),
-	),
-)("旧 Done $oldRequestOutcome 不能关闭 $nextFlowKind 的核对与原因草稿", async ({ nextFlowKind, oldRequestOutcome }) => {
-	let completeOldMove!: (result: unknown) => void;
+async function submitExplicitClosureForm() {
+	const select = document.querySelector<HTMLSelectElement>('select[aria-label="结案结果"]');
+	if (!select) return;
+	await act(async () => {
+		select.value = "delivery_accepted";
+		select.dispatchEvent(new Event("change", { bubbles: true }));
+	});
+	await act(async () => {
+		buttonWithText("归档并结案").click();
+	});
+}
+
+it.each(["成功", "失败"])("结案提交中保持任务身份，旧请求%s后才允许打开另一任务", async (outcome) => {
+	let finish!: (value: unknown) => void;
 	mocks.move.mockReset().mockReturnValueOnce(
 		new Promise((resolve) => {
-			completeOldMove = resolve;
+			finish = resolve;
 		}),
 	);
-	mocks.verificationState.mockResolvedValue({ activeDeploymentId: null, deploymentGroups: [] });
-	const nextWorkspaceId = nextFlowKind === "另一项目同号任务" ? "other-project-3" : "other-project-2";
-	const nextCard = nextFlowKind === "另一任务" ? { ...card, id: "next-task-id", title: "另一任务" } : card;
-	const board = createInitialBoardData();
-	board.columns.find((column) => column.id === "validation")!.cards.push(nextCard);
-	const task = createPostDeployVerificationTaskReadModelTestFixture({
-		taskId: nextCard.id,
-		checklist: [
-			{
-				id: "pending-review-item",
-				label: "尚未完成的验证",
-				checked: false,
-				source: "authored",
-				kind: "guided_manual",
-				guidance: null,
-				script: null,
-				run: null,
-				cleanup: null,
-			},
-		],
+	mocks.read.mockReset().mockResolvedValue({
+		taskCardLookupOutcome: "task_card_found_on_workspace_board",
+		taskCardSnapshot: { taskCard: card, boardColumnIdContainingTaskCard: "validation" },
 	});
-	const group: RuntimePostDeployVerificationDeploymentGroup = {
-		workspaceId: nextWorkspaceId,
-		deploymentId: "next-review-deployment",
-		deployedSourceCommit: "abc",
-		previousDeployedSourceCommit: null,
-		deployedAtIso: "2026-10-23T10:00:00Z",
-		foldedAtIso: null,
-		tasks: [task],
-	};
-	mocks.workspaceRead.mockResolvedValue({ board, sessions: {}, repoPath: `/fixture/${nextWorkspaceId}` });
+	mocks.verificationState.mockResolvedValue({ activeDeploymentId: null, deploymentGroups: [] });
 	const host = document.createElement("div");
 	document.body.append(host);
 	const root = createRoot(host);
-	let requestDone: ((workspaceId: string, taskCard: BoardCard) => void) | null = null;
+	let requestDone: ((taskCard: BoardCard) => void) | undefined;
 	function Harness() {
 		const controller = useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
 			onRequestPinTaskCardInOtherProjectToTaskPinboard: noop,
 			onUnpinTaskCardInOtherProjectFromTaskPinboard: noop,
 		});
-		requestDone = (workspaceId, taskCard) =>
+		requestDone = (taskCard) =>
 			controller
 				.buildTaskCardActionHandlerBundleForOtherProjectTaskCard({
-					workspaceId,
+					workspaceId: "other-project-2",
 					taskCard,
 					boardColumnIdContainingTaskCard: "validation",
 					taskCardActionCommandKindInFlight: null,
@@ -129,51 +110,28 @@ it.each(
 	}
 	try {
 		await act(async () => root.render(<Harness />));
-		if (nextFlowKind === "同任务新核对代次")
-			mocks.verificationState.mockResolvedValue({
-				activeDeploymentId: group.deploymentId,
-				deploymentGroups: [group],
-			});
-		await act(async () => requestDone?.("other-project-2", card));
-		if (nextFlowKind === "同任务新核对代次") {
-			await act(async () => buttonWithText("继续填写未完成原因").click());
-			await act(async () => {
-				for (const selector of document.querySelectorAll<HTMLSelectElement>("select")) {
-					selector.value = [...selector.options].find((option) => option.value !== "")!.value;
-					selector.dispatchEvent(new Event("change", { bubbles: true }));
-				}
-			});
-			await act(async () => buttonWithText("确认移入 Done").click());
-		}
+		await act(async () => requestDone?.(card));
+		await submitExplicitClosureForm();
 		expect(mocks.move).toHaveBeenCalledOnce();
-		mocks.verificationState.mockResolvedValue({ activeDeploymentId: group.deploymentId, deploymentGroups: [group] });
-		await act(async () => requestDone?.(nextWorkspaceId, nextCard));
-		await act(async () => buttonWithText("继续填写未完成原因").click());
-		const reasonSelector = document.querySelector<HTMLSelectElement>("select")!;
-		const selectedReason = [...reasonSelector.options].find((option) => option.value !== "")!.value;
-		await act(async () => {
-			reasonSelector.value = selectedReason;
-			reasonSelector.dispatchEvent(new Event("change", { bubbles: true }));
-		});
+		const nextCard = { ...card, id: "next-task", title: "下一任务" };
+		await act(async () => requestDone?.(nextCard));
+		expect(document.body.textContent).not.toContain("下一任务");
 		await act(async () =>
-			completeOldMove(
-				oldRequestOutcome === "成功"
+			finish(
+				outcome === "成功"
 					? {
 							taskCardActionCommandExecutionOutcome: "command_completed_by_runtime",
 							response: { taskWorktreeDeletionResult: null },
 						}
-					: {
-							taskCardActionCommandExecutionOutcome: "command_failed",
-							commandFailureMessage: `${POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX}核对清单已变化`,
-						},
+					: { taskCardActionCommandExecutionOutcome: "command_failed", commandFailureMessage: "网络失败" },
 			),
 		);
-		expect(document.querySelector<HTMLSelectElement>("select")?.value).toBe(selectedReason);
-		expect(document.body.textContent).toContain("带原因移入 Done");
+		if (outcome === "失败") await act(async () => buttonWithText("取消").click());
+		await act(async () => requestDone?.(nextCard));
+		expect(document.body.textContent).toContain("下一任务");
 	} finally {
 		await act(async () => root.unmount());
 		host.remove();
-		mocks.verificationState.mockResolvedValue({ deploymentGroups: [], activeDeploymentId: null });
 	}
 });
 
@@ -239,14 +197,14 @@ describe("其他项目卡片的评论后完成", () => {
 					actions.onMoveToTrashTask(card.id, { requestTaskCommentBeforeMovingIntoDone: true });
 				});
 				await enterComment("项目二已提交的完成评论");
-				await act(async () => buttonWithText("提交评论并移入 Done").click());
+				await submitExplicitClosureForm();
 				expect(document.querySelector('[role="alert"]')?.textContent).toBe("保存后的网络响应丢失");
 				mocks.read.mockResolvedValue({
 					taskCardLookupOutcome: "task_card_found_on_workspace_board",
 					taskCardSnapshot: { taskCard: persistedCard, boardColumnIdContainingTaskCard: "trash" },
 				});
 				if (savedCommentState === "重试时改写正文") await enterComment("改写后的完成评论");
-				await act(async () => buttonWithText("提交评论并移入 Done").click());
+				await submitExplicitClosureForm();
 				if (savedCommentState === "原 ID 同文已保存") {
 					expect(document.querySelector('[role="dialog"]')).toBeNull();
 					expect(persistedCard.taskCommentEntries).toHaveLength(1);
@@ -316,18 +274,18 @@ describe("其他项目卡片的评论后完成", () => {
 						taskCardActionCommandExecutionOutcome: "command_failed",
 						commandFailureMessage: "网络暂时失败",
 					});
-				await act(async () => buttonWithText("提交评论并移入 Done").click());
+				await submitExplicitClosureForm();
 				if (columnId === "review") {
 					expect(mocks.move).not.toHaveBeenCalled();
 					await act(async () => buttonWithText("Cancel").click());
 					expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务评论"]')?.value).toBe(
 						"项目二的评论",
 					);
-					await act(async () => buttonWithText("提交评论并移入 Done").click());
-					await act(async () => buttonWithText("Move to Done").click());
+					await submitExplicitClosureForm();
+					await act(async () => buttonWithText("结案任务").click());
 				} else {
 					expect(document.querySelector('[role="alert"]')?.textContent).toBe("网络暂时失败");
-					await act(async () => buttonWithText("提交评论并移入 Done").click());
+					await submitExplicitClosureForm();
 					expect(mocks.move.mock.calls[0]?.[0].taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId).toBe(
 						mocks.move.mock.calls[1]?.[0].taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
 					);
@@ -415,6 +373,13 @@ describe("其他项目的 PDV 核对阶段", () => {
 						columnId === "validation" ? { requestTaskCommentBeforeMovingIntoDone: true } : undefined,
 					);
 				});
+				if (columnId !== "validation") {
+					mocks.read.mockResolvedValue({
+						taskCardLookupOutcome: "task_card_found_on_workspace_board",
+						taskCardSnapshot: { taskCard: card, boardColumnIdContainingTaskCard: columnId },
+					});
+					await submitExplicitClosureForm();
+				}
 				if (columnId === "validation") {
 					mocks.read.mockResolvedValue({
 						taskCardLookupOutcome: "task_card_found_on_workspace_board",
@@ -428,9 +393,9 @@ describe("其他项目的 PDV 核对阶段", () => {
 						);
 						textarea.dispatchEvent(new Event("input", { bubbles: true }));
 					});
-					await act(async () => buttonWithText("提交评论并移入 Done").click());
+					await submitExplicitClosureForm();
 				}
-				expect(document.body.textContent).toContain("移入 Done 前核对");
+				expect(document.body.textContent).toContain("结案前核对");
 				expect(document.body.textContent).toContain("其他项目的实际验证");
 				expect(document.querySelector("select")).toBeNull();
 				expect(mocks.move).not.toHaveBeenCalled();
@@ -440,9 +405,9 @@ describe("其他项目的 PDV 核对阶段", () => {
 					expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务评论"]')?.value).toBe(
 						"核对前的原评论",
 					);
-					expect(buttonWithText("提交评论并移入 Done").disabled).toBe(false);
-					await act(async () => buttonWithText("提交评论并移入 Done").click());
-					expect(document.body.textContent).toContain("移入 Done 前核对");
+					expect(buttonWithText("归档并结案").disabled).toBe(false);
+					await submitExplicitClosureForm();
+					expect(document.body.textContent).toContain("结案前核对");
 					expect(mocks.move).not.toHaveBeenCalled();
 				}
 			} finally {
@@ -519,16 +484,21 @@ it("结案前重读所属项目看板，列变化后重新核对并显式确认�
 	try {
 		await act(async () => root.render(<Harness />));
 		await act(async () => actions?.onMoveToTrashTask?.(card.id));
-		await act(async () => buttonWithText("完成核对并移入 Done").click());
+		mocks.read.mockResolvedValueOnce({
+			taskCardLookupOutcome: "task_card_found_on_workspace_board",
+			taskCardSnapshot: { taskCard: card, boardColumnIdContainingTaskCard: "validation" },
+		});
+		await submitExplicitClosureForm();
+		await act(async () => buttonWithText("完成核对并结案").click());
 		expect(mocks.workspaceRead).toHaveBeenCalledTimes(2);
 		expect(mocks.move).not.toHaveBeenCalled();
 		expect(document.querySelector('[role="alert"]')?.textContent).toContain("重新核对");
 		const acknowledgement = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
 		expect(acknowledgement?.checked).toBe(false);
-		await act(async () => buttonWithText("完成核对并移入 Done").click());
+		await act(async () => buttonWithText("完成核对并结案").click());
 		expect(mocks.move).not.toHaveBeenCalled();
 		await act(async () => acknowledgement!.click());
-		await act(async () => buttonWithText("完成核对并移入 Done").click());
+		await act(async () => buttonWithText("完成核对并结案").click());
 		expect(mocks.move).toHaveBeenCalledWith(
 			expect.objectContaining({
 				workspaceId: "other-project-2",
@@ -639,6 +609,11 @@ it("跨项目引导等待真实目标看板落定，局部视图卸载后仍能�
 	try {
 		await act(async () => root.render(<Harness currentProjectId="project-a" owner="project-a" settled />));
 		await act(async () => actions?.onMoveToTrashTask?.(card.id));
+		mocks.read.mockResolvedValueOnce({
+			taskCardLookupOutcome: "task_card_found_on_workspace_board",
+			taskCardSnapshot: { taskCard: card, boardColumnIdContainingTaskCard: "validation" },
+		});
+		await submitExplicitClosureForm();
 		await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="定位并核对"]')!.click());
 		expect(selectProject).toHaveBeenCalledWith("other-project-2");
 		expect(document.querySelector('[data-testid="局部视图"]')).toBeNull();

@@ -105,6 +105,9 @@ function expectedFormattedTaskRecord(column: string) {
 		autoReviewEnabled: false,
 		autoReviewMode: "commit",
 		taskCommentEntries: [],
+		taskClosureSummary: null,
+		taskClosureOperationProgress: null,
+		closureOutcome: column === "trash" ? "closure_outcome_unspecified" : null,
 		createdAt: 1,
 		updatedAt: 2,
 		taskDescriptionLastUpdatedAt: 2,
@@ -211,6 +214,32 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 			workspacePath: "/fake/repo",
 			worktreeDeleted: false,
 			worktreeDeleteError: "locked",
+		});
+	});
+
+	it.each([
+		[
+			"--preserve-path",
+			"reports/accepted-ignored.md",
+			{ selectedArtifactRelativePaths: ["reports/accepted-ignored.md"] },
+		],
+		["--evidence", "用户验收记录", { details: { evidence: ["用户验收记录"] } }],
+		["--reason", "保留判断依据", { details: { reason: "保留判断依据" } }],
+	])("task done 单独传 %s 仍创建未标注结案请求并透传参数", async (option, value, expected) => {
+		harness.responsesByProcedureName.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree = {
+			boardColumnIdOfTaskCardBeforeAction: "review",
+			taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: false,
+			taskWorktreeDeletionResult: null,
+			taskCardSnapshotAfterAction: createTaskCardSnapshot("trash"),
+		};
+		const result = await runKanbanTaskCommand(["done", "--task-id", "task-1", option, value]);
+		expect(result.exitCode).not.toBe(1);
+		expect(harness.taskCardActionRequests[0]?.input).toMatchObject({
+			closure: {
+				closureRequestId: expect.any(String),
+				details: { outcome: "closure_outcome_unspecified" },
+				...expected,
+			},
 		});
 	});
 

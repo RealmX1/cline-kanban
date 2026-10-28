@@ -11,6 +11,7 @@ import {
 	runtimeAllProjectsTaskGroupQuerySnapshotSchema,
 } from "../core/api-contract";
 import { resolveCliTrpcTimeoutMs, safeErrorMessage, safeStringify } from "../core/cli-process-guards";
+import { type TaskClosureOutcome, taskClosureOutcomeSchema } from "../core/task-closure-contract";
 import {
 	AllProjectsTaskGroupQueryRuntimeCompatibilityError,
 	runAllProjectsTaskGroupMonitor,
@@ -18,6 +19,7 @@ import {
 
 interface TaskGroupQueryCommandOptions {
 	allProjects?: boolean;
+	closureOutcome?: TaskClosureOutcome;
 	projectPath?: string;
 	column?: RuntimeBoardColumnId;
 	group?: AllProjectsTaskQueryGroup;
@@ -35,6 +37,7 @@ interface TaskGroupQueryCommandDependencies {
 	listSingleProjectTasks: (input: {
 		projectPath?: string;
 		column?: RuntimeBoardColumnId;
+		closureOutcome?: TaskClosureOutcome;
 	}) => Promise<Record<string, unknown>>;
 	runTaskCommand: (handler: () => Promise<Record<string, unknown>>) => Promise<void>;
 }
@@ -73,6 +76,9 @@ function parseMonitorIntervalMs(value: string): number {
 
 function addTaskGroupQueryOptions(command: Command): Command {
 	return command
+		.option("--closure-outcome <outcome>", "按结构化结案结果筛选。", (value: string) =>
+			taskClosureOutcomeSchema.parse(value),
+		)
 		.option("--all-projects", "查询全部已注册项目，使用 All Projects 分组。")
 		.option("--group <group>", `只查询 ${ALL_PROJECTS_TASK_QUERY_GROUPS.join(" | ")} 分组。`, parseQueryGroup)
 		.option("--query <text>", "按任务 ID 或标题做不区分大小写的字面子串筛选。")
@@ -157,6 +163,7 @@ export function registerAllProjectsTaskGroupQueryCommands(
 					return await dependencies.listSingleProjectTasks({
 						projectPath: options.projectPath,
 						column: options.column,
+						closureOutcome: options.closureOutcome,
 					});
 				const snapshot = await readCompatibleSnapshot(
 					dependencies,

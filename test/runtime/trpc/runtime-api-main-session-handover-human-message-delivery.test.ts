@@ -24,6 +24,14 @@ import { createRuntimeApi } from "../../../src/trpc/runtime-api";
 import { confirmTestNativeUserInputAcceptance } from "../../utilities/confirm-test-native-user-input-acceptance";
 import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
+vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
+	withTaskClosureLifecycleLocks: async (
+		_workspaceId: string,
+		_ids: readonly string[],
+		action: () => Promise<unknown>,
+	) => await action(),
+}));
+
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
 	loadPersistedWorkspaceStateById: vi.fn(),

@@ -57,7 +57,7 @@ function renderDialog(input: {
 	act(() => {
 		root.render(
 			<PostDeployVerificationUncheckedItemsClosureReasonDialog
-				dialogTitle="带原因移入 Done"
+				dialogTitle="带原因结案"
 				taskEntries={input.taskEntries}
 				taskEntrySelectionMode={input.taskEntrySelectionMode ?? "single_task_entry_always_included"}
 				isSubmittingClosure={false}
@@ -108,7 +108,7 @@ describe("PostDeployVerificationUncheckedItemsClosureReasonDialog", () => {
 			taskEntries: [taskEntry("task-a", ["item-1", "item-2"])],
 			onConfirmClosureRequestsBySelectedTaskId,
 		});
-		const confirmButton = findButtonByText("确认移入 Done");
+		const confirmButton = findButtonByText("确认结案");
 		expect(confirmButton.disabled).toBe(true);
 
 		setFormControlValueAsUser(
@@ -145,7 +145,7 @@ describe("PostDeployVerificationUncheckedItemsClosureReasonDialog", () => {
 			findByAriaLabel<HTMLSelectElement>("核对 item-1：原因"),
 			"custom_reason_described_in_reason_text",
 		);
-		const confirmButton = findButtonByText("确认移入 Done");
+		const confirmButton = findButtonByText("确认结案");
 		expect(confirmButton.disabled).toBe(true);
 		expect(document.body.textContent).toContain("没有填写原因文本");
 		setFormControlValueAsUser(findByAriaLabel<HTMLInputElement>("核对 item-1：原因文本"), "行为已被重写");
@@ -166,7 +166,7 @@ describe("PostDeployVerificationUncheckedItemsClosureReasonDialog", () => {
 		expect(findByAriaLabel<HTMLSelectElement>("核对 item-2：原因").value).toBe(
 			"trigger_condition_random_or_rare_so_deferred_to_natural_usage_observation",
 		);
-		expect(findButtonByText("确认移入 Done").disabled).toBe(false);
+		expect(findButtonByText("确认结案").disabled).toBe(false);
 	});
 
 	it("吸收了跳过 Validation 与 In Progress 两层确认：同一对话框里的条件段落，In Progress 需显式勾选", () => {
@@ -180,7 +180,7 @@ describe("PostDeployVerificationUncheckedItemsClosureReasonDialog", () => {
 		});
 		expect(document.body.textContent).toContain("跳过 Validation 列");
 		expect(document.body.textContent).toContain("最后一条 agent 回复");
-		const confirmButton = findButtonByText("确认移入 Done");
+		const confirmButton = findButtonByText("确认结案");
 		expect(confirmButton.disabled).toBe(true);
 		act(() => findByAriaLabel<HTMLButtonElement>("我已了解 In Progress 任务的会话可能仍在运行").click());
 		expect(confirmButton.disabled).toBe(false);
@@ -192,10 +192,10 @@ describe("PostDeployVerificationUncheckedItemsClosureReasonDialog", () => {
 			taskEntrySelectionMode: "multiple_task_entries_selectable_for_batch_closure",
 		});
 		expect(document.body.querySelector('[aria-label="核对 item-1：原因"]')).toBeNull();
-		expect(findButtonByText("结案并移入 Done（0 个任务）").disabled).toBe(true);
+		expect(findButtonByText("结案（0 个任务）").disabled).toBe(true);
 		act(() => findByAriaLabel<HTMLButtonElement>("纳入本次结案：任务 task-a").click());
 		expect(document.body.querySelector('[aria-label="核对 item-1：原因"]')).not.toBeNull();
 		expect(document.body.querySelector('[aria-label="核对 item-2：原因"]')).toBeNull();
-		expect(findButtonByText("结案并移入 Done（1 个任务）")).toBeTruthy();
+		expect(findButtonByText("结案（1 个任务）")).toBeTruthy();
 	});
 });

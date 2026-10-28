@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
@@ -12,8 +11,10 @@ import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 } from "../../../src/core/kanban-cli-invocation-environment-actor-claims";
+import type { TaskClosureRecord } from "../../../src/core/task-closure-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import type { TaskMutationIntentWithResolvedActor } from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { TaskClosureOperation } from "../../../src/task-closure/task-closure-operation-store";
 
 // taskCardAction.* 的单元测试：board 持久化漏斗换成内存假实现（照样执行 mutate 回调、尊重 save:false），
 // 会话 / worktree 副作用换成记录调用顺序的桩，草稿 / 排队 prompt / checkpoint ref 清理同样只记顺序。
@@ -21,11 +22,61 @@ import type { TaskMutationIntentWithResolvedActor } from "../../../src/state/wor
 
 const harness = vi.hoisted(() => ({
 	callOrder: [] as string[],
+	closureOperations: new Map<string, TaskClosureOperation>(),
+	closureHistory: [] as TaskClosureRecord[],
+	archiveFailure: null as string | null,
+	historyWriteFailure: false,
 	workspaceState: {
 		board: { columns: [] } as unknown,
 		sessions: {} as Record<string, unknown>,
 	},
 	capturedTaskMutationIntents: [] as unknown[],
+}));
+
+vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
+	withTaskClosureLifecycleLocks: async (_workspaceId: string, _ids: string[], action: () => Promise<unknown>) =>
+		await action(),
+	writeTaskClosureOperation: async (operation: TaskClosureOperation) => {
+		harness.closureOperations.set(operation.progress.closureRequestId, structuredClone(operation));
+	},
+	readTaskClosureOperation: async (_identity: unknown, id: string) =>
+		structuredClone(harness.closureOperations.get(id) ?? null),
+	listTaskClosureOperations: async (identity?: { taskId: string }) =>
+		structuredClone(
+			[...harness.closureOperations.values()].filter(
+				(op) => !identity || op.taskIdentity.taskId === identity.taskId,
+			),
+		),
+	writeTaskClosureHistoryRecord: async (record: TaskClosureRecord) => {
+		if (harness.historyWriteFailure) throw new Error("历史镜像写入中断");
+		if (!harness.closureHistory.some((entry) => entry.closureRequestId === record.closureRequestId))
+			harness.closureHistory.push(record);
+	},
+	readTaskClosureHistory: async () => ({
+		records: harness.closureHistory,
+		operations: [...harness.closureOperations.values()].map((op) => op.progress),
+	}),
+}));
+vi.mock("../../../src/task-closure/task-closure-archive", () => ({
+	captureAndVerifyTaskClosureArchive: async () => {
+		harness.callOrder.push("verifyRecoverableArchive");
+		if (harness.archiveFailure) throw new Error(harness.archiveFailure);
+		return {
+			archiveDirectory: "/isolated-archive",
+			headCommit: null,
+			persistentHeadReference: null,
+			verifiedAtEpochMs: 2,
+			availability: "no_task_worktree",
+			preservedFileCount: 0,
+			selectedArtifactRelativePaths: [],
+		};
+	},
+	restoreVerifiedTaskClosureArchive: async () => {
+		harness.callOrder.push("restoreVerifiedArchive");
+	},
+}));
+vi.mock("../../../src/workspace/task-worktree", () => ({
+	getTaskWorkspacePathInfo: async () => ({ exists: false, path: "/isolated-source-worktree" }),
 }));
 
 vi.mock("../../../src/state/backlog-task-project-transfer", () => ({
@@ -53,7 +104,8 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 			return { value: mutation.value, state: currentState, saved: false };
 		}
 		harness.workspaceState.board = mutation.board;
-		harness.callOrder.push(`boardWrite:${taskMutationIntentWithResolvedActor.taskMutationIntentKind}`);
+		if (taskMutationIntentWithResolvedActor.taskMutationIntentKind !== "task_closure_operation_progress_changed")
+			harness.callOrder.push(`boardWrite:${taskMutationIntentWithResolvedActor.taskMutationIntentKind}`);
 		return { value: mutation.value, state: { ...currentState, board: mutation.board }, saved: true };
 	},
 	loadPersistedWorkspaceStateById: async (workspaceId: string) => ({
@@ -295,6 +347,7 @@ function createApiForTest(
 		broadcastRuntimeProjectsUpdated,
 		findTaskSessionSummaryLiveInRuntimeProcessMemory: (_workspaceId, taskId) =>
 			liveTaskSessionSummaryByTaskId.get(taskId) ?? null,
+		listTaskSessionSummariesLiveInRuntimeProcessMemory: () => [...liveTaskSessionSummaryByTaskId.values()],
 		taskCardActionPerTaskCommandSerializer: createTaskCardActionPerTaskCommandSerializer(),
 		onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards,
 		...(options.postDeployVerificationDoneEntryGate
@@ -315,6 +368,10 @@ function createApiForTest(
 
 beforeEach(() => {
 	harness.callOrder.length = 0;
+	harness.closureOperations.clear();
+	harness.closureHistory.length = 0;
+	harness.archiveFailure = null;
+	harness.historyWriteFailure = false;
 	harness.capturedTaskMutationIntents.length = 0;
 	seedWorkspace(createBoard({}));
 });
@@ -576,7 +633,7 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 		expect(harness.callOrder).toEqual([]);
 	});
 
-	it("移入 Done → 并行停 agent 会话与详情 shell 终端 → 按卡片 worktreeMode 删 worktree", async () => {
+	it("停止所属会话 → 验证归档 → 移入已结案 → 按 worktreeMode 清理", async () => {
 		seedWorkspace(createBoard({ review: [createCard("task-r", { worktreeMode: "inplace" })] }), {
 			"task-r": createSummary("task-r"),
 		});
@@ -588,12 +645,13 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
 		);
 
-		expect(harness.callOrder[0]).toBe("boardWrite:web_ui_task_card_action_move_into_done");
-		expect(harness.callOrder.slice(1, 3).sort()).toEqual([
-			"stopTaskSession:__detail_terminal__:task-r",
+		expect(harness.callOrder).toEqual([
 			"stopTaskSession:task-r",
+			"stopTaskSession:__detail_terminal__:task-r",
+			"verifyRecoverableArchive",
+			"boardWrite:web_ui_task_card_action_move_into_done",
+			"deleteWorktree:task-r:inplace",
 		]);
-		expect(harness.callOrder[3]).toBe("deleteWorktree:task-r:inplace");
 		expect(readColumnTaskIds("trash")).toEqual(["task-r"]);
 		expect(response).toMatchObject({
 			boardColumnIdOfTaskCardBeforeAction: "review",
@@ -607,7 +665,7 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 		});
 	});
 
-	it("从 backlog 移入 Done：backlog 从没起过 agent 会话，只停详情终端", async () => {
+	it("从 backlog 结案也确认所属会话已停止，归档先于移列", async () => {
 		seedWorkspace(createBoard({ backlog: [createCard("task-b")] }));
 		const { api } = createApiForTest();
 
@@ -618,8 +676,10 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 		);
 
 		expect(harness.callOrder).toEqual([
-			"boardWrite:kanban_cli_task_trash",
+			"stopTaskSession:task-b",
 			"stopTaskSession:__detail_terminal__:task-b",
+			"verifyRecoverableArchive",
+			"boardWrite:kanban_cli_task_trash",
 			"deleteWorktree:task-b:unspecified",
 		]);
 		expect(response.taskAgentSessionStopWasRequested).toBe(false);
@@ -695,6 +755,362 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 	});
 });
 
+describe("结构化结案的失败恢复和追加历史", () => {
+	const closure = (outcome: "plan_retired" | "delivery_accepted" = "plan_retired") => ({
+		closureRequestId: "22222222-2222-4222-8222-222222222222",
+		details: {
+			outcome,
+			reason: "采用后继方案",
+			evidence: ["调查报告"],
+			acceptedDeliverables: [{ description: "已接受的分析", evidence: ["用户验收消息"] }],
+		},
+		selectedArtifactRelativePaths: [],
+	});
+	it("停止失败仍持久保存所有所属活体 PID，重试前不归档或删除", async () => {
+		seedWorkspace(createBoard({ review: [createCard("retire")] }));
+		const { api, runtimeApi, liveTaskSessionSummaryByTaskId, workspaceApi } = createApiForTest();
+		liveTaskSessionSummaryByTaskId.set("retire", createSummary("retire", { pid: 1_000_000_001 }));
+		liveTaskSessionSummaryByTaskId.set(
+			"side",
+			createSummary("side", {
+				pid: 1_000_000_002,
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "retire",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "retire",
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			}),
+		);
+		runtimeApi.stopTaskSession.mockResolvedValueOnce({ ok: false, summary: null, error: "等待停止确认" } as never);
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "retire", closure: closure() },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("等待停止确认");
+		expect(harness.closureOperations.get(closure().closureRequestId)?.processIdsAwaitingExit).toEqual([
+			1_000_000_001, 1_000_000_002,
+		]);
+		expect(harness.callOrder).not.toContain("verifyRecoverableArchive");
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+	});
+	it("三次归档失败保留原列与工作树，重建 API 后同请求可恢复且不重复结案", async () => {
+		seedWorkspace(createBoard({ review: [createCard("retire")] }));
+		harness.archiveFailure = "磁盘不可写";
+		const request = { taskId: "retire", expectedTaskIncarnationCreatedAtEpochMs: 1, closure: closure() };
+		const { api, workspaceApi } = createApiForTest();
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("成果保全失败");
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+		expect(readColumnTaskIds("review")).toEqual(["retire"]);
+		expect(harness.closureOperations.get(request.closure.closureRequestId)?.progress).toMatchObject({
+			phase: "preservation_waiting_for_recovery",
+			attemptCount: 3,
+			lastError: "磁盘不可写",
+		});
+		harness.archiveFailure = null;
+		const restarted = createApiForTest().api;
+		const result = await restarted.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(result.closureRecord?.details.acceptedDeliverables).toHaveLength(1);
+		expect(result.closureRecord?.details.outcome).toBe("plan_retired");
+		expect(result.closureOperationProgress?.phase).toBe("completed");
+		const previous = [...harness.callOrder];
+		await restarted.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(harness.callOrder).toEqual(previous);
+		expect(harness.closureHistory).toHaveLength(1);
+	});
+	it("清理失败保留结案结果；重开取消旧操作并追加重开事件，旧请求不得删除", async () => {
+		seedWorkspace(createBoard({ review: [createCard("cleanup")] }));
+		const { api, workspaceApi } = createApiForTest();
+		workspaceApi.deleteWorktree.mockRejectedValueOnce(new Error("目录占用"));
+		const request = { taskId: "cleanup", closure: closure() };
+		const result = await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(result.closureOperationProgress?.phase).toBe("closed_cleanup_pending");
+		expect(readColumnTaskIds("trash")).toEqual(["cleanup"]);
+		await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+			WORKSPACE_SCOPE,
+			{ taskId: "cleanup" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(harness.closureOperations.get(request.closure.closureRequestId)?.progress.phase).toBe("cancelled");
+		expect(harness.closureHistory.map((record) => record.eventKind)).toEqual(["closed", "reopened"]);
+		expect(readColumnTaskIds("review")).toEqual(["cleanup"]);
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(workspaceApi.deleteWorktree).toHaveBeenCalledTimes(1);
+	});
+	it("更正结案结果后仍由原操作补完失败的清理，不重复归档或覆盖更正", async () => {
+		seedWorkspace(createBoard({ review: [createCard("correct-cleanup")] }));
+		const { api, workspaceApi } = createApiForTest();
+		workspaceApi.deleteWorktree.mockRejectedValueOnce(new Error("暂不可清理"));
+		const request = { taskId: "correct-cleanup", closure: closure() };
+		await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		const corrected = await api.correctTaskClosureOutcome(
+			WORKSPACE_SCOPE,
+			{
+				taskId: request.taskId,
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+				expectedPreviousClosureRequestId: request.closure.closureRequestId,
+				closure: { ...closure("delivery_accepted"), closureRequestId: "33333333-3333-4333-8333-333333333333" },
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		const resumed = await createApiForTest().api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(resumed.closureOperationProgress?.phase).toBe("completed");
+		expect(
+			readBoard().columns.find((column) => column.id === "trash")?.cards[0]?.taskClosureSummary?.closureRequestId,
+		).toBe(corrected.closureRequestId);
+		expect(harness.callOrder.filter((entry) => entry === "verifyRecoverableArchive")).toHaveLength(1);
+		expect(harness.closureHistory.map((record) => record.eventKind)).toEqual(["closed", "outcome_corrected"]);
+	});
+	it("旧入口标为未标注，历史补记只追加结果，不重新清理", async () => {
+		seedWorkspace(createBoard({ trash: [createCard("historical")] }));
+		const { api, workspaceApi, runtimeApi } = createApiForTest();
+		const record = await api.correctTaskClosureOutcome(
+			WORKSPACE_SCOPE,
+			{
+				taskId: "historical",
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+				expectedPreviousClosureRequestId: null,
+				closure: closure("delivery_accepted"),
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(record.archiveManifest.availability).toBe("historical_artifacts_unavailable");
+		expect(record.eventKind).toBe("outcome_corrected");
+		// 模拟摘要已写、历史镜像尚未落盘时中断；同请求恢复不能再追加更正。
+		harness.closureHistory.length = 0;
+		expect(
+			await createApiForTest().api.correctTaskClosureOutcome(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "historical",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					expectedPreviousClosureRequestId: null,
+					closure: closure("delivery_accepted"),
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).toEqual(record);
+		expect(harness.closureHistory).toEqual([record]);
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+		expect(runtimeApi.stopTaskSession).not.toHaveBeenCalled();
+		await expect(
+			api.correctTaskClosureOutcome(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "historical",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					expectedPreviousClosureRequestId: null,
+					closure: { ...closure(), closureRequestId: "33333333-3333-4333-8333-333333333333" },
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+	});
+	it.each(["correct_again", "reopen", "delete", "query"] as const)(
+		"更正摘要已保存而镜像中断，重建 API 后 %s 先持久补齐旧记录",
+		async (nextAction) => {
+			seedWorkspace(createBoard({ trash: [createCard("history-interruption")] }));
+			const request = {
+				taskId: "history-interruption",
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+				expectedPreviousClosureRequestId: null,
+				closure: closure(),
+			};
+			harness.historyWriteFailure = true;
+			await expect(
+				createApiForTest().api.correctTaskClosureOutcome(
+					WORKSPACE_SCOPE,
+					request,
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+				),
+			).rejects.toThrow("历史镜像写入中断");
+			expect(
+				readBoard().columns.find((column) => column.id === "trash")?.cards[0]?.taskClosureSummary?.closureRequestId,
+			).toBe(request.closure.closureRequestId);
+			expect(harness.closureHistory).toEqual([]);
+			harness.historyWriteFailure = false;
+			const restarted = createApiForTest().api;
+			if (nextAction === "correct_again")
+				await restarted.correctTaskClosureOutcome(
+					WORKSPACE_SCOPE,
+					{
+						...request,
+						expectedPreviousClosureRequestId: request.closure.closureRequestId,
+						closure: {
+							...closure("delivery_accepted"),
+							closureRequestId: "33333333-3333-4333-8333-333333333333",
+						},
+					},
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+				);
+			else if (nextAction === "reopen")
+				await restarted.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+					WORKSPACE_SCOPE,
+					{ taskId: request.taskId },
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+				);
+			else if (nextAction === "delete")
+				await restarted.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					WORKSPACE_SCOPE,
+					{
+						permanentlyDeletedTaskCardSelection: {
+							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+							selectedTaskIds: [request.taskId],
+						},
+					},
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+				);
+			else await restarted.readTaskClosureHistory(WORKSPACE_SCOPE, request);
+			expect(harness.closureHistory[0]?.closureRequestId).toBe(request.closure.closureRequestId);
+			const history = await restarted.readTaskClosureHistory(WORKSPACE_SCOPE, request);
+			expect(history.records.some((record) => record.closureRequestId === request.closure.closureRequestId)).toBe(
+				true,
+			);
+		},
+	);
+
+	it("保全失败后修改评论并复用结案 ID 会冲突，原请求可恢复且不会吞掉新评论", async () => {
+		seedWorkspace(createBoard({ review: [createCard("comment-conflict")] }));
+		const { api, workspaceApi } = createApiForTest();
+		const request = {
+			taskId: "comment-conflict",
+			closure: closure(),
+			taskCommentToAppendWhenMovingIntoDone: { taskCommentEntryId: "original-comment", commentText: "原评论" },
+		};
+		harness.archiveFailure = "注入保全失败";
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("成果保全失败");
+		harness.archiveFailure = null;
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{
+					...request,
+					taskCommentToAppendWhenMovingIntoDone: {
+						taskCommentEntryId: "edited-comment",
+						commentText: "修改后评论",
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(readColumnTaskIds("review")).toEqual([request.taskId]);
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+		await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(readBoard().columns.find((column) => column.id === "trash")?.cards[0]?.taskCommentEntries).toMatchObject([
+			{ taskCommentEntryId: "original-comment", commentText: "原评论" },
+		]);
+	});
+
+	it("请求版本、身份与同 ID 内容冲突均拒绝，停止失败不允许清理", async () => {
+		seedWorkspace(createBoard({ review: [createCard("identity")] }));
+		const { api, runtimeApi, workspaceApi } = createApiForTest();
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "identity", closure: { ...closure(), expectedTaskUpdatedAtEpochMs: 99 } },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		runtimeApi.stopTaskSession.mockRejectedValueOnce(new Error("进程尚未停止"));
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "identity", closure: closure() },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("成果保全失败");
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "identity", closure: closure("delivery_accepted") },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+	});
+	it("永久删除保全失败后复用原操作恢复，不转换为结案，也不拒绝显式删除搁置卡", async () => {
+		seedWorkspace(
+			createBoard({
+				review: [createCard("delete-recovery", { taskShelvingState: { isShelved: true, lastChangedAt: 1 } })],
+			}),
+		);
+		const { api, workspaceApi } = createApiForTest();
+		const request = {
+			permanentlyDeletedTaskCardSelection: {
+				permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id" as const,
+				selectedTaskIds: ["delete-recovery"],
+			},
+		};
+		harness.archiveFailure = "暂时不可归档";
+		await expect(
+			api.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("成果保全失败");
+		const originalId = [...harness.closureOperations.keys()][0];
+		expect(harness.closureOperations.get(originalId ?? "")?.preservationPurpose).toBe("permanently_delete_task");
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+		harness.archiveFailure = null;
+		await createApiForTest().api.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(harness.closureOperations.size).toBe(1);
+		expect(readBoard().columns.flatMap((column) => column.cards)).toEqual([]);
+		expect(harness.closureHistory).toEqual([]);
+	});
+});
+
 describe("taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession", () => {
 	it("移回 review 并在同一次写盘里关掉自动 review → ensure → 以 resumeFromTrash 续跑（不重投 prompt / 附图）", async () => {
 		seedWorkspace(
@@ -720,6 +1136,7 @@ describe("taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession",
 			"boardWrite:web_ui_task_card_action_restore_from_done_into_review",
 			"ensureWorktree:task-t",
 			"startTaskSession:task-t",
+			"boardWrite:web_ui_task_card_action_restore_from_done_into_review",
 		]);
 		expect(startTaskSessionRequests[0]).toMatchObject({ taskId: "task-t", prompt: "", resumeFromTrash: true });
 		expect(startTaskSessionRequests[0]?.images).toBeUndefined();
@@ -757,7 +1174,7 @@ describe("taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession",
 		await vi.waitFor(() => expect(harness.callOrder).toContain("ensureWorktree:task-t"));
 
 		// 移回 review 那次写盘已经广播；此刻浏览器读到的 review 卡必须已经不带自动动作。
-		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledTimes(1);
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalled();
 		const reviewCardWhileRestoreIsPending = readBoard()
 			.columns.find((column) => column.id === "review")
 			?.cards.find((card) => card.id === "task-t");
@@ -766,8 +1183,9 @@ describe("taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession",
 		ensureWorktreeReleased.resolve();
 		const response = await restore;
 		expect(response.taskCardRestoreFromDoneOutcome).toBe("agent_session_resumed_and_task_card_kept_in_review");
-		// 续跑成功之后不再有第二次写盘。
+		// 自动 review 已在移列时关闭，续跑成功后仅追加重开历史。
 		expect(harness.callOrder.filter((entry) => entry.startsWith("boardWrite:"))).toEqual([
+			"boardWrite:web_ui_task_card_action_restore_from_done_into_review",
 			"boardWrite:web_ui_task_card_action_restore_from_done_into_review",
 		]);
 	});
@@ -914,18 +1332,14 @@ describe("taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup", () 
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
 		);
 
-		expect(harness.callOrder.slice(0, 4)).toEqual([
+		expect(harness.callOrder).toEqual([
+			"stopTaskSession:task-1",
+			"stopTaskSession:__detail_terminal__:task-1",
+			"verifyRecoverableArchive",
 			"boardWrite:kanban_cli_task_delete",
 			"discardTaskEditDrafts:task-1",
 			"discardQueuedTaskPromptDeliveries:task-1",
 			"notifyQueuedTaskPromptDeliveryDispatcher",
-		]);
-		expect(harness.callOrder.slice(4, 6).sort()).toEqual([
-			"stopTaskSession:__detail_terminal__:task-1",
-			"stopTaskSession:task-1",
-		]);
-		// 批删必须是整条收尾链的最后一步——给 runtime 侧在途捕获最大收敛窗口；入参用 workspace 主仓路径。
-		expect(harness.callOrder.slice(6)).toEqual([
 			"deleteWorktree:task-1:branch",
 			"deleteAllTaskTurnCheckpointRefs:/tmp/repo-b:task-1",
 		]);
@@ -965,7 +1379,9 @@ describe("taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup", () 
 			"task-t2",
 		]);
 		expect(harness.callOrder.filter((entry) => entry.startsWith("stopTaskSession:"))).toEqual([
+			"stopTaskSession:task-t1",
 			"stopTaskSession:__detail_terminal__:task-t1",
+			"stopTaskSession:task-t2",
 			"stopTaskSession:__detail_terminal__:task-t2",
 		]);
 
@@ -1615,10 +2031,14 @@ describe("taskCardAction.moveTaskCardIntoDone… 的 Post-Deploy Verification �
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
 		);
 
-		expect(harness.callOrder.slice(0, 3)).toEqual([
+		expect(harness.callOrder).toEqual([
 			"authorizePostDeployVerificationDoneEntry",
+			"stopTaskSession:task-v",
+			"stopTaskSession:__detail_terminal__:task-v",
+			"verifyRecoverableArchive",
 			"boardWrite:web_ui_task_card_action_move_into_done",
 			"finalizePostDeployVerificationClosure",
+			"deleteWorktree:task-v:unspecified",
 		]);
 		expect(readColumnTaskIds("trash")).toEqual(["task-v"]);
 		expect(response.postDeployVerificationClosureOutcome).toBe("closed_into_done_with_unchecked_items_reasoned");
@@ -1713,7 +2133,9 @@ describe("taskCardAction 的意图种类与发起方标注按请求来源区分"
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
 		);
 
-		const capturedIntents = readCapturedTaskMutationIntents();
+		const capturedIntents = readCapturedTaskMutationIntents().filter(
+			(intent) => intent.taskMutationIntentKind !== "task_closure_operation_progress_changed",
+		);
 		expect(capturedIntents.map((intent) => intent.taskMutationIntentKind)).toEqual([
 			"kanban_cli_task_start_move_to_in_progress",
 			"kanban_cli_task_trash",
