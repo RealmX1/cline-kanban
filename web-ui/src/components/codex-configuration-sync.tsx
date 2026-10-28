@@ -1,9 +1,11 @@
 import * as RadixSwitch from "@radix-ui/react-switch";
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { ChevronDown, ClipboardCheck } from "lucide-react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/components/ui/cn";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
+import type { CodexConfigurationSyncNoticePresentation } from "@/hooks/use-codex-configuration-sync-notice";
 import type { CodexConfigurationChange } from "@/runtime/types";
-import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 type Controller = ReturnType<typeof useCodexConfigurationSync>;
 const targetStatusLabels = {
@@ -463,69 +465,94 @@ function CodexConfigurationReviewList({
 	);
 }
 
+export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexConfigurationSyncNoticePresentation }) {
+	if (!notice.hasReminders) return null;
+	const summary = `待审批 ${notice.pendingApprovalCount} 项 · 来源更新 ${notice.sourceUpdateCount} 条`;
+	return (
+		<button
+			ref={notice.summaryButtonRef}
+			type="button"
+			aria-label={`配置提醒，${summary}`}
+			aria-expanded={notice.isExpanded}
+			aria-controls={notice.contentId}
+			title={summary}
+			data-verification-anchor="codex-configuration-sync-summary"
+			onClick={(event) => notice.toggleExpanded(event.detail === 0)}
+			className={cn(
+				"inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs text-text-primary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent md:min-h-8",
+				notice.isExpanded && "bg-surface-3",
+			)}
+		>
+			<ClipboardCheck size={14} aria-hidden="true" />
+			<span className="hidden xl:inline">配置</span>
+			<span className="font-mono tabular-nums">{notice.pendingApprovalCount + notice.sourceUpdateCount}</span>
+			<ChevronDown
+				size={12}
+				aria-hidden="true"
+				className={cn("transition-transform motion-reduce:transition-none", notice.isExpanded && "rotate-180")}
+			/>
+		</button>
+	);
+}
+
 export function CodexConfigurationSyncNotice({
-	workspaceId,
+	notice,
 	onOpenSettings,
 }: {
-	workspaceId: string | null;
+	notice: CodexConfigurationSyncNoticePresentation;
 	onOpenSettings: () => void;
 }) {
-	const controller = useCodexConfigurationSync(workspaceId);
-	const [collapsed, setCollapsed] = useBooleanLocalStorageValue("codex-configuration-change-notice-collapsed", false);
-	const contentId = useId();
-	const scrollContainer = useRef<HTMLDivElement>(null);
-	const readingPosition = useRef(0);
-	const pending =
-		controller.state?.changes.filter(
-			(change) => change.recordKind === "settings_proposal" && change.acknowledgedAt === null,
-		) ?? [];
-	const sources =
-		controller.state?.sourceObservations.filter((observation) => observation.acknowledgedAt === null) ?? [];
-	useLayoutEffect(() => {
-		if (!collapsed && scrollContainer.current) scrollContainer.current.scrollTop = readingPosition.current;
-	}, [collapsed]);
-	if (!pending.length && !sources.length) return null;
+	if (!notice.hasReminders) return null;
 	return (
 		<section
-			className="shrink-0 min-w-0 border-b border-border bg-surface-1 px-3 sm:px-4"
+			ref={notice.panelRef}
+			id={notice.contentId}
+			hidden={!notice.isVisible}
+			tabIndex={-1}
+			className="absolute inset-x-0 top-0 z-40 flex max-h-[min(36rem,100%)] min-h-0 min-w-0 flex-col overflow-hidden border-b border-border bg-surface-1 shadow-md focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
 			aria-label="Codex 配置变更提示"
 			data-verification-anchor="codex-configuration-sync-notice"
+			data-mobile-focus-view-idle-collapse-suspension=""
+			data-state={notice.isVisible ? "open" : "closed"}
+			onKeyDown={(event) => {
+				if (event.key !== "Escape" || event.defaultPrevented) return;
+				event.preventDefault();
+				event.stopPropagation();
+				notice.closeAndRestoreSummaryFocus();
+			}}
 		>
-			<div className="flex items-center justify-between gap-2 py-2">
+			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2 sm:px-4">
 				<span className="min-w-0 text-xs font-medium text-text-primary" role="status">
-					待审批 {pending.filter((change) => change.approvalStatus === "pending").length} 项 · 来源更新{" "}
-					{sources.length} 条
+					待审批 {notice.pendingApprovalCount} 项 · 来源更新 {notice.sourceUpdateCount} 条
 				</span>
 				<div className="flex shrink-0 items-center gap-1">
-					<Button size="sm" variant="ghost" onClick={onOpenSettings}>
+					<Button
+						size="sm"
+						variant="ghost"
+						className="min-h-11 md:min-h-8"
+						onClick={() => {
+							notice.closeForSettings();
+							onOpenSettings();
+						}}
+					>
 						配置同步设置
 					</Button>
 					<Button
 						size="sm"
 						variant="ghost"
-						aria-expanded={!collapsed}
-						aria-controls={contentId}
-						onClick={() => {
-							if (!collapsed && scrollContainer.current)
-								readingPosition.current = scrollContainer.current.scrollTop;
-							setCollapsed(!collapsed);
-						}}
+						className="min-h-11 md:min-h-8"
+						onClick={notice.closeAndRestoreSummaryFocus}
 					>
-						{collapsed ? "展开" : "收起"}
+						收起
 					</Button>
 				</div>
 			</div>
-			<div id={contentId} hidden={collapsed}>
-				<div
-					ref={scrollContainer}
-					className="max-h-[38vh] overflow-y-auto overscroll-contain pb-2"
-					onScroll={() => {
-						if (!collapsed && scrollContainer.current)
-							readingPosition.current = scrollContainer.current.scrollTop;
-					}}
-				>
-					<CodexConfigurationReviewList controller={controller} remindersOnly />
-				</div>
+			<div
+				ref={notice.scrollContainerRef}
+				className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-2 sm:px-4"
+				onScroll={notice.recordReadingPosition}
+			>
+				<CodexConfigurationReviewList controller={notice.controller} remindersOnly />
 			</div>
 		</section>
 	);

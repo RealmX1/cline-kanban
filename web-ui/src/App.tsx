@@ -12,7 +12,10 @@ import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoar
 import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
-import { CodexConfigurationSyncNotice } from "@/components/codex-configuration-sync";
+import {
+	CodexConfigurationSyncNotice,
+	CodexConfigurationSyncSummaryButton,
+} from "@/components/codex-configuration-sync";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import {
 	DailyWorkProgressExpandedRegion,
@@ -70,6 +73,7 @@ import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
+import { useCodexConfigurationSyncNotice } from "@/hooks/use-codex-configuration-sync-notice";
 import { useCreatePostDeployVerificationFollowUpTask } from "@/hooks/use-create-post-deploy-verification-follow-up-task";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
@@ -1622,6 +1626,11 @@ export default function App(): ReactElement {
 		focusedTaskIdentity: JSON.stringify([currentProjectId, selectedCardRenderedInFocusView?.card.id ?? null]),
 		isDocumentVisible,
 	});
+	const codexConfigurationNotice = useCodexConfigurationSyncNotice({
+		workspaceId: currentProjectId,
+		isPresentationAvailable:
+			!mobileFocusViewControls.isEnabled || mobileFocusViewControls.upperNavigationAndToolsExpanded,
+	});
 	const latestSelectedTaskChatMessage = selectLatestTaskChatMessageForTask(
 		selectedCard?.card.id,
 		latestTaskChatMessage,
@@ -1732,10 +1741,6 @@ export default function App(): ReactElement {
 						/>
 					) : null}
 					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-						<CodexConfigurationSyncNotice
-							workspaceId={currentProjectId}
-							onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
-						/>
 						<div
 							hidden={
 								mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded
@@ -1745,6 +1750,9 @@ export default function App(): ReactElement {
 							data-mobile-focus-view-collapsible-region=""
 						>
 							<TopBar
+								codexConfigurationNoticeSummaryControl={
+									<CodexConfigurationSyncSummaryButton notice={codexConfigurationNotice} />
+								}
 								dailyWorkProgressSummaryControl={
 									<DailyWorkProgressSummaryButton progress={dailyWorkProgressStatistics} />
 								}
@@ -2168,6 +2176,11 @@ export default function App(): ReactElement {
 									/>
 								</div>
 							) : null}
+							{/* 同一覆盖层级按 DOM 顺序绘制，通知须覆盖手机首页终端。 */}
+							<CodexConfigurationSyncNotice
+								notice={codexConfigurationNotice}
+								onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
+							/>
 						</div>
 					</div>
 					<TaskProjectAssignmentPreflightHost />
