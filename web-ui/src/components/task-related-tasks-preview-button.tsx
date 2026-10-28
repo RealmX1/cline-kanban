@@ -26,7 +26,7 @@ const COLUMN_LABELS: Record<string, string> = {
 	in_progress: "进行中",
 	review: "待审阅",
 	validation: "待验证",
-	trash: "Done",
+	trash: "已结案",
 };
 const ASSERTION_SOURCE_LABELS = {
 	asserted_directly_by_user_in_web_ui: "用户声明",

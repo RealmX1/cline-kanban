@@ -299,10 +299,27 @@ interface HookSnapshot {
 	handleDragEnd: (result: DropResult) => void;
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
+	taskCommentBeforeMoveIntoDone: ReturnType<typeof useBoardInteractions>["taskCommentBeforeMoveIntoDone"];
+	confirmTaskCommentBeforeMoveIntoDone: ReturnType<
+		typeof useBoardInteractions
+	>["confirmTaskCommentBeforeMoveIntoDone"];
 	cancelMoveToDone: () => void;
 	handleMoveCardToReview: (taskId: string) => void;
 	moveToReviewLoadingById: Record<string, boolean>;
 	completePostDeployVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
+}
+
+async function submitExplicitClosureResult(snapshot: HookSnapshot) {
+	const request = snapshot.taskCommentBeforeMoveIntoDone.request;
+	if (!request) throw new Error("应先显示结案表单。");
+	await act(async () =>
+		snapshot.confirmTaskCommentBeforeMoveIntoDone("结案说明", {
+			closureRequestId: request.closureRequestId,
+			expectedTaskUpdatedAtEpochMs: request.expectedTaskUpdatedAtEpochMs,
+			details: { outcome: "delivery_accepted", evidence: [], acceptedDeliverables: [] },
+			selectedArtifactRelativePaths: [],
+		}),
+	);
 }
 
 function createRect(width: number, height: number): DOMRect {
@@ -386,6 +403,8 @@ function HookHarness({
 			handleDragEnd: actions.handleDragEnd,
 			isMoveToDoneConfirmOpen: actions.isMoveToDoneConfirmOpen,
 			confirmMoveToDone: actions.confirmMoveToDone,
+			taskCommentBeforeMoveIntoDone: actions.taskCommentBeforeMoveIntoDone,
+			confirmTaskCommentBeforeMoveIntoDone: actions.confirmTaskCommentBeforeMoveIntoDone,
 			cancelMoveToDone: actions.cancelMoveToDone,
 			handleMoveCardToReview: actions.handleMoveCardToReview,
 			moveToReviewLoadingById: actions.moveToReviewLoadingById,
@@ -406,6 +425,8 @@ function HookHarness({
 		actions.handleDragEnd,
 		actions.isMoveToDoneConfirmOpen,
 		actions.confirmMoveToDone,
+		actions.taskCommentBeforeMoveIntoDone,
+		actions.confirmTaskCommentBeforeMoveIntoDone,
 		actions.cancelMoveToDone,
 		actions.handleMoveCardToReview,
 		actions.moveToReviewLoadingById,
@@ -1420,6 +1441,8 @@ describe("useBoardInteractions", () => {
 				await Promise.resolve();
 			}
 		});
+		await submitExplicitClosureResult(harness.requireSnapshot());
+		await act(async () => harness.requireSnapshot().confirmMoveToDone());
 
 		expect(
 			taskCardActionQueryMocks.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
@@ -1655,78 +1678,77 @@ describe("useBoardInteractions", () => {
 		expect(inProgressCards.map((card) => card.id)).toEqual(["task-active-review"]);
 	});
 
-	it("confirms before moving a review card to Done but moves a validation card directly", async () => {
-		const requestMoveTaskToTrashWithAnimation = vi.fn(async () => {});
+	it.each(["review", "validation"] as const)(
+		"%s 结案均先选择结果，Review 再确认跳过 Validation",
+		async (sourceColumnId) => {
+			const requestMoveTaskToTrashWithAnimation = vi.fn(async () => {});
 
-		useProgrammaticCardMovesMock.mockReturnValue({
-			handleProgrammaticCardMoveReady: () => {},
-			setRequestMoveTaskToTrashHandler: () => {},
-			tryProgrammaticCardMove: () => "unavailable",
-			consumeProgrammaticCardMove: () => ({}),
-			resolvePendingProgrammaticTrashMove: () => {},
-			waitForProgrammaticCardMoveAvailability: async () => {},
-			resetProgrammaticCardMoves: () => {},
-			requestMoveTaskToTrashWithAnimation,
-			programmaticCardMoveCycle: 0,
-		});
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove: () => "unavailable",
+				consumeProgrammaticCardMove: () => ({}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation,
+				programmaticCardMoveCycle: 0,
+			});
 
-		const board: BoardData = {
-			columns: [
-				{ id: "backlog", title: "Backlog", cards: [] },
-				{ id: "in_progress", title: "In Progress", cards: [] },
-				{ id: "review", title: "Review", cards: [createTask("task-review", "Review task", 1)] },
-				{ id: "validation", title: "Validation", cards: [createTask("task-val", "Validation task", 2)] },
-				{ id: "trash", title: "Done", cards: [] },
-			],
-		};
+			const board: BoardData = {
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{ id: "in_progress", title: "In Progress", cards: [] },
+					{ id: "review", title: "Review", cards: [createTask("task-review", "Review task", 1)] },
+					{ id: "validation", title: "Validation", cards: [createTask("task-val", "Validation task", 2)] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+			};
 
-		let latestSnapshot: HookSnapshot | null = null;
-		await act(async () => {
-			root.render(
-				<HookHarness
-					board={board}
-					setBoard={vi.fn()}
-					onSnapshot={(snapshot) => {
-						latestSnapshot = snapshot;
-					}}
-				/>,
-			);
-		});
+			let latestSnapshot: HookSnapshot | null = null;
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={board}
+						setBoard={vi.fn()}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>,
+				);
+			});
 
-		const requireSnapshot = (): HookSnapshot => {
-			if (!latestSnapshot) {
-				throw new Error("Expected a hook snapshot.");
+			const requireSnapshot = (): HookSnapshot => {
+				if (!latestSnapshot) {
+					throw new Error("Expected a hook snapshot.");
+				}
+				return latestSnapshot;
+			};
+
+			const taskId = sourceColumnId === "review" ? "task-review" : "task-val";
+			await act(async () => requireSnapshot().handleMoveReviewCardToTrash(taskId));
+			expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request?.taskId).toBe(taskId);
+			expect(requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
+			await submitExplicitClosureResult(requireSnapshot());
+			if (sourceColumnId === "review") {
+				expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
+				await act(async () => requireSnapshot().confirmMoveToDone());
 			}
-			return latestSnapshot;
-		};
-
-		// Review → Done opens the confirmation instead of moving immediately.
-		await act(async () => {
-			requireSnapshot().handleMoveReviewCardToTrash("task-review");
-		});
-		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
-		expect(requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
-
-		// Confirming runs the actual move with the review source column.
-		await act(async () => {
-			requireSnapshot().confirmMoveToDone();
-		});
-		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-review", "review", {
-			boardMutationInitiator: "web_ui_user_gesture",
-		});
-
-		requestMoveTaskToTrashWithAnimation.mockClear();
-
-		// Validation → Done is the normal completion path: no confirmation, moves directly.
-		await act(async () => {
-			requireSnapshot().handleMoveReviewCardToTrash("task-val");
-		});
-		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-val", "validation", {
-			boardMutationInitiator: "web_ui_user_gesture",
-		});
-	});
+			expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
+			expect(
+				taskCardActionQueryMocks.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace,
+			).toHaveBeenCalledWith(
+				"project-1",
+				expect.objectContaining({
+					taskId,
+					closure: expect.objectContaining({
+						details: expect.objectContaining({ outcome: "delivery_accepted" }),
+					}),
+				}),
+			);
+			expect(requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
+		},
+	);
 
 	// Stage 3 ④：列自动流转的 state 读已翻为 facet 权威（resolveSessionFacets + isAwaitingUserReviewTurn /
 	// turnOwner==="agent" / liveness==="interrupted"）。下面钉住「行为保持 + facet 采信 + exited 折叠不偷渡

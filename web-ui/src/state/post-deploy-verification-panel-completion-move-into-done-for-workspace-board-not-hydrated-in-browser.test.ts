@@ -174,14 +174,14 @@ describe("completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHyd
 			boardColumnIdObservedInBoardSnapshot: "review",
 		});
 		expect(failed).toEqual({ ok: false, moveIntoDoneFailureMessage: "disk full" });
-		expect(notifyErrorMock).toHaveBeenCalledWith("Could not move the task to Done: disk full");
+		expect(notifyErrorMock).toHaveBeenCalledWith("Could not 结案任务: disk full");
 		notifyErrorMock.mockReset();
 		const inFlight = await completePostDeployVerificationPanelMoveIntoDoneForWorkspaceBoardNotHydratedInBrowser({
 			workspaceId: "cline-kanban",
 			taskId: "task-1",
 			boardColumnIdObservedInBoardSnapshot: "review",
 		});
-		expect(inFlight).toEqual({ ok: false, moveIntoDoneFailureMessage: "该任务的移入 Done 已在进行中" });
+		expect(inFlight).toEqual({ ok: false, moveIntoDoneFailureMessage: "该任务的结案 已在进行中" });
 		expect(notifyErrorMock).not.toHaveBeenCalled();
 	});
 });

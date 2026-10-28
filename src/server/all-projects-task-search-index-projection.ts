@@ -116,6 +116,7 @@ export function projectAllProjectsTaskSearchIndex(
 			for (const card of column.cards) {
 				tasks.push({
 					taskId: card.id,
+					taskClosureSummary: card.taskClosureSummary,
 					title: card.title ?? "",
 					prompt: card.prompt,
 					columnId: column.id,

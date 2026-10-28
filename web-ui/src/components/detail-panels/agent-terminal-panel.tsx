@@ -1277,7 +1277,7 @@ function AgentTerminalPanelLayout({
 						) : null}
 						{showMoveToTrash && onMoveToTrash ? (
 							<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-								{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
+								{isMoveToTrashLoading ? <Spinner size={14} /> : "结案任务"}
 							</Button>
 						) : null}
 					</div>

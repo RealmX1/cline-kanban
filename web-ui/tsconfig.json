@@ -63,7 +63,8 @@
       "@runtime-task-pinboard-pinning": ["../src/core/task-pinboard-pinning.ts"],
       "@runtime-task-title": ["../src/core/task-title.ts"],
       "@runtime-task-worktree-path": ["../src/workspace/task-worktree-path.ts"],
-      "@runtime-task-state": ["../src/core/task-board-mutations.ts"]
+      "@runtime-task-state": ["../src/core/task-board-mutations.ts"],
+      "@runtime-task-closure-contract": ["../src/core/task-closure-contract.ts"]
     },
     "types": ["vitest/globals"]
   },

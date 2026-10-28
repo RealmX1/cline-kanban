@@ -11,6 +11,26 @@ import type {
 // 「跨项目执行动作而不切换当前项目」的基础。
 
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+
+export async function readTaskClosureHistoryInWorkspace(workspaceId: string, taskId: string, createdAt: number) {
+	return await getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskClosureHistory.query({
+		taskId,
+		expectedTaskIncarnationCreatedAtEpochMs: createdAt,
+	});
+}
+export async function correctTaskClosureOutcomeInWorkspace(
+	workspaceId: string,
+	request: RuntimeAppRouterInputs["taskCardAction"]["correctTaskClosureOutcome"],
+) {
+	return await getRuntimeTrpcClient(workspaceId).taskCardAction.correctTaskClosureOutcome.mutate(request);
+}
+export async function cancelTaskClosureOperationInWorkspace(workspaceId: string, taskId: string, createdAt: number) {
+	return await getRuntimeTrpcClient(workspaceId).taskCardAction.cancelTaskClosureOperation.mutate({
+		taskId,
+		expectedTaskIncarnationCreatedAtEpochMs: createdAt,
+	});
+}
+
 import type {
 	RuntimeTaskCardActionMoveBetweenNonTrashColumnsRequest,
 	RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse,

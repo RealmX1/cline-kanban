@@ -391,7 +391,7 @@ const RECENT_TASK_STAGE_FILTER_LABELS: Record<CrossProjectTaskSwitcherRecentTask
 	in_progress_and_review: "In progress / Review",
 	backlog: "Backlog",
 	validation: "Validation",
-	done: "Done",
+	done: "已结案",
 };
 
 /** Recent：阶段筛选取并集，排序不改变候选集合，可按需扩展到 30 天。 */

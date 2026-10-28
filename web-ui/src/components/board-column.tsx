@@ -212,7 +212,7 @@ export const BoardColumn = memo(function BoardColumn({
 								onClick={onClearTrash}
 								disabled={column.cards.length === 0}
 								aria-label="Clear done"
-								title={column.cards.length > 0 ? "Clear done items permanently" : "Done is empty"}
+								title={column.cards.length > 0 ? "永久删除已结案任务" : "暂无已结案任务"}
 							/>
 						) : null}
 						{onCollapseColumn ? (

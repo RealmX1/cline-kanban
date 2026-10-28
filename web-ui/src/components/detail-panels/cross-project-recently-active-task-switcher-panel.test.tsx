@@ -423,13 +423,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		]);
 		act(() => filterButton("Backlog")?.click());
 		expect(rowTaskIds(section("remaining"))).toEqual(["pinned-backlog"]);
-		act(() => filterButton("Done")?.click());
+		act(() => filterButton("已结案")?.click());
 		expect(rowTaskIds(section("remaining"))).toEqual(["done", "pinned-backlog"]);
 		expect(filterButton("Backlog")?.getAttribute("aria-pressed")).toBe("true");
 		expect(filterButton("All")?.getAttribute("aria-pressed")).toBe("false");
 		act(() => filterButton("Backlog")?.click());
 		expect(rowTaskIds(section("remaining"))).toEqual(["done"]);
-		act(() => filterButton("Done")?.click());
+		act(() => filterButton("已结案")?.click());
 		expect(filterButton("All")?.getAttribute("aria-pressed")).toBe("true");
 		act(() => filterButton("In progress / Review")?.click());
 		expect(rowTaskIds(section("remaining"))).toEqual(["in-progress", "review"]);
@@ -530,13 +530,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const taskCards = renderFocusedTask("outside", "trash", host);
 		const fallback = container.querySelector("[data-cross-project-focused-task-outside-sections]");
 		expect(fallback?.textContent).toContain("完整焦点卡 outside");
-		expect(fallback?.textContent).toContain("Done");
+		expect(fallback?.textContent).toContain("已结案");
 		expect(fallback?.querySelector("[data-task-id]")).toBeNull();
 		expect(
 			container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:outside"]'),
 		).toHaveLength(1);
 		expect(rowTaskIds(section("remaining"))).not.toContain("outside");
-		const restore = fallback?.querySelector<HTMLButtonElement>('button[aria-label="Restore task from done"]');
+		const restore = fallback?.querySelector<HTMLButtonElement>('button[aria-label="重新打开已结案任务"]');
 		act(() => restore?.click());
 		expect(taskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith("outside");
 	});
@@ -729,7 +729,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			if (scenario !== "running_collapsed") {
 				act(() =>
 					queryTargetAnchor()
-						?.querySelector<HTMLButtonElement>('button[aria-label="Restore task from done"]')
+						?.querySelector<HTMLButtonElement>('button[aria-label="重新打开已结案任务"]')
 						?.click(),
 				);
 				expect(hydratedTaskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith(
@@ -2028,9 +2028,9 @@ describe("collectCrossProjectTaskSwitcherEntriesInProjects", () => {
 		]);
 	});
 
-	it("快照里落在广播取景范围内却不在广播里的条目已失效（取消置顶 / 移入 Done / 已删除），不按旧状态补回", () => {
+	it("快照里落在广播取景范围内却不在广播里的条目已失效（取消置顶 / 结案 / 已删除），不按旧状态补回", () => {
 		const entries = collectCrossProjectTaskSwitcherEntriesInProjects(
-			// 广播里已经没有这些任务：旧置顶卡被取消置顶后滑出取景范围；最近碰过的卡被移入 Done 或删除。
+			// 广播里已经没有这些任务：旧置顶卡被取消置顶后滑出取景范围；最近碰过的卡被结案 或删除。
 			[makeProject("project-a", [])],
 			{
 				activityHorizonMs: EXTENDED_ACTIVITY_HORIZON_MS,
@@ -2038,7 +2038,7 @@ describe("collectCrossProjectTaskSwitcherEntriesInProjects", () => {
 					{
 						workspaceId: "project-a",
 						crossProjectTaskSwitcherEntries: [
-							// 快照时是置顶的旧卡（review 列）；此后被取消置顶，或取消置顶并移入 Done。
+							// 快照时是置顶的旧卡（review 列）；此后被取消置顶，或取消置顶并结案。
 							makeEntry("unpinned-or-unpinned-and-moved-to-done-since-snapshot", {
 								...OLDER_THAN_BROADCAST_ACTIVITY_HORIZON,
 								pinnedToTaskPinboardAt: 1,

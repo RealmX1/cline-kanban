@@ -20,6 +20,7 @@ import {
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
+import { preserveRuntimeOwnedTaskClosureState } from "../core/task-closure-protected-board-state";
 import {
 	preserveRuntimeOwnedMainSessionBindings,
 	projectTaskConversationSessionsForMainSessionBinding,
@@ -68,7 +69,7 @@ const BOARD_COLUMNS: Array<{ id: RuntimeBoardColumnId; title: string }> = [
 	{ id: "in_progress", title: "In Progress" },
 	{ id: "review", title: "Review" },
 	{ id: "validation", title: "Validation" },
-	{ id: "trash", title: "Done" },
+	{ id: "trash", title: "已结案" },
 ];
 
 interface WorkspaceIndexEntry {
@@ -206,6 +207,10 @@ function reconcileBoardColumns(board: RuntimeBoardData): RuntimeBoardData {
 		}
 		if (board.columns[expectedIndex]?.id !== expectedColumn.id) {
 			columnsChanged = true;
+		}
+		if (existingColumn.id === "trash" && existingColumn.title !== "已结案") {
+			columnsChanged = true;
+			return { ...existingColumn, title: "已结案" };
 		}
 		return existingColumn;
 	});
@@ -1117,9 +1122,12 @@ export async function saveWorkspaceState(
 				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
 			});
 		}
-		const board = preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot(
+		const board = preserveRuntimeOwnedTaskClosureState(
 			persistedBoard,
-			preserveRuntimeOwnedMainSessionBindings(persistedBoard, postDeployVerificationDoneEntryGuarded.board),
+			preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot(
+				persistedBoard,
+				preserveRuntimeOwnedMainSessionBindings(persistedBoard, postDeployVerificationDoneEntryGuarded.board),
+			),
 		);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {

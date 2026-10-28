@@ -105,6 +105,13 @@ import {
 	loadWorkspaceBoardById,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
+import {
+	readTaskClosureOperation,
+	withTaskClosureLifecycleLocks,
+	writeTaskClosureHistoryRecord,
+	writeTaskClosureOperation,
+} from "../task-closure/task-closure-operation-store";
+import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
 import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
@@ -938,11 +945,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		executeAgent: executeTaskAnalysisApi,
 		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
 	});
-	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
-		const requestUrl = new URL(req.url ?? "/", "http://localhost");
-		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
-		// taskCardActionApi 与自动收尾复用同一份 runtimeApi 的起停和投递漏斗。
-		const workspaceApi = createWorkspaceApi({
+	const createWorkspaceControlApi = () =>
+		createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 			getScopedClineTaskSessionService,
 			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
@@ -954,6 +958,32 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
 			},
 		});
+	const createTaskCardActions = (workspaceApi: RuntimeTrpcContext["workspaceApi"]) =>
+		createTaskCardActionApi({
+			runtimeApi,
+			workspaceApi,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
+			findTaskSessionSummaryLiveInRuntimeProcessMemory: findRuntimeSessionSummary,
+			listTaskSessionSummariesLiveInRuntimeProcessMemory: listProjectRuntimeSessionSummaries,
+			taskCardActionPerTaskCommandSerializer,
+			// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
+			onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
+				void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+			},
+			// 所有进 Done 的入口共用的 Post-Deploy Verification 门禁（未勾项必须带原因）。
+			postDeployVerificationDoneEntryGate: {
+				authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
+				finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
+				revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
+			},
+		});
+
+	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
+		const requestUrl = new URL(req.url ?? "/", "http://localhost");
+		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+		// taskCardActionApi 与自动收尾复用同一份 runtimeApi 的起停和投递漏斗。
+		const workspaceApi = createWorkspaceControlApi();
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			codexConfigurationSyncApi: codexConfigurationSyncService,
@@ -974,24 +1004,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			taskMainSessionHandoverApi,
 			independentTaskCreationApi,
 			workspaceApi,
-			taskCardActionApi: createTaskCardActionApi({
-				runtimeApi,
-				workspaceApi,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
-				findTaskSessionSummaryLiveInRuntimeProcessMemory: findRuntimeSessionSummary,
-				taskCardActionPerTaskCommandSerializer,
-				// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
-				onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
-					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
-				},
-				// 所有进 Done 的入口共用的 Post-Deploy Verification 门禁（未勾项必须带原因）。
-				postDeployVerificationDoneEntryGate: {
-					authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone,
-					finalizePostDeployVerificationClosureAfterTaskCardMovedIntoDone,
-					revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
-				},
-			}),
+			taskCardActionApi: createTaskCardActions(workspaceApi),
 			projectsApi: createProjectsApi({
 				getActiveWorkspacePath: deps.workspaceRegistry.getActiveWorkspacePath,
 				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -1125,6 +1138,101 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			taskVisualizationArtifactApi,
 		};
 	};
+
+	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(async (staleOperation) => {
+		const identity = staleOperation.taskIdentity;
+		const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
+		const board = await loadWorkspaceBoardById(identity.workspaceId);
+		const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
+		const card = column?.cards.find((entry) => entry.id === identity.taskId);
+		if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
+			if (
+				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+				card.taskClosureSummary?.eventKind === "reopened" &&
+				card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
+			) {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (current?.reopening) {
+						current.reopening.phase = "completed";
+						await writeTaskClosureOperation(current);
+					}
+					if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
+				});
+			} else if (
+				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+				((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
+					(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
+			) {
+				await createTaskCardActions(
+					createWorkspaceControlApi(),
+				).restoreTaskCardFromDoneIntoReviewResumingAgentSession(scope, staleOperation.reopening.request, {
+					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
+				});
+			} else {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (current?.reopening) {
+						current.reopening.phase = "cancelled";
+						current.reopening.lastError = "任务身份已变化或卡片已删除";
+						await writeTaskClosureOperation(current);
+					}
+				});
+			}
+			return;
+		}
+		if (
+			card &&
+			(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
+				(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
+		) {
+			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+				if (!current || current.progress.phase === "completed") return;
+				current.progress.phase = "cancelled";
+				current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
+				await writeTaskClosureOperation(current);
+			});
+			return;
+		}
+		const workspaceApi = createWorkspaceControlApi();
+		if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
+			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+				if (!current || current.progress.phase !== "closed_cleanup_pending") return;
+				const result = await workspaceApi.deleteWorktree(scope, {
+					taskId: identity.taskId,
+					taskClosureArchiveCleanupCredential: {
+						taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
+						closureRequestId: current.progress.closureRequestId,
+					},
+				});
+				current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
+				current.progress.lastError = result.error ?? null;
+				await writeTaskClosureOperation(current);
+			});
+		} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
+			await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
+				scope,
+				{
+					expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
+						[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+					},
+					permanentlyDeletedTaskCardSelection: {
+						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+						selectedTaskIds: [identity.taskId],
+					},
+				},
+				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+			);
+		} else if (card) {
+			await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				scope,
+				staleOperation.request,
+				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+			);
+		}
+	});
 
 	const trpcHttpHandler = createHTTPHandler({
 		basePath: "/api/trpc/",
@@ -1370,6 +1478,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	});
 
 	const closeRuntimeServerResources = async (): Promise<void> => {
+		await taskClosureRecoveryMonitor.close();
 		await taskVisualizationArtifactApi.stop();
 		await taskLookupConversationApi.close();
 		await codexConfigurationSyncService.close();
@@ -1452,6 +1561,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
+	taskClosureRecoveryMonitor.start();
 	agentSessionInactivityReclamationScheduler.start();
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();

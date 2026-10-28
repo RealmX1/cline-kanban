@@ -19,7 +19,7 @@ import {
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
 // 看板入口（按钮 / 拖拽 / 服务端拒绝兜底 / 会话中断与自动 review 的自动流转）撞上 Post-Deploy Verification
-// 「移入 Done」门禁时的行为。门禁唯一判据在服务端；这里钉住客户端预检与拒绝分流。
+// 「结案」门禁时的行为。门禁唯一判据在服务端；这里钉住客户端预检与拒绝分流。
 
 const notifyErrorMock = vi.hoisted(() => vi.fn());
 const showAppToastMock = vi.hoisted(() => vi.fn());
@@ -199,7 +199,7 @@ function HookHarness({
 	return null;
 }
 
-describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", () => {
+describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
@@ -265,6 +265,19 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		return latestSnapshot;
 	}
 
+	async function submitExplicitClosureResultForTest() {
+		const request = requireSnapshot().taskCommentBeforeMoveIntoDone.request;
+		if (!request || request.phase !== "editing") return;
+		await act(async () =>
+			requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("结案说明", {
+				closureRequestId: request.closureRequestId,
+				expectedTaskUpdatedAtEpochMs: request.expectedTaskUpdatedAtEpochMs,
+				details: { outcome: "delivery_accepted", evidence: [], acceptedDeliverables: [] },
+				selectedArtifactRelativePaths: [],
+			}),
+		);
+	}
+
 	it("评论确认后才发单次 Done 命令，空白输入无效，成功清空草稿", async () => {
 		mockProgrammaticCardMoves();
 		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
@@ -311,76 +324,22 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
 	});
 
-	it.each(["取消评论确认", "在途结束后重试成功", "在途结束后重试失败"])(
-		"同卡普通 Done 在途时保留带评论的 Skip Validation 确认：%s",
-		async (followupAction) => {
-			let finishOrdinaryMoveIntoDone: (() => void) | undefined;
-			const ordinaryMoveIntoDoneCompletion = new Promise<void>((resolve) => {
-				finishOrdinaryMoveIntoDone = resolve;
-			});
-			const programmaticCardMoves = mockProgrammaticCardMoves({
-				requestMoveTaskToTrashWithAnimation: vi.fn(() => ordinaryMoveIntoDoneCompletion),
-			});
-			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"), activeGroup: null });
-			await act(async () =>
-				requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID, {
-					requestTaskCommentBeforeMovingIntoDone: true,
-				}),
-			);
-			await act(async () => requireSnapshot().confirmTaskCommentBeforeMoveIntoDone("并发操作期间保留的评论"));
-			const originalCommentId = requireSnapshot().taskCommentBeforeMoveIntoDone.request!.taskCommentEntryId;
-			// 模拟确认期间看板广播先移入 Validation，随后普通 Done 动作开始，评论确认仍等待用户决定。
-			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
-			await act(async () => requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID));
-			expect(programmaticCardMoves.requestMoveTaskToTrashWithAnimation).toHaveBeenCalledOnce();
-			expect(requireSnapshot().moveToTrashLoadingById[GATED_TASK_ID]).toBe(true);
-			await act(async () => requireSnapshot().confirmMoveToDone());
-			expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
-			expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
-				phase: "awaiting_confirmation",
-				taskCommentEntryId: originalCommentId,
-				commentText: "并发操作期间保留的评论",
-			});
-			expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
-			if (followupAction === "取消评论确认") {
-				await act(async () => requireSnapshot().cancelMoveToDone());
-				expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-				expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
-					phase: "editing",
-					taskCommentEntryId: originalCommentId,
-					commentText: "并发操作期间保留的评论",
-				});
-			}
-			await act(async () => finishOrdinaryMoveIntoDone!());
-			expect(requireSnapshot().moveToTrashLoadingById[GATED_TASK_ID]).toBeFalsy();
-			if (followupAction === "取消评论确认") {
-				expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
-				return;
-			}
-			if (followupAction === "在途结束后重试失败")
-				moveTaskCardIntoDoneInWorkspaceMock.mockRejectedValueOnce(new Error("任务已完成，未提交本次评论"));
-			await act(async () => requireSnapshot().confirmMoveToDone());
-			expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
-			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledWith(
-				"project-1",
-				expect.objectContaining({
-					taskCommentToAppendWhenMovingIntoDone: {
-						taskCommentEntryId: originalCommentId,
-						commentText: "并发操作期间保留的评论",
-					},
-				}),
-			);
-			if (followupAction === "在途结束后重试失败")
-				expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toMatchObject({
-					phase: "editing",
-					taskCommentEntryId: originalCommentId,
-					commentText: "并发操作期间保留的评论",
-					errorMessage: "任务已完成，未提交本次评论",
-				});
-			else expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request).toBeNull();
-		},
-	);
+	it("重复普通结案入口保留正在编辑或确认的同一份结果与评论草稿", async () => {
+		mockProgrammaticCardMoves();
+		await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"), activeGroup: null });
+		await act(async () => requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID));
+		const original = requireSnapshot().taskCommentBeforeMoveIntoDone.request;
+		await act(async () => requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID));
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request?.closureRequestId).toBe(
+			original?.closureRequestId,
+		);
+		await submitExplicitClosureResultForTest();
+		await act(async () => requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID));
+		expect(requireSnapshot().taskCommentBeforeMoveIntoDone.request?.phase).toBe("awaiting_confirmation");
+		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
+		await act(async () => requireSnapshot().confirmMoveToDone());
+		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledOnce();
+	});
 
 	it("评论与 PDV 原因一并传递；取消原因确认时返回原评论", async () => {
 		mockProgrammaticCardMoves();
@@ -481,7 +440,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 	});
 
 	it.each(["缺少本次评论", "同文但不同 ID", "同 ID 但不同正文", "重试时改写正文"])(
-		"其他操作已移入 Done：%s 时保留草稿且不事后补加评论",
+		"其他操作已结案：%s 时保留草稿且不事后补加评论",
 		async (mismatch) => {
 			mockProgrammaticCardMoves();
 			await renderHarness({ board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"), activeGroup: null });
@@ -520,7 +479,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		},
 	);
 
-	it("卡片按钮移入 Done：有未勾项先开原因对话框（不弹跳过 Validation 的确认、不发命令），确认后带原因移列", async () => {
+	it("卡片按钮结案：有未勾项先开原因对话框（不弹跳过 Validation 的确认、不发命令），确认后带原因移列", async () => {
 		mockProgrammaticCardMoves();
 		await renderHarness({
 			board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"),
@@ -529,6 +488,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		await act(async () => {
 			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID);
 		});
+		await submitExplicitClosureResultForTest();
 		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
 		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
 		const closureDialog = requireSnapshot().postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone;
@@ -580,6 +540,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		await act(async () => {
 			requireSnapshot().handleMoveReviewCardToTrash(GATED_TASK_ID);
 		});
+		await submitExplicitClosureResultForTest();
 		expect(requireSnapshot().postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone).not.toBeNull();
 
 		// 另一处（Focus View / 跨项目面板）对同一张卡的命令还在路上。
@@ -624,6 +585,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		await act(async () => {
 			requireSnapshot().handleMoveReviewCardToTrash("task-free");
 		});
+		await submitExplicitClosureResultForTest();
 		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
 		expect(requireSnapshot().postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone).toBeNull();
 	});
@@ -646,19 +608,21 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		await act(async () => {
 			requireSnapshot().handleDragEnd(dropIntoDone);
 		});
+		await submitExplicitClosureResultForTest();
 		expect(moveTaskCardIntoDoneInWorkspaceMock).not.toHaveBeenCalled();
 		expect(programmaticCardMoves.resolvePendingProgrammaticTrashMove).toHaveBeenCalledWith(GATED_TASK_ID);
 		expect(requireSnapshot().postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone?.dialogRequest).toEqual(
 			{
 				taskId: GATED_TASK_ID,
 				insertAtIndexWithinDoneBoardColumn: 0,
+				taskCommentToAppendWhenMovingIntoDone: expect.any(Object),
 				runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
 			},
 		);
 	});
 
 	it("预检数据过期、服务端以 PRECONDITION_FAILED 拒绝：不弹通用错误，重拉读模型并打开对话框", async () => {
-		// 非动画列的移入 Done 由 useProgrammaticCardMoves 直接转给 hook 注册的 requestMoveTaskToTrash。
+		// 非动画列的结案 由 useProgrammaticCardMoves 直接转给 hook 注册的 requestMoveTaskToTrash。
 		let registeredRequestMoveTaskToTrash:
 			| ((taskId: string, fromColumnId: BoardColumnId, options?: object) => Promise<void>)
 			| null = null;
@@ -685,6 +649,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		await act(async () => {
 			requireSnapshot().handleMoveReviewCardToTrash("task-stale");
 		});
+		await submitExplicitClosureResultForTest();
 		expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledTimes(1);
 		expect(notifyErrorMock).not.toHaveBeenCalled();
 		expect(refreshPostDeployVerification).toHaveBeenCalled();
@@ -726,7 +691,7 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		expect(showAppToastMock).toHaveBeenCalledTimes(1);
 	});
 
-	it("自动 review 完成后的自动移入 Done：受门禁的卡不发起（连动画都不放）", async () => {
+	it("自动 review 完成后的自动结案：受门禁的卡不发起（连动画都不放）", async () => {
 		const programmaticCardMoves = mockProgrammaticCardMoves();
 		await renderHarness({
 			board: createBoardWithTaskInColumn(GATED_TASK_ID, "review"),
@@ -740,6 +705,61 @@ describe("useBoardInteractions · Post-Deploy Verification 移入 Done 门禁", 
 		expect(programmaticCardMoves.requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
 		expect(showAppToastMock).toHaveBeenCalledTimes(1);
 	});
+
+	it.each([true, false])(
+		"项目水合后 PDV 完成保留评论、结构化结果及 ignored 成果，带原因=%s",
+		async (hasPdvReasons) => {
+			const programmaticCardMoves = mockProgrammaticCardMoves();
+			succeedMoveIntoDone();
+			await renderHarness({
+				board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"),
+				activeGroup: createActiveGroupWithTask(GATED_TASK_WITH_UNCHECKED_ITEM),
+			});
+			const prepared = {
+				taskCommentEntryId: "prepared-comment",
+				commentText: "已接受报告，剩余方案退役",
+				closure: {
+					closureRequestId: "22222222-2222-4222-8222-222222222222",
+					details: {
+						outcome: "plan_retired" as const,
+						reason: "采用后继方案",
+						evidence: [],
+						acceptedDeliverables: [],
+					},
+					selectedArtifactRelativePaths: ["reports/accepted-ignored-report.md"],
+				},
+			};
+			const reasons = hasPdvReasons
+				? {
+						closureReasonAppliedToRemainingUncheckedChecklistItems: {
+							uncheckedChecklistItemClosureReasonCode:
+								"assertion_obsolete_because_verified_behavior_changed_or_removed" as const,
+						},
+					}
+				: undefined;
+			await act(async () => {
+				expect(
+					await requireSnapshot().completePostDeployVerificationMoveToDone(
+						GATED_TASK_ID,
+						"validation",
+						reasons,
+						prepared,
+					),
+				).toEqual({ ok: true });
+			});
+			expect(programmaticCardMoves.requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
+			expect(moveTaskCardIntoDoneInWorkspaceMock).toHaveBeenCalledWith(
+				"project-1",
+				expect.objectContaining({
+					closure: prepared.closure,
+					taskCommentToAppendWhenMovingIntoDone: expect.objectContaining({
+						taskCommentEntryId: prepared.taskCommentEntryId,
+						commentText: prepared.commentText,
+					}),
+				}),
+			);
+		},
+	);
 
 	it("PDV 面板带原因完成：直接发命令（不走动画）并把服务端说明带回调用方", async () => {
 		const programmaticCardMoves = mockProgrammaticCardMoves();

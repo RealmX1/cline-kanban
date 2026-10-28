@@ -34,7 +34,7 @@ const BOARD_COLUMN_DISPLAY_LABEL: Record<BoardColumnId, string> = {
 	in_progress: "In Progress",
 	review: "Review",
 	validation: "Validation",
-	trash: "Done",
+	trash: "已结案",
 };
 
 export function formatBoardColumnLabel(columnId: BoardColumnId): string {
