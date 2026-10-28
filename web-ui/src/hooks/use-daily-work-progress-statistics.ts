@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { WORKSPACE_NOTICE_AUTOMATIC_EXPANSION_DURATION_MS } from "@/hooks/workspace-notice-automatic-expansion-duration";
 import {
 	readDailyWorkProgressStatisticsUpdateSnapshot,
 	subscribeToDailyWorkProgressStatisticsUpdates,
@@ -14,8 +15,7 @@ import type {
 } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 
-// EXPERIMENT_NODE: 8 秒停留和 60 秒合并窗口是否足够看清成果，同时保持工作流连续。
-const MILESTONE_AUTOMATIC_EXPANSION_DURATION_MS = 8_000;
+// EXPERIMENT_NODE: 60 秒合并窗口是否足以避免重复打断工作流。
 const MILESTONE_CELEBRATION_COALESCING_WINDOW_MS = 60_000;
 function readBrowserCalendarContext() {
 	const date = new Date();
@@ -86,7 +86,10 @@ export function useDailyWorkProgressStatistics() {
 	}, [refresh, calendar.dateKey, calendar.timeZone]);
 	useEffect(() => {
 		if (expansionMode !== "celebration") return;
-		const timer = window.setTimeout(() => setExpansionMode("collapsed"), MILESTONE_AUTOMATIC_EXPANSION_DURATION_MS);
+		const timer = window.setTimeout(
+			() => setExpansionMode("collapsed"),
+			WORKSPACE_NOTICE_AUTOMATIC_EXPANSION_DURATION_MS,
+		);
 		return () => window.clearTimeout(timer);
 	}, [expansionMode]);
 	useEffect(() => {

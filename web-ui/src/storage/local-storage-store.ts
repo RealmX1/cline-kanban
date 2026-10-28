@@ -1,4 +1,5 @@
 export enum LocalStorageKey {
+	CodexConfigurationChangeNoticeCollapsed = "codex-configuration-change-notice-collapsed",
 	DailyWorkProgressSelectedWorkspace = "kanban.daily-work-progress-selected-workspace.v1",
 	TaskAutoReviewEnabled = "kanban.task-auto-review-enabled",
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
