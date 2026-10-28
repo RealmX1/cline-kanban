@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +18,7 @@ import {
 	type WorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
+	getPersistedWorkspaceBoardFilePathById,
 	loadWorkspaceContext,
 	loadWorkspaceState,
 	mutateWorkspaceState,
@@ -101,6 +103,15 @@ function withoutCard(board: RuntimeBoardData, taskId: string): RuntimeBoardData 
 			cards: column.cards.filter((card) => card.id !== taskId),
 		})),
 	};
+}
+
+async function overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+	workspacePath: string,
+	board: RuntimeBoardData,
+): Promise<void> {
+	const context = await loadWorkspaceContext(workspacePath);
+	// 真正模拟历史进程直接写盘，不让当前 saveWorkspaceState 的结案保护拦下测试所需的越界写入。
+	await writeFile(getPersistedWorkspaceBoardFilePathById(context.workspaceId), JSON.stringify(board, null, 2), "utf8");
 }
 
 async function withIsolatedHomeAndLedger(
@@ -337,10 +348,10 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 
 			// 模拟迁到 runtime procedure 之前的 CLI 进程：没有注册捕获，直接写盘。
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: createBoard({ trash: [createCard("t0001", "requirement")] }),
-				sessions: {},
-			});
+			await overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+				workspacePath,
+				createBoard({ trash: [createCard("t0001", "requirement")] }),
+			);
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, (state) => ({
 				board: state.board,
@@ -411,10 +422,10 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 			}));
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
 			const onDisk = await loadWorkspaceState(workspacePath);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: withoutCard(onDisk.board, "t0001"),
-				sessions: {},
-			});
+			await overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+				workspacePath,
+				withoutCard(onDisk.board, "t0001"),
+			);
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, (state) => ({
 				board: state.board,
