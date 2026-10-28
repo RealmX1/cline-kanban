@@ -32,7 +32,7 @@ function validate(draft: AddReferenceRelationDialogDraft) {
 }
 
 describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
-	it("空草稿：要求选对端、选 kind、写理由", () => {
+	it("空草稿只要求选择对端", () => {
 		expect(
 			validateAddReferenceRelationDialogDraftIntoAssertionRequest({
 				draft: EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
@@ -41,11 +41,19 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 			}),
 		).toEqual({
 			isDraftReadyForSubmission: false,
-			draftValidationProblemMessages: [
-				"Choose the other task.",
-				"Choose a relation kind.",
-				"Write a one-sentence rationale.",
-			],
+			draftValidationProblemMessages: ["Choose the other task."],
+		});
+	});
+
+	it("只选择任务时默认为普通关联且不编造详情", () => {
+		expect(validate(buildDraft({ relationAssertionRationaleOneSentenceText: "" }))).toMatchObject({
+			isDraftReadyForSubmission: true,
+			referenceRelationAssertionRequestWithoutClientCharacteristics: {
+				relationKind: "reference_is_generally_related_with",
+				relationAssertionRationaleOneSentence: "",
+				relationAssertionEvidencePointers: [],
+				assertedRelationKindSpecificAttributes: {},
+			},
 		});
 	});
 
@@ -67,12 +75,11 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 		});
 	});
 
-	it("concerns：必填 aspect，nature 可选；只带该 kind 允许的属性", () => {
+	it("concerns：详情可选，只带该 kind 允许的属性", () => {
 		expect(
 			validate(buildDraft({ selectedReferenceRelationKind: "reference_concerns_behavior_or_state_of" })),
-		).toEqual({
-			isDraftReadyForSubmission: false,
-			draftValidationProblemMessages: ["Fill in Concerned aspect."],
+		).toMatchObject({
+			isDraftReadyForSubmission: true,
 		});
 		const outcome = validate(
 			buildDraft({
@@ -110,8 +117,7 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 
 	it("verifies：一行一个主张，结论一律 pending", () => {
 		expect(validate(buildDraft({ selectedReferenceRelationKind: "reference_verifies_claims_of" }))).toMatchObject({
-			isDraftReadyForSubmission: false,
-			draftValidationProblemMessages: ["Fill in Claims to verify."],
+			isDraftReadyForSubmission: true,
 		});
 		const outcome = validate(
 			buildDraft({
@@ -131,10 +137,11 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 		});
 	});
 
-	it("reuses：摘要或指针至少一个", () => {
-		expect(validate(buildDraft({ selectedReferenceRelationKind: "reference_reuses_produced_outputs_of" }))).toEqual({
-			isDraftReadyForSubmission: false,
-			draftValidationProblemMessages: ["Fill in at least one of: Reused output pointers or Reused output summary."],
+	it("reuses：摘要和指针均可省略", () => {
+		expect(
+			validate(buildDraft({ selectedReferenceRelationKind: "reference_reuses_produced_outputs_of" })),
+		).toMatchObject({
+			isDraftReadyForSubmission: true,
 		});
 		const onlyPointersOutcome = validate(
 			buildDraft({
@@ -149,7 +156,7 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 		).toEqual({ reusedOutputPointers: ["bench/results.json"] });
 	});
 
-	it("requirement origin 与 generally related 没有专有必填；cross-repository 必填契约指针", () => {
+	it("六种人工关系均不要求专有信息", () => {
 		expect(
 			validate(buildDraft({ selectedReferenceRelationKind: "reference_requirement_originates_from" }))
 				.isDraftReadyForSubmission,
@@ -160,9 +167,8 @@ describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
 		).toBe(true);
 		expect(
 			validate(buildDraft({ selectedReferenceRelationKind: "reference_is_cross_repository_counterpart_with" })),
-		).toEqual({
-			isDraftReadyForSubmission: false,
-			draftValidationProblemMessages: ["Fill in Shared contract pointer."],
+		).toMatchObject({
+			isDraftReadyForSubmission: true,
 		});
 	});
 
