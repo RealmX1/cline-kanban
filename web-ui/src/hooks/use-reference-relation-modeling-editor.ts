@@ -230,6 +230,12 @@ export function useReferenceRelationModelingEditor(input: {
 						? createRandomUuidV4WithInsecureContextFallback()
 						: draftRef.current.modelingSubmissionId,
 			};
+			if (change.referenceRelationDrafts && next.invalidReferenceRelationDetailsFormsByDraftId)
+				next.invalidReferenceRelationDetailsFormsByDraftId = Object.fromEntries(
+					Object.entries(next.invalidReferenceRelationDetailsFormsByDraftId).filter(([draftId]) =>
+						next.referenceRelationDrafts.some((entry) => entry.draftId === draftId),
+					),
+				);
 			draftRef.current = next;
 			setDraft(next);
 			localStorage.setItem(mirrorKey, JSON.stringify(next));
@@ -260,6 +266,8 @@ export function useReferenceRelationModelingEditor(input: {
 		targetWorkspaceId?: string,
 	) => {
 		if (!input.workspaceId) throw new Error("请先选择项目。");
+		if (Object.keys(draftRef.current.invalidReferenceRelationDetailsFormsByDraftId ?? {}).length)
+			throw new Error("请先修正无效的关系详情，或移除该关系。");
 		const isStillCurrentScope = () => currentScopeRef.current === mirrorKey;
 		setDraftScopesWithApplyInFlight((previous) => new Set(previous).add(mirrorKey));
 		setWriteError(null);

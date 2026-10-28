@@ -30,7 +30,6 @@ export function TaskCreationTargetProjectFieldControl({
 }): ReactElement {
 	return (
 		<div data-testid="task-creation-target-project-field">
-			<span className="text-sm text-text-secondary block mb-1.5">Project</span>
 			{taskCreationTargetProjectField.taskCreationTargetProjectFieldPresentation ===
 			"target_project_selectable_in_board_scope" ? (
 				<SearchSelectDropdown
@@ -59,7 +58,7 @@ export function TaskCreationTargetProjectFieldControl({
 							size={22}
 						/>
 					}
-					buttonClassName="min-h-11 font-medium [&>span]:text-base"
+					buttonClassName="min-h-9 font-medium"
 					fill
 					size="sm"
 					placeholder="Search projects..."

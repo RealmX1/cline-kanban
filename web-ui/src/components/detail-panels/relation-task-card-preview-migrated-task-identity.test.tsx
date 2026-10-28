@@ -185,7 +185,7 @@ function SummaryHarness({ asserted }: { asserted: boolean }) {
 	);
 }
 function editorController(relationKind = "provenance_created_by"): ReferenceRelationModelingEditorController {
-	return {
+	const controller: ReferenceRelationModelingEditorController = {
 		suggestions: null,
 		suggestionsLoading: false,
 		suggestionsError: null,
@@ -224,12 +224,13 @@ function editorController(relationKind = "provenance_created_by"): ReferenceRela
 		addDraft: vi.fn(),
 		updateDraft: vi.fn(),
 		applyToTask: vi.fn(),
-		readLatestDraft: vi.fn(),
+		readLatestDraft: () => controller.draft,
 		persistDraftNow: vi.fn(),
 		refresh: vi.fn(),
 		hasChanges: false,
 		discard: vi.fn(),
 	};
+	return controller;
 }
 let root: Root;
 let container: HTMLDivElement;
@@ -245,25 +246,17 @@ async function clickButton(label: string) {
 }
 async function prepareRelationForm() {
 	const controller = editorController();
-	await render(<ReferenceRelationModelingEditor controller={controller} workspaceId="project-a" taskId="root" />);
+	await render(
+		<ReferenceRelationModelingEditor
+			presentation="foreground"
+			controller={controller}
+			workspaceId="project-a"
+			taskId="root"
+		/>,
+	);
 	await clickButton(`图节点 ${migratedEntry.workUnitKey}`);
 	await clickButton("与当前任务建立关系");
-	const kind = container.querySelector<HTMLSelectElement>('select[aria-label="关系类型"]')!;
-	await act(async () => {
-		Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(
-			kind,
-			"reference_is_generally_related_with",
-		);
-		kind.dispatchEvent(new Event("change", { bubbles: true }));
-	});
-	const reasonLabel = [...container.querySelectorAll("label")].find(
-		(label) => label.firstChild?.textContent?.trim() === "关系理由",
-	);
-	const reason = reasonLabel!.querySelector("input")!;
-	await act(async () => {
-		Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(reason, "复用迁移前的工作产物");
-		reason.dispatchEvent(new Event("input", { bubbles: true }));
-	});
+
 	return controller;
 }
 
@@ -325,6 +318,7 @@ describe("关系预览保留 canonical 图身份并使用迁移后的位置", ()
 		async (relationKind) => {
 			await render(
 				<ReferenceRelationModelingEditor
+					presentation="foreground"
 					controller={editorController(relationKind)}
 					workspaceId="project-a"
 					taskId="root"
@@ -343,21 +337,24 @@ describe("关系预览保留 canonical 图身份并使用迁移后的位置", ()
 	);
 	it("未迁移的根任务仍按完整身份读取", async () => {
 		await render(
-			<ReferenceRelationModelingEditor controller={editorController()} workspaceId="project-a" taskId="root" />,
+			<ReferenceRelationModelingEditor
+				presentation="foreground"
+				controller={editorController()}
+				workspaceId="project-a"
+				taskId="root"
+			/>,
 		);
 		await clickButton(`图节点 ${rootEntry.workUnitKey}`);
 		expect(readSnapshot.mock.calls[0]?.[0]).toEqual(rootEntry.workUnit);
 	});
 	it("合法迁移按当前位置解析候选，并以 canonical 端点加入关系草稿", async () => {
 		const controller = await prepareRelationForm();
-		await clickButton("加入关系草稿");
 		expect(resolveCandidates).toHaveBeenCalledWith("project-a", { bareTaskId: "review" });
 		expect(controller.addDraft).toHaveBeenCalledOnce();
 		expect(vi.mocked(controller.addDraft).mock.calls[0]?.[0].counterpartWorkUnit).toEqual(canonicalTask);
 		expect(container.querySelector('[role="alert"]')).toBeNull();
 	});
 	it("迁移后同 ID 重建的候选不能绕过创建时间门禁", async () => {
-		const controller = await prepareRelationForm();
 		resolveCandidates.mockResolvedValue({
 			kanbanBoardCardIdentityCandidates: [
 				{
@@ -367,7 +364,7 @@ describe("关系预览保留 canonical 图身份并使用迁移后的位置", ()
 				},
 			],
 		});
-		await clickButton("加入关系草稿");
+		const controller = await prepareRelationForm();
 		expect(controller.addDraft).not.toHaveBeenCalled();
 		expect(container.querySelector('[role="alert"]')?.textContent).toContain("预览中的任务已删除并重建");
 	});

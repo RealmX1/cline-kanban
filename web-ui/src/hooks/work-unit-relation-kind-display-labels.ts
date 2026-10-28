@@ -5,7 +5,7 @@ export const REFERENCE_RELATION_LABELS: Record<string, string> = {
 	reference_reuses_produced_outputs_of: "复用产物",
 	reference_requirement_originates_from: "需求源自",
 	reference_is_cross_repository_counterpart_with: "跨仓对应",
-	reference_is_generally_related_with: "一般相关",
+	reference_is_generally_related_with: "普通关联",
 };
 export const RELATION_GRAPH_LABELS: Record<string, string> = {
 	...REFERENCE_RELATION_LABELS,

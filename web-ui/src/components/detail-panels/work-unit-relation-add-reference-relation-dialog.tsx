@@ -21,7 +21,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { useWorkUnitRelationAddReferenceRelationDialogForm } from "@/hooks/use-work-unit-relation-add-reference-relation-dialog-form";
 import {
 	type AddReferenceRelationDialogDraft,
-	isKindSpecificAttributeKeyPartOfAnyRequiredAlternative,
 	listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogInputs,
 	REFERENCE_RELATION_KIND_SPECIFIC_ATTRIBUTE_FORM_FIELD_LABEL_BY_ATTRIBUTE_KEY,
 } from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
@@ -179,15 +178,13 @@ function AddReferenceRelationDialogContent({
 		onReferenceRelationAssertionWriteSucceeded,
 	});
 	const draft = form.addReferenceRelationDialogDraft;
-	const selectedReferenceRelationKind = draft.selectedReferenceRelationKind;
+	const selectedReferenceRelationKind = draft.selectedReferenceRelationKind || "reference_is_generally_related_with";
 	const selectedRelationKindRegistryEntry = selectedReferenceRelationKind
 		? ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[selectedReferenceRelationKind]
 		: null;
 	const shownKindSpecificAttributeKeys = selectedReferenceRelationKind
 		? listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogInputs(selectedReferenceRelationKind)
 		: [];
-	const selectedRelationKindHasAlternativeRequiredAttributes =
-		(selectedRelationKindRegistryEntry?.requiredKindSpecificAttributeKeyAlternatives.length ?? 0) > 1;
 	const counterpart = draft.selectedCounterpartKanbanBoardCard;
 	// 只提示、不拦：同项目跨仓配对以 runtime 的拒绝为准（界面原样转述那句话）。
 	const isSameProjectCounterpartForCrossRepositoryKind =
@@ -215,9 +212,9 @@ function AddReferenceRelationDialogContent({
 				</AddReferenceRelationFormField>
 
 				<AddReferenceRelationFormField
-					fieldLabel="Relation"
+					fieldLabel="关系类型（可选）"
 					fieldInputElementId={`${fieldElementIdPrefix}-relation-kind`}
-					isFieldRequired
+					isFieldRequired={false}
 					fieldHint={
 						selectedRelationKindRegistryEntry ? (
 							<span data-relation-statement-preview="">
@@ -231,7 +228,7 @@ function AddReferenceRelationDialogContent({
 						id={`${fieldElementIdPrefix}-relation-kind`}
 						size="sm"
 						fill
-						value={selectedReferenceRelationKind}
+						value={draft.selectedReferenceRelationKind}
 						onChange={(event) =>
 							form.updateAddReferenceRelationDialogDraft({
 								selectedReferenceRelationKind: event.target.value as
@@ -240,7 +237,7 @@ function AddReferenceRelationDialogContent({
 							})
 						}
 					>
-						<option value="">Choose how this task relates to the other task…</option>
+						<option value="">普通关联（默认）</option>
 						{ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS.filter((relationKind) =>
 							ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[relationKind].allowedSubjectWorkUnitTypes.includes(
 								"kanban_board_card",
@@ -253,76 +250,72 @@ function AddReferenceRelationDialogContent({
 					</NativeSelect>
 				</AddReferenceRelationFormField>
 
-				{selectedReferenceRelationKind && selectedRelationKindHasAlternativeRequiredAttributes ? (
-					<div className="text-[11px] text-text-tertiary">Fill in at least one of the fields marked *.</div>
-				) : null}
-				{shownKindSpecificAttributeKeys.map((attributeKey) => (
+				<details className="space-y-3">
+					<summary className="cursor-pointer text-xs text-text-secondary">可选详情</summary>
+					{shownKindSpecificAttributeKeys.map((attributeKey) => (
+						<AddReferenceRelationFormField
+							key={attributeKey}
+							fieldLabel={
+								REFERENCE_RELATION_KIND_SPECIFIC_ATTRIBUTE_FORM_FIELD_LABEL_BY_ATTRIBUTE_KEY[attributeKey]
+							}
+							fieldInputElementId={`${fieldElementIdPrefix}-${attributeKey}`}
+							isFieldRequired={false}
+							fieldHint={KIND_SPECIFIC_ATTRIBUTE_HINT_BY_ATTRIBUTE_KEY[attributeKey]}
+						>
+							<KindSpecificAttributeInput
+								attributeKey={attributeKey}
+								attributeInputElementId={`${fieldElementIdPrefix}-${attributeKey}`}
+								draft={draft}
+								updateDraft={form.updateAddReferenceRelationDialogDraft}
+							/>
+						</AddReferenceRelationFormField>
+					))}
+					{isSameProjectCounterpartForCrossRepositoryKind ? (
+						<div className="flex items-start gap-1 text-[11px] text-status-orange">
+							<TriangleAlert size={12} className="mt-0.5 shrink-0" />
+							Both tasks are in the same project; Kanban only accepts this kind between different repositories.
+						</div>
+					) : null}
+
 					<AddReferenceRelationFormField
-						key={attributeKey}
-						fieldLabel={
-							REFERENCE_RELATION_KIND_SPECIFIC_ATTRIBUTE_FORM_FIELD_LABEL_BY_ATTRIBUTE_KEY[attributeKey]
-						}
-						fieldInputElementId={`${fieldElementIdPrefix}-${attributeKey}`}
-						isFieldRequired={
-							selectedReferenceRelationKind !== "" &&
-							isKindSpecificAttributeKeyPartOfAnyRequiredAlternative(selectedReferenceRelationKind, attributeKey)
-						}
-						fieldHint={KIND_SPECIFIC_ATTRIBUTE_HINT_BY_ATTRIBUTE_KEY[attributeKey]}
+						fieldLabel="关系理由（可选）"
+						fieldInputElementId={`${fieldElementIdPrefix}-rationale`}
+						isFieldRequired={false}
 					>
-						<KindSpecificAttributeInput
-							attributeKey={attributeKey}
-							attributeInputElementId={`${fieldElementIdPrefix}-${attributeKey}`}
-							draft={draft}
-							updateDraft={form.updateAddReferenceRelationDialogDraft}
+						<input
+							id={`${fieldElementIdPrefix}-rationale`}
+							type="text"
+							maxLength={600}
+							className={FORM_TEXT_INPUT_CLASS_NAME}
+							placeholder="Why these two tasks are related"
+							value={draft.relationAssertionRationaleOneSentenceText}
+							onChange={(event) =>
+								form.updateAddReferenceRelationDialogDraft({
+									relationAssertionRationaleOneSentenceText: event.target.value,
+								})
+							}
 						/>
 					</AddReferenceRelationFormField>
-				))}
-				{isSameProjectCounterpartForCrossRepositoryKind ? (
-					<div className="flex items-start gap-1 text-[11px] text-status-orange">
-						<TriangleAlert size={12} className="mt-0.5 shrink-0" />
-						Both tasks are in the same project; Kanban only accepts this kind between different repositories.
-					</div>
-				) : null}
 
-				<AddReferenceRelationFormField
-					fieldLabel="Rationale (one sentence)"
-					fieldInputElementId={`${fieldElementIdPrefix}-rationale`}
-					isFieldRequired
-				>
-					<input
-						id={`${fieldElementIdPrefix}-rationale`}
-						type="text"
-						maxLength={600}
-						className={FORM_TEXT_INPUT_CLASS_NAME}
-						placeholder="Why these two tasks are related"
-						value={draft.relationAssertionRationaleOneSentenceText}
-						onChange={(event) =>
-							form.updateAddReferenceRelationDialogDraft({
-								relationAssertionRationaleOneSentenceText: event.target.value,
-							})
-						}
-					/>
-				</AddReferenceRelationFormField>
-
-				<AddReferenceRelationFormField
-					fieldLabel="Evidence pointers (optional)"
-					fieldInputElementId={`${fieldElementIdPrefix}-evidence-pointers`}
-					isFieldRequired={false}
-					fieldHint="One per line: file paths, commits, URLs."
-				>
-					<textarea
-						id={`${fieldElementIdPrefix}-evidence-pointers`}
-						rows={2}
-						className={FORM_TEXT_INPUT_CLASS_NAME}
-						value={draft.relationAssertionEvidencePointersOnePerLineText}
-						onChange={(event) =>
-							form.updateAddReferenceRelationDialogDraft({
-								relationAssertionEvidencePointersOnePerLineText: event.target.value,
-							})
-						}
-					/>
-				</AddReferenceRelationFormField>
-
+					<AddReferenceRelationFormField
+						fieldLabel="Evidence pointers (optional)"
+						fieldInputElementId={`${fieldElementIdPrefix}-evidence-pointers`}
+						isFieldRequired={false}
+						fieldHint="One per line: file paths, commits, URLs."
+					>
+						<textarea
+							id={`${fieldElementIdPrefix}-evidence-pointers`}
+							rows={2}
+							className={FORM_TEXT_INPUT_CLASS_NAME}
+							value={draft.relationAssertionEvidencePointersOnePerLineText}
+							onChange={(event) =>
+								form.updateAddReferenceRelationDialogDraft({
+									relationAssertionEvidencePointersOnePerLineText: event.target.value,
+								})
+							}
+						/>
+					</AddReferenceRelationFormField>
+				</details>
 				{form.draftValidationProblemMessagesShownAfterSubmitAttempt.length > 0 ? (
 					<ul
 						role="alert"

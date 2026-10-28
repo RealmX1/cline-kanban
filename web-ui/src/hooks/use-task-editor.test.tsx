@@ -2875,7 +2875,7 @@ describe("useTaskEditor", () => {
 			root.render(renderTaskCreateDialogForSuggestionRounds(true));
 		});
 		const createMoreLabel = Array.from(currentDialogElement().querySelectorAll("label")).find((label) =>
-			label.textContent?.includes("Create more"),
+			label.textContent?.includes("连续创建"),
 		);
 		await act(async () => {
 			document.getElementById(createMoreLabel?.getAttribute("for") ?? "")?.click();

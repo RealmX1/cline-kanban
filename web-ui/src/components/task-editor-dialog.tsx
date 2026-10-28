@@ -798,7 +798,10 @@ export function TaskEditorDialog({
 			!branchRef
 		)
 			return false;
-		if (hasUnstagedRelationForm) {
+		if (
+			hasUnstagedRelationForm ||
+			Object.keys(relationModeling.readLatestDraft().invalidReferenceRelationDetailsFormsByDraftId ?? {}).length
+		) {
 			setRelationAwareCreationError("请先将当前关系加入草稿，或取消关系编辑，再提交任务。");
 			revealAndFocusRelations();
 			return false;
@@ -1239,14 +1242,271 @@ export function TaskEditorDialog({
 	const primaryStartLabel =
 		taskEditorMode === "edit"
 			? effectivePrimaryStartAction === "start"
-				? "Save and start"
-				: "Save, start and open"
+				? "保存并启动"
+				: "保存、启动并打开"
 			: effectivePrimaryStartAction === "start"
-				? "Start task"
-				: "Start and open";
+				? "创建并启动"
+				: "创建、启动并打开";
 	const primaryStartShortcutModifier = effectivePrimaryStartAction === "start" ? "mod" : "alt";
-	const secondaryStartLabel = secondaryStartAction === "start" ? "Start task" : "Start and open";
+	const secondaryStartLabel =
+		taskEditorMode === "edit"
+			? secondaryStartAction === "start"
+				? "保存并启动"
+				: "保存、启动并打开"
+			: secondaryStartAction === "start"
+				? "创建并启动"
+				: "创建、启动并打开";
 	const secondaryStartShortcutModifier = secondaryStartAction === "start" ? "mod" : "alt";
+
+	const commonTaskEditorSettings = [
+		{
+			key: "base_ref",
+			label: "基础分支",
+			summary: branchRef,
+			content: (
+				<>
+					<div>
+						<span className="text-[11px] text-text-secondary block mb-1">
+							{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
+						</span>
+						<BranchSelectDropdown
+							options={effectiveBranchOptions}
+							selectedValue={branchRef}
+							onSelect={onBranchRefChange}
+							fill
+							size="sm"
+							emptyText="No branches detected"
+						/>
+						{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
+							    被记住这件事必须看得见，而且要能一键退出。两条提示都只在**建卡**模式、且下拉框
+							    当前显示的正是那个自动解析出来的值时才成立；编辑既有卡片显示的是那张卡自己的
+							    baseRef、用户手动改过之后显示的是他自己的选择，那两种情况下把它说成
+							    「记住的 / 回落的结果」都是在撒谎。 */}
+						{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
+							<p className="text-[11px] text-text-tertiary mt-1">
+								Last used{" "}
+								<code className="text-text-secondary">
+									{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
+								</code>{" "}
+								for this project, but that branch no longer exists — fell back to{" "}
+								<code className="text-text-secondary">{branchRef}</code>.
+							</p>
+						) : isShowingRememberedTaskCreateBaseRefHint ? (
+							<p className="text-[11px] text-text-tertiary mt-1">
+								Remembered from the last task you created in this project.{" "}
+								<button
+									type="button"
+									className="underline underline-offset-2 hover:text-text-secondary"
+									onClick={() => onBranchRefChange(repositoryDefaultBranchRef ?? "")}
+								>
+									Use {repositoryDefaultBranchRef} instead
+								</button>
+							</p>
+						) : null}
+					</div>
+				</>
+			),
+		},
+		{
+			key: "plan_mode",
+			label: "Plan Mode",
+			summary: startInPlanMode ? "开启" : "关闭",
+			content: (
+				<>
+					<label
+						htmlFor={startInPlanModeId}
+						className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+					>
+						<RadixCheckbox.Root
+							id={startInPlanModeId}
+							checked={startInPlanMode}
+							onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
+							disabled={startInPlanModeDisabled}
+							className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
+						>
+							<RadixCheckbox.Indicator>
+								<Check size={10} className="text-white" />
+							</RadixCheckbox.Indicator>
+						</RadixCheckbox.Root>
+						Start in plan mode
+					</label>
+				</>
+			),
+		},
+		{
+			key: "permissions",
+			label: "Agent 权限",
+			summary: {
+				ask_for_every_tool_use: "每次询问",
+				auto_approve_file_edits_only: "允许编辑文件",
+				bypass_all_permission_prompts: "全部允许",
+			}[taskAgentPermissionMode],
+			content: (
+				<>
+					<div>
+						{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
+							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
+							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
+							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
+						<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
+						<TaskAgentPermissionModeControl
+							value={taskAgentPermissionMode}
+							onChange={onTaskAgentPermissionModeChange}
+							selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
+							selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
+							startInPlanMode={startInPlanMode}
+							idPrefix="task-create-agent-permission-mode"
+						/>
+					</div>
+				</>
+			),
+		},
+	];
+	const moreTaskEditorSettings = [
+		{
+			key: "session_initialization",
+			label: "会话上下文",
+			content: (
+				<>
+					{mode === "single" && onTaskAgentSessionInitializationChange && onAgentIdChange ? (
+						<TaskAgentSessionInitializationControl
+							agentId={agentId}
+							defaultAgentId={defaultAgentId}
+							workspaceId={targetWorkspaceId}
+							value={taskAgentSessionInitialization}
+							onChange={onTaskAgentSessionInitializationChange}
+							onAgentIdChange={onAgentIdChange}
+						/>
+					) : null}
+				</>
+			),
+		},
+		{
+			key: "worktree_mode",
+			label: "任务工作区",
+			summary: worktreeMode === "branch" ? "独立工作树" : "当前工作区",
+			content: (
+				<>
+					<div>
+						<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
+						<TaskWorktreeModeControl
+							value={worktreeMode}
+							onChange={onWorktreeModeChange}
+							idPrefix="task-create-worktree-mode"
+						/>
+					</div>
+				</>
+			),
+		},
+		{
+			key: "conversation_mode",
+			label: "会话模式",
+			summary: taskConversationMode === "exploratory" ? "探索" : "执行",
+			content: (
+				<>
+					<div>
+						{/* 会话模式声明（蓝图 §A.1）：探索会话的结构与结论本身是资产——默认展开
+							    session map 面板、agent 经指令文件维护 map。快照语义：只影响下一次启动，
+							    活会话不热切换。与「Start in plan mode」/权限档位都是正交轴。 */}
+						<span className="text-[11px] text-text-secondary block mb-1">Session mode</span>
+						<TaskConversationModeControl
+							value={taskConversationMode}
+							onChange={onTaskConversationModeChange}
+							idPrefix="task-editor-conversation-mode"
+						/>
+						{taskConversationMode === "exploratory" ? (
+							<p className="text-[11px] text-text-tertiary mt-1">
+								For research and exploration — the agent keeps a session map of milestones and findings. Applies
+								to the next session start.
+							</p>
+						) : null}
+					</div>
+				</>
+			),
+		},
+		{
+			key: "auto_review_enabled",
+			label: "自动评审",
+			summary: autoReviewEnabled ? "开启" : "关闭",
+			content: (
+				<label
+					htmlFor={autoReviewEnabledId}
+					className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+				>
+					<RadixCheckbox.Root
+						id={autoReviewEnabledId}
+						checked={autoReviewEnabled}
+						onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
+						className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
+					>
+						<RadixCheckbox.Indicator>
+							<Check size={10} className="text-white" />
+						</RadixCheckbox.Indicator>
+					</RadixCheckbox.Root>
+					Automatically
+				</label>
+			),
+		},
+		{
+			key: "auto_review_mode",
+			label: "收尾方式",
+			summary: autoReviewMode,
+			content: (
+				<NativeSelect
+					size="sm"
+					value={autoReviewMode}
+					onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
+					style={{ width: "16ch", maxWidth: "100%" }}
+				>
+					{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
+						<option key={option.value} value={option.value}>
+							{option.label}
+						</option>
+					))}
+				</NativeSelect>
+			),
+		},
+		{
+			key: "project_assignment_analysis",
+			label: "项目归属分析",
+			content: (
+				<>
+					<div className="mb-3">
+						<label
+							htmlFor={automaticProjectAssignmentAnalysisId}
+							className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-text-primary"
+						>
+							<RadixSwitch.Root
+								id={automaticProjectAssignmentAnalysisId}
+								data-verification-anchor={taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey()}
+								aria-label="自动分析项目归属"
+								aria-describedby={`${automaticProjectAssignmentAnalysisId}-description`}
+								checked={automaticProjectAssignmentAnalysisEnabled}
+								onCheckedChange={setAutomaticProjectAssignmentAnalysisEnabled}
+								className="relative h-5 w-9 shrink-0 cursor-pointer rounded-full bg-surface-4 data-[state=checked]:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-1"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[18px] motion-reduce:transition-none" />
+							</RadixSwitch.Root>
+							<span>自动分析项目归属</span>
+						</label>
+						<p id={`${automaticProjectAssignmentAnalysisId}-description`} className="text-xs text-text-secondary">
+							开启后，创建、保存和启动前自动分析。所有项目共用。
+						</p>
+					</div>
+					<Button
+						size="sm"
+						disabled={!promptDraft.trim() || isRelationAwareCreationInFlight}
+						onClick={() => void handleAnalyzeProject()}
+					>
+						分析项目归属
+					</Button>
+					{selectedTargetGit && targetWorkspaceId !== workspaceId ? (
+						<p className="mt-2 text-xs text-text-secondary">已按目标项目校验基础分支：{branchRef}</p>
+					) : null}
+				</>
+			),
+		},
+	];
 
 	return (
 		<>
@@ -1286,7 +1546,27 @@ export function TaskEditorDialog({
 									返回草稿：{suspendedTaskEditorTitle}
 								</Button>
 							) : null}
-							<div className="grid min-w-0 gap-5 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+							<div className="min-w-0 space-y-5">
+								<TaskEditorSettingGroup
+									title="所属项目"
+									defaultPresentation="expanded"
+									settings={[
+										{
+											key: "project",
+											label: "所属项目",
+											summary: targetWorkspaceId ?? "未选择",
+											content: effectiveProjectField ? (
+												<TaskCreationTargetProjectFieldControl
+													taskCreationTargetProjectField={effectiveProjectField}
+												/>
+											) : (
+												<p className="break-words text-sm text-text-primary">
+													{targetWorkspaceId ?? "请选择项目"}
+												</p>
+											),
+										},
+									]}
+								/>
 								<div className="min-w-0 space-y-3">
 									{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
 					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
@@ -1339,7 +1619,9 @@ export function TaskEditorDialog({
 												onImagesChange={onImagesChange}
 												onSubmit={handleCreateSingle}
 												onSubmitAndStart={() => handleRunSingleStartAction("start")}
-												placeholder="Describe the task..."
+												placeholder="描述要完成的任务…"
+												aria-label="任务正文"
+												minimumTextareaHeight={180}
 												autoFocus
 												workspaceId={targetWorkspaceId}
 												showAttachImageButton
@@ -1431,334 +1713,61 @@ export function TaskEditorDialog({
 										</div>
 									)}
 								</div>
-								<div className="min-w-0 space-y-5">
-									<TaskEditorSettingGroup
-										title="项目与 Git"
-										settings={[
-											{
-												key: "project",
-												label: "所属项目",
-												content: (
-													<>
-														{taskCreationTargetProjectField ? (
-															<div className="mb-4">
-																<TaskCreationTargetProjectFieldControl
-																	taskCreationTargetProjectField={effectiveProjectField!}
-																/>
-															</div>
-														) : null}
-														<div className="mb-3">
-															<label
-																htmlFor={automaticProjectAssignmentAnalysisId}
-																className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-text-primary"
-															>
-																<RadixSwitch.Root
-																	id={automaticProjectAssignmentAnalysisId}
-																	data-verification-anchor={taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey()}
-																	aria-label="自动分析项目归属"
-																	aria-describedby={`${automaticProjectAssignmentAnalysisId}-description`}
-																	checked={automaticProjectAssignmentAnalysisEnabled}
-																	onCheckedChange={setAutomaticProjectAssignmentAnalysisEnabled}
-																	className="relative h-5 w-9 shrink-0 cursor-pointer rounded-full bg-surface-4 data-[state=checked]:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-1"
-																>
-																	<RadixSwitch.Thumb className="block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[18px] motion-reduce:transition-none" />
-																</RadixSwitch.Root>
-																<span>自动分析项目归属</span>
-															</label>
-															<p
-																id={`${automaticProjectAssignmentAnalysisId}-description`}
-																className="text-xs text-text-secondary"
-															>
-																开启后，创建、保存和启动前自动分析。所有项目共用。
-															</p>
-														</div>
-														<Button
-															size="sm"
-															disabled={!promptDraft.trim() || isRelationAwareCreationInFlight}
-															onClick={() => void handleAnalyzeProject()}
-														>
-															分析项目归属
-														</Button>
-														{selectedTargetGit && targetWorkspaceId !== workspaceId ? (
-															<p className="mt-2 text-xs text-text-secondary">
-																已按目标项目校验基础分支：{branchRef}
-															</p>
-														) : null}
-													</>
-												),
-											},
-											{
-												key: "worktree_mode",
-												label: "任务工作区",
-												summary: worktreeMode,
-												content: (
-													<>
-														<div>
-															<span className="text-[11px] text-text-secondary block mb-1">
-																Task workspace
-															</span>
-															<TaskWorktreeModeControl
-																value={worktreeMode}
-																onChange={onWorktreeModeChange}
-																idPrefix="task-create-worktree-mode"
-															/>
-														</div>
-													</>
-												),
-											},
-											{
-												key: "base_ref",
-												label: "基础分支",
-												summary: branchRef,
-												content: (
-													<>
-														<div>
-															<span className="text-[11px] text-text-secondary block mb-1">
-																{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
-															</span>
-															<BranchSelectDropdown
-																options={effectiveBranchOptions}
-																selectedValue={branchRef}
-																onSelect={onBranchRefChange}
-																fill
-																size="sm"
-																emptyText="No branches detected"
-															/>
-															{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
-							    被记住这件事必须看得见，而且要能一键退出。两条提示都只在**建卡**模式、且下拉框
-							    当前显示的正是那个自动解析出来的值时才成立；编辑既有卡片显示的是那张卡自己的
-							    baseRef、用户手动改过之后显示的是他自己的选择，那两种情况下把它说成
-							    「记住的 / 回落的结果」都是在撒谎。 */}
-															{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
-																<p className="text-[11px] text-text-tertiary mt-1">
-																	Last used{" "}
-																	<code className="text-text-secondary">
-																		{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
-																	</code>{" "}
-																	for this project, but that branch no longer exists — fell back to{" "}
-																	<code className="text-text-secondary">{branchRef}</code>.
-																</p>
-															) : isShowingRememberedTaskCreateBaseRefHint ? (
-																<p className="text-[11px] text-text-tertiary mt-1">
-																	Remembered from the last task you created in this project.{" "}
-																	<button
-																		type="button"
-																		className="underline underline-offset-2 hover:text-text-secondary"
-																		onClick={() =>
-																			onBranchRefChange(repositoryDefaultBranchRef ?? "")
-																		}
-																	>
-																		Use {repositoryDefaultBranchRef} instead
-																	</button>
-																</p>
-															) : null}
-														</div>
-													</>
-												),
-											},
-										]}
+								{onAgentIdChange && onClineSettingsChange ? (
+									<TaskAgentModelPicker
+										renderControls={({ agentSelection, modelSelection }) => (
+											<TaskEditorSettingGroup
+												title="常用设置"
+												settings={[
+													{
+														key: "agent",
+														label: "Agent",
+														summary: agentId ?? defaultAgentId ?? "默认",
+														content: agentSelection,
+													},
+													{
+														key: "model",
+														label: "模型与参数",
+														summary:
+															terminalAgentModelOverrideSettings?.modelId ??
+															effectiveDefaultModelId ??
+															"默认",
+														content: modelSelection,
+													},
+													...commonTaskEditorSettings,
+												]}
+											/>
+										)}
+										agentId={agentId}
+										onAgentIdChange={onAgentIdChange}
+										clineSettings={clineSettings}
+										onClineSettingsChange={onClineSettingsChange}
+										terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+										onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+										agentOptions={agentOptions}
+										clineProviderOptions={clineProviderOptions}
+										clineModelOptions={clineModelOptions}
+										terminalAgentModelOptions={terminalAgentModelOptions}
+										terminalAgentDefaultModelId={terminalAgentDefaultModelId}
+										effectiveDefaultModelId={effectiveDefaultModelId}
+										providerModels={providerModels}
+										isLoadingProviders={isLoadingProviders}
+										isLoadingModels={isLoadingModels}
+										isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+										defaultAgentId={defaultAgentId}
+										defaultProviderId={defaultProviderId}
+										defaultReasoningEffort={defaultReasoningEffort}
+										providerDefaultModels={providerDefaultModels}
 									/>
-									{onAgentIdChange && onClineSettingsChange ? (
-										<TaskAgentModelPicker
-											renderControls={({ agentSelection, modelSelection }) => (
-												<TaskEditorSettingGroup
-													title="Agent 与上下文"
-													settings={[
-														{
-															key: "agent",
-															label: "Agent",
-															summary: agentId ?? defaultAgentId ?? "默认",
-															content: agentSelection,
-														},
-														{
-															key: "model",
-															label: "模型与参数",
-															summary: terminalAgentModelOverrideSettings?.modelId ?? "默认",
-															content: modelSelection,
-														},
-														{
-															key: "session_initialization",
-															label: "会话上下文",
-															content: (
-																<>
-																	{mode === "single" && onTaskAgentSessionInitializationChange ? (
-																		<TaskAgentSessionInitializationControl
-																			agentId={agentId}
-																			defaultAgentId={defaultAgentId}
-																			workspaceId={targetWorkspaceId}
-																			value={taskAgentSessionInitialization}
-																			onChange={onTaskAgentSessionInitializationChange}
-																			onAgentIdChange={onAgentIdChange}
-																		/>
-																	) : null}
-																</>
-															),
-														},
-													]}
-												/>
-											)}
-											agentId={agentId}
-											onAgentIdChange={onAgentIdChange}
-											clineSettings={clineSettings}
-											onClineSettingsChange={onClineSettingsChange}
-											terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-											onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-											agentOptions={agentOptions}
-											clineProviderOptions={clineProviderOptions}
-											clineModelOptions={clineModelOptions}
-											terminalAgentModelOptions={terminalAgentModelOptions}
-											terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-											effectiveDefaultModelId={effectiveDefaultModelId}
-											providerModels={providerModels}
-											isLoadingProviders={isLoadingProviders}
-											isLoadingModels={isLoadingModels}
-											isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-											defaultAgentId={defaultAgentId}
-											defaultProviderId={defaultProviderId}
-											defaultReasoningEffort={defaultReasoningEffort}
-											providerDefaultModels={providerDefaultModels}
-										/>
-									) : null}
-									<TaskEditorSettingGroup
-										title="运行方式"
-										settings={[
-											{
-												key: "plan_mode",
-												label: "Plan Mode",
-												summary: startInPlanMode ? "开启" : "关闭",
-												content: (
-													<>
-														<label
-															htmlFor={startInPlanModeId}
-															className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-														>
-															<RadixCheckbox.Root
-																id={startInPlanModeId}
-																checked={startInPlanMode}
-																onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
-																disabled={startInPlanModeDisabled}
-																className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
-															>
-																<RadixCheckbox.Indicator>
-																	<Check size={10} className="text-white" />
-																</RadixCheckbox.Indicator>
-															</RadixCheckbox.Root>
-															Start in plan mode
-														</label>
-													</>
-												),
-											},
-											{
-												key: "conversation_mode",
-												label: "会话模式",
-												summary: taskConversationMode,
-												content: (
-													<>
-														<div>
-															{/* 会话模式声明（蓝图 §A.1）：探索会话的结构与结论本身是资产——默认展开
-							    session map 面板、agent 经指令文件维护 map。快照语义：只影响下一次启动，
-							    活会话不热切换。与「Start in plan mode」/权限档位都是正交轴。 */}
-															<span className="text-[11px] text-text-secondary block mb-1">
-																Session mode
-															</span>
-															<TaskConversationModeControl
-																value={taskConversationMode}
-																onChange={onTaskConversationModeChange}
-																idPrefix="task-editor-conversation-mode"
-															/>
-															{taskConversationMode === "exploratory" ? (
-																<p className="text-[11px] text-text-tertiary mt-1">
-																	For research and exploration — the agent keeps a session map of
-																	milestones and findings. Applies to the next session start.
-																</p>
-															) : null}
-														</div>
-													</>
-												),
-											},
-											{
-												key: "permissions",
-												label: "Agent 权限",
-												summary: taskAgentPermissionMode,
-												content: (
-													<>
-														<div>
-															{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
-							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
-							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
-							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
-															<span className="text-[11px] text-text-secondary block mb-1">
-																Agent permissions
-															</span>
-															<TaskAgentPermissionModeControl
-																value={taskAgentPermissionMode}
-																onChange={onTaskAgentPermissionModeChange}
-																selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
-																selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
-																startInPlanMode={startInPlanMode}
-																idPrefix="task-create-agent-permission-mode"
-															/>
-														</div>
-													</>
-												),
-											},
-										]}
-									/>
-									<TaskEditorSettingGroup
-										title="自动评审"
-										settings={[
-											{
-												key: "auto_review_enabled",
-												label: "自动评审",
-												summary: autoReviewEnabled ? "开启" : "关闭",
-												content: (
-													<label
-														htmlFor={autoReviewEnabledId}
-														className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-													>
-														<RadixCheckbox.Root
-															id={autoReviewEnabledId}
-															checked={autoReviewEnabled}
-															onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
-															className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
-														>
-															<RadixCheckbox.Indicator>
-																<Check size={10} className="text-white" />
-															</RadixCheckbox.Indicator>
-														</RadixCheckbox.Root>
-														Automatically
-													</label>
-												),
-											},
-											{
-												key: "auto_review_mode",
-												label: "收尾方式",
-												summary: autoReviewMode,
-												content: (
-													<NativeSelect
-														size="sm"
-														value={autoReviewMode}
-														onChange={(e) =>
-															onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)
-														}
-														style={{ width: "16ch", maxWidth: "100%" }}
-													>
-														{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
-															<option key={option.value} value={option.value}>
-																{option.label}
-															</option>
-														))}
-													</NativeSelect>
-												),
-											},
-										]}
-									/>
-								</div>
+								) : (
+									<TaskEditorSettingGroup title="常用设置" settings={commonTaskEditorSettings} />
+								)}
 							</div>
 							{mode === "single" && workspaceId ? (
 								<TaskEditorSettingGroup
 									className="mt-5"
 									title="任务关系"
+									defaultPresentation="expanded"
 									settings={[
 										{
 											key: "relations",
@@ -1767,6 +1776,7 @@ export function TaskEditorDialog({
 												<ReferenceRelationModelingEditor
 													key={workspaceId}
 													controller={relationModeling}
+													presentation="task_editor"
 													clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
 													workspaceId={workspaceId}
 													taskId={taskEditorMode === "edit" ? editingTaskId : null}
@@ -1779,9 +1789,11 @@ export function TaskEditorDialog({
 									]}
 								/>
 							) : null}
+							<TaskEditorSettingGroup className="mt-5" title="更多设置" settings={moreTaskEditorSettings} />
 							<TaskEditorHiddenSettingsManager
 								settings={[
 									{ key: "project", label: "所属项目" },
+									{ key: "project_assignment_analysis", label: "项目归属分析" },
 									{ key: "worktree_mode", label: "任务工作区" },
 									{ key: "base_ref", label: "基础分支" },
 									{ key: "agent", label: "Agent" },
@@ -1808,7 +1820,7 @@ export function TaskEditorDialog({
 							{taskEditorOperationStatusText}
 						</p>
 					) : null}
-					<DialogFooter>
+					<DialogFooter className="flex-wrap gap-y-2 [&>label]:max-sm:basis-full">
 						{taskEditorMode === "create" ? (
 							<label
 								htmlFor={createMoreId}
@@ -1822,7 +1834,7 @@ export function TaskEditorDialog({
 								>
 									<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
 								</RadixSwitch.Root>
-								<span>Create more</span>
+								<span>连续创建</span>
 							</label>
 						) : (
 							<span className="mr-auto" />
