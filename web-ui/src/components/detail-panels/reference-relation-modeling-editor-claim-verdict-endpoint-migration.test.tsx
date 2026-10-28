@@ -118,7 +118,7 @@ async function renderExistingClaimRelation(input: {
 		addDraft,
 		updateDraft: vi.fn(),
 		applyToTask: vi.fn(),
-		readLatestDraft: vi.fn(),
+		readLatestDraft: () => controller.draft,
 		persistDraftNow: vi.fn(),
 		refresh: vi.fn(),
 		hasChanges: false,
@@ -190,7 +190,7 @@ describe("核验结论与有序端点身份绑定", () => {
 			...counterpartWorkUnit,
 			taskId: "replacement-counterpart",
 		});
-		await clickButton("暂存修改");
+		await clickButton("保存详情到草稿");
 		expectSavedClaims([{ claimSummary: "缓存已失效", verificationVerdict: "pending" }]);
 	});
 	it.each([true, false])(
@@ -198,7 +198,7 @@ describe("核验结论与有序端点身份绑定", () => {
 		async (currentTaskIsStatementSubject) => {
 			await renderExistingClaimRelation({ verdict: "confirmed", currentTaskIsStatementSubject });
 			await changeFormValue("陈述方向", currentTaskIsStatementSubject ? "other" : "current");
-			await clickButton("暂存修改");
+			await clickButton("保存详情到草稿");
 			expectSavedClaims([{ claimSummary: "缓存已失效", verificationVerdict: "pending" }]);
 		},
 	);
@@ -208,20 +208,20 @@ describe("核验结论与有序端点身份绑定", () => {
 			...counterpartWorkUnit,
 			taskIncarnationCreatedAtEpochMs: 2_000,
 		});
-		await clickButton("暂存修改");
+		await clickButton("保存详情到草稿");
 		expectSavedClaims([{ claimSummary: "缓存已失效", verificationVerdict: "pending" }]);
 	});
 	it.each([true, false])("原当前任务为主语：%s，仅改理由证据仍保留结论", async (currentTaskIsStatementSubject) => {
 		await renderExistingClaimRelation({ verdict: "refuted", currentTaskIsStatementSubject });
-		await changeFormValue("关系理由", "更新核验依据");
+		await changeFormValue("关系理由（可选）", "更新核验依据");
 		await changeFormValue("证据位置（可选，每行一个）", "docs/new-evidence.md");
-		await clickButton("暂存修改");
+		await clickButton("保存详情到草稿");
 		expectSavedClaims([{ claimSummary: "缓存已失效", verificationVerdict: "refuted" }]);
 	});
 	it("端点与方向保持不变时，保留同名主张结论而新增主张为 pending", async () => {
 		await renderExistingClaimRelation({ verdict: "confirmed" });
 		await changeFormValue("要核验的主张", "缓存已失效\n新增主张");
-		await clickButton("暂存修改");
+		await clickButton("保存详情到草稿");
 		expectSavedClaims([
 			{ claimSummary: "缓存已失效", verificationVerdict: "confirmed" },
 			{ claimSummary: "新增主张", verificationVerdict: "pending" },

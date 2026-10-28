@@ -85,7 +85,10 @@ export function planReferenceRelationModelingChanges(
 			relationStatementAnchorWorkUnitRef: draft.currentTaskIsStatementSubject ? draft.counterpartWorkUnit : root,
 		};
 		const endpointValidation = validateAssertedReferenceRelationEndpoints(endpoints);
-		const attributeValidation = validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(draft);
+		const attributeValidation = validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(
+			draft,
+			"web_ui_user_with_verified_page_load_nonce",
+		);
 		if (!endpointValidation.validationPassed || !attributeValidation.validationPassed)
 			throw new TRPCError({
 				code: "BAD_REQUEST",

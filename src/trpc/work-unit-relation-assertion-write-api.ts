@@ -426,11 +426,14 @@ export function createWorkUnitRelationAssertionWriteApi(
 	async function writeReferenceRelationAssertion(
 		input: ReferenceRelationAssertionWriteInput,
 	): Promise<InterWorkUnitRelationAssertionWriteResponse> {
-		const attributeValidation = validateAndCompleteAssertedReferenceRelationKindSpecificAttributes({
-			relationKind: input.relationKind,
-			assertedRelationKindSpecificAttributes: input.assertedRelationKindSpecificAttributes,
-			relationAssertionRationaleOneSentence: input.relationAssertionRationaleOneSentence,
-		});
+		const attributeValidation = validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(
+			{
+				relationKind: input.relationKind,
+				assertedRelationKindSpecificAttributes: input.assertedRelationKindSpecificAttributes,
+				relationAssertionRationaleOneSentence: input.relationAssertionRationaleOneSentence,
+			},
+			input.proposer.proposerKind,
+		);
 		if (!attributeValidation.validationPassed) {
 			throwRelationAssertionWriteError(
 				"BAD_REQUEST",

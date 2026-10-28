@@ -5,6 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import * as relationModelingHooks from "@/hooks/use-reference-relation-modeling-editor";
+import {
+	EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
+	type SelectedCounterpartKanbanBoardCardForAddReferenceRelation,
+} from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
 import * as taskCardActionQueries from "@/runtime/task-card-action-query";
 import {
 	resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests,
@@ -27,6 +31,29 @@ vi.mock("@/state/task-project-assignment-preflight", () => ({
 }));
 vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards", () => ({
 	ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission: vi.fn(async () => undefined),
+}));
+vi.mock("@/components/detail-panels/work-unit-relation-counterpart-kanban-board-card-picker", () => ({
+	WorkUnitRelationCounterpartKanbanBoardCardPicker: ({
+		onSelectedCounterpartKanbanBoardCardChange,
+	}: {
+		onSelectedCounterpartKanbanBoardCardChange: (
+			value: SelectedCounterpartKanbanBoardCardForAddReferenceRelation,
+		) => void;
+	}) => (
+		<button
+			type="button"
+			onClick={() =>
+				onSelectedCounterpartKanbanBoardCardChange({
+					counterpartKanbanBoardCardWorkspaceId: "counterpart-project",
+					counterpartKanbanBoardCardTaskId: "ee150",
+					counterpartKanbanBoardCardTitle: "明确选择的关联任务",
+					counterpartKanbanProjectDisplayName: "关联项目",
+				})
+			}
+		>
+			选择关联任务
+		</button>
+	),
 }));
 beforeEach(() => {
 	resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
@@ -199,9 +226,9 @@ describe("TaskEditorDialog interactions", () => {
 
 	it.each([
 		["create", "创建任务"],
-		["create", "Start task"],
+		["create", "创建并启动"],
 		["edit", "保存更改"],
-		["edit", "Save and start"],
+		["edit", "保存并启动"],
 	] as const)("默认关闭时 %s 的 %s 沿用项目与分支且不接受分析缓存", async (taskEditorMode, actionLabel) => {
 		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
 		mockSuccessfulTaskStart();
@@ -274,7 +301,7 @@ describe("TaskEditorDialog interactions", () => {
 		).toBe("false");
 	});
 
-	it("项目分组与单条和批量任务正文并列，初始焦点仍在原输入框", async () => {
+	it("项目摘要位于单条和批量任务正文之前，初始焦点仍在原输入框", async () => {
 		vi.spyOn(relationModelingQueries, "readRelationModelingEditorDraft").mockResolvedValue(null);
 		vi.spyOn(relationModelingQueries, "persistRelationModelingEditorDraft").mockResolvedValue({ saved: true });
 		await render(
@@ -293,7 +320,7 @@ describe("TaskEditorDialog interactions", () => {
 		expect(projectField).not.toBeNull();
 		expect(taskInput).not.toBeNull();
 		expect(
-			Boolean((projectField?.compareDocumentPosition(taskInput as Node) ?? 0) & Node.DOCUMENT_POSITION_PRECEDING),
+			Boolean((projectField?.compareDocumentPosition(taskInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING),
 		).toBe(true);
 		expect(projectField?.contains(document.activeElement)).toBe(false);
 		const splitButton = Array.from(document.querySelectorAll("button")).find((button) =>
@@ -306,7 +333,7 @@ describe("TaskEditorDialog interactions", () => {
 		const batchInput = document.querySelector('input[placeholder="Describe the task..."]');
 		expect(batchInput).not.toBeNull();
 		expect(
-			(projectField?.compareDocumentPosition(batchInput as Node) ?? 0) & Node.DOCUMENT_POSITION_PRECEDING,
+			(projectField?.compareDocumentPosition(batchInput as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING,
 		).toBeTruthy();
 	});
 
@@ -478,6 +505,63 @@ describe("TaskEditorDialog interactions", () => {
 			}));
 	}
 
+	it("已选关系身份解析失败时，创建并启动不会建卡、保存关系或启动会话", async () => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const startTask = mockSuccessfulTaskStart();
+		vi.spyOn(relationModelingQueries, "resolveRelationModelingCounterpart").mockRejectedValueOnce(
+			new Error("身份查询暂不可用"),
+		);
+		const props = makeProps({
+			prompt: "必须关联已选任务",
+			onCreate: vi.fn(() => "new-task"),
+			onCreateAndStart: vi.fn(() => null),
+		});
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		await act(async () => findButtonByText("添加关系")?.click());
+		await act(async () => findButtonByText("选择关联任务")?.click());
+		expect(document.body.textContent).toContain("身份查询暂不可用");
+		await act(async () => findButtonByText("创建并启动")?.click());
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(applyChanges).not.toHaveBeenCalled();
+		expect(startTask).not.toHaveBeenCalled();
+		expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+	});
+	it.each(["create", "edit"] as const)("%s 恢复的无效关系详情阻止提交和启动", async (taskEditorMode) => {
+		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+		const startTask = mockSuccessfulTaskStart();
+		const props = makeProps({
+			taskEditorMode,
+			editingTaskId: taskEditorMode === "edit" ? "ed150" : null,
+			prompt: "保留尚未修正的证据",
+			onCreate: vi.fn(() => "new-task"),
+			onCreateAndStart: vi.fn(() => null),
+		});
+		await render(props);
+		const draft = restoredCreationDraft("project-1");
+		const { selectedCounterpartKanbanBoardCard: _counterpart, ...details } =
+			EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT;
+		await act(async () =>
+			resolveDraftRead({
+				...draft,
+				createdTaskId: null,
+				invalidReferenceRelationDetailsFormsByDraftId: {
+					"restored-relation-project-1": {
+						...details,
+						currentTaskIsStatementSubject: true,
+						relationAssertionEvidencePointersOnePerLineText: "x".repeat(1001),
+					},
+				},
+			}),
+		);
+		expect(document.body.textContent).toContain("1000");
+		await act(async () => findButtonByText(taskEditorMode === "create" ? "创建并启动" : "保存并启动")?.click());
+		expect(props.onCreate).not.toHaveBeenCalled();
+		expect(taskCardActionQueries.updateTaskCardFieldValuesInWorkspace).not.toHaveBeenCalled();
+		expect(applyChanges).not.toHaveBeenCalled();
+		expect(startTask).not.toHaveBeenCalled();
+	});
+
 	it.each(["create", "start"] as const)("批量 %s 在真实关系 hook inactive 且未就绪时仍逐项提交", async (action) => {
 		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
 		const actualRelationHook = relationModelingHooks.useReferenceRelationModelingEditor;
@@ -618,7 +702,7 @@ describe("TaskEditorDialog interactions", () => {
 				creationTitle: snapshot.title ?? "",
 			}),
 		);
-		await act(async () => findButtonByText("Start task")?.click());
+		await act(async () => findButtonByText("创建并启动")?.click());
 		expect(applyChanges).toHaveBeenCalledExactlyOnceWith(
 			"target-project",
 			expect.objectContaining({
@@ -635,7 +719,7 @@ describe("TaskEditorDialog interactions", () => {
 			createdTaskCardSnapshot: { id: snapshot.id, createdAt: snapshot.createdAt },
 			referenceRelationDrafts: [],
 		});
-		await act(async () => findButtonByText("Start task")?.click());
+		await act(async () => findButtonByText("创建并启动")?.click());
 		expect(onCreate).toHaveBeenCalledTimes(1);
 		expect(ensureTask).toHaveBeenCalledExactlyOnceWith("target-project", snapshot);
 		expect(taskCardActionQueries.updateTaskCardFieldValuesInWorkspace).toHaveBeenCalledWith(
@@ -706,11 +790,11 @@ describe("TaskEditorDialog interactions", () => {
 		});
 		await render(props);
 		expect(findButtonByText("创建任务")?.disabled).toBe(true);
-		expect(findButtonByText("Start task")?.disabled).toBe(true);
+		expect(findButtonByText("创建并启动")?.disabled).toBe(true);
 		expect(document.querySelector<HTMLButtonElement>('[aria-label="More start options"]')?.disabled).toBe(true);
 		await act(async () => {
 			findButtonByText("创建任务")?.click();
-			findButtonByText("Start task")?.click();
+			findButtonByText("创建并启动")?.click();
 		});
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true, shiftKey: true });

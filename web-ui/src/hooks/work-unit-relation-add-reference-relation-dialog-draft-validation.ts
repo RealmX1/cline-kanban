@@ -1,6 +1,6 @@
 // dd2db 2.1「添加关系」对话框（T12 ②）的草稿 → 断言请求（纯函数）。
 //
-// 客户端校验只是镜像 kind 注册表（requiredKindSpecificAttributeKeyAlternatives / allowedKindSpecificAttributeKeys）与
+// 人工输入只校验 kind 的允许字段与
 // 写入契约的长度上限，让用户在提交前就看到缺了什么；**runtime 仍是唯一权威**（端点校验、同项目跨仓配对拒绝等都以 runtime
 // 的回复为准，界面原样转述）。主语恒为面板所在的卡（只有卡能作主语，面板主体恒为卡，满足「需求来源」的主语限制）。
 
@@ -8,9 +8,9 @@ import {
 	ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY,
 	type AssertedInterWorkUnitReferenceRelationKind,
 	type AssertedReferenceRelationKindSpecificAttributes,
-	type ReferenceConcernNature,
 } from "@runtime-inter-work-unit-asserted-relation-kind-registry-contract";
 import type { AssertReferenceRelationDirectlyAsWebUiUserRequest } from "@runtime-work-unit-relation-assertion-write-api-contract";
+import type { ReferenceRelationModelingInvalidDetailsForm } from "@runtime-work-unit-relation-modeling-api-contract";
 
 // 与写入契约（work-unit-relation-assertion-write-api-contract.ts）的上限一致。
 const RELATION_ASSERTION_RATIONALE_MAXIMUM_LENGTH = 600;
@@ -24,20 +24,9 @@ export interface SelectedCounterpartKanbanBoardCardForAddReferenceRelation {
 	counterpartKanbanProjectDisplayName: string;
 }
 
-export interface AddReferenceRelationDialogDraft {
+export interface AddReferenceRelationDialogDraft
+	extends Omit<ReferenceRelationModelingInvalidDetailsForm, "currentTaskIsStatementSubject"> {
 	selectedCounterpartKanbanBoardCard: SelectedCounterpartKanbanBoardCardForAddReferenceRelation | null;
-	// "" = 还没选。
-	selectedReferenceRelationKind: AssertedInterWorkUnitReferenceRelationKind | "";
-	relationAssertionRationaleOneSentenceText: string;
-	relationAssertionEvidencePointersOnePerLineText: string;
-	concernedAspectSummaryText: string;
-	// "" = 不指定。
-	selectedConcernNature: ReferenceConcernNature | "";
-	claimsUnderVerificationOnePerLineText: string;
-	reusedOutputSummaryText: string;
-	reusedOutputPointersOnePerLineText: string;
-	originatedRequirementPortionSummaryText: string;
-	sharedCrossRepositoryContractPointerText: string;
 }
 
 export const EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT: AddReferenceRelationDialogDraft = {
@@ -79,17 +68,6 @@ export function listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogIn
 		(attributeKey) =>
 			attributeKey !== "relatednessRationaleOneSentence" &&
 			attributeKey !== "originatingPostDeployVerificationEntry",
-	);
-}
-
-export function isKindSpecificAttributeKeyPartOfAnyRequiredAlternative(
-	relationKind: AssertedInterWorkUnitReferenceRelationKind,
-	attributeKey: ReferenceRelationKindSpecificAttributeKey,
-): boolean {
-	return ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[
-		relationKind
-	].requiredKindSpecificAttributeKeyAlternatives.some((requiredAttributeKeyGroup) =>
-		requiredAttributeKeyGroup.includes(attributeKey),
 	);
 }
 
@@ -169,15 +147,10 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 		draftValidationProblemMessages.push("A task cannot have a relation with itself; choose another task.");
 	}
 
-	const relationKind = draft.selectedReferenceRelationKind;
-	if (!relationKind) {
-		draftValidationProblemMessages.push("Choose a relation kind.");
-	}
+	const relationKind = draft.selectedReferenceRelationKind || "reference_is_generally_related_with";
 
 	const relationAssertionRationaleOneSentence = draft.relationAssertionRationaleOneSentenceText.trim();
-	if (!relationAssertionRationaleOneSentence) {
-		draftValidationProblemMessages.push("Write a one-sentence rationale.");
-	} else if (relationAssertionRationaleOneSentence.length > RELATION_ASSERTION_RATIONALE_MAXIMUM_LENGTH) {
+	if (relationAssertionRationaleOneSentence.length > RELATION_ASSERTION_RATIONALE_MAXIMUM_LENGTH) {
 		draftValidationProblemMessages.push(
 			`The rationale is limited to ${RELATION_ASSERTION_RATIONALE_MAXIMUM_LENGTH} characters (one sentence).`,
 		);
@@ -211,29 +184,6 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 				(relationKindRegistryEntry.allowedKindSpecificAttributeKeys as readonly string[]).includes(attributeKey),
 			),
 		) as AssertedReferenceRelationKindSpecificAttributes;
-		const requiredAlternatives = relationKindRegistryEntry.requiredKindSpecificAttributeKeyAlternatives;
-		const isAnyRequiredAlternativeSatisfied =
-			requiredAlternatives.length === 0 ||
-			requiredAlternatives.some((requiredAttributeKeyGroup) =>
-				requiredAttributeKeyGroup.every(
-					(attributeKey) => assertedRelationKindSpecificAttributes[attributeKey] !== undefined,
-				),
-			);
-		if (!isAnyRequiredAlternativeSatisfied) {
-			const requiredAlternativeDescriptions = requiredAlternatives.map((requiredAttributeKeyGroup) =>
-				requiredAttributeKeyGroup
-					.map(
-						(attributeKey) =>
-							REFERENCE_RELATION_KIND_SPECIFIC_ATTRIBUTE_FORM_FIELD_LABEL_BY_ATTRIBUTE_KEY[attributeKey],
-					)
-					.join(" and "),
-			);
-			draftValidationProblemMessages.push(
-				requiredAlternativeDescriptions.length > 1
-					? `Fill in at least one of: ${requiredAlternativeDescriptions.join(" or ")}.`
-					: `Fill in ${requiredAlternativeDescriptions[0]}.`,
-			);
-		}
 	}
 
 	if (draftValidationProblemMessages.length > 0 || !counterpart || !relationKind) {

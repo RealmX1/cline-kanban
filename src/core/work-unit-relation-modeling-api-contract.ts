@@ -4,6 +4,7 @@ import {
 	ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS,
 	assertedInterWorkUnitRelationSchema,
 	assertedReferenceRelationKindSpecificAttributesSchema,
+	REFERENCE_CONCERN_NATURES,
 } from "./inter-work-unit-asserted-relation-kind-registry-contract";
 import { RELATION_ASSERTION_REVOCATION_REASONS } from "./inter-work-unit-relation-assertion-lifecycle-event-contract";
 import {
@@ -22,9 +23,11 @@ export const referenceRelationModelingDraftSchema = z.object({
 	replacesRelationId: z.string().nullable().default(null),
 	expectedAssertedRelationStateVersion: z.number().int().positive().nullable().default(null),
 	counterpartWorkUnit: interWorkUnitRelationWorkUnitReferenceSchema,
-	relationKind: z.enum(ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS),
+	relationKind: z
+		.enum(ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS)
+		.default("reference_is_generally_related_with"),
 	currentTaskIsStatementSubject: z.boolean().default(true),
-	relationAssertionRationaleOneSentence: z.string().trim().min(1).max(600),
+	relationAssertionRationaleOneSentence: z.string().trim().max(600).default(""),
 	relationAssertionEvidencePointers: z.array(z.string().trim().min(1).max(1000)).max(50).default([]),
 	assertedRelationKindSpecificAttributes: assertedReferenceRelationKindSpecificAttributesSchema.default({}),
 });
@@ -104,8 +107,29 @@ export const referenceRelationModelingSuggestionsResponseSchema = z.object({
 	),
 });
 
+// 无效详情仅用于恢复编辑原文，不能作为预览或账本写入请求。
+export const referenceRelationModelingInvalidDetailsFormSchema = z.object({
+	selectedReferenceRelationKind: z.enum(["", ...ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS]),
+	currentTaskIsStatementSubject: z.boolean(),
+	relationAssertionRationaleOneSentenceText: z.string(),
+	relationAssertionEvidencePointersOnePerLineText: z.string(),
+	concernedAspectSummaryText: z.string(),
+	selectedConcernNature: z.enum(["", ...REFERENCE_CONCERN_NATURES]),
+	claimsUnderVerificationOnePerLineText: z.string(),
+	reusedOutputSummaryText: z.string(),
+	reusedOutputPointersOnePerLineText: z.string(),
+	originatedRequirementPortionSummaryText: z.string(),
+	sharedCrossRepositoryContractPointerText: z.string(),
+});
+export type ReferenceRelationModelingInvalidDetailsForm = z.infer<
+	typeof referenceRelationModelingInvalidDetailsFormSchema
+>;
+
 export const referenceRelationModelingEditorDraftSchema = z.object({
 	referenceRelationDrafts: z.array(referenceRelationModelingDraftSchema).max(50),
+	invalidReferenceRelationDetailsFormsByDraftId: z
+		.record(z.string().min(1).max(100), referenceRelationModelingInvalidDetailsFormSchema)
+		.optional(),
 	relationRevocations: z.array(referenceRelationModelingRevocationSchema).max(50),
 	createdTaskWorkspaceId: z.string().optional(),
 	createdTaskId: z.string().nullable(),

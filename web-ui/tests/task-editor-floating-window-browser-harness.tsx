@@ -19,11 +19,12 @@ function Harness() {
 		{!open ? <button type="button" onClick={() => setOpen(true)}>重新打开编辑器</button> : null}
 		<TaskProjectAssignmentPreflightHost />
 		<Toaster />
-		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateMultiple={() => []}
+		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateAndStart={() => null} onCreateStartAndOpen={() => null} onCreateMultiple={() => []}
 			startInPlanMode={plan} onStartInPlanModeChange={setPlan} taskAgentPermissionMode="ask_for_every_tool_use" onTaskAgentPermissionModeChange={() => {}}
 			taskConversationMode="operational" onTaskConversationModeChange={() => {}} autoReviewEnabled={false} onAutoReviewEnabledChange={() => {}} autoReviewMode="commit" onAutoReviewModeChange={() => {}}
-			workspaceId="isolated-task-editor-project" branchRef="main" branchOptions={[{value:"main",label:"main"}]} onBranchRefChange={() => {}} worktreeMode="branch" onWorktreeModeChange={() => {}}
-			agents={[]} defaultAgentId="codex" taskCreationTargetProjectField={{taskCreationTargetProjectFieldPresentation:"target_project_selectable_in_board_scope",selectedTargetWorkspaceId:"isolated-task-editor-project",selectableProjects:[{workspaceId:"isolated-task-editor-project",projectName:"隔离测试项目"}],onSelectTargetWorkspaceId:() => {}}}
+			taskEditorMode={new URLSearchParams(location.search).get("mode") === "edit" ? "edit" : "create"} editingTaskId={new URLSearchParams(location.search).get("mode") === "edit" ? "ed150" : null}
+ workspaceId="isolated-task-editor-project" branchRef="main" branchOptions={[{value:"main",label:"main"}]} onBranchRefChange={() => {}} worktreeMode="branch" onWorktreeModeChange={() => {}}
+			agents={[]} agentId="codex" onAgentIdChange={() => {}} onClineSettingsChange={() => {}} defaultAgentId="codex" taskCreationTargetProjectField={{taskCreationTargetProjectFieldPresentation:"target_project_selectable_in_board_scope",selectedTargetWorkspaceId:"isolated-task-editor-project",selectableProjects:[{workspaceId:"isolated-task-editor-project",projectName:"隔离测试项目"}],onSelectTargetWorkspaceId:() => {}}}
 		/>
 	</main></TooltipProvider>;
 }

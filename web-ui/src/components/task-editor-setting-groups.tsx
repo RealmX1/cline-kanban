@@ -46,23 +46,33 @@ export function TaskEditorSettingGroup({
 	title,
 	settings,
 	className = "",
+	defaultPresentation = "collapsed_in_group",
 }: {
 	title: string;
 	settings: TaskEditorSetting[];
 	className?: string;
+	defaultPresentation?: TaskEditorSettingPresentation;
 }) {
 	const context = useContext(TaskEditorSettingPresentationContext);
 	if (!context) throw new Error("任务设置缺少偏好上下文");
 	const presentation = (key: string) =>
-		context.temporarilyRevealedKeys.has(key) ? "expanded" : (context.preferences[key] ?? "expanded");
+		context.temporarilyRevealedKeys.has(key) ? "expanded" : (context.preferences[key] ?? defaultPresentation);
 	const visible = settings.filter((setting) => presentation(setting.key) !== "hidden");
 	return (
 		<section
 			hidden={!visible.length}
-			className={`min-w-0 space-y-3 border-t border-border pt-4 ${className}`}
+			className={`min-w-0 space-y-3 border-t border-border pt-4 first:border-t-0 first:pt-0 ${className}`}
 			aria-label={title}
 		>
-			<h3 className="text-sm font-semibold text-text-primary">{title}</h3>
+			<h3
+				className={
+					settings.length === 1 && settings[0]?.label === title
+						? "sr-only"
+						: "text-sm font-semibold text-text-primary"
+				}
+			>
+				{title}
+			</h3>
 			{settings.map((setting) => (
 				<div
 					key={setting.key}
@@ -106,7 +116,7 @@ export function TaskEditorSettingGroup({
 							onClick={() => context.setPresentation(setting.key, "expanded")}
 						>
 							<ChevronDown size={13} />
-							<span className="truncate">
+							<span className="min-w-0 break-words text-left">
 								{setting.label}
 								{setting.summary ? `：${setting.summary}` : ""}
 							</span>

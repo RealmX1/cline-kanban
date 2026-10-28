@@ -55,9 +55,11 @@ export type WebUiUserDecisionClientCharacteristics = z.infer<typeof webUiUserDec
 
 export const assertReferenceRelationDirectlyAsWebUiUserRequestSchema = z.object({
 	subjectWorkUnit: workUnitSelectorForRelationReadSchema,
-	relationKind: z.enum(ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS),
+	relationKind: z
+		.enum(ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS)
+		.default("reference_is_generally_related_with"),
 	counterpartWorkUnit: workUnitSelectorForRelationReadSchema,
-	relationAssertionRationaleOneSentence: relationAssertionRationaleOneSentenceSchema,
+	relationAssertionRationaleOneSentence: z.string().trim().max(600).default(""),
 	relationAssertionEvidencePointers: z.array(relationAssertionEvidencePointerSchema).max(50).default([]),
 	assertedRelationKindSpecificAttributes: assertedReferenceRelationKindSpecificAttributesSchema.default({}),
 	webUiUserDecisionClientCharacteristics: webUiUserDecisionClientCharacteristicsSchema,

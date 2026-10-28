@@ -98,9 +98,14 @@ export function DialogBody({ children, className }: { children: ReactNode; class
 	);
 }
 
-export function DialogFooter({ children }: { children: ReactNode }): React.ReactElement {
+export function DialogFooter({ children, className }: { children: ReactNode; className?: string }): React.ReactElement {
 	return (
-		<div className="flex justify-end gap-2 px-2 py-2 max-md:px-3 max-md:py-3 max-md:gap-3 bg-surface-2 border-t border-[#5A6572] shrink-0 rounded-b-lg">
+		<div
+			className={cn(
+				"flex justify-end gap-2 px-2 py-2 max-md:px-3 max-md:py-3 max-md:gap-3 bg-surface-2 border-t border-[#5A6572] shrink-0 rounded-b-lg",
+				className,
+			)}
+		>
 			{children}
 		</div>
 	);

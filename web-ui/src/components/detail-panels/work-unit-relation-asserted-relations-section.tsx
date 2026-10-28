@@ -93,6 +93,7 @@ function AssertedRelationRationale({
 }: {
 	assertedRelationRow: AssertedRelationRowFromPanelSubjectPerspective;
 }): ReactElement {
+	if (!assertedRelationRow.relationAssertionRationaleOneSentence.trim()) return <></>;
 	if (assertedRelationRow.isUnilaterallyDeclaredByAnotherWorkUnitWithoutConfirmation) {
 		// 别的 agent 写的话：按引用数据展示（引号 + 引用块），明确不是面板自己的说明文字。
 		return (
