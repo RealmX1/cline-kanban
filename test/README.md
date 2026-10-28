@@ -37,7 +37,7 @@ tracked 内容证据使用 `git diff --binary --full-index HEAD --` 的完整 OI
 
 ## Codex 后台终端等待的真实原生检查
 
-Codex 后台终端等待有独立的真实原生集成用例：模型使用隔离的本地 HTTP fixture，不调用外部模型；真实 Codex 创建后台 `sleep` 命令并连续执行 `write_stdin`，宿主判定时间推进六分钟验证静默门，再验证同回合误判纠正。通过以下入口启用，证据目录使用持久路径：
+Codex 后台终端等待有独立的真实原生集成用例：模型使用隔离的本地 HTTP fixture，不调用外部模型；分别验证静默后的 `idle_stall` 误判，以及真实 Stop hook 返回继续要求、主工具执行后连续 `write_stdin` 静默等待的误判。两者都核对原回合与缓存保留、派生交棒撤销及无浏览器的持久列恢复；HOME、CODEX_HOME、CODEX_SQLITE_HOME 全部隔离。通过以下入口启用，证据目录保存 Stop payload、原生转录与纠偏前后摘要，必须使用持久路径：
 
 ```sh
 KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \

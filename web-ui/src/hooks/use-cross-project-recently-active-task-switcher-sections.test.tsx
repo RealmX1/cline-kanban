@@ -256,6 +256,45 @@ describe("跨项目共享分区模型的活动生命周期", () => {
 		},
 	);
 
+	it.each(["kanban_board", "task_focus"] as const)(
+		"%s：Stop 误判纠偏的推流快照将任务从 Cache warm your turn 恢复到 Running",
+		(allProjectsTaskSwitcherView) => {
+			const projects = makeInputs().projects;
+			const entry = projects[0]?.crossProjectTaskSwitcherEntries[0];
+			if (!entry) throw new Error("缺少 Stop 误判测试条目");
+			entry.columnId = "review";
+			entry.agentProcessStartedAt = INITIAL_NOW_MS - 60 * MINUTE_MS;
+			entry.turnOwner = "user";
+			entry.userTurnKind = "review";
+			entry.lastAgentConversationUserHandoffObservation = {
+				observedAtMs: INITIAL_NOW_MS - MINUTE_MS,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			};
+			entry.lastAgentConversationPromptCacheReferenceObservation = {
+				observedAtMs: INITIAL_NOW_MS - MINUTE_MS,
+				evidenceKind: "post_tool_use_hook_event",
+			};
+			render({ projects, allProjectsTaskSwitcherView });
+			expect(model.sections.promptCacheWarmAwaitingUserEntries.map(({ entry }) => entry.taskId)).toEqual([
+				"recently-running",
+			]);
+			const correctedProjects = structuredClone(projects);
+			const corrected = correctedProjects[0]?.crossProjectTaskSwitcherEntries[0];
+			if (!corrected) throw new Error("缺少纠偏后的测试条目");
+			corrected.columnId = "in_progress";
+			corrected.turnOwner = "agent";
+			corrected.userTurnKind = null;
+			corrected.lastAgentConversationUserHandoffObservation = null;
+			render({ projects: correctedProjects, allProjectsTaskSwitcherView });
+			expect(model.sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["recently-running"]);
+			expect(model.sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+			expect(corrected.lastAgentConversationPromptCacheReferenceObservation).toEqual(
+				entry.lastAgentConversationPromptCacheReferenceObservation,
+			);
+		},
+	);
+
 	it.each(["resolved", "rejected"] as const)("停用前首次加载的迟到结果不写入模型与记忆：%s", async (outcome) => {
 		const pendingRequest = deferredSnapshotRequest();
 		fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReturnValueOnce(pendingRequest.promise);

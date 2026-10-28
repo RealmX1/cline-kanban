@@ -49,6 +49,7 @@ function createHubWithFakeTerminalManager() {
 	const hub = createRuntimeStateHub({ workspaceRegistry });
 	let emitSummary: ((summary: RuntimeTaskSessionSummary) => void) | null = null;
 	hub.trackTerminalManager(WORKSPACE_ID, {
+		setCodexReviewMisclassificationPersistenceHandler: () => {},
 		onSummary: (listener: (summary: RuntimeTaskSessionSummary) => void) => {
 			emitSummary = listener;
 			return () => {

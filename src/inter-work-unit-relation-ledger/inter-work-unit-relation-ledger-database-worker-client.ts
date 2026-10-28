@@ -305,6 +305,8 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		limit?: number;
 		subjectWorkspaceId?: string;
 		subjectTaskId?: string;
+		eventFamily?: string;
+		sortDirection?: "asc" | "desc";
 	}): Promise<CommittedInterWorkUnitRelationLedgerEvent[]> {
 		const rows = (await this.request("listCommittedEvents", input)) as unknown[];
 		return rows.map((row) => committedInterWorkUnitRelationLedgerEventSchema.parse(row));

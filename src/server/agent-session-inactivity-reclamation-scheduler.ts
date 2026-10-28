@@ -80,7 +80,7 @@ export interface CreateAgentSessionInactivityReclamationSchedulerOptions {
 	// （服务重启、项目被移除、会话已被清理）⇒ 没有可回收的运行时，记录置 superseded。
 	getTaskSessionSummary: (workspaceId: string, taskId: string) => RuntimeTaskSessionSummary | null;
 	reclaimAgentSession: AgentSessionReclamationExecutor;
-	inspectNativeTurnExecutionBeforeIdleStallReclamation?: (
+	inspectNativeTurnExecutionBeforeReviewReclamation?: (
 		workspaceId: string,
 		taskId: string,
 	) => Promise<"allow_reclamation" | "defer_reclamation">;
@@ -276,10 +276,10 @@ export function createAgentSessionInactivityReclamationScheduler(
 				}
 
 				// 重启后的首轮 sweep 也必须补证，不能抢在原生观察器纠偏之前把后台等待中的进程杀掉。
-				if (options.inspectNativeTurnExecutionBeforeIdleStallReclamation) {
+				if (options.inspectNativeTurnExecutionBeforeReviewReclamation) {
 					let eligibility: "allow_reclamation" | "defer_reclamation";
 					try {
-						eligibility = await options.inspectNativeTurnExecutionBeforeIdleStallReclamation(
+						eligibility = await options.inspectNativeTurnExecutionBeforeReviewReclamation(
 							workspaceId,
 							record.taskId,
 						);

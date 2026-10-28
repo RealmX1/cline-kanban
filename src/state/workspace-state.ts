@@ -1157,7 +1157,9 @@ export interface RuntimeWorkspaceAtomicMutationResponse<T> {
 export async function mutateWorkspaceState<T>(
 	cwd: string,
 	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor,
-	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceAtomicMutationResult<T>,
+	mutate: (
+		state: RuntimeWorkspaceStateResponse,
+	) => RuntimeWorkspaceAtomicMutationResult<T> | Promise<RuntimeWorkspaceAtomicMutationResult<T>>,
 ): Promise<RuntimeWorkspaceAtomicMutationResponse<T>> {
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
@@ -1183,7 +1185,8 @@ export async function mutateWorkspaceState<T>(
 			currentMeta.revision,
 		);
 
-		const mutation = mutate(currentState);
+		const mutationResult = mutate(currentState);
+		const mutation = mutationResult instanceof Promise ? await mutationResult : mutationResult;
 		if (mutation.save === false) {
 			return {
 				value: mutation.value,

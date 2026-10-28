@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { open, stat } from "node:fs/promises";
-import type { RuntimeTaskSessionSummary } from "../core/api-contract";
-import type { CodexNativeAgentTurnExecutionObservation } from "../core/codex-native-agent-turn-execution-observation";
+import { resolveCurrentAgentProcessUserTurnIdleRetentionStarted } from "../core/agent-conversation-activity-observation";
+import type {
+	RuntimeLastEffectiveAgentConversationActivityObservation,
+	RuntimeTaskSessionSummary,
+} from "../core/api-contract";
+import {
+	type CodexNativeAgentTurnExecutionObservation,
+	isCodexReviewMisclassificationNativeReconciliationCandidate,
+} from "../core/codex-native-agent-turn-execution-observation";
+import { LAST_CONVERSATION_PROGRESS_FUTURE_OBSERVATION_TOLERANCE_MS } from "../core/last-conversation-progress-observation";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import type { NativeAgentConversationTranscriptActivityObservation } from "./native-agent-conversation-transcript-activity";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
@@ -15,10 +23,12 @@ export interface CodexCurrentNativeTurnToolActivityReadCursor {
 	verifiedSessionMetadata: boolean;
 	transcriptNativeTurnId: string | null;
 	seenToolEventIds: string[];
+	reviewStopRecoveryBoundaryIdentity?: string | null;
+	latestSameNativeTurnPersistedToolActivityObservation?: RuntimeLastEffectiveAgentConversationActivityObservation;
 	oversizedTranscriptRecordNewlineScanInProgress?: boolean;
 }
 
-// 与消息接受游标分离：冷启动可分段补查回合边界，但绝不重报历史或从转录确认用户接受。
+// 与消息接受游标分离：冷启动按持久 Stop 补查同回合工具，绝不从该通道确认用户接受。
 export async function readCodexCurrentNativeTurnToolActivity(input: {
 	summary: RuntimeTaskSessionSummary;
 	execution: CodexNativeAgentTurnExecutionObservation;
@@ -43,15 +53,35 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 	const metadata = await stat(path);
 	if (!metadata.isFile()) return null;
 	const fileIdentity = `${metadata.dev}:${metadata.ino}`;
+	const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(input.summary);
+	const recoveryStoppedAtMs =
+		(input.summary.reviewReason === "hook" || retention?.latestCodexStopHookBoundary) &&
+		isCodexReviewMisclassificationNativeReconciliationCandidate(input.summary) &&
+		retention
+			? Math.max(retention.stoppedAt, retention.latestCodexStopHookBoundary?.observedAtMs ?? 0)
+			: null;
+	const reviewStopRecoveryBoundaryIdentity =
+		recoveryStoppedAtMs === null
+			? null
+			: JSON.stringify([
+					input.summary.runtimeSessionIncarnationId,
+					input.summary.agentResponseGenerationTurnSequence,
+					retention,
+				]);
 	const previous = input.cursor;
 	const cursor: CodexCurrentNativeTurnToolActivityReadCursor =
-		previous && previous.fileIdentity === fileIdentity && metadata.size >= previous.lastObservedFileSize
+		previous &&
+		previous.fileIdentity === fileIdentity &&
+		metadata.size >= previous.lastObservedFileSize &&
+		(reviewStopRecoveryBoundaryIdentity === null ||
+			previous.reviewStopRecoveryBoundaryIdentity === reviewStopRecoveryBoundaryIdentity)
 			? { ...previous }
 			: {
 					fileIdentity,
 					nextByteOffset: 0,
-					baselineByteOffset: metadata.size,
-					baselineAtMs: input.observedAtMs,
+					baselineByteOffset: recoveryStoppedAtMs === null ? metadata.size : 0,
+					baselineAtMs: recoveryStoppedAtMs ?? input.observedAtMs,
+					reviewStopRecoveryBoundaryIdentity,
 					lastObservedFileSize: metadata.size,
 					verifiedSessionMetadata: false,
 					transcriptNativeTurnId: null,
@@ -99,6 +129,7 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 				return null;
 			cursor.verifiedSessionMetadata = true;
 			cursor.transcriptNativeTurnId = null;
+			cursor.latestSameNativeTurnPersistedToolActivityObservation = undefined;
 			continue;
 		}
 		if (
@@ -112,6 +143,17 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 		)
 			continue;
 		if (record.type === "event_msg") {
+			if (
+				[
+					"task_started",
+					"task_complete",
+					"turn_aborted",
+					"thread_rolled_back",
+					"thread_reverted",
+					"conversation_reverted",
+				].includes(String(payload.type))
+			)
+				cursor.latestSameNativeTurnPersistedToolActivityObservation = undefined;
 			if (payload.type === "task_started")
 				cursor.transcriptNativeTurnId = typeof payload.turn_id === "string" ? payload.turn_id : null;
 			else if (
@@ -128,7 +170,10 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 		}
 		if (record.type === "turn_context") {
 			// turn_context 只核对已经证明的 task_started，不把压缩或历史拷贝提升为新分支。
-			if (payload.turn_id !== cursor.transcriptNativeTurnId) cursor.transcriptNativeTurnId = null;
+			if (payload.turn_id !== cursor.transcriptNativeTurnId) {
+				cursor.transcriptNativeTurnId = null;
+				cursor.latestSameNativeTurnPersistedToolActivityObservation = undefined;
+			}
 			continue;
 		}
 		if (
@@ -152,13 +197,19 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 		)
 			continue;
 		// observer 的扫描起点可能早于本次追加；实际未来时间门禁仍由活动写入漏斗负责。
-		events.push({
+		const activity: NativeAgentConversationTranscriptActivityObservation = {
 			observedAtMs,
 			activityKind: "tool_activity",
 			evidenceKind: "persisted_agent_transcript",
 			eventId,
 			nativeSessionId: identity.nativeSessionId,
-		});
+		};
+		events.push(activity);
+		if (
+			observedAtMs <= input.observedAtMs + LAST_CONVERSATION_PROGRESS_FUTURE_OBSERVATION_TOLERANCE_MS &&
+			observedAtMs > (cursor.latestSameNativeTurnPersistedToolActivityObservation?.observedAtMs ?? 0)
+		)
+			cursor.latestSameNativeTurnPersistedToolActivityObservation = activity;
 	}
 	if (
 		lineStart < bytesRead &&
@@ -167,6 +218,7 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 		// 长行可能包含 rewind 或 turn 边界；逐预算找换行，不缓存整行，也不沿用旧回合。
 		oversizedTranscriptRecordNewlineScanInProgress = true;
 		cursor.transcriptNativeTurnId = null;
+		cursor.latestSameNativeTurnPersistedToolActivityObservation = undefined;
 		lineStart = bytesRead;
 	}
 	cursor.nextByteOffset += lineStart;

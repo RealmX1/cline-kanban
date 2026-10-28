@@ -44,6 +44,7 @@ import {
 } from "../core/agent-catalog";
 import {
 	recordEffectiveAgentConversationActivityPatch,
+	resolveCurrentAgentProcessUserTurnIdleRetentionStarted,
 	resolveLastEffectiveAgentConversationActivityObservation,
 } from "../core/agent-conversation-activity-observation";
 import {
@@ -89,8 +90,8 @@ import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
 	type CodexNativeAgentTurnExecutionObservation,
-	canCorrectCodexIdleStallForSameNativeTurn,
-	isCodexIdleStallNativeReconciliationCandidate,
+	canCorrectCodexReviewMisclassificationForSameNativeTurn,
+	isCodexReviewMisclassificationNativeReconciliationCandidate,
 	isCurrentCodexNativeAgentTurnExecutionObservation,
 } from "../core/codex-native-agent-turn-execution-observation";
 import {
@@ -1286,6 +1287,12 @@ export interface TerminalSessionManagerOptions {
 	claudeCodeBackgroundSessionDaemonClient?: ClaudeCodeBackgroundSessionDaemonClient;
 }
 
+export type CodexReviewMisclassificationPersistenceHandler = (
+	summaryBeforeRead: RuntimeTaskSessionSummary,
+	observation: CodexNativeAgentTurnExecutionObservation,
+	applyCorrectionAfterPersistence: () => RuntimeTaskSessionSummary | null,
+) => Promise<RuntimeTaskSessionSummary | null>;
+
 export class TerminalSessionManager implements TerminalSessionService {
 	private humanTerminalInputMutationSequenceNumber = 0;
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
@@ -1316,6 +1323,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
+	private codexReviewMisclassificationPersistenceHandler: CodexReviewMisclassificationPersistenceHandler | null = null;
 	private readonly stallThresholdMs = readStallThresholdMs();
 	private stallScanInterval: NodeJS.Timeout | null = null;
 	private stallScanInFlight: Promise<void> | null = null;
@@ -6892,7 +6900,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
-	reconcileCodexIdleStallWithNativeAgentTurnExecution(
+	setCodexReviewMisclassificationPersistenceHandler(
+		handler: CodexReviewMisclassificationPersistenceHandler | null,
+	): void {
+		this.codexReviewMisclassificationPersistenceHandler = handler;
+	}
+
+	async reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		observation: CodexNativeAgentTurnExecutionObservation,
+	): Promise<RuntimeTaskSessionSummary | null> {
+		const applyCorrectionAfterPersistence = () =>
+			this.applyCodexReviewMisclassificationCorrection(taskId, summaryBeforeRead, observation);
+		const entry = this.entries.get(taskId);
+		if (
+			entry?.active &&
+			isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) &&
+			canCorrectCodexReviewMisclassificationForSameNativeTurn(entry.summary, observation) &&
+			this.codexReviewMisclassificationPersistenceHandler
+		)
+			return this.codexReviewMisclassificationPersistenceHandler(
+				summaryBeforeRead,
+				observation,
+				applyCorrectionAfterPersistence,
+			);
+		return applyCorrectionAfterPersistence();
+	}
+
+	private applyCodexReviewMisclassificationCorrection(
 		taskId: string,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
 		observation: CodexNativeAgentTurnExecutionObservation,
@@ -6901,15 +6937,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (
 			!entry?.active ||
 			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) ||
-			!canCorrectCodexIdleStallForSameNativeTurn(entry.summary, observation)
+			!canCorrectCodexReviewMisclassificationForSameNativeTurn(entry.summary, observation)
 		)
 			return entry ? cloneSummary(entry.summary) : null;
 		const previous = entry.summary;
-		const retention = previous.currentAgentProcessUserTurnIdleRetentionStarted;
+		const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(previous);
 		const handoff = previous.lastAgentConversationUserHandoffObservation;
 		const isMatchingFalseHandoff =
 			retention != null &&
-			handoff?.signalConfidence === "prompt_ready_fallback" &&
+			handoff?.signalConfidence === retention.signalConfidence &&
 			handoff.turnSequence === retention?.turnSequence &&
 			handoff.observedAtMs === retention.stoppedAt;
 		const summary = updateSummary(entry, {
@@ -6926,7 +6962,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
 		this.emitSummary(summary);
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-idle-stall-corrected taskId=${taskId} nativeTurnId=${observation.nativeTurnId} turnSequence=${summary.agentResponseGenerationTurnSequence}`,
+			`[tui-freeze] codex-review-misclassification-corrected taskId=${taskId} previousReviewReason=${previous.reviewReason} nativeTurnId=${observation.nativeTurnId} turnSequence=${summary.agentResponseGenerationTurnSequence}`,
 		);
 		return cloneSummary(summary);
 	}
@@ -6971,15 +7007,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return { summaryBeforeRead, observation };
 	}
 
-	async inspectCodexNativeTurnBeforeIdleStallSessionReclamation(
+	async inspectCodexNativeTurnBeforeReviewSessionReclamation(
 		taskId: string,
 	): Promise<"allow_reclamation" | "defer_reclamation"> {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active || !isCodexIdleStallNativeReconciliationCandidate(entry.summary)) return "allow_reclamation";
+		if (!entry?.active || !isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary))
+			return "allow_reclamation";
 		const result = await this.readCurrentCodexNativeTurnExecution(entry);
 		if (!result) return "defer_reclamation";
 		if (result.observation.executionStatus === "running") {
-			this.reconcileCodexIdleStallWithNativeAgentTurnExecution(taskId, result.summaryBeforeRead, result.observation);
+			try {
+				await this.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+					taskId,
+					result.summaryBeforeRead,
+					result.observation,
+				);
+			} catch (error) {
+				logTuiFreezeWarning(
+					`[tui-freeze] codex-review-correction-persistence-deferred taskId=${taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 			return "defer_reclamation";
 		}
 		return "allow_reclamation";
@@ -7016,7 +7063,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		reason: RuntimeTaskSessionReviewReason,
 		userTurnKindOverride?: RuntimeTaskSessionUserTurnKind,
 		// hook 驱动时传入事件的捕获时刻（spool 晚送达时停止时刻按它记，见 SummaryWriteDomainEventTiming）。
-		domainEventTiming?: SummaryWriteDomainEventTiming,
+		domainEventTiming?: SummaryWriteDomainEventTiming & { hookEventDeliveryIdempotencyKey?: string },
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -7030,6 +7077,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const before = entry.summary;
 		const beforeFacets = resolveSessionFacets(before);
+		if (
+			before.agentId === "codex" &&
+			reason === "manual_review" &&
+			beforeFacets.turnOwner === "user" &&
+			beforeFacets.userTurnKind === "review"
+		) {
+			const summary = updateSummary(entry, { ...beforeFacets, reviewReason: reason }, undefined, domainEventTiming);
+			for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+			this.emitSummary(summary);
+			return cloneSummary(summary);
+		}
 		if (before.agentId === "kimi" && reason === "hook" && beforeFacets.turnOwner === "user") {
 			const userTurnKind = userTurnKindOverride ?? "review";
 			// 存活终端的原生中断与 agent 回合一样使用 hook 成因；中断语义由 userTurnKind 保留，
@@ -7069,7 +7127,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// reviewReason 透传进 hook.to_review 事件 → 既 stamp 进 summary、又驱动 userTurnKind 派生。
 		// userTurnKindOverride（B3 Claude permission 采集）随同事件下发，由 reducer 在 user 回合覆写人轴
 		// （经完整 facet 三元组，不裸写单字段）。
-		const summary = this.applySessionEvent(
+		let summary = this.applySessionEvent(
 			entry,
 			{
 				type: "hook.to_review",
@@ -7078,6 +7136,34 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 			domainEventTiming,
 		);
+		const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary);
+		const nativeIdentity = summary.agentNativeConversationSessionIdentity;
+		const stopObservedAtMs = Math.min(domainEventTiming?.domainEventObservedAtEpochMs ?? now(), now());
+		if (
+			summary.agentId === "codex" &&
+			reason === "hook" &&
+			(userTurnKindOverride === undefined || userTurnKindOverride === "review") &&
+			resolveSessionFacets(summary).userTurnKind === "review" &&
+			(summary.reviewReason === "hook" || summary.reviewReason === "idle_stall") &&
+			retention &&
+			nativeIdentity?.sourceAgentId === "codex" &&
+			summary.runtimeSessionIncarnationId &&
+			Number.isFinite(stopObservedAtMs) &&
+			stopObservedAtMs >= (summary.startedAt ?? 0) &&
+			stopObservedAtMs >= (retention.latestCodexStopHookBoundary?.observedAtMs ?? retention.stoppedAt)
+		) {
+			summary = updateSummary(entry, {
+				currentAgentProcessUserTurnIdleRetentionStarted: {
+					...retention,
+					latestCodexStopHookBoundary: {
+						observedAtMs: stopObservedAtMs,
+						hookEventDeliveryIdempotencyKey: domainEventTiming?.hookEventDeliveryIdempotencyKey ?? null,
+						nativeSessionId: nativeIdentity.nativeSessionId,
+						runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+					},
+				},
+			});
+		}
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -8461,8 +8547,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const [taskId, entry] of this.entries.entries()) {
 			if (entry.summary.taskConversationSessionNativeIdentityRecovery)
 				void this.advanceSideSessionNativeIdentityRecovery(entry).catch(() => {});
-			if (entry.active && isCodexIdleStallNativeReconciliationCandidate(entry.summary)) {
-				await this.inspectCodexNativeTurnBeforeIdleStallSessionReclamation(taskId);
+			if (entry.active && isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary)) {
+				await this.inspectCodexNativeTurnBeforeReviewSessionReclamation(taskId);
 			}
 			// 首轮落盘看门狗与回合无关（卡在信任对话框时 turnOwner 仍是 agent，但也可能已被翻成 user），
 			// 所以排在下面的回合门控之前。

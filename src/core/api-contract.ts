@@ -1065,7 +1065,18 @@ export type RuntimeLastAgentConversationUserHandoffObservation = z.infer<
 >;
 
 // 当前进程的待命期限锚点沿用旧停止事件形状；它与用户看到的历史交棒完全独立。
-export const runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema = runtimeAgentResponseGenerationStoppedSchema;
+export const runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema =
+	runtimeAgentResponseGenerationStoppedSchema.extend({
+		// 独立于待命起点与显示元数据：相同正文的新 Stop 也必须推进纠偏边界，晚送达保留捕获时刻。
+		latestCodexStopHookBoundary: z
+			.object({
+				observedAtMs: z.number(),
+				hookEventDeliveryIdempotencyKey: z.string().nullable(),
+				nativeSessionId: z.string(),
+				runtimeSessionIncarnationId: z.string(),
+			})
+			.optional(),
+	});
 export type RuntimeCurrentAgentProcessUserTurnIdleRetentionStarted = z.infer<
 	typeof runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema
 >;

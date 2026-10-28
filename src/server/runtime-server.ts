@@ -477,10 +477,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		listProjectRuntimeSessionSummaries(workspaceId).find((summary) => summary.taskId === taskId) ?? null;
 	const agentSessionInactivityReclamationScheduler = createAgentSessionInactivityReclamationScheduler({
 		getTaskSessionSummary: findRuntimeSessionSummary,
-		inspectNativeTurnExecutionBeforeIdleStallReclamation: async (workspaceId, taskId) =>
+		inspectNativeTurnExecutionBeforeReviewReclamation: async (workspaceId, taskId) =>
 			(await deps.workspaceRegistry
 				.getTerminalManagerForWorkspace(workspaceId)
-				?.inspectCodexNativeTurnBeforeIdleStallSessionReclamation(taskId)) ?? "allow_reclamation",
+				?.inspectCodexNativeTurnBeforeReviewSessionReclamation(taskId)) ?? "allow_reclamation",
 		reclaimAgentSession: createTransportAwareAgentSessionReclamationExecutor({
 			getTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
 			getClineTaskSessionService: (workspaceId) => clineTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,

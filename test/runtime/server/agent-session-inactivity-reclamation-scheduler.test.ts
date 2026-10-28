@@ -114,17 +114,16 @@ function createScheduler(
 		nowMs?: number;
 		reclaim?: (request: AgentSessionReclamationRequest) => Promise<RuntimeAgentSessionReclamationOutcome>;
 		markPendingUserDecisionsReclaimed?: (workspaceId: string, taskId: string, reclaimedAt: number) => Promise<number>;
-		inspectNativeTurnExecutionBeforeIdleStallReclamation?: Parameters<
+		inspectNativeTurnExecutionBeforeReviewReclamation?: Parameters<
 			typeof createAgentSessionInactivityReclamationScheduler
-		>[0]["inspectNativeTurnExecutionBeforeIdleStallReclamation"];
+		>[0]["inspectNativeTurnExecutionBeforeReviewReclamation"];
 	} = {},
 ) {
 	const nowMs = options.nowMs ?? NOW;
 	return createAgentSessionInactivityReclamationScheduler({
 		now: () => nowMs,
 		getTaskSessionSummary: (_workspaceId, taskId) => harness.summaryByTaskId.get(taskId) ?? null,
-		inspectNativeTurnExecutionBeforeIdleStallReclamation:
-			options.inspectNativeTurnExecutionBeforeIdleStallReclamation,
+		inspectNativeTurnExecutionBeforeReviewReclamation: options.inspectNativeTurnExecutionBeforeReviewReclamation,
 		reclaimAgentSession: async (request) => {
 			harness.reclaimRequests.push(request);
 			harness.reclamationStepOrder.push("reclaim-agent-session");
@@ -184,7 +183,7 @@ describe("原生回合补证先于重启恢复回收", () => {
 			);
 			let ready = false;
 			const scheduler = createScheduler(harness, {
-				inspectNativeTurnExecutionBeforeIdleStallReclamation: async () =>
+				inspectNativeTurnExecutionBeforeReviewReclamation: async () =>
 					ready ? "allow_reclamation" : "defer_reclamation",
 			});
 			await scheduler.runSweepNow();
@@ -196,13 +195,13 @@ describe("原生回合补证先于重启恢复回收", () => {
 			expect(harness.reclaimRequests).toHaveLength(1);
 		},
 	);
-	it("同回合纠偏后作废旧期限，不靠虚增序号挡回收", async () => {
+	it.each(["idle_stall", "hook"] as const)("%s 同回合纠偏后作废旧期限，不靠虚增序号挡回收", async (reviewReason) => {
 		const harness = createHarness();
 		harness.records.push(makeRecord());
-		const summary = makeDeadlineBearingSummary({ agentId: "codex", reviewReason: "idle_stall" });
+		const summary = makeDeadlineBearingSummary({ agentId: "codex", reviewReason });
 		harness.summaryByTaskId.set("task-a", summary);
 		const scheduler = createScheduler(harness, {
-			inspectNativeTurnExecutionBeforeIdleStallReclamation: async () => {
+			inspectNativeTurnExecutionBeforeReviewReclamation: async () => {
 				harness.summaryByTaskId.set("task-a", {
 					...summary,
 					state: "running",
@@ -224,7 +223,7 @@ describe("原生回合补证先于重启恢复回收", () => {
 		const summary = makeDeadlineBearingSummary();
 		harness.summaryByTaskId.set("task-a", summary);
 		const scheduler = createScheduler(harness, {
-			inspectNativeTurnExecutionBeforeIdleStallReclamation: async () => {
+			inspectNativeTurnExecutionBeforeReviewReclamation: async () => {
 				harness.summaryByTaskId.set("task-a", { ...summary, runtimeSessionIncarnationId: "new-incarnation" });
 				return "allow_reclamation";
 			},
@@ -239,7 +238,7 @@ describe("原生回合补证先于重启恢复回收", () => {
 		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
 		harness.summaryByTaskId.set("task-b", makeDeadlineBearingSummary({ taskId: "task-b" }));
 		const scheduler = createScheduler(harness, {
-			inspectNativeTurnExecutionBeforeIdleStallReclamation: async (_workspaceId, taskId) => {
+			inspectNativeTurnExecutionBeforeReviewReclamation: async (_workspaceId, taskId) => {
 				if (taskId === "task-a") throw new Error("原生端点暂缺");
 				return "allow_reclamation";
 			},

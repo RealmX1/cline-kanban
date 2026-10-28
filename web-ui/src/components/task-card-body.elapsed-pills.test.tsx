@@ -356,6 +356,35 @@ describe("卡片头部时长药丸", () => {
 		expect(stoppedPill(host)).toBeNull();
 		expect(progressPill(host)).not.toBeNull();
 	});
+	it("Stop 误判被服务端纠偏后隐藏交棒药丸，保留原来的推进时间", () => {
+		const stopped = createSummary({
+			agentId: "codex",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: NOW - 3 * 60_000,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			},
+			lastEffectiveAgentConversationActivityObservation: {
+				observedAtMs: NOW - 2 * 60_000,
+				activityKind: "tool_activity",
+				evidenceKind: "persisted_agent_transcript",
+			},
+		});
+		expect(stoppedPill(renderCard(stopped))).not.toBeNull();
+		const corrected = renderCard({
+			...stopped,
+			state: "running",
+			turnOwner: "agent",
+			userTurnKind: null,
+			reviewReason: null,
+			lastAgentConversationUserHandoffObservation: null,
+		});
+		expect(stoppedPill(corrected)).toBeNull();
+		expect(progressPill(corrected)?.textContent).toContain("2m");
+	});
 
 	it("推进观测为 null ⇒ Progress 药丸隐藏，且绝不回退去读实质戳", () => {
 		const host = renderCard(
