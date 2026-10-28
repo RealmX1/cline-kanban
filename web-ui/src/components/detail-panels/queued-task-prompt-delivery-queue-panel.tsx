@@ -162,7 +162,10 @@ function QueuedPromptDeliveryMetadata({
 		handed_to_transport: "到期时间",
 	}[projection.deliveryState];
 	const resultTimestamp =
-		projection.deliveryState === "expired" || !isQueuedTaskPromptDeliveryTerminal(projection)
+		projection.deliveryState === "expired" ||
+		projection.deliveryState === "queued" ||
+		projection.deliveryState === "claimed_for_dispatch" ||
+		projection.deliveryState === "handed_to_transport"
 			? projection.expiresAt
 			: projection.settledAt;
 	return (
@@ -679,6 +682,7 @@ function SettledQueuedPromptRow({
 							size="xs"
 							icon={<X size={12} />}
 							aria-label="Dismiss settled queued prompt"
+							disabled={projection.isReadOnlyHistoricalDelivery}
 							onClick={() => void controller.dismissSettledQueuedPromptDelivery(projection.queueEntryId)}
 						/>
 					</Tooltip>

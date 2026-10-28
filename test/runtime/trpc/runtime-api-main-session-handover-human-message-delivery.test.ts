@@ -330,6 +330,20 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 		return { api, acpService, confirmAcpPromptAcceptance };
 	}
 
+	it("旧自动来源在读取状态和恢复会话前即被拒绝", async () => {
+		const manager = new TerminalSessionManager();
+		const { api } = createSendingApi(manager);
+		const reads = workspaceStateMocks.loadWorkspaceBoardById.mock.calls.length;
+		await expect(
+			api.sendTaskChatMessage(
+				scope,
+				{ taskId: "task-1", text: "不应续跑", source: "rvf_automatic_closeout" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).resolves.toMatchObject({ ok: false, error: expect.stringContaining("已退役") });
+		expect(workspaceStateMocks.loadWorkspaceBoardById).toHaveBeenCalledTimes(reads);
+	});
+
 	async function sendHumanMessage(api: ReturnType<typeof createRuntimeApi>) {
 		return api.sendTaskChatMessage(
 			scope,

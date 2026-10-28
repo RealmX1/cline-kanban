@@ -14,8 +14,8 @@ import {
 	migrateStoppedCodexConversationStorage,
 	rollbackStoppedCodexConversationStorage,
 } from "../../src/codex-conversation-storage/codex-conversation-storage-migration";
-import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
-import { readCodexConversationTurns } from "../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
+import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
+import { readCodexConversationTurns } from "../../src/codex-native-session-protocol/codex-native-conversation-history";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import {

@@ -1,0 +1,52 @@
+{
+  "baselineCommit": "fefa08730f487aa32798f5bb694d3b99ef2f36cb",
+  "sample": {
+    "taskId": "a289f",
+    "cwd": "/workspace/task",
+    "commandPrefix": "kanban",
+    "scope": "角色流程说明；不含用户需求、动态关系邻域、AGENTS.md 或模型提供方指令"
+  },
+  "planReportedBaselineCharacters": {
+    "task": 8895,
+    "sidebar": 16045,
+    "collaboration": 9071
+  },
+  "roles": {
+    "task": {
+      "before": {
+        "unicodeCharacters": 7767,
+        "utf8Bytes": 12331
+      },
+      "after": {
+        "unicodeCharacters": 2266,
+        "utf8Bytes": 3752
+      },
+      "unicodeCharacterReductionPercent": 70.83,
+      "utf8ByteReductionPercent": 69.57
+    },
+    "sidebar": {
+      "before": {
+        "unicodeCharacters": 14628,
+        "utf8Bytes": 18550
+      },
+      "after": {
+        "unicodeCharacters": 1957,
+        "utf8Bytes": 3343
+      },
+      "unicodeCharacterReductionPercent": 86.62,
+      "utf8ByteReductionPercent": 81.98
+    },
+    "collaboration": {
+      "before": {
+        "unicodeCharacters": 7941,
+        "utf8Bytes": 12779
+      },
+      "after": {
+        "unicodeCharacters": 2435,
+        "utf8Bytes": 4193
+      },
+      "unicodeCharacterReductionPercent": 69.34,
+      "utf8ByteReductionPercent": 67.19
+    }
+  }
+}

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
-} from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+} from "../../../src/codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import {
 	type SendTaskChatMessageAcrossSessionTransportsDependencies,
 	sendTaskChatMessageAcrossSessionTransports,

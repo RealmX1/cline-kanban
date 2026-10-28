@@ -6,13 +6,13 @@ import {
 	resolveMigratedCodexConversationHome,
 	resolveRecordedCodexConversationHome,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
-import type { RuntimeTaskSessionSummary } from "../core/api-contract";
-import { lockedFileSystem } from "../fs/locked-file-system";
-import { withCodexAppServerRequestConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
+import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import {
 	type CodexAppServerRequestPort,
 	readCodexConversationTurns,
-} from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+} from "../codex-native-session-protocol/codex-native-conversation-history";
+import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import { lockedFileSystem } from "../fs/locked-file-system";
 
 export class TaskMainSessionHandoverExecutionProhibitedError extends Error {}
 

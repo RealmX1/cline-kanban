@@ -1,3 +1,4 @@
+import { isRetiredRvfAutomaticMessageSource } from "./retired-rvf-automatic-message-history";
 // 程序化投递（`kanban task message` / RVF followup）的注入账本：CLI 与 runtime 共用的**同一份真相**。
 //
 // 为什么需要一个共享模块（而不是留在 src/commands/task.ts 里）：
@@ -6,8 +7,8 @@
 // runtime 在投递真正落定（或失败）之后回来**就地改写**同一条记录。CLI 和 runtime 是两个进程，因此这份
 // 读写必须走跨进程文件锁（proper-lockfile，与看板状态同一套），且终态**写一次即定**。
 //
-// 跨仓契约：~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md
-// 字段名与取值集合已对外发布、RVF 侧据此接线，**改动前必须先改契约文件**。
+// 通用投递契约见 docs/terminal-io.md 与 core/api-contract.ts。
+// 字段名与取值供现有调用方和历史读取共用，变更时保留兼容与真实接受事实。
 //
 // ## 两种记录：立即投递 与 agent 空闲门控的排队投递
 //
@@ -28,12 +29,6 @@ import {
 	type CodexNativePromptDeliveryOperation,
 	codexNativePromptDeliveryOperationSchema,
 } from "./api-contract";
-import {
-	CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS,
-	type CodexRvfCloseoutCompactionAwareConfirmation,
-	codexRvfCloseoutCompactionAwareConfirmationSchema,
-	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
-} from "./codex-rvf-closeout-compaction-aware-confirmation";
 
 export const TASK_MESSAGE_INJECTION_LEDGER_FILENAME = "task-message-injections.json";
 
@@ -91,7 +86,7 @@ const LEGACY_STATUS_MIRROR: Record<TaskMessageTerminalDeliveryStatus, string> = 
 };
 
 export interface TaskMessageInjectionRecord {
-	nativeCompactionAwareConfirmation?: CodexRvfCloseoutCompactionAwareConfirmation;
+	nativeCompactionAwareConfirmation?: unknown;
 	task_id: string;
 	// 新请求总是记录受理时解析的真实目标会话；旧记录缺省时保持原样，不推断历史主会话。
 	attempt_id?: string;
@@ -187,13 +182,9 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 			: {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
-		...(codexRvfCloseoutCompactionAwareConfirmationSchema.safeParse(record.nativeCompactionAwareConfirmation).success
-			? {
-					nativeCompactionAwareConfirmation: codexRvfCloseoutCompactionAwareConfirmationSchema.parse(
-						record.nativeCompactionAwareConfirmation,
-					),
-				}
-			: {}),
+		...(record.nativeCompactionAwareConfirmation === undefined
+			? {}
+			: { nativeCompactionAwareConfirmation: record.nativeCompactionAwareConfirmation }),
 		...(typeof record.required_native_independent_user_turn_session_id === "string"
 			? { required_native_independent_user_turn_session_id: record.required_native_independent_user_turn_session_id }
 			: {}),
@@ -462,53 +453,6 @@ export interface StalePendingTaskMessageInjectionSweepResult {
 	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
 }
 
-// 先把有界截止写入与清扫器共用的账本，再允许内存延长等待；终态与旧 revision 均不可覆盖。
-export async function persistTaskMessageNativeCompactionAwareConfirmation(input: {
-	ledgerPath: string;
-	ledgerTaskId: string;
-	snapshot: CodexRvfCloseoutCompactionAwareConfirmation;
-	expectedRevision: number | null;
-}): Promise<boolean> {
-	const snapshot = codexRvfCloseoutCompactionAwareConfirmationSchema.parse(input.snapshot);
-	return withTaskMessageInjectionLedgerLock(
-		input.ledgerPath,
-		async (records) => {
-			const record = findTaskMessageInjectionRecord(records, input.ledgerTaskId, snapshot.binding.idempotencyKey);
-			if (
-				!record ||
-				record.terminal_delivery_status !== "accepted_pending_submit_confirmation" ||
-				record.source !== "rvf_automatic_closeout" ||
-				record.prompt_sha256 !== snapshot.binding.promptSha256 ||
-				(record.attempt_id !== undefined && record.attempt_id !== snapshot.binding.conversationSessionId)
-			)
-				return { result: false };
-			const previous = record.nativeCompactionAwareConfirmation;
-			if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return { result: true };
-			if (
-				(previous?.revision ?? null) !== input.expectedRevision ||
-				snapshot.revision !== (previous ? previous.revision + 1 : 0) ||
-				(previous &&
-					(JSON.stringify(previous.binding) !== JSON.stringify(snapshot.binding) ||
-						previous.firstSubmissionAtEpochMs !== snapshot.firstSubmissionAtEpochMs ||
-						previous.absoluteConfirmationDeadlineAtEpochMs !== snapshot.absoluteConfirmationDeadlineAtEpochMs ||
-						previous.clientUserMessageId !== snapshot.clientUserMessageId ||
-						previous.submissionTransport !== snapshot.submissionTransport ||
-						previous.predecessorNativeTurnId !== snapshot.predecessorNativeTurnId ||
-						(previous.nativeTurnIdReturnedBySubmissionRequest !== undefined &&
-							previous.nativeTurnIdReturnedBySubmissionRequest !==
-								snapshot.nativeTurnIdReturnedBySubmissionRequest) ||
-						previous.accumulatedCompactionWaitMs > snapshot.accumulatedCompactionWaitMs ||
-						previous.ordinaryConfirmationBudgetRemainingMs < snapshot.ordinaryConfirmationBudgetRemainingMs ||
-						previous.phaseStartedAtEpochMs > snapshot.phaseStartedAtEpochMs))
-			)
-				return { result: false };
-			const updated = { ...record, nativeCompactionAwareConfirmation: snapshot };
-			return { records: records.map((entry) => (entry === record ? updated : entry)), result: true };
-		},
-		{ retries: 3, factor: 1, minTimeout: 25, maxTimeout: 25 },
-	);
-}
-
 // 账本时间戳读不出来（手改坏 / 更旧的格式）时返回 null，调用方按「已超期」处理：
 // 判失败是安全的那一侧，留着才会变成永远没人收敛的 pending。
 //
@@ -520,12 +464,6 @@ export function resolvePendingRecordBecomesStaleAtEpochMs(
 	record: TaskMessageInjectionRecord,
 	stalePendingThresholdMs: number,
 ): number | null {
-	if (record.nativeCompactionAwareConfirmation) {
-		return (
-			resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(record.nativeCompactionAwareConfirmation) +
-			CODEX_RVF_CLOSEOUT_CONFIRMATION_SWEEP_MARGIN_MS
-		);
-	}
 	const statusUpdatedAtMs = Date.parse(record.terminal_delivery_status_updated_at);
 	if (Number.isNaN(statusUpdatedAtMs)) {
 		return null;
@@ -561,7 +499,10 @@ export async function sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart(
 		let earliestSkippedPendingBecomesStaleAtEpochMs: number | null = null;
 		const sweptRecords: TaskMessageInjectionRecord[] = [];
 		for (const record of records) {
-			if (isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status)) {
+			if (
+				isRetiredRvfAutomaticMessageSource(record.source) ||
+				isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status)
+			) {
 				sweptRecords.push(record);
 				continue;
 			}

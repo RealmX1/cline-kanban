@@ -10,7 +10,7 @@ import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { applySessionFacets } from "../../../src/core/session-activity";
 
 const request = vi.hoisted(() => vi.fn());
-vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-request-connection", () => ({
+vi.mock("../../../src/codex-native-session-protocol/codex-app-server-request-connection", () => ({
 	withRunningCodexAppServerControlSocketConnection: async (
 		operation: (port: { request: typeof request }) => Promise<unknown>,
 	) => operation({ request }),

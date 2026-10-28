@@ -73,7 +73,6 @@ import {
 } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import { readTaskAssistanceModelProviderRoutingSettings } from "../model-provider-access/kanban-model-provider-settings";
-import { createRvfAutomaticCloseoutRuntimeService } from "../rvf-automatic-closeout/rvf-automatic-closeout-runtime-service";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -514,15 +513,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 排队 prompt 的出队引擎（runtime 级单例）。放在这里的理由与上面的回收调度器相同：三种 transport 的
 	// 服务持有者都在本作用域，findRuntimeSessionSummary 是现成的三流合并查询面。
 	//
-	// 发送走的是与人类聊天、RVF followup **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
+	// 发送走的是与人类聊天、后台任务消息 **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
-	let rvfAutomaticCloseoutPromptDeliveryValidator:
-		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["validateCloseoutPromptDelivery"]
-		| undefined;
-	let settleRvfCloseoutPromptTerminalDelivery:
-		| ReturnType<typeof createRvfAutomaticCloseoutRuntimeService>["settleCloseoutPromptTerminalDelivery"]
-		| undefined;
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		getTaskSessionSummary: findRuntimeSessionSummary,
 		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
@@ -549,28 +542,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					resolveClineTaskSessionLaunchConfig: async () =>
 						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-					onProgrammaticTerminalDeliverySettled: (outcome) => {
-						onProgrammaticTerminalDeliverySettled?.(outcome);
-						if (request.source === "rvf_automatic_closeout")
-							void settleRvfCloseoutPromptTerminalDelivery?.(
-								scope,
-								request,
-								outcome.status === "delivered_and_submit_confirmed",
-							).catch((error) => deps.warn(`收尾终端投递登记尚待对账：${String(error)}`));
-					},
+					onProgrammaticTerminalDeliverySettled,
 					programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
 					programmaticInjectionLedgerTaskId: injectionLedgerTaskId,
-					validateBeforeTerminalWrite:
-						request.source === "rvf_automatic_closeout" || validateBeforeTerminalWrite
-							? async (phase) => {
-									await validateBeforeTerminalWrite?.(phase);
-									if (request.source === "rvf_automatic_closeout") {
-										if (!rvfAutomaticCloseoutPromptDeliveryValidator)
-											throw new Error("自动收尾投递门尚未就绪。");
-										await rvfAutomaticCloseoutPromptDeliveryValidator(scope, request, phase);
-									}
-								}
-							: undefined,
+					validateBeforeTerminalWrite,
 				},
 				scope,
 				request,
@@ -874,7 +849,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
 
-	let pauseAutomaticRvfCloseoutForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	let pauseAutomaticMainSessionHandoverForStoppedTask:
 		| ((workspaceId: string, taskId: string) => Promise<void>)
 		| undefined;
@@ -891,10 +865,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 				});
 			} finally {
-				await Promise.all([
-					pauseAutomaticRvfCloseoutForStoppedTask?.(workspaceId, taskId),
-					pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId),
-				]);
+				await Promise.all([pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId)]);
 			}
 		},
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -916,21 +887,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		runUpdateNow: deps.runUpdateNow,
 		queuedTaskPromptDeliveryDispatcher,
 	});
-
-	const rvfAutomaticCloseoutApi = createRvfAutomaticCloseoutRuntimeService({
-		taskCardActionPerTaskCommandSerializer,
-		getManager: getScopedTerminalManager,
-		runtimeApi,
-		listWorkspaces: async () =>
-			(await listWorkspaceIndexEntries()).map((entry) => ({
-				workspaceId: entry.workspaceId,
-				workspacePath: entry.repoPath,
-			})),
-		warn: deps.warn,
-	});
-	pauseAutomaticRvfCloseoutForStoppedTask = rvfAutomaticCloseoutApi.pauseForExplicitStop;
-	rvfAutomaticCloseoutPromptDeliveryValidator = rvfAutomaticCloseoutApi.validateCloseoutPromptDelivery;
-	settleRvfCloseoutPromptTerminalDelivery = rvfAutomaticCloseoutApi.settleCloseoutPromptTerminalDelivery;
 
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
 		getAcpTaskSessionService: getScopedAcpTaskSessionService,
@@ -1017,7 +973,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			runtimeApi,
 			taskMainSessionHandoverApi,
 			independentTaskCreationApi,
-			rvfAutomaticCloseoutApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActionApi({
 				runtimeApi,
@@ -1420,7 +1375,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		await codexConfigurationSyncService.close();
 		await taskIndexingSupportApi.close();
 		await taskMainSessionHandoverApi.close();
-		await rvfAutomaticCloseoutApi.stop();
 		await promptDraftUsageService.close();
 		await dailyWorkProgressStatisticsService.close();
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
@@ -1502,21 +1456,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskMainSessionHandoverApi.start();
-	rvfAutomaticCloseoutApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
 	promptDraftUsageService.startInitialHistoricalBackfill();
 	dailyWorkProgressStatisticsService.start();
-	taskIndexingSupportApi.startAutomaticBackfill(
-		async () =>
-			(await listWorkspaceIndexEntries()).map((entry) => ({
-				workspaceId: entry.workspaceId,
-				workspacePath: entry.repoPath,
-			})),
-		deps.warn,
-	);
 
 	return {
 		url,

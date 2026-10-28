@@ -1,14 +1,14 @@
 import { resolve } from "node:path";
 import { z } from "zod";
 import { loadTaskConversationHistoryPage } from "../agent-session-history/task-conversation-history-page";
-import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../core/api-contract";
-import { mergeSummaryWithFacets } from "../core/session-activity";
-import type { TaskMainSessionHandoverReportAcceptanceProbe } from "../core/task-main-session-handover-contract";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import {
 	type CodexAppServerRequestPort,
 	readCodexConversationTurns,
-} from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+} from "../codex-native-session-protocol/codex-native-conversation-history";
+import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { mergeSummaryWithFacets } from "../core/session-activity";
+import type { TaskMainSessionHandoverReportAcceptanceProbe } from "../core/task-main-session-handover-contract";
 import { TaskMainSessionHandoverExecutionProhibitedError } from "./codex-main-session-handover-native-fork";
 
 const nativeReportHistoryPageSchema = z.object({

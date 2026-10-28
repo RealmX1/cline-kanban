@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { taskRvfHistoryResponseSchema } from "../../src/core/task-rvf-history-contract";
+import { historicalRvfCloseoutRecordSchema } from "../../src/rvf-task-review-history/historical-rvf-artifact-reader";
 import {
 	createTaskRvfHistoryQueryService,
 	type TaskRvfHistoryContext,
@@ -58,14 +60,8 @@ async function setup() {
 	}
 	const query = createTaskRvfHistoryQueryService({
 		loadTaskContext: async () => context,
-		queryProducer: async (args) => {
-			if (args[1] === "storage-paths")
-				return {
-					schema: "rvf-storage-paths/v1",
-					run_logs_root: join(root, "run-logs"),
-					rvf_home: join(root, "rvf-home"),
-				};
-			const directories = args.flatMap((arg, index) => (arg === "--run-dir" ? [args[index + 1]] : []));
+		readRunLogsRoot: async () => join(root, "run-logs"),
+		readRunEvidence: async (directories) => {
 			inspected.push(...directories);
 			return {
 				schema: "rvf-run-review-evidence/v1",
@@ -80,7 +76,10 @@ async function setup() {
 					handoff_sha256: records[directory].handoffSha256 ?? "a".repeat(64),
 					reviewed_candidate_content_manifest_sha256: "b".repeat(64),
 					reason_code: "fixture_verified",
-					current_candidate_coverage: { status: records[directory].coverage, reason_code: "fixture_coverage" },
+					current_candidate_coverage: {
+						status: records[directory].coverage,
+						reason_code: "historical_records_do_not_attest_current_candidate",
+					},
 				})),
 			};
 		},
@@ -169,9 +168,11 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 				handoffPath: join(fixture.currentDirectory, "artifacts", "handoff.md"),
 			});
 			expect(response.hasVerifiedCompletedRvf).toBe(true);
-			expect(response.currentCandidateReviewCoverage.status).toBe(
-				producerStatus === "completed" ? "not_covered" : "unknown",
-			);
+			expect(response.currentCandidateReviewCoverage).toMatchObject({
+				status: "unknown",
+				reasonCode: "historical_records_do_not_attest_current_candidate",
+				recoveryCondition: "当前候选评审由独立评审流程提供，不从历史记录推定",
+			});
 			expect(response.issues).toEqual([]);
 			expect(await readFile(scopePath)).toEqual(originalScope);
 			expect(JSON.stringify(fixture.source.record)).toBe(originalRecord);
@@ -184,7 +185,7 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(fixture.inspected).toEqual([fixture.currentDirectory]);
 		expect(response.recentRuns).toHaveLength(1);
 		expect(response.recentRuns[0].startedAt).toBe(10);
-		expect(response.currentCandidateReviewCoverage.status).toBe("not_covered");
+		expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
 		expect(response.issues).toEqual([]);
 	});
 	it("归并后的生产方 handoff 摘要冲突不撤销旧接受事实，也不认定当前覆盖", async () => {
@@ -194,7 +195,11 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(fixture.inspected).toEqual([fixture.currentDirectory]);
 		expect(response.recentRuns).toHaveLength(1);
 		expect(response.recentRuns[0].completionEvidenceSource).toBe("kanban_server_accepted_closeout_record");
-		expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
+		expect(response.currentCandidateReviewCoverage).toMatchObject({
+			status: "unknown",
+			reasonCode: "coverage_evidence_incomplete",
+			recoveryCondition: "缺失证据或查询能力恢复后重新查询",
+		});
 		expect(response.issues.some((issue) => issue.reasonCode === "producer_run_identity_invalid")).toBe(true);
 	});
 	it("不同 runId 即使目录名复用也不归并历史收尾绑定", async () => {
@@ -323,7 +328,7 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(response.discoveryStatus).toBe("complete");
 		expect(response.issues).toEqual([]);
 		expect(response.hasVerifiedCompletedRvf).toBe(status === "completed");
-		expect(response.currentCandidateReviewCoverage.status).toBe("not_covered");
+		expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
 	});
 	it.each([false, true])("路径别名在正常与恢复分支均只鉴证一轮（summary 损坏：%s）", async (damaged) => {
 		const fixture = await setup();
@@ -351,7 +356,7 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(response.recentRuns.map((run) => run.runDirectory)).toEqual([directory]);
 		expect(fixture.inspected).toEqual([directory]);
 		expect(response.issues).toEqual([]);
-		expect(response.currentCandidateReviewCoverage.status).toBe("covered");
+		expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
 	});
 	it("迁移存储根后按本轮工件身份发现，仍排除指向父 run 的子日志", async () => {
 		const fixture = await setup();
@@ -418,7 +423,7 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 				sessionId: "frozen-native-session",
 				decisionToken: "frozen-token",
 			});
-			expect(response.currentCandidateReviewCoverage.status).toBe("covered");
+			expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
 			expect(response.issues).toEqual([]);
 		},
 	);
@@ -635,7 +640,7 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 		expect(first.hasVerifiedCompletedRvf).toBe(true);
 		expect(first.mostRecentVerifiedCompletedRun?.runDirectory).toBe(oldRun);
 		expect(first.recentRuns.map((run) => run.runId)).toEqual(["new-running"]);
-		expect(first.currentCandidateReviewCoverage.status).toBe("covered");
+		expect(first.currentCandidateReviewCoverage.status).toBe("unknown");
 		const second = await fixture.query(fixture.scope, { taskId: "task", cursor: first.nextCursor, limit: 1 });
 		expect(second.recentRuns.map((run) => run.runId)).toEqual(["old-completed"]);
 	});
@@ -703,11 +708,12 @@ describe("按 Task 聚合 RVF 历史与当前覆盖", () => {
 	});
 });
 
-it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会被改写为通过", async () => {
+it("实际收尾完成独立展示，嵌套扩展字段原样保留，原协议阻塞与未知覆盖不改写为通过", async () => {
 	const fixture = await setup();
 	const directory = await fixture.addRun("manual-closeout", undefined, "unknown", "unknown");
 	const observation = {
 		schema: "kanban-existing-closeout-goal-completion/v1" as const,
+		additionalHistoricalObservation: { acceptedAtEventTime: true },
 		binding: {
 			workspaceId: fixture.scope.workspaceId,
 			taskId: "task",
@@ -716,6 +722,7 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 			runDirectory: directory,
 			handoffSha256: "a".repeat(64),
 			receiptSha256: "b".repeat(64),
+			additionalHistoricalBinding: "原绑定扩展事实",
 		},
 		verdict: "completed" as const,
 		verifiedStages: [
@@ -725,6 +732,7 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 				source: "historical_manual_execution" as const,
 				evidenceSha256s: [],
 				observedAt: 30,
+				additionalHistoricalStageEvidence: { originalReceipt: "已接受" },
 			},
 			{
 				stage: "base_branch_sync" as const,
@@ -737,6 +745,12 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 		],
 		evidenceReferences: [],
 		verificationGaps: [],
+		externalConsumption: {
+			operationId: "external-op",
+			evidenceSha256: "e".repeat(64),
+			observedAt: 32,
+			additionalHistoricalConsumption: "原外部消费事实",
+		},
 		observedAt: 31,
 		recovery: {
 			fingerprint: "observed",
@@ -745,8 +759,18 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 			nextCapabilityProbeAtMs: 0,
 			discoveryAfterPath: null,
 			discoveryComplete: true,
+			additionalHistoricalRecoveryObservation: "原恢复观察",
 		},
 	};
+	const parsedRecord = historicalRvfCloseoutRecordSchema.parse({
+		workspaceId: fixture.scope.workspaceId,
+		taskId: "task",
+		createdAt: 10,
+		status: "paused",
+		receipt: { session_id: "manual-session" },
+		existingCloseoutGoalCompletionReconciliation: observation,
+	});
+	expect(parsedRecord.existingCloseoutGoalCompletionReconciliation).toEqual(observation);
 	fixture.context.boundRuns.push({
 		runDirectory: directory,
 		runId: "manual-closeout",
@@ -762,7 +786,7 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 			existingCloseoutGoalCompletionReconciliation: observation,
 		},
 	});
-	const response = await fixture.query(fixture.scope, { taskId: "task" });
+	const response = taskRvfHistoryResponseSchema.parse(await fixture.query(fixture.scope, { taskId: "task" }));
 	expect(response.hasVerifiedCompletedRvf).toBeNull();
 	expect(response.currentCandidateReviewCoverage.status).toBe("unknown");
 	const run = response.recentRuns.find((entry) => entry.runId === "manual-closeout");
@@ -770,4 +794,22 @@ it("实际收尾完成独立展示，原协议阻塞与未知 RVF 覆盖不会�
 	expect(run?.landExecutionResult?.outcome).toBe("blocked");
 	expect(run?.baseBranchSyncExecutionResult?.outcome).toBe("blocked");
 	expect(run?.completionStatus).toBe("unknown");
+});
+
+it("旧历史的覆盖记录不推定当前候选资格", async () => {
+	const fixture = await setup();
+	await fixture.addRun("historical-covered");
+	const result = await fixture.query(fixture.scope, { taskId: "task" });
+	expect(result.hasVerifiedCompletedRvf).toBe(true);
+	expect(result.discoveryStatus).toBe("complete");
+	expect(result.issues).toEqual([]);
+	expect(result.currentCandidateReviewCoverage).toMatchObject({
+		status: "unknown",
+		reasonCode: "historical_records_do_not_attest_current_candidate",
+		recoveryCondition: "当前候选评审由独立评审流程提供，不从历史记录推定",
+	});
+	expect(result.recentRuns[0].currentCandidateReviewCoverage).toMatchObject({
+		status: "unknown",
+		reasonCode: "historical_records_do_not_attest_current_candidate",
+	});
 });

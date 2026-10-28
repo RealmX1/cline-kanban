@@ -17,7 +17,7 @@ const nativeFaults = vi.hoisted(() => ({
 
 vi.mock("node:child_process", { spy: true });
 
-vi.mock("../../src/rvf-automatic-closeout/codex-app-server-request-connection", () => ({
+vi.mock("../../src/codex-native-session-protocol/codex-app-server-request-connection", () => ({
 	withCodexAppServerRequestConnection: async (
 		input: { codexConversationStorageHomeDirectoryPath: string },
 		operation: (port: {

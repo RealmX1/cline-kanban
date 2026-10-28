@@ -1,6 +1,6 @@
 import { z } from "zod";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import { buildTerminalNativeConversationIdentityForAsynchronousWriteValidation } from "./terminal-native-conversation-write-target-identity";
 
 type CodexNativeConnectionRetryContinuationReadiness =

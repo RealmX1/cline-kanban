@@ -465,18 +465,6 @@ import {
 	runtimeWorktreeDeleteResponseSchema,
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
-	rvfAutomaticCloseoutExecutionResultReportRequestSchema,
-	rvfAutomaticCloseoutExecutionResultReportResponseSchema,
-	rvfAutomaticCloseoutRunBindingActivationRequestSchema,
-	rvfAutomaticCloseoutRunBindingActivationResponseSchema,
-	rvfAutomaticCloseoutStatusRequestSchema,
-	rvfAutomaticCloseoutStatusResponseSchema,
-	rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema,
-	rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema,
-	rvfReviewStartBoundaryObservationRequestSchema,
-	rvfReviewStartBoundaryObservationResponseSchema,
-	rvfReviewStartBoundaryRequestSchema,
-	rvfReviewStartBoundaryResponseSchema,
 } from "../core/api-contract";
 import {
 	type CodexConfigurationSyncApi,
@@ -541,10 +529,6 @@ import {
 	type SetProjectVisualIdentityRequest,
 	setProjectVisualIdentityRequestSchema,
 } from "../core/project-visual-identity";
-import {
-	rvfCloseoutStageClaimRequestSchema,
-	rvfCloseoutStageClaimResponseSchema,
-} from "../core/rvf-automatic-closeout-recovery-contract";
 import { taskAssistanceModelProviderRoutingSettingsSchema } from "../core/task-assistance-model-provider-routing-contract";
 import {
 	appendTaskCommentRequestSchema,
@@ -662,7 +646,6 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
-import { RvfAutomaticCloseoutExecutionResultDeliveryPendingError } from "../rvf-automatic-closeout/validate-rvf-automatic-closeout-execution-result";
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import {
 	readPersistentAgentPromptImageAttachments,
@@ -717,36 +700,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string },
 		) => Promise<{ record: TaskMainSessionHandoverRecord | null }>;
-	};
-	rvfAutomaticCloseoutApi?: {
-		claimExecutionStage?: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfCloseoutStageClaimRequestSchema>,
-		) => Promise<z.infer<typeof rvfCloseoutStageClaimResponseSchema>>;
-		reconcileLateNativePromptAcceptance?: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema>,
-		) => Promise<z.infer<typeof rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema>>;
-		reportExecutionResult?: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfAutomaticCloseoutExecutionResultReportRequestSchema>,
-		) => Promise<z.infer<typeof rvfAutomaticCloseoutExecutionResultReportResponseSchema>>;
-		observeBoundary?: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfReviewStartBoundaryObservationRequestSchema>,
-		) => Promise<z.infer<typeof rvfReviewStartBoundaryObservationResponseSchema>>;
-		activateAfterRunBinding: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfAutomaticCloseoutRunBindingActivationRequestSchema>,
-		) => Promise<z.infer<typeof rvfAutomaticCloseoutRunBindingActivationResponseSchema>>;
-		capture: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfReviewStartBoundaryRequestSchema>,
-		) => Promise<z.infer<typeof rvfReviewStartBoundaryResponseSchema>>;
-		status: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: z.infer<typeof rvfAutomaticCloseoutStatusRequestSchema>,
-		) => Promise<z.infer<typeof rvfAutomaticCloseoutStatusResponseSchema>>;
 	};
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
@@ -1648,14 +1601,6 @@ export const runtimeAppRouter = t.router({
 				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
 				return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
 			}),
-		scheduleRvfFindingsBackfill: workspaceProcedure.mutation(({ ctx }) => {
-			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.taskIndexingSupportApi.scheduleBackfill(ctx.workspaceScope);
-		}),
-		getRvfFindingsBackfillStatus: workspaceProcedure.query(({ ctx }) => {
-			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.taskIndexingSupportApi.readBackfillStatus(ctx.workspaceScope);
-		}),
 	}),
 	independentTaskCreation: t.router({
 		read: workspaceProcedure
@@ -1779,67 +1724,6 @@ export const runtimeAppRouter = t.router({
 			.input(taskRvfHistoryRequestSchema)
 			.output(taskRvfHistoryResponseSchema)
 			.query(({ ctx, input }) => getTaskRvfHistory(ctx.workspaceScope, input)),
-		observeRvfReviewStartBoundary: workspaceProcedure
-			.input(rvfReviewStartBoundaryObservationRequestSchema)
-			.output(rvfReviewStartBoundaryObservationResponseSchema)
-			.query(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi?.observeBoundary)
-					return { review_start_boundary_pending_reason: "宿主尚未提供实时活动分支观测。" };
-				return ctx.rvfAutomaticCloseoutApi.observeBoundary(ctx.workspaceScope, input);
-			}),
-		captureRvfReviewStartBoundary: workspaceProcedure
-			.input(rvfReviewStartBoundaryRequestSchema)
-			.output(rvfReviewStartBoundaryResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
-				return ctx.rvfAutomaticCloseoutApi.capture(ctx.workspaceScope, input);
-			}),
-		activateRvfAutomaticCloseoutAfterRunBinding: workspaceProcedure
-			.input(rvfAutomaticCloseoutRunBindingActivationRequestSchema)
-			.output(rvfAutomaticCloseoutRunBindingActivationResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
-				return ctx.rvfAutomaticCloseoutApi.activateAfterRunBinding(ctx.workspaceScope, input);
-			}),
-		rvfAutomaticCloseoutStatus: workspaceProcedure
-			.input(rvfAutomaticCloseoutStatusRequestSchema)
-			.output(rvfAutomaticCloseoutStatusResponseSchema)
-			.query(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动 RVF 收尾服务未启用。" });
-				return ctx.rvfAutomaticCloseoutApi.status(ctx.workspaceScope, input);
-			}),
-		reconcileRvfAutomaticCloseoutLateNativePromptAcceptance: workspaceProcedure
-			.input(rvfLateNativeCloseoutPromptAcceptanceRecoveryRequestSchema)
-			.output(rvfLateNativeCloseoutPromptAcceptanceRecoveryResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi?.reconcileLateNativePromptAcceptance)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "迟到原生接受补证服务未启用。" });
-				return ctx.rvfAutomaticCloseoutApi.reconcileLateNativePromptAcceptance(ctx.workspaceScope, input);
-			}),
-		claimRvfAutomaticCloseoutExecutionStage: workspaceProcedure
-			.input(rvfCloseoutStageClaimRequestSchema)
-			.output(rvfCloseoutStageClaimResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi?.claimExecutionStage) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.rvfAutomaticCloseoutApi.claimExecutionStage(ctx.workspaceScope, input);
-			}),
-		reportRvfAutomaticCloseoutExecutionResult: workspaceProcedure
-			.input(rvfAutomaticCloseoutExecutionResultReportRequestSchema)
-			.output(rvfAutomaticCloseoutExecutionResultReportResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.rvfAutomaticCloseoutApi?.reportExecutionResult)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "自动收尾执行结果登记服务未启用。" });
-				try {
-					return await ctx.rvfAutomaticCloseoutApi.reportExecutionResult(ctx.workspaceScope, input);
-				} catch (error) {
-					if (error instanceof RvfAutomaticCloseoutExecutionResultDeliveryPendingError)
-						throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
-					throw error;
-				}
-			}),
 		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
 		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
 			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)

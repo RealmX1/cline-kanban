@@ -6,6 +6,7 @@ import { spawn as spawnPty } from "node-pty";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import { runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
 import { createCodexNativePromptDeliveryJournal } from "../../src/core/codex-native-prompt-delivery-journal";
 import {
@@ -14,7 +15,6 @@ import {
 	readTaskMessageInjectionLedger,
 	withTaskMessageInjectionLedgerLock,
 } from "../../src/core/task-message-injection-ledger";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
 import { deliverCodexNativePromptWithoutChangingComposer } from "../../src/terminal/codex-native-prompt-delivery";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../src/terminal/session-manager";
 import {
@@ -202,7 +202,7 @@ it.skipIf(process.platform === "win32").each(["human_draft_edit", "question", "p
 	},
 );
 
-it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
+it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
 	"真实 Codex 注入保留草稿、Ctrl+G 与 Plan 模式，提问和审批仍由原 TUI 接收",
 	async (test) => {
 		vi.stubEnv("TMPDIR", "/tmp");
@@ -352,7 +352,7 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.
 		});
 		const runtimeSessionIncarnationId = randomUUID();
 		const launch = await prepareCodexNativeSessionControlHostLaunch({
-			binary: process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+			binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 			arguments: [
 				"--dangerously-bypass-hook-trust",
 				"--no-alt-screen",

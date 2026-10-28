@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import {
 	type RuntimeAgentNativeConversationSessionIdentity,
 	type RuntimeTaskSessionSummary,
@@ -14,7 +15,6 @@ import {
 	runtimeTaskConversationSessionMetadataSchema,
 	runtimeTaskTerminalAgentModelOverrideSettingsSchema,
 } from "../core/api-contract";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { StartTaskSessionRequest } from "./session-manager";
 

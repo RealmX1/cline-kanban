@@ -40,7 +40,7 @@ tracked 内容证据使用 `git diff --binary --full-index HEAD --` 的完整 OI
 Codex 后台终端等待有独立的真实原生集成用例：模型使用隔离的本地 HTTP fixture，不调用外部模型；真实 Codex 创建后台 `sleep` 命令并连续执行 `write_stdin`，宿主判定时间推进六分钟验证静默门，再验证同回合误判纠正。通过以下入口启用，证据目录使用持久路径：
 
 ```sh
-KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY=/absolute/path/to/codex \
+KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \
 KANBAN_CODEX_BACKGROUND_WAIT_EVIDENCE_DIRECTORY=/absolute/persistent/background-wait-evidence \
 npm run test:guarded -- --project runtime-integration test/integration/codex-native-background-terminal-wait.integration.test.ts
 ```
@@ -103,42 +103,14 @@ npm run test:guarded -- --project runtime-integration test/integration/codex-mob
 
 ## 命令
 
-### RVF 独立主会话的打包态原生投递联调
+### 旧 RVF 历史与通用会话回归
 
-`rvf-decision-point-target-conversation-session.integration.test.ts` 使用隔离 HOME、Git fixture、真实 runtime 与真实 Codex TUI，模型只连接本地响应桩，不访问账号或调用付费模型。真实 RVF Stop 经打包 CLI 投递到独立主会话，UPS 使用指定 RVF 仓库的真实实现，验证原生 user message、正文唯一注入、真实终态和幂等重试。默认跳过，完整运行需显式设置：
+`task-rvf-history-through-cli-and-api.integration.test.ts` 用隔离 HOME 和 Git fixture 验证旧完成、失败、未完成、缺损及离线重建，只读 API/CLI 不调用旧生产方。通用投递、人工 rewind、原生 fork、配置同步与迁移继续使用各自用例。
 
-```sh
-KANBAN_RVF_SESSION_DELIVERY_PACKAGED_CLI_PATH=/absolute/task-build/dist/cli.js \
-KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY=/absolute/path/to/codex \
-KANBAN_RVF_BOUNDARY_CONSUMER_REPOSITORY=/absolute/path/to/review-validate-fix \
-KANBAN_RVF_SESSION_DELIVERY_EVIDENCE_DIRECTORY=/absolute/persistent/rvf-delivery-evidence \
-npm run test:guarded -- --project runtime-integration test/integration/rvf-decision-point-target-conversation-session.integration.test.ts
+`retired-rvf-history-packaged-runtime-restart.integration.test.ts` 验证真实打包运行时的两次冷启动：原始历史、队列与账本逐字保留，不启动 Agent、不恢复旧执行。先按 `AGENTS.md` 隔离两处构建输出，再指定实际构建的 CLI：
+
+```bash
+KANBAN_RETIRED_RVF_HISTORY_PACKAGED_RUNTIME_CLI_PATH=/持久验证目录/dist/cli.js \
+  npm run test:guarded -- --project runtime-integration \
+  test/integration/retired-rvf-history-packaged-runtime-restart.integration.test.ts
 ```
-
-CLI 构建目录不能指向在线实例的共享 `dist` 软链接。测试结束或失败时都会回收自身启动的子进程，并把指定目录中的证据持久保留。
-
-额外设置 `KANBAN_RVF_SESSION_DELIVERY_INJECT_PRE_SUBMISSION_QUERY_TIMEOUT=1` 可在同一隔离链路中丢弃一次二次完整回合查询响应，验证真实超时后的恢复、唯一原生提交以及先于提交持久化的边界；不向常驻实例注入故障。
-
-- `npm run test:policy`：只运行 Git 测试安全策略。
-- `npm run test:guarded -- <vitest args>`：在 policy 与宿主仓 canary 下运行指定 Vitest 参数。
-- `npm run test:precommit`：运行 `precommit-safe`。
-- `npm run test:integration`：运行 `runtime-integration`。
-- `npm test`：依次运行两个 projects。
-- `npm run test:watch`：在相同保护下启动 watch；退出时执行最终 canary 复查。
-
-pre-commit 保持 Biome → typecheck → tests 的顺序；测试子进程的 Git 环境清洗不会改变 hook 随后的 Git 环境。
-
-### 跨项目卡片动作真实浏览器检查
-
-`cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts` 按需启用：真实 runtime、Vite、Chromium、PTY 与 worktree 都由隔离 fixture 管理；本地 Claude 桩不请求模型。覆盖阶段 3/4 的卡片动作与三种跨项目建卡入口，以及阶段 5 的本体卡、置顶分身、rail 副本截图。普通套件跳过此用例，不要求安装 Chromium。
-
-先确保 `web-ui` 的 Playwright Chromium 已安装。将下面两个路径分别换成该浏览器缓存和持久证据目录；显式浏览器缓存路径可避免 guarded runner 覆写 HOME 后找不到浏览器：
-
-```sh
-PLAYWRIGHT_BROWSERS_PATH=/absolute/path/to/playwright-browser-cache \
-KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK=1 \
-KANBAN_ISOLATED_REAL_BROWSER_CHECK_EVIDENCE_OUTPUT_DIRECTORY=/absolute/persistent/browser-check-evidence \
-npm run test:guarded -- --project runtime-integration test/integration/cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts
-```
-
-证据目录包含结果 JSON、截图、fixture 请求与隔离进程日志。测试自行分配端口并拒绝 3484，只收口自己派生的进程；CLI、runtime 和 Vite 均登记到现有子进程清理设施，异常路径也会回收。

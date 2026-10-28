@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
 import { createNativeAgentConversationActivityObserver } from "../../src/server/native-agent-conversation-activity-observer";
 import type * as AgentSessionAdapters from "../../src/terminal/agent-session-adapters";
 import type { AgentAdapterLaunchInput, PreparedAgentLaunch } from "../../src/terminal/agent-session-adapters";
@@ -26,7 +26,7 @@ vi.mock("../../src/terminal/agent-session-adapters", async (importOriginal) => (
 	}),
 }));
 
-describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
+describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
 	"普通 Codex rewind 的原生状态校正（无 RVF、无外部模型）",
 	{ timeout: 180_000 },
 	() => {
@@ -180,7 +180,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 						},
 					});
 				attachTerminal(taskId);
-				const binary = process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex";
+				const binary = process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex";
 				const start = (resumeFromTrash: boolean, nativeId?: string) =>
 					manager.startTaskSession({
 						taskId,

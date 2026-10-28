@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CodexNativeConversationTurn } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
+import { NativeIndependentUserTurnDeliveryError } from "../../../src/codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import {
 	type QueuedTaskPromptDeliveryEntry,
 	queuedTaskPromptDeliveryEntrySchema,
@@ -11,19 +13,12 @@ import {
 } from "../../../src/core/api-contract";
 import { createCodexNativePromptDeliveryJournal } from "../../../src/core/codex-native-prompt-delivery-journal";
 import {
-	applyCodexAutomaticCompactionPhaseObservation,
-	createCodexRvfCloseoutCompactionAwareConfirmation,
-	resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs,
-} from "../../../src/core/codex-rvf-closeout-compaction-aware-confirmation";
-import {
 	createPendingTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
 	recordTaskMessageTerminalDeliveryOutcome,
 	withTaskMessageInjectionLedgerLock,
 } from "../../../src/core/task-message-injection-ledger";
-import type { CodexNativeConversationTurn } from "../../../src/rvf-automatic-closeout/codex-native-conversation-prefix";
-import { NativeIndependentUserTurnDeliveryError } from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { createNativeIndependentUserTurnBeforeSubmissionValidator } from "../../../src/server/native-independent-user-turn-before-submission-validator";
 import {
 	mutateWorkspaceQueuedTaskPromptDeliveries,
@@ -41,7 +36,7 @@ const mocks = vi.hoisted(() => ({
 	isolatedRuntimeHomePath: "",
 	queryRecoveryClockEpochMs: 0,
 }));
-vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection", () => ({
+vi.mock("../../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection", () => ({
 	withRunningCodexAppServerControlSocketConnection: mocks.connect,
 }));
 vi.mock("../../../src/state/workspace-state", () => ({
@@ -390,31 +385,11 @@ describe("Codex 原生投递保留 composer", () => {
 		expect(input.onRequestAttempted).not.toHaveBeenCalled();
 	});
 	it.each([117_160, 129_828, 120_347])(
-		"同一正文在 %i ms 自动压缩后确认，原生请求只发送一次",
+		"同一正文在 %i ms 延迟后确认，有界截止内原生请求只发送一次",
 		async (compactionDurationMs) => {
 			let clock = 0;
 			let attempted = false;
-			let state = createCodexRvfCloseoutCompactionAwareConfirmation({
-				binding: {
-					workspaceId: "workspace-1",
-					taskId: "task-1",
-					conversationSessionId: "conversation-1",
-					decisionToken: "token",
-					runId: "run",
-					handoffSha256: "a".repeat(64),
-					idempotencyKey: "key",
-					promptSha256: "b".repeat(64),
-					nativeSessionId: "thread-1",
-					runtimeSessionIncarnationId: INCARNATION_ID,
-					controlHostSocketPath: "/isolated/control.sock",
-					terminalSessionSpawnedAtEpochMs: 0,
-				},
-				firstSubmissionAtEpochMs: 0,
-				submissionTransport: "codex_native_request",
-				clientUserMessageId: CLIENT_MESSAGE_ID,
-				predecessorNativeTurnId: "prior-turn",
-				lastHumanInputAtSubmission: null,
-			});
+			const confirmationDeadlineAtEpochMs = compactionDurationMs + 15_000;
 			mocks.request.mockImplementation(async (method: string) => {
 				if (method === "thread/loaded/list") return { data: ["thread-1"], nextCursor: null };
 				if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace" } };
@@ -460,17 +435,9 @@ describe("Codex 原生投递保留 composer", () => {
 					recordAcceptance: vi.fn(async () => {}),
 				},
 				onNativeTurnStarted: vi.fn(async () => {}),
-				confirmationDeadlineAtEpochMs: async () => resolveCodexRvfCloseoutConfirmationDeadlineAtEpochMs(state),
+				confirmationDeadlineAtEpochMs: async () => confirmationDeadlineAtEpochMs,
 				waitMilliseconds: async (milliseconds) => {
 					clock += milliseconds;
-					if (clock === 3000 || clock === 3000 + Math.ceil(compactionDurationMs / 250) * 250)
-						state = applyCodexAutomaticCompactionPhaseObservation(state, {
-							phase: clock === 3000 ? "started" : "completed",
-							nativeTurnId: "native-turn-2",
-							capturedAtEpochMs: clock,
-							receivedAtEpochMs: clock,
-							hookDeliveryId: String(clock),
-						});
 				},
 			});
 			expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("confirmed");

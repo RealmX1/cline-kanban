@@ -102,14 +102,14 @@ You can still use `KANBAN_RUNTIME_PORT` if needed, but `--port` is preferred for
 
 ## Long-lived tmux launch
 
-When launching a reusable local Kanban server for automation or RVF, run it in tmux session `cline-kanban` or `cline-kanban-<port>`. For the default port:
+为自动化验证启动可复用的本地 Kanban server 时，使用 tmux 会话 `cline-kanban` 或 `cline-kanban-<port>`。默认端口示例：
 
 ```bash
 tmux new-session -d -s cline-kanban-3484 -c "$PWD" \
   'exec kanban --no-open --port 3484'
 ```
 
-RVF uses the tmux session name, not the server process cwd, to decide whether an existing listener is a Cline Kanban runtime it may reuse. A listener in an unrelated tmux session, a legacy `vibe-kanban` session, or no tmux session should be treated as foreign even if the command line contains `kanban`.
+自动化脚本复用监听器前应核对本 workflow 的 tmux 会话归属，不能只看 server cwd 或命令行中的 `kanban`。不相关会话、旧 `vibe-kanban` 会话及无归属证据的监听器按外部实例处理。
 
 ## Dogfooding with two Kanban instances
 

@@ -632,3 +632,17 @@ describe("ACP 提交只在可靠协议活动后确认接受", () => {
 		expect(service.getSummary(TASK_ID)?.agentConversationPromptSubmissionAcceptance?.status).not.toBe("accepted");
 	});
 });
+
+it("ACP 实际发送正文只带一份任务角色与一份需求", async () => {
+	const { service, connection, turn } = await startAwaitingUserSession({ initialPromptText: "ACP需求唯一哨兵" });
+	try {
+		await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledOnce());
+		const sent = JSON.stringify(vi.mocked(connection.prompt).mock.calls[0]);
+		expect(sent.split("ACP需求唯一哨兵")).toHaveLength(2);
+		expect(sent.split("# Kanban Task Workspace")).toHaveLength(2);
+		expect(sent).not.toContain("rvf-land");
+	} finally {
+		turn.resolve({ stopReason: "end_turn" });
+		service.disposeAllTaskSessions();
+	}
+});

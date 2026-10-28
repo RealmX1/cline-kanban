@@ -11,16 +11,12 @@
 
 ---
 
-RVF entry: Post-Deploy Verification authoring
+## 部署后验证与工作流边界
 
-RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
-
-- 查询本 Task 近期 RVF、完整完成事实与当前候选覆盖，使用 `kanban task rvf-history`（默认环境身份；显式指定时用 main checkout 的 `--project-path`）。结果语义与生产方契约见 `docs/task-rvf-history-query.md`；证据不足是 `unknown`，不能据此断言没有 RVF。
-
-- kanban 任务收尾 / 宣告完成 / 进入 review 前，**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：把只有部署后真实实例才验得到的断言注册成验证；fix 改变了可观察行为则以 **reconcile 模式**幂等重注册，不堆叠重复。
-- `RVF-ENTRY-SKILL:` 是 repo 通用的机器可发现入口。
-- 默认自动流程为「计划 → 实现 → 固定候选 RVF → rvf-land → base-branch-sync」：仅在最终 `base-branch-sync` 或未来 GitHub PR 合并阶段吸收 base 并解决冲突；开工、计划草拟后、实现完成后与 RVF 准备阶段均不自动吸收 local `main`。计划与实现阶段可只读查看 base 差异、记录交互风险。
-- RVF 冻结本轮候选、HEAD 与比较基线 OID；local `main` 前移不重定向本轮比较 OID。真实 HEAD 或候选变化时拒绝复用旧快照，经既有恢复入口建立新候选和开审分界并保留原轮次记录。用户显式 Stop、不同步、不得推送或部署等限制及现有权限门禁继续有效。
+- 任务实现收尾 / 宣告完成 / 进入 review 前，必须调用 `cline-kanban-post-deploy-verification-authoring`，只注册真实实例才能验证的断言；行为变化时幂等 reconcile。
+- Kanban 仅提供通用任务、会话、等待与重启恢复；不编排 RVF 分界、自动 rewind、Land 再投递或阶段资格。人工 rewind、checkpoint、原生 fork 与前缀核验继续保留。
+- 旧 RVF 用 `kanban task rvf-history` 只读查询；历史完成、失败和投递事实独立展示，缺证及当前候选覆盖为 unknown。见 `docs/task-rvf-history-query.md`。
+- 审阅、普通 Git 提交与 base 同步按本任务真实授权和各自约定执行。开工、计划与实现阶段不自动吸收 local main；Stop、禁止提交、同步、推送或部署的明确限制继续有效。
 
 ---
 
@@ -59,10 +55,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
 - **输入接受不能受工具历史预算阻塞**：Codex 用户消息单独记原生位置水位；历史补证只修正标记，不发布新输入或重开回合。持久扫描、按键候选和退出/Rewind 边界见 `docs/runbooks/prompt-submission-acceptance-reconciliation.md`。
-- **RVF 收尾的阶段等待与迟到补证分开**：可信自动压缩可有界暂停普通确认计时，仍须精确正文证明接受；旧失败只追加补证，不重发或覆盖历史。首次策略见 `docs/runbooks/codex-rvf-closeout-compaction-aware-confirmation.md`，恢复入口及历史样本见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
-- **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/rvf-native-independent-user-turn-before-submission-query-recovery.md`。
-- **RVF 收尾恢复区分历史接受、执行资格与真实结果**：保留原失败账本，以事件时证据自动补证，或独立核验规范执行结果；机器缺证走有界恢复和受控续验，Stop 与身份门禁不放宽。`task_started` 或压缩活动不能代替接受证据。恢复入口、首次超时的保留边界及案例见 `docs/runbooks/rvf-late-native-closeout-prompt-acceptance-recovery.md`。
-- **实际收尾已完成或原 run 已被备用路线消费时，旧路线停止调度**：独立完成观察不改写原协议拒绝或审查覆盖；旧未分类 blocked 只在后台补证，不生成检查消息唤醒 Agent。完成事实、取消重试与发送门禁见 `docs/runbooks/rvf-existing-closeout-goal-completion-reconciliation.md`。
+- **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
@@ -109,7 +102,6 @@ web-ui：
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
-| `docs/rvf-automatic-rewind-and-closeout.md` | Codex RVF 开审分界、默认自动恢复与收尾投递、跨仓完成凭据及重启边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
 | `docs/task-initial-prompt-structured-markup.md` | 任务起草的来源与阶段标签、实际默认设置选择、共享指导注入及历史兼容边界 |

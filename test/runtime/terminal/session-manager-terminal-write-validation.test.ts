@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
-} from "../../../src/rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
+} from "../../../src/codex-native-session-protocol/native-independent-user-turn-delivery-gate";
+import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
 

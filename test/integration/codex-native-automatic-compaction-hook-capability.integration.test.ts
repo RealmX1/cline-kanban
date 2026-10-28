@@ -3,7 +3,7 @@ import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import {
 	configureCodexHooks,
 	supportsVerifiedCodexAutomaticCompactionPhaseHooks,
@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 describe("真实 Codex 自动压缩开始/结束能力", { timeout: 100_000 }, () => {
-	it.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
+	it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
 		"隔离 HOME 和模型桩中，开始 hook 在压缩请求未完成时已经提供相同 session/turn 绑定",
 		async () => {
 			vi.stubEnv("TMPDIR", "/tmp");
@@ -39,7 +39,7 @@ describe("真实 Codex 自动压缩开始/结束能力", { timeout: 100_000 }, (
 			);
 			expect(
 				await supportsVerifiedCodexAutomaticCompactionPhaseHooks(
-					process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					fixture.createIsolatedChildProcessEnvironment(),
 				),
 			).toBe(true);
@@ -63,7 +63,7 @@ describe("真实 Codex 自动压缩开始/结束能力", { timeout: 100_000 }, (
 						resolve("test/integration/fixtures/codex-native-automatic-compaction-hook-probe.py"),
 						fixture.fixtureRootDirectoryPath,
 						repository.repositoryPath,
-						process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+						process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					],
 					{ env: fixture.createIsolatedChildProcessEnvironment(), stdio: ["ignore", "pipe", "pipe"] },
 				),

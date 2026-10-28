@@ -131,6 +131,64 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		);
 	}
 
+	it("旧自动消息只作为历史显示，不能重排或重新投递", () => {
+		const controller = createControllerDouble([
+			projection("old-rvf", {
+				deliveryState: "queued",
+				isReadOnlyHistoricalDelivery: true,
+				programmaticInjectionSource: "rvf_automatic_closeout",
+			}),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("历史：等待投递");
+		expect(buttonsWithLabel(container, "重新排队")).toHaveLength(0);
+		expect(buttonsWithLabel(container, "Move queued prompt up")).toHaveLength(0);
+	});
+
+	it("未落定的历史自动消息显示原到期时间，已落定历史仍显示落定时间", () => {
+		const expiresAt = Date.parse("2026-10-24T15:30:00Z");
+		const settledAt = Date.parse("2026-10-24T16:00:00Z");
+		for (const deliveryState of ["queued", "claimed_for_dispatch", "handed_to_transport"] as const) {
+			render(
+				createControllerDouble([
+					projection(`historical-${deliveryState}`, {
+						deliveryState,
+						isReadOnlyHistoricalDelivery: true,
+						programmaticInjectionSource: "rvf_automatic_closeout",
+						expiresAt,
+						settledAt: null,
+					}),
+				]),
+			);
+			const row = container.querySelector(`[data-queued-prompt-entry-id="historical-${deliveryState}"]`);
+			expect(row?.textContent).toContain("历史：");
+			expect(row?.textContent).toContain("到期时间：");
+			expect(row?.textContent).not.toContain("时间未知");
+			expect(
+				Array.from(row?.querySelectorAll("time") ?? []).some(
+					(element) => element.getAttribute("dateTime") === new Date(expiresAt).toISOString(),
+				),
+			).toBe(true);
+		}
+		render(
+			createControllerDouble([
+				projection("historical-delivered", {
+					deliveryState: "settled_delivered",
+					isReadOnlyHistoricalDelivery: true,
+					expiresAt,
+					settledAt,
+				}),
+			]),
+		);
+		const delivered = container.querySelector('[data-queued-prompt-entry-id="historical-delivered"]');
+		expect(delivered?.textContent).toContain("送达时间：");
+		expect(
+			Array.from(delivered?.querySelectorAll("time") ?? []).some(
+				(element) => element.getAttribute("dateTime") === new Date(settledAt).toISOString(),
+			),
+		).toBe(true);
+	});
+
 	it("时间不显示年份，尝试次数置于时间信息之外", () => {
 		const enqueuedAt = Date.parse("2026-10-24T12:00:00Z");
 		render(

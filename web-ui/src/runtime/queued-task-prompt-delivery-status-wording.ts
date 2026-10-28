@@ -31,8 +31,15 @@ export function describeQueuedTaskPromptDeliveryStatusChip(
 		RuntimeQueuedTaskPromptDeliveryProjection,
 		"deliveryState" | "awaitsHumanReconfirmationAfterRuntimeRestart"
 	> &
-		Partial<Pick<RuntimeQueuedTaskPromptDeliveryProjection, "managedDelivery" | "lastDeliveryFailureNote">>,
+		Partial<
+			Pick<
+				RuntimeQueuedTaskPromptDeliveryProjection,
+				"managedDelivery" | "lastDeliveryFailureNote" | "isReadOnlyHistoricalDelivery"
+			>
+		>,
 ): QueuedTaskPromptDeliveryStatusChip {
+	if (projection.isReadOnlyHistoricalDelivery)
+		return { label: `历史：${STATUS_CHIP_BY_DELIVERY_STATE[projection.deliveryState].label}`, tone: "muted" };
 	if (projection.deliveryState === "queued" && projection.awaitsHumanReconfirmationAfterRuntimeRestart) {
 		return { label: "重启后待确认", tone: "warning" };
 	}
@@ -51,9 +58,12 @@ export function describeQueuedTaskPromptDeliveryStatusChip(
 }
 
 export function isTaskPromptDeliveryWaitingForAgentTurn(
-	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "managedDelivery">,
+	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "managedDelivery" | "isReadOnlyHistoricalDelivery">,
 ): boolean {
-	return projection.managedDelivery == null || projection.managedDelivery.deliveryStrategy === "after_agent_turn";
+	return (
+		!projection.isReadOnlyHistoricalDelivery &&
+		(projection.managedDelivery == null || projection.managedDelivery.deliveryStrategy === "after_agent_turn")
+	);
 }
 
 export function describeTaskPromptDeliveryMessageType(projection: RuntimeQueuedTaskPromptDeliveryProjection): string {
@@ -98,15 +108,19 @@ export function describeQueuedTaskPromptDispatchBlockReason(
 
 /** 已交给 transport 的条目不能再撤回一个已经粘进框里的字节——取消按钮要如实说出来。 */
 export function isQueuedTaskPromptDeliveryInFlight(
-	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "deliveryState">,
+	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "deliveryState" | "isReadOnlyHistoricalDelivery">,
 ): boolean {
-	return projection.deliveryState === "claimed_for_dispatch" || projection.deliveryState === "handed_to_transport";
+	return (
+		!projection.isReadOnlyHistoricalDelivery &&
+		(projection.deliveryState === "claimed_for_dispatch" || projection.deliveryState === "handed_to_transport")
+	);
 }
 
 export function isQueuedTaskPromptDeliveryTerminal(
-	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "deliveryState">,
+	projection: Pick<RuntimeQueuedTaskPromptDeliveryProjection, "deliveryState" | "isReadOnlyHistoricalDelivery">,
 ): boolean {
 	return (
+		projection.isReadOnlyHistoricalDelivery === true ||
 		projection.deliveryState === "settled_delivered" ||
 		projection.deliveryState === "settled_failed" ||
 		projection.deliveryState === "cancelled" ||
@@ -130,6 +144,7 @@ export function summarizeQueuedTaskPromptDeliveryCountIndicator(
 	let hasFailedEntries = false;
 	let hasEntriesAwaitingReconfirmationAfterRestart = false;
 	for (const projection of projections) {
+		if (projection.isReadOnlyHistoricalDelivery) continue;
 		if (isTaskPromptDeliveryWaitingForAgentTurn(projection) && !isQueuedTaskPromptDeliveryTerminal(projection)) {
 			pendingCount += 1;
 		}

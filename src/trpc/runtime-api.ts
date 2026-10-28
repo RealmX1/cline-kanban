@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
+import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
 // Coordinates the runtime-side TRPC handlers used by the browser.
@@ -2955,6 +2956,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 搬出去是因为排队投递 dispatcher 也要用同一条出口，而它由 turn 结束边沿驱动、手上没有请求，
 		// 拿不到这个每请求新建的 runtimeApi 闭包。
 		sendTaskChatMessage: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			if (isRetiredRvfAutomaticMessageSource(input.source))
+				return {
+					ok: false,
+					summary: null,
+					error: "旧 RVF 自动投递已退役，仅保留历史读取。",
+					terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+				};
 			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 			const addressedCard = findWorkspaceBoardCard(board, input.taskId);
 			const addressedTaskId = input.taskId;

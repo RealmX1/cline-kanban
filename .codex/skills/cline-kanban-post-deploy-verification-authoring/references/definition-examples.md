@@ -6,7 +6,7 @@
 
 ```jsonc
 {
-  // 可选。缺省则 register 分配 uuid；提供则用于 rvf-reopen 幂等重注册（按 verificationId upsert 替换）。
+  // 可选。缺省则 register 分配 uuid；提供则用于 后续修复幂等重注册（按 verificationId upsert 替换）。
   "verificationId": "<uuid, 可选>",
   // 必填。"automated_script" | "guided_manual"
   "kind": "automated_script",

@@ -2362,6 +2362,7 @@ const droidAdapter: AgentSessionAdapter = {
 			}
 		}
 
+		let kanbanGuidanceIncludedInSystemPrompt = false;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 		if (
 			appendedSystemPrompt &&
@@ -2369,9 +2370,14 @@ const droidAdapter: AgentSessionAdapter = {
 			!hasCliOption(args, "--system-prompt")
 		) {
 			args.push("--append-system-prompt", appendedSystemPrompt);
+			kanbanGuidanceIncludedInSystemPrompt = true;
 		}
 
-		const withPromptLaunch = withPrompt(args, prependTaskSessionGuidanceToPrompt(input), "append");
+		const withPromptLaunch = withPrompt(
+			args,
+			kanbanGuidanceIncludedInSystemPrompt ? input.prompt : prependTaskSessionGuidanceToPrompt(input),
+			"append",
+		);
 		return {
 			...withPromptLaunch,
 			env: {

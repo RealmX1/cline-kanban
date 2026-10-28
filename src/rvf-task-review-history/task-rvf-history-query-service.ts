@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
-import type { RvfAutomaticCloseoutRecord } from "../core/rvf-automatic-closeout-contract";
 import {
 	type TaskRvfHistoryIssue,
 	type TaskRvfHistoryRequest,
@@ -13,21 +10,18 @@ import {
 	taskRvfHistoryRequestSchema,
 	taskRvfHistoryResponseSchema,
 } from "../core/task-rvf-history-contract";
-import {
-	getRvfAutomaticCloseoutStorePath,
-	readRvfAutomaticCloseoutRecords,
-} from "../rvf-automatic-closeout/rvf-automatic-closeout-store";
 import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
 import type { RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
+import {
+	type HistoricalRvfCloseoutRecord,
+	readHistoricalRvfCloseoutRecords,
+	readHistoricalRvfRunEvidence,
+	resolveHistoricalRvfRunLogsRoot,
+} from "./historical-rvf-artifact-reader";
 
 const QUERY_BUDGET_MS = 20_000;
-const producerStoragePathsSchema = z.object({
-	schema: z.literal("rvf-storage-paths/v1"),
-	run_logs_root: z.string(),
-	rvf_home: z.string(),
-});
-const producerRunEvidenceSchema = z.object({
+const historicalRunEvidenceSchema = z.object({
 	run_id: z.string().nullish(),
 	run_directory: z.string(),
 	repository_path: z.string().nullish(),
@@ -47,6 +41,7 @@ const producerRunEvidenceSchema = z.object({
 		.string()
 		.regex(/^[a-f0-9]{64}$/u)
 		.nullish(),
+	historical_run_summary: z.record(z.string(), z.unknown()).optional(),
 	reason_code: z.string(),
 	reason: z.string().nullish(),
 	recovery_condition: z.string().nullish(),
@@ -61,7 +56,7 @@ const producerRunEvidenceSchema = z.object({
 		})
 		.optional(),
 });
-const producerInspectionResponseSchema = z.object({
+const historicalRunEvidenceCollectionSchema = z.object({
 	schema: z.literal("rvf-run-review-evidence/v1"),
 	runs: z.array(z.unknown()),
 });
@@ -83,7 +78,7 @@ interface BoundTaskRvfRun {
 	runId: string | null;
 	decisionToken: string | null;
 	record?: Pick<
-		RvfAutomaticCloseoutRecord,
+		HistoricalRvfCloseoutRecord,
 		| "createdAt"
 		| "status"
 		| "handoffPath"
@@ -91,10 +86,9 @@ interface BoundTaskRvfRun {
 		| "landExecutionResult"
 		| "baseBranchSyncExecutionResult"
 		| "existingCloseoutGoalCompletionReconciliation"
-	> & {
-		receipt: Pick<RvfAutomaticCloseoutRecord["receipt"], "session_id"> &
-			Partial<Pick<RvfAutomaticCloseoutRecord["receipt"], "worktree" | "kanban_task_id" | "decision_token">>;
-	};
+		| "receipt"
+	> &
+		Record<string, unknown>;
 }
 interface DiscoveredTaskRvfRun {
 	runId: string | null;
@@ -118,12 +112,13 @@ export interface TaskRvfHistoryContext {
 }
 interface TaskRvfHistoryQueryDependencies {
 	loadTaskContext: (scope: RuntimeTrpcWorkspaceScope, taskId: string) => Promise<TaskRvfHistoryContext>;
-	queryProducer: (arguments_: string[], timeoutMs: number) => Promise<unknown>;
+	readRunLogsRoot: () => string | Promise<string>;
+	readRunEvidence: (directories: string[]) => Promise<unknown>;
 	budgetMs: number;
 }
 
 function evidenceIssue(reasonCode: string, reason: string): TaskRvfHistoryIssue {
-	return { reasonCode, reason, recoveryCondition: "相关存储、生产方接口或工件恢复且稳定后重新查询；无需重新发起 RVF" };
+	return { reasonCode, reason, recoveryCondition: "相关历史存储或工件恢复且稳定后重新查询；无需重新发起 RVF" };
 }
 
 async function readRegularJson(path: string): Promise<unknown> {
@@ -394,9 +389,17 @@ async function loadTaskHistoryContext(
 		worktreeMode: card.worktreeMode,
 	});
 	const issues: TaskRvfHistoryIssue[] = [];
-	let records: RvfAutomaticCloseoutRecord[] = [];
+	let records: HistoricalRvfCloseoutRecord[] = [];
 	try {
-		records = (await readRvfAutomaticCloseoutRecords(getRvfAutomaticCloseoutStorePath(scope.workspaceId))).filter(
+		const historical = await readHistoricalRvfCloseoutRecords(scope.workspaceId);
+		if (historical.invalidRecordCount)
+			issues.push(
+				evidenceIssue(
+					"closeout_record_invalid",
+					`有 ${historical.invalidRecordCount} 条历史记录缺损；其余记录继续读取。`,
+				),
+			);
+		records = historical.records.filter(
 			(record) =>
 				record.workspaceId === scope.workspaceId &&
 				record.taskId === taskId &&
@@ -405,7 +408,10 @@ async function loadTaskHistoryContext(
 	} catch {
 		issues.push(evidenceIssue("closeout_records_unavailable", "无法完整读取自动收尾记录；普通 run 发现仍继续。"));
 	}
-	const paths = new Set([resolve(worktree.path), ...records.map((record) => resolve(record.receipt.worktree))]);
+	const paths = new Set([
+		resolve(worktree.path),
+		...records.flatMap((record) => (record.receipt.worktree ? [resolve(record.receipt.worktree)] : [])),
+	]);
 	for (const [sessionKey, summary] of Object.entries(state.sessions)) {
 		if (
 			(sessionKey === taskId || summary.taskConversationSessionMetadata?.workspaceTaskId === taskId) &&
@@ -423,8 +429,8 @@ async function loadTaskHistoryContext(
 				? [
 						{
 							runDirectory: record.runDirectory,
-							runId: record.runId,
-							decisionToken: record.receipt.decision_token,
+							runId: record.runId ?? null,
+							decisionToken: record.receipt.decision_token ?? null,
 							record,
 						},
 					]
@@ -434,38 +440,11 @@ async function loadTaskHistoryContext(
 	};
 }
 
-export async function queryRvfReadOnlyInspectionProducer(arguments_: string[], timeoutMs: number): Promise<unknown> {
-	if (timeoutMs <= 0) throw new Error("RVF 查询预算已耗尽。");
-	// RVF_HOME 是数据根；生产方部署的 shim 固定位于用户 home 下。
-	const executable =
-		process.env.KANBAN_RVF_INSPECTION_EXECUTABLE_PATH?.trim() || join(homedir(), ".rvf", "bin", "rvf");
-	return new Promise((accept, reject) => {
-		execFile(
-			executable,
-			arguments_,
-			{
-				timeout: timeoutMs,
-				killSignal: "SIGKILL",
-				maxBuffer: 16 * 1024 * 1024,
-				windowsHide: true,
-				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", PYTHONDONTWRITEBYTECODE: "1" },
-			},
-			(error, stdout) => {
-				if (error) return reject(new Error(`RVF 只读鉴证接口不可用：${error.code ?? "execution_failed"}`));
-				try {
-					accept(JSON.parse(stdout) as unknown);
-				} catch {
-					reject(new Error("RVF 只读鉴证返回了无效 JSON。"));
-				}
-			},
-		);
-	});
-}
-
 export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHistoryQueryDependencies> = {}) {
 	const dependencies: TaskRvfHistoryQueryDependencies = {
 		loadTaskContext: loadTaskHistoryContext,
-		queryProducer: queryRvfReadOnlyInspectionProducer,
+		readRunLogsRoot: resolveHistoricalRvfRunLogsRoot,
+		readRunEvidence: readHistoricalRvfRunEvidence,
 		budgetMs: QUERY_BUDGET_MS,
 		...overrides,
 	};
@@ -494,10 +473,7 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 			[...candidates.values()].flatMap((candidate) => (candidate.runId ? [candidate.runId] : [])),
 		);
 		try {
-			const storage = producerStoragePathsSchema.parse(
-				await dependencies.queryProducer(["inspect", "storage-paths", "--json"], remaining()),
-			);
-			const runsRoot = await canonicalizePath(join(storage.run_logs_root, "runs"));
+			const runsRoot = await canonicalizePath(join(await dependencies.readRunLogsRoot(), "runs"));
 			let entries: string[];
 			try {
 				entries = await readdir(runsRoot, { encoding: "utf8" });
@@ -638,9 +614,7 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 				);
 			}
 		} catch {
-			issues.push(
-				evidenceIssue("producer_discovery_unavailable", "生产方存储根查询不可用；仍核验已绑定的精确 run。"),
-			);
+			issues.push(evidenceIssue("producer_discovery_unavailable", "历史存储根读取不可用；仍核验已绑定的精确 run。"));
 		}
 		await reconcileDeletedStorageRunBindings(
 			candidates,
@@ -653,24 +627,14 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 		const orderedCandidates = [...candidates.entries()].sort(
 			(left, right) => (right[1].startedAt ?? 0) - (left[1].startedAt ?? 0) || left[0].localeCompare(right[0]),
 		);
-		const evidenceByDirectory = new Map<string, z.infer<typeof producerRunEvidenceSchema>>();
+		const evidenceByDirectory = new Map<string, z.infer<typeof historicalRunEvidenceSchema>>();
 		if (orderedCandidates.length) {
 			try {
-				const args = [
-					"inspect",
-					"run-review-evidence",
-					"--project-path",
-					scope.workspacePath,
-					"--current-worktree",
-					context.worktreePath,
-					"--json",
-					...orderedCandidates.flatMap(([directory]) => ["--run-dir", directory]),
-				];
-				const inspection = producerInspectionResponseSchema.parse(
-					await dependencies.queryProducer(args, remaining()),
+				const inspection = historicalRunEvidenceCollectionSchema.parse(
+					await dependencies.readRunEvidence(orderedCandidates.map(([directory]) => directory)),
 				);
 				for (const rawEvidence of inspection.runs) {
-					const parsed = producerRunEvidenceSchema.safeParse(rawEvidence);
+					const parsed = historicalRunEvidenceSchema.safeParse(rawEvidence);
 					if (!parsed.success) {
 						issues.push(
 							evidenceIssue("producer_run_evidence_invalid", "某轮鉴证响应不符合契约，其他轮次继续核验。"),
@@ -725,15 +689,13 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 				}
 			} catch {
 				evidenceByDirectory.clear();
-				issues.push(
-					evidenceIssue("producer_evidence_unavailable", "无法完整核验 RVF 生产方证据；未推断为未完成。"),
-				);
+				issues.push(evidenceIssue("producer_evidence_unavailable", "无法完整读取 RVF 历史工件；未推断为未完成。"));
 			}
 		}
 		const runs: TaskRvfHistoryRun[] = orderedCandidates.map(([directory, candidate]) => {
 			const evidence = evidenceByDirectory.get(directory);
 			const record = candidate.bound?.record;
-			const coverage = evidence?.current_candidate_coverage;
+
 			// 两阶段 completed 是服务端当时已核验提交、RVF evidence 和本地 base 祖先关系的接受事实。
 			// 当前安装缺失或历史缓存被清理，只影响本次再鉴证，不撤销已有接受事件。
 			const previouslyAcceptedCompletion = Boolean(
@@ -792,21 +754,15 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 					evidence?.recovery_condition ??
 					(evidence?.review_completion_status === "completed" ? null : "本轮证据恢复后重新查询"),
 				currentCandidateReviewCoverage: {
-					status: useAcceptedHistoricalCompletion ? "unknown" : (coverage?.status ?? "unknown"),
-					reasonCode: useAcceptedHistoricalCompletion
-						? "current_coverage_requires_fresh_inspection"
-						: (coverage?.reason_code ?? "coverage_evidence_unavailable"),
-					verifiedByRunId:
-						!useAcceptedHistoricalCompletion && coverage?.status === "covered"
-							? (evidence?.run_id ?? candidate.runId)
-							: null,
-					currentCandidateContentManifestSha256: coverage?.current_candidate_content_manifest_sha256 ?? null,
-					recoveryCondition:
-						useAcceptedHistoricalCompletion || coverage?.status === "unknown"
-							? "当前 worktree 与鉴证能力可用且内容稳定后重新查询"
-							: null,
+					verifiedByRunId: null,
+					currentCandidateContentManifestSha256: null,
+					status: "unknown",
+					reasonCode: "historical_records_do_not_attest_current_candidate",
+					recoveryCondition: "当前候选评审由独立评审流程提供，不从历史记录推定",
 				},
 				automaticCloseoutStatus: record?.status ?? null,
+				historicalCloseoutRecord: record ?? null,
+				historicalRunSummary: evidence?.historical_run_summary ?? null,
 				landExecutionResult: record?.landExecutionResult ?? null,
 				baseBranchSyncExecutionResult: record?.baseBranchSyncExecutionResult ?? null,
 				...(record?.existingCloseoutGoalCompletionReconciliation
@@ -820,8 +776,21 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 		);
 		const historyUnknown = issues.length > 0 || runs.some((run) => run.completionStatus === "unknown");
 		const covered = completed.find((run) => run.currentCandidateReviewCoverage.status === "covered");
+		// 每轮覆盖固定为「历史不核验当前候选」。这是政策 unknown，不能当成缺证后可恢复。
+		const completedRunsDoNotAttestCurrentCandidate =
+			completed.length > 0 &&
+			completed.every(
+				(run) =>
+					run.currentCandidateReviewCoverage.status === "unknown" &&
+					run.currentCandidateReviewCoverage.reasonCode === "historical_records_do_not_attest_current_candidate",
+			);
 		const coverageUnknown =
-			historyUnknown || completed.some((run) => run.currentCandidateReviewCoverage.status === "unknown");
+			historyUnknown ||
+			completed.some(
+				(run) =>
+					run.currentCandidateReviewCoverage.status === "unknown" &&
+					run.currentCandidateReviewCoverage.reasonCode !== "historical_records_do_not_attest_current_candidate",
+			);
 		let offset = 0;
 		if (input.cursor) {
 			const cursor = z
@@ -851,13 +820,19 @@ export function createTaskRvfHistoryQueryService(overrides: Partial<TaskRvfHisto
 			hasVerifiedCompletedRvf: completed.length ? true : historyUnknown ? null : false,
 			mostRecentVerifiedCompletedRun: completed[0] ?? null,
 			currentCandidateReviewCoverage: covered?.currentCandidateReviewCoverage ?? {
-				status: coverageUnknown ? "unknown" : "not_covered",
+				status: "unknown",
 				reasonCode: coverageUnknown
 					? "coverage_evidence_incomplete"
-					: completed.length
-						? "candidate_not_covered_by_completed_runs"
-						: "no_verified_completed_rvf",
-				recoveryCondition: coverageUnknown ? "缺失证据或查询能力恢复后重新查询" : null,
+					: completedRunsDoNotAttestCurrentCandidate
+						? "historical_records_do_not_attest_current_candidate"
+						: completed.length
+							? "candidate_not_covered_by_completed_runs"
+							: "no_verified_completed_rvf",
+				recoveryCondition: coverageUnknown
+					? "缺失证据或查询能力恢复后重新查询"
+					: completedRunsDoNotAttestCurrentCandidate
+						? "当前候选评审由独立评审流程提供，不从历史记录推定"
+						: null,
 			},
 			recentRuns,
 			nextCursor:

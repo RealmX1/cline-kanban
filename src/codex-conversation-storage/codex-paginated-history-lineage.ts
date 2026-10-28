@@ -4,7 +4,7 @@ import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs
 import { basename, dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
-import type { CodexNativeConversationTurn } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
+import type { CodexNativeConversationTurn } from "../codex-native-session-protocol/codex-native-conversation-history";
 import { assertCodexStorageWritablePathInsideHome } from "./codex-conversation-storage-home";
 import type { CodexNativeConversationFamilyWriterLockGuard } from "./codex-native-thread-writer-lock";
 

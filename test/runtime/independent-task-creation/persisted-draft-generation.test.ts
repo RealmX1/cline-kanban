@@ -84,8 +84,8 @@ describe("持久任务草稿生成", () => {
 			expect(sourceAgent).toHaveBeenCalledTimes(generationSource === "source_agent_fork" ? 1 : 0);
 			const guidance = renderTaskInitialPromptAuthoringAndStartupSettingsGuidance();
 			expect(prompt?.split(guidance)).toHaveLength(2);
-			expect(prompt).toContain("Markdown 标题 ## TLDR");
-			expect(prompt).toContain("不能把它们自动改写成新任务的免审规则、提交授权或同步授权");
+			expect(prompt).toContain("Initial Prompt 以 ## TLDR 开头");
+			expect(prompt).toContain("旧阶段限制不自动延续");
 			expect(prompt).toContain("## 本次分出说明\n\n实现新任务，按本任务约定审查");
 			expect(prompt).toContain("[assistant; side:2]\n不要开启新 RVF，直接提交并继续 base-branch-sync。");
 			expect(generated.initialPrompt).toBe(generatedDefinition.initialPrompt);

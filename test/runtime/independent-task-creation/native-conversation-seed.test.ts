@@ -8,7 +8,7 @@ import { freezeIndependentTaskConversationSeed } from "../../../src/independent-
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const mocked = vi.hoisted(() => ({ request: vi.fn() }));
-vi.mock("../../../src/rvf-automatic-closeout/codex-app-server-request-connection", () => ({
+vi.mock("../../../src/codex-native-session-protocol/codex-app-server-request-connection", () => ({
 	withCodexAppServerRequestConnection: async (
 		_input: unknown,
 		operation: (port: { request: typeof mocked.request }) => Promise<unknown>,

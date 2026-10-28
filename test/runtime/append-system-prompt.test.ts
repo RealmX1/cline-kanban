@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { resolveAgentGuidanceDocumentPath } from "../../src/core/agent-guidance-document-reference";
 
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
 	combineAppendSystemPrompts,
 	renderAppendSystemPrompt,
 	renderExploratoryModeAppendSystemPrompt,
+	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveAppendSystemPromptCommandPrefix,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
@@ -58,197 +61,75 @@ describe("resolveAppendSystemPromptCommandPrefix", () => {
 	});
 });
 
-describe("renderAppendSystemPrompt", () => {
-	it("renders Kanban sidebar guidance and command reference", () => {
-		const rendered = renderAppendSystemPrompt("kanban");
-		expect(rendered).toContain("Kanban sidebar agent");
-		expect(rendered).toContain("kanban task create");
-		expect(rendered).toContain("kanban task done");
-		expect(rendered).toContain("kanban task delete");
-		expect(rendered).toContain("--column backlog|in_progress|review|done");
-		expect(rendered).toContain("Default follows the runtime Settings default");
-		expect(rendered).not.toContain("`--start-in-plan-mode <true|false>` optional. Default false.");
-		expect(rendered).toContain("Provide exactly one of");
-		expect(rendered).toContain("task delete --column done");
-		expect(rendered).toContain("kanban task get --task-id <task_id>");
-		expect(rendered).not.toContain("task link");
-		expect(rendered).toContain("If a task command fails because the runtime is unavailable");
-		expect(rendered).toContain("If the user asks for GitHub work");
-		expect(rendered).toContain("gh issue view");
-		expect(rendered).toContain("If the user references Linear");
-		expect(rendered).toContain("Current home agent: `unknown`");
-		expect(rendered).not.toContain("claude mcp add --transport http --scope user linear https://mcp.linear.app/mcp");
-		expect(rendered).not.toContain("codex mcp add linear --url https://mcp.linear.app/mcp");
+describe("精简的角色提示", () => {
+	it("侧栏保留管理职责、真实默认与按需命令参考", () => {
+		const prompt = renderAppendSystemPrompt("kanban", { agentId: "codex" });
+		expect(prompt).toContain("看板管理助手");
+		expect(prompt).toContain("不直接修改项目源码");
+		expect(prompt).toContain("当前 Agent：`codex`");
+		expect(prompt).toContain("resolvedSettings");
+		expect(prompt).toContain(resolveAgentGuidanceDocumentPath("kanban-command-reference.md"));
+		expect(prompt).not.toContain("# CLI Reference");
+		expect(prompt).not.toContain("mcp add");
 	});
-
-	it("renders only the active-agent Linear MCP guidance when an agent is provided", () => {
-		const rendered = renderAppendSystemPrompt("kanban", {
-			agentId: "codex",
-		});
-
-		expect(rendered).toContain("Current home agent: `codex`");
-		expect(rendered).toContain("codex mcp add linear --url https://mcp.linear.app/mcp");
-		expect(rendered).not.toContain("claude mcp add --transport http --scope user linear https://mcp.linear.app/mcp");
-		expect(rendered).not.toContain("droid mcp add linear https://mcp.linear.app/mcp --type http");
-	});
-});
-
-describe("resolveHomeAgentAppendSystemPrompt", () => {
-	it("returns null for non-home task sessions", () => {
-		expect(resolveHomeAgentAppendSystemPrompt("task-1")).toBeNull();
-	});
-
-	it("returns the appended prompt for current home sidebar sessions", () => {
-		const prompt = resolveHomeAgentAppendSystemPrompt("__home_agent__:workspace-1:codex", {
-			currentVersion: "0.1.10",
-			cwd: "/Users/example/repo",
-			execPath: "/usr/local/bin/node",
-			execArgv: [],
-			argv: ["node", "/Users/example/repo/dist/cli.js"],
-			resolveRealPath: (path) => path,
-		});
-		expect(prompt).toContain("Kanban sidebar agent");
-		expect(prompt).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task list");
-		expect(prompt).toContain("Current home agent: `codex`");
-		expect(prompt).toContain("codex mcp add linear --url https://mcp.linear.app/mcp");
-		expect(prompt).not.toContain("claude mcp add --transport http --scope user linear https://mcp.linear.app/mcp");
-	});
-
-	it("returns active-agent guidance for droid home sidebar sessions", () => {
-		const prompt = resolveHomeAgentAppendSystemPrompt("__home_agent__:workspace-1:droid", {
-			currentVersion: "0.1.10",
-			cwd: "/Users/example/repo",
-			execPath: "/usr/local/bin/node",
-			execArgv: [],
-			argv: ["node", "/Users/example/repo/dist/cli.js"],
-			resolveRealPath: (path) => path,
-		});
-		expect(prompt).toContain("Current home agent: `droid`");
-		expect(prompt).toContain("droid mcp add linear https://mcp.linear.app/mcp --type http");
-	});
-
-	it("returns active-agent guidance for kiro home sidebar sessions", () => {
-		const prompt = resolveHomeAgentAppendSystemPrompt("__home_agent__:workspace-1:kiro", {
-			currentVersion: "0.1.10",
-			cwd: "/Users/example/repo",
-			execPath: "/usr/local/bin/node",
-			execArgv: [],
-			argv: ["node", "/Users/example/repo/dist/cli.js"],
-			resolveRealPath: (path) => path,
-		});
-		expect(prompt).toContain("Current home agent: `kiro`");
-		expect(prompt).toContain("kiro-cli mcp add --name linear --url https://mcp.linear.app/mcp --scope global");
-		expect(prompt).not.toContain("--scope user");
-	});
-});
-
-describe("resolveTaskSessionAppendSystemPrompt", () => {
-	it("injects a task workspace guard for non-home task sessions", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
-		expect(prompt).toContain("Kanban-managed task session");
-		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(prompt).toContain("ask the user to confirm which workspace owns the work");
-	});
-
-	it("allows derived same-repository worktrees created by task tooling without asking", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
-		expect(prompt).toContain("derived from this workspace");
-		expect(prompt).toContain("git worktree add");
+	it("任务保留真实身份、派生工作树授权和无关仓库确认边界", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/workspace/derived");
+		expect(prompt).toContain("任务 ID：`task-1`");
+		expect(prompt).toContain("工作区：`/workspace/derived`");
+		expect(prompt).toContain("不从 cwd 重新推导任务 ID");
+		expect(prompt).toContain("同一 git-common-dir");
+		expect(prompt).toContain("用户显式调用 workflow");
+		expect(prompt).toContain("先确认其编辑归属");
+		expect(prompt).toContain("不能传 task worktree");
 		expect(prompt).toContain("git rev-parse --git-common-dir");
-		expect(prompt).toContain("without stopping to ask");
-		expect(prompt).not.toContain("assigned workspace/branch only");
+		expect(prompt).not.toContain("不直接修改项目源码");
+		expect(prompt).toContain("人工 rewind 和 checkpoint");
 	});
-
-	it("treats a user-invoked workflow as pre-authorized for the checkouts its procedure operates on", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
-		expect(prompt).toContain("Workflows the user explicitly invoked");
-		expect(prompt).toContain("base-branch-sync");
-		expect(prompt).toContain("the invocation itself authorizes");
+	it("协作会话保留共享目录与生命周期责任", () => {
+		const prompt = renderTaskCollaborationSessionResponsibilityGuidance("card-1", "collaborator-2");
+		expect(prompt).toContain("任务 card-1");
+		expect(prompt).toContain("collaborator-2");
+		expect(prompt).toContain("文件修改立即相互可见");
+		expect(prompt).toContain("主会话负责卡片生命周期");
+		expect(prompt).not.toContain("RVF");
 	});
-
-	it("teaches how to resolve the task back from a worktree directory", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo", {
-			currentVersion: "0.1.10",
-			cwd: "/Users/example/repo",
-			execPath: "/usr/local/bin/node",
-			execArgv: [],
-			argv: ["node", "/Users/example/repo/dist/cli.js"],
-			resolveRealPath: (path) => path,
-		});
-		expect(prompt).toContain(".cline/worktrees/<task_id>/<repo_folder>");
-		expect(prompt).toContain(
-			`'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task get --task-id 'task-1' --project-path "$(dirname "$(git rev-parse --git-common-dir)")"`,
-		);
-		// 另一种输入形态：别人递来一个 worktree 路径字符串，而不是 agent 自己就在那个 worktree 里。
-		expect(prompt).toContain("~/.cline/worktrees/ab12c/my-repo");
-		expect(prompt).toContain("never at a task worktree");
-	});
-
-	// 自己的 task ID 必须来自调用方已持有的真值，不能靠 cwd 反推：派生 worktree 与 inplace 任务的
-	// workspace 路径里根本没有 `worktrees/<task_id>` 段，反推会静默算出一个看似合法的错误 ID。
-	it("states the caller-known task ID instead of deriving it from the current directory", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/Users/example/repo", {
-			currentVersion: "0.1.10",
-			cwd: "/Users/example/repo",
-			execPath: "/usr/local/bin/node",
-			execArgv: [],
-			argv: ["node", "/Users/example/repo/dist/cli.js"],
-			resolveRealPath: (path) => path,
-		});
-		expect(prompt).toContain("You are running as Kanban task `task-1`");
-		expect(prompt).toContain("never re-derive it from your current directory");
-		expect(prompt).not.toContain("git rev-parse --show-toplevel");
-		expect(prompt).not.toContain("basename");
-	});
-
-	// `--project-path` 的推导仍需一条 git 命令，但不得只教 POSIX 命令替换：Windows 默认 shell 没有
-	// `$(...)`/`basename`/`dirname`。
-	it("gives a non-POSIX shell fallback for deriving the main repository path", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
-		expect(prompt).toContain("on PowerShell or cmd");
-		expect(prompt).toContain("git rev-parse --git-common-dir");
-	});
-
-	it("does not inject a task workspace guard for home sidebar sessions", () => {
-		expect(resolveTaskSessionAppendSystemPrompt("__home_agent__:workspace-1:codex", "/tmp/repo")).toBeNull();
-	});
-});
-
-describe("combineAppendSystemPrompts", () => {
-	it("joins only non-empty prompts", () => {
-		expect(combineAppendSystemPrompts("first", null, "  ", "second")).toBe("first\n\nsecond");
-	});
-});
-
-describe("renderExploratoryModeAppendSystemPrompt", () => {
-	it("把指令文件绝对路径原样内联，并要求 agent 完整阅读且遵守", () => {
-		const rendered = renderExploratoryModeAppendSystemPrompt(
-			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md",
-		);
-		expect(rendered).toContain("exploratory");
-		expect(rendered).toContain("exploration thread graph");
-		expect(rendered).toContain("never write that structure yourself");
-		expect(rendered).toContain(
-			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md`",
-		);
-		expect(rendered).toContain("IN FULL");
-	});
-});
-
-describe("结构化任务起草指导的入口覆盖", () => {
 	it.each([
-		["侧栏 Agent", () => renderAppendSystemPrompt("kanban")],
-		["Task Agent", () => resolveTaskSessionAppendSystemPrompt("task-1", "/workspace/project")],
-	] as const)("%s 恰好注入一次共享指导", (_entrypoint, renderPrompt) => {
-		const prompt = renderPrompt();
+		["侧栏", () => renderAppendSystemPrompt("kanban")],
+		["主任务", () => resolveTaskSessionAppendSystemPrompt("task-1", "/workspace")],
+	] as const)("%s 共享承重指导只注入一次", (_role, render) => {
+		const prompt = render();
 		const guidance = renderTaskInitialPromptAuthoringAndStartupSettingsGuidance();
-		expect(prompt).toContain(guidance);
 		expect(prompt?.split(guidance)).toHaveLength(2);
+		expect(prompt).toContain("## TLDR");
+		expect(prompt).toContain("startInPlanMode 与权限独立");
+		expect(prompt).toContain("用户原话与来源");
+		expect(prompt).toContain("unknown");
+		expect(prompt).not.toContain("固定候选 RVF");
+		expect(prompt).not.toContain("rvf-land");
 	});
-
-	it("Task 接收端不继承侧栏不可写代码的角色限制", () => {
-		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/workspace/project");
-		expect(prompt).toContain('<task-prompt-authoring-and-startup-settings-guidance schema-version="1">');
-		expect(prompt).not.toContain("# CRITICAL: You are NOT a coding agent");
+	it("完整起草规范与操作参考在源码安装中可读", () => {
+		const authoring = readFileSync(
+			resolveAgentGuidanceDocumentPath("task-authoring-and-startup-settings.md"),
+			"utf8",
+		);
+		expect(authoring).toContain("source-request-id");
+		expect(authoring).toContain("XML 文本转义");
+		expect(authoring).toContain("resolvedSettings");
+		const reference = readFileSync(resolveAgentGuidanceDocumentPath("kanban-command-reference.md"), "utf8");
+		expect(reference).toContain("task delete");
+		expect(reference).toContain("人工 rewind");
+		expect(reference).toContain("--expect-resolved-settings-fingerprint");
 	});
+	it("home 与任务角色互斥，空工作区不注入", () => {
+		expect(resolveTaskSessionAppendSystemPrompt("__home_agent__:workspace-1:codex", "/workspace")).toBeNull();
+		expect(resolveTaskSessionAppendSystemPrompt("task-1", "  ")).toBeNull();
+		expect(resolveHomeAgentAppendSystemPrompt("task-1")).toBeNull();
+		expect(resolveHomeAgentAppendSystemPrompt("__home_agent__:workspace-1:codex")).toContain("当前 Agent：`codex`");
+	});
+	it("空段不进入最终正文", () =>
+		expect(combineAppendSystemPrompts("first", null, " ", "second")).toBe("first\n\nsecond"));
+	it("探索说明继续引用指令文件", () =>
+		expect(renderExploratoryModeAppendSystemPrompt("/persistent/instructions.md")).toContain(
+			"`/persistent/instructions.md`",
+		));
 });

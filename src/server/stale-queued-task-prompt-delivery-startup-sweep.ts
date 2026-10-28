@@ -22,10 +22,6 @@
 //     store 的 stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart）。
 
 import type { WorkspaceQueuedTaskPromptDeliverySnapshot } from "../core/api-contract";
-import {
-	CODEX_RVF_CLOSEOUT_CUMULATIVE_COMPACTION_WAIT_BUDGET_MS,
-	CODEX_RVF_CLOSEOUT_ORDINARY_CONFIRMATION_BUDGET_MS,
-} from "../core/codex-rvf-closeout-compaction-aware-confirmation";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart,
@@ -172,10 +168,7 @@ export function scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart(
 	const nowEpochMs = input.nowEpochMs ?? (() => Date.now());
 	let startupFollowUpDeadlineAtEpochMs =
 		nowEpochMs() +
-		Math.max(
-			input.inFlightSettlementBudgetMs ?? TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
-			CODEX_RVF_CLOSEOUT_ORDINARY_CONFIRMATION_BUDGET_MS + CODEX_RVF_CLOSEOUT_CUMULATIVE_COMPACTION_WAIT_BUDGET_MS,
-		) +
+		(input.inFlightSettlementBudgetMs ?? TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS) +
 		2 * STALE_QUEUED_PROMPT_IN_FLIGHT_SWEEP_FOLLOW_UP_MARGIN_MS;
 	const scheduleFollowUp = (result: QueuedTaskPromptDeliveryRuntimeRestartSweepResult): void => {
 		if (result.earliestYoungInFlightDeliveryBecomesStaleAtEpochMs === null) {

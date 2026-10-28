@@ -1,3 +1,4 @@
+import { isRetiredRvfAutomaticQueuedDelivery } from "./retired-rvf-automatic-message-history";
 // 程序化排队投递（`kanban task message --deliver-when-agent-idle`）的「队列条目 → 注入账本」镜像规则。
 // **纯函数、零 IO**：IO 由 src/state/queued-task-prompt-delivery-store.ts 在每一次队列写盘之后统一执行。
 //
@@ -52,7 +53,7 @@ export function resolveInjectionLedgerReceiptForSettledProgrammaticInjection(
 	entry: QueuedTaskPromptDeliveryEntry,
 ): InjectionLedgerTerminalDeliveryReceipt | null {
 	const link = entry.programmaticInjectionLedgerReceiptLink ?? null;
-	if (link === null || !isQueueEntryStateTerminal(entry.deliveryState)) {
+	if (isRetiredRvfAutomaticQueuedDelivery(entry) || link === null || !isQueueEntryStateTerminal(entry.deliveryState)) {
 		return null;
 	}
 	if (link.settledTerminalDeliveryReceipt !== null) {
@@ -94,6 +95,7 @@ function indexEntriesByTaskAndQueueEntryId(
 	const index = new Map<string, QueuedTaskPromptDeliveryEntry>();
 	for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
 		for (const entry of entries) {
+			if (isRetiredRvfAutomaticQueuedDelivery(entry)) continue;
 			index.set(`${taskId}\u0000${entry.queueEntryId}`, entry);
 		}
 	}
@@ -148,7 +150,12 @@ export function collectInjectionLedgerUpdatesForQueueSnapshotTransition(
 	}
 	for (const [key, beforeEntry] of beforeIndex) {
 		const link = beforeEntry.programmaticInjectionLedgerReceiptLink ?? null;
-		if (link === null || afterIndex.has(key) || isQueueEntryStateTerminal(beforeEntry.deliveryState)) {
+		if (
+			isRetiredRvfAutomaticQueuedDelivery(beforeEntry) ||
+			link === null ||
+			afterIndex.has(key) ||
+			isQueueEntryStateTerminal(beforeEntry.deliveryState)
+		) {
 			continue;
 		}
 		updates.push({

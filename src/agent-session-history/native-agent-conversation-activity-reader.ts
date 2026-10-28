@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { readAppendedCompleteJsonLines } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import { z } from "zod";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import type {
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeTaskSessionSummary,
@@ -11,7 +12,6 @@ import {
 	type CodexNativeDirectInputReadinessObservation,
 	isCodexNeedsInputNativeReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 import { parseTranscriptJsonRecord, readBoundedJsonLines } from "./bounded-agent-transcript-reader";
 import {
 	type CodexCurrentNativeTurnToolActivityReadCursor,

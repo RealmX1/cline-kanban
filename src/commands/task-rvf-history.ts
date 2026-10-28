@@ -60,7 +60,7 @@ export function registerTaskRvfHistoryCommand(
 ): void {
 	task
 		.command("rvf-history")
-		.description("只读查询本 Task 近期 RVF、完整完成事实及当前候选覆盖；运行时不可用时读取持久状态。")
+		.description("只读查询本 Task 的旧 RVF 历史；缺证及当前候选覆盖保持 unknown；运行时不可用时读取持久状态。")
 		.option("--task-id <id>", "Task ID；默认 KANBAN_TASK_ID。")
 		.option("--project-path <path>", "main checkout 路径；默认 KANBAN_PROJECT_PATH。")
 		.option("--limit <count>", "每页条数（1–50）；不限制全历史完成核验。", "10")

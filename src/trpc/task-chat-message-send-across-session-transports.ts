@@ -1,15 +1,21 @@
+import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 // 三条 session transport 的统一发送出口：ACP（stdio 子进程）/ Cline SDK（进程内）/ 终端 PTY。
 //
 // 从 `runtime-api.ts` 的 handler 里原样提出来，**不改任何行为**。抽取的唯一理由是调用方多了一类：
 // 排队投递 dispatcher 由「agent 这一轮结束」的边沿驱动，手上没有 TRPC 请求，而 `createRuntimeApi`
 // 是**每请求**新建的（`src/server/runtime-server.ts` 的 `createTrpcContext`）。要让 dispatcher 与
-// 人类聊天、RVF followup 共用同一条投递语义，出口必须先从请求作用域里拿出来。
+// 人类聊天、后台任务消息 共用同一条投递语义，出口必须先从请求作用域里拿出来。
 
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
 import type { ResolvedClineLaunchConfig } from "../cline-sdk/cline-provider-service";
 import { isClineClearSlashCommand } from "../cline-sdk/cline-slash-commands";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+import {
+	NativeIndependentUserTurnDeliveryError,
+	NativeIndependentUserTurnMessageAlreadyAccepted,
+	NativeIndependentUserTurnSubmissionRecoverySuspended,
+} from "../codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
@@ -24,12 +30,6 @@ import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
 } from "../core/task-message-injection-ledger";
-import {
-	NativeIndependentUserTurnDeliveryError,
-	NativeIndependentUserTurnMessageAlreadyAccepted,
-	NativeIndependentUserTurnSubmissionRecoverySuspended,
-} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
-import { resolveRvfCloseoutCompactionConfirmationPersistence } from "../rvf-automatic-closeout/rvf-closeout-compaction-confirmation-persistence";
 import {
 	beginManagedTaskPromptDelivery,
 	buildManagedTaskPromptDeliveryOrigin,
@@ -94,6 +94,13 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 	workspaceScope: RuntimeTrpcWorkspaceScope,
 	input: RuntimeTaskChatSendRequest,
 ): Promise<RuntimeTaskChatSendResponse> {
+	if (isRetiredRvfAutomaticMessageSource(input.source))
+		return {
+			ok: false,
+			summary: null,
+			error: "旧 RVF 自动投递已退役，仅保留历史读取。",
+			terminalDelivery: { status: "delivery_failed", reason: "cancelled_before_delivery" },
+		};
 	if (!deps.recordManagedTaskPromptDeliveries || isClineClearSlashCommand(input.text))
 		return sendTaskChatMessageThroughSelectedTransport(deps, workspaceScope, input);
 	try {
@@ -285,7 +292,7 @@ async function sendTaskChatMessageThroughSelectedTransport(
 						};
 					}
 					const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-					// RVF followup 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
+					// 后台任务消息 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
 					// 避免 Stop 后 TUI 重绘态下「粘贴进输入框但 CR 被吞、不发送」的间歇竞态。详见 submitTaskChatInputWhenReady。
 					// deferWhileUserTurn=（带 source 即后台自动注入）：后台注入遇会话处于非 agent 回合（agent 正等用户
 					// 回答 AskUserQuestion / 计划评审 / 权限确认）时让位挂起、待 agent 回合恢复再投递，绝不把正等用户的
@@ -338,21 +345,7 @@ async function sendTaskChatMessageThroughSelectedTransport(
 							},
 						};
 					}
-					const targetTerminalSummary =
-						body.source === "rvf_automatic_closeout" ? terminalManager.getSummary(body.taskId) : null;
-					const rvfCloseoutCompactionConfirmationPersistence =
-						body.source === "rvf_automatic_closeout" && injectionIdempotencyKey && targetTerminalSummary
-							? await resolveRvfCloseoutCompactionConfirmationPersistence({
-									workspaceId: workspaceScope.workspaceId,
-									summary: targetTerminalSummary,
-									idempotencyKey: injectionIdempotencyKey,
-									promptText: body.text,
-								})
-							: null;
 					const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
-						...(rvfCloseoutCompactionConfirmationPersistence
-							? { rvfCloseoutCompactionConfirmationPersistence }
-							: {}),
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,

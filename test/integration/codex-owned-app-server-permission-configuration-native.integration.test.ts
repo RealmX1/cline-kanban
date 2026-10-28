@@ -9,12 +9,12 @@ import {
 	inspectCodexNativeSessionControlHostArguments,
 	prepareCodexNativeSessionControlHostLaunch,
 } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
-import { withCodexAppServerRequestConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
+import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 afterEach(() => vi.unstubAllEnvs());
 
-describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
+describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY)(
 	"真实 Codex 加载独享宿主的权限配置顺序",
 	{ timeout: 120_000 },
 	() => {
@@ -38,7 +38,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
 			const inspectNativeConfiguration = (arguments_: string[]) =>
 				withCodexAppServerRequestConnection(
 					{
-						binary: process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY,
+						binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY,
 						workingDirectory: fixture.fixtureRootDirectoryPath,
 						environment,
 						argumentsBeforeSubcommand: arguments_,
@@ -99,7 +99,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
 				];
 				await expect(
 					prepareCodexNativeSessionControlHostLaunch({
-						binary: process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+						binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 						arguments: untrustedArguments,
 						workingDirectoryPath: fixture.fixtureRootDirectoryPath,
 						environment,
@@ -111,7 +111,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
 			}
 			await expect(
 				promisify(execFile)(
-					process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					["-capproval_policy=untrusted", "app-server", "--stdio"],
 					{ cwd: fixture.fixtureRootDirectoryPath, env: environment, timeout: 5_000 },
 				),
@@ -120,7 +120,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY)(
 			});
 			await expect(
 				promisify(execFile)(
-					process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					["-a", "untrusted", "--no-alt-screen"],
 					{ cwd: fixture.fixtureRootDirectoryPath, env: environment, timeout: 5_000 },
 				),

@@ -1380,7 +1380,7 @@ describe("createHooksApi", () => {
 		);
 	});
 
-	it("PreCompact 只关联阶段，不写身份、不产生接受或 Stop；重复 hook 幂等", async () => {
+	it("PreCompact 不接续专属流程，不写身份、不产生接受或 Stop；重复 hook 幂等", async () => {
 		const identity = {
 			sourceAgentId: "codex" as const,
 			nativeSessionId: "native-1",
@@ -1389,12 +1389,10 @@ describe("createHooksApi", () => {
 		};
 		const current = createSummary({ agentId: "codex", agentNativeConversationSessionIdentity: identity });
 		const applied = new Set<string>();
-		const observe = vi.fn(async () => {});
 		const persist = vi.fn();
 		const transition = vi.fn();
 		const manager = {
 			getSummary: () => current,
-			observeRvfCloseoutNativeCompactionPhase: observe,
 			applyAgentNativeConversationSessionIdentity: persist,
 			transitionToRunning: transition,
 			transitionToReview: transition,
@@ -1421,11 +1419,7 @@ describe("createHooksApi", () => {
 		};
 		expect(await api.ingest(input)).toEqual({ ok: true });
 		expect(await api.ingest(input)).toEqual({ ok: true });
-		expect(observe).toHaveBeenCalledOnce();
-		expect(observe).toHaveBeenCalledWith(
-			"task-1",
-			expect.objectContaining({ phase: "started", nativeSessionId: "native-1", nativeTurnId: "turn-1" }),
-		);
+		expect(applied.has("unique-precompact")).toBe(true);
 		expect(persist).not.toHaveBeenCalled();
 		expect(transition).not.toHaveBeenCalled();
 		await api.ingest({
@@ -1443,7 +1437,8 @@ describe("createHooksApi", () => {
 			hookEventDeliveryIdempotencyKey: "manual",
 			mainAgentConversationContextCompactionTriggerReportedByHarness: "manual_compact_command",
 		});
-		expect(observe).toHaveBeenCalledOnce();
+		expect(persist).not.toHaveBeenCalled();
+		expect(transition).not.toHaveBeenCalled();
 	});
 
 	// 压缩完成（PostCompact）只推进 Cache warm 起点：不推进对话推进、不刷新活动行、不转移回合、不产生通知。

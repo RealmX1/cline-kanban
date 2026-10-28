@@ -3,9 +3,9 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
+import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { resolveSessionFacets } from "../../src/core/session-activity";
-import { withRunningCodexAppServerControlSocketConnection } from "../../src/rvf-automatic-closeout/codex-app-server-request-connection";
 import { createNativeAgentConversationActivityObserver } from "../../src/server/native-agent-conversation-activity-observer";
 import type * as AgentSessionAdapters from "../../src/terminal/agent-session-adapters";
 import type { AgentAdapterLaunchInput, PreparedAgentLaunch } from "../../src/terminal/agent-session-adapters";
@@ -23,7 +23,7 @@ vi.mock("../../src/terminal/agent-session-adapters", async (importOriginal) => (
 	}),
 }));
 
-describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || process.platform === "win32")(
+describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
 	"真实 Codex 后台终端等待（本地模型，无外部推理）",
 	{ timeout: 120_000 },
 	() => {
@@ -154,7 +154,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY || pr
 				await manager.startTaskSession({
 					taskId,
 					agentId: "codex",
-					binary: process.env.KANBAN_CODEX_NATIVE_RVF_CLOSEOUT_SMOKE_BINARY ?? "codex",
+					binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 					args: [
 						"--no-alt-screen",
 						"--dangerously-bypass-approvals-and-sandbox",

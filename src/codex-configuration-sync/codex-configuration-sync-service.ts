@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
+import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type CodexConfigurationBatchActionRequest,
@@ -20,8 +22,6 @@ import {
 	listRuntimeCodexConfigurationTraceTargets,
 	waitForCodexConfigurationRequestWriterOwnershipVerifications,
 } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-control-socket-request-connection";
-import type { CodexAppServerRequestPort } from "../rvf-automatic-closeout/codex-native-conversation-prefix";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,

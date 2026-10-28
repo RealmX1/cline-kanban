@@ -1266,7 +1266,7 @@ describe("InMemoryClineTaskSessionService", () => {
 
 		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				systemPrompt: expect.stringContaining("Kanban-managed task session"),
+				systemPrompt: expect.stringContaining("你负责在分配的工作区完成本任务"),
 			}),
 		);
 		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
@@ -1276,7 +1276,7 @@ describe("InMemoryClineTaskSessionService", () => {
 		);
 		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				systemPrompt: expect.stringContaining("ask the user to confirm which workspace owns the work"),
+				systemPrompt: expect.stringContaining("先确认其编辑归属"),
 			}),
 		);
 	});
@@ -1301,14 +1301,12 @@ describe("InMemoryClineTaskSessionService", () => {
 		);
 		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				systemPrompt: expect.stringContaining("Kanban sidebar agent"),
+				systemPrompt: expect.stringContaining("看板管理助手"),
 			}),
 		);
 		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				systemPrompt: expect.stringContaining(
-					"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
-				),
+				systemPrompt: expect.stringContaining("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js'"),
 			}),
 		);
 	});

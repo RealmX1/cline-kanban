@@ -2,6 +2,7 @@ import {
 	isNativeIndependentUserTurnSubmissionKnownNotStarted,
 	resolveNativeIndependentUserTurnQueryRetryNotBeforeEpochMs,
 } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
+import { isRetiredRvfAutomaticQueuedDelivery } from "../core/retired-rvf-automatic-message-history";
 import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 // 排队 prompt 的出队引擎：agent 这一轮停下来 → 从该任务的 durable 队列里认领队首（及被合并开关链住的
 // 那一串）→ 经既有三 transport 统一发送出口发出去 → 按回执结算。
@@ -17,7 +18,7 @@ import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-
 //   (b) 队列被改动之后立刻尝试一次 —— 覆盖「用户在 agent 已经闲着的时候排了一条」。那时根本不存在
 //       未来的边沿，只靠 (a) 会永远躺着。语义也对：当前这一轮已经结束了。
 //   (c) 60s 兜底 sweep —— 覆盖「阻塞条件自行解除却没有新边沿」（恢复守卫 30 分钟兜底过期、PTY 单飞槽
-//       里那条 RVF 投递失败了没开新一轮）以及「别的进程改了队列文件」（CLI 删任务 / 并存实例）。
+//       里那条程序化投递失败了没开新一轮）以及「别的进程改了队列文件」（CLI 删任务 / 并存实例）。
 //
 // ## 一轮至多交出一次
 //
@@ -38,16 +39,15 @@ import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-
 //   - 60s 兜底 sweep 对每个 workspace 做同一件事；
 //   - 托管者仍活着的条目由门控 -1（queued_under_another_live_kanban_runtime_instance）挡住：只有托管者发它。
 //
-// ## 与 RVF 自注入的关系
+// ## 与其他程序化投递共用出口
 //
-// 队列坐在发送出口**之上**，不改它一个字节。PTY 单飞槽被 RVF 占着时门控 6 让路；剩下的 TOCTOU 窗口里
-// 被 RVF 顶掉（superseded_by_later_delivery）归可重试。RVF 那条「一条投递永不排在别人后面」的收敛承诺
-// 因此原样成立。人排的条目**不写**注入账本（task-message-injections.json）：那是跨仓契约，其「唯一非终态
-// 必然有界收敛」不变量对可以合法等几个小时、又没有截止时刻的排队意图不成立。
+// 队列位于统一发送出口之上。PTY 单飞槽被其他投递占用时让路，剩余 TOCTOU 窗口被替代的投递
+// 按真实回执决定是否可重试。人排的条目不写程序化注入账本；无截止时刻的长期等待不适用该账本的有界收敛约定。
+// 已退役的 RVF 自动条目只用于历史读取，不参与认领、调度、计时或重启恢复。
 //
 // ## 程序化条目（`kanban task message --deliver-when-agent-idle`）
 //
-// RVF 也可以把一条投递排进来，等 agent 空闲再交出。它与人排的条目走同一套门控与触发源，只差四处：
+// 普通后台调用方可以把一条投递排进来，等 agent 空闲再交出。它与人排的条目走同一套门控与触发源，只差四处：
 //   - 交给终端投递时用**调用方的** idempotency key 与 source：交出之后的取消、账本回写与不带 flag 的
 //     `kanban task message` 逐字相同；
 //   - 回执一次定终身，绝不回队首（store 的 settleQueuedTaskPromptDelivery 执行）；每个落定点都把真实终端回执
@@ -56,6 +56,10 @@ import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-
 //   - 兜底 sweep 额外对一次账：已落定的程序化条目，账本却还 pending 的，补写。
 
 import { randomUUID } from "node:crypto";
+import {
+	NativeIndependentUserTurnDeliveryError,
+	readCurrentTuiNativeConversationTurns,
+} from "../codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import type {
 	QueuedTaskPromptDeliveryEntry,
 	QueuedTaskPromptDispatchBlockReason,
@@ -80,10 +84,6 @@ import {
 	routeQueuedTaskPromptDeliveryTerminalOutcome,
 } from "../core/queued-task-prompt-delivery-outcome-routing";
 import { buildRuntimeQueuedTaskPromptDeliveryProjectionsByTaskId } from "../core/queued-task-prompt-delivery-projection";
-import {
-	NativeIndependentUserTurnDeliveryError,
-	readCurrentTuiNativeConversationTurns,
-} from "../rvf-automatic-closeout/native-independent-user-turn-delivery-gate";
 import { reconcileManagedTaskPromptDeliveryReceipts } from "../state/managed-task-prompt-delivery-coordinator";
 import { reconcileInjectionLedgerWithSettledProgrammaticInjections } from "../state/mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import {
@@ -290,6 +290,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		let earliestDeadlineAtEpochMs: number | null = null;
 		for (const entries of Object.values(snapshot.entriesByTaskId)) {
 			for (const entry of entries) {
+				if (isRetiredRvfAutomaticQueuedDelivery(entry)) continue;
 				if (entry.deliveryState === "queued" && isQueuedTaskPromptDeliveryProgrammaticInjection(entry)) {
 					earliestDeadlineAtEpochMs =
 						earliestDeadlineAtEpochMs === null
@@ -913,6 +914,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				const hasProgrammaticInjectionPastDeadline = Object.values(snapshot.entriesByTaskId).some((entries) =>
 					entries.some(
 						(entry) =>
+							!isRetiredRvfAutomaticQueuedDelivery(entry) &&
 							entry.deliveryState === "queued" &&
 							isQueuedTaskPromptDeliveryProgrammaticInjection(entry) &&
 							sweepNowEpochMs >= entry.expiresAt,
@@ -953,6 +955,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			const entry = (snapshot.entriesByTaskId[taskId] ?? []).find(
 				(candidate) => candidate.queueEntryId === queueEntryId,
 			);
+			if (entry && isRetiredRvfAutomaticQueuedDelivery(entry)) return null;
 			if (entry?.deliveryState !== "handed_to_transport" || entry.dispatchIdempotencyKey === null) {
 				return null;
 			}

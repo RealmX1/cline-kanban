@@ -1,10 +1,10 @@
 import { z } from "zod";
+import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	type CodexNativeAgentTurnExecutionObservation,
 } from "../core/codex-native-agent-turn-execution-observation";
-import { withRunningCodexAppServerControlSocketConnection } from "../rvf-automatic-closeout/codex-app-server-request-connection";
 
 const loadedPageSchema = z.object({ data: z.array(z.string()), nextCursor: z.string().nullish() });
 const latestTurnPageSchema = z.object({
