@@ -170,6 +170,10 @@ import {
 	stopWorkspaceTrustTimers,
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
+import {
+	buildCodexModelCapacityErrorDetectionTurnIdentity,
+	createCodexModelCapacityErrorDetector,
+} from "./codex-model-capacity-error-detection";
 import { inspectCodexNativeConnectionRetryContinuationReadiness } from "./codex-native-connection-retry-continuation-readiness";
 import { deliverCodexNativePromptWithoutChangingComposer } from "./codex-native-prompt-delivery";
 import {
@@ -1337,7 +1341,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// hosted 会话的接管记录推送去抖：summary 每次变化都推会太频繁（lastOutputAt 逐 chunk 变化）。
 	private readonly pendingTerminalSessionAdoptionRecordPublicationTimersByTaskId = new Map<string, NodeJS.Timeout>();
 	private readonly kimiStartupWaitingReasonByActiveProcess = new WeakMap<ActiveProcessState, string>();
-	private readonly kimiOutputUtf8StreamDecoderByActiveProcess = new WeakMap<ActiveProcessState, StringDecoder>();
+	private readonly agentOutputUtf8StreamDecoderByActiveProcess = new WeakMap<ActiveProcessState, StringDecoder>();
+	private readonly codexModelCapacityErrorDetectorByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		ReturnType<typeof createCodexModelCapacityErrorDetector>
+	>();
+	private readonly codexOutputAnalysisTurnIdentityByActiveProcess = new WeakMap<ActiveProcessState, string | null>();
+	private readonly codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		string
+	>();
+	private readonly codexModelCapacityErrorInspectionInFlightByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		{ turnIdentity: string; reinspectionRequested: boolean }
+	>();
 	private readonly sideSessionNativeIdentityRecoveryInFlightByTaskId = new Map<string, Promise<void>>();
 	private sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = false;
 
@@ -1643,6 +1660,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!active) {
 			return;
 		}
+		if (entry.summary.agentId === "codex") {
+			const turnIdentity = buildCodexModelCapacityErrorDetectionTurnIdentity(
+				entry.summary,
+				active.suppressSubstantiveOutputUntilContinues,
+				this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.get(active) ?? null,
+			);
+			if (
+				active.pendingOutputAnalysisText.length > 0 &&
+				this.codexOutputAnalysisTurnIdentityByActiveProcess.get(active) !== turnIdentity
+			) {
+				this.flushPendingOutputAnalysis(taskId);
+			}
+			this.codexOutputAnalysisTurnIdentityByActiveProcess.set(active, turnIdentity);
+		}
 		active.pendingOutputAnalysisText += decodedChunk;
 		if (
 			OUTPUT_ANALYSIS_BATCH_WINDOW_MS <= 0 ||
@@ -1704,6 +1735,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.deferSubstantiveOutputAnalysisUntilThrottleWindowEnds(taskId, active, batchText, flushedAt);
 		}
 
+		if (entry.summary.agentId === "codex") {
+			const turnIdentity = buildCodexModelCapacityErrorDetectionTurnIdentity(
+				entry.summary,
+				active.suppressSubstantiveOutputUntilContinues,
+				this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.get(active) ?? null,
+			);
+			if (!turnIdentity || this.codexOutputAnalysisTurnIdentityByActiveProcess.get(active) !== turnIdentity) {
+				this.codexModelCapacityErrorDetectorByActiveProcess.delete(active);
+			} else {
+				let detector = this.codexModelCapacityErrorDetectorByActiveProcess.get(active);
+				if (!detector) {
+					detector = createCodexModelCapacityErrorDetector();
+					this.codexModelCapacityErrorDetectorByActiveProcess.set(active, detector);
+				}
+				if (detector(batchText, turnIdentity)) void this.handleCodexModelCapacityError(entry, active, turnIdentity);
+			}
+		}
+
 		const adapterEvent = active.detectOutputTransition?.(batchText, entry.summary) ?? null;
 		if (adapterEvent && adapterEvent.type !== "agent.prompt-ready" && adapterEvent.type !== "hook.to_in_progress") {
 			const summary = this.applySessionEvent(entry, adapterEvent);
@@ -1713,6 +1762,93 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		if (active.outputReactionEngine !== null) {
 			this.processOutputReactionChunk(taskId, entry, strippedBatchText);
+		}
+	}
+
+	private async handleCodexModelCapacityError(
+		entry: SessionEntry,
+		active: ActiveProcessState,
+		turnIdentity: string,
+	): Promise<void> {
+		const existingInspection = this.codexModelCapacityErrorInspectionInFlightByActiveProcess.get(active);
+		if (existingInspection?.turnIdentity === turnIdentity) {
+			existingInspection.reinspectionRequested = true;
+			return;
+		}
+		const inspection = { turnIdentity, reinspectionRequested: false };
+		this.codexModelCapacityErrorInspectionInFlightByActiveProcess.set(active, inspection);
+		const before = cloneSummary(entry.summary);
+		const capacityErrorDetectedAtMs = now();
+		try {
+			let observation: CodexNativeAgentTurnExecutionObservation | null = null;
+			try {
+				// 共享在途查询可能早于本次错误；只补读一次，不把旧完成态当作当前回合的状态。
+				for (
+					let nativeExecutionReadAttemptIndex = 0;
+					nativeExecutionReadAttemptIndex < 2;
+					nativeExecutionReadAttemptIndex++
+				) {
+					const nativeExecutionReadSummary = cloneSummary(entry.summary);
+					observation = await readCodexNativeAgentTurnExecution({
+						workspaceId: nativeExecutionReadSummary.codexNativeSessionControlEndpoint?.workspaceId ?? "",
+						summary: nativeExecutionReadSummary,
+						observedAtMs: now(),
+						signal: this.nativeExecutionReadAbortController.signal,
+					});
+					// 首次身份补证后再读一次，让新获得的原生运行态仍能否决旧错误重绘。
+					if (
+						!nativeExecutionReadSummary.agentNativeConversationSessionIdentity &&
+						entry.summary.agentNativeConversationSessionIdentity
+					)
+						continue;
+					if (!observation || observation.observedAtMs >= capacityErrorDetectedAtMs) break;
+				}
+			} catch {
+				observation = null;
+				// 控制端点不可用时，完整且属于当前回合的终端错误横幅是替代证据。
+			}
+			if (
+				this.entries.get(before.taskId) !== entry ||
+				entry.active !== active ||
+				buildCodexNativeAgentTurnExecutionIdentity({
+					...before,
+					agentNativeConversationSessionIdentity:
+						before.agentNativeConversationSessionIdentity ?? entry.summary.agentNativeConversationSessionIdentity,
+				}) !== buildCodexNativeAgentTurnExecutionIdentity(entry.summary) ||
+				buildCodexModelCapacityErrorDetectionTurnIdentity(
+					entry.summary,
+					active.suppressSubstantiveOutputUntilContinues,
+					this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.get(active) ?? null,
+				) !== turnIdentity ||
+				(observation &&
+					observation.observedAtMs >= capacityErrorDetectedAtMs &&
+					isCurrentCodexNativeAgentTurnExecutionObservation(entry.summary, entry.summary, observation) &&
+					(observation.executionStatus === "running" || observation.executionStatus === "waiting_for_user"))
+			)
+				return;
+			this.endActiveOutputReactionEpisode(entry, before.taskId);
+			clearOutputReactionTimer(active);
+			this.applyConnectionRetryState(before.taskId, null);
+			const summary = this.applySessionEvent(entry, { type: "hook.to_review", reviewReason: "error" });
+			for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+			this.emitSummary(summary);
+		} catch (error) {
+			logTuiFreezeError(`Codex 容量错误交棒失败 taskId=${before.taskId}：${String(error)}`);
+		} finally {
+			if (this.codexModelCapacityErrorInspectionInFlightByActiveProcess.get(active) === inspection) {
+				this.codexModelCapacityErrorInspectionInFlightByActiveProcess.delete(active);
+				if (
+					inspection.reinspectionRequested &&
+					this.entries.get(before.taskId) === entry &&
+					entry.active === active &&
+					buildCodexModelCapacityErrorDetectionTurnIdentity(
+						entry.summary,
+						active.suppressSubstantiveOutputUntilContinues,
+						this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.get(active) ?? null,
+					) === turnIdentity
+				)
+					void this.handleCodexModelCapacityError(entry, active, turnIdentity);
+			}
 		}
 	}
 
@@ -4004,7 +4140,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.active = active;
 		if (agentId === "kimi") {
 			// 追赶末尾可能只有省略号的前几个字节，必须由实时输出接续同一个解码器。
-			this.kimiOutputUtf8StreamDecoderByActiveProcess.set(active, kimiCatchUpOutputUtf8StreamDecoder);
+			this.agentOutputUtf8StreamDecoderByActiveProcess.set(active, kimiCatchUpOutputUtf8StreamDecoder);
 		}
 		entry.terminalStateMirror = terminalStateMirror;
 		// EXPERIMENT_NODE: 接管后的会话暂不恢复自动重启（restartRequest 跨重启持久化之后再恢复，计划 P5）。
@@ -5724,14 +5860,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			hasBatchedOutputAnalysisConsumer;
 		let data = "";
 		if (needsDecodedOutput) {
-			if (entry.summary.agentId === "kimi") {
-				// 裁剪横幅的 Unicode 省略号会跨 PTY chunk；不能把半个字符替换后写进信任历史。
-				let kimiOutputUtf8StreamDecoder = this.kimiOutputUtf8StreamDecoderByActiveProcess.get(entry.active);
-				if (!kimiOutputUtf8StreamDecoder) {
-					kimiOutputUtf8StreamDecoder = new StringDecoder("utf8");
-					this.kimiOutputUtf8StreamDecoderByActiveProcess.set(entry.active, kimiOutputUtf8StreamDecoder);
+			if (entry.summary.agentId === "kimi" || entry.summary.agentId === "codex") {
+				// 横幅符号可能跨 PTY 字节边界，不能把半个 Unicode 字符替换后交给输出检测。
+				let agentOutputUtf8StreamDecoder = this.agentOutputUtf8StreamDecoderByActiveProcess.get(entry.active);
+				if (!agentOutputUtf8StreamDecoder) {
+					agentOutputUtf8StreamDecoder = new StringDecoder("utf8");
+					this.agentOutputUtf8StreamDecoderByActiveProcess.set(entry.active, agentOutputUtf8StreamDecoder);
 				}
-				data = kimiOutputUtf8StreamDecoder.write(filteredChunk);
+				data = agentOutputUtf8StreamDecoder.write(filteredChunk);
 			} else {
 				data = filteredChunk.toString("utf8");
 			}
@@ -7528,6 +7664,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				userHandoff !== undefined &&
 				userHandoff.observedAtMs >= (entry.summary.startedAt ?? 0) &&
 				userHandoff.observedAtMs >= input.observedAtMs);
+		// 已结束回合的迟到接受只补证；真实新输入接受才使旧批次与在途错误核验失效。
+		if (entry.summary.agentId === "codex" && !shouldPreserveCurrentTurnAfterAcceptedInput)
+			this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.set(entry.active, input.eventId);
 		const submittedUserMessagePreview = input.submittedPromptText?.trim();
 		const summary = updateSummary(
 			entry,
@@ -7761,6 +7900,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			previousIdentity?.observedAt === identity.observedAt
 		) {
 			return cloneSummary(entry.summary);
+		}
+		if (
+			entry.summary.agentId === "codex" &&
+			entry.active &&
+			previousIdentity &&
+			previousIdentity.nativeSessionId !== identity.nativeSessionId
+		) {
+			const active = entry.active;
+			this.flushPendingOutputAnalysis(taskId);
+			this.codexModelCapacityErrorDetectorByActiveProcess.delete(active);
+			this.codexModelCapacityErrorInspectionInFlightByActiveProcess.delete(active);
 		}
 		const summary = updateSummary(
 			entry,
