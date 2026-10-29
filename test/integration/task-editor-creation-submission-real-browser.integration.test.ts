@@ -114,7 +114,18 @@ it.skipIf(!packagedCliPath)(
 			page.on("pageerror", (error) => pageErrors.push(error.message));
 			await page.addInitScript(() => localStorage.setItem("kanban.onboarding.dialog.shown", "true"));
 			const openCreate = async (workspaceId: string, prompt: string, title: string) => {
+				const workspaceRuntimeConfigurationResponse = page.waitForResponse(
+					(response) =>
+						response.url().includes("runtime.getConfig") &&
+						response.request().headers()["x-kanban-workspace-id"] === workspaceId &&
+						response.ok(),
+				);
 				await page.goto(`${origin}/${workspaceId}`);
+				await (await workspaceRuntimeConfigurationResponse).finished();
+				// 首屏配置尚未进入 React 时，创建入口会按既有门禁忽略点击；等默认设置生效后再验收建卡。
+				await page.evaluate(
+					"new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())))",
+				);
 				await page.getByRole("button", { name: "Create task", exact: true }).first().click();
 				const editor = page
 					.getByRole("dialog")
