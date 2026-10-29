@@ -3,6 +3,7 @@ import {
 	acknowledgeCodexConfigurationChange,
 	batchCodexConfigurationAction,
 	fetchCodexConfigurationSyncState,
+	mutateCodexConfigurationProfile,
 	notifyCodexConfigurationSyncUpdated,
 	resolveCodexConfigurationConflict,
 	resolveCodexConfigurationTargetConflict,
@@ -13,6 +14,7 @@ import type {
 	CodexConfigurationBatchActionRequest,
 	CodexConfigurationBatchActionResult,
 	CodexConfigurationChange,
+	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationPropagationTarget,
 	CodexConfigurationSyncState,
 } from "@/runtime/types";
@@ -24,7 +26,9 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 	const pending = useRef(false);
 	const [batchResults, setBatchResults] = useState<CodexConfigurationBatchActionResult["results"]>([]);
 	const operationIdentities = useRef(new Map<string, string>());
+	const unconfirmedProfileMutation = useRef<{ requestIdentity: string; idempotencyKey: string } | null>(null);
 	const refreshSequence = useRef(0);
+	const [feedbackOpportunityNowMs, setFeedbackOpportunityNowMs] = useState(Date.now);
 	const refresh = useCallback(async () => {
 		const sequence = ++refreshSequence.current;
 		try {
@@ -48,6 +52,54 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			refreshSequence.current++;
 		};
 	}, [enabled, refresh]);
+	useEffect(() => {
+		const deadlines =
+			state?.changes
+				.filter(
+					(change) =>
+						change.approvalStatus === "pending" &&
+						change.feedbackExpiresAtMs !== undefined &&
+						change.feedbackExpiresAtMs > feedbackOpportunityNowMs,
+				)
+				.flatMap((change) => (change.feedbackExpiresAtMs === undefined ? [] : [change.feedbackExpiresAtMs])) ?? [];
+		if (!enabled || !deadlines.length) return;
+		const timer = setTimeout(
+			() => {
+				setFeedbackOpportunityNowMs(Date.now());
+				void refresh();
+			},
+			Math.max(0, Math.min(...deadlines) - Date.now() + 1),
+		);
+		return () => clearTimeout(timer);
+	}, [enabled, feedbackOpportunityNowMs, refresh, state?.changes]);
+	const profileAction = useCallback(
+		async (input: CodexConfigurationProfileMutationRequest) => {
+			if (pending.current) return;
+			pending.current = true;
+			setPendingChangeId("profile");
+			setError(null);
+			try {
+				const requestIdentity = JSON.stringify([workspaceId, { ...input, idempotencyKey: undefined }]);
+				const idempotencyKey =
+					unconfirmedProfileMutation.current?.requestIdentity === requestIdentity
+						? unconfirmedProfileMutation.current.idempotencyKey
+						: input.idempotencyKey;
+				unconfirmedProfileMutation.current = { requestIdentity, idempotencyKey };
+				setState(await mutateCodexConfigurationProfile(workspaceId, { ...input, idempotencyKey }));
+				unconfirmedProfileMutation.current = null;
+				notifyCodexConfigurationSyncUpdated();
+				return true;
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "profile 操作未确认，请刷新后重试。");
+				void refresh();
+				return false;
+			} finally {
+				pending.current = false;
+				setPendingChangeId(null);
+			}
+		},
+		[workspaceId, refresh],
+	);
 	const act = useCallback(
 		async (
 			change: CodexConfigurationChange,
@@ -156,5 +208,16 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		},
 		[workspaceId, refresh],
 	);
-	return { state, error, pendingChangeId, act, resolveTarget, refresh, batch, batchResults };
+	return {
+		state,
+		error,
+		pendingChangeId,
+		act,
+		resolveTarget,
+		refresh,
+		batch,
+		batchResults,
+		profileAction,
+		feedbackOpportunityNowMs,
+	};
 }

@@ -178,6 +178,8 @@ export function buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawIn
 		baseRef: rawInput.baseRef ?? currentTaskCard.baseRef,
 		startInPlanMode: rawInput.startInPlanMode ?? currentTaskCard.startInPlanMode,
 		taskAgentPermissionMode: rawInput.taskAgentPermissionMode ?? currentTaskCard.taskAgentPermissionMode,
+		codexConfigurationProfileId: rawInput.codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource: rawInput.codexConfigurationPermissionSelectionSource,
 		autoReviewEnabled: rawInput.autoReviewEnabled ?? currentTaskCard.autoReviewEnabled === true,
 		autoReviewMode: rawInput.autoReviewMode ?? currentTaskCard.autoReviewMode ?? "commit",
 		agentId: rawInput.agentId,
@@ -203,6 +205,8 @@ export function buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch
 		prompt: patch.prompt ?? currentTaskCard.prompt,
 		startInPlanMode: patch.startInPlanMode ?? currentTaskCard.startInPlanMode,
 		taskAgentPermissionMode: patch.taskAgentPermissionMode,
+		codexConfigurationProfileId: patch.codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource: patch.codexConfigurationPermissionSelectionSource,
 		autoReviewEnabled: patch.autoReviewEnabled ?? currentTaskCard.autoReviewEnabled === true,
 		autoReviewMode: patch.autoReviewMode ?? currentTaskCard.autoReviewMode ?? "commit",
 		// updateTask 的 images 只有两态（undefined 保留 / 数组覆盖，空数组 = 清空），null 折成空数组。

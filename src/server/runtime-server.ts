@@ -18,6 +18,7 @@ import {
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
 import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
+import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentSessionCountsAffectedByRuntimeExit,
@@ -517,6 +518,29 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return Array.from(summariesByTaskId.values());
 	};
 	const codexConfigurationSyncService = createCodexConfigurationSyncService({
+		listTaskProfileBindings: async () => {
+			const bindings: Array<{ workspaceId: string; conversationSessionId: string; profileId: string }> = [];
+			const results = await Promise.allSettled(
+				deps.workspaceRegistry.listManagedWorkspaces().map(async ({ workspaceId }) => {
+					const board = await loadWorkspaceBoardById(workspaceId);
+					for (const card of board.columns.flatMap((column) => column.cards))
+						if (card.codexConfigurationProfileId)
+							bindings.push({
+								workspaceId,
+								conversationSessionId: resolveMainTaskConversationSessionId(card),
+								profileId: card.codexConfigurationProfileId,
+							});
+				}),
+			);
+			return {
+				bindings,
+				unavailableWorkspaceCount: results.filter((result) => result.status === "rejected").length,
+			};
+		},
+		reconcileRetainedTerminalInput: async () => {
+			for (const { terminalManager } of deps.workspaceRegistry.listManagedWorkspaces())
+				await terminalManager.restoreTerminalInputRetainedDuringCodexProfileAdoption();
+		},
 		listSessions: () =>
 			deps.workspaceRegistry
 				.listManagedWorkspaces()
@@ -524,8 +548,59 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					terminalManager.listSummaries().map((summary) => ({ workspaceId, summary })),
 				),
 		onUpdated: (revision) => deps.runtimeStateHub.broadcastCodexConfigurationSyncUpdated?.(revision),
+		onSessionProfileBound: async (
+			workspaceId,
+			conversationSessionId,
+			profileId,
+			onlyUpdatePermissionSelectionSource,
+		) => {
+			const workspacePath = deps.workspaceRegistry
+				.listManagedWorkspaces()
+				.find((workspace) => workspace.workspaceId === workspaceId)?.workspacePath;
+			if (!workspacePath) throw new Error("工作区暂不可用，profile 绑定恢复后自动补做。");
+			const bindingIsCurrent = await persistCodexConfigurationProfileBindingForMainTaskSession({
+				workspaceId,
+				workspacePath,
+				conversationSessionId,
+				profileId,
+				permissionSelectionSource: "profile",
+				onlyUpdatePermissionSelectionSource,
+				broadcastWorkspaceUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			});
+			if (bindingIsCurrent)
+				deps.workspaceRegistry
+					.getTerminalManagerForWorkspace(workspaceId)
+					?.applyCodexConfigurationProfileBinding(conversationSessionId, profileId);
+		},
+		onWriterPermissionsObserved: (workspaceId, conversationSessionId, fields) =>
+			deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(workspaceId)
+				?.applyCodexEffectivePermissionMode(conversationSessionId, fields),
+		resumeSessionToAdoptProfile: async ({ workspaceId, summary, profileId, onBeforeProcessReplacement }) => {
+			const workspace = deps.workspaceRegistry
+				.listManagedWorkspaces()
+				.find((workspace) => workspace.workspaceId === workspaceId);
+			const nativeSessionId = summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+			if (!workspace?.workspacePath || !nativeSessionId || !summary.runtimeSessionIncarnationId)
+				return { resumed: false, reason: "等待原工作区和原生会话身份恢复后自动重验。" };
+			const pendingProcessReplacementRetainedInputRecordPath =
+				workspace.terminalManager.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(summary.taskId);
+			if (resolveSessionFacets(summary).liveness !== "live" && !pendingProcessReplacementRetainedInputRecordPath)
+				return { resumed: false, reason: "未持有可继续的自动启动记录，或 Stop 已取消续接；保留原决定。" };
+			const response = await runtimeApi.refreshTaskTerminal(
+				{ workspaceId, workspacePath: workspace.workspacePath },
+				{ taskId: summary.taskId },
+				{
+					profileId,
+					pendingProcessReplacementRetainedInputRecordPath,
+					expectedRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+					expectedNativeSessionId: nativeSessionId,
+					onBeforeProcessReplacement,
+				},
+			);
+			return { resumed: response.ok, reason: response.error ?? "同一原生会话已续接，等待配置实际加载核验。" };
+		},
 	});
-	codexConfigurationSyncService.start();
 	// 「停止生成响应后固定宽限期」回收调度器。放在这里是因为三种 transport 的服务持有者都在本作用域：
 	// listProjectRuntimeSessionSummaries 已经把三条 summary 流合并成一个查询面，正是陈旧定时器防护
 	// 需要的「当前这个 task 的 summary 到底长什么样」。
@@ -1335,6 +1410,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		taskCommandExecutionApi.cancelForTask,
 	);
 
+	codexConfigurationSyncService.start();
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
 		getAcpTaskSessionService: getScopedAcpTaskSessionService,
 		getTerminalManager: getScopedTerminalManager,

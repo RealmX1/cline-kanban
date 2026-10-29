@@ -6,6 +6,7 @@ import {
 } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
@@ -23,6 +24,7 @@ import { TaskMainSessionHandoverAction } from "./task-main-session-handover-acti
 type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
 
 interface TaskSessionCreationDraft {
+	codexConfigurationProfileId?: string;
 	initialUserQuestion: string;
 	contextSource: NewTaskConversationSessionContextSource;
 	sessionRole: "by_the_way" | "task_collaborator";
@@ -42,6 +44,7 @@ function resolveDefaultCollaborationAgentId(mainAgentId: RuntimeAgentId): Runtim
 }
 
 interface CreateTaskConversationSessionRequest {
+	codexConfigurationProfileId?: string;
 	agentId: RuntimeAgentId;
 	sessionRole: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
@@ -76,6 +79,22 @@ function TaskConversationSessionIdentifierChips({
 					identifierValue={agentNativeConversationSessionIdentity.nativeSessionId}
 				/>
 			) : null}
+			{summary.codexEffectivePermissionMode && (
+				<span className="text-[10px] text-text-secondary">
+					当前权限：
+					{summary.codexEffectivePermissionMode === "bypass_all_permission_prompts"
+						? "全部允许"
+						: "受审批或沙箱限制"}
+				</span>
+			)}
+			{summary.codexConfigurationWriterBinding && summary.codexEffectivePermissionMode === null && (
+				<span className="text-[10px] text-text-secondary">当前权限：待原生核验</span>
+			)}
+			{summary.codexConfigurationProfileRetainedInputRecovery && (
+				<span role="status" className="text-[10px] text-status-gold">
+					{summary.codexConfigurationProfileRetainedInputRecovery.reason}
+				</span>
+			)}
 		</div>
 	);
 }
@@ -158,6 +177,9 @@ export function TaskConversationSessionsPanel({
 	const [isCreationDialogOpen, setCreationDialogOpen] = useState(false);
 	const draftIdentity = JSON.stringify([workspaceId, workspaceTaskId]);
 	const savedDraft = taskSessionCreationDraftsByWorkspaceAndTask.get(draftIdentity);
+	const [codexConfigurationProfileId, setCodexConfigurationProfileId] = useState<string | undefined>(
+		savedDraft?.codexConfigurationProfileId,
+	);
 	const [initialUserQuestion, setInitialUserQuestion] = useState(savedDraft?.initialUserQuestion ?? "");
 	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(
 		savedDraft?.contextSource ?? "forked_from_main_current_turn",
@@ -182,12 +204,21 @@ export function TaskConversationSessionsPanel({
 	useEffect(() => {
 		if (workspaceId)
 			taskSessionCreationDraftsByWorkspaceAndTask.set(draftIdentity, {
+				codexConfigurationProfileId,
 				initialUserQuestion,
 				contextSource,
 				sessionRole,
 				collaborationAgentId,
 			});
-	}, [workspaceId, draftIdentity, initialUserQuestion, contextSource, sessionRole, collaborationAgentId]);
+	}, [
+		workspaceId,
+		draftIdentity,
+		initialUserQuestion,
+		contextSource,
+		sessionRole,
+		collaborationAgentId,
+		codexConfigurationProfileId,
+	]);
 
 	const [readUserHandoffObservedAtMsBySessionId, setReadUserHandoffObservedAtMsBySessionId] = useState<
 		Record<string, number>
@@ -263,6 +294,10 @@ export function TaskConversationSessionsPanel({
 
 		try {
 			const result = await onCreateTaskConversationSession({
+				codexConfigurationProfileId:
+					codexConfigurationProfileId ??
+					mainSessionSummary.codexConfigurationProfileId ??
+					taskCard?.codexConfigurationProfileId,
 				agentId: selectedAgentId,
 				sessionRole,
 				initialUserQuestion,
@@ -515,6 +550,17 @@ export function TaskConversationSessionsPanel({
 								<p className="mb-3 text-xs text-text-secondary">共用当前工作目录。主会话负责卡片生命周期。</p>
 							</>
 						) : null}
+						{selectedAgentId === "codex" && (
+							<CodexConfigurationProfileSelect
+								workspaceId={workspaceId ?? null}
+								value={codexConfigurationProfileId}
+								onChange={setCodexConfigurationProfileId}
+								inheritedProfileId={
+									mainSessionSummary.codexConfigurationProfileId ?? taskCard?.codexConfigurationProfileId
+								}
+								enabled={isCreationDialogOpen && !isCreating}
+							/>
+						)}
 						<>
 							<label
 								className="mb-1 block text-xs font-medium text-text-secondary"

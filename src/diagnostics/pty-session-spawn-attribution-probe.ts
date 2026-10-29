@@ -41,6 +41,7 @@ export type PtySessionSpawnReason = "task_agent_session" | "shell_session" | "un
 // 这份归因里。于是 refresh_task_terminal 的占比预期会下降——那是归因信噪比的改善（剩下的更接近「真的
 // 需要换一代 PTY」），不是回归。下次看到这条占比骤降，先想到这件事，别当成异常去查。
 export type TaskSessionStartOrigin =
+	| "codex_configuration_profile_safe_auto_resume"
 	| "external_entry_point"
 	| "refresh_task_terminal"
 	| "resume_reclaimed_task_session_for_pending_user_decision_answer_delivery"

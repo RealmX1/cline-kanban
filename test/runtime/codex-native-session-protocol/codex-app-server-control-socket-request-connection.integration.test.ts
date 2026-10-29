@@ -102,6 +102,18 @@ describe("Codex 原生控制 socket 请求与脱敏诊断", () => {
 		expect(JSON.stringify(fixture.diagnostics)).not.toContain("SECRET_NATIVE_ERROR");
 		expectConnectionResourcesReleased(fixture.diagnostics);
 	});
+	it.skipIf(process.platform === "win32")(
+		"路径过长的失效端点立即返回可恢复错误，不创建会抛出迟到错误的连接",
+		async () => {
+			const operation = vi.fn(async () => undefined);
+			await expect(
+				withRunningCodexAppServerControlSocketConnection(operation, {
+					socketPath: `/invalid-native-control-endpoint/${"x".repeat(200)}`,
+				}),
+			).rejects.toMatchObject({ outcome: "connection_error" });
+			expect(operation).not.toHaveBeenCalled();
+		},
+	);
 	it.each(["invalid_json", "invalid_error", "both_result_error", "missing_result_error"])(
 		"%s 立即拒绝全部 pending，不吞成超时或泄露正文",
 		async (scenario) => {

@@ -1,4 +1,8 @@
 import { z } from "zod";
+export const codexConfigurationPermissionSelectionSourceSchema = z.enum(["profile", "task_local"]);
+export type CodexConfigurationPermissionSelectionSource = z.infer<
+	typeof codexConfigurationPermissionSelectionSourceSchema
+>;
 
 export const codexConfigurationWriterBindingSchema = z.object({
 	schemaVersion: z.literal(1),
@@ -16,9 +20,89 @@ export const codexConfigurationWriterBindingSchema = z.object({
 	sqliteDirectoryIdentity: z.string().min(1),
 	launchConfigurationDigest: z.string().min(1),
 	launchSharedVersion: z.number().int().nonnegative(),
+	codexConfigurationProfileId: z.string().min(1).optional(),
 	createdAt: z.number(),
 });
 export type CodexConfigurationWriterBinding = z.infer<typeof codexConfigurationWriterBindingSchema>;
+
+export const codexConfigurationProfileFieldSchema = z.object({
+	fieldKey: z.string().min(1),
+	fieldLabel: z.string(),
+	value: z.unknown().optional(),
+	valueSummary: z.string(),
+	version: z.number().int().nonnegative(),
+	exceptionGroup: z.enum(["model", "reasoning_effort", "permissions"]).nullable(),
+});
+export const codexConfigurationProfileSchema = z.object({
+	profileId: z.string().min(1),
+	name: z.string().trim().min(1).max(100),
+	sourceIdentity: z.string(),
+	version: z.number().int().nonnegative(),
+	fields: z.array(codexConfigurationProfileFieldSchema),
+});
+export interface CodexConfigurationProfile {
+	profileId: string;
+	name: string;
+	sourceIdentity: string;
+	version: number;
+	fields: Array<{
+		fieldKey: string;
+		fieldLabel: string;
+		value?: unknown;
+		valueSummary: string;
+		version: number;
+		exceptionGroup: "model" | "reasoning_effort" | "permissions" | null;
+	}>;
+}
+const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnion("action", [
+	z.object({
+		action: z.literal("create"),
+		name: z.string().trim().min(1).max(100),
+		copyFromProfileId: z.string().min(1),
+		idempotencyKey: z.string().min(1).max(200),
+	}),
+	z.object({
+		action: z.literal("update"),
+		profileId: z.string().min(1),
+		expectedVersion: z.number().int().nonnegative(),
+		name: z.string().trim().min(1).max(100).optional(),
+		fields: z
+			.array(z.object({ fieldKey: z.string().min(1), value: z.unknown(), delete: z.boolean().optional() }))
+			.max(200)
+			.optional(),
+		idempotencyKey: z.string().min(1).max(200),
+	}),
+	z.object({
+		action: z.literal("set_default"),
+		profileId: z.string().min(1),
+		idempotencyKey: z.string().min(1).max(200),
+	}),
+	z.object({
+		action: z.literal("bind_session"),
+		profileId: z.string().min(1),
+		workspaceId: z.string().min(1),
+		conversationSessionId: z.string().min(1),
+		expectedRuntimeSessionIncarnationId: z.string().uuid(),
+		idempotencyKey: z.string().min(1).max(200),
+	}),
+]);
+export type CodexConfigurationProfileMutationRequest = z.infer<
+	typeof codexConfigurationProfileMutationRequestObjectSchema
+>;
+export const codexConfigurationProfileMutationRequestSchema: z.ZodType<
+	CodexConfigurationProfileMutationRequest,
+	CodexConfigurationProfileMutationRequest
+> = codexConfigurationProfileMutationRequestObjectSchema;
+
+// 只供运行时内部接线，浏览器不能伪造安全续接的持久提交回执。
+export interface CodexConfigurationProfileAutomaticAdoptionGuard {
+	profileId: string;
+	expectedRuntimeSessionIncarnationId: string;
+	expectedNativeSessionId: string;
+	readTaskExecutionEligibilityFingerprint?: () => Promise<string | null>;
+	pendingProcessReplacementRetainedInputRecordPath?: string;
+	onBeforeProcessReplacement: (evidenceFingerprint: string) => Promise<boolean>;
+}
 
 export const codexConfigurationPropagationTargetSchema = z.object({
 	writerId: z.string(),
@@ -48,7 +132,12 @@ export const codexConfigurationChangeSchema = z.object({
 	valueSummary: z.string(),
 	observedAt: z.number(),
 	recordKind: z.enum(["settings_proposal", "source_observation", "historical_record"]),
-	approvalStatus: z.enum(["pending", "approved", "rejected", "historical", "not_required"]),
+	approvalStatus: z.enum(["pending", "approved", "rejected", "historical", "not_required", "expired"]),
+	codexConfigurationProfileId: z.string().optional(),
+	profileName: z.string().optional(),
+	feedbackExpiresAtMs: z.number().optional(),
+	exceptionGroup: z.enum(["model", "reasoning_effort", "permissions"]).optional(),
+	sharingScope: z.enum(["profile", "all_profiles_hook_trust"]).optional(),
 	decidedAt: z.number().nullable(),
 	settingDifferences: z.array(z.object({ label: z.string(), previous: z.string(), current: z.string() })),
 	mergeStatus: z.enum([
@@ -77,11 +166,25 @@ export const codexConfigurationSourceObservationSchema = z.object({
 	detectedLocations: z.array(z.object({ workspaceId: z.string(), conversationSessionId: z.string() })).optional(),
 });
 export type CodexConfigurationSourceObservation = z.infer<typeof codexConfigurationSourceObservationSchema>;
-export const codexConfigurationSyncStateSchema = z.object({
+const codexConfigurationSyncStateObjectSchema = z.object({
 	revision: z.number().int().nonnegative(),
 	changes: z.array(codexConfigurationChangeSchema),
 	sourceObservations: z.array(codexConfigurationSourceObservationSchema),
 	observationProblem: z.string().nullable(),
+	profiles: z.array(codexConfigurationProfileSchema).optional(),
+	defaultCodexConfigurationProfileId: z.string().nullable().optional(),
+	sessionProfileBindings: z
+		.array(
+			z.object({
+				workspaceId: z.string(),
+				conversationSessionId: z.string(),
+				codexConfigurationProfileId: z.string(),
+				localExceptionGroups: z.array(z.string()),
+				adoptionReason: z.string().optional(),
+				runtimeSessionIncarnationId: z.string().optional(),
+			}),
+		)
+		.optional(),
 	diagnosticCoverage: z
 		.object({
 			fileObservation: z.enum(["starting", "active"]),
@@ -91,7 +194,31 @@ export const codexConfigurationSyncStateSchema = z.object({
 		})
 		.optional(),
 });
-export type CodexConfigurationSyncState = z.infer<typeof codexConfigurationSyncStateSchema>;
+export interface CodexConfigurationSessionProfileBinding {
+	workspaceId: string;
+	conversationSessionId: string;
+	codexConfigurationProfileId: string;
+	localExceptionGroups: string[];
+	adoptionReason?: string;
+	runtimeSessionIncarnationId?: string;
+}
+export interface CodexConfigurationSyncState {
+	revision: number;
+	changes: CodexConfigurationChange[];
+	sourceObservations: CodexConfigurationSourceObservation[];
+	observationProblem: string | null;
+	profiles?: CodexConfigurationProfile[];
+	defaultCodexConfigurationProfileId?: string | null;
+	sessionProfileBindings?: CodexConfigurationSessionProfileBinding[];
+	diagnosticCoverage?: {
+		fileObservation: "starting" | "active";
+		targetCount: number;
+		coverageGapCount: number;
+		systemWriterEvidence: "not_collected_by_runtime";
+	};
+}
+export const codexConfigurationSyncStateSchema: z.ZodType<CodexConfigurationSyncState> =
+	codexConfigurationSyncStateObjectSchema;
 export type CodexConfigurationChange = z.infer<typeof codexConfigurationChangeSchema>;
 
 export const codexConfigurationChangeMutationRequestSchema = z.object({
@@ -151,6 +278,7 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
+	mutateProfile: (input: CodexConfigurationProfileMutationRequest) => Promise<CodexConfigurationSyncState>;
 	getState: () => Promise<CodexConfigurationSyncState>;
 	batchAction: (input: CodexConfigurationBatchActionRequest) => Promise<CodexConfigurationBatchActionResult>;
 	synchronize: (input: CodexConfigurationSynchronizeRequest) => Promise<CodexConfigurationSyncState>;

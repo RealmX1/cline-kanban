@@ -941,6 +941,15 @@ export const TaskCardBody = memo(function TaskCardBody(
 						: "尚未确认接受"}
 				</span>
 			) : null}
+			{sessionSummary?.codexConfigurationProfileRetainedInputRecovery && (
+				<span
+					role="status"
+					className="text-[10px] text-status-gold"
+					title={sessionSummary.codexConfigurationProfileRetainedInputRecovery.reason}
+				>
+					续接输入已保留
+				</span>
+			)}
 		</>
 	);
 	const resourceUsagePill = isTaskCardOwnedByOtherProject ? null : (
