@@ -1,331 +1,37 @@
-// connection-drop-auto-continue：检测到瞬时连接错误后，在 agent 回到空闲提示符时
-// 自动注入一条「引用续跑指令文件的简短续跑指令」，按指数退避无限重试，直到 agent
-// 恢复推进（移出重试列表）或命中 permanent 错误（放弃）。
-//
-// 退避用作「再注入」与「恢复探测」二合一：每次注入后记录是否又见到新的连接错误，
-// 下一次退避定时器触发时——
-//   - 若自上次注入后**没有**再出现连接错误 → 判定 agent 已恢复 → 结束重试；
-//   - 若**又**出现了连接错误 → 仍在失败 → 再注入一次（退避继续增长）。
-// 这样既不需要脆弱的「进度字符计数」，也天然忽略注入回显（回显不是连接错误）。
-
-import type { RuntimeAgentId } from "../../core/api-contract";
+// 输出层只检测故障；退避、投递、取消与重启对账由共用协调器持有。
 import { normalizeTerminalText } from "../terminal-output-normalization";
 import { classifyConnectionError } from "./connection-error-patterns";
-import type {
-	ConnectionRetryContinuationSubmissionResult,
-	OutputReaction,
-	OutputReactionActions,
-	OutputReactionContext,
-} from "./output-reaction";
+import type { OutputReaction } from "./output-reaction";
 
 export const CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID = "connection-drop-auto-continue";
-
-// 指数增长的退避间隔（毫秒），到顶（最后一项）后按顶值无限重试，绝不彻底停止。
-// 第 0 次（首个 attempt）用一个较短的「沉降」延时，等 TUI 把提示符框重绘完整。
-//
-// 首档（4s）特意留足够余量大于 AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s，见 src/core/session-activity.ts）的「输出静默」门控：
-// 真实连接中断时 agent 确实停产，到首个 attempt 时一定已静默、不会被误判为「仍在工作」
-// 而清掉 episode；而误命中（正常输出含 timeout 等词）若 agent 仍在持续产出，则到首个
-// attempt 时输出未静默，触发 endEpisode 清除伪「重连中」状态、绝不注入打断。
-const BACKOFF_SCHEDULE_MS: readonly number[] = [4_000, 15_000, 60_000, 240_000, 480_000];
-
-// 「输出静默」阈值（AGENT_OUTPUT_QUIET_THRESHOLD_MS，2s）现由 src/core/session-activity.ts 统一持有：
-// session-manager 注入的 isEffectiveAgentConversationActivityQuiet 动作复用该阈值，仅当距 agent 最近一次输出已超过它、
-// 判定 agent 确实停在原地时，本反应才注入续跑。
-
-// attempt 触发时若尚未就绪（agent 仍在忙 / deferred input 未注入完 / 用户刚输入），
-// 隔这么久再探一次，而不是消耗一次退避档位。
-const NOT_READY_RECHECK_DELAY_MS = 2_000;
-
-// 桥接被多个 PTY chunk 切断的错误行：保留最近输出末尾这么多字符作为前缀。
-const SPLIT_CARRYOVER_CHARS = 256;
-
-function backoffMs(attemptIndex: number): number {
-	const clamped = Math.min(Math.max(attemptIndex, 0), BACKOFF_SCHEDULE_MS.length - 1);
-	return BACKOFF_SCHEDULE_MS[clamped];
-}
-
-interface ConnectionDropReactionState {
-	episodeGeneration: number;
-	continuationSubmissionInFlight: boolean;
-	readFirstSubmitCarriageReturnState: NonNullable<
-		ConnectionRetryContinuationSubmissionResult["readFirstSubmitCarriageReturnState"]
-	> | null;
-	lastErrorObservedAtMs: number;
-	// 是否正处于一次「连接重试」episode。
-	episodeActive: boolean;
-	// 已执行的续跑注入次数（也用作退避档位索引）。
-	retryCount: number;
-	firstErrorAt: number;
-	lastAttemptAt: number | null;
-	nextAttemptAt: number | null;
-	lastErrorSignature: string | null;
-	// 自上一次注入以来，是否又观察到连接错误（恢复探测的关键信号）。
-	errorSeenSinceLastInjection: boolean;
-	// 最近输出末尾，用于桥接跨多个 chunk 的错误行。
+interface ConnectionFailureDetectionState {
 	splitCarryover: string;
 }
-
-function createInitialState(): ConnectionDropReactionState {
-	return {
-		episodeGeneration: 0,
-		continuationSubmissionInFlight: false,
-		readFirstSubmitCarriageReturnState: null,
-		lastErrorObservedAtMs: 0,
-		episodeActive: false,
-		retryCount: 0,
-		firstErrorAt: 0,
-		lastAttemptAt: null,
-		nextAttemptAt: null,
-		lastErrorSignature: null,
-		errorSeenSinceLastInjection: false,
-		splitCarryover: "",
-	};
-}
-
-function startEpisode(state: ConnectionDropReactionState, ctx: OutputReactionContext, signature: string | null): void {
-	state.episodeGeneration += 1;
-	state.continuationSubmissionInFlight = false;
-	state.readFirstSubmitCarriageReturnState = null;
-	state.lastErrorObservedAtMs = ctx.now;
-	state.episodeActive = true;
-	state.retryCount = 0;
-	state.firstErrorAt = ctx.now;
-	state.lastAttemptAt = null;
-	state.lastErrorSignature = signature;
-	state.errorSeenSinceLastInjection = true;
-	state.nextAttemptAt = ctx.now + backoffMs(0);
-}
-
-function endEpisode(state: ConnectionDropReactionState, actions: OutputReactionActions, reason: string): void {
-	state.episodeGeneration += 1;
-	state.continuationSubmissionInFlight = false;
-	state.readFirstSubmitCarriageReturnState = null;
-	state.episodeActive = false;
-	state.retryCount = 0;
-	state.lastAttemptAt = null;
-	state.nextAttemptAt = null;
-	state.errorSeenSinceLastInjection = false;
-	state.lastErrorSignature = null;
-	// 清空跨 chunk 桥接缓存：结束 episode 时（user 回合让位 / recovered / permanent / dismiss）
-	// 残留的 carryover 可能仍含命中正则的文本，若不清掉会被下一段无害输出拼成 detectionText
-	// 再次误命中，把这一回合的误判桥接泄漏到下一个 agent 回合，复活一次伪 retry episode。
-	state.splitCarryover = "";
-	actions.clearScheduledAttempts();
-	actions.clearConnectionRetryState();
-	actions.log(`[output-reaction] ${CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID} episode ended: ${reason}`);
-}
-
-function publishRetryState(state: ConnectionDropReactionState, actions: OutputReactionActions): void {
-	actions.setConnectionRetryState({
-		status: "retrying",
-		retryCount: state.retryCount,
-		firstErrorAt: state.firstErrorAt,
-		lastAttemptAt: state.lastAttemptAt,
-		nextAttemptAt: state.nextAttemptAt,
-	});
-}
-
-// 执行一次 attempt。manual=true 表示用户手动「立即续跑」：跳过「已恢复」判定，强制注入。
-function performAttempt(
-	state: ConnectionDropReactionState,
-	ctx: OutputReactionContext,
-	actions: OutputReactionActions,
-	options: { manual: boolean },
-): void {
-	if (!state.episodeActive) {
-		return;
-	}
-	// facet 主门控：会话已翻入 user 回合（agent 正在向用户提问 / 计划评审 / 权限确认）。
-	// 真实掉线永远不会产生 user 回合（agent 没提问，是卡住 / 死了，没有 hook 翻面）；走到这里
-	// 说明当初那个 episode 多半是正则误命中 agent 自产文本起的伪 episode，或是「PTY 输出先于
-	// hook 落地、episode 已起、standDown 还没到」的竞态尾巴。无论哪种，都立即结束 episode、清掉
-	// 「重连中」徽标，**绝不**把续跑指令注入到正在等待用户的对话框里（那等于替用户答题 / 打断
-	// 人轴交互）。手动「立即续跑」同样不豁免：user 回合下注入本质就是错的，且重试列表本不该含
-	// user 回合的会话。
-	if (!actions.isAgentTurnActive()) {
-		endEpisode(state, actions, "user-turn-active");
-		return;
-	}
-	if (state.continuationSubmissionInFlight) return;
-	// 还没到下一次注入时刻（自动路径下的早醒）：补齐剩余等待。手动路径忽略时刻限制。
-	if (!options.manual && state.nextAttemptAt !== null && ctx.now < state.nextAttemptAt) {
-		actions.schedule(state.nextAttemptAt - ctx.now);
-		return;
-	}
-	// 输出静默门控（仅自动路径）：若 agent 输出仍在流动（未静默），说明它仍在工作 /
-	// 已自行恢复——常见于正则误命中（正常输出含 timeout/5xx 等词）起的伪 episode。
-	// 此时结束 episode（清掉 UI「重连中」），绝不注入打断正在工作的 agent。
-	// 首档退避（4s）大于静默阈值（2s），故真实连接中断到首个 attempt 时一定已静默、不被误清。
-	// 手动「立即续跑」豁免此门控。
-	if (!options.manual && !actions.isEffectiveAgentConversationActivityQuiet()) {
-		endEpisode(state, actions, "agent-output-still-flowing");
-		return;
-	}
-	const firstSubmitCarriageReturnState = state.readFirstSubmitCarriageReturnState?.();
-	if (firstSubmitCarriageReturnState === "awaiting_first_submit") {
-		actions.schedule(NOT_READY_RECHECK_DELAY_MS);
-		return;
-	}
-	if (firstSubmitCarriageReturnState === "target_invalidated") {
-		endEpisode(state, actions, "continuation-target-invalidated-before-submit");
-		return;
-	}
-	if (firstSubmitCarriageReturnState === "deferred_before_submit") {
-		// 本次 paste 确实计过数，但 Enter 被拒绝并已撤回，不能据「没有新错误」宣告恢复。
-		state.errorSeenSinceLastInjection = true;
-	}
-	state.readFirstSubmitCarriageReturnState = null;
-	// 恢复探测：已经注入过、且自上次注入以来没有再出现连接错误 → agent 已恢复。
-	if (!options.manual && state.retryCount > 0 && !state.errorSeenSinceLastInjection) {
-		endEpisode(state, actions, "recovered");
-		return;
-	}
-	// 可注入门只保护写入，不能挡住上面的恢复清理。
-	if (!actions.isAtInteractivePrompt() || !actions.canInjectNow()) {
-		actions.schedule(NOT_READY_RECHECK_DELAY_MS);
-		return;
-	}
-	const generation = state.episodeGeneration;
-	state.continuationSubmissionInFlight = true;
-	const completeSubmission = (result: ConnectionRetryContinuationSubmissionResult) => {
-		if (!state.episodeActive || state.episodeGeneration !== generation) return;
-		state.continuationSubmissionInFlight = false;
-		if (result.outcome === "target_invalidated") {
-			endEpisode(state, actions, "continuation-target-invalidated");
-			return;
-		}
-		if (result.outcome === "deferred_before_terminal_write") {
-			actions.schedule(NOT_READY_RECHECK_DELAY_MS);
-			return;
-		}
-		state.retryCount += 1;
-		state.lastAttemptAt = result.terminalWrittenAtMs ?? ctx.now;
-		state.errorSeenSinceLastInjection = false;
-		state.readFirstSubmitCarriageReturnState = result.readFirstSubmitCarriageReturnState ?? null;
-		const delay = backoffMs(state.retryCount);
-		state.nextAttemptAt = state.lastAttemptAt + delay;
-		publishRetryState(state, actions);
-		actions.log(
-			`[output-reaction] ${CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID} wrote continuation #${state.retryCount}` +
-				`${options.manual ? " (manual)" : ""}; next check in ${delay}ms`,
-		);
-		actions.schedule(delay);
-	};
-	try {
-		const submission = actions.submitContinuationReference();
-		if (submission instanceof Promise) {
-			void submission
-				.then(completeSubmission)
-				.catch(() => completeSubmission({ outcome: "deferred_before_terminal_write" }));
-		} else completeSubmission(submission);
-	} catch {
-		completeSubmission({ outcome: "deferred_before_terminal_write" });
-	}
-}
-
-// appliesTo：当前覆盖 Claude Code + Codex。Cursor 已是可选 agent，但 connection-drop 续跑还
-// 需要补 Cursor 专属连接错误文案 / 提示符确认后再放行，避免误注入。
-//
-// TODO（第二序列 · droid / kiro 等）：用户主动使用这些终端 agent 时，在此追加对应
-//   agentId 即可——接入成本基本就是「appliesTo 放行 + 一组正则」。
-function appliesToAgent(agentId: RuntimeAgentId): boolean {
-	return agentId === "claude" || agentId === "codex";
-}
-
 export function createConnectionDropAutoContinueReaction(): OutputReaction {
+	const reset = (_context: unknown, state: unknown) => {
+		(state as ConnectionFailureDetectionState).splitCarryover = "";
+	};
 	return {
 		id: CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID,
-		appliesTo: appliesToAgent,
-		createState: createInitialState,
-		onOutput(ctx, rawState, actions) {
-			const state = rawState as ConnectionDropReactionState;
-			const newlyObservedTextStartIndex = normalizeTerminalText(state.splitCarryover).length;
-			const bridgedOutputText = `${state.splitCarryover}${ctx.chunkText}`;
-			const detectionText = normalizeTerminalText(bridgedOutputText);
-			state.splitCarryover = bridgedOutputText.slice(-SPLIT_CARRYOVER_CHARS);
-
-			const { classification, signature } = classifyConnectionError(detectionText, newlyObservedTextStartIndex);
-
+		appliesTo: (agentId) => agentId === "claude" || agentId === "codex",
+		createState: () => ({ splitCarryover: "" }),
+		onOutput(context, rawState, actions) {
+			const state = rawState as ConnectionFailureDetectionState;
+			const boundary = normalizeTerminalText(state.splitCarryover).length;
+			const bridged = state.splitCarryover + context.chunkText;
+			state.splitCarryover = bridged.slice(-256);
+			const { classification } = classifyConnectionError(normalizeTerminalText(bridged), boundary);
 			if (classification === "permanent") {
-				if (state.episodeActive) {
-					endEpisode(state, actions, `permanent-error:${signature ?? "?"}`);
-				}
-				return;
-			}
-
-			if (classification === "transient") {
-				if (!state.episodeActive) {
-					// facet 主门控（常见路径：PreToolUse hook 通常先于问题 UI 渲染落地，故问题文本
-					// 到达检测器时 turnOwner 多已是 user）：仅在活跃的 agent 回合才起 episode。若此刻
-					// 已翻入 user 回合，瞬时正则命中的几乎必是 agent 自产的问题 / 选项 / 内容文本，
-					// 而非真实掉线——直接不起 episode，从源头消除「提问被误判为网络中断」的徽标与注入。
-					if (!actions.isAgentTurnActive()) {
-						// 清空跨 chunk 桥接缓存：这一段命中正则的文本几乎必是 agent 自产的问题 /
-						// 选项内容，决不能让它残留在 carryover 里。否则用户答完、回合切回 agent 后，
-						// 下一段无害输出会被拼成 `stale carryover + ' ' + 新 chunk` 再次命中正则，
-						// 把当回合的误判桥接泄漏到下一个 agent 回合、复活一次伪 retry。
-						state.splitCarryover = "";
-						return;
-					}
-					startEpisode(state, ctx, signature);
-					publishRetryState(state, actions);
-					actions.log(
-						`[output-reaction] ${CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID} detected transient connection error` +
-							` (${signature ?? "?"}); first continuation in ${backoffMs(0)}ms`,
-					);
-					actions.schedule(backoffMs(0));
-				} else {
-					state.lastErrorObservedAtMs = ctx.now;
-					// 仍在失败：标记「注入后又出错」，让下一次退避触发时继续注入而非判恢复。
-					state.errorSeenSinceLastInjection = true;
-					state.lastErrorSignature = signature;
-				}
-				return;
-			}
-			// classification === null：无错误输出。恢复判定交给退避定时器（onAttempt），
-			// 这里无需处理（天然忽略注入回显）。
-		},
-		onAttempt(ctx, rawState, actions) {
-			performAttempt(rawState as ConnectionDropReactionState, ctx, actions, { manual: false });
-		},
-		triggerNow(ctx, rawState, actions) {
-			const state = rawState as ConnectionDropReactionState;
-			if (!state.episodeActive) {
-				return;
-			}
-			state.nextAttemptAt = ctx.now;
-			performAttempt(state, ctx, actions, { manual: true });
-		},
-		dismiss(_ctx, rawState, actions) {
-			// 手动「移出列表 / 停止重试」：结束当前 episode（清定时器 + 清 UI 重连状态、不注入）。
-			// 软移除——之后若再检测到新的瞬时连接错误，onOutput 仍会重新进入一次新 episode。
-			const state = rawState as ConnectionDropReactionState;
-			if (!state.episodeActive) {
-				return;
-			}
-			endEpisode(state, actions, "manual-dismiss");
-		},
-		standDown(_ctx, rawState, actions) {
-			// facet→检测器的显式输入边：会话刚翻入 user 回合（agent 向用户提问 / 计划评审 /
-			// 权限确认）时由引擎转发到此。立即让位——结束当前 episode（清定时器 + 清「重连中」
-			// 状态、不注入）。这条边专治「PTY 输出先于 hook 落地、episode 已起」的竞态：让 facet
-			// 翻面能即时清掉残留 episode 与 retrying 徽标，不必等下一个退避定时器到点。
-			const state = rawState as ConnectionDropReactionState;
-			if (!state.episodeActive) {
-				return;
-			}
-			endEpisode(state, actions, "user-turn-started");
-		},
-		onEffectiveAgentConversationActivity(_ctx, rawState, actions, observation) {
-			const state = rawState as ConnectionDropReactionState;
-			if (!state.episodeActive) {
-				actions.clearConnectionRetryState();
-				return;
-			}
-			if (observation.observedAtMs > state.lastErrorObservedAtMs) {
-				endEpisode(state, actions, "trusted-agent-conversation-activity-resumed");
+				actions.onAutomaticFailureDetected?.("permanent");
+				state.splitCarryover = "";
+			} else if (classification === "transient") {
+				if (actions.isAgentTurnActive()) actions.onAutomaticFailureDetected?.("connection");
+				else state.splitCarryover = "";
 			}
 		},
+		onAttempt() {},
+		triggerNow() {},
+		dismiss: reset,
+		standDown: reset,
 	};
 }

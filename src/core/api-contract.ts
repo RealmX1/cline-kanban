@@ -859,6 +859,115 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
+export interface RuntimeAutomaticAgentFailureContinuation {
+	agentId: "codex" | "claude";
+	nativeTranscriptPath: string | null;
+	episodeId: string;
+	workspaceId: string;
+	taskId: string;
+	taskIncarnationCreatedAtEpochMs: number | null;
+	conversationSessionId: string;
+	runtimeSessionIncarnationId: string | null;
+	nativeSessionId: string | null;
+	ownerProcessId: number | null;
+	executionWorkingDirectoryPath: string | null;
+	faultTurnIdentity: string;
+	faultNativeTurnId: string | null;
+	reason: "connection" | "model_capacity";
+	phase:
+		| "waiting_backoff"
+		| "waiting_machine_evidence"
+		| "sending"
+		| "reconciling_acceptance"
+		| "executing"
+		| "cancelled"
+		| "expired"
+		| "recovered"
+		| "failed";
+	firstErrorAtMs: number;
+	firstCapacityErrorAtMs?: number;
+	capacityRetryAttemptCount?: number;
+	lastErrorAtMs: number;
+	deadlineAtMs: number | null;
+	lastCheckAtMs: number | null;
+	nextCheckAtMs: number | null;
+	lastAttemptAtMs: number | null;
+	attemptCount: number;
+	acceptedCount: number;
+	activeDeliveryId: string | null;
+	activeDeliveryWasAccepted: boolean;
+	activeDeliveryAttemptCounted: boolean;
+	activeDeliveryRequestMayHaveBeenSent?: boolean;
+	activeDeliverySubmissionStartedAtMs?: number;
+	activeDeliveryObservedFailure?: { reason: "connection" | "model_capacity"; nativeTurnId: string | null };
+	pendingCompletionReview?: { reason: "hook" | "idle_stall"; observedAtMs: number; activeDeliveryId: string | null };
+	terminalSubmissionTranscriptReadCursor?: { fileIdentity: string; nextByteOffset: number; baselineAtMs: number };
+	unchangedCheckCount: number;
+	blockingReason: string | null;
+}
+export const runtimeAutomaticAgentFailureContinuationSchema: z.ZodType<RuntimeAutomaticAgentFailureContinuation> =
+	z.object({
+		episodeId: z.string(),
+		workspaceId: z.string(),
+		taskId: z.string(),
+		taskIncarnationCreatedAtEpochMs: z.number().nullable(),
+		conversationSessionId: z.string(),
+		runtimeSessionIncarnationId: z.string().nullable(),
+		nativeSessionId: z.string().nullable(),
+		agentId: z.enum(["codex", "claude"]),
+		nativeTranscriptPath: z.string().nullable(),
+		ownerProcessId: z.number().nullable(),
+		executionWorkingDirectoryPath: z.string().nullable(),
+		faultTurnIdentity: z.string(),
+		faultNativeTurnId: z.string().nullable(),
+		reason: z.enum(["connection", "model_capacity"]),
+		phase: z.enum([
+			"waiting_backoff",
+			"waiting_machine_evidence",
+			"sending",
+			"reconciling_acceptance",
+			"executing",
+			"cancelled",
+			"expired",
+			"recovered",
+			"failed",
+		]),
+		firstErrorAtMs: z.number(),
+		firstCapacityErrorAtMs: z.number().optional(),
+		capacityRetryAttemptCount: z.number().int().nonnegative().optional(),
+		lastErrorAtMs: z.number(),
+		deadlineAtMs: z.number().nullable(),
+		lastCheckAtMs: z.number().nullable(),
+		nextCheckAtMs: z.number().nullable(),
+		lastAttemptAtMs: z.number().nullable(),
+		attemptCount: z.number().int().nonnegative(),
+		acceptedCount: z.number().int().nonnegative(),
+		activeDeliveryId: z.string().nullable(),
+		activeDeliveryWasAccepted: z.boolean(),
+		activeDeliveryAttemptCounted: z.boolean(),
+		activeDeliveryRequestMayHaveBeenSent: z.boolean().optional(),
+		activeDeliverySubmissionStartedAtMs: z.number().optional(),
+		activeDeliveryObservedFailure: z
+			.object({ reason: z.enum(["connection", "model_capacity"]), nativeTurnId: z.string().nullable() })
+			.optional(),
+		pendingCompletionReview: z
+			.object({
+				reason: z.enum(["hook", "idle_stall"]),
+				observedAtMs: z.number(),
+				activeDeliveryId: z.string().nullable(),
+			})
+			.optional(),
+		terminalSubmissionTranscriptReadCursor: z
+			.object({
+				fileIdentity: z.string(),
+				nextByteOffset: z.number().nonnegative(),
+				baselineAtMs: z.number(),
+			})
+			.optional(),
+		unchangedCheckCount: z.number().int().nonnegative(),
+		blockingReason: z.string().nullable(),
+	});
+
 // 恢复一个落盘会话只负责重建上下文，绝不等价于开始新一轮生成。PTY agent 恢复期间用这条
 // 加性 sidecar 把「恢复历史」与「用户显式继续」分开：只有 UserPromptSubmit / BeforeAgent 这类
 // 货真价实的用户提交才能解除守卫。旧 sessions.json 缺字段时按 inactive 处理。
@@ -904,7 +1013,19 @@ export type RuntimeTaskTerminalDeliveryContention = z.infer<typeof runtimeTaskTe
 //     session-manager 共用的唯一谓词）；置 / 清标经 TerminalSessionManager 的 park / unpark 走 updateSummary
 //     metadata-only 漏斗，不携带 facet / state，故 {turnOwner:"agent", liveness:"live", userTurnKind:null} 三元组
 //     与下方 superRefine 护栏从不被触碰（parked 主 agent 的真相就是普通 running 三元组）。
+export {
+	type TaskCommandExecutionRecord,
+	type TaskCommandExecutionSpecification,
+	taskCommandExecutionIdentityRequestSchema,
+	taskCommandExecutionRecordSchema,
+	taskCommandExecutionResponseSchema,
+	taskCommandExecutionSpecificationSchema,
+	taskCommandExecutionStartRequestSchema,
+} from "./task-command-execution-contract";
+
 export const runtimeTaskAwaitingDispatchedBackgroundWorkSchema = z.object({
+	owningCommandExecutionIds: z.array(z.string().uuid()).optional(),
+	hasUnownedBackgroundWorkWait: z.boolean().optional(),
 	// park 起始时刻（epoch ms）。用于 UI 展示与（自研 Kanban 继承时）潜在的 park 超时兜底。
 	sinceMs: z.number(),
 	// 可选的人类可读标签（例：被派发的子任务 id / 简述），仅用于 UI 与诊断。
@@ -1256,6 +1377,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	automaticAgentFailureContinuation: runtimeAutomaticAgentFailureContinuationSchema.nullable().optional(),
 	restorationContinuationGuardState: runtimeTaskSessionRestorationContinuationGuardStateSchema.optional(),
 	// 程序化投递被人类输入框占用而挂起时的可见性 sidecar（加性、nullable + optional，仅内存态）。
 	// present = 此刻确实有投递在等这个终端的输入框；null = 没有任何投递在等（绝大多数时刻）。
@@ -2018,6 +2140,7 @@ export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabili
 // deriveLiveAgentTaskCount）；跨项目切换面板的条目是它的超集（下方 runtimeCrossProjectTaskSwitcherEntrySchema）。
 // 原消费者 Stage-First Overview 已退役（docs/context-board-scope-all-projects-and-single-project-scope.md）。
 export const runtimeInProgressTaskDetailSchema = z.object({
+	automaticAgentFailureContinuation: runtimeAutomaticAgentFailureContinuationSchema.nullable().optional(),
 	taskClosureSummary: taskClosureRecordSchema.optional(),
 	taskClosureOperationProgress: taskClosureOperationProgressSchema.optional(),
 	lastEffectiveAgentConversationActivityObservation: runtimeLastEffectiveAgentConversationActivityObservationSchema
@@ -2737,11 +2860,20 @@ export const codexNativePromptDeliveryOperationSchema = z.object({
 });
 export type CodexNativePromptDeliveryOperation = z.infer<typeof codexNativePromptDeliveryOperationSchema>;
 
+export const nativePromptSubmissionNotStartedEvidenceSchema = z.object({
+	source: z.literal("acp_input_rejected_before_prompt_registration"),
+	clientUserMessageId: z.string().min(1),
+	submissionAttemptId: z.string().min(1),
+	nativeSessionId: z.string().min(1),
+	reason: z.enum(["connection_unavailable", "request_busy"]),
+});
+
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
 });
 export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
@@ -2764,6 +2896,7 @@ export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
 });
 export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
 
@@ -4132,6 +4265,7 @@ export const runtimeConfigResponseSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean(),
 	notificationSoundEnabled: z.boolean(),
 	autoContinueOnConnectionDropEnabled: z.boolean(),
+	codexModelCapacityErrorAutoContinuationEnabled: z.boolean().optional(),
 	// 程序化投递与人类抢输入框时，人不在场是否允许自动暂存抢占（false = 恒定只挂起可见）。
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: z.boolean(),
 	// Post-Deploy Verification 「一键强制完成（跳过 token 两步确认）」的全局总闸；配合 CLI `--force` 才生效（plan Grilling #9）。
@@ -4159,6 +4293,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	notificationSoundEnabled: z.boolean().optional(),
 	autoContinueOnConnectionDropEnabled: z.boolean().optional(),
+	codexModelCapacityErrorAutoContinuationEnabled: z.boolean().optional(),
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: z.boolean().optional(),
 	postDeployVerificationForceCompleteEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
@@ -6692,3 +6827,13 @@ export const runtimeClaimDailyWorkProgressCelebrationsResponseSchema = z.object(
 export type RuntimeClaimDailyWorkProgressCelebrationsResponse = z.infer<
 	typeof runtimeClaimDailyWorkProgressCelebrationsResponseSchema
 >;
+
+export const runtimeAutomaticAgentFailureContinuationActionRequestSchema = z.object({
+	taskId: z.string().min(1),
+	episodeId: z.string().min(1),
+	action: z.enum(["retry_now", "cancel"]),
+});
+export type RuntimeAutomaticAgentFailureContinuationActionRequest = z.infer<
+	typeof runtimeAutomaticAgentFailureContinuationActionRequestSchema
+>;
+export const runtimeAutomaticAgentFailureContinuationActionResponseSchema = z.object({ ok: z.boolean() });

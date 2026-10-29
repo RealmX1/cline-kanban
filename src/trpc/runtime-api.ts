@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
+import { runtimeAutomaticAgentFailureContinuationActionRequestSchema } from "../core/api-contract";
 import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
@@ -716,6 +717,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					scopedRuntimeConfig.agentAutonomousModeEnabled,
 				),
 				autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+				codexModelCapacityErrorAutoContinuationEnabled:
+					scopedRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled,
 				cwd: taskCwd,
 				prompt: "",
 				images: undefined,
@@ -814,6 +817,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			if (!workspaceScope) {
 				deps.setActiveRuntimeConfig(nextRuntimeConfig);
 			}
+			if (workspaceScope)
+				(await deps.getScopedTerminalManager(workspaceScope)).reconcileAutomaticFailureContinuationSettings?.(
+					nextRuntimeConfig.autoContinueOnConnectionDropEnabled,
+					nextRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled ?? true,
+				);
 			return buildConfigResponse(nextRuntimeConfig);
 		},
 		saveClineProviderSettings: async (_workspaceScope, input) => {
@@ -1609,6 +1617,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							scopedRuntimeConfig.agentAutonomousModeEnabled,
 						),
 						autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+						codexModelCapacityErrorAutoContinuationEnabled:
+							scopedRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled,
 						cwd: taskCwd,
 						prompt: body.prompt,
 						images: body.images,
@@ -1843,6 +1853,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						scopedRuntimeConfig.agentAutonomousModeEnabled,
 					),
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+					codexModelCapacityErrorAutoContinuationEnabled:
+						scopedRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled,
 					cwd: taskCwd,
 					prompt: "",
 					images: undefined,
@@ -2550,6 +2562,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
+		actOnAutomaticFailureContinuation: async (workspaceScope, input) => {
+			const body = runtimeAutomaticAgentFailureContinuationActionRequestSchema.parse(input);
+			return {
+				ok: await (await deps.getScopedTerminalManager(workspaceScope)).actOnAutomaticFailureContinuation(
+					body.taskId,
+					body.episodeId,
+					body.action,
+				),
+			};
+		},
 		continueConnectionRetrySessions: async (workspaceScope, input) => {
 			try {
 				const body = parseContinueConnectionRetrySessionsRequest(input);
@@ -2573,6 +2595,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseDismissConnectionRetrySessionsRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const dismissedTaskIds = terminalManager.dismissConnectionRetrySessions(body.taskIds);
+				await terminalManager.flushAutomaticFailureContinuationPersistence?.(dismissedTaskIds);
 				return {
 					ok: true,
 					dismissedTaskIds,
@@ -2836,6 +2859,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		cancelTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatCancelRequest(input);
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId);
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const acpSummary = await acpTaskSessionService.cancelTaskTurn(body.taskId);
 				if (acpSummary) {

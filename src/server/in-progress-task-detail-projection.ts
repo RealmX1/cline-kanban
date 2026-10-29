@@ -27,6 +27,7 @@ import { resolveMainTaskConversationSessionId } from "../core/task-main-conversa
 // 2.8 MB），每 150ms 一次的 projects_updated 广播不可能每次重新解析；workspace-registry 按文件 mtime 缓存，
 // 缓存里只留这几个字段（见 persisted-task-session-facts-cache-for-unloaded-projects.ts）。
 export interface TaskSessionFactsForCrossProjectTaskViews {
+	automaticAgentFailureContinuation?: RuntimeTaskSessionSummary["automaticAgentFailureContinuation"];
 	agentConversationPromptSubmissionAcceptance?: RuntimeTaskSessionSummary["agentConversationPromptSubmissionAcceptance"];
 	taskConversationSessionMetadata?: RuntimeTaskSessionSummary["taskConversationSessionMetadata"];
 	lastEffectiveAgentConversationActivityObservation?: RuntimeTaskSessionSummary["lastEffectiveAgentConversationActivityObservation"];
@@ -81,6 +82,7 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 		lastAgentConversationPromptCacheReferenceObservation:
 			resolveLastAgentConversationPromptCacheReferenceObservation(summary),
 		agentConversationPromptSubmissionAcceptance: summary.agentConversationPromptSubmissionAcceptance ?? null,
+		automaticAgentFailureContinuation: summary.automaticAgentFailureContinuation,
 		agentId: summary.agentId,
 		lastOutputAt: roundLastOutputAtDownForCrossProjectTaskViews(summary.lastOutputAt),
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
@@ -142,6 +144,7 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 	sessionFacts: TaskSessionFactsForCrossProjectTaskViews | undefined,
 ): RuntimeInProgressTaskDetail {
 	return {
+		automaticAgentFailureContinuation: sessionFacts?.automaticAgentFailureContinuation,
 		taskId: card.id,
 		taskClosureSummary: card.taskClosureSummary,
 		taskClosureOperationProgress: card.taskClosureOperationProgress,

@@ -46,6 +46,23 @@ function parkRunningAcpContext(context: AcpSessionUpdateContext, label = "rvf re
 }
 
 describe("ACP park awaiting dispatched background work", () => {
+	it("所属等待之后新增的普通后台等待在本执行解除后继续保留", () => {
+		const context = createRunningAcpContext();
+		const executionId = "9aacf74c-c9ee-4c2c-a70e-997879f182e1";
+		parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork({
+			taskId: context.taskId,
+			entry: context.entry,
+			hasLiveAcpConnection: true,
+			owningCommandExecutionId: executionId,
+		});
+		parkRunningAcpContext(context, "其他后台等待");
+		unparkAcpTaskSessionEntry(context.entry, executionId);
+		expect(context.entry.summary.awaitingDispatchedBackgroundWork).toMatchObject({
+			label: "其他后台等待",
+			hasUnownedBackgroundWorkWait: true,
+			owningCommandExecutionIds: [],
+		});
+	});
 	it("keeps the agent turn when a parked turn ends normally, instead of handing it to the user for review", () => {
 		const context = createRunningAcpContext();
 		parkRunningAcpContext(context);

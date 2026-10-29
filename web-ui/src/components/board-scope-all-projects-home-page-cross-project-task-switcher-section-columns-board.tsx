@@ -17,6 +17,7 @@ import type { RuntimeAgentId } from "@/runtime/types";
 const BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER: readonly CrossProjectTaskSwitcherTaskRowSection[] = [
 	"pinned",
 	"running",
+	"waiting_automatic_recovery",
 	"prompt_cache_warm",
 	"remaining",
 	"shelved",

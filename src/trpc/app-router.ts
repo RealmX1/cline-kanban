@@ -228,6 +228,7 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	type RuntimeAutomaticAgentFailureContinuationActionRequest,
 	type RuntimeTaskCardActionSetShelvingStateRequest,
 	type RuntimeTaskCardActionSetShelvingStateResponse,
 	runtimeAddBacklogTaskRequestSchema,
@@ -244,6 +245,8 @@ import {
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeArchiveExploratoryFindingRequestSchema,
 	runtimeArchiveExploratoryFindingResponseSchema,
+	runtimeAutomaticAgentFailureContinuationActionRequestSchema,
+	runtimeAutomaticAgentFailureContinuationActionResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClaimDailyWorkProgressCelebrationsRequestSchema,
@@ -537,6 +540,11 @@ import {
 	taskClosureRecordSchema,
 } from "../core/task-closure-contract";
 import {
+	taskCommandExecutionIdentityRequestSchema,
+	taskCommandExecutionResponseSchema,
+	taskCommandExecutionStartRequestSchema,
+} from "../core/task-command-execution-contract";
+import {
 	taskEditorCreationSubmissionLookupSchema,
 	taskEditorCreationSubmissionRequestSchema,
 	taskEditorCreationSubmissionRetryRequestSchema,
@@ -665,6 +673,7 @@ import {
 	savePersistentAgentPromptImageAttachments,
 } from "../state/persistent-agent-prompt-image-attachments";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { TaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
 import type { TaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
@@ -677,6 +686,7 @@ export interface RuntimeTrpcWorkspaceScope {
 
 export interface RuntimeTrpcContext {
 	taskEditorCreationSubmissionApi?: TaskEditorCreationSubmissionService;
+	taskCommandExecutionApi?: TaskCommandExecutionService;
 	codexConfigurationSyncApi?: CodexConfigurationSyncApi;
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
 	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
@@ -791,6 +801,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeDismissAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeDismissAgentRaisedPendingUserDecisionResponse>;
+		actOnAutomaticFailureContinuation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAutomaticAgentFailureContinuationActionRequest,
+		) => Promise<{ ok: boolean }>;
 		continueConnectionRetrySessions: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeContinueConnectionRetrySessionsRequest,
@@ -1442,6 +1456,41 @@ export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEdi
 const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
 
 export const runtimeAppRouter = t.router({
+	taskCommandExecution: t.router({
+		start: workspaceProcedure
+			.input(taskCommandExecutionStartRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.start(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+		inspect: workspaceProcedure
+			.input(taskCommandExecutionIdentityRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.inspect(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+		cancel: workspaceProcedure
+			.input(taskCommandExecutionIdentityRequestSchema)
+			.output(taskCommandExecutionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!ctx.taskCommandExecutionApi)
+					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+				return {
+					ok: true as const,
+					execution: await ctx.taskCommandExecutionApi.cancel(ctx.workspaceScope.workspaceId, input),
+				};
+			}),
+	}),
 	dailyWorkProgressStatistics: t.router({
 		getSummary: t.procedure
 			.input(runtimeDailyWorkProgressRequestSchema)
@@ -1967,6 +2016,12 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.dismissAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
 			}),
+		actOnAutomaticFailureContinuation: workspaceProcedure
+			.input(runtimeAutomaticAgentFailureContinuationActionRequestSchema)
+			.output(runtimeAutomaticAgentFailureContinuationActionResponseSchema)
+			.mutation(async ({ ctx, input }) =>
+				ctx.runtimeApi.actOnAutomaticFailureContinuation(ctx.workspaceScope, input),
+			),
 		continueConnectionRetrySessions: workspaceProcedure
 			.input(runtimeContinueConnectionRetrySessionsRequestSchema)
 			.output(runtimeContinueConnectionRetrySessionsResponseSchema)

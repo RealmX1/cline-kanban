@@ -122,6 +122,8 @@ export function buildRuntimeConfigResponse(
 		readyForReviewNotificationsEnabled: runtimeConfig.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: runtimeConfig.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: runtimeConfig.autoContinueOnConnectionDropEnabled,
+		codexModelCapacityErrorAutoContinuationEnabled:
+			runtimeConfig.codexModelCapacityErrorAutoContinuationEnabled ?? true,
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 			runtimeConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: runtimeConfig.postDeployVerificationForceCompleteEnabled,

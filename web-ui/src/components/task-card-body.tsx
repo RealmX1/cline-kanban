@@ -47,6 +47,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { notifyError, showAppToast } from "@/components/app-toaster";
+import { AutomaticAgentFailureContinuationNotice } from "@/components/automatic-agent-failure-continuation-notice";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
 import {
 	formatClineReasoningEffortLabel,
@@ -1782,6 +1783,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : null}
 				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
+				<AutomaticAgentFailureContinuationNotice
+					summary={sessionSummary}
+					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+					executionForbidden={isTrashCard || !!card.taskShelvingState?.isShelved}
+				/>
 				{sessionActivity ? (
 					<div
 						data-task-card-session-activity=""

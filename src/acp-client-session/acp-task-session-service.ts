@@ -510,16 +510,38 @@ export class AcpTaskSessionService {
 		return cloneAcpSummary(entry.summary);
 	}
 
+	private readonly inputSubmissionReadinessObservationsByTaskId = new Map<
+		string,
+		{ isBusy: boolean; observationSequenceNumber: number }
+	>();
+
+	getTaskSessionInputSubmissionReadiness(taskId: string): { isBusy: boolean; observationSequenceNumber: number } {
+		const connection = this.connectionRuntime.getConnection(taskId);
+		const isBusy =
+			this.promptTurnAwaitingProtocolEvidenceByTaskId.has(taskId) ||
+			Boolean(connection && this.inFlightPromptCancellationNotificationCountByConnection.has(connection));
+		const previous = this.inputSubmissionReadinessObservationsByTaskId.get(taskId);
+		const observation = {
+			isBusy,
+			observationSequenceNumber:
+				(previous?.observationSequenceNumber ?? 0) + (previous && previous.isBusy !== isBusy ? 1 : 0),
+		};
+		this.inputSubmissionReadinessObservationsByTaskId.set(taskId, observation);
+		return observation;
+	}
+
 	async sendTaskSessionInput(
 		taskId: string,
 		text: string,
 		images?: RuntimeTaskImage[],
 		onPromptAcceptanceSettled?: (accepted: boolean) => void,
 		programmaticPromptSubmissionIdempotencyKey?: string,
+		onPromptSubmissionNotStarted?: (reason: "connection_unavailable" | "request_busy") => void,
 	): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.registry.getEntry(taskId);
 		const connection = this.connectionRuntime.getConnection(taskId);
 		if (!entry || !connection) {
+			onPromptSubmissionNotStarted?.("connection_unavailable");
 			return null;
 		}
 		const previousAcceptance = entry.summary.agentConversationPromptSubmissionAcceptance;
@@ -538,6 +560,7 @@ export class AcpTaskSessionService {
 			this.promptTurnAwaitingProtocolEvidenceByTaskId.has(taskId) ||
 			this.inFlightPromptCancellationNotificationCountByConnection.has(connection)
 		) {
+			onPromptSubmissionNotStarted?.("request_busy");
 			throw new Error("当前 ACP 请求正在处理，无法同时提交另一条输入。");
 		}
 		this.emitMessage(
@@ -559,13 +582,14 @@ export class AcpTaskSessionService {
 	// 编排方须 await park 成功再让 agent 结束这一轮：回合收束读的是此刻内存里的 summary。
 	parkTaskSessionAwaitingDispatchedBackgroundWork(
 		taskId: string,
-		options: { label?: string } = {},
+		options: { label?: string; owningCommandExecutionId?: string } = {},
 	): AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult {
 		const result = parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork({
 			taskId,
 			entry: this.registry.getEntry(taskId),
 			hasLiveAcpConnection: this.connectionRuntime.getConnection(taskId) !== null,
 			label: options.label,
+			owningCommandExecutionId: options.owningCommandExecutionId,
 		});
 		if (result.ok) {
 			this.emitSummary(result.summary);
@@ -573,12 +597,12 @@ export class AcpTaskSessionService {
 		return result;
 	}
 
-	unparkTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+	unparkTaskSession(taskId: string, owningCommandExecutionId?: string): RuntimeTaskSessionSummary | null {
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
 			return null;
 		}
-		const unparkedSummary = unparkAcpTaskSessionEntry(entry);
+		const unparkedSummary = unparkAcpTaskSessionEntry(entry, owningCommandExecutionId);
 		if (unparkedSummary) {
 			this.emitSummary(unparkedSummary);
 			return unparkedSummary;
@@ -858,6 +882,7 @@ export class AcpTaskSessionService {
 		for (const taskId of this.promptTurnAwaitingProtocolEvidenceByTaskId.keys())
 			this.finishTrackingPromptTurn(taskId);
 		this.connectionRuntime.disposeAllTaskConnections();
+		this.inputSubmissionReadinessObservationsByTaskId.clear();
 	}
 
 	private async runPromptTurn(

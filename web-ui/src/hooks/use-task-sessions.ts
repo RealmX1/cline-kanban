@@ -87,6 +87,11 @@ function logTaskSessionStartClientFailure(input: {
 }
 
 export interface UseTaskSessionsResult {
+	actOnAutomaticFailureContinuation: (
+		taskId: string,
+		episodeId: string,
+		action: "retry_now" | "cancel",
+	) => Promise<boolean>;
 	upsertSession: (summary: RuntimeTaskSessionSummary) => void;
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
@@ -379,6 +384,24 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
+	const actOnAutomaticFailureContinuation = useCallback(
+		async (taskId: string, episodeId: string, action: "retry_now" | "cancel") => {
+			if (!currentProjectId) return false;
+			try {
+				return (
+					await getRuntimeTrpcClient(currentProjectId).runtime.actOnAutomaticFailureContinuation.mutate({
+						taskId,
+						episodeId,
+						action,
+					})
+				).ok;
+			} catch {
+				return false;
+			}
+		},
+		[currentProjectId],
+	);
+
 	const continueConnectionRetrySessions = useCallback(
 		async (taskIds: string[]): Promise<string[]> => {
 			if (!currentProjectId || taskIds.length === 0) {
@@ -516,6 +539,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		createTaskConversationSession,
 		stopTaskSession,
 		transitionTaskToReview,
+		actOnAutomaticFailureContinuation,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,

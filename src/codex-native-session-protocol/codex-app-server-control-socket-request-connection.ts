@@ -75,6 +75,7 @@ export class CodexAppServerControlSocketRequestError extends Error {
 	constructor(
 		public readonly outcome: ControlSocketRequestOutcome,
 		message: string,
+		public readonly unsupportedNativeCapability?: "thread_turns_list",
 	) {
 		super(message);
 	}
@@ -270,7 +271,14 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 			finishRequest(
 				id,
 				"native_error",
-				new CodexAppServerControlSocketRequestError("native_error", "Codex 原生请求失败。"),
+				new CodexAppServerControlSocketRequestError(
+					"native_error",
+					"Codex 原生请求失败。",
+					entry.method === "thread/turns/list" &&
+						parsed.data.error.message.includes("list_turns is not supported yet")
+						? "thread_turns_list"
+						: undefined,
+				),
 			);
 		} else finishRequest(id, "resolved", undefined, parsed.data.result);
 	};

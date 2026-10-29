@@ -22,6 +22,7 @@ import type {
 	RuntimeTaskChatMessage,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	TerminalDeliveryReceipt,
 } from "../core/api-contract";
 import { terminalDeliveryReceiptSchema } from "../core/api-contract";
 import { parseTaskChatSendRequest } from "../core/api-validation";
@@ -63,6 +64,9 @@ export interface SendTaskChatMessageAcrossSessionTransportsDependencies {
 	programmaticInjectionLedgerTaskId?: string;
 	// 领域级投递授权在受理前与每次实际终端写入前重读，覆盖持久队列已交给 transport 的停止竞争。
 	validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator;
+	preserveExistingComposerDraft?: boolean;
+	owningCommandExecutionId?: string;
+	programmaticSubmissionAttemptId?: string;
 }
 
 function buildTerminalTaskChatDeliveryMessage(input: {
@@ -176,7 +180,8 @@ async function sendTaskChatMessageThroughSelectedTransport(
 			deps.programmaticTerminalDeliveryReceiptPersistenceOwner !== "queued_task_prompt_delivery_store";
 		const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 		// 同 getTaskChatMessages：按活会话盖的通道章分派，而不是「账本里有没有 entry」。
-		if (isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acpTaskSessionService.getSummary(body.taskId))) {
+		const acpCurrentSummary = acpTaskSessionService.getSummary(body.taskId);
+		if (isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acpCurrentSummary)) {
 			if (isClineClearSlashCommand(body.text)) {
 				const clearedSummary = await acpTaskSessionService.clearTaskSession(body.taskId);
 				deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
@@ -190,33 +195,62 @@ async function sendTaskChatMessageThroughSelectedTransport(
 					: null;
 			const observesAcceptance =
 				injectionIdempotencyKey != null || deps.onProgrammaticTerminalDeliverySettled != null;
-			const acpSummary = await acpTaskSessionService.sendTaskSessionInput(
-				body.taskId,
-				body.text,
-				body.images,
-				observesAcceptance
-					? (accepted) => {
-							const outcome = accepted
-								? { status: "delivered_and_submit_confirmed" as const, reason: null }
-								: {
-										status: "delivery_failed" as const,
-										reason: "submit_confirmation_budget_exhausted" as const,
-									};
-							if (injectionLedgerPath && injectionIdempotencyKey) {
-								void recordTaskMessageTerminalDeliveryOutcome({
-									ledgerPath: injectionLedgerPath,
-									taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
-									idempotencyKey: injectionIdempotencyKey,
-									status: outcome.status,
-									...(outcome.reason ? { failureReason: outcome.reason } : {}),
-									nowIso: new Date().toISOString(),
-								}).catch(() => {});
+			await deps.validateBeforeTerminalWrite?.("before_first_transport_write");
+			let notStartedReceipt: TerminalDeliveryReceipt | undefined;
+			let acpSummary: RuntimeTaskChatSendResponse["summary"];
+			try {
+				acpSummary = await acpTaskSessionService.sendTaskSessionInput(
+					body.taskId,
+					body.text,
+					body.images,
+					observesAcceptance
+						? (accepted) => {
+								const outcome = accepted
+									? { status: "delivered_and_submit_confirmed" as const, reason: null }
+									: {
+											status: "delivery_failed" as const,
+											reason: "submit_confirmation_budget_exhausted" as const,
+										};
+								if (injectionLedgerPath && injectionIdempotencyKey) {
+									void recordTaskMessageTerminalDeliveryOutcome({
+										ledgerPath: injectionLedgerPath,
+										taskId: deps.programmaticInjectionLedgerTaskId ?? body.taskId,
+										idempotencyKey: injectionIdempotencyKey,
+										status: outcome.status,
+										...(outcome.reason ? { failureReason: outcome.reason } : {}),
+										nowIso: new Date().toISOString(),
+									}).catch(() => {});
+								}
+								deps.onProgrammaticTerminalDeliverySettled?.(outcome);
 							}
-							deps.onProgrammaticTerminalDeliverySettled?.(outcome);
-						}
-					: undefined,
-				injectionIdempotencyKey ?? undefined,
-			);
+						: undefined,
+					injectionIdempotencyKey ?? undefined,
+					(reason) => {
+						const nativeSessionId = acpCurrentSummary?.agentNativeConversationSessionIdentity?.nativeSessionId;
+						if (!injectionIdempotencyKey || !deps.programmaticSubmissionAttemptId || !nativeSessionId) return;
+						notStartedReceipt = {
+							status: "delivery_failed",
+							reason: "no_active_terminal_session",
+							nativePromptSubmissionNotStartedEvidence: {
+								source: "acp_input_rejected_before_prompt_registration",
+								clientUserMessageId: injectionIdempotencyKey,
+								submissionAttemptId: deps.programmaticSubmissionAttemptId,
+								nativeSessionId,
+								reason,
+							},
+						};
+					},
+				);
+			} catch (error) {
+				if (!notStartedReceipt) throw error;
+				deps.onProgrammaticTerminalDeliverySettled?.(notStartedReceipt);
+				return {
+					ok: false,
+					summary: acpCurrentSummary ?? null,
+					error: error instanceof Error ? error.message : String(error),
+					terminalDelivery: notStartedReceipt,
+				};
+			}
 			if (acpSummary) {
 				return {
 					ok: true,
@@ -237,11 +271,12 @@ async function sendTaskChatMessageThroughSelectedTransport(
 			}
 			// 有会话账本但连接已经没了（会话被回收 / 子进程已退）：此刻确实没有活着的会话可投，
 			// 如实落终态，别让调用方空等一个不会到来的确认。
+			if (notStartedReceipt) deps.onProgrammaticTerminalDeliverySettled?.(notStartedReceipt);
 			return {
 				ok: false,
 				summary: null,
 				error: "The ACP agent session is not connected.",
-				terminalDelivery: {
+				terminalDelivery: notStartedReceipt ?? {
 					status: "delivery_failed" as const,
 					reason: "no_active_terminal_session" as const,
 				},
@@ -349,6 +384,7 @@ async function sendTaskChatMessageThroughSelectedTransport(
 						deferWhileUserTurn: body.source != null && body.source !== "task_main_session_handover",
 						...(body.source === "task_main_session_handover" ? { requiresCodexStartupPromptReady: true } : {}),
 						validateBeforeTerminalWrite: deps.validateBeforeTerminalWrite,
+						owningCommandExecutionId: deps.owningCommandExecutionId,
 						idempotencyKey: injectionIdempotencyKey ?? deps.managedTerminalDeliveryCancellationKey,
 						...(injectionLedgerPath && injectionIdempotencyKey
 							? {
@@ -361,6 +397,7 @@ async function sendTaskChatMessageThroughSelectedTransport(
 								}
 							: {}),
 						mayAutoStashAbsentHumanInputBox:
+							!deps.preserveExistingComposerDraft &&
 							contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 						preemptivelyStashHumanInputBox: async (taskId) => {
 							const stash = await stashTaskTerminalInputBoxIntoPromptLibrary(

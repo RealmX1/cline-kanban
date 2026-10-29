@@ -3,6 +3,7 @@ import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-re
 import { type ReactElement, useEffect, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
+	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
 	CrossProjectTaskSwitcherPinnedSectionBlock,
 	CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock,
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
@@ -152,6 +153,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				) : null}
 				<CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />
+				<CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherRemainingRecentSectionBlock {...sectionBlockProps} />
 				<CrossProjectTaskSwitcherShelvedSectionBlock {...sectionBlockProps} />

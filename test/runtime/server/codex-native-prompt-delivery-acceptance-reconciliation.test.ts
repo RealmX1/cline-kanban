@@ -149,6 +149,43 @@ describe("运行时重启后的原生接受补证", () => {
 		expect(await readFile(ledgerPath, "utf8")).toBe(before);
 	});
 
+	it("自动恢复到期或端点暂缺时仍沿原账本补证，并将迟到事实送回历史计数", async () => {
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+			records: records.map((record) => ({ ...record, source: "automatic_agent_failure_continuation" })),
+			result: undefined,
+		}));
+		const onAutomaticFailureContinuationDeliveryObserved = vi.fn();
+		const deliver = vi.fn<typeof deliverCodexNativePromptWithoutChangingComposer>(async (input) => {
+			expect(input.reconcileAcceptanceOnly).toBe(true);
+			expect(await input.beforeSubmit()).toBe(false);
+			if (!input.summary.codexNativeSessionControlEndpoint) return { status: "unavailable" };
+			await input.deliveryJournal?.recordAcceptance(evidence);
+			return { status: "confirmed", evidence };
+		});
+		const input = {
+			workspaceId: "workspace",
+			ledgerPath,
+			getSummary: () => ({ ...summary, codexNativeSessionControlEndpoint: undefined }),
+			deliver,
+			onAutomaticFailureContinuationDeliveryObserved,
+		};
+		expect(await reconcileWorkspaceCodexNativePromptDeliveryAcceptances(input)).toEqual({
+			confirmedCount: 0,
+			unknownCount: 1,
+		});
+		expect(
+			await reconcileWorkspaceCodexNativePromptDeliveryAcceptances({ ...input, getSummary: () => summary }),
+		).toEqual({ confirmedCount: 1, unknownCount: 0 });
+		expect(onAutomaticFailureContinuationDeliveryObserved).toHaveBeenLastCalledWith(
+			"conversation",
+			"wake-key",
+			true,
+			true,
+		);
+		await reconcileWorkspaceCodexNativePromptDeliveryAcceptances({ ...input, getSummary: () => summary });
+		expect(deliver).toHaveBeenCalledTimes(2);
+	});
+
 	it("查询未知可继续重验，所有补证都不增加实际发送预算", async () => {
 		const deliver = vi.fn<typeof deliverCodexNativePromptWithoutChangingComposer>(async () => ({
 			status: "unconfirmed",
