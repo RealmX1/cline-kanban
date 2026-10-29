@@ -22,6 +22,7 @@ import { resolveWorkUnitSelectorAgainstRecordedRelationProjection } from "./work
 export async function applyReferenceRelationModelingChanges(
 	deps: CreateWorkUnitRelationAssertionWriteApiDependencies,
 	input: ApplyReferenceRelationModelingChangesRequest,
+	acceptedTaskCreationAuthorization?: { submissionId: string; acceptedAtEpochMs: number },
 ): Promise<ApplyReferenceRelationModelingChangesResponse> {
 	return deps.readRecordedInterWorkUnitRelationProjection(async (reader) => {
 		const state = reader.projectionState;
@@ -102,6 +103,7 @@ export async function applyReferenceRelationModelingChanges(
 				capturingKanbanRuntimeInstance,
 				relationEndpoints: [root],
 				eventPayload: {
+					...(acceptedTaskCreationAuthorization ? { acceptedTaskCreationAuthorization } : {}),
 					modelingSubmissionId: input.modelingSubmissionId,
 					modelingSubmissionFingerprint: fingerprint,
 					relationsAfterChange: plan.relationsAfterChange,

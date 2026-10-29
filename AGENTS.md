@@ -102,6 +102,7 @@ web-ui：
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
+| `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
 | `docs/task-initial-prompt-structured-markup.md` | 任务起草的来源与阶段标签、实际默认设置选择、共享指导注入及历史兼容边界 |

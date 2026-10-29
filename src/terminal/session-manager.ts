@@ -757,6 +757,7 @@ export interface StartTaskSessionRequest {
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
+	beforeAgentProcessLaunch?: () => Promise<void>;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -5069,6 +5070,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			request: {
 				...cloneStartTaskSessionRequest(request),
 				revalidateExistingMainSessionHandoverTargetBeforeLaunch: undefined,
+				beforeAgentProcessLaunch: undefined,
 			},
 		};
 		if (entry.active && isSummaryInActiveTurn(entry.summary)) {
@@ -5441,12 +5443,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					runtimeSessionIncarnationId,
 				});
 			throwIfTaskSessionStartWasCancelled();
+			if (!hostedTerminalPtyProcessSpawner) await request.beforeAgentProcessLaunch?.();
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
 				? await hostedTerminalPtyProcessSpawner.spawnHostedTerminalPtyProcess({
 						taskId: request.taskId,
 						hostedSessionKind: "task_agent_session",
+						beforeAgentProcessLaunch: request.beforeAgentProcessLaunch,
 						binary: commandBinary,
 						args: commandArgs,
 						cwd: request.cwd,

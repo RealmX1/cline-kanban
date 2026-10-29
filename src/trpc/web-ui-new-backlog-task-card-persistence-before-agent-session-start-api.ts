@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import type {
 	RuntimeBoardCard,
 	RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest,
@@ -63,6 +64,11 @@ export async function persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessi
 			const taskCardIdsInsertedByThisRequest = new Set<string>();
 			const newBacklogTaskCardsNotYetOnBoard: RuntimeBoardCard[] = [];
 			for (const card of request.newBacklogTaskCardsCreatedFromWebUi) {
+				const existing = state.board.columns
+					.flatMap((column) => column.cards)
+					.find((candidate) => candidate.id === card.id);
+				if (existing && existing.createdAt !== card.createdAt)
+					throw new TRPCError({ code: "CONFLICT", message: "同 ID 任务的创建身份已变化，不能写入旧创建提交。" });
 				// 已在盘上（重试，或浏览器的整板保存先到了）：幂等跳过，不拿浏览器这份覆盖盘上较新的版本。
 				if (taskCardIdsAlreadyOnBoard.has(card.id) || taskCardIdsInsertedByThisRequest.has(card.id)) {
 					continue;

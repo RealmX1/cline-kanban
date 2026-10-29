@@ -499,13 +499,6 @@ export function ReferenceRelationModelingEditor({
 						</Button>
 					</div>
 				</div>
-				{controller.draft.createdTaskId ? (
-					<p role="status" className="rounded-md bg-status-orange/15 p-2 text-text-primary">
-						任务 {controller.draft.createdTaskId} 已创建，
-						{controller.hasChanges ? "关系尚未保存。" : "尚未完成提交。"}
-						再次提交会继续完成这张任务，不会重复创建。
-					</p>
-				) : null}
 				{controller.draftPersistenceError ? (
 					<p role="status" className="text-status-orange">
 						{controller.draftPersistenceError}

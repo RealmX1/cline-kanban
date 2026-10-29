@@ -93,6 +93,7 @@ export interface StartAcpTaskSessionRequest {
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
+	beforeAgentProcessLaunch?: () => Promise<void>;
 	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
 	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
@@ -320,6 +321,7 @@ export class AcpTaskSessionService {
 		this.latestStartRequestByTaskId.set(request.taskId, {
 			...request,
 			revalidateExistingMainSessionHandoverTargetBeforeLaunch: undefined,
+			beforeAgentProcessLaunch: undefined,
 		});
 		const startedAt = now();
 		const runtimeSessionIncarnationId = randomUUID();
@@ -393,6 +395,7 @@ export class AcpTaskSessionService {
 				);
 			}
 			const connection = await this.connectionRuntime.startTaskConnection({
+				beforeAgentProcessLaunch: request.beforeAgentProcessLaunch,
 				revalidateExistingMainSessionHandoverTargetBeforeLaunch:
 					request.revalidateExistingMainSessionHandoverTargetBeforeLaunch,
 				isRuntimeSessionIncarnationCurrent: () =>

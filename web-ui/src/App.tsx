@@ -778,6 +778,7 @@ export default function App(): ReactElement {
 		handleSaveTaskTitle,
 		handleCreateTask,
 		handleCreateTasks,
+		handleTaskEditorCreationCardPersisted,
 		resetTaskEditorState,
 	} = useTaskEditor({
 		board,
@@ -2236,6 +2237,7 @@ export default function App(): ReactElement {
 						images={editingTaskId ? editTaskImages : newTaskImages}
 						onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
 						onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
+						onTaskCreationCardPersisted={handleTaskEditorCreationCardPersisted}
 						onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 						onCreateAndStart={
 							editingTaskId

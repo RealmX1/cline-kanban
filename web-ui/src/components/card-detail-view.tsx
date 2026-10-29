@@ -40,6 +40,7 @@ import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-pa
 import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { ReadOnlyTaskConversationHistoryPanel } from "@/components/detail-panels/read-only-task-conversation-history-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
+import { TaskEditorCreationProgressNotice } from "@/components/detail-panels/task-editor-creation-progress-notice";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
@@ -1835,6 +1836,15 @@ export function CardDetailView({
 					className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
 					data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
 				>
+					{currentProjectId ? (
+						<TaskEditorCreationProgressNotice
+							key={`${currentProjectId}:${selection.card.id}:${selection.card.createdAt}`}
+							workspaceId={currentProjectId}
+							taskId={selection.card.id}
+							taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
+							readOnly={selection.column.id === "trash"}
+						/>
+					) : null}
 					{isMobile && !taskLookupWorkbenchContent ? (
 						<>
 							<MobileFocusedTaskCardHeader

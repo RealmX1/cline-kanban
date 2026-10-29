@@ -446,12 +446,13 @@ export function createTaskCardActionApi(
 		taskCard: RuntimeBoardCard,
 		hints: Parameters<typeof buildTaskSessionStartRequestFromBoardCard>[1],
 		failureMessageFallback: string,
+		beforeAgentProcessLaunch?: () => Promise<void>,
 	): Promise<{ ok: true; startedSummary: RuntimeTaskSessionSummary } | { ok: false; failureMessage: string }> => {
 		try {
-			const started = await deps.runtimeApi.startTaskSession(
-				workspaceScope,
-				buildTaskSessionStartRequestFromBoardCard(taskCard, hints),
-			);
+			const request = buildTaskSessionStartRequestFromBoardCard(taskCard, hints);
+			const started = beforeAgentProcessLaunch
+				? await deps.runtimeApi.startTaskSession(workspaceScope, request, beforeAgentProcessLaunch)
+				: await deps.runtimeApi.startTaskSession(workspaceScope, request);
 			if (!started.ok || !started.summary) {
 				return { ok: false, failureMessage: started.error ?? failureMessageFallback };
 			}
@@ -1193,6 +1194,7 @@ export function createTaskCardActionApi(
 			workspaceScope,
 			input,
 			kanbanRequestOriginActorEvidence,
+			beforeAgentProcessLaunch,
 		) =>
 			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
 				const initialState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
@@ -1228,6 +1230,7 @@ export function createTaskCardActionApi(
 						workspaceScope.workspacePath,
 						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
+					if (beforeAgentProcessLaunch) assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 					if (found.boardColumnId !== "backlog" && found.boardColumnId !== "in_progress") {
 						throw createTaskCardInBoardColumnNotAllowingActionError(
 							`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be started from backlog or in_progress.`,
@@ -1334,6 +1337,7 @@ export function createTaskCardActionApi(
 					foundAfterMovement.taskCard,
 					{ agentTerminalGeometryForTaskSessionSpawn: input.agentTerminalGeometryForTaskSessionSpawn },
 					"Could not start task session.",
+					beforeAgentProcessLaunch,
 				);
 				if (!started.ok) {
 					return await buildResponse({
