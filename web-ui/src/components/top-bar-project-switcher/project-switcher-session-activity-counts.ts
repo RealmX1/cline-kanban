@@ -1,3 +1,4 @@
+import { isAutomaticAgentFailureContinuationWaiting } from "@runtime-session-activity";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 
 /**
@@ -12,7 +13,12 @@ import type { RuntimeProjectSummary } from "@/runtime/types";
  * 所以 0 是语义正确的答案，不是缺数据。
  */
 export function deriveLiveAgentTaskCount(project: RuntimeProjectSummary): number {
-	return project.inProgressTaskDetails.filter((taskDetail) => taskDetail.turnOwner === "agent").length;
+	return project.inProgressTaskDetails.filter(
+		(taskDetail) =>
+			taskDetail.turnOwner === "agent" &&
+			taskDetail.liveness !== "retrying" &&
+			!isAutomaticAgentFailureContinuationWaiting(taskDetail.automaticAgentFailureContinuation),
+	).length;
 }
 
 /**

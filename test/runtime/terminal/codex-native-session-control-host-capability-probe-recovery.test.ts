@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type PreparedCodexNativeSessionControlHostLaunch,
 	prepareCodexNativeSessionControlHostLaunch,
+	readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification,
 } from "../../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 
 interface CapabilityHelpResponse {
@@ -73,6 +74,19 @@ async function prepareWithControlledCapabilityProbe(binary: string) {
 }
 
 describe.skipIf(process.platform === "win32")("Codex 原生控制能力探测的同进程失败恢复", () => {
+	it("只按同代持久启动描述恢复控制端点，拒绝跨任务绑定", async () => {
+		const prepared = await prepareWithControlledCapabilityProbe("isolated-endpoint-recovery");
+		if (!prepared) throw new Error("未建立隔离控制宿主");
+		expect(await readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification(prepared.endpoint)).toEqual(
+			prepared.endpoint,
+		);
+		await expect(
+			readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification({
+				...prepared.endpoint,
+				conversationSessionId: "other-session",
+			}),
+		).rejects.toThrow("持久身份不匹配");
+	});
 	it.each(["spawn-failure", "help-timeout", "missing-capability", "app-server-help-failure"])(
 		"%s：短期失败冷却，恢复后下一次合法启动重新获得端点",
 		async (failureMode) => {

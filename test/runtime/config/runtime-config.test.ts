@@ -849,3 +849,26 @@ describe.sequential("runtime-config auto agent selection", () => {
 		}
 	});
 });
+
+it("容量自动恢复默认开启，关闭及重开均独立于网络自动续跑", async () => {
+	const directory = createTempDir("automatic-failure-settings-");
+	try {
+		await withTemporaryEnv({ home: directory.path }, async () => {
+			const initial = await loadGlobalRuntimeConfig();
+			expect(initial.codexModelCapacityErrorAutoContinuationEnabled).toBe(true);
+			const disabled = await updateGlobalRuntimeConfig(initial, {
+				codexModelCapacityErrorAutoContinuationEnabled: false,
+			});
+			expect(disabled.autoContinueOnConnectionDropEnabled).toBe(true);
+			expect((await loadGlobalRuntimeConfig()).codexModelCapacityErrorAutoContinuationEnabled).toBe(false);
+			const enabled = await updateGlobalRuntimeConfig(disabled, {
+				codexModelCapacityErrorAutoContinuationEnabled: true,
+				autoContinueOnConnectionDropEnabled: false,
+			});
+			expect(enabled.codexModelCapacityErrorAutoContinuationEnabled).toBe(true);
+			expect(enabled.autoContinueOnConnectionDropEnabled).toBe(false);
+		});
+	} finally {
+		directory.cleanup();
+	}
+});

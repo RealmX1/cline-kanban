@@ -3,6 +3,10 @@ import {
 	type CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import {
+	describeAutomaticAgentFailureContinuation,
+	isAutomaticAgentFailureContinuationWaiting,
+} from "@runtime-session-activity";
 import { Pin, PinOff } from "lucide-react";
 import { type ReactElement, type ReactNode, type RefObject, useCallback, useLayoutEffect, useRef } from "react";
 import { CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
@@ -25,10 +29,12 @@ import { resolveBoardColumnTitle } from "@/data/board-data";
 import { useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition } from "@/hooks/use-cross-project-task-switcher-hover-floating-card-viewport-position";
 import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
+import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 
 export type CrossProjectTaskSwitcherTaskRowSection =
 	| "pinned"
 	| "running"
+	| "waiting_automatic_recovery"
 	| "prompt_cache_warm"
 	| "remaining"
 	| "shelved";
@@ -93,6 +99,9 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	onEditTaskPinboardPinReason?: () => void;
 }): ReactElement {
 	const { entry, workspaceId, projectName } = entryInProject;
+	const automaticRecoveryClockNowMs = useSharedFineClockTimestampMs(
+		isAutomaticAgentFailureContinuationWaiting(entry.automaticAgentFailureContinuation),
+	);
 	const isPinned = entry.pinnedToTaskPinboardAt !== null;
 	const rowContainerAttributes = {
 		"data-cross-project-task-switcher-section": section,
@@ -195,9 +204,17 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							data-task-card-secondary-metadata-row=""
 							className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
 						>
-							{entry.turnOwner === "agent" && entry.liveness === "retrying" ? (
+							{entry.automaticAgentFailureContinuation &&
+							entry.automaticAgentFailureContinuation.phase !== "recovered" ? (
+								<span className="max-w-full break-words text-status-orange">
+									{describeAutomaticAgentFailureContinuation(
+										entry.automaticAgentFailureContinuation,
+										automaticRecoveryClockNowMs,
+									)}
+								</span>
+							) : entry.turnOwner === "agent" && entry.liveness === "retrying" ? (
 								<span className="shrink-0 text-status-orange" title="正在自动重连，当前任务回合尚未结束">
-									重连中
+									等待自动恢复
 								</span>
 							) : null}
 							{showsProjectName ? (

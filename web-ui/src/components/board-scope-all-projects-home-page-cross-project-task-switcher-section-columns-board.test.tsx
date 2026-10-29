@@ -250,6 +250,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
 			"pinned",
 			"running",
+			"waiting-automatic-recovery",
 			"prompt-cache-warm",
 			"remaining",
 			"shelved",
@@ -272,7 +273,13 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			}),
 		);
 
-		expect(sectionColumnTestIdSuffixesInOrder()).toEqual(["running", "prompt-cache-warm", "remaining", "shelved"]);
+		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
+			"running",
+			"waiting-automatic-recovery",
+			"prompt-cache-warm",
+			"remaining",
+			"shelved",
+		]);
 	});
 
 	it("Pinned 列全量显示、不折叠；Running 列不读左栏的收起偏好，始终列出行", () => {
@@ -349,6 +356,7 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		expect(sectionColumnTestIdSuffixesInOrder()).toEqual([
 			"pinned",
 			"running",
+			"waiting-automatic-recovery",
 			"prompt-cache-warm",
 			"remaining",
 			"shelved",

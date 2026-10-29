@@ -339,6 +339,7 @@ export default function App(): ReactElement {
 		upsertSession,
 		startTaskSession,
 		createTaskConversationSession,
+		actOnAutomaticFailureContinuation,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
@@ -385,6 +386,7 @@ export default function App(): ReactElement {
 				taskTitle: titleByTaskId.get(summary.taskId) ?? summary.taskId,
 				retryCount: retry.retryCount,
 				nextAttemptAt: retry.nextAttemptAt,
+				recovery: summary.automaticAgentFailureContinuation,
 			});
 		}
 		return views;
@@ -392,16 +394,24 @@ export default function App(): ReactElement {
 
 	const handleContinueConnectionRetrySessions = useCallback(
 		(taskIds: string[]) => {
-			void continueConnectionRetrySessions(taskIds);
+			for (const taskId of taskIds) {
+				const episodeId = connectionRetrySessions.find((view) => view.taskId === taskId)?.recovery?.episodeId;
+				if (episodeId) void actOnAutomaticFailureContinuation(taskId, episodeId, "retry_now");
+				else void continueConnectionRetrySessions([taskId]);
+			}
 		},
-		[continueConnectionRetrySessions],
+		[continueConnectionRetrySessions, actOnAutomaticFailureContinuation, connectionRetrySessions],
 	);
 
 	const handleDismissConnectionRetrySessions = useCallback(
 		(taskIds: string[]) => {
-			void dismissConnectionRetrySessions(taskIds);
+			for (const taskId of taskIds) {
+				const episodeId = connectionRetrySessions.find((view) => view.taskId === taskId)?.recovery?.episodeId;
+				if (episodeId) void actOnAutomaticFailureContinuation(taskId, episodeId, "cancel");
+				else void dismissConnectionRetrySessions([taskId]);
+			}
 		},
-		[dismissConnectionRetrySessions],
+		[dismissConnectionRetrySessions, actOnAutomaticFailureContinuation, connectionRetrySessions],
 	);
 
 	const {

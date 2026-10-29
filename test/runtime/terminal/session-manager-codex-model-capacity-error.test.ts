@@ -74,6 +74,7 @@ async function startSession(
 		args: [],
 		cwd: "/isolated/codex-capacity-error",
 		prompt: "执行任务",
+		codexModelCapacityErrorAutoContinuationEnabled: false,
 		workspaceId: "isolated",
 		...overrides,
 	});
@@ -117,6 +118,115 @@ function execution(summary: RuntimeTaskSessionSummary): CodexNativeAgentTurnExec
 }
 
 describe("Codex 模型容量不足后的会话交棒", () => {
+	it("任务 ID 复用后，新进程的新故障绑定当前任务 incarnation", async () => {
+		let incarnation = 1;
+		const manager = new TerminalSessionManager({
+			readAutomaticFailureContinuationEligibility: async () => ({
+				eligible: true,
+				taskIncarnationCreatedAtEpochMs: incarnation,
+				connectionEnabled: true,
+				capacityEnabled: true,
+			}),
+		});
+		managers.push(manager);
+		const first = await startSession({ codexModelCapacityErrorAutoContinuationEnabled: true }, manager);
+		first.session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		const originalEpisode = manager.getSummary(first.taskId)?.automaticAgentFailureContinuation;
+		expect(originalEpisode?.taskIncarnationCreatedAtEpochMs).toBe(1);
+		await manager.forceStopTaskSession(first.taskId);
+		incarnation = 2;
+		const second = await startSession({ codexModelCapacityErrorAutoContinuationEnabled: true }, manager);
+		second.session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(second.taskId)?.automaticAgentFailureContinuation).toMatchObject({
+			taskIncarnationCreatedAtEpochMs: 2,
+			phase: "waiting_backoff",
+		});
+		expect(manager.getSummary(second.taskId)?.automaticAgentFailureContinuation?.episodeId).not.toBe(
+			originalEpisode?.episodeId,
+		);
+	});
+	it.each([true, false])("默认开启的容量恢复不受网络开关 %s 影响", async (autoContinueOnConnectionDropEnabled) => {
+		const { manager, session, taskId } = await startSession({
+			autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled: undefined,
+		});
+		session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(taskId)?.automaticAgentFailureContinuation).toMatchObject({
+			reason: "model_capacity",
+			phase: "waiting_backoff",
+		});
+		const recovery = manager.getSummary(taskId)?.automaticAgentFailureContinuation;
+		if (!recovery) throw new Error("缺少容量恢复记录");
+		expect(recovery.deadlineAtMs).toBe(recovery.firstErrorAtMs + 30 * 60_000);
+		expect(manager.getSummary(taskId)?.liveness).toBe("retrying");
+		manager.reconcileAutomaticFailureContinuationSettings(true, false);
+		expect(manager.getSummary(taskId)?.automaticAgentFailureContinuation?.phase).toBe("cancelled");
+		manager.reconcileAutomaticFailureContinuationSettings(true, true);
+		session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(taskId)?.automaticAgentFailureContinuation?.phase).toBe("cancelled");
+	});
+	it("关闭容量开关本身保留网络恢复，新容量故障则必须交棒而不能借用网络策略", async () => {
+		const { manager, session, taskId } = await startSession({ autoContinueOnConnectionDropEnabled: true });
+		session.output("Error: read ECONNRESET\n› ");
+		await flushOutputAnalysis();
+		const original = manager.getSummary(taskId)?.automaticAgentFailureContinuation;
+		expect(original).toMatchObject({ reason: "connection", phase: "waiting_backoff" });
+		manager.reconcileAutomaticFailureContinuationSettings(true, false);
+		expect(manager.getSummary(taskId)?.automaticAgentFailureContinuation).toMatchObject({
+			episodeId: original?.episodeId,
+			reason: "connection",
+			phase: "waiting_backoff",
+		});
+		session.output(`\n${CAPACITY_ERROR}\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(taskId)?.automaticAgentFailureContinuation).toMatchObject({
+			reason: "model_capacity",
+			phase: "cancelled",
+		});
+		expectLiveError(manager.getSummary(taskId));
+	});
+	it("读取失败时使用刚更新的关闭设置，不能退回启动时的开启快照", async () => {
+		const manager = new TerminalSessionManager({
+			readAutomaticFailureContinuationEligibility: async () => {
+				throw new Error("配置暂时不可读");
+			},
+		});
+		managers.push(manager);
+		const session = await startSession({ codexModelCapacityErrorAutoContinuationEnabled: true }, manager);
+		manager.reconcileAutomaticFailureContinuationSettings(true, false);
+		session.session.output(`${CAPACITY_ERROR}\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(session.taskId)?.automaticAgentFailureContinuation ?? null).toBeNull();
+		expectLiveError(manager.getSummary(session.taskId));
+	});
+
+	it("资格查询失败时仍遵守已经关闭的容量开关", async () => {
+		const manager = new TerminalSessionManager({
+			readAutomaticFailureContinuationEligibility: async () => {
+				throw new Error("看板暂时不可读");
+			},
+		});
+		managers.push(manager);
+		const disabled = await startSession({ codexModelCapacityErrorAutoContinuationEnabled: false }, manager);
+		disabled.session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		expect(disabled.manager.getSummary(disabled.taskId)?.automaticAgentFailureContinuation ?? null).toBeNull();
+		expectLiveError(disabled.manager.getSummary(disabled.taskId));
+		const enabled = await startSession(
+			{ taskId: "capacity-eligibility-open", codexModelCapacityErrorAutoContinuationEnabled: true },
+			manager,
+		);
+		enabled.session.output(`${CAPACITY_ERROR}\r\n› `);
+		await flushOutputAnalysis();
+		expect(manager.getSummary(enabled.taskId)?.automaticAgentFailureContinuation).toMatchObject({
+			reason: "model_capacity",
+			phase: "waiting_backoff",
+		});
+	});
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.setSystemTime(1_790_000_000_000);

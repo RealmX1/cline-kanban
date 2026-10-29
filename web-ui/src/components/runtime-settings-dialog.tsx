@@ -422,6 +422,8 @@ export function RuntimeSettingsDialog({
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
+	const [codexModelCapacityErrorAutoContinuationEnabled, setCodexModelCapacityErrorAutoContinuationEnabled] =
+		useState(true);
 	const [
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		setProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -514,6 +516,8 @@ export function RuntimeSettingsDialog({
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
+	const initialCodexModelCapacityErrorAutoContinuationEnabled =
+		config?.codexModelCapacityErrorAutoContinuationEnabled ?? true;
 	const initialProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
 		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ?? true;
 	const initialPostDeployVerificationForceCompleteEnabled =
@@ -558,6 +562,9 @@ export function RuntimeSettingsDialog({
 		if (autoContinueOnConnectionDropEnabled !== initialAutoContinueOnConnectionDropEnabled) {
 			return true;
 		}
+		if (codexModelCapacityErrorAutoContinuationEnabled !== initialCodexModelCapacityErrorAutoContinuationEnabled) {
+			return true;
+		}
 		if (
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
 			initialProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled
@@ -593,6 +600,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		agentAutonomousModeEnabled,
 		autoContinueOnConnectionDropEnabled,
+		codexModelCapacityErrorAutoContinuationEnabled,
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled,
 		clineMcpSettings.hasUnsavedChanges,
@@ -634,6 +642,7 @@ export function RuntimeSettingsDialog({
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
+		setCodexModelCapacityErrorAutoContinuationEnabled(config?.codexModelCapacityErrorAutoContinuationEnabled ?? true);
 		setProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled(
 			config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ?? true,
 		);
@@ -645,6 +654,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		config?.agentAutonomousModeEnabled,
 		config?.autoContinueOnConnectionDropEnabled,
+		config?.codexModelCapacityErrorAutoContinuationEnabled,
 		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		config?.postDeployVerificationForceCompleteEnabled,
 		config?.commitPromptTemplate,
@@ -844,6 +854,7 @@ export function RuntimeSettingsDialog({
 			readyForReviewNotificationsEnabled,
 			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled,
 			shortcuts,
@@ -1217,6 +1228,23 @@ export function RuntimeSettingsDialog({
 						<p className="text-text-secondary text-[13px] mt-2 mb-0">
 							当 Claude Code、Codex 等终端 agent 因网络抖动打印连接错误并停在空闲提示符时， Kanban
 							会按指数退避自动注入一条续跑指令，让 agent 自查并恢复被打断的工作；agent 恢复推进后自动停止重试。
+						</p>
+					</div>
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<div className="flex items-center gap-2">
+							<RadixSwitch.Root
+								aria-label="Codex 容量不足时自动恢复"
+								checked={codexModelCapacityErrorAutoContinuationEnabled}
+								disabled={controlsDisabled}
+								onCheckedChange={setCodexModelCapacityErrorAutoContinuationEnabled}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">Codex 容量不足时自动恢复</span>
+						</div>
+						<p className="text-text-secondary text-[13px] mt-2 mb-0">
+							保持原模型、模式和权限等待并重试，单次故障最多 30 分钟。关闭立即停止；开启只处理后续新故障。
 						</p>
 					</div>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">

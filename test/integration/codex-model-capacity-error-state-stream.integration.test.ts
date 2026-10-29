@@ -137,6 +137,7 @@ describe("Codex 容量错误的隔离 PTY 与状态推送", { timeout: 45_000 },
 					cwd: fixture.ownedIntegrationProjectsDirectoryPath,
 					prompt: "执行隔离验证",
 					autoContinueOnConnectionDropEnabled,
+					codexModelCapacityErrorAutoContinuationEnabled: false,
 					env: fixture.createIsolatedChildProcessEnvironment({
 						CODEX_HOME: codexHome,
 						CODEX_SQLITE_HOME: codexHome,

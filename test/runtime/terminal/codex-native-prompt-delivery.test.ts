@@ -294,6 +294,54 @@ describe("Codex 原生投递保留 composer", () => {
 		expect(journal.recordAcceptance).toHaveBeenCalledOnce();
 	});
 
+	it("写前意图落盘后出现模态时撤回未调用意图，同一消息随后仍可发送", async () => {
+		installNativeResponses();
+		let mayInvoke = true;
+		let requestMayHaveBeenSent = false;
+		const journal = {
+			prepare: vi.fn(async () => ({
+				clientUserMessageId: CLIENT_MESSAGE_ID,
+				requestMayHaveBeenSent,
+				previousTurnId: null,
+				returnedTurnId: null,
+			})),
+			recordRequestIntent: vi.fn(async () => {
+				requestMayHaveBeenSent = true;
+				mayInvoke = false;
+			}),
+			recordRequestNotInvoked: vi.fn(async () => {
+				requestMayHaveBeenSent = false;
+			}),
+			recordTerminalPtyWriteIntent: vi.fn(async () => {}),
+			recordRequestInvoked: vi.fn(async () => {}),
+			recordReturnedTurn: vi.fn(async () => {}),
+			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+			recordAcceptance: vi.fn(async () => {}),
+		};
+		expect(
+			(
+				await deliverCodexNativePromptWithoutChangingComposer(
+					createInput({ deliveryJournal: journal, mayInvokeNativeTurnStartRequest: () => mayInvoke }),
+				)
+			).status,
+		).toBe("cancelled");
+		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(0);
+		expect(journal.recordRequestNotInvoked).toHaveBeenCalledOnce();
+		journal.recordRequestIntent.mockImplementation(async () => {
+			requestMayHaveBeenSent = true;
+		});
+		mayInvoke = true;
+		expect(
+			(
+				await deliverCodexNativePromptWithoutChangingComposer(
+					createInput({ deliveryJournal: journal, mayInvokeNativeTurnStartRequest: () => mayInvoke }),
+				)
+			).status,
+		).toBe("confirmed");
+		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+		expect(journal.recordTerminalPtyWriteIntent).not.toHaveBeenCalled();
+	});
+
 	it("持久写入失败时不调用 turn/start", async () => {
 		const journal = {
 			prepare: vi.fn(async () => ({

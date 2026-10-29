@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
+import { readCodexConversationTurnPageWithCapabilityFallback } from "../codex-native-session-protocol/codex-native-conversation-history";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	buildCodexNativeAgentTurnExecutionIdentity,
@@ -7,9 +8,6 @@ import {
 } from "../core/codex-native-agent-turn-execution-observation";
 
 const loadedPageSchema = z.object({ data: z.array(z.string()), nextCursor: z.string().nullish() });
-const latestTurnPageSchema = z.object({
-	data: z.array(z.object({ id: z.string(), status: z.string(), startedAt: z.number().nullish() })),
-});
 const threadStateSchema = z.object({
 	thread: z.object({
 		id: z.string(),
@@ -82,15 +80,12 @@ export function readCodexNativeAgentTurnExecution(input: {
 				}
 				if (!loaded) return null;
 				// 仅取最新回合的轻量状态；超长消息页、历史游标和工具投影都不能挡住这条证据。
-				const turns = latestTurnPageSchema.parse(
-					await port.request("thread/turns/list", {
-						threadId: nativeSessionId,
-						cursor: null,
-						limit: 1,
-						sortDirection: "desc",
-						itemsView: "summary",
-					}),
-				);
+				const turns = await readCodexConversationTurnPageWithCapabilityFallback(port, nativeSessionId, {
+					cursor: null,
+					limit: 1,
+					sortDirection: "desc",
+					itemsView: "summary",
+				});
 				const state = threadStateSchema.safeParse(
 					await port.request("thread/read", { threadId: nativeSessionId, includeTurns: false }),
 				);
@@ -99,13 +94,15 @@ export function readCodexNativeAgentTurnExecution(input: {
 				const turn = turns.data[0];
 				const activeFlags = thread.status.activeFlags ?? [];
 				let executionStatus: CodexNativeAgentTurnExecutionObservation["executionStatus"] = "unknown";
-				if (thread.status.type === "active" && turn?.status === "inProgress") {
-					if (activeFlags.some((flag) => ["waitingOnApproval", "waitingOnUserInput"].includes(flag)))
-						executionStatus = "waiting_for_user";
-					else if (activeFlags.length === 0) executionStatus = "running";
+				if (activeFlags.some((flag) => ["waitingOnApproval", "waitingOnUserInput"].includes(flag))) {
+					executionStatus = "waiting_for_user";
+				} else if (thread.status.type === "active" && turn?.status === "inProgress") {
+					if (activeFlags.length === 0) executionStatus = "running";
 				} else if (
-					thread.status.type === "idle" &&
-					(!turn || ["completed", "interrupted", "failed"].includes(turn.status))
+					activeFlags.length === 0 &&
+					((thread.status.type === "idle" &&
+						(!turn || ["completed", "interrupted", "failed"].includes(turn.status))) ||
+						(thread.status.type === "systemError" && turn?.status === "failed"))
 				)
 					executionStatus = "finished";
 				return {
@@ -118,6 +115,7 @@ export function readCodexNativeAgentTurnExecution(input: {
 					observedAtMs: input.observedAtMs,
 					threadStatus: thread.status.type,
 					nativeTurnStatus: turn?.status ?? null,
+					nativeTurnErrorMessage: turn?.error?.message ?? null,
 					activeFlags,
 					canAcceptDirectInput: thread.canAcceptDirectInput ?? null,
 					executionStatus,

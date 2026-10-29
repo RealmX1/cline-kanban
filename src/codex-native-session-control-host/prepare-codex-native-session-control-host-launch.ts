@@ -203,6 +203,40 @@ export async function prepareCodexNativeSessionControlHostLaunch(input: {
 	}
 }
 
+// summary 暂缺端点时，只从同一代持久启动描述恢复；不搜索共享 daemon 或最新会话。
+export async function readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification(
+	identity: Omit<CodexNativeSessionControlEndpoint, "socketPath">,
+): Promise<CodexNativeSessionControlEndpoint | null> {
+	const target = codexNativeSessionControlEndpointSchema.omit({ socketPath: true }).parse(identity);
+	const launchDirectory = join(
+		getRuntimeHomePath(),
+		"codex-native-session-control-host-launches",
+		target.runtimeSessionIncarnationId,
+	);
+	try {
+		const specification = codexNativeSessionControlHostLaunchSpecificationSchema.parse(
+			JSON.parse(await readFile(join(launchDirectory, "launch-specification.json"), "utf8")),
+		);
+		if (
+			specification.endpoint.workspaceId !== target.workspaceId ||
+			specification.endpoint.conversationSessionId !== target.conversationSessionId ||
+			specification.endpoint.runtimeSessionIncarnationId !== target.runtimeSessionIncarnationId ||
+			specification.ownedLaunchDirectory.path !== launchDirectory ||
+			specification.ownedSocketDirectory.path !== dirname(specification.endpoint.socketPath)
+		)
+			throw new Error("原生控制端点的持久身份不匹配。");
+		for (const directory of [specification.ownedLaunchDirectory, specification.ownedSocketDirectory]) {
+			const current = await lstat(directory.path, { bigint: true });
+			if (!current.isDirectory() || `${current.dev}` !== directory.device || `${current.ino}` !== directory.inode)
+				throw new Error("原生控制端点的宿主目录已替换。");
+		}
+		return specification.endpoint;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+}
+
 // 闭包不能跨 runtime 存活；从本代持久描述重建目录所有权，供接管后的强杀路径兜底。
 export async function restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart(
 	endpoint: CodexNativeSessionControlEndpoint,

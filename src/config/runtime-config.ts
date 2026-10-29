@@ -33,6 +33,7 @@ interface RuntimeGlobalConfigFileShape {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	// Legacy 键（Post-Deploy Verification 全量重命名前叫 guidedVerificationForceCompleteEnabled）。
@@ -60,6 +61,7 @@ export interface RuntimeConfigState {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
@@ -79,6 +81,7 @@ export interface RuntimeConfigUpdateInput {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
@@ -108,6 +111,7 @@ const DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS: RuntimeAgentSessionTran
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
+const DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED = true;
 // 程序化投递撞上「人类输入框里有未提交内容」时的争用策略开关（计划里的 auto / never_preempt 两档）。
 // true（默认，auto）：人**不在场**时先把那段未提交内容无损暂存进 Prompt Library 再放行投递；人在场时
 // 仍只挂起可见、绝不动框。false（never_preempt）：任何情况下都只挂起，等人自己让路或预算耗尽诚实失败。
@@ -360,6 +364,10 @@ function toRuntimeConfigState({
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		codexModelCapacityErrorAutoContinuationEnabled: normalizeBoolean(
+			globalConfig?.codexModelCapacityErrorAutoContinuationEnabled,
+			DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED,
+		),
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
 			globalConfig?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
@@ -403,6 +411,7 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
@@ -449,6 +458,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizeBoolean(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+				);
+	const codexModelCapacityErrorAutoContinuationEnabled =
+		config.codexModelCapacityErrorAutoContinuationEnabled === undefined
+			? DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED
+			: normalizeBoolean(
+					config.codexModelCapacityErrorAutoContinuationEnabled,
+					DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED,
 				);
 	const programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
 		config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled === undefined
@@ -523,6 +539,12 @@ async function writeRuntimeGlobalConfigFile(
 		autoContinueOnConnectionDropEnabled !== DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
 	) {
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
+	}
+	if (
+		hasOwnKey(existing, "codexModelCapacityErrorAutoContinuationEnabled") ||
+		codexModelCapacityErrorAutoContinuationEnabled !== DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED
+	) {
+		payload.codexModelCapacityErrorAutoContinuationEnabled = codexModelCapacityErrorAutoContinuationEnabled;
 	}
 	if (
 		hasOwnKey(existing, "programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled") ||
@@ -637,6 +659,7 @@ function createRuntimeConfigStateFromValues(input: {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
@@ -670,6 +693,10 @@ function createRuntimeConfigStateFromValues(input: {
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		codexModelCapacityErrorAutoContinuationEnabled: normalizeBoolean(
+			input.codexModelCapacityErrorAutoContinuationEnabled,
+			DEFAULT_CODEX_MODEL_CAPACITY_ERROR_AUTO_CONTINUATION_ENABLED,
+		),
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
 			input.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
@@ -701,6 +728,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
+		codexModelCapacityErrorAutoContinuationEnabled: current.codexModelCapacityErrorAutoContinuationEnabled,
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 			current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: current.postDeployVerificationForceCompleteEnabled,
@@ -744,6 +772,7 @@ export async function saveRuntimeConfig(
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
+		codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 		postDeployVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
@@ -770,6 +799,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled: config.codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
@@ -789,6 +819,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled: config.codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
@@ -821,6 +852,9 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled:
+				updates.codexModelCapacityErrorAutoContinuationEnabled ??
+				current.codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 				updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
 				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -846,6 +880,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+			nextConfig.codexModelCapacityErrorAutoContinuationEnabled !==
+				current.codexModelCapacityErrorAutoContinuationEnabled ||
 			nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
 				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 			nextConfig.postDeployVerificationForceCompleteEnabled !== current.postDeployVerificationForceCompleteEnabled ||
@@ -870,6 +906,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled: nextConfig.codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
@@ -892,6 +929,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			codexModelCapacityErrorAutoContinuationEnabled: nextConfig.codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
@@ -956,6 +994,9 @@ export async function updateGlobalRuntimeConfig(
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+				codexModelCapacityErrorAutoContinuationEnabled:
+					updates.codexModelCapacityErrorAutoContinuationEnabled ??
+					current.codexModelCapacityErrorAutoContinuationEnabled,
 				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 					updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
 					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -981,6 +1022,8 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+				nextConfig.codexModelCapacityErrorAutoContinuationEnabled !==
+					current.codexModelCapacityErrorAutoContinuationEnabled ||
 				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
 					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 				nextConfig.postDeployVerificationForceCompleteEnabled !==
@@ -1005,6 +1048,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				codexModelCapacityErrorAutoContinuationEnabled: nextConfig.codexModelCapacityErrorAutoContinuationEnabled,
 				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
@@ -1025,6 +1069,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				codexModelCapacityErrorAutoContinuationEnabled: nextConfig.codexModelCapacityErrorAutoContinuationEnabled,
 				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,

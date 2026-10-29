@@ -394,6 +394,38 @@ function createClineTaskSessionServiceMock() {
 }
 
 describe("createRuntimeApi startTaskSession", () => {
+	it("自动恢复动作按 workspace、会话与当前 episode 投递，不把过期动作冒充成功", async () => {
+		const actOnAutomaticFailureContinuation = vi.fn(
+			async (_taskId: string, episodeId: string) => episodeId === "current",
+		);
+		const getScopedTerminalManager = vi.fn(async () => ({ actOnAutomaticFailureContinuation }) as never);
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager,
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const scope = { workspaceId: "workspace-1", workspacePath: "/isolated" };
+		expect(
+			await api.actOnAutomaticFailureContinuation(scope, {
+				taskId: "conversation",
+				episodeId: "stale",
+				action: "cancel",
+			}),
+		).toEqual({ ok: false });
+		expect(
+			await api.actOnAutomaticFailureContinuation(scope, {
+				taskId: "conversation",
+				episodeId: "current",
+				action: "retry_now",
+			}),
+		).toEqual({ ok: true });
+		expect(getScopedTerminalManager).toHaveBeenCalledWith(scope);
+		expect(actOnAutomaticFailureContinuation).toHaveBeenLastCalledWith("conversation", "current", "retry_now");
+	});
 	const originalClineApiKey = process.env.CLINE_API_KEY;
 	const originalOcaApiKey = process.env.OCA_API_KEY;
 	const originalClineMcpSettingsPath = process.env.CLINE_MCP_SETTINGS_PATH;

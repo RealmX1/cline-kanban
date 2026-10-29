@@ -111,6 +111,19 @@ describe("原生投递持久意图与接受历史", () => {
 		).toBe(0);
 	});
 
+	it("本进程确认未调用时可撤回意图，已调用后禁止撤回", async () => {
+		const journal = createCodexNativePromptDeliveryJournal(binding());
+		await journal.prepare(identity);
+		await journal.recordRequestIntent("previous-turn");
+		await journal.recordRequestNotInvoked?.();
+		expect(await createCodexNativePromptDeliveryJournal(binding()).prepare(identity)).toMatchObject({
+			requestMayHaveBeenSent: false,
+		});
+		await journal.recordRequestIntent("previous-turn");
+		await journal.recordRequestInvoked();
+		await expect(journal.recordRequestNotInvoked?.()).rejects.toThrow("不能恢复发送资格");
+	});
+
 	it("失败后的迟到接受追加历史证据，保留原失败与实际发送计数", async () => {
 		const journal = createCodexNativePromptDeliveryJournal(binding());
 		await journal.prepare(identity);

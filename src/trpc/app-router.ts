@@ -228,6 +228,7 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	type RuntimeAutomaticAgentFailureContinuationActionRequest,
 	type RuntimeTaskCardActionSetShelvingStateRequest,
 	type RuntimeTaskCardActionSetShelvingStateResponse,
 	runtimeAddBacklogTaskRequestSchema,
@@ -244,6 +245,8 @@ import {
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeArchiveExploratoryFindingRequestSchema,
 	runtimeArchiveExploratoryFindingResponseSchema,
+	runtimeAutomaticAgentFailureContinuationActionRequestSchema,
+	runtimeAutomaticAgentFailureContinuationActionResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClaimDailyWorkProgressCelebrationsRequestSchema,
@@ -788,6 +791,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeDismissAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeDismissAgentRaisedPendingUserDecisionResponse>;
+		actOnAutomaticFailureContinuation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAutomaticAgentFailureContinuationActionRequest,
+		) => Promise<{ ok: boolean }>;
 		continueConnectionRetrySessions: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeContinueConnectionRetrySessionsRequest,
@@ -1947,6 +1954,12 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.dismissAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
 			}),
+		actOnAutomaticFailureContinuation: workspaceProcedure
+			.input(runtimeAutomaticAgentFailureContinuationActionRequestSchema)
+			.output(runtimeAutomaticAgentFailureContinuationActionResponseSchema)
+			.mutation(async ({ ctx, input }) =>
+				ctx.runtimeApi.actOnAutomaticFailureContinuation(ctx.workspaceScope, input),
+			),
 		continueConnectionRetrySessions: workspaceProcedure
 			.input(runtimeContinueConnectionRetrySessionsRequestSchema)
 			.output(runtimeContinueConnectionRetrySessionsResponseSchema)

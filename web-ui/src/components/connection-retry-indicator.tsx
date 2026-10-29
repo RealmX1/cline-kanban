@@ -1,6 +1,8 @@
+import type { RuntimeTaskSessionSummary } from "@runtime-contract";
+import { describeAutomaticAgentFailureContinuation } from "@runtime-session-activity";
 // 顶栏「重连中」指示器：当有终端 agent 因瞬时连接错误正在自动续跑重试时，
 // 显示一个橙色计数按钮，点开是重试列表（每项含任务名、下一次重试倒计时、
-// 单任务「立即续跑」），底部「全部立即续跑」。
+// 单任务「立即重试或核对」），底部「全部立即重试或核对」。
 //
 // 自身无数据获取：重试会话视图与续跑回调由 App.tsx 从 workspace 范围的 sessions 派生后下传。
 
@@ -12,6 +14,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useInterval } from "@/utils/react-use";
 
 export interface ConnectionRetrySessionView {
+	recovery?: RuntimeTaskSessionSummary["automaticAgentFailureContinuation"];
 	taskId: string;
 	taskTitle: string;
 	retryCount: number;
@@ -42,7 +45,7 @@ export function ConnectionRetryIndicator({
 }: {
 	sessions: ConnectionRetrySessionView[];
 	onContinue: (taskIds: string[]) => void;
-	// 手动「移出列表 / 停止重试」：把任务从自动续跑重试列表里移出（软移除，新错误仍会再入）。
+	// 停止当前故障的恢复意图；同一旧错误重绘不能重新启用。
 	onDismiss?: (taskIds: string[]) => void;
 }): React.ReactElement | null {
 	const [open, setOpen] = useState(false);
@@ -66,7 +69,7 @@ export function ConnectionRetryIndicator({
 			<RadixPopover.Trigger asChild>
 				<button
 					type="button"
-					aria-label={`${sessions.length} 个任务正在重连中`}
+					aria-label={`${sessions.length} 个任务等待自动恢复`}
 					className="ml-0.5 inline-flex items-center gap-1 h-8 px-2 rounded-md border border-status-orange/30 bg-status-orange/10 text-xs text-status-orange transition-colors hover:bg-status-orange/15 focus:outline-none focus:ring-2 focus:ring-border-focus"
 				>
 					<PlugZap size={14} className="animate-pulse" />
@@ -82,9 +85,9 @@ export function ConnectionRetryIndicator({
 					style={{ animation: "kb-tooltip-show 100ms ease" }}
 				>
 					<div className="px-1.5 py-1">
-						<p className="m-0 text-[13px] font-semibold text-text-primary">连接中断 · 自动续跑中</p>
+						<p className="m-0 text-[13px] font-semibold text-text-primary">等待自动恢复</p>
 						<p className="m-0 mt-0.5 text-[12px] text-text-secondary">
-							检测到瞬时连接错误，正按指数退避自动续跑。恢复后自动停止。
+							正在等待恢复条件，并核对每次续跑的真实接受与执行状态。
 						</p>
 					</div>
 					<div className="mt-1 max-h-[260px] overflow-y-auto">
@@ -98,11 +101,14 @@ export function ConnectionRetryIndicator({
 										{session.taskTitle}
 									</p>
 									<p className="m-0 text-[12px] text-text-tertiary">
-										已续跑 {session.retryCount} 次 · {formatNextAttempt(session.nextAttemptAt, nowMs)}
+										已发送 {session.retryCount} 次 ·{" "}
+										{session.recovery
+											? describeAutomaticAgentFailureContinuation(session.recovery, nowMs)
+											: formatNextAttempt(session.nextAttemptAt, nowMs)}
 									</p>
 								</div>
 								<Button size="sm" variant="default" onClick={() => onContinue([session.taskId])}>
-									立即续跑
+									立即重试或核对
 								</Button>
 								{onDismiss ? (
 									<Tooltip content="停止重试并移出列表">
@@ -120,7 +126,7 @@ export function ConnectionRetryIndicator({
 					</div>
 					<div className="mt-1 space-y-1 border-t border-border pt-1.5">
 						<Button size="sm" variant="primary" fill onClick={() => onContinue(allTaskIds)}>
-							全部立即续跑（{sessions.length}）
+							全部立即重试或核对（{sessions.length}）
 						</Button>
 						{onDismiss ? (
 							<Button size="sm" variant="ghost" fill onClick={() => onDismiss(allTaskIds)}>
