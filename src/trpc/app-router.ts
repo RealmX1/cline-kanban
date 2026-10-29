@@ -545,6 +545,13 @@ import {
 	taskCommandExecutionStartRequestSchema,
 } from "../core/task-command-execution-contract";
 import {
+	taskEditorCreationSubmissionLookupSchema,
+	taskEditorCreationSubmissionRequestSchema,
+	taskEditorCreationSubmissionRetryRequestSchema,
+	taskEditorCreationSubmissionStatusSchema,
+	taskEditorCreationSubmissionsForTaskRequestSchema,
+} from "../core/task-editor-creation-submission-contract";
+import {
 	appendTaskCommentRequestSchema,
 	appendTaskCommentResponseSchema,
 	IncomingWorkItemTriageOperationError,
@@ -667,6 +674,7 @@ import {
 } from "../state/persistent-agent-prompt-image-attachments";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
+import type { TaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
@@ -677,6 +685,7 @@ export interface RuntimeTrpcWorkspaceScope {
 }
 
 export interface RuntimeTrpcContext {
+	taskEditorCreationSubmissionApi?: TaskEditorCreationSubmissionService;
 	taskCommandExecutionApi?: TaskCommandExecutionService;
 	codexConfigurationSyncApi?: CodexConfigurationSyncApi;
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
@@ -757,6 +766,7 @@ export interface RuntimeTrpcContext {
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
+			beforeAgentProcessLaunch?: () => Promise<void>,
 		) => Promise<RuntimeTaskSessionStartResponse>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1093,6 +1103,7 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionStartAgentSessionRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+			beforeAgentProcessLaunch?: () => Promise<void>,
 		) => Promise<RuntimeTaskCardActionStartAgentSessionResponse>;
 		moveTaskCardIntoReviewByHandingTurnToUser: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1394,6 +1405,56 @@ const gitSyncActionInputSchema = z.object({
 	action: runtimeGitSyncActionSchema,
 });
 
+function buildTaskEditorCreationRouter() {
+	return t.router({
+		recoverLegacyDraft: workspaceProcedure
+			.input(referenceRelationModelingEditorDraftSchema)
+			.output(referenceRelationModelingEditorDraftSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskEditorCreationSubmissionApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskEditorCreationSubmissionApi.migrateLegacyDraft(ctx.workspaceScope.workspaceId, input);
+			}),
+		submit: workspaceProcedure
+			.input(taskEditorCreationSubmissionRequestSchema)
+			.output(taskEditorCreationSubmissionStatusSchema)
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskEditorCreationSubmissionApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskEditorCreationSubmissionApi.submit(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		getStatus: workspaceProcedure
+			.input(taskEditorCreationSubmissionLookupSchema)
+			.output(taskEditorCreationSubmissionStatusSchema.nullable())
+			.query(({ ctx, input }) => {
+				if (!ctx.taskEditorCreationSubmissionApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskEditorCreationSubmissionApi.getStatus(ctx.workspaceScope, input);
+			}),
+		listForTask: workspaceProcedure
+			.input(taskEditorCreationSubmissionsForTaskRequestSchema)
+			.output(z.array(taskEditorCreationSubmissionStatusSchema))
+			.query(({ ctx, input }) => {
+				if (!ctx.taskEditorCreationSubmissionApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskEditorCreationSubmissionApi.listForTask(ctx.workspaceScope, input);
+			}),
+		retry: workspaceProcedure
+			.input(taskEditorCreationSubmissionRetryRequestSchema)
+			.output(taskEditorCreationSubmissionStatusSchema.nullable())
+			.mutation(({ ctx, input }) => {
+				if (!ctx.taskEditorCreationSubmissionApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+				return ctx.taskEditorCreationSubmissionApi.retry(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+	});
+}
+export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEditorCreationRouter> {}
+const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
+
 export const runtimeAppRouter = t.router({
 	taskCommandExecution: t.router({
 		start: workspaceProcedure
@@ -1672,6 +1733,7 @@ export const runtimeAppRouter = t.router({
 				return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
 			}),
 	}),
+	taskEditorCreation: taskEditorCreationRouter,
 	independentTaskCreation: t.router({
 		read: workspaceProcedure
 			.input(z.object({ requestId: z.string().uuid() }))
@@ -2808,7 +2870,13 @@ export const runtimeAppRouter = t.router({
 		readRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(relationModelingEditorDraftReadRequestSchema)
 			.output(referenceRelationModelingEditorDraftSchema.nullable())
-			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input)),
+			.query(async ({ ctx, input }) => {
+				const draft = await ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input);
+				if (!draft?.createdTaskId || !ctx.taskEditorCreationSubmissionApi) return draft;
+				const migrated = await ctx.taskEditorCreationSubmissionApi.migrateLegacyDraft(input.workspaceId, draft);
+				await ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft({ ...input, draft: migrated });
+				return migrated;
+			}),
 		saveRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(relationModelingEditorDraftSaveRequestSchema)
 			.output(z.object({ saved: z.boolean() }))

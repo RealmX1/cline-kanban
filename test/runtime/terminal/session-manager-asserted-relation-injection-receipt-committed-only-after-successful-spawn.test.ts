@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
@@ -43,6 +43,7 @@ function startTaskSessionRequestFor(taskId: string) {
 // 新会话装进槽位之后——spawn 失败时注入根本没发生，账本只追加、记下了就删不掉。
 describe("asserted relation injection receipt is committed only after the task session was spawned and installed", () => {
 	const commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded = vi.fn();
+	afterEach(() => vi.restoreAllMocks());
 
 	beforeEach(() => {
 		prepareAgentLaunchMock.mockReset();
@@ -81,5 +82,47 @@ describe("asserted relation injection receipt is committed only after the task s
 			commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded.mock.invocationCallOrder[0] ?? 0,
 		);
 		expect(manager.getSummary("b0002")?.pid).toBe(100);
+	});
+	it("创建提交在异步准备期间 Stop，最终门禁拒绝真正 spawn", async () => {
+		let finishPreparation!: () => void;
+		const preparation = new Promise<void>((resolve) => {
+			finishPreparation = resolve;
+		});
+		prepareAgentLaunchMock.mockImplementationOnce(async () => {
+			await preparation;
+			return { args: [], env: {} };
+		});
+		ptySessionSpawnMock.mockImplementation(() => createMockPtySession(100));
+		const manager = new TerminalSessionManager();
+		let stopped = false;
+		const beforeAgentProcessLaunch = vi.fn(async () => {
+			if (stopped) throw new Error("用户已经 Stop");
+		});
+		const running = manager.startTaskSession({ ...startTaskSessionRequestFor("stop1"), beforeAgentProcessLaunch });
+		const failure = expect(running).rejects.toThrow("用户已经 Stop");
+		await vi.waitFor(() => expect(prepareAgentLaunchMock).toHaveBeenCalled());
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+		stopped = true;
+		manager.stopTaskSession("stop1");
+		finishPreparation();
+		await failure;
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(1);
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+	});
+
+	it("准备失败不会越过启动标记；依赖恢复后门禁紧邻 spawn", async () => {
+		const beforeAgentProcessLaunch = vi.fn(async () => undefined);
+		prepareAgentLaunchMock.mockRejectedValueOnce(new Error("准备依赖暂不可用"));
+		const manager = new TerminalSessionManager();
+		const request = { ...startTaskSessionRequestFor("prep1"), beforeAgentProcessLaunch };
+		await expect(manager.startTaskSession(request)).rejects.toThrow("准备依赖暂不可用");
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		ptySessionSpawnMock.mockImplementation(() => createMockPtySession(100));
+		await manager.startTaskSession(request);
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledOnce();
+		expect(beforeAgentProcessLaunch.mock.invocationCallOrder[0]).toBeLessThan(
+			ptySessionSpawnMock.mock.invocationCallOrder[0] ?? 0,
+		);
 	});
 });

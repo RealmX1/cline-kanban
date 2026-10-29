@@ -234,7 +234,7 @@ import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
-import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { type StartTaskSessionRequest, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import type { HostedTerminalPtyProcessSpawnRequest } from "../../../src/terminal/terminal-pty-process-handle";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
@@ -738,6 +738,43 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect.any(Function),
 		);
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("创建提交的启动门禁在 transport 的 spawn 前拒绝时，不启动实际终端进程", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		const spawnTerminalProcess = vi.fn(() => createSummary());
+		const terminalManager = {
+			startTaskSession: vi.fn(async (request: StartTaskSessionRequest) => {
+				await request.beforeAgentProcessLaunch?.();
+				return spawnTerminalProcess();
+			}),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const beforeAgentProcessLaunch = vi.fn(async () => {
+			throw new Error("已收到 Stop，创建提交禁止启动");
+		});
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", baseRef: "main", prompt: "只启动一次" },
+			beforeAgentProcessLaunch,
+		);
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Stop") });
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(1);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledTimes(1);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({ beforeAgentProcessLaunch }),
+			expect.any(String),
+		);
+		expect(spawnTerminalProcess).not.toHaveBeenCalled();
 	});
 
 	describe("taskConversationMode 传参", () => {

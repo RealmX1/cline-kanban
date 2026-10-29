@@ -271,12 +271,15 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 	taskId: string,
 	prompt: string,
 	priorTitle: string,
+	alreadyPersistedCard?: BoardCard,
 ): Promise<void> {
 	try {
 		// 在第一个 await 前捕获落盘请求；成功后登记会移除，但这次回填仍须等待该请求。
 		const [suggestion, persistenceOutcome] = await Promise.all([
 			suggestTaskNamesFromTaskDescription(prompt),
-			waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({ workspaceId, taskId }),
+			alreadyPersistedCard
+				? Promise.resolve({ ok: true })
+				: waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({ workspaceId, taskId }),
 		]);
 		if (!persistenceOutcome.ok) return;
 		const title = suggestion.status === "suggested" ? suggestion.suggestedTaskNames[0] : undefined;
@@ -284,6 +287,7 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 		// 后台回填由服务端 CAS 保护，不占交互命令锁，否则会丢回填或反向拒绝正常启动。
 		await updateTaskCardFieldValuesInWorkspace(workspaceId, {
 			taskId,
+			...(alreadyPersistedCard ? { expectedTaskIncarnationCreatedAtEpochMs: alreadyPersistedCard.createdAt } : {}),
 			taskCardFieldUpdate: {
 				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 				taskCardFieldValuePatch: { title },
@@ -296,6 +300,7 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 }
 
 export interface UseTaskEditorResult {
+	handleTaskEditorCreationCardPersisted: (workspaceId: string, card: BoardCard, suggestTitle: boolean) => void;
 	isInlineTaskCreateOpen: boolean;
 	taskEditorSessionWorkspaceId: string | null;
 	taskEditorDefaultAgentId: RuntimeAgentId | null;
@@ -1789,6 +1794,39 @@ export function useTaskEditor({
 			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
 			const explicitTaskName = (options?.taskNameOverride ?? newTaskName).trim();
 			const title = explicitTaskName || deriveTaskTitleFromPrompt(prompt);
+			if (options?.delegateNewTaskCardPersistenceToRuntimeCreationSubmission) {
+				const workspaceId = options.targetWorkspaceIdOverride ?? taskCreationTargetWorkspaceId;
+				const taskId = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
+					workspaceId,
+					1,
+				)?.[0];
+				if (!taskId) return null;
+				const created = addTaskToColumnWithResult(
+					{ columns: [{ id: "backlog", title: "Backlog", cards: [] }] },
+					"backlog",
+					{
+						title,
+						prompt,
+						baseRef,
+						startInPlanMode: newTaskStartInPlanMode,
+						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						taskConversationMode: newTaskConversationMode,
+						autoReviewEnabled: newTaskAutoReviewEnabled,
+						autoReviewMode: newTaskAutoReviewMode,
+						images: newTaskImages,
+						agentId: newTaskAgentId,
+						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
+						ompAgentSessionTransportForNewTasks,
+						clineSettings: newTaskClineSettings,
+						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+						taskAgentSessionInitialization: newTaskAgentSessionInitialization,
+						worktreeMode: newTaskWorktreeMode,
+					},
+					taskId,
+				);
+				options.onNewTaskCardPreparedForRuntimeCreationSubmission?.(created.task);
+				return taskId;
+			}
 			if (explicitTargetOtherWorkspaceId) {
 				const createdTaskCard = createBacklogTaskCardsInOtherProject(
 					explicitTargetOtherWorkspaceId,
@@ -1798,7 +1836,7 @@ export function useTaskEditor({
 				if (!createdTaskCard) {
 					return null;
 				}
-				options?.onTaskCardAllocatedForRelationModeling?.(createdTaskCard);
+				options?.onNewTaskCardPreparedForRuntimeCreationSubmission?.(createdTaskCard);
 				if (!explicitTaskName) {
 					backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject(
 						explicitTargetOtherWorkspaceId,
@@ -1849,7 +1887,7 @@ export function useTaskEditor({
 				},
 				runtimeAllocatedTaskId,
 			);
-			options?.onTaskCardAllocatedForRelationModeling?.(created.task);
+			options?.onNewTaskCardPreparedForRuntimeCreationSubmission?.(created.task);
 			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
 				boardBeforeMutation: board,
 				boardAfterMutation: created.board,
@@ -1903,6 +1941,7 @@ export function useTaskEditor({
 			return created.task.id;
 		},
 		[
+			taskCreationTargetWorkspaceId,
 			backfillSuggestedTaskTitleForCreatedTask,
 			backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject,
 			createBacklogTaskCardsInOtherProject,
@@ -1940,6 +1979,27 @@ export function useTaskEditor({
 		],
 	);
 
+	const handleTaskEditorCreationCardPersisted = useCallback(
+		(workspaceId: string, card: BoardCard, suggestTitle: boolean) => {
+			writeMostRecentlyUsedTaskCreateBaseRefForProject(workspaceId, card.baseRef);
+			if (workspaceId !== currentProjectId) onTaskCardsCreatedInOtherProject?.(workspaceId, 1);
+			if (suggestTitle)
+				void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
+					workspaceId,
+					card.id,
+					card.prompt,
+					card.title,
+					card,
+				);
+			trackTaskCreated({
+				selected_agent_id: toTelemetrySelectedAgentId(card.agentId ?? taskCreationDefaultAgentId),
+				start_in_plan_mode: card.startInPlanMode,
+				prompt_character_count: card.prompt.length,
+				...(card.autoReviewEnabled ? { auto_review_mode: resolveTaskAutoReviewMode(card.autoReviewMode) } : {}),
+			});
+		},
+		[currentProjectId, onTaskCardsCreatedInOtherProject, taskCreationDefaultAgentId],
+	);
 	const handleCreateTasks = useCallback(
 		(prompts: string[], options?: TaskEditorSubmitOptions): string[] => {
 			if (!isNewTaskStartInPlanModeDefaultLoaded && !isInlineTaskCreateOpen) {
@@ -2239,6 +2299,7 @@ export function useTaskEditor({
 				: suspendedTaskEditorSeed.taskCard.title
 			: null,
 		handleResumeSuspendedTaskEditor,
+		handleTaskEditorCreationCardPersisted,
 		isInlineTaskCreateOpen,
 		taskEditorSessionWorkspaceId,
 		taskEditorDefaultAgentId,

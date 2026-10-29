@@ -30,6 +30,9 @@ const CATCH_UP_OUTPUT_FRAME_BYTE_LENGTH_LIKE_HOST = 64 * 1024;
 // 只实现 facade 与链路在接管路径上用到的方法；帧的到达由测试逐个「socket data 事件」驱动。
 class FakeAgentSessionPtyHostControllerConnectionDrivenByTest {
 	isClosed = false;
+	readonly requestSpawnHostedSession = vi.fn(async () => {
+		throw new Error("不应发送 hosted spawn");
+	});
 	readonly sentControlMessages: AgentSessionPtyHostControllerToHostMessage[] = [];
 	private eventHandlers: AgentSessionPtyHostControllerConnectionEventHandlers | null = null;
 	private resolvePendingAttachResponse: ((outcome: AttachHostedSessionOutputStreamOutcome) => void) | null = null;
@@ -132,6 +135,7 @@ async function startFacadeOverFakeConnectionAndTakeAdoptionCandidate(
 	exitRecord: AgentSessionPtyHostHostedSessionExitRecord | null = null,
 ): Promise<{
 	fakeConnection: FakeAgentSessionPtyHostControllerConnectionDrivenByTest;
+	facade: AgentSessionPtyHostRuntimeFacade;
 	adoptionCandidate: HostedTerminalPtySessionAdoptionCandidate;
 }> {
 	// /tmp 下的短目录：os.tmpdir()（macOS 的 /var/folders/…）会让 socket 路径触发 sun_path 回退、落进共享目录。
@@ -166,7 +170,7 @@ async function startFacadeOverFakeConnectionAndTakeAdoptionCandidate(
 	if (!adoptionCandidate) {
 		throw new Error("expected one adoption candidate");
 	}
-	return { fakeConnection, adoptionCandidate };
+	return { fakeConnection, facade, adoptionCandidate };
 }
 
 describe("agent session pty host adoption catch-up output routing", () => {
@@ -353,5 +357,44 @@ describe("agent session pty host adoption catch-up output routing", () => {
 			type: "acknowledge_hosted_session_exit",
 			hostedSessionKey: "hosted-session-adopted",
 		});
+	});
+	it("PTY host 重连等待期间 Stop，重连后仍在发送 spawn 前核验", async () => {
+		const { facade, fakeConnection } = await startFacadeOverFakeConnectionAndTakeAdoptionCandidate();
+		fakeConnection.isClosed = true;
+		const reconnected = new FakeAgentSessionPtyHostControllerConnectionDrivenByTest([]);
+		let finishReconnect!: () => void;
+		const reconnect = new Promise<void>((resolve) => {
+			finishReconnect = resolve;
+		});
+		vi.mocked(AgentSessionPtyHostControllerConnection.connectAsController).mockImplementationOnce(async () => {
+			await reconnect;
+			return reconnected as unknown as AgentSessionPtyHostControllerConnection;
+		});
+		let stopped = false;
+		const beforeAgentProcessLaunch = vi.fn(async () => {
+			if (stopped) throw new Error("用户已经 Stop");
+		});
+		const starting = facade
+			.createHostedTerminalPtyProcessSpawnerForWorkspace("workspace-1", null)
+			.spawnHostedTerminalPtyProcess({
+				taskId: "new-task",
+				hostedSessionKind: "task_agent_session",
+				binary: "unused",
+				args: [],
+				cwd: "/",
+				env: {},
+				cols: 80,
+				rows: 24,
+				onData: vi.fn(),
+				onExit: vi.fn(),
+				beforeAgentProcessLaunch,
+			});
+		const rejection = expect(starting).rejects.toThrow("用户已经 Stop");
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+		stopped = true;
+		finishReconnect();
+		await rejection;
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledOnce();
+		expect(reconnected.requestSpawnHostedSession).not.toHaveBeenCalled();
 	});
 });

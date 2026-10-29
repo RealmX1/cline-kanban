@@ -538,6 +538,12 @@ export const runtimeBoardCardSchema = z
 	);
 export type RuntimeBoardCard = z.infer<typeof runtimeBoardCardSchema>;
 
+// 编辑器创建提交单独定义，避免与关系草稿的值契约形成初始化环。
+export type {
+	TaskEditorCreationSubmissionRequest,
+	TaskEditorCreationSubmissionStatus,
+} from "./task-editor-creation-submission-contract";
+
 export const runtimeBoardColumnSchema = z.object({
 	id: runtimeBoardColumnIdSchema,
 	title: z.string(),

@@ -7,6 +7,7 @@ import type {
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as creationQueries from "@/runtime/task-editor-creation-submission-query";
 import { notifyTaskVisualizationStreamReconnected } from "@/stores/task-visualization-browser-bridge";
 import { useReferenceRelationModelingEditor } from "./use-reference-relation-modeling-editor";
 import { EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT } from "./work-unit-relation-add-reference-relation-dialog-draft-validation";
@@ -101,6 +102,13 @@ describe("关系预览防抖与恢复", () => {
 		expect(queries.readRelationModelingPreview).toHaveBeenCalledTimes(1);
 		expect(queries.readRelationModelingPreview.mock.calls[0]?.[1]).toMatchObject({ draftTaskTitle: "新增任务" });
 		expect(queries.persistRelationModelingEditorDraft).not.toHaveBeenCalled();
+	});
+
+	it("网络重连只恢复失败水合，不重铺已经编辑的关系草稿", async () => {
+		await act(async () => controller.addDraft(referenceDraft));
+		await act(async () => notifyTaskVisualizationStreamReconnected("project-a"));
+		await act(async () => vi.advanceTimersByTimeAsync(150));
+		expect(controller.readLatestDraft().referenceRelationDrafts).toEqual([referenceDraft]);
 	});
 
 	it("等待防抖时切换项目取消旧目标的预览，只读取新项目", async () => {
@@ -347,7 +355,19 @@ describe("关系编辑草稿与失败恢复", () => {
 		expect(controller.ready).toBe(true);
 		expect(controller.draft.referenceRelationDrafts).toEqual([]);
 	});
-	it("关系保存清理保留跨项目已创建卡片的项目、快照和同一世身份，重挂载可恢复", async () => {
+	it("旧已建卡草稿重挂后迁入任务恢复记录，不复用创建表单的身份", async () => {
+		const recoverLegacy = vi
+			.spyOn(creationQueries, "recoverLegacyTaskEditorCreationDraft")
+			.mockImplementation(async (_workspaceId, draft) => ({
+				...draft,
+				createdTaskId: null,
+				createdTaskCardSnapshot: null,
+				createdTaskWorkspaceId: undefined,
+				creationPrompt: "",
+				creationTitle: "",
+				referenceRelationDrafts: [],
+				relationRevocations: [],
+			}));
 		const snapshot = {
 			id: "abcde",
 			title: "目标项目任务",
@@ -389,7 +409,10 @@ describe("关系编辑草稿与失败恢复", () => {
 		await act(async () => root.unmount());
 		root = createRoot(container);
 		await act(async () => root.render(<Harness />));
-		expect(controller.draft).toMatchObject(expectedRecovery);
+		expect(recoverLegacy).toHaveBeenCalledWith("project-a", expect.objectContaining(expectedRecovery));
+		expect(controller.draft.createdTaskId).toBeNull();
+		expect(controller.draft.createdTaskCardSnapshot).toBeNull();
+		recoverLegacy.mockRestore();
 		expect(queries.applyReferenceRelationModelingChangesFromExplicitUserGesture).toHaveBeenCalledTimes(1);
 	});
 	it("旧保存未完成时放弃并重开，草稿读取等待删除完成且不会复活旧内容", async () => {

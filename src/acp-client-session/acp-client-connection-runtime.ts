@@ -61,6 +61,7 @@ export interface AcpTaskConnectionStartInput {
 	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
+	beforeAgentProcessLaunch?: () => Promise<void>;
 	// 连接完成前任务可能已停止或重开；拒绝旧连接注册和迟到事件。
 	isRuntimeSessionIncarnationCurrent?: () => boolean;
 	env?: Record<string, string | undefined>;
@@ -146,6 +147,9 @@ export class AcpClientConnectionRuntime {
 		}
 
 		await input.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
+		await input.beforeAgentProcessLaunch?.();
+		if (input.isRuntimeSessionIncarnationCurrent?.() === false)
+			throw new Error("启动已被停止或替换，未创建 ACP 子进程。");
 		const child = spawn(spawnCommand.binary, spawnCommand.args, {
 			cwd: input.cwd,
 			env: { ...process.env, ...input.env, ...spawnCommand.env },

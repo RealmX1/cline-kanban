@@ -8,6 +8,7 @@ import { referenceRelationModelingEditorDraftSchema } from "@runtime-work-unit-r
 import isDeepEqual from "fast-deep-equal";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRecoverableForegroundRead } from "@/expanded-foreground-view/use-recoverable-foreground-read";
+import { recoverLegacyTaskEditorCreationDraft } from "@/runtime/task-editor-creation-submission-query";
 import {
 	applyReferenceRelationModelingChangesFromExplicitUserGesture,
 	persistRelationModelingEditorDraft,
@@ -15,6 +16,7 @@ import {
 	readRelationModelingPreview,
 	requestReferenceRelationModelingSuggestions,
 } from "@/runtime/work-unit-relation-modeling-query";
+import { subscribeToTaskVisualizationBrowserEvents } from "@/stores/task-visualization-browser-bridge";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 function emptyDraft(): ReferenceRelationModelingEditorDraft {
@@ -52,6 +54,9 @@ export function useReferenceRelationModelingEditor(input: {
 	currentScopeRef.current = mirrorKey;
 	const [draft, setDraft] = useState<ReferenceRelationModelingEditorDraft>(emptyDraft);
 	const [ready, setReady] = useState(false);
+	const [draftHydrationRecoverySequence, setDraftHydrationRecoverySequence] = useState(0);
+	const draftHydrationRetry = useRef({ scope: mirrorKey, attempts: 0 });
+	const legacyDraftHydrationNeedsRecoveryRef = useRef(false);
 	const [hydratedScope, setHydratedScope] = useState<string | null>(null);
 	const [writeError, setWriteError] = useState<string | null>(null);
 	const [preview, setPreview] = useState<RelationModelingPreviewResponse | null>(null);
@@ -91,6 +96,10 @@ export function useReferenceRelationModelingEditor(input: {
 
 	useEffect(() => {
 		let current = true;
+		let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+		if (draftHydrationRetry.current.scope !== mirrorKey)
+			draftHydrationRetry.current = { scope: mirrorKey, attempts: 0 };
+		legacyDraftHydrationNeedsRecoveryRef.current = false;
 		setReady(false);
 		draftWasEditedInCurrentScope.current = false;
 		setPreview(null);
@@ -108,33 +117,76 @@ export function useReferenceRelationModelingEditor(input: {
 			/* 服务端仍可恢复草稿。 */
 		}
 		const workspaceId = input.workspaceId;
+		let restoredForHydration = mirror;
 		// 重开前先完成已排队的保存与放弃删除，避免旧草稿被恢复并再次自动保存。
 		const persistedDraftAfterQueuedWrites = saveTail.current
 			.catch(() => undefined)
 			.then(() => readRelationModelingEditorDraft(workspaceId, draftScopeId));
-		persistedDraftAfterQueuedWrites.then(
-			(saved) => {
+		persistedDraftAfterQueuedWrites
+			.then(async (saved) => {
+				if (!current) return;
+				const restored = mirror ?? saved;
+				restoredForHydration = restored;
+				const recovered =
+					restored?.createdTaskId && !input.taskId
+						? await recoverLegacyTaskEditorCreationDraft(workspaceId, restored)
+						: restored;
 				if (current) {
-					setDraft(mirror ?? saved ?? emptyDraft());
+					draftHydrationRetry.current.attempts = 0;
+					setDraft(recovered ?? emptyDraft());
+					if (restored?.createdTaskId && recovered) localStorage.setItem(mirrorKey, JSON.stringify(recovered));
 					setHydratedScope(mirrorKey);
 					setReady(true);
 				}
-			},
-			(failure: unknown) => {
+			})
+			.catch((failure: unknown) => {
 				if (current) {
-					setDraft(mirror ?? emptyDraft());
+					setDraft(restoredForHydration ?? emptyDraft());
 					setHydratedScope(mirrorKey);
-					setReady(true);
+					setReady(!restoredForHydration?.createdTaskId);
+					legacyDraftHydrationNeedsRecoveryRef.current = Boolean(restoredForHydration?.createdTaskId);
+					if (restoredForHydration?.createdTaskId && draftHydrationRetry.current.attempts < 3) {
+						draftHydrationRetry.current.attempts++;
+						recoveryTimer = setTimeout(() => setDraftHydrationRecoverySequence((value) => value + 1), 1_000);
+					}
 					setDraftPersistenceError(
 						`草稿暂时只保存在此浏览器：${failure instanceof Error ? failure.message : String(failure)}`,
 					);
 				}
-			},
-		);
+			});
 		return () => {
 			current = false;
+			clearTimeout(recoveryTimer);
 		};
-	}, [input.workspaceId, input.active, input.taskIncarnationCreatedAtEpochMs, draftScopeId, mirrorKey]);
+	}, [
+		input.workspaceId,
+		input.active,
+		input.taskIncarnationCreatedAtEpochMs,
+		draftScopeId,
+		mirrorKey,
+		draftHydrationRecoverySequence,
+	]);
+	useEffect(() => {
+		if (input.active === false || !input.workspaceId) return;
+		const resume = () => {
+			if (!legacyDraftHydrationNeedsRecoveryRef.current) return;
+			draftHydrationRetry.current.attempts = 0;
+			setDraftHydrationRecoverySequence((value) => value + 1);
+		};
+		const resumeWhenVisible = () => {
+			if (document.visibilityState === "visible") resume();
+		};
+		window.addEventListener("online", resume);
+		document.addEventListener("visibilitychange", resumeWhenVisible);
+		const unsubscribe = subscribeToTaskVisualizationBrowserEvents((event) => {
+			if (event.type === "stream_reconnected") resume();
+		});
+		return () => {
+			window.removeEventListener("online", resume);
+			document.removeEventListener("visibilitychange", resumeWhenVisible);
+			unsubscribe();
+		};
+	}, [input.workspaceId, input.active]);
 	const persist = useCallback(
 		(value: ReferenceRelationModelingEditorDraft | null) => {
 			if (!input.workspaceId) return Promise.resolve();
@@ -170,7 +222,7 @@ export function useReferenceRelationModelingEditor(input: {
 	const readPreview = useCallback(
 		(signal: AbortSignal) => {
 			if (!input.workspaceId) return Promise.reject(new Error("缺少项目归属。"));
-			const taskId = input.taskId ?? draft.createdTaskId;
+			const taskId = input.taskId;
 			return readRelationModelingPreview(
 				input.workspaceId,
 				{
@@ -354,7 +406,7 @@ export function useReferenceRelationModelingEditor(input: {
 			setSuggestionsError(null);
 			setSuggestions(null);
 			try {
-				const taskId = input.taskId ?? draftRef.current.createdTaskId;
+				const taskId = input.taskId;
 				const result = await requestReferenceRelationModelingSuggestions(input.workspaceId, {
 					workUnit: taskId
 						? {

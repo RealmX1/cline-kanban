@@ -5,9 +5,7 @@ import type {
 	ReferenceRelationModelingSuggestionsRequest,
 	RelationModelingPreviewRequest,
 } from "@runtime-work-unit-relation-modeling-api-contract";
-import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "@/runtime/new-backlog-task-card-persistence-before-agent-session-start-query";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { RuntimeBoardCard } from "@/runtime/types";
 
 export function readRelationModelingPreview(
 	workspaceId: string,
@@ -74,29 +72,4 @@ export async function resolveTaskEditorClipboardTaskCandidates(
 			(path) => path && getWorkspaceFolderLabelForWorktreePath(path) === reference.repositoryFolder,
 		);
 	});
-}
-
-export async function ensureRelationModelingCreatedTaskCardPersisted(
-	workspaceId: string,
-	snapshot: RuntimeBoardCard,
-): Promise<void> {
-	const client = getRuntimeTrpcClient(workspaceId);
-	const identities = await client.workUnit.resolveKanbanBoardCardIdentityByBareTaskId.query({
-		bareTaskId: snapshot.id,
-	});
-	const existing = identities.kanbanBoardCardIdentityCandidates.find(
-		(entry) => entry.kanbanBoardCard.workspaceId === workspaceId,
-	);
-	if (
-		existing &&
-		(existing.permanentlyRemovedFromBoardAt !== null ||
-			existing.kanbanBoardCard.taskIncarnationCreatedAtEpochMs !== snapshot.createdAt)
-	)
-		throw new Error("原任务已删除或身份已变化，不能恢复为新任务。 ");
-	if (!existing)
-		await persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
-			workspaceId,
-			newBacklogTaskCardsCreatedFromWebUi: [snapshot],
-			boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
-		});
 }
