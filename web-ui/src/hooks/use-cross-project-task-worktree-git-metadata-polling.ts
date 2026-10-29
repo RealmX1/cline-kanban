@@ -29,6 +29,7 @@ export function collectEntriesShownInCrossProjectTaskSwitcherSections(
 	return [
 		...sections.pinnedEntries,
 		...sections.runningEntries,
+		...sections.automaticRecoveryWaitingEntries,
 		...sections.promptCacheWarmAwaitingUserEntries,
 		...remainingEntries,
 	];

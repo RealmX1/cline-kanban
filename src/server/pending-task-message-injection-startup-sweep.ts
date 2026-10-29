@@ -57,7 +57,16 @@ export const STALE_PENDING_SWEEP_MARGIN_BEYOND_CONTRACT_CONVERGENCE_BOUND_MS = 5
 export const STALE_PENDING_SWEEP_PERIODIC_BACKSTOP_INTERVAL_MS = 60_000;
 
 export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(
-	deps: { getSummary?: (workspaceId: string, conversationSessionId: string) => RuntimeTaskSessionSummary | null } = {},
+	deps: {
+		getSummary?: (workspaceId: string, conversationSessionId: string) => RuntimeTaskSessionSummary | null;
+		onAutomaticFailureContinuationDeliveryObserved?: (
+			workspaceId: string,
+			conversationSessionId: string,
+			deliveryId: string,
+			requestWasInvoked: boolean,
+			acceptanceConfirmed: boolean,
+		) => void;
+	} = {},
 ): Promise<{
 	sweptCount: number;
 	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
@@ -81,6 +90,8 @@ export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(
 					ledgerPath: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceEntry.workspaceId)),
 					getSummary: (conversationSessionId) =>
 						deps.getSummary?.(workspaceEntry.workspaceId, conversationSessionId) ?? null,
+					onAutomaticFailureContinuationDeliveryObserved: (...observation) =>
+						deps.onAutomaticFailureContinuationDeliveryObserved?.(workspaceEntry.workspaceId, ...observation),
 				});
 			const result = await sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart({
 				ledgerPath: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceEntry.workspaceId)),

@@ -340,7 +340,7 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
-	it("重连任务保留 Running 并显示重连说明，恢复后位置保持不变", () => {
+	it("网络等待进入自动恢复组，确证执行后回到 Running", () => {
 		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
 		const renderEntries = (liveness: "retrying" | "live") =>
 			act(() =>
@@ -366,8 +366,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				),
 			);
 		renderEntries("retrying");
-		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
-		expect(section("running").textContent).toContain("重连中");
+		expect(rowTaskIds(section("running"))).toEqual(["other"]);
+		expect(rowTaskIds(section("waiting-automatic-recovery"))).toEqual(["retrying"]);
+		expect(section("waiting-automatic-recovery").textContent).toContain("等待自动恢复");
 		expect(rowTaskIds(section("remaining"))).not.toContain("retrying");
 		renderEntries("live");
 		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);

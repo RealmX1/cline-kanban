@@ -1,6 +1,7 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { type ReactElement, useLayoutEffect, useRef } from "react";
 import {
+	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
 	CrossProjectTaskSwitcherPinnedSectionBlock,
 	CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock,
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
@@ -75,6 +76,8 @@ export function CrossProjectTaskSwitcherSectionColumnScrollContainerWithOwnRowHo
 			return <CrossProjectTaskSwitcherPinnedSectionBlock {...sectionBlockProps} />;
 		case "running":
 			return <CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />;
+		case "waiting_automatic_recovery":
+			return <CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock {...sectionBlockProps} />;
 		case "prompt_cache_warm":
 			return <CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />;
 		case "remaining":

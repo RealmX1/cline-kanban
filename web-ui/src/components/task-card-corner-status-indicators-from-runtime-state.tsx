@@ -43,6 +43,7 @@ export function TaskCardCornerStatusIndicatorsFromRuntimeState({
 					{
 						turnOwner: facets?.turnOwner ?? null,
 						liveness: facets?.liveness ?? "none",
+						automaticAgentFailureContinuation: sessionSummary?.automaticAgentFailureContinuation,
 						isParkedAwaitingDispatchedBackgroundWork: isParkedAwaitingDispatchedBackgroundWork(sessionSummary),
 					},
 					nowMs,

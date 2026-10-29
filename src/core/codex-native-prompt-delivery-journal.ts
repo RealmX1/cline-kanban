@@ -37,6 +37,7 @@ export interface CodexNativePromptDeliveryJournal {
 	}) => Promise<CodexNativePromptDeliveryJournalState>;
 	recordRequestIntent: (previousTurnId: string | null) => Promise<void>;
 	recordRequestInvoked: () => Promise<void>;
+	recordRequestNotInvoked?: () => Promise<void>;
 	recordReturnedTurn: (returnedTurnId: string) => Promise<void>;
 	recordAcceptanceHistoryQueryProgress: (progress: CodexNativePromptAcceptanceHistoryQueryProgress) => Promise<void>;
 	recordAcceptance: (evidence: CodexNativePromptDeliveryEvidence) => Promise<void>;
@@ -138,6 +139,12 @@ export function createCodexNativePromptDeliveryJournal(
 					sendPhase: current.sendPhase === "native_accepted" ? "native_accepted" : "request_invoked",
 					actualSendAttemptCount: Math.max(current.actualSendAttemptCount, 1),
 				};
+			}),
+		recordRequestNotInvoked: async () =>
+			updateExisting((current) => {
+				if (current.sendPhase !== "request_intent_persisted" || current.actualSendAttemptCount !== 0)
+					throw new Error("原生请求可能已发出，不能恢复发送资格");
+				return { ...current, sendPhase: "registered", previousTurnId: null };
 			}),
 		recordReturnedTurn: async (returnedTurnId) => updateExisting((current) => ({ ...current, returnedTurnId })),
 		recordAcceptanceHistoryQueryProgress: async (acceptanceHistoryQueryProgress) =>

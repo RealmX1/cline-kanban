@@ -1,3 +1,19 @@
+import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
+import {
+	persistAutomaticAgentFailureContinuation,
+	readAutomaticAgentFailureContinuations,
+} from "../state/automatic-agent-failure-continuation-store";
+import {
+	type AutomaticFailureContinuationAttemptResult,
+	claudeAutomaticFailureContinuationMayStartWrite,
+	createAutomaticAgentFailureContinuationCoordinator,
+	hasCompletionReviewForSubmittedAutomaticFailureContinuation,
+	isAutomaticAgentFailureContinuationActive,
+} from "./automatic-agent-failure-continuation-coordinator";
+import {
+	buildAutomaticAgentFailureContinuationPrompt,
+	deliverAutomaticAgentFailureContinuationNativePrompt,
+} from "./automatic-agent-failure-continuation-native-delivery";
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
@@ -29,6 +45,7 @@ import type {
 	prepareCodexNativeSessionControlHostLaunch,
 	restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
 } from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
+import { readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification } from "../codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import {
 	NativeIndependentUserTurnDeliveryError,
 	NativeIndependentUserTurnMessageAlreadyAccepted,
@@ -131,6 +148,7 @@ import {
 	type ManagedTaskPromptDeliveryHandle,
 	settleManagedTaskPromptDeliveryWithoutBlocking,
 } from "../state/managed-task-prompt-delivery-coordinator";
+import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../state/queued-task-prompt-delivery-store";
 import {
 	createAgentOutputSubstanceMemory,
 	detectFreshSubstantiveAgentOutputFromStripped,
@@ -174,7 +192,6 @@ import {
 	buildCodexModelCapacityErrorDetectionTurnIdentity,
 	createCodexModelCapacityErrorDetector,
 } from "./codex-model-capacity-error-detection";
-import { inspectCodexNativeConnectionRetryContinuationReadiness } from "./codex-native-connection-retry-continuation-readiness";
 import { deliverCodexNativePromptWithoutChangingComposer } from "./codex-native-prompt-delivery";
 import {
 	hasCodexInteractivePrompt,
@@ -210,18 +227,12 @@ import {
 	isKimiWorkspaceTrustNavigationOrConfirmationInput,
 } from "./kimi-readiness";
 import {
-	type ConnectionRetryContinuationFirstSubmitCarriageReturnState,
-	type ConnectionRetryContinuationSubmissionResult,
 	getDefaultOutputReactionEngine,
 	type OutputReactionActions,
 	type OutputReactionContext,
 	type OutputReactionEngine,
 } from "./output-reactions";
-import {
-	buildNetworkInterruptionContinuationLine,
-	ensureNetworkInterruptionResumeInstructionsFile,
-	getNetworkInterruptionResumeInstructionsPath,
-} from "./output-reactions/network-interruption-continuation-instructions";
+import { ensureNetworkInterruptionResumeInstructionsFile } from "./output-reactions/network-interruption-continuation-instructions";
 import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
 import {
@@ -727,6 +738,7 @@ interface SessionEntry {
 
 export interface StartTaskSessionRequest {
 	taskId: string;
+	automaticFailureContinuationEpisodeId?: string;
 	workspaceTaskId?: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: AgentAdapterLaunchInput["agentId"];
@@ -734,6 +746,7 @@ export interface StartTaskSessionRequest {
 	args: string[];
 	taskAgentPermissionMode?: AgentAdapterLaunchInput["taskAgentPermissionMode"];
 	autoContinueOnConnectionDropEnabled?: boolean;
+	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 	cwd: string;
 	prompt: string;
 	images?: RuntimeTaskImage[];
@@ -1262,6 +1275,14 @@ function takeLastLines(text: string, lineCount: number): string {
 }
 
 export interface TerminalSessionManagerOptions {
+	automaticFailureContinuationWorkspaceId?: string;
+	readAutomaticFailureContinuationEligibility?: (conversationSessionId: string) => Promise<{
+		eligible: boolean;
+		taskIncarnationCreatedAtEpochMs: number | null;
+		connectionEnabled: boolean;
+		capacityEnabled: boolean;
+	}>;
+
 	enableManagedTaskPromptDeliveryRecording?: boolean;
 	deliverCodexNativePromptWithoutChangingComposer?: typeof deliverCodexNativePromptWithoutChangingComposer;
 	// 真实运行时由 workspace registry 启用；裸 manager 可继续作为不访问用户配置的进程编排器使用。
@@ -1291,6 +1312,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		number
+	>();
+	private readonly automaticFailureContinuationCoordinators = new Map<
+		string,
+		ReturnType<typeof createAutomaticAgentFailureContinuationCoordinator>
+	>();
+	private automaticFailureContinuationRestoreRetryTimer: NodeJS.Timeout | null = null;
+	private automaticFailureContinuationRestoreFailureCount = 0;
+	private automaticFailureContinuationConfiguredSettings: {
+		connectionEnabled: boolean;
+		capacityEnabled: boolean;
+	} | null = null;
+	private readonly automaticFailureContinuationTimers = new Map<string, NodeJS.Timeout>();
+	private readonly automaticFailureContinuationPersistence = new Map<string, Promise<void>>();
+	private readonly automaticFailureContinuationPendingInspection = new Set<string>();
+	private readonly automaticFailureContinuationClaudeResults = new Map<
+		string,
+		AutomaticFailureContinuationAttemptResult
 	>();
 	private readonly connectionRetryEpisodeGenerationByActiveProcess = new WeakMap<ActiveProcessState, number>();
 	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {}
@@ -1616,6 +1654,691 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
+	private automaticFailureContinuationFaultIdentity(summary: RuntimeTaskSessionSummary): string {
+		return JSON.stringify([
+			summary.runtimeSessionIncarnationId,
+			summary.agentResponseGenerationTurnSequence,
+			summary.agentConversationPromptSubmissionAcceptance?.eventId ?? null,
+		]);
+	}
+
+	private getAutomaticFailureContinuationCoordinator(taskId: string) {
+		const existing = this.automaticFailureContinuationCoordinators.get(taskId);
+		if (existing) return existing;
+		const coordinator = createAutomaticAgentFailureContinuationCoordinator({
+			now,
+			target: () => {
+				const entry = this.entries.get(taskId);
+				const summary = entry?.summary;
+				return {
+					workspaceId:
+						this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId ??
+						(entry?.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : null) ??
+						summary?.codexNativeSessionControlEndpoint?.workspaceId ??
+						"unmanaged",
+					taskId: summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+					conversationSessionId: taskId,
+					taskIncarnationCreatedAtEpochMs:
+						summary?.automaticAgentFailureContinuation?.taskIncarnationCreatedAtEpochMs ?? null,
+					runtimeSessionIncarnationId: summary?.runtimeSessionIncarnationId ?? null,
+					nativeSessionId: summary?.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+					agentId: summary?.agentId === "claude" ? "claude" : "codex",
+					nativeTranscriptPath: summary?.agentNativeConversationSessionIdentity?.transcriptPath ?? null,
+					executionWorkingDirectoryPath: summary?.workspacePath ?? null,
+					ownerProcessId: summary?.pid ?? null,
+					faultTurnIdentity: summary ? this.automaticFailureContinuationFaultIdentity(summary) : "unavailable",
+				};
+			},
+			publish: (record) => {
+				const entry = this.entries.get(taskId);
+				if (!entry) return;
+				const previous = entry.summary.automaticAgentFailureContinuation;
+				const phaseChanged = previous?.episodeId !== record.episodeId || previous.phase !== record.phase;
+				const ownsCurrentSession =
+					entry.summary.runtimeSessionIncarnationId === record.runtimeSessionIncarnationId &&
+					(record.nativeSessionId === null ||
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId === record.nativeSessionId);
+				const modalHeld = MODAL_USER_DECISION_TURN_KINDS.has(resolveSessionFacets(entry.summary).userTurnKind);
+				updateSummary(entry, {
+					automaticAgentFailureContinuation: ownsCurrentSession ? record : null,
+					...(ownsCurrentSession &&
+					phaseChanged &&
+					["cancelled", "expired", "failed"].includes(record.phase) &&
+					!modalHeld
+						? {
+								turnOwner: "user" as const,
+								liveness: entry.active ? ("live" as const) : ("exited" as const),
+								userTurnKind: "error" as const,
+								reviewReason: "error" as const,
+							}
+						: {}),
+					...(ownsCurrentSession && record.phase === "executing" && !modalHeld
+						? { turnOwner: "agent" as const, liveness: "live" as const, userTurnKind: null, reviewReason: null }
+						: {}),
+				});
+				this.applyConnectionRetryState(
+					taskId,
+					ownsCurrentSession &&
+						isAutomaticAgentFailureContinuationActive(record) &&
+						record.phase !== "executing" &&
+						record.blockingReason !== "waiting_for_user_decision"
+						? {
+								status: "retrying",
+								retryCount: record.attemptCount,
+								firstErrorAt: record.firstErrorAtMs,
+								lastAttemptAt: record.lastAttemptAtMs,
+								nextAttemptAt: record.nextCheckAtMs,
+							}
+						: null,
+				);
+				this.emitSummary(entry.summary);
+				if (this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId) {
+					const previous = this.automaticFailureContinuationPersistence.get(taskId) ?? Promise.resolve();
+					const pending = previous.catch(() => {}).then(() => persistAutomaticAgentFailureContinuation(record));
+					this.automaticFailureContinuationPersistence.set(taskId, pending);
+					void pending.catch((error) =>
+						logTuiFreezeWarning(`自动恢复意图持久化暂时失败 taskId=${taskId}：${String(error)}`),
+					);
+				}
+				if (
+					ownsCurrentSession &&
+					phaseChanged &&
+					record.phase === "recovered" &&
+					(record.blockingReason === "native_turn_completed" ||
+						(record.agentId === "claude" && hasCompletionReviewForSubmittedAutomaticFailureContinuation(record)))
+				)
+					this.transitionToReview(
+						taskId,
+						record.pendingCompletionReview?.reason ?? "hook",
+						undefined,
+						record.pendingCompletionReview
+							? { domainEventObservedAtEpochMs: record.pendingCompletionReview.observedAtMs }
+							: undefined,
+					);
+			},
+			clearScheduled: () => {
+				const timer = this.automaticFailureContinuationTimers.get(taskId);
+				if (timer) clearTimeout(timer);
+				this.automaticFailureContinuationTimers.delete(taskId);
+			},
+			schedule: (delay) => {
+				const previous = this.automaticFailureContinuationTimers.get(taskId);
+				if (previous) clearTimeout(previous);
+				const timer = setTimeout(() => {
+					this.automaticFailureContinuationTimers.delete(taskId);
+					void coordinator.attempt();
+				}, delay);
+				timer.unref?.();
+				this.automaticFailureContinuationTimers.set(taskId, timer);
+			},
+			canAttempt: () => {
+				const entry = this.entries.get(taskId);
+				if (!entry || entry.suppressAutoRestartOnExit) return false;
+				return (
+					!isParkedAwaitingDispatchedBackgroundWork(entry.summary) &&
+					!entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+				);
+			},
+			softDeferralReason: () => this.automaticFailureContinuationModalDeferral(taskId),
+			submit: (record) => this.submitAutomaticFailureContinuation(taskId, record),
+		});
+		this.automaticFailureContinuationCoordinators.set(taskId, coordinator);
+		return coordinator;
+	}
+
+	private async beginAutomaticFailureContinuation(
+		taskId: string,
+		reason: "connection" | "model_capacity",
+		nativeTurnId: string | null = null,
+	): Promise<boolean> {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active || this.automaticFailureContinuationPendingInspection.has(taskId)) return false;
+		const active = entry.active;
+		const faultIdentity = this.automaticFailureContinuationFaultIdentity(entry.summary);
+		const request = entry.restartRequest?.kind === "task" ? entry.restartRequest.request : null;
+		this.automaticFailureContinuationPendingInspection.add(taskId);
+		try {
+			const eligibility =
+				await this.terminalSessionManagerOptions.readAutomaticFailureContinuationEligibility?.(taskId);
+			if (
+				this.entries.get(taskId) !== entry ||
+				entry.active !== active ||
+				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity
+			)
+				return false;
+			if (eligibility && !eligibility.eligible) return false;
+			const automaticRecoveryEnabled = eligibility
+				? reason === "connection"
+					? eligibility.connectionEnabled
+					: eligibility.capacityEnabled
+				: reason === "connection"
+					? (this.automaticFailureContinuationConfiguredSettings?.connectionEnabled ??
+						request?.autoContinueOnConnectionDropEnabled !== false)
+					: (this.automaticFailureContinuationConfiguredSettings?.capacityEnabled ??
+						request?.codexModelCapacityErrorAutoContinuationEnabled !== false);
+			if (!automaticRecoveryEnabled && reason === "connection") return false;
+			if (request && this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId)
+				await persistSideSessionResumeRequestWaitingForNativeIdentity(entry.summary, { ...request, prompt: "" });
+			if (
+				entry.active !== active ||
+				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity ||
+				entry.suppressAutoRestartOnExit
+			)
+				return false;
+			const coordinator = this.getAutomaticFailureContinuationCoordinator(taskId);
+			const previous = coordinator.snapshot();
+			coordinator.observeFailure(reason, nativeTurnId);
+			if (
+				eligibility &&
+				(coordinator.snapshot()?.taskIncarnationCreatedAtEpochMs == null ||
+					coordinator.snapshot()?.episodeId !== previous?.episodeId)
+			)
+				coordinator.bindTaskIncarnation(eligibility.taskIncarnationCreatedAtEpochMs);
+			if (!automaticRecoveryEnabled) {
+				coordinator.cancel("automatic_recovery_setting_disabled");
+				return false;
+			}
+			return (
+				isAutomaticAgentFailureContinuationActive(coordinator.snapshot()) ||
+				previous?.phase === "cancelled" ||
+				previous?.phase === "expired"
+			);
+		} catch (error) {
+			if (
+				this.entries.get(taskId) !== entry ||
+				entry.active !== active ||
+				entry.suppressAutoRestartOnExit ||
+				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity
+			)
+				return false;
+			const switchStillEnabled =
+				reason === "connection"
+					? (this.automaticFailureContinuationConfiguredSettings?.connectionEnabled ??
+						request?.autoContinueOnConnectionDropEnabled !== false)
+					: (this.automaticFailureContinuationConfiguredSettings?.capacityEnabled ??
+						request?.codexModelCapacityErrorAutoContinuationEnabled !== false);
+			if (!switchStillEnabled) return false;
+			logTuiFreezeWarning(`自动恢复资格查询暂时失败 taskId=${taskId}：${String(error)}`);
+			const coordinator = this.getAutomaticFailureContinuationCoordinator(taskId);
+			coordinator.observeFailure(reason, nativeTurnId);
+			return true;
+		} finally {
+			this.automaticFailureContinuationPendingInspection.delete(taskId);
+		}
+	}
+
+	private async submitAutomaticFailureContinuation(
+		taskId: string,
+		record: RuntimeAutomaticAgentFailureContinuation,
+	): Promise<AutomaticFailureContinuationAttemptResult> {
+		await this.automaticFailureContinuationPersistence.get(taskId);
+		const eligibility =
+			await this.terminalSessionManagerOptions.readAutomaticFailureContinuationEligibility?.(taskId);
+		if (this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown)
+			return { outcome: "deferred", blockingReason: "runtime_shutting_down" };
+		if (eligibility && record.taskIncarnationCreatedAtEpochMs === null && eligibility.eligible) {
+			this.getAutomaticFailureContinuationCoordinator(taskId).bindTaskIncarnation(
+				eligibility.taskIncarnationCreatedAtEpochMs,
+			);
+			return { outcome: "deferred", blockingReason: "task_identity_reconciled" };
+		}
+		if (
+			eligibility &&
+			(!eligibility.eligible ||
+				eligibility.taskIncarnationCreatedAtEpochMs !== record.taskIncarnationCreatedAtEpochMs ||
+				!(record.reason === "connection" ? eligibility.connectionEnabled : eligibility.capacityEnabled))
+		)
+			return { outcome: "invalidated", blockingReason: "task_or_setting_qualification_revoked" };
+		let entry = this.entries.get(taskId);
+		if (!entry) return { outcome: "invalidated" };
+		if (
+			record.nativeSessionId === null &&
+			entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId &&
+			entry.summary.runtimeSessionIncarnationId === record.runtimeSessionIncarnationId
+		) {
+			this.getAutomaticFailureContinuationCoordinator(taskId).bindNativeSession(
+				entry.summary.agentNativeConversationSessionIdentity.nativeSessionId,
+				entry.summary.agentNativeConversationSessionIdentity.transcriptPath ?? null,
+			);
+			return { outcome: "deferred", blockingReason: "native_identity_reconciled" };
+		}
+		if (
+			entry.active &&
+			entry.restartRequest?.kind === "task" &&
+			this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId
+		)
+			await persistSideSessionResumeRequestWaitingForNativeIdentity(entry.summary, {
+				...entry.restartRequest.request,
+				prompt: "",
+			});
+		if (!entry.active) {
+			if (record.ownerProcessId === null)
+				return { outcome: "deferred", blockingReason: "previous_owner_exit_unknown" };
+			if (record.ownerProcessId !== null) {
+				try {
+					process.kill(record.ownerProcessId, 0);
+					return { outcome: "deferred", blockingReason: "waiting_for_previous_owner_exit_evidence" };
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+						return { outcome: "deferred", blockingReason: "previous_owner_exit_unknown" };
+				}
+			}
+			const generation = entry.autoRestartCancellationGeneration;
+			const resumeRequest = await readSideSessionResumeRequestWaitingForNativeIdentity(
+				{
+					...entry.summary,
+					workspacePath: record.executionWorkingDirectoryPath,
+					runtimeSessionIncarnationId: record.runtimeSessionIncarnationId,
+				},
+				{ rebuildAutomaticRecoveryMetadataForWorkspaceTaskId: record.taskId },
+			);
+			if (!resumeRequest || !record.nativeSessionId)
+				return { outcome: "deferred", blockingReason: "waiting_for_durable_native_resume_binding" };
+			if (
+				entry.autoRestartCancellationGeneration !== generation ||
+				entry.summary.automaticAgentFailureContinuation?.episodeId !== record.episodeId
+			)
+				return { outcome: "invalidated" };
+			await this.startTaskSession(
+				{
+					...resumeRequest,
+					automaticFailureContinuationEpisodeId: record.episodeId,
+					prompt: "",
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+				},
+				"durable_record_rebuilt_resume",
+			);
+			entry = this.entries.get(taskId);
+			if (!entry?.active) return { outcome: "deferred", blockingReason: "waiting_for_native_process_resume" };
+			if (entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.nativeSessionId)
+				return { outcome: "invalidated" };
+			this.getAutomaticFailureContinuationCoordinator(taskId).bindCurrentProcess(
+				entry.summary.runtimeSessionIncarnationId ?? null,
+				entry.summary.pid,
+			);
+			return { outcome: "deferred", blockingReason: "checking_resumed_native_conversation" };
+		}
+		if (
+			entry.summary.runtimeSessionIncarnationId !== record.runtimeSessionIncarnationId &&
+			entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId === record.nativeSessionId
+		) {
+			if (record.ownerProcessId === null)
+				return { outcome: "deferred", blockingReason: "previous_owner_exit_unknown" };
+			try {
+				process.kill(record.ownerProcessId, 0);
+				return { outcome: "deferred", blockingReason: "waiting_for_previous_owner_exit_evidence" };
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+					return { outcome: "deferred", blockingReason: "previous_owner_exit_unknown" };
+			}
+			this.getAutomaticFailureContinuationCoordinator(taskId).bindCurrentProcess(
+				entry.summary.runtimeSessionIncarnationId ?? null,
+				entry.summary.pid,
+			);
+			return { outcome: "deferred", blockingReason: "checking_resumed_native_conversation" };
+		}
+		const active = entry.active;
+		const originalIdentity = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(entry.summary);
+		const humanSequence = this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(active);
+		const deliveryGeneration = active.taskChatInputDeliveryGeneration;
+		const isCurrent = () => {
+			const current = this.entries.get(taskId);
+			const episode = current?.summary.automaticAgentFailureContinuation;
+			return (
+				current?.active === active &&
+				!this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown &&
+				!current.suppressAutoRestartOnExit &&
+				episode?.episodeId === record.episodeId &&
+				isAutomaticAgentFailureContinuationActive(episode) &&
+				current.summary.runtimeSessionIncarnationId === record.runtimeSessionIncarnationId &&
+				(record.nativeSessionId === null ||
+					current.summary.agentNativeConversationSessionIdentity?.nativeSessionId === record.nativeSessionId) &&
+				this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(active) === humanSequence &&
+				active.taskChatInputDeliveryGeneration === deliveryGeneration &&
+				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(current.summary) ===
+					originalIdentity &&
+				!current.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			);
+		};
+		if (!isCurrent()) return { outcome: "invalidated" };
+		if (active.programmaticDeliveryReceipt || active.taskChatInputDeliveryTimer)
+			return { outcome: "deferred", blockingReason: "another_programmatic_delivery_in_flight" };
+		if (!this.canInjectIntoTerminalNow(active))
+			return { outcome: "deferred", blockingReason: "waiting_for_startup_or_human_input" };
+		if (entry.summary.agentId === "codex") {
+			if (!entry.summary.codexNativeSessionControlEndpoint && entry.summary.runtimeSessionIncarnationId) {
+				const endpoint = await readOwnedCodexNativeControlEndpointFromDurableLaunchSpecification({
+					workspaceId: record.workspaceId,
+					conversationSessionId: taskId,
+					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+				});
+				if (!isCurrent()) return { outcome: "invalidated" };
+				if (endpoint) {
+					updateSummary(entry, { codexNativeSessionControlEndpoint: endpoint });
+					this.emitSummary(entry.summary);
+				}
+				return {
+					outcome: "deferred",
+					blockingReason: endpoint
+						? "native_control_endpoint_reconciled"
+						: "waiting_for_native_identity_and_control_endpoint",
+				};
+			}
+			if (!entry.summary.agentNativeConversationSessionIdentity) {
+				const identity = await readSideSessionNativeIdentityFromOwnedCodexControl(entry.summary);
+				if (identity && this.entries.get(taskId)?.active === active) {
+					this.applyAgentNativeConversationSessionIdentity(taskId, identity);
+					this.getAutomaticFailureContinuationCoordinator(taskId).bindNativeSession(
+						identity.nativeSessionId,
+						identity.transcriptPath ?? null,
+					);
+				}
+				return { outcome: "deferred", blockingReason: "waiting_for_native_identity_and_control_endpoint" };
+			}
+			const result = await deliverAutomaticAgentFailureContinuationNativePrompt({
+				record,
+				onSubmissionStarted: () =>
+					this.getAutomaticFailureContinuationCoordinator(taskId).markActiveDeliverySubmissionStarted(
+						record.activeDeliveryId ?? "",
+					),
+				onRequestInvoked: () =>
+					this.getAutomaticFailureContinuationCoordinator(taskId).recordNativeRequestInvoked(
+						record.activeDeliveryId ?? "",
+						record.reason,
+					),
+				onAcceptanceConfirmed: () =>
+					this.getAutomaticFailureContinuationCoordinator(taskId).recordNativeAcceptanceConfirmed(
+						record.activeDeliveryId ?? "",
+					),
+				summary: cloneSummary(entry.summary),
+				getCurrentSummary: () => (isCurrent() ? (this.entries.get(taskId)?.summary ?? null) : null),
+				readSoftDeferral: () => this.automaticFailureContinuationModalDeferral(taskId),
+				beforeSubmit: async () => {
+					await this.automaticFailureContinuationPersistence.get(taskId);
+					const currentEligibility =
+						await this.terminalSessionManagerOptions.readAutomaticFailureContinuationEligibility?.(taskId);
+					return (
+						isCurrent() &&
+						(!currentEligibility ||
+							(currentEligibility.eligible &&
+								currentEligibility.taskIncarnationCreatedAtEpochMs === record.taskIncarnationCreatedAtEpochMs &&
+								(record.reason === "connection"
+									? currentEligibility.connectionEnabled
+									: currentEligibility.capacityEnabled)))
+					);
+				},
+				sender: this.terminalSessionManagerOptions.deliverCodexNativePromptWithoutChangingComposer,
+			});
+			if (!isCurrent()) return { outcome: "invalidated" };
+			if (result.retryableFailureReason && result.retryableFailureReason !== record.reason) {
+				if (
+					!(await this.beginAutomaticFailureContinuation(
+						taskId,
+						result.retryableFailureReason,
+						result.nativeTurnId ?? null,
+					))
+				)
+					return { outcome: "invalidated", blockingReason: "automatic_recovery_setting_disabled" };
+			}
+			return result;
+		}
+		const deliveryId = record.activeDeliveryId;
+		if (!deliveryId) return { outcome: "invalidated" };
+		const cachedResult = this.automaticFailureContinuationClaudeResults.get(deliveryId);
+		const managedEntry =
+			record.workspaceId === "unmanaged"
+				? undefined
+				: (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[taskId]?.find(
+						(candidate) => candidate.queueEntryId === deliveryId,
+					);
+		if (!isCurrent()) return { outcome: "invalidated" };
+		let accepted =
+			record.activeDeliveryWasAccepted ||
+			cachedResult?.nativeAcceptanceConfirmed ||
+			managedEntry?.managedDelivery?.terminalDeliveryReceipt?.status === "delivered_and_submit_confirmed";
+		if (managedEntry && record.terminalSubmissionTranscriptReadCursor) {
+			const activity = await readNativeAgentConversationActivity({
+				workspaceId: record.workspaceId,
+				summary: entry.summary,
+				observedAtMs: now(),
+				cursor: { transport: "transcript", ...record.terminalSubmissionTranscriptReadCursor, seenEventIds: [] },
+			});
+			if (!isCurrent()) return { outcome: "invalidated" };
+			const acceptance = activity?.events.find(
+				(event) =>
+					event.activityKind === "accepted_user_input" &&
+					event.submittedPromptText === managedEntry.text &&
+					event.observedAtMs >= managedEntry.enqueuedAt,
+			);
+			if (acceptance) {
+				const { handle } = await beginManagedTaskPromptDelivery({
+					workspaceId: record.workspaceId,
+					taskId,
+					workspaceTaskId: record.taskId,
+					deliveryRequestId: deliveryId,
+					text: managedEntry.text,
+					origin: { messageType: "system_continuation", sourceLabel: "网络中断自动恢复" },
+					summary: entry.summary,
+				});
+				await handle.settle({ status: "delivered_and_submit_confirmed", reason: null });
+				accepted = true;
+			}
+			if (
+				accepted &&
+				activity?.events.some(
+					(event) =>
+						["agent_output", "tool_activity", "context_compaction"].includes(event.activityKind) &&
+						event.observedAtMs >
+							Math.max(record.lastErrorAtMs, acceptance?.observedAtMs ?? managedEntry.enqueuedAt),
+				)
+			)
+				return { outcome: "accepted_progressed" };
+			if (activity?.cursor?.transport === "transcript") {
+				const { fileIdentity, nextByteOffset, baselineAtMs } = activity.cursor;
+				this.getAutomaticFailureContinuationCoordinator(taskId).markTerminalRequestMayHaveBeenSent(deliveryId, {
+					fileIdentity,
+					nextByteOffset,
+					baselineAtMs,
+				});
+				await this.automaticFailureContinuationPersistence.get(taskId);
+			}
+		}
+		const currentRecord = this.automaticFailureContinuationCoordinators.get(taskId)?.snapshot();
+		if (accepted && currentRecord?.activeDeliveryObservedFailure?.reason === "connection")
+			return { outcome: "accepted_failed", nativeAcceptanceConfirmed: true };
+		if (
+			accepted &&
+			currentRecord &&
+			hasCompletionReviewForSubmittedAutomaticFailureContinuation(currentRecord) &&
+			!this.automaticFailureContinuationPendingInspection.has(taskId)
+		)
+			return { outcome: "accepted_finished" };
+
+		if (accepted) {
+			const facets = resolveSessionFacets(entry.summary);
+			return facets.turnOwner === "agent" && facets.liveness === "live"
+				? { outcome: "accepted_running" }
+				: {
+						outcome: "unconfirmed",
+						nativeAcceptanceConfirmed: true,
+						blockingReason: "waiting_for_accepted_turn_execution",
+						requestWasInvoked: true,
+					};
+		}
+		const receipt = managedEntry?.managedDelivery?.terminalDeliveryReceipt;
+		if (
+			!claudeAutomaticFailureContinuationMayStartWrite({
+				activeDeliveryAttemptCounted: record.activeDeliveryAttemptCounted,
+				activeDeliveryRequestMayHaveBeenSent: record.activeDeliveryRequestMayHaveBeenSent,
+				hasManagedEntry: !!managedEntry,
+				managedReceiptStatus: receipt?.status,
+				managedReceiptReason: receipt?.reason,
+			})
+		)
+			return {
+				outcome: "unconfirmed",
+				blockingReason: "checking_original_terminal_submission",
+				requestWasInvoked: record.activeDeliveryAttemptCounted,
+			};
+		if (this.automaticFailureContinuationModalDeferral(taskId))
+			return { outcome: "deferred", blockingReason: "waiting_for_user_decision" };
+		if (!this.isAtInteractivePromptForReaction(entry))
+			return { outcome: "deferred", blockingReason: "waiting_for_interactive_prompt" };
+		const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(taskId);
+		if (!isCurrent()) return { outcome: "invalidated" };
+		if (
+			!occupancy ||
+			occupancy.hasUncommittedInput ||
+			(!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition &&
+				occupancy.screenReadingSaysNonEmpty !== false)
+		)
+			return { outcome: "deferred", blockingReason: "waiting_for_confirmed_empty_terminal_composer" };
+		const written = await this.writePasteSubmissionWithConfirm(
+			taskId,
+			active,
+			buildAutomaticAgentFailureContinuationPrompt(record.reason),
+			{
+				automaticFailureContinuationDeliveryId: deliveryId,
+				onFirstSubmitCarriageReturnWritten: () =>
+					this.getAutomaticFailureContinuationCoordinator(taskId).markActiveDeliverySubmissionStarted(deliveryId),
+				validateBeforeTerminalWrite: async () => {
+					if (!isCurrent() || this.automaticFailureContinuationModalDeferral(taskId))
+						throw new Error("自动恢复已取消、会话已替换或正在等待用户决定。");
+					const coordinator = this.getAutomaticFailureContinuationCoordinator(taskId);
+					let transcriptCursor = coordinator.snapshot()?.terminalSubmissionTranscriptReadCursor;
+					if (!transcriptCursor && entry.summary.agentNativeConversationSessionIdentity?.transcriptPath) {
+						const baseline = await readNativeAgentConversationActivity({
+							workspaceId: record.workspaceId,
+							summary: entry.summary,
+							cursor: null,
+							observedAtMs: now(),
+						});
+						if (baseline?.cursor?.transport !== "transcript") throw new Error("原生转录基线暂不可用。");
+						const { fileIdentity, nextByteOffset, baselineAtMs } = baseline.cursor;
+						transcriptCursor = { fileIdentity, nextByteOffset, baselineAtMs };
+					}
+					if (!isCurrent() || !coordinator.markTerminalRequestMayHaveBeenSent(deliveryId, transcriptCursor))
+						throw new Error("自动恢复投递已作废。");
+					await this.automaticFailureContinuationPersistence.get(taskId);
+					if (!isCurrent() || this.automaticFailureContinuationModalDeferral(taskId))
+						throw new Error("自动恢复在持久登记期间已取消或正在等待用户决定。");
+				},
+				onAutomaticFailureContinuationReceipt: (outcome) => {
+					this.automaticFailureContinuationClaudeResults.set(deliveryId, {
+						outcome: "unconfirmed",
+						nativeAcceptanceConfirmed: outcome.status === "delivered_and_submit_confirmed",
+						blockingReason: "checking_original_terminal_submission",
+					});
+				},
+			},
+		);
+		return written
+			? { outcome: "unconfirmed", blockingReason: "checking_original_terminal_submission", requestWasInvoked: true }
+			: { outcome: "deferred", blockingReason: "terminal_submission_not_written", requestWasInvoked: false };
+	}
+
+	async restoreAutomaticFailureContinuationsAfterRuntimeRestart(): Promise<void> {
+		const workspaceId = this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+		if (!workspaceId || this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown) return;
+		let needsAnotherRead = false;
+		try {
+			const records = await readAutomaticAgentFailureContinuations(workspaceId, () => {
+				needsAnotherRead = true;
+			});
+			for (const record of records) {
+				if (this.automaticFailureContinuationCoordinators.has(record.conversationSessionId)) continue;
+				const existingEntry = this.entries.get(record.conversationSessionId);
+				const entry = existingEntry ?? this.ensureEntry(record.conversationSessionId);
+				if (
+					!existingEntry ||
+					(!entry.summary.agentNativeConversationSessionIdentity &&
+						entry.summary.runtimeSessionIncarnationId === record.runtimeSessionIncarnationId)
+				)
+					updateSummary(entry, {
+						agentId: record.agentId,
+						workspacePath: record.executionWorkingDirectoryPath,
+						runtimeSessionIncarnationId: record.runtimeSessionIncarnationId,
+						agentNativeConversationSessionIdentity: record.nativeSessionId
+							? {
+									sourceAgentId: record.agentId,
+									nativeSessionId: record.nativeSessionId,
+									transcriptPath: record.nativeTranscriptPath,
+									observedAt: record.firstErrorAtMs,
+								}
+							: undefined,
+					});
+				if (
+					(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null) !==
+					record.nativeSessionId
+				)
+					continue;
+				updateSummary(entry, { automaticAgentFailureContinuation: record });
+				this.getAutomaticFailureContinuationCoordinator(record.conversationSessionId).restore(record);
+			}
+		} catch (error) {
+			needsAnotherRead = true;
+			logTuiFreezeWarning(`恢复意图暂时不可读，将自动重验 workspaceId=${workspaceId} reason=${String(error)}`);
+		}
+		if (this.automaticFailureContinuationRestoreRetryTimer)
+			clearTimeout(this.automaticFailureContinuationRestoreRetryTimer);
+		this.automaticFailureContinuationRestoreRetryTimer = null;
+		if (needsAnotherRead && !this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown) {
+			const delay = Math.min(
+				5_000 * 2 ** Math.min(this.automaticFailureContinuationRestoreFailureCount++, 4),
+				60_000,
+			);
+			this.automaticFailureContinuationRestoreRetryTimer = setTimeout(() => {
+				this.automaticFailureContinuationRestoreRetryTimer = null;
+				void this.restoreAutomaticFailureContinuationsAfterRuntimeRestart();
+			}, delay);
+			this.automaticFailureContinuationRestoreRetryTimer.unref?.();
+		} else this.automaticFailureContinuationRestoreFailureCount = 0;
+	}
+
+	async flushAutomaticFailureContinuationPersistence(taskIds?: readonly string[]): Promise<void> {
+		await Promise.all(
+			taskIds
+				? taskIds.map((taskId) => this.automaticFailureContinuationPersistence.get(taskId))
+				: this.automaticFailureContinuationPersistence.values(),
+		);
+	}
+
+	reconcileAutomaticFailureContinuationSettings(connectionEnabled: boolean, capacityEnabled: boolean): void {
+		this.automaticFailureContinuationConfiguredSettings = { connectionEnabled, capacityEnabled };
+		for (const coordinator of this.automaticFailureContinuationCoordinators.values()) {
+			const record = coordinator.snapshot();
+			if (record && !(record.reason === "connection" ? connectionEnabled : capacityEnabled))
+				coordinator.cancel("automatic_recovery_setting_disabled");
+		}
+	}
+
+	reconcileHistoricalAutomaticFailureContinuationDelivery(
+		taskId: string,
+		deliveryId: string,
+		requestWasInvoked: boolean,
+		acceptanceConfirmed: boolean,
+	): void {
+		const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
+		const record = coordinator?.snapshot();
+		if (!record || record.activeDeliveryId !== deliveryId) return;
+		// 账本补证只补历史计数，不重新取得发送资格，也不制造执行或交棒。
+		if (requestWasInvoked) coordinator?.recordNativeRequestInvoked(deliveryId, record.reason);
+		if (acceptanceConfirmed) coordinator?.recordNativeAcceptanceConfirmed(deliveryId);
+	}
+
+	async actOnAutomaticFailureContinuation(
+		taskId: string,
+		episodeId: string,
+		action: "retry_now" | "cancel",
+	): Promise<boolean> {
+		const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
+		if (!coordinator || coordinator.snapshot()?.episodeId !== episodeId) return false;
+		if (action === "cancel") coordinator.cancel("user_stopped");
+		else void coordinator.attempt(true);
+		await this.automaticFailureContinuationPersistence.get(taskId);
+		return true;
+	}
+
 	// 是否为该任务挂载输出反应引擎：开关开启（默认开）且有 reaction 适用于该 agent。
 	private settleUnconfirmedManagedArgumentStartupDelivery(entry: SessionEntry): void {
 		const startup = this.managedArgumentStartupDeliveryByTaskId.get(entry.summary.taskId);
@@ -1628,7 +2351,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private resolveOutputReactionEngine(request: StartTaskSessionRequest): OutputReactionEngine | null {
-		if (request.autoContinueOnConnectionDropEnabled === false) {
+		if (
+			request.autoContinueOnConnectionDropEnabled === false &&
+			(request.agentId !== "codex" || request.codexModelCapacityErrorAutoContinuationEnabled === false)
+		) {
 			return null;
 		}
 		const engine = getDefaultOutputReactionEngine();
@@ -1826,6 +2552,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					(observation.executionStatus === "running" || observation.executionStatus === "waiting_for_user"))
 			)
 				return;
+			if (
+				await this.beginAutomaticFailureContinuation(
+					before.taskId,
+					"model_capacity",
+					observation?.nativeTurnId ?? null,
+				)
+			)
+				return;
 			this.endActiveOutputReactionEpisode(entry, before.taskId);
 			clearOutputReactionTimer(active);
 			this.applyConnectionRetryState(before.taskId, null);
@@ -1985,8 +2719,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 构造注入 / 调度 / 状态更新等副作用入口，交给 reaction 调用。
 	private buildOutputReactionActions(taskId: string): OutputReactionActions {
 		return {
+			onAutomaticFailureDetected: (reason) => {
+				if (reason === "permanent")
+					this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("non_retryable_error");
+				else void this.beginAutomaticFailureContinuation(taskId, "connection");
+			},
 			submitContinuationReference: () => {
-				return this.submitConnectionDropContinuation(taskId);
+				return (
+					this.automaticFailureContinuationCoordinators
+						.get(taskId)
+						?.attempt(true)
+						.then(() => ({ outcome: "deferred_before_terminal_write" as const })) ?? {
+						outcome: "target_invalidated",
+					}
+				);
 			},
 			schedule: (delayMs: number) => {
 				const active = this.entries.get(taskId)?.active;
@@ -2063,142 +2809,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 	}
 
-	// 实际把续跑指令注入 PTY：bracketed paste 引用续跑指令文件；Codex 追加回车。
-	private async submitConnectionDropContinuation(
-		taskId: string,
-	): Promise<ConnectionRetryContinuationSubmissionResult> {
-		const entry = this.entries.get(taskId);
-		const active = entry?.active;
-		if (!entry || !active) {
-			return { outcome: "target_invalidated" };
-		}
-		if (entry.summary.agentId === "codex") return this.submitCodexConnectionDropContinuation(taskId, entry, active);
-		void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {
-			// 落盘失败不阻断注入：路径确定，文件稍后可补写。
-		});
-		const instructionsPath = getNetworkInterruptionResumeInstructionsPath();
-		const line = buildNetworkInterruptionContinuationLine(instructionsPath);
-		// 经写后确认闭环注入：paste 框架与提交 CR 分两次写、第二次以 TUI 摄入为门；若 CR 仍被重绘吞掉（框卡 idle、
-		// 续跑不发送），确认 tick 会补发裸 `\r`——绝不重发整段 paste（重 paste 正是连接中断路径旧的「文本翻倍」病）。
-		// Codex 置位 awaitingCodexPromptAfterEnter 由该闭环统一处理，且跟着第二次写（提交 CR）而非框架。
-		const written = await this.writePasteSubmissionWithConfirm(taskId, active, line);
-		if (!written) return { outcome: "target_invalidated" };
-		return { outcome: "written_to_terminal", terminalWrittenAtMs: now() };
-	}
-
-	private async submitCodexConnectionDropContinuation(
-		taskId: string,
-		entry: SessionEntry,
-		active: ActiveProcessState,
-	): Promise<ConnectionRetryContinuationSubmissionResult> {
-		const targetIdentity = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(entry.summary);
-		const firstErrorAt = entry.summary.connectionRetry?.firstErrorAt;
-		if (firstErrorAt === undefined) return { outcome: "target_invalidated" };
-		const retryEpisodeGeneration = this.connectionRetryEpisodeGenerationByActiveProcess.get(active);
-		const originalGeneration = active.submitConfirmGeneration;
-		let originalProgrammaticDeliveryReceipt = active.programmaticDeliveryReceipt;
-		const lastHumanInputAtBeforeNativeReadinessCheck = active.lastUserInputAt;
-		let pasteWritten = false;
-		let firstSubmitCarriageReturnState: ConnectionRetryContinuationFirstSubmitCarriageReturnState =
-			"awaiting_first_submit";
-		const stillOwnsOriginalTerminalInput = () => {
-			const current = this.entries.get(taskId);
-			return (
-				current?.active === active &&
-				!current.suppressAutoRestartOnExit &&
-				active.submitConfirmGeneration === originalGeneration + (pasteWritten ? 1 : 0) &&
-				active.programmaticDeliveryReceipt === originalProgrammaticDeliveryReceipt &&
-				active.lastUserInputAt === lastHumanInputAtBeforeNativeReadinessCheck &&
-				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(current.summary) === targetIdentity
-			);
-		};
-		const targetIsCurrent = () => {
-			const current = this.entries.get(taskId);
-			return (
-				stillOwnsOriginalTerminalInput() &&
-				current?.summary.connectionRetry?.firstErrorAt === firstErrorAt &&
-				this.connectionRetryEpisodeGenerationByActiveProcess.get(active) === retryEpisodeGeneration &&
-				resolveSessionFacets(current.summary).turnOwner === "agent" &&
-				!isParkedAwaitingDispatchedBackgroundWork(current.summary) &&
-				!current.suppressAutoRestartOnExit
-			);
-		};
-		const getCurrentSummary = () => (targetIsCurrent() ? (this.entries.get(taskId)?.summary ?? null) : null);
-		if (!targetIsCurrent()) return { outcome: "target_invalidated" };
-		if (active.programmaticDeliveryReceipt || !this.canInjectIntoTerminalNow(active))
-			return { outcome: "deferred_before_terminal_write" };
-		const readiness = await inspectCodexNativeConnectionRetryContinuationReadiness({
-			summary: entry.summary,
-			getCurrentSummary,
-		});
-		if (!targetIsCurrent()) return { outcome: "target_invalidated" };
-		if (readiness.outcome !== "ready_for_terminal_write") return readiness;
-		const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(taskId);
-		if (!targetIsCurrent()) return { outcome: "target_invalidated" };
-		if (
-			!occupancy ||
-			occupancy.hasUncommittedInput ||
-			!occupancy.inputSideByteTrackingHasKnownEmptyBaselineForCurrentComposition ||
-			!this.canInjectIntoTerminalNow(active)
-		)
-			return { outcome: "deferred_before_terminal_write" };
-		const rejectBeforeFirstSubmitCarriageReturn = (outcome: "deferred_before_submit" | "target_invalidated") => {
-			if (!pasteWritten || firstSubmitCarriageReturnState !== "awaiting_first_submit") return;
-			firstSubmitCarriageReturnState = outcome;
-			if (!stillOwnsOriginalTerminalInput()) return;
-			// 写前已确认空框，续跑正文只有一条逻辑行，且此后没有人工输入或更新投递。
-			// Ctrl+U 只撤回光标前的本行，不会像 Ctrl+C 一样中断已经自行恢复的原生回合。
-			active.session.write("\u0015");
-		};
-		const validateBeforeTerminalWrite = async () => {
-			const latest = getCurrentSummary();
-			if (!latest) {
-				rejectBeforeFirstSubmitCarriageReturn("target_invalidated");
-				throw new Error("重连续跑目标已经失效。");
-			}
-			const verified = await inspectCodexNativeConnectionRetryContinuationReadiness({
-				summary: latest,
-				getCurrentSummary,
-				requiredNativeTurnId: readiness.nativeTurnId,
-			});
-			if (
-				verified.outcome !== "ready_for_terminal_write" ||
-				!targetIsCurrent() ||
-				!this.canInjectIntoTerminalNow(active)
-			) {
-				rejectBeforeFirstSubmitCarriageReturn(
-					verified.outcome === "target_invalidated" || !targetIsCurrent()
-						? "target_invalidated"
-						: "deferred_before_submit",
-				);
-				throw new Error("当前原生回合不允许自动续跑，未继续提交。");
-			}
-		};
-		await validateBeforeTerminalWrite();
-		if (!targetIsCurrent()) return { outcome: "target_invalidated" };
-		void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {});
-		const written = await this.writePasteSubmissionWithConfirm(
-			taskId,
-			active,
-			buildNetworkInterruptionContinuationLine(getNetworkInterruptionResumeInstructionsPath()),
-			{
-				validateBeforeTerminalWrite,
-				onFirstSubmitCarriageReturnWritten: () => {
-					firstSubmitCarriageReturnState = "carriage_return_written";
-				},
-			},
-		);
-		if (!written) return { outcome: "target_invalidated" };
-		originalProgrammaticDeliveryReceipt = active.programmaticDeliveryReceipt;
-		pasteWritten = true;
-		return {
-			outcome: "written_to_terminal",
-			terminalWrittenAtMs: now(),
-			readFirstSubmitCarriageReturnState: () =>
-				stillOwnsOriginalTerminalInput() ? firstSubmitCarriageReturnState : "target_invalidated",
-		};
-	}
-
 	// 当前是否可向终端注入程序化输入：deferred-startup 仍待发、或用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS（8s）
 	// 内手敲过，都视为不可注入（避免抢在启动 prompt 之前 / 打断正在打字的用户）。
 	// 现在的消费者是 output-reaction 的 canInjectNow 动作（连接中断自动续跑）与**写后确认链的补发让位**。
@@ -2247,7 +2857,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry || !active) {
 			return null;
 		}
-		if (text.trim()) this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
+		if (text.trim()) {
+			this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("new_task_message_superseded_recovery");
+			this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
+		}
 		const deferWhileUserTurn = options?.deferWhileUserTurn ?? false;
 		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（后台任务消息）——一个 parked 会话收到投递就是被恢复，
 		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
@@ -3040,6 +3653,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			isNativeModeInitializationOnly?: boolean;
 			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator | null;
 			onFirstSubmitCarriageReturnWritten?: () => void;
+			automaticFailureContinuationDeliveryId?: string;
+			onAutomaticFailureContinuationReceipt?: (outcome: TaskChatInputDeliveryOutcome) => void;
 		},
 	): Promise<boolean> {
 		const entry = this.entries.get(taskId);
@@ -3062,6 +3677,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				({ handle } = await beginManagedTaskPromptDelivery({
 					workspaceId,
 					taskId,
+					deliveryRequestId: options?.automaticFailureContinuationDeliveryId,
 					text,
 					workspaceTaskId: entry?.summary.taskConversationSessionMetadata?.workspaceTaskId,
 					origin: {
@@ -3126,7 +3742,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
 				queuedBehindActiveAgentTurn: false,
 				settled: false,
-				observer: (outcome) => settleManagedTaskPromptDeliveryWithoutBlocking(handle, outcome),
+				observer: (outcome) => {
+					settleManagedTaskPromptDeliveryWithoutBlocking(handle, outcome);
+					options?.onAutomaticFailureContinuationReceipt?.(outcome);
+				},
 			};
 		}
 		if (!options?.retainsProgrammaticDeliveryReceipt) {
@@ -3691,7 +4310,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 翻入 user 回合（transitionToReview）与 park（parkTaskSessionAwaitingDispatchedBackgroundWork）共用：转换闸 /
 	// isAgentTurnActive 只挡「新 episode 起不起」，对一个已 active 的 episode 必须显式 teardown 才会让位——否则
 	// parked / 等审会话里仍跑着的 episode 会继续把续跑注入进去。engine 的 onUserTurnStart 即其 episode teardown 入口。
-	private endActiveOutputReactionEpisode(entry: SessionEntry, taskId: string): void {
+	private automaticFailureContinuationModalDeferral(taskId: string): string | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) return null;
+		return MODAL_USER_DECISION_TURN_KINDS.has(resolveSessionFacets(entry.summary).userTurnKind)
+			? "waiting_for_user_decision"
+			: null;
+	}
+
+	private endActiveOutputReactionEpisode(
+		entry: SessionEntry,
+		taskId: string,
+		preserveAutomaticRecoveryForModal = false,
+	): void {
+		// 提问、计划评审、权限和补充输入只暂停这一次发送。用户停止、交接和搁置仍取消整段恢复。
+		if (preserveAutomaticRecoveryForModal) this.applyConnectionRetryState(taskId, null);
+		else this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("user_turn_or_session_handover");
 		const active = entry.active;
 		if (!active || active.outputReactionEngine === null || active.outputReactionSession === null) {
 			return;
@@ -3796,6 +4430,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 	continueConnectionRetrySessions(taskIds: readonly string[]): string[] {
 		const triggered: string[] = [];
 		for (const taskId of taskIds) {
+			const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
+			if (coordinator && isAutomaticAgentFailureContinuationActive(coordinator.snapshot())) {
+				void coordinator.attempt(true);
+				triggered.push(taskId);
+				continue;
+			}
 			const entry = this.entries.get(taskId);
 			const active = entry?.active;
 			if (!entry || !active || active.outputReactionEngine === null || active.outputReactionSession === null) {
@@ -3824,6 +4464,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 	dismissConnectionRetrySessions(taskIds: readonly string[]): string[] {
 		const dismissed: string[] = [];
 		for (const taskId of taskIds) {
+			const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
+			if (coordinator && isAutomaticAgentFailureContinuationActive(coordinator.snapshot())) {
+				coordinator.cancel("user_stopped");
+				dismissed.push(taskId);
+				continue;
+			}
 			const entry = this.entries.get(taskId);
 			const active = entry?.active;
 			if (!entry || !active || active.outputReactionEngine === null || active.outputReactionSession === null) {
@@ -4354,6 +5000,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
 	): Promise<RuntimeTaskSessionSummary> {
+		if (!["durable_record_rebuilt_resume", "auto_restart_after_pty_exit"].includes(taskSessionStartOrigin))
+			this.automaticFailureContinuationCoordinators.get(request.taskId)?.cancel("session_replaced");
 		const arrival = createTaskSessionStartRequestArrival();
 		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
 			this.startTaskSessionHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin, arrival),
@@ -5039,7 +5687,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 到达时刻在闸门**之外**取，才看得见排队并发；闸门时刻在闸门**之内**取，才判得出互斥是否失效。
 		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
-		const isTaskSessionStartCancelled = () => isTaskSessionStartStillRequested?.() === false;
+		const isTaskSessionStartCancelled = () =>
+			isTaskSessionStartStillRequested?.() === false ||
+			(request.automaticFailureContinuationEpisodeId !== undefined &&
+				(this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown ||
+					entry.summary.automaticAgentFailureContinuation?.episodeId !==
+						request.automaticFailureContinuationEpisodeId ||
+					!isAutomaticAgentFailureContinuationActive(entry.summary.automaticAgentFailureContinuation)));
 		if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		// 有别的路径要起会话了，在途的自动重启就没有意义了：让它跑完只会把刚起的会话顶掉。
 		// 自动重启自己走的是同一个私有方法，故按来源排除，否则它会把自己作废掉。
@@ -6387,6 +7041,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
 		}
+		this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("human_terminal_input");
 		this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, false);
 		// 单调序号覆盖同毫秒内的输入与清空，不能靠 lastUserInputAt 的墙钟区分竞争输入。
 		this.humanTerminalInputMutationSequenceNumbersByActiveProcess.set(
@@ -7028,6 +7683,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (reason !== "hook" && reason !== "manual_review" && reason !== "idle_stall") {
 			return cloneSummary(entry.summary);
 		}
+		const recovery = this.automaticFailureContinuationCoordinators.get(taskId);
+		const recoveryRecord = recovery?.snapshot() ?? null;
+		if (
+			recovery &&
+			recoveryRecord &&
+			isAutomaticAgentFailureContinuationActive(recoveryRecord) &&
+			reason !== "manual_review" &&
+			!MODAL_USER_DECISION_TURN_KINDS.has(userTurnKindOverride ?? null)
+		) {
+			this.flushPendingOutputAnalysis(taskId);
+			recovery.requestCompletionReview(
+				reason,
+				Math.min(domainEventTiming?.domainEventObservedAtEpochMs ?? now(), now()),
+			);
+			// Codex 必须由原生 completed 补证；failed 的 Stop 可能先于错误输出攒批到达。
+			if (
+				entry.summary.agentId === "claude" &&
+				recovery.snapshot()?.phase === "executing" &&
+				hasCompletionReviewForSubmittedAutomaticFailureContinuation(recovery.snapshot() ?? recoveryRecord) &&
+				!this.automaticFailureContinuationPendingInspection.has(taskId) &&
+				(userTurnKindOverride === undefined || userTurnKindOverride === "review")
+			)
+				recovery.finishRecovered("trusted_conversation_completion");
+			else void recovery.attempt();
+			return cloneSummary(entry.summary);
+		}
 		const before = entry.summary;
 		const beforeFacets = resolveSessionFacets(before);
 		if (before.agentId === "kimi" && reason === "hook" && beforeFacets.turnOwner === "user") {
@@ -7088,7 +7769,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 驱动输入边，兜住「PTY 输出先于 hook 落地、误起 episode」的竞态；并顺带清掉 to_review 后
 			// 残留的 connectionRetry（episode 仍 active 时 endEpisode 会一并 clearConnectionRetryState），
 			// 否则会话再回到 running 会让陈旧值复活成 retrying。
-			this.endActiveOutputReactionEpisode(entry, taskId);
+			this.endActiveOutputReactionEpisode(
+				entry,
+				taskId,
+				MODAL_USER_DECISION_TURN_KINDS.has(userTurnKindOverride ?? null) && reason !== "manual_review",
+			);
 		}
 		return cloneSummary(summary);
 	}
@@ -7349,8 +8034,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		)
 			return cloneSummary(summary);
 		this.emitSummary(summary);
-		const retry = entry.summary.connectionRetry;
+		const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
 		const acceptedActivity = summary.lastEffectiveAgentConversationActivityObservation;
+		if (
+			coordinator &&
+			acceptedActivity &&
+			acceptedActivity !== previousObservation &&
+			["agent_output", "tool_activity", "context_compaction"].includes(acceptedActivity.activityKind) &&
+			["agent_lifecycle_hook_event", "structured_agent_session_event", "persisted_agent_transcript"].includes(
+				acceptedActivity.evidenceKind,
+			)
+		)
+			coordinator.observeProgress(acceptedActivity.observedAtMs);
+		const retry = coordinator ? null : entry.summary.connectionRetry;
 		if (
 			retry &&
 			acceptedActivity &&
@@ -7987,6 +8683,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	stopTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+		this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("user_stopped");
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
@@ -8041,6 +8738,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const active = entry.active;
 		entry.suppressAutoRestartOnExit = true;
+		this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("session_replaced");
 		const cleanupFn = active.onSessionCleanup;
 		active.onSessionCleanup = null;
 		stopWorkspaceTrustTimers(active);
@@ -8356,6 +9054,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
+		for (const coordinator of this.automaticFailureContinuationCoordinators.values())
+			coordinator.suspendForRuntimeShutdown();
 		this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = true;
 		// 先把**每一个** entry 的自动重启掐掉，再处理活会话——顺序与范围都要紧。
 		//
@@ -8536,7 +9236,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.summary.agentId === "codex") {
 			const result = await this.readCurrentCodexNativeTurnExecution(entry);
 			// 原生输入框在执行中也可使用。只有明确结束的当前原生回合才允许提示符兜底交棒。
+			// 容量失败也是 finished，但不能当成完工交棒。
 			if (!result || result.observation.executionStatus !== "finished") return false;
+			if (result.observation.nativeTurnStatus === "failed" || result.observation.threadStatus === "systemError")
+				return false;
 		}
 		let readiness: TaskChatInputDeliveryReadiness;
 		try {
@@ -8571,6 +9274,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	dispose(): void {
+		for (const coordinator of this.automaticFailureContinuationCoordinators.values())
+			coordinator.suspendForRuntimeShutdown();
+		if (this.automaticFailureContinuationRestoreRetryTimer)
+			clearTimeout(this.automaticFailureContinuationRestoreRetryTimer);
+		this.automaticFailureContinuationRestoreRetryTimer = null;
+		for (const timer of this.automaticFailureContinuationTimers.values()) clearTimeout(timer);
+		this.automaticFailureContinuationTimers.clear();
 		this.sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = true;
 		this.nativeExecutionReadAbortController.abort();
 		this.nativeExecutionReadRetriesByConversationSessionId.clear();

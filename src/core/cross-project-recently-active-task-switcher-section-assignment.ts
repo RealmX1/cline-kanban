@@ -7,6 +7,7 @@ import {
 	CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 	type CodingAgentPromptCacheRetentionMeasuredLowerBound,
 } from "./coding-agent-prompt-cache-retention-measured-ttl-lower-bounds";
+import { isAutomaticAgentFailureContinuationWaiting } from "./session-activity";
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
@@ -82,6 +83,7 @@ export interface CrossProjectTaskSwitcherSections {
 	pinnedEntries: CrossProjectTaskSwitcherEntryInProject[];
 	shelvedEntries: CrossProjectTaskSwitcherEntryInProject[];
 	runningEntries: CrossProjectTaskSwitcherEntryInProject[];
+	automaticRecoveryWaitingEntries: CrossProjectTaskSwitcherEntryInProject[];
 	promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[];
 	remainingSection: CrossProjectTaskSwitcherRemainingSection;
 }
@@ -109,15 +111,20 @@ export function buildCrossProjectTaskSwitcherEntryKey(workspaceId: string, taskI
 export function isCrossProjectTaskSwitcherEntryRunning(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		"turnOwner" | "liveness" | "isParkedAwaitingDispatchedBackgroundWork"
+		"turnOwner" | "liveness" | "isParkedAwaitingDispatchedBackgroundWork" | "automaticAgentFailureContinuation"
 	>,
 	_nowMs: number,
 ): boolean {
+	if (
+		entry.liveness === "retrying" ||
+		isAutomaticAgentFailureContinuationWaiting(entry.automaticAgentFailureContinuation)
+	)
+		return false;
 	if (entry.turnOwner !== "agent") {
 		return false;
 	}
 	// 静默、转圈和重绘均不能证明回合结束。存活性由运行时负责，明确 park 仍由 agent 持有回合。
-	return entry.liveness === "live" || entry.liveness === "retrying" || entry.isParkedAwaitingDispatchedBackgroundWork;
+	return entry.liveness === "live" || entry.isParkedAwaitingDispatchedBackgroundWork;
 }
 
 // Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或
@@ -391,6 +398,7 @@ export function assignCrossProjectTaskSwitcherSections(
 	const shelvedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const pinnedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const runningEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
+	const automaticRecoveryWaitingEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[] = [];
 	const remainingCandidates: CrossProjectTaskSwitcherEntryInProject[] = [];
 	for (const entryInProject of input.entriesInProjects) {
@@ -401,6 +409,14 @@ export function assignCrossProjectTaskSwitcherSections(
 		}
 		if (entry.pinnedToTaskPinboardAt !== null) {
 			pinnedEntries.push(entryInProject);
+		}
+		if (
+			entry.columnId !== "trash" &&
+			(entry.liveness === "retrying" ||
+				isAutomaticAgentFailureContinuationWaiting(entry.automaticAgentFailureContinuation))
+		) {
+			automaticRecoveryWaitingEntries.push(entryInProject);
+			continue;
 		}
 		if (isCrossProjectTaskSwitcherEntryRunning(entry, input.nowMs)) {
 			runningEntries.push(entryInProject);
@@ -451,6 +467,7 @@ export function assignCrossProjectTaskSwitcherSections(
 		shelvedEntries,
 		pinnedEntries,
 		runningEntries,
+		automaticRecoveryWaitingEntries,
 		promptCacheWarmAwaitingUserEntries,
 		remainingSection: assignRemainingSection(remainingCandidates, input),
 	};

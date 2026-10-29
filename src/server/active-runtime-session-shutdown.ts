@@ -5,7 +5,10 @@ import { resolveSessionFacets } from "../core/session-activity";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 
 export interface ActiveTerminalClineAndAcpRuntimeSessionShutdownDependencies {
-	terminalManager: Pick<TerminalSessionManager, "listSummaries" | "markInterruptedAndStopAll"> | null;
+	terminalManager:
+		| (Pick<TerminalSessionManager, "listSummaries" | "markInterruptedAndStopAll"> &
+				Partial<Pick<TerminalSessionManager, "flushAutomaticFailureContinuationPersistence">>)
+		| null;
 	clineTaskSessionService: Pick<ClineTaskSessionService, "listSummaries" | "stopTaskSessionForSafeShutdown"> | null;
 	// ACP agent（omp 等）是持有 stdio 的真子进程：漏掉它，永久删项目会在 worktree 已被删掉之后
 	// 才拆连接，正常关服也会留下还能继续改仓库、并阻塞 Kanban 退出的 agent 进程。
@@ -65,6 +68,7 @@ export async function stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace(
 	for (const summary of dependencies.terminalManager?.markInterruptedAndStopAll() ?? []) {
 		stoppedRuntimeSessionSummariesByTaskId.set(summary.taskId, summary);
 	}
+	await dependencies.terminalManager?.flushAutomaticFailureContinuationPersistence?.();
 
 	for (const source of collectConversationRuntimeSessionShutdownSources(dependencies)) {
 		for (const summary of source.listSummaries()) {

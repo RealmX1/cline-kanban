@@ -68,14 +68,14 @@ describe("全项目分组查询", () => {
 		]);
 		expect(
 			buildAllProjectsTaskGroupQueryResult(input, { group: "running" }).groups[0].tasks.map((row) => row.taskId),
-		).toEqual(["parked", "retrying", "later"]);
+		).toEqual(["parked", "later"]);
 	});
 
 	it("Pinned 可重复归组，去重计数保留跨项目同号身份", () => {
 		const input = snapshot([entry("same", { turnOwner: "agent", liveness: "live", pinnedToTaskPinboardAt: 1 })]);
 		input.projects.push({ ...input.projects[0], workspaceId: "project-b", projectPath: "/project-b" });
 		const result = buildAllProjectsTaskGroupQueryResult(input, {});
-		expect(result.groups.map((group) => group.tasks.length)).toEqual([2, 2, 0, 0, 0]);
+		expect(result.groups.map((group) => group.tasks.length)).toEqual([2, 2, 0, 0, 0, 0]);
 		expect(result.count).toBe(2);
 		expect(result.groups[1].tasks.map((row) => row.workspaceId)).toEqual(["project-a", "project-b"]);
 	});

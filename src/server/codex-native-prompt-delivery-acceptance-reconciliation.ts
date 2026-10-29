@@ -13,6 +13,12 @@ export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(inp
 	ledgerPath: string;
 	reconcilerRuntimeProcessInstanceId?: string;
 	getSummary: (conversationSessionId: string) => RuntimeTaskSessionSummary | null;
+	onAutomaticFailureContinuationDeliveryObserved?: (
+		conversationSessionId: string,
+		deliveryId: string,
+		requestWasInvoked: boolean,
+		acceptanceConfirmed: boolean,
+	) => void;
 	deliver?: typeof deliverCodexNativePromptWithoutChangingComposer;
 }): Promise<{ confirmedCount: number; unknownCount: number }> {
 	const records = await readTaskMessageInjectionLedger(input.ledgerPath);
@@ -24,6 +30,16 @@ export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(inp
 		),
 	)) {
 		const operation = record.codex_native_prompt_delivery_operation;
+		const publishAutomaticContinuationHistory = (acceptanceConfirmed: boolean) => {
+			if (record.source === "automatic_agent_failure_continuation" && operation?.workspaceId === input.workspaceId)
+				input.onAutomaticFailureContinuationDeliveryObserved?.(
+					operation.conversationSessionId,
+					record.idempotency_key,
+					operation.actualSendAttemptCount > 0,
+					acceptanceConfirmed,
+				);
+		};
+		publishAutomaticContinuationHistory(!!operation?.historicalAcceptanceEvidence);
 		if (
 			isRetiredRvfAutomaticMessageSource(record.source) ||
 			!operation ||
@@ -98,6 +114,7 @@ export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(inp
 			},
 		});
 		await rememberObservation(result.status === "confirmed" ? "confirmed" : "unknown");
+		if (result.status === "confirmed") publishAutomaticContinuationHistory(true);
 		if (result.status === "confirmed") confirmedCount += 1;
 		else unknownCount += 1;
 	}

@@ -49,6 +49,7 @@ export type ConnectionRetryStatePatch = RuntimeTaskConnectionRetry;
 
 // session-manager 注入给 reaction 的副作用入口。
 export interface OutputReactionActions {
+	onAutomaticFailureDetected?: (reason: "connection" | "permanent") => void;
 	// 注入一条「引用续跑指令文件的简短续跑指令」（bracketed paste + 回车；Codex 追加回车）。
 	submitContinuationReference():
 		| ConnectionRetryContinuationSubmissionResult

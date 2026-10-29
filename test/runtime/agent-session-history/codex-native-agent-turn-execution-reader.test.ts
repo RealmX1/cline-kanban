@@ -94,6 +94,9 @@ describe("Codex 轻量原生回合执行状态", () => {
 		["idle", "completed", [], "finished"],
 		["idle", "interrupted", [], "finished"],
 		["idle", "failed", [], "finished"],
+		["systemError", "failed", [], "finished"],
+		["systemError", "inProgress", [], "unknown"],
+		["systemError", "failed", ["waitingOnApproval"], "waiting_for_user"],
 		["idle", "inProgress", [], "unknown"],
 		["active", "completed", [], "unknown"],
 	] as const)("线程 %s、回合 %s、标记 %j → %s", async (thread, turn, flags, expected) => {
@@ -103,6 +106,51 @@ describe("Codex 轻量原生回合执行状态", () => {
 				?.executionStatus,
 		).toBe(expected);
 	});
+	it("legacy 明确拒绝分页时以完整历史取得失败回合，连接错误不能触发后备读取", async () => {
+		const normal = request.getMockImplementation();
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/turns/list") throw new Error("list_turns is not supported yet");
+			if (method === "thread/read" && parameters.includeTurns)
+				return { thread: { turns: [{ id: "failed-legacy", status: "failed", items: [] }] } };
+			return normal?.(method, parameters);
+		});
+		expect(
+			(await readCodexNativeAgentTurnExecution({ workspaceId: "isolated", summary: summary(), observedAtMs: NOW }))
+				?.nativeTurnId,
+		).toBe("failed-legacy");
+		request.mockClear();
+		request.mockImplementation(async (method, parameters) => {
+			if (method === "thread/turns/list") throw new Error("network timeout");
+			return normal?.(method, parameters);
+		});
+		await expect(
+			readCodexNativeAgentTurnExecution({ workspaceId: "isolated", summary: summary(), observedAtMs: NOW }),
+		).rejects.toThrow("network timeout");
+		expect(request).not.toHaveBeenCalledWith("thread/read", expect.objectContaining({ includeTurns: true }));
+	});
+	it.each([false, true])("原生失败原因在 legacy=%s 时由共享历史读取保留", async (legacy) => {
+		const normal = request.getMockImplementation();
+		request.mockImplementation(async (method, parameters) => {
+			const turn = {
+				id: "failed-turn",
+				status: "failed",
+				items: [],
+				error: { message: "authentication failed", codexErrorInfo: "unauthorized" },
+			};
+			if (method === "thread/turns/list") {
+				if (legacy) throw new Error("list_turns is not supported yet");
+				return { data: [turn], nextCursor: null };
+			}
+			if (method === "thread/read" && parameters.includeTurns) return { thread: { turns: [turn] } };
+			if (method === "thread/read")
+				return { thread: { id: "native", status: { type: "systemError", activeFlags: [] } } };
+			return normal?.(method, parameters);
+		});
+		expect(
+			await readCodexNativeAgentTurnExecution({ workspaceId: "isolated", summary: summary(), observedAtMs: NOW }),
+		).toMatchObject({ executionStatus: "finished", nativeTurnErrorMessage: "authentication failed" });
+	});
+
 	it("首次超预算建立独立接受基线且不重放历史，新增输入只消费一次并始终独立输出执行状态", async () => {
 		const normal = request.getMockImplementation();
 		const overBudgetUserInputItems = Array.from({ length: 600 }, (_, index) => ({

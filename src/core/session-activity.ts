@@ -980,3 +980,53 @@ export function deriveSessionRecentEffectiveActivityDisplayLiveness(
 		? "recent_effective_activity"
 		: "quiet";
 }
+
+export function isAutomaticAgentFailureContinuationWaiting(
+	record: RuntimeTaskSessionSummary["automaticAgentFailureContinuation"],
+): boolean {
+	return (
+		!!record &&
+		["waiting_backoff", "waiting_machine_evidence", "sending", "reconciling_acceptance"].includes(record.phase)
+	);
+}
+export function describeAutomaticAgentFailureContinuation(
+	record: RuntimeTaskSessionSummary["automaticAgentFailureContinuation"],
+	nowMs = Date.now(),
+): string {
+	if (!record) return "等待自动恢复";
+	const reason = record.reason === "model_capacity" ? "容量不足" : "网络中断";
+	if (record.phase === "expired") return `${reason}，自动恢复已到期`;
+	if (record.phase === "cancelled") return `${reason}，已停止自动恢复`;
+	if (record.phase === "failed") return `${reason}，自动恢复已停止，需要处理当前错误`;
+	if (record.phase === "recovered") return "已确认任务恢复";
+	if (record.phase === "executing") return "已确认接受，原生回合执行中";
+	if (record.phase === "sending") return `${reason}，正在发送续跑提示`;
+	const reasons: Record<string, string> = {
+		waiting_for_native_identity_and_control_endpoint: "等待原生身份与控制端点恢复",
+		native_control_temporarily_unavailable: "等待控制端点恢复",
+		waiting_for_failed_native_turn_evidence: "等待失败回合证据",
+		waiting_for_failed_native_turn_reason: "已确认接受，等待本次失败原因补证",
+		waiting_for_user_decision: "等待用户回答问题、确认计划或权限",
+		waiting_for_previous_owner_exit_evidence: "等待旧会话所有权释放",
+		previous_owner_exit_unknown: "正在核验旧进程是否退出",
+		waiting_for_durable_native_resume_binding: "等待持久续跑身份补证",
+		query_or_persistence_temporarily_unavailable: "等待查询或存储恢复",
+		checking_original_terminal_submission: "正在核对原终端提交",
+		waiting_for_interactive_prompt: "等待交互提示符就绪",
+		waiting_for_confirmed_empty_terminal_composer: "等待确认终端输入框为空",
+		another_programmatic_delivery_in_flight: "等待当前消息投递完成",
+		waiting_for_startup_or_human_input: "等待启动完成或人工输入结束",
+		waiting_for_accepted_turn_execution: "已确认接受，正在核验执行",
+		checking_resumed_native_conversation: "正在核验接回的原生会话",
+		task_identity_reconciled: "任务身份已恢复，正在重新核验",
+		native_identity_reconciled: "原生身份已恢复，正在重新核验",
+		native_control_endpoint_reconciled: "控制端点已恢复，正在重新核验",
+	};
+	if (record.blockingReason && reasons[record.blockingReason]) return `${reason}，${reasons[record.blockingReason]}`;
+	if (record.phase === "reconciling_acceptance") return `${reason}，正在核对原生接受`;
+	const seconds =
+		record.nextCheckAtMs === null ? null : Math.max(0, Math.ceil((record.nextCheckAtMs - nowMs) / 1_000));
+	return seconds === null || seconds === 0
+		? `${reason}，正在核验恢复条件`
+		: `${reason}，${seconds} 秒后${record.phase === "waiting_backoff" ? "重试" : "核验"}`;
+}

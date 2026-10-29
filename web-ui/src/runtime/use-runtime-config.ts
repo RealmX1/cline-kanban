@@ -24,6 +24,7 @@ export interface UseRuntimeConfigResult {
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
@@ -97,6 +98,7 @@ export function useRuntimeConfig(
 			readyForReviewNotificationsEnabled?: boolean;
 			notificationSoundEnabled?: boolean;
 			autoContinueOnConnectionDropEnabled?: boolean;
+			codexModelCapacityErrorAutoContinuationEnabled?: boolean;
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 			postDeployVerificationForceCompleteEnabled?: boolean;
 			commitPromptTemplate?: string;

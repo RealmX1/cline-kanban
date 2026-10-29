@@ -76,6 +76,32 @@ function expectConnectionResourcesReleased(diagnostics: CodexNativeControlSocket
 afterEach(() => vi.useRealTimers());
 
 describe("Codex 原生控制 socket 请求与脱敏诊断", () => {
+	it("保留明确分页能力拒绝分类，完整读取后备不泄露原生错误正文", async () => {
+		const fixture = await createIsolatedControlSocketFixture((request, socket) => {
+			if (request.method === "thread/turns/list")
+				socket.send(
+					JSON.stringify({
+						id: request.id,
+						error: { message: "list_turns is not supported yet SECRET_NATIVE_ERROR" },
+					}),
+				);
+			else
+				socket.send(
+					JSON.stringify({
+						id: request.id,
+						result: { thread: { turns: [{ id: "legacy", status: "failed", items: [] }] } },
+					}),
+				);
+		});
+		const turns = await withRunningCodexAppServerControlSocketConnection(
+			(port) => readCodexConversationTurns(port, "legacy-thread"),
+			fixture.input,
+		);
+		expect(turns[0]?.id).toBe("legacy");
+		expect(fixture.requests.filter((request) => request.method === "thread/read")).toHaveLength(1);
+		expect(JSON.stringify(fixture.diagnostics)).not.toContain("SECRET_NATIVE_ERROR");
+		expectConnectionResourcesReleased(fixture.diagnostics);
+	});
 	it.each(["invalid_json", "invalid_error", "both_result_error", "missing_result_error"])(
 		"%s 立即拒绝全部 pending，不吞成超时或泄露正文",
 		async (scenario) => {

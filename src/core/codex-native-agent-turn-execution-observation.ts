@@ -12,6 +12,7 @@ export interface CodexNativeAgentTurnExecutionObservation {
 	observedAtMs: number;
 	threadStatus: string;
 	nativeTurnStatus: string | null;
+	nativeTurnErrorMessage?: string | null;
 	activeFlags: string[];
 	canAcceptDirectInput: boolean | null;
 	executionStatus: "running" | "waiting_for_user" | "finished" | "unknown";

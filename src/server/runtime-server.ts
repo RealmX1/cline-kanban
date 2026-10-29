@@ -252,6 +252,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						deps.workspaceRegistry
 							.getTerminalManagerForWorkspace(workspaceId)
 							?.getSummary(conversationSessionId) ?? null,
+					onAutomaticFailureContinuationDeliveryObserved: (workspaceId, conversationSessionId, ...observation) =>
+						deps.workspaceRegistry
+							.getTerminalManagerForWorkspace(workspaceId)
+							?.reconcileHistoricalAutomaticFailureContinuationDelivery(conversationSessionId, ...observation),
 				}),
 		});
 

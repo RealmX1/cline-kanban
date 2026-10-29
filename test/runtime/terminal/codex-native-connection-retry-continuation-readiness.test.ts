@@ -55,16 +55,20 @@ describe("Codex 自动重连续跑的原生写前核验", () => {
 	] as const)("原生回合 %s 时返回 %s", async (status, outcome) => {
 		const summary = makeSummary();
 		request.mockImplementation(async (method) =>
-			method === "thread/loaded/list"
-				? { data: ["native"], nextCursor: null }
-				: { data: [{ id: "turn", status, items: [] }], nextCursor: null },
+			method === "thread/read"
+				? { thread: { id: "native", status: { type: "idle" } } }
+				: method === "thread/loaded/list"
+					? { data: ["native"], nextCursor: null }
+					: { data: [{ id: "turn", status, items: [] }], nextCursor: null },
 		);
 		expect(
 			await inspectCodexNativeConnectionRetryContinuationReadiness({ summary, getCurrentSummary: () => summary }),
 		).toMatchObject({ outcome });
-		expect(request.mock.calls.every(([method]) => ["thread/loaded/list", "thread/turns/list"].includes(method))).toBe(
-			true,
-		);
+		expect(
+			request.mock.calls.every(([method]) =>
+				["thread/loaded/list", "thread/turns/list", "thread/read"].includes(method),
+			),
+		).toBe(true);
 	});
 	it("缺少控制面或读取失败时保持未知，不把 TUI 输入框当成故障证据", async () => {
 		const summary = makeSummary();
@@ -96,11 +100,13 @@ describe("Codex 自动重连续跑的原生写前核验", () => {
 	it("已加载列表分页后核对同一回合，新的失败回合不能继承旧回合的写入资格", async () => {
 		const summary = makeSummary();
 		request.mockImplementation(async (method, parameters) =>
-			method === "thread/loaded/list"
-				? parameters.cursor === null
-					? { data: ["other"], nextCursor: "second-page" }
-					: { data: ["native"], nextCursor: null }
-				: { data: [{ id: "new-failed-turn", status: "failed" }] },
+			method === "thread/read"
+				? { thread: { id: "native", status: { type: "idle" } } }
+				: method === "thread/loaded/list"
+					? parameters.cursor === null
+						? { data: ["other"], nextCursor: "second-page" }
+						: { data: ["native"], nextCursor: null }
+					: { data: [{ id: "new-failed-turn", status: "failed" }] },
 		);
 		expect(
 			await inspectCodexNativeConnectionRetryContinuationReadiness({

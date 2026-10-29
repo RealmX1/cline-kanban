@@ -7,7 +7,13 @@ const nativeItemSchema = z.looseObject({
 	type: z.string(),
 	content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
 });
-const nativeTurnSchema = z.object({ id: z.string(), status: z.string(), items: z.array(nativeItemSchema) });
+const nativeTurnSchema = z.object({
+	id: z.string(),
+	status: z.string(),
+	startedAt: z.number().nullish(),
+	error: z.object({ message: z.string() }).nullish(),
+	items: z.array(nativeItemSchema),
+});
 const turnPageSchema = z.object({ data: z.array(nativeTurnSchema), nextCursor: z.string().nullable() });
 const forkResponseSchema = z.object({ thread: z.object({ id: z.string(), path: z.string(), cwd: z.string() }) });
 export type CodexNativeConversationTurn = z.infer<typeof nativeTurnSchema>;
@@ -17,6 +23,47 @@ export interface CodexAppServerRequestPort {
 export interface RestoredCodexConversationIdentity {
 	nativeSessionId: string;
 	transcriptPath: string;
+}
+
+export async function readCodexConversationTurnPageWithCapabilityFallback(
+	port: CodexAppServerRequestPort,
+	threadId: string,
+	options: { cursor: string | null; limit: number; sortDirection: "asc" | "desc"; itemsView: "summary" | "full" },
+) {
+	const schema =
+		options.itemsView === "full"
+			? nativeTurnSchema
+			: nativeTurnSchema.extend({ items: z.array(nativeItemSchema).default([]) });
+	try {
+		return z
+			.object({
+				data: z.array(schema),
+				nextCursor:
+					options.itemsView === "full"
+						? z.string().nullable()
+						: z
+								.string()
+								.nullish()
+								.transform((cursor) => cursor ?? null),
+			})
+			.parse(await port.request("thread/turns/list", { threadId, ...options }));
+	} catch (error) {
+		// 只对第一页明确的能力拒绝后备；超时、损坏结果与中途分页失败继续保持未知。
+		if (
+			options.cursor !== null ||
+			!(error instanceof Error) ||
+			!(
+				error.message.includes("list_turns is not supported yet") ||
+				("unsupportedNativeCapability" in error && error.unsupportedNativeCapability === "thread_turns_list")
+			)
+		)
+			throw error;
+		const turns = z
+			.object({ thread: z.object({ turns: z.array(nativeTurnSchema) }) })
+			.parse(await port.request("thread/read", { threadId, includeTurns: true })).thread.turns;
+		if (new Set(turns.map((turn) => turn.id)).size !== turns.length) throw new Error("Codex 完整读取重复返回回合。");
+		return { data: options.sortDirection === "desc" ? turns.reverse() : turns, nextCursor: null };
+	}
 }
 
 export async function assertCodexNativeConversationLoadedByCurrentHost(
@@ -43,15 +90,12 @@ export async function readCodexConversationTurnHistoryPage(
 	threadId: string,
 	cursor: string | null,
 ) {
-	return turnPageSchema.parse(
-		await port.request("thread/turns/list", {
-			threadId,
-			cursor,
-			limit: 100,
-			sortDirection: "asc",
-			itemsView: "full",
-		}),
-	);
+	return readCodexConversationTurnPageWithCapabilityFallback(port, threadId, {
+		cursor,
+		limit: 100,
+		sortDirection: "asc",
+		itemsView: "full",
+	});
 }
 
 export async function readCodexConversationTurns(
@@ -67,23 +111,8 @@ export async function readCodexConversationTurns(
 		try {
 			page = await readCodexConversationTurnHistoryPage(port, threadId, cursor);
 		} catch (error) {
-			// 0.164 的 legacy 历史明确不支持分页；只在第一页的这一能力拒绝上走原生完整读取。
-			// 网络失败、分页中断及其它协议错误仍须原样失败，不能把未知当成完整历史。
-			if (
-				cursor !== null ||
-				turns.length ||
-				!(error instanceof Error) ||
-				!error.message.includes("list_turns is not supported yet")
-			) {
-				await options?.onNativeTurnHistoryPageReadFailure?.(cursor);
-				throw error;
-			}
-			const legacyTurns = z
-				.object({ thread: z.object({ turns: z.array(nativeTurnSchema) }) })
-				.parse(await port.request("thread/read", { threadId, includeTurns: true })).thread.turns;
-			if (new Set(legacyTurns.map((turn) => turn.id)).size !== legacyTurns.length)
-				throw new Error("Codex 完整读取重复返回回合。");
-			return legacyTurns;
+			await options?.onNativeTurnHistoryPageReadFailure?.(cursor);
+			throw error;
 		}
 		turns.push(...page.data);
 		cursor = page.nextCursor;

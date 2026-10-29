@@ -58,7 +58,10 @@ import {
 	resetTerminalInputBoxOccupancyTrackerComposition,
 	type TerminalInputBoxOccupancyTrackerState,
 } from "../../../src/terminal/terminal-input-box-occupancy";
-import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
+import type {
+	ActiveProcessState,
+	PendingProgrammaticDeliveryReceipt,
+} from "../../../src/terminal/terminal-session-active-process-state";
 
 interface MockSpawnRequest {
 	env?: Record<string, string | undefined>;
@@ -3106,16 +3109,28 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		expect(manager.cancelTaskChatInputDelivery("task-missing", "any-key")).toBe("no_pending_delivery");
 	});
 
-	// 连接中断自动续跑（submitConnectionDropContinuation）与在途投递的三种撞车。
+	// 独立续跑的底层确认链与在途投递的撞车。共用协调器会提前让位；这里直接测试 writer 的回执隔离，
+	// 保留其他自动提示入口绕过调度时仍不能误结算消息的防线。
 	// 共同的守卫：只有**已写进 PTY、正在等确认**的投递才归确认链管；仍停在 awaiting_readiness 的投递
 	// 一个字节都没写，续跑那条链的成败与它无关，替它下任何结论都是撒谎。
 	// 未就绪屏：没有输入框，正则通道与结构判定都不命中 → 投递稳定停在 awaiting_readiness。
 	const CLAUDE_SCREEN_WITHOUT_INPUT_BOX = "正在思考…\n工具调用输出若干行";
 
-	function triggerConnectionDropContinuation(manager: TerminalSessionManager, taskId: string): void {
-		(
-			manager as unknown as { submitConnectionDropContinuation: (taskId: string) => void }
-		).submitConnectionDropContinuation(taskId);
+	async function writeIndependentContinuationWithSubmissionConfirmation(
+		manager: TerminalSessionManager,
+		taskId: string,
+	): Promise<void> {
+		const writer = manager as unknown as {
+			entries: Map<string, { active: ActiveProcessState }>;
+			writePasteSubmissionWithConfirm: (
+				taskId: string,
+				active: ActiveProcessState,
+				text: string,
+			) => Promise<boolean>;
+		};
+		const active = writer.entries.get(taskId)?.active;
+		if (!active) throw new Error("测试缺少独立续跑所需的当前进程");
+		expect(await writer.writePasteSubmissionWithConfirm(taskId, active, "核对上一步结果，再继续原任务。")).toBe(true);
 	}
 
 	it("续跑注入撞上尚未写入的在途投递 → 不误判失败；投递照常送达并诚实落定", async () => {
@@ -3138,7 +3153,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(0);
 
 		// 连接中断自动续跑写自己的续跑指令、夺走确认通道；这条投递还没写入，不该被它连坐。
-		triggerConnectionDropContinuation(manager, "task-receipt-continuation-race");
+		await writeIndependentContinuationWithSubmissionConfirmation(manager, "task-receipt-continuation-race");
 		expect(outcomes).toEqual([]);
 
 		// 输入框出现 → 投递照常写入（证明它确实还活着，判它失败即撒谎）。
@@ -3172,7 +3187,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		triggerConnectionDropContinuation(manager, "task-receipt-continuation-confirmed");
+		await writeIndependentContinuationWithSubmissionConfirmation(manager, "task-receipt-continuation-confirmed");
 
 		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
@@ -3200,7 +3215,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		triggerConnectionDropContinuation(manager, "task-receipt-continuation-exhausted");
+		await writeIndependentContinuationWithSubmissionConfirmation(manager, "task-receipt-continuation-exhausted");
 
 		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
@@ -3228,7 +3243,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		triggerConnectionDropContinuation(manager, "task-receipt-continuation-convergence");
+		await writeIndependentContinuationWithSubmissionConfirmation(manager, "task-receipt-continuation-convergence");
 
 		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
@@ -3261,7 +3276,10 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		triggerConnectionDropContinuation(manager, "task-receipt-continuation-yield-exhausted");
+		await writeIndependentContinuationWithSubmissionConfirmation(
+			manager,
+			"task-receipt-continuation-yield-exhausted",
+		);
 
 		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);

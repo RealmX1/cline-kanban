@@ -420,8 +420,29 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			return loaded;
 		}
 		const loading = (async () => {
-			const manager = new TerminalSessionManager({
+			const manager: TerminalSessionManager = new TerminalSessionManager({
 				enableManagedTaskPromptDeliveryRecording: true,
+				automaticFailureContinuationWorkspaceId: workspaceId,
+				readAutomaticFailureContinuationEligibility: async (conversationSessionId) => {
+					const [board, config] = await Promise.all([
+						loadWorkspaceBoardById(workspaceId),
+						deps.loadRuntimeConfig(repoPath),
+					]);
+					const summary = manager.getSummary(conversationSessionId);
+					const taskId = summary?.taskConversationSessionMetadata?.workspaceTaskId ?? conversationSessionId;
+					const column = board.columns.find((column) => column.cards.some((card) => card.id === taskId));
+					const card = column?.cards.find((card) => card.id === taskId);
+					return {
+						eligible:
+							!!card &&
+							column?.id !== "trash" &&
+							!card.taskShelvingState?.isShelved &&
+							!summary?.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover,
+						taskIncarnationCreatedAtEpochMs: card?.createdAt ?? null,
+						connectionEnabled: config.autoContinueOnConnectionDropEnabled,
+						capacityEnabled: config.codexModelCapacityErrorAutoContinuationEnabled ?? true,
+					};
+				},
 				enableManagedCodexConversationStorageForNewSessions: true,
 				prepareCodexNativeSessionControlHostLaunch,
 				restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
@@ -463,6 +484,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			if (hostedTerminalPtySessionAdoptionCandidates.length > 0) {
 				await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart(hostedTerminalPtySessionAdoptionCandidates);
 			}
+			await manager.restoreAutomaticFailureContinuationsAfterRuntimeRestart();
 			terminalManagersByWorkspaceId.set(workspaceId, manager);
 			return manager;
 		})().finally(() => {
@@ -826,6 +848,11 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		rememberWorkspace,
 		getActiveRuntimeConfig: () => activeRuntimeConfig,
 		setActiveRuntimeConfig: (config: RuntimeConfigState) => {
+			for (const manager of terminalManagersByWorkspaceId.values())
+				manager.reconcileAutomaticFailureContinuationSettings(
+					config.autoContinueOnConnectionDropEnabled,
+					config.codexModelCapacityErrorAutoContinuationEnabled ?? true,
+				);
 			globalRuntimeConfig = toGlobalRuntimeConfigState(config);
 			activeRuntimeConfig = activeWorkspaceId ? config : globalRuntimeConfig;
 		},

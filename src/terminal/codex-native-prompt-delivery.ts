@@ -3,7 +3,10 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { withRunningCodexAppServerControlSocketConnection } from "../codex-native-session-protocol/codex-app-server-control-socket-request-connection";
-import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
+import {
+	type CodexAppServerRequestPort,
+	readCodexConversationTurnPageWithCapabilityFallback,
+} from "../codex-native-session-protocol/codex-native-conversation-history";
 import type {
 	CodexNativePromptAcceptanceHistoryQueryProgress,
 	CodexNativePromptDeliveryEvidence,
@@ -72,6 +75,7 @@ export interface CodexNativePromptDeliveryInput {
 	clientUserMessageId: string;
 	isCurrent: () => boolean;
 	beforeSubmit: () => Promise<boolean>;
+	mayInvokeNativeTurnStartRequest?: () => boolean;
 	onRequestAttempted: (observation?: { predecessorNativeTurnId: string | null }) => void | Promise<void>;
 	// 只改变等待策略；真实 userMessage 核验与“不重复 turn/start”仍由本模块负责。
 	confirmationDeadlineAtEpochMs?: () => Promise<number>;
@@ -147,8 +151,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 			: currentDeliveryPhaseDeadlineEpochMs;
 	const readTurnsPage = async (port: CodexAppServerRequestPort, cursor: string | null) =>
 		nativeTurnsPageSchema.parse(
-			await port.request("thread/turns/list", {
-				threadId: nativeSessionId,
+			await readCodexConversationTurnPageWithCapabilityFallback(port, nativeSessionId, {
 				cursor,
 				limit: 10,
 				sortDirection: "desc",
@@ -276,6 +279,14 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						await input.deliveryJournal?.recordRequestIntent(previousTurnId);
 						await input.onRequestAttempted({ predecessorNativeTurnId: previousTurnId });
 						if (!input.isCurrent()) return { status: "unconfirmed" };
+						if (input.mayInvokeNativeTurnStartRequest?.() === false) {
+							if (input.deliveryJournal && !input.deliveryJournal.recordRequestNotInvoked)
+								return { status: "unconfirmed" };
+							// 本进程仍持有调用栈，确定尚未调用原生请求时才能撤回写前意图。
+							await input.deliveryJournal?.recordRequestNotInvoked?.();
+							requestAttempted = false;
+							return { status: "cancelled" };
+						}
 						try {
 							const pendingResponse = port
 								.request("turn/start", {

@@ -35,6 +35,7 @@ const persistedResumeRequestSchema = z.object({
 		taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		autoContinueOnConnectionDropEnabled: z.boolean().optional(),
+		codexModelCapacityErrorAutoContinuationEnabled: z.boolean().optional(),
 		cols: z.number().optional(),
 		rows: z.number().optional(),
 	}),
@@ -65,6 +66,7 @@ export async function persistSideSessionResumeRequestWaitingForNativeIdentity(
 
 export async function readSideSessionResumeRequestWaitingForNativeIdentity(
 	summary: RuntimeTaskSessionSummary,
+	options?: { rebuildAutomaticRecoveryMetadataForWorkspaceTaskId: string },
 ): Promise<StartTaskSessionRequest | null> {
 	try {
 		const record = persistedResumeRequestSchema.parse(
@@ -75,10 +77,20 @@ export async function readSideSessionResumeRequestWaitingForNativeIdentity(
 			record.request.taskId !== summary.taskId ||
 			record.request.agentId !== summary.agentId ||
 			resolve(record.request.cwd) !== resolve(summary.workspacePath ?? "") ||
-			record.request.workspaceTaskId !== summary.taskConversationSessionMetadata?.workspaceTaskId
+			(!options && record.request.workspaceTaskId !== summary.taskConversationSessionMetadata?.workspaceTaskId)
 		)
 			return null;
-		if (!isDeepStrictEqual(record.request.taskConversationSessionMetadata, summary.taskConversationSessionMetadata))
+		if (
+			options &&
+			(record.request.workspaceTaskId ??
+				record.request.taskConversationSessionMetadata?.workspaceTaskId ??
+				record.request.taskId) !== options.rebuildAutomaticRecoveryMetadataForWorkspaceTaskId
+		)
+			return null;
+		if (
+			!options &&
+			!isDeepStrictEqual(record.request.taskConversationSessionMetadata, summary.taskConversationSessionMetadata)
+		)
 			return null;
 		return { ...record.request, prompt: "", resumePriorAgentConversationWithoutResendingPrompt: true };
 	} catch {

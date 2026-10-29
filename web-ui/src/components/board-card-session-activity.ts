@@ -1,3 +1,4 @@
+import { describeAutomaticAgentFailureContinuation } from "@runtime-session-activity";
 // 看板卡片「会话活性预览」（状态点颜色 + 单行预览文案）的纯派生逻辑——从 board-card.tsx 抽出为
 // 独立、零 React 依赖、可直接单测的模块（双轴会话状态重构 Stage 3 首步抽取，零行为变更）。
 //
@@ -144,6 +145,14 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
 	}
 	// 连接重试是最显著的「卡住」状态：优先于普通活动文案展示。
+	if (
+		summary.automaticAgentFailureContinuation &&
+		!["recovered", "executing"].includes(summary.automaticAgentFailureContinuation.phase)
+	)
+		return {
+			dotColor: SESSION_ACTIVITY_COLOR.warning,
+			text: describeAutomaticAgentFailureContinuation(summary.automaticAgentFailureContinuation),
+		};
 	if (summary.connectionRetry?.status === "retrying") {
 		const attempts = summary.connectionRetry.retryCount;
 		return {

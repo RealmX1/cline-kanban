@@ -9,6 +9,7 @@ import { resolveTaskClosureOutcomeForBoardColumn, type TaskClosureOutcome } from
 export const ALL_PROJECTS_TASK_QUERY_GROUPS = [
 	"pinned",
 	"running",
+	"waiting_automatic_recovery",
 	"cache_warm_awaiting_user",
 	"recent",
 	"shelved",
@@ -45,6 +46,7 @@ export function buildAllProjectsTaskGroupQueryResult(
 		shelved: sections.shelvedEntries,
 		pinned: sections.pinnedEntries,
 		running: sections.runningEntries,
+		waiting_automatic_recovery: sections.automaticRecoveryWaitingEntries,
 		cache_warm_awaiting_user: sections.promptCacheWarmAwaitingUserEntries,
 		recent: sections.remainingSection.entries,
 	};
