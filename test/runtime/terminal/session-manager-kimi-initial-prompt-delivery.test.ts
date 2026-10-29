@@ -204,6 +204,9 @@ describe("Kimi 初始提示词投递", () => {
 					cols: terminalColumns,
 					rows: 24,
 					exitedWhileRuntimeWasAbsent: false,
+					reclaimedByHostWhileRuntimeWasAbsent: false,
+					retainedOutputStartByteOffset: 0,
+					outputEndByteOffset: Buffer.byteLength(trustScreen),
 					terminalSessionAdoptionRecord: session.readAdoptionRecord(),
 					async adoptHostedTerminalPtyProcess(callbacks) {
 						emitLiveOutput = callbacks.onData;
@@ -245,6 +248,9 @@ describe("Kimi 初始提示词投递", () => {
 				cols: 30,
 				rows: 24,
 				exitedWhileRuntimeWasAbsent: false,
+				reclaimedByHostWhileRuntimeWasAbsent: false,
+				retainedOutputStartByteOffset: 0,
+				outputEndByteOffset: replayLiveBoundary,
 				terminalSessionAdoptionRecord: session.readAdoptionRecord(),
 				async adoptHostedTerminalPtyProcess(callbacks) {
 					emitLiveOutput = callbacks.onData;

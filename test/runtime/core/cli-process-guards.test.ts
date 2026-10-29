@@ -13,6 +13,31 @@ import {
 } from "../../../src/core/cli-process-guards";
 
 describe("cli-process-guards", () => {
+	it.each([undefined, "0", "120", "0.5"])("handover 等待 %s 秒的预算覆盖请求、后继等待和退出", (seconds) => {
+		vi.stubEnv("KANBAN_CLI_HARD_TIMEOUT_MS", "");
+		vi.stubEnv("KANBAN_CLI_TRPC_TIMEOUT_MS", "");
+		try {
+			const options = seconds === undefined ? [] : ["--wait-for-successor-seconds", seconds];
+			const argv = ["node", "kanban", "runtime", "handover-restart", ...options];
+			expect(resolveCliHardTimeoutMs(argv)).toBeGreaterThan(
+				resolveCliTrpcTimeoutMs(argv) + Number(seconds ?? 60) * 1000,
+			);
+			if (seconds !== undefined)
+				expect(
+					resolveCliHardTimeoutMs(["runtime", "handover-restart", `--wait-for-successor-seconds=${seconds}`]),
+				).toBe(resolveCliHardTimeoutMs(argv));
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+	it("handover 保留用户显式指定的整命令硬超时", () => {
+		vi.stubEnv("KANBAN_CLI_HARD_TIMEOUT_MS", "12345");
+		try {
+			expect(resolveCliHardTimeoutMs(["runtime", "handover-restart"])).toBe(12345);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
 	describe("watch 中断退出兜底", () => {
 		it.each(["SIGINT", "SIGTERM"] as const)("%s 覆盖最终排空，第二次信号不重置退出期限或退出码", (signalName) => {
 			vi.useFakeTimers();

@@ -22,10 +22,16 @@ export interface AgentSessionPtyHostHostedSessionDescriptor {
 	hostedSessionKind: AgentSessionPtyHostHostedSessionKind;
 }
 
+// host 自己动手终止会话的原因（runtime 下令的停止不带它）。旧 host 不报。只增不改：新原因追加新字面量。
+export type AgentSessionPtyHostHostedSessionTerminatedByHostReason =
+	// runtime 不在、会话已过回收期限（runtime 最后一次 detach 时推来的 eligibleAt），host 按同一期限回收。
+	"reclaimed_by_host_while_runtime_absent";
+
 export interface AgentSessionPtyHostHostedSessionExitRecord {
 	exitCode: number;
 	signal: number | null;
 	exitedAtEpochMs: number;
+	hostedSessionTerminatedByHostReason?: AgentSessionPtyHostHostedSessionTerminatedByHostReason;
 }
 
 export interface AgentSessionPtyHostHostedSessionListing {
@@ -50,6 +56,8 @@ export interface AgentSessionPtyHostHostedSessionListing {
 	// true：controller 已确认这条会话的退出，但 spool 里还有未确认的 hook 事件，host 把会话留到 spool 被确认清空。
 	// 新 runtime 只需排空它的 spool，不应再把它当接管候选（它的退出已经交付过）。旧 host 不报。
 	exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged?: boolean;
+	// 没有 controller 时 host 据此回收会话的绝对时刻（见 PutHostedSessionAdoptionRecordMessage）；null = 不回收。旧 host 不报。
+	hostedSessionOrphanReclamationEligibleAtEpochMs?: number | null;
 }
 
 // 一条存在 host 里、等 runtime 回来取走的 hook 事件。
@@ -130,6 +138,12 @@ export interface PutHostedSessionAdoptionRecordMessage {
 	type: "put_hosted_session_adoption_record";
 	hostedSessionKey: string;
 	adoptionRecord: unknown;
+	// 孤儿回收期限：runtime 不在（没有 controller）且到了这个时刻，host 终止会话（进程组 SIGTERM，5s 后 SIGKILL），
+	// 退出记录带 reclaimed_by_host_while_runtime_absent。与 runtime 的会话回收共用同一份期限账本里的 eligibleAt，
+	// 不另立常量。每条消息都覆盖上一条的值：缺省（旧 runtime）与 null 一样表示「不回收」——agent 回合中、
+	// park 无期限，以及 runtime 只在 detach 时才算期限（平时推的记录一律带 null，免得一个过时的期限在
+	// runtime 崩溃后把一个又跑起来的会话杀掉）。
+	hostedSessionOrphanReclamationEligibleAtEpochMs?: number | null;
 }
 
 // 订阅一条会话的输出：host 先把环形缓冲里 [fromByteOffset, 当前末尾) 的字节作为「追赶」帧发出，随后转为实时推送。
@@ -297,10 +311,18 @@ export interface QueryControllerPresenceRequestMessage {
 	requestId: string;
 }
 
+// 离线显式全停：host 原子检查 controller 槽，拒绝在线/正在接管的 runtime；客户端不取得 controller 身份。
+// 只追加：旧 host 不识别时不响应，客户端超时后明确失败，绝不回退到会顶替 controller 的旧组合。
+export interface TerminateAllHostedSessionsIfNoControllerRequestMessage {
+	type: "terminate_all_hosted_sessions_if_no_controller_request";
+	requestId: string;
+}
+
 export type AgentSessionPtyHostHostedSessionCliClientToHostMessage =
 	| HostedSessionCliClientHelloMessage
 	| AppendHookEventToHostedSessionSpoolRequestMessage
-	| QueryControllerPresenceRequestMessage;
+	| QueryControllerPresenceRequestMessage
+	| TerminateAllHostedSessionsIfNoControllerRequestMessage;
 
 export type AppendHookEventToHostedSessionSpoolOutcome =
 	| { kind: "spooled"; hookSpoolEntrySequenceNumber: number }
@@ -320,9 +342,20 @@ export interface QueryControllerPresenceResponseMessage {
 	controllerAbsentSinceEpochMs: number | null;
 }
 
+export type TerminateAllHostedSessionsIfNoControllerOutcome =
+	| { kind: "termination_requested" }
+	| { kind: "refused_because_controller_connected" };
+
+export interface TerminateAllHostedSessionsIfNoControllerResponseMessage {
+	type: "terminate_all_hosted_sessions_if_no_controller_response";
+	requestId: string;
+	outcome: TerminateAllHostedSessionsIfNoControllerOutcome;
+}
+
 export type AgentSessionPtyHostHostToHostedSessionCliClientMessage =
 	| AppendHookEventToHostedSessionSpoolResponseMessage
-	| QueryControllerPresenceResponseMessage;
+	| QueryControllerPresenceResponseMessage
+	| TerminateAllHostedSessionsIfNoControllerResponseMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);

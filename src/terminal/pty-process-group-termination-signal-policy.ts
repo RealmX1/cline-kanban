@@ -20,6 +20,10 @@ export interface PtyProcessGroupTerminationOptions {
 	escalateToSigkillAfterMs?: number;
 	// 升级前用来判断进程是否已经退出；未提供时视为未退出，到点无条件补发（对已死进程发信号会被吞掉）。
 	hasProcessExited?: () => boolean;
+	// host 必须清理后代：根进程退出后仍给原进程组升级，但不再向可能复用的根 PID 发信号。
+	escalateProcessGroupEvenAfterRootProcessExited?: boolean;
+	// 升级信号尝试结束后通知生命周期持有者；无论根进程是否退出都恰好调用一次。
+	onSigkillEscalationAttemptCompleted?: () => void;
 }
 
 function sendSignalToPtyProcessGroupBestEffort(pid: number, signal: NodeJS.Signals): void {
@@ -64,11 +68,14 @@ export function terminatePtyProcessGroup(
 		return () => {};
 	}
 	const escalationTimer = setTimeout(() => {
-		if (options.hasProcessExited?.() === true) {
-			return;
+		try {
+			const rootProcessExited = options.hasProcessExited?.() === true;
+			if (rootProcessExited && !options.escalateProcessGroupEvenAfterRootProcessExited) return;
+			if (!rootProcessExited) sendSignalToPtyProcessBestEffort(target, "SIGKILL");
+			sendSignalToPtyProcessGroupBestEffort(pid, "SIGKILL");
+		} finally {
+			options.onSigkillEscalationAttemptCompleted?.();
 		}
-		sendSignalToPtyProcessBestEffort(target, "SIGKILL");
-		sendSignalToPtyProcessGroupBestEffort(pid, "SIGKILL");
 	}, escalateToSigkillAfterMs);
 	escalationTimer.unref?.();
 	return () => clearTimeout(escalationTimer);

@@ -20,11 +20,14 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
+	RuntimeAgentSessionCountsAffectedByRuntimeExit,
 	RuntimeCommandRunResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
+	RuntimePlannedHandoverRestartResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeStopTerminatingHostedAgentSessionsResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -42,6 +45,10 @@ import {
 	getKanbanRuntimeTls,
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
+import type {
+	HostedAgentSessionDispositionForRuntimeShutdown,
+	RuntimeShutdownTrigger,
+} from "../core/runtime-shutdown-trigger";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
 	projectConversationSessionMetadataForMainSessionBinding,
@@ -167,6 +174,7 @@ import { createAgentSessionInactivityReclamationScheduler } from "./agent-sessio
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
+import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import {
 	startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime,
@@ -217,11 +225,23 @@ export interface CreateRuntimeServerDependencies {
 		) => void;
 		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
 	};
+	// runtime 退出类请求（`kanban runtime handover-restart` / `stop --terminate-hosted-agent-sessions`）的执行方：
+	// cli.ts 装好 graceful shutdown 之后才能执行，所以这里只给读取函数。缺席或尚未就绪时 procedure 报错。
+	readRuntimeExitRequestHandler?: () => RuntimeExitRequestHandler | null;
+}
+
+export interface RuntimeExitRequestHandler {
+	agentSessionPtyHostModeEnabled: boolean;
+	isRuntimeShutdownInProgress: () => boolean;
+	// 同步置位「退出已开始」，实际流程延后一拍再跑：先让 tRPC 响应发出去。
+	startRuntimeShutdownAfterResponseIsSent: (trigger: RuntimeShutdownTrigger) => void;
 }
 
 export interface RuntimeServer {
 	url: string;
-	stopAllActiveRuntimeSessionsForShutdown: () => Promise<
+	stopAllActiveRuntimeSessionsForShutdown: (
+		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown,
+	) => Promise<
 		Array<
 			ActiveRuntimeSessionShutdownResult & {
 				workspaceId: string;
@@ -229,6 +249,14 @@ export interface RuntimeServer {
 			}
 		>
 	>;
+	// runtime 退出流程的第一步：不再起新工作（会话回收调度、排队 prompt 出队、陈旧清扫），HTTP 停止接受新连接
+	// （新到的 hook 走 spool、CLI 写动词进入重启等待）。handover 时以 1012 关闭浏览器连接，web-ui 据此提示「正在热重启」。
+	stopAcceptingNewWorkBeforeRuntimeExit: (input: { closeBrowserConnectionsBecauseRuntimeIsRestarting: boolean }) => {
+		waitForRuntimeOwnedBackgroundServicesToStopBeforeSessionDetach: () => Promise<void>;
+		waitForAlreadyStartedQueuedPromptDispatchAttemptsToSettle: () => Promise<void>;
+		stopRemainingQueuedPromptDispatchAttemptsBeforeSessionDetach: () => void;
+	};
+	countAgentSessionsAffectedByRuntimeExit: () => RuntimeAgentSessionCountsAffectedByRuntimeExit;
 	close: () => Promise<void>;
 }
 
@@ -709,19 +737,32 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return liveSessionCount;
 	};
 
+	// 缺省终止 hosted 会话：删项目等路径（worktree 都要删了）必须停掉会话。只有 runtime 退出才传 detach。
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
+		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown = "terminate_hosted_agent_sessions",
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
 		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
 		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
 		const acpTaskSessionService = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
+		const detachesHostedAgentSessions =
+			hostedAgentSessionDisposition === "detach_hosted_agent_sessions_for_successor_runtime";
 		return await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
 			terminalManager,
 			clineTaskSessionService: clineTaskSessionService ?? null,
 			acpTaskSessionService: acpTaskSessionService ?? null,
+			hostedAgentSessionDisposition,
+			...(detachesHostedAgentSessions && terminalManager
+				? {
+						readHostedSessionOrphanReclamationEligibleAtEpochMs:
+							await loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace(workspaceId, deps.warn),
+					}
+				: {}),
 		});
 	};
-	const stopAllActiveRuntimeSessionsForShutdown = async () => {
+	const stopAllActiveRuntimeSessionsForShutdown = async (
+		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown,
+	) => {
 		const workspacePathByWorkspaceId = new Map<string, string | null>();
 		for (const { workspaceId, workspacePath } of deps.workspaceRegistry.listManagedWorkspaces()) {
 			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
@@ -740,7 +781,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				results.push({
 					workspaceId,
 					workspacePath,
-					...(await stopAndCollectProjectRuntimeSessionsForSafePersistence(workspaceId)),
+					...(await stopAndCollectProjectRuntimeSessionsForSafePersistence(
+						workspaceId,
+						hostedAgentSessionDisposition,
+					)),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -749,6 +793,93 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return results;
 	};
+	const countAgentSessionsAffectedByRuntimeExit = (): RuntimeAgentSessionCountsAffectedByRuntimeExit => {
+		let agentSessionsHostedByAgentSessionPtyHost = 0;
+		let agentSessionsWithPtyOwnedByRuntimeProcess = 0;
+		for (const { workspaceId } of deps.workspaceRegistry.listManagedWorkspaces()) {
+			const counts = deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(workspaceId)
+				?.countActiveTerminalSessionsByPtyOwnership();
+			agentSessionsHostedByAgentSessionPtyHost += counts?.hostedInAgentSessionPtyHost ?? 0;
+			agentSessionsWithPtyOwnedByRuntimeProcess += counts?.inProcessPtyOwnedByRuntime ?? 0;
+		}
+		let conversationAgentSessionsRunningInsideRuntimeProcess = 0;
+		for (const service of [
+			...clineTaskSessionServiceByWorkspaceId.values(),
+			...acpTaskSessionServiceByWorkspaceId.values(),
+		]) {
+			for (const summary of service.listSummaries()) {
+				const { liveness } = resolveSessionFacets(summary);
+				if (liveness === "starting" || liveness === "live" || liveness === "retrying") {
+					conversationAgentSessionsRunningInsideRuntimeProcess += 1;
+				}
+			}
+		}
+		return {
+			agentSessionsHostedByAgentSessionPtyHost,
+			agentSessionsWithPtyOwnedByRuntimeProcess,
+			conversationAgentSessionsRunningInsideRuntimeProcess,
+			inFlightExplorationThreadGraphMaintenanceJobs:
+				explorationThreadGraphMaintenanceTrigger.countInFlightMaintenanceJobs(),
+		};
+	};
+	const requireRuntimeExitRequestHandler = (): RuntimeExitRequestHandler => {
+		const runtimeExitRequestHandler = deps.readRuntimeExitRequestHandler?.() ?? null;
+		if (runtimeExitRequestHandler === null) {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message: "This Kanban runtime cannot be restarted or stopped over the API yet.",
+			});
+		}
+		return runtimeExitRequestHandler;
+	};
+	const requestPlannedHandoverRestartPreservingHostedAgentSessions = async (input: {
+		allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost?: boolean;
+	}): Promise<RuntimePlannedHandoverRestartResponse> => {
+		const runtimeExitRequestHandler = requireRuntimeExitRequestHandler();
+		const agentSessionCountsAffectedByRuntimeExit = countAgentSessionsAffectedByRuntimeExit();
+		const responseFacts = {
+			runtimeProcessId: process.pid,
+			agentSessionPtyHostModeEnabled: runtimeExitRequestHandler.agentSessionPtyHostModeEnabled,
+			agentSessionCountsAffectedByRuntimeExit,
+		};
+		if (runtimeExitRequestHandler.isRuntimeShutdownInProgress()) {
+			return { outcome: "runtime_shutdown_already_in_progress", ...responseFacts };
+		}
+		const agentSessionsThatHandoverWouldInterrupt =
+			agentSessionCountsAffectedByRuntimeExit.agentSessionsWithPtyOwnedByRuntimeProcess +
+			agentSessionCountsAffectedByRuntimeExit.conversationAgentSessionsRunningInsideRuntimeProcess;
+		if (
+			agentSessionsThatHandoverWouldInterrupt > 0 &&
+			input.allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost !== true
+		) {
+			return {
+				outcome: "refused_because_agent_sessions_not_preserved_by_agent_session_pty_host_would_be_interrupted",
+				...responseFacts,
+			};
+		}
+		runtimeExitRequestHandler.startRuntimeShutdownAfterResponseIsSent({
+			kind: "planned_handover_restart_preserving_hosted_agent_sessions",
+			requestedVia: "runtime_trpc_procedure",
+		});
+		return { outcome: "handover_restart_started", ...responseFacts };
+	};
+	const requestRuntimeStopTerminatingHostedAgentSessions =
+		async (): Promise<RuntimeStopTerminatingHostedAgentSessionsResponse> => {
+			const runtimeExitRequestHandler = requireRuntimeExitRequestHandler();
+			const responseFacts = {
+				runtimeProcessId: process.pid,
+				agentSessionCountsAffectedByRuntimeExit: countAgentSessionsAffectedByRuntimeExit(),
+			};
+			if (runtimeExitRequestHandler.isRuntimeShutdownInProgress()) {
+				return { outcome: "runtime_shutdown_already_in_progress", ...responseFacts };
+			}
+			runtimeExitRequestHandler.startRuntimeShutdownAfterResponseIsSent({
+				kind: "explicit_stop_terminating_hosted_agent_sessions",
+				requestedVia: "runtime_trpc_procedure",
+			});
+			return { outcome: "stop_started", ...responseFacts };
+		};
 	const prepareForStateReset = async (): Promise<void> => {
 		const workspaceIds = new Set<string>();
 		for (const { workspaceId } of deps.workspaceRegistry.listManagedWorkspaces()) {
@@ -923,6 +1054,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		prepareForStateReset,
 		getUpdateStatus: deps.getUpdateStatus,
 		runUpdateNow: deps.runUpdateNow,
+		requestPlannedHandoverRestartPreservingHostedAgentSessions,
+		requestRuntimeStopTerminatingHostedAgentSessions,
 		queuedTaskPromptDeliveryDispatcher,
 	});
 	const taskCommandExecutionApi = createTaskCommandExecutionService({
@@ -1932,24 +2065,57 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		socket.destroy();
 	});
 
-	const closeRuntimeServerResources = async (): Promise<void> => {
-		await taskClosureRecoveryMonitor.close();
-		await taskEditorCreationSubmissionApi.close();
-		await taskVisualizationArtifactApi.stop();
-		await taskLookupConversationApi.close();
-		await codexConfigurationSyncService.close();
-		await taskIndexingSupportApi.close();
-		await taskMainSessionHandoverApi.close();
-		await promptDraftUsageService.close();
-		await dailyWorkProgressStatisticsService.close();
+	// 退出流程里 HTTP 监听可能先于 close 停掉（stopAcceptingNewWorkBeforeRuntimeExit）；两处共用同一次 server.close。
+	let httpServerStoppedAcceptingConnections: Promise<void> | null = null;
+	const stopHttpServerFromAcceptingConnections = (): Promise<void> => {
+		if (httpServerStoppedAcceptingConnections !== null) return httpServerStoppedAcceptingConnections;
+		// 监听失败时也走统一资源释放；此时没有成功监听的 HTTP server 可供关闭。
+		if (!server.listening) return Promise.resolve();
+		httpServerStoppedAcceptingConnections = new Promise<void>((resolveClose, rejectClose) => {
+			server.close((error) => {
+				if (error) {
+					rejectClose(error);
+					return;
+				}
+				resolveClose();
+			});
+		});
+		return httpServerStoppedAcceptingConnections;
+	};
+	const stopStartingNewBackgroundWork = (preserveAlreadyStartedQueueDispatches = false) => {
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();
-		// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
-		queuedTaskPromptDeliveryDispatcher.stop();
+		// 计划内 handover 先停止新认领，给已进入写链的投递保留同一个有界排空窗口。
+		// 窗口结束后必须硬停，防止尚在 await 身份复核的操作在 detach 后写入。
+		if (preserveAlreadyStartedQueueDispatches) {
+			queuedTaskPromptDeliveryDispatcher.pauseNewDispatchAttemptsForRuntimeHandover();
+		} else {
+			queuedTaskPromptDeliveryDispatcher.stop();
+		}
 		taskCommandExecutionApi.stop();
 		stopObservingOwnedCommandExecutionUserStops();
 		unregisterQueuedTaskPromptDeliveryDispatchObserver();
 		stopObservingManagedTaskPromptDeliveries();
+	};
+	let runtimeOwnedBackgroundServicesShutdown: Promise<void> | null = null;
+	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
+		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
+		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			taskClosureRecoveryMonitor.close(),
+			taskEditorCreationSubmissionApi.close(),
+			taskVisualizationArtifactApi.stop(),
+			taskLookupConversationApi.close(),
+			codexConfigurationSyncService.close(),
+			dailyWorkProgressStatisticsService.close(),
+			taskIndexingSupportApi.close(),
+			taskMainSessionHandoverApi.close(),
+			promptDraftUsageService.close(),
+		]).then(() => undefined);
+		return runtimeOwnedBackgroundServicesShutdown;
+	};
+	const closeRuntimeServerResources = async (): Promise<void> => {
+		stopStartingNewBackgroundWork();
+		await beginRuntimeOwnedBackgroundServicesShutdown();
 		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
 		taskAttributedProcessTreeResourceSampler.stop();
 		taskAgentConversationModelTokenUsageJournalMonitor.stop();
@@ -1978,16 +2144,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		stopProcessFileDescriptorWatermarkMonitor();
 		await terminalWebSocketBridge.close();
 		await activatedInterWorkUnitRelationLedgerLiveCapture.deactivate();
-		if (!server.listening) return;
-		await new Promise<void>((resolveClose, rejectClose) => {
-			server.close((error) => {
-				if (error) {
-					rejectClose(error);
-					return;
-				}
-				resolveClose();
-			});
-		});
+		await stopHttpServerFromAcceptingConnections();
 	};
 
 	try {
@@ -2036,6 +2193,30 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
+		stopAcceptingNewWorkBeforeRuntimeExit: ({ closeBrowserConnectionsBecauseRuntimeIsRestarting }) => {
+			stopStartingNewBackgroundWork(closeBrowserConnectionsBecauseRuntimeIsRestarting);
+			void beginRuntimeOwnedBackgroundServicesShutdown().catch((error: unknown) => {
+				deps.warn(`运行时后台服务关闭失败：${error instanceof Error ? error.message : String(error)}`);
+			});
+			if (closeBrowserConnectionsBecauseRuntimeIsRestarting) {
+				deps.runtimeStateHub.closeBrowserConnectionsBecauseRuntimeIsRestarting();
+				terminalWebSocketBridge.closeBrowserConnectionsBecauseRuntimeIsRestarting();
+			}
+			// 不在这里等：在途请求（含触发 handover 的那条 tRPC 响应）照常完成，close 时再等它们收尾。
+			void stopHttpServerFromAcceptingConnections().catch(() => undefined);
+			return {
+				waitForRuntimeOwnedBackgroundServicesToStopBeforeSessionDetach: beginRuntimeOwnedBackgroundServicesShutdown,
+				waitForAlreadyStartedQueuedPromptDispatchAttemptsToSettle:
+					queuedTaskPromptDeliveryDispatcher.waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover,
+				stopRemainingQueuedPromptDispatchAttemptsBeforeSessionDetach: () => {
+					queuedTaskPromptDeliveryDispatcher.stop();
+					for (const { terminalManager } of deps.workspaceRegistry.listManagedWorkspaces()) {
+						terminalManager.revokeProgrammaticInputDeliveryEligibilityForRuntimeHandover();
+					}
+				},
+			};
+		},
+		countAgentSessionsAffectedByRuntimeExit,
 		close: closeRuntimeServerResources,
 	};
 }

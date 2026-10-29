@@ -4155,6 +4155,51 @@ export const runtimeRunUpdateResponseSchema = z.object({
 });
 export type RuntimeRunUpdateResponse = z.infer<typeof runtimeRunUpdateResponseSchema>;
 
+// runtime 退出前各类 agent 会话的去向（handover / 显式全停的回执里报给调用方）。
+export const runtimeAgentSessionCountsAffectedByRuntimeExitSchema = z.object({
+	// agent session PTY host 里、本 runtime 接管 / spawn 的会话：handover 后由下一个 runtime 接管，显式全停时被终止。
+	agentSessionsHostedByAgentSessionPtyHost: z.number().int().nonnegative(),
+	// runtime 自己持有的 PTY（host 模式没开，或 host 拉不起来时降级出的会话）：活不过 runtime 退出。
+	agentSessionsWithPtyOwnedByRuntimeProcess: z.number().int().nonnegative(),
+	// Cline SDK / ACP（omp）会话：随 runtime 停止。
+	conversationAgentSessionsRunningInsideRuntimeProcess: z.number().int().nonnegative(),
+	// 在途的 exploration 维护作业（runtime 子进程）：会被中止，下次 Stop 边沿重新 fork。
+	inFlightExplorationThreadGraphMaintenanceJobs: z.number().int().nonnegative(),
+});
+export type RuntimeAgentSessionCountsAffectedByRuntimeExit = z.infer<
+	typeof runtimeAgentSessionCountsAffectedByRuntimeExitSchema
+>;
+
+// `kanban runtime handover-restart` 的请求。**输入从首版起冻结**：新 build 的 CLI 会对仍在跑的旧 runtime 发它，
+// 只许追加可选字段。
+export const runtimePlannedHandoverRestartRequestSchema = z.object({
+	// 默认拒绝：有 agent 会话不在 host 里（handover 会打断它们）时不重启，只把数量报回去。
+	allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost: z.boolean().optional(),
+});
+export type RuntimePlannedHandoverRestartRequest = z.infer<typeof runtimePlannedHandoverRestartRequestSchema>;
+
+export const runtimePlannedHandoverRestartResponseSchema = z.object({
+	outcome: z.enum([
+		// 已开始：本 runtime 回完这条响应就进入 handover，随后以 exit 75 退出，由 supervisor 重拉。
+		"handover_restart_started",
+		"refused_because_agent_sessions_not_preserved_by_agent_session_pty_host_would_be_interrupted",
+		"runtime_shutdown_already_in_progress",
+	]),
+	runtimeProcessId: z.number().int(),
+	agentSessionPtyHostModeEnabled: z.boolean(),
+	agentSessionCountsAffectedByRuntimeExit: runtimeAgentSessionCountsAffectedByRuntimeExitSchema,
+});
+export type RuntimePlannedHandoverRestartResponse = z.infer<typeof runtimePlannedHandoverRestartResponseSchema>;
+
+export const runtimeStopTerminatingHostedAgentSessionsResponseSchema = z.object({
+	outcome: z.enum(["stop_started", "runtime_shutdown_already_in_progress"]),
+	runtimeProcessId: z.number().int(),
+	agentSessionCountsAffectedByRuntimeExit: runtimeAgentSessionCountsAffectedByRuntimeExitSchema,
+});
+export type RuntimeStopTerminatingHostedAgentSessionsResponse = z.infer<
+	typeof runtimeStopTerminatingHostedAgentSessionsResponseSchema
+>;
+
 export const runtimeAgentDefinitionSchema = z.object({
 	id: runtimeAgentIdSchema,
 	label: z.string(),

@@ -5,6 +5,7 @@ import type {
 	CodexNativePromptDeliveryInput,
 	CodexNativePromptDeliveryResult,
 } from "../../../src/terminal/codex-native-prompt-delivery";
+import { createIdleHarnessBackgroundSessionReclaimWatchState } from "../../../src/terminal/harness-background-session-reclaim-watch-after-unsafe-resume-refusal";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -67,11 +68,13 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 		awaitingCodexPromptAfterEnter: false,
 		suppressSubstantiveOutputUntilContinues: false,
 		terminalSessionIncarnationToken: INCARNATION,
+		recentlyAppliedHookEventDeliveryIdempotencyKeys: [],
 	};
 	const entry = {
 		summary,
 		active,
 		listeners: new Map(),
+		harnessBackgroundSessionReclaimWatchState: createIdleHarnessBackgroundSessionReclaimWatchState(),
 		restartRequest: { kind: "task", request: { workspaceId: "workspace-1" } },
 		terminalStateMirror: {
 			getScreenSnapshot: async () => ({
@@ -106,6 +109,89 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 }
 
 describe("session manager 的 Codex 原生投递", () => {
+	it("hard stop 在冻结 host 或进入 detach 前就封住原生投递和新投递", async () => {
+		let captured: CodexNativePromptDeliveryInput | undefined;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const nativeWrite = vi.fn();
+		const manager = new TerminalSessionManager({
+			deliverCodexNativePromptWithoutChangingComposer: async (input) => {
+				captured = input;
+				await gate;
+				if (await input.beforeSubmit()) nativeWrite();
+				return { status: "cancelled" };
+			},
+		});
+		installSession(manager, "");
+		const outcome = vi.fn();
+		manager.submitTaskChatInputWhenReady("conversation-1", "旧消息", { onDeliveryOutcome: outcome });
+		await vi.advanceTimersByTimeAsync(1100);
+		manager.revokeProgrammaticInputDeliveryEligibilityForRuntimeHandover();
+		expect(captured?.isCurrent()).toBe(false);
+		expect(manager.submitTaskChatInputWhenReady("conversation-1", "迟到的新消息")).toBeNull();
+		release();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(nativeWrite).not.toHaveBeenCalled();
+		expect(outcome).not.toHaveBeenCalled();
+	});
+	it.each(["beforeSubmit之前", "beforeSubmit之后", "响应返回之前"] as const)(
+		"handover 在 %s 暂停时撤销写入资格且不结算迟到回执",
+		async (pausePhase) => {
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const nativeWrite = vi.fn();
+			let nativeInput: CodexNativePromptDeliveryInput | undefined;
+			const native = vi.fn(
+				async (input: CodexNativePromptDeliveryInput): Promise<CodexNativePromptDeliveryResult> => {
+					nativeInput = input;
+					if (pausePhase === "beforeSubmit之前") await gate;
+					if (!(await input.beforeSubmit())) return { status: "cancelled" };
+					if (pausePhase === "beforeSubmit之后") await gate;
+					await input.onRequestAttempted();
+					if (!input.isCurrent()) return { status: "unconfirmed" };
+					nativeWrite();
+					if (pausePhase === "响应返回之前") await gate;
+					return {
+						status: "confirmed",
+						evidence: {
+							clientUserMessageId: input.clientUserMessageId,
+							nativeSessionId: "thread-1",
+							nativeTurnId: "turn-2",
+							nativeUserMessageId: "user-2",
+						},
+					};
+				},
+			);
+			const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
+			const { active, entry } = installSession(manager, "");
+			Object.assign(active, {
+				session: { ...active.session, detachFromRuntimeForHandoverRestartWithoutSignallingProcess: vi.fn() },
+				terminalProtocolFilter: { pendingChunk: null },
+				outputReactionEngine: null,
+			});
+			const outcome = vi.fn();
+			manager.submitTaskChatInputWhenReady("conversation-1", "正文", { onDeliveryOutcome: outcome });
+			await vi.advanceTimersByTimeAsync(1100);
+			expect(nativeInput).toBeDefined();
+			const receiptPhase = active.programmaticDeliveryReceipt?.phase;
+			const generationBeforeDetach = active.submitConfirmGeneration;
+			await manager.detachHostedPtySessionsForRuntimeHandover({
+				readHostedSessionOrphanReclamationEligibleAtEpochMs: () => null,
+			});
+			expect(nativeInput?.isCurrent()).toBe(false);
+			expect(active.submitConfirmGeneration).toBeGreaterThan(generationBeforeDetach);
+			release();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(nativeWrite).toHaveBeenCalledTimes(pausePhase === "响应返回之前" ? 1 : 0);
+			expect(outcome).not.toHaveBeenCalled();
+			expect(active.programmaticDeliveryReceipt?.phase).toBe(receiptPhase);
+			expect(entry.active).toBe(active);
+		},
+	);
 	it("所属结果让位于在途 PTY 回执，自己的写前核验可以排除自己的回执", () => {
 		const manager = new TerminalSessionManager();
 		const { active } = installSession(manager, "");

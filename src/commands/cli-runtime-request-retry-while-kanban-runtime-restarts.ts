@@ -8,6 +8,12 @@ import {
 	queryAgentSessionPtyHostControllerPresence,
 	readHostedSessionBindingToAgentSessionPtyHostFromEnvironment,
 } from "../agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
+import {
+	readFreshKanbanRuntimeHandoverRestartInProgressMarker,
+	resolveKanbanRuntimeHandoverRestartInProgressMarkerPath,
+} from "../core/kanban-runtime-handover-restart-in-progress-marker";
+import { getKanbanRuntimePort } from "../core/runtime-endpoint";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
 
 // EXPERIMENT_NODE: 等 runtime 重启回来的上限；超过就照旧报错（runtime 可能是真停了）。
 export const MAXIMUM_WAIT_FOR_RESTARTING_KANBAN_RUNTIME_MS = 60_000;
@@ -28,14 +34,27 @@ export function isRuntimeConnectionRefusedTransportError(transportError: unknown
 	return false;
 }
 
-// 有证据时返回一句给人看的说明，没有证据返回 null。证据只来自本会话的 agent session PTY host：
-//   - host 有 controller 连着：新 runtime 已连上 host、正在接管，HTTP 还没开始监听；
-//   - controller 刚离开不久：旧 runtime 刚退出，新 runtime 还没连上。
-// 不在 hosted 会话里（没有 host 绑定）就没有证据，行为与以前一样。
+// 有证据时返回一句给人看的说明，没有证据返回 null。证据有两个来源：
+//   - 本端口的 runtime 留下的「正在计划内 handover 重启」标记（足够新才算）：对任何调用方都成立；
+//   - 本会话的 agent session PTY host（只在 hosted 会话里有）：
+//     - host 有 controller 连着：新 runtime 已连上 host、正在接管，HTTP 还没开始监听；
+//     - controller 刚离开不久：旧 runtime 刚退出，新 runtime 还没连上。
+// 两者都没有就不是重启，行为与以前一样。
 export async function readKanbanRuntimeRestartInProgressEvidence(
 	environment: NodeJS.ProcessEnv,
 	nowEpochMs: number,
+	handoverRestartInProgressMarkerPath: string = resolveKanbanRuntimeHandoverRestartInProgressMarkerPath({
+		runtimeHomeDirectoryPath: getRuntimeHomePath(),
+		runtimePort: getKanbanRuntimePort(),
+	}),
 ): Promise<string | null> {
+	const handoverRestartInProgressMarker = readFreshKanbanRuntimeHandoverRestartInProgressMarker(
+		handoverRestartInProgressMarkerPath,
+		nowEpochMs,
+	);
+	if (handoverRestartInProgressMarker !== null) {
+		return `计划内 handover 重启已进行 ${Math.round((nowEpochMs - handoverRestartInProgressMarker.handoverRestartStartedAtEpochMs) / 1000)}s`;
+	}
 	const hostedSessionBinding = readHostedSessionBindingToAgentSessionPtyHostFromEnvironment(environment);
 	if (hostedSessionBinding === null) {
 		return null;

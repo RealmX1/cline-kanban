@@ -111,6 +111,8 @@ import type {
 	RuntimeOpenFileRequest,
 	RuntimeOpenFileResponse,
 	RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest,
+	RuntimePlannedHandoverRestartRequest,
+	RuntimePlannedHandoverRestartResponse,
 	RuntimeProjectAddRequest,
 	RuntimeProjectAddResponse,
 	RuntimeProjectDirectoryPickerResponse,
@@ -145,6 +147,7 @@ import type {
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
+	RuntimeStopTerminatingHostedAgentSessionsResponse,
 	RuntimeTaskAgentUserDecisionResolveRequest,
 	RuntimeTaskAgentUserDecisionResolveResponse,
 	RuntimeTaskCardActionMoveBetweenNonTrashColumnsRequest,
@@ -344,6 +347,8 @@ import {
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
 	runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema,
+	runtimePlannedHandoverRestartRequestSchema,
+	runtimePlannedHandoverRestartResponseSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
@@ -380,6 +385,7 @@ import {
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
+	runtimeStopTerminatingHostedAgentSessionsResponseSchema,
 	runtimeTaskAgentUserDecisionResolveRequestSchema,
 	runtimeTaskAgentUserDecisionResolveResponseSchema,
 	runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema,
@@ -970,6 +976,10 @@ export interface RuntimeTrpcContext {
 		openFile: (input: RuntimeOpenFileRequest) => Promise<RuntimeOpenFileResponse>;
 		getUpdateStatus: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeUpdateStatusResponse>;
 		runUpdateNow: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeRunUpdateResponse>;
+		requestPlannedHandoverRestartPreservingHostedAgentSessions: (
+			input: RuntimePlannedHandoverRestartRequest,
+		) => Promise<RuntimePlannedHandoverRestartResponse>;
+		requestRuntimeStopTerminatingHostedAgentSessions: () => Promise<RuntimeStopTerminatingHostedAgentSessionsResponse>;
 		broadcastNotificationArchiveChanged?: () => Promise<void>;
 		markTaskNotificationsVisited: (
 			scope: RuntimeTrpcWorkspaceScope | null,
@@ -2326,6 +2336,21 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeRunUpdateResponseSchema)
 			.mutation(async ({ ctx }) => {
 				return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
+			}),
+		// `kanban runtime handover-restart`：热重启，agent session PTY host 里的会话留给下一个 runtime 接管。
+		// 输入从首版起冻结（新 CLI 会对旧 runtime 发它）。回完响应才开始 handover。
+		requestPlannedHandoverRestartPreservingHostedAgentSessions:
+			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+				.input(runtimePlannedHandoverRestartRequestSchema)
+				.output(runtimePlannedHandoverRestartResponseSchema)
+				.mutation(async ({ ctx, input }) => {
+					return await ctx.runtimeApi.requestPlannedHandoverRestartPreservingHostedAgentSessions(input);
+				}),
+		// `kanban runtime stop --terminate-hosted-agent-sessions`：停 runtime 并终止全部 hosted 会话（含未接管的）。
+		requestRuntimeStopTerminatingHostedAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeStopTerminatingHostedAgentSessionsResponseSchema)
+			.mutation(async ({ ctx }) => {
+				return await ctx.runtimeApi.requestRuntimeStopTerminatingHostedAgentSessions();
 			}),
 		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。procedureRejectingUnknownWebUiPageLoadRequestOriginNonce 不强制 workspace scope。
 		markTaskNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce

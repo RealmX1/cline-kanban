@@ -104,12 +104,14 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 	if (input.deliveryJournal) {
 		if (!workingDirectoryPath || !requestedNativeSessionId) return { status: "unconfirmed" };
 		try {
+			const canonicalWorkingDirectoryPath = await canonicalWorkingDirectory(workingDirectoryPath);
+			if (!input.isCurrent()) return { status: "unconfirmed" };
 			persisted = await input.deliveryJournal.prepare({
 				clientUserMessageId: input.clientUserMessageId,
 				workspaceId: input.workspaceId,
 				conversationSessionId: summary.taskId,
 				nativeSessionId: requestedNativeSessionId,
-				workingDirectoryPath: await canonicalWorkingDirectory(workingDirectoryPath),
+				workingDirectoryPath: canonicalWorkingDirectoryPath,
 				text: input.text,
 				...(input.expectedHistoricalPromptSha256
 					? { historicalPromptSha256: input.expectedHistoricalPromptSha256 }
@@ -141,6 +143,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 		persisted?.previousTurnId ?? input.previouslySubmitted?.predecessorNativeTurnId ?? null;
 	let acceptanceHistoryQueryProgress = requestAttempted ? persisted?.acceptanceHistoryQueryProgress : undefined;
 	const rememberAcceptanceHistoryQueryProgress = async (progress: CodexNativePromptAcceptanceHistoryQueryProgress) => {
+		if (!input.isCurrent()) return;
 		await input.deliveryJournal?.recordAcceptanceHistoryQueryProgress(progress);
 		acceptanceHistoryQueryProgress = progress;
 	};
@@ -196,6 +199,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 			try {
 				page = await readTurnsPage(port, cursor);
 			} catch (error) {
+				if (!input.isCurrent()) return { evidence: null, latestTurns, complete: false };
 				if (!requestAttempted) throw error;
 				// cursor 可能在原生历史变更后失效；只重置查询进度，当前结果仍是未知。
 				await rememberAcceptanceHistoryQueryProgress({
@@ -205,6 +209,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 				});
 				return { evidence: null, latestTurns, complete: false };
 			}
+			if (!input.isCurrent()) return { evidence: null, latestTurns, complete: false };
 			queriedPageCount += 1;
 			if (cursor === null) latestTurns = page.data;
 			const evidence = findAcceptance(page.data);
@@ -277,6 +282,7 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						// 一旦开始调用，超时、断线、协议错误都只能读回核对。绝不重发，也不切回 PTY。
 						requestAttempted = true;
 						await input.deliveryJournal?.recordRequestIntent(previousTurnId);
+						if (!input.isCurrent()) return { status: "unconfirmed" };
 						await input.onRequestAttempted({ predecessorNativeTurnId: previousTurnId });
 						if (!input.isCurrent()) return { status: "unconfirmed" };
 						if (input.mayInvokeNativeTurnStartRequest?.() === false) {
@@ -301,8 +307,11 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 									() => ({ response: null }),
 								);
 							await input.deliveryJournal?.recordRequestInvoked();
-							returnedTurnId = submittedTurnSchema.parse((await pendingResponse).response).turn.id;
+							const response = await pendingResponse;
+							if (!input.isCurrent()) return { status: "unconfirmed" };
+							returnedTurnId = submittedTurnSchema.parse(response.response).turn.id;
 							await input.deliveryJournal?.recordReturnedTurn(returnedTurnId);
+							if (!input.isCurrent()) return { status: "unconfirmed" };
 							await input.onNativeTurnStarted?.(returnedTurnId);
 						} catch {
 							// 原生调用可能已经提交；下方只查语义接受记录。

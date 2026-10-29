@@ -2,11 +2,16 @@
 // 实际的 PTY master 在 agent session PTY host 进程里，所有操作经 controller 连接转发。
 
 import type { TerminalPtyProcessExitEvent, TerminalPtyProcessHandle } from "../../terminal/terminal-pty-process-handle";
+import { omitPlannedHandoverTerminalMirrorCheckpointFromAdoptionRecord } from "../wire-protocol/agent-session-pty-host-control-message-checkpoint-payload-budget";
+import { AGENT_SESSION_PTY_HOST_WIRE_FRAME_MAXIMUM_PAYLOAD_BYTE_LENGTH } from "../wire-protocol/agent-session-pty-host-wire-frame-codec";
+import type { PutHostedSessionAdoptionRecordMessage } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 import type { AgentSessionPtyHostControllerConnection } from "./agent-session-pty-host-controller-connection";
 
 export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements TerminalPtyProcessHandle {
 	private exited = false;
 	private interrupted = false;
+	// 计划内 handover 已把会话交给下一个 runtime：本句柄此后对进程什么都不做（尤其绝不发 stop），也不再接收事件。
+	private detachedForRuntimeHandoverRestart = false;
 	// 下一个应当到达的输出字节的绝对偏移。到达帧的偏移与它不符说明有缺段或重复（接管续流时用于对齐）。
 	private nextExpectedOutputByteOffset = 0;
 
@@ -17,15 +22,23 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		readonly pid: number,
 		private readonly onData: (chunk: Buffer) => void,
 		private readonly onExit: (event: TerminalPtyProcessExitEvent) => void,
+		// 接管时从追赶终点继续计数；创建时间独立沿用 host 的真实值。
+		initialOutputByteOffset = 0,
 		readonly hostedTerminalPtySessionSpawnedAtEpochMs?: number,
-	) {}
+	) {
+		this.nextExpectedOutputByteOffset = initialOutputByteOffset;
+	}
 
 	get outputByteOffsetAfterLastDeliveredChunk(): number {
 		return this.nextExpectedOutputByteOffset;
 	}
 
+	private get mayOperateOnHostedProcess(): boolean {
+		return !this.exited && !this.detachedForRuntimeHandoverRestart;
+	}
+
 	write(data: string | Buffer): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.controllerConnection.sendHostedSessionInputBytes(
@@ -35,7 +48,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	}
 
 	resize(cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.controllerConnection.sendControlMessage({
@@ -48,7 +61,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	}
 
 	pause(): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.controllerConnection.sendControlMessage({
@@ -58,7 +71,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	}
 
 	resume(): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.controllerConnection.sendControlMessage({
@@ -71,7 +84,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		if (options?.interrupted) {
 			this.interrupted = true;
 		}
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.controllerConnection.sendControlMessage({
@@ -85,15 +98,32 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		return this.exited;
 	}
 
-	publishTerminalSessionAdoptionRecordForRuntimeRestart(adoptionRecord: unknown): void {
-		if (this.exited) {
+	// hostedSessionOrphanReclamationEligibleAtEpochMs：只有 detach 时才带期限；平时一律 null（见 wire-protocol）。
+	publishTerminalSessionAdoptionRecordForRuntimeRestart(
+		adoptionRecord: unknown,
+		hostedSessionOrphanReclamationEligibleAtEpochMs: number | null = null,
+	): void {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
-		this.controllerConnection.sendControlMessage({
+		const message: PutHostedSessionAdoptionRecordMessage = {
 			type: "put_hosted_session_adoption_record",
 			hostedSessionKey: this.hostedSessionKey,
 			adoptionRecord,
-		});
+			hostedSessionOrphanReclamationEligibleAtEpochMs,
+		};
+		if (
+			Buffer.byteLength(JSON.stringify(message), "utf8") >
+			AGENT_SESSION_PTY_HOST_WIRE_FRAME_MAXIMUM_PAYLOAD_BYTE_LENGTH
+		) {
+			message.adoptionRecord = omitPlannedHandoverTerminalMirrorCheckpointFromAdoptionRecord(adoptionRecord);
+		}
+		this.controllerConnection.sendControlMessage(message);
+	}
+
+	// 不发任何信号、不关 PTY：进程照常跑在 host 里，等下一个 runtime 接管。调用前必须已推完最终接管记录。
+	detachFromRuntimeForHandoverRestartWithoutSignallingProcess(): void {
+		this.detachedForRuntimeHandoverRestart = true;
 	}
 
 	wasInterrupted(): boolean {
@@ -101,7 +131,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	}
 
 	deliverHostedSessionOutput(startByteOffset: number, bytes: Buffer): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.nextExpectedOutputByteOffset = startByteOffset + bytes.byteLength;
@@ -109,7 +139,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	}
 
 	deliverHostedSessionExit(event: TerminalPtyProcessExitEvent): void {
-		if (this.exited) {
+		if (!this.mayOperateOnHostedProcess) {
 			return;
 		}
 		this.exited = true;

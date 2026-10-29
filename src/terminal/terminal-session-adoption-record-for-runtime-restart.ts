@@ -86,7 +86,19 @@ export interface TerminalSessionAdoptionRederivationInputs {
 }
 
 // 新 runtime 必须能读旧 runtime 写的记录：改结构就升版本；读到不认识的版本时退回「合成三元组」那一级，绝不因此杀会话。
+// 只增可选字段不升版本（旧 runtime 读到会忽略，新 runtime 读旧记录按缺省处理）。
 export const TERMINAL_SESSION_ADOPTION_RECORD_SCHEMA_VERSION = 1;
+
+// 计划内 handover 时的屏幕 checkpoint：mirror 的完整序列化（含 scrollback）与它覆盖到的输出偏移。
+// 下一个 runtime 先把它写进新 mirror，再从这个偏移续流——屏幕与 scrollback 原样延续，不必从环形缓冲起点重放
+// （环形缓冲只有 2 MiB，长会话的 scrollback 早被覆盖），也不必让 TUI 整屏重绘。
+// 偏移已不在 host 环形缓冲的保留区间里（runtime 缺席期间输出超过了缓冲容量）时不可用，退回崩溃路径。
+export interface PlannedHandoverTerminalMirrorCheckpoint {
+	serializedTerminalMirrorSnapshot: string;
+	cols: number;
+	rows: number;
+	outputByteOffsetCoveredBySnapshot: number;
+}
 
 export interface TerminalSessionAdoptionRecord {
 	terminalSessionAdoptionRecordSchemaVersion: typeof TERMINAL_SESSION_ADOPTION_RECORD_SCHEMA_VERSION;
@@ -94,6 +106,8 @@ export interface TerminalSessionAdoptionRecord {
 	summary: RuntimeTaskSessionSummary;
 	carriedActiveProcessStateFields: ActiveProcessStateFieldsCarriedInAdoptionRecord;
 	rederivationInputs: TerminalSessionAdoptionRederivationInputs;
+	// 只有计划内 handover 推的最终记录带它；接管后下一次推送即不再携带。
+	plannedHandoverTerminalMirrorCheckpoint?: PlannedHandoverTerminalMirrorCheckpoint;
 }
 
 export function captureActiveProcessStateFieldsCarriedInAdoptionRecord(
@@ -131,6 +145,7 @@ export function buildTerminalSessionAdoptionRecord(input: {
 	summary: RuntimeTaskSessionSummary;
 	active: ActiveProcessState;
 	recordedAtEpochMs: number;
+	plannedHandoverTerminalMirrorCheckpoint?: PlannedHandoverTerminalMirrorCheckpoint;
 }): TerminalSessionAdoptionRecord {
 	return {
 		terminalSessionAdoptionRecordSchemaVersion: TERMINAL_SESSION_ADOPTION_RECORD_SCHEMA_VERSION,
@@ -142,6 +157,35 @@ export function buildTerminalSessionAdoptionRecord(input: {
 			suppressDeviceAttributeQueries: input.active.terminalProtocolFilter.suppressDeviceAttributeQueries,
 			outputReactionEngineWasActive: input.active.outputReactionEngine !== null,
 		},
+		...(input.plannedHandoverTerminalMirrorCheckpoint !== undefined
+			? { plannedHandoverTerminalMirrorCheckpoint: input.plannedHandoverTerminalMirrorCheckpoint }
+			: {}),
+	};
+}
+
+function readPlannedHandoverTerminalMirrorCheckpoint(
+	rawCheckpoint: unknown,
+): PlannedHandoverTerminalMirrorCheckpoint | undefined {
+	if (!isRecordObject(rawCheckpoint)) {
+		return undefined;
+	}
+	const { serializedTerminalMirrorSnapshot, cols, rows, outputByteOffsetCoveredBySnapshot } = rawCheckpoint;
+	if (
+		typeof serializedTerminalMirrorSnapshot !== "string" ||
+		!Number.isInteger(cols) ||
+		!Number.isInteger(rows) ||
+		!Number.isInteger(outputByteOffsetCoveredBySnapshot) ||
+		(cols as number) <= 0 ||
+		(rows as number) <= 0 ||
+		(outputByteOffsetCoveredBySnapshot as number) < 0
+	) {
+		return undefined;
+	}
+	return {
+		serializedTerminalMirrorSnapshot,
+		cols: cols as number,
+		rows: rows as number,
+		outputByteOffsetCoveredBySnapshot: outputByteOffsetCoveredBySnapshot as number,
 	};
 }
 
@@ -179,6 +223,10 @@ export function parseTerminalSessionAdoptionRecord(rawAdoptionRecord: unknown): 
 		return { kind: "malformed_adoption_record", reason: "rederivationInputs is not an object" };
 	}
 	const recordedAtEpochMs = rawAdoptionRecord.recordedAtEpochMs;
+	// checkpoint 形状不对只丢掉 checkpoint（退回崩溃路径的重放），不让整份记录作废。
+	const plannedHandoverTerminalMirrorCheckpoint = readPlannedHandoverTerminalMirrorCheckpoint(
+		rawAdoptionRecord.plannedHandoverTerminalMirrorCheckpoint,
+	);
 	return {
 		kind: "usable_adoption_record",
 		adoptionRecord: {
@@ -189,6 +237,7 @@ export function parseTerminalSessionAdoptionRecord(rawAdoptionRecord: unknown): 
 				rawAdoptionRecord.carriedActiveProcessStateFields as unknown as ActiveProcessStateFieldsCarriedInAdoptionRecord,
 			rederivationInputs:
 				rawAdoptionRecord.rederivationInputs as unknown as TerminalSessionAdoptionRederivationInputs,
+			...(plannedHandoverTerminalMirrorCheckpoint !== undefined ? { plannedHandoverTerminalMirrorCheckpoint } : {}),
 		},
 	};
 }

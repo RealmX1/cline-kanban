@@ -106,6 +106,7 @@ export class HostedSessionHookSpoolDrainCoordinator {
 	private spooledHookIngestRequestApplier: SpooledHookIngestRequestApplier | null = null;
 	private readonly waitersForApplierBinding: Array<() => void> = [];
 	private readonly waitBeforeRetryingSpooledHookEventApply: (delayMilliseconds: number) => Promise<void>;
+	private readonly runningDrainLoops = new Set<Promise<void>>();
 
 	constructor(private readonly options: HostedSessionHookSpoolDrainCoordinatorOptions) {
 		this.waitBeforeRetryingSpooledHookEventApply =
@@ -211,9 +212,22 @@ export class HostedSessionHookSpoolDrainCoordinator {
 		});
 		if (!registration.drainLoopRunning) {
 			registration.drainLoopRunning = true;
-			void this.runDrainLoopUntilHookSpoolReadsBackEmptyWithoutNewerReadRequests(registration);
+			const drainLoop = this.runDrainLoopUntilHookSpoolReadsBackEmptyWithoutNewerReadRequests(registration);
+			this.runningDrainLoops.add(drainLoop);
+			void drainLoop.finally(() => {
+				this.runningDrainLoops.delete(drainLoop);
+			});
 		}
 		return freshHookSpoolReadApplied;
+	}
+
+	// 计划内 handover：注销全部目标（不再起新的应用），并等在途的应用跑完。之后才推最终接管记录——
+	// 在途那条应用完却来不及确认时，它的幂等 key 已在记录里，下一个 runtime 重读到它只确认、不重放。
+	async forgetEveryHookSpoolDrainTargetAndWaitForRunningDrainLoopsToStop(): Promise<void> {
+		for (const hostedSessionKey of [...this.registrationsByHostedSessionKey.keys()]) {
+			this.forgetHookSpoolDrainTargetHostedSession(hostedSessionKey);
+		}
+		await Promise.all([...this.runningDrainLoops]);
 	}
 
 	private async runDrainLoopUntilHookSpoolReadsBackEmptyWithoutNewerReadRequests(

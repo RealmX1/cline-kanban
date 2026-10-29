@@ -27,7 +27,15 @@ export interface TerminalPtyProcessHandle {
 	hasExited(): boolean;
 	wasInterrupted(): boolean;
 	// 仅 hosted 句柄实现：把热重启接管记录推给 PTY host 保管（runtime 被 kill -9 后新 runtime 从 host 取回）。
-	publishTerminalSessionAdoptionRecordForRuntimeRestart?(adoptionRecord: unknown): void;
+	// hostedSessionOrphanReclamationEligibleAtEpochMs：runtime 不在时 host 据此回收会话；只有 detach 时才带，平时为 null。
+	publishTerminalSessionAdoptionRecordForRuntimeRestart?(
+		adoptionRecord: unknown,
+		hostedSessionOrphanReclamationEligibleAtEpochMs?: number | null,
+	): void;
+	// 仅 hosted 句柄实现：已交付给 session-manager 的输出截止到哪个绝对字节偏移（handover checkpoint 与之对齐）。
+	readonly outputByteOffsetAfterLastDeliveredChunk?: number;
+	// 仅 hosted 句柄实现：计划内 handover 把会话留给下一个 runtime。不发任何信号，此后句柄对进程什么都不做。
+	detachFromRuntimeForHandoverRestartWithoutSignallingProcess?(): void;
 }
 
 export type HostedTerminalPtySessionKind = "task_agent_session" | "shell_session";
@@ -67,11 +75,20 @@ export interface HostedTerminalPtySessionAdoptionCandidate {
 	cols: number;
 	rows: number;
 	exitedWhileRuntimeWasAbsent: boolean;
+	// host 在 runtime 缺席期间按回收期限终止了它（孤儿回收）：接管时补记回收账本。
+	reclaimedByHostWhileRuntimeWasAbsent: boolean;
+	// host 环形缓冲当前保留的输出区间 [retained, end)：handover checkpoint 的偏移落在其中才能从 checkpoint 续流。
+	retainedOutputStartByteOffset: number;
+	outputEndByteOffset: number;
 	// 上一个 runtime 推给 host 的接管记录原文；由 session-manager 解析（见 terminal-session-adoption-record-for-runtime-restart.ts）。
 	terminalSessionAdoptionRecord: unknown;
-	// 订阅输出并返回句柄。返回之前，环形缓冲里的历史输出经 onCatchUpOutput 交付（只该喂给 mirror，
-	// 绝不进字节流检测与查询应答）；之后的实时输出经 onData、退出经 onExit。
+	// 订阅输出并返回句柄。返回之前，环形缓冲里 [fromOutputByteOffset, 末尾) 的历史输出经 onCatchUpOutput 交付
+	// （只该喂给 mirror，绝不进字节流检测与查询应答）；之后的实时输出经 onData、退出经 onExit。
+	// fromOutputByteOffset 缺省为环形缓冲保留起点（崩溃路径）；计划内 handover 后为 checkpoint 的偏移。
 	adoptHostedTerminalPtyProcess(callbacks: {
+		fromOutputByteOffset?: number;
+		// attach 时才确证的覆盖缺口：必须在交付任何追赶字节前丢弃旧 checkpoint、重新建立 mirror。
+		onCatchUpOutputGap?: () => void | Promise<void>;
 		onCatchUpOutput: (bytes: Buffer) => void;
 		onData: (chunk: Buffer) => void;
 		onExit: (event: TerminalPtyProcessExitEvent) => void;

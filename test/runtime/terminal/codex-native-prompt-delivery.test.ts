@@ -139,6 +139,51 @@ function installNativeResponses(
 }
 
 describe("Codex 原生投递保留 composer", () => {
+	it.each(["request_intent", "native_response", "acceptance_response", "acceptance_error"] as const)(
+		"%s 的 await 之后资格已撤销就不再写正文或结算回执",
+		async (phase) => {
+			let isCurrent = true;
+			const originalRequest = mocks.request.getMockImplementation();
+			if (!originalRequest) throw new Error("缺少原生请求夹具");
+			mocks.request.mockImplementation(async (method, ...args) => {
+				const response = await originalRequest(method, ...args);
+				if (method === "turn/start" && phase === "native_response") isCurrent = false;
+				if (
+					method === "thread/turns/list" &&
+					mocks.request.mock.calls.some(([calledMethod]) => calledMethod === "turn/start")
+				) {
+					if (phase === "acceptance_response" || phase === "acceptance_error") isCurrent = false;
+					if (phase === "acceptance_error") throw new Error("关闭后才返回的历史查询失败");
+				}
+				return response;
+			});
+			const journal = {
+				prepare: vi.fn(async () => ({
+					clientUserMessageId: CLIENT_MESSAGE_ID,
+					requestMayHaveBeenSent: false,
+					previousTurnId: null,
+					returnedTurnId: null,
+				})),
+				recordRequestIntent: vi.fn(async () => {
+					if (phase === "request_intent") isCurrent = false;
+				}),
+				recordTerminalPtyWriteIntent: vi.fn(async () => {}),
+				recordRequestInvoked: vi.fn(async () => {}),
+				recordReturnedTurn: vi.fn(async () => {}),
+				recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
+				recordAcceptance: vi.fn(async () => {}),
+			};
+			const input = createInput({ isCurrent: () => isCurrent, deliveryJournal: journal });
+			expect((await deliverCodexNativePromptWithoutChangingComposer(input)).status).toBe("unconfirmed");
+			expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+				phase === "request_intent" ? 0 : 1,
+			);
+			expect(journal.recordReturnedTurn).toHaveBeenCalledTimes(phase.startsWith("acceptance_") ? 1 : 0);
+			expect(journal.recordAcceptance).not.toHaveBeenCalled();
+			expect(journal.recordAcceptanceHistoryQueryProgress).not.toHaveBeenCalled();
+			if (phase === "request_intent") expect(input.onRequestAttempted).not.toHaveBeenCalled();
+		},
+	);
 	beforeEach(() => {
 		vi.resetAllMocks();
 		mocks.connect.mockImplementation(async (operation) => operation({ request: mocks.request }));

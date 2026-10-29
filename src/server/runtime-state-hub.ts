@@ -54,6 +54,10 @@ import type {
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 } from "../core/api-contract";
 import { runtimeStateStreamClientMessageSchema } from "../core/api-contract";
+import {
+	WEBSOCKET_CLOSE_CODE_SERVICE_RESTART,
+	WEBSOCKET_CLOSE_REASON_KANBAN_RUNTIME_HANDOVER_RESTART,
+} from "../core/kanban-runtime-handover-restart-websocket-close";
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import {
 	isNotifiableUserTurn,
@@ -184,6 +188,8 @@ export interface RuntimeStateHub {
 		workspaceId: string,
 		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
 	) => void;
+	// 计划内 handover：以 1012（Service Restart）关闭全部状态流连接，浏览器据此提示「正在热重启」。
+	closeBrowserConnectionsBecauseRuntimeIsRestarting: () => void;
 	close: () => Promise<void>;
 }
 
@@ -1450,6 +1456,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		broadcastQueuedTaskPromptDeliveriesUpdated,
 		broadcastTaskResourceUsageSnapshotsUpdated,
+		closeBrowserConnectionsBecauseRuntimeIsRestarting: () => {
+			for (const client of runtimeStateClients) {
+				try {
+					client.close(
+						WEBSOCKET_CLOSE_CODE_SERVICE_RESTART,
+						WEBSOCKET_CLOSE_REASON_KANBAN_RUNTIME_HANDOVER_RESTART,
+					);
+				} catch {
+					// 连接已在断开中。
+				}
+			}
+		},
 		close: async () => {
 			broadcastCostRecorder?.close();
 			unsubscribePromptLibraryChanges();

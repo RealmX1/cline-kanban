@@ -7,6 +7,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-theme";
+import {
+	isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting,
+	KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE,
+} from "@/runtime/kanban-runtime-hot-restart-websocket-close";
 import { estimateTaskSessionGeometry, SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
@@ -1104,7 +1108,7 @@ class PersistentTerminal {
 			this.lastError = "Terminal stream failed.";
 			this.notifyLastError();
 		};
-		ioSocket.onclose = () => {
+		ioSocket.onclose = (closeEvent) => {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
@@ -1112,7 +1116,13 @@ class PersistentTerminal {
 			this.outputTextDecoder = new TextDecoder();
 			this.connectionReady = false;
 			this.clearTerminalTransportConnectionStabilityTimer();
-			this.lastError = "Terminal stream closed. Reconnecting...";
+			// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
+			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
+				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
+				this.reconnectAttempt = 0;
+			} else {
+				this.lastError = "Terminal stream closed. Reconnecting...";
+			}
 			this.notifyLastError();
 			this.scheduleReconnect();
 		};
@@ -1214,7 +1224,7 @@ class PersistentTerminal {
 			this.lastError = "Terminal control connection failed.";
 			this.notifyLastError();
 		};
-		controlSocket.onclose = () => {
+		controlSocket.onclose = (closeEvent) => {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
@@ -1222,7 +1232,12 @@ class PersistentTerminal {
 			this.connectionReady = false;
 			this.clearTerminalTransportConnectionStabilityTimer();
 			this.restoreCompleted = false;
-			this.lastError = "Terminal control connection closed. Reconnecting...";
+			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
+				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
+				this.reconnectAttempt = 0;
+			} else {
+				this.lastError = "Terminal control connection closed. Reconnecting...";
+			}
 			this.notifyLastError();
 			this.scheduleReconnect();
 		};

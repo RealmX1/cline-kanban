@@ -42,9 +42,9 @@ const HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTi
 	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 15_000,
 };
 const HOST_PROCESS_EXITS_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
-	waitedForDescription: "host 进程自行退出（空闲自退 / 显式全停）",
-	softDeadlineMsExpectedOnUncontendedHost: 3_000,
-	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 20_000,
+	waitedForDescription: "host 完成 5s 进程组升级窗口后自行退出（空闲自退 / 显式全停）",
+	softDeadlineMsExpectedOnUncontendedHost: 8_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 30_000,
 };
 // 用例超时：一次 host 冷启动 + 若干次输出 / 退出等待的硬档之和，闭合外层预算。
 const AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS =
@@ -507,6 +507,74 @@ describe.skipIf(process.platform === "win32")("agent session pty host process", 
 			expect(isProcessAlive(handleOfCrashedRuntime.pid)).toBe(false);
 			await restartedAgainFacade.closeControllerConnectionsAfterFlushingPendingFrames();
 			await restartedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
+		},
+		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"reclaims a session past its reclamation deadline only while no runtime is connected, and records why it exited",
+		async (testContext) => {
+			const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
+			const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
+			const detachingController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+			recordControllerEvents(detachingController);
+			const { pid: pidPastDeadline } = await spawnHostedShellSession(
+				detachingController,
+				"session-past-deadline",
+				"sleep 600",
+			);
+			const { pid: pidInAgentTurn } = await spawnHostedShellSession(
+				detachingController,
+				"session-in-agent-turn",
+				"sleep 600",
+			);
+			// detach 时推的最终记录：一条期限已过，一条在 agent 回合中（null，绝不回收）。
+			detachingController.sendControlMessage({
+				type: "put_hosted_session_adoption_record",
+				hostedSessionKey: "session-past-deadline",
+				adoptionRecord: { recordedBy: "detaching runtime" },
+				hostedSessionOrphanReclamationEligibleAtEpochMs: Date.now() - 1_000,
+			});
+			detachingController.sendControlMessage({
+				type: "put_hosted_session_adoption_record",
+				hostedSessionKey: "session-in-agent-turn",
+				adoptionRecord: { recordedBy: "detaching runtime" },
+				hostedSessionOrphanReclamationEligibleAtEpochMs: null,
+			});
+			// controller 在线时 host 不插手回收（期限归 runtime 自己的调度器）。
+			expect(await detachingController.requestListHostedSessions()).toMatchObject([
+				{ hostedSessionKey: "session-past-deadline", exitRecord: null },
+				{ hostedSessionKey: "session-in-agent-turn", exitRecord: null },
+			]);
+			expect(isProcessAlive(pidPastDeadline)).toBe(true);
+
+			await detachingController.closeAfterFlushingPendingFrames();
+			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+				testContext,
+				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+				() => !isProcessAlive(pidPastDeadline),
+			);
+			expect(isProcessAlive(pidInAgentTurn)).toBe(true);
+
+			const returningController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+			recordControllerEvents(returningController);
+			const hostedSessionsSeenByReturningRuntime = await returningController.requestListHostedSessions();
+			expect(
+				hostedSessionsSeenByReturningRuntime.find((listing) => listing.hostedSessionKey === "session-past-deadline")
+					?.exitRecord,
+			).toMatchObject({ hostedSessionTerminatedByHostReason: "reclaimed_by_host_while_runtime_absent" });
+			expect(
+				hostedSessionsSeenByReturningRuntime.find((listing) => listing.hostedSessionKey === "session-in-agent-turn")
+					?.exitRecord,
+			).toBeNull();
+
+			returningController.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
+			await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+				testContext,
+				hostProcess,
+				HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
+			);
+			expect(isProcessAlive(pidInAgentTurn)).toBe(false);
 		},
 		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
 	);

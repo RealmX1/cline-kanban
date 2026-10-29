@@ -155,6 +155,32 @@ function continuedAfterStopFixture() {
 }
 
 describe("Codex 后台终端执行状态与误判纠正", () => {
+	it.each(["running", "unknown", "finished"] as const)(
+		"detach 原生状态 %s 时只给确证结束的回合下发期限",
+		async (executionStatus) => {
+			const { manager, entry } = fixture(true);
+			nativeExecutionRead.mockResolvedValue(execution({ executionStatus }));
+			const publish = vi.fn();
+			Object.assign(entry, { terminalStateMirror: null });
+			Object.assign(entry.active, {
+				recentlyAppliedHookEventDeliveryIdempotencyKeys: [],
+				terminalProtocolFilter: { pendingChunk: null },
+				taskChatInputDeliveryGeneration: 0,
+				submitConfirmGeneration: 0,
+				session: {
+					write: vi.fn(),
+					detachFromRuntimeForHandoverRestartWithoutSignallingProcess: vi.fn(),
+					publishTerminalSessionAdoptionRecordForRuntimeRestart: publish,
+				},
+			});
+			await manager.detachHostedPtySessionsForRuntimeHandover({
+				readHostedSessionOrphanReclamationEligibleAtEpochMs: (summary) =>
+					resolveSessionFacets(summary).turnOwner === "user" ? 1234 : null,
+			});
+			expect(nativeExecutionRead).toHaveBeenCalledOnce();
+			expect(publish).toHaveBeenCalledWith(expect.anything(), executionStatus === "finished" ? 1234 : null);
+		},
+	);
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.setSystemTime(NOW);

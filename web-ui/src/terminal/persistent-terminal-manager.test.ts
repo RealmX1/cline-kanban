@@ -42,6 +42,7 @@ const webSocketInstances = vi.hoisted(
 		[] as Array<{
 			addEventListener: (type: string, handler: (event: MessageEvent) => void) => void;
 			close: () => void;
+			closeFromServerWithCode: MockWebSocket["closeFromServerWithCode"];
 			messageListeners: Array<(event: MessageEvent) => void>;
 			onmessage: ((event: MessageEvent) => void) | null;
 			onopen: ((event: Event) => void) | null;
@@ -263,6 +264,12 @@ class MockWebSocket {
 	close(): void {
 		this.readyState = MockWebSocket.CLOSED;
 		this.onclose?.(new CloseEvent("close"));
+	}
+
+	// 服务端带关闭码关掉连接（例如热重启的 1012）。
+	closeFromServerWithCode(code: number): void {
+		this.readyState = MockWebSocket.CLOSED;
+		this.onclose?.(new CloseEvent("close", { code }));
 	}
 
 	send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
@@ -748,6 +755,35 @@ describe("persistent-terminal-manager", () => {
 		vi.advanceTimersByTime(20_000);
 		expect(webSocketInstances).toHaveLength(previousSocketCount);
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("runtime 以 1012 关闭流时说明热重启，并从最短退避重新连接", () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		const lastErrors: Array<string | null> = [];
+		terminal.subscribe({
+			onLastError: (message) => {
+				lastErrors.push(message);
+			},
+		});
+		terminal.mount(container, appearance, { isVisible: true });
+		const listIoSockets = () => webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
+
+		// 一次普通断线把退避推到下一档（500ms）。
+		listIoSockets()[0]?.close();
+		vi.advanceTimersByTime(250);
+		expect(listIoSockets()).toHaveLength(2);
+
+		listIoSockets()[1]?.closeFromServerWithCode(1012);
+		expect(lastErrors.at(-1)).toBe("Kanban is hot-restarting; agent sessions keep running. Reconnecting...");
+		// 退避已重置：250ms 就重连，而不是 500ms。
+		vi.advanceTimersByTime(250);
+		expect(listIoSockets()).toHaveLength(3);
 	});
 
 	// 运行时 redeploy（服务端重启）不会重建 PersistentTerminal：两条 socket 关闭只走 scheduleReconnect →

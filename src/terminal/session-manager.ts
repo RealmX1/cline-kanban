@@ -292,6 +292,10 @@ import {
 	parseTerminalSessionAdoptionRecord,
 	readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields,
 } from "./terminal-session-adoption-record-for-runtime-restart";
+import {
+	capturePlannedHandoverTerminalMirrorCheckpoint,
+	resolvePlannedHandoverTerminalMirrorCheckpointUsableForAdoption,
+} from "./terminal-session-planned-handover-terminal-mirror-checkpoint";
 import type { TerminalSessionListener, TerminalSessionService } from "./terminal-session-service";
 import { TerminalStateMirror } from "./terminal-state-mirror";
 
@@ -966,6 +970,18 @@ export type HostedTerminalPtySessionAdoptionOutcome =
 	// facade 会把这条会话如实留在未接管告警名单里（warnAboutHostedSessionsNotAdoptedDuringStartup）。
 	| { taskId: string; adoptionOutcome: "refused_and_terminated"; refusalReason: string };
 
+export interface TerminalSessionsDetachedForRuntimeHandoverRestart {
+	// 留在 agent session PTY host 里、等下一个 runtime 接管的会话（summary 原样持久化：仍是活着的）。
+	detachedHostedSessionSummaries: RuntimeTaskSessionSummary[];
+	// 进程内 PTY 会话（host 拉不起来时的降级）：活不过 runtime 退出，已按中断停止。
+	interruptedInProcessSessionSummaries: RuntimeTaskSessionSummary[];
+}
+
+export interface ActiveTerminalSessionCountsByPtyOwnership {
+	hostedInAgentSessionPtyHost: number;
+	inProcessPtyOwnedByRuntime: number;
+}
+
 export function chooseTaskSessionSummaryForHostedSessionAdoption(input: {
 	parsedAdoptionRecord: ParsedTerminalSessionAdoptionRecord;
 	persistedSummary: RuntimeTaskSessionSummary | null;
@@ -990,14 +1006,31 @@ export function chooseTaskSessionSummaryForHostedSessionAdoption(input: {
 		if (
 			persistedSummaryClaimsThisProcess &&
 			persistedSummary !== null &&
-			persistedSummary.runtimeSessionIncarnationId != null &&
+			persistedSummary.taskId === adoptionRecordSummary.taskId &&
+			Boolean(persistedSummary.runtimeSessionIncarnationId?.trim()) &&
 			persistedSummary.runtimeSessionIncarnationId === adoptionRecordSummary.runtimeSessionIncarnationId &&
-			persistedSummary.updatedAt > adoptionRecordSummary.updatedAt
+			persistedSummary.agentId === adoptionRecordSummary.agentId &&
+			persistedSummary.startedAt !== null &&
+			persistedSummary.startedAt === adoptionRecordSummary.startedAt
 		) {
+			const persistedActivityIsNewer = persistedSummary.updatedAt > adoptionRecordSummary.updatedAt;
+			const activitySummary = persistedActivityIsNewer ? persistedSummary : adoptionRecordSummary;
+			// 原生身份的确认水位独立于 activity：hook 可先把身份持久化，而 host 的 debounce 记录尚未追上；
+			// 反过来 disk activity 较新也不能把 host 已确认的较新身份倒退。只在同一活体绑定内挑选身份 sidecar。
+			const hostNativeIdentity = adoptionRecordSummary.agentNativeConversationSessionIdentity;
+			const persistedNativeIdentity = persistedSummary.agentNativeConversationSessionIdentity;
+			const nativeIdentity =
+				persistedNativeIdentity?.sourceAgentId === adoptionRecordSummary.agentId &&
+				(!hostNativeIdentity || persistedNativeIdentity.observedAt > hostNativeIdentity.observedAt)
+					? persistedNativeIdentity
+					: hostNativeIdentity;
 			return {
 				kind: "chosen",
-				summarySource: "persisted_sessions_json_of_same_incarnation",
-				summary: persistedSummary,
+				summarySource: persistedActivityIsNewer ? "persisted_sessions_json_of_same_incarnation" : "adoption_record",
+				summary:
+					activitySummary.agentNativeConversationSessionIdentity === nativeIdentity
+						? activitySummary
+						: { ...activitySummary, agentNativeConversationSessionIdentity: nativeIdentity },
 			};
 		}
 		return { kind: "chosen", summarySource: "adoption_record", summary: adoptionRecordSummary };
@@ -1409,6 +1442,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	>();
 	private readonly sideSessionNativeIdentityRecoveryInFlightByTaskId = new Map<string, Promise<void>>();
 	private sideSessionNativeIdentityRecoveryStoppedForRuntimeShutdown = false;
+	private programmaticInputDeliveryEligibilityRevokedForRuntimeHandover = false;
 
 	private hasIndependentSideSessionNativeIdentity(entry: SessionEntry): boolean {
 		const identity = entry.summary.agentNativeConversationSessionIdentity;
@@ -2867,6 +2901,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			preemptivelyStashHumanInputBox?: ProgrammaticDeliveryPreemptiveInputBoxStashHandler;
 		},
 	): RuntimeTaskSessionSummary | null {
+		if (this.programmaticInputDeliveryEligibilityRevokedForRuntimeHandover) return null;
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -3349,6 +3384,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				return bindingStillMatches() && active.lastUserInputAt === capturedHumanInputAt;
 			},
 			onRequestAttempted: async (_observation) => {
+				if (!bindingStillMatches()) return;
 				if (receipt) {
 					receipt.phase = "awaiting_codex_native_acceptance_confirmation";
 					receipt.firstSubmitCarriageReturnAtEpochMs = now();
@@ -4724,17 +4760,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 			suppressDeviceAttributeQueries:
 				adoptionRecord?.rederivationInputs.suppressDeviceAttributeQueries ?? agentId === "droid",
 		};
+		// 计划内 handover 留下的屏幕 checkpoint：可用时 mirror 从它起步、只追赶 checkpoint 之后的字节（屏幕与 scrollback
+		// 原样延续，不必让 TUI 重绘）；不可用（崩溃路径、或缺席期间输出超过了环形缓冲容量）时从环形缓冲起点重放。
+		let plannedHandoverTerminalMirrorCheckpoint = resolvePlannedHandoverTerminalMirrorCheckpointUsableForAdoption({
+			adoptionRecord,
+			retainedOutputStartByteOffset: adoptionCandidate.retainedOutputStartByteOffset,
+			outputEndByteOffset: adoptionCandidate.outputEndByteOffset,
+		});
 		// 追赶字节是历史输出：mirror 照常吃下以还原屏幕，但其中的终端查询（DA / CPR / OSC10/11）绝不能再应答给 agent。
 		// mirror 的写入是异步排队的，所以应答开关要等追赶字节全部应用完才打开。
 		let terminalStateMirrorMayAnswerTerminalQueries = false;
-		const terminalStateMirror = new TerminalStateMirror(adoptionCandidate.cols, adoptionCandidate.rows, {
-			onInputResponse: (data) => {
-				if (!terminalStateMirrorMayAnswerTerminalQueries || !entry.active || this.hasLiveOutputListener(entry)) {
-					return;
-				}
-				entry.active.session.write(data);
-			},
-		});
+		const createAdoptedTerminalStateMirror = (cols: number, rows: number) =>
+			new TerminalStateMirror(cols, rows, {
+				onInputResponse: (data) => {
+					if (!terminalStateMirrorMayAnswerTerminalQueries || !entry.active || this.hasLiveOutputListener(entry)) {
+						return;
+					}
+					entry.active.session.write(data);
+				},
+			});
+		let terminalStateMirror = createAdoptedTerminalStateMirror(
+			plannedHandoverTerminalMirrorCheckpoint?.cols ?? adoptionCandidate.cols,
+			plannedHandoverTerminalMirrorCheckpoint?.rows ?? adoptionCandidate.rows,
+		);
+		if (plannedHandoverTerminalMirrorCheckpoint !== null) {
+			terminalStateMirror.applyOutput(
+				Buffer.from(plannedHandoverTerminalMirrorCheckpoint.serializedTerminalMirrorSnapshot, "utf8"),
+			);
+			terminalStateMirror.resize(adoptionCandidate.cols, adoptionCandidate.rows);
+		}
 		const catchUpTerminalProtocolFilter = createTerminalProtocolFilterState(terminalProtocolFilterOptions);
 		const liveOutputChunksArrivedBeforeInstall: Buffer[] = [];
 		let exitEventArrivedBeforeInstall: PtyExitEvent | null = null;
@@ -4778,6 +4832,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		try {
 			adoptedHandle = await adoptionCandidate.adoptHostedTerminalPtyProcess({
+				...(plannedHandoverTerminalMirrorCheckpoint !== null
+					? { fromOutputByteOffset: plannedHandoverTerminalMirrorCheckpoint.outputByteOffsetCoveredBySnapshot }
+					: {}),
+				onCatchUpOutputGap: async () => {
+					// listing 只用于预判；attach 的真实偏移才决定能否续流。缺段时清空旧屏幕并启用既有重绘路径。
+					await terminalStateMirror.getScreenSnapshot();
+					terminalStateMirror.dispose();
+					terminalStateMirror = createAdoptedTerminalStateMirror(adoptionCandidate.cols, adoptionCandidate.rows);
+					plannedHandoverTerminalMirrorCheckpoint = null;
+				},
 				onCatchUpOutput: (bytes) => {
 					const filteredCatchUpBytes = filterTerminalProtocolOutput(catchUpTerminalProtocolFilter, bytes, {});
 					if (filteredCatchUpBytes.byteLength > 0) {
@@ -4907,7 +4971,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(entry.summary);
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
 		logTuiFreezeWarning(
-			`[hosted-session-adoption] adopted taskId=${taskId} pid=${adoptionCandidate.pid} kind=${adoptionCandidate.hostedSessionKind} summarySource=${summaryChoice.summarySource} adoptionRecord=${parsedAdoptionRecord.kind}`,
+			`[hosted-session-adoption] adopted taskId=${taskId} pid=${adoptionCandidate.pid} kind=${adoptionCandidate.hostedSessionKind} summarySource=${summaryChoice.summarySource} adoptionRecord=${parsedAdoptionRecord.kind} screenRestoredFrom=${plannedHandoverTerminalMirrorCheckpoint !== null ? "planned_handover_checkpoint" : "output_ring_buffer_replay"}`,
 		);
 		for (const chunk of liveOutputChunksArrivedBeforeInstall.splice(0)) {
 			handleAdoptedLiveOutput(chunk);
@@ -4922,8 +4986,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			};
 		}
 		if (adoptsTaskAgentSession) {
-			// 独占接管和原宿主验证完成后才恢复观测；绝不走 submitTaskChatInputWhenReady 重发。
-			this.nudgeAdoptedTerminalUserInterfaceToRedrawFullScreen(taskId, active);
+			// 独占接管后恢复观测；已有完整 checkpoint 时沿用屏幕，绝不重发输入。
+			// checkpoint 还原的屏幕是完整的，不必让 TUI 重绘；环形缓冲重放可能缺了开头，要重绘。
+			if (plannedHandoverTerminalMirrorCheckpoint === null) {
+				this.nudgeAdoptedTerminalUserInterfaceToRedrawFullScreen(taskId, active);
+			}
 			this.reevaluateScreenDependentEdgesAfterHostedSessionAdoption(taskId, active, screenTextAfterCatchUp);
 		}
 		return { taskId, adoptionOutcome: "adopted_running_session", summarySource: summaryChoice.summarySource };
@@ -9288,29 +9355,167 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
 		for (const entry of activeEntries) {
+			this.interruptAndStopActiveSessionForRuntimeShutdown(entry);
+		}
+		return activeEntries.map((entry) => cloneSummary(entry.summary));
+	}
+
+	// hard stop 与 detach 共同使用的同步门禁：必须在任何 checkpoint / hook drain 的 await 前撤销所有在途资格。
+	// 不结算旧 receipt，也不撤销持久的「可能已发送」标记；后继只能补证，不能盲目重发。
+	revokeProgrammaticInputDeliveryEligibilityForRuntimeHandover(): void {
+		if (this.programmaticInputDeliveryEligibilityRevokedForRuntimeHandover) return;
+		this.programmaticInputDeliveryEligibilityRevokedForRuntimeHandover = true;
+		for (const entry of this.entries.values()) {
+			if (!entry.active) continue;
+			clearTaskChatInputDeliveryTimer(entry.active);
+			clearSubmitConfirmTimer(entry.active);
+			entry.active.taskChatInputDeliveryGeneration++;
+			entry.active.submitConfirmGeneration++;
+		}
+	}
+
+	// 计划内 handover，以及信号触发的保活停止：hosted 会话留在 agent session PTY host 里由下一个 runtime 接管——
+	// 绝不发信号、不跑 cleanup；进程内 PTY（host 拉不起来时降级出的会话）活不过 runtime 退出，照旧按中断停止。
+	// 调用方必须先冻结 host 链路（facade.freezeHostedSessionEventRoutingAndStopHookSpoolDrainsForRuntimeHandover）：
+	// 此后句柄的输出偏移不再变化，checkpoint 才对得齐。
+	async detachHostedPtySessionsForRuntimeHandover(input: {
+		readHostedSessionOrphanReclamationEligibleAtEpochMs: (summary: RuntimeTaskSessionSummary) => number | null;
+	}): Promise<TerminalSessionsDetachedForRuntimeHandoverRestart> {
+		this.revokeProgrammaticInputDeliveryEligibilityForRuntimeHandover();
+		for (const entry of this.entries.values()) {
+			entry.suppressAutoRestartOnExit = true;
+			this.cancelPendingAutoRestart(entry);
+			this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
+		}
+		const detachedHostedSessionSummaries: RuntimeTaskSessionSummary[] = [];
+		const interruptedInProcessSessionSummaries: RuntimeTaskSessionSummary[] = [];
+		for (const [taskId, entry] of Array.from(this.entries.entries())) {
+			const active = entry.active;
+			if (!active) {
+				continue;
+			}
+			if (!active.session.detachFromRuntimeForHandoverRestartWithoutSignallingProcess) {
+				this.interruptAndStopActiveSessionForRuntimeShutdown(entry);
+				interruptedInProcessSessionSummaries.push(cloneSummary(entry.summary));
+				continue;
+			}
+			// 会往 PTY 里写字节、或改 summary 的定时器先停掉：进程归下一个 runtime 了，它会按接管记录重新武装。
+			stopWorkspaceTrustTimers(active);
+			clearStartupReadinessTimer(active);
+			clearOutputReactionTimer(active);
+			clearTaskChatInputDeliveryTimer(active);
+			clearSubmitConfirmTimer(active);
+			discardPendingOutputAnalysis(active);
+			const pendingPublicationTimer = this.pendingTerminalSessionAdoptionRecordPublicationTimersByTaskId.get(taskId);
+			if (pendingPublicationTimer !== undefined) {
+				clearTimeout(pendingPublicationTimer);
+				this.pendingTerminalSessionAdoptionRecordPublicationTimersByTaskId.delete(taskId);
+			}
+			const checkpointCapture = await capturePlannedHandoverTerminalMirrorCheckpoint({
+				terminalStateMirror: entry.terminalStateMirror,
+				active,
+			});
+			if (entry.active !== active) {
+				continue;
+			}
+			let orphanReclamationEligibleAt = input.readHostedSessionOrphanReclamationEligibleAtEpochMs(entry.summary);
+			if (orphanReclamationEligibleAt !== null) {
+				try {
+					const eligibility = await this.inspectCodexNativeTurnBeforeReviewSessionReclamation(taskId);
+					// 原生补证可能纠正误判、换代或推进回合；必须重新核对同一条 live 账本。
+					orphanReclamationEligibleAt =
+						eligibility === "allow_reclamation"
+							? input.readHostedSessionOrphanReclamationEligibleAtEpochMs(entry.summary)
+							: null;
+				} catch (error) {
+					orphanReclamationEligibleAt = null;
+					logTuiFreezeWarning(
+						`[runtime-handover] native-turn-recheck-deferred taskId=${taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+			if (entry.active !== active) continue;
+			const summary = cloneSummary(entry.summary);
+			active.session.publishTerminalSessionAdoptionRecordForRuntimeRestart?.(
+				buildTerminalSessionAdoptionRecord({
+					summary,
+					active,
+					recordedAtEpochMs: now(),
+					...(checkpointCapture.kind === "captured"
+						? { plannedHandoverTerminalMirrorCheckpoint: checkpointCapture.checkpoint }
+						: {}),
+				}),
+				orphanReclamationEligibleAt,
+			);
+			active.session.detachFromRuntimeForHandoverRestartWithoutSignallingProcess();
+			logTuiFreezeWarning(
+				`[runtime-handover] detached hosted session taskId=${taskId} pid=${active.session.pid} terminalMirrorCheckpoint=${checkpointCapture.kind === "captured" ? "captured" : checkpointCapture.reason}`,
+			);
+			detachedHostedSessionSummaries.push(summary);
+		}
+		return { detachedHostedSessionSummaries, interruptedInProcessSessionSummaries };
+	}
+
+	// handover 等这些投递走完再 detach：paste + 延迟回车、先关后答之类的多段序列被腰斩，会在 agent 输入框里留下半截输入。
+	listTaskIdsWithUnsettledProgrammaticTaskChatInputDelivery(): string[] {
+		const taskIds: string[] = [];
+		for (const [taskId, entry] of this.entries) {
+			if (entry.active?.programmaticDeliveryReceipt != null && !entry.active.programmaticDeliveryReceipt.settled) {
+				taskIds.push(taskId);
+			}
+		}
+		return taskIds;
+	}
+
+	// handover 据此等刚 spawn 的会话度过启动期：agent 启动时发出的终端查询（DA / CPR / OSC10/11）在 runtime 缺席的窗口里没人应答。
+	listSpawnedAtEpochMsOfActiveHostedPtySessions(): number[] {
+		const spawnedAtEpochMsList: number[] = [];
+		for (const entry of this.entries.values()) {
+			if (entry.active?.session.detachFromRuntimeForHandoverRestartWithoutSignallingProcess) {
+				spawnedAtEpochMsList.push(entry.active.terminalSessionIncarnationSpawnedAtEpochMs);
+			}
+		}
+		return spawnedAtEpochMsList;
+	}
+
+	countActiveTerminalSessionsByPtyOwnership(): ActiveTerminalSessionCountsByPtyOwnership {
+		let hostedInAgentSessionPtyHost = 0;
+		let inProcessPtyOwnedByRuntime = 0;
+		for (const entry of this.entries.values()) {
 			if (!entry.active) {
 				continue;
 			}
-			stopWorkspaceTrustTimers(entry.active);
-			clearStartupReadinessTimer(entry.active);
-			clearOutputReactionTimer(entry.active);
-			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
-			clearTaskChatInputDeliveryContentionVisibility(entry);
-			clearTaskChatInputDeliveryTimer(entry.active);
-			clearSubmitConfirmTimer(entry.active);
-			discardPendingOutputAnalysis(entry.active);
-			// 同样摘跑 cleanup：这条路径（runtime 关停时批量硬中断）此前也全程不碰 onSessionCleanup，
-			// 而它之后进程就要退出了，没有任何后续路径能补上这一跑。
-			const interruptedSessionCleanup = entry.active.onSessionCleanup;
-			entry.active.onSessionCleanup = null;
-			entry.active.session.stop({ interrupted: true });
-			if (interruptedSessionCleanup) {
-				interruptedSessionCleanup().catch(() => {
-					// Best effort: cleanup failure is non-critical.
-				});
+			if (entry.active.session.detachFromRuntimeForHandoverRestartWithoutSignallingProcess) {
+				hostedInAgentSessionPtyHost += 1;
+			} else {
+				inProcessPtyOwnedByRuntime += 1;
 			}
 		}
-		return activeEntries.map((entry) => cloneSummary(entry.summary));
+		return { hostedInAgentSessionPtyHost, inProcessPtyOwnedByRuntime };
+	}
+
+	private interruptAndStopActiveSessionForRuntimeShutdown(entry: SessionEntry): void {
+		if (!entry.active) {
+			return;
+		}
+		stopWorkspaceTrustTimers(entry.active);
+		clearStartupReadinessTimer(entry.active);
+		clearOutputReactionTimer(entry.active);
+		settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
+		clearTaskChatInputDeliveryContentionVisibility(entry);
+		clearTaskChatInputDeliveryTimer(entry.active);
+		clearSubmitConfirmTimer(entry.active);
+		discardPendingOutputAnalysis(entry.active);
+		// 同样摘跑 cleanup：这条路径（runtime 关停时批量硬中断）此前也全程不碰 onSessionCleanup，
+		// 而它之后进程就要退出了，没有任何后续路径能补上这一跑。
+		const interruptedSessionCleanup = entry.active.onSessionCleanup;
+		entry.active.onSessionCleanup = null;
+		entry.active.session.stop({ interrupted: true });
+		if (interruptedSessionCleanup) {
+			interruptedSessionCleanup().catch(() => {
+				// Best effort: cleanup failure is non-critical.
+			});
+		}
 	}
 
 	private applySessionEvent(

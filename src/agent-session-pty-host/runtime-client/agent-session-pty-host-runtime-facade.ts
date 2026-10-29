@@ -64,6 +64,20 @@ function hostedSessionListingComesFromHostThatSupportsHookSpool(
 // 也不能当它们不存在（旧路径会把会话归零、前端随后再起第二个 agent）。启动必须失败，交给 supervisor 重试。
 export class AgentSessionPtyHostPreventsSafeRuntimeStartupError extends Error {}
 
+// runtime 正在退出（handover / 信号停止）：新会话一律不起——起在本 runtime 里的进程内 PTY 活不过退出，
+// 起在 host 里的会话赶不上最终接管记录。调用方按普通的启动失败处理，稍后重试即可。
+export class AgentSessionPtyHostRefusesNewSpawnsWhileRuntimeShutsDownError extends Error {
+	readonly code = "KANBAN_RUNTIME_SHUTTING_DOWN";
+}
+
+// 上一个 runtime 缺席期间被 host 按回收期限终止、随后由本 runtime 接管（交付了退出）的会话：启动时据此补记回收账本。
+export interface HostedSessionReclaimedByHostWhileRuntimeWasAbsent {
+	workspaceId: string;
+	taskId: string;
+	pid: number;
+	exitedAtEpochMs: number;
+}
+
 export interface AgentSessionPtyHostRuntimeFacadeOptions {
 	runtimeIdentity: AgentSessionPtyHostRuntimeIdentity;
 	warn: (message: string) => void;
@@ -115,6 +129,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 	// 启动时当前 build 的 host 拉不起来、但旧 generation 里有会话待接管时置位（之后不再复位）：
 	// 此后凡当前 generation 未连上的 spawn 都降级为进程内 PtySession，并在后台再试连接当前 generation。
 	private newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable = false;
+	private newSpawnsRefusedBecauseRuntimeIsShuttingDown = false;
 	private readonly hostedSessionHookSpoolDrainCoordinator: HostedSessionHookSpoolDrainCoordinator;
 
 	private constructor(
@@ -224,6 +239,50 @@ export class AgentSessionPtyHostRuntimeFacade {
 		);
 	}
 
+	// runtime 退出流程的第一步（handover 与信号停止都是）：此后的 spawn 一律以 AgentSessionPtyHostRefusesNewSpawnsWhileRuntimeShutsDownError 失败。
+	refuseNewSpawnsBecauseRuntimeIsShuttingDown(): void {
+		this.newSpawnsRefusedBecauseRuntimeIsShuttingDown = true;
+	}
+
+	// detach 之前：每条链路停止消费会话事件（输出、退出、spool 通知），并等在途的 spool 应用跑完。
+	// 之后每条句柄的输出偏移不再变化，session-manager 据此做 checkpoint、推最终接管记录。
+	async freezeHostedSessionEventRoutingAndStopHookSpoolDrainsForRuntimeHandover(): Promise<void> {
+		for (const link of this.generationLinksBySocketPath.values()) {
+			link.freezeHostedSessionEventRoutingForRuntimeHandover();
+		}
+		await this.hostedSessionHookSpoolDrainCoordinator.forgetEveryHookSpoolDrainTargetAndWaitForRunningDrainLoopsToStop();
+	}
+
+	// 显式全停（`kanban runtime stop --terminate-hosted-agent-sessions`）：每个 generation 的 host 终止全部会话后退出，
+	// 包括本 runtime 没有接管的会话。runtime 自己的会话由调用方先按正常停止流程停掉并记账。
+	requestEveryGenerationHostToTerminateAllHostedSessionsAndExit(): number {
+		let reachedHostCount = 0;
+		for (const link of this.generationLinksBySocketPath.values()) {
+			if (link.connection.isClosed) {
+				continue;
+			}
+			link.connection.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
+			reachedHostCount += 1;
+		}
+		return reachedHostCount;
+	}
+
+	listHostedSessionsReclaimedByHostWhileRuntimeWasAbsentThatWereAdopted(): HostedSessionReclaimedByHostWhileRuntimeWasAbsent[] {
+		return this.pendingAdoptionCandidateBookkeeping
+			.filter(
+				(bookkeeping) =>
+					bookkeeping.dispositionState === "adopted_with_handle_owned_by_terminal_session_manager" &&
+					bookkeeping.listing.exitRecord?.hostedSessionTerminatedByHostReason ===
+						"reclaimed_by_host_while_runtime_absent",
+			)
+			.map((bookkeeping) => ({
+				workspaceId: bookkeeping.listing.hostedSessionDescriptor.workspaceId,
+				taskId: bookkeeping.listing.hostedSessionDescriptor.taskId,
+				pid: bookkeeping.listing.pid,
+				exitedAtEpochMs: bookkeeping.listing.exitRecord?.exitedAtEpochMs ?? 0,
+			}));
+	}
+
 	// runtime 退出前调用：把已排队的 stop / 接管记录等消息写进内核再断开。
 	async closeControllerConnectionsAfterFlushingPendingFrames(): Promise<void> {
 		const links = [...this.generationLinksBySocketPath.values()];
@@ -238,6 +297,12 @@ export class AgentSessionPtyHostRuntimeFacade {
 		workspaceRepositoryPath: string | null,
 		request: HostedTerminalPtyProcessSpawnRequest,
 	): Promise<TerminalPtyProcessHandle> {
+		// 闸只拦新请求；闸落下前已发出的 spawn 照常完成，会话起在 host 里，没人 stop 它，下一个 runtime 照常接管。
+		if (this.newSpawnsRefusedBecauseRuntimeIsShuttingDown) {
+			throw new AgentSessionPtyHostRefusesNewSpawnsWhileRuntimeShutsDownError(
+				"Kanban runtime is restarting or stopping; start this session again once it is back",
+			);
+		}
 		if (
 			this.newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable &&
 			!this.isConnectedToCurrentGenerationHost()
@@ -289,6 +354,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 			outcome.pid,
 			request.onData,
 			request.onExit,
+			0,
 			outcome.spawnedAtEpochMs,
 		);
 		// 新会话只进当前 build 的 host，它一定支持 spool。登记即请求一次读（不靠 0 计数跳过）。
@@ -357,6 +423,10 @@ export class AgentSessionPtyHostRuntimeFacade {
 			cols: listing.cols,
 			rows: listing.rows,
 			exitedWhileRuntimeWasAbsent: listing.exitRecord !== null,
+			reclaimedByHostWhileRuntimeWasAbsent:
+				listing.exitRecord?.hostedSessionTerminatedByHostReason === "reclaimed_by_host_while_runtime_absent",
+			retainedOutputStartByteOffset: listing.retainedOutputStartByteOffset,
+			outputEndByteOffset: listing.outputEndByteOffset,
 			terminalSessionAdoptionRecord: listing.adoptionRecord,
 			adoptHostedTerminalPtyProcess: async (callbacks) => {
 				if (bookkeeping.dispositionState !== "awaiting_adoption_or_refusal") {
@@ -367,13 +437,21 @@ export class AgentSessionPtyHostRuntimeFacade {
 				bookkeeping.dispositionState = "adoption_output_stream_attach_in_progress";
 				let handle: HostedTerminalPtyProcessHandleOverAgentSessionPtyHost;
 				try {
-					// EXPERIMENT_NODE: 崩溃路径从环形缓冲起点重放；计划内 handover 改为从 checkpoint 偏移续流（计划 P4）。
+					// 崩溃路径从环形缓冲起点重放；计划内 handover 之后由 session-manager 传 checkpoint 的偏移，从那里续流。
 					const attachOutcome = await link.connection.requestAttachHostedSessionOutputStream(
 						listing.hostedSessionKey,
-						listing.retainedOutputStartByteOffset,
+						callbacks.fromOutputByteOffset ?? listing.retainedOutputStartByteOffset,
 					);
 					if (attachOutcome.kind !== "attached") {
 						throw new Error(`hosted session ${listing.hostedSessionKey} disappeared before adoption`);
+					}
+					if (
+						callbacks.fromOutputByteOffset !== undefined &&
+						(attachOutcome.catchUpStartByteOffset !== callbacks.fromOutputByteOffset ||
+							attachOutcome.overwrittenByteCountBeforeCatchUpStart > 0)
+					) {
+						if (!callbacks.onCatchUpOutputGap) throw new Error("checkpoint 追赶输出存在缺口，但没有恢复处理函数");
+						await callbacks.onCatchUpOutputGap();
 					}
 					handle = new HostedTerminalPtyProcessHandleOverAgentSessionPtyHost(
 						link.connection,
@@ -382,6 +460,8 @@ export class AgentSessionPtyHostRuntimeFacade {
 						listing.pid,
 						callbacks.onData,
 						callbacks.onExit,
+						// 追赶区间之后的第一帧实时输出到达之前，「已交付到哪里」就是追赶终点（再次 handover 时 checkpoint 与之对齐）。
+						attachOutcome.catchUpEndByteOffset,
 						listing.spawnedAtEpochMs,
 					);
 					// 先于句柄登记：登记时交付的退出（接管期间进程退出）也要等 spool 排空。

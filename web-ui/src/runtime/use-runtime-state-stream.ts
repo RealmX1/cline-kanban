@@ -7,6 +7,10 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
+import {
+	isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting,
+	KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE,
+} from "@/runtime/kanban-runtime-hot-restart-websocket-close";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type {
@@ -837,14 +841,21 @@ export function useRuntimeStateStream(
 					// Ignore malformed stream messages.
 				}
 			};
-			socket.onclose = () => {
+			socket.onclose = (closeEvent) => {
 				if (cancelled) {
 					return;
 				}
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+				// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
+				const runtimeIsHotRestarting = isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent);
+				if (runtimeIsHotRestarting) {
+					reconnectAttempt = 0;
+				}
 				dispatch({
 					type: "stream_disconnected",
-					message: "Runtime stream disconnected.",
+					message: runtimeIsHotRestarting
+						? KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE
+						: "Runtime stream disconnected.",
 				});
 				if (hasOpenedRuntimeStream) {
 					shouldCheckServedBuildAssetsOnOpen = true;

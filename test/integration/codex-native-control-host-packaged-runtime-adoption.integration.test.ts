@@ -1,9 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
-import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionPtyHostControllerConnection } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { listAgentSessionPtyHostGenerationSocketPaths } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-socket-path-for-runtime-identity";
@@ -16,6 +16,7 @@ import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutatio
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	sigkillChildProcessAndWaitForExit,
+	waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
@@ -26,11 +27,16 @@ afterEach(async () => {
 });
 
 describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000 }, () => {
-	it
-		.skipIf(!process.env.KANBAN_CODEX_CONTROL_HOST_PACKAGED_RUNTIME_CLI_PATH || process.platform === "win32")
-		.for(["responsive-children", "children-ignore-stop-signals"])(
-		"%s：热接管后刷新清理旧代目录，保留另一会话",
-		async (failureMode, test) => {
+	it.skipIf(!process.env.KANBAN_CODEX_CONTROL_HOST_PACKAGED_RUNTIME_CLI_PATH || process.platform === "win32").for(
+		(["responsive-children", "children-ignore-stop-signals"] as const).flatMap((failureMode) =>
+			(["SIGKILL", "SIGTERM", "planned_handover"] as const).map((restartMethod) => ({
+				failureMode,
+				restartMethod,
+			})),
+		),
+	)(
+		"$failureMode / $restartMethod：多进程与原生身份连续，刷新只清理所属代",
+		async ({ failureMode, restartMethod }, test) => {
 			vi.stubEnv("TMPDIR", "/tmp");
 			const fixture = createIsolatedGitTestWorkspaceFixture({ fixtureRootDirectoryNamePrefix: "kch-" });
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "control-host-runtime" });
@@ -127,6 +133,51 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 					},
 					condition,
 				);
+			// 模拟 CLI 不执行 hook；提供隔离主转录并经真实 API 登记身份，满足共享 cwd 与持久转录预检。
+			const recordSyntheticNativeIdentityBeforeRestart = async (
+				client: TRPCClient<RuntimeAppRouter>,
+				taskId: string,
+			) => {
+				const nativeSessionId = randomUUID();
+				// 环境 CODEX_HOME 仅提供用户配置；转录必须写入 runtime 记录的实际会话存储目录。
+				const codexConversationStorageHomeDirectoryPath = (await client.workspace.getState.query()).sessions[taskId]
+					?.codexConversationStorageHomeDirectoryPath;
+				if (!codexConversationStorageHomeDirectoryPath) throw new Error("隔离 Codex 会话未记录实际存储目录");
+				expect((await stat(codexConversationStorageHomeDirectoryPath)).isDirectory()).toBe(true);
+				const fixtureRelativeStorageHomeDirectoryPath = relative(
+					await realpath(fixture.fixtureRootDirectoryPath),
+					await realpath(codexConversationStorageHomeDirectoryPath),
+				);
+				expect(fixtureRelativeStorageHomeDirectoryPath).not.toBe("");
+				expect(isAbsolute(fixtureRelativeStorageHomeDirectoryPath)).toBe(false);
+				expect(fixtureRelativeStorageHomeDirectoryPath.split(sep)).not.toContain("..");
+				const transcriptPath = join(
+					codexConversationStorageHomeDirectoryPath,
+					"sessions",
+					`rollout-${nativeSessionId}.jsonl`,
+				);
+				await mkdir(dirname(transcriptPath), { recursive: true });
+				await writeFile(
+					transcriptPath,
+					`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`,
+				);
+				const recorded = await client.hooks.ingest.mutate({
+					taskId,
+					workspaceId: workspace.workspaceId,
+					event: "agent_conversation_session_identity_observed",
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "codex",
+						nativeSessionId,
+						transcriptPath,
+						observedAt: Date.now(),
+					},
+				});
+				expect(recorded.ok, recorded.error).toBe(true);
+				expect(
+					(await client.workspace.getState.query()).sessions[taskId].agentNativeConversationSessionIdentity
+						?.nativeSessionId,
+				).toBe(nativeSessionId);
+			};
 			try {
 				const initial = await startRuntime();
 				for (const taskId of taskIds) {
@@ -147,11 +198,53 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 							.trim()
 							.split("\n").length === 4,
 				);
+				for (const taskId of taskIds) await recordSyntheticNativeIdentityBeforeRestart(initial.client, taskId);
 				const before = (await initial.client.workspace.getState.query()).sessions;
+				const processObservationsPath = join(fixture.fixtureRootDirectoryPath, "process-observations.jsonl");
+				const processObservationsBeforeRestart = await readFile(processObservationsPath, "utf8");
+				const observedCodexProcesses = processObservationsBeforeRestart
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line) as { kind: "server" | "tui"; pid: number; taskId: string });
+				expect(observedCodexProcesses).toHaveLength(4);
+				for (const taskId of taskIds) {
+					expect(
+						observedCodexProcesses
+							.filter((process) => process.taskId === taskId)
+							.map((process) => process.kind)
+							.sort(),
+					).toEqual(["server", "tui"]);
+					expect(before[taskId].pid).toBeGreaterThan(0);
+					expect(before[taskId].startedAt).not.toBeNull();
+				}
+				for (const observedProcess of observedCodexProcesses)
+					expect(process.kill(observedProcess.pid, 0)).toBe(true);
 				expect(before[taskIds[0]].codexNativeSessionControlEndpoint?.socketPath).not.toBe(
 					before[taskIds[1]].codexNativeSessionControlEndpoint?.socketPath,
 				);
-				expect(await sigkillChildProcessAndWaitForExit(initial.child)).toBe(true);
+				if (restartMethod === "planned_handover") {
+					const requested =
+						await initial.client.runtime.requestPlannedHandoverRestartPreservingHostedAgentSessions.mutate({});
+					expect(requested.outcome).toBe("handover_restart_started");
+				} else {
+					expect(initial.child.kill(restartMethod)).toBe(true);
+				}
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(test, initial.child, {
+					waitedForDescription: `旧打包 runtime 完成 ${restartMethod} 退出，host 保留 Codex 会话`,
+					softDeadlineMsExpectedOnUncontendedHost: 10_000,
+					// 计划内 handover 的产品期限为30秒；额外5秒只用于观察退出，不延长产品期限。
+					hardDeadlineMsOnlyExplainedByRealHangOrRegression: 35_000,
+				});
+				if (restartMethod === "planned_handover") {
+					expect(initial.child.exitCode).toBe(75);
+					expect(initial.child.signalCode).toBeNull();
+				} else {
+					expect(initial.child.signalCode).toBe(restartMethod);
+				}
+				// runtime 离线窗口内，监督进程与两种原生子进程均应存活。
+				for (const taskId of taskIds) expect(process.kill(before[taskId].pid ?? 0, 0)).toBe(true);
+				for (const observedProcess of observedCodexProcesses)
+					expect(process.kill(observedProcess.pid, 0)).toBe(true);
 				const restarted = await startRuntime();
 				await wait(
 					async () =>
@@ -159,33 +252,17 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 						before[taskIds[0]].pid,
 				);
 				const adopted = (await restarted.client.workspace.getState.query()).sessions;
-				// 模拟 CLI 不执行 hook；提供隔离主转录并经真实 API 登记身份，满足共享 cwd 与持久转录预检。
-				const recordSyntheticNativeIdentityForRefresh = async (taskId: string) => {
-					const nativeSessionId = randomUUID();
-					const transcriptPath = join(codexHomeDirectoryPath, "sessions", `rollout-${nativeSessionId}.jsonl`);
-					await mkdir(dirname(transcriptPath), { recursive: true });
-					await writeFile(
-						transcriptPath,
-						`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`,
-					);
-					const recorded = await restarted.client.hooks.ingest.mutate({
-						taskId,
-						workspaceId: workspace.workspaceId,
-						event: "agent_conversation_session_identity_observed",
-						agentNativeConversationSessionIdentity: {
-							sourceAgentId: "codex",
-							nativeSessionId,
-							transcriptPath,
-							observedAt: Date.now(),
-						},
-					});
-					expect(recorded.ok, recorded.error).toBe(true);
-					expect(
-						(await restarted.client.workspace.getState.query()).sessions[taskId]
-							.agentNativeConversationSessionIdentity?.nativeSessionId,
-					).toBe(nativeSessionId);
-				};
+				expect(await readFile(processObservationsPath, "utf8")).toBe(processObservationsBeforeRestart);
+				for (const observedProcess of observedCodexProcesses)
+					expect(process.kill(observedProcess.pid, 0)).toBe(true);
 				for (const taskId of taskIds) {
+					expect(adopted[taskId].pid).toBe(before[taskId].pid);
+					expect(adopted[taskId].startedAt).toBe(before[taskId].startedAt);
+					expect(adopted[taskId].agentNativeConversationSessionIdentity).toMatchObject({
+						sourceAgentId: "codex",
+						nativeSessionId: before[taskId].agentNativeConversationSessionIdentity?.nativeSessionId,
+						transcriptPath: before[taskId].agentNativeConversationSessionIdentity?.transcriptPath,
+					});
 					expect(adopted[taskId].runtimeSessionIncarnationId).toBe(before[taskId].runtimeSessionIncarnationId);
 					expect(adopted[taskId].codexNativeSessionControlEndpoint).toEqual(
 						before[taskId].codexNativeSessionControlEndpoint,
@@ -194,7 +271,6 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 						(await stat(adopted[taskId].codexNativeSessionControlEndpoint?.socketPath ?? "")).isSocket(),
 					).toBe(true);
 				}
-				await recordSyntheticNativeIdentityForRefresh(taskIds[0]);
 				const fresh = await restarted.client.runtime.refreshTaskTerminal.mutate({ taskId: taskIds[0] });
 				expect(fresh.ok, fresh.error).toBe(true);
 				const oldLaunchDirectory = join(
@@ -226,7 +302,6 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 				// 监督进程暂停后不能执行 finally；强杀必须由接管时恢复的目录所有权兜底。
 				const adoptedBetaPid = adopted[taskIds[1]].pid;
 				if (!adoptedBetaPid) throw new Error("隔离接管会话缺少监督进程 PID");
-				await recordSyntheticNativeIdentityForRefresh(taskIds[1]);
 				process.kill(adoptedBetaPid, "SIGSTOP");
 				const refreshedBeta = await restarted.client.runtime.refreshTaskTerminal.mutate({ taskId: taskIds[1] });
 				expect(refreshedBeta.ok, refreshedBeta.error).toBe(true);
@@ -276,14 +351,22 @@ describe("打包 runtime 的 Codex 独享控制宿主接管", { timeout: 180_000
 					const ownedHostPid = controller.hostHello.hostProcessId;
 					controller.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
 					await controller.closeAfterFlushingPendingFrames();
-					await wait(() => {
-						try {
-							process.kill(ownedHostPid, 0);
-							return false;
-						} catch {
-							return true;
-						}
-					});
+					await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+						test,
+						{
+							waitedForDescription: "清理 host 完成 5s 进程组 SIGKILL 升级窗口并退出",
+							softDeadlineMsExpectedOnUncontendedHost: 8_000,
+							hardDeadlineMsOnlyExplainedByRealHangOrRegression: 30_000,
+						},
+						() => {
+							try {
+								process.kill(ownedHostPid, 0);
+								return false;
+							} catch {
+								return true;
+							}
+						},
+					);
 				}
 			}
 		},

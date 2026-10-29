@@ -719,4 +719,43 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 		expect(test.start).toHaveBeenCalledTimes(2);
 		expect((await test.service.getStatus(test.source, request))?.phase).toBe("completed");
 	});
+	it("runtime 关闭时等待中的创建不再启动进程，后继实例按原提交恢复一次", async () => {
+		const test = await scenario();
+		const request = test.request("clse1", false);
+		const originalStart = test.start.getMockImplementation();
+		if (!originalStart) throw new Error("缺少隔离启动实现");
+		let releasePreparation!: () => void;
+		let observePreparationEntered!: () => void;
+		const preparation = new Promise<void>((resolve) => {
+			releasePreparation = resolve;
+		});
+		const preparationEntered = new Promise<void>((resolve) => {
+			observePreparationEntered = resolve;
+		});
+		const actualProcessLaunch = vi.fn();
+		test.start.mockImplementation(async (...argumentsForStart) => {
+			observePreparationEntered();
+			await preparation;
+			const result = await originalStart(...argumentsForStart);
+			actualProcessLaunch();
+			return result;
+		});
+		await test.service.submit(test.source, request, evidence);
+		await preparationEntered;
+		const closing = test.service.close();
+		releasePreparation();
+		await closing;
+		expect(actualProcessLaunch).not.toHaveBeenCalled();
+		expect(
+			(await readTaskEditorCreationSubmission(test.source.workspaceId, request.submissionId))
+				?.agentProcessLaunchMayHaveBegun,
+		).toBe(false);
+		expect((await test.service.getStatus(test.source, request))?.phase).toBe("waiting_for_dependency");
+		const successor = test.makeService();
+		await successor.sweep();
+		await successor.settle();
+		expect(actualProcessLaunch).toHaveBeenCalledOnce();
+		expect(test.start).toHaveBeenCalledTimes(2);
+		expect((await successor.getStatus(test.source, request))?.phase).toBe("completed");
+	});
 });

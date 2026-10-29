@@ -174,6 +174,32 @@ async function startFacadeOverFakeConnectionAndTakeAdoptionCandidate(
 }
 
 describe("agent session pty host adoption catch-up output routing", () => {
+	it("listing 后覆盖 checkpoint 时，先通知缺口再交付追赶字节，保留原会话", async () => {
+		const { fakeConnection, adoptionCandidate } = await startFacadeOverFakeConnectionAndTakeAdoptionCandidate();
+		const events: string[] = [];
+		const promise = adoptionCandidate.adoptHostedTerminalPtyProcess({
+			fromOutputByteOffset: 14,
+			onCatchUpOutputGap: () => {
+				events.push("discard_checkpoint");
+			},
+			onCatchUpOutput: (bytes) => events.push(bytes.toString()),
+			onData: () => {},
+			onExit: () => {},
+		});
+		await yieldToNextSocketDataEventTurn();
+		fakeConnection.deliverAttachResponseAndOutputFramesInOneSocketDataEvent(
+			{
+				kind: "attached",
+				catchUpStartByteOffset: 30,
+				catchUpEndByteOffset: 34,
+				overwrittenByteCountBeforeCatchUpStart: 16,
+			},
+			[{ startByteOffset: 30, bytes: Buffer.from("tail") }],
+		);
+		await promise;
+		expect(events).toEqual(["discard_checkpoint", "tail"]);
+		expect(fakeConnection.sentControlMessages.some((message) => message.type === "stop_hosted_session")).toBe(false);
+	});
 	it("routes catch-up frames arriving in later socket data events to onCatchUpOutput only and resolves adoption after the last one", async () => {
 		const { fakeConnection, adoptionCandidate } = await startFacadeOverFakeConnectionAndTakeAdoptionCandidate();
 		const firstCatchUpFrameBytes = Buffer.alloc(CATCH_UP_OUTPUT_FRAME_BYTE_LENGTH_LIKE_HOST, "a");
