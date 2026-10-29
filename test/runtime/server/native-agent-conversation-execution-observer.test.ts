@@ -17,7 +17,7 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-function fixture() {
+function fixture(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 	const state: { summary: RuntimeTaskSessionSummary } = {
 		summary: {
 			taskId: "background-wait",
@@ -48,6 +48,7 @@ function fixture() {
 				runtimeSessionIncarnationId: "incarnation",
 				socketPath: "/isolated/control.sock",
 			},
+			...summaryOverrides,
 		},
 	};
 	const execution = (): CodexNativeAgentTurnExecutionObservation => ({
@@ -88,6 +89,25 @@ function fixture() {
 }
 
 describe("静默期间持续原生回合核验", () => {
+	it("重启后首次观察已持久化的 Stop 误判，静默时仍持续自动补证", async () => {
+		const stoppedAt = Date.now() - 500;
+		const f = fixture({
+			turnOwner: "user",
+			userTurnKind: "review",
+			reviewReason: "hook",
+			agentResponseGenerationTurnSequence: 1,
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			},
+		});
+		await f.observe();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(f.onExecution).toHaveBeenCalledTimes(3);
+		expect(f.onActivity).not.toHaveBeenCalled();
+		expect(f.onAccepted).not.toHaveBeenCalled();
+	});
 	it("没有摘要或活动也每十五秒核验，基线状态不制造接受或活动", async () => {
 		const f = fixture();
 		await f.observe();

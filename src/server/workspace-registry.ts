@@ -39,6 +39,7 @@ import {
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
+import { persistOwnedCommandExecutionRevocationsBeforeUserTerminalInterrupt } from "../task-command-execution/task-command-execution-user-stop-port";
 import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
@@ -421,6 +422,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		const loading = (async () => {
 			const manager: TerminalSessionManager = new TerminalSessionManager({
+				beforeUserTerminalInterrupt: (sessionId) =>
+					persistOwnedCommandExecutionRevocationsBeforeUserTerminalInterrupt(workspaceId, sessionId),
 				enableManagedTaskPromptDeliveryRecording: true,
 				automaticFailureContinuationWorkspaceId: workspaceId,
 				readAutomaticFailureContinuationEligibility: async (conversationSessionId) => {

@@ -88,6 +88,27 @@ async function fixture() {
 }
 
 describe("当前原生回合工具活动的增量补充", () => {
+	it("重启后从已持久 Stop 边界补查同回合既有工具，不重报用户输入或 Stop 前历史", async () => {
+		const f = await fixture();
+		f.summary.turnOwner = "user";
+		f.summary.liveness = "live";
+		f.summary.userTurnKind = "review";
+		f.summary.reviewReason = "hook";
+		f.summary.agentResponseGenerationTurnSequence = 1;
+		f.summary.currentAgentProcessUserTurnIdleRetentionStarted = {
+			stoppedAt: NOW - 500,
+			signalConfidence: "harness_turn_complete",
+			turnSequence: 1,
+		};
+		await appendFile(
+			f.transcriptPath,
+			jsonLine("response_item", { type: "function_call", call_id: "offline-tool", arguments: "{}" }, NOW - 100),
+		);
+		const restored = await f.read(null);
+		expect(restored?.events).toHaveLength(1);
+		expect(restored?.events[0]).toMatchObject({ observedAtMs: NOW - 100, activityKind: "tool_activity" });
+		expect((await f.read(restored?.cursor ?? null))?.events).toEqual([]);
+	});
 	it("基线不重放历史；exec / write_stdin 空结果保留原始时间，重复读取不更新", async () => {
 		const f = await fixture();
 		expect(f.initial?.events).toEqual([]);

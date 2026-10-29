@@ -199,6 +199,7 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 
 	let terminalSummaryListener: ((summary: RuntimeTaskSessionSummary) => void) | null = null;
 	const fakeTerminalManager = {
+		setCodexReviewMisclassificationPersistenceHandler: () => {},
 		onSummary: (listener: (summary: RuntimeTaskSessionSummary) => void) => {
 			terminalSummaryListener = listener;
 			return () => {

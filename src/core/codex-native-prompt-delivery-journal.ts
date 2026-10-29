@@ -36,11 +36,28 @@ export interface CodexNativePromptDeliveryJournal {
 		historicalPromptSha256?: string;
 	}) => Promise<CodexNativePromptDeliveryJournalState>;
 	recordRequestIntent: (previousTurnId: string | null) => Promise<void>;
+	recordTerminalPtyWriteIntent: () => Promise<void>;
 	recordRequestInvoked: () => Promise<void>;
 	recordRequestNotInvoked?: () => Promise<void>;
 	recordReturnedTurn: (returnedTurnId: string) => Promise<void>;
 	recordAcceptanceHistoryQueryProgress: (progress: CodexNativePromptAcceptanceHistoryQueryProgress) => Promise<void>;
 	recordAcceptance: (evidence: CodexNativePromptDeliveryEvidence) => Promise<void>;
+}
+
+export function isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(record: TaskMessageInjectionRecord): boolean {
+	const operation = record.codex_native_prompt_delivery_operation;
+	return (
+		record.source === "owned_command_execution_result" &&
+		record.terminal_delivery_status === "delivery_failed" &&
+		[
+			"no_active_terminal_session",
+			"human_terminal_contention_timeout",
+			"terminal_input_box_contended_but_unstashable",
+			"agent_awaiting_user_decision_timeout",
+		].some((reason) => reason === record.terminal_delivery_failure_reason) &&
+		operation?.sendPhase === "registered" &&
+		operation.actualSendAttemptCount === 0
+	);
 }
 
 export function createCodexNativePromptDeliveryJournal(
@@ -56,9 +73,12 @@ export function createCodexNativePromptDeliveryJournal(
 		withTaskMessageInjectionLedgerLock(binding.ledgerPath, async (records) => {
 			const record = findTaskMessageInjectionRecord(records, binding.ledgerTaskId, binding.idempotencyKey);
 			if (!record) throw new Error("原生发送缺少已登记的程序化投递意图");
+			const current = record.codex_native_prompt_delivery_operation;
+			// 所属执行在每次写前重验授权；未发送的登记可恢复，原失败终态仍保留。
+			const ownedResultKnownNotSubmitted = isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(record);
 			const update = operation(
-				record.codex_native_prompt_delivery_operation,
-				record.terminal_delivery_status !== "accepted_pending_submit_confirmation",
+				current,
+				record.terminal_delivery_status !== "accepted_pending_submit_confirmation" && !ownedResultKnownNotSubmitted,
 				record,
 			);
 			return {
@@ -77,6 +97,35 @@ export function createCodexNativePromptDeliveryJournal(
 		});
 	};
 	return {
+		recordTerminalPtyWriteIntent: async () => {
+			await withTaskMessageInjectionLedgerLock(binding.ledgerPath, async (records) => {
+				const record = findTaskMessageInjectionRecord(records, binding.ledgerTaskId, binding.idempotencyKey);
+				const current = record?.codex_native_prompt_delivery_operation;
+				if (!record || record.source !== "owned_command_execution_result" || !current) return { result: undefined };
+				if (
+					current.sendPhase !== "registered" ||
+					current.actualSendAttemptCount !== 0 ||
+					(record.terminal_delivery_status !== "accepted_pending_submit_confirmation" &&
+						!isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(record))
+				)
+					throw new Error("已有可能写入的原生或 PTY 意图，只允许补证");
+				return {
+					records: records.map((value) =>
+						value === record
+							? {
+									...value,
+									codex_native_prompt_delivery_operation: {
+										...current,
+										sendPhase: "request_intent_persisted" as const,
+										updatedAtIso: new Date().toISOString(),
+									},
+								}
+							: value,
+					),
+					result: undefined,
+				};
+			});
+		},
 		prepare: async (identity) =>
 			mutate((current, settled, record) => {
 				const promptSha256 =

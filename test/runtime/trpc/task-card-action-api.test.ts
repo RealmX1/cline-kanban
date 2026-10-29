@@ -6,6 +6,7 @@ import type {
 	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionSummary,
 } from "../../../src/core/api-contract";
+import type { CodexNativeAgentTurnExecutionObservation } from "../../../src/core/codex-native-agent-turn-execution-observation";
 import {
 	collectKanbanCliInvocationEnvironmentActorClaims,
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
@@ -13,6 +14,7 @@ import {
 } from "../../../src/core/kanban-cli-invocation-environment-actor-claims";
 import type { TaskClosureRecord } from "../../../src/core/task-closure-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import type * as TaskMutationCapturePort from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskMutationIntentWithResolvedActor } from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskClosureOperation } from "../../../src/task-closure/task-closure-operation-store";
 
@@ -31,8 +33,19 @@ const harness = vi.hoisted(() => ({
 		sessions: {} as Record<string, unknown>,
 	},
 	capturedTaskMutationIntents: [] as unknown[],
+	readLatestAutomaticReviewPlacement: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock(
+	"../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port",
+	async (importOriginal) => ({
+		...(await importOriginal<typeof TaskMutationCapturePort>()),
+		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture: () => ({
+			readLatestTaskCardMutationIsSessionFacetDrivenAutomaticReviewPlacement:
+				harness.readLatestAutomaticReviewPlacement,
+		}),
+	}),
+);
 vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
 	withTaskClosureLifecycleLocks: async (_workspaceId: string, _ids: string[], action: () => Promise<unknown>) =>
 		await action(),
@@ -88,7 +101,11 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	mutateWorkspaceState: async (
 		cwd: string,
 		taskMutationIntentWithResolvedActor: { taskMutationIntentKind: string },
-		mutate: (state: unknown) => { board: unknown; value: unknown; save?: boolean },
+		mutate: (
+			state: unknown,
+		) =>
+			| { board: unknown; value: unknown; save?: boolean }
+			| Promise<{ board: unknown; value: unknown; save?: boolean }>,
 	) => {
 		harness.capturedTaskMutationIntents.push(taskMutationIntentWithResolvedActor);
 		const currentState = {
@@ -99,7 +116,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 			sessions: harness.workspaceState.sessions,
 			revision: 1,
 		};
-		const mutation = mutate(currentState);
+		const mutation = await mutate(currentState);
 		if (mutation.save === false) {
 			return { value: mutation.value, state: currentState, saved: false };
 		}
@@ -116,6 +133,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 		revision: 1,
 	}),
 	loadWorkspaceBoardById: async () => harness.workspaceState.board,
+	loadWorkspaceContextById: async () => ({ repoPath: "/isolated/review-recovery" }),
 }));
 
 vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", () => ({
@@ -137,7 +155,10 @@ vi.mock("../../../src/workspace/turn-checkpoints.js", () => ({
 	},
 }));
 
-import { createTaskCardActionApi } from "../../../src/trpc/task-card-action-api";
+import {
+	createTaskCardActionApi,
+	moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification,
+} from "../../../src/trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../../../src/trpc/task-card-action-per-task-command-serializer";
 
 const WORKSPACE_SCOPE = { workspaceId: "workspace-b", workspacePath: "/tmp/repo-b" };
@@ -255,6 +276,166 @@ function seedWorkspace(board: RuntimeBoardData, sessions: Record<string, Runtime
 function readBoard(): RuntimeBoardData {
 	return harness.workspaceState.board as RuntimeBoardData;
 }
+
+describe("原生回合纠偏的服务端持久移列", () => {
+	beforeEach(() => harness.readLatestAutomaticReviewPlacement.mockReset().mockResolvedValue(null));
+	function createCorrectionInput() {
+		const summary = createSummary("task-a", {
+			agentId: "codex",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			reviewReason: "hook",
+			runtimeSessionIncarnationId: "current",
+			agentResponseGenerationTurnSequence: 1,
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt: 200,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			},
+			lastEffectiveAgentConversationActivityObservation: {
+				observedAtMs: 300,
+				activityKind: "tool_activity",
+				evidenceKind: "persisted_agent_transcript",
+				nativeSessionId: "native",
+				eventId: "codex:native:turn:tool",
+			},
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				transcriptPath: "/isolated/native.jsonl",
+				observedAt: 1,
+			},
+			codexNativeSessionControlEndpoint: {
+				workspaceId: "workspace-b",
+				conversationSessionId: "task-a",
+				runtimeSessionIncarnationId: "current",
+				socketPath: "/isolated/native.sock",
+			},
+		});
+		const observation: CodexNativeAgentTurnExecutionObservation = {
+			workspaceId: "workspace-b",
+			conversationSessionId: "task-a",
+			runtimeSessionIncarnationId: "current",
+			nativeSessionId: "native",
+			nativeTurnId: "turn",
+			nativeTurnStartedAtMs: 100,
+			observedAtMs: 400,
+			threadStatus: "active",
+			nativeTurnStatus: "inProgress",
+			activeFlags: [],
+			canAcceptDirectInput: true,
+			executionStatus: "running",
+		};
+		return {
+			workspaceId: "workspace-b",
+			summaryBeforeRead: structuredClone(summary),
+			observation,
+			getCurrentSummary: () => summary,
+		};
+	}
+	it("无浏览器且没有新输入接受，也通过既有漏斗移回 In Progress；重试不重复落盘", async () => {
+		seedWorkspace(createBoard({ review: [createCard("task-a")] }));
+		const input = createCorrectionInput();
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: true,
+		});
+		expect(readBoard().columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe("task-a");
+		expect(harness.capturedTaskMutationIntents).toContainEqual(
+			expect.objectContaining({
+				taskMutationIntentKind: "codex_native_review_misclassification_restores_task_into_in_progress",
+			}),
+		);
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: false,
+		});
+	});
+	it("浏览器晚落自动 Review 的更新时间晚于工具，仍按可信账本恢复；缺证保留锚点重试", async () => {
+		seedWorkspace(createBoard({ review: [createCard("task-a", { updatedAt: 350 })] }));
+		const input = createCorrectionInput();
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: false,
+			sessionCorrectionAllowed: false,
+		});
+		harness.readLatestAutomaticReviewPlacement.mockResolvedValueOnce(true);
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: true,
+			sessionCorrectionAllowed: true,
+		});
+		expect(harness.readLatestAutomaticReviewPlacement).toHaveBeenLastCalledWith({
+			workspaceId: "workspace-b",
+			taskId: "task-a",
+			taskIncarnationCreatedAtEpochMs: 1,
+			taskCardUpdatedAtMs: 350,
+			stoppedAtMs: 200,
+		});
+	});
+	it("异步查询自动移列证据期间新 Stop 到达，仍在写锁内拒绝旧纠偏", async () => {
+		const board = createBoard({ review: [createCard("task-a", { updatedAt: 350 })] });
+		seedWorkspace(board);
+		const input = createCorrectionInput();
+		harness.readLatestAutomaticReviewPlacement.mockImplementationOnce(async () => {
+			input.getCurrentSummary().lastHookAt = 401;
+			return true;
+		});
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: false,
+			sessionCorrectionAllowed: false,
+		});
+		expect(readBoard()).toBe(board);
+	});
+	it.each(["validation", "trash", "in_progress"] as const)("保留 %s 中的手动阶段调整", async (columnId) => {
+		seedWorkspace(createBoard({ [columnId]: [createCard("task-a")] }));
+		expect(
+			await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(createCorrectionInput()),
+		).toMatchObject({ saved: false });
+	});
+	it.each<Partial<RuntimeBoardCard>>([
+		{ updatedAt: 301 },
+		{ mainTaskConversationSessionId: "new-main" },
+		{ createdAt: 2 },
+		{ taskShelvingState: { isShelved: true, lastChangedAt: 10 } },
+		{ taskShelvingState: { isShelved: false, lastChangedAt: 350 } },
+	])("不覆盖新修改、换绑、同号新卡或搁置历史 %j", async (overrides) => {
+		const board = createBoard({ review: [createCard("task-a", overrides)] });
+		seedWorkspace(board);
+		expect(
+			await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(createCorrectionInput()),
+		).toMatchObject({ saved: false });
+		expect(readBoard()).toBe(board);
+	});
+	it("写锁内复核当前 incarnation 与原始 Stop，拒绝晚到核验", async () => {
+		seedWorkspace(createBoard({ review: [createCard("task-a")] }));
+		const input = createCorrectionInput();
+		input.getCurrentSummary().runtimeSessionIncarnationId = "new-process";
+		expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+			saved: false,
+		});
+	});
+	it("park 与交接 hold 不自动移卡", async () => {
+		for (const parked of [true, false]) {
+			seedWorkspace(createBoard({ review: [createCard("task-a")] }));
+			const input = createCorrectionInput();
+			const current = input.getCurrentSummary();
+			if (parked) current.awaitingDispatchedBackgroundWork = { sinceMs: 250 };
+			else
+				current.taskConversationSessionMetadata = {
+					workspaceTaskId: "task-a",
+					taskConversationSessionRole: "main",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+					taskAutomationSuspendedForMainSessionHandover: true,
+				};
+			input.summaryBeforeRead = structuredClone(current);
+			expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+				saved: false,
+			});
+		}
+	});
+});
 
 function readColumnTaskIds(columnId: RuntimeBoardColumnId): string[] {
 	return (

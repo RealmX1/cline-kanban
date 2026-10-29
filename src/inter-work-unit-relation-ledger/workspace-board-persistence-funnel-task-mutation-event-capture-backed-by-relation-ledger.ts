@@ -13,6 +13,7 @@ import type {
 	KanbanActor,
 	TaskMutationOccurrenceCaptureMode,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
+import { kanbanBoardCardWorkUnitQualifiedReferenceSchema } from "../core/inter-work-unit-relation-ledger-event-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import { createShortTaskId } from "../core/task-id";
 import type {
@@ -345,6 +346,33 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 	}
 
 	return {
+		async readLatestTaskCardMutationIsSessionFacetDrivenAutomaticReviewPlacement(readInput) {
+			const [event] = await ledgerClient.listCommittedEvents({
+				subjectWorkspaceId: readInput.workspaceId,
+				subjectTaskId: readInput.taskId,
+				eventFamily: "task_mutation_event",
+				sortDirection: "desc",
+				limit: 1,
+			});
+			if (!event) return null;
+			const cardIdentity = kanbanBoardCardWorkUnitQualifiedReferenceSchema.safeParse(
+				event.eventPayload.subjectKanbanBoardCard,
+			);
+			return (
+				cardIdentity.success &&
+				cardIdentity.data.workspaceId === readInput.workspaceId &&
+				cardIdentity.data.taskId === readInput.taskId &&
+				cardIdentity.data.taskIncarnationCreatedAtEpochMs === readInput.taskIncarnationCreatedAtEpochMs &&
+				event.recordCaptureChannel === "live_runtime_capture" &&
+				event.eventPayload.taskMutationOccurrenceCaptureMode === "captured_within_runtime_persistence_funnel" &&
+				event.eventKind === "task_card_moved_between_non_trash_board_columns" &&
+				event.eventPayload.fromBoardColumnId === "in_progress" &&
+				event.eventPayload.toBoardColumnId === "review" &&
+				event.occurredAt >= Math.max(readInput.stoppedAtMs, readInput.taskCardUpdatedAtMs) &&
+				event.actor.kanbanActorKind === "kanban_web_ui_client_side_automation_with_verified_page_load_nonce" &&
+				event.actor.boardMutationInitiator === "web_ui_client_automation_session_facet_driven_column_autoflow"
+			);
+		},
 		async reconcileLedgerWithPersistedBoardWithinBoardLock(reconcileInput) {
 			const captureState = await ledgerClient.readWorkspaceTaskMutationCaptureState(
 				reconcileInput.workspaceId,

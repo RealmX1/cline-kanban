@@ -192,6 +192,101 @@ describe("TerminalSessionManager hosted PTY session adoption after runtime resta
 		}
 	});
 
+	it("重启接管保留 Stop 误判证据，当前原生回合复核后恢复执行且不制造新回合", async () => {
+		const taskId = "codex-stop-adopt";
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 4545, prompt: "" });
+		const parsed = parseTerminalSessionAdoptionRecord(previousRuntime.readLatestPublishedAdoptionRecord());
+		if (parsed.kind !== "usable_adoption_record") throw new Error("缺少原生接管记录");
+		const stoppedAt = Date.now() + 10;
+		vi.useFakeTimers();
+		vi.setSystemTime(stoppedAt + 2);
+		const incarnation = parsed.adoptionRecord.summary.runtimeSessionIncarnationId;
+		if (!incarnation) throw new Error("接管记录缺少进程代际");
+		const summary: RuntimeTaskSessionSummary = {
+			...parsed.adoptionRecord.summary,
+			agentId: "codex",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			reviewReason: "hook",
+			updatedAt: stoppedAt + 1,
+			agentResponseGenerationTurnSequence: 7,
+			agentResponseGenerationTurnStarted: { startedAt: stoppedAt - 1, turnSequence: 7 },
+			currentAgentProcessUserTurnIdleRetentionStarted: {
+				stoppedAt,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 7,
+			},
+			lastAgentConversationUserHandoffObservation: {
+				observedAtMs: stoppedAt,
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 7,
+			},
+			lastEffectiveAgentConversationActivityObservation: {
+				observedAtMs: stoppedAt + 1,
+				activityKind: "tool_activity",
+				evidenceKind: "persisted_agent_transcript",
+				nativeSessionId: "native",
+				eventId: "codex:native:turn:tool",
+			},
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native",
+				transcriptPath: "/isolated/adopt.jsonl",
+				observedAt: stoppedAt,
+			},
+			codexNativeSessionControlEndpoint: {
+				workspaceId: "isolated",
+				conversationSessionId: taskId,
+				runtimeSessionIncarnationId: incarnation,
+				socketPath: "/isolated/adopt.sock",
+			},
+		};
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({}, new Set([taskId]));
+		const { candidate } = createFakeAdoptionCandidate({
+			taskId,
+			pid: 4545,
+			terminalSessionAdoptionRecord: { ...parsed.adoptionRecord, summary },
+		});
+		const persist = vi.fn(async (_before, _observation, applyCorrection) => applyCorrection());
+		manager.setCodexReviewMisclassificationPersistenceHandler(persist);
+		try {
+			await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+			const before = manager.getSummary(taskId);
+			if (!before) throw new Error("未接管原会话");
+			expect(before.turnOwner).toBe("user");
+			await manager.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(taskId, before, {
+				workspaceId: "isolated",
+				conversationSessionId: taskId,
+				runtimeSessionIncarnationId: incarnation,
+				nativeSessionId: "native",
+				nativeTurnId: "turn",
+				nativeTurnStartedAtMs: stoppedAt - 1,
+				observedAtMs: stoppedAt + 2,
+				threadStatus: "active",
+				nativeTurnStatus: "inProgress",
+				activeFlags: [],
+				canAcceptDirectInput: true,
+				executionStatus: "running",
+			});
+			expect(manager.getSummary(taskId)).toMatchObject({
+				turnOwner: "agent",
+				liveness: "live",
+				userTurnKind: null,
+				reviewReason: null,
+				agentResponseGenerationTurnSequence: 7,
+				agentResponseGenerationTurnStarted: summary.agentResponseGenerationTurnStarted,
+				lastAgentConversationUserHandoffObservation: null,
+				currentAgentProcessUserTurnIdleRetentionStarted: null,
+			});
+			expect(persist).toHaveBeenCalledOnce();
+		} finally {
+			manager.dispose();
+			previousRuntime.previousRuntimeManager.dispose();
+		}
+	});
+
 	it("adopts from the adoption record without answering stale terminal queries or advancing lastSubstantiveOutputAt", async () => {
 		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({
 			taskId: "task-adopt",

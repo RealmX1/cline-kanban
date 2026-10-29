@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { setTimeout as waitForProcessExit } from "node:timers/promises";
 import { TRPCError } from "@trpc/server";
+import { resolveCurrentAgentProcessUserTurnIdleRetentionStarted } from "../core/agent-conversation-activity-observation";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
@@ -19,6 +20,11 @@ import type {
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import { runtimeTaskCardActionMoveIntoDoneRequestSchema } from "../core/api-contract";
+import {
+	type CodexNativeAgentTurnExecutionObservation,
+	canCorrectCodexReviewMisclassificationForSameNativeTurn,
+	isCurrentCodexNativeAgentTurnExecutionObservation,
+} from "../core/codex-native-agent-turn-execution-observation";
 import type { WebUiBoardMutationInitiator } from "../core/kanban-web-ui-page-load-request-origin-nonce";
 import { POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX } from "../core/post-deploy-verification-done-entry-closure-contract";
 import { resolveSessionFacets } from "../core/session-activity";
@@ -70,7 +76,10 @@ import {
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import type { TaskMutationIntentWithResolvedActor } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
-import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import {
+	buildTaskMutationIntentForKanbanRuntimeSystemComponent,
+	getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
+} from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceBoardById,
@@ -180,6 +189,79 @@ export async function moveTaskCardIntoInProgressAfterAcceptedMainConversationInp
 		},
 	);
 	return { saved: result.saved, workspacePath: context.repoPath };
+}
+
+// 先持久移列再撤销会话误判；写盘失败时保留原纠偏锚点，后续原生观察可自动重试。
+export async function moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input: {
+	workspaceId: string;
+	summaryBeforeRead: RuntimeTaskSessionSummary;
+	observation: CodexNativeAgentTurnExecutionObservation;
+	getCurrentSummary: () => RuntimeTaskSessionSummary | null;
+}): Promise<{ saved: boolean; workspacePath: string; sessionCorrectionAllowed: boolean }> {
+	const context = await loadWorkspaceContextById(input.workspaceId);
+	if (!context) throw new Error("原生回合纠偏暂时无法定位任务工作区，等待自动重试");
+	const result = await mutateWorkspaceState(
+		context.repoPath,
+		buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+			"codex_native_review_misclassification_restores_task_into_in_progress",
+			"codex-native-turn-execution-reconciliation",
+		),
+		async (state) => {
+			const current = input.getCurrentSummary();
+			if (
+				!current ||
+				input.workspaceId !== input.observation.workspaceId ||
+				!isCurrentCodexNativeAgentTurnExecutionObservation(input.summaryBeforeRead, current, input.observation) ||
+				!canCorrectCodexReviewMisclassificationForSameNativeTurn(current, input.observation) ||
+				current.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			)
+				return { board: state.board, value: false, save: false };
+			const taskId = current.taskConversationSessionMetadata?.workspaceTaskId ?? current.taskId;
+			const found = findTaskCardWithBoardColumn(state.board, taskId);
+			const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(current);
+			const stoppedAt = retention?.stoppedAt ?? 0;
+			const latestEvidenceAt =
+				current.reviewReason === "hook" || retention?.latestCodexStopHookBoundary
+					? (input.observation.latestSameNativeTurnPersistedToolActivityObservation?.observedAtMs ??
+						current.lastEffectiveAgentConversationActivityObservation?.observedAtMs ??
+						0)
+					: input.observation.observedAtMs;
+			if (
+				!found ||
+				!["review", "in_progress"].includes(found.boardColumnId) ||
+				isTaskCardShelved(found.taskCard) ||
+				(found.taskCard.taskShelvingState?.lastChangedAt ?? 0) >= stoppedAt ||
+				found.taskCard.createdAt > (current.startedAt ?? 0) ||
+				resolveMainTaskConversationSessionId(found.taskCard) !== current.taskId
+			)
+				return { board: state.board, value: false, save: false };
+			if (found.boardColumnId === "in_progress") return { board: state.board, value: true, save: false };
+			if (found.taskCard.updatedAt > latestEvidenceAt) {
+				const isAutomaticReviewPlacement =
+					await getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.readLatestTaskCardMutationIsSessionFacetDrivenAutomaticReviewPlacement?.(
+						{
+							workspaceId: input.workspaceId,
+							taskId,
+							taskIncarnationCreatedAtEpochMs: found.taskCard.createdAt,
+							taskCardUpdatedAtMs: found.taskCard.updatedAt,
+							stoppedAtMs: stoppedAt,
+						},
+					);
+				if (isAutomaticReviewPlacement !== true) return { board: state.board, value: false, save: false };
+			}
+			// 账本查询也会让出执行权；持有 board 锁不等于会话身份或 Stop 边界没有变化。
+			const afterRead = input.getCurrentSummary();
+			if (
+				!afterRead ||
+				!isCurrentCodexNativeAgentTurnExecutionObservation(input.summaryBeforeRead, afterRead, input.observation) ||
+				!canCorrectCodexReviewMisclassificationForSameNativeTurn(afterRead, input.observation)
+			)
+				return { board: state.board, value: false, save: false };
+			const moved = moveTaskToColumn(state.board, taskId, "in_progress");
+			return { board: moved.board, value: moved.moved, save: moved.moved };
+		},
+	);
+	return { saved: result.saved, workspacePath: context.repoPath, sessionCorrectionAllowed: result.value };
 }
 
 type AutoReviewSettingsOfTaskCard = Pick<RuntimeBoardCard, "autoReviewEnabled" | "autoReviewMode">;

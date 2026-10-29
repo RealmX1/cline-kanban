@@ -1,4 +1,8 @@
-import type { RuntimeTaskSessionSummary } from "./api-contract";
+import { resolveCurrentAgentProcessUserTurnIdleRetentionStarted } from "./agent-conversation-activity-observation";
+import type {
+	RuntimeLastEffectiveAgentConversationActivityObservation,
+	RuntimeTaskSessionSummary,
+} from "./api-contract";
 import { resolveSessionFacets } from "./session-activity";
 
 // 执行状态不属于有效活动：重复核验不能推进活动、缓存、接受边沿或回合序号。
@@ -16,6 +20,7 @@ export interface CodexNativeAgentTurnExecutionObservation {
 	activeFlags: string[];
 	canAcceptDirectInput: boolean | null;
 	executionStatus: "running" | "waiting_for_user" | "finished" | "unknown";
+	latestSameNativeTurnPersistedToolActivityObservation?: RuntimeLastEffectiveAgentConversationActivityObservation;
 }
 
 export function buildCodexNativeAgentTurnExecutionIdentity(summary: RuntimeTaskSessionSummary): string {
@@ -49,21 +54,30 @@ export function buildCodexNativeAgentTurnExecutionSemanticGuard(summary: Runtime
 		summary.agentResponseGenerationTurnSequence,
 		summary.agentResponseGenerationTurnStarted,
 		summary.agentConversationPromptSubmissionAcceptance,
+		summary.lastEffectiveAgentConversationActivityObservation,
 		summary.lastAgentConversationUserHandoffObservation,
-		summary.currentAgentProcessUserTurnIdleRetentionStarted,
+		resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary),
 		summary.awaitingDispatchedBackgroundWork,
+		summary.taskConversationSessionMetadata,
 	]);
 }
 
-export function isCodexIdleStallNativeReconciliationCandidate(summary: RuntimeTaskSessionSummary): boolean {
+export function isCodexReviewMisclassificationNativeReconciliationCandidate(
+	summary: RuntimeTaskSessionSummary,
+): boolean {
 	const facets = resolveSessionFacets(summary);
+	const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary);
 	return (
 		summary.agentId === "codex" &&
 		facets.liveness === "live" &&
 		facets.turnOwner === "user" &&
 		facets.userTurnKind === "review" &&
-		summary.reviewReason === "idle_stall" &&
-		!summary.awaitingDispatchedBackgroundWork
+		(summary.reviewReason === "idle_stall" || summary.reviewReason === "hook") &&
+		retention?.turnSequence === summary.agentResponseGenerationTurnSequence &&
+		retention?.signalConfidence ===
+			(summary.reviewReason === "hook" ? "harness_turn_complete" : "prompt_ready_fallback") &&
+		!summary.awaitingDispatchedBackgroundWork &&
+		!summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
 	);
 }
 
@@ -73,7 +87,7 @@ export function shouldContinuouslyObserveCodexNativeTurnExecution(summary: Runti
 		summary.agentId === "codex" &&
 		facets.liveness === "live" &&
 		!summary.awaitingDispatchedBackgroundWork &&
-		(facets.turnOwner === "agent" || isCodexIdleStallNativeReconciliationCandidate(summary))
+		(facets.turnOwner === "agent" || isCodexReviewMisclassificationNativeReconciliationCandidate(summary))
 	);
 }
 
@@ -100,27 +114,54 @@ export function isCurrentCodexNativeAgentTurnExecutionObservation(
 	);
 }
 
-export function canCorrectCodexIdleStallForSameNativeTurn(
+export function canCorrectCodexReviewMisclassificationForSameNativeTurn(
 	summary: RuntimeTaskSessionSummary,
 	observation: CodexNativeAgentTurnExecutionObservation,
 ): boolean {
 	if (
-		!isCodexIdleStallNativeReconciliationCandidate(summary) ||
+		!isCodexReviewMisclassificationNativeReconciliationCandidate(summary) ||
 		observation.executionStatus !== "running" ||
+		observation.threadStatus !== "active" ||
+		observation.nativeTurnStatus !== "inProgress" ||
+		observation.activeFlags.length !== 0 ||
 		!observation.nativeTurnId
 	)
 		return false;
-	const retention = summary.currentAgentProcessUserTurnIdleRetentionStarted;
+	const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary);
 	const turnSequence = summary.agentResponseGenerationTurnSequence;
 	if (
 		!retention ||
-		retention.signalConfidence !== "prompt_ready_fallback" ||
+		retention.signalConfidence !==
+			(summary.reviewReason === "hook" ? "harness_turn_complete" : "prompt_ready_fallback") ||
 		retention.turnSequence !== turnSequence ||
 		observation.nativeTurnStartedAtMs === null ||
-		observation.nativeTurnStartedAtMs > retention.stoppedAt
+		!Number.isFinite(observation.nativeTurnStartedAtMs) ||
+		observation.nativeTurnStartedAtMs > retention.stoppedAt ||
+		observation.observedAtMs < retention.stoppedAt
 	)
 		return false;
 	const eventPrefix = `codex:${observation.nativeSessionId}:${observation.nativeTurnId}:`;
+	if (summary.reviewReason === "hook" || retention.latestCodexStopHookBoundary) {
+		const activity =
+			observation.latestSameNativeTurnPersistedToolActivityObservation ??
+			summary.lastEffectiveAgentConversationActivityObservation;
+		const stopBoundary = retention.latestCodexStopHookBoundary;
+		if (
+			stopBoundary &&
+			(stopBoundary.nativeSessionId !== observation.nativeSessionId ||
+				stopBoundary.runtimeSessionIncarnationId !== observation.runtimeSessionIncarnationId)
+		)
+			return false;
+		const stoppedAtMs = Math.max(retention.stoppedAt, stopBoundary?.observedAtMs ?? 0);
+		return (
+			activity?.activityKind === "tool_activity" &&
+			activity.evidenceKind === "persisted_agent_transcript" &&
+			activity.nativeSessionId === observation.nativeSessionId &&
+			activity.eventId?.startsWith(eventPrefix) === true &&
+			activity.observedAtMs > stoppedAtMs &&
+			activity.observedAtMs <= observation.observedAtMs
+		);
+	}
 	// 仅采信已持有的原生消息关联；同 cwd、同 PID 或当前 active 都不足以证明误判发生在哪一回合。
 	return (
 		summary.agentConversationPromptSubmissionAcceptance?.eventId?.startsWith(eventPrefix) === true ||

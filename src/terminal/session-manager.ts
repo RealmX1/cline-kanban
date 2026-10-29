@@ -61,6 +61,7 @@ import {
 } from "../core/agent-catalog";
 import {
 	recordEffectiveAgentConversationActivityPatch,
+	resolveCurrentAgentProcessUserTurnIdleRetentionStarted,
 	resolveLastEffectiveAgentConversationActivityObservation,
 } from "../core/agent-conversation-activity-observation";
 import {
@@ -106,8 +107,8 @@ import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
 	type CodexNativeAgentTurnExecutionObservation,
-	canCorrectCodexIdleStallForSameNativeTurn,
-	isCodexIdleStallNativeReconciliationCandidate,
+	canCorrectCodexReviewMisclassificationForSameNativeTurn,
+	isCodexReviewMisclassificationNativeReconciliationCandidate,
 	isCurrentCodexNativeAgentTurnExecutionObservation,
 } from "../core/codex-native-agent-turn-execution-observation";
 import {
@@ -1295,6 +1296,7 @@ export interface TerminalSessionManagerOptions {
 	hostedTerminalPtyProcessSpawner?: HostedTerminalPtyProcessSpawner;
 	// 用户在终端里提交了一次输入（dd2db 1a 终端输入观测）。由 workspace registry 接到关系账本；缺省不观测。
 	onUserTerminalInputSubmissionObservedForSession?: (kanbanTaskConversationSessionId: string) => void;
+	beforeUserTerminalInterrupt?: (kanbanTaskConversationSessionId: string) => Promise<void>;
 	// 把 summary 上刚确定的原生会话身份**立即**落盘（不等浏览器保存 board / 正常关机）。kanban 在 spawn 前为
 	// Cursor 分配 chat id 时用：spawn 之后运行时若崩溃，没落盘的 id 就丢了，下次只能退回 cwd-latest。
 	// 由 workspace registry 接到 persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId；缺省不落盘。
@@ -1307,7 +1309,17 @@ export interface TerminalSessionManagerOptions {
 	claudeCodeBackgroundSessionDaemonClient?: ClaudeCodeBackgroundSessionDaemonClient;
 }
 
+export type CodexReviewMisclassificationPersistenceHandler = (
+	summaryBeforeRead: RuntimeTaskSessionSummary,
+	observation: CodexNativeAgentTurnExecutionObservation,
+	applyCorrectionAfterPersistence: () => RuntimeTaskSessionSummary | null,
+) => Promise<RuntimeTaskSessionSummary | null>;
+
 export class TerminalSessionManager implements TerminalSessionService {
+	private readonly pendingUserTerminalWritesAfterStopByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		Promise<void>
+	>();
 	private humanTerminalInputMutationSequenceNumber = 0;
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
 		ActiveProcessState,
@@ -1354,6 +1366,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
+	private codexReviewMisclassificationPersistenceHandler: CodexReviewMisclassificationPersistenceHandler | null = null;
 	private readonly stallThresholdMs = readStallThresholdMs();
 	private stallScanInterval: NodeJS.Timeout | null = null;
 	private stallScanInFlight: Promise<void> | null = null;
@@ -2841,6 +2854,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		text: string,
 		options?: {
 			deferWhileUserTurn?: boolean;
+			owningCommandExecutionId?: string;
 			requiresCodexStartupPromptReady?: boolean;
 			validateBeforeTerminalWrite?: TaskChatDeliveryWriteValidator;
 			idempotencyKey?: string | null;
@@ -2857,6 +2871,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry || !active) {
 			return null;
 		}
+		if (options?.owningCommandExecutionId) {
+			const park = entry.summary.awaitingDispatchedBackgroundWork;
+			if (
+				this.hasPendingProgrammaticTaskChatInputDelivery(taskId) ||
+				park?.hasUnownedBackgroundWorkWait ||
+				(park &&
+					(!park.owningCommandExecutionIds?.includes(options.owningCommandExecutionId) ||
+						park.owningCommandExecutionIds.some((id) => id !== options.owningCommandExecutionId)))
+			)
+				return null;
+		}
 		if (text.trim()) {
 			this.automaticFailureContinuationCoordinators.get(taskId)?.cancel("new_task_message_superseded_recovery");
 			this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
@@ -2865,7 +2890,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（后台任务消息）——一个 parked 会话收到投递就是被恢复，
 		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
 		// 不依赖任何 hook 往返，且只在 parked 期间真正有后台等待时投递才会出现（park→Stop 后无投递，故 park 稳定保持）。
-		this.unparkTaskSession(taskId);
+		this.unparkTaskSession(taskId, options?.owningCommandExecutionId);
 		// last-write-wins：清掉该 task 上一个未决投递的定时器，并自增代际令本次成为唯一有效投递——
 		// 把已过定时器、正 await 就绪判定的在途 attempt 也一并作废（见 taskChatInputDeliveryGeneration）。
 		clearTaskChatInputDeliveryTimer(active);
@@ -2969,13 +2994,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	//
 	// 三个 phase 都算「在途」：awaiting_readiness 尚未交给执行通道，另两个分别等待 PTY 提交确认
 	// 或 Codex 原生接受确认；单飞槽在确认完成前均不能被排队 prompt 抢走。
-	hasPendingProgrammaticTaskChatInputDelivery(taskId: string): boolean {
+	hasPendingProgrammaticTaskChatInputDelivery(taskId: string, excludingIdempotencyKey?: string): boolean {
 		const active = this.entries.get(taskId)?.active;
 		return (
 			active !== null &&
 			active !== undefined &&
 			[active.programmaticDeliveryReceipt, automaticPasteSubmissionReceiptByActiveProcess.get(active)].some(
-				(receipt) => receipt != null && !receipt.settled,
+				(receipt) =>
+					receipt != null &&
+					!receipt.settled &&
+					(!excludingIdempotencyKey || receipt.idempotencyKey !== excludingIdempotencyKey),
 			)
 		);
 	}
@@ -3175,6 +3203,61 @@ export class TerminalSessionManager implements TerminalSessionService {
 		)
 			return;
 		const deliveryReceipt = currentActive.programmaticDeliveryReceipt;
+		if (currentEntry.summary.agentId === "codex" && plan.codexNativeDeliveryLedgerBinding) {
+			const inputMutationSequence =
+				this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(currentActive) ?? 0;
+			const nativeIdentity = buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(
+				currentEntry.summary,
+			);
+			const stillOwnsPtyAttempt = () =>
+				this.entries.get(taskId)?.active === currentActive &&
+				currentActive.taskChatInputDeliveryGeneration === generation &&
+				currentActive.programmaticDeliveryReceipt === deliveryReceipt &&
+				!deliveryReceipt?.settled;
+			try {
+				await createCodexNativePromptDeliveryJournal(
+					plan.codexNativeDeliveryLedgerBinding,
+				).recordTerminalPtyWriteIntent();
+			} catch {
+				if (stillOwnsPtyAttempt())
+					settleOwnedProgrammaticDeliveryReceipt(
+						currentActive,
+						deliveryReceipt,
+						"delivery_failed",
+						"codex_native_prompt_delivery_unconfirmed",
+					);
+				return;
+			}
+			if (!stillOwnsPtyAttempt()) return;
+			if (
+				plan.validateBeforeTerminalWrite &&
+				!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
+					taskId,
+					currentActive,
+					plan.validateBeforeTerminalWrite,
+					stillOwnsPtyAttempt,
+					deliveryReceipt,
+				))
+			)
+				return;
+			if (!stillOwnsPtyAttempt()) return;
+			const entryAfterJournalWrite = this.entries.get(taskId);
+			if (
+				!entryAfterJournalWrite ||
+				(this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(currentActive) ?? 0) !==
+					inputMutationSequence ||
+				buildTerminalNativeConversationIdentityForAsynchronousWriteValidation(entryAfterJournalWrite.summary) !==
+					nativeIdentity
+			) {
+				settleOwnedProgrammaticDeliveryReceipt(
+					currentActive,
+					deliveryReceipt,
+					"delivery_failed",
+					"codex_native_prompt_delivery_unconfirmed",
+				);
+				return;
+			}
+		}
 		if (deliveryReceipt) {
 			deliveryReceipt.phase = "awaiting_submit_confirmation";
 			deliveryReceipt.queuedBehindActiveAgentTurn = resolveSessionFacets(currentEntry.summary).turnOwner === "agent";
@@ -4351,7 +4434,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 原 sinceMs（重复 park 不报错，便于编排重试）。
 	parkTaskSessionAwaitingDispatchedBackgroundWork(
 		taskId: string,
-		options: { label?: string } = {},
+		options: { label?: string; owningCommandExecutionId?: string } = {},
 	): { ok: true; summary: RuntimeTaskSessionSummary } | { ok: false; error: string } {
 		const entry = this.entries.get(taskId);
 		if (!entry || !entry.active) {
@@ -4361,9 +4444,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return { ok: false, error: `Task "${taskId}" is not in an agent turn and cannot be parked.` };
 		}
 		const label = options.label?.trim() || undefined;
+		const previousPark = entry.summary.awaitingDispatchedBackgroundWork;
+		if (options.owningCommandExecutionId && previousPark && !previousPark.owningCommandExecutionIds)
+			return { ok: false, error: "会话已有其他后台等待，不能转移其所有权。" };
+		const owningCommandExecutionIds = options.owningCommandExecutionId
+			? [...new Set([...(previousPark?.owningCommandExecutionIds ?? []), options.owningCommandExecutionId])]
+			: previousPark?.owningCommandExecutionIds;
 		const sinceMs = entry.summary.awaitingDispatchedBackgroundWork?.sinceMs ?? now();
 		const summary = updateSummary(entry, {
-			awaitingDispatchedBackgroundWork: { sinceMs, ...(label ? { label } : {}) },
+			awaitingDispatchedBackgroundWork: {
+				sinceMs,
+				...((!options.owningCommandExecutionId && previousPark?.owningCommandExecutionIds?.length) ||
+				previousPark?.hasUnownedBackgroundWorkWait
+					? { hasUnownedBackgroundWorkWait: true }
+					: {}),
+				...(label ? { label } : {}),
+				...(owningCommandExecutionIds ? { owningCommandExecutionIds } : {}),
+			},
 		});
 		entry.suppressAutoRestartOnExit = true;
 		this.endActiveOutputReactionEpisode(entry, taskId);
@@ -4378,7 +4475,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 清标经 updateSummary metadata-only 写 null（同 connectionRetry 清标，facet 三元组不变），并复位
 	// suppressAutoRestartOnExit=false 恢复正常重启语义（park 期的真退出已在 onExit 的 shouldAutoRestart 处被
 	// parked / wasSuppressed 守卫拦下，此处复位只影响 resume 后的后续退出）。
-	unparkTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+	unparkTaskSession(taskId: string, owningCommandExecutionId?: string): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
@@ -4386,8 +4483,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
-		const summary = updateSummary(entry, { awaitingDispatchedBackgroundWork: null });
-		entry.suppressAutoRestartOnExit = false;
+		const previousPark = entry.summary.awaitingDispatchedBackgroundWork;
+		if (owningCommandExecutionId && !previousPark?.owningCommandExecutionIds?.includes(owningCommandExecutionId))
+			return cloneSummary(entry.summary);
+		const remainingOwners = previousPark?.owningCommandExecutionIds?.filter((id) => id !== owningCommandExecutionId);
+		const summary = updateSummary(entry, {
+			awaitingDispatchedBackgroundWork:
+				previousPark &&
+				owningCommandExecutionId &&
+				(remainingOwners?.length || previousPark.hasUnownedBackgroundWorkWait)
+					? { ...previousPark, owningCommandExecutionIds: remainingOwners }
+					: null,
+		});
+		entry.suppressAutoRestartOnExit = summary.awaitingDispatchedBackgroundWork != null;
 		for (const listener of entry.listeners.values()) {
 			listener.onState?.(cloneSummary(summary));
 		}
@@ -7085,9 +7193,36 @@ export class TerminalSessionManager implements TerminalSessionService {
 		) {
 			entry.active.awaitingCodexPromptAfterEnter = true;
 		}
-		entry.active.session.write(data);
+		const isExplicitInterrupt =
+			data.includes(0x03) ||
+			(data.length === 1 && data[0] === 0x1b && resolveSessionFacets(entry.summary).turnOwner === "agent");
+		const pendingWrite = this.pendingUserTerminalWritesAfterStopByActiveProcess.get(entry.active);
+		if ((isExplicitInterrupt && this.terminalSessionManagerOptions.beforeUserTerminalInterrupt) || pendingWrite) {
+			const activeAtWrite = entry.active;
+			const barrier = (pendingWrite ?? Promise.resolve()).then(async () => {
+				if (isExplicitInterrupt)
+					await this.terminalSessionManagerOptions
+						.beforeUserTerminalInterrupt?.(taskId)
+						.catch((error: unknown) => {
+							logTuiFreezeWarning(`用户停止的所属执行撤销待补证 taskId=${taskId} reason=${String(error)}`);
+						});
+				if (entry.active === activeAtWrite) activeAtWrite.session.write(data);
+			});
+			this.pendingUserTerminalWritesAfterStopByActiveProcess.set(activeAtWrite, barrier);
+			void barrier
+				.finally(() => {
+					if (this.pendingUserTerminalWritesAfterStopByActiveProcess.get(activeAtWrite) === barrier)
+						this.pendingUserTerminalWritesAfterStopByActiveProcess.delete(activeAtWrite);
+				})
+				.catch((error) => logTuiFreezeWarning(String(error)));
+		} else entry.active.session.write(data);
 		// 信任确认、菜单选择与换行都不是接受证据；侧会话预览只随原生接受的正文推进。
 		return cloneSummary(entry.summary);
+	}
+
+	getTaskHumanTerminalInputMutationSequenceNumber(taskId: string): number | null {
+		const active = this.entries.get(taskId)?.active;
+		return active ? (this.humanTerminalInputMutationSequenceNumbersByActiveProcess.get(active) ?? 0) : null;
 	}
 
 	// 原生动作前同步重验本代输入，不读屏、不清草稿、不刷新 summary；空值表示本代已无活体 tracker。
@@ -7547,7 +7682,35 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
-	reconcileCodexIdleStallWithNativeAgentTurnExecution(
+	setCodexReviewMisclassificationPersistenceHandler(
+		handler: CodexReviewMisclassificationPersistenceHandler | null,
+	): void {
+		this.codexReviewMisclassificationPersistenceHandler = handler;
+	}
+
+	async reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		observation: CodexNativeAgentTurnExecutionObservation,
+	): Promise<RuntimeTaskSessionSummary | null> {
+		const applyCorrectionAfterPersistence = () =>
+			this.applyCodexReviewMisclassificationCorrection(taskId, summaryBeforeRead, observation);
+		const entry = this.entries.get(taskId);
+		if (
+			entry?.active &&
+			isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) &&
+			canCorrectCodexReviewMisclassificationForSameNativeTurn(entry.summary, observation) &&
+			this.codexReviewMisclassificationPersistenceHandler
+		)
+			return this.codexReviewMisclassificationPersistenceHandler(
+				summaryBeforeRead,
+				observation,
+				applyCorrectionAfterPersistence,
+			);
+		return applyCorrectionAfterPersistence();
+	}
+
+	private applyCodexReviewMisclassificationCorrection(
 		taskId: string,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
 		observation: CodexNativeAgentTurnExecutionObservation,
@@ -7556,15 +7719,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (
 			!entry?.active ||
 			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) ||
-			!canCorrectCodexIdleStallForSameNativeTurn(entry.summary, observation)
+			!canCorrectCodexReviewMisclassificationForSameNativeTurn(entry.summary, observation)
 		)
 			return entry ? cloneSummary(entry.summary) : null;
 		const previous = entry.summary;
-		const retention = previous.currentAgentProcessUserTurnIdleRetentionStarted;
+		const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(previous);
 		const handoff = previous.lastAgentConversationUserHandoffObservation;
 		const isMatchingFalseHandoff =
 			retention != null &&
-			handoff?.signalConfidence === "prompt_ready_fallback" &&
+			handoff?.signalConfidence === retention.signalConfidence &&
 			handoff.turnSequence === retention?.turnSequence &&
 			handoff.observedAtMs === retention.stoppedAt;
 		const summary = updateSummary(entry, {
@@ -7581,7 +7744,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
 		this.emitSummary(summary);
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-idle-stall-corrected taskId=${taskId} nativeTurnId=${observation.nativeTurnId} turnSequence=${summary.agentResponseGenerationTurnSequence}`,
+			`[tui-freeze] codex-review-misclassification-corrected taskId=${taskId} previousReviewReason=${previous.reviewReason} nativeTurnId=${observation.nativeTurnId} turnSequence=${summary.agentResponseGenerationTurnSequence}`,
 		);
 		return cloneSummary(summary);
 	}
@@ -7626,15 +7789,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return { summaryBeforeRead, observation };
 	}
 
-	async inspectCodexNativeTurnBeforeIdleStallSessionReclamation(
+	async inspectCodexNativeTurnBeforeReviewSessionReclamation(
 		taskId: string,
 	): Promise<"allow_reclamation" | "defer_reclamation"> {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active || !isCodexIdleStallNativeReconciliationCandidate(entry.summary)) return "allow_reclamation";
+		if (!entry?.active || !isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary))
+			return "allow_reclamation";
 		const result = await this.readCurrentCodexNativeTurnExecution(entry);
 		if (!result) return "defer_reclamation";
 		if (result.observation.executionStatus === "running") {
-			this.reconcileCodexIdleStallWithNativeAgentTurnExecution(taskId, result.summaryBeforeRead, result.observation);
+			try {
+				await this.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+					taskId,
+					result.summaryBeforeRead,
+					result.observation,
+				);
+			} catch (error) {
+				logTuiFreezeWarning(
+					`[tui-freeze] codex-review-correction-persistence-deferred taskId=${taskId} reason=${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 			return "defer_reclamation";
 		}
 		return "allow_reclamation";
@@ -7671,7 +7845,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		reason: RuntimeTaskSessionReviewReason,
 		userTurnKindOverride?: RuntimeTaskSessionUserTurnKind,
 		// hook 驱动时传入事件的捕获时刻（spool 晚送达时停止时刻按它记，见 SummaryWriteDomainEventTiming）。
-		domainEventTiming?: SummaryWriteDomainEventTiming,
+		domainEventTiming?: SummaryWriteDomainEventTiming & { hookEventDeliveryIdempotencyKey?: string },
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -7711,6 +7885,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const before = entry.summary;
 		const beforeFacets = resolveSessionFacets(before);
+		if (
+			before.agentId === "codex" &&
+			reason === "manual_review" &&
+			beforeFacets.turnOwner === "user" &&
+			beforeFacets.userTurnKind === "review"
+		) {
+			const summary = updateSummary(entry, { ...beforeFacets, reviewReason: reason }, undefined, domainEventTiming);
+			for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+			this.emitSummary(summary);
+			return cloneSummary(summary);
+		}
 		if (before.agentId === "kimi" && reason === "hook" && beforeFacets.turnOwner === "user") {
 			const userTurnKind = userTurnKindOverride ?? "review";
 			// 存活终端的原生中断与 agent 回合一样使用 hook 成因；中断语义由 userTurnKind 保留，
@@ -7750,7 +7935,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// reviewReason 透传进 hook.to_review 事件 → 既 stamp 进 summary、又驱动 userTurnKind 派生。
 		// userTurnKindOverride（B3 Claude permission 采集）随同事件下发，由 reducer 在 user 回合覆写人轴
 		// （经完整 facet 三元组，不裸写单字段）。
-		const summary = this.applySessionEvent(
+		let summary = this.applySessionEvent(
 			entry,
 			{
 				type: "hook.to_review",
@@ -7759,6 +7944,34 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 			domainEventTiming,
 		);
+		const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(summary);
+		const nativeIdentity = summary.agentNativeConversationSessionIdentity;
+		const stopObservedAtMs = Math.min(domainEventTiming?.domainEventObservedAtEpochMs ?? now(), now());
+		if (
+			summary.agentId === "codex" &&
+			reason === "hook" &&
+			(userTurnKindOverride === undefined || userTurnKindOverride === "review") &&
+			resolveSessionFacets(summary).userTurnKind === "review" &&
+			(summary.reviewReason === "hook" || summary.reviewReason === "idle_stall") &&
+			retention &&
+			nativeIdentity?.sourceAgentId === "codex" &&
+			summary.runtimeSessionIncarnationId &&
+			Number.isFinite(stopObservedAtMs) &&
+			stopObservedAtMs >= (summary.startedAt ?? 0) &&
+			stopObservedAtMs >= (retention.latestCodexStopHookBoundary?.observedAtMs ?? retention.stoppedAt)
+		) {
+			summary = updateSummary(entry, {
+				currentAgentProcessUserTurnIdleRetentionStarted: {
+					...retention,
+					latestCodexStopHookBoundary: {
+						observedAtMs: stopObservedAtMs,
+						hookEventDeliveryIdempotencyKey: domainEventTiming?.hookEventDeliveryIdempotencyKey ?? null,
+						nativeSessionId: nativeIdentity.nativeSessionId,
+						runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+					},
+				},
+			});
+		}
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -9161,8 +9374,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const [taskId, entry] of this.entries.entries()) {
 			if (entry.summary.taskConversationSessionNativeIdentityRecovery)
 				void this.advanceSideSessionNativeIdentityRecovery(entry).catch(() => {});
-			if (entry.active && isCodexIdleStallNativeReconciliationCandidate(entry.summary)) {
-				await this.inspectCodexNativeTurnBeforeIdleStallSessionReclamation(taskId);
+			if (entry.active && isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary)) {
+				await this.inspectCodexNativeTurnBeforeReviewSessionReclamation(taskId);
 			}
 			// 首轮落盘看门狗与回合无关（卡在信任对话框时 turnOwner 仍是 agent，但也可能已被翻成 user），
 			// 所以排在下面的回合门控之前。

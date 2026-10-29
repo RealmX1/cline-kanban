@@ -36,7 +36,8 @@ function isManagedTaskPromptDeliveryAwaitingLateConfirmation(entry: QueuedTaskPr
 		reason === "runtime_restarted_before_confirmation" ||
 		reason === "submit_confirmation_budget_exhausted" ||
 		reason === "codex_native_prompt_delivery_unconfirmed" ||
-		entry.managedDelivery?.terminalDeliveryReceipt == null
+		entry.managedDelivery?.terminalDeliveryReceipt == null ||
+		entry.managedDelivery.terminalDeliveryReceipt.nativePromptSubmissionNotStartedEvidence != null
 	);
 }
 

@@ -249,7 +249,9 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 		);
 		workspaceStateMocks.mutateWorkspaceState.mockReset();
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path, _intent, mutate) => {
-			const mutation: RuntimeWorkspaceAtomicMutationResult<unknown> = mutate(persistedState);
+			const mutationResult = mutate(persistedState);
+			const mutation: RuntimeWorkspaceAtomicMutationResult<unknown> =
+				mutationResult instanceof Promise ? await mutationResult : mutationResult;
 			if (mutation.save !== false) {
 				const wasCompleted = currentCard().taskMainSessionHandover?.status === "completed";
 				persistedState = {
@@ -407,6 +409,7 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 				undefined,
 				undefined,
 				undefined,
+				expect.any(Function),
 			);
 		},
 	);
