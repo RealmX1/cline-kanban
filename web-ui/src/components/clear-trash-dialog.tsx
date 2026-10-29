@@ -33,7 +33,7 @@ export function ClearTrashDialog({
 			}}
 		>
 			<AlertDialogHeader>
-				<AlertDialogTitle>Clear done items permanently?</AlertDialogTitle>
+				<AlertDialogTitle>永久删除已结案任务?</AlertDialogTitle>
 			</AlertDialogHeader>
 			<AlertDialogBody>
 				<AlertDialogDescription>

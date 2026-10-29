@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+	taskClosureArchiveCleanupCredentialSchema,
+	taskClosureOperationProgressSchema,
+	taskClosureRecordSchema,
+	taskClosureRequestSchema,
+} from "./task-closure-contract";
 
 export {
 	type PostDeployVerificationEntryReference,
@@ -8,6 +14,7 @@ export {
 	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema,
 	runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema,
 } from "./post-deploy-verification-entry-navigation-contract";
+export * from "./task-closure-contract";
 
 import {
 	taskVisualizationArtifactsUpdatedMessageSchema,
@@ -421,6 +428,8 @@ export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
 		taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
+		taskClosureSummary: taskClosureRecordSchema.optional(),
+		taskClosureOperationProgress: taskClosureOperationProgressSchema.optional(),
 		// 运行时维护的当前主会话绑定；缺省兼容旧卡片（会话 ID 等于卡片 ID）。
 		mainTaskConversationSessionId: z.string().min(1).optional(),
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
@@ -1077,7 +1086,18 @@ export type RuntimeLastAgentConversationUserHandoffObservation = z.infer<
 >;
 
 // 当前进程的待命期限锚点沿用旧停止事件形状；它与用户看到的历史交棒完全独立。
-export const runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema = runtimeAgentResponseGenerationStoppedSchema;
+export const runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema =
+	runtimeAgentResponseGenerationStoppedSchema.extend({
+		// 独立于待命起点与显示元数据：相同正文的新 Stop 也必须推进纠偏边界，晚送达保留捕获时刻。
+		latestCodexStopHookBoundary: z
+			.object({
+				observedAtMs: z.number(),
+				hookEventDeliveryIdempotencyKey: z.string().nullable(),
+				nativeSessionId: z.string(),
+				runtimeSessionIncarnationId: z.string(),
+			})
+			.optional(),
+	});
 export type RuntimeCurrentAgentProcessUserTurnIdleRetentionStarted = z.infer<
 	typeof runtimeCurrentAgentProcessUserTurnIdleRetentionStartedSchema
 >;
@@ -1773,6 +1793,7 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 // 移入 Done（trash 列）→ 停 agent 会话与详情 shell 终端会话 → 删 worktree（按卡片的 worktreeMode）。
 // 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
+	closure: taskClosureRequestSchema.optional(),
 	taskId: z.string().min(1),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	// 评论与移列在同一次保存里生效；稳定 ID 供网络重试去重，时间由服务端填写。
@@ -1791,6 +1812,8 @@ export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 });
 export type RuntimeTaskCardActionMoveIntoDoneRequest = z.infer<typeof runtimeTaskCardActionMoveIntoDoneRequestSchema>;
 export const runtimeTaskCardActionMoveIntoDoneResponseSchema = z.object({
+	closureRecord: taskClosureRecordSchema.nullable().optional(),
+	closureOperationProgress: taskClosureOperationProgressSchema.optional(),
 	// 本次移入 Done 时 Post-Deploy Verification 结案的结果；任务不受门禁时为 null。
 	postDeployVerificationClosureOutcome: runtimePostDeployVerificationClosureOutcomeSchema.nullable().optional(),
 	boardColumnIdOfTaskCardBeforeAction: runtimeBoardColumnIdSchema,
@@ -2001,6 +2024,8 @@ export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabili
 // deriveLiveAgentTaskCount）；跨项目切换面板的条目是它的超集（下方 runtimeCrossProjectTaskSwitcherEntrySchema）。
 // 原消费者 Stage-First Overview 已退役（docs/context-board-scope-all-projects-and-single-project-scope.md）。
 export const runtimeInProgressTaskDetailSchema = z.object({
+	taskClosureSummary: taskClosureRecordSchema.optional(),
+	taskClosureOperationProgress: taskClosureOperationProgressSchema.optional(),
 	lastEffectiveAgentConversationActivityObservation: runtimeLastEffectiveAgentConversationActivityObservationSchema
 		.nullable()
 		.optional(),
@@ -3315,6 +3340,7 @@ export type RuntimeProjectsResponse = z.infer<typeof runtimeProjectsResponseSche
 // 塞进这个按需拉取的快照只会得到一份立刻过期的假值。
 // 本端点是按需拉取（弹层开 + All projects 打开）而非高频广播，因此这几个定长字段的体积可以接受。
 export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
+	taskClosureSummary: taskClosureRecordSchema.optional(),
 	taskId: z.string(),
 	title: z.string(),
 	prompt: z.string(),
@@ -3645,6 +3671,7 @@ export const runtimeWorktreeEnsureResponseSchema = z.union([
 export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsureResponseSchema>;
 
 export const runtimeWorktreeDeleteRequestSchema = z.object({
+	taskClosureArchiveCleanupCredential: taskClosureArchiveCleanupCredentialSchema.optional(),
 	taskId: z.string(),
 	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });

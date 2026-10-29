@@ -87,6 +87,7 @@ function workspaceState(workspaceId: string) {
 async function openRealApp(page: Page) {
 	const errors: string[] = [];
 	const requests: Array<{ procedure: string; workspaceId: string; input: unknown }> = [];
+	let savedSettingPresentationPreferences: Record<string, string> = {};
 	page.on("pageerror", (error) => {
 		errors.push(error.message);
 		console.error("隔离 App 页面错误：", error.stack);
@@ -132,12 +133,25 @@ async function openRealApp(page: Page) {
 			const input = (url.searchParams.get("batch") === "1" ? payload[index] : payload) ?? {};
 			requests.push({ procedure, workspaceId, input });
 			let value: unknown = {};
-			if (procedure === "runtime.getConfig" || procedure === "runtime.saveConfig")
-				value = runtimeConfig(workspaceId);
-			else if (procedure === "workspace.getState" || procedure === "workspace.saveState")
+			if (procedure === "runtime.getConfig" || procedure === "runtime.saveConfig") {
+				const preferencePatch =
+					input.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskEditorSettingPresentationBySettingKey;
+				if (preferencePatch)
+					savedSettingPresentationPreferences = { ...savedSettingPresentationPreferences, ...preferencePatch };
+				const configuration = runtimeConfig(workspaceId);
+				value = {
+					...configuration,
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						...configuration.userInterfacePreferencesSharedAcrossBrowserOrigins,
+						taskEditorSettingPresentationBySettingKey: savedSettingPresentationPreferences,
+					},
+				};
+			} else if (procedure === "workspace.getState" || procedure === "workspace.saveState")
 				value = workspaceState(workspaceId);
 			else if (procedure === "runtime.issueKanbanWebUiPageLoadRequestOriginNonce")
 				value = { kanbanWebUiPageLoadIssuedRequestOriginNonce: "isolated-page-nonce" };
+			else if (procedure === "runtime.getCodexConfigurationSyncState")
+				value = { revision: 0, changes: [], sourceObservations: [], observationProblem: null };
 			else if (procedure === "runtime.getClineKanbanAccess") value = { enabled: true };
 			else if (procedure === "dailyWorkProgressStatistics.getSummary")
 				value = {
@@ -242,9 +256,9 @@ for (const kind of ["create", "edit"] as const) {
 				.getByRole("dialog")
 				.filter({ has: page.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
 			await expect(dialog).toBeVisible();
-			await dialog.getByRole("textbox", { name: "Task name", exact: true }).fill("切换后保留的名称");
+			await dialog.getByRole("textbox", { name: "任务名称（可选）", exact: true }).fill("切换后保留的名称");
 			await dialog.locator("textarea").first().fill("切换后台项目时不能丢失的正文");
-			await dialog.getByRole("textbox", { name: "Task name", exact: true }).focus();
+			await dialog.getByRole("textbox", { name: "任务名称（可选）", exact: true }).focus();
 			await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
 			await page
 				.getByRole("button", { name: /背景导航项目/ })
@@ -255,18 +269,23 @@ for (const kind of ["create", "edit"] as const) {
 			await expect(page.getByRole("button", { name: "展开任务编辑器", exact: true })).toBeVisible();
 			await page.getByRole("button", { name: "展开任务编辑器", exact: true }).click();
 			await expect(dialog.locator("textarea").first()).toHaveValue("切换后台项目时不能丢失的正文");
-			await expect(dialog.getByRole("textbox", { name: "Task name", exact: true })).toHaveValue("切换后保留的名称");
+			await expect(dialog.getByRole("textbox", { name: "任务名称（可选）", exact: true })).toHaveValue(
+				"切换后保留的名称",
+			);
 			await expect(dialog.locator('[data-testid="task-creation-target-project-field"]')).toContainText(
 				"编辑来源项目",
 			);
+			await dialog.getByRole("button", { name: /^Agent：/ }).click();
 			await expect(
 				dialog.getByRole("button", { name: "OpenAI Codex (default agent)", exact: true }),
 			).toHaveAttribute("aria-pressed", "true");
-			if (kind === "create")
+			if (kind === "create") {
+				await dialog.getByRole("button", { name: /^模型与参数：/ }).click();
 				await expect(dialog.getByRole("button", { name: "source-codex-model", exact: true })).toHaveAttribute(
 					"aria-pressed",
 					"true",
 				);
+			}
 			expect(fixture.errors).toEqual([]);
 		});
 	}

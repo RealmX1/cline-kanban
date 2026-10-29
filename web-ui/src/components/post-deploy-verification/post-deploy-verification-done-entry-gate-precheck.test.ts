@@ -36,7 +36,7 @@ function activeGroupWith(tasks: RuntimePostDeployVerificationTask[]): RuntimePos
 	};
 }
 
-describe("PDV 移入 Done 门禁的客户端预检", () => {
+describe("PDV 结案门禁的客户端预检", () => {
 	it("活跃组里未结案、有未勾项的任务：要逐项原因，并列出未勾项", () => {
 		const group = activeGroupWith([
 			createPostDeployVerificationTaskReadModelTestFixture({

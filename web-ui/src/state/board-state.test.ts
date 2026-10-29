@@ -1222,6 +1222,38 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	// 服务端卡片 schema 的每个字段都填上非缺省值。新增字段时 typecheck 会先在
 	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
+		taskClosureSummary: {
+			closureRequestId: "11111111-1111-4111-8111-111111111111",
+			taskIdentity: { workspaceId: "test", taskId: "task", taskIncarnationCreatedAtEpochMs: 1 },
+			details: {
+				outcome: "plan_retired",
+				reason: "采用后继方案",
+				evidence: ["docs/report.md"],
+				acceptedDeliverables: [],
+			},
+			recordedAtEpochMs: 2,
+			actor: { kanbanActorKind: "kanban_web_ui_user_gesture_with_verified_page_load_nonce" },
+			eventKind: "closed",
+			previousClosureRequestId: null,
+			isCurrentlyClosed: true,
+			archiveManifest: {
+				archiveDirectory: "/durable/archive",
+				headCommit: "abc",
+				persistentHeadReference: "refs/kanban/archive",
+				verifiedAtEpochMs: 2,
+				availability: "verified_recoverable",
+				preservedFileCount: 1,
+				selectedArtifactRelativePaths: [],
+			},
+		},
+		taskClosureOperationProgress: {
+			closureRequestId: "11111111-1111-4111-8111-111111111111",
+			phase: "completed",
+			attemptCount: 1,
+			lastError: null,
+			recoveryCondition: null,
+			nextRetryAtEpochMs: null,
+		},
 		taskStickerEntries: [
 			{ taskStickerEntryId: "sticker-1", stickerText: "便签正文", isCollapsed: true, createdAt: 10, updatedAt: 11 },
 		],

@@ -320,7 +320,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			const hookEventObservedAtEpochMs = resolveHookEventObservedAtEpochMs(body, hookIngestReceivedAtEpochMs);
 			const hookEventDomainEventTiming =
 				hookEventObservedAtEpochMs !== null
-					? { domainEventObservedAtEpochMs: hookEventObservedAtEpochMs }
+					? { domainEventObservedAtEpochMs: hookEventObservedAtEpochMs, hookEventDeliveryIdempotencyKey }
 					: undefined;
 			const isCompactionPhaseEvent =
 				event === "main_agent_conversation_context_compaction_started" ||

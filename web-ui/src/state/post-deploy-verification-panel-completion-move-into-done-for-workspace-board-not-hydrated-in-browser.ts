@@ -17,7 +17,7 @@ function describeReadFailure(error: unknown): string {
 }
 
 /**
- * PDV 面板「完成核对 / 带原因移入 Done」在 PDV workspace 的 board **不在浏览器里**时的移列（All projects 视图下面板
+ * PDV 面板「完成核对 / 带原因结案」在 PDV workspace 的 board **不在浏览器里**时的移列（All projects 视图下面板
  * 绑定的不是当前项目，或跨项目打开的过渡窗口里）。与当前项目那条（useBoardInteractions.completePostDeployVerificationMoveToDone）
  * 调同一个 taskCardAction 命令、同样的发起方标注，差别：
  *   - 移列前先在服务端复检卡片所在列：面板手里的 board 是最多旧 30s 的快照，controller 的本地复检不够——
@@ -58,12 +58,12 @@ export async function completePostDeployVerificationPanelMoveIntoDoneForWorkspac
 	});
 	if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
 		if (!isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(result.commandFailureMessage)) {
-			notifyError(`Could not move the task to Done: ${result.commandFailureMessage}`);
+			notifyError(`Could not 结案任务: ${result.commandFailureMessage}`);
 		}
 		return { ok: false, moveIntoDoneFailureMessage: result.commandFailureMessage };
 	}
 	if (result.taskCardActionCommandExecutionOutcome === "rejected_because_another_command_is_in_flight_for_task_card") {
-		return { ok: false, moveIntoDoneFailureMessage: "该任务的移入 Done 已在进行中" };
+		return { ok: false, moveIntoDoneFailureMessage: "该任务的结案 已在进行中" };
 	}
 	const worktreeDeletionErrorMessage =
 		result.response.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? null;

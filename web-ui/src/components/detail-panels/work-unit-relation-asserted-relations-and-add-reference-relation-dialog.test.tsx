@@ -351,7 +351,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		);
 	});
 
-	it("添加关系：先校验必填；选跨项目对端、选 kind、填专有属性后提交，成功即关闭、重拉、提示", async () => {
+	it("添加关系：只要求选择对端，可填写可选类型与详情后提交，成功即关闭、重拉、提示", async () => {
 		fetchRelationNeighborhoodSummaryMock.mockImplementation(async () =>
 			buildEmptyRelationNeighborhoodSummaryResponseForTest(),
 		);
@@ -389,22 +389,16 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		).not.toBeNull();
 
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLSelectElement>(dialog, "Relation"),
+			findLabeledFormControl<HTMLSelectElement>(dialog, "关系类型（可选）"),
 			"reference_concerns_behavior_or_state_of",
 		);
 		expect(dialog.querySelector("[data-relation-statement-preview]")?.textContent).toContain(
 			"This task concerns the behavior or state of Creator card in other project",
 		);
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLInputElement>(dialog, "Rationale"),
+			findLabeledFormControl<HTMLInputElement>(dialog, "关系理由（可选）"),
 			"Diagnosing its retry loop.",
 		);
-		await clickElement(findButtonByText(dialog, "Add relation"));
-		// 只差 concerns 的必填 aspect。
-		expect(dialog.querySelector('[aria-label="Add relation form problems"]')?.textContent).toBe(
-			"Fill in Concerned aspect.",
-		);
-		expect(assertReferenceRelationMock).not.toHaveBeenCalled();
 
 		await changeFormControlValue(findLabeledFormControl<HTMLInputElement>(dialog, "Concerned aspect"), "retry loop");
 		await changeFormControlValue(
@@ -473,7 +467,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 			)!,
 		);
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLSelectElement>(dialog, "Relation"),
+			findLabeledFormControl<HTMLSelectElement>(dialog, "关系类型（可选）"),
 			"reference_is_cross_repository_counterpart_with",
 		);
 		// 同项目只提示、不拦（runtime 是权威）。
@@ -483,7 +477,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 			"api/schema.json",
 		);
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLInputElement>(dialog, "Rationale"),
+			findLabeledFormControl<HTMLInputElement>(dialog, "关系理由（可选）"),
 			"They share the API schema.",
 		);
 		await clickElement(findButtonByText(dialog, "Add relation"));

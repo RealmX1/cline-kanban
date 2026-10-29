@@ -1040,8 +1040,7 @@ export function RuntimeSettingsDialog({
 						</div>
 						<p className="text-text-secondary text-[13px] mt-2 mb-0">
 							仅作为 break-glass 逃生舱：开启此总闸后，CLI 传 <code className="font-mono text-xs">--force</code>{" "}
-							才能跳过 token 两步确认，直接把任务移入 Done（供脚本化 dogfood / CI
-							使用，操作者自担风险）。默认关闭。
+							才能跳过 token 两步确认，直接把任务结案（供脚本化 dogfood / CI 使用，操作者自担风险）。默认关闭。
 						</p>
 					</div>
 

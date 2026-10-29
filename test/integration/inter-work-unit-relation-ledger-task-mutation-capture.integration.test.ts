@@ -1,10 +1,12 @@
 import { mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import type { CommittedInterWorkUnitRelationLedgerEvent } from "../../src/core/inter-work-unit-relation-ledger-event-contract";
+import { moveTaskToColumn } from "../../src/core/task-board-mutations";
 import { InterWorkUnitRelationLedgerDatabaseWorkerClient } from "../../src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker-client";
 import {
 	createCapturingKanbanRuntimeInstanceIdentity,
@@ -16,12 +18,14 @@ import {
 	type WorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
+	getPersistedWorkspaceBoardFilePathById,
 	loadWorkspaceContext,
 	loadWorkspaceState,
 	mutateWorkspaceState,
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
+import { moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification } from "../../src/trpc/task-card-action-api";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
@@ -101,6 +105,15 @@ function withoutCard(board: RuntimeBoardData, taskId: string): RuntimeBoardData 
 	};
 }
 
+async function overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+	workspacePath: string,
+	board: RuntimeBoardData,
+): Promise<void> {
+	const context = await loadWorkspaceContext(workspacePath);
+	// 真正模拟历史进程直接写盘，不让当前 saveWorkspaceState 的结案保护拦下测试所需的越界写入。
+	await writeFile(getPersistedWorkspaceBoardFilePathById(context.workspaceId), JSON.stringify(board, null, 2), "utf8");
+}
+
 async function withIsolatedHomeAndLedger(
 	run: (context: {
 		workspacePath: string;
@@ -145,6 +158,119 @@ function summarize(events: CommittedInterWorkUnitRelationLedgerEvent[]) {
 describe("inter-work-unit relation ledger task mutation capture", () => {
 	afterEach(() => {
 		registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
+	});
+	it("用真实账本撤销晚于工具的自动 Review，保留后续人工 Review", async () => {
+		await withIsolatedHomeAndLedger(async ({ workspacePath, realCapture }) => {
+			const card = createCard("t0001", "Stop 纠偏");
+			const initialBoard = moveTaskToColumn(createBoard({ backlog: [card] }), card.id, "in_progress").board;
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: initialBoard,
+				sessions: {},
+			});
+			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
+			const context = await loadWorkspaceContext(workspacePath);
+			const stoppedAtMs = Date.now() - 10_000;
+			await mutateWorkspaceState(
+				workspacePath,
+				{
+					taskMutationIntentKind: "test_delayed_automatic_review",
+					resolvedKanbanActor: {
+						kanbanActorKind:
+							"kanban_web_ui_request_with_verified_page_load_nonce_without_board_mutation_initiator_annotation",
+					},
+					webUiBoardMutationInitiatorAnnotationsForTaskMutationEventCapture: [
+						{
+							taskId: card.id,
+							annotatedBoardMutationKind: "task_card_moved_between_non_trash_board_columns",
+							fromColumnId: "in_progress",
+							toColumnId: "review",
+							boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+						},
+					],
+				},
+				(state) => ({ board: moveTaskToColumn(state.board, card.id, "review").board, value: null }),
+			);
+			const current: RuntimeTaskSessionSummary = {
+				...createSessionSummaryWithNativeIdentity(card.id, "native"),
+				agentId: "codex",
+				workspacePath,
+				pid: 1234,
+				startedAt: 2_000,
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "review",
+				reviewReason: "hook",
+				runtimeSessionIncarnationId: "current",
+				agentResponseGenerationTurnSequence: 1,
+				currentAgentProcessUserTurnIdleRetentionStarted: {
+					stoppedAt: stoppedAtMs,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 1,
+				},
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId: "native",
+					transcriptPath: null,
+					observedAt: 2_000,
+				},
+				lastEffectiveAgentConversationActivityObservation: {
+					observedAtMs: stoppedAtMs + 1_000,
+					activityKind: "tool_activity",
+					evidenceKind: "persisted_agent_transcript",
+					nativeSessionId: "native",
+					eventId: "codex:native:turn:tool",
+				},
+				codexNativeSessionControlEndpoint: {
+					workspaceId: context.workspaceId,
+					conversationSessionId: card.id,
+					runtimeSessionIncarnationId: "current",
+					socketPath: "/isolated/not-used.sock",
+				},
+			};
+			const input = {
+				workspaceId: context.workspaceId,
+				summaryBeforeRead: structuredClone(current),
+				getCurrentSummary: () => current,
+				observation: {
+					workspaceId: context.workspaceId,
+					conversationSessionId: card.id,
+					runtimeSessionIncarnationId: "current",
+					nativeSessionId: "native",
+					nativeTurnId: "turn",
+					nativeTurnStartedAtMs: stoppedAtMs - 1_000,
+					observedAtMs: Date.now(),
+					threadStatus: "active",
+					nativeTurnStatus: "inProgress",
+					activeFlags: [],
+					canAcceptDirectInput: true,
+					executionStatus: "running" as const,
+				},
+			};
+			expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+				saved: true,
+				sessionCorrectionAllowed: true,
+			});
+			expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+				saved: false,
+				sessionCorrectionAllowed: true,
+			});
+			await mutateWorkspaceState(
+				workspacePath,
+				{
+					taskMutationIntentKind: "test_manual_review_after_correction",
+					resolvedKanbanActor: { kanbanActorKind: "kanban_web_ui_user_gesture_with_verified_page_load_nonce" },
+				},
+				(state) => ({ board: moveTaskToColumn(state.board, card.id, "review").board, value: null }),
+			);
+			expect(await moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification(input)).toMatchObject({
+				saved: false,
+				sessionCorrectionAllowed: false,
+			});
+			expect(
+				(await loadWorkspaceState(workspacePath)).board.columns.find((column) => column.id === "review")?.cards[0]
+					?.id,
+			).toBe(card.id);
+		});
 	});
 
 	it("records an activation baseline, then captures funnel mutations with the declared actor and full field text", async () => {
@@ -222,10 +348,10 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 
 			// 模拟迁到 runtime procedure 之前的 CLI 进程：没有注册捕获，直接写盘。
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: createBoard({ trash: [createCard("t0001", "requirement")] }),
-				sessions: {},
-			});
+			await overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+				workspacePath,
+				createBoard({ trash: [createCard("t0001", "requirement")] }),
+			);
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, (state) => ({
 				board: state.board,
@@ -296,10 +422,10 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 			}));
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
 			const onDisk = await loadWorkspaceState(workspacePath);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: withoutCard(onDisk.board, "t0001"),
-				sessions: {},
-			});
+			await overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
+				workspacePath,
+				withoutCard(onDisk.board, "t0001"),
+			);
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, (state) => ({
 				board: state.board,

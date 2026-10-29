@@ -51,14 +51,17 @@ let controller: ReturnType<typeof useReferenceRelationModelingEditor>;
 let root: Root;
 let container: HTMLDivElement;
 const onDraftInteraction = vi.fn();
+const onUnstagedFormChange = vi.fn();
 function Harness({
 	workspaceId = "project-a",
 	taskId = "task-a",
 	showEditor = true,
+	presentation,
 }: {
 	workspaceId?: string;
 	taskId?: string | null;
 	showEditor?: boolean;
+	presentation?: "embedded" | "foreground" | "task_editor";
 }) {
 	controller = useReferenceRelationModelingEditor({
 		workspaceId,
@@ -72,6 +75,8 @@ function Harness({
 			workspaceId={workspaceId}
 			taskId={taskId}
 			onDraftInteraction={onDraftInteraction}
+			onUnstagedFormChange={onUnstagedFormChange}
+			presentation={presentation}
 		/>
 	) : null;
 }
@@ -84,21 +89,24 @@ async function clickButton(label: string) {
 	await act(async () => button.click());
 }
 
+async function changeControlValue(selector: string, value: string) {
+	const control = container.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(selector);
+	if (!control) throw new Error(`找不到控件：${selector}`);
+	await act(async () => {
+		const prototype =
+			control instanceof HTMLSelectElement
+				? HTMLSelectElement.prototype
+				: control instanceof HTMLTextAreaElement
+					? HTMLTextAreaElement.prototype
+					: HTMLInputElement.prototype;
+		Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(control, value);
+		control.dispatchEvent(new Event(control instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+	});
+}
+
 async function openAndFillRelationForm() {
 	await clickButton("添加关系");
 	await clickButton("选择关联任务");
-	await act(async () => {
-		const kind = container.querySelector<HTMLSelectElement>('select[aria-label="关系类型"]');
-		const rationale = container.querySelector<HTMLInputElement>("input");
-		if (!kind || !rationale) throw new Error("找不到关系表单");
-		Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(
-			kind,
-			"reference_is_generally_related_with",
-		);
-		kind.dispatchEvent(new Event("change", { bubbles: true }));
-		Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(rationale, "共享验收目标");
-		rationale.dispatchEvent(new Event("input", { bubbles: true }));
-	});
 }
 
 async function beginDelayedCounterpartResolution() {
@@ -111,7 +119,6 @@ async function beginDelayedCounterpartResolution() {
 		}),
 	);
 	await openAndFillRelationForm();
-	await clickButton("加入关系草稿");
 	expect(queries.resolveRelationModelingCounterpart).toHaveBeenCalledOnce();
 	return {
 		complete: () => act(async () => resolveCounterpart(counterpartWorkUnit)),
@@ -214,16 +221,199 @@ describe("按需 AI 关系建议", () => {
 });
 
 describe("关系表单迟到的身份解析", () => {
-	it("普通 HTTP 缺少 randomUUID 时仍可将表单暂存为合法 UUID 的关系草稿", async () => {
+	it("身份解析失败保留已选关系的提交阻塞，重试成功或明确取消才解除", async () => {
+		queries.resolveRelationModelingCounterpart.mockRejectedValueOnce(new Error("身份查询暂不可用"));
+		await openAndFillRelationForm();
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("身份查询暂不可用");
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(true);
+		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+		await clickButton("添加关系到草稿");
+		expect(controller.draft.referenceRelationDrafts).toHaveLength(1);
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
+		await clickButton("移除关系");
+		queries.resolveRelationModelingCounterpart.mockRejectedValueOnce(new Error("身份查询暂不可用"));
+		await openAndFillRelationForm();
+		await clickButton("取消");
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
+	});
+	it.each(["browser", "runtime"] as const)(
+		"无效详情在切换条目和 %s 恢复后仍保留原文、错误与提交阻塞",
+		async (restoreFrom) => {
+			await openAndFillRelationForm();
+			const originalDraft = controller.draft.referenceRelationDrafts[0];
+			if (!originalDraft) throw new Error("未暂存已选择的关系。");
+			await act(async () =>
+				controller.addDraft({
+					...originalDraft,
+					draftId: "another-relation",
+					counterpartWorkUnit: { ...counterpartWorkUnit, taskId: "another-task" },
+				}),
+			);
+			await clickButton("详情");
+			const invalidEvidence = "x".repeat(1001);
+			await changeControlValue('textarea[id$="-evidence"]', invalidEvidence);
+			const detailButtons = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+				(button) => button.textContent === "详情",
+			);
+			await act(async () => detailButtons[0]?.click());
+			expect(onUnstagedFormChange).toHaveBeenLastCalledWith(true);
+			expect(container.textContent).toContain("1000");
+			await act(async () => vi.advanceTimersByTimeAsync(250));
+			const persistedDraft = queries.persistRelationModelingEditorDraft.mock.calls.at(-1)?.[2];
+			expect(persistedDraft).toMatchObject({
+				invalidReferenceRelationDetailsFormsByDraftId: {
+					[originalDraft.draftId]: {
+						relationAssertionEvidencePointersOnePerLineText: invalidEvidence,
+					},
+				},
+			});
+			await act(async () => root.unmount());
+			if (restoreFrom === "runtime") {
+				localStorage.clear();
+				queries.readRelationModelingEditorDraft.mockResolvedValueOnce(persistedDraft);
+			}
+			root = createRoot(container);
+			await act(async () => root.render(<Harness />));
+			expect(onUnstagedFormChange).toHaveBeenLastCalledWith(true);
+			expect(container.textContent).toContain("1000");
+			const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+				(button) => button.textContent === "保存关系变更",
+			);
+			expect(save?.disabled).toBe(true);
+			await clickButton("详情");
+			expect(container.querySelector<HTMLTextAreaElement>('textarea[id$="-evidence"]')?.value).toBe(invalidEvidence);
+			await changeControlValue('textarea[id$="-evidence"]', "src/verified.ts");
+			expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
+			expect(controller.draft.referenceRelationDrafts[0]?.relationAssertionEvidencePointers).toEqual([
+				"src/verified.ts",
+			]);
+			expect(save?.disabled).toBe(false);
+		},
+	);
+	it("移除包含无效详情的条目会同时移除原文并解除提交阻塞", async () => {
+		await openAndFillRelationForm();
+		await clickButton("详情");
+		await changeControlValue('textarea[id$="-evidence"]', "x".repeat(1001));
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(true);
+		await clickButton("移除关系");
+		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+		expect(controller.draft.invalidReferenceRelationDetailsFormsByDraftId).toEqual({});
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
+	});
+	it("重复选择同一任务可为新增条目改选另一类型，同时保留原普通关联", async () => {
+		await openAndFillRelationForm();
+		const originalDraft = controller.draft.referenceRelationDrafts[0];
+		await openAndFillRelationForm();
+		expect(controller.draft.referenceRelationDrafts).toEqual([originalDraft]);
+		await changeControlValue('select[aria-label="关系类型"]', "reference_reuses_produced_outputs_of");
+		await clickButton("添加关系到草稿");
+		expect(controller.draft.referenceRelationDrafts).toEqual([
+			originalDraft,
+			expect.objectContaining({
+				relationKind: "reference_reuses_produced_outputs_of",
+				counterpartWorkUnit,
+			}),
+		]);
+		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
+	});
+	it.each(["embedded", "task_editor"] as const)("%s 仅在任务编辑器中默认收起关系图", async (presentation) => {
+		queries.readRelationModelingPreview.mockResolvedValue({
+			rootWorkUnitKey: "root",
+			workUnits: [],
+			relations: [],
+			truncated: false,
+			projectedThroughGlobalCommittedEventSequence: 0,
+		});
+		await act(async () => root.render(<Harness key={presentation} presentation={presentation} />));
+		await act(async () => vi.advanceTimersByTimeAsync(300));
+		expect(Boolean(container.querySelector('[aria-label="任务多跳关系图"]'))).toBe(presentation === "embedded");
+		if (presentation === "task_editor") {
+			await clickButton("关系图");
+			expect(container.querySelector('[aria-label="任务多跳关系图"]')).not.toBeNull();
+		}
+	});
+	it("自指与非法证据不放行，收起非法详情后仍显示错误且禁止保存", async () => {
+		queries.resolveRelationModelingCounterpart.mockResolvedValueOnce({
+			...counterpartWorkUnit,
+			workspaceId: "project-a",
+			taskId: "task-a",
+		});
+		await openAndFillRelationForm();
+		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("自身");
+		await clickButton("取消");
+		await openAndFillRelationForm();
+		await clickButton("详情");
+		await changeControlValue('textarea[id$="-evidence"]', "x".repeat(1001));
+		await clickButton("收起详情");
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("1000");
+		const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+			(button) => button.textContent === "保存关系变更",
+		);
+		expect(save?.disabled).toBe(true);
+		await clickButton("详情");
+		await changeControlValue('textarea[id$="-evidence"]', "src/file.ts");
+		expect(save?.disabled).toBe(false);
+	});
+	it("详情和方向立即进入草稿，收起、重新打开与刷新恢复均保留", async () => {
+		await openAndFillRelationForm();
+		await clickButton("详情");
+		await changeControlValue('select[aria-label="关系类型"]', "reference_concerns_behavior_or_state_of");
+		await changeControlValue('select[aria-label="陈述方向"]', "other");
+		await changeControlValue('input[id$="-reason"]', "可选的说明");
+		await clickButton("收起详情");
+		expect(controller.draft.referenceRelationDrafts).toEqual([
+			expect.objectContaining({
+				relationKind: "reference_concerns_behavior_or_state_of",
+				currentTaskIsStatementSubject: false,
+				relationAssertionRationaleOneSentence: "可选的说明",
+				assertedRelationKindSpecificAttributes: {},
+			}),
+		]);
+		const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+			(button) => button.textContent === "保存关系变更",
+		);
+		expect(save?.disabled).toBe(false);
+		await act(async () => {
+			root.unmount();
+		});
+		root = createRoot(container);
+		await act(async () => {
+			root.render(<Harness />);
+		});
+		expect(controller.draft.referenceRelationDrafts[0]).toMatchObject({
+			currentTaskIsStatementSubject: false,
+			relationAssertionRationaleOneSentence: "可选的说明",
+		});
+		await clickButton("详情");
+		expect(container.querySelector<HTMLInputElement>('input[id$="-reason"]')?.value).toBe("可选的说明");
+	});
+	it("重复选择不增加第二条关系，移除后可再次选择", async () => {
+		await openAndFillRelationForm();
+		await openAndFillRelationForm();
+		expect(controller.draft.referenceRelationDrafts).toHaveLength(1);
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("已在待保存列表");
+		await clickButton("取消");
+		await clickButton("移除关系");
+		expect(controller.draft.referenceRelationDrafts).toHaveLength(0);
+		await openAndFillRelationForm();
+		expect(controller.draft.referenceRelationDrafts).toHaveLength(1);
+	});
+	it("保存成功清空草稿后，打开的详情不会重新生成旧关系", async () => {
+		await openAndFillRelationForm();
+		await clickButton("详情");
+		await act(async () => controller.updateDraft({ referenceRelationDrafts: [] }));
+		expect(controller.draft.referenceRelationDrafts).toEqual([]);
+	});
+	it("只选任务立即暂存普通关联，普通 HTTP 也生成合法 UUID", async () => {
 		const getRandomValues = vi.fn(crypto.getRandomValues.bind(crypto));
 		vi.stubGlobal("crypto", { getRandomValues });
 		await openAndFillRelationForm();
-		await clickButton("加入关系草稿");
 		expect(controller.draft.referenceRelationDrafts).toEqual([
 			expect.objectContaining({
 				draftId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
 				counterpartWorkUnit,
-				relationAssertionRationaleOneSentence: "共享验收目标",
+				relationAssertionRationaleOneSentence: "",
 			}),
 		]);
 		expect(container.querySelector('[role="alert"]')).toBeNull();
@@ -261,7 +451,6 @@ describe("关系表单迟到的身份解析", () => {
 		await openAndFillRelationForm();
 		await resolution.fail();
 		expect(container.querySelector('[role="alert"]')).toBeNull();
-		await clickButton("加入关系草稿");
 		expect(controller.draft.referenceRelationDrafts).toHaveLength(1);
 		expect(onDraftInteraction).toHaveBeenCalledOnce();
 	});
@@ -269,7 +458,7 @@ describe("关系表单迟到的身份解析", () => {
 		const resolution = await beginDelayedCounterpartResolution();
 		await resolution.complete();
 		expect(controller.draft.referenceRelationDrafts).toEqual([
-			expect.objectContaining({ counterpartWorkUnit, relationAssertionRationaleOneSentence: "共享验收目标" }),
+			expect.objectContaining({ counterpartWorkUnit, relationAssertionRationaleOneSentence: "" }),
 		]);
 		expect(onDraftInteraction).toHaveBeenCalledOnce();
 		expect(container.querySelector('[role="group"]')).toBeNull();

@@ -1,3 +1,4 @@
+import { resolveTaskClosureOutcomeForBoardColumn } from "@runtime-task-closure-contract";
 import { useCallback, useMemo } from "react";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeAllProjectsTaskSearchIndexProjectEntry } from "@/runtime/types";
@@ -14,6 +15,7 @@ function buildDocumentsFromProjectEntry(
 			projectId: entry.projectId,
 			projectName: entry.projectName,
 			taskId: task.taskId,
+			closureOutcome: resolveTaskClosureOutcomeForBoardColumn(task.columnId, task.taskClosureSummary) ?? undefined,
 			columnId: task.columnId,
 			title: task.title,
 			prompt: task.prompt,

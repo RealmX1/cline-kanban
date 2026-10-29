@@ -128,12 +128,12 @@ function button(text: string) {
 	return result;
 }
 
-describe("移入 Done 前核对", () => {
+describe("结案前核对", () => {
 	it.each<BoardColumnId>(["review", "validation", "in_progress"])(
 		"%s 先显示真实任务卡和可操作清单，不直接问原因",
 		(column) => {
 			render(column);
-			expect(document.body.textContent).toContain("移入 Done 前核对");
+			expect(document.body.textContent).toContain("结案前核对");
 			expect(document.body.textContent).toContain("验证实际交互");
 			expect(document.querySelector(".kb-board-card-shell")).not.toBeNull();
 			expect(document.querySelector("select")).toBeNull();
@@ -187,10 +187,10 @@ describe("移入 Done 前核对", () => {
 	it("全通过的 In Progress 任务仍需显式确认停止会话", async () => {
 		group.tasks[0]!.checklist[0]!.checked = true;
 		render("in_progress");
-		await act(async () => button("完成核对并移入 Done").click());
+		await act(async () => button("完成核对并结案").click());
 		expect(confirm).not.toHaveBeenCalled();
 		act(() => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
-		await act(async () => button("完成核对并移入 Done").click());
+		await act(async () => button("完成核对并结案").click());
 		expect(confirm).toHaveBeenCalledWith({
 			"task-1": { confirmedAcknowledgements: ["skip_validation", "in_progress_active"] },
 		});

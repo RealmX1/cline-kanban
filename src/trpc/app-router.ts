@@ -531,6 +531,12 @@ import {
 } from "../core/project-visual-identity";
 import { taskAssistanceModelProviderRoutingSettingsSchema } from "../core/task-assistance-model-provider-routing-contract";
 import {
+	taskClosureHistoryRequestSchema,
+	taskClosureHistoryResponseSchema,
+	taskClosureOutcomeCorrectionRequestSchema,
+	taskClosureRecordSchema,
+} from "../core/task-closure-contract";
+import {
 	taskCommandExecutionIdentityRequestSchema,
 	taskCommandExecutionResponseSchema,
 	taskCommandExecutionStartRequestSchema,
@@ -1047,6 +1053,21 @@ export interface RuntimeTrpcContext {
 	};
 	// 看板卡片 per-card 动作的唯一服务端实现（src/trpc/task-card-action-api.ts）。浏览器与 CLI 都调它。
 	taskCardActionApi: {
+		readTaskClosureHistory: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof taskClosureHistoryRequestSchema>,
+		) => Promise<z.infer<typeof taskClosureHistoryResponseSchema>>;
+		correctTaskClosureOutcome: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof taskClosureOutcomeCorrectionRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof taskClosureRecordSchema>>;
+		cancelTaskClosureOperation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof taskClosureHistoryRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof taskClosureHistoryResponseSchema>>;
+
 		applyTaskStickerEntryMutation: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: z.infer<typeof runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema>,
@@ -2403,6 +2424,31 @@ export const runtimeAppRouter = t.router({
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
 	taskCardAction: t.router({
+		readTaskClosureHistory: workspaceProcedure
+			.input(taskClosureHistoryRequestSchema)
+			.output(taskClosureHistoryResponseSchema)
+			.query(({ ctx, input }) => ctx.taskCardActionApi.readTaskClosureHistory(ctx.workspaceScope, input)),
+		correctTaskClosureOutcome: workspaceProcedure
+			.input(taskClosureOutcomeCorrectionRequestSchema)
+			.output(taskClosureRecordSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.taskCardActionApi.correctTaskClosureOutcome(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
+		cancelTaskClosureOperation: workspaceProcedure
+			.input(taskClosureHistoryRequestSchema)
+			.output(taskClosureHistoryResponseSchema)
+			.mutation(({ ctx, input }) =>
+				ctx.taskCardActionApi.cancelTaskClosureOperation(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+			),
+
 		applyTaskStickerEntryMutation: workspaceProcedure
 			.input(runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema)
 			.output(runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema)

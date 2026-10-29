@@ -23,6 +23,7 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
 } from "../state/workspace-state";
+import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
 import { recordTaskWorktreeCreationCommitProvenance } from "./task-commit-integration-provenance";
 import { getWorkspaceFolderLabelForWorktreePath, normalizeTaskIdForWorktreePath } from "./task-worktree-path";
@@ -516,185 +517,196 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 }): Promise<RuntimeWorktreeEnsureResponse> {
 	try {
 		const context = await loadWorkspaceContext(options.cwd);
-		if (options.worktreeMode === "inplace") {
-			const inplaceBaseRef = options.baseRef.trim();
-			const inplaceCommit = await tryRunGit(context.repoPath, ["rev-parse", "HEAD"]);
-			return {
-				ok: true,
-				path: context.repoPath,
-				baseRef: inplaceBaseRef,
-				baseCommit: inplaceCommit ?? "",
-			};
-		}
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
-		const worktreePath = getTaskWorktreePath(context.repoPath, taskId);
-		// Investigation note: ensure is called on every task start. The previous implementation
-		// compared the worktree HEAD to the latest baseRef commit and recreated the worktree
-		// when the base branch advanced, which could destroy valid task progress. Existing
-		// worktrees are now treated as authoritative and only missing worktrees are created.
-		// 就绪门控：并发 ensure 正在 setup 时，半 checkout 的 worktree 已能通过 rev-parse HEAD
-		//（git worktree add 先写 HEAD 后铺文件），快速路径不可信任，跳过并进锁排队等 setup 完成
-		//（锁内 lockedExistingCommit 复查会返回真实结果）。
-		if (!isTaskWorktreeSetupInProgress(worktreePath)) {
-			const existingResult = await runGit(worktreePath, ["rev-parse", "HEAD"]);
-			// rev-parse 的 await 期间 setup 可能刚开始，返回前复查一次标记关闭 TOCTOU 窗口。
-			if (existingResult.ok && existingResult.stdout && !isTaskWorktreeSetupInProgress(worktreePath)) {
-				await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
-				await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
+		return await withTaskClosureLifecycleLocks(context.workspaceId, [taskId], async () => {
+			const board = await loadWorkspaceBoardById(context.workspaceId);
+			if (board.columns.find((column) => column.id === "trash")?.cards.some((card) => card.id === taskId))
+				throw new Error("已结案任务须先通过归档重开，不能直接创建工作树。");
+			if (options.worktreeMode === "inplace") {
+				const inplaceBaseRef = options.baseRef.trim();
+				const inplaceCommit = await tryRunGit(context.repoPath, ["rev-parse", "HEAD"]);
 				return {
 					ok: true,
-					path: worktreePath,
-					baseRef: options.baseRef.trim(),
-					baseCommit: existingResult.stdout,
+					path: context.repoPath,
+					baseRef: inplaceBaseRef,
+					baseCommit: inplaceCommit ?? "",
 				};
 			}
-		}
-
-		markTaskWorktreeSetupInProgress(worktreePath);
-		try {
-			return await withTaskWorktreeSetupLock(context.repoPath, async () => {
-				const lockedExistingCommit = await tryRunGit(worktreePath, ["rev-parse", "HEAD"]);
-				if (lockedExistingCommit) {
+			const worktreePath = getTaskWorktreePath(context.repoPath, taskId);
+			// Investigation note: ensure is called on every task start. The previous implementation
+			// compared the worktree HEAD to the latest baseRef commit and recreated the worktree
+			// when the base branch advanced, which could destroy valid task progress. Existing
+			// worktrees are now treated as authoritative and only missing worktrees are created.
+			// 就绪门控：并发 ensure 正在 setup 时，半 checkout 的 worktree 已能通过 rev-parse HEAD
+			//（git worktree add 先写 HEAD 后铺文件），快速路径不可信任，跳过并进锁排队等 setup 完成
+			//（锁内 lockedExistingCommit 复查会返回真实结果）。
+			if (!isTaskWorktreeSetupInProgress(worktreePath)) {
+				const existingResult = await runGit(worktreePath, ["rev-parse", "HEAD"]);
+				// rev-parse 的 await 期间 setup 可能刚开始，返回前复查一次标记关闭 TOCTOU 窗口。
+				if (existingResult.ok && existingResult.stdout && !isTaskWorktreeSetupInProgress(worktreePath)) {
 					await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
 					await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
 					return {
 						ok: true,
 						path: worktreePath,
 						baseRef: options.baseRef.trim(),
-						baseCommit: lockedExistingCommit,
+						baseCommit: existingResult.stdout,
 					};
 				}
+			}
 
-				const requestedBaseRef = options.baseRef.trim();
-				if (!requestedBaseRef) {
-					return {
-						ok: false,
-						path: null,
-						baseRef: requestedBaseRef,
-						baseCommit: null,
-						error: "Task base branch is required for worktree creation.",
-					};
-				}
+			markTaskWorktreeSetupInProgress(worktreePath);
+			try {
+				return await withTaskWorktreeSetupLock(context.repoPath, async () => {
+					const lockedExistingCommit = await tryRunGit(worktreePath, ["rev-parse", "HEAD"]);
+					if (lockedExistingCommit) {
+						await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
+						await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
+						return {
+							ok: true,
+							path: worktreePath,
+							baseRef: options.baseRef.trim(),
+							baseCommit: lockedExistingCommit,
+						};
+					}
 
-				const baseRefResult = await runGit(context.repoPath, [
-					"rev-parse",
-					"--verify",
-					`${requestedBaseRef}^{commit}`,
-				]);
-				if (!baseRefResult.ok) {
-					return {
-						ok: false,
-						path: null,
-						baseRef: requestedBaseRef,
-						baseCommit: null,
-						error: getWorktreeBaseRefResolutionErrorMessage(
-							requestedBaseRef,
-							baseRefResult.stderr || baseRefResult.output,
-						),
-					};
-				}
-				const requestedBaseCommit = baseRefResult.stdout;
-				const owningCard = (await loadWorkspaceBoardById(context.workspaceId)).columns
-					.flatMap((column) => column.cards)
-					.find((card) => card.id === taskId);
-				if (owningCard) {
-					await readValidatedIndependentTaskCreationRecord(context.workspaceId, owningCard);
-					await assertIndependentTaskSourceLandedBeforeInitialStart({
-						workspaceId: context.workspaceId,
-						repoPath: context.repoPath,
-						card: owningCard,
-					});
-				}
-				const inheritedSnapshotDirectory =
-					owningCard?.independentTaskCreationProvenance?.worktreeSource ===
-					"copy_source_git_working_state_immediately"
-						? join(
-								owningCard.independentTaskCreationProvenance.contextArtifactDirectory,
-								"source-git-working-state",
-							)
-						: null;
-				const inheritedSnapshot = inheritedSnapshotDirectory
-					? await readSourceGitWorkingStateSnapshot(inheritedSnapshotDirectory)
-					: null;
-				if (
-					inheritedSnapshotDirectory &&
-					inheritedSnapshot &&
-					!(await runGit(context.repoPath, ["cat-file", "-e", inheritedSnapshot.headCommit])).ok
-				)
-					await restoreSourceGitObjectSnapshot(context.repoPath, inheritedSnapshotDirectory);
-
-				const storedPatch = await findTaskPatch(taskId);
-				let baseCommit = storedPatch?.commit ?? inheritedSnapshot?.headCommit ?? requestedBaseCommit;
-				let warning: string | undefined;
-
-				if (await pathExists(worktreePath)) {
-					await removeTaskWorktreeInternal(context.repoPath, worktreePath);
-				}
-
-				// Clean up stale worktree registrations that can linger when git
-				// worktree remove fails or the process is interrupted. Without this,
-				// git worktree add refuses with "missing but already registered".
-				await runGit(context.repoPath, ["worktree", "prune"]);
-
-				await mkdir(dirname(worktreePath), { recursive: true });
-				const addResult = await runGit(context.repoPath, ["worktree", "add", "--detach", worktreePath, baseCommit]);
-				if (!addResult.ok) {
-					if (!storedPatch) {
+					const requestedBaseRef = options.baseRef.trim();
+					if (!requestedBaseRef) {
 						return {
 							ok: false,
 							path: null,
 							baseRef: requestedBaseRef,
 							baseCommit: null,
-							error: addResult.stderr || addResult.output,
+							error: "Task base branch is required for worktree creation.",
 						};
 					}
 
-					baseCommit = requestedBaseCommit;
-					warning =
-						"Could not restore the saved task patch onto its original commit. Started from the task base ref instead.";
-					await getGitStdout(["worktree", "add", "--detach", worktreePath, baseCommit], context.repoPath);
-				}
-				await prepareNewTaskWorktree(context.repoPath, worktreePath);
-				if (inheritedSnapshotDirectory && !storedPatch) {
-					try {
-						await restoreSourceGitWorkingState(worktreePath, inheritedSnapshotDirectory);
-					} catch (error) {
-						await removeTaskWorktreeInternal(context.repoPath, worktreePath);
-						throw error;
+					const baseRefResult = await runGit(context.repoPath, [
+						"rev-parse",
+						"--verify",
+						`${requestedBaseRef}^{commit}`,
+					]);
+					if (!baseRefResult.ok) {
+						return {
+							ok: false,
+							path: null,
+							baseRef: requestedBaseRef,
+							baseCommit: null,
+							error: getWorktreeBaseRefResolutionErrorMessage(
+								requestedBaseRef,
+								baseRefResult.stderr || baseRefResult.output,
+							),
+						};
 					}
-				}
-
-				if (storedPatch && baseCommit === storedPatch.commit) {
-					try {
-						await applyTaskPatch(storedPatch.path, worktreePath);
-						await rm(storedPatch.path, { force: true });
-					} catch (error) {
-						warning = `Saved task changes could not be reapplied automatically. ${getGitCommandErrorMessage(error)}`;
+					const requestedBaseCommit = baseRefResult.stdout;
+					const owningCard = (await loadWorkspaceBoardById(context.workspaceId)).columns
+						.flatMap((column) => column.cards)
+						.find((card) => card.id === taskId);
+					if (owningCard) {
+						await readValidatedIndependentTaskCreationRecord(context.workspaceId, owningCard);
+						await assertIndependentTaskSourceLandedBeforeInitialStart({
+							workspaceId: context.workspaceId,
+							repoPath: context.repoPath,
+							card: owningCard,
+						});
 					}
-				}
+					const inheritedSnapshotDirectory =
+						owningCard?.independentTaskCreationProvenance?.worktreeSource ===
+						"copy_source_git_working_state_immediately"
+							? join(
+									owningCard.independentTaskCreationProvenance.contextArtifactDirectory,
+									"source-git-working-state",
+								)
+							: null;
+					const inheritedSnapshot = inheritedSnapshotDirectory
+						? await readSourceGitWorkingStateSnapshot(inheritedSnapshotDirectory)
+						: null;
+					if (
+						inheritedSnapshotDirectory &&
+						inheritedSnapshot &&
+						!(await runGit(context.repoPath, ["cat-file", "-e", inheritedSnapshot.headCommit])).ok
+					)
+						await restoreSourceGitObjectSnapshot(context.repoPath, inheritedSnapshotDirectory);
 
-				await recordTaskWorktreeCreationCommitProvenance({
-					workspaceId: context.workspaceId,
-					taskId,
-					baseRef: requestedBaseRef,
-					// restored patch 可能以旧 task HEAD 为物理 checkout 起点；所有权边界仍必须是
-					// task 所声明的 baseRef tip，否则会把旧 task commits 静默当成 base 历史。
-					initialBaseCommit: inheritedSnapshot?.headCommit ?? requestedBaseCommit,
-					// 来源 HEAD 只界定继承历史；base 历史探测仍从创建时的本地 base tip 开始。
-					...(inheritedSnapshot ? { baseRefCommitHistoryProbeFloorCommit: requestedBaseCommit } : {}),
+					const storedPatch = await findTaskPatch(taskId);
+					let baseCommit = storedPatch?.commit ?? inheritedSnapshot?.headCommit ?? requestedBaseCommit;
+					let warning: string | undefined;
+
+					if (await pathExists(worktreePath)) {
+						throw new Error("现有任务目录无法核验 Git 状态，已保留全部内容；修复 Git 元数据后可重试。");
+					}
+
+					// Clean up stale worktree registrations that can linger when git
+					// worktree remove fails or the process is interrupted. Without this,
+					// git worktree add refuses with "missing but already registered".
+					await runGit(context.repoPath, ["worktree", "prune"]);
+
+					await mkdir(dirname(worktreePath), { recursive: true });
+					const addResult = await runGit(context.repoPath, [
+						"worktree",
+						"add",
+						"--detach",
+						worktreePath,
+						baseCommit,
+					]);
+					if (!addResult.ok) {
+						if (!storedPatch) {
+							return {
+								ok: false,
+								path: null,
+								baseRef: requestedBaseRef,
+								baseCommit: null,
+								error: addResult.stderr || addResult.output,
+							};
+						}
+
+						baseCommit = requestedBaseCommit;
+						warning =
+							"Could not restore the saved task patch onto its original commit. Started from the task base ref instead.";
+						await getGitStdout(["worktree", "add", "--detach", worktreePath, baseCommit], context.repoPath);
+					}
+					await prepareNewTaskWorktree(context.repoPath, worktreePath);
+					if (inheritedSnapshotDirectory && !storedPatch) {
+						try {
+							await restoreSourceGitWorkingState(worktreePath, inheritedSnapshotDirectory);
+						} catch (error) {
+							await removeTaskWorktreeInternal(context.repoPath, worktreePath);
+							throw error;
+						}
+					}
+
+					if (storedPatch && baseCommit === storedPatch.commit) {
+						try {
+							await applyTaskPatch(storedPatch.path, worktreePath);
+							await rm(storedPatch.path, { force: true });
+						} catch (error) {
+							warning = `Saved task changes could not be reapplied automatically. ${getGitCommandErrorMessage(error)}`;
+						}
+					}
+
+					await recordTaskWorktreeCreationCommitProvenance({
+						workspaceId: context.workspaceId,
+						taskId,
+						baseRef: requestedBaseRef,
+						// restored patch 可能以旧 task HEAD 为物理 checkout 起点；所有权边界仍必须是
+						// task 所声明的 baseRef tip，否则会把旧 task commits 静默当成 base 历史。
+						initialBaseCommit: inheritedSnapshot?.headCommit ?? requestedBaseCommit,
+						// 来源 HEAD 只界定继承历史；base 历史探测仍从创建时的本地 base tip 开始。
+						...(inheritedSnapshot ? { baseRefCommitHistoryProbeFloorCommit: requestedBaseCommit } : {}),
+					});
+
+					return {
+						ok: true,
+						path: worktreePath,
+						baseRef: requestedBaseRef,
+						baseCommit,
+						warning,
+					};
 				});
-
-				return {
-					ok: true,
-					path: worktreePath,
-					baseRef: requestedBaseRef,
-					baseCommit,
-					warning,
-				};
-			});
-		} finally {
-			clearTaskWorktreeSetupInProgress(worktreePath);
-		}
+			} finally {
+				clearTaskWorktreeSetupInProgress(worktreePath);
+			}
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
@@ -711,6 +723,7 @@ export async function deleteTaskWorktree(options: {
 	repoPath: string;
 	taskId: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
+	assertCleanupStillAuthorizedBeforeRemoval?: () => Promise<void>;
 }): Promise<RuntimeWorktreeDeleteResponse> {
 	try {
 		// Inplace tasks share an existing worktree owned by another session; never delete it.
@@ -742,6 +755,7 @@ export async function deleteTaskWorktree(options: {
 			// Patch capture is best-effort. A corrupted or partially-created
 			// worktree (e.g. plain directory, no git init) should still be removed.
 		}
+		await options.assertCleanupStillAuthorizedBeforeRemoval?.();
 		const removed = await removeTaskWorktreeInternal(options.repoPath, worktreePath);
 		await pruneEmptyParents(rootPath, dirname(worktreePath));
 

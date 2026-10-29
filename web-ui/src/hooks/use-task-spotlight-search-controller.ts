@@ -53,16 +53,16 @@ import { useJsonLocalStorageValue, useRawLocalStorageValue } from "@/utils/react
 
 export type TaskSpotlightCrossProjectStatus = AllProjectsTaskSearchIndexStatus;
 
-/** stage 分段的固定顺序与展示名（trash 展示为 "Done"，与看板列语义一致）。 */
+/** stage 分段的固定顺序与展示名（trash 展示为 "已结案"，与看板列语义一致）。 */
 const SPOTLIGHT_STAGE_DEFINITIONS: ReadonlyArray<{ columnId: BoardColumnId; label: string }> = [
 	{ columnId: "backlog", label: "Backlog" },
 	{ columnId: "in_progress", label: "In Progress" },
 	{ columnId: "review", label: "Review" },
 	{ columnId: "validation", label: "Validation" },
-	{ columnId: "trash", label: "Done" },
+	{ columnId: "trash", label: "已结案" },
 ];
 
-/** 供结果行等外部消费者解析 stage 展示名（trash → "Done"），与 stage 分段共用同一来源防漂移。 */
+/** 供结果行等外部消费者解析 stage 展示名（trash → "已结案"），与 stage 分段共用同一来源防漂移。 */
 export function resolveSpotlightStageLabel(columnId: BoardColumnId): string {
 	return SPOTLIGHT_STAGE_DEFINITIONS.find((definition) => definition.columnId === columnId)?.label ?? columnId;
 }
@@ -518,6 +518,7 @@ export function useTaskSpotlightSearchController({
 				selection: filterSelection,
 				nowEpochMs: filterEvaluationNowEpochMs,
 				describeRow: (result: TaskBoardSearchResult) => ({
+					closureOutcome: result.document.closureOutcome,
 					projectId: result.document.projectId,
 					columnId: result.document.columnId as BoardColumnId,
 					agentId: resolveEffectiveAgentId(result.document),

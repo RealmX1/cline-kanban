@@ -12,12 +12,37 @@ import {
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	assertSourceGitWorkingStateMatchesSnapshot,
 	captureSourceGitWorkingState,
 	restoreSourceGitWorkingState,
 } from "../../../src/independent-task-creation/git-working-state-snapshot";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("独立任务的 Git 工作状态复制", () => {
+	it("显式选择 ignored 成果，并在清理前检出来源漂移", async () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const repo = fixture.createNonBareRepository({
+			repositoryDirectoryName: "explicit-artifacts",
+			initialBranchName: "main",
+		});
+		writeFileSync(join(repo.repositoryPath, ".gitignore"), "reports/\n");
+		repo.commitAllRepositoryFilesAtDate({ message: "初始版本", authorAndCommitterIsoDate: "2026-01-01T00:00:00Z" });
+		mkdirSync(join(repo.repositoryPath, "reports"));
+		writeFileSync(join(repo.repositoryPath, "reports", "accepted.md"), "调查成果");
+		const archive = join(fixture.fixtureRootDirectoryPath, "explicit-preserved-artifacts");
+		const snapshot = await captureSourceGitWorkingState(repo.repositoryPath, archive, ["reports"]);
+		const target = repo.createLinkedWorktree({
+			worktreeDirectoryName: "restored-artifacts",
+			branchName: "restored-artifacts",
+			startPoint: snapshot.headCommit,
+		});
+		await restoreSourceGitWorkingState(target.worktreePath, archive);
+		expect(readFileSync(join(target.worktreePath, "reports", "accepted.md"), "utf8")).toBe("调查成果");
+		await assertSourceGitWorkingStateMatchesSnapshot(target.worktreePath, archive);
+		writeFileSync(join(repo.repositoryPath, "reports", "accepted.md"), "后来变化");
+		await expect(assertSourceGitWorkingStateMatchesSnapshot(repo.repositoryPath, archive)).rejects.toThrow("变化");
+		await expect(captureSourceGitWorkingState(repo.repositoryPath, archive, ["../outside"])).rejects.toThrow("路径");
+	});
 	it("保留未合入提交、分开的 index/工作文件、删除、新文件和二进制，来源不变", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const repo = fixture.createNonBareRepository({ repositoryDirectoryName: "source", initialBranchName: "main" });

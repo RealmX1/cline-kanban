@@ -197,12 +197,16 @@ export type RelationAssertionWritePlanningValidationResult<T> =
 	| { validationPassed: true; validatedValue: T }
 	| { validationPassed: false; validationFailureMessage: string };
 
-// 按注册表校验专有属性：只允许本 kind 的属性、至少满足一组必填；泛相关的一句话理由就是断言理由本身。
-export function validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(input: {
-	relationKind: AssertedInterWorkUnitReferenceRelationKind;
-	assertedRelationKindSpecificAttributes: AssertedReferenceRelationKindSpecificAttributes;
-	relationAssertionRationaleOneSentence: string;
-}): RelationAssertionWritePlanningValidationResult<AssertedReferenceRelationKindSpecificAttributes> {
+// 完整性只按服务端已核验的提议方放宽；人工省略的信息保持空值，字段归属仍按注册表校验。
+export function validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(
+	input: {
+		relationKind: AssertedInterWorkUnitReferenceRelationKind;
+		assertedRelationKindSpecificAttributes: AssertedReferenceRelationKindSpecificAttributes;
+		relationAssertionRationaleOneSentence: string;
+	},
+	verifiedProposerKind?: InterWorkUnitRelationAssertionProposer["proposerKind"],
+): RelationAssertionWritePlanningValidationResult<AssertedReferenceRelationKindSpecificAttributes> {
+	const isVerifiedWebUiUser = verifiedProposerKind === "web_ui_user_with_verified_page_load_nonce";
 	const registryEntry = ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[input.relationKind];
 	const attributes: AssertedReferenceRelationKindSpecificAttributes = {
 		...input.assertedRelationKindSpecificAttributes,
@@ -217,6 +221,10 @@ export function validateAndCompleteAssertedReferenceRelationKindSpecificAttribut
 			validationPassed: false,
 			validationFailureMessage: `${input.relationKind} does not take ${disallowedAttributeKeys.join(", ")}; it accepts only ${[...allowedAttributeKeys].join(", ") || "no kind-specific attributes"}.`,
 		};
+	}
+	if (isVerifiedWebUiUser) return { validationPassed: true, validatedValue: attributes };
+	if (!input.relationAssertionRationaleOneSentence.trim()) {
+		return { validationPassed: false, validationFailureMessage: "Agent／CLI 断言必须填写关系理由。" };
 	}
 	if (input.relationKind === "reference_is_generally_related_with") {
 		attributes.relatednessRationaleOneSentence ??= input.relationAssertionRationaleOneSentence;

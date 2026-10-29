@@ -27,7 +27,7 @@ export function UnavailableProjectRuntimeState({
 		["In Progress", project.taskCounts.in_progress],
 		["Review", project.taskCounts.review],
 		["Validation", project.taskCounts.validation],
-		["Done", project.taskCounts.trash],
+		["已结案", project.taskCounts.trash],
 	] as const;
 
 	return (

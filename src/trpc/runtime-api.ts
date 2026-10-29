@@ -125,6 +125,7 @@ import {
 } from "../core/task-main-conversation-session-binding";
 import { getTaskMessageInjectionLedgerPath } from "../core/task-message-injection-ledger";
 import { resolveTaskTitle } from "../core/task-title.js";
+import { parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
 	recordTaskSessionStartDiagnostic,
@@ -183,6 +184,7 @@ import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
+import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import { isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible } from "../terminal/agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
@@ -586,6 +588,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 
 	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) =>
 		buildRuntimeConfigResponse(runtimeConfig, clineProviderService.getProviderSettingsSummary());
+	const serializeSessionStartupAgainstTaskClosure = async <Response>(
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		resolveOwningTaskCardId: () => string | null | Promise<string | null>,
+		startSession: () => Promise<Response>,
+		rejectSessionStart: (error: string) => Response,
+	): Promise<Response> => {
+		try {
+			const taskCardId = await resolveOwningTaskCardId();
+			if (taskCardId === null) return await startSession();
+			return await withTaskClosureLifecycleLocks(workspaceScope.workspaceId, [taskCardId], async () => {
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				if (getTaskColumnId(board, taskCardId) === "trash")
+					throw new Error("任务已结案，请先重新打开并恢复成果，再启动所属会话。");
+				return await startSession();
+			});
+		} catch (error) {
+			return rejectSessionStart(error instanceof Error ? error.message : String(error));
+		}
+	};
 
 	// 宿主卡只提供执行目录参数；协作会话的身份、权限、模型与目标通道来自自己的 durable 快照。
 	// 同时供冷恢复答案和用户明确发送使用，避免两条入口分别拼出不同的恢复配置。
@@ -636,7 +657,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		};
 	};
 
-	const resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery = async (
+	const resumeTerminalTaskSessionForPendingUserDecisionAnswerDeliveryWithoutClosureLock = async (
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		taskId: string,
 	): Promise<boolean> => {
@@ -739,6 +760,23 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			},
 		);
 
+	const resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		taskId: string,
+	) =>
+		await serializeSessionStartupAgainstTaskClosure(
+			workspaceScope,
+			async () => {
+				const manager = await deps.getScopedTerminalManager(workspaceScope);
+				return manager.getSummary(taskId)?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId;
+			},
+			async () =>
+				await resumeTerminalTaskSessionForPendingUserDecisionAnswerDeliveryWithoutClosureLock(
+					workspaceScope,
+					taskId,
+				),
+			() => false,
+		);
 	const runtimeApi: RuntimeTrpcContext["runtimeApi"] = {
 		loadConfig: async (workspaceScope) => {
 			const activeRuntimeConfig = deps.getActiveRuntimeConfig?.();
@@ -1684,18 +1722,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							workspaceTaskId === body.taskId
 								? "Card not found in the workspace board."
 								: "The board card hosting this conversation session no longer exists.",
-					};
-				}
-				// 打开一张 Done 卡不该把它的 agent 复活：前端的陈旧会话自动续跑已不再以「停在用户回合」为由让位
-				// （回收后的会话恒在用户回合），这里是独立于客户端版本的那道防线。人点的重启照常放行。
-				if (
-					body.taskSessionStartOriginDeclaredByClient === "stale_session_client_auto_resume" &&
-					getTaskColumnId(board, workspaceTaskId) === "trash"
-				) {
-					return {
-						ok: false,
-						summary: null,
-						error: "Automatic resume is skipped for tasks in Done; use Restart to resume this session.",
 					};
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
@@ -3863,5 +3889,37 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 		},
 	};
+	const startTaskSessionWithoutClosureLock = runtimeApi.startTaskSession;
+	runtimeApi.startTaskSession = async (scope, input) =>
+		await serializeSessionStartupAgainstTaskClosure(
+			scope,
+			() => input.workspaceTaskId ?? resolveSessionCategoryAndAttributedTaskCardId(input).attributedTaskCardId,
+			async () => await startTaskSessionWithoutClosureLock(scope, input),
+			(error) => ({ ok: false, summary: null, error }),
+		);
+	const refreshTaskTerminalWithoutClosureLock = runtimeApi.refreshTaskTerminal;
+	runtimeApi.refreshTaskTerminal = async (scope, input) =>
+		await serializeSessionStartupAgainstTaskClosure(
+			scope,
+			async () => {
+				const manager = await deps.getScopedTerminalManager(scope);
+				return manager.getSummary(input.taskId)?.taskConversationSessionMetadata?.workspaceTaskId ?? input.taskId;
+			},
+			async () => await refreshTaskTerminalWithoutClosureLock(scope, input),
+			(error) => ({ ok: false, summary: null, error }),
+		);
+	const startShellSessionWithoutClosureLock = runtimeApi.startShellSession;
+	runtimeApi.startShellSession = async (scope, input) =>
+		await serializeSessionStartupAgainstTaskClosure(
+			scope,
+			() => {
+				const detailTaskCardId = parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId(input.taskId);
+				if (input.workspaceTaskId && input.workspaceTaskId !== detailTaskCardId)
+					throw new Error("任务详情终端 ID 必须与所属任务一致。");
+				return detailTaskCardId;
+			},
+			async () => await startShellSessionWithoutClosureLock(scope, input),
+			(error) => ({ ok: false, summary: null, shellBinary: null, error }),
+		);
 	return runtimeApi;
 }

@@ -204,6 +204,9 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	}
 	return {
 		taskId,
+		...(parsed.taskClosureArchiveCleanupCredential
+			? { taskClosureArchiveCleanupCredential: parsed.taskClosureArchiveCleanupCredential }
+			: {}),
 		...(parsed.worktreeMode ? { worktreeMode: parsed.worktreeMode } : {}),
 	};
 }

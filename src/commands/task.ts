@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
@@ -51,6 +51,13 @@ import {
 	cloneTaskClineSettings,
 	type ParsedTaskClineReasoningEffort,
 } from "../core/task-card-field-patch-resolution";
+import {
+	resolveTaskClosureOutcomeForBoardColumn,
+	TASK_CLOSURE_OUTCOME_LABELS,
+	type TaskClosureOutcome,
+	type TaskClosureRequest,
+	taskClosureRequestSchema,
+} from "../core/task-closure-contract";
 import { taskCommandExecutionSpecificationSchema } from "../core/task-command-execution-contract";
 import {
 	resolveMainTaskConversationSessionSummary,
@@ -420,6 +427,9 @@ function formatTaskRecordWithSessionSummary(
 		prompt: task.prompt,
 		column: columnId,
 		taskShelvingState: task.taskShelvingState ?? null,
+		taskClosureSummary: task.taskClosureSummary ?? null,
+		taskClosureOperationProgress: task.taskClosureOperationProgress ?? null,
+		closureOutcome: resolveTaskClosureOutcomeForBoardColumn(columnId, task.taskClosureSummary),
 		baseRef: task.baseRef,
 		startInPlanMode: task.startInPlanMode,
 		taskAgentPermissionMode: task.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
@@ -472,7 +482,12 @@ function findTasksInColumn(
 	}));
 }
 
-async function listTasks(input: { cwd: string; projectPath?: string; column?: ListTaskColumn }): Promise<JsonRecord> {
+async function listTasks(input: {
+	cwd: string;
+	projectPath?: string;
+	column?: ListTaskColumn;
+	closureOutcome?: TaskClosureOutcome;
+}): Promise<JsonRecord> {
 	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
 		autoCreateIfMissing: false,
 	});
@@ -483,20 +498,28 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 	]);
 
 	const tasks = state.board.columns.flatMap((boardColumn) => {
-		if (!input.column && boardColumn.id === "trash") {
+		if (!input.column && !input.closureOutcome && boardColumn.id === "trash") {
 			return [];
 		}
 		if (input.column && boardColumn.id !== input.column) {
 			return [];
 		}
-		return boardColumn.cards.map((task) =>
-			formatTaskRecord(
-				state,
-				task,
-				boardColumn.id,
-				taskWorkspaceGitStatusesResponse.taskWorkspaceGitStatuses[task.id] ?? null,
-			),
-		);
+		return boardColumn.cards
+			.filter(
+				(task) =>
+					!input.closureOutcome ||
+					(boardColumn.id === "trash" &&
+						resolveTaskClosureOutcomeForBoardColumn(boardColumn.id, task.taskClosureSummary) ===
+							input.closureOutcome),
+			)
+			.map((task) =>
+				formatTaskRecord(
+					state,
+					task,
+					boardColumn.id,
+					taskWorkspaceGitStatusesResponse.taskWorkspaceGitStatuses[task.id] ?? null,
+				),
+			);
 	});
 
 	return {
@@ -1051,6 +1074,69 @@ async function isTaskParkedCommand(input: { cwd: string; taskId: string; project
 	};
 }
 
+interface TaskClosureCliOptions {
+	outcome?: string;
+	reason?: string;
+	authorizationSource?: string;
+	successorWorkspaceId?: string;
+	successorTaskId?: string;
+	evidence?: string[];
+	acceptedDeliverablesFile?: string;
+	preservePath?: string[];
+	requestId?: string;
+	correctExisting?: boolean;
+}
+async function resolveTaskClosureCliRequest(
+	options: TaskClosureCliOptions | undefined,
+	workspaceId: string,
+): Promise<TaskClosureRequest | undefined> {
+	if (
+		!options ||
+		![
+			options.outcome,
+			options.reason,
+			options.authorizationSource,
+			options.successorWorkspaceId,
+			options.successorTaskId,
+			options.evidence?.length,
+			options.acceptedDeliverablesFile,
+			options.preservePath?.length,
+			options.requestId,
+			options.correctExisting,
+		].some(Boolean)
+	)
+		return undefined;
+	if (options.successorWorkspaceId && !options.successorTaskId)
+		throw new Error("指定承接工作区时必须同时提供 --successor-task-id。");
+	let successorTask: TaskClosureRequest["details"]["successorTask"];
+	if (options.successorTaskId) {
+		const targetWorkspaceId = options.successorWorkspaceId ?? workspaceId;
+		const target = await createRuntimeTrpcClient(targetWorkspaceId).taskCardAction.readTaskCardWithBoardColumn.query({
+			taskId: options.successorTaskId,
+		});
+		if (target.taskCardLookupOutcome !== "task_card_found_on_workspace_board") throw new Error("承接任务不存在。");
+		successorTask = {
+			workspaceId: targetWorkspaceId,
+			taskId: target.taskCardSnapshot.taskCard.id,
+			taskIncarnationCreatedAtEpochMs: target.taskCardSnapshot.taskCard.createdAt,
+		};
+	}
+	return taskClosureRequestSchema.parse({
+		closureRequestId: options.requestId ?? randomUUID(),
+		details: {
+			outcome: options.outcome ?? "closure_outcome_unspecified",
+			reason: options.reason,
+			authorizationSource: options.authorizationSource,
+			successorTask,
+			evidence: options.evidence ?? [],
+			acceptedDeliverables: options.acceptedDeliverablesFile
+				? JSON.parse(await readFile(options.acceptedDeliverablesFile, "utf8"))
+				: [],
+		},
+		selectedArtifactRelativePaths: options.preservePath ?? [],
+	});
+}
+
 interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
@@ -1094,11 +1180,13 @@ async function trashTaskById(input: {
 	taskId: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
 	postDeployVerificationDoneEntryClosure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
+	closure?: TaskClosureRequest;
 }): Promise<TrashTaskByIdOutcome> {
 	try {
 		const movedIntoDone =
 			await input.runtimeClient.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
 				taskId: input.taskId,
+				closure: input.closure,
 				...(input.postDeployVerificationDoneEntryClosure
 					? { postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure }
 					: {}),
@@ -1137,17 +1225,33 @@ async function trashTask(input: {
 	column?: ListTaskColumn;
 	projectPath?: string;
 	postDeployVerificationDoneEntryClosure: RuntimePostDeployVerificationDoneEntryClosureRequest | undefined;
+	closureOptions?: TaskClosureCliOptions;
 }): Promise<JsonRecord> {
 	const target = resolveTaskCommandTarget(input, "task done");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const closure = await resolveTaskClosureCliRequest(input.closureOptions, workspaceId);
+	if (input.closureOptions?.correctExisting) {
+		if (target.kind !== "task" || !closure) throw new Error("补记或更正结果必须指定单个 --task-id。");
+		const current = await runtimeClient.taskCardAction.readTaskCardWithBoardColumn.query({ taskId: target.taskId });
+		if (current.taskCardLookupOutcome !== "task_card_found_on_workspace_board") throw new Error("任务不存在。");
+		const card = current.taskCardSnapshot.taskCard;
+		const record = await runtimeClient.taskCardAction.correctTaskClosureOutcome.mutate({
+			taskId: target.taskId,
+			expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
+			expectedPreviousClosureRequestId: card.taskClosureSummary?.closureRequestId ?? null,
+			closure,
+		});
+		return { ok: true, closureRecord: record, workspacePath: workspaceRepoPath };
+	}
 
 	if (target.kind === "task") {
 		const outcome = await trashTaskById({
 			taskId: target.taskId,
 			runtimeClient,
 			postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure,
+			closure,
 		});
 		if (outcome.trashTaskByIdOutcomeKind === "rejected_by_post_deploy_verification_done_entry_gate") {
 			return {
@@ -1197,6 +1301,7 @@ async function trashTask(input: {
 			taskId: task.id,
 			runtimeClient,
 			postDeployVerificationDoneEntryClosure: input.postDeployVerificationDoneEntryClosure,
+			closure,
 		});
 		if (outcome.trashTaskByIdOutcomeKind === "rejected_by_post_deploy_verification_done_entry_gate") {
 			rejectedByPostDeployVerificationDoneEntryGate.push({
@@ -1907,6 +2012,44 @@ export function registerTaskCommand(program: Command): void {
 			});
 	}
 
+	for (const commandName of ["closure-history", "cancel-closure"] as const) {
+		task
+			.command(commandName)
+			.description(
+				commandName === "closure-history"
+					? "查询只追加的结案、更正、重开历史及保全状态。"
+					: "取消待恢复的结案或清理，保留工作树与归档。",
+			)
+			.requiredOption("--task-id <id>", "任务 ID。")
+			.option("--project-path <path>", "项目主仓库路径。")
+			.option("--incarnation-created-at <milliseconds>", "已删卡的 incarnation 时间戳。", Number)
+			.action(
+				async (options: { taskId: string; projectPath?: string; incarnationCreatedAt?: number }) =>
+					await runTaskCommand(async () => {
+						const workspace = await resolveRuntimeWorkspace(options.projectPath, process.cwd(), {
+							autoCreateIfMissing: false,
+						});
+						const client = createRuntimeTrpcClient(workspace.workspaceId);
+						const current = await client.taskCardAction.readTaskCardWithBoardColumn.query({
+							taskId: options.taskId,
+						});
+						const incarnation =
+							options.incarnationCreatedAt ??
+							(current.taskCardLookupOutcome === "task_card_found_on_workspace_board"
+								? current.taskCardSnapshot.taskCard.createdAt
+								: undefined);
+						if (incarnation === undefined)
+							throw new Error("卡片不存在，请用 --incarnation-created-at 指定原身份以查询持久归档。");
+						const request = { taskId: options.taskId, expectedTaskIncarnationCreatedAtEpochMs: incarnation };
+						const result =
+							commandName === "closure-history"
+								? await client.taskCardAction.readTaskClosureHistory.query(request)
+								: await client.taskCardAction.cancelTaskClosureOperation.mutate(request);
+						return { ok: true, ...result };
+					}),
+			);
+	}
+
 	registerAllProjectsTaskGroupQueryCommands(task, {
 		querySnapshot: (input, signal) =>
 			createRuntimeTrpcClient(null, {
@@ -2203,7 +2346,27 @@ export function registerTaskCommand(program: Command): void {
 	addPostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions(
 		task
 			.command("trash")
-			.alias("done")
+			.aliases(["done", "close"])
+			.option("--outcome <value>", `结案结果：${Object.keys(TASK_CLOSURE_OUTCOME_LABELS).join(" | ")}`)
+			.option("--reason <text>", "结案原因或判断依据。")
+			.option("--authorization-source <text>", "用户取消的授权来源。")
+			.option("--successor-workspace-id <id>", "承接任务所属项目 ID。")
+			.option("--successor-task-id <id>", "承接或替代任务 ID。")
+			.option(
+				"--evidence <text>",
+				"验收或判断证据，可重复。",
+				(value: string, previous: string[]) => [...previous, value],
+				[],
+			)
+			.option("--accepted-deliverables-file <path>", "已接受成果 JSON 数组，每项含 description 与 evidence。")
+			.option(
+				"--preserve-path <path>",
+				"显式保全任务目录内路径，可含 ignored 文件，可重复。",
+				(value: string, previous: string[]) => [...previous, value],
+				[],
+			)
+			.option("--request-id <uuid>", "稳定请求 ID，网络重试时复用。")
+			.option("--correct-existing", "仅补记或更正已结案结果，不执行工作树清理。")
 			.description(
 				"Move a task or an entire column to done and clean up task workspaces. Tasks awaiting Post-Deploy Verification with unchecked items need a closure reason for each.",
 			)
@@ -2220,12 +2383,14 @@ export function registerTaskCommand(program: Command): void {
 				taskId?: string;
 				column?: ListTaskColumn;
 				projectPath?: string;
-			} & PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions,
+			} & PostDeployVerificationUncheckedChecklistItemClosureReasonCliOptions &
+				TaskClosureCliOptions,
 		) => {
 			await runTaskCommand(
 				async () =>
 					await trashTask({
 						cwd: process.cwd(),
+						closureOptions: options,
 						taskId: options.taskId,
 						column: options.column,
 						projectPath: options.projectPath,

@@ -138,10 +138,10 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 }
 
 async function selectCommentBeforeCompletion() {
-	const trigger = document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="Move task to done"]');
+	const trigger = document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="结案任务"]');
 	expect(trigger).not.toBeNull();
 	await act(async () => trigger!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
-	const option = document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="添加评论并移入 Done…"]');
+	const option = document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="添加评论并结案…"]');
 	expect(option).not.toBeNull();
 	await act(async () => option!.click());
 }
@@ -167,6 +167,11 @@ async function enterTaskComment(commentText: string) {
 	const textarea = document.querySelector<HTMLTextAreaElement>('[aria-label="任务评论"]');
 	expect(textarea).not.toBeNull();
 	await act(async () => {
+		const outcome = document.querySelector<HTMLSelectElement>('select[aria-label="结案结果"]');
+		if (outcome) {
+			outcome.value = "delivery_accepted";
+			outcome.dispatchEvent(new Event("change", { bubbles: true }));
+		}
 		Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, commentText);
 		textarea!.dispatchEvent(new Event("input", { bubbles: true }));
 	});
@@ -189,12 +194,18 @@ it("Validation 清单已核对：确认评论后经过原 token 完成流，并�
 		await renderUnhydratedWorkspacePostDeployVerificationCard();
 	await selectCommentBeforeCompletion();
 	await enterTaskComment("  已完成实际验证  ");
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	expect(verification.requestComplete).toHaveBeenCalledWith({ deploymentId: "deployment-1", taskId: "task-1" });
-	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledWith("task-1", "validation", undefined, {
-		taskCommentEntryId: expect.any(String),
-		commentText: "已完成实际验证",
-	});
+	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledWith(
+		"task-1",
+		"validation",
+		undefined,
+		expect.objectContaining({
+			taskCommentEntryId: expect.any(String),
+			commentText: "已完成实际验证",
+			closure: expect.objectContaining({ details: expect.objectContaining({ outcome: "delivery_accepted" }) }),
+		}),
+	);
 	expect(verification.confirmComplete).toHaveBeenCalledWith({
 		deploymentId: "deployment-1",
 		taskId: "task-1",
@@ -209,15 +220,15 @@ it("有未勾项时评论先经过核对再填写原因：取消保留草稿，�
 		await renderUnhydratedWorkspacePostDeployVerificationCard(true);
 	await selectCommentBeforeCompletion();
 	await enterTaskComment("保留在门禁里的评论");
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
-	expect(document.body.textContent).toContain("移入 Done 前核对");
+	expect(document.body.textContent).toContain("结案前核对");
 	expect(document.querySelector("select")).toBeNull();
 	expect(completePostDeployVerificationMoveToDone).not.toHaveBeenCalled();
 	await act(async () => buttonWithText("取消").click());
 	expect(document.querySelector<HTMLTextAreaElement>('[aria-label="任务评论"]')?.value).toBe("保留在门禁里的评论");
 	expect(completePostDeployVerificationMoveToDone).not.toHaveBeenCalled();
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	await act(async () => buttonWithText("继续填写未完成原因").click());
 	const reasonSelect = document.querySelector<HTMLSelectElement>('[aria-label="检查真实行为：原因"]')!;
 	await act(async () => {
@@ -229,8 +240,8 @@ it("有未勾项时评论先经过核对再填写原因：取消保留草稿，�
 		Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(reasonInput, "另有实测证据");
 		reasonInput.dispatchEvent(new Event("input", { bubbles: true }));
 	});
-	expect(buttonWithText("确认移入 Done").disabled).toBe(false);
-	await act(async () => buttonWithText("确认移入 Done").click());
+	expect(buttonWithText("确认结案").disabled).toBe(false);
+	await act(async () => buttonWithText("确认结案").click());
 	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledOnce();
 	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledWith(
 		"task-1",
@@ -244,7 +255,11 @@ it("有未勾项时评论先经过核对再填写原因：取消保留草稿，�
 				},
 			],
 		},
-		{ taskCommentEntryId: expect.any(String), commentText: "保留在门禁里的评论" },
+		expect.objectContaining({
+			taskCommentEntryId: expect.any(String),
+			commentText: "保留在门禁里的评论",
+			closure: expect.objectContaining({ details: expect.objectContaining({ outcome: "delivery_accepted" }) }),
+		}),
 	);
 	expect(verification.confirmComplete).not.toHaveBeenCalled();
 });
@@ -253,7 +268,7 @@ it("未水合宿主的直接完成保留原行为，不打开评论弹窗", asyn
 	const { verification, completePostDeployVerificationMoveToDone } =
 		await renderUnhydratedWorkspacePostDeployVerificationCard();
 	await act(async () =>
-		document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="Move task to done"]')!.click(),
+		document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="结案任务"]')!.click(),
 	);
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
 	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledWith("task-1", "validation", undefined, undefined);
@@ -271,7 +286,7 @@ async function simulateCommentPersistedBeforeCompletionResponseLoss() {
 	);
 	await selectCommentBeforeCompletion();
 	await enterTaskComment("已经写盘的评论");
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	expect(document.querySelector<HTMLTextAreaElement>('[aria-label="任务评论"]')?.disabled).toBe(false);
 	for (const column of harness.board.columns)
 		column.cards = column.cards.filter((card) => card.id !== harness.card.id);
@@ -287,7 +302,7 @@ it("PDV 响应丢失后同 ID 同文已读回且无 token：重试只结算评�
 	harness.task.verifiedAt = "2026-10-18T00:01:00.000Z";
 	harness.task.pendingConfirmation = null;
 	await harness.rerender();
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
 	expect(harness.card.taskCommentEntries).toHaveLength(1);
 	expect(harness.completePostDeployVerificationMoveToDone).toHaveBeenCalledOnce();
@@ -305,14 +320,14 @@ it("PDV 响应丢失后保留有效空 acknowledgement token：同 ID 同文结�
 	};
 	harness.task.pendingConfirmation = pendingConfirmation;
 	await harness.rerender();
-	await act(async () => buttonWithText("提交评论并移入 Done").click());
+	await act(async () => buttonWithText("归档并结案").click());
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
 	expect(harness.completePostDeployVerificationMoveToDone).toHaveBeenCalledOnce();
 	expect(harness.verification.requestComplete).not.toHaveBeenCalled();
 	expect(harness.verification.confirmComplete).not.toHaveBeenCalled();
 	expect(harness.task.pendingConfirmation).toBe(pendingConfirmation);
 	expect(harness.task.verifiedAt).toBeNull();
-	await act(async () => buttonWithText("完成核对并移入 Done").click());
+	await act(async () => buttonWithText("完成核对并结案").click());
 	expect(harness.verification.confirmComplete).toHaveBeenCalledWith({
 		deploymentId: "deployment-1",
 		taskId: "task-1",
@@ -340,7 +355,7 @@ it.each(["missing", "different_id", "different_saved_text", "edited_draft"] as c
 			columnIdAtIssuance: "validation",
 		};
 		await harness.rerender();
-		await act(async () => buttonWithText("提交评论并移入 Done").click());
+		await act(async () => buttonWithText("归档并结案").click());
 		const textarea = document.querySelector<HTMLTextAreaElement>('[aria-label="任务评论"]');
 		expect(textarea?.disabled).toBe(false);
 		expect(textarea?.value).toBe(conflictKind === "edited_draft" ? "用户修改后的草稿" : "已经写盘的评论");

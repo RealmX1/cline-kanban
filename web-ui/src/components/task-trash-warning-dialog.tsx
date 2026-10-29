@@ -35,7 +35,7 @@ function getTrashWarningGuidance(workspaceInfo: RuntimeTaskWorkspaceInfoResponse
 	const branch = workspaceInfo.branch ?? workspaceInfo.baseRef;
 	return [
 		`Commit your changes in the worktree branch (${branch}), then open a PR or cherry-pick as needed.`,
-		"After preserving the work, you can safely move this task to Done.",
+		"成果完整归档并验证后才能结案。",
 	];
 }
 
@@ -88,7 +88,7 @@ export function TaskTrashWarningDialog({
 				</AlertDialogCancel>
 				<AlertDialogAction asChild>
 					<Button variant="danger" onClick={onConfirm}>
-						Move to Done Anyway
+						继续结案
 					</Button>
 				</AlertDialogAction>
 			</AlertDialogFooter>

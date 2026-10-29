@@ -184,7 +184,7 @@ export function TaskNameInputWithAiSuggestions({
 	return (
 		<div className="mb-2.5">
 			<label htmlFor={taskNameInputId} className="text-[11px] text-text-secondary block mb-1">
-				Task name
+				任务名称（可选）
 			</label>
 			<div className="flex items-center gap-1.5">
 				<input

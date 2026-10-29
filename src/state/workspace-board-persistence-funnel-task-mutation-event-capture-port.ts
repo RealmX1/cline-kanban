@@ -48,6 +48,14 @@ export interface WorkspaceBoardPersistenceFunnelLockedStateIdentity {
 }
 
 export interface WorkspaceBoardPersistenceFunnelTaskMutationEventCapture {
+	// 在 board 锁内、完成账本对账后读取；缺证为 null，不能把新近的手动修改当作旧自动移列撤销。
+	readLatestTaskCardMutationIsSessionFacetDrivenAutomaticReviewPlacement?(input: {
+		workspaceId: string;
+		taskId: string;
+		taskIncarnationCreatedAtEpochMs: number;
+		taskCardUpdatedAtMs: number;
+		stoppedAtMs: number;
+	}): Promise<boolean | null>;
 	// 第 1、2 步：结算悬挂批次，检出漏斗外变更；首次见到该 workspace 时写激活基线。必须在 board 锁内调用。
 	reconcileLedgerWithPersistedBoardWithinBoardLock(
 		input: WorkspaceBoardPersistenceFunnelLockedStateIdentity & {

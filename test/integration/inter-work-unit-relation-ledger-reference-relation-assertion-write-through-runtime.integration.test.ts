@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeBoardCard, RuntimeBoardData } from "../../src/core/api-contract";
-import type { WebUiUserDecisionClientCharacteristics } from "../../src/core/work-unit-relation-assertion-write-api-contract";
+import {
+	assertReferenceRelationAsActingWorkUnitRequestSchema,
+	assertReferenceRelationDirectlyAsWebUiUserRequestSchema,
+	type WebUiUserDecisionClientCharacteristics,
+} from "../../src/core/work-unit-relation-assertion-write-api-contract";
 import { listInjectionReceiptsOfAssertedInterWorkUnitRelation } from "../../src/inter-work-unit-relation-ledger/asserted-inter-work-unit-relation-projection-from-ledger-events";
 import type { KanbanRequestOriginActorEvidence } from "../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import {
@@ -586,6 +590,85 @@ describe("reference relation assertion write through the runtime", () => {
 					);
 					expect(competingEdits.filter((result) => result.status === "fulfilled")).toHaveLength(1);
 					expect(competingEdits.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+					// 人工省略详情的资格来自已核验来源，客户端自报身份不能放宽 CLI 完整性。
+					const minimalUserRequest = assertReferenceRelationDirectlyAsWebUiUserRequestSchema.parse({
+						subjectWorkUnit: cardBSelector,
+						counterpartWorkUnit: cardASelector,
+						webUiUserDecisionClientCharacteristics: TRUSTED_USER_GESTURE,
+					});
+					await expect(
+						writeApi.assertReferenceRelationDirectlyAsWebUiUser(minimalUserRequest, evidenceOfCardA),
+					).rejects.toMatchObject({ code: "FORBIDDEN" });
+					await expect(
+						writeApi.assertReferenceRelationDirectlyAsWebUiUser(
+							{
+								...minimalUserRequest,
+								webUiUserDecisionClientCharacteristics: {
+									...TRUSTED_USER_GESTURE,
+									triggeringDomEventIsTrusted: false,
+								},
+							},
+							WEB_UI_USER_EVIDENCE,
+						),
+					).rejects.toMatchObject({ code: "FORBIDDEN" });
+					const minimalUserRelation = await writeApi.assertReferenceRelationDirectlyAsWebUiUser(
+						minimalUserRequest,
+						WEB_UI_USER_EVIDENCE,
+					);
+					expect(minimalUserRelation.assertedRelation).toMatchObject({
+						relationKind: "reference_is_generally_related_with",
+						relationAssertionRationaleOneSentence: "",
+						relationAssertionEvidencePointers: [],
+						assertedRelationKindSpecificAttributes: {},
+					});
+					expect(
+						(
+							await writeApi.assertReferenceRelationDirectlyAsWebUiUser(
+								{ ...minimalUserRequest, relationKind: "reference_concerns_behavior_or_state_of" },
+								WEB_UI_USER_EVIDENCE,
+							)
+						).assertedRelation.assertedRelationKindSpecificAttributes,
+					).toEqual({});
+					expect(
+						assertReferenceRelationAsActingWorkUnitRequestSchema.safeParse({
+							counterpartWorkUnit: cardBSelector,
+							verifiedProposerKind: "web_ui_user_with_verified_page_load_nonce",
+						}).success,
+					).toBe(false);
+					for (const relationKind of [
+						"reference_concerns_behavior_or_state_of",
+						"reference_verifies_claims_of",
+						"reference_reuses_produced_outputs_of",
+						"reference_is_cross_repository_counterpart_with",
+					] as const) {
+						await expect(
+							writeApi.assertReferenceRelationAsActingWorkUnit(
+								{
+									relationKind,
+									counterpartWorkUnit: cardBSelector,
+									relationAssertionRationaleOneSentence: "机器必须提供专有信息",
+									relationAssertionEvidencePointers: [],
+									assertedRelationKindSpecificAttributes: {},
+									dryRunWithoutWritingIntoLedger: true,
+								},
+								evidenceOfCardA,
+							),
+						).rejects.toMatchObject({ code: "BAD_REQUEST" });
+					}
+					await expect(
+						writeApi.assertReferenceRelationAsActingWorkUnit(
+							{
+								relationKind: "reference_is_generally_related_with",
+								counterpartWorkUnit: cardBSelector,
+								relationAssertionRationaleOneSentence: "",
+								relationAssertionEvidencePointers: [],
+								assertedRelationKindSpecificAttributes: {},
+								dryRunWithoutWritingIntoLedger: true,
+							},
+							evidenceOfCardA,
+						),
+					).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
 					// 写侧当前态表只是缓存：与从族 4 事件推出的投影逐条一致（全量重建 = 增量维护）。
 					const currentStateRows =

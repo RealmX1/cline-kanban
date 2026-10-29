@@ -91,7 +91,7 @@ export function buildPostDeployVerificationFollowUpTaskCreationDraftSeed(input: 
 			...itemContexts,
 			"## 目标与验收",
 			"先依据当前代码和真实行为核查，再按补充需求完成必要改动与验证；区分已复现、未复现与无法验证。",
-			"原 Task 的核对结果与结案状态由原流程管理，本任务不自动将它标成通过或移入 Done。",
+			"原 Task 的核对结果与结案状态由原流程管理，本任务不自动将它标成通过或结案。",
 		].join("\n\n");
 	const maximumPromptCharacters =
 		referenceRelationModelingEditorDraftSchema.shape.creationPrompt.unwrap().maxLength ?? Number.POSITIVE_INFINITY;

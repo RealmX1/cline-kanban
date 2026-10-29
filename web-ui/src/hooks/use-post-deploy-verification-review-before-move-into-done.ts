@@ -95,7 +95,7 @@ export function usePostDeployVerificationReviewBeforeMoveIntoDone(input: {
 					board: liveBoard,
 				});
 				const entry = liveEntries[0];
-				if (!entry) throw new Error("任务已不在看板，无法移入 Done");
+				if (!entry) throw new Error("任务已不在看板，无法结案");
 				if (entry.uncheckedChecklistItemsRequiringClosureReason.length > 0) {
 					if (!closureRequests) {
 						setHasVisitedClosureReasons(true);
@@ -123,7 +123,7 @@ export function usePostDeployVerificationReviewBeforeMoveIntoDone(input: {
 					!inProgressSessionStopAcknowledged &&
 					!closureRequests?.[taskId]?.confirmedAcknowledgements?.includes("in_progress_active")
 				) {
-					throw new Error("请确认已了解会话可能仍在运行，再移入 Done");
+					throw new Error("请确认已了解会话可能仍在运行，再结案");
 				}
 				const acknowledgements =
 					resolveRequiredPostDeployVerificationAcknowledgementsForMoveIntoDoneFromBoardColumn(liveColumnId);

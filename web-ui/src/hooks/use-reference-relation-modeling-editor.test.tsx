@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { notifyTaskVisualizationStreamReconnected } from "@/stores/task-visualization-browser-bridge";
 import { useReferenceRelationModelingEditor } from "./use-reference-relation-modeling-editor";
+import { EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT } from "./work-unit-relation-add-reference-relation-dialog-draft-validation";
 
 const queries = vi.hoisted(() => ({
 	readRelationModelingEditorDraft: vi.fn(),
@@ -263,6 +264,27 @@ it("迁移后的限定身份仍为当前任务叠加草稿并保存到目标项�
 });
 
 describe("关系编辑草稿与失败恢复", () => {
+	it("控制器拒绝绕过无效详情提交旧有效内容，且不调用关系写入", async () => {
+		await act(async () => controller.addDraft(referenceDraft));
+		const { selectedCounterpartKanbanBoardCard: _counterpart, ...details } =
+			EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT;
+		await act(async () =>
+			controller.updateDraft({
+				invalidReferenceRelationDetailsFormsByDraftId: {
+					[referenceDraft.draftId]: {
+						...details,
+						currentTaskIsStatementSubject: true,
+						relationAssertionEvidencePointersOnePerLineText: "x".repeat(1001),
+					},
+				},
+			}),
+		);
+		await expect(
+			controller.applyToTask("created-task", {} as WebUiUserDecisionClientCharacteristics),
+		).rejects.toThrow("请先修正无效的关系详情");
+		expect(queries.applyReferenceRelationModelingChangesFromExplicitUserGesture).not.toHaveBeenCalled();
+		expect(controller.draft.createdTaskId).toBeNull();
+	});
 	it("普通 HTTP 缺少 randomUUID 时可初始化、修改、保存及放弃草稿", async () => {
 		await act(async () => root.unmount());
 		sessionStorage.clear();

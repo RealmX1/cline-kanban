@@ -61,7 +61,7 @@ export function TaskEditorFloatingWindow({
 		return () => window.removeEventListener("resize", keepHeaderVisible);
 	}, [open]);
 	const style: CSSProperties = {
-		left: position?.left ?? "max(8px, calc((100vw - min(1100px, 94vw)) / 2))",
+		left: position?.left ?? "max(8px, calc((100vw - min(860px, 94vw)) / 2))",
 		top: position?.top ?? "min(5vh, 40px)",
 	};
 	return (
@@ -81,7 +81,7 @@ export function TaskEditorFloatingWindow({
 						role="dialog"
 						tabIndex={-1}
 						style={style}
-						className="fixed z-40 flex w-[min(1100px,94vw)] max-h-[88dvh] flex-col overflow-hidden rounded-lg border border-border-bright bg-surface-1 focus:outline-none"
+						className="fixed z-40 flex w-[min(860px,94vw)] max-h-[88dvh] flex-col overflow-hidden rounded-lg border border-border-bright bg-surface-1 focus:outline-none"
 						data-verification-anchor="task-editor-floating-window"
 						aria-modal={false}
 						aria-labelledby={taskEditorWindowAccessibleTitleElementId}

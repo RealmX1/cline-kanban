@@ -17,11 +17,18 @@ async function mountEditorHarness(page: Page) {
 			"import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;",
 	});
 	await page.addScriptTag({ type: "module", url: "/tests/task-editor-floating-window-browser-harness.tsx" });
-	await expect(page.getByRole("dialog", { name: "创建任务" })).toBeVisible();
+	await expect(page.getByRole("dialog", { name: /创建任务|编辑 Backlog 任务/ })).toBeVisible();
 }
 
-async function openEditorHarness(page: Page, options: { failAutomaticAnalysisPreferenceSaves?: boolean } = {}) {
-	const observations = { analysisRequestCount: 0, savedAutomaticAnalysisChoices: [] as boolean[] };
+async function openEditorHarness(
+	page: Page,
+	options: { failAutomaticAnalysisPreferenceSaves?: boolean; mode?: "create" | "edit" } = {},
+) {
+	const observations = {
+		analysisRequestCount: 0,
+		savedAutomaticAnalysisChoices: [] as boolean[],
+		lastSavedRelationDrafts: [] as unknown[],
+	};
 	await page.addInitScript(() => {
 		Object.defineProperty(navigator, "clipboard", {
 			value: { readText: async () => document.body.dataset.controlledClipboardText ?? "" },
@@ -85,8 +92,18 @@ async function openEditorHarness(page: Page, options: { failAutomaticAnalysisPre
 						},
 					],
 				};
-			else if (name === "workUnit.saveRelationModelingEditorDraft") value = { saved: true };
-			else if (name === "workspace.allocateTaskIdForNewWebUiTaskCard")
+			else if (name === "workUnit.getRelationModelingPreview")
+				value = {
+					rootWorkUnitKey: "draft-root",
+					workUnits: [],
+					relations: [],
+					truncated: false,
+					projectedThroughGlobalCommittedEventSequence: 0,
+				};
+			else if (name === "workUnit.saveRelationModelingEditorDraft") {
+				observations.lastSavedRelationDrafts = payload[index]?.draft?.referenceRelationDrafts ?? [];
+				value = { saved: true };
+			} else if (name === "workspace.allocateTaskIdForNewWebUiTaskCard")
 				value = { allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry: "abcde" };
 			else if (name === "support.analyzeTaskProjectAssignment") {
 				observations.analysisRequestCount++;
@@ -105,13 +122,13 @@ async function openEditorHarness(page: Page, options: { failAutomaticAnalysisPre
 		});
 		await route.fulfill({ json: results });
 	});
-	await page.route("**/isolated-task-editor-floating-window", (route) =>
+	await page.route("**/isolated-task-editor-floating-window*", (route) =>
 		route.fulfill({
 			contentType: "text/html",
 			body: "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body></body></html>",
 		}),
 	);
-	await page.goto("/isolated-task-editor-floating-window");
+	await page.goto(`/isolated-task-editor-floating-window?mode=${options.mode ?? "create"}`);
 	await mountEditorHarness(page);
 	return observations;
 }
@@ -119,6 +136,7 @@ async function openEditorHarness(page: Page, options: { failAutomaticAnalysisPre
 test("自动归属开关默认关闭，手动分析可用，键盘切换后刷新恢复全局偏好", async ({ page }) => {
 	await page.setViewportSize({ width: 1440, height: 1000 });
 	const observations = await openEditorHarness(page);
+	await page.getByRole("button", { name: "项目归属分析", exact: true }).click();
 	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
 	await expect(automaticAnalysisSwitch).not.toBeChecked();
 	await page.getByRole("button", { name: "创建任务", exact: true }).click();
@@ -147,6 +165,7 @@ test("自动归属开关默认关闭，手动分析可用，键盘切换后刷�
 
 test("自动分析偏好保存失败明确提示并保留当前选择", async ({ page }) => {
 	await openEditorHarness(page, { failAutomaticAnalysisPreferenceSaves: true });
+	await page.getByRole("button", { name: "项目归属分析", exact: true }).click();
 	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
 	await automaticAnalysisSwitch.click();
 	await expect(page.getByText(/“自动分析项目归属”偏好尚未保存到运行时/)).toBeVisible();
@@ -168,7 +187,7 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.keyboard.press("Shift+Tab");
 	await expect(focusableControls.last()).toBeFocused();
 	const before = await dialog.boundingBox();
-	expect(before?.width).toBeGreaterThan(1000);
+	expect(before?.width).toBeGreaterThan(700);
 	const header = page.getByRole("heading", { name: "创建任务" });
 	const box = await header.boundingBox();
 	if (!box) throw new Error("标题栏未出现");
@@ -187,8 +206,10 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await expect(dialog).toBeVisible();
 	await expect(page.getByLabel("背景输入")).toBeFocused();
 	await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
-	await expect(page.getByRole("textbox", { name: "Task name" })).toBeHidden();
+	await expect(page.getByRole("textbox", { name: "任务名称（可选）" })).toBeHidden();
 	await page.getByRole("button", { name: "展开任务编辑器", exact: true }).click();
+	await expect(page.getByRole("button", { name: "Plan Mode：开启" })).toBeVisible();
+	await page.getByRole("button", { name: "Plan Mode：开启" }).click();
 	await page.getByRole("button", { name: "收起Plan Mode", exact: true }).click();
 	await expect(page.getByRole("button", { name: "Plan Mode：开启" })).toBeVisible();
 	await page.getByRole("button", { name: "Plan Mode：开启" }).click();
@@ -199,10 +220,12 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.getByRole("button", { name: "显示Plan Mode", exact: true }).click();
 	await expect(page.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeChecked();
 	await page.setViewportSize({ width: 820, height: 700 });
-	const resized = await dialog.boundingBox();
-	expect(resized!.x).toBeGreaterThanOrEqual(8);
-	expect(resized!.x + resized!.width).toBeLessThanOrEqual(820);
-	expect(resized!.y).toBeLessThanOrEqual(636);
+	await expect
+		.poll(async () => {
+			const resized = await dialog.boundingBox();
+			return Boolean(resized && resized.x >= 8 && resized.x + resized.width <= 820 && resized.y <= 636);
+		})
+		.toBe(true);
 	await page.screenshot({ path: test.info().outputPath("desktop-task-editor.png") });
 });
 
@@ -211,6 +234,7 @@ test("手机浮窗保留背景入口并避免横向溢出", async ({ page }) => 
 	await openEditorHarness(page);
 	const bounds = await page.getByRole("dialog", { name: "创建任务" }).boundingBox();
 	expect(bounds?.width).toBeLessThan(390);
+	await page.getByRole("button", { name: "项目归属分析", exact: true }).click();
 	const automaticAnalysisSwitch = page.getByRole("switch", { name: "自动分析项目归属" });
 	await automaticAnalysisSwitch.scrollIntoViewIfNeeded();
 	await expect(automaticAnalysisSwitch).not.toBeChecked();
@@ -233,12 +257,105 @@ test("从背景切回时解析剪贴板，临时揭示隐藏的关系组并保�
 		document.body.dataset.controlledClipboardText = "ee150";
 	});
 	await page.getByRole("dialog", { name: "创建任务" }).locator("textarea").first().focus();
-	await expect(page.getByText("剪贴板任务 ee150", { exact: true })).toBeVisible();
+	await expect(page.getByRole("button", { name: /关联 .*剪贴板任务 ee150/ })).toBeVisible();
+	await expect(page.getByRole("list", { name: "待保存关联任务" }).locator("li")).toHaveCount(0);
+	await page.getByRole("button", { name: /关联 .*剪贴板任务 ee150/ }).click();
+	await expect(page.getByRole("list", { name: "待保存关联任务" }).locator("li")).toHaveCount(1);
+	await page.getByRole("button", { name: "详情", exact: true }).click();
 	await page.getByLabel("背景输入").focus();
 	await page.evaluate(() => {
 		document.body.dataset.controlledClipboardText = "ff160";
 	});
 	await page.getByRole("dialog", { name: "创建任务" }).locator("textarea").first().focus();
-	await expect(page.getByText("剪贴板任务 ee150", { exact: true })).toBeVisible();
-	await expect(page.getByText("剪贴板任务 ff160", { exact: true })).toHaveCount(0);
+	await expect(page.getByRole("list", { name: "待保存关联任务" })).toContainText("ee150");
+	await expect(page.getByRole("button", { name: /关联 .*剪贴板任务 ff160/ })).toHaveCount(0);
+});
+
+for (const mode of ["create", "edit"] as const) {
+	for (const width of [1440, 320] as const) {
+		test(`${mode}：${width}px 仅正文即可提交，设置摘要和底栏保持在边界内`, async ({ page }) => {
+			await page.setViewportSize({ width, height: 900 });
+			await openEditorHarness(page, { mode });
+			const dialog = page.getByRole("dialog", {
+				name: mode === "create" ? "创建任务" : "编辑 Backlog 任务",
+				exact: true,
+			});
+			await expect(dialog.getByRole("textbox", { name: "任务名称（可选）" })).toHaveValue("");
+			await expect(dialog.getByRole("button", { name: "Agent：codex", exact: true })).toBeVisible();
+			await expect(dialog.getByRole("button", { name: "基础分支：main", exact: true })).toBeVisible();
+			await expect(dialog.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeHidden();
+			await dialog.getByRole("textbox", { name: "任务正文", exact: true }).fill("只填写正文的创建或编辑要求");
+			const submit = dialog.getByRole("button", { name: mode === "create" ? "创建任务" : "保存更改", exact: true });
+			await expect(submit).toBeVisible();
+			await submit.click();
+			await expect(page.locator("body")).toHaveAttribute("data-task-editor-submission-count", "1");
+			await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+			for (const locator of [dialog.getByRole("textbox", { name: "任务正文", exact: true }), submit]) {
+				const bounds = await locator.boundingBox();
+				expect(bounds).not.toBeNull();
+				expect(bounds!.x).toBeGreaterThanOrEqual(0);
+				expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+			}
+			await page.screenshot({ path: test.info().outputPath(`${mode}-${width}-prompt-first.png`) });
+		});
+	}
+}
+
+test("未采纳的剪贴板候选不阻塞正文创建", async ({ page }) => {
+	await openEditorHarness(page);
+	await page.getByLabel("背景输入").focus();
+	await page.evaluate(() => {
+		document.body.dataset.controlledClipboardText = "ee150";
+	});
+	await page.getByRole("textbox", { name: "任务正文", exact: true }).focus();
+	await expect(page.getByRole("button", { name: /关联 .*剪贴板任务 ee150/ })).toBeVisible();
+	await expect(page.getByRole("list", { name: "待保存关联任务" }).locator("li")).toHaveCount(0);
+	await page.getByRole("button", { name: "创建任务", exact: true }).click();
+	await expect(page.locator("body")).toHaveAttribute("data-task-editor-submission-count", "1");
+});
+
+test("六种关系不填详情均进入列表，方向修改与收起后刷新恢复", async ({ page }) => {
+	const observations = await openEditorHarness(page);
+	await page.getByLabel("背景输入").focus();
+	await page.evaluate(() => {
+		document.body.dataset.controlledClipboardText = "ee150";
+	});
+	await page.getByRole("textbox", { name: "任务正文", exact: true }).focus();
+	await page.getByRole("button", { name: /关联 .*剪贴板任务 ee150/ }).click();
+	const pendingRelations = page.getByRole("list", { name: "待保存关联任务" });
+	await expect(pendingRelations.locator("li")).toHaveCount(1);
+	const kind = pendingRelations.getByRole("combobox", { name: "待保存关系类型" });
+	await expect(kind).toHaveValue("reference_is_generally_related_with");
+	for (const relationKind of [
+		"reference_concerns_behavior_or_state_of",
+		"reference_verifies_claims_of",
+		"reference_reuses_produced_outputs_of",
+		"reference_requirement_originates_from",
+		"reference_is_cross_repository_counterpart_with",
+		"reference_is_generally_related_with",
+	]) {
+		await kind.selectOption(relationKind);
+		await expect
+			.poll(() => observations.lastSavedRelationDrafts)
+			.toEqual([
+				expect.objectContaining({
+					relationKind,
+					relationAssertionRationaleOneSentence: "",
+					relationAssertionEvidencePointers: [],
+					assertedRelationKindSpecificAttributes: {},
+				}),
+			]);
+	}
+	await kind.selectOption("reference_concerns_behavior_or_state_of");
+	await pendingRelations.getByRole("button", { name: "详情", exact: true }).click();
+	await page.getByRole("combobox", { name: "陈述方向", exact: true }).selectOption("other");
+	await page.getByRole("button", { name: "收起详情", exact: true }).first().click();
+	await expect
+		.poll(() => observations.lastSavedRelationDrafts)
+		.toEqual([expect.objectContaining({ currentTaskIsStatementSubject: false })]);
+	await page.reload();
+	await mountEditorHarness(page);
+	await expect(pendingRelations.locator("li")).toHaveCount(1);
+	await pendingRelations.getByRole("button", { name: "详情", exact: true }).click();
+	await expect(page.getByRole("combobox", { name: "陈述方向", exact: true })).toHaveValue("other");
 });

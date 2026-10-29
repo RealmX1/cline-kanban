@@ -30,15 +30,21 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 		const search = editor.getByPlaceholder("Search tasks in all projects (title, prompt or task id)");
 		await search.fill(taskId);
 		await editor.locator(`[data-counterpart-candidate-kanban-board-card="${workspaceId}:${taskId}"]`).first().click();
-		await editor.getByLabel("关系类型", { exact: true }).selectOption("reference_is_generally_related_with");
-		await editor.getByLabel("关系理由", { exact: true }).fill(reason);
+		await editor.getByRole("list", { name: "待保存关联任务" }).locator("li").last().waitFor();
+		await editor.getByRole("button", { name: "详情", exact: true }).last().click();
+		await editor.locator("summary").filter({ hasText: "可选详情" }).click();
+		await editor.getByLabel("关系理由（可选）", { exact: true }).fill(reason);
 		await editor.getByLabel("证据位置（可选，每行一个）").fill("before-edit.md");
-		await editor.getByRole("button", { name: "加入关系草稿", exact: true }).click();
-		await editor.getByRole("group", { name: "新增参照关系", exact: true }).waitFor({ state: "detached" });
+		await editor.getByRole("button", { name: "收起详情", exact: true }).first().click();
 	}
 	await page.goto(`${webUiOrigin}/${workspaceId}?task=${input.focusId}`);
+	await page
+		.getByRole("combobox", { name: /^工作台格位/ })
+		.first()
+		.selectOption("cross_task_relations");
 	const relations = page.getByRole("region", { name: "Relations", exact: true });
-	await relations.getByRole("button", { name: /^Relations/ }).click();
+	const relationsToggle = relations.getByRole("button", { name: /^Relations/ });
+	if ((await relationsToggle.getAttribute("aria-expanded")) === "false") await relationsToggle.click();
 	await relations.getByRole("button", { name: "关系图与建模", exact: true }).click();
 	await addReference(input.chainStartId, "浏览器验证：人工关联焦点任务");
 	await getEditor().getByRole("button", { name: "保存关系变更", exact: true }).click();
@@ -58,9 +64,10 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 	recordCheck("默认两跳可展开至三跳，人工断言关系也参与展开");
 	await getEditor().getByRole("button", { name: "列表", exact: true }).click();
 	await getEditor().getByRole("button", { name: "修改", exact: true }).first().click();
-	await getEditor().getByLabel("关系理由", { exact: true }).fill("浏览器验证：修改后的理由");
+	await getEditor().locator("summary").filter({ hasText: "可选详情" }).click();
+	await getEditor().getByLabel("关系理由（可选）", { exact: true }).fill("浏览器验证：修改后的理由");
 	await getEditor().getByLabel("证据位置（可选，每行一个）").fill("after-edit.md");
-	await getEditor().getByRole("button", { name: "暂存修改", exact: true }).click();
+	await getEditor().getByRole("button", { name: "保存详情到草稿", exact: true }).click();
 	await getEditor().getByRole("button", { name: "保存关系变更", exact: true }).click();
 	await observeUntil(
 		async () =>
@@ -71,10 +78,15 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 	);
 	recordCheck("修改保存替代旧证据，非追加并集");
 	await page.setViewportSize({ width: 390, height: 844 });
+	const mobileToolsToggle = page.getByRole("button", { name: /^(展开|收起)上方导航与工具$/ });
+	await mobileToolsToggle.waitFor({ state: "visible" });
+	if ((await mobileToolsToggle.getAttribute("aria-expanded")) === "false") await mobileToolsToggle.click();
 	await page.getByRole("button", { name: "Sessions", exact: true }).click();
 	const mobileRelations = page.getByRole("region", { name: "Relations", exact: true });
-	await mobileRelations.getByRole("button", { name: /^Relations/ }).click();
-	await mobileRelations.getByRole("button", { name: "关系图与建模", exact: true }).click();
+	const mobileToggle = mobileRelations.getByRole("button", { name: /^Relations/ });
+	if ((await mobileToggle.getAttribute("aria-expanded")) === "false") await mobileToggle.click();
+	const openMobileModeling = mobileRelations.getByRole("button", { name: "关系图与建模", exact: true });
+	if (await openMobileModeling.isVisible()) await openMobileModeling.click();
 	await getEditor().getByRole("button", { name: "关系图", exact: true }).click();
 	await graph.locator(".react-flow__node").first().waitFor({ state: "visible" });
 	await graph.scrollIntoViewIfNeeded();
@@ -92,11 +104,12 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 	await page.setViewportSize({ width: 1600, height: 1000 });
 	await page.goto(`${webUiOrigin}/${workspaceId}`);
 	await page.getByRole("button", { name: "Create task", exact: true }).first().click();
-	const dialog = page.getByRole("dialog").filter({ hasText: "New task" });
-	await dialog.getByPlaceholder("Describe the task...").fill("浏览器验证：创建时关联任务");
-	await dialog.getByLabel("Task name", { exact: true }).fill("[TEST]创建关系验收");
+	const dialog = page.getByRole("dialog", { name: "创建任务", exact: true });
+	await dialog.getByRole("textbox", { name: "任务正文", exact: true }).fill("浏览器验证：创建时关联任务");
+	await dialog.getByLabel("任务名称（可选）", { exact: true }).fill("[TEST]创建关系验收");
 	await addReference(input.chainStartId, "浏览器验证：创建草稿关系");
-	expect((await dialog.boundingBox())?.width).toBeGreaterThanOrEqual(900);
+	expect((await dialog.boundingBox())?.width).toBeGreaterThanOrEqual(800);
+	await getEditor().getByRole("button", { name: "关系图", exact: true }).click();
 	await observeUntil(
 		async () => (await graph.locator(".react-flow__node").count()) >= 3,
 		"创建前虚拟根和两跳关系图可见",
@@ -104,7 +117,7 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 	await graph.locator(".react-flow__node").first().waitFor({ state: "visible" });
 	await getEditor().scrollIntoViewIfNeeded();
 	await page.screenshot({ path: join(evidenceOutputDirectory, "creation-pending-relations-preview.png") });
-	recordCheck("创建草稿以虚拟根预览两跳，宽屏列表与关系图同时可见");
+	recordCheck("创建草稿按需打开虚拟根与两跳关系图");
 	const originalCount = (await input.readBoard()).columns.flatMap((column) => column.cards).length;
 	let failNextWrite = true;
 	await page.route("**/api/trpc/*", async (route) => {
@@ -113,24 +126,25 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 			await route.abort("failed");
 		} else await route.continue();
 	});
-	await dialog.getByRole("button", { name: "Create", exact: true }).click();
+	await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
 	await dialog.getByText(/已创建，关系尚未保存/).waitFor();
 	await observeUntil(
 		async () => (await input.readBoard()).columns.flatMap((column) => column.cards).length === originalCount + 1,
 		"失败前只创建一次任务",
 	);
 	await observeUntil(
-		async () => await dialog.getByRole("button", { name: "Create", exact: true }).isEnabled(),
+		async () => await dialog.getByRole("button", { name: "创建任务", exact: true }).isEnabled(),
 		"失败后可重试",
 	);
 	await page.screenshot({ path: join(evidenceOutputDirectory, "creation-relation-write-recovery.png") });
 	await page.reload();
 	await page.getByRole("button", { name: "Create task", exact: true }).first().click();
 	await observeUntil(
-		async () => (await dialog.getByPlaceholder("Describe the task...").inputValue()).includes("创建时关联任务"),
+		async () =>
+			(await dialog.getByRole("textbox", { name: "任务正文", exact: true }).inputValue()).includes("创建时关联任务"),
 		"页面刷新后恢复创建需求与原任务身份",
 	);
-	await dialog.getByRole("button", { name: "Create", exact: true }).click();
+	await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
 	await dialog.waitFor({ state: "detached" });
 	const cards = (await input.readBoard()).columns.flatMap((column) => column.cards);
 	expect(cards.length).toBe(originalCount + 1);
@@ -143,8 +157,8 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 		JSON.stringify({ taskId: created.id, cardCountBefore: originalCount, cardCountAfter: cards.length }),
 	);
 	await page.getByRole("button", { name: "Create task", exact: true }).first().click();
-	await dialog.getByPlaceholder("Describe the task...").fill("浏览器验证：先保存关系再启动");
-	await dialog.getByLabel("Task name", { exact: true }).fill("[TEST]创建关系后启动验收");
+	await dialog.getByRole("textbox", { name: "任务正文", exact: true }).fill("浏览器验证：先保存关系再启动");
+	await dialog.getByLabel("任务名称（可选）", { exact: true }).fill("[TEST]创建关系后启动验收");
 	await addReference(input.chainStartId, "浏览器验证：启动顺序");
 	let verifiedStartAfterRelationCommit = false;
 	await page.route("**/api/trpc/taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress*", async (route) => {
@@ -158,7 +172,7 @@ export async function runReferenceRelationModelingRealBrowserCheck(input: {
 		await route.continue();
 	});
 	await dialog
-		.getByPlaceholder("Describe the task...")
+		.getByRole("textbox", { name: "任务正文", exact: true })
 		.press(process.platform === "darwin" ? "Meta+Shift+Enter" : "Control+Shift+Enter");
 	await dialog.waitFor({ state: "detached" });
 	expect(verifiedStartAfterRelationCommit).toBe(true);

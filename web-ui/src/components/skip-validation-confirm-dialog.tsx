@@ -44,7 +44,7 @@ export function SkipValidationConfirmDialog({
 				</AlertDialogCancel>
 				<AlertDialogAction asChild>
 					<Button variant="danger" onClick={onConfirm}>
-						Move to Done
+						结案任务
 					</Button>
 				</AlertDialogAction>
 			</AlertDialogFooter>

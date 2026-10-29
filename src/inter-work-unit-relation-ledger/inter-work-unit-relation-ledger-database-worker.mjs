@@ -425,7 +425,7 @@ const appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded = 
 	},
 );
 
-function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subjectWorkspaceId, subjectTaskId }) {
+function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subjectWorkspaceId, subjectTaskId, eventFamily, sortDirection }) {
 	const conditions = ["event_commit_status = 'committed'", "global_committed_event_sequence > ?"];
 	const parameters = [afterGlobalCommittedEventSequence ?? 0];
 	if (subjectWorkspaceId) {
@@ -436,10 +436,14 @@ function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subject
 		conditions.push("subject_task_id = ?");
 		parameters.push(subjectTaskId);
 	}
+	if (eventFamily) {
+		conditions.push("event_family = ?");
+		parameters.push(eventFamily);
+	}
 	parameters.push(Math.max(1, Math.min(limit ?? 500, 5000)));
 	return database
 		.prepare(
-			`SELECT global_committed_event_sequence, recorded_in_source_of_truth_event_log_at, event_json FROM inter_work_unit_relation_ledger_events WHERE ${conditions.join(" AND ")} ORDER BY global_committed_event_sequence LIMIT ?`,
+			`SELECT global_committed_event_sequence, recorded_in_source_of_truth_event_log_at, event_json FROM inter_work_unit_relation_ledger_events WHERE ${conditions.join(" AND ")} ORDER BY global_committed_event_sequence ${sortDirection === "desc" ? "DESC" : "ASC"} LIMIT ?`,
 		)
 		.all(...parameters)
 		.map((row) => ({

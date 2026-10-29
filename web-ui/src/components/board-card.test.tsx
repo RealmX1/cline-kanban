@@ -305,7 +305,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const trashButton = container.querySelector('button[aria-label="Move task to done"]');
+		const trashButton = container.querySelector('button[aria-label="结案任务"]');
 		expect(trashButton).toBeInstanceOf(HTMLButtonElement);
 		expect((trashButton as HTMLButtonElement | null)?.disabled).toBe(true);
 		expect(trashButton?.querySelector("svg.animate-spin")).toBeTruthy();
@@ -320,7 +320,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const doneButton = container.querySelector('button[aria-label="Move task to done"]');
+		const doneButton = container.querySelector('button[aria-label="结案任务"]');
 		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
@@ -599,7 +599,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.querySelector('button[aria-label="Move task to done"]')).toBeNull();
+		expect(container.querySelector('button[aria-label="结案任务"]')).toBeNull();
 		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
 	});
 
@@ -702,7 +702,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to done"]');
+		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="结案任务"]');
 		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
 		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
 

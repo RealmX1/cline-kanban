@@ -477,9 +477,7 @@ describe("ColumnContextPanel", () => {
 			);
 		});
 
-		const restoreButton = container.querySelector<HTMLButtonElement>(
-			'button[aria-label="Restore most recent done task"]',
-		);
+		const restoreButton = container.querySelector<HTMLButtonElement>('button[aria-label="重新打开最近结案的任务"]');
 		expect(restoreButton).toBeInstanceOf(HTMLButtonElement);
 		expect(restoreButton?.disabled).toBe(false);
 
@@ -512,9 +510,7 @@ describe("ColumnContextPanel", () => {
 			);
 		});
 
-		const restoreButton = container.querySelector<HTMLButtonElement>(
-			'button[aria-label="Restore most recent done task"]',
-		);
+		const restoreButton = container.querySelector<HTMLButtonElement>('button[aria-label="重新打开最近结案的任务"]');
 		expect(restoreButton).toBeInstanceOf(HTMLButtonElement);
 		expect(restoreButton?.disabled).toBe(true);
 

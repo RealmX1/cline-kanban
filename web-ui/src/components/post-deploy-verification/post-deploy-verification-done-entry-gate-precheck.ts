@@ -11,7 +11,7 @@ import type {
 	RuntimePostDeployVerificationTask,
 } from "@/runtime/types";
 
-// 「移入 Done」门禁的**客户端预检**。唯一判据在服务端（taskCardAction.moveIntoDone 缺原因时抛 PRECONDITION_FAILED）；
+// 「结案」门禁的**客户端预检**。唯一判据在服务端（taskCardAction.moveIntoDone 缺原因时抛 PRECONDITION_FAILED）；
 // 这里只用 PDV 读模型提前判断，好在发请求前就进入核对与结案流程，而不是让用户先看到一次失败。读模型最多滞后 30s，
 // 预检说「不受门禁」而服务端拒绝时，由调用方按下方的拒绝处理策略兜底。
 
@@ -65,7 +65,7 @@ export function evaluatePostDeployVerificationDoneEntryGatePrecheckForTask(
 		isPostDeployVerificationTaskClosed(task) ||
 		task.droppedReason !== null ||
 		isPostDeployVerificationTaskIncludedAsReadOnlyBecauseAlreadyInDoneColumn(task) ||
-		// 结案授权在途：上一次移入 Done 已经带齐原因、正在落盘，交给服务端对账补完，不再弹框要原因。
+		// 结案授权在途：上一次结案 已经带齐原因、正在落盘，交给服务端对账补完，不再弹框要原因。
 		(task.doneEntryClosureAuthorizationInFlight ?? null) !== null
 	) {
 		return notSubjectToGate;
@@ -124,7 +124,7 @@ export function describePostDeployVerificationDoneEntryGateRejectionForHumans(
 		: moveIntoDoneFailureMessage.trim();
 	return humanReadablePart.length > 0
 		? humanReadablePart
-		: "该任务还有未勾选的 Post-Deploy Verification 核对项，移入 Done 前需要逐项给出原因。";
+		: "该任务还有未勾选的 Post-Deploy Verification 核对项，结案 前需要逐项给出原因。";
 }
 
 const WEB_UI_BOARD_MUTATION_INITIATORS_OF_CLIENT_AUTOMATION: ReadonlySet<WebUiBoardMutationInitiator> = new Set([

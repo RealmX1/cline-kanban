@@ -32,6 +32,7 @@ import type {
 import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { findCardSelection } from "@/state/board-state";
 import type { PendingTaskCardCommandExpectedBoardEffect } from "@/state/pending-task-card-command-board-overlay";
+import { requestPostDeployVerificationTaskClosureForm } from "@/state/post-deploy-verification-task-closure-form-request";
 import {
 	executeTaskCardActionCommand,
 	type TaskCardActionCommandExecutionResult,
@@ -326,7 +327,7 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 	});
 }
 
-// --- 移入 Done：停 agent 会话与详情 shell 终端、删 worktree ---
+// --- 结案：停 agent 会话与详情 shell 终端、删 worktree ---
 // 浏览器端「会话中断自动流转进 Done」刻意不走这里：那条要保留 worktree 供恢复。
 export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime(input: {
 	workspaceId: string;
@@ -340,6 +341,20 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 	// 卡片受 Post-Deploy Verification 门禁时的结案原因 / 确认项；缺省 = 不受门禁或尚未问过原因（受门禁时服务端拒绝）。
 	postDeployVerificationDoneEntryClosure?: RuntimePostDeployVerificationDoneEntryClosureRequest;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionMoveIntoDoneResponse>> {
+	let taskCommentToAppendWhenMovingIntoDone = input.taskCommentToAppendWhenMovingIntoDone;
+	if (
+		!taskCommentToAppendWhenMovingIntoDone?.closure &&
+		input.boardMutationInitiator === "web_ui_user_gesture_post_deploy_verification_panel_completion"
+	) {
+		const chosen = await requestPostDeployVerificationTaskClosureForm(
+			input.workspaceId,
+			input.taskId,
+			input.expectedTaskIncarnationCreatedAtEpochMs,
+		);
+		if (chosen === null)
+			return { taskCardActionCommandExecutionOutcome: "command_failed", commandFailureMessage: "已取消任务结案" };
+		if (chosen) taskCommentToAppendWhenMovingIntoDone = chosen;
+	}
 	return await executeTaskCardActionCommand({
 		workspaceId: input.workspaceId,
 		taskIds: [input.taskId],
@@ -355,12 +370,13 @@ export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThr
 		sendCommand: () =>
 			moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				...(taskCommentToAppendWhenMovingIntoDone?.closure
+					? { closure: taskCommentToAppendWhenMovingIntoDone.closure }
+					: {}),
 				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
 					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
 					: {}),
-				...(input.taskCommentToAppendWhenMovingIntoDone
-					? { taskCommentToAppendWhenMovingIntoDone: input.taskCommentToAppendWhenMovingIntoDone }
-					: {}),
+				...(taskCommentToAppendWhenMovingIntoDone ? { taskCommentToAppendWhenMovingIntoDone } : {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 				// 落点必须发给服务端：只进 overlay 的话，广播回灌后卡片会跳回列顶。
 				...(input.insertAtIndexWithinDoneBoardColumn !== undefined

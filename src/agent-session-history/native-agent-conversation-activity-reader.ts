@@ -621,6 +621,11 @@ async function readCurrentCodexNativeActivity(
 		if (tools)
 			return {
 				...result,
+				codexNativeAgentTurnExecution: {
+					...execution,
+					latestSameNativeTurnPersistedToolActivityObservation:
+						tools.cursor.latestSameNativeTurnPersistedToolActivityObservation,
+				},
 				events: [...result.events, ...tools.events],
 				codexToolTranscriptCursor: tools.cursor,
 				moreAppendedTranscriptBytesRemain: tools.moreAppendedTranscriptBytesRemain,

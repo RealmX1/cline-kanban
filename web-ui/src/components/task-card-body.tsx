@@ -62,6 +62,7 @@ import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/tas
 import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskCardStickers } from "@/components/task-card-stickers";
+import { TaskClosureSummaryAndHistory } from "@/components/task-closure-summary-and-history";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
@@ -224,7 +225,7 @@ export type TaskCardBodyRenderRole =
 	// Post-Deploy Verification 面板里一个任务条目的上半部分（下半部分的核对清单由条目 wrapper 自己渲染）。
 	// 不可拖；`data-task-id` 与 verification 锚点留在 wrapper 上（wrapper 挂 `verification-panel-task:<taskId>`），
 	// 卡体副本一律不输出。其余交互与置顶板分身一致、即与本体一致：单击进详情（会跳转的列延迟单击留出双击窗口）、
-	// 双击改标题、全部动作按钮（移入 Done 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡也可点开。
+	// 双击改标题、全部动作按钮（结案 等动作照样经看板同一组 handler，因而同样过 PDV 门禁）；Done 卡也可点开。
 	// 不显示置顶板专属的 stage 标签与原因行——所在列由 wrapper 的徽标表达。
 	| "task_card_copy_in_post_deploy_verification_panel_entry"
 	// 关联列表旁的完整可操作副本：无本体身份、无拖拽，也不递归打开关联预览。
@@ -295,7 +296,7 @@ type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	taskCardWorkspaceIdForCrossProjectGitMetadataPolling?: string | null;
 	/** 完整关联预览只消费已核对创建时间的局部快照；null 或缺省均表示未知，不回退到共享 store。 */
 	relatedTaskPreviewWorktreeGitMetadataSnapshot?: ReviewTaskWorkspaceSnapshot | null;
-	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
+	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "已结案"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
 	onNavigateToCanonicalCardInItsStage?: (taskId: string) => void;
@@ -1402,6 +1403,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</p>
 							</>
 						)}
+						<TaskClosureSummaryAndHistory
+							card={card}
+							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+							isClosed={isTrashCard}
+						/>
 						{showsTaskPinboardPinReasonRowOnThisCopy ? (
 							// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
 							<button
@@ -1673,12 +1679,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 								setOpenedQuickActionMenu((current) => (open ? "done" : current === "done" ? null : current))
 							}
 							icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
-							primaryLabel="移入 Done"
-							primaryAccessibleLabel="Move task to done"
+							primaryLabel="结案"
+							primaryAccessibleLabel="结案任务"
 							disabled={isMoveToTrashLoading || !onMoveToTrash}
 							onPrimaryAction={() => onMoveToTrash?.(card.id)}
 							quickOption={{
-								label: "添加评论并移入 Done…",
+								label: "添加评论并结案…",
 								icon: <MessagesSquare size={14} />,
 								onSelect: () => onMoveToTrash?.(card.id, { requestTaskCommentBeforeMovingIntoDone: true }),
 							}}
@@ -1701,7 +1707,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								icon={<RotateCcw size={12} />}
 								variant="ghost"
 								size="xs"
-								aria-label="Restore task from done"
+								aria-label="重新打开已结案任务"
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);

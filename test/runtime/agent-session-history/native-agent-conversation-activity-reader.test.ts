@@ -7,6 +7,7 @@ import {
 	readNativeAgentConversationActivity,
 } from "../../../src/agent-session-history/native-agent-conversation-activity-reader";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { canCorrectCodexReviewMisclassificationForSameNativeTurn } from "../../../src/core/codex-native-agent-turn-execution-observation";
 import { applySessionFacets } from "../../../src/core/session-activity";
 
 const request = vi.hoisted(() => vi.fn());
@@ -1162,5 +1163,82 @@ describe("有界原生活动增量读取", () => {
 			observedAtMs: baselineAtMs + 3,
 		});
 		expect(received?.events.map((event) => event.activityKind)).toEqual(["tool_activity"]);
+	});
+	it.each([false, true])("Codex 延迟发现工具按原始转录判断 Stop 先后，真实续跑=%s", async (continuedAfterStop) => {
+		const directory = await mkdtemp(join(tmpdir(), "codex-stop-original-tool-evidence-"));
+		directories.push(directory);
+		const path = join(directory, "native.jsonl");
+		const target = summary("codex", path);
+		const stoppedAtMs = baselineAtMs + 100;
+		const toolOccurredAtMs = baselineAtMs + (continuedAfterStop ? 200 : 50);
+		const line = (type: string, payload: Record<string, unknown>, atMs: number) =>
+			`${JSON.stringify({ type, payload, timestamp: new Date(atMs).toISOString() })}\n`;
+		await writeFile(
+			path,
+			line("session_meta", { id: "native", source: "cli", cwd: "/isolated" }, baselineAtMs - 1_000) +
+				line("event_msg", { type: "task_started", turn_id: "current" }, baselineAtMs - 1_000) +
+				line(
+					"response_item",
+					{ type: "function_call", call_id: "main-tool", name: "exec", arguments: "{}" },
+					toolOccurredAtMs,
+				),
+		);
+		const items: Array<Record<string, unknown>> = [];
+		request.mockImplementation(async (method) => {
+			if (method === "thread/loaded/list") return { data: ["native"] };
+			if (method === "thread/read")
+				return {
+					thread: { id: "native", status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+				};
+			return {
+				data: [{ id: "current", status: "inProgress", startedAt: (baselineAtMs - 1_000) / 1_000, items }],
+				nextCursor: null,
+			};
+		});
+		const initial = await readNativeAgentConversationActivity({
+			workspaceId: "workspace",
+			summary: target,
+			cursor: null,
+			observedAtMs: baselineAtMs,
+		});
+		target.turnOwner = "user";
+		target.userTurnKind = "review";
+		target.reviewReason = "hook";
+		target.agentResponseGenerationTurnSequence = 1;
+		target.currentAgentProcessUserTurnIdleRetentionStarted = {
+			stoppedAt: stoppedAtMs,
+			signalConfidence: "harness_turn_complete",
+			turnSequence: 1,
+		};
+		items.push({ id: "main-tool", type: "commandExecution", status: "completed" });
+		const readInput = { workspaceId: "workspace", summary: target, observedAtMs: baselineAtMs + 1_000 };
+		const result = await readNativeAgentConversationActivity({
+			...readInput,
+			cursor: initial?.cursor ?? null,
+			codexToolTranscriptCursor: initial?.codexToolTranscriptCursor,
+		});
+		target.lastEffectiveAgentConversationActivityObservation = result?.events.find(
+			(event) => event.evidenceKind === "structured_agent_session_event",
+		);
+		expect(target.lastEffectiveAgentConversationActivityObservation?.observedAtMs).toBe(readInput.observedAtMs);
+		if (!result?.codexNativeAgentTurnExecution) throw new Error("缺少原生执行证明");
+		expect(
+			canCorrectCodexReviewMisclassificationForSameNativeTurn(target, result.codexNativeAgentTurnExecution),
+		).toBe(continuedAfterStop);
+		const repeated = await readNativeAgentConversationActivity({
+			...readInput,
+			cursor: result.cursor,
+			codexToolTranscriptCursor: result.codexToolTranscriptCursor,
+		});
+		expect(repeated?.events).toEqual([]);
+		if (!repeated?.codexNativeAgentTurnExecution) throw new Error("缺少重复核验的原生执行证明");
+		expect(
+			canCorrectCodexReviewMisclassificationForSameNativeTurn(target, repeated.codexNativeAgentTurnExecution),
+		).toBe(continuedAfterStop);
+		const afterRestart = await readNativeAgentConversationActivity({ ...readInput, cursor: null });
+		if (!afterRestart?.codexNativeAgentTurnExecution) throw new Error("缺少重启后的原生执行证明");
+		expect(
+			canCorrectCodexReviewMisclassificationForSameNativeTurn(target, afterRestart.codexNativeAgentTurnExecution),
+		).toBe(continuedAfterStop);
 	});
 });

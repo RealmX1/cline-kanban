@@ -1,3 +1,4 @@
+import type { TaskClosureRequest } from "@runtime-task-closure-contract";
 import { type ReactElement, useCallback, useMemo, useRef, useState } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
@@ -60,7 +61,7 @@ export interface PostDeployVerificationControllerProps {
 	postDeployVerificationWorkspaceProjectNameShownInPanelHeader?: string | null;
 }
 
-// 单任务完成流（面板条目的「完成核对并移入 Done」/「带原因移入 Done」）：token / 需确认项 / agent 回复 / 发起时的列。
+// 单任务完成流（面板条目的「完成核对并结案」/「带原因结案」）：token / 需确认项 / agent 回复 / 发起时的列。
 interface PostDeployVerificationSingleTaskCompletionAwaitingClosureDialog {
 	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	deploymentId: string;
@@ -165,7 +166,7 @@ export function PostDeployVerificationController({
 				if (pending.taskCommentToAppendWhenMovingIntoDone)
 					returnTaskCommentToEditing(
 						pending.taskId,
-						moveIntoDoneFailureMessage || "移入 Done 失败，评论尚未提交。",
+						moveIntoDoneFailureMessage || "结案 失败，评论尚未提交。",
 						pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
 					);
 				showAppToast({
@@ -174,7 +175,7 @@ export function PostDeployVerificationController({
 						moveIntoDoneFailureMessage,
 					)
 						? `${describePostDeployVerificationDoneEntryGateRejectionForHumans(moveIntoDoneFailureMessage)}（核对清单已刷新，请重新点击）`
-						: "移入 Done 失败，核对未标记完成",
+						: "结案 失败，核对未标记完成",
 				});
 				closeCompletionFlow();
 				refresh();
@@ -195,13 +196,13 @@ export function PostDeployVerificationController({
 			if (confirmed?.ok) {
 				showAppToast({
 					intent: "success",
-					message: closedWithUncheckedItemsReasoned ? "已带原因结案并移入 Done" : "已完成核对并移入 Done",
+					message: closedWithUncheckedItemsReasoned ? "已带原因结案" : "已完成核对并结案",
 				});
 			} else {
-				// 卡片已移入 Done，但 state 标记失败（token 过期 / 校验未过）——如实告知，轮询会对账。
+				// 卡片已结案，但 state 标记失败（token 过期 / 校验未过）——如实告知，轮询会对账。
 				showAppToast({
 					intent: "warning",
-					message: confirmed?.error ?? "任务已移入 Done，但核对状态标记失败",
+					message: confirmed?.error ?? "任务已结案，但核对状态标记失败",
 				});
 			}
 			closeCompletionFlow();
@@ -374,7 +375,7 @@ export function PostDeployVerificationController({
 		}
 	};
 
-	const submitTaskCommentBeforeCompletion = (commentText: string) => {
+	const submitTaskCommentBeforeCompletion = (commentText: string, closure?: TaskClosureRequest) => {
 		const request = taskCommentBeforeMoveIntoDone.request;
 		const deploymentId = deploymentIdForTaskCommentCompletionRef.current;
 		if (!request || !deploymentId) return;
@@ -387,7 +388,10 @@ export function PostDeployVerificationController({
 			returnTaskCommentToEditing(request.taskId, "当前核对的项目已变化，请关闭评论弹窗后重新操作。");
 			return;
 		}
-		const taskCommentToAppendWhenMovingIntoDone = taskCommentBeforeMoveIntoDone.prepareSubmission(commentText);
+		const taskCommentToAppendWhenMovingIntoDone = taskCommentBeforeMoveIntoDone.prepareSubmission(
+			commentText,
+			closure,
+		);
 		if (!taskCommentToAppendWhenMovingIntoDone) return;
 		const currentTaskCardSelection = findCardSelection(latestBoardRef.current, request.taskId);
 		if (currentTaskCardSelection?.column.id === "trash") {
@@ -403,7 +407,7 @@ export function PostDeployVerificationController({
 			else
 				returnTaskCommentToEditing(
 					request.taskId,
-					"任务已移入 Done，尚无法确认本次评论已保存，请核对任务评论后取消或重试。",
+					"任务已结案，尚无法确认本次评论已保存，请核对任务评论后取消或重试。",
 					taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
 				);
 			return;
@@ -503,7 +507,7 @@ export function PostDeployVerificationController({
 					closedTaskCount += 1;
 					continue;
 				}
-				const moveIntoDoneFailureMessage = moved.moveIntoDoneFailureMessage ?? "移入 Done 失败";
+				const moveIntoDoneFailureMessage = moved.moveIntoDoneFailureMessage ?? "结案 失败";
 				failedTaskDescriptions.push(
 					`${taskTitle}：${
 						isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate(moveIntoDoneFailureMessage)
@@ -513,7 +517,7 @@ export function PostDeployVerificationController({
 				);
 			}
 			if (failedTaskDescriptions.length === 0) {
-				showAppToast({ intent: "success", message: `已结案并移入 Done：${closedTaskCount} 个任务` });
+				showAppToast({ intent: "success", message: `已结案：${closedTaskCount} 个任务` });
 			} else {
 				showAppToast({
 					intent: closedTaskCount > 0 ? "warning" : "danger",
@@ -614,7 +618,7 @@ export function PostDeployVerificationController({
 									);
 									showAppToast({
 										intent: "danger",
-										message: result.moveIntoDoneFailureMessage ?? "移入 Done 失败，请重试",
+										message: result.moveIntoDoneFailureMessage ?? "结案 失败，请重试",
 									});
 								}
 								refresh();
@@ -669,7 +673,7 @@ export function PostDeployVerificationController({
 			{singleTaskCompletionAwaitingClosureDialog ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog
 					key={`single:${singleTaskCompletionAwaitingClosureDialog.taskId}:${singleTaskCompletionAwaitingClosureDialog.token}`}
-					dialogTitle="完成核对并移入 Done"
+					dialogTitle="完成核对并结案"
 					taskEntries={closureDialogTaskEntries}
 					taskEntrySelectionMode="single_task_entry_always_included"
 					isSubmittingClosure={isSubmittingClosure}
@@ -680,7 +684,7 @@ export function PostDeployVerificationController({
 			{batchClosureAwaitingClosureDialog ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog
 					key={`batch:${batchClosureAwaitingClosureDialog.deploymentId}:${batchClosureAwaitingClosureDialog.candidateTaskIds.join(",")}`}
-					dialogTitle="批量带原因结案并移入 Done"
+					dialogTitle="批量带原因结案"
 					taskEntries={closureDialogTaskEntries}
 					taskEntrySelectionMode="multiple_task_entries_selectable_for_batch_closure"
 					isSubmittingClosure={isSubmittingClosure}
