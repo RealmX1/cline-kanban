@@ -58,6 +58,7 @@ import {
 	type TaskClosureRequest,
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
+import { taskCommandExecutionSpecificationSchema } from "../core/task-command-execution-contract";
 import {
 	resolveMainTaskConversationSessionSummary,
 	resolveTaskChatMessageTargetConversationSessionSummary,
@@ -1972,6 +1973,45 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
 	registerTaskVisualizationCommand(task);
+	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
+	commandExecution
+		.command("start")
+		.requiredOption("--task-id <id>", "任务 ID。")
+		.requiredOption("--idempotency-key <key>", "相同工作与材料的稳定幂等键。")
+		.requiredOption("--spec-file <path>", "冻结命令、恢复动作与结果文件的 JSON。")
+		.option("--project-path <path>", "项目主仓库路径。")
+		.action(async (options: { taskId: string; idempotencyKey: string; specFile: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const workspaceId = await ensureRuntimeWorkspace(
+					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+				);
+				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.start.mutate({
+					taskId: options.taskId,
+					idempotencyKey: options.idempotencyKey,
+					specification: taskCommandExecutionSpecificationSchema.parse(
+						JSON.parse(await readFile(options.specFile, "utf8")),
+					),
+				});
+			});
+		});
+	for (const action of ["inspect", "cancel"] as const) {
+		commandExecution
+			.command(action)
+			.requiredOption("--task-id <id>", "任务 ID。")
+			.requiredOption("--execution-id <id>", "精确执行 ID。")
+			.option("--project-path <path>", "项目主仓库路径。")
+			.action(async (options: { taskId: string; executionId: string; projectPath?: string }) => {
+				await runTaskCommand(async () => {
+					const workspaceId = await ensureRuntimeWorkspace(
+						await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+					);
+					const client = createRuntimeTrpcClient(workspaceId).taskCommandExecution;
+					const identity = { taskId: options.taskId, executionId: options.executionId };
+					return action === "inspect" ? client.inspect.query(identity) : client.cancel.mutate(identity);
+				});
+			});
+	}
+
 	for (const commandName of ["closure-history", "cancel-closure"] as const) {
 		task
 			.command(commandName)

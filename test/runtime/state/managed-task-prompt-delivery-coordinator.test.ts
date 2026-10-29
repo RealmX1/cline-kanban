@@ -367,6 +367,36 @@ describe("所有主动投递使用统一记录", () => {
 		);
 	});
 
+	it("ACP 明确未派发后同一结果的成功重投更新统一投影并保留原失败", async () => {
+		const input = {
+			workspaceId: "workspace",
+			taskId: "session-1",
+			text: "所属结果",
+			deliveryRequestId: "owned-result",
+			origin: { messageType: "programmatic_injection" as const, sourceLabel: "所属执行" },
+			summary,
+		};
+		const first = await beginManagedTaskPromptDelivery(input);
+		await first.handle.settle({
+			status: "delivery_failed",
+			reason: "no_active_terminal_session",
+			nativePromptSubmissionNotStartedEvidence: {
+				source: "acp_input_rejected_before_prompt_registration",
+				clientUserMessageId: "owned-result",
+				submissionAttemptId: "attempt-1",
+				nativeSessionId: "native-session",
+				reason: "request_busy",
+			},
+		});
+		const retry = await beginManagedTaskPromptDelivery(input);
+		await retry.handle.settle({ status: "delivered_and_submit_confirmed", reason: null });
+		const entry = (await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace")).entriesByTaskId[
+			"session-1"
+		].find((entry) => entry.queueEntryId === "owned-result");
+		expect(entry?.deliveryState).toBe("settled_delivered");
+		expect(entry?.managedDelivery?.previousUnconfirmedTerminalDeliveryReceipt?.status).toBe("delivery_failed");
+	});
+
 	it("ACP 即时注入发送前登记，pending 不算送达，协议回执只产生一条结果", async () => {
 		let accept: ((accepted: boolean) => void) | undefined;
 		const acp = {
