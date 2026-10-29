@@ -898,7 +898,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input, abortSignal) => {
 			return await suggestTaskNamesFromTaskDescription(input, { abortSignal });
 		},
-		startTaskSession: async (workspaceScope, input) => {
+		startTaskSession: async (workspaceScope, input, beforeAgentProcessLaunch) => {
 			const startRequestReceivedAt = Date.now();
 			let diagnosticTaskId = "(unparsed)";
 			let requestedAgentIdForDiagnostics: RuntimeAgentId | null = null;
@@ -1378,6 +1378,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					await revalidateMainContextForkSourceBeforeLaunch?.();
 					const acpSummary = await acpTaskSessionService.startTaskSession({
 						taskId: body.taskId,
+						beforeAgentProcessLaunch,
 						workspaceTaskId,
 						taskConversationSessionMetadata,
 						agentId: effectiveAgentId,
@@ -1504,6 +1505,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							? await clineTaskSessionService.loadPersistedTaskSessionMessages(workspaceTaskId)
 							: undefined;
 					startFailurePhase = "start_in_process_cline_runtime_session";
+					await beforeAgentProcessLaunch?.();
 					const summary = await clineTaskSessionService.startTaskSession({
 						taskId: body.taskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
@@ -1611,6 +1613,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const summary = await terminalManager.startTaskSession(
 					{
 						taskId: body.taskId,
+						beforeAgentProcessLaunch,
 						workspaceTaskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
 						taskConversationMode: body.taskConversationMode,
@@ -3933,11 +3936,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 	};
 	const startTaskSessionWithoutClosureLock = runtimeApi.startTaskSession;
-	runtimeApi.startTaskSession = async (scope, input) =>
+	runtimeApi.startTaskSession = async (scope, input, beforeAgentProcessLaunch) =>
 		await serializeSessionStartupAgainstTaskClosure(
 			scope,
 			() => input.workspaceTaskId ?? resolveSessionCategoryAndAttributedTaskCardId(input).attributedTaskCardId,
-			async () => await startTaskSessionWithoutClosureLock(scope, input),
+			async () => await startTaskSessionWithoutClosureLock(scope, input, beforeAgentProcessLaunch),
 			(error) => ({ ok: false, summary: null, error }),
 		);
 	const refreshTaskTerminalWithoutClosureLock = runtimeApi.refreshTaskTerminal;

@@ -62,6 +62,9 @@ export async function buildKanbanBoardCardIdentityResolutionCandidates(
 		return {
 			kanbanBoardCard: card,
 			canonicalKanbanBoardCard: projection.kanbanBoardCard,
+			workspaceIdsUsedByTaskIncarnation: projection.workspaceIdsUsedByCard ?? [
+				projection.kanbanBoardCard.workspaceId,
+			],
 			previousWorkspaceRepositoryPaths: (projection.workspaceIdsUsedByCard ?? []).flatMap((workspaceId) => {
 				const path =
 					getWorkspacePathById(workspaceId) ??

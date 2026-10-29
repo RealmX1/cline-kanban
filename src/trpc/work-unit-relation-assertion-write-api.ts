@@ -135,7 +135,7 @@ async function translateLedgerUnavailability<T>(operation: () => Promise<T>): Pr
 
 // 决策类 procedure 的来源校验（R3 b 项）：必须带已校验的页面 nonce、不能带 CLI 声明头（CLI 请求永远不记为用户决策），
 // 触发它的 DOM 事件必须是可信的用户事件（脚本合成的 click 拒绝）。客户端特征原样记进事件，供事后甄别浏览器自动化。
-function assertWebUiUserDecisionRequestOrigin(
+export function assertWebUiUserDecisionRequestOrigin(
 	evidence: KanbanRequestOriginActorEvidence,
 	clientCharacteristics: WebUiUserDecisionClientCharacteristics,
 ): void {

@@ -45,6 +45,7 @@ export type HostedTerminalPtySessionKind = "task_agent_session" | "shell_session
 // - 不记 pty 创建归因探针：那个探针对账的是 runtime 进程自己持有的 pty 资源，hosted pty 不在 runtime 里；
 // - 带会话身份，host 用它列出与诊断。
 export interface HostedTerminalPtyProcessSpawnRequest {
+	beforeAgentProcessLaunch?: () => Promise<void>;
 	taskId: string;
 	hostedSessionKind: HostedTerminalPtySessionKind;
 	binary: string;

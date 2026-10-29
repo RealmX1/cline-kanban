@@ -404,4 +404,50 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		);
 		expect(response.summary?.agentNativeConversationSessionIdentity).toEqual(identity);
 	});
+	it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
+		"创建启动门禁透传至 %s，不在 runtime API 提前执行",
+		async (transport) => {
+			const beforeAgentProcessLaunch = vi.fn(async () => undefined);
+			const startTaskSession = vi.fn(async (request: { beforeAgentProcessLaunch?: () => Promise<void> }) => {
+				expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+				expect(request.beforeAgentProcessLaunch).toBe(beforeAgentProcessLaunch);
+				await request.beforeAgentProcessLaunch?.();
+				throw new Error("已触达 transport 的最终门禁");
+			});
+			const manager = {
+				getSummary: vi.fn(() => null),
+				listSummaries: () => [],
+				startTaskSession,
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: () => "workspace-1",
+				loadScopedRuntimeConfig: async () => ({
+					...createRuntimeConfigState(),
+					ompAgentSessionTransportForNewTasks: transport,
+				}),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: async () => manager as never,
+				getScopedClineTaskSessionService: async () => ({ listSummaries: () => [] }) as never,
+				getScopedAcpTaskSessionService: async () => manager as never,
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			} as never);
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-omp",
+					prompt: "创建任务",
+					baseRef: "main",
+					agentId: "omp",
+					requestedAgentSessionTransport: transport,
+				},
+				beforeAgentProcessLaunch,
+			);
+			expect(response.ok).toBe(false);
+			expect(response.error).toContain("已触达 transport 的最终门禁");
+			expect(startTaskSession).toHaveBeenCalledOnce();
+			expect(beforeAgentProcessLaunch).toHaveBeenCalledOnce();
+		},
+	);
 });

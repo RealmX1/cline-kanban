@@ -309,6 +309,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 		) {
 			// 不在这里 await 重试：拉起失败要等满 launcher 的就绪期限，每次新会话都会被拖慢这么久。
 			this.retryConnectingToCurrentGenerationHostInBackgroundForLaterSpawns();
+			await request.beforeAgentProcessLaunch?.();
 			return this.spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(request);
 		}
 		const link = await this.ensureConnectedToCurrentGenerationHost();
@@ -323,6 +324,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME] = link.socketPath;
 		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME] =
 			hostedSessionKey;
+		await request.beforeAgentProcessLaunch?.();
 		const outcome = await link.connection.requestSpawnHostedSession({
 			hostedSessionKey,
 			hostedSessionDescriptor: {

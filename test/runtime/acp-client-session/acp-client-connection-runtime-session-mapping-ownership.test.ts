@@ -279,4 +279,45 @@ describe("ACP 协作 fork", () => {
 			connection.close();
 		}
 	});
+	it("ACP 完成异步启动准备后才核验创建资格，Stop 时不 spawn", async () => {
+		const { runtime } = createRuntime();
+		let finishPreparation!: () => void;
+		const preparation = new Promise<void>((resolve) => {
+			finishPreparation = resolve;
+		});
+		let stopped = false;
+		const beforeAgentProcessLaunch = vi.fn(async () => {
+			if (stopped) throw new Error("用户已经 Stop");
+		});
+		const starting = runtime.startTaskConnection({
+			...resumeInput,
+			taskId: "guarded-task",
+			revalidateExistingMainSessionHandoverTargetBeforeLaunch: () => preparation,
+			beforeAgentProcessLaunch,
+		});
+		const rejected = expect(starting).rejects.toThrow("用户已经 Stop");
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+		stopped = true;
+		finishPreparation();
+		await rejected;
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledOnce();
+		expect(connectionMocks.spawn).not.toHaveBeenCalled();
+	});
+
+	it("ACP 在 spawn 前准备失败时不持久化可能已启动标记", async () => {
+		const { runtime } = createRuntime();
+		const beforeAgentProcessLaunch = vi.fn(async () => undefined);
+		await expect(
+			runtime.startTaskConnection({
+				...resumeInput,
+				taskId: "preparation-failed",
+				beforeAgentProcessLaunch,
+				revalidateExistingMainSessionHandoverTargetBeforeLaunch: async () => {
+					throw new Error("准备失败");
+				},
+			}),
+		).rejects.toThrow("准备失败");
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+		expect(connectionMocks.spawn).not.toHaveBeenCalled();
+	});
 });

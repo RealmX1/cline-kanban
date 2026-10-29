@@ -85,6 +85,10 @@ export default defineConfig({
 				__dirname,
 				"../src/core/agent-prompt-image-attachment-reference.ts",
 			),
+			"@runtime-task-editor-creation-submission-contract": resolve(
+				__dirname,
+				"../src/core/task-editor-creation-submission-contract.ts",
+			),
 			"@runtime-work-unit-relation-modeling-api-contract": resolve(
 				__dirname,
 				"../src/core/work-unit-relation-modeling-api-contract.ts",

@@ -10,11 +10,11 @@ vi.mock("@/state/task-project-assignment-preflight", () => ({
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { readSavedTaskEditDraft, saveTaskEditDraft } from "@/hooks/task-edit-drafts";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import { resetTaskEditDraftStoreForTests } from "@/runtime/task-edit-draft-store";
+import * as creationQueries from "@/runtime/task-editor-creation-submission-query";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskAgentPermissionMode,
@@ -2800,7 +2800,18 @@ describe("useTaskEditor", () => {
 				onPromptChange={vi.fn()}
 				images={[]}
 				onImagesChange={vi.fn()}
-				onCreate={() => "created-task-1"}
+				onCreate={(options) => {
+					options?.onNewTaskCardPreparedForRuntimeCreationSubmission?.({
+						id: "new01",
+						title: "任务名称",
+						prompt: options.promptOverride ?? "创建内容",
+						baseRef: "main",
+						startInPlanMode: false,
+						createdAt: 41,
+						updatedAt: 41,
+					});
+					return "new01";
+				}}
 				taskAgentPermissionMode="bypass_all_permission_prompts"
 				onTaskAgentPermissionModeChange={vi.fn()}
 				taskConversationMode="operational"
@@ -2871,6 +2882,23 @@ describe("useTaskEditor", () => {
 	});
 
 	it("drops the name suggestion rounds when Create more reuses the dialog for the next task", async () => {
+		vi.spyOn(creationQueries, "readTaskEditorCreationSubmissionStatus").mockResolvedValue(null);
+		vi.spyOn(creationQueries, "submitTaskEditorCreation").mockImplementation(async (workspaceId, request) => ({
+			submissionId: request.submissionId,
+			workspaceId,
+			taskId: request.newTaskCard.id,
+			taskIncarnationCreatedAtEpochMs: request.newTaskCard.createdAt,
+			cardPersisted: true,
+			relationsCompleted: true,
+			startRequested: false,
+			startCompleted: false,
+			phase: "completed",
+			lastError: null,
+			recoveryCondition: null,
+			attemptsInCurrentRecoveryRound: 0,
+			acceptedAtEpochMs: 1,
+			updatedAtEpochMs: 1,
+		}));
 		await act(async () => {
 			root.render(renderTaskCreateDialogForSuggestionRounds(true));
 		});

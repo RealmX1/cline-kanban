@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { TRPCError } from "@trpc/server";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
@@ -18,7 +18,7 @@ import {
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
 import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
-import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
+import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentSessionCountsAffectedByRuntimeExit,
 	RuntimeCommandRunResponse,
@@ -136,6 +136,8 @@ import {
 import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
 import { createTaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
 import { observeUserStopBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-user-stop-port";
+import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
+import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
 import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
@@ -157,6 +159,7 @@ import { createTaskCardActionApi } from "../trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
 import { createWorkUnitRelationAssertionWriteApi } from "../trpc/work-unit-relation-assertion-write-api";
+import { applyReferenceRelationModelingChanges } from "../trpc/work-unit-relation-modeling-write-api";
 import { createWorkUnitRelationPresentationPreferenceApi } from "../trpc/work-unit-relation-presentation-preference-api";
 import {
 	createWorkUnitRelationReadApi,
@@ -1012,12 +1015,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	let pauseAutomaticMainSessionHandoverForStoppedTask:
 		| ((workspaceId: string, taskId: string) => Promise<void>)
 		| undefined;
+	let recordTaskEditorCreationStop: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	let cancelOwnedCommandExecutionsForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
 	const runtimeApi = createRuntimeApi({
 		recordManagedTaskPromptDeliveries: true,
 		onTaskSessionStopRequested: async (workspaceId, taskId) => {
-			await cancelOwnedCommandExecutionsForStoppedTask?.(workspaceId, taskId);
 			try {
+				await cancelOwnedCommandExecutionsForStoppedTask?.(workspaceId, taskId);
 				await recordProgrammaticReviewExplicitUserStopObservations({
 					workspaceId,
 					workspaceTaskId: taskId,
@@ -1027,7 +1031,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					),
 				});
 			} finally {
-				await Promise.all([pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId)]);
+				await Promise.all([
+					pauseAutomaticMainSessionHandoverForStoppedTask?.(workspaceId, taskId),
+					recordTaskEditorCreationStop?.(workspaceId, taskId),
+				]);
 			}
 		},
 		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
@@ -1412,6 +1419,152 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			},
 		});
 
+	const taskEditorCreationRelationReadApi = createWorkUnitRelationReadApi({
+		readRecordedInterWorkUnitRelationProjection:
+			readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+		readLatestNotificationSummaryTextOfTaskCard:
+			readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+	});
+	const taskEditorCreationSubmissionApi = createTaskEditorCreationSubmissionService({
+		findSession: findRuntimeSessionSummary,
+		resolveIdentity: async (workspaceId, card) => {
+			const { kanbanBoardCardIdentityCandidates } =
+				await taskEditorCreationRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId({ bareTaskId: card.id });
+			const matches = kanbanBoardCardIdentityCandidates.filter((candidate) => {
+				const canonical = candidate.canonicalKanbanBoardCard ?? candidate.kanbanBoardCard;
+				const originalProjectPath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+				return (
+					canonical.workspaceId === workspaceId ||
+					candidate.kanbanBoardCard.workspaceId === workspaceId ||
+					(originalProjectPath !== null &&
+						candidate.previousWorkspaceRepositoryPaths?.includes(originalProjectPath))
+				);
+			});
+			if (matches.length > 1)
+				throw new TRPCError({ code: "CONFLICT", message: "任务身份不唯一，未执行旧创建提交。" });
+			const identity = matches[0];
+			return identity
+				? {
+						workspaceId: identity.kanbanBoardCard.workspaceId,
+						taskIncarnationCreatedAtEpochMs: identity.kanbanBoardCard.taskIncarnationCreatedAtEpochMs,
+						permanentlyRemoved: identity.permanentlyRemovedFromBoardAt !== null,
+						workspaceIdsUsedByTaskIncarnation: identity.workspaceIdsUsedByTaskIncarnation,
+					}
+				: null;
+		},
+		persistCard: (scope, card, evidence) =>
+			createWorkspaceControlApi().persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
+				scope,
+				{
+					newBacklogTaskCardsCreatedFromWebUi: [card],
+					boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+				},
+				evidence,
+			),
+		applyAcceptedRelations: (input, acceptedAuthorization) =>
+			applyReferenceRelationModelingChanges(
+				{
+					readRecordedInterWorkUnitRelationProjection:
+						readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+					runInterWorkUnitRelationLedgerClientOperation:
+						runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+					getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+				},
+				input,
+				acceptedAuthorization,
+			),
+		startAgent: (scope, card, record, beforeAgentProcessLaunch) =>
+			createTaskCardActions(createWorkspaceControlApi()).startTaskCardAgentSessionMovingItIntoInProgress(
+				scope,
+				{
+					taskId: card.id,
+					expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
+					boardMutationInitiator: "web_ui_user_gesture",
+					agentTerminalGeometryForTaskSessionSpawn: record.request.agentTerminalGeometryForTaskSessionSpawn,
+				},
+				record.acceptedUserAuthorization?.requestOriginActorEvidence ?? {
+					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
+				},
+				beforeAgentProcessLaunch,
+			),
+		readDependencyFingerprint: async (record) => {
+			const [config, identities, executableDirectories] = await Promise.all([
+				deps.workspaceRegistry.loadScopedRuntimeConfig({
+					workspaceId: record.status.workspaceId,
+					workspacePath: record.workspacePath,
+				}),
+				Promise.all(
+					[
+						record.request.newTaskCard.id,
+						...record.request.referenceRelationDrafts.flatMap((draft) =>
+							draft.counterpartWorkUnit.workUnitType === "kanban_board_card"
+								? [draft.counterpartWorkUnit.taskId]
+								: [],
+						),
+					].map((bareTaskId) =>
+						taskEditorCreationRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId({ bareTaskId }),
+					),
+				),
+				Promise.all(
+					(process.env.PATH ?? "")
+						.split(delimiter)
+						.filter(Boolean)
+						.map(async (path) => {
+							try {
+								const info = await stat(path);
+								return [path, info.mtimeMs];
+							} catch {
+								return [path, "不可读"];
+							}
+						}),
+				),
+			]);
+			const agentBinary = getRuntimeAgentCatalogEntry(
+				record.request.newTaskCard.agentId ?? config.selectedAgentId ?? "codex",
+			)?.binary;
+			const executableFiles = agentBinary
+				? await Promise.all(
+						(process.env.PATH ?? "")
+							.split(delimiter)
+							.filter(Boolean)
+							.map(async (path) => {
+								try {
+									const info = await stat(join(path, agentBinary));
+									return [path, info.mtimeMs, info.mode, info.size];
+								} catch {
+									return [path, "不可用"];
+								}
+							}),
+					)
+				: [];
+			const liveSession = findRuntimeSessionSummary(
+				record.status.workspaceId,
+				resolveMainTaskConversationSessionId(record.request.newTaskCard),
+			);
+			return [
+				{
+					selectedAgentId: config.selectedAgentId,
+					selectedShortcutLabel: config.selectedShortcutLabel,
+					agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+					ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
+					shortcuts: config.shortcuts,
+				},
+				identities,
+				executableDirectories,
+				executableFiles,
+				liveSession,
+			];
+		},
+		warn: deps.warn,
+	});
+	recordTaskEditorCreationStop = async (workspaceId, taskId) => {
+		const board = await loadWorkspaceBoardById(workspaceId);
+		const card = board.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === taskId || resolveMainTaskConversationSessionId(entry) === taskId);
+		if (card) await recordTaskEditorCreationExplicitStop(workspaceId, card.id, card.createdAt);
+	};
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -1437,6 +1590,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			runtimeApi,
 			taskMainSessionHandoverApi,
 			independentTaskCreationApi,
+			taskEditorCreationSubmissionApi,
 			workspaceApi,
 			taskCardActionApi: createTaskCardActions(workspaceApi),
 			projectsApi: createProjectsApi({
@@ -1945,9 +2099,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	};
 	let runtimeOwnedBackgroundServicesShutdown: Promise<void> | null = null;
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
-		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起交接、结案恢复或查卡作业。
+		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
 			taskClosureRecoveryMonitor.close(),
+			taskEditorCreationSubmissionApi.close(),
 			taskVisualizationArtifactApi.stop(),
 			taskLookupConversationApi.close(),
 			codexConfigurationSyncService.close(),
@@ -2022,6 +2177,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	taskClosureRecoveryMonitor.start();
+	taskEditorCreationSubmissionApi.start();
 	agentSessionInactivityReclamationScheduler.start();
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();

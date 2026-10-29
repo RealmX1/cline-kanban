@@ -5,6 +5,7 @@ import {
 	type KanbanBoardCardIdentityProjection,
 } from "../../../src/inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 import { createEmptyRecordedInterWorkUnitRelationProjectionState } from "../../../src/inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-from-ledger-events";
+import { buildKanbanBoardCardIdentityResolutionCandidates } from "../../../src/inter-work-unit-relation-ledger/work-unit-relation-neighborhood-summary-assembly";
 import { resolveWorkUnitSelectorAgainstRecordedRelationProjection } from "../../../src/trpc/work-unit-relation-read-api";
 
 describe("Relations 前台视图按完整一世读取", () => {
@@ -110,5 +111,27 @@ describe("Relations 前台视图按完整一世读取", () => {
 				bareTaskId: "same-id",
 			}),
 		).toMatchObject({ taskIncarnationCreatedAtEpochMs: 2 });
+	});
+	it("身份候选保留完整迁移项目 ID，不依赖旧项目路径仍可解析", async () => {
+		const projection = [
+			...state.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.values(),
+		][0];
+		if (!projection) throw new Error("测试缺少一世身份");
+		const candidates = await buildKanbanBoardCardIdentityResolutionCandidates(
+			{
+				projectionState: state,
+				readRetainedTaskCardFieldValuesBySha256: async () => new Map(),
+				findRetainedTaskCardFieldKeywordMatchesBySha256: async () => new Map(),
+			},
+			[
+				{
+					...projection,
+					currentWorkspaceId: "project-c",
+					workspaceIdsUsedByCard: ["project-a", "project-b", "project-c"],
+				},
+			],
+			() => null,
+		);
+		expect(candidates[0]?.workspaceIdsUsedByTaskIncarnation).toEqual(["project-a", "project-b", "project-c"]);
 	});
 });

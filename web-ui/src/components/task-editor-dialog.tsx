@@ -2,6 +2,7 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import type { WebUiUserDecisionClientCharacteristics } from "@runtime-work-unit-relation-assertion-write-api-contract";
 import {
 	ArrowBigUp,
 	ArrowLeft,
@@ -56,11 +57,7 @@ import { useGitRepositoryInfoOfOtherProjectForTaskEditorDialog } from "@/hooks/u
 import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 import { useTaskEditorClipboardTaskReference } from "@/hooks/use-task-editor-clipboard-task-reference";
 import { ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
-import {
-	readTaskCardWithBoardColumnInWorkspace,
-	transferNeverStartedBacklogTaskToProjectInWorkspace,
-	updateTaskCardFieldValuesInWorkspace,
-} from "@/runtime/task-card-action-query";
+import { readTaskEditorCreationSubmissionStatus } from "@/runtime/task-editor-creation-submission-query";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -71,6 +68,7 @@ import type {
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
+	TaskEditorCreationSubmissionStatus,
 } from "@/runtime/types";
 import {
 	useTaskCreateDialogPrimaryStartActionPreference,
@@ -81,15 +79,22 @@ import {
 	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
 	type TriggeringExplicitUserGestureEvent,
 } from "@/runtime/work-unit-relation-assertion-write-query";
-import { ensureRelationModelingCreatedTaskCardPersisted } from "@/runtime/work-unit-relation-modeling-query";
-import { waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import { startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
+import {
+	clearConfirmedPendingTaskEditorCreationSubmission,
+	confirmTaskEditorCreationCardPersistence,
+	type PendingTaskEditorCreationSubmission,
+	readPendingTaskEditorCreationSubmission,
+	savePendingTaskEditorCreationSubmission,
+	taskEditorPendingCreationStorageKey,
+} from "@/state/task-editor-creation-submission-browser-recovery";
 import {
 	rememberTaskProjectAssignmentAnalysisAccepted,
 	runTaskProjectAssignmentPreflight,
 } from "@/state/task-project-assignment-preflight";
+import { subscribeToTaskVisualizationBrowserEvents } from "@/stores/task-visualization-browser-bridge";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
-import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
+import type { BoardCard, TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -287,6 +292,7 @@ export function TaskEditorDialog({
 	onAdoptPromotedTaskEditDraft,
 	taskCreationTargetProjectField,
 	onOpenCreatedTaskWithRelations,
+	onTaskCreationCardPersisted,
 	postDeployVerificationFollowUpTaskCreationDraftSeed,
 }: {
 	suspendedTaskEditorTitle?: string | null;
@@ -297,6 +303,7 @@ export function TaskEditorDialog({
 	onPromptChange: (value: string) => void;
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
+	onTaskCreationCardPersisted?: (workspaceId: string, card: BoardCard, suggestTitle: boolean) => void;
 	onOpenCreatedTaskWithRelations?: (workspaceId: string, taskId: string) => void;
 	onCreate: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateAndStart?: (options?: TaskEditorSubmitOptions) => string | null;
@@ -646,12 +653,19 @@ export function TaskEditorDialog({
 		}
 	}, [selectableTargetProjectField, selectedTargetGit, branchRef, onBranchRefChange]);
 	const submissionInFlightRef = useRef(false);
+	const batchSubmissionInFlightRef = useRef(false);
+	const editorDialogGenerationRef = useRef(Symbol("task-editor-generation"));
 	const submissionOperationTokenRef = useRef<symbol | null>(null);
 	const [isTaskEditorPersisting, setIsTaskEditorPersisting] = useState(false);
 
-	const submissionImagesRevisionRef = useRef({ images, revision: 0 });
-	if (submissionImagesRevisionRef.current.images !== images)
-		submissionImagesRevisionRef.current = { images, revision: submissionImagesRevisionRef.current.revision + 1 };
+	const relationModeling = useReferenceRelationModelingEditor({
+		workspaceId: editorSessionWorkspaceId,
+		taskId: taskEditorMode === "edit" ? editingTaskId : null,
+		draftTaskTitle: taskName || "待创建任务",
+		draftTaskPrompt: promptDraft,
+		active: open && mode === "single",
+	});
+	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
 	const latestSubmissionInputRef = useRef("");
 	latestSubmissionInputRef.current = JSON.stringify({
 		open,
@@ -661,7 +675,7 @@ export function TaskEditorDialog({
 		prompt: promptDraft,
 		title: taskName,
 		branchRef,
-		imagesRevision: submissionImagesRevisionRef.current.revision,
+		images,
 		startInPlanMode,
 		taskAgentPermissionMode,
 		taskConversationMode,
@@ -674,15 +688,13 @@ export function TaskEditorDialog({
 		taskAgentSessionInitialization,
 		mode,
 		taskPrompts,
+		referenceRelationDrafts: relationModeling.draft.referenceRelationDrafts,
+		relationRevocations: relationModeling.draft.relationRevocations,
+		invalidReferenceRelationDetailsFormsByDraftId:
+			relationModeling.draft.invalidReferenceRelationDetailsFormsByDraftId,
+		hasUnstagedRelationForm,
 	});
 
-	const relationModeling = useReferenceRelationModelingEditor({
-		workspaceId: editorSessionWorkspaceId,
-		taskId: taskEditorMode === "edit" ? editingTaskId : null,
-		draftTaskTitle: taskName || "待创建任务",
-		draftTaskPrompt: promptDraft,
-		active: open && mode === "single",
-	});
 	const [processedFollowUpSeedInitializationId, setProcessedFollowUpSeedInitializationId] = useState<string | null>(
 		null,
 	);
@@ -701,13 +713,13 @@ export function TaskEditorDialog({
 	const [isRelationAwareCreationInFlight, setIsRelationAwareCreationInFlight] = useState(false);
 	const [taskEditorOperationStatusText, setTaskEditorOperationStatusText] = useState<string | null>(null);
 	useEffect(() => {
+		editorDialogGenerationRef.current = Symbol("task-editor-generation");
 		submissionOperationTokenRef.current = null;
 		submissionInFlightRef.current = false;
 		setIsRelationAwareCreationInFlight(false);
 		setIsTaskEditorPersisting(false);
 		setTaskEditorOperationStatusText(null);
 	}, [open, editorSessionWorkspaceId, editingTaskId]);
-	const [hasUnstagedRelationForm, setHasUnstagedRelationForm] = useState(false);
 	const [relationAwareCreationError, setRelationAwareCreationError] = useState<string | null>(null);
 	const lastCreationGestureRef = useRef<{ event: TriggeringExplicitUserGestureEvent; observedAt: number } | null>(
 		null,
@@ -717,6 +729,8 @@ export function TaskEditorDialog({
 		if (
 			relationModeling.ready &&
 			relationModeling.draft.creationPrompt &&
+			!relationModeling.draft.createdTaskId &&
+			!promptDraft.trim() &&
 			relationRecoveryAppliedRef.current !== editorSessionWorkspaceId
 		) {
 			relationRecoveryAppliedRef.current = editorSessionWorkspaceId;
@@ -786,13 +800,21 @@ export function TaskEditorDialog({
 		initializeFollowUpTaskCreationDraft,
 	]);
 
+	const pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef = useRef(new Set<string>());
+	const pendingSubmissionConnectionWasUnavailableRef = useRef(false);
+	const [pendingCreationDraftHydratedForWorkspaceId, setPendingCreationDraftHydratedForWorkspaceId] = useState<
+		string | null
+	>(null);
 	const submitSingleTask = async (
 		action: "create" | "start" | "start_and_open",
 		promptOverride?: string,
 		keepOpenOverride?: boolean,
+		batchPromptsAfterCurrentCard?: string[],
+		acceptedBatchGestureCharacteristics?: WebUiUserDecisionClientCharacteristics,
 	) => {
 		if (
 			submissionInFlightRef.current ||
+			(batchSubmissionInFlightRef.current && !promptOverride) ||
 			isTaskCreationWaitingForRelationDraftHydration ||
 			!targetWorkspaceId ||
 			!branchRef
@@ -821,10 +843,11 @@ export function TaskEditorDialog({
 		const gesture = lastCreationGestureRef.current;
 		// 在用户动作发生时读取来源证据，分析耗时不能伪造新的用户手势。
 		const characteristics =
-			gesture && performance.now() - gesture.observedAt <= 1000
+			acceptedBatchGestureCharacteristics ??
+			(gesture && performance.now() - gesture.observedAt <= 1000
 				? collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(gesture.event)
-				: null;
-		if (relationModeling.hasChanges && !characteristics) {
+				: null);
+		if ((taskEditorMode === "create" || relationModeling.hasChanges) && !characteristics) {
 			setRelationAwareCreationError("请点击提交按钮或使用快捷键保存关系。");
 			return false;
 		}
@@ -840,23 +863,28 @@ export function TaskEditorDialog({
 			automaticProjectAssignmentAnalysisEnabledForThisSubmission ? "正在分析项目归属…" : "正在保存任务…",
 		);
 		try {
-			const assignment = automaticProjectAssignmentAnalysisEnabledForThisSubmission
-				? await runTaskProjectAssignmentPreflight({
-						workspaceId: targetWorkspaceId,
-						title: submittingTitle,
-						prompt: submittingPrompt,
-						baseRef: branchRef,
-						isStillCurrent: () =>
-							latestSubmissionInputRef.current === inputSnapshot &&
-							JSON.stringify({
-								drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
-								revocations: relationModeling.readLatestDraft().relationRevocations,
-							}) === relationSnapshot,
-					})
-				: { workspaceId: targetWorkspaceId, baseRef: branchRef };
+			const pendingStorageKey = taskEditorPendingCreationStorageKey(editorSessionWorkspaceId ?? targetWorkspaceId);
+			const priorPending =
+				taskEditorMode === "create" ? readPendingTaskEditorCreationSubmission(pendingStorageKey) : null;
+			const assignment = priorPending
+				? { workspaceId: priorPending.workspaceId, baseRef: priorPending.request.newTaskCard.baseRef }
+				: automaticProjectAssignmentAnalysisEnabledForThisSubmission
+					? await runTaskProjectAssignmentPreflight({
+							workspaceId: targetWorkspaceId,
+							title: submittingTitle,
+							prompt: submittingPrompt,
+							baseRef: branchRef,
+							isStillCurrent: () =>
+								latestSubmissionInputRef.current === inputSnapshot &&
+								JSON.stringify({
+									drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
+									revocations: relationModeling.readLatestDraft().relationRevocations,
+								}) === relationSnapshot,
+						})
+					: { workspaceId: targetWorkspaceId, baseRef: branchRef };
 			if (!assignment) return false;
 			setTaskEditorOperationStatusText("正在保存任务…");
-			if (taskEditorMode === "create")
+			if (taskEditorMode === "create" && !priorPending)
 				await ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission(assignment.workspaceId);
 			if (latestSubmissionInputRef.current !== inputSnapshot) return false;
 			acceptedAssignmentInputSnapshot = JSON.stringify({
@@ -865,99 +893,95 @@ export function TaskEditorDialog({
 				branchRef: assignment.baseRef,
 			});
 			setIsTaskEditorPersisting(true);
-			setSelectedTargetWorkspaceId(assignment.workspaceId);
-			onBranchRefChange(assignment.baseRef);
-			let persistence: Promise<boolean> | null = null;
-			const recoveredTaskId =
-				taskEditorMode === "create" && !promptOverride ? relationModeling.draft.createdTaskId : null;
-			const taskId = recoveredTaskId
-				? recoveredTaskId
-				: onCreate({
+			if (taskEditorMode === "create") {
+				let pending: PendingTaskEditorCreationSubmission | null = priorPending;
+				if (!pending) {
+					setSelectedTargetWorkspaceId(assignment.workspaceId);
+					onBranchRefChange(assignment.baseRef);
+					let allocatedCard: BoardCard | null = null;
+					const taskId = onCreate({
 						keepDialogOpen: true,
 						preserveFormUntilCreationConfirmed: true,
+						delegateNewTaskCardPersistenceToRuntimeCreationSubmission: true,
 						promptOverride: submittingPrompt,
 						taskNameOverride: submittingTitle,
 						targetWorkspaceIdOverride: assignment.workspaceId,
 						baseRefOverride: assignment.baseRef,
-						onTaskPersistenceRequested: (requested) => {
-							persistence = requested;
-						},
-						onTaskCardAllocatedForRelationModeling: (card) => {
-							if (!promptOverride)
-								relationModeling.updateDraft({
-									createdTaskId: card.id,
-									createdTaskWorkspaceId: assignment.workspaceId,
-									createdTaskCardSnapshot: card,
-									creationPrompt: submittingPrompt,
-									creationTitle: taskName,
-								});
+						onNewTaskCardPreparedForRuntimeCreationSubmission: (card) => {
+							allocatedCard = card;
 						},
 					});
-			if (!taskId) return false;
-			if (recoveredTaskId) {
-				const draft = relationModeling.readLatestDraft();
-				const sourceWorkspaceId = draft.createdTaskWorkspaceId ?? workspaceId;
-				if (!sourceWorkspaceId) throw new Error("恢复草稿缺少所属项目，请重新选择该任务。");
-				let recoveredSnapshot = draft.createdTaskCardSnapshot;
-				if (!recoveredSnapshot) {
-					const existing = await readTaskCardWithBoardColumnInWorkspace(sourceWorkspaceId, taskId);
-					if (existing.taskCardLookupOutcome !== "task_card_found_on_workspace_board")
-						throw new Error("恢复草稿对应的任务尚未确认存在，未创建重复任务。");
-					recoveredSnapshot = existing.taskCardSnapshot.taskCard;
-				} else await ensureRelationModelingCreatedTaskCardPersisted(sourceWorkspaceId, recoveredSnapshot);
-
-				await updateTaskCardFieldValuesInWorkspace(sourceWorkspaceId, {
-					taskId,
-					expectedTaskIncarnationCreatedAtEpochMs: recoveredSnapshot.createdAt,
-					taskCardFieldUpdate: {
-						taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
-						taskCardFieldValuePatch: {
-							title: taskName.trim() || null,
-							prompt: submittingPrompt,
-							images,
-							startInPlanMode,
-							taskAgentPermissionMode,
-							taskConversationMode,
-							autoReviewEnabled,
-							autoReviewMode,
-							worktreeMode,
-							baseRef: assignment.baseRef,
-							agentId: agentId ?? null,
-							clineSettings: clineSettings ?? null,
-							terminalAgentModelOverrideSettings: terminalAgentModelOverrideSettings ?? null,
-							taskAgentSessionInitialization: taskAgentSessionInitialization ?? null,
+					if (!taskId || !allocatedCard || !characteristics) return false;
+					const draft = relationModeling.readLatestDraft();
+					pending = {
+						workspaceId: assignment.workspaceId,
+						editorInputSnapshot: batchPromptsAfterCurrentCard
+							? JSON.stringify({
+									...(JSON.parse(acceptedAssignmentInputSnapshot) as Record<string, unknown>),
+									taskPrompts: [submittingPrompt, ...batchPromptsAfterCurrentCard],
+								})
+							: acceptedAssignmentInputSnapshot,
+						openTaskAfterPersistence: action === "start_and_open",
+						keepEditorOpenAfterPersistence: keepOpenOverride ?? createMore,
+						batchPromptsAfterCurrentCard: batchPromptsAfterCurrentCard ?? null,
+						keepEditorOpenAfterBatchCompletion: createMore,
+						request: {
+							submissionId: createRandomUuidV4WithInsecureContextFallback(),
+							newTaskCard: allocatedCard,
+							referenceRelationDrafts: promptOverride ? [] : draft.referenceRelationDrafts,
+							relationRevocations: promptOverride ? [] : draft.relationRevocations,
+							startAgentAfterCreation: action !== "create",
+							agentTerminalGeometryForTaskSessionSpawn: resolveAgentTerminalGeometryForTaskSessionSpawn(taskId),
+							webUiUserDecisionClientCharacteristics: characteristics,
 						},
-					},
-					boardMutationInitiator: "web_ui_user_gesture",
-				});
-				if (sourceWorkspaceId !== assignment.workspaceId)
-					await transferNeverStartedBacklogTaskToProjectInWorkspace(sourceWorkspaceId, {
-						operationId: createRandomUuidV4WithInsecureContextFallback(),
-						taskId,
-						taskIncarnationCreatedAtEpochMs: recoveredSnapshot.createdAt,
-						targetWorkspaceId: assignment.workspaceId,
-						targetBaseRef: assignment.baseRef,
-					});
-				relationModeling.updateDraft({
-					createdTaskWorkspaceId: assignment.workspaceId,
-					creationPrompt: submittingPrompt,
-					creationTitle: taskName,
-				});
-				await relationModeling.persistDraftNow();
-			}
-			if (taskEditorMode === "edit") {
-				if (persistence && !(await persistence)) throw new Error("任务更改尚未保存，草稿已保留。");
-			} else {
-				const persisted = await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
-					workspaceId: assignment.workspaceId,
-					taskId,
-				});
-				if (!persisted.ok) {
-					const snapshot = relationModeling.readLatestDraft().createdTaskCardSnapshot;
-					if (snapshot) await ensureRelationModelingCreatedTaskCardPersisted(assignment.workspaceId, snapshot);
-					else throw new Error(`任务尚未确认保存：${persisted.message}`);
+					};
+					savePendingTaskEditorCreationSubmission(pendingStorageKey, pending);
 				}
+				pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef.current.add(pending.request.submissionId);
+				const confirmedTaskCreationSubmissionStatus = await confirmTaskEditorCreationCardPersistence(pending);
+				clearConfirmedPendingTaskEditorCreationSubmission(pendingStorageKey, pending.request.submissionId);
+				onTaskCreationCardPersisted?.(pending.workspaceId, pending.request.newTaskCard, !submittingTitle.trim());
+				if (automaticProjectAssignmentAnalysisEnabledForThisSubmission && !priorPending)
+					rememberTaskProjectAssignmentAnalysisAccepted(
+						pending.workspaceId,
+						pending.request.newTaskCard.id,
+						submittingTitle,
+						submittingPrompt,
+					);
+				if (submissionOperationTokenRef.current !== operationToken) return true;
+				if (
+					!isSubmittedInputStillCurrent() ||
+					(priorPending &&
+						(priorPending.editorDraftWasExplicitlyDiscarded ||
+							priorPending.editorInputSnapshot !== inputSnapshot))
+				) {
+					setRelationAwareCreationError("原创建请求已确认保存，后来填写的内容已保留；再次提交将创建独立新任务。");
+					return false;
+				}
+				if (!promptOverride) relationModeling.discard();
+				const keepOpen = pending.keepEditorOpenAfterPersistence;
+				if (!promptOverride) resetForCreateMore();
+				if (!keepOpen) onOpenChange(false);
+				if (pending.openTaskAfterPersistence && confirmedTaskCreationSubmissionStatus.phase !== "identity_conflict")
+					onOpenCreatedTaskWithRelations?.(pending.workspaceId, pending.request.newTaskCard.id);
+				return true;
 			}
+			setSelectedTargetWorkspaceId(assignment.workspaceId);
+			onBranchRefChange(assignment.baseRef);
+			let persistence: Promise<boolean> | null = null;
+			const taskId = onCreate({
+				keepDialogOpen: true,
+				preserveFormUntilCreationConfirmed: true,
+				promptOverride: submittingPrompt,
+				taskNameOverride: submittingTitle,
+				targetWorkspaceIdOverride: assignment.workspaceId,
+				baseRefOverride: assignment.baseRef,
+				onTaskPersistenceRequested: (requested) => {
+					persistence = requested;
+				},
+			});
+			if (!taskId) return false;
+			if (persistence && !(await persistence)) throw new Error("任务更改尚未保存，草稿已保留。");
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("提交期间输入又有更改，新的草稿已保留，请核对后再次保存。");
 			if (relationModeling.hasChanges && characteristics)
@@ -994,7 +1018,7 @@ export function TaskEditorDialog({
 			}
 			relationModeling.discard();
 			if (!isSubmittedInputStillCurrent()) return true;
-			if (!(keepOpenOverride ?? (createMore && taskEditorMode === "create"))) onOpenChange(false);
+			if (!keepOpenOverride) onOpenChange(false);
 			else if (!promptOverride) resetForCreateMore();
 			return true;
 		} catch (failure) {
@@ -1014,6 +1038,178 @@ export function TaskEditorDialog({
 			}
 		}
 	};
+	useEffect(() => {
+		if (!open || taskEditorMode !== "create" || !editorSessionWorkspaceId) {
+			setPendingCreationDraftHydratedForWorkspaceId(null);
+			return;
+		}
+		if (!relationModeling.ready || pendingCreationDraftHydratedForWorkspaceId === editorSessionWorkspaceId) return;
+		const key = taskEditorPendingCreationStorageKey(editorSessionWorkspaceId);
+		const pending = readPendingTaskEditorCreationSubmission(key);
+		if (
+			pending &&
+			!pending.editorDraftWasExplicitlyDiscarded &&
+			!promptDraft.trim() &&
+			!taskName?.trim() &&
+			!images.length &&
+			!taskPrompts.length &&
+			!hasUnstagedRelationForm
+		) {
+			const card = pending.request.newTaskCard;
+			setPromptDraft(card.prompt);
+			propagatePromptDraft(card.prompt);
+			setTaskName(card.title);
+			onImagesChange(card.images ?? []);
+			setSelectedTargetWorkspaceId(pending.workspaceId);
+			onBranchRefChange(card.baseRef);
+			const batchPrompts = pending.batchPromptsAfterCurrentCard
+				? [card.prompt, ...pending.batchPromptsAfterCurrentCard]
+				: [];
+			setMode(pending.batchPromptsAfterCurrentCard ? "multi" : "single");
+			setTaskPrompts(batchPrompts);
+			pending.editorInputSnapshot = JSON.stringify({
+				...(JSON.parse(latestSubmissionInputRef.current) as Record<string, unknown>),
+				workspaceId: pending.workspaceId,
+				branchRef: card.baseRef,
+				prompt: card.prompt,
+				title: card.title,
+				images: card.images ?? [],
+				mode: pending.batchPromptsAfterCurrentCard ? "multi" : "single",
+				taskPrompts: batchPrompts,
+				referenceRelationDrafts: pending.request.referenceRelationDrafts,
+				relationRevocations: pending.request.relationRevocations,
+				invalidReferenceRelationDetailsFormsByDraftId: undefined,
+				hasUnstagedRelationForm: false,
+			});
+			savePendingTaskEditorCreationSubmission(key, pending);
+		}
+		const savedBatch = localStorage.getItem(`${key}:remaining-batch-prompts`);
+		if (savedBatch && !promptDraft.trim() && !taskPrompts.length) {
+			const remaining: unknown = JSON.parse(savedBatch);
+			if (Array.isArray(remaining) && remaining.every((entry) => typeof entry === "string") && remaining.length) {
+				setMode("multi");
+				setTaskPrompts(remaining);
+			}
+		}
+		setPendingCreationDraftHydratedForWorkspaceId(editorSessionWorkspaceId);
+	}, [
+		open,
+		taskEditorMode,
+		editorSessionWorkspaceId,
+		relationModeling.ready,
+		pendingCreationDraftHydratedForWorkspaceId,
+	]);
+
+	useEffect(() => {
+		if (
+			!open ||
+			taskEditorMode !== "create" ||
+			!editorSessionWorkspaceId ||
+			pendingCreationDraftHydratedForWorkspaceId !== editorSessionWorkspaceId
+		)
+			return;
+		let cancelled = false;
+		let reading = false;
+		const generation = editorDialogGenerationRef.current;
+		const key = taskEditorPendingCreationStorageKey(editorSessionWorkspaceId);
+
+		const reconcile = async () => {
+			if (reading || submissionInFlightRef.current) return;
+			reading = true;
+			try {
+				const pending = readPendingTaskEditorCreationSubmission(key);
+				if (!pending) return;
+				const inputAtRead = latestSubmissionInputRef.current;
+				let status: TaskEditorCreationSubmissionStatus | null;
+				try {
+					status = await readTaskEditorCreationSubmissionStatus(pending.workspaceId, pending.request.submissionId);
+				} catch (error) {
+					pendingSubmissionConnectionWasUnavailableRef.current = true;
+					throw error;
+				}
+				if (cancelled || editorDialogGenerationRef.current !== generation || submissionInFlightRef.current) return;
+				if (pendingSubmissionConnectionWasUnavailableRef.current) {
+					pendingSubmissionConnectionWasUnavailableRef.current = false;
+					pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef.current.delete(pending.request.submissionId);
+				}
+				if (
+					!status &&
+					!pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef.current.has(pending.request.submissionId)
+				) {
+					pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef.current.add(pending.request.submissionId);
+					status = await confirmTaskEditorCreationCardPersistence(pending);
+				}
+				if (
+					cancelled ||
+					submissionInFlightRef.current ||
+					editorDialogGenerationRef.current !== generation ||
+					!status?.cardPersisted
+				)
+					return;
+				clearConfirmedPendingTaskEditorCreationSubmission(key, pending.request.submissionId);
+				onTaskCreationCardPersisted?.(pending.workspaceId, pending.request.newTaskCard, false);
+				if (pending.editorDraftWasExplicitlyDiscarded) return;
+				if (latestSubmissionInputRef.current !== inputAtRead || pending.editorInputSnapshot !== inputAtRead) {
+					setRelationAwareCreationError("原创建请求已确认保存，后来填写的内容已保留；再次提交将创建独立新任务。");
+					return;
+				}
+				if (pending.batchPromptsAfterCurrentCard) {
+					const remaining = pending.batchPromptsAfterCurrentCard;
+					localStorage.setItem(`${key}:remaining-batch-prompts`, JSON.stringify(remaining));
+					setTaskPrompts(remaining);
+					if (remaining.length) return;
+					localStorage.removeItem(`${key}:remaining-batch-prompts`);
+					resetForCreateMore();
+					if (!pending.keepEditorOpenAfterBatchCompletion) onOpenChange(false);
+					return;
+				} else {
+					relationModeling.discard();
+					resetForCreateMore();
+				}
+				if (!pending.keepEditorOpenAfterPersistence) onOpenChange(false);
+				if (pending.openTaskAfterPersistence && status.phase !== "identity_conflict")
+					onOpenCreatedTaskWithRelations?.(pending.workspaceId, pending.request.newTaskCard.id);
+			} catch (error) {
+				if (!cancelled)
+					setRelationAwareCreationError(
+						`正在核验原创建请求，输入已保留：${error instanceof Error ? error.message : String(error)}`,
+					);
+			} finally {
+				reading = false;
+			}
+		};
+		void reconcile();
+		const interval = setInterval(() => void reconcile(), 5_000);
+		const resumeAfterDependencyRecovery = () => {
+			pendingSubmissionIdsAttemptedInCurrentRecoveryRoundRef.current.clear();
+			void reconcile();
+		};
+		const resumeWhenVisible = () => {
+			if (document.visibilityState === "visible") resumeAfterDependencyRecovery();
+		};
+		const unsubscribe = subscribeToTaskVisualizationBrowserEvents((event) => {
+			if (event.type === "stream_reconnected" && event.workspaceId === editorSessionWorkspaceId)
+				resumeAfterDependencyRecovery();
+		});
+		window.addEventListener("online", resumeAfterDependencyRecovery);
+		document.addEventListener("visibilitychange", resumeWhenVisible);
+		return () => {
+			cancelled = true;
+			clearInterval(interval);
+			unsubscribe();
+			window.removeEventListener("online", resumeAfterDependencyRecovery);
+			document.removeEventListener("visibilitychange", resumeWhenVisible);
+		};
+	}, [
+		open,
+		taskEditorMode,
+		editorSessionWorkspaceId,
+		pendingCreationDraftHydratedForWorkspaceId,
+		onTaskCreationCardPersisted,
+		onOpenChange,
+		onOpenCreatedTaskWithRelations,
+		resetForCreateMore,
+	]);
 	const handleCreateSingle = () => {
 		void submitSingleTask("create");
 	};
@@ -1037,15 +1233,39 @@ export function TaskEditorDialog({
 	);
 
 	const submitMultipleTasks = async (action: "create" | "start") => {
-		const prompts = getValidPrompts();
-		for (let index = 0; index < prompts.length; index++) {
-			if (!(await submitSingleTask(action, prompts[index], true))) {
-				setTaskPrompts(prompts.slice(index));
-				return;
+		if (batchSubmissionInFlightRef.current || submissionInFlightRef.current) return;
+		const gesture = lastCreationGestureRef.current;
+		if (!gesture || performance.now() - gesture.observedAt > 1000) return;
+		const batchGestureCharacteristics = collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(
+			gesture.event,
+		);
+		batchSubmissionInFlightRef.current = true;
+		try {
+			const prompts = getValidPrompts();
+			const generation = editorDialogGenerationRef.current;
+			const batchStorageKey = `${taskEditorPendingCreationStorageKey(editorSessionWorkspaceId ?? targetWorkspaceId ?? "unavailable")}:remaining-batch-prompts`;
+			localStorage.setItem(batchStorageKey, JSON.stringify(prompts));
+			for (let index = 0; index < prompts.length; index++) {
+				const saved = await submitSingleTask(
+					action,
+					prompts[index],
+					true,
+					prompts.slice(index + 1),
+					batchGestureCharacteristics,
+				);
+				if (editorDialogGenerationRef.current !== generation) return;
+				if (!saved) {
+					setTaskPrompts(prompts.slice(index));
+					return;
+				}
+				localStorage.setItem(batchStorageKey, JSON.stringify(prompts.slice(index + 1)));
 			}
+			localStorage.removeItem(batchStorageKey);
+			if (createMore) resetForCreateMore();
+			else onOpenChange(false);
+		} finally {
+			batchSubmissionInFlightRef.current = false;
 		}
-		if (createMore) resetForCreateMore();
-		else onOpenChange(false);
 	};
 	const handleCreateAll = () => {
 		void submitMultipleTasks("create");
@@ -1202,6 +1422,19 @@ export function TaskEditorDialog({
 
 	const handleConfirmDiscard = useCallback(() => {
 		setIsDiscardConfirmOpen(false);
+		if (taskEditorMode === "create" && editorSessionWorkspaceId) {
+			const key = taskEditorPendingCreationStorageKey(editorSessionWorkspaceId);
+			localStorage.removeItem(`${key}:remaining-batch-prompts`);
+			const pending = readPendingTaskEditorCreationSubmission(key);
+			if (pending)
+				savePendingTaskEditorCreationSubmission(key, {
+					...pending,
+					editorDraftWasExplicitlyDiscarded: true,
+					batchPromptsAfterCurrentCard: null,
+				});
+			setTaskPrompts([]);
+			setMode("single");
+		}
 		relationModeling.discard();
 		if (
 			followUpSeedAwaitingDiscardConfirmation &&
@@ -1217,6 +1450,8 @@ export function TaskEditorDialog({
 	}, [
 		onOpenChange,
 		relationModeling.discard,
+		taskEditorMode,
+		editorSessionWorkspaceId,
 		followUpSeedAwaitingDiscardConfirmation,
 		workspaceId,
 		postDeployVerificationFollowUpTaskCreationDraftSeed,

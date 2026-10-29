@@ -18,6 +18,7 @@
       "@runtime-agent-catalog": ["../src/core/agent-catalog.ts"],
       "@runtime-agent-session-transport-selection": ["../src/core/agent-session-transport-selection.ts"],
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],
+      "@runtime-task-editor-creation-submission-contract": ["../src/core/task-editor-creation-submission-contract.ts"],
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
       "@runtime-inter-work-unit-recorded-relation-projection-contract": [

@@ -34,6 +34,7 @@ export type WorkUnitSelectorForRelationRead = z.infer<typeof workUnitSelectorFor
 // 一世卡片的身份投影（全局 task 身份登记簿的读侧）。永久删除的卡也在，permanentlyRemovedFromBoardAt 非空即墓碑。
 export const kanbanBoardCardIdentityResolutionCandidateSchema = z.object({
 	canonicalKanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema.optional(),
+	workspaceIdsUsedByTaskIncarnation: z.array(z.string()).optional(),
 	previousWorkspaceRepositoryPaths: z.array(z.string()).optional(),
 	kanbanBoardCard: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
 	workspaceRepositoryPath: z.string().nullable(),
