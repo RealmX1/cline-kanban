@@ -14,6 +14,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 	private detachedForRuntimeHandoverRestart = false;
 	// 下一个应当到达的输出字节的绝对偏移。到达帧的偏移与它不符说明有缺段或重复（接管续流时用于对齐）。
 	private nextExpectedOutputByteOffset = 0;
+	private readonly confirmedExitWaiters = new Set<() => void>();
 
 	constructor(
 		private readonly controllerConnection: AgentSessionPtyHostControllerConnection,
@@ -27,6 +28,10 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		readonly hostedTerminalPtySessionSpawnedAtEpochMs?: number,
 	) {
 		this.nextExpectedOutputByteOffset = initialOutputByteOffset;
+	}
+
+	get agentSessionPtyHostBinding(): { socketPath: string; hostedSessionKey: string } {
+		return { socketPath: this.controllerConnection.socketPath, hostedSessionKey: this.hostedSessionKey };
 	}
 
 	get outputByteOffsetAfterLastDeliveredChunk(): number {
@@ -98,6 +103,25 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 		return this.exited;
 	}
 
+	waitForHostedPtyExitAfterStopRequest(): Promise<void> {
+		if (this.exited) return Promise.resolve();
+		if (this.controllerConnection.isClosed) return Promise.reject(new Error("原 host 连接已断开，退出归属仍未知"));
+		return new Promise((resolve, reject) => {
+			const confirmExit = () => {
+				clearTimeout(deadlineTimer);
+				this.confirmedExitWaiters.delete(confirmExit);
+				resolve();
+			};
+			// EXPERIMENT_NODE: 已授权换代最多等待三十秒；未确证退出时拒绝新建，不自动升级为强杀。
+			const deadlineTimer = setTimeout(() => {
+				this.confirmedExitWaiters.delete(confirmExit);
+				reject(new Error("原 hosted 会话停止后尚未确证退出，保留归属并拒绝重复创建"));
+			}, 30_000);
+			deadlineTimer.unref?.();
+			this.confirmedExitWaiters.add(confirmExit);
+		});
+	}
+
 	// hostedSessionOrphanReclamationEligibleAtEpochMs：只有 detach 时才带期限；平时一律 null（见 wire-protocol）。
 	publishTerminalSessionAdoptionRecordForRuntimeRestart(
 		adoptionRecord: unknown,
@@ -143,6 +167,7 @@ export class HostedTerminalPtyProcessHandleOverAgentSessionPtyHost implements Te
 			return;
 		}
 		this.exited = true;
+		for (const confirmExit of this.confirmedExitWaiters) confirmExit();
 		this.onExit(event);
 	}
 }

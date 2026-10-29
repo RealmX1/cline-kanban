@@ -3,12 +3,22 @@
 //   整理成按 workspace 分组的接管候选（新 runtime 在 listen 之前把它们装回 session-manager）；
 // - 旧 generation 的 host 令其「排空后退休」：继续服务存量会话，不再接新 spawn；
 // - 为每个 workspace 提供 HostedTerminalPtyProcessSpawner，新会话一律进当前 generation 的 host；
-//   唯一例外：启动时当前 generation 拉不起来而旧 generation 有会话待接管，此后新会话降级为进程内 PTY（见 start）；
+//   用户关闭新托管或当前 generation 就绪预算耗尽且归属明确时，新会话维持进程内 PTY；
 // - 本 runtime spawn / 接管的会话，其 hook spool（runtime 缺席期间存进 host 的 hook 事件）经
 //   HostedSessionHookSpoolDrainCoordinator 按序应用回 hooks ingest。
 
 import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
+import { open, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { setTimeout as waitForRuntimeOwnedPtyHostRecoveryCheck } from "node:timers/promises";
+import { z } from "zod";
+import type {
+	AgentSessionPtyHostDiagnostics,
+	AgentSessionPtyHostReadOnlyHostStatus,
+} from "../../core/agent-session-pty-host-diagnostics-contract";
+import { readPosixProcessResourceTable } from "../../diagnostics/posix-process-table-with-resource-columns-reader";
+import { lockedFileSystem } from "../../fs/locked-file-system";
 import { PtySession } from "../../terminal/pty-session";
 import type {
 	HostedTerminalPtyProcessSpawner,
@@ -16,7 +26,10 @@ import type {
 	HostedTerminalPtySessionAdoptionCandidate,
 	TerminalPtyProcessHandle,
 } from "../../terminal/terminal-pty-process-handle";
-import type { AgentSessionPtyHostHostedSessionListing } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
+import type {
+	AgentSessionPtyHostHostedSessionListing,
+	SpawnHostedSessionOutcome,
+} from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 import {
 	type CurrentBuildAgentSessionPtyHostDescriptor,
 	resolveCurrentBuildAgentSessionPtyHostDescriptor,
@@ -30,6 +43,17 @@ import {
 	launchDetachedAgentSessionPtyHostAndWaitUntilSocketAcceptsConnections,
 } from "./agent-session-pty-host-detached-process-launcher";
 import { AgentSessionPtyHostGenerationControllerLink } from "./agent-session-pty-host-generation-controller-link";
+import type { AgentSessionPtyHostModeEnablementDecision } from "./agent-session-pty-host-mode-enablement";
+import {
+	AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS,
+	AgentSessionPtyHostPersistentRecoveryBudget,
+} from "./agent-session-pty-host-persistent-recovery-budget";
+import { readAgentSessionPtyHostRecoveryEvidenceFingerprint } from "./agent-session-pty-host-recovery-evidence-fingerprint";
+import { claimAgentSessionPtyHostRuntimeControllerOwnership } from "./agent-session-pty-host-runtime-controller-ownership";
+import {
+	createAgentSessionPtyHostDiagnosticsReport,
+	notifyAgentSessionPtyHostDiagnosticsChanged,
+} from "./agent-session-pty-host-runtime-diagnostics";
 import {
 	type AgentSessionPtyHostRuntimeIdentity,
 	listAgentSessionPtyHostGenerationSocketPaths,
@@ -39,6 +63,8 @@ import {
 import {
 	AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME,
 	AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME,
+	queryAgentSessionPtyHostControllerPresence,
+	queryAgentSessionPtyHostReadOnlyStatus,
 } from "./hosted-session-cli-client-requests-to-agent-session-pty-host";
 import {
 	HostedSessionHookSpoolDrainCoordinator,
@@ -81,6 +107,10 @@ export interface HostedSessionReclaimedByHostWhileRuntimeWasAbsent {
 export interface AgentSessionPtyHostRuntimeFacadeOptions {
 	runtimeIdentity: AgentSessionPtyHostRuntimeIdentity;
 	warn: (message: string) => void;
+	newHostedSessionsEnabled?: boolean;
+	startupDecision?: AgentSessionPtyHostModeEnablementDecision;
+	recoveryConfigurationEvidenceFilePath?: string;
+	waitBeforeRetryingHostReadiness?: (milliseconds: number) => Promise<void>;
 	// 测试注入：缺省按当前 build 计算。
 	currentBuildHostDescriptor?: CurrentBuildAgentSessionPtyHostDescriptor;
 	hostIdleExitAfterMilliseconds?: number;
@@ -121,14 +151,39 @@ interface PendingAdoptionCandidateBookkeeping {
 	dispositionState: HostedSessionAdoptionCandidateDispositionState;
 }
 
+const pendingHostedSessionSpawnOwnershipSchema = z.array(
+	z.object({
+		hostedSessionKey: z.string(),
+		workspaceId: z.string(),
+		conversationSessionId: z.string(),
+		socketPath: z.string(),
+		attemptedAtEpochMs: z.number(),
+		originalHostProcessId: z.number().int().positive().optional(),
+		originalHostProcessStartTimeText: z.string().nullable().optional(),
+		originalHostStartedAtEpochMs: z.number().optional(),
+	}),
+);
+
 export class AgentSessionPtyHostRuntimeFacade {
 	private readonly generationLinksBySocketPath = new Map<string, AgentSessionPtyHostGenerationControllerLink>();
+	private runtimeControllerOwnership: Awaited<
+		ReturnType<typeof claimAgentSessionPtyHostRuntimeControllerOwnership>
+	> | null = null;
+	private currentGenerationRecoveryBudget: AgentSessionPtyHostPersistentRecoveryBudget | null = null;
+	private generationDiscoveryRecoveryBudget: AgentSessionPtyHostPersistentRecoveryBudget | null = null;
+	private readinessRecoveryInProgress: Promise<void> | null = null;
+	private recoveryProbeTimer: NodeJS.Timeout | null = null;
+	private periodicReadOnlyProbeInProgress: Promise<void> | null = null;
+	private nextReadOnlyHostProbeAtEpochMs: number | null = null;
+	private lastObservedHostReadinessFingerprint: string | null = null;
+	private runtimeIsClosing = false;
+	private readonly runtimeClosingAbortController = new AbortController();
+	private pendingHostedSessionSpawnOwnership: z.infer<typeof pendingHostedSessionSpawnOwnershipSchema> = [];
+	private pendingHostedSessionSpawnOwnershipPersistence: Promise<void> = Promise.resolve();
+	private readonly hostedSessionSpawnOperations = new Set<Promise<TerminalPtyProcessHandle>>();
 	private connectingToCurrentGeneration: Promise<AgentSessionPtyHostGenerationControllerLink> | null = null;
 	private readonly adoptionCandidatesOfWorkspaces: HostedTerminalPtySessionAdoptionCandidatesOfWorkspace[] = [];
 	private readonly pendingAdoptionCandidateBookkeeping: PendingAdoptionCandidateBookkeeping[] = [];
-	// 启动时当前 build 的 host 拉不起来、但旧 generation 里有会话待接管时置位（之后不再复位）：
-	// 此后凡当前 generation 未连上的 spawn 都降级为进程内 PtySession，并在后台再试连接当前 generation。
-	private newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable = false;
 	private newSpawnsRefusedBecauseRuntimeIsShuttingDown = false;
 	private readonly hostedSessionHookSpoolDrainCoordinator: HostedSessionHookSpoolDrainCoordinator;
 
@@ -150,22 +205,102 @@ export class AgentSessionPtyHostRuntimeFacade {
 			options,
 			options.currentBuildHostDescriptor ?? resolveCurrentBuildAgentSessionPtyHostDescriptor(),
 		);
-		await facade.connectToEveryGenerationHostAndCollectAdoptionCandidates();
+		facade.runtimeControllerOwnership = await claimAgentSessionPtyHostRuntimeControllerOwnership(
+			options.runtimeIdentity,
+		);
 		try {
-			await facade.ensureConnectedToCurrentGenerationHost();
-		} catch (error) {
-			// 没有待接管的会话：没什么可保住的，照旧抛出，由调用方整体退回进程内 PTY。
-			if (facade.pendingAdoptionCandidateBookkeeping.length === 0) {
-				throw error;
-			}
-			// 旧 generation 里有会话：此时丢掉 facade 就是丢掉它们（卡片按无活进程归零，前端自动续跑再起第二个 agent）。
-			// 照常交出 facade，经旧 generation 链路完成接管；新会话降级为进程内 PTY，热重启后不再存活。
-			facade.newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable = true;
-			options.warn(
-				`agent session pty host for the current build could not start (${error instanceof Error ? error.message : String(error)}); adopting ${facade.pendingAdoptionCandidateBookkeeping.length} agent session(s) from older agent session pty host generations, but new agent sessions fall back to in-process PTY and end when this runtime exits until the current build's host becomes reachable`,
+			await facade.loadPendingHostedSessionSpawnOwnership();
+			const recoveryOptions = {
+				readEvidenceFingerprint: () =>
+					readAgentSessionPtyHostRecoveryEvidenceFingerprint(
+						facade.currentBuildHostDescriptor,
+						options.recoveryConfigurationEvidenceFilePath,
+					),
+				shouldContinueRecovery: () => !facade.runtimeIsClosing,
+				waitBeforeRetry:
+					options.waitBeforeRetryingHostReadiness ??
+					((milliseconds: number) =>
+						waitForRuntimeOwnedPtyHostRecoveryCheck(milliseconds, undefined, {
+							signal: facade.runtimeClosingAbortController.signal,
+						}).catch(() => {})),
+				isFailureWithUnknownHostedSessionOwnership: (error: unknown) =>
+					error instanceof AgentSessionPtyHostPreventsSafeRuntimeStartupError ||
+					(error instanceof AgentSessionPtyHostUnreachableError && !error.noHostIsListening),
+				onProgress: (progress: unknown) => {
+					options.warn(
+						JSON.stringify({
+							event: "agent_session_pty_host_recovery_progress",
+							runtimePort: options.runtimeIdentity.runtimePort,
+							progress,
+						}),
+					);
+					notifyAgentSessionPtyHostDiagnosticsChanged();
+				},
+			};
+			facade.generationDiscoveryRecoveryBudget = await AgentSessionPtyHostPersistentRecoveryBudget.load({
+				...recoveryOptions,
+				recoveryStateFilePath: facade.runtimeIdentityEvidenceFilePath("generation-discovery-recovery"),
+			});
+			const discovery = await facade.generationDiscoveryRecoveryBudget.recover(
+				(deadline) => facade.connectToEveryGenerationHostAndCollectAdoptionCandidates(deadline),
+				async () => {
+					const statuses = await Promise.all(
+						listAgentSessionPtyHostGenerationSocketPaths(options.runtimeIdentity).map((socketPath) =>
+							queryAgentSessionPtyHostReadOnlyStatus({ agentSessionPtyHostSocketPath: socketPath }),
+						),
+					);
+					return statuses.every((status) => "hostProcessId" in status || status.noHostIsListening === true);
+				},
 			);
+			if (discovery.kind !== "ready")
+				throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(discovery.failureMessage);
+			await facade.reconcilePendingHostedSessionSpawnOwnershipFromOriginalHostEvidence();
+			facade.currentGenerationRecoveryBudget = await AgentSessionPtyHostPersistentRecoveryBudget.load({
+				...recoveryOptions,
+				recoveryStateFilePath: facade.runtimeIdentityEvidenceFilePath("current-generation-readiness-recovery"),
+			});
+			if (options.newHostedSessionsEnabled !== false)
+				await facade.recoverCurrentGenerationHostWithPersistentBudget();
+			facade.nextReadOnlyHostProbeAtEpochMs =
+				Date.now() + AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS;
+			facade.recoveryProbeTimer = setInterval(() => {
+				if (facade.runtimeIsClosing || facade.periodicReadOnlyProbeInProgress) return;
+				facade.periodicReadOnlyProbeInProgress = (async () => {
+					facade.nextReadOnlyHostProbeAtEpochMs =
+						Date.now() + AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS;
+					await facade.reconcilePendingHostedSessionSpawnOwnershipFromOriginalHostEvidence();
+					if (options.newHostedSessionsEnabled !== false && !facade.isConnectedToCurrentGenerationHost())
+						await facade.recoverCurrentGenerationHostWithPersistentBudget();
+					const diagnostics = await facade.queryDiagnostics();
+					const fingerprint = JSON.stringify([
+						diagnostics.newSessionHostingMode,
+						diagnostics.generations.map((generation) => [
+							generation.socketPath,
+							generation.readiness,
+							generation.hostStatus?.hostProcessId,
+							generation.hostStatus?.controllerProcessId,
+						]),
+					]);
+					if (facade.lastObservedHostReadinessFingerprint !== fingerprint) {
+						facade.lastObservedHostReadinessFingerprint = fingerprint;
+						notifyAgentSessionPtyHostDiagnosticsChanged();
+					}
+				})()
+					.catch((error: unknown) =>
+						options.warn(
+							JSON.stringify({ event: "agent_session_pty_host_recovery_waiting", message: String(error) }),
+						),
+					)
+					.finally(() => {
+						facade.periodicReadOnlyProbeInProgress = null;
+					});
+			}, AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS);
+			facade.recoveryProbeTimer.unref();
+			return facade;
+		} catch (error) {
+			await facade.closeControllerConnectionsAfterFlushingPendingFrames();
+			throw error;
 		}
-		return facade;
 	}
 
 	get currentGenerationSocketPath(): string {
@@ -220,8 +355,15 @@ export class AgentSessionPtyHostRuntimeFacade {
 		workspaceRepositoryPath: string | null,
 	): HostedTerminalPtyProcessSpawner {
 		return {
-			spawnHostedTerminalPtyProcess: (request) =>
-				this.spawnHostedTerminalPtyProcess(workspaceId, workspaceRepositoryPath, request),
+			spawnHostedTerminalPtyProcess: (request) => {
+				const operation = this.spawnHostedTerminalPtyProcess(workspaceId, workspaceRepositoryPath, request);
+				this.hostedSessionSpawnOperations.add(operation);
+				void operation.then(
+					() => this.hostedSessionSpawnOperations.delete(operation),
+					() => this.hostedSessionSpawnOperations.delete(operation),
+				);
+				return operation;
+			},
 		};
 	}
 
@@ -285,11 +427,20 @@ export class AgentSessionPtyHostRuntimeFacade {
 
 	// runtime 退出前调用：把已排队的 stop / 接管记录等消息写进内核再断开。
 	async closeControllerConnectionsAfterFlushingPendingFrames(): Promise<void> {
+		this.runtimeIsClosing = true;
+		this.runtimeClosingAbortController.abort();
+		if (this.recoveryProbeTimer) clearInterval(this.recoveryProbeTimer);
+		await this.periodicReadOnlyProbeInProgress?.catch(() => {});
+		await this.readinessRecoveryInProgress?.catch(() => {});
 		const links = [...this.generationLinksBySocketPath.values()];
 		for (const link of links) {
 			link.markRuntimeIsClosingControllerConnections();
 		}
 		await Promise.all(links.map((link) => link.connection.closeAfterFlushingPendingFrames()));
+		await Promise.allSettled([...this.hostedSessionSpawnOperations]);
+		await this.pendingHostedSessionSpawnOwnershipPersistence.catch(() => {});
+		await this.runtimeControllerOwnership?.release();
+		this.runtimeControllerOwnership = null;
 	}
 
 	private async spawnHostedTerminalPtyProcess(
@@ -298,21 +449,35 @@ export class AgentSessionPtyHostRuntimeFacade {
 		request: HostedTerminalPtyProcessSpawnRequest,
 	): Promise<TerminalPtyProcessHandle> {
 		// 闸只拦新请求；闸落下前已发出的 spawn 照常完成，会话起在 host 里，没人 stop 它，下一个 runtime 照常接管。
-		if (this.newSpawnsRefusedBecauseRuntimeIsShuttingDown) {
+		if (this.newSpawnsRefusedBecauseRuntimeIsShuttingDown || this.runtimeIsClosing) {
 			throw new AgentSessionPtyHostRefusesNewSpawnsWhileRuntimeShutsDownError(
 				"Kanban runtime is restarting or stopping; start this session again once it is back",
 			);
 		}
 		if (
-			this.newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable &&
-			!this.isConnectedToCurrentGenerationHost()
+			this.pendingHostedSessionSpawnOwnership.some(
+				(pending) => pending.workspaceId === workspaceId && pending.conversationSessionId === request.taskId,
+			)
 		) {
-			// 不在这里 await 重试：拉起失败要等满 launcher 的就绪期限，每次新会话都会被拖慢这么久。
-			this.retryConnectingToCurrentGenerationHostInBackgroundForLaterSpawns();
-			await request.beforeAgentProcessLaunch?.();
+			throw new Error("原 hosted session 的创建归属仍待核对，拒绝重复启动");
+		}
+		await this.assertNoExistingHostedConversationBeforeCreatingAnotherPty(workspaceId, request.taskId);
+		if (this.options.newHostedSessionsEnabled === false)
+			return this.spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(request);
+		await this.recoverCurrentGenerationHostWithPersistentBudget();
+		if (!this.isConnectedToCurrentGenerationHost()) {
+			if (this.currentGenerationRecoveryBudget?.progress?.lastFailureMayHideHostedSessions)
+				throw new Error("host 归属未知，拒绝降级后重复启动");
 			return this.spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(request);
 		}
-		const link = await this.ensureConnectedToCurrentGenerationHost();
+		let link = await this.ensureConnectedToCurrentGenerationHost();
+		const originalHostProcessStartTimeText = await readPosixProcessResourceTable()
+			.then(
+				(processes) =>
+					processes.find((entry) => entry.processId === link.connection.hostHello.hostProcessId)
+						?.processStartTimeText ?? null,
+			)
+			.catch(() => null);
 		const hostedSessionKey = randomUUID();
 		const environmentWithoutUndefinedValues: Record<string, string> = {};
 		for (const [environmentKey, environmentValue] of Object.entries(request.env)) {
@@ -324,24 +489,70 @@ export class AgentSessionPtyHostRuntimeFacade {
 		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME] = link.socketPath;
 		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME] =
 			hostedSessionKey;
-		await request.beforeAgentProcessLaunch?.();
-		const outcome = await link.connection.requestSpawnHostedSession({
+		this.pendingHostedSessionSpawnOwnership.push({
 			hostedSessionKey,
-			hostedSessionDescriptor: {
-				workspaceId,
-				...(workspaceRepositoryPath !== null ? { workspaceRepositoryPath } : {}),
-				taskId: request.taskId,
-				hostedSessionKind: request.hostedSessionKind,
-			},
-			binary: request.binary,
-			args: request.args,
-			cwd: request.cwd,
-			env: environmentWithoutUndefinedValues,
-			// 与 PtySession.spawn 同一取法；buildTerminalEnvironment 总会写入 TERM。
-			terminalName: environmentWithoutUndefinedValues.TERM?.trim() || "xterm-256color",
-			cols: request.cols,
-			rows: request.rows,
+			workspaceId,
+			conversationSessionId: request.taskId,
+			socketPath: link.socketPath,
+			attemptedAtEpochMs: Date.now(),
+			originalHostProcessId: link.connection.hostHello.hostProcessId,
+			originalHostProcessStartTimeText,
+			originalHostStartedAtEpochMs: link.connection.hostHello.hostStartedAtEpochMs,
 		});
+		await this.persistPendingHostedSessionSpawnOwnership();
+		if (this.runtimeIsClosing) throw new Error("runtime 已进入退出阶段，已持久保留尚未提交的 session key");
+		try {
+			await request.beforeAgentProcessLaunch?.();
+		} catch (error) {
+			// 尚未发送 spawn，撤销本次预留即可；不得把退出闸门的拒绝当作回执丢失。
+			this.pendingHostedSessionSpawnOwnership = this.pendingHostedSessionSpawnOwnership.filter(
+				(pending) => pending.hostedSessionKey !== hostedSessionKey,
+			);
+			await this.persistPendingHostedSessionSpawnOwnership();
+			throw error;
+		}
+		let outcome: SpawnHostedSessionOutcome;
+		try {
+			outcome = await link.connection.requestSpawnHostedSession({
+				hostedSessionKey,
+				hostedSessionDescriptor: {
+					workspaceId,
+					...(workspaceRepositoryPath !== null ? { workspaceRepositoryPath } : {}),
+					taskId: request.taskId,
+					hostedSessionKind: request.hostedSessionKind,
+				},
+				binary: request.binary,
+				args: request.args,
+				cwd: request.cwd,
+				env: environmentWithoutUndefinedValues,
+				// 与 PtySession.spawn 同一取法；buildTerminalEnvironment 总会写入 TERM。
+				terminalName: environmentWithoutUndefinedValues.TERM?.trim() || "xterm-256color",
+				cols: request.cols,
+				rows: request.rows,
+			});
+		} catch (error) {
+			// 回执丢失只查询原 key，绝不重发 spawn，也不在归属未知时改用进程内 PTY。
+			const recovered = await this.waitUntilPendingSpawnOwnershipCanBeConfirmed(link, hostedSessionKey, error);
+			if (!recovered) {
+				this.pendingHostedSessionSpawnOwnership = this.pendingHostedSessionSpawnOwnership.filter(
+					(pending) => pending.hostedSessionKey !== hostedSessionKey,
+				);
+				await this.persistPendingHostedSessionSpawnOwnership();
+				throw error;
+			}
+			link = recovered.link;
+			const listing = recovered.listing;
+			outcome = {
+				kind: "spawned",
+				hostedSessionChannelNumber: listing.hostedSessionChannelNumber,
+				pid: listing.pid,
+				spawnedAtEpochMs: listing.spawnedAtEpochMs,
+			};
+		}
+		this.pendingHostedSessionSpawnOwnership = this.pendingHostedSessionSpawnOwnership.filter(
+			(pending) => pending.hostedSessionKey !== hostedSessionKey,
+		);
+		await this.persistPendingHostedSessionSpawnOwnership();
 		if (outcome.kind === "spawn_failed") {
 			const spawnError = new Error(outcome.errorMessage) as NodeJS.ErrnoException;
 			spawnError.code = outcome.errorCode;
@@ -361,6 +572,374 @@ export class AgentSessionPtyHostRuntimeFacade {
 		this.registerHookSpoolDrainTargetHostedSession(link, hostedSessionKey, workspaceId, request.taskId);
 		link.registerHandleAndDeliverEventsThatArrivedEarlier(handle);
 		return handle;
+	}
+
+	private async assertNoExistingHostedConversationBeforeCreatingAnotherPty(
+		workspaceId: string,
+		conversationSessionId: string,
+	): Promise<void> {
+		for (const socketPath of new Set([
+			...listAgentSessionPtyHostGenerationSocketPaths(this.options.runtimeIdentity),
+			...this.generationLinksBySocketPath.keys(),
+		])) {
+			const link = this.generationLinksBySocketPath.get(socketPath);
+			if (link && !link.connection.isClosed) {
+				const listings = await link.connection.requestListHostedSessions(1_000);
+				if (
+					listings.some(
+						(listing) =>
+							listing.exitRecord === null &&
+							listing.hostedSessionDescriptor.workspaceId === workspaceId &&
+							listing.hostedSessionDescriptor.taskId === conversationSessionId,
+					)
+				)
+					throw new Error(
+						`会话 ${workspaceId}/${conversationSessionId} 仍由 ${socketPath} 托管，拒绝重复创建 PTY`,
+					);
+				continue;
+			}
+			const status = await queryAgentSessionPtyHostReadOnlyStatus({ agentSessionPtyHostSocketPath: socketPath });
+			if ("hostProcessId" in status) {
+				if (
+					status.hostedSessions.some(
+						(session) =>
+							!session.exited &&
+							session.workspaceId === workspaceId &&
+							session.conversationSessionId === conversationSessionId,
+					)
+				)
+					throw new Error(`原 hosted 会话仍存活，等待接回 ${workspaceId}/${conversationSessionId}`);
+			} else if (!status.noHostIsListening)
+				throw new Error(`无法核对 ${socketPath} 中的会话归属，拒绝降级或重复创建：${status.failureMessage}`);
+		}
+	}
+
+	private runtimeIdentityEvidenceFilePath(evidenceKind: string): string {
+		return join(
+			this.options.runtimeIdentity.runtimeHomeDirectoryPath,
+			"agent-session-pty-host",
+			`p${this.options.runtimeIdentity.runtimePort}-${evidenceKind}.json`,
+		);
+	}
+
+	private async loadPendingHostedSessionSpawnOwnership(): Promise<void> {
+		try {
+			this.pendingHostedSessionSpawnOwnership = pendingHostedSessionSpawnOwnershipSchema.parse(
+				JSON.parse(
+					await readFile(this.runtimeIdentityEvidenceFilePath("pending-hosted-session-spawn-ownership"), "utf8"),
+				),
+			);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+
+	private async persistPendingHostedSessionSpawnOwnership(): Promise<void> {
+		const snapshot = this.pendingHostedSessionSpawnOwnership.map((pending) => ({ ...pending }));
+		const persistence = this.pendingHostedSessionSpawnOwnershipPersistence
+			.catch(() => {})
+			.then(() =>
+				lockedFileSystem.writeJsonFileAtomic(
+					this.runtimeIdentityEvidenceFilePath("pending-hosted-session-spawn-ownership"),
+					snapshot,
+					{ lock: null, durable: true, fileMode: 0o600 },
+				),
+			);
+		this.pendingHostedSessionSpawnOwnershipPersistence = persistence;
+		await persistence;
+		notifyAgentSessionPtyHostDiagnosticsChanged();
+	}
+
+	private async reconcilePendingHostedSessionSpawnOwnershipFromOriginalHostEvidence(): Promise<void> {
+		if (!this.pendingHostedSessionSpawnOwnership.length) return;
+		const processes = await readPosixProcessResourceTable().catch(() => null);
+		if (!processes) return;
+		const resolvedKeys = new Set<string>();
+		for (const pending of this.pendingHostedSessionSpawnOwnership) {
+			if (!pending.originalHostProcessId) continue;
+			const currentProcess = processes.find((entry) => entry.processId === pending.originalHostProcessId);
+			let resolutionReason = "original_host_exited_or_process_identity_replaced";
+			if (currentProcess) {
+				if (
+					!pending.originalHostProcessStartTimeText ||
+					currentProcess.processStartTimeText === pending.originalHostProcessStartTimeText
+				) {
+					// 没有在途 spawn 才允许用原 host 的“原 key 不存在”补证；避免抢在创建请求前清掉记录。
+					if (this.hostedSessionSpawnOperations.size || pending.originalHostStartedAtEpochMs === undefined)
+						continue;
+					const status = await queryAgentSessionPtyHostReadOnlyStatus({
+						agentSessionPtyHostSocketPath: pending.socketPath,
+					});
+					if (
+						!("hostProcessId" in status) ||
+						status.hostProcessId !== pending.originalHostProcessId ||
+						status.hostStartedAtEpochMs !== pending.originalHostStartedAtEpochMs ||
+						status.hostedSessions.some((session) => session.hostedSessionKey === pending.hostedSessionKey)
+					)
+						continue;
+					resolutionReason = "original_host_confirms_session_key_absent_without_inflight_spawn";
+				}
+			} else {
+				try {
+					process.kill(pending.originalHostProcessId, 0);
+					continue;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+				}
+			}
+			// 先追加持久恢复证据，再解除当前阻塞；旧失败与原 session key 仍可审计。
+			const resolution = {
+				event: "hosted_session_spawn_ownership_resolved",
+				resolutionReason,
+				resolvedAtEpochMs: Date.now(),
+				...pending,
+			};
+			const history = await open(
+				this.runtimeIdentityEvidenceFilePath("pending-hosted-session-spawn-ownership").replace(
+					/\.json$/u,
+					"-resolution-history.jsonl",
+				),
+				"a",
+				0o600,
+			);
+			try {
+				await history.write(`${JSON.stringify(resolution)}\n`);
+				await history.sync();
+			} finally {
+				await history.close();
+			}
+			this.options.warn(JSON.stringify(resolution));
+			resolvedKeys.add(pending.hostedSessionKey);
+		}
+		if (resolvedKeys.size) {
+			this.pendingHostedSessionSpawnOwnership = this.pendingHostedSessionSpawnOwnership.filter(
+				(pending) => !resolvedKeys.has(pending.hostedSessionKey),
+			);
+			await this.persistPendingHostedSessionSpawnOwnership();
+		}
+	}
+
+	private async assertNoOtherRuntimeControllerBeforeHandshake(
+		socketPath: string,
+		deadlineAtEpochMs = Date.now() + 1_000,
+	): Promise<void> {
+		if (Date.now() >= deadlineAtEpochMs)
+			throw new AgentSessionPtyHostUnreachableError("核验 controller 所有权的预算已耗尽", false);
+		const status = await queryAgentSessionPtyHostReadOnlyStatus({
+			agentSessionPtyHostSocketPath: socketPath,
+			responseDeadlineMilliseconds: Math.min(500, Math.max(1, deadlineAtEpochMs - Date.now())),
+		});
+		if ("hostProcessId" in status) {
+			if (status.controllerProcessId !== null && status.controllerProcessId !== process.pid)
+				throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(
+					`host ${socketPath} 仍由 pid=${status.controllerProcessId} 控制，拒绝抢占`,
+				);
+			return;
+		}
+		if (status.noHostIsListening) return;
+		const legacyPresence = await queryAgentSessionPtyHostControllerPresence({
+			agentSessionPtyHostSocketPath: socketPath,
+			responseDeadlineMilliseconds: Math.min(500, Math.max(1, deadlineAtEpochMs - Date.now())),
+		});
+		if ("controllerConnected" in legacyPresence && !legacyPresence.controllerConnected) return;
+		throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(
+			`无法证明 host ${socketPath} 没有其他 controller，保留 unknown：${status.failureMessage}`,
+		);
+	}
+
+	private recoverCurrentGenerationHostWithPersistentBudget(): Promise<void> {
+		if (this.isConnectedToCurrentGenerationHost() || this.options.newHostedSessionsEnabled === false)
+			return Promise.resolve();
+		if (this.readinessRecoveryInProgress) return this.readinessRecoveryInProgress;
+		this.readinessRecoveryInProgress = (async () => {
+			if (!this.currentGenerationRecoveryBudget) throw new Error("host 恢复预算尚未加载");
+			const result = await this.currentGenerationRecoveryBudget.recover(
+				(deadline) => this.ensureConnectedToCurrentGenerationHost(deadline),
+				async () =>
+					"hostProcessId" in
+					(await queryAgentSessionPtyHostReadOnlyStatus({
+						agentSessionPtyHostSocketPath: this.currentGenerationSocketPath,
+					})),
+			);
+			if (result.kind !== "ready")
+				this.options.warn(
+					JSON.stringify({
+						event: "agent_session_pty_host_readiness_budget_exhausted",
+						mode: this.currentGenerationRecoveryBudget.progress?.lastFailureMayHideHostedSessions
+							? "ownership_unknown"
+							: "in_process_pty",
+						failureMessage: result.failureMessage,
+						recoveryProgress: this.currentGenerationRecoveryBudget.progress,
+					}),
+				);
+			notifyAgentSessionPtyHostDiagnosticsChanged();
+		})().finally(() => {
+			this.readinessRecoveryInProgress = null;
+		});
+		return this.readinessRecoveryInProgress;
+	}
+
+	private async waitUntilPendingSpawnOwnershipCanBeConfirmed(
+		originalLink: AgentSessionPtyHostGenerationControllerLink,
+		hostedSessionKey: string,
+		failure: unknown,
+	): Promise<{
+		link: AgentSessionPtyHostGenerationControllerLink;
+		listing: AgentSessionPtyHostHostedSessionListing;
+	} | null> {
+		while (!this.runtimeIsClosing) {
+			await this.reconcilePendingHostedSessionSpawnOwnershipFromOriginalHostEvidence();
+			if (!this.pendingHostedSessionSpawnOwnership.some((pending) => pending.hostedSessionKey === hostedSessionKey))
+				return null;
+			if (!originalLink.connection.isClosed) {
+				try {
+					const listings = await originalLink.connection.requestListHostedSessions(1_000);
+					const listing = listings.find((candidate) => candidate.hostedSessionKey === hostedSessionKey);
+					return listing ? { link: originalLink, listing } : null;
+				} catch {
+					/* 原连接仍可能持有已创建会话，改用非 controller 只读证据。 */
+				}
+			}
+			const status = await queryAgentSessionPtyHostReadOnlyStatus({
+				agentSessionPtyHostSocketPath: originalLink.socketPath,
+			});
+			if (
+				"hostProcessId" in status &&
+				status.hostProcessId === originalLink.connection.hostHello.hostProcessId &&
+				status.hostStartedAtEpochMs === originalLink.connection.hostHello.hostStartedAtEpochMs
+			) {
+				if (!status.hostedSessions.some((session) => session.hostedSessionKey === hostedSessionKey)) return null;
+				await this.assertNoOtherRuntimeControllerBeforeHandshake(originalLink.socketPath);
+				const connection = await AgentSessionPtyHostControllerConnection.connectAsController(
+					originalLink.socketPath,
+				);
+				const link = this.registerGenerationLink(originalLink.socketPath, connection);
+				const listing = (await connection.requestListHostedSessions()).find(
+					(candidate) => candidate.hostedSessionKey === hostedSessionKey,
+				);
+				if (!listing) return null;
+				await connection.requestAttachHostedSessionOutputStream(
+					hostedSessionKey,
+					listing.retainedOutputStartByteOffset,
+				);
+				return { link, listing };
+			}
+			this.options.warn(
+				JSON.stringify({
+					event: "hosted_session_spawn_ownership_unknown",
+					hostedSessionKey,
+					socketPath: originalLink.socketPath,
+					failure: String(failure),
+					recoveryCondition: "original_host_response_for_session_key",
+					nextCheckAtEpochMs: Date.now() + AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS,
+				}),
+			);
+			notifyAgentSessionPtyHostDiagnosticsChanged();
+			await waitForRuntimeOwnedPtyHostRecoveryCheck(
+				AGENT_SESSION_PTY_HOST_RECOVERY_READONLY_PROBE_INTERVAL_MS,
+				undefined,
+				{ signal: this.runtimeClosingAbortController.signal },
+			).catch(() => {});
+		}
+		throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(
+			`runtime 退出时 ${hostedSessionKey} 的创建归属仍未知，已保留持久记录`,
+		);
+	}
+
+	async queryDiagnostics(): Promise<AgentSessionPtyHostDiagnostics> {
+		const report = createAgentSessionPtyHostDiagnosticsReport({
+			runtimeIdentity: this.options.runtimeIdentity,
+			startupDecision: this.options.startupDecision ?? null,
+			runtimeProcessStartTimeText: this.runtimeControllerOwnership?.processStartTimeText,
+		});
+		const paths = new Set([
+			...listAgentSessionPtyHostGenerationSocketPaths(this.options.runtimeIdentity),
+			...this.generationLinksBySocketPath.keys(),
+		]);
+		const generations = await Promise.all(
+			[...paths].map(async (socketPath): Promise<AgentSessionPtyHostDiagnostics["generations"][number]> => {
+				const status = await queryAgentSessionPtyHostReadOnlyStatus({ agentSessionPtyHostSocketPath: socketPath });
+				if ("hostProcessId" in status)
+					return {
+						socketPath,
+						readiness: "ready",
+						observationSource: "readonly_host_query",
+						failureMessage: null,
+						hostStatus: status,
+					};
+				// 旧 host 不懂新诊断消息时，只使用本 runtime 已拥有的连接，绝不另发 controller 握手。
+				const link = this.generationLinksBySocketPath.get(socketPath);
+				if (link && !link.connection.isClosed && link.connection.hostHello) {
+					try {
+						const listings = await link.connection.requestListHostedSessions(1_000);
+						const hostStatus: AgentSessionPtyHostReadOnlyHostStatus = {
+							...link.connection.hostHello,
+							hostProcessInstanceId: null,
+							hostLifecycleState:
+								socketPath === this.currentGenerationSocketPath ? "serving" : "retiring_when_drained",
+							controllerProcessId: process.pid,
+							hostedSessions: listings.map((listing) => ({
+								hostedSessionKey: listing.hostedSessionKey,
+								workspaceId: listing.hostedSessionDescriptor.workspaceId,
+								conversationSessionId: listing.hostedSessionDescriptor.taskId,
+								hostedSessionKind: listing.hostedSessionDescriptor.hostedSessionKind,
+								processId: listing.pid,
+								processStartedAtEpochMs: listing.spawnedAtEpochMs,
+								exited: listing.exitRecord !== null,
+								adoptionRecordPresent: listing.adoptionRecord !== null,
+								outputEndByteOffset: listing.outputEndByteOffset,
+							})),
+						};
+						return {
+							socketPath,
+							readiness: "ready",
+							observationSource: "own_controller_connection",
+							failureMessage: null,
+							hostStatus,
+						};
+					} catch {
+						/* 不把缓存中的握手冒充当前响应。 */
+					}
+				}
+				return {
+					socketPath,
+					readiness: status.noHostIsListening ? "not_listening" : "unknown",
+					observationSource: "unavailable",
+					failureMessage: status.failureMessage,
+					hostStatus: null,
+				};
+			}),
+		);
+		const currentGenerationIsRespondingToThisController = generations.some(
+			(generation) =>
+				generation.socketPath === this.currentGenerationSocketPath &&
+				generation.readiness === "ready" &&
+				generation.hostStatus?.controllerProcessId === process.pid &&
+				generation.hostStatus.hostLifecycleState === "serving",
+		);
+		return {
+			...report,
+			currentGenerationSocketPath: this.currentGenerationSocketPath,
+			nextReadOnlyHostProbeAtEpochMs: this.nextReadOnlyHostProbeAtEpochMs,
+			recoveryProgress:
+				this.options.newHostedSessionsEnabled === false
+					? null
+					: (this.currentGenerationRecoveryBudget?.progress ??
+						this.generationDiscoveryRecoveryBudget?.progress ??
+						null),
+			generations,
+			pendingHostedSessionSpawnOwnership: [...this.pendingHostedSessionSpawnOwnership],
+			newSessionHostingMode:
+				this.options.newHostedSessionsEnabled === false
+					? "disabled"
+					: this.isConnectedToCurrentGenerationHost()
+						? currentGenerationIsRespondingToThisController
+							? "independent_host"
+							: "ownership_unknown"
+						: this.currentGenerationRecoveryBudget?.progress?.lastFailureMayHideHostedSessions
+							? "ownership_unknown"
+							: "in_process_pty",
+		};
 	}
 
 	private registerHookSpoolDrainTargetHostedSession(
@@ -536,12 +1115,17 @@ export class AgentSessionPtyHostRuntimeFacade {
 		candidatesOfWorkspace.adoptionCandidates.push(this.buildAdoptionCandidate(link, listing));
 	}
 
-	private async connectToEveryGenerationHostAndCollectAdoptionCandidates(): Promise<void> {
+	private async connectToEveryGenerationHostAndCollectAdoptionCandidates(deadlineAtEpochMs: number): Promise<void> {
 		const currentGenerationSocketPath = this.currentGenerationSocketPath;
 		for (const generationSocketPath of listAgentSessionPtyHostGenerationSocketPaths(this.options.runtimeIdentity)) {
+			if (this.generationLinksBySocketPath.has(generationSocketPath)) continue;
 			let connection: AgentSessionPtyHostControllerConnection;
 			try {
-				connection = await AgentSessionPtyHostControllerConnection.connectAsController(generationSocketPath);
+				await this.assertNoOtherRuntimeControllerBeforeHandshake(generationSocketPath, deadlineAtEpochMs);
+				connection = await AgentSessionPtyHostControllerConnection.connectAsController(
+					generationSocketPath,
+					Math.max(1, deadlineAtEpochMs - Date.now()),
+				);
 			} catch (error) {
 				if (error instanceof AgentSessionPtyHostUnreachableError && error.noHostIsListening) {
 					// host 已死、socket 文件残留；它的会话随它一起结束了。当前 generation 的残留由新 host 绑定时自行清理。
@@ -558,15 +1142,16 @@ export class AgentSessionPtyHostRuntimeFacade {
 					`agent session pty host at ${generationSocketPath} is alive but not responding; refusing to start so its agent sessions are neither lost nor duplicated: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-			const link = this.registerGenerationLink(generationSocketPath, connection);
 			let hostedSessions: AgentSessionPtyHostHostedSessionListing[];
 			try {
-				hostedSessions = await connection.requestListHostedSessions();
+				hostedSessions = await connection.requestListHostedSessions(Math.max(1, deadlineAtEpochMs - Date.now()));
 			} catch (error) {
+				await connection.closeAfterFlushingPendingFrames();
 				throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(
 					`agent session pty host at ${generationSocketPath} did not list its sessions: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
+			const link = this.registerGenerationLink(generationSocketPath, connection);
 			for (const listing of hostedSessions) {
 				if (listing.exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged === true) {
 					this.drainHookSpoolOfHostedSessionWhoseExitWasAlreadyAcknowledged(link, listing);
@@ -574,6 +1159,10 @@ export class AgentSessionPtyHostRuntimeFacade {
 				}
 				this.recordAdoptionCandidate(link, listing);
 			}
+			this.pendingHostedSessionSpawnOwnership = this.pendingHostedSessionSpawnOwnership.filter(
+				(pending) => pending.socketPath !== generationSocketPath,
+			);
+			await this.persistPendingHostedSessionSpawnOwnership();
 			if (generationSocketPath !== currentGenerationSocketPath) {
 				// 旧 generation：继续服务存量会话（接管后照常经这条链路收发），不再接新 spawn，排空后自行退出。
 				connection.sendControlMessage({ type: "retire_when_drained" });
@@ -593,6 +1182,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 			(closedLink) => {
 				if (this.generationLinksBySocketPath.get(closedLink.socketPath) === closedLink) {
 					this.generationLinksBySocketPath.delete(closedLink.socketPath);
+					notifyAgentSessionPtyHostDiagnosticsChanged();
 				}
 			},
 			{
@@ -614,24 +1204,34 @@ export class AgentSessionPtyHostRuntimeFacade {
 		return link;
 	}
 
-	private ensureConnectedToCurrentGenerationHost(): Promise<AgentSessionPtyHostGenerationControllerLink> {
+	private ensureConnectedToCurrentGenerationHost(
+		deadlineAtEpochMs = Date.now() + 8_000,
+	): Promise<AgentSessionPtyHostGenerationControllerLink> {
 		const existingLink = this.generationLinksBySocketPath.get(this.currentGenerationSocketPath);
 		if (existingLink && !existingLink.connection.isClosed) {
 			return Promise.resolve(existingLink);
 		}
 		if (this.connectingToCurrentGeneration === null) {
-			this.connectingToCurrentGeneration = this.connectToCurrentGenerationHostLaunchingItIfNeeded().finally(() => {
+			this.connectingToCurrentGeneration = this.connectToCurrentGenerationHostLaunchingItIfNeeded(
+				deadlineAtEpochMs,
+			).finally(() => {
 				this.connectingToCurrentGeneration = null;
 			});
 		}
 		return this.connectingToCurrentGeneration;
 	}
 
-	private async connectToCurrentGenerationHostLaunchingItIfNeeded(): Promise<AgentSessionPtyHostGenerationControllerLink> {
+	private async connectToCurrentGenerationHostLaunchingItIfNeeded(
+		deadlineAtEpochMs: number,
+	): Promise<AgentSessionPtyHostGenerationControllerLink> {
 		const socketPath = this.currentGenerationSocketPath;
 		let connection: AgentSessionPtyHostControllerConnection;
 		try {
-			connection = await AgentSessionPtyHostControllerConnection.connectAsController(socketPath);
+			await this.assertNoOtherRuntimeControllerBeforeHandshake(socketPath, deadlineAtEpochMs);
+			connection = await AgentSessionPtyHostControllerConnection.connectAsController(
+				socketPath,
+				Math.max(1, deadlineAtEpochMs - Date.now()),
+			);
 		} catch (error) {
 			if (!(error instanceof AgentSessionPtyHostUnreachableError) || !error.noHostIsListening) {
 				throw error;
@@ -646,8 +1246,13 @@ export class AgentSessionPtyHostRuntimeFacade {
 				hostLogFilePath: resolveAgentSessionPtyHostLogFilePath(this.options.runtimeIdentity),
 				hostWorkingDirectoryPath: this.options.runtimeIdentity.runtimeHomeDirectoryPath,
 				idleExitAfterMilliseconds: this.options.hostIdleExitAfterMilliseconds,
+				readinessDeadlineMilliseconds: Math.max(1, deadlineAtEpochMs - Date.now()),
 			});
-			connection = await AgentSessionPtyHostControllerConnection.connectAsController(socketPath);
+			await this.assertNoOtherRuntimeControllerBeforeHandshake(socketPath, deadlineAtEpochMs);
+			connection = await AgentSessionPtyHostControllerConnection.connectAsController(
+				socketPath,
+				Math.max(1, deadlineAtEpochMs - Date.now()),
+			);
 		}
 		return this.registerGenerationLink(socketPath, connection);
 	}
@@ -657,27 +1262,11 @@ export class AgentSessionPtyHostRuntimeFacade {
 		return currentGenerationLink !== undefined && !currentGenerationLink.connection.isClosed;
 	}
 
-	// 已有一次连接在途时不重复发起；成功之后的 spawn 恢复进当前 generation 的 host。
-	private retryConnectingToCurrentGenerationHostInBackgroundForLaterSpawns(): void {
-		if (this.connectingToCurrentGeneration !== null) {
-			return;
-		}
-		void this.ensureConnectedToCurrentGenerationHost().then(
-			() => {
-				this.options.warn(
-					"agent session pty host for the current build is reachable again; new agent sessions run in it again and survive runtime restarts",
-				);
-			},
-			() => {
-				// 仍连不上：本次会话已在进程内起好，下一次 spawn 再试。降级时已告警过一次，不逐次刷屏。
-			},
-		);
-	}
-
 	// 与 session-manager 非 host 模式的 PtySession.spawn 同形；只缺 hosted 请求里不携带的启动请求归因字段。
-	private spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(
+	private async spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(
 		request: HostedTerminalPtyProcessSpawnRequest,
-	): TerminalPtyProcessHandle {
+	): Promise<TerminalPtyProcessHandle> {
+		await request.beforeAgentProcessLaunch?.();
 		return PtySession.spawn({
 			binary: request.binary,
 			args: request.args,

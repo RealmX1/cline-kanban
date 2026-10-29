@@ -1,3 +1,5 @@
+export * from "./agent-session-pty-host-diagnostics-contract";
+
 import { z } from "zod";
 import {
 	taskClosureArchiveCleanupCredentialSchema,
@@ -3381,6 +3383,10 @@ export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema =
 	revision: z.number().int().nonnegative(),
 });
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("agent_session_pty_host_diagnostics_updated"),
+		revision: z.number().int().nonnegative(),
+	}),
 	z.object({ type: z.literal("codex_configuration_sync_updated"), revision: z.number().int().nonnegative() }),
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
@@ -4296,7 +4302,13 @@ export const runtimeHostRemoteEditorAccessIdentitySchema = z.object({
 });
 export type RuntimeHostRemoteEditorAccessIdentity = z.infer<typeof runtimeHostRemoteEditorAccessIdentitySchema>;
 
+export const runtimeAgentSessionPtyHostEnablementPreferenceSchema = z.enum(["enabled", "disabled"]);
+export type RuntimeAgentSessionPtyHostEnablementPreference = z.infer<
+	typeof runtimeAgentSessionPtyHostEnablementPreferenceSchema
+>;
+
 export const runtimeConfigResponseSchema = z.object({
+	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema,
 	selectedShortcutLabel: z.string().nullable(),
 	agentAutonomousModeEnabled: z.boolean(),
@@ -4329,6 +4341,7 @@ export const runtimeConfigResponseSchema = z.object({
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 
 export const runtimeConfigSaveRequestSchema = z.object({
+	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema.optional(),
 	selectedShortcutLabel: z.string().nullable().optional(),
 	agentAutonomousModeEnabled: z.boolean().optional(),

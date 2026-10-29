@@ -1,3 +1,4 @@
+import type { RuntimePtySessionProcessOwnership } from "../core/agent-session-pty-host-diagnostics-contract";
 import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
 import {
 	persistAutomaticAgentFailureContinuation,
@@ -5076,6 +5077,47 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return Boolean(active && !active.session.hasExited());
 	}
 
+	listLivePtySessionProcessOwnership(): Omit<RuntimePtySessionProcessOwnership, "workspaceId">[] {
+		return Array.from(this.entries.entries()).flatMap(([conversationSessionId, entry]) => {
+			const active = entry.active;
+			if (!active || active.session.hasExited()) return [];
+			const binding = active.session.agentSessionPtyHostBinding;
+			const acceptance = entry.summary.agentConversationPromptSubmissionAcceptance;
+			const acceptanceBelongsToCurrentNativeSession =
+				acceptance?.nativeSessionId === entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId &&
+				acceptance?.runtimeSessionIncarnationId === entry.summary.runtimeSessionIncarnationId;
+			return [
+				{
+					conversationSessionId,
+					processId: active.session.pid,
+					processStartedAtEpochMs: active.terminalSessionIncarnationSpawnedAtEpochMs,
+					currentRuntimeDeliveredHostedOutputEndByteOffset: binding
+						? (active.session.outputByteOffsetAfterLastDeliveredChunk ?? null)
+						: null,
+					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId ?? null,
+					nativeConversationSessionId:
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+					mostRecentPromptSubmissionId: acceptanceBelongsToCurrentNativeSession
+						? (acceptance?.submissionId ?? acceptance?.eventId ?? null)
+						: null,
+					mostRecentNativePromptAcceptedAtEpochMs:
+						acceptanceBelongsToCurrentNativeSession &&
+						acceptance?.status === "accepted" &&
+						acceptance.acceptedByHistoricalReconciliation !== true
+							? (acceptance.confirmedAtMs ?? null)
+							: null,
+					ownership: binding
+						? ("independent_host" as const)
+						: active.session.publishTerminalSessionAdoptionRecordForRuntimeRestart
+							? ("ownership_unknown" as const)
+							: ("runtime_process" as const),
+					hostSocketPath: binding?.socketPath ?? null,
+					hostedSessionKey: binding?.hostedSessionKey ?? null,
+				},
+			];
+		});
+	}
+
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
 	}
@@ -5964,13 +6006,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// Codex 控制宿主的 spawn 失败与强杀兜底也经 launch.cleanup；监督进程同时负责自己的退出清理。
 			const supersededSessionCleanup = entry.active.onSessionCleanup;
 			entry.active.onSessionCleanup = null;
-			entry.active.session.stop();
+			const supersededPtySession = entry.active.session;
+			supersededPtySession.stop();
+			const supersededHostedPtyExit = supersededPtySession.waitForHostedPtyExitAfterStopRequest?.();
 			entry.active = null;
 			if (supersededSessionCleanup) {
 				supersededSessionCleanup().catch(() => {
 					// Best effort: cleanup failure is non-critical.
 				});
 			}
+			if (supersededHostedPtyExit) await supersededHostedPtyExit;
+			if (isTaskSessionStartCancelled()) return cloneSummary(entry.summary);
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
@@ -6225,7 +6271,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 换代身份守卫。没有它，一条**上一代**的迟到退出事件会把当前这条活着的会话整个拆掉：
 			// 打掉 entry.active、把 summary 迁成已退出、通知所有监听者、再触发一次自动重启。
 			// 换代块先 stop()（只是 SIGTERM）再置空 active，而真正的 exit 事件只能异步投递，
-			// shell 侧从 stop() 到装载新代之间**逐行确认无 await**，也就是说那条路径上的错配是确定的、
+			// 进程内 shell 从 stop() 到装载新代之间没有 await，也就是说那条路径上的错配是确定的、
 			// 不是罕见竞态。
 			//
 			// 判据取对象身份而不是 terminalSessionIncarnationToken：manager 内部已有 7 处同形先例
@@ -6921,13 +6967,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// shell 会话与 task 会话共用同一个 entry.active 槽位，被这里换掉的完全可能是一条 agent 会话。
 			const supersededSessionCleanup = entry.active.onSessionCleanup;
 			entry.active.onSessionCleanup = null;
-			entry.active.session.stop();
+			const supersededPtySession = entry.active.session;
+			supersededPtySession.stop();
+			const supersededHostedPtyExit = supersededPtySession.waitForHostedPtyExitAfterStopRequest?.();
 			entry.active = null;
 			if (supersededSessionCleanup) {
 				supersededSessionCleanup().catch(() => {
 					// Best effort: cleanup failure is non-critical.
 				});
 			}
+			if (supersededHostedPtyExit) await supersededHostedPtyExit;
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
@@ -6977,7 +7026,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				return;
 			}
 			// 换代身份守卫，与 startTaskSession 那侧同形、同理由（见那边的长注释）。
-			// shell 侧尤其要紧：从换代块的 stop() 到装载新代之间**逐行确认无 await**，而 pty 的
+			// 进程内 shell 尤其要紧：从换代块的 stop() 到装载新代之间没有 await，而 pty 的
 			// 退出事件只能异步投递——也就是说「在活体上重开 shell」时的错配是确定发生的，
 			// 不是罕见竞态。没有这道守卫，每一次重开都会让上一代的退出事件把刚起来的这条拆掉。
 			if (currentActive.session !== session) {

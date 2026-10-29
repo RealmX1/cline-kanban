@@ -322,7 +322,8 @@ export type AgentSessionPtyHostHostedSessionCliClientToHostMessage =
 	| HostedSessionCliClientHelloMessage
 	| AppendHookEventToHostedSessionSpoolRequestMessage
 	| QueryControllerPresenceRequestMessage
-	| TerminateAllHostedSessionsIfNoControllerRequestMessage;
+	| TerminateAllHostedSessionsIfNoControllerRequestMessage
+	| QueryAgentSessionPtyHostReadOnlyStatusRequestMessage;
 
 export type AppendHookEventToHostedSessionSpoolOutcome =
 	| { kind: "spooled"; hookSpoolEntrySequenceNumber: number }
@@ -355,7 +356,40 @@ export interface TerminateAllHostedSessionsIfNoControllerResponseMessage {
 export type AgentSessionPtyHostHostToHostedSessionCliClientMessage =
 	| AppendHookEventToHostedSessionSpoolResponseMessage
 	| QueryControllerPresenceResponseMessage
-	| TerminateAllHostedSessionsIfNoControllerResponseMessage;
+	| TerminateAllHostedSessionsIfNoControllerResponseMessage
+	| QueryAgentSessionPtyHostReadOnlyStatusResponseMessage;
+
+// 诊断复用非 controller 通道；握手保持冻结，响应不带 argv、env 或接管记录正文。
+export interface QueryAgentSessionPtyHostReadOnlyStatusRequestMessage {
+	type: "query_agent_session_pty_host_readonly_status_request";
+	requestId: string;
+}
+
+export interface QueryAgentSessionPtyHostReadOnlyStatusResponseMessage {
+	type: "query_agent_session_pty_host_readonly_status_response";
+	requestId: string;
+	hostProcessId: number;
+	hostStartedAtEpochMs: number;
+	hostProcessInstanceId: string;
+	hostBuildIdentity: string;
+	hostLifecycleState:
+		| "serving"
+		| "retiring_when_drained"
+		| "offline_termination_reserved_awaiting_acknowledgement_flush"
+		| "terminating_all_hosted_sessions";
+	controllerProcessId: number | null;
+	hostedSessions: Array<{
+		hostedSessionKey: string;
+		workspaceId: string;
+		conversationSessionId: string;
+		hostedSessionKind: AgentSessionPtyHostHostedSessionKind;
+		processId: number;
+		processStartedAtEpochMs: number;
+		exited: boolean;
+		adoptionRecordPresent: boolean;
+		outputEndByteOffset: number;
+	}>;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);

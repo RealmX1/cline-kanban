@@ -143,6 +143,20 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 				errorMessage: `hosted session key already exists: ${request.hostedSessionKey}`,
 			};
 		}
+		if (
+			Array.from(this.hostedSessionsByKey.values()).some(
+				(session) =>
+					session.exitRecord === null &&
+					session.hostedSessionDescriptor.workspaceId === request.hostedSessionDescriptor.workspaceId &&
+					session.hostedSessionDescriptor.taskId === request.hostedSessionDescriptor.taskId,
+			)
+		) {
+			return {
+				kind: "spawn_failed",
+				errorCode: "DUPLICATE_RUNNING_CONVERSATION_SESSION",
+				errorMessage: `该 workspace/conversation 已有活 hosted 会话：${request.hostedSessionDescriptor.workspaceId}/${request.hostedSessionDescriptor.taskId}`,
+			};
+		}
 		let ptyProcess: HostedPtyProcess;
 		try {
 			ptyProcess = this.spawnHostedPtyProcess({

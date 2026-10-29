@@ -42,7 +42,7 @@ function buildSpawnRequest(hostedSessionKey: string): SpawnHostedSessionRequestM
 		hostedSessionKey,
 		hostedSessionDescriptor: {
 			workspaceId: "workspace-1",
-			taskId: "task-1",
+			taskId: `task-${hostedSessionKey}`,
 			hostedSessionKind: "task_agent_session",
 		},
 		binary: "/bin/sh",
@@ -222,6 +222,19 @@ describe("AgentSessionPtyHostHostedSessionRegistry", () => {
 		registry.acknowledgeHostedSessionExit("session-a");
 
 		expect(registry.hostedSessionCount).toBe(1);
+	});
+
+	it("更换 session key 也不能并发创建同一 workspace/conversation 的第二份活会话", () => {
+		const { registry, fakePtyProcesses } = createRegistryWithFakePtyProcesses();
+		const original = buildSpawnRequest("session-a");
+		registry.spawnHostedSession(original);
+		expect(registry.spawnHostedSession({ ...original, hostedSessionKey: "different-key" })).toMatchObject({
+			kind: "spawn_failed",
+			errorCode: "DUPLICATE_RUNNING_CONVERSATION_SESSION",
+		});
+		expect(fakePtyProcesses).toHaveLength(1);
+		fakePtyProcesses[0]?.emitExit(0);
+		expect(registry.spawnHostedSession({ ...original, hostedSessionKey: "different-key" }).kind).toBe("spawned");
 	});
 
 	it("rejects a duplicate hosted session key and reports spawn errors without registering a session", () => {

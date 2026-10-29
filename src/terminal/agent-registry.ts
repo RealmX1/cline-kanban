@@ -113,6 +113,7 @@ export function buildRuntimeConfigResponse(
 		selectedAgentId: runtimeConfig.selectedAgentId,
 		selectedShortcutLabel: runtimeConfig.selectedShortcutLabel,
 		agentAutonomousModeEnabled: runtimeConfig.agentAutonomousModeEnabled,
+		agentSessionPtyHostEnablementPreference: runtimeConfig.agentSessionPtyHostEnablementPreference,
 		newTaskStartInPlanModeByDefault: runtimeConfig.newTaskStartInPlanModeByDefault,
 		ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
 		debugModeEnabled: isRuntimeDebugModeEnabled(),

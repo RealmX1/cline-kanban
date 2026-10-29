@@ -6,6 +6,10 @@
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import {
+	type AgentSessionPtyHostReadOnlyHostStatus,
+	agentSessionPtyHostReadOnlyHostStatusSchema,
+} from "../../core/agent-session-pty-host-diagnostics-contract";
+import {
 	AgentSessionPtyHostWireFrameDecoder,
 	encodeJsonControlMessageFrame,
 } from "../wire-protocol/agent-session-pty-host-wire-frame-codec";
@@ -196,4 +200,24 @@ export async function requestAgentSessionPtyHostToTerminateAllHostedSessionsIfNo
 		return { kind: "agent_session_pty_host_unreachable", failureMessage: "host 返回了无效的离线全停结果" };
 	}
 	return outcome;
+}
+
+export async function queryAgentSessionPtyHostReadOnlyStatus(input: {
+	agentSessionPtyHostSocketPath: string;
+	responseDeadlineMilliseconds?: number;
+}): Promise<AgentSessionPtyHostReadOnlyHostStatus | HostedSessionCliClientRequestFailure> {
+	const result = await sendOneHostedSessionCliClientRequest(
+		input.agentSessionPtyHostSocketPath,
+		(requestId) => ({ type: "query_agent_session_pty_host_readonly_status_request", requestId }),
+		input.responseDeadlineMilliseconds ?? 1_000,
+	);
+	if (result.kind !== "responded") return result;
+	const parsed = agentSessionPtyHostReadOnlyHostStatusSchema.safeParse(result.response);
+	if (
+		readWireControlMessageType(result.response) !== "query_agent_session_pty_host_readonly_status_response" ||
+		!parsed.success
+	) {
+		return { kind: "agent_session_pty_host_unreachable", failureMessage: "host 未提供有效的只读诊断，保留 unknown" };
+	}
+	return parsed.data;
 }

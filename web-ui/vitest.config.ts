@@ -14,6 +14,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-agent-session-pty-host-diagnostics-contract": resolve(
+				__dirname,
+				"../src/core/agent-session-pty-host-diagnostics-contract.ts",
+			),
 			"@runtime-task-closure-contract": resolve(__dirname, "../src/core/task-closure-contract.ts"),
 			"@runtime-agent-prompt-image-attachment-reference": resolve(
 				__dirname,

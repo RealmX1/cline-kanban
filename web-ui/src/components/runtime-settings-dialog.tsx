@@ -47,6 +47,7 @@ import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
+import { useAgentSessionPtyHostDiagnostics } from "@/hooks/use-agent-session-pty-host-diagnostics";
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
@@ -414,6 +415,9 @@ export function RuntimeSettingsDialog({
 	const { resetLayoutCustomizations } = useLayoutCustomizations();
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
+	const [agentSessionPtyHostEnablementPreferenceEnabled, setAgentSessionPtyHostEnablementPreferenceEnabled] =
+		useState(true);
+	const agentSessionPtyHostDiagnostics = useAgentSessionPtyHostDiagnostics(open, workspaceId);
 	const [newTaskStartInPlanModeByDefault, setNewTaskStartInPlanModeByDefault] = useState(true);
 	// omp 新任务的默认通话通道。严格是「新任务默认值」：建卡时固化到卡上，改它不追溯已有卡片。
 	// 已存在的会话要换通道走详情页会话工具条上的那个开关，与本项无关。
@@ -510,6 +514,8 @@ export function RuntimeSettingsDialog({
 	const fallbackAgentId = firstInstalledAgentId ?? displayedAgents[0]?.id ?? "claude";
 	const initialSelectedAgentId = configuredAgentId ?? fallbackAgentId;
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
+	const initialAgentSessionPtyHostEnablementPreferenceEnabled =
+		config?.agentSessionPtyHostEnablementPreference !== "disabled";
 	const initialNewTaskStartInPlanModeByDefault = config?.newTaskStartInPlanModeByDefault ?? true;
 	const initialOmpAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport =
 		config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal";
@@ -544,6 +550,8 @@ export function RuntimeSettingsDialog({
 		if (selectedAgentId !== initialSelectedAgentId) {
 			return true;
 		}
+		if (agentSessionPtyHostEnablementPreferenceEnabled !== initialAgentSessionPtyHostEnablementPreferenceEnabled)
+			return true;
 		if (agentAutonomousModeEnabled !== initialAgentAutonomousModeEnabled) {
 			return true;
 		}
@@ -598,6 +606,8 @@ export function RuntimeSettingsDialog({
 			normalizeTemplateForComparison(initialOpenPrPromptTemplate)
 		);
 	}, [
+		agentSessionPtyHostEnablementPreferenceEnabled,
+		initialAgentSessionPtyHostEnablementPreferenceEnabled,
 		agentAutonomousModeEnabled,
 		autoContinueOnConnectionDropEnabled,
 		codexModelCapacityErrorAutoContinuationEnabled,
@@ -637,6 +647,7 @@ export function RuntimeSettingsDialog({
 		}
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
+		setAgentSessionPtyHostEnablementPreferenceEnabled(config?.agentSessionPtyHostEnablementPreference !== "disabled");
 		setNewTaskStartInPlanModeByDefault(config?.newTaskStartInPlanModeByDefault ?? true);
 		setOmpAgentSessionTransportForNewTasks(config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal");
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
@@ -653,6 +664,7 @@ export function RuntimeSettingsDialog({
 		setSaveError(null);
 	}, [
 		config?.agentAutonomousModeEnabled,
+		config?.agentSessionPtyHostEnablementPreference,
 		config?.autoContinueOnConnectionDropEnabled,
 		config?.codexModelCapacityErrorAutoContinuationEnabled,
 		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -847,6 +859,13 @@ export function RuntimeSettingsDialog({
 		await notificationSettings.save();
 		await taskAnalysisSettings.save();
 		const saved = await save({
+			...(agentSessionPtyHostEnablementPreferenceEnabled !== initialAgentSessionPtyHostEnablementPreferenceEnabled
+				? {
+						agentSessionPtyHostEnablementPreference: agentSessionPtyHostEnablementPreferenceEnabled
+							? ("enabled" as const)
+							: ("disabled" as const),
+					}
+				: {}),
 			selectedAgentId,
 			agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault,
@@ -1212,6 +1231,96 @@ export function RuntimeSettingsDialog({
 							<PlugZap size={16} className="text-text-secondary" />
 							终端 agent 可靠性
 						</h2>
+					</div>
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<div className="flex items-center gap-2">
+							<RadixSwitch.Root
+								aria-label="默认启用会话热接管"
+								checked={agentSessionPtyHostEnablementPreferenceEnabled}
+								disabled={controlsDisabled}
+								onCheckedChange={setAgentSessionPtyHostEnablementPreferenceEnabled}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">默认启用会话热接管</span>
+						</div>
+						<p className="text-text-secondary text-[13px] mt-2 mb-0">
+							保存后在下次 runtime 启动时生效。已托管的会话继续由原 host
+							保持；机器关机后恢复偏好，不能保留断电前的进程。
+						</p>
+						<div className="text-[13px] text-text-secondary mt-2" aria-live="polite">
+							{agentSessionPtyHostDiagnostics.isError ? (
+								<p className="m-0 text-status-orange">实际托管状态暂时不可用，连接恢复后自动重查。</p>
+							) : !agentSessionPtyHostDiagnostics.data ? (
+								<p className="m-0">正在读取实际托管状态…</p>
+							) : (
+								(() => {
+									const status = agentSessionPtyHostDiagnostics.data;
+									const modeLabels = {
+										independent_host: "独立 host 已就绪",
+										in_process_pty: "已降级为进程内 PTY",
+										disabled: "新会话热接管已关闭",
+										unsupported: "当前启动方式不支持热接管",
+										ownership_unknown: "会话归属待核对",
+										runtime_offline: "runtime 离线",
+									};
+									const reasonLabels = {
+										persistent_preference_disabled: "持久设置关闭",
+										environment_override_disabled: "临时环境覆盖关闭",
+										invalid_environment_override: "临时环境覆盖无效，兼容旧行为而关闭",
+										runtime_port_auto_selected: "自动端口无法稳定接回会话",
+										remote_host_mode: "remote-host 的 hook 身份尚不支持接管",
+										unsupported_platform_win32: "Windows 不支持独立 PTY host",
+										electron_desktop_shell: "Electron 壳管理会话生命周期",
+									};
+									return (
+										<>
+											<p className="m-0">当前实际模式：{modeLabels[status.newSessionHostingMode]}</p>
+											<p className="m-0">
+												启动偏好来源：
+												{status.startupDecision?.enablementPreferenceSource === "environment_override"
+													? "临时环境覆盖"
+													: status.startupDecision?.enablementPreferenceSource === "persistent_preference"
+														? "持久设置"
+														: status.startupDecision
+															? "默认启用"
+															: "未知"}
+												；环境覆盖：{status.startupDecision?.environmentOverride ?? "无"}
+											</p>
+											{status.startupDecision?.disabledReason && (
+												<p className="m-0">原因：{reasonLabels[status.startupDecision.disabledReason]}</p>
+											)}
+											{(config?.agentSessionPtyHostEnablementPreference ?? null) !==
+												status.startupDecision?.persistentPreference && (
+												<p className="m-0 text-status-orange">已保存的偏好等待下次 runtime 启动生效。</p>
+											)}
+											<p className="m-0">
+												活跃 PTY 会话：
+												{
+													status.runtimePtySessions.filter(
+														(session) => session.ownership === "independent_host",
+													).length
+												}{" "}
+												条由独立 host 托管，
+												{
+													status.runtimePtySessions.filter(
+														(session) => session.ownership === "runtime_process",
+													).length
+												}{" "}
+												条由当前 runtime 持有。
+											</p>
+											{status.recoveryProgress?.lastFailureMessage && (
+												<p className="m-0 text-status-orange">
+													恢复已尝试 {status.recoveryProgress.attemptsStarted}/3 次；等待 host
+													响应或运行证据变化后自动重查。
+												</p>
+											)}
+										</>
+									);
+								})()
+							)}
+						</div>
 					</div>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
 						<div className="flex items-center gap-2">

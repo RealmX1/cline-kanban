@@ -57,6 +57,9 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
    - Do not assume a symlinked global CLI hot-reloads source edits. Running processes keep the build they already loaded; source changes usually require rebuild plus process restart.
 
 4. Restart with state-preserving flags.
+   - **首次部署即生效**：候选须包含持久偏好实现及下述 handover 实现；新 runtime 首次启动就读取持久偏好，受支持的固定端口实例在字段和环境覆盖均缺失时默认启用，无需再部署一次。显式关闭继续有效。首次没有 hosted 基线只影响跨重启连续性的取证，不推迟功能启用；仍须先等待旧非托管会话自然结束，并在启动后核验实际模式。
+   - **会话连续性硬闸**：停止旧 runtime 前，按 `references/kanban-runtime-upgrades.md` 用 `verify-agent-session-pty-host-runtime-readiness.mjs --before-runtime-restart` 生成本次候选绑定的持久基线，并在停止前再次核验。非托管活会话默认等待自然结束；不得自动 Stop/resume 或使用中断会话的 override。旧诊断接口不存在时仅允许经旧 API 与原生进程交叉证明无活会话后首次切换，不能把它写成连续性通过。
+   - 使用 dbfe4 的 `runtime handover-restart` 契约（候选须实际包含该实现），不在部署 skill 重建 handover、离线全停或 host 回收。重启后核对原 session PID/启动身份/native ID、host 实例、持续输出及自然新输入；只读观察器不自行部署。没有 hosted 基线或自然输入时如实保留待验。禁止无条件 SIGKILL 后只查 HTTP 便宣告成功。
    - **重启前硬闸**：在即将部署的源 checkout 内，用实际启动服务的 Node 绝对路径执行 `scripts/verify-notification-archive-native-runtime.mjs`。脚本只操作内存 SQLite；非零退出立即停止部署，保留旧服务。即使 `npm run build` 的预检通过，也不能省略这一步（构建 Node 与启动 Node 可能不同）。失败时用目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3` 并重新预检；禁止仅换一个能通过的 Node 测试后仍用原来的不匹配 Node 启动。
    - Before stopping the old process, check whether shutdown cleanup mutates worktrees or task state.
    - Prefer `--skip-shutdown-cleanup` or the tool's equivalent for upgrade restarts.

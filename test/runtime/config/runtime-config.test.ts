@@ -67,6 +67,60 @@ function writeFakeCommand(binDir: string, command: string): void {
 }
 
 describe.sequential("runtime-config auto agent selection", () => {
+	it("热接管选择跨全局、项目和并发设置更新保留，全量保存省略字段也不清除它", async () => {
+		const isolatedHome = createTempDir("kanban-pty-host-preference-home-");
+		const isolatedProject = createTempDir("kanban-pty-host-preference-project-");
+		try {
+			await withTemporaryEnv({ home: isolatedHome.path }, async () => {
+				const originalConfig = await loadGlobalRuntimeConfig();
+				expect(originalConfig.agentSessionPtyHostEnablementPreference).toBeUndefined();
+				await updateGlobalRuntimeConfig(originalConfig, { agentSessionPtyHostEnablementPreference: "disabled" });
+				await Promise.all([
+					updateGlobalRuntimeConfig(originalConfig, { notificationSoundEnabled: false }),
+					updateRuntimeConfig(isolatedProject.path, { commitPromptTemplate: "保留并发修改" }),
+				]);
+				const current = await loadRuntimeConfig(isolatedProject.path);
+				expect(current.agentSessionPtyHostEnablementPreference).toBe("disabled");
+				const { agentSessionPtyHostEnablementPreference: _preference, ...otherSettings } = current;
+				await saveRuntimeConfig(isolatedProject.path, otherSettings);
+				const reloaded = await loadGlobalRuntimeConfig();
+				expect(reloaded.agentSessionPtyHostEnablementPreference).toBe("disabled");
+				expect(reloaded.notificationSoundEnabled).toBe(false);
+				expect(reloaded.commitPromptTemplate).toBe("保留并发修改");
+				await updateRuntimeConfig(isolatedProject.path, { agentSessionPtyHostEnablementPreference: "enabled" });
+				expect((await loadGlobalRuntimeConfig()).agentSessionPtyHostEnablementPreference).toBe("enabled");
+			});
+		} finally {
+			isolatedProject.cleanup();
+			isolatedHome.cleanup();
+		}
+	});
+
+	it("配置读取失败不得当成字段缺失或在保存其他设置时覆盖原文件", async () => {
+		const isolatedHome = createTempDir("kanban-pty-host-corrupt-config-");
+		try {
+			await withTemporaryEnv({ home: isolatedHome.path }, async () => {
+				const configPath = join(isolatedHome.path, ".cline", "kanban", "config.json");
+				const originalConfig = await loadGlobalRuntimeConfig();
+				mkdirSync(join(configPath, ".."), { recursive: true });
+				for (const originalContents of [
+					"{broken",
+					"null",
+					'{"agentSessionPtyHostEnablementPreference":"invalid"}',
+				]) {
+					writeFileSync(configPath, originalContents);
+					await expect(loadGlobalRuntimeConfig()).rejects.toThrow(configPath);
+					await expect(
+						updateGlobalRuntimeConfig(originalConfig, { notificationSoundEnabled: false }),
+					).rejects.toThrow(configPath);
+					expect(readFileSync(configPath, "utf8")).toBe(originalContents);
+				}
+			});
+		} finally {
+			isolatedHome.cleanup();
+		}
+	});
+
 	it("selects agents using the configured priority order", () => {
 		expect(pickBestInstalledAgentIdFromDetected(["codex", "opencode", "gemini"])).toBe("codex");
 		expect(pickBestInstalledAgentIdFromDetected(["opencode", "droid", "gemini"])).toBe("droid");

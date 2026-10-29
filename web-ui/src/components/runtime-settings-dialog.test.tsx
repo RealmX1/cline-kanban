@@ -3,7 +3,7 @@ import { act, createContext, useContext } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimeSettingsDialog } from "@/components/runtime-settings-dialog";
-import type { RuntimeConfigResponse } from "@/runtime/types";
+import type { AgentSessionPtyHostDiagnostics, RuntimeConfigResponse } from "@/runtime/types";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 
 /*
@@ -126,6 +126,11 @@ const savedNotificationProviders = [
 		credentialStatusMessage: null,
 	},
 ];
+
+const ptyHostDiagnosticsMock = vi.hoisted(() => ({ data: null as AgentSessionPtyHostDiagnostics | null }));
+vi.mock("@/hooks/use-agent-session-pty-host-diagnostics", () => ({
+	useAgentSessionPtyHostDiagnostics: () => ({ data: ptyHostDiagnosticsMock.data, isError: false }),
+}));
 
 const resetLayoutCustomizationsMock = vi.hoisted(() => vi.fn());
 const useRuntimeConfigSaveMock = vi.hoisted(() => vi.fn(async () => true));
@@ -288,6 +293,7 @@ describe("RuntimeSettingsDialog", () => {
 		notificationSettingsMocks.saveProvider.mockResolvedValue({ ok: true });
 		notificationSettingsMocks.saveSettings.mockResolvedValue({ ok: true });
 		resetLayoutCustomizationsMock.mockReset();
+		ptyHostDiagnosticsMock.data = null;
 		useRuntimeConfigSaveMock.mockClear();
 		useRuntimeConfigSaveMock.mockResolvedValue(true);
 		clineSetupSectionOnSavedRef.onSaved = null;
@@ -694,6 +700,20 @@ describe("RuntimeSettingsDialog", () => {
 		expect(findButtonByText(document.body, "Save")?.disabled).toBe(false);
 		await act(async () => findButtonByText(document.body, "Save")?.click());
 		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledTimes(1);
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+	});
+
+	it("热接管开关保存持久选择并提示下次启动生效，其他设置保存不补写缺省偏好", async () => {
+		const onOpenChange = vi.fn();
+		await renderSettings(true, onOpenChange);
+		const toggle = findButtonByAriaLabel(document.body, "默认启用会话热接管");
+		expect(toggle?.getAttribute("aria-checked")).toBe("true");
+		expect(document.body.textContent).toContain("保存后在下次 runtime 启动时生效");
+		await act(async () => toggle?.click());
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(useRuntimeConfigSaveMock).toHaveBeenCalledWith(
+			expect.objectContaining({ agentSessionPtyHostEnablementPreference: "disabled" }),
+		);
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 

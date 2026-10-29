@@ -57,6 +57,7 @@ import {
 	resolveHostedAgentSessionDispositionForRuntimeShutdownTrigger,
 	resolveRuntimeShutdownDeadlineMilliseconds,
 } from "./core/runtime-shutdown-trigger";
+import { resolveSessionFacets } from "./core/session-activity";
 import { disablePasscode, generateInternalToken, generatePasscode } from "./security/passcode-manager";
 import { terminateProcessForTimeout } from "./server/process-termination";
 import type { RuntimeExitRequestHandler } from "./server/runtime-server";
@@ -431,7 +432,12 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		{ recordHostedSessionsReclaimedByAgentSessionPtyHostWhileRuntimeWasAbsent },
 		{ createWorkspaceRegistry },
 		{ clearPendingUpdateNotification, getPendingUpdateNotification },
-		{ startAgentSessionPtyHostRuntimeFacadeWhenEnabled },
+		{
+			startAgentSessionPtyHostRuntimeFacadeWhenEnabled,
+			setRuntimePtySessionOwnershipProvider,
+			setNonPtyAgentSessionsPreventingContinuityProvider,
+			notifyAgentSessionPtyHostDiagnosticsChanged,
+		},
 	] = await Promise.all([
 		import("./projects/project-path.js"),
 		import("./server/directory-picker.js"),
@@ -470,10 +476,41 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		hasGitRepository,
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
+			const processIdentityBySessionId = new Map<string, string>();
+			manager.onSummary((summary) => {
+				const identity = `${summary.pid}:${summary.startedAt}:${summary.runtimeSessionIncarnationId}`;
+				if (processIdentityBySessionId.get(summary.taskId) === identity) return;
+				processIdentityBySessionId.set(summary.taskId, identity);
+				notifyAgentSessionPtyHostDiagnosticsChanged();
+			});
 		},
 		listConversationTaskSessionSummariesForWorkspace: (workspaceId) =>
 			runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? [],
 	});
+	setRuntimePtySessionOwnershipProvider(() =>
+		workspaceRegistry
+			.listManagedWorkspaces()
+			.flatMap(({ workspaceId, terminalManager }) =>
+				terminalManager.listLivePtySessionProcessOwnership().map((session) => ({ ...session, workspaceId })),
+			),
+	);
+	setNonPtyAgentSessionsPreventingContinuityProvider(() =>
+		workspaceRegistry.listManagedWorkspaces().flatMap(({ workspaceId }) =>
+			(runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? []).flatMap((summary) => {
+				if (!["starting", "live", "retrying"].includes(resolveSessionFacets(summary).liveness)) return [];
+				const transport = summary.sessionTransport;
+				if (transport !== "acp_stdio_subprocess" && transport !== "in_process_cline_sdk") return [];
+				return [
+					{
+						workspaceId,
+						conversationSessionId: summary.taskId,
+						processId: summary.pid,
+						sessionTransport: transport,
+					},
+				];
+			}),
+		),
+	);
 	runtimeStateHub = createRuntimeStateHub({
 		workspaceRegistry,
 	});

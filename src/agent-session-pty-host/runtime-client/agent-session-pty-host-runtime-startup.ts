@@ -1,22 +1,45 @@
-// runtime 启动时决定是否启用 agent session PTY host 模式，启用则启动 facade（发现 / 拉起 host 并连接）。
-// 由 cli.ts 在创建 workspace registry 之前懒加载调用。
-
+// 必须先于 workspace registry 和任何 PTY：启动偏好只读一次，保存设置不自动切换存量进程。
+import { loadGlobalRuntimeConfig } from "../../config/runtime-config";
 import { getKanbanRuntimePort, isKanbanRemoteHost } from "../../core/runtime-endpoint";
+import { readPosixProcessResourceTable } from "../../diagnostics/posix-process-table-with-resource-columns-reader";
 import { getRuntimeHomePath } from "../../state/runtime-home-path";
 import {
 	KANBAN_AGENT_SESSION_PTY_HOST_MODE_ENVIRONMENT_VARIABLE_NAME,
 	resolveAgentSessionPtyHostModeEnablement,
 } from "./agent-session-pty-host-mode-enablement";
 import {
+	createAgentSessionPtyHostDiagnosticsReport,
+	persistAgentSessionPtyHostDiagnostics,
+	queryCurrentRuntimeAgentSessionPtyHostDiagnostics,
+	registerAgentSessionPtyHostRuntimeDiagnosticsProvider,
+} from "./agent-session-pty-host-runtime-diagnostics";
+import {
 	AgentSessionPtyHostPreventsSafeRuntimeStartupError,
 	AgentSessionPtyHostRuntimeFacade,
 } from "./agent-session-pty-host-runtime-facade";
+import { listAgentSessionPtyHostGenerationSocketPaths } from "./agent-session-pty-host-socket-path-for-runtime-identity";
+import { queryAgentSessionPtyHostReadOnlyStatus } from "./hosted-session-cli-client-requests-to-agent-session-pty-host";
 
 export async function startAgentSessionPtyHostRuntimeFacadeWhenEnabled(input: {
 	runtimePortWasAutoSelected: boolean;
 	warn: (message: string) => void;
 }): Promise<AgentSessionPtyHostRuntimeFacade | null> {
+	const runtimeIdentity = { runtimeHomeDirectoryPath: getRuntimeHomePath(), runtimePort: getKanbanRuntimePort() };
+	let config: Awaited<ReturnType<typeof loadGlobalRuntimeConfig>>;
+	try {
+		config = await loadGlobalRuntimeConfig();
+	} catch (error) {
+		await persistAgentSessionPtyHostDiagnostics(
+			createAgentSessionPtyHostDiagnosticsReport({
+				runtimeIdentity,
+				startupDecision: null,
+				configurationReadError: String(error),
+			}),
+		);
+		throw error;
+	}
 	const enablement = resolveAgentSessionPtyHostModeEnablement({
+		agentSessionPtyHostEnablementPreference: config.agentSessionPtyHostEnablementPreference,
 		agentSessionPtyHostModeEnvironmentValue:
 			process.env[KANBAN_AGENT_SESSION_PTY_HOST_MODE_ENVIRONMENT_VARIABLE_NAME],
 		kanbanDesktopEnvironmentValue: process.env.KANBAN_DESKTOP,
@@ -24,29 +47,51 @@ export async function startAgentSessionPtyHostRuntimeFacadeWhenEnabled(input: {
 		runtimeServesRemoteHost: isKanbanRemoteHost(),
 		platform: process.platform,
 	});
-	if (!enablement.agentSessionPtyHostModeEnabled) {
-		if (enablement.disabledReason !== "not_opted_in") {
-			input.warn(
-				`${KANBAN_AGENT_SESSION_PTY_HOST_MODE_ENVIRONMENT_VARIABLE_NAME}=enabled is ignored (${enablement.disabledReason}); agent sessions will end when this runtime exits`,
-			);
+	if (enablement.disabledReason)
+		input.warn(JSON.stringify({ event: "agent_session_pty_host_disabled", ...enablement }));
+	if (!enablement.canAdoptExistingHostedSessions && process.platform !== "win32") {
+		for (const socketPath of listAgentSessionPtyHostGenerationSocketPaths(runtimeIdentity)) {
+			const status = await queryAgentSessionPtyHostReadOnlyStatus({ agentSessionPtyHostSocketPath: socketPath });
+			if (
+				"hostProcessId" in status
+					? status.hostedSessions.some((session) => !session.exited)
+					: !status.noHostIsListening
+			) {
+				await persistAgentSessionPtyHostDiagnostics(
+					createAgentSessionPtyHostDiagnosticsReport({ runtimeIdentity, startupDecision: enablement }),
+				);
+				throw new AgentSessionPtyHostPreventsSafeRuntimeStartupError(
+					`当前启动方式 ${enablement.disabledReason} 不能接管原 host；保留会话，等待原会话自然结束或恢复受支持的启动方式：${socketPath}`,
+				);
+			}
 		}
-		return null;
 	}
+	const facade = enablement.canAdoptExistingHostedSessions
+		? await AgentSessionPtyHostRuntimeFacade.start({
+				runtimeIdentity,
+				warn: input.warn,
+				startupDecision: enablement,
+				newHostedSessionsEnabled: enablement.agentSessionPtyHostModeEnabled,
+				recoveryConfigurationEvidenceFilePath: config.globalConfigPath,
+			})
+		: null;
+	const baseline = createAgentSessionPtyHostDiagnosticsReport({ runtimeIdentity, startupDecision: enablement });
 	try {
-		return await AgentSessionPtyHostRuntimeFacade.start({
-			runtimeIdentity: { runtimeHomeDirectoryPath: getRuntimeHomePath(), runtimePort: getKanbanRuntimePort() },
-			warn: input.warn,
-		});
-	} catch (error) {
-		// 有 host 活着却不应答：它手里的会话既不能接管也不能当作不存在，启动失败、交给 supervisor 重试。
-		if (error instanceof AgentSessionPtyHostPreventsSafeRuntimeStartupError) {
-			throw error;
-		}
-		// 其余失败（例如当前 build 的 host 拉不起来、且旧 generation 没有待接管的会话；有会话时 start 不抛，
-		// 而是交出 facade 完成接管、新会话降级为进程内 PTY）退回进程内 PTY，不阻断 runtime 启动。
-		input.warn(
-			`agent session pty host could not start; falling back to in-process PTY sessions: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
+		baseline.runtimeProcessStartTimeText =
+			(await readPosixProcessResourceTable()).find((entry) => entry.processId === process.pid)
+				?.processStartTimeText ?? null;
+	} catch {
+		/* 不支持的平台仍可报告限制；没有 OS 身份时保留 null。 */
 	}
+	registerAgentSessionPtyHostRuntimeDiagnosticsProvider(async () =>
+		facade ? facade.queryDiagnostics() : { ...baseline, reportGeneratedAtEpochMs: Date.now() },
+	);
+	await persistAgentSessionPtyHostDiagnostics(await queryCurrentRuntimeAgentSessionPtyHostDiagnostics());
+	return facade;
 }
+
+export {
+	notifyAgentSessionPtyHostDiagnosticsChanged,
+	setNonPtyAgentSessionsPreventingContinuityProvider,
+	setRuntimePtySessionOwnershipProvider,
+} from "./agent-session-pty-host-runtime-diagnostics";

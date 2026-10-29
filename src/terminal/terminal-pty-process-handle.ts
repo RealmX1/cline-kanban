@@ -14,6 +14,7 @@ export interface TerminalPtyProcessExitEvent {
 
 export interface TerminalPtyProcessHandle {
 	readonly pid: number;
+	readonly agentSessionPtyHostBinding?: { socketPath: string; hostedSessionKey: string };
 	// hosted 会话的真实创建时间来自 host；旧句柄与进程内 PTY 缺省时由调用方沿用本地时间。
 	readonly hostedTerminalPtySessionSpawnedAtEpochMs?: number;
 	write(data: string | Buffer): void;
@@ -24,6 +25,8 @@ export interface TerminalPtyProcessHandle {
 	// interrupted：标记这次停止是用户 / 系统主动打断，退出时据此把会话记成 interrupted 而非正常退出。
 	// force：直接 SIGKILL，而不是先 SIGTERM。
 	stop(options?: { interrupted?: boolean; force?: boolean }): void;
+	// 已请求停止的 hosted 会话换代时，须等 host 确证退出，不能把停止请求当作退出事实。
+	waitForHostedPtyExitAfterStopRequest?(): Promise<void>;
 	hasExited(): boolean;
 	wasInterrupted(): boolean;
 	// 仅 hosted 句柄实现：把热重启接管记录推给 PTY host 保管（runtime 被 kill -9 后新 runtime 从 host 取回）。

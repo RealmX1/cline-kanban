@@ -4,6 +4,8 @@
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { queryCurrentRuntimeAgentSessionPtyHostDiagnostics } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
+import { agentSessionPtyHostDiagnosticsSchema } from "../core/agent-session-pty-host-diagnostics-contract";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
@@ -1872,6 +1874,9 @@ export const runtimeAppRouter = t.router({
 			.mutation(() => ({
 				kanbanWebUiPageLoadIssuedRequestOriginNonce: issueKanbanWebUiPageLoadRequestOriginNonce(),
 			})),
+		getAgentSessionPtyHostDiagnostics: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(agentSessionPtyHostDiagnosticsSchema)
+			.query(() => queryCurrentRuntimeAgentSessionPtyHostDiagnostics()),
 		getConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeConfigResponseSchema)
 			.query(async ({ ctx }) => {

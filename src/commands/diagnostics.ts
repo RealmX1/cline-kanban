@@ -1,3 +1,8 @@
+import { queryAgentSessionPtyHostDiagnosticsWithoutRuntime } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
+import type { AgentSessionPtyHostDiagnostics } from "../core/agent-session-pty-host-diagnostics-contract";
+import { getKanbanRuntimePort } from "../core/runtime-endpoint";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { createRuntimeTrpcClient } from "./task";
 // `kanban diagnostics …`：只读地汇总本机诊断 journal。直接读 ~/.cline/kanban/diagnostic-event-journals，
 // 不依赖运行时在线（运行时挂了、或者想事后复盘时同样可用）。
 
@@ -69,6 +74,26 @@ export function registerDiagnosticsCommand(program: Command): void {
 	const diagnostics = program
 		.command("diagnostics")
 		.description("Read Kanban's local diagnostic journals (read-only; works without the runtime running).");
+
+	diagnostics
+		.command("agent-session-pty-hosts")
+		.description("只读核对热接管偏好、host 就绪、会话归属与持久恢复进度；不抢占 controller。")
+		.option("--json", "输出机器可读 JSON。")
+		.action(async () => {
+			let report: AgentSessionPtyHostDiagnostics;
+			try {
+				report = await createRuntimeTrpcClient(null, {
+					requestTimeoutMs: 2_000,
+					retryWhileKanbanRuntimeRestarts: false,
+				}).runtime.getAgentSessionPtyHostDiagnostics.query();
+			} catch {
+				report = await queryAgentSessionPtyHostDiagnosticsWithoutRuntime({
+					runtimeHomeDirectoryPath: getRuntimeHomePath(),
+					runtimePort: getKanbanRuntimePort(),
+				});
+			}
+			process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+		});
 
 	diagnostics
 		.command("task-resource-usage-report")
