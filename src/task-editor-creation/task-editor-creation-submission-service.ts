@@ -145,6 +145,7 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 			(current.column && !["backlog", "in_progress"].includes(current.column.id))
 		)
 			throw new Error("任务已搁置、关闭或离开可启动阶段，等待恢复执行资格。");
+		if (closed) throw new Error("运行时正在关闭，创建后续步骤等待后继实例恢复。");
 		return current;
 	};
 	const recoveryFingerprint = async (record: TaskEditorCreationSubmissionRecord) => {
