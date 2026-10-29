@@ -38,12 +38,17 @@ export function SkipValidationConfirmDialog({
 			</AlertDialogBody>
 			<AlertDialogFooter>
 				<AlertDialogCancel asChild>
-					<Button variant="default" onClick={onCancel}>
-						Cancel
-					</Button>
+					<Button variant="default">Cancel</Button>
 				</AlertDialogCancel>
 				<AlertDialogAction asChild>
-					<Button variant="danger" onClick={onConfirm}>
+					<Button
+						variant="danger"
+						onClick={(event) => {
+							// 由调用方关闭；Radix 默认关闭会经 onOpenChange 误触取消并恢复结案表单。
+							event.preventDefault();
+							onConfirm();
+						}}
+					>
 						结案任务
 					</Button>
 				</AlertDialogAction>
