@@ -97,7 +97,12 @@ export const taskCommandExecutionRecordSchema = z.object({
 	cancellationObservation: z.record(z.string(), z.unknown()).nullable(),
 });
 export type TaskCommandExecutionRecord = z.infer<typeof taskCommandExecutionRecordSchema>;
-export const taskCommandExecutionResponseSchema = z.object({
+export interface TaskCommandExecutionResponse {
+	ok: true;
+	execution: TaskCommandExecutionRecord;
+}
+// 用具名输出类型限制大型 router 的声明展开，保留完整响应契约与运行时校验。
+export const taskCommandExecutionResponseSchema: z.ZodType<TaskCommandExecutionResponse> = z.object({
 	ok: z.literal(true),
 	execution: taskCommandExecutionRecordSchema,
 });

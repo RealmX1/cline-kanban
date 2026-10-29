@@ -312,6 +312,7 @@ describe("Codex 原生投递保留 composer", () => {
 			recordRequestNotInvoked: vi.fn(async () => {
 				requestMayHaveBeenSent = false;
 			}),
+			recordTerminalPtyWriteIntent: vi.fn(async () => {}),
 			recordRequestInvoked: vi.fn(async () => {}),
 			recordReturnedTurn: vi.fn(async () => {}),
 			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
@@ -338,6 +339,7 @@ describe("Codex 原生投递保留 composer", () => {
 			).status,
 		).toBe("confirmed");
 		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+		expect(journal.recordTerminalPtyWriteIntent).not.toHaveBeenCalled();
 	});
 
 	it("持久写入失败时不调用 turn/start", async () => {
