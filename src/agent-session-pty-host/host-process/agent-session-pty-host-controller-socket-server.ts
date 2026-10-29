@@ -1,5 +1,5 @@
 // host 进程的 Unix socket 服务端：握手、单 controller 槽、把控制消息路由到会话注册表、把输出推给 controller，
-// 以及 host 自身的生命周期（空闲自退、排空后退休、显式全停）。
+// 以及 host 自身的生命周期（空闲自退、排空后退休、显式全停、runtime 不在时的孤儿回收）。
 // 另一种连接是 hosted 会话里的 CLI（hooks CLI 等）：一问一答、不占 controller 槽（见 wire-protocol）。
 //
 // 本文件属于 host 进程的依赖闭包：只允许 import `node:*`、wire-protocol 与同目录模块。
@@ -7,7 +7,9 @@
 import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
+import { omitPlannedHandoverTerminalMirrorCheckpointFromAdoptionRecord } from "../wire-protocol/agent-session-pty-host-control-message-checkpoint-payload-budget";
 import {
+	AGENT_SESSION_PTY_HOST_WIRE_FRAME_MAXIMUM_PAYLOAD_BYTE_LENGTH,
 	AgentSessionPtyHostWireFrameDecoder,
 	encodeHostedSessionOutputBytesFrame,
 	encodeJsonControlMessageFrame,
@@ -16,6 +18,7 @@ import {
 	AGENT_SESSION_PTY_HOST_WIRE_PROTOCOL_VERSION,
 	type AgentSessionPtyHostHostToControllerMessage,
 	type AgentSessionPtyHostHostToHostedSessionCliClientMessage,
+	type ListHostedSessionsResponseMessage,
 	readWireControlMessageType,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 import {
@@ -24,6 +27,8 @@ import {
 } from "./agent-session-pty-host-hosted-session-registry";
 
 const CONTROLLER_HELLO_DEADLINE_MS = 5_000;
+// setTimeout 的上限约 24.8 天；更远的回收期限先睡到这个上限再重新判定。
+const MAXIMUM_ORPHAN_RECLAMATION_TIMER_DELAY_MS = 2 ** 31 - 1;
 // 显式全停：SIGKILL 升级在 5s，再留 2s 等退出事件送达，然后无论如何退出。
 const TERMINATE_ALL_HOSTED_SESSIONS_FORCED_HOST_EXIT_DEADLINE_MS = 7_000;
 
@@ -42,7 +47,11 @@ export interface AgentSessionPtyHostControllerSocketServerOptions {
 	outputRingBufferCapacityBytes?: number;
 }
 
-type HostLifecycleState = "serving" | "retiring_when_drained" | "terminating_all_hosted_sessions";
+type HostLifecycleState =
+	| "serving"
+	| "retiring_when_drained"
+	| "offline_termination_reserved_awaiting_acknowledgement_flush"
+	| "terminating_all_hosted_sessions";
 
 type AcceptedConnectionRole = "awaiting_hello" | "controller" | "hosted_session_cli_client";
 
@@ -80,6 +89,8 @@ export class AgentSessionPtyHostControllerSocketServer {
 	private hostLifecycleState: HostLifecycleState = "serving";
 	private idleExitTimer: NodeJS.Timeout | null = null;
 	private idleExitTimerDelayMilliseconds: number | null = null;
+	private orphanReclamationTimer: NodeJS.Timeout | null = null;
+	private orphanReclamationTimerTargetEpochMs: number | null = null;
 	private hostExitRequested = false;
 	// 没有 controller 时：自哪一刻起没有（上一个 controller 断开的时刻；从未有过时为 host 启动时刻）。
 	private controllerAbsentSinceEpochMs: number;
@@ -146,6 +157,10 @@ export class AgentSessionPtyHostControllerSocketServer {
 	}
 
 	close(): void {
+		if (this.orphanReclamationTimer !== null) {
+			clearTimeout(this.orphanReclamationTimer);
+			this.orphanReclamationTimer = null;
+		}
 		this.server.close();
 		this.currentControllerSocket?.destroy();
 	}
@@ -292,7 +307,10 @@ export class AgentSessionPtyHostControllerSocketServer {
 			);
 			return false;
 		}
-		if (this.hostLifecycleState === "terminating_all_hosted_sessions") {
+		if (
+			this.hostLifecycleState === "terminating_all_hosted_sessions" ||
+			this.hostLifecycleState === "offline_termination_reserved_awaiting_acknowledgement_flush"
+		) {
 			socket.end(
 				encodeJsonControlMessageFrame({
 					type: "controller_rejected",
@@ -418,20 +436,35 @@ export class AgentSessionPtyHostControllerSocketServer {
 				return;
 			}
 			case "list_hosted_sessions_request": {
-				this.sendMessageToCurrentController({
+				const response: ListHostedSessionsResponseMessage = {
 					type: "list_hosted_sessions_response",
 					requestId: readStringField(message, "requestId") ?? "",
-					hostedSessions: this.hostedSessionRegistry.listHostedSessions(),
-				});
+					hostedSessions: this.hostedSessionRegistry.listHostedSessions().map((listing) => ({ ...listing })),
+				};
+				// 单条合法不代表总帧合法。只删响应副本中的 checkpoint，host 原件留给之后的接管。
+				let responsePayloadByteLength = Buffer.byteLength(JSON.stringify(response), "utf8");
+				for (const listing of response.hostedSessions) {
+					if (responsePayloadByteLength <= AGENT_SESSION_PTY_HOST_WIRE_FRAME_MAXIMUM_PAYLOAD_BYTE_LENGTH) break;
+					const previousRecordByteLength = Buffer.byteLength(JSON.stringify(listing.adoptionRecord), "utf8");
+					listing.adoptionRecord = omitPlannedHandoverTerminalMirrorCheckpointFromAdoptionRecord(
+						listing.adoptionRecord,
+					);
+					responsePayloadByteLength -=
+						previousRecordByteLength - Buffer.byteLength(JSON.stringify(listing.adoptionRecord), "utf8");
+				}
+				this.sendMessageToCurrentController(response);
 				return;
 			}
 			case "put_hosted_session_adoption_record": {
 				const hostedSessionKey = readStringField(message, "hostedSessionKey");
 				if (hostedSessionKey !== null) {
+					// 缺省（旧 runtime）与 null 一样：不回收。
 					this.hostedSessionRegistry.putHostedSessionAdoptionRecord(
 						hostedSessionKey,
 						(message as Record<string, unknown>).adoptionRecord ?? null,
+						readFiniteNumberField(message, "hostedSessionOrphanReclamationEligibleAtEpochMs"),
 					);
+					this.evaluateHostLifecycle();
 				}
 				return;
 			}
@@ -515,7 +548,8 @@ export class AgentSessionPtyHostControllerSocketServer {
 			case "append_hook_event_to_hosted_session_spool_request": {
 				const hostedSessionKey = readStringField(message, "hostedSessionKey") ?? "";
 				const outcome =
-					this.hostLifecycleState === "terminating_all_hosted_sessions"
+					this.hostLifecycleState === "terminating_all_hosted_sessions" ||
+					this.hostLifecycleState === "offline_termination_reserved_awaiting_acknowledgement_flush"
 						? ({ kind: "spool_rejected", reason: "host_is_terminating" } as const)
 						: this.hostedSessionRegistry.appendHookEventToHostedSessionSpool(
 								hostedSessionKey,
@@ -524,6 +558,38 @@ export class AgentSessionPtyHostControllerSocketServer {
 							);
 				this.options.appendHostLogEntry({ event: "hook_event_spooled", hostedSessionKey, outcome });
 				respond({ type: "append_hook_event_to_hosted_session_spool_response", requestId, outcome });
+				return;
+			}
+			case "terminate_all_hosted_sessions_if_no_controller_request": {
+				if (this.currentControllerSocket !== null) {
+					respond({
+						type: "terminate_all_hosted_sessions_if_no_controller_response",
+						requestId,
+						outcome: { kind: "refused_because_controller_connected" },
+					});
+					return;
+				}
+				if (this.hostLifecycleState === "terminating_all_hosted_sessions") {
+					respond({
+						type: "terminate_all_hosted_sessions_if_no_controller_response",
+						requestId,
+						outcome: { kind: "termination_requested" },
+					});
+					return;
+				}
+				// 检查与预留在同一事件循环内完成；确认写入内核之前也拒绝新 controller。
+				this.hostLifecycleState = "offline_termination_reserved_awaiting_acknowledgement_flush";
+				this.evaluateHostLifecycle();
+				const response: AgentSessionPtyHostHostToHostedSessionCliClientMessage = {
+					type: "terminate_all_hosted_sessions_if_no_controller_response",
+					requestId,
+					outcome: { kind: "termination_requested" },
+				};
+				if (socket.destroyed) {
+					this.terminateAllHostedSessionsAndExit();
+				} else {
+					socket.write(encodeJsonControlMessageFrame(response), () => this.terminateAllHostedSessionsAndExit());
+				}
 				return;
 			}
 			case "query_controller_presence_request": {
@@ -563,14 +629,22 @@ export class AgentSessionPtyHostControllerSocketServer {
 		if (this.hostExitRequested) {
 			return;
 		}
+		this.rescheduleOrphanReclamationTimer();
+		const processGroupsAwaitingSigkillEscalation =
+			this.hostedSessionRegistry.hasHostedSessionProcessGroupsAwaitingSigkillEscalation();
 		if (
 			this.hostLifecycleState === "terminating_all_hosted_sessions" &&
+			!processGroupsAwaitingSigkillEscalation &&
 			!this.hostedSessionRegistry.hasRunningHostedSessions()
 		) {
 			this.requestHostExit("all_hosted_sessions_terminated");
 			return;
 		}
-		if (this.hostLifecycleState === "retiring_when_drained" && this.hostedSessionRegistry.hostedSessionCount === 0) {
+		if (
+			this.hostLifecycleState === "retiring_when_drained" &&
+			!processGroupsAwaitingSigkillEscalation &&
+			this.hostedSessionRegistry.hostedSessionCount === 0
+		) {
 			this.requestHostExit("retired_after_draining_all_hosted_sessions");
 			return;
 		}
@@ -590,11 +664,62 @@ export class AgentSessionPtyHostControllerSocketServer {
 		}
 	}
 
+	// 孤儿回收只在没有 controller 时生效：runtime 在线时回收由它自己的调度器按同一份期限做，host 不插手。
+	// 定时器按最早的期限排；到点后回收所有已到期的会话，再按剩下的期限重排。
+	private rescheduleOrphanReclamationTimer(): void {
+		const earliestEligibleAtEpochMs =
+			this.currentControllerSocket === null &&
+			(this.hostLifecycleState === "serving" || this.hostLifecycleState === "retiring_when_drained")
+				? this.hostedSessionRegistry.resolveEarliestOrphanReclamationEligibleAtAmongRunningHostedSessions()
+				: null;
+		if (earliestEligibleAtEpochMs === this.orphanReclamationTimerTargetEpochMs) {
+			return;
+		}
+		if (this.orphanReclamationTimer !== null) {
+			clearTimeout(this.orphanReclamationTimer);
+			this.orphanReclamationTimer = null;
+		}
+		this.orphanReclamationTimerTargetEpochMs = earliestEligibleAtEpochMs;
+		if (earliestEligibleAtEpochMs === null) {
+			return;
+		}
+		const delayMilliseconds = Math.min(
+			Math.max(0, earliestEligibleAtEpochMs - this.readNowEpochMs()),
+			MAXIMUM_ORPHAN_RECLAMATION_TIMER_DELAY_MS,
+		);
+		this.orphanReclamationTimer = setTimeout(() => {
+			this.orphanReclamationTimer = null;
+			this.orphanReclamationTimerTargetEpochMs = null;
+			this.reclaimOrphanedHostedSessionsWhoseReclamationDeadlinePassed();
+		}, delayMilliseconds);
+	}
+
+	private reclaimOrphanedHostedSessionsWhoseReclamationDeadlinePassed(): void {
+		if (this.hostExitRequested || this.currentControllerSocket !== null) {
+			return;
+		}
+		const reclaimedHostedSessions =
+			this.hostedSessionRegistry.reclaimOrphanedHostedSessionsWhoseReclamationDeadlinePassed(this.readNowEpochMs());
+		if (reclaimedHostedSessions.length > 0) {
+			this.options.appendHostLogEntry({
+				event: "hosted_sessions_reclaimed_while_runtime_absent",
+				controllerAbsentSinceEpochMs: this.controllerAbsentSinceEpochMs,
+				reclaimedHostedSessions,
+			});
+		}
+		this.evaluateHostLifecycle();
+	}
+
 	// null：不该空闲退出（有 controller 或有运行中的会话）。
 	// 「退出已确认、等 spool 排空」的会话与未确认的退出记录同等对待：计入 hostedSessionCount（退休要等它们排空），
 	// 没有 controller 时按保留期限等新 runtime 来取。
 	private resolveIdleExitDelayMilliseconds(): number | null {
-		if (this.currentControllerSocket !== null || this.hostedSessionRegistry.hasRunningHostedSessions()) {
+		if (
+			this.currentControllerSocket !== null ||
+			this.hostLifecycleState === "offline_termination_reserved_awaiting_acknowledgement_flush" ||
+			this.hostedSessionRegistry.hasHostedSessionProcessGroupsAwaitingSigkillEscalation() ||
+			this.hostedSessionRegistry.hasRunningHostedSessions()
+		) {
 			return null;
 		}
 		return this.hostedSessionRegistry.hostedSessionCount === 0
@@ -607,6 +732,10 @@ export class AgentSessionPtyHostControllerSocketServer {
 			return;
 		}
 		this.hostExitRequested = true;
+		if (this.orphanReclamationTimer !== null) {
+			clearTimeout(this.orphanReclamationTimer);
+			this.orphanReclamationTimer = null;
+		}
 		this.options.appendHostLogEntry({ event: "host_exiting", reason });
 		// libuv 关闭 Unix socket 监听时会自行删除 socket 文件；这里不再手动 unlink，
 		// 免得删掉一个新 host 刚在同一路径上绑好的 socket。

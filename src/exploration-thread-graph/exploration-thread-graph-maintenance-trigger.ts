@@ -97,6 +97,9 @@ export interface ExplorationThreadGraphMaintenanceTrigger {
 	}): Promise<ExplorationThreadGraphMaintenanceOutcome>;
 	// 运行时关停：取消全部待触发的防抖窗口（在途作业不打断，它自己会结束）。
 	dispose(): void;
+	// 在途（已过单飞闸、正在 fork 跑）的维护作业数。runtime 退出会中止它们（下次 Stop 边沿重新 fork，白花一次），
+	// handover 前据此提示。
+	countInFlightMaintenanceJobs(): number;
 }
 
 // 账本键：workspace + exploration 联合，绝不只用 explorationId（board-local 短 id 跨 project 撞号）。
@@ -281,5 +284,7 @@ export function createExplorationThreadGraphMaintenanceTrigger(
 			}
 			pendingDebounceByExplorationKey.clear();
 		},
+
+		countInFlightMaintenanceJobs: () => inFlightExplorationKeys.size,
 	};
 }

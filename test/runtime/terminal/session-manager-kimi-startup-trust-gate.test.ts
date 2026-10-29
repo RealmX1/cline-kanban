@@ -173,6 +173,9 @@ describe("Kimi 首发正文等待工作区信任", () => {
 				cols: 80,
 				rows: 24,
 				exitedWhileRuntimeWasAbsent: false,
+				reclaimedByHostWhileRuntimeWasAbsent: false,
+				retainedOutputStartByteOffset: 0,
+				outputEndByteOffset: Buffer.byteLength(trustPromptWithUnderlyingComposer),
 				terminalSessionAdoptionRecord: session.readAdoptionRecord(),
 				async adoptHostedTerminalPtyProcess(callbacks) {
 					emitLiveOutput = callbacks.onData;

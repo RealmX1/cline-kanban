@@ -1,10 +1,13 @@
+import type { HostedAgentSessionDispositionForRuntimeShutdown } from "../core/runtime-shutdown-trigger";
 import { listWorkspaceIndexEntries } from "../state/workspace-state";
 import { removeTaskWorktreeSetupLock } from "../workspace/task-worktree";
 import type { ActiveRuntimeSessionShutdownResult } from "./active-runtime-session-shutdown";
 import { persistSafelyStoppedRuntimeSessionsByWorkspaceId } from "./safely-stopped-runtime-session-persistence";
 
 export interface RuntimeShutdownCoordinatorDependencies {
-	stopAllActiveRuntimeSessionsForShutdown: () => Promise<
+	stopAllActiveRuntimeSessionsForShutdown: (
+		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown,
+	) => Promise<
 		Array<
 			ActiveRuntimeSessionShutdownResult & {
 				workspaceId: string;
@@ -12,8 +15,15 @@ export interface RuntimeShutdownCoordinatorDependencies {
 			}
 		>
 	>;
+	// 缺省终止（旧语义）。runtime 退出时由触发决定（见 src/core/runtime-shutdown-trigger.ts）。
+	hostedAgentSessionDisposition?: HostedAgentSessionDispositionForRuntimeShutdown;
 	warn: (message: string) => void;
 	closeRuntimeServer: () => Promise<void>;
+}
+
+export interface RuntimeShutdownOutcome {
+	// 留在 agent session PTY host 里、等下一个 runtime 接管的会话数（停止时据此提示「还有 N 个会话在跑」）。
+	detachedHostedAgentSessionCount: number;
 }
 
 async function cleanupTaskWorktreeSetupLocks(
@@ -32,14 +42,21 @@ async function cleanupTaskWorktreeSetupLocks(
 	);
 }
 
-export async function shutdownRuntimeServer(deps: RuntimeShutdownCoordinatorDependencies): Promise<void> {
+export async function shutdownRuntimeServer(
+	deps: RuntimeShutdownCoordinatorDependencies,
+): Promise<RuntimeShutdownOutcome> {
 	const managedWorkspacePaths = new Set<string>();
-	const runtimeSessionShutdownResults = await deps.stopAllActiveRuntimeSessionsForShutdown();
+	let detachedHostedAgentSessionCount = 0;
+	const runtimeSessionShutdownResults = await deps.stopAllActiveRuntimeSessionsForShutdown(
+		deps.hostedAgentSessionDisposition ?? "terminate_hosted_agent_sessions",
+	);
 	for (const {
 		workspaceId,
 		workspacePath,
 		runtimeSessionSummariesForSafePersistence,
+		detachedHostedAgentSessionSummaries,
 	} of runtimeSessionShutdownResults) {
+		detachedHostedAgentSessionCount += detachedHostedAgentSessionSummaries?.length ?? 0;
 		if (workspacePath) {
 			managedWorkspacePaths.add(workspacePath);
 		}
@@ -58,4 +75,5 @@ export async function shutdownRuntimeServer(deps: RuntimeShutdownCoordinatorDepe
 		[...managedWorkspacePaths, ...indexedWorkspaces.map((workspace) => workspace.repoPath)],
 		deps.warn,
 	);
+	return { detachedHostedAgentSessionCount };
 }

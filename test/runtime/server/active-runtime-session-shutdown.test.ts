@@ -75,6 +75,9 @@ describe("active runtime session shutdown", () => {
 			terminalManager: {
 				listSummaries: () => [terminalRunning],
 				markInterruptedAndStopAll: () => [terminalRunning],
+				detachHostedPtySessionsForRuntimeHandover: async () => {
+					throw new Error("detach must not be used without the detach disposition");
+				},
 			},
 			clineTaskSessionService: {
 				listSummaries: () => [clineRunning, clineIdle],
@@ -93,6 +96,50 @@ describe("active runtime session shutdown", () => {
 			"cline-running",
 			"terminal-running",
 		]);
+	});
+
+	it("detaches hosted terminal sessions instead of stopping them when the runtime exits for a successor, while still stopping ACP sessions", async () => {
+		const terminalHosted = createSummary("terminal-hosted", "running", "codex");
+		const terminalInProcess = createSummary("terminal-in-process", "running", "codex");
+		const acpRunning = createSummary("acp-running", "running", "omp");
+		const markInterruptedAndStopAll = vi.fn(() => [terminalHosted, terminalInProcess]);
+		const detachHostedPtySessionsForRuntimeHandover = vi.fn(
+			async (input: {
+				readHostedSessionOrphanReclamationEligibleAtEpochMs: (summary: typeof terminalHosted) => number | null;
+			}) => {
+				expect(input.readHostedSessionOrphanReclamationEligibleAtEpochMs(terminalHosted)).toBe(1_900_000_000_000);
+				return {
+					detachedHostedSessionSummaries: [terminalHosted],
+					interruptedInProcessSessionSummaries: [terminalInProcess],
+				};
+			},
+		);
+		const stopTaskSession = vi.fn(async () => ({ ...acpRunning, state: "interrupted" as const }));
+
+		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+			terminalManager: {
+				listSummaries: () => [terminalHosted, terminalInProcess],
+				markInterruptedAndStopAll,
+				detachHostedPtySessionsForRuntimeHandover,
+			},
+			clineTaskSessionService: null,
+			acpTaskSessionService: { listSummaries: () => [acpRunning], stopTaskSession },
+			hostedAgentSessionDisposition: "detach_hosted_agent_sessions_for_successor_runtime",
+			readHostedSessionOrphanReclamationEligibleAtEpochMs: () => 1_900_000_000_000,
+		});
+
+		expect(markInterruptedAndStopAll).not.toHaveBeenCalled();
+		expect(detachHostedPtySessionsForRuntimeHandover).toHaveBeenCalledTimes(1);
+		expect(stopTaskSession).toHaveBeenCalledWith("acp-running");
+		expect(result.detachedHostedAgentSessionSummaries?.map((summary) => summary.taskId)).toEqual(["terminal-hosted"]);
+		expect(result.stoppedRuntimeSessionSummaries.map((summary) => summary.taskId).sort()).toEqual([
+			"acp-running",
+			"terminal-in-process",
+		]);
+		// 留给下一个 runtime 的会话照样按原样持久化（仍是活着的）。
+		expect(result.runtimeSessionSummariesForSafePersistence.map((summary) => summary.taskId)).toContain(
+			"terminal-hosted",
+		);
 	});
 
 	it("stops live ACP agent subprocesses alongside terminal and Cline sessions", async () => {

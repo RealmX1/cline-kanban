@@ -6,6 +6,10 @@ import { WebSocketServer } from "ws";
 
 import type { RuntimeTerminalWsServerMessage } from "../core/api-contract";
 import { parseTerminalWsClientMessage } from "../core/api-validation";
+import {
+	WEBSOCKET_CLOSE_CODE_SERVICE_RESTART,
+	WEBSOCKET_CLOSE_REASON_KANBAN_RUNTIME_HANDOVER_RESTART,
+} from "../core/kanban-runtime-handover-restart-websocket-close";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { handleSocketUpgrade } from "../server/middleware";
@@ -38,6 +42,8 @@ export interface CreateTerminalWebSocketBridgeRequest {
 }
 
 export interface TerminalWebSocketBridge {
+	// 计划内 handover：以 1012（Service Restart）关闭全部终端连接，浏览器据此提示「正在热重启」并立即开始重连。
+	closeBrowserConnectionsBecauseRuntimeIsRestarting: () => void;
 	close: () => Promise<void>;
 }
 
@@ -807,6 +813,18 @@ export function createTerminalWebSocketBridge({
 	});
 
 	return {
+		closeBrowserConnectionsBecauseRuntimeIsRestarting: () => {
+			for (const client of [...ioServer.clients, ...controlServer.clients]) {
+				try {
+					client.close(
+						WEBSOCKET_CLOSE_CODE_SERVICE_RESTART,
+						WEBSOCKET_CLOSE_REASON_KANBAN_RUNTIME_HANDOVER_RESTART,
+					);
+				} catch {
+					// 连接已在断开中。
+				}
+			}
+		},
 		close: async () => {
 			for (const client of ioServer.clients) {
 				try {

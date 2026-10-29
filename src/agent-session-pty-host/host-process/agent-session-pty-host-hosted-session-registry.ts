@@ -8,6 +8,8 @@
 // - hook spool 跟着会话走，但不随退出确认静默丢弃：确认退出时 spool 若非空，会话留在注册表里
 //   （标记「退出已确认、等 spool 排空」），spool 被确认清空后才移除。只有 controller 显式要求
 //  （拒绝接管、已下令终止的会话）才连同非空 spool 一起移除。
+// - host 自己只在一种情况下终止会话：孤儿回收（没有 controller、且过了 runtime 推来的回收期限）。
+//   新 hook 到达即作废旧期限，待 runtime 排空核对后重新发布；退出记录带上原因，新 runtime 据此补记回收账本。
 //
 // 本文件属于 host 进程的依赖闭包：只允许 import `node:*`、wire-protocol 与终止信号策略。
 
@@ -16,6 +18,7 @@ import type {
 	AgentSessionPtyHostHostedSessionDescriptor,
 	AgentSessionPtyHostHostedSessionExitRecord,
 	AgentSessionPtyHostHostedSessionListing,
+	AgentSessionPtyHostHostedSessionTerminatedByHostReason,
 	AppendHookEventToHostedSessionSpoolOutcome,
 	AttachHostedSessionOutputStreamOutcome,
 	HostedSessionHookSpoolEntry,
@@ -68,6 +71,10 @@ interface HostedSessionInsideHost {
 	nextHookSpoolEntrySequenceNumber: number;
 	// controller 已确认退出，但 spool 里还有未确认的条目：会话留到 spool 被确认清空再移除。
 	exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged: boolean;
+	// 没有 controller 时按它回收（null = 不回收）。新 hook 作废旧值，排空后才允许 runtime 重新发布。
+	orphanReclamationEligibleAtEpochMs: number | null;
+	// host 自己发起了终止（孤儿回收）：随后的退出记录带上这个原因，新 runtime 据此补记回收账本。
+	terminatedByHostReason: AgentSessionPtyHostHostedSessionTerminatedByHostReason | null;
 }
 
 export type AcknowledgeHostedSessionExitOutcome =
@@ -114,6 +121,8 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 	private readonly hostedSessionsByChannelNumber = new Map<number, HostedSessionInsideHost>();
 	private nextHostedSessionChannelNumber = 1;
 	private socketBackpressureActive = false;
+	// 根退出与退出确认不代表后代已退出；升级窗口独立于会话记录保留，防止 host 提前退出丢掉 SIGKILL。
+	private readonly hostedSessionKeysAwaitingProcessGroupSigkillEscalation = new Set<string>();
 
 	constructor(
 		private readonly spawnHostedPtyProcess: SpawnHostedPtyProcess,
@@ -170,6 +179,8 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 			hookSpoolEntries: [],
 			nextHookSpoolEntrySequenceNumber: 1,
 			exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged: false,
+			orphanReclamationEligibleAtEpochMs: null,
+			terminatedByHostReason: null,
 		};
 		this.nextHostedSessionChannelNumber += 1;
 		this.hostedSessionsByKey.set(hostedSession.hostedSessionKey, hostedSession);
@@ -190,6 +201,9 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 				exitCode: event.exitCode,
 				signal: event.signal ?? null,
 				exitedAtEpochMs: this.readNowEpochMs(),
+				...(hostedSession.terminatedByHostReason !== null
+					? { hostedSessionTerminatedByHostReason: hostedSession.terminatedByHostReason }
+					: {}),
 			};
 			hostedSession.exitRecord = exitRecord;
 			this.callbacks.onHostedSessionExited(hostedSession.hostedSessionKey, exitRecord);
@@ -240,11 +254,68 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 		}
 	}
 
-	putHostedSessionAdoptionRecord(hostedSessionKey: string, adoptionRecord: unknown): void {
+	putHostedSessionAdoptionRecord(
+		hostedSessionKey: string,
+		adoptionRecord: unknown,
+		orphanReclamationEligibleAtEpochMs: number | null,
+	): void {
 		const hostedSession = this.hostedSessionsByKey.get(hostedSessionKey);
 		if (hostedSession) {
 			hostedSession.adoptionRecord = adoptionRecord;
+			// 尚未核对的 hook 可能改变回合/执行状态，迟到的记录不能重新授权离线回收。
+			hostedSession.orphanReclamationEligibleAtEpochMs =
+				hostedSession.hookSpoolEntries.length === 0 ? orphanReclamationEligibleAtEpochMs : null;
 		}
+	}
+
+	// 仍在运行、带回收期限的会话里最早的那个期限；没有则 null。
+	resolveEarliestOrphanReclamationEligibleAtAmongRunningHostedSessions(): number | null {
+		let earliestEligibleAtEpochMs: number | null = null;
+		for (const hostedSession of this.hostedSessionsByKey.values()) {
+			const eligibleAtEpochMs = hostedSession.orphanReclamationEligibleAtEpochMs;
+			if (
+				hostedSession.exitRecord !== null ||
+				hostedSession.terminatedByHostReason !== null ||
+				eligibleAtEpochMs === null
+			) {
+				continue;
+			}
+			if (earliestEligibleAtEpochMs === null || eligibleAtEpochMs < earliestEligibleAtEpochMs) {
+				earliestEligibleAtEpochMs = eligibleAtEpochMs;
+			}
+		}
+		return earliestEligibleAtEpochMs;
+	}
+
+	// 孤儿回收：调用方保证此刻没有 controller。终止期限已到、仍在运行的会话（进程组 SIGTERM，5s 后升级 SIGKILL），
+	// 退出记录随后带 reclaimed_by_host_while_runtime_absent。返回本次被回收的会话。
+	reclaimOrphanedHostedSessionsWhoseReclamationDeadlinePassed(
+		nowEpochMs: number,
+	): Array<{ hostedSessionKey: string; pid: number; orphanReclamationEligibleAtEpochMs: number }> {
+		const reclaimedHostedSessions: Array<{
+			hostedSessionKey: string;
+			pid: number;
+			orphanReclamationEligibleAtEpochMs: number;
+		}> = [];
+		for (const hostedSession of this.hostedSessionsByKey.values()) {
+			const eligibleAtEpochMs = hostedSession.orphanReclamationEligibleAtEpochMs;
+			if (
+				hostedSession.exitRecord !== null ||
+				hostedSession.terminatedByHostReason !== null ||
+				eligibleAtEpochMs === null ||
+				nowEpochMs < eligibleAtEpochMs
+			) {
+				continue;
+			}
+			hostedSession.terminatedByHostReason = "reclaimed_by_host_while_runtime_absent";
+			this.terminateRunningHostedSessionWithSigkillEscalation(hostedSession);
+			reclaimedHostedSessions.push({
+				hostedSessionKey: hostedSession.hostedSessionKey,
+				pid: hostedSession.pid,
+				orphanReclamationEligibleAtEpochMs: eligibleAtEpochMs,
+			});
+		}
+		return reclaimedHostedSessions;
 	}
 
 	// hooks CLI 在 runtime 不可达时存进来的一条 hook 事件。会话已退出、退出尚未确认（或已确认但 spool 还没排空）时照收：
@@ -258,6 +329,9 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 		if (!hostedSession) {
 			return { kind: "spool_rejected", reason: "unknown_hosted_session" };
 		}
+		// host 不解释 hook 状态；新证据让旧期限失效，调度与实际终止都读这个 null。
+		// 即使 spool 已满，也不能用收到了但无法保留的新状态继续授权终止。
+		hostedSession.orphanReclamationEligibleAtEpochMs = null;
 		const lastHookSpoolEntry = hostedSession.hookSpoolEntries.at(-1);
 		if (
 			coalescibleWithAdjacentCoalescibleHookSpoolEntry &&
@@ -386,7 +460,13 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 		if (!hostedSession || hostedSession.exitRecord !== null) {
 			return;
 		}
-		terminatePtyProcessGroup(hostedSession.ptyProcess, { force });
+		if (force) {
+			terminatePtyProcessGroup(hostedSession.ptyProcess, { force: true });
+		} else {
+			// 在线全停会先逐条 stop，再发 terminate-all；根可能在两条消息之间退出并被确认。
+			// 从首次软停止起就持有进程组升级，不能等第二条消息才登记。
+			this.terminateRunningHostedSessionWithSigkillEscalation(hostedSession);
+		}
 	}
 
 	// 终止全部仍在运行的会话：进程组 SIGTERM，5s 后仍未退出就升级 SIGKILL。返回被终止的会话数。
@@ -397,15 +477,30 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 				continue;
 			}
 			terminatedHostedSessionCount += 1;
-			// 暂停中的 PTY 读不到退出前的输出，也可能拖住退出事件；终止前先恢复读取。
-			hostedSession.controllerRequestedOutputPause = false;
-			this.applyEffectivePtyReadingPause(hostedSession);
-			terminatePtyProcessGroup(hostedSession.ptyProcess, {
-				escalateToSigkillAfterMs: SIGKILL_ESCALATION_DELAY_AFTER_HOSTED_SESSION_TERMINATION_MS,
-				hasProcessExited: () => hostedSession.exitRecord !== null,
-			});
+			this.terminateRunningHostedSessionWithSigkillEscalation(hostedSession);
 		}
 		return terminatedHostedSessionCount;
+	}
+
+	hasHostedSessionProcessGroupsAwaitingSigkillEscalation(): boolean {
+		return this.hostedSessionKeysAwaitingProcessGroupSigkillEscalation.size > 0;
+	}
+
+	private terminateRunningHostedSessionWithSigkillEscalation(hostedSession: HostedSessionInsideHost): void {
+		if (this.hostedSessionKeysAwaitingProcessGroupSigkillEscalation.has(hostedSession.hostedSessionKey)) return;
+		this.hostedSessionKeysAwaitingProcessGroupSigkillEscalation.add(hostedSession.hostedSessionKey);
+		// 暂停中的 PTY 读不到退出前的输出，也可能拖住退出事件；终止前先恢复读取。
+		hostedSession.controllerRequestedOutputPause = false;
+		this.applyEffectivePtyReadingPause(hostedSession);
+		terminatePtyProcessGroup(hostedSession.ptyProcess, {
+			escalateToSigkillAfterMs: SIGKILL_ESCALATION_DELAY_AFTER_HOSTED_SESSION_TERMINATION_MS,
+			hasProcessExited: () => hostedSession.exitRecord !== null,
+			escalateProcessGroupEvenAfterRootProcessExited: true,
+			onSigkillEscalationAttemptCompleted: () => {
+				this.hostedSessionKeysAwaitingProcessGroupSigkillEscalation.delete(hostedSession.hostedSessionKey);
+				this.callbacks.onHostedSessionSetChanged();
+			},
+		});
 	}
 
 	// spool 为空（或 controller 要求一并丢弃）时移除会话；否则保留到 spool 被确认清空，并推一次「有待取条目」，
@@ -454,6 +549,7 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 			...(hostedSession.exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged
 				? { exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged: true }
 				: {}),
+			hostedSessionOrphanReclamationEligibleAtEpochMs: hostedSession.orphanReclamationEligibleAtEpochMs,
 		}));
 	}
 

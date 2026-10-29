@@ -54,6 +54,23 @@ describe.skipIf(process.platform === "win32")("terminatePtyProcessGroup", () => 
 		]);
 	});
 
+	it("根已退出时只升级进程组，不向可能复用的根 PID 发 SIGKILL，并通知升级结束", () => {
+		const target = createFakePtyProcessTerminationTarget();
+		const onSigkillEscalationAttemptCompleted = vi.fn();
+		terminatePtyProcessGroup(target, {
+			escalateToSigkillAfterMs: 5_000,
+			hasProcessExited: () => true,
+			escalateProcessGroupEvenAfterRootProcessExited: true,
+			onSigkillEscalationAttemptCompleted,
+		});
+
+		vi.advanceTimersByTime(5_000);
+
+		expect(target.kill.mock.calls).toEqual([[]]);
+		expect(processKillSpy).toHaveBeenCalledWith(-FAKE_PTY_PROCESS_GROUP_LEADER_PID, "SIGKILL");
+		expect(onSigkillEscalationAttemptCompleted).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not escalate when the process has already exited or the escalation was cancelled", () => {
 		const exitedTarget = createFakePtyProcessTerminationTarget();
 		terminatePtyProcessGroup(exitedTarget, { escalateToSigkillAfterMs: 5_000, hasProcessExited: () => true });

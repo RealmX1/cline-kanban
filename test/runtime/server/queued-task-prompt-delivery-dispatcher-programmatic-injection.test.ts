@@ -28,6 +28,7 @@ import {
 } from "../../../src/core/task-message-injection-ledger";
 import { type LockRequest, lockedFileSystem } from "../../../src/fs/locked-file-system";
 import type { QueuedTaskPromptDeliveryDispatcherDependencies } from "../../../src/server/queued-task-prompt-delivery-dispatcher";
+import * as queuedTaskPromptDeliveryStore from "../../../src/state/queued-task-prompt-delivery-store";
 import type {
 	TaskChatInputDeliveryOutcomeObserver,
 	TerminalSessionManager,
@@ -157,7 +158,9 @@ function generatingSummary(turnSequence: number): RuntimeTaskSessionSummary {
 	});
 }
 
-type SendBehavior = (request: RuntimeTaskChatSendRequest) => RuntimeTaskChatSendResponse;
+type SendBehavior = (
+	request: RuntimeTaskChatSendRequest,
+) => RuntimeTaskChatSendResponse | Promise<RuntimeTaskChatSendResponse>;
 
 const deliveredImmediately: SendBehavior = () => ({
 	ok: true,
@@ -230,6 +233,9 @@ function createHarness(
 		readNativeConversationTurns?: () => Promise<CodexNativeConversationTurn[]>;
 		validateDuringSend?: boolean;
 		runtimeProcessInstanceCustody?: QueuedTaskPromptDeliveryDispatcherDependencies["runtimeProcessInstanceCustody"];
+		onProjectedQueueChanged?: Parameters<
+			typeof createQueuedTaskPromptDeliveryDispatcher
+		>[0]["onProjectedQueueChanged"];
 	} = {},
 ) {
 	testRuntimeHome.runtimeProcessInstanceId =
@@ -294,7 +300,7 @@ function createHarness(
 		},
 		cancelProgrammaticTerminalDelivery: async () => "cancelled_before_delivery",
 		readPromptLibraryEntryTextSha256ByEntryId: async () => new Map(),
-		onProjectedQueueChanged: () => {},
+		onProjectedQueueChanged: options.onProjectedQueueChanged ?? (() => {}),
 		createDispatchIdempotencyKey: () => "kanban-generated-key",
 		fallbackSweepIntervalMs: 60_000,
 		programmaticTerminalDeliveryOutcomeWaitBudgetMs: options.programmaticTerminalDeliveryOutcomeWaitBudgetMs,
@@ -728,6 +734,200 @@ describe("真实统一出口 × dispatcher 的终态托管归属", () => {
 		});
 		await ledgerWrites.waitForLedgerWrites();
 		expect((await readLedgerRecord())?.terminal_delivery_status).toBe(status);
+	});
+});
+
+function createManuallyResolvedTestPromise<T>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
+function stoppedCodexSummaryForIndependentNativeTurn(): RuntimeTaskSessionSummary {
+	return stoppedSummary(1, {
+		agentId: "codex",
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex",
+			nativeSessionId: "native",
+			observedAt: NOW,
+			transcriptPath: "/isolated/transcript",
+		},
+	});
+}
+
+describe("runtime handover 暂停新出队并排空已开始的投递", () => {
+	it("认领 IO 跨过暂停才返回时释放 queued，排空仍等释放写盘完成", async () => {
+		const claimHasCommitted = createManuallyResolvedTestPromise<void>();
+		const claimMayReturn = createManuallyResolvedTestPromise<void>();
+		const originalClaimNextQueuedTaskPromptDeliveryRunForDispatch =
+			queuedTaskPromptDeliveryStore.claimNextQueuedTaskPromptDeliveryRunForDispatch;
+		const claimSpy = vi
+			.spyOn(queuedTaskPromptDeliveryStore, "claimNextQueuedTaskPromptDeliveryRunForDispatch")
+			.mockImplementation(async (input) => {
+				const claimed = await originalClaimNextQueuedTaskPromptDeliveryRunForDispatch(input);
+				claimHasCommitted.resolve(undefined);
+				await claimMayReturn.promise;
+				return claimed;
+			});
+		const subject = harness();
+		try {
+			subject.observe(stoppedSummary(1));
+			await subject.enqueueProgrammatic(60_000, false);
+			await claimHasCommitted.promise;
+			expect(await readStates()).toEqual(["claimed_for_dispatch"]);
+
+			subject.dispatcher.pauseNewDispatchAttemptsForRuntimeHandover();
+			let handoverDrainFinished = false;
+			const handoverDrain = subject.dispatcher
+				.waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover()
+				.then(() => {
+					handoverDrainFinished = true;
+				});
+			await Promise.resolve();
+			expect(handoverDrainFinished).toBe(false);
+			claimMayReturn.resolve(undefined);
+			await handoverDrain;
+
+			expect(subject.sends).toHaveLength(0);
+			expect(
+				(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0],
+			).toMatchObject({ deliveryState: "queued", deliveryAttemptCount: 0, dispatchIdempotencyKey: null });
+		} finally {
+			subject.dispatcher.stop();
+			claimMayReturn.resolve(undefined);
+			await subject.dispatcher.whenIdle();
+			claimSpy.mockRestore();
+		}
+	});
+
+	it("原生查询还没认领时暂停：排空等查询退出，条目留在 queued 且不消耗投递次数", async () => {
+		const nativeQueryEntered = createManuallyResolvedTestPromise<void>();
+		const nativeQueryMayFinish = createManuallyResolvedTestPromise<CodexNativeConversationTurn[]>();
+		const readNativeConversationTurns = vi.fn(async () => {
+			nativeQueryEntered.resolve(undefined);
+			return await nativeQueryMayFinish.promise;
+		});
+		const subject = harness({ readNativeConversationTurns });
+		subject.observe(stoppedCodexSummaryForIndependentNativeTurn());
+		await subject.enqueueProgrammatic(60_000, false, KEY, "native");
+		await nativeQueryEntered.promise;
+
+		subject.dispatcher.pauseNewDispatchAttemptsForRuntimeHandover();
+		let handoverDrainFinished = false;
+		const handoverDrain = subject.dispatcher
+			.waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover()
+			.then(() => {
+				handoverDrainFinished = true;
+			});
+		await Promise.resolve();
+		expect(handoverDrainFinished).toBe(false);
+		nativeQueryMayFinish.resolve([{ id: "implementation", status: "completed", items: [] }]);
+		await handoverDrain;
+
+		expect(subject.sends).toHaveLength(0);
+		expect(
+			(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0],
+		).toMatchObject({ deliveryState: "queued", deliveryAttemptCount: 0 });
+		subject.dispatcher.requestDispatchAttempt(WORKSPACE_ID, TASK_ID);
+		await subject.dispatcher.runFallbackSweep();
+		await subject.dispatcher.whenIdle();
+		expect(readNativeConversationTurns).toHaveBeenCalledOnce();
+	});
+
+	it("已认领但 transport 尚未返回 receipt 时暂停：保留写前核验并等真实回执写盘，后续触发不再出队", async () => {
+		const transportMayReturn = createManuallyResolvedTestPromise<RuntimeTaskChatSendResponse>();
+		const readNativeConversationTurns = vi.fn(async () => [{ id: "implementation", status: "completed", items: [] }]);
+		const subject = harness({
+			sendBehavior: async () => await transportMayReturn.promise,
+			readNativeConversationTurns,
+		});
+		subject.observe(stoppedCodexSummaryForIndependentNativeTurn());
+		await subject.enqueueProgrammatic(60_000, false, KEY, "native");
+		await vi.waitFor(() => expect(subject.sends).toHaveLength(1));
+		const sent = subject.sends[0];
+
+		subject.dispatcher.pauseNewDispatchAttemptsForRuntimeHandover();
+		let handoverDrainFinished = false;
+		const handoverDrain = subject.dispatcher
+			.waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover()
+			.then(() => {
+				handoverDrainFinished = true;
+			});
+		await Promise.resolve();
+		expect(handoverDrainFinished).toBe(false);
+		await expect(sent.validateBeforeTerminalWrite?.()).resolves.toBeUndefined();
+		expect(readNativeConversationTurns).toHaveBeenCalledTimes(2);
+		transportMayReturn.resolve(await acceptedPendingPtyConfirmation(sent.request));
+		sent.settlePtyDelivery({ status: "delivered_and_submit_confirmed", reason: null });
+		await handoverDrain;
+		expect(await readStates()).toEqual(["settled_delivered"]);
+		expect((await readLedgerRecord())?.terminal_delivery_status).toBe("delivered_and_submit_confirmed");
+
+		subject.observe(stoppedSummary(2));
+		await subject.enqueueHuman("after-handover-pause", "暂停后继续排队");
+		subject.dispatcher.requestDispatchAttempt(WORKSPACE_ID, TASK_ID);
+		await subject.dispatcher.runFallbackSweep();
+		await subject.dispatcher.whenIdle();
+		expect(subject.sends).toHaveLength(1);
+		expect(await readStates()).toEqual(["settled_delivered", "queued"]);
+	});
+
+	it.each(["hard_stop", "session_replaced"] as const)(
+		"写前原生查询期间发生 %s：await 返回后仍必须拒绝",
+		async (reason) => {
+			const terminalWriteNativeQueryEntered = createManuallyResolvedTestPromise<void>();
+			const terminalWriteNativeQueryMayFinish = createManuallyResolvedTestPromise<CodexNativeConversationTurn[]>();
+			let nativeQueryCount = 0;
+			const subject = harness({
+				sendBehavior: acceptedPendingPtyConfirmation,
+				readNativeConversationTurns: async () => {
+					if (++nativeQueryCount === 1) return [{ id: "implementation", status: "completed", items: [] }];
+					terminalWriteNativeQueryEntered.resolve(undefined);
+					return await terminalWriteNativeQueryMayFinish.promise;
+				},
+			});
+			subject.observe(stoppedCodexSummaryForIndependentNativeTurn());
+			await subject.enqueueProgrammatic(60_000, false, KEY, "native");
+			await vi.waitFor(() => expect(subject.sends).toHaveLength(1));
+			subject.dispatcher.pauseNewDispatchAttemptsForRuntimeHandover();
+			const sent = subject.sends[0];
+			const terminalWriteValidation = sent.validateBeforeTerminalWrite?.();
+			const rejection = expect(terminalWriteValidation).rejects.toThrow();
+			await terminalWriteNativeQueryEntered.promise;
+			if (reason === "hard_stop") subject.dispatcher.stop();
+			else
+				subject.observe({
+					...stoppedCodexSummaryForIndependentNativeTurn(),
+					runtimeSessionIncarnationId: "replacement",
+				});
+			terminalWriteNativeQueryMayFinish.resolve([{ id: "implementation", status: "completed", items: [] }]);
+			await rejection;
+			sent.settlePtyDelivery({ status: "delivery_failed", reason: "native_independent_user_turn_session_replaced" });
+			await subject.dispatcher.waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover();
+			if (reason === "hard_stop") {
+				// 已停止的旧托管者不能再结算迟到回执；保留持久状态，交给后继 runtime 补证。
+				expect((await readLedgerRecord())?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
+				expect(await readStates()).toEqual(["handed_to_transport"]);
+			} else {
+				expect((await readLedgerRecord())?.terminal_delivery_status).toBe("delivery_failed");
+				expect(await readStates()).toEqual(["settled_failed"]);
+			}
+		},
+	);
+
+	it("普通 transport 的 durable handed 标记落盘后 hard stop：发送入口也必须被拦住", async () => {
+		const subject = harness({
+			onProjectedQueueChanged: (_workspaceId, projected) => {
+				if (projected[TASK_ID]?.[0]?.deliveryState === "handed_to_transport") subject.dispatcher.stop();
+			},
+		});
+		subject.observe(stoppedSummary(1));
+		await subject.enqueueProgrammatic();
+
+		expect(subject.sends).toHaveLength(0);
+		expect((await readLedgerRecord())?.terminal_delivery_failure_reason).toBe("session_ended_before_delivery");
 	});
 });
 

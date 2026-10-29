@@ -12,12 +12,13 @@ import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
+import { registerRuntimeCommand } from "./commands/runtime";
 import { registerSupportCommand } from "./commands/support";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
 import { registerWorkUnitCommand } from "./commands/work-unit";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
-import type { RuntimeCommandRunResponse } from "./core/api-contract";
+import type { RuntimeAgentSessionCountsAffectedByRuntimeExit, RuntimeCommandRunResponse } from "./core/api-contract";
 import {
 	DEFAULT_CLI_TELEMETRY_FLUSH_MS,
 	installCliFatalErrorHandlers,
@@ -32,6 +33,7 @@ import {
 	installGracefulShutdownHandlers,
 	shouldSuppressImmediateDuplicateShutdownSignals,
 } from "./core/graceful-shutdown";
+import { resolveKanbanRuntimeHandoverRestartInProgressMarkerPath } from "./core/kanban-runtime-handover-restart-in-progress-marker";
 import {
 	buildKanbanRuntimeUrl,
 	clearKanbanRuntimeTls,
@@ -48,9 +50,18 @@ import {
 	setKanbanRuntimePort,
 	setKanbanRuntimeTls,
 } from "./core/runtime-endpoint";
+import {
+	canAcceptPlannedHandoverRestartSignalWithoutInterruptingAgentSessions,
+	KANBAN_RUNTIME_SHUTDOWN_SIGNAL_DISPOSITION_FOR_HOSTED_AGENT_SESSIONS_ENVIRONMENT_VARIABLE_NAME,
+	type RuntimeShutdownTrigger,
+	resolveHostedAgentSessionDispositionForRuntimeShutdownTrigger,
+	resolveRuntimeShutdownDeadlineMilliseconds,
+} from "./core/runtime-shutdown-trigger";
 import { disablePasscode, generateInternalToken, generatePasscode } from "./security/passcode-manager";
 import { terminateProcessForTimeout } from "./server/process-termination";
+import type { RuntimeExitRequestHandler } from "./server/runtime-server";
 import type { RuntimeStateHub } from "./server/runtime-state-hub";
+import { getRuntimeHomePath } from "./state/runtime-home-path";
 import { captureNodeException, flushNodeTelemetry } from "./telemetry/sentry-node.js";
 import type { TerminalSessionManager } from "./terminal/session-manager";
 import { runOnDemandUpdate } from "./update/update";
@@ -394,7 +405,10 @@ async function runScopedCommand(command: string, cwd: string): Promise<RuntimeCo
 async function startServer(startServerOptions: { runtimePortWasAutoSelected: boolean }): Promise<{
 	url: string;
 	close: () => Promise<void>;
-	shutdown: () => Promise<void>;
+	shutdown: (trigger: RuntimeShutdownTrigger) => Promise<{ detachedHostedAgentSessionCount: number }>;
+	agentSessionPtyHostModeEnabled: boolean;
+	countAgentSessionsAffectedByRuntimeExit: () => RuntimeAgentSessionCountsAffectedByRuntimeExit;
+	bindRuntimeExitRequestHandler: (handler: RuntimeExitRequestHandler) => void;
 }> {
 	/*
 		Server-only modules are loaded lazily because task-oriented subcommands like
@@ -413,7 +427,8 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		{ createRuntimeServer },
 		{ createRuntimeStateHub },
 		{ resolveInteractiveShellCommand },
-		{ shutdownRuntimeServer },
+		{ runKanbanRuntimeExitSequence, removeKanbanRuntimeHandoverRestartInProgressMarkerAfterRuntimeListens },
+		{ recordHostedSessionsReclaimedByAgentSessionPtyHostWhileRuntimeWasAbsent },
 		{ createWorkspaceRegistry },
 		{ clearPendingUpdateNotification, getPendingUpdateNotification },
 		{ startAgentSessionPtyHostRuntimeFacadeWhenEnabled },
@@ -423,7 +438,8 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		import("./server/runtime-server.js"),
 		import("./server/runtime-state-hub.js"),
 		import("./server/shell.js"),
-		import("./server/shutdown-coordinator.js"),
+		import("./server/runtime-handover-restart-preserving-hosted-agent-sessions.js"),
+		import("./server/agent-session-pty-host-orphan-reclamation-bookkeeping-after-runtime-restart.js"),
 		import("./server/workspace-registry.js"),
 		import("./update/update.js"),
 		import("./agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-startup.js"),
@@ -484,10 +500,24 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 			}
 		}
 		agentSessionPtyHostRuntimeFacade.warnAboutHostedSessionsNotAdoptedDuringStartup();
+		// 必须先于回收调度器的第一次扫描（createRuntimeServer 里 listen 之后启动），见该函数注释。
+		await recordHostedSessionsReclaimedByAgentSessionPtyHostWhileRuntimeWasAbsent({
+			reclaimedHostedSessions:
+				agentSessionPtyHostRuntimeFacade.listHostedSessionsReclaimedByHostWhileRuntimeWasAbsentThatWereAdopted(),
+			applyAgentSessionReclamationOutcomeToTerminalSessionSummary: (workspaceId, taskId, outcome) =>
+				workspaceRegistry
+					.getTerminalManagerForWorkspace(workspaceId)
+					?.applyAgentSessionReclamationOutcome(taskId, outcome) ?? null,
+			warn: (message) => {
+				console.warn(`[kanban] ${message}`);
+			},
+		});
 	}
 	for (const { workspaceId, terminalManager } of workspaceRegistry.listManagedWorkspaces()) {
 		runtimeHub.trackTerminalManager(workspaceId, terminalManager);
 	}
+	// runtime 退出类 tRPC 请求的执行方：runMainCommand 装好 graceful shutdown 之后才绑定。
+	let runtimeExitRequestHandler: RuntimeExitRequestHandler | null = null;
 
 	const disposeTrackedWorkspace = (
 		workspaceId: string,
@@ -505,6 +535,7 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 	const runtimeServer = await createRuntimeServer({
 		workspaceRegistry,
 		runtimeStateHub: runtimeHub,
+		readRuntimeExitRequestHandler: () => runtimeExitRequestHandler,
 		agentSessionPtyHostHookSpool: agentSessionPtyHostRuntimeFacade
 			? {
 					bindSpooledHookIngestRequestApplier: (spooledHookIngestRequestApplier) =>
@@ -569,26 +600,58 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		},
 	});
 
+	const handoverRestartInProgressMarkerPath = resolveKanbanRuntimeHandoverRestartInProgressMarkerPath({
+		runtimeHomeDirectoryPath: getRuntimeHomePath(),
+		runtimePort: getKanbanRuntimePort(),
+	});
+	// 已在监听：上一个 runtime 的 handover 窗口到此结束，CLI 写动词不必再等。
+	removeKanbanRuntimeHandoverRestartInProgressMarkerAfterRuntimeListens(
+		handoverRestartInProgressMarkerPath,
+		(message) => {
+			console.warn(`[kanban] ${message}`);
+		},
+	);
+
 	const close = async () => {
 		await runtimeServer.close();
 	};
 
-	const shutdown = async () => {
-		await shutdownRuntimeServer({
-			stopAllActiveRuntimeSessionsForShutdown: runtimeServer.stopAllActiveRuntimeSessionsForShutdown,
+	const shutdown = async (trigger: RuntimeShutdownTrigger) =>
+		await runKanbanRuntimeExitSequence({
+			trigger,
+			hostedAgentSessionDisposition: resolveHostedAgentSessionDispositionForRuntimeShutdownTrigger(
+				trigger,
+				process.env[KANBAN_RUNTIME_SHUTDOWN_SIGNAL_DISPOSITION_FOR_HOSTED_AGENT_SESSIONS_ENVIRONMENT_VARIABLE_NAME],
+			),
+			agentSessionPtyHostRuntimeFacade,
+			runtimeServer,
+			listTerminalSessionManagers: () =>
+				workspaceRegistry.listManagedWorkspaces().map(({ terminalManager }) => terminalManager),
+			handoverRestartInProgressMarker: {
+				markerPath: handoverRestartInProgressMarkerPath,
+				marker: {
+					handoverRestartStartedAtEpochMs: Date.now(),
+					previousRuntimeProcessId: process.pid,
+					runtimePort: getKanbanRuntimePort(),
+				},
+			},
+			log: (message) => {
+				console.log(`[kanban] ${message}`);
+			},
 			warn: (message) => {
 				console.warn(`[kanban] ${message}`);
 			},
-			closeRuntimeServer: close,
 		});
-		// 关停里对 hosted 会话发出的 stop 等消息必须写进内核再断开，否则会留在用户态缓冲里随进程一起丢掉。
-		await agentSessionPtyHostRuntimeFacade?.closeControllerConnectionsAfterFlushingPendingFrames();
-	};
 
 	return {
 		url: runtimeServer.url,
 		close,
 		shutdown,
+		agentSessionPtyHostModeEnabled: agentSessionPtyHostRuntimeFacade !== null,
+		countAgentSessionsAffectedByRuntimeExit: runtimeServer.countAgentSessionsAffectedByRuntimeExit,
+		bindRuntimeExitRequestHandler: (handler: RuntimeExitRequestHandler) => {
+			runtimeExitRequestHandler = handler;
+		},
 	};
 }
 
@@ -696,30 +759,46 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 	console.log("Press Ctrl+C to stop.");
 
 	let isShuttingDown = false;
+	// tRPC 请求的退出已受理、但还没真正开始（先让响应发出去）：此时再来的请求按「已在退出中」答复。
+	let runtimeShutdownRequestedOverApi = false;
 	const shutdownIndicator = createShutdownIndicator();
-	const shutdown = async () => {
+	const shutdown = async (trigger: RuntimeShutdownTrigger) => {
 		if (isShuttingDown) {
 			return;
 		}
 		isShuttingDown = true;
 		runPendingAutoUpdateOnShutdown();
-		await runtime.shutdown();
+		const exitOutcome = await runtime.shutdown(trigger);
+		printHostedAgentSessionsLeftRunningAfterRuntimeExit(trigger, exitOutcome.detachedHostedAgentSessionCount);
 		await disposeCliTelemetryService().catch(() => {});
 	};
 
-	installGracefulShutdownHandlers({
+	const gracefulShutdown = installGracefulShutdownHandlers({
 		process,
 		delayMs: 10000,
+		resolveShutdownDeadlineMs: resolveRuntimeShutdownDeadlineMilliseconds,
 		exit: (code) => {
 			process.exit(code);
 		},
 		reraiseSignal: (signal) => {
 			process.kill(process.pid, signal);
 		},
-		onShutdown: async () => {
+		// 每次信号都重读活体计数：host 模式开启仍可能存在降级 PTY / ACP 等随 runtime 结束的会话。
+		acceptPlannedHandoverRestartSignal: () =>
+			canAcceptPlannedHandoverRestartSignalWithoutInterruptingAgentSessions({
+				agentSessionPtyHostModeEnabled: runtime.agentSessionPtyHostModeEnabled,
+				agentSessionCountsAffectedByRuntimeExit: runtime.countAgentSessionsAffectedByRuntimeExit(),
+			}),
+		onPlannedHandoverRestartSignalIgnored: () => {
+			const counts = runtime.countAgentSessionsAffectedByRuntimeExit();
+			console.warn(
+				`[kanban] 已忽略 SIGUSR2 热重启：PTY host 模式${runtime.agentSessionPtyHostModeEnabled ? "已启用" : "未启用"}；仍有 ${counts.agentSessionsWithPtyOwnedByRuntimeProcess} 条 runtime-owned PTY 会话和 ${counts.conversationAgentSessionsRunningInsideRuntimeProcess} 条进程内对话会话，无法保证全部保活。如需明确允许打断这些会话，请通过 tRPC 命令 kanban runtime handover-restart --allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host 请求重启。`,
+			);
+		},
+		onShutdown: async (trigger) => {
 			shutdownIndicator.start();
 			try {
-				await shutdown();
+				await shutdown(trigger);
 				shutdownIndicator.stop("done");
 			} catch (error) {
 				shutdownIndicator.stop("failed");
@@ -742,6 +821,35 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		},
 		suppressImmediateDuplicateSignals: shouldSuppressImmediateDuplicateShutdownSignals(),
 	});
+	runtime.bindRuntimeExitRequestHandler({
+		agentSessionPtyHostModeEnabled: runtime.agentSessionPtyHostModeEnabled,
+		isRuntimeShutdownInProgress: () => isShuttingDown || runtimeShutdownRequestedOverApi,
+		startRuntimeShutdownAfterResponseIsSent: (trigger) => {
+			runtimeShutdownRequestedOverApi = true;
+			setImmediate(() => {
+				gracefulShutdown.requestShutdown(trigger);
+			});
+		},
+	});
+}
+
+// 护栏：runtime 停了、agent 还在跑——说清楚还有几个、谁会接管、怎么全停。
+function printHostedAgentSessionsLeftRunningAfterRuntimeExit(
+	trigger: RuntimeShutdownTrigger,
+	detachedHostedAgentSessionCount: number,
+): void {
+	if (detachedHostedAgentSessionCount === 0) {
+		return;
+	}
+	if (trigger.kind === "planned_handover_restart_preserving_hosted_agent_sessions") {
+		console.log(
+			`Handed ${detachedHostedAgentSessionCount} agent session(s) over to the next Kanban runtime; they keep running in the agent session pty host.`,
+		);
+		return;
+	}
+	console.log(
+		`${detachedHostedAgentSessionCount} agent session(s) keep running in the agent session pty host and will be adopted when Kanban starts again on port ${getKanbanRuntimePort()}. To end them as well, run: KANBAN_RUNTIME_PORT=${getKanbanRuntimePort()} kanban runtime stop --terminate-hosted-agent-sessions`,
+	);
 }
 
 async function runUpdateCommand(): Promise<void> {
@@ -804,6 +912,7 @@ function createProgram(invocationArgs: string[]): Command {
 	registerVerificationCommand(program);
 	registerDiagnosticsCommand(program);
 	registerCodexConversationStorageCommand(program);
+	registerRuntimeCommand(program);
 
 	program
 		.command("mcp")

@@ -15,6 +15,8 @@ export interface TerminalRestoreSnapshot {
 	snapshot: string;
 	cols: number;
 	rows: number;
+	// 尚未形成码点的 UTF-8 尾字节不在序列化屏幕里，handover 必须从 host 重读它们。
+	pendingUtf8InputByteLength?: number;
 }
 
 interface TerminalStateMirrorOptions {
@@ -37,6 +39,7 @@ export class TerminalStateMirror {
 	//       且之后到达的写入排在其后、会重新置位 dirty。
 	private isSnapshotDirty = true;
 	private cachedSnapshot: TerminalRestoreSnapshot | null = null;
+	private pendingUtf8InputBytes = Buffer.alloc(0);
 
 	constructor(cols: number, rows: number, options: TerminalStateMirrorOptions = {}) {
 		this.terminal = new Terminal({
@@ -78,6 +81,21 @@ export class TerminalStateMirror {
 		this.enqueueOperation(
 			() =>
 				new Promise<void>((resolve) => {
+					// 只检查最后四字节，保留与 xterm 增量解码器相同的未完成字符前缀；不读取 xterm 私有状态。
+					const decoderTail =
+						chunkCopy.length >= 4
+							? chunkCopy.subarray(-4)
+							: Buffer.concat([this.pendingUtf8InputBytes, chunkCopy]).subarray(-4);
+					this.pendingUtf8InputBytes = Buffer.alloc(0);
+					for (let index = decoderTail.length - 1; index >= 0; index--) {
+						const byte = decoderTail[index];
+						if ((byte & 0xc0) === 0x80) continue;
+						const expectedLength =
+							(byte & 0xe0) === 0xc0 ? 2 : (byte & 0xf0) === 0xe0 ? 3 : (byte & 0xf8) === 0xf0 ? 4 : 1;
+						if (decoderTail.length - index < expectedLength)
+							this.pendingUtf8InputBytes = Buffer.from(decoderTail.subarray(index));
+						break;
+					}
 					this.terminal.write(chunkCopy, () => {
 						// 写入「被应用」的时刻置 dirty（见类注释 (1)）。
 						this.isSnapshotDirty = true;
@@ -194,6 +212,9 @@ export class TerminalStateMirror {
 				this.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK }),
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
+			...(this.pendingUtf8InputBytes.byteLength > 0
+				? { pendingUtf8InputByteLength: this.pendingUtf8InputBytes.byteLength }
+				: {}),
 		};
 		this.cachedSnapshot = snapshot;
 		this.isSnapshotDirty = false;

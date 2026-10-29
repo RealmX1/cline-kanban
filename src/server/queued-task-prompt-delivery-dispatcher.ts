@@ -203,6 +203,10 @@ export interface QueuedTaskPromptDeliveryDispatcher {
 	runFallbackSweep(): Promise<void>;
 	forgetWorkspace(workspaceId: string): void;
 	start(): void;
+	// handover 只停止新认领和后继重试；已经认领并进入投递链的工作仍可在完整写前核验下收尾。
+	pauseNewDispatchAttemptsForRuntimeHandover(): void;
+	// 先 pause 再等待。覆盖认领前的异步查询、认领 IO、transport 受理与回执写盘；退出流程统一裁定预算。
+	waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover(): Promise<void>;
 	stop(): void;
 	// 测试用：等所有已排上的出队尝试与投影广播落定。
 	whenIdle(): Promise<void>;
@@ -258,6 +262,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	const whenStopped = new Promise<void>((resolve) => {
 		resolveStopped = resolve;
 	});
+	let newDispatchAttemptsArePausedForRuntimeHandover = false;
 
 	const track = <T>(operation: Promise<T>): Promise<T> => {
 		pendingOperations.add(operation);
@@ -284,7 +289,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		workspaceId: string,
 		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	): void => {
-		if (stopped) {
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
 			return;
 		}
 		let earliestDeadlineAtEpochMs: number | null = null;
@@ -428,7 +433,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	};
 
 	const scheduleProjectionRebroadcast = (workspaceId: string): void => {
-		if (stopped || projectionRebroadcastTimerByWorkspaceId.has(workspaceId)) {
+		if (
+			stopped ||
+			newDispatchAttemptsArePausedForRuntimeHandover ||
+			projectionRebroadcastTimerByWorkspaceId.has(workspaceId)
+		) {
 			return;
 		}
 		const timer = setTimeout(() => {
@@ -541,7 +550,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	const runDispatchAttempt = async (workspaceId: string, taskId: string): Promise<void> => {
 		const taskKey = buildTaskKey(workspaceId, taskId);
 		let awaitingEntries = listAwaitingDispatchEntries(await loadSnapshot(workspaceId), taskId, now());
-		if (awaitingEntries.length === 0) {
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover || awaitingEntries.length === 0) {
 			return;
 		}
 		// 队首不归本实例托管：先过一遍持续盖章屏障（托管者死了就盖章并接管），再按刷新后的快照判断。
@@ -552,8 +561,9 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			headCustodianRuntimeProcessInstanceId !== custody.thisRuntimeProcessInstanceId
 		) {
 			await stampEntriesWhoseCustodianIsGone(workspaceId);
+			if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) return;
 			awaitingEntries = listAwaitingDispatchEntries(await loadSnapshot(workspaceId), taskId, now());
-			if (awaitingEntries.length === 0) {
+			if (stopped || newDispatchAttemptsArePausedForRuntimeHandover || awaitingEntries.length === 0) {
 				return;
 			}
 		}
@@ -584,6 +594,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 					entry: headEntry,
 					getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
 				});
+				if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) return;
 				// 查询跨 await；取消、到期或队首变化后绝不可继续认领。
 				let fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
 				rememberSnapshot(workspaceId, fresh);
@@ -600,7 +611,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 						return;
 				}
 				if (turns.at(-1)?.status !== "completed") {
-					if (!stopped && !nativeTurnPollTimerByTaskKey.has(taskKey)) {
+					if (
+						!stopped &&
+						!newDispatchAttemptsArePausedForRuntimeHandover &&
+						!nativeTurnPollTimerByTaskKey.has(taskKey)
+					) {
 						const timer = setTimeout(
 							() => {
 								nativeTurnPollTimerByTaskKey.delete(taskKey);
@@ -638,6 +653,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			}
 		}
 
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) return;
 		const claimed = await claimNextQueuedTaskPromptDeliveryRunForDispatch({
 			expectedQueueHeadEntryId: headEntry.queueEntryId,
 			workspaceId,
@@ -653,15 +669,28 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				requestDispatchAttempt(workspaceId, taskId);
 			return;
 		}
-		await commitSnapshotAndBroadcast(workspaceId, claimed.snapshot);
 		const claimedQueueEntryIds = claimed.claimedEntries.map((entry) => entry.queueEntryId);
 		const claimedHead = claimed.claimedEntries[0];
+		// 认领 IO 可能跨过 pause：尚未进入投递链，一个字节都没发，释放回 queued，不能拿迟到的认领继续 send。
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
+			const released = await releaseQueuedTaskPromptDeliveryClaim({
+				workspaceId,
+				taskId,
+				queueEntryIds: claimedQueueEntryIds,
+				nowEpochMs: now(),
+			});
+			await commitSnapshotAndBroadcast(workspaceId, released);
+			return;
+		}
+		await commitSnapshotAndBroadcast(workspaceId, claimed.snapshot);
 
 		// 认领之后、send 之前的陈旧复核：重读 summary，认领说的还是不是这个活体的这一轮、门控是否仍放行。
 		const summaryAtSend = deps.getTaskSessionSummary(workspaceId, taskId);
 		const scope = deps.resolveWorkspaceScope(workspaceId);
 		if (
 			scope === null ||
+			stopped ||
+			summaryAtSend === null ||
 			!isQueuedTaskPromptDeliveryClaimStillCurrentForSession(claimedHead, summaryAtSend) ||
 			resolveBlockReasonForEntry(workspaceId, claimedHead, summaryAtSend) !== null
 		) {
@@ -711,6 +740,48 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			}
 			return;
 		}
+		// 所有 transport 都过这道门；mark / 广播都是异步边界，hard stop 不能只靠严格 native 分支的 validator。
+		if (stopped) {
+			const receipt = { status: "delivery_failed", reason: "session_ended_before_delivery" } as const;
+			await settleHandedOffRun(workspaceId, taskId, claimedQueueEntryIds, {
+				...routeQueuedTaskPromptDeliveryTerminalOutcome(receipt),
+				terminalDeliveryReceiptForInjectionLedger: receipt,
+			});
+			return;
+		}
+
+		const validateHandedOffQueueEntryAndSessionBindingBeforeTerminalWrite = async (): Promise<void> => {
+			if (stopped) throw new Error("运行时已停止投递，未继续写入终端。");
+			const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+			const current = fresh.entriesByTaskId[taskId]?.find(
+				(entry) => entry.queueEntryId === claimedHead.queueEntryId,
+			);
+			if (
+				stopped ||
+				!current ||
+				current.deliveryState !== "handed_to_transport" ||
+				current.dispatchIdempotencyKey !== dispatchIdempotencyKey
+			)
+				throw new Error("排队投递已取消或失效，未继续写入终端。");
+			const latest = deps.getTaskSessionSummary(workspaceId, taskId);
+			if (
+				!latest ||
+				latest.runtimeSessionIncarnationId !== summaryAtSend.runtimeSessionIncarnationId ||
+				latest.startedAt !== summaryAtSend.startedAt ||
+				latest.agentId !== summaryAtSend.agentId ||
+				latest.pid !== summaryAtSend.pid ||
+				(nativePredecessorTurnId !== null &&
+					latest.agentNativeConversationSessionIdentity?.nativeSessionId !==
+						claimedHead.requiredNativeIndependentUserTurnSessionId)
+			) {
+				if (nativePredecessorTurnId !== null)
+					throw new NativeIndependentUserTurnDeliveryError(
+						"native_independent_user_turn_session_replaced",
+						"写入前会话绑定已改变，未继续投递。",
+					);
+				throw new Error("写入前会话绑定已改变，未继续投递。");
+			}
+		};
 
 		const settleCurrentTransportAttempt = (settlement: QueuedTaskPromptDeliverySettlement) =>
 			settleHandedOffRun(
@@ -730,6 +801,24 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		handedOffAtTurnKeyByTaskKey.set(taskKey, turnKey);
 		const waiter = createProgrammaticTerminalDeliveryOutcomeWaiter();
 		const dispatchedText = buildMergedQueuedTaskPromptDeliveryText(claimed.claimedEntries);
+		const validateNativeIndependentUserTurnBeforeTerminalWrite = nativePredecessorTurnId
+			? createNativeIndependentUserTurnBeforeSubmissionValidator({
+					workspaceId,
+					entry: handedOffEntries[0],
+					predecessorNativeTurnId: nativePredecessorTurnId,
+					text: dispatchedText,
+					now,
+					isStopped: () => stopped,
+					whenStopped,
+					readNativeConversationTurns: () =>
+						(deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
+							workspaceId,
+							entry: claimedHead,
+							getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
+						}),
+					onSnapshotChanged: (snapshot) => commitSnapshotAndBroadcast(workspaceId, snapshot),
+				})
+			: undefined;
 		let response: RuntimeTaskChatSendResponse;
 		try {
 			response = await deps.sendThroughTaskChatTransports(
@@ -742,24 +831,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				},
 				waiter.observer,
 				programmaticInjectionLink?.injectionLedgerTaskId,
-				nativePredecessorTurnId
-					? createNativeIndependentUserTurnBeforeSubmissionValidator({
-							workspaceId,
-							entry: handedOffEntries[0],
-							predecessorNativeTurnId: nativePredecessorTurnId,
-							text: dispatchedText,
-							now,
-							isStopped: () => stopped,
-							whenStopped,
-							readNativeConversationTurns: () =>
-								(deps.readNativeConversationTurns ?? readCurrentTuiNativeConversationTurns)({
-									workspaceId,
-									entry: claimedHead,
-									getSummary: () => deps.getTaskSessionSummary(workspaceId, taskId),
-								}),
-							onSnapshotChanged: (snapshot) => commitSnapshotAndBroadcast(workspaceId, snapshot),
-						})
-					: undefined,
+				async (phase) => {
+					await validateHandedOffQueueEntryAndSessionBindingBeforeTerminalWrite();
+					await validateNativeIndependentUserTurnBeforeTerminalWrite?.(phase);
+					await validateHandedOffQueueEntryAndSessionBindingBeforeTerminalWrite();
+				},
 			);
 		} catch (error) {
 			if (stopped) return;
@@ -837,7 +913,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	// 每个 task 同一时刻至多一次尝试在跑（内存互斥，与 store 的 durable 认领互斥并联——后者拦得住第二个
 	// runtime，拦不住同进程重入时的重复读写）。在跑期间来的请求折叠成「跑完再来一次」。
 	const requestDispatchAttempt = (workspaceId: string, taskId: string): void => {
-		if (stopped) {
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
 			return;
 		}
 		knownWorkspaceIds.add(workspaceId);
@@ -859,7 +935,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 							}`,
 						);
 					}
-				} while (rerunRequestedTaskKeys.has(taskKey) && !stopped);
+				} while (
+					rerunRequestedTaskKeys.has(taskKey) &&
+					!stopped &&
+					!newDispatchAttemptsArePausedForRuntimeHandover
+				);
 			} finally {
 				inFlightAttemptByTaskKey.delete(taskKey);
 			}
@@ -869,7 +949,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	};
 
 	const observeTaskSessionSummary = (workspaceId: string, summary: RuntimeTaskSessionSummary): void => {
-		if (stopped) {
+		if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
 			return;
 		}
 		knownWorkspaceIds.add(workspaceId);
@@ -900,7 +980,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 
 	const runFallbackSweep = async (): Promise<void> => {
 		for (const workspaceId of knownWorkspaceIds) {
-			if (stopped) {
+			if (stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
 				return;
 			}
 			try {
@@ -938,6 +1018,20 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				);
 			}
 		}
+	};
+
+	const clearScheduledDispatchAndProjectionWork = (): void => {
+		rerunRequestedTaskKeys.clear();
+		for (const timer of nativeTurnPollTimerByTaskKey.values()) clearTimeout(timer);
+		nativeTurnPollTimerByTaskKey.clear();
+		if (fallbackSweepTimer !== null) {
+			clearInterval(fallbackSweepTimer);
+			fallbackSweepTimer = null;
+		}
+		for (const timer of projectionRebroadcastTimerByWorkspaceId.values()) clearTimeout(timer);
+		projectionRebroadcastTimerByWorkspaceId.clear();
+		for (const armed of programmaticInjectionDeadlineTimerByWorkspaceId.values()) clearTimeout(armed.timer);
+		programmaticInjectionDeadlineTimerByWorkspaceId.clear();
 	};
 
 	return {
@@ -1014,7 +1108,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			}
 		},
 		start: () => {
-			if (fallbackSweepTimer !== null || stopped) {
+			if (fallbackSweepTimer !== null || stopped || newDispatchAttemptsArePausedForRuntimeHandover) {
 				return;
 			}
 			fallbackSweepTimer = setInterval(() => {
@@ -1022,23 +1116,17 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			}, fallbackSweepIntervalMs);
 			fallbackSweepTimer.unref?.();
 		},
+		pauseNewDispatchAttemptsForRuntimeHandover: () => {
+			newDispatchAttemptsArePausedForRuntimeHandover = true;
+			clearScheduledDispatchAndProjectionWork();
+		},
+		waitForAlreadyStartedDispatchAttemptsToSettleForRuntimeHandover: async () => {
+			await Promise.allSettled([...inFlightAttemptByTaskKey.values()]);
+		},
 		stop: () => {
 			stopped = true;
 			resolveStopped();
-			for (const timer of nativeTurnPollTimerByTaskKey.values()) clearTimeout(timer);
-			nativeTurnPollTimerByTaskKey.clear();
-			if (fallbackSweepTimer !== null) {
-				clearInterval(fallbackSweepTimer);
-				fallbackSweepTimer = null;
-			}
-			for (const timer of projectionRebroadcastTimerByWorkspaceId.values()) {
-				clearTimeout(timer);
-			}
-			projectionRebroadcastTimerByWorkspaceId.clear();
-			for (const armed of programmaticInjectionDeadlineTimerByWorkspaceId.values()) {
-				clearTimeout(armed.timer);
-			}
-			programmaticInjectionDeadlineTimerByWorkspaceId.clear();
+			clearScheduledDispatchAndProjectionWork();
 		},
 		whenIdle: async () => {
 			while (pendingOperations.size > 0 || projectionRebroadcastTimerByWorkspaceId.size > 0) {

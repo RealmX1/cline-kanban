@@ -1,11 +1,19 @@
 // CLI 写动词在 runtime 热重启窗口内等待重试：只重试「确定没发出」的 ECONNREFUSED，且只在有重启证据时。
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CliRuntimeRequestRetryWhileKanbanRuntimeRestartsDependencies,
 	MAXIMUM_WAIT_FOR_RESTARTING_KANBAN_RUNTIME_MS,
 	readKanbanRuntimeRestartInProgressEvidence,
 	retryCliRuntimeRequestWhileKanbanRuntimeRestarts,
 } from "../../../src/commands/cli-runtime-request-retry-while-kanban-runtime-restarts";
+import {
+	KANBAN_RUNTIME_HANDOVER_RESTART_IN_PROGRESS_MARKER_MAXIMUM_EVIDENCE_AGE_MS,
+	resolveKanbanRuntimeHandoverRestartInProgressMarkerPath,
+	writeKanbanRuntimeHandoverRestartInProgressMarker,
+} from "../../../src/core/kanban-runtime-handover-restart-in-progress-marker";
 
 function buildRuntimeConnectionRefusedError(): Error {
 	const systemError = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:3484"), { code: "ECONNREFUSED" });
@@ -96,8 +104,25 @@ describe("retryCliRuntimeRequestWhileKanbanRuntimeRestarts", () => {
 });
 
 describe("readKanbanRuntimeRestartInProgressEvidence", () => {
-	it("has no evidence outside a hosted session", async () => {
-		expect(await readKanbanRuntimeRestartInProgressEvidence({}, Date.now())).toBeNull();
+	let markerDirectoryPath: string;
+	let handoverRestartInProgressMarkerPath: string;
+
+	beforeEach(() => {
+		markerDirectoryPath = mkdtempSync(join(tmpdir(), "kanban-handover-restart-marker-"));
+		handoverRestartInProgressMarkerPath = resolveKanbanRuntimeHandoverRestartInProgressMarkerPath({
+			runtimeHomeDirectoryPath: markerDirectoryPath,
+			runtimePort: 3497,
+		});
+	});
+
+	afterEach(() => {
+		rmSync(markerDirectoryPath, { recursive: true, force: true });
+	});
+
+	it("has no evidence outside a hosted session without a handover marker", async () => {
+		expect(
+			await readKanbanRuntimeRestartInProgressEvidence({}, Date.now(), handoverRestartInProgressMarkerPath),
+		).toBeNull();
 	});
 
 	it("has no evidence when the session's agent session pty host is unreachable", async () => {
@@ -108,7 +133,33 @@ describe("readKanbanRuntimeRestartInProgressEvidence", () => {
 					KANBAN_AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY: "hosted-session-1",
 				},
 				Date.now(),
+				handoverRestartInProgressMarkerPath,
 			),
+		).toBeNull();
+	});
+
+	it("treats a fresh planned handover marker as evidence even outside a hosted session", async () => {
+		const nowEpochMs = 1_700_000_100_000;
+		writeKanbanRuntimeHandoverRestartInProgressMarker(handoverRestartInProgressMarkerPath, {
+			handoverRestartStartedAtEpochMs: nowEpochMs - 4_000,
+			previousRuntimeProcessId: 4242,
+			runtimePort: 3497,
+		});
+		expect(
+			await readKanbanRuntimeRestartInProgressEvidence({}, nowEpochMs, handoverRestartInProgressMarkerPath),
+		).toContain("4s");
+	});
+
+	it("ignores a handover marker older than the evidence window (the runtime never came back)", async () => {
+		const nowEpochMs = 1_700_000_100_000;
+		writeKanbanRuntimeHandoverRestartInProgressMarker(handoverRestartInProgressMarkerPath, {
+			handoverRestartStartedAtEpochMs:
+				nowEpochMs - KANBAN_RUNTIME_HANDOVER_RESTART_IN_PROGRESS_MARKER_MAXIMUM_EVIDENCE_AGE_MS - 1,
+			previousRuntimeProcessId: 4242,
+			runtimePort: 3497,
+		});
+		expect(
+			await readKanbanRuntimeRestartInProgressEvidence({}, nowEpochMs, handoverRestartInProgressMarkerPath),
 		).toBeNull();
 	});
 });

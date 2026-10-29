@@ -58,7 +58,10 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeCommandRunResponse,
+	RuntimePlannedHandoverRestartRequest,
+	RuntimePlannedHandoverRestartResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeStopTerminatingHostedAgentSessionsResponse,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskChatSendResponse,
 	RuntimeTaskSessionStartRequest,
@@ -281,6 +284,11 @@ export interface CreateRuntimeApiDependencies {
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	// runtime 退出类请求由 runtime server 实现（它掌握全部 workspace 的会话与关停流程）；缺席时（单测）一律报错。
+	requestPlannedHandoverRestartPreservingHostedAgentSessions?: (
+		input: RuntimePlannedHandoverRestartRequest,
+	) => Promise<RuntimePlannedHandoverRestartResponse>;
+	requestRuntimeStopTerminatingHostedAgentSessions?: () => Promise<RuntimeStopTerminatingHostedAgentSessionsResponse>;
 	// 排队 prompt 的出队引擎（runtime 级单例，见 src/server/queued-task-prompt-delivery-dispatcher.ts）。
 	// 缺席时（单测）队列照样可读写，只是改动后不会立刻尝试出队、投影不带阻塞原因、在途条目无法取消。
 	queuedTaskPromptDeliveryDispatcher?: Pick<
@@ -3657,6 +3665,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		runUpdateNow: async () => {
 			return await deps.runUpdateNow();
+		},
+		requestPlannedHandoverRestartPreservingHostedAgentSessions: async (input) => {
+			if (!deps.requestPlannedHandoverRestartPreservingHostedAgentSessions) {
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Runtime handover restart is not available." });
+			}
+			return await deps.requestPlannedHandoverRestartPreservingHostedAgentSessions(input);
+		},
+		requestRuntimeStopTerminatingHostedAgentSessions: async () => {
+			if (!deps.requestRuntimeStopTerminatingHostedAgentSessions) {
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Runtime stop is not available." });
+			}
+			return await deps.requestRuntimeStopTerminatingHostedAgentSessions();
 		},
 		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。落库后重建 feed 全局广播。
 		broadcastNotificationArchiveChanged: async () => {

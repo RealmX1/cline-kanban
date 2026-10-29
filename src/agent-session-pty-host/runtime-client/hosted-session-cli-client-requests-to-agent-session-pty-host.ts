@@ -14,6 +14,7 @@ import {
 	type AgentSessionPtyHostHostedSessionCliClientToHostMessage,
 	type AppendHookEventToHostedSessionSpoolOutcome,
 	readWireControlMessageType,
+	type TerminateAllHostedSessionsIfNoControllerOutcome,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 
 // runtime spawn hosted 会话时注入：会话所在 host 的 socket 路径与会话 key。名字只增不改（存活会话里冻结着旧值）。
@@ -41,6 +42,8 @@ export function readHostedSessionBindingToAgentSessionPtyHostFromEnvironment(
 export type HostedSessionCliClientRequestFailure = {
 	kind: "agent_session_pty_host_unreachable";
 	failureMessage: string;
+	// 仅明确的 ECONNREFUSED / ENOENT 表示无 host；旧 host 不支持、响应超时和协议错误不等于不存在。
+	noHostIsListening?: boolean;
 };
 
 // 连上 → hello + 请求 → 等同 requestId 的响应 → 断开。连不上、对端先断开（旧 host 不认这个握手）、超时都按不可达返回，绝不抛。
@@ -101,7 +104,13 @@ function sendOneHostedSessionCliClientRequest(
 			}
 		});
 		socket.on("error", (error) => {
-			settle({ kind: "agent_session_pty_host_unreachable", failureMessage: error.message });
+			settle({
+				kind: "agent_session_pty_host_unreachable",
+				failureMessage: error.message,
+				noHostIsListening:
+					(error as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
+					(error as NodeJS.ErrnoException).code === "ENOENT",
+			});
 		});
 		socket.on("close", () => {
 			settle({
@@ -166,4 +175,25 @@ export async function queryAgentSessionPtyHostControllerPresence(input: {
 		controllerAbsentSinceEpochMs:
 			typeof response.controllerAbsentSinceEpochMs === "number" ? response.controllerAbsentSinceEpochMs : null,
 	};
+}
+
+// 服务器在同一请求内检查槽位并预留全停，确认前后都不会被新 controller 插入。
+export async function requestAgentSessionPtyHostToTerminateAllHostedSessionsIfNoController(input: {
+	agentSessionPtyHostSocketPath: string;
+	responseDeadlineMilliseconds: number;
+}): Promise<TerminateAllHostedSessionsIfNoControllerOutcome | HostedSessionCliClientRequestFailure> {
+	const result = await sendOneHostedSessionCliClientRequest(
+		input.agentSessionPtyHostSocketPath,
+		(requestId) => ({ type: "terminate_all_hosted_sessions_if_no_controller_request", requestId }),
+		input.responseDeadlineMilliseconds,
+	);
+	if (result.kind !== "responded") return result;
+	if (readWireControlMessageType(result.response) !== "terminate_all_hosted_sessions_if_no_controller_response") {
+		return { kind: "agent_session_pty_host_unreachable", failureMessage: "host 返回了不支持的离线全停响应" };
+	}
+	const outcome = (result.response as { outcome?: TerminateAllHostedSessionsIfNoControllerOutcome }).outcome;
+	if (outcome?.kind !== "termination_requested" && outcome?.kind !== "refused_because_controller_connected") {
+		return { kind: "agent_session_pty_host_unreachable", failureMessage: "host 返回了无效的离线全停结果" };
+	}
+	return outcome;
 }

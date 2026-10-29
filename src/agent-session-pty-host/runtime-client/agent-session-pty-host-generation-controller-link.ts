@@ -69,6 +69,9 @@ export class AgentSessionPtyHostGenerationControllerLink {
 	// 被拒绝接管、已下令终止的会话：退出一到就确认，不再交给任何人。
 	private readonly hostedSessionKeysAcknowledgedOnExitWithoutHandle = new Set<string>();
 	private runtimeIsClosingControllerConnections = false;
+	// 计划内 handover 已开始：本 runtime 不再消费这条链路上的任何会话事件。输出不再送进句柄（每条句柄停在一个确定的
+	// 偏移上，checkpoint 与之对齐），退出不交付、不确认（留给下一个 runtime 从 listing 里取），spool 通知忽略。
+	private hostedSessionEventRoutingFrozenForRuntimeHandover = false;
 
 	constructor(
 		readonly socketPath: string,
@@ -78,14 +81,25 @@ export class AgentSessionPtyHostGenerationControllerLink {
 		private readonly hookSpoolCallbacks?: AgentSessionPtyHostGenerationControllerLinkHookSpoolCallbacks,
 	) {
 		connection.setEventHandlers({
-			onHostedSessionHookSpoolEntriesPending: (hostedSessionKey, pendingHookSpoolEntryCount) =>
+			onHostedSessionHookSpoolEntriesPending: (hostedSessionKey, pendingHookSpoolEntryCount) => {
+				if (this.hostedSessionEventRoutingFrozenForRuntimeHandover) {
+					return;
+				}
 				this.hookSpoolCallbacks?.onHostedSessionHookSpoolEntriesPending(
 					hostedSessionKey,
 					pendingHookSpoolEntryCount,
-				),
-			onHostedSessionOutput: (hostedSessionChannelNumber, startByteOffset, bytes) =>
-				this.routeHostedSessionOutputFrame(hostedSessionChannelNumber, startByteOffset, bytes),
+				);
+			},
+			onHostedSessionOutput: (hostedSessionChannelNumber, startByteOffset, bytes) => {
+				if (this.hostedSessionEventRoutingFrozenForRuntimeHandover) {
+					return;
+				}
+				this.routeHostedSessionOutputFrame(hostedSessionChannelNumber, startByteOffset, bytes);
+			},
 			onHostedSessionExited: (hostedSessionKey, exitRecord) => {
+				if (this.hostedSessionEventRoutingFrozenForRuntimeHandover) {
+					return;
+				}
 				const handle = this.handlesByHostedSessionKey.get(hostedSessionKey);
 				if (handle) {
 					this.deliverExitToHandleAndAcknowledge(handle, exitRecord);
@@ -151,6 +165,10 @@ export class AgentSessionPtyHostGenerationControllerLink {
 		this.handlesByChannelNumber.delete(handle.hostedSessionChannelNumber);
 		this.handlesByHostedSessionKey.delete(handle.hostedSessionKey);
 		const deliverExitThenAcknowledge = () => {
+			// 排空期间 handover 开始了：这条退出留给下一个 runtime（它从 listing 里看到未确认的退出记录）。
+			if (this.hostedSessionEventRoutingFrozenForRuntimeHandover) {
+				return;
+			}
 			handle.deliverHostedSessionExit({
 				exitCode: exitRecord.exitCode,
 				...(exitRecord.signal !== null ? { signal: exitRecord.signal } : {}),
@@ -181,8 +199,12 @@ export class AgentSessionPtyHostGenerationControllerLink {
 			});
 	}
 
-	terminateHostedSessionWithoutHandle(hostedSessionKey: string, alreadyExited: boolean): void {
-		if (alreadyExited) {
+	terminateHostedSessionWithoutHandle(hostedSessionKey: string, exitedAtListing: boolean): void {
+		// listing 之后、拒绝之前退出的会话：host 推来的退出已暂存在这里，host 不会再推第二次（对已退出的会话 stop 是空操作）。
+		// 不在这里确认，这条退出就永远没人确认，旧 generation host 因此永远排不空、退不了休。
+		const exitArrivedAfterListingBeforeRefusal =
+			this.exitRecordsArrivedBeforeHandleRegistrationByHostedSessionKey.delete(hostedSessionKey);
+		if (exitedAtListing || exitArrivedAfterListingBeforeRefusal) {
 			this.acknowledgeExitOfHostedSessionTerminatedAfterRefusedAdoption(hostedSessionKey);
 			return;
 		}
@@ -191,6 +213,13 @@ export class AgentSessionPtyHostGenerationControllerLink {
 	}
 
 	markRuntimeIsClosingControllerConnections(): void {
+		this.runtimeIsClosingControllerConnections = true;
+	}
+
+	// 计划内 handover 的第一步（见 hostedSessionEventRoutingFrozenForRuntimeHandover）。同时视为 runtime 主动关连接：
+	// 之后连接断开不再把句柄按 SIGHUP 退出处理——会话活着，归下一个 runtime。
+	freezeHostedSessionEventRoutingForRuntimeHandover(): void {
+		this.hostedSessionEventRoutingFrozenForRuntimeHandover = true;
 		this.runtimeIsClosingControllerConnections = true;
 	}
 

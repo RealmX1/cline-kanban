@@ -9,6 +9,7 @@ vi.mock("../../../src/terminal/agent-session-adapters.js", async (importOriginal
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { resolveAgentOutputTransitionDetectionForAgentId } from "../../../src/terminal/agent-session-adapters";
+import type { ClaudeCodeBackgroundSessionDaemonClient } from "../../../src/terminal/claude-code-background-session-ownership-preflight-before-resume";
 import {
 	chooseTaskSessionSummaryForHostedSessionAdoption,
 	TerminalSessionManager,
@@ -29,11 +30,15 @@ interface FakeHostedTerminalPtyProcessHandle extends TerminalPtyProcessHandle {
 	write: ReturnType<typeof vi.fn<(data: string | Buffer) => void>>;
 	resize: ReturnType<typeof vi.fn<(cols: number, rows: number) => void>>;
 	stop: ReturnType<typeof vi.fn<(options?: { interrupted?: boolean; force?: boolean }) => void>>;
+	detachFromRuntimeForHandoverRestartWithoutSignallingProcess: ReturnType<typeof vi.fn<() => void>>;
 	publishedAdoptionRecords: unknown[];
+	publishedHostedSessionOrphanReclamationEligibleAtEpochMsList: Array<number | null | undefined>;
+	outputByteOffsetAfterLastDeliveredChunk: number;
 }
 
 function createFakeHostedTerminalPtyProcessHandle(pid: number): FakeHostedTerminalPtyProcessHandle {
 	const publishedAdoptionRecords: unknown[] = [];
+	const publishedHostedSessionOrphanReclamationEligibleAtEpochMsList: Array<number | null | undefined> = [];
 	return {
 		pid,
 		write: vi.fn<(data: string | Buffer) => void>(),
@@ -43,10 +48,19 @@ function createFakeHostedTerminalPtyProcessHandle(pid: number): FakeHostedTermin
 		stop: vi.fn<(options?: { interrupted?: boolean; force?: boolean }) => void>(),
 		hasExited: () => false,
 		wasInterrupted: () => false,
-		publishTerminalSessionAdoptionRecordForRuntimeRestart: (adoptionRecord) => {
+		publishTerminalSessionAdoptionRecordForRuntimeRestart: (
+			adoptionRecord,
+			hostedSessionOrphanReclamationEligibleAtEpochMs,
+		) => {
 			publishedAdoptionRecords.push(adoptionRecord);
+			publishedHostedSessionOrphanReclamationEligibleAtEpochMsList.push(
+				hostedSessionOrphanReclamationEligibleAtEpochMs,
+			);
 		},
+		detachFromRuntimeForHandoverRestartWithoutSignallingProcess: vi.fn<() => void>(),
 		publishedAdoptionRecords,
+		publishedHostedSessionOrphanReclamationEligibleAtEpochMsList,
+		outputByteOffsetAfterLastDeliveredChunk: 0,
 	};
 }
 
@@ -75,8 +89,12 @@ async function startHostedClaudeTaskSessionInPreviousRuntime(input: { taskId: st
 	return {
 		previousRuntimeManager,
 		handle,
-		emitOutput: (text: string) =>
-			(spawnRequest as HostedTerminalPtyProcessSpawnRequest | null)?.onData(Buffer.from(text, "utf8")),
+		// 与 hosted 句柄同一口径：每交付一段输出，「已交付到哪里」随之前进。
+		emitOutput: (text: string) => {
+			const bytes = Buffer.from(text, "utf8");
+			handle.outputByteOffsetAfterLastDeliveredChunk += bytes.byteLength;
+			(spawnRequest as HostedTerminalPtyProcessSpawnRequest | null)?.onData(bytes);
+		},
 		readLatestPublishedAdoptionRecord: () => handle.publishedAdoptionRecords.at(-1),
 	};
 }
@@ -86,6 +104,7 @@ interface FakeAdoptionCandidateControls {
 	handle: FakeHostedTerminalPtyProcessHandle;
 	terminateAfterRefusedAdoption: ReturnType<typeof vi.fn>;
 	emitLiveOutput: (text: string) => void;
+	readRequestedFromOutputByteOffset: () => number | undefined;
 }
 
 function createFakeAdoptionCandidate(input: {
@@ -94,10 +113,14 @@ function createFakeAdoptionCandidate(input: {
 	terminalSessionAdoptionRecord: unknown;
 	catchUpOutputTexts?: string[];
 	exitDuringAttachment?: TerminalPtyProcessExitEvent;
+	retainedOutputStartByteOffset?: number;
+	outputEndByteOffset?: number;
+	catchUpOutputGap?: boolean;
 }): FakeAdoptionCandidateControls {
 	const handle = createFakeHostedTerminalPtyProcessHandle(input.pid);
 	const terminateAfterRefusedAdoption = vi.fn();
 	let onDataCallback: ((chunk: Buffer) => void) | null = null;
+	let requestedFromOutputByteOffset: number | undefined;
 	const candidate: HostedTerminalPtySessionAdoptionCandidate = {
 		taskId: input.taskId,
 		hostedSessionKind: "task_agent_session",
@@ -106,9 +129,14 @@ function createFakeAdoptionCandidate(input: {
 		cols: 100,
 		rows: 30,
 		exitedWhileRuntimeWasAbsent: input.exitDuringAttachment !== undefined,
+		reclaimedByHostWhileRuntimeWasAbsent: false,
+		retainedOutputStartByteOffset: input.retainedOutputStartByteOffset ?? 0,
+		outputEndByteOffset: input.outputEndByteOffset ?? 1_000_000,
 		terminalSessionAdoptionRecord: input.terminalSessionAdoptionRecord,
 		adoptHostedTerminalPtyProcess: async (callbacks) => {
+			requestedFromOutputByteOffset = callbacks.fromOutputByteOffset;
 			onDataCallback = callbacks.onData;
+			if (input.catchUpOutputGap) await callbacks.onCatchUpOutputGap?.();
 			for (const catchUpOutputText of input.catchUpOutputTexts ?? []) {
 				callbacks.onCatchUpOutput(Buffer.from(catchUpOutputText, "utf8"));
 			}
@@ -124,6 +152,7 @@ function createFakeAdoptionCandidate(input: {
 		handle,
 		terminateAfterRefusedAdoption,
 		emitLiveOutput: (text) => onDataCallback?.(Buffer.from(text, "utf8")),
+		readRequestedFromOutputByteOffset: () => requestedFromOutputByteOffset,
 	};
 }
 
@@ -458,6 +487,348 @@ describe("TerminalSessionManager hosted PTY session adoption after runtime resta
 	});
 });
 
+describe("TerminalSessionManager planned handover restart", () => {
+	beforeEach(() => {
+		prepareAgentLaunchMock.mockReset();
+		prepareAgentLaunchMock.mockImplementation(async () => ({
+			args: [],
+			env: {},
+			...resolveAgentOutputTransitionDetectionForAgentId("claude"),
+		}));
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each([
+		["task_collaborator", "detach"],
+		["by_the_way", "detach"],
+		["task_collaborator", "interrupt"],
+		["by_the_way", "interrupt"],
+	] as const)("接管 %s 后保留真实身份与启动快照，%s 按会话去向处理 Codex cleanup", async (role, disposition) => {
+		const taskId = `task-codex-${role}-${disposition}`;
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 9595, prompt: "" });
+		const parsedRecord = parseTerminalSessionAdoptionRecord(previousRuntime.readLatestPublishedAdoptionRecord());
+		if (parsedRecord.kind !== "usable_adoption_record") throw new Error("测试接管记录不可用");
+		const runtimeSessionIncarnationId = parsedRecord.adoptionRecord.summary.runtimeSessionIncarnationId;
+		if (!runtimeSessionIncarnationId) throw new Error("测试会话 incarnation 不存在");
+		const adoptedCodexControlHostCleanup = vi.fn(async () => undefined);
+		const restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart = vi.fn(
+			async () => adoptedCodexControlHostCleanup,
+		);
+		const expectedSummary: RuntimeTaskSessionSummary = {
+			...parsedRecord.adoptionRecord.summary,
+			agentId: "codex",
+			codexNativeSessionControlEndpoint: {
+				socketPath: "/tmp/test-codex-control-host/socket",
+				workspaceId: "test-hosted-session-adoption-workspace",
+				conversationSessionId: taskId,
+				runtimeSessionIncarnationId,
+			},
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId: "native-codex-conversation-before-runtime-restart",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "card-with-side-conversation-sessions",
+				sideSessionCreatedAt: 1,
+				sideSessionOriginMainSessionId: "source-main-conversation-session",
+				sideSessionOriginMainNativeSessionId: "source-main-native-conversation-session",
+				taskConversationSessionRole: role,
+				taskConversationSessionRoleAtCreation: role,
+				taskConversationSessionContextSource: "forked_from_main_current_turn",
+				parentTaskConversationSessionId: "source-main-conversation-session",
+				mainSessionOriginTurnNumber: 2,
+				mainSessionOriginUserMessagePreview: "来源主会话请求",
+				latestUserMessagePreview: "侧会话请求",
+				taskAutomationSuspendedForMainSessionHandover: true,
+				taskConversationSessionLaunchSettings: {
+					taskAgentPermissionMode: "auto_approve_file_edits_only",
+					startInPlanMode: true,
+					sessionTransport: "pty_terminal",
+				},
+			},
+		};
+		const restartedRuntimeManager = new TerminalSessionManager({
+			restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart,
+		});
+		const { candidate, handle } = createFakeAdoptionCandidate({
+			taskId,
+			pid: 9595,
+			terminalSessionAdoptionRecord: { ...parsedRecord.adoptionRecord, summary: expectedSummary },
+		});
+
+		await restartedRuntimeManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+
+		expect(restoreCodexNativeSessionControlHostCleanupAfterRuntimeRestart).toHaveBeenCalledWith(
+			expectedSummary.codexNativeSessionControlEndpoint,
+		);
+		expect(restartedRuntimeManager.getSummary(taskId)).toEqual(expectedSummary);
+		if (disposition === "detach") {
+			await restartedRuntimeManager.detachHostedPtySessionsForRuntimeHandover({
+				readHostedSessionOrphanReclamationEligibleAtEpochMs: () => null,
+			});
+			expect(adoptedCodexControlHostCleanup).not.toHaveBeenCalled();
+			expect(handle.stop).not.toHaveBeenCalled();
+			expect(handle.detachFromRuntimeForHandoverRestartWithoutSignallingProcess).toHaveBeenCalledOnce();
+			const finalRecord = parseTerminalSessionAdoptionRecord(handle.publishedAdoptionRecords.at(-1));
+			expect(finalRecord.kind === "usable_adoption_record" && finalRecord.adoptionRecord.summary).toEqual(
+				expectedSummary,
+			);
+		} else {
+			restartedRuntimeManager.markInterruptedAndStopAll();
+			expect(adoptedCodexControlHostCleanup).toHaveBeenCalledOnce();
+			expect(handle.stop).toHaveBeenCalledWith({ interrupted: true });
+		}
+		previousRuntime.previousRuntimeManager.dispose();
+		restartedRuntimeManager.dispose();
+	});
+
+	it("handover 取消没有活 PTY 的后台会话回收盯梢，阻止旧 runtime 再续跑", async () => {
+		const taskId = "task-watching-background-conversation-during-handover";
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 9696, prompt: "" });
+		const persistedSummary = previousRuntime.previousRuntimeManager.getSummary(taskId);
+		if (!persistedSummary) throw new Error("测试会话 summary 不存在");
+		previousRuntime.previousRuntimeManager.dispose();
+		vi.useFakeTimers();
+		const nativeSessionId = "native-claude-conversation-held-by-background-session";
+		const listLiveSessionsStartedUnderWorkingDirectory = vi.fn<
+			ClaudeCodeBackgroundSessionDaemonClient["listLiveSessionsStartedUnderWorkingDirectory"]
+		>(async () => ({
+			ok: true,
+			liveSessions: [
+				{
+					claudeCodeSessionShortId: "held-session",
+					nativeSessionId,
+					startedInWorkingDirectoryPath: `/tmp/${taskId}`,
+					sessionHostKind: "background",
+					processId: 9797,
+					turnActivityStatus: "busy",
+				},
+			],
+		}));
+		const manager = new TerminalSessionManager({
+			claudeCodeBackgroundSessionDaemonClient: {
+				listLiveSessionsStartedUnderWorkingDirectory,
+				readBackgroundSessionRecentTerminalOutput: async () => ({
+					ok: true,
+					recentTerminalOutputBytes: Buffer.alloc(0),
+				}),
+				stopBackgroundSession: async () => ({ ok: true }),
+			},
+		});
+		manager.hydrateFromRecord({ [taskId]: persistedSummary });
+		manager.applyAgentNativeConversationSessionIdentity(taskId, {
+			sourceAgentId: "claude",
+			nativeSessionId,
+			transcriptPath: null,
+			observedAt: 1,
+		});
+		await expect(
+			manager.startTaskSession({
+				taskId,
+				agentId: "claude",
+				binary: "claude",
+				args: [],
+				cwd: `/tmp/${taskId}`,
+				prompt: "",
+				resumeFromTrash: true,
+			}),
+		).rejects.toThrow();
+		expect(
+			manager.getSummary(taskId)?.agentNativeConversationHeldByHarnessBackgroundSessionObservation,
+		).toMatchObject({ automaticReclaimWatchActive: true });
+
+		const result = await manager.detachHostedPtySessionsForRuntimeHandover({
+			readHostedSessionOrphanReclamationEligibleAtEpochMs: () => null,
+		});
+
+		expect(result).toEqual({ detachedHostedSessionSummaries: [], interruptedInProcessSessionSummaries: [] });
+		expect(
+			manager.getSummary(taskId)?.agentNativeConversationHeldByHarnessBackgroundSessionObservation,
+		).toMatchObject({ nativeSessionId, automaticReclaimWatchActive: false });
+		await vi.advanceTimersByTimeAsync(5_001);
+		expect(listLiveSessionsStartedUnderWorkingDirectory).toHaveBeenCalledOnce();
+		manager.dispose();
+	});
+
+	// 协议过滤器还压着这段没结束的 OSC：它没进 mirror，checkpoint 的偏移必须把它让出来，交给下一个 runtime 重读。
+	const UNTERMINATED_OSC_SEQUENCE_HELD_BACK_BY_PROTOCOL_FILTER = "\u001b]0;title-still-being-written";
+
+	it.each(["defer_reclamation", "allow_reclamation", "failed"] as const)(
+		"离线孤儿期限复用原生执行门禁：%s",
+		async (eligibility) => {
+			const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({
+				taskId: "native-deadline",
+				pid: 9595,
+				prompt: "",
+			});
+			const inspect = vi.spyOn(
+				previousRuntime.previousRuntimeManager,
+				"inspectCodexNativeTurnBeforeReviewSessionReclamation",
+			);
+			if (eligibility === "failed") inspect.mockRejectedValue(new Error("原生状态暂时不可读"));
+			else inspect.mockResolvedValue(eligibility);
+			await previousRuntime.previousRuntimeManager.detachHostedPtySessionsForRuntimeHandover({
+				readHostedSessionOrphanReclamationEligibleAtEpochMs: () => 1234,
+			});
+			expect(inspect).toHaveBeenCalledExactlyOnceWith("native-deadline");
+			expect(previousRuntime.handle.publishedHostedSessionOrphanReclamationEligibleAtEpochMsList.at(-1)).toBe(
+				eligibility === "allow_reclamation" ? 1234 : null,
+			);
+		},
+	);
+
+	async function detachAfterOutput(input: { taskId: string; pid: number }) {
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ ...input, prompt: "" });
+		previousRuntime.emitOutput("Claude Code\r\n⏺ Line before handover.\r\n");
+		previousRuntime.emitOutput(UNTERMINATED_OSC_SEQUENCE_HELD_BACK_BY_PROTOCOL_FILTER);
+		const outputByteOffsetDeliveredBeforeDetach = previousRuntime.handle.outputByteOffsetAfterLastDeliveredChunk;
+		const detachResult = await previousRuntime.previousRuntimeManager.detachHostedPtySessionsForRuntimeHandover({
+			readHostedSessionOrphanReclamationEligibleAtEpochMs: (summary) =>
+				summary.taskId === input.taskId ? 1_800_000_000_000 : null,
+		});
+		const parsedFinalRecord = parseTerminalSessionAdoptionRecord(previousRuntime.readLatestPublishedAdoptionRecord());
+		const checkpoint =
+			parsedFinalRecord.kind === "usable_adoption_record"
+				? parsedFinalRecord.adoptionRecord.plannedHandoverTerminalMirrorCheckpoint
+				: undefined;
+		return { previousRuntime, detachResult, outputByteOffsetDeliveredBeforeDetach, checkpoint };
+	}
+
+	it("detaches hosted sessions without signalling them and publishes a final record with an aligned screen checkpoint and the orphan reclamation deadline", async () => {
+		const { previousRuntime, detachResult, outputByteOffsetDeliveredBeforeDetach, checkpoint } =
+			await detachAfterOutput({ taskId: "task-handover-detach", pid: 9191 });
+
+		expect(detachResult.detachedHostedSessionSummaries.map((summary) => summary.taskId)).toEqual([
+			"task-handover-detach",
+		]);
+		expect(detachResult.interruptedInProcessSessionSummaries).toEqual([]);
+		// 确定性断言：detach 绝不发信号。
+		expect(previousRuntime.handle.stop).not.toHaveBeenCalled();
+		expect(previousRuntime.handle.detachFromRuntimeForHandoverRestartWithoutSignallingProcess).toHaveBeenCalledTimes(
+			1,
+		);
+		expect(previousRuntime.handle.publishedHostedSessionOrphanReclamationEligibleAtEpochMsList.at(-1)).toBe(
+			1_800_000_000_000,
+		);
+		expect(checkpoint?.outputByteOffsetCoveredBySnapshot).toBe(
+			outputByteOffsetDeliveredBeforeDetach -
+				Buffer.byteLength(UNTERMINATED_OSC_SEQUENCE_HELD_BACK_BY_PROTOCOL_FILTER, "utf8"),
+		);
+		expect(checkpoint?.serializedTerminalMirrorSnapshot).toContain("Line before handover.");
+		// summary 原样保留（仍是活着的会话），没有被记成中断。
+		expect(previousRuntime.previousRuntimeManager.getSummary("task-handover-detach")).toMatchObject({ pid: 9191 });
+		expect(previousRuntime.previousRuntimeManager.getSummary("task-handover-detach")?.reviewReason).not.toBe(
+			"interrupted",
+		);
+	});
+
+	it("adopts from the checkpoint: restores the screen, resumes output from the checkpoint offset and does not nudge a redraw", async () => {
+		const { previousRuntime, checkpoint } = await detachAfterOutput({ taskId: "task-handover-adopt", pid: 9292 });
+		const checkpointOutputByteOffset = checkpoint?.outputByteOffsetCoveredBySnapshot ?? -1;
+		const restartedRuntimeManager = new TerminalSessionManager();
+		restartedRuntimeManager.hydrateFromRecord({}, new Set(["task-handover-adopt"]));
+		const { candidate, handle, readRequestedFromOutputByteOffset } = createFakeAdoptionCandidate({
+			taskId: "task-handover-adopt",
+			pid: 9292,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+			catchUpOutputTexts: ["\r\n⏺ Line written while the runtime was away.\r\n"],
+			retainedOutputStartByteOffset: 0,
+			outputEndByteOffset: checkpointOutputByteOffset + 200,
+		});
+
+		const [adoptionOutcome] = await restartedRuntimeManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([
+			candidate,
+		]);
+
+		expect(adoptionOutcome?.adoptionOutcome).toBe("adopted_running_session");
+		expect(readRequestedFromOutputByteOffset()).toBe(checkpointOutputByteOffset);
+		expect(handle.resize).not.toHaveBeenCalledWith(100, 29);
+		const restoreSnapshot = await restartedRuntimeManager.getRestoreSnapshot("task-handover-adopt");
+		expect(restoreSnapshot?.snapshot).toContain("Line before handover.");
+		expect(restoreSnapshot?.snapshot).toContain("Line written while the runtime was away.");
+	});
+
+	it("attach 时新出现覆盖缺口会丢弃旧屏幕并重绘，不拼接旧 checkpoint", async () => {
+		const { previousRuntime, checkpoint } = await detachAfterOutput({ taskId: "attach-gap", pid: 9696 });
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({}, new Set(["attach-gap"]));
+		const { candidate, handle } = createFakeAdoptionCandidate({
+			taskId: "attach-gap",
+			pid: 9696,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+			retainedOutputStartByteOffset: 0,
+			outputEndByteOffset: (checkpoint?.outputByteOffsetCoveredBySnapshot ?? 0) + 100,
+			catchUpOutputGap: true,
+			catchUpOutputTexts: ["new-tail"],
+		});
+		expect((await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]))[0].adoptionOutcome).toBe(
+			"adopted_running_session",
+		);
+		const snapshot = await manager.getRestoreSnapshot("attach-gap");
+		expect(snapshot?.snapshot).toContain("new-tail");
+		expect(snapshot?.snapshot).not.toContain("Line before handover.");
+		expect(handle.resize).toHaveBeenCalledWith(100, 29);
+	});
+
+	it("falls back to replaying the output ring buffer when the checkpoint offset is no longer retained by the host", async () => {
+		const { previousRuntime, checkpoint } = await detachAfterOutput({
+			taskId: "task-handover-overwritten",
+			pid: 9393,
+		});
+		const checkpointOutputByteOffset = checkpoint?.outputByteOffsetCoveredBySnapshot ?? -1;
+		const restartedRuntimeManager = new TerminalSessionManager();
+		restartedRuntimeManager.hydrateFromRecord({}, new Set(["task-handover-overwritten"]));
+		const { candidate, handle, readRequestedFromOutputByteOffset } = createFakeAdoptionCandidate({
+			taskId: "task-handover-overwritten",
+			pid: 9393,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+			catchUpOutputTexts: ["Claude Code\r\n"],
+			// 缺席期间输出超过了环形缓冲容量：checkpoint 之后的一段已被覆盖。
+			retainedOutputStartByteOffset: checkpointOutputByteOffset + 1,
+			outputEndByteOffset: checkpointOutputByteOffset + 5_000,
+		});
+
+		await restartedRuntimeManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+
+		expect(readRequestedFromOutputByteOffset()).toBeUndefined();
+		expect(handle.resize).toHaveBeenCalledWith(100, 29);
+	});
+
+	it("still interrupts in-process PTY sessions, which cannot outlive the runtime, while detaching hosted ones", async () => {
+		const inProcessHandle = createFakeHostedTerminalPtyProcessHandle(9494);
+		const {
+			detachFromRuntimeForHandoverRestartWithoutSignallingProcess: _detachIsHostedOnly,
+			...inProcessPtyHandle
+		} = inProcessHandle;
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: { spawnHostedTerminalPtyProcess: async () => inProcessPtyHandle },
+		});
+		await manager.startTaskSession({
+			taskId: "task-in-process",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-in-process",
+			prompt: "",
+		});
+
+		const detachResult = await manager.detachHostedPtySessionsForRuntimeHandover({
+			readHostedSessionOrphanReclamationEligibleAtEpochMs: () => null,
+		});
+
+		expect(detachResult.detachedHostedSessionSummaries).toEqual([]);
+		expect(detachResult.interruptedInProcessSessionSummaries.map((summary) => summary.taskId)).toEqual([
+			"task-in-process",
+		]);
+		expect(inProcessHandle.stop).toHaveBeenCalledWith({ interrupted: true });
+	});
+});
+
 describe("chooseTaskSessionSummaryForHostedSessionAdoption", () => {
 	async function captureRunningClaudeSummary(pid: number): Promise<RuntimeTaskSessionSummary> {
 		prepareAgentLaunchMock.mockImplementation(async () => ({ args: [], env: {} }));
@@ -472,6 +843,165 @@ describe("chooseTaskSessionSummaryForHostedSessionAdoption", () => {
 		}
 		return summary;
 	}
+
+	function chooseBetweenHostAndPersistedSummary(
+		adoptionRecordSummary: RuntimeTaskSessionSummary,
+		persistedSummary: RuntimeTaskSessionSummary,
+	) {
+		return chooseTaskSessionSummaryForHostedSessionAdoption({
+			parsedAdoptionRecord: {
+				kind: "usable_adoption_record",
+				adoptionRecord: {
+					terminalSessionAdoptionRecordSchemaVersion: 1,
+					recordedAtEpochMs: adoptionRecordSummary.updatedAt,
+					summary: adoptionRecordSummary,
+					carriedActiveProcessStateFields: {} as never,
+					rederivationInputs: {
+						suppressScrollbackErasure: true,
+						suppressDeviceAttributeQueries: false,
+						outputReactionEngineWasActive: false,
+					},
+				},
+			},
+			persistedSummary,
+			summaryOfHydratedEntry: adoptionRecordSummary,
+			hostReportedPid: adoptionRecordSummary.pid ?? -1,
+			hostReportedSpawnedAtEpochMs: adoptionRecordSummary.startedAt ?? 1,
+		});
+	}
+
+	function claudeNativeIdentityObservedAt(observedAt: number, nativeSessionId = "newer-durable-native-session") {
+		return {
+			sourceAgentId: "claude",
+			nativeSessionId,
+			transcriptPath: `/isolated-native-transcripts/${nativeSessionId}.jsonl`,
+			observedAt,
+		};
+	}
+
+	it("身份独立水位：host 尚未带身份且 activity 时间相等时保留已持久化的 native identity", async () => {
+		const hostSummary = await captureRunningClaudeSummary(9797);
+		const persistedSummary = {
+			...hostSummary,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(200),
+		};
+
+		const choice = chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary);
+
+		expect(choice).toEqual({
+			kind: "chosen",
+			summarySource: "adoption_record",
+			summary: {
+				...hostSummary,
+				agentNativeConversationSessionIdentity: persistedSummary.agentNativeConversationSessionIdentity,
+			},
+		});
+	});
+
+	it("身份独立水位：disk 的较新身份不覆盖 host 的较新 activity", async () => {
+		const originalSummary = await captureRunningClaudeSummary(9798);
+		const hostSummary = {
+			...originalSummary,
+			updatedAt: originalSummary.updatedAt + 2_000,
+			lastOutputAt: originalSummary.updatedAt + 1_500,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(100, "older-host-native-session"),
+		};
+		const persistedSummary = {
+			...originalSummary,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(200),
+		};
+
+		const choice = chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary);
+
+		expect(choice).toEqual({
+			kind: "chosen",
+			summarySource: "adoption_record",
+			summary: {
+				...hostSummary,
+				agentNativeConversationSessionIdentity: persistedSummary.agentNativeConversationSessionIdentity,
+			},
+		});
+		expect(hostSummary.agentNativeConversationSessionIdentity.nativeSessionId).toBe("older-host-native-session");
+	});
+
+	it("身份独立水位：disk activity 较新但身份较旧时，活动取 disk、身份保留 host 的较新观测", async () => {
+		const originalSummary = await captureRunningClaudeSummary(9799);
+		const hostSummary = {
+			...originalSummary,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(200, "newer-host-native-session"),
+		};
+		const persistedSummary = {
+			...originalSummary,
+			updatedAt: originalSummary.updatedAt + 2_000,
+			lastOutputAt: originalSummary.updatedAt + 1_500,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(100),
+		};
+
+		const choice = chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary);
+
+		expect(choice).toEqual({
+			kind: "chosen",
+			summarySource: "persisted_sessions_json_of_same_incarnation",
+			summary: {
+				...persistedSummary,
+				agentNativeConversationSessionIdentity: hostSummary.agentNativeConversationSessionIdentity,
+			},
+		});
+	});
+
+	it.each([100, 200])("身份独立水位：disk observedAt=%s 不比 host 新时不覆盖 host 身份", async (observedAt) => {
+		const hostSummary = {
+			...(await captureRunningClaudeSummary(9800)),
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(200, "host-native-session"),
+		};
+		const persistedSummary = {
+			...hostSummary,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(observedAt),
+		};
+
+		expect(chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary)).toEqual({
+			kind: "chosen",
+			summarySource: "adoption_record",
+			summary: hostSummary,
+		});
+	});
+
+	it.each([
+		{ bindingMismatch: "pid", patch: { pid: 9802 } },
+		{ bindingMismatch: "incarnation", patch: { runtimeSessionIncarnationId: "another-live-process-incarnation" } },
+		{ bindingMismatch: "空 incarnation", patch: { runtimeSessionIncarnationId: "" } },
+		{ bindingMismatch: "agent", patch: { agentId: "codex" as const } },
+		{ bindingMismatch: "startedAt", patch: { startedAt: 1 } },
+	])("身份独立水位：$bindingMismatch 不匹配时不从磁盘拼入身份或活动", async ({ patch }) => {
+		const hostSummary = await captureRunningClaudeSummary(9801);
+		const persistedSummary: RuntimeTaskSessionSummary = {
+			...hostSummary,
+			...patch,
+			updatedAt: hostSummary.updatedAt + 2_000,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(300),
+		};
+
+		expect(chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary)).toEqual({
+			kind: "chosen",
+			summarySource: "adoption_record",
+			summary: hostSummary,
+		});
+	});
+
+	it("身份独立水位：两份记录都缺少非空 incarnation 时不能仅凭 pid 和时间戳合并", async () => {
+		const hostSummary = { ...(await captureRunningClaudeSummary(9803)), runtimeSessionIncarnationId: "" };
+		const persistedSummary = {
+			...hostSummary,
+			updatedAt: hostSummary.updatedAt + 2_000,
+			agentNativeConversationSessionIdentity: claudeNativeIdentityObservedAt(300),
+		};
+
+		expect(chooseBetweenHostAndPersistedSummary(hostSummary, persistedSummary)).toEqual({
+			kind: "chosen",
+			summarySource: "adoption_record",
+			summary: hostSummary,
+		});
+	});
 
 	it("prefers a newer sessions.json summary of the same incarnation over the adoption record", async () => {
 		const runningSummary = await captureRunningClaudeSummary(9191);
