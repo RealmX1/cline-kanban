@@ -93,6 +93,7 @@ function requestedSandboxPolicy(response: NativeConversationResponse, plan: Code
 }
 
 export interface CodexRemoteConversationBootstrapReceipt {
+	executionWorkingDirectoryPath: string;
 	nativeSessionId: string;
 	nativeTranscriptPath: string | null;
 	effectiveApprovalPolicy: NativeConversationResponse["approvalPolicy"];
@@ -156,6 +157,7 @@ export async function bootstrapCodexRemoteConversationBeforeTuiAttach(
 	}
 	return {
 		nativeSessionId,
+		executionWorkingDirectoryPath: response.thread.cwd,
 		nativeTranscriptPath: response.thread.path ?? null,
 		effectiveApprovalPolicy: response.approvalPolicy,
 		effectiveSandbox: response.sandbox,

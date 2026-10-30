@@ -2,7 +2,9 @@ import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtim
 import { PanelBottomOpen } from "lucide-react";
 import { AgentConversationHeldByHarnessBackgroundSessionNotice } from "@/components/detail-panels/agent-conversation-held-by-harness-background-session-notice";
 import { AgentNativeConversationPersistenceRecoveryNotice } from "@/components/detail-panels/agent-native-conversation-persistence-recovery-notice";
+import { AgentSessionRestartWithAdditionalStartupArgumentsDialog } from "@/components/detail-panels/agent-session-restart-with-additional-startup-arguments-dialog";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
+import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 import "@xterm/xterm/css/xterm.css";
 
 import {
@@ -81,7 +83,7 @@ interface AgentTerminalSessionControls {
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
-	refreshTerminal: () => Promise<void>;
+	refreshTerminal: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
 	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
@@ -413,6 +415,7 @@ function AgentTerminalEmptySessionRecoveryNotice({
 // - Restart：杀掉 agent 进程再从磁盘 transcript 续跑。它会丢掉当前这一轮（还没落盘），所以在活跃回合里
 //   先弹确认。
 function TerminalViewResyncAndAgentSessionRestartButtons({
+	supportsAdditionalStartupArgumentsForRestart,
 	showAgentSessionRestartButton,
 	canRestartAgentSession,
 	isRestartingAgentSession,
@@ -423,17 +426,24 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 	iconSize,
 	variant,
 }: {
+	supportsAdditionalStartupArgumentsForRestart: boolean;
 	showAgentSessionRestartButton: boolean;
 	canRestartAgentSession: boolean;
 	isRestartingAgentSession: boolean;
 	isResyncingTerminalView: boolean;
 	isAgentSessionInActiveTurn: boolean;
 	onResyncTerminalView: () => Promise<void>;
-	onRestartAgentSession: () => Promise<void>;
+	onRestartAgentSession: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	iconSize: number;
 	variant: "default" | "ghost";
 }): ReactElement {
 	const [isRestartConfirmOpen, setIsRestartConfirmOpen] = useState(false);
+	const [isAdditionalRestartActionMenuOpen, setIsAdditionalRestartActionMenuOpen] = useState(false);
+	const [isRestartWithArgumentsDialogOpen, setIsRestartWithArgumentsDialogOpen] = useState(false);
+	const requestQuickRestart = () => {
+		if (isAgentSessionInActiveTurn) setIsRestartConfirmOpen(true);
+		else void onRestartAgentSession();
+	};
 	return (
 		<>
 			{/* 门控**刻意**与重启按钮不同：resync 不需要看板卡片、不调 tRPC、纯 WebSocket，所以合成 shell
@@ -451,7 +461,20 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 					aria-label="Resync terminal view"
 				/>
 			</Tooltip>
-			{showAgentSessionRestartButton ? (
+			{showAgentSessionRestartButton && supportsAdditionalStartupArgumentsForRestart ? (
+				<PrimaryActionButtonWithAdditionalActionMenu
+					open={isAdditionalRestartActionMenuOpen}
+					onOpenChange={setIsAdditionalRestartActionMenuOpen}
+					icon={isRestartingAgentSession ? <Spinner size={iconSize} /> : <RotateCcw size={iconSize} />}
+					variant={variant}
+					size="sm"
+					primaryLabel="快捷重启"
+					primaryAccessibleLabel="Restart agent session"
+					onPrimaryAction={requestQuickRestart}
+					additionalAction={{ label: "带参数重启…", onSelect: () => setIsRestartWithArgumentsDialogOpen(true) }}
+					disabled={!canRestartAgentSession || isRestartingAgentSession}
+				/>
+			) : showAgentSessionRestartButton ? (
 				<Tooltip
 					side="top"
 					content="Restart this agent session — kills the agent process and resumes it from its transcript"
@@ -460,18 +483,20 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 						icon={isRestartingAgentSession ? <Spinner size={iconSize} /> : <RotateCcw size={iconSize} />}
 						variant={variant}
 						size="sm"
-						onClick={() => {
-							// 活跃回合里重启会丢掉正在跑的这一轮，先问一句；空闲时不打扰。
-							if (isAgentSessionInActiveTurn) {
-								setIsRestartConfirmOpen(true);
-								return;
-							}
-							void onRestartAgentSession();
-						}}
+						onClick={requestQuickRestart}
 						disabled={!canRestartAgentSession || isRestartingAgentSession}
 						aria-label="Restart agent session"
 					/>
 				</Tooltip>
+			) : null}
+			{isRestartWithArgumentsDialogOpen ? (
+				<AgentSessionRestartWithAdditionalStartupArgumentsDialog
+					open
+					onOpenChange={setIsRestartWithArgumentsDialogOpen}
+					isAgentSessionInActiveTurn={isAgentSessionInActiveTurn}
+					onRestartAgentSession={onRestartAgentSession}
+					disabled={!canRestartAgentSession}
+				/>
 			) : null}
 			<AlertDialog
 				open={isRestartConfirmOpen}
@@ -988,6 +1013,10 @@ function AgentTerminalPanelLayout({
 									/>
 								</Tooltip>
 								<TerminalViewResyncAndAgentSessionRestartButtons
+									supportsAdditionalStartupArgumentsForRestart={
+										(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
+										"codex"
+									}
 									showAgentSessionRestartButton={showRefreshButton}
 									canRestartAgentSession={canRefresh}
 									isRestartingAgentSession={isRefreshing}
@@ -1069,6 +1098,10 @@ function AgentTerminalPanelLayout({
 								/>
 							</Tooltip>
 							<TerminalViewResyncAndAgentSessionRestartButtons
+								supportsAdditionalStartupArgumentsForRestart={
+									(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
+									"codex"
+								}
 								showAgentSessionRestartButton={showRefreshButton}
 								canRestartAgentSession={canRefresh}
 								isRestartingAgentSession={isRefreshing}

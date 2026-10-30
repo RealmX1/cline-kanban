@@ -38,6 +38,10 @@ export default defineConfig({
 			),
 			"@": resolve(__dirname, "src"),
 			"@runtime-project-visual-identity": resolve(__dirname, "../src/core/project-visual-identity.ts"),
+			"@runtime-parse-additional-agent-startup-arguments": resolve(
+				__dirname,
+				"../src/core/parse-additional-agent-startup-arguments.ts",
+			),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-agent-session-transport-selection": resolve(
 				__dirname,

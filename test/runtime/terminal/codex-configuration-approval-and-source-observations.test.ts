@@ -57,6 +57,7 @@ describe("配置审批与来源提示", () => {
 		}
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const items = [first, second].map((binding) => {
 				const change = state.changes.find((entry) => entry.sourceWriterId === binding.writerId);
@@ -113,6 +114,14 @@ describe("配置审批与来源提示", () => {
 		expect(differences[0]?.label).toBe("信任绑定");
 		expect(differences[0]?.previous).toContain("已保存信任决定");
 		expect(differences[0]?.current).toBe("未保存信任决定");
+		const contentDifferences = describeCodexConfigurationSettingDifferences(
+			{ value: { trusted_hash: "same-definition", trusted_content_hash: "previous-content" } },
+			{ value: { trusted_hash: "same-definition", trusted_content_hash: "confirmed-content" } },
+		);
+		expect(contentDifferences).toHaveLength(1);
+		expect(contentDifferences[0]?.label).toBe("内容信任绑定");
+		expect(contentDifferences[0]?.previous).toContain("已保存信任决定");
+		expect(contentDifferences[0]?.current).toContain("已保存信任决定");
 	});
 	it("批量部分失败继续处理有效提案；审批、稍后、拒绝与跨重启幂等互相独立", async () => {
 		const binding = await createWriter("approval-source");
@@ -124,6 +133,7 @@ describe("配置审批与来源提示", () => {
 		await writeFile(filePath, stringify(configuration));
 		const dependencies = { listSessions: () => [], onUpdated: () => {} };
 		const service = createCodexConfigurationSyncService(dependencies);
+		await service.scan();
 		const state = await service.getState();
 		const model = state.changes.find((change) => change.fieldLabel.endsWith(" · model"));
 		const effort = state.changes.find((change) => change.fieldLabel.endsWith(" · model_reasoning_effort"));
@@ -208,6 +218,7 @@ describe("配置审批与来源提示", () => {
 		await writeFile(filePath, stringify(configuration));
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			expect(
 				(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[

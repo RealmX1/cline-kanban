@@ -10,6 +10,10 @@ import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import type { PendingUserDecisionQuestionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision";
 import { useAgentRaisedPendingUserDecisionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision-answer-draft";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { RuntimeAgentRaisedPendingUserDecision } from "@/runtime/types";
 
 // 调用方必须以 workspace + task + decision 作为 key 挂载本组件：草稿选择、展开状态属于「这一次提问」，
@@ -102,6 +106,22 @@ export function AgentRaisedPendingUserDecisionPanel({
 		setIsExpanded((value) => !value);
 	};
 
+	const primaryActionDisabled =
+		isSubmitting ||
+		requiresAnswerInCodexTerminal ||
+		questionsPreparingImages.size > 0 ||
+		answerIsRecordedButNotYetDelivered ||
+		!isExpanded;
+	const submitAnswers = async () => {
+		if (await onAnswer(answers)) {
+			discardAnswerDraft();
+			setIsExpanded(false);
+		}
+	};
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submitAnswers,
+		disabled: primaryActionDisabled,
+	});
 	const headerTitle = answerIsRecordedButNotYetDelivered
 		? "答案已保存，尚未送达 agent"
 		: isAgentStoppedOnThisQuestionSelectorInLiveTerminal
@@ -116,6 +136,7 @@ export function AgentRaisedPendingUserDecisionPanel({
 
 	return (
 		<section
+			onKeyDown={handlePrimaryActionKeyDown}
 			className="shrink-0 border-b border-status-gold/30 bg-status-gold/5"
 			aria-label="Agent 等待你的回答"
 			data-verification-anchor="agent-raised-pending-user-decision-panel"
@@ -283,13 +304,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 								<Button
 									variant="primary"
 									size="sm"
-									disabled={isSubmitting || requiresAnswerInCodexTerminal || questionsPreparingImages.size > 0}
-									onClick={async () => {
-										if (await onAnswer(answers)) {
-											discardAnswerDraft();
-											setIsExpanded(false);
-										}
-									}}
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+									disabled={primaryActionDisabled}
+									onClick={() => void submitAnswers()}
 								>
 									提交回答
 								</Button>

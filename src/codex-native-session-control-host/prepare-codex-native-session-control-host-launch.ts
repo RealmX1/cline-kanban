@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { codexNativeSessionControlEndpointSchema } from "../core/codex-native-session-control-endpoint-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { hasCodexStartupArgumentsRequiringNativeCliParsing } from "../terminal/codex-additional-startup-arguments-for-restart";
 import { CODEX_CLI_OPTIONS_WITH_VALUES } from "../terminal/codex-hook-config";
 import {
 	type CodexNativeSessionControlEndpoint,
@@ -124,6 +125,7 @@ export async function prepareCodexNativeSessionControlHostLaunch(input: {
 	conversationSessionId: string;
 	runtimeSessionIncarnationId: string;
 }): Promise<PreparedCodexNativeSessionControlHostLaunch | null> {
+	if (hasCodexStartupArgumentsRequiringNativeCliParsing(input.arguments)) return null;
 	const inspected = inspectCodexNativeSessionControlHostArguments(input.arguments);
 	if ("unsupportedAppServerDefaultApprovalPolicy" in inspected)
 		throw new Error(

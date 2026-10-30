@@ -1,4 +1,4 @@
-# Codex 配置写入者与选择性会话同步
+# Codex profiles、自动共享与原进程采用
 
 每代看板 Codex 原生进程持有独立、持久的 `codexConfigurationWriterBinding`。运行时重启接管同一绑定；原生进程替换时创建新的 writer，并保留旧副本与尚未合并的本地决定。旧共享目录只初始化一次，之后不再刷新其 `config.toml`，避免最终检查与原子替换之间覆盖原生 `/hooks` 保存结果。
 
@@ -8,39 +8,56 @@
 
 共享默认保存于看板内部的 `configuration-sync-state.json`，权限为 `0600`。用户自己的全局 `config.toml` 始终作为来源，由其原所有者管理。独立历史 helper 与无状态 Codex 执行器也使用自己的配置副本，不能通过辅助进程刷新活会话。
 
-## 增量与冲突
+## Profile 与字段归属
 
-启动时的 `launchBaselineFields` 保持不可变，合并使用独立的 `mergeBaselineFields`，最近观测保存为 `lastObservedFields`。扫描只处理相对上次观测实际变化的字段。真实设置变化只登记待审批提案；扫描、会话启动与来源观测均不直接改写已有共享默认。通过后才更新未来看板会话默认，来源会话保留自己的本地改动。不同修改保存为冲突，处理冲突也必须核验提案版本、来源身份和当前定义。明确禁用、显式未信任、删除和重新启用都保存为有版本的决定，较新的重新启用不受永久的“禁用优先”规则阻挡。
+`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，侧会话默认继承 Task，可另选同来源 profile。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
 
-hook 状态按规范化来源键保存，来源身份与定义摘要不同的目标不继承信任。向原所有者传播信任时，还核对原生 `hooks/list` 的 `currentHash`。主配置、外置 profile、旧内联 profile 的来源重定位采用同一规则；插件保持原插件来源身份。运行时注入的 `<session-flags>` 状态不进入共享默认。认证、环境变量、会话身份、SQLite 路径、项目路径和其他机器专属配置不进入同步状态，公开接口仅返回脱敏的值摘要。
+| 设置 | 会话中修改后的默认行为 | 范围 |
+| --- | --- | --- |
+| 普通可共享字段 | 自动反馈、更新并广播 | 所属 profile |
+| 模型、Reasoning Effort、完整权限 | 仅作用于当前会话，提供十分钟反馈机会 | 明确反馈后更新 profile 并广播 |
+| hook 信任与撤销 | 复用已确认决定 | 同来源、同定义的所有 profile |
+| hook 启用与禁用 | 自动反馈、更新并广播 | 所属 profile |
 
-配置来源、写入者文件和共享状态由目录监听发现变化；启动和五秒周期补扫提供替代路径。原目录身份或文件暂不可读时保留现场，公开 `observationProblem`，恢复后自动补扫。已经退休的 writer 保留历史，不再反复扫描。
+模型、Effort 与权限按三组保存局部例外。profile 明确更新某组时才取代该组局部值；更新其他字段、重命名或切换页面不会清除局部选择。完整权限同时保存审批、沙箱、工作区写入与命名权限配置，不能仅从 Full Access / Ask 标签重建。Task 用 `codexConfigurationPermissionSelectionSource` 区分完整 profile 权限与 Task 局部档位；界面展示权限来源和当前会话实际有效档位，只读侧问继续受只读约束。配置文件变化只表示选择已保存；权限展示先退回待核验，再由变更之后、身份与工作目录匹配的原生回合上下文确认。较旧回合、其他会话或不同权限不能冒充当前采用，待核验时间跨重启保存。
 
-## 用户操作与真实生效
+十分钟期限在第一次观测时固定为 `feedbackExpiresAtMs`，同一会话同组只留最新建议。关闭页面、折叠、重连、服务重启均不延长期限。服务端每次受理前检查期限、版本和当前完整字段；过期、被替代或 profile 对应组已更新的建议不能提交。客户端按绝对期限退出待反馈列表，离线时也不会留下可提交按钮。反馈一次完成更新和广播；不反馈保留局部选择。
 
-原生界面的决定首先只影响来源会话。配置摘要位于顶栏，详情覆盖工作区且最后绘制，避免同层手机终端遮挡；关闭入口位于滚动内容之外。`use-codex-configuration-sync-notice.ts` 管理展示与焦点，审批 controller 保持原有行为。隐藏不卸载列表、不参与键盘导航，保留筛选、多选、同步选项与阅读位置。
+启动基线 `launchBaselineFields` 不变；合并使用 `mergeBaselineFields`、最近观测 `lastObservedFields` 和逐字段 `fieldVersions`。所有 profile 修改经持久 store 锁串行受理，不同字段分别合并，同字段以最后受理的有效版本为准。A→B→A 仍用字段版本使旧传播失效。已登记传播写入的文件变化不会反向形成新决定。休眠副本恢复时先追上当前 profile，再保留未被对应新版本替代的局部例外，防止旧快照回流。
 
-沿用 `codex-configuration-change-notice-collapsed`：`true` 保持收起，`false` 恢复手动展开，无值时首次提醒自动展开。仅自动展开采用与每日进展共用的 8 秒闲置时长；交互、确认、提交或页面隐藏期间暂停，滚动及保护解除后重新计时，元数据刷新不续期。关闭只改变展示，新条目与刷新不强开；键盘手动展开聚焦详情，Escape/收起恢复摘要焦点，配置设置自行接管焦点。手机 Focus View 导航隐藏时保留展示意图，详情可见期间保护导航闲置收起。
+## 跨 profile hook 信任
 
-管理页分别展示设置待审批、来源更新与历史记录，提供筛选、单选、多选、全选当前筛选结果，以及批量通过、拒绝、稍后。稍后只撤下提醒，待审批状态保留；拒绝不采纳到默认；通过只更新未来看板会话默认。只有已通过或升级前已采用的设置决定才能显示单独的会话同步选项，且每条默认关闭。新变更使用新身份，浏览器重连、重复扫描与协调器自己的写入不会再次提醒同一条目。
+信任账本以配置来源身份、规范化 hook 来源键和定义摘要联合定位，保存定义哈希、内容哈希或明确撤销。仅内容重新确认也会登记并传播，目标 profile 的启停保持独立。旧记录缺少内容事实时保持未知，不从当前文件补造；插件缺内容的正向决定不授予信任，任何已有内容约束也不降为旧格式信任。普通文件 hook 已知无内容的确认仍兼容；撤销清除两个哈希。定义变化只生成来源提示；新定义仍需原生确认。确认后，同来源同定义的其他 profile 自动复用；先观察新定义、后收到确认的目标也会由周期补扫追上。
 
-同步目标包含同来源绑定的主、侧会话。写请求携带变更身份、预期版本和幂等键。目标保留自己的本地修改，发生冲突时须明确选择来源决定或保留目标决定；处理请求额外核验目标值的最新摘要。原冲突值和处理选择保留在持久历史中。
+传播前同时核验目录身份、规范化定义摘要及原所有者 `hooks/list.currentHash`。原生插件、外置 profile、旧内联 profile 的来源规则保持一致；`<session-flags>`、认证、环境变量、机器路径、历史身份与运行时注入不进入共享字段。管理页不能通过编辑 JSON 授予或撤销信任，信任必须来自原生确认。
 
-活副本的写入只通过原 app-server 的 `config/batchWrite`，带目标配置层的 `expectedVersion`。调用前核验端点代际、原生线程与配置文件归属；操作身份和“提交可能开始”事实先持久保存，再提交。受理、磁盘保存、原所有者重载和后续启动采用分别记录，不能从磁盘内容或 `hooks/list` 推断既有线程已经加载。
+## 真实采用、安全续接与恢复
 
-即时重载的已验证范围是 Codex CLI `0.164.0` 的普通 `hooks.json` 和主配置 hook 状态。未知版本、插件或 profile 生命周期、静态模型设置、启动参数覆盖及没有原所有者端点的会话会显示待重载或待下次启动，不冒报即时生效。明确禁用和撤销保留原决定，不表示已经开始执行的 hook 被取消。尚未隔离的旧共享会话保留现场，在自然重启时迁入。
+活副本只经原 app-server 的 `config/batchWrite` 写入，携带配置层 `expectedVersion`，并核验端点代际、原生线程、配置文件及源定义。操作身份与“提交可能开始”先持久保存。受理、磁盘保存、原进程重载和后续启动实际采用分别记录；文件内容、另一进程重载或 `hooks/list` 不能冒充原线程采用。
 
-相同证据最多尝试三次，次数跨运行时重启保存。端点、进程或配置证据改变后重新获得恢复资格。回执丢失先核验实际文件：值已经保存时只补幂等重载，不重写同一字段。后来出现的共享决定停止旧操作传播。后续原生启动采用选定变更时，记录独立的启动采用事实。
+Codex CLI `0.164.0`、`0.165.0` 的普通主配置 hook 状态已核验可原进程热更新。静态模型、权限、插件生命周期及未验证版本保留待采用，在安全时自动续接同一原生会话 ID。必须确认本代存活、回合已结束、无未提交草稿、无待答问题、无投递占用或 Stop 限制；搁置、已结案、垃圾桶任务不能被广播唤醒。
 
-## 来源观测、迁移与批量审批
+Codex CLI `0.165.0` 的插件 `hooks/list.currentHash` 为 `定义哈希/内容哈希`。继承已有决定时，若原始状态包含 `trusted_content_hash`，两个哈希都必须与原生完整指纹匹配；只匹配定义不能授予内容信任。旧格式仍保留原始事实，不从当前插件文件补造内容确认；禁用和撤销继续独立处理。仅内容确认的变化显示为「内容信任绑定」。
 
-设置值与 hook 定义摘要分别比较。同一来源的定义切换即使被多个 writer、多个 hook、多个扫描轮次观测到，也归并为一条来源提示。原始记录继续保留；定义变化不授予信任、不更新共享默认，也不显示无效的审批按钮。提示只提供确认和稍后。
+纯禁用仅将 `enabled` 改为 `false`，保留目标原有全部信任字段，因此不要求变化后的内容先重新获得信任。配置版本与完整状态冲突检查继续生效；同时修改信任字段的禁用决定仍须通过完整指纹门禁。
 
-schemaVersion 2 将设置提案的审批、来源观测的确认和会话同步进度分开保存。旧版已经采用的默认值不回滚；旧设置记录标为历史事实，定义摘要变化归并为来源观测，均不伪造新的设置审批。公开文案分别说明变化、检测位置与影响范围，只有实际变化的值显示箭头；检测会话不代表修改者。
+双哈希目录兼容、验证及 Codex 原生 Git 元数据限制见 [实现与依赖边界](research/codex-plugin-hook-dual-hash-trust-implementation.md)。本仓库修复不改变 Codex 的插件内容指纹算法。
 
-`runtime.batchCodexConfigurationAction` 为每项绑定条目类型、变更 ID、预期版本和幂等身份，返回逐项结果。过期、冲突、来源或定义暂不可核验的项保留待处理，其余项继续。重复身份只重放完成事实，不重复修改默认；回执持久保存。来源出现新的未审批设置时，旧同步会停止，已经发生的保存事实保留，新提案不会因此自动采用。
+缺原进程端点的旧会话可从绑定转录取得等价完成证据：核验原生身份、工作目录、最新完整完成事件和文件读取期间稳定性，任何后续执行、用户消息或不完整记录均使证据失效。续接前再次核验转录、语义代际、输入序号和双路空输入框。证据不足保留具体恢复条件，继续其他会话，条件恢复后自动接续。
 
-审批沿用目录恢复后已核验的历史来源键，不以当前裸设备号重新比较或重写旧 manifest。所选提案可以来自退休 writer；审批单独在 store 锁外预取其 source、history 与 SQLite 卷证据，锁内重读并核验绑定。source-only 提案只核验自身来源资格，不依赖退休 writer 的桥接。批量逐项持久化并释放锁，慢卷系统查询不占着全局锁阻塞其他来源启动。
+停止原进程到新输入框就绪之间的新输入持久写入专用 `retained-terminal-input-during-profile-adoption`，只交给同一原生会话的新进程。投递前先登记提交状态；回执不明时按原生接受游标补证，不能盲目重复发送。启动失败或运行时重启后，从同一持久启动记录自动继续；跨字段共用三次启动上限，profile、原生二进制或来源证据改变后恢复资格。显式 Stop 持久取消后续自动启动，输入记录保留供后来明确续跑；界面显示保留字节与原因。
+
+同一写入或续接证据最多三次，次数与证据指纹跨重启保存。端点、原生进程、配置或完成证据变化后重新取得资格。回执丢失先核验磁盘；值已保存时只补幂等重载。profile 绑定另有持久待办，Task 写入中断后自动补做，幂等回放不能误报绑定已完成。目录监听、启动扫描与五秒周期补扫互为替代路径；不可读来源保持未知状态并公开 `observationProblem`。
+
+## 升级与历史
+
+schemaVersion 3 从已经采用的共享字段建立兼容 profile，不同来源分别绑定。已有 writer 的模型、Effort 和权限保留为局部选择；恢复时补入旧 Task 模型及原启动参数的 Effort，但已被 profile 对应字段明确更新的选择不再恢复。局部覆盖只改变记录的字段，删除操作保存显式标记，跨 JSON 持久化不会丢失。旧 manifest、副本、历史与存储路径不改写。旧待审批提案归档，不因升级自动广播。已批准传播、冲突值、明确处理选择、保存与重载事实继续保留，历史事实与当前覆盖独立展示。
+
+显式切换 profile 的绑定副作用跨进程换代补做，当前 writer 也追上已接受的归属。权限广播只更新仍属该 profile 的权限来源，不能通过退休 writer 的旧回执把当前会话或 Task 绑回旧 profile。
+
+没有 writer 的旧共享会话，只有能确认原生身份与原存储归属时才登记迁入进度；安全时自动续接并取得独立配置副本。缺失归属的旧会话保留现场，等待自然启动补齐。App Recents 不属于此配置调整的验收范围。
+
+界面保留顶栏覆盖式通知、8 秒自动收起、键盘焦点、隐藏导航和阅读位置。普通变更进入历史；模型、Effort 与权限进入限时待反馈。隐藏与折叠只改变展示，不重置期限。来源定义提示独立确认，不授予信任。
 
 ## 新原生会话的权限继承
 
@@ -84,12 +101,22 @@ land/base 的阶段认领记录实际配置摘要、writer、启动共享版本�
 
 这是本任务实现的接缝，不替代 RVF 原 run 的历史账本，也不建立独立的跨仓发布平台。来源 Task `7494b` 的原 `RVF-002` 及失败记录保持原样；本任务的验证不能冒充原 run 已收尾。
 
+## 扫描、恢复和只读查询的开销边界
+
+`getState()` 只读取持久配置状态并生成展示投影，不触发或等待扫描、原生重载和安全续接。运行时初始化、目录监听和五秒补扫负责独立收敛；修改接口仍观察最新事实并推进传播。浏览器沿用 WebSocket 建连与重连补读、请求序号防止旧响应覆盖，以及精确到期的提醒隐藏；服务端提交仍重新校验期限。
+
+恢复阶段先过滤出含 `accepted`、`pending_reload`、`pending_next_start` 目标的记录，再按撤销/禁用优先级和版本排序。已应用、冲突和不适用目标不再产生逐目标状态读取。`accepted` 应用后转为待续接仍在同轮继续；执行前的最新来源、定义、代际、输入占用和三次重试门禁保持原样。
+
+后台观察在共享存储锁内保留持久原文，完成迁移和观察后比较最终序列化正文。内容完全一致才跳过正文写入、临时文件创建、原子替换和 `fsync`。首次创建、迁移，以及没有 `revision` 变化的文件清单等元数据变更仍保存。明确操作及其幂等重试继续完整持久化，补齐此前原子替换成功但同步或回执失败的情况。
+
+这三项优化不提供索引或历史分页。当前仍需解析整份状态、遍历 writer 与历史的关联、生成完整响应和渲染历史；规模核验及后续建议见 [同步效率核验](codex-configuration-sync-efficiency-verification.md)。
+
 ## 可重放验证
 
 普通单测和 UI 测试：
 
 ```sh
-npm run test:guarded -- --project precommit-safe test/runtime/terminal/codex-configuration-writer-binding-and-sync.test.ts test/runtime/terminal/codex-conversation-storage-home.test.ts test/runtime/terminal/session-manager-codex-conversation-storage.test.ts
+npm run test:guarded -- --project precommit-safe test/runtime/terminal/codex-configuration test/runtime/terminal/codex-profile-adoption-native-turn-completion-evidence.test.ts test/runtime/terminal/session-manager-codex-profile-safe-adoption.test.ts test/runtime/terminal/codex-conversation-storage-home.test.ts test/runtime/terminal/session-manager-codex-conversation-storage.test.ts
 npm run web:test -- src/components/codex-configuration-sync.test.tsx
 npm run typecheck
 npm run web:typecheck
@@ -103,7 +130,7 @@ KANBAN_CODEX_CONFIGURATION_SYNC_EVIDENCE_DIRECTORY=/absolute/persistent/evidence
 npm run test:guarded -- --project runtime-integration test/integration/codex-configuration-writer-sync-native.integration.test.ts
 ```
 
-打包态浏览器回归使用隔离 Git fixture、HOME、运行时和 Chromium，覆盖桌面、手机、横屏、Focus View，以及顶栏/看板/终端容器的开合与新提醒前后几何（误差 ≤1px）、遮挡、焦点和审批请求：
+打包态浏览器回归使用隔离 Git fixture、HOME、运行时和 Chromium，覆盖桌面、手机、横屏、Focus View，以及顶栏/看板/终端容器的开合与新提醒前后几何（误差 ≤1px）、遮挡、焦点和反馈请求：
 
 ```sh
 PLAYWRIGHT_BROWSERS_PATH=/absolute/path/to/playwright-cache \

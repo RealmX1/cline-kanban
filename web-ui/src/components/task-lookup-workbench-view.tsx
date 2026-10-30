@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
 import { useFocusViewDesktopPanelArrangement } from "@/hooks/use-focus-view-desktop-panel-arrangement";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { TaskLookupWorkbenchController } from "@/hooks/use-task-lookup-workbench";
 import { ResizeHandle } from "@/resize/resize-handle";
@@ -87,6 +91,15 @@ export function TaskLookupWorkbenchView({
 	const lastDisplayedTurnIdRef = useRef<string | undefined>(undefined);
 	const { startDrag } = useResizeDrag();
 	const conversationId = controller.conversation?.conversationId;
+	const primaryActionDisabled =
+		controller.isRunning || controller.isPending || isPreparingQuestionImages || !controller.draftQuestion.trim();
+	const submitQuestion = () => {
+		if (!primaryActionDisabled) return controller.submitQuestion();
+	};
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submitQuestion,
+		disabled: primaryActionDisabled,
+	});
 	const latestTurnIdForScrollRestorationRef = useRef<string | undefined>(undefined);
 	latestTurnIdForScrollRestorationRef.current = controller.conversation?.turns.at(-1)?.turnId;
 	useLayoutEffect(() => {
@@ -429,11 +442,11 @@ export function TaskLookupWorkbenchView({
 				</div>
 			) : null}
 			<form
+				onKeyDown={handlePrimaryActionKeyDown}
 				className="shrink-0 space-y-2 border-t border-border p-3"
 				onSubmit={(event) => {
 					event.preventDefault();
-					if (isPreparingQuestionImages) return;
-					void controller.submitQuestion();
+					void submitQuestion();
 				}}
 			>
 				<p className="text-xs text-text-secondary">
@@ -448,9 +461,6 @@ export function TaskLookupWorkbenchView({
 					value={controller.draftQuestion}
 					onValueChange={(value) => controller.setQuestionDraftForConversation(conversationId ?? null, value)}
 					placeholder="描述任务，或补充上一轮的条件…"
-					onSubmit={() => {
-						if (!controller.isRunning && !controller.isPending) void controller.submitQuestion();
-					}}
 					workspaceId={controller.contextWorkspaceId}
 					onImagePreparationPendingChange={setIsPreparingQuestionImages}
 					disabled={controller.isPending}
@@ -469,12 +479,8 @@ export function TaskLookupWorkbenchView({
 						variant="primary"
 						type="submit"
 						icon={<Send size={13} />}
-						disabled={
-							controller.isRunning ||
-							controller.isPending ||
-							isPreparingQuestionImages ||
-							!controller.draftQuestion.trim()
-						}
+						{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+						disabled={primaryActionDisabled}
 					>
 						查询任务
 					</Button>

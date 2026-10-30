@@ -89,7 +89,7 @@ async function prepareIdenticalProposals(fieldKind: "model" | "hook" = "model", 
 	await setWriterChoice(first, fieldKind);
 	await setWriterChoice(second, fieldKind, secondChoice);
 	const service = createService();
-	await service.getState();
+	await service.scan();
 	const store = await readCodexConfigurationSyncStore();
 	const fieldKey =
 		fieldKind === "model"
@@ -111,24 +111,27 @@ async function prepareIdenticalProposals(fieldKind: "model" | "hook" = "model", 
 }
 
 describe("相同设置提案审批不制造冲突", () => {
-	it("两项同值提案均获批，跨重启重试幂等，未来 writer 采用同一默认", async () => {
+	it("同字段明确反馈后其余旧建议结束，跨重启重试幂等，未来 writer 采用 profile", async () => {
 		const { first, service, items } = await prepareIdenticalProposals();
 		const sourceText = await readFile(join(sourceHome, "config.toml"), "utf8");
 		const request = { action: "approve" as const, items };
 		const approved = await service.batchAction(request);
-		expect(approved.results.map((result) => result.status)).toEqual(["applied", "applied"]);
-		for (const item of items)
-			expect(approved.state.changes.find((change) => change.changeId === item.changeId)).toMatchObject({
-				approvalStatus: "approved",
-				mergeStatus: "shared_default_updated",
-			});
+		expect(approved.results.map((result) => result.status)).toEqual(["applied", "stale_version"]);
+		expect(approved.state.changes.find((change) => change.changeId === items[0].changeId)).toMatchObject({
+			approvalStatus: "approved",
+			mergeStatus: "shared_default_updated",
+		});
+		expect(approved.state.changes.find((change) => change.changeId === items[1].changeId)).toMatchObject({
+			approvalStatus: "historical",
+			mergeStatus: "superseded",
+		});
 		expect((await readCodexConfigurationSyncStore()).sources[first.sourceIdentity].fields[modelFieldKey]).toEqual({
 			value: "same-choice",
 		});
 		await service.close();
 		expect((await createService().batchAction(request)).results.map((result) => result.status)).toEqual([
 			"replayed",
-			"replayed",
+			"stale_version",
 		]);
 		const future = await createWriter("future-writer");
 		expect(parse(await readFile(join(future.configurationHomeDirectoryPath, "config.toml"), "utf8")).model).toBe(
@@ -142,33 +145,22 @@ describe("相同设置提案审批不制造冲突", () => {
 		{ defect: "unreadable_user_source", expectedStatus: "source_unverifiable", fieldKind: "model" },
 		{ defect: "unreadable_writer", expectedStatus: "source_unverifiable", fieldKind: "model" },
 		{ defect: "changed_local_value", expectedStatus: "stale_version", fieldKind: "model" },
-		{ defect: "changed_hook_definition", expectedStatus: "stale_version", fieldKind: "hook" },
-		{ defect: "unreadable_hook_definition", expectedStatus: "source_unverifiable", fieldKind: "hook" },
-	] as const)("共享默认同值时仍拒绝 $defect，保留原提案待处理", async ({ defect, expectedStatus, fieldKind }) => {
+	] as const)("例外反馈仍核验 $defect，不能把失效建议广播", async ({ defect, expectedStatus, fieldKind }) => {
 		const { second, service, items } = await prepareIdenticalProposals(fieldKind);
-		expect((await service.batchAction({ action: "approve", items: [items[0]] })).results[0].status).toBe("applied");
 		const secondItem = { ...items[1] };
 		let unavailableFilePath: string | undefined;
 		if (defect === "stale_expected_version") secondItem.expectedVersion++;
 		if (defect === "unreadable_user_source") unavailableFilePath = join(sourceHome, "config.toml");
 		if (defect === "unreadable_writer")
 			unavailableFilePath = join(second.configurationHomeDirectoryPath, "config.toml");
-		if (defect === "unreadable_hook_definition")
-			unavailableFilePath = join(second.configurationHomeDirectoryPath, "hooks.json");
 		if (unavailableFilePath) await rename(unavailableFilePath, `${unavailableFilePath}.unavailable`);
 		if (defect === "changed_local_value") await setWriterChoice(second, "model", "new-unapproved-choice");
-		if (defect === "changed_hook_definition")
-			await writeFile(
-				join(second.configurationHomeDirectoryPath, "hooks.json"),
-				JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "true # 新定义" }] }] } }),
-			);
 		const request = { action: "approve" as const, items: [secondItem] };
 		const rejected = await service.batchAction(request);
 		expect(rejected.results[0].status).toBe(expectedStatus);
-		expect(rejected.state.changes.find((change) => change.changeId === secondItem.changeId)).toMatchObject({
-			approvalStatus: "pending",
-			mergeStatus: "pending_approval",
-		});
+		expect(rejected.state.changes.find((change) => change.changeId === secondItem.changeId)?.approvalStatus).toBe(
+			defect === "changed_local_value" ? "historical" : "pending",
+		);
 		expect((await readCodexConfigurationSyncStore()).mutationReceipts[secondItem.idempotencyKey]).toBeUndefined();
 		if (unavailableFilePath) {
 			await rename(`${unavailableFilePath}.unavailable`, unavailableFilePath);
@@ -176,13 +168,13 @@ describe("相同设置提案审批不制造冲突", () => {
 		}
 	});
 
-	it("同字段的不同决定继续保留真实冲突", async () => {
+	it("明确更新 profile 会结束同字段旧建议，其他会话未提交的建议不能覆盖新版本", async () => {
 		const { service, items } = await prepareIdenticalProposals("model", "different-choice");
 		const approved = await service.batchAction({ action: "approve", items });
-		expect(approved.results.map((result) => result.status)).toEqual(["applied", "conflict"]);
+		expect(approved.results.map((result) => result.status)).toEqual(["applied", "stale_version"]);
 		expect(approved.state.changes.find((change) => change.changeId === items[1].changeId)).toMatchObject({
-			approvalStatus: "pending",
-			mergeStatus: "conflict",
+			approvalStatus: "historical",
+			mergeStatus: "superseded",
 		});
 	});
 });

@@ -1,12 +1,15 @@
 import { FolderOpen, GitBranch, Search } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-
 import { showAppToast } from "@/components/app-toaster";
 import { DirectoryAutocomplete } from "@/components/directory-autocomplete";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import { toServerAbsolute } from "@/utils/server-path";
 
@@ -220,10 +223,26 @@ export function AddProjectDialog({
 	}, []);
 
 	const isBusy = isAddingByPath || isCloning || isInitializingGit;
+	const primaryActionDisabled =
+		isBusy ||
+		(activeTab === "path"
+			? pendingGitInitPath === null && (pathInput.trim() === "/" || !pathInput.trim())
+			: !gitUrlInput.trim());
+	const submitPrimaryAction = () =>
+		activeTab === "clone"
+			? handleClone()
+			: pendingGitInitPath
+				? handleInitializeGit(pendingGitInitPath)
+				: handleAddByPath(pathInput);
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submitPrimaryAction,
+		disabled: primaryActionDisabled,
+	});
 
 	return (
 		<>
 			<Dialog
+				onKeyDown={handlePrimaryActionKeyDown}
 				open={open}
 				onOpenChange={(isOpen) => {
 					if (!isOpen && isBusy) {
@@ -321,8 +340,9 @@ export function AddProjectDialog({
 						pendingGitInitPath === null ? (
 							<Button
 								variant="primary"
-								onClick={() => void handleAddByPath(pathInput)}
-								disabled={pathInput.trim() === "/" || isAddingByPath}
+								{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+								onClick={() => void submitPrimaryAction()}
+								disabled={primaryActionDisabled}
 							>
 								{isAddingByPath ? (
 									<>
@@ -336,10 +356,9 @@ export function AddProjectDialog({
 						) : (
 							<Button
 								variant="primary"
-								onClick={() => {
-									if (pendingGitInitPath) void handleInitializeGit(pendingGitInitPath);
-								}}
-								disabled={isInitializingGit}
+								{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+								onClick={() => void submitPrimaryAction()}
+								disabled={primaryActionDisabled}
 							>
 								{isInitializingGit ? (
 									<>
@@ -354,8 +373,9 @@ export function AddProjectDialog({
 					) : (
 						<Button
 							variant="primary"
-							onClick={() => void handleClone()}
-							disabled={!gitUrlInput.trim() || isCloning}
+							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+							onClick={() => void submitPrimaryAction()}
+							disabled={primaryActionDisabled}
 						>
 							{isCloning ? (
 								<>

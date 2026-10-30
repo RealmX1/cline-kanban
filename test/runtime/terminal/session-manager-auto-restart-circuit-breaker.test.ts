@@ -78,6 +78,51 @@ describe("auto-restart circuit breaker", () => {
 		await vi.advanceTimersByTimeAsync(backoffMs);
 	}
 
+	it("单次参数深拷贝后沿用有界自动重试，下次手动重启清除", async () => {
+		const manager = new TerminalSessionManager();
+		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+		const additionalArguments = ["--cd", "/explicit-restart"];
+		try {
+			await manager.refreshTaskTerminal({
+				...startTaskSessionRequest(),
+				prompt: "",
+				resumeFromTrash: true,
+				additionalAgentStartupArgumentsForThisRestart: additionalArguments,
+			});
+			additionalArguments[1] = "/mutated-by-caller";
+			await crashNewestIncarnationAndSettleBackoff(0);
+			expect(prepareAgentLaunchMock).toHaveBeenCalledTimes(2);
+			expect(prepareAgentLaunchMock.mock.calls.at(-1)?.[0].additionalAgentStartupArgumentsForThisRestart).toEqual([
+				"--cd",
+				"/explicit-restart",
+			]);
+			spawnedSessions.at(-1)?.triggerExit(0);
+			await manager.refreshTaskTerminal({ ...startTaskSessionRequest(), prompt: "", resumeFromTrash: true });
+			expect(
+				prepareAgentLaunchMock.mock.calls.at(-1)?.[0].additionalAgentStartupArgumentsForThisRestart,
+			).toBeUndefined();
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it("已知参数缺值在停止旧进程前报错", async () => {
+		const manager = new TerminalSessionManager();
+		try {
+			await manager.startTaskSession(startTaskSessionRequest());
+			await expect(
+				manager.refreshTaskTerminal({
+					...startTaskSessionRequest(),
+					additionalAgentStartupArgumentsForThisRestart: ["--cd"],
+				}),
+			).rejects.toThrow("缺少参数值");
+			expect(spawnedSessions[0].stop).not.toHaveBeenCalled();
+			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+		} finally {
+			manager.dispose();
+		}
+	});
+
 	it("stretches each retry further apart and then stops on its own, leaving a visible reason", async () => {
 		const manager = new TerminalSessionManager();
 		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });

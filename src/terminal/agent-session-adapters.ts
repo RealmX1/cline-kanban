@@ -4,6 +4,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
+import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
+import {
+	buildCodexArgumentsUsingCompleteProfilePermissions,
+	formatCodexConfigurationOverrideTomlValue,
+} from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
 import { isManagedCodexConversationStorageHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
@@ -36,6 +41,10 @@ import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from ".
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import {
+	hasExplicitCodexConversationSelectionForRestart,
+	mergeCodexAdditionalStartupArgumentsForRestart,
+} from "./codex-additional-startup-arguments-for-restart";
+import {
 	CODEX_CLI_OPTIONS_WITH_VALUES,
 	configureCodexHooks,
 	hasCodexConfigOverride,
@@ -62,11 +71,13 @@ import { prepareTaskPromptWithImages } from "./task-image-prompt";
 import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-selection";
 
 export interface AgentAdapterLaunchInput {
+	codexConfigurationProfileLaunchFields?: CodexConfigurationFields;
 	taskId: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
 	binary?: string;
 	args: string[];
+	additionalAgentStartupArgumentsForThisRestart?: string[];
 	// 每任务的放权档位。与 startInPlanMode **正交**：plan 起步只决定开局模式，不得在这里
 	// 被翻译成「降权」——不能同时表达两者的 harness（droid）是显式例外，见
 	// doesPlanModeStartOverridePermissionModeForAgent。
@@ -1621,7 +1632,18 @@ const codexAdapter: AgentSessionAdapter = {
 		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
 			: input.args;
-		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
+		let codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
+		const profilePermissionArguments =
+			input.codexConfigurationProfileLaunchFields &&
+			buildCodexArgumentsUsingCompleteProfilePermissions(codexArgs, input.codexConfigurationProfileLaunchFields);
+		if (profilePermissionArguments) codexArgs = profilePermissionArguments;
+		const profileReasoningEffort =
+			input.codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model_reasoning_effort"])];
+		if (profileReasoningEffort)
+			codexArgs.push(
+				"-c",
+				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(profileReasoningEffort.value)}`,
+			);
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		if (
@@ -1648,11 +1670,13 @@ const codexAdapter: AgentSessionAdapter = {
 			hasCliOption(codexArgs, "--ask-for-approval") || hasCliOption(codexArgs, "-a");
 		if (
 			codexPermissionMode === "bypass_all_permission_prompts" &&
+			!profilePermissionArguments &&
 			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
 		) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		} else if (
 			codexPermissionMode === "ask_for_every_tool_use" &&
+			!profilePermissionArguments &&
 			!hasExplicitCodexApprovalPolicy &&
 			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
 		) {
@@ -1719,6 +1743,7 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const selectsLatestWorkingDirectorySession =
+			!hasExplicitCodexConversationSelectionForRestart(input.additionalAgentStartupArgumentsForThisRestart ?? []) &&
 			!observedNativeSessionResumeAddressing &&
 			(continuesWithoutNewPrompt ||
 				(!input.taskConversationSessionMainContextForkSourceNativeSessionId &&
@@ -1752,6 +1777,14 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
+		codexArgs.splice(
+			0,
+			codexArgs.length,
+			...mergeCodexAdditionalStartupArgumentsForRestart(
+				codexArgs,
+				input.additionalAgentStartupArgumentsForThisRestart ?? [],
+			),
+		);
 		normalizeCodexConfigOverridesBeforeSubcommand(codexArgs);
 		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
 		if (input.startInPlanMode && !continuesWithoutNewPrompt) {

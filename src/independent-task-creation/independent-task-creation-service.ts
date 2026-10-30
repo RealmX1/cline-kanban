@@ -355,6 +355,7 @@ export function createIndependentTaskCreationService(deps: IndependentTaskCreati
 				result =
 					prepared.record.draft.generationSource === "source_agent_fork"
 						? await generateIndependentTaskDraftWithSourceAgentFork({
+								workspaceId: scope.workspaceId,
 								record: prepared.record,
 								artifactDirectory: independentTaskCreationArtifactDirectory(scope.workspaceId, input.requestId),
 								prompt: `${generationSystemPrompt}\n\n${request.context}`,

@@ -1056,6 +1056,24 @@ describe("TaskEditorDialog interactions", () => {
 		expect(applyChanges).not.toHaveBeenCalled();
 	});
 
+	it("输入法组字的提交组合键不穿透到 document 上的 Diff 快捷键", async () => {
+		await render(makeProps());
+		const documentShortcut = vi.fn();
+		document.addEventListener("keydown", documentShortcut);
+		try {
+			for (const modifiers of [
+				{ metaKey: true },
+				{ ctrlKey: true, shiftKey: true },
+				{ altKey: true, shiftKey: true },
+			]) {
+				await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", isComposing: true, ...modifiers });
+			}
+			expect(documentShortcut).not.toHaveBeenCalled();
+		} finally {
+			document.removeEventListener("keydown", documentShortcut);
+		}
+	});
+
 	it("does not create the task on a Mod+Enter emitted while the IME is still composing", async () => {
 		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");
 		await render(makeProps({ onCreate, prompt: "测试任务" }));

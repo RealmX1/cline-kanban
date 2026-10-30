@@ -312,6 +312,12 @@ export interface UseTaskEditorResult {
 	setNewTaskImages: Dispatch<SetStateAction<TaskImage[]>>;
 	newTaskStartInPlanMode: boolean;
 	setNewTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
+	newTaskCodexConfigurationPermissionSelectionSource: "profile" | "task_local" | undefined;
+	setNewTaskCodexConfigurationPermissionSelectionSource: Dispatch<
+		SetStateAction<"profile" | "task_local" | undefined>
+	>;
+	newTaskCodexConfigurationProfileId: string | undefined;
+	setNewTaskCodexConfigurationProfileId: Dispatch<SetStateAction<string | undefined>>;
 	newTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setNewTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	newTaskConversationMode: RuntimeTaskConversationMode;
@@ -342,6 +348,12 @@ export interface UseTaskEditorResult {
 	setEditTaskImages: Dispatch<SetStateAction<TaskImage[]>>;
 	editTaskStartInPlanMode: boolean;
 	setEditTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
+	editTaskCodexConfigurationPermissionSelectionSource: "profile" | "task_local" | undefined;
+	setEditTaskCodexConfigurationPermissionSelectionSource: Dispatch<
+		SetStateAction<"profile" | "task_local" | undefined>
+	>;
+	editTaskCodexConfigurationProfileId: string | undefined;
+	setEditTaskCodexConfigurationProfileId: Dispatch<SetStateAction<string | undefined>>;
 	editTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setEditTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	editTaskConversationMode: RuntimeTaskConversationMode;
@@ -444,6 +456,12 @@ export function useTaskEditor({
 		},
 		[currentProjectId, selectedAgentId],
 	);
+	const [newTaskCodexConfigurationPermissionSelectionSource, setNewTaskCodexConfigurationPermissionSelectionSource] =
+		useState<"profile" | "task_local" | undefined>();
+	const [newTaskCodexConfigurationProfileId, setNewTaskCodexConfigurationProfileId] = useState<string | undefined>();
+	const [editTaskCodexConfigurationPermissionSelectionSource, setEditTaskCodexConfigurationPermissionSelectionSource] =
+		useState<"profile" | "task_local" | undefined>();
+	const [editTaskCodexConfigurationProfileId, setEditTaskCodexConfigurationProfileId] = useState<string | undefined>();
 	const [newTaskName, setNewTaskName] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
@@ -639,6 +657,8 @@ export function useTaskEditor({
 		}
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 	}, [isInlineTaskCreateOpen, newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault]);
 
 	useEffect(() => {
@@ -722,6 +742,8 @@ export function useTaskEditor({
 		startInPlanMode: editTaskStartInPlanMode,
 		taskConversationMode: editTaskConversationMode,
 		taskAgentPermissionMode: editTaskAgentPermissionMode,
+		codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 		autoReviewEnabled: editTaskAutoReviewEnabled,
 		autoReviewMode: editTaskAutoReviewMode,
 		branchRef: editTaskBranchRef,
@@ -796,6 +818,8 @@ export function useTaskEditor({
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskCodexConfigurationProfileId(undefined);
+			setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
@@ -836,6 +860,8 @@ export function useTaskEditor({
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
+				codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+				codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
@@ -861,6 +887,8 @@ export function useTaskEditor({
 			editTaskWorkspaceId,
 			findEditingTaskCardWithBoardColumn,
 			editTaskAgentId,
+			editTaskCodexConfigurationPermissionSelectionSource,
+			editTaskCodexConfigurationProfileId,
 			editTaskAgentPermissionMode,
 			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
@@ -905,6 +933,8 @@ export function useTaskEditor({
 						images: newTaskImages.map((image) => ({ ...image })),
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
 						autoReviewMode: newTaskAutoReviewMode,
@@ -942,6 +972,8 @@ export function useTaskEditor({
 			newTaskPrompt,
 			newTaskImages,
 			newTaskStartInPlanMode,
+			newTaskCodexConfigurationPermissionSelectionSource,
+			newTaskCodexConfigurationProfileId,
 			newTaskAgentPermissionMode,
 			newTaskConversationMode,
 			newTaskAutoReviewEnabled,
@@ -984,6 +1016,8 @@ export function useTaskEditor({
 		setNewTaskAgentSessionInitialization(undefined);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(currentProjectId);
 		setIsInlineTaskCreateOpen(true);
@@ -1046,6 +1080,8 @@ export function useTaskEditor({
 		setNewTaskImages([]);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskConversationMode("operational");
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
@@ -1068,6 +1104,9 @@ export function useTaskEditor({
 					? task.images.map((image) => ({ ...image }))
 					: [],
 			startInPlanMode: savedDraft?.startInPlanMode ?? task.startInPlanMode,
+			codexConfigurationProfileId: savedDraft?.codexConfigurationProfileId ?? task.codexConfigurationProfileId,
+			codexConfigurationPermissionSelectionSource:
+				savedDraft?.codexConfigurationPermissionSelectionSource ?? task.codexConfigurationPermissionSelectionSource,
 			taskConversationMode: savedDraft?.taskConversationMode ?? task.taskConversationMode ?? "operational",
 			taskAgentPermissionMode:
 				savedDraft?.taskAgentPermissionMode ?? task.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault,
@@ -1095,6 +1134,8 @@ export function useTaskEditor({
 			setEditTaskPrompt(formValues.prompt);
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
+			setEditTaskCodexConfigurationProfileId(formValues.codexConfigurationProfileId);
+			setEditTaskCodexConfigurationPermissionSelectionSource(formValues.codexConfigurationPermissionSelectionSource);
 			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
 			setEditTaskConversationMode(formValues.taskConversationMode ?? "operational");
 			setEditTaskAutoReviewEnabled(formValues.autoReviewEnabled);
@@ -1276,6 +1317,8 @@ export function useTaskEditor({
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskCodexConfigurationProfileId(undefined);
+		setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
@@ -1329,6 +1372,8 @@ export function useTaskEditor({
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
+				codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+				codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
@@ -1364,6 +1409,8 @@ export function useTaskEditor({
 					images: submitted.images.map((image) => ({ ...image })),
 					startInPlanMode: submitted.startInPlanMode,
 					taskAgentPermissionMode: submitted.taskAgentPermissionMode,
+					codexConfigurationProfileId: submitted.codexConfigurationProfileId,
+					codexConfigurationPermissionSelectionSource: submitted.codexConfigurationPermissionSelectionSource,
 					taskConversationMode: submitted.taskConversationMode,
 					autoReviewEnabled: submitted.autoReviewEnabled,
 					autoReviewMode: submitted.autoReviewMode,
@@ -1483,6 +1530,8 @@ export function useTaskEditor({
 				setEditTaskPrompt("");
 				setEditTaskStartInPlanMode(false);
 				setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+				setEditTaskCodexConfigurationProfileId(undefined);
+				setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 				setEditTaskConversationMode("operational");
 				setEditTaskAutoReviewEnabled(false);
 				setEditTaskAutoReviewMode("commit");
@@ -1503,6 +1552,8 @@ export function useTaskEditor({
 		},
 		[
 			editTaskAgentId,
+			editTaskCodexConfigurationPermissionSelectionSource,
+			editTaskCodexConfigurationProfileId,
 			editTaskAgentPermissionMode,
 			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
@@ -1641,6 +1692,8 @@ export function useTaskEditor({
 						prompt: newTaskCard.prompt,
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
 						autoReviewMode: newTaskAutoReviewMode,
@@ -1679,6 +1732,8 @@ export function useTaskEditor({
 		},
 		[
 			newTaskAgentId,
+			newTaskCodexConfigurationPermissionSelectionSource,
+			newTaskCodexConfigurationProfileId,
 			newTaskAgentPermissionMode,
 			newTaskAgentSessionInitialization,
 			newTaskAutoReviewEnabled,
@@ -1758,6 +1813,8 @@ export function useTaskEditor({
 			}
 		},
 		[
+			newTaskCodexConfigurationPermissionSelectionSource,
+			newTaskCodexConfigurationProfileId,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -1870,6 +1927,8 @@ export function useTaskEditor({
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
+					codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+					codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 					taskConversationMode: newTaskConversationMode,
 					autoReviewEnabled: newTaskAutoReviewEnabled,
 					autoReviewMode: newTaskAutoReviewMode,
@@ -1964,6 +2023,8 @@ export function useTaskEditor({
 			ompAgentSessionTransportForNewTasks,
 			newTaskName,
 			newTaskPrompt,
+			newTaskCodexConfigurationPermissionSelectionSource,
+			newTaskCodexConfigurationProfileId,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -2062,6 +2123,8 @@ export function useTaskEditor({
 						prompt,
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
 						autoReviewMode: newTaskAutoReviewMode,
@@ -2151,6 +2214,8 @@ export function useTaskEditor({
 			newTaskImages,
 			// 同 handleCreateTask：全局默认只在建卡那一刻固化，漏进依赖会让批量建卡整批写成旧通道。
 			ompAgentSessionTransportForNewTasks,
+			newTaskCodexConfigurationPermissionSelectionSource,
+			newTaskCodexConfigurationProfileId,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -2229,11 +2294,15 @@ export function useTaskEditor({
 		setNewTaskPrompt("");
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskConversationMode("operational");
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskCodexConfigurationProfileId(undefined);
+		setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
@@ -2271,6 +2340,8 @@ export function useTaskEditor({
 		setNewTaskImages(values.images.map((image) => ({ ...image })));
 		setNewTaskStartInPlanMode(values.startInPlanMode);
 		setNewTaskAgentPermissionMode(values.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
+		setNewTaskCodexConfigurationProfileId(values.codexConfigurationProfileId);
+		setNewTaskCodexConfigurationPermissionSelectionSource(values.codexConfigurationPermissionSelectionSource);
 		setNewTaskConversationMode(values.taskConversationMode ?? "operational");
 		setNewTaskAutoReviewEnabled(values.autoReviewEnabled);
 		setNewTaskAutoReviewMode(values.autoReviewMode);
@@ -2311,8 +2382,12 @@ export function useTaskEditor({
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
+		newTaskCodexConfigurationPermissionSelectionSource,
+		newTaskCodexConfigurationProfileId,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		setNewTaskCodexConfigurationProfileId,
+		setNewTaskCodexConfigurationPermissionSelectionSource,
 		newTaskConversationMode,
 		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
@@ -2341,8 +2416,12 @@ export function useTaskEditor({
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
+		editTaskCodexConfigurationPermissionSelectionSource,
+		editTaskCodexConfigurationProfileId,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		setEditTaskCodexConfigurationProfileId,
+		setEditTaskCodexConfigurationPermissionSelectionSource,
 		editTaskConversationMode,
 		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,

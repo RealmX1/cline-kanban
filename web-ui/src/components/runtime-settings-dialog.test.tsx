@@ -650,17 +650,46 @@ describe("RuntimeSettingsDialog", () => {
 			expect(document.body.textContent).toContain("保存未完成");
 		},
 	);
-	it("保存失败保留密钥草稿和对话框，重试后才关闭", async () => {
+	it.each([{ metaKey: true }, { ctrlKey: true }])(
+		"Agent 行上的提交组合键只保存当前选择，不触发本地选择",
+		async (modifier) => {
+			const onOpenChange = vi.fn();
+			await renderSettings(true, onOpenChange);
+			await changeInput("延期兜底", "15");
+			const claudeRow = Array.from(document.querySelectorAll<HTMLElement>('[role="button"]')).find((element) =>
+				element.textContent?.includes("Claude Code"),
+			);
+			if (!claudeRow) throw new Error("缺少 Claude Code Agent 行");
+			await act(async () => {
+				claudeRow.dispatchEvent(
+					new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...modifier }),
+				);
+			});
+			expect(useRuntimeConfigSaveMock).toHaveBeenCalledWith(expect.objectContaining({ selectedAgentId: "cline" }));
+			expect(claudeRow.querySelector(".lucide-circle-dot")).toBeNull();
+			expect(onOpenChange).toHaveBeenCalledWith(false);
+		},
+	);
+	it("两种提交组合键保存设置，失败保留密钥草稿，重试后才关闭", async () => {
 		const onOpenChange = vi.fn();
 		await renderSettings(true, onOpenChange);
 		await changeInput("API Key", "test-only-retry");
 		notificationSettingsMocks.saveProvider.mockRejectedValueOnce(new Error("系统钥匙串不可用"));
-		await act(async () => findButtonByText(document.body, "Save")?.click());
+		const pressSubmit = async (options: KeyboardEventInit) => {
+			await act(async () =>
+				document
+					.querySelector('input[type="password"]')!
+					.dispatchEvent(
+						new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options }),
+					),
+			);
+		};
+		await pressSubmit({ metaKey: true });
 		expect(onOpenChange).not.toHaveBeenCalled();
 		expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
 		expect(document.body.textContent).toContain("保存未完成，草稿已保留");
 		expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("test-only-retry");
-		await act(async () => findButtonByText(document.body, "Save")?.click());
+		await pressSubmit({ ctrlKey: true });
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 

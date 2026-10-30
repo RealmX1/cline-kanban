@@ -130,6 +130,13 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 			"app-server-control.sock",
 		);
 	const requestTimeoutMs = input?.requestTimeoutMs ?? 2000;
+	const maximumUnixSocketPathByteLength =
+		process.platform === "darwin" ? 103 : process.platform === "linux" ? 107 : null;
+	if (maximumUnixSocketPathByteLength !== null && Buffer.byteLength(socketPath) > maximumUnixSocketPathByteLength)
+		throw new CodexAppServerControlSocketRequestError(
+			"connection_error",
+			"原生控制端点路径超过本机 Unix socket 限制，等待有效端点后自动重验。",
+		);
 	const connectionId = randomUUID();
 	const endpointSha256 = sha256(socketPath);
 	const connectionStartedAt = performance.now();

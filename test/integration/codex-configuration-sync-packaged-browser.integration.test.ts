@@ -27,7 +27,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 	"打包态配置同步真实浏览器",
 	{ timeout: 120_000 },
 	() => {
-		it("隔离运行时通过推流显示新决定，默认关闭同步，支持键盘、手机布局和稍后处理", async () => {
+		it("profile 自动共享与例外反馈经真实推流呈现，支持键盘、手机布局和稍后处理", async () => {
 			const fixture = createIsolatedGitTestWorkspaceFixture({
 				fixtureRootDirectoryNamePrefix: "codex-config-browser-",
 			});
@@ -222,7 +222,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				);
 				await summary.click();
 				await notice.waitFor();
-				expect(await notice.textContent()).toContain("待审批 2 项");
+				expect(await notice.textContent()).toContain("待反馈 2 项");
 				expect(await notice.getByRole("switch").count()).toBe(0);
 				expect(
 					(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[
@@ -236,7 +236,20 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				expect(await notice.isHidden()).toBe(true);
 				configuration.hide_agent_reasoning = true;
 				await writeFile(writerConfigurationPath, stringify(configuration));
-				await vi.waitFor(async () => expect(await summary.getAttribute("aria-label")).toContain("待审批 3 项"), {
+				await vi.waitFor(
+					async () =>
+						expect(
+							(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[
+								JSON.stringify(["config.toml", "hide_agent_reasoning"])
+							]?.value,
+						).toBe(true),
+					{ timeout: 15_000 },
+				);
+				expect(await summary.getAttribute("aria-label")).toContain("待反馈 2 项");
+				configuration.approval_policy = "on-request";
+				configuration.sandbox_mode = "workspace-write";
+				await writeFile(writerConfigurationPath, stringify(configuration));
+				await vi.waitFor(async () => expect(await summary.getAttribute("aria-label")).toContain("待反馈 3 项"), {
 					timeout: 15_000,
 				});
 				expect(await summary.getAttribute("aria-expanded")).toBe("false");
@@ -372,7 +385,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				await notice.waitFor({ timeout: 15_000 });
 				await notice.getByRole("button", { name: "确认", exact: true }).waitFor();
 				assertUnchangedGeometry(beforeNewDesktopNotice, await measureWorkspaceGeometry("desktop-after-new-notice"));
-				expect(await notice.textContent()).toContain("待审批 0 项 · 来源更新 1 条");
+				expect(await notice.textContent()).toContain("待反馈 0 项 · 来源更新 1 条");
 				expect(await notice.getByRole("button", { name: "通过", exact: true }).count()).toBe(0);
 				await notice.getByRole("button", { name: "确认", exact: true }).click();
 				await notice.waitFor({ state: "detached", timeout: 15_000 });
@@ -391,12 +404,52 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				await settings.waitFor({ timeout: 15_000 });
 				expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
 				await settings
-					.locator('[aria-label="设置待审批"]')
+					.locator('[aria-label="设置待反馈"]')
 					.getByRole("button", { name: "稍后处理", exact: true })
 					.click();
 				await vi.waitFor(async () =>
-					expect(await settings.getByRole("button", { name: "通过", exact: true }).isEnabled()).toBe(true),
+					expect(
+						await settings.getByRole("button", { name: "反馈到 profile 并广播", exact: true }).isEnabled(),
+					).toBe(true),
 				);
+				const profiles = settings.locator('[data-verification-anchor="codex-configuration-profile-management"]');
+				await profiles.getByLabel("从当前 profile 复制", { exact: true }).fill("浏览器验证配置");
+				await profiles.getByRole("button", { name: "创建 profile", exact: true }).click();
+				await vi.waitFor(async () =>
+					expect(
+						(await readCodexConfigurationSyncStore()).profiles &&
+							Object.values((await readCodexConfigurationSyncStore()).profiles).some(
+								(profile) => profile.name === "浏览器验证配置",
+							),
+					).toBe(true),
+				);
+				await profiles.getByLabel("管理 profile", { exact: true }).selectOption({ label: "浏览器验证配置" });
+				await profiles.getByLabel("重命名当前 profile", { exact: true }).fill("浏览器独立配置");
+				await profiles.getByRole("button", { name: "保存名称", exact: true }).click();
+				await profiles
+					.getByLabel("管理 profile", { exact: true })
+					.locator("option", { hasText: "浏览器独立配置" })
+					.waitFor({ state: "attached" });
+				await profiles.getByRole("button", { name: "设为默认", exact: true }).click();
+				await vi.waitFor(async () => {
+					const stored = await readCodexConfigurationSyncStore();
+					expect(stored.profiles[stored.defaultCodexConfigurationProfileId ?? ""]?.name).toBe("浏览器独立配置");
+				});
+				await profiles.getByText(/共享设置 ·/).click();
+				const modelEditor = profiles.getByLabel("model", { exact: true });
+				await modelEditor.fill("browser-profile-model");
+				await modelEditor.locator("..").getByRole("button", { name: "更新并广播", exact: true }).click();
+				await vi.waitFor(async () => {
+					const stored = await readCodexConfigurationSyncStore();
+					expect(
+						stored.profiles[stored.defaultCodexConfigurationProfileId ?? ""]?.fields[
+							JSON.stringify(["config.toml", "model"])
+						].value,
+					).toBe("browser-profile-model");
+				});
+				await page.screenshot({ path: join(evidenceDirectory, "mobile-codex-profile-management.png") });
+				checks.push("真实 profile 管理可创建、重命名、设为默认并更新模型；新默认不会覆盖另一 profile 的局部选择");
+
 				await page.screenshot({ path: join(evidenceDirectory, "mobile-configuration-approval-settings.png") });
 				await page.keyboard.press("Escape");
 				await notice.waitFor({ state: "detached", timeout: 15_000 });

@@ -32,6 +32,7 @@ import {
 	ClaudeCodeTranscriptCompletedTurnSource,
 } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import type { RuntimeIngestExploratoryFindingCandidateRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { createSessionOwnedBackgroundAgentExecutor } from "../state/session-owned-background-agent-executions";
 import { collectExplorationThreadGraphFindingCandidateRequests } from "./exploration-thread-graph-finding-candidate-relay";
 import { decideExplorationThreadGraphMaintenanceThrottle } from "./exploration-thread-graph-maintenance-throttle";
 import { loadExplorationThreadGraphProjection } from "./exploration-thread-graph-projection-loader";
@@ -43,7 +44,6 @@ import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "./exploration-t
 export const EXPLORATION_THREAD_GRAPH_MAINTENANCE_DEBOUNCE_MS = 45_000;
 
 // 单次作业的墙钟上限。核心包默认 300s；这里不放宽——超时的分身照样计费，拖久了只是多烧钱。
-export const EXPLORATION_THREAD_GRAPH_MAINTENANCE_TIMEOUT_MS = 300_000;
 
 export type ExplorationThreadGraphMaintenanceOutcome =
 	| { kind: "completed"; result: RunExplorationThreadGraphMaintenanceJobResult }
@@ -207,10 +207,17 @@ export function createExplorationThreadGraphMaintenanceTrigger(
 				explorationId: input.explorationId,
 				sessions: sessionRefs,
 				turnSource: input.turnSource,
-				executor: createForkedWorkBranchExecutor(),
+				executor: createSessionOwnedBackgroundAgentExecutor({
+					workspaceId: input.workspaceId,
+					taskId: input.explorationId,
+					runtimeSessionIncarnationId:
+						sessionSummaries.find((summary) => summary.taskId === input.explorationId)
+							?.runtimeSessionIncarnationId ?? null,
+					purpose: "exploration_thread_graph_maintenance",
+					executor: createForkedWorkBranchExecutor(),
+				}),
 				storeRoot,
 				mode: maintenanceJobMode,
-				timeoutMs: EXPLORATION_THREAD_GRAPH_MAINTENANCE_TIMEOUT_MS,
 			});
 
 			// 只有真正落盘了才重算并广播——被拒 / 跳过 / fork 失败时图没变，广播一次相同的值只是噪音。

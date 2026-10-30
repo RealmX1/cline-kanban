@@ -142,14 +142,13 @@ function createNativeOwnerHarness() {
 	};
 	return owner;
 }
-function createConfigurationService(owner: ReturnType<typeof createNativeOwnerHarness>) {
-	const service = withExplicitApprovalOfObservedCodexConfigurationProposals(
-		createCodexConfigurationSyncService({
-			listSessions: () => sessionTargets,
-			onUpdated: () => {},
-			withOwnerConnection: owner.connect,
-		}),
-	);
+function createConfigurationService(owner: ReturnType<typeof createNativeOwnerHarness>, approveObserved = true) {
+	const rawService = createCodexConfigurationSyncService({
+		listSessions: () => sessionTargets,
+		onUpdated: () => {},
+		withOwnerConnection: owner.connect,
+	});
+	const service = approveObserved ? withExplicitApprovalOfObservedCodexConfigurationProposals(rawService) : rawService;
 	configurationServices.push(service);
 	return service;
 }
@@ -157,21 +156,63 @@ async function prepareTargetConflict() {
 	const sourceWriter = await createConfigurationWriter("source-session");
 	const targetWriter = await createConfigurationWriter("target-session");
 	const owner = createNativeOwnerHarness();
-	const observer = createConfigurationService(owner);
+	owner.available = false;
+	const observer = createConfigurationService(owner, false);
 	await setWriterModel(sourceWriter, "source-model");
-	const sourceChange = (await observer.getState()).changes[0];
-	await setWriterModel(targetWriter, "target-model");
-	const state = await observer.synchronize({
-		changeId: sourceChange.changeId,
-		expectedVersion: sourceChange.version,
-		idempotencyKey: randomUUID(),
-		synchronizeExistingSessions: true,
+	await observer.scan();
+	const suggestion = (await observer.getState()).changes[0];
+	const approved = await observer.batchAction({
+		action: "approve",
+		items: [
+			{
+				entryKind: "settings_proposal",
+				changeId: suggestion.changeId,
+				expectedVersion: suggestion.version,
+				idempotencyKey: randomUUID(),
+			},
+		],
 	});
+	const sourceChange = approved.state.changes.find((change) => change.changeId === suggestion.changeId);
+	if (!sourceChange) throw new Error("缺少已批准来源决定");
+	await setWriterModel(targetWriter, "target-model");
+	await observer.scan();
+	// 直接恢复升级前已经存在的已批准传播与目标冲突；新模型调整走限时反馈，不再制造这类冲突。
+	await mutateCodexConfigurationSyncStore((store) => {
+		const approved = store.changes.find((change) => change.changeId === sourceChange.changeId);
+		const local = store.changes.find(
+			(change) => change.sourceWriterId === targetWriter.writerId && change.fieldKey === modelFieldKey,
+		);
+		if (!approved || !local) throw new Error("缺少历史冲突夹具");
+		delete approved.codexConfigurationProfileId;
+		delete approved.acceptedProfileFieldVersion;
+		local.mergeStatus = "conflict";
+		local.sharedValueAtConflict = { value: "source-model" };
+		approved.targets = [
+			{
+				writerId: targetWriter.writerId,
+				workspaceId: "target-conflict-workspace",
+				conversationSessionId: "target-session",
+				status: "conflict",
+				reason: "升级前已存在的目标决定",
+				attemptCount: 0,
+				acceptedAt: 1,
+				diskSavedAt: null,
+				ownerReloadedAt: null,
+				recoveryCondition: null,
+				conflictingTargetValueDigest: configurationDigest({ value: "target-model" }),
+				conflictHistory: [{ observedAt: 1, value: { value: "target-model" } }],
+			},
+		];
+		store.sources[sourceWriter.sourceIdentity].fields[modelFieldKey] = { value: "source-model" };
+	});
+	await observer.scan();
+	const state = await observer.getState();
 	const target = state.changes.find((change) => change.changeId === sourceChange.changeId)?.targets[0];
 	const localConflict = state.changes.find((change) => change.sourceWriterId === targetWriter.writerId);
 	expect(target?.status).toBe("conflict");
 	expect(localConflict?.mergeStatus).toBe("conflict");
 	await observer.close();
+	owner.available = true;
 	return {
 		sourceWriter,
 		targetWriter,
@@ -235,7 +276,9 @@ describe("目标冲突处理的明确选择与实际采用事实", () => {
 			value: { value: "target-model" },
 		});
 		await service.close();
-		const restored = await createConfigurationService(owner).getState();
+		const restoredConfigurationService = createConfigurationService(owner);
+		await restoredConfigurationService.scan();
+		const restored = await restoredConfigurationService.getState();
 		expect(restored.changes.find((change) => change.changeId === localConflict?.changeId)?.mergeStatus).toBe(
 			scenario.expectedMergeStatus,
 		);
@@ -260,7 +303,9 @@ describe("目标冲突处理的明确选择与实际采用事实", () => {
 		expect(await readWriterModel(targetWriter)).toBe("target-model");
 		expect(owner.batchWriteRequests).toHaveLength(0);
 		await service.close();
-		const restored = await createConfigurationService(owner).getState();
+		const restoredConfigurationService = createConfigurationService(owner);
+		await restoredConfigurationService.scan();
+		const restored = await restoredConfigurationService.getState();
 		expect(restored.changes.find((change) => change.changeId === localConflict?.changeId)?.mergeStatus).toBe(
 			"target_conflict_source_change_selected",
 		);
@@ -274,7 +319,9 @@ describe("目标冲突处理的明确选择与实际采用事实", () => {
 			if (historicalChange) historicalChange.mergeStatus = "kept_shared_value";
 		});
 		await service.close();
-		const restored = await createConfigurationService(owner).getState();
+		const restoredConfigurationService = createConfigurationService(owner);
+		await restoredConfigurationService.scan();
+		const restored = await restoredConfigurationService.getState();
 		expect(restored.changes.find((change) => change.changeId === localConflict?.changeId)?.mergeStatus).toBe(
 			"kept_shared_value",
 		);

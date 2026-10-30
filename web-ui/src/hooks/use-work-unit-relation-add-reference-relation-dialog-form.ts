@@ -1,11 +1,11 @@
 // dd2db 2.1「添加关系」对话框的表单状态编排：草稿、提交前校验（第一次点提交之后才显示问题，免得边打字边挨骂）、
 // 提交中状态、runtime 拒绝时原样转述的那句话。
 //
-// 提交是决策类 procedure（R3）：本 hook 只**造**提交按钮的点击处理器，处理器把这次点击事件原样交给传输层
-// （runtime 据此拒绝脚本合成的点击）；绝不在 effect / 自动流程里提交。
+// 提交是决策类 procedure（R3）：点击或键盘手势的原始事件交给传输层，
+// runtime 据此拒绝脚本合成事件；绝不在 effect / 自动流程里提交。
 
 import type { InterWorkUnitRelationAssertionWriteResponse } from "@runtime-work-unit-relation-assertion-write-api-contract";
-import { type MouseEventHandler, useCallback, useState } from "react";
+import { useCallback, useState } from "react";
 import { describeInterWorkUnitRelationAssertionWriteFailureForUser } from "@/hooks/use-work-unit-relation-neighborhood-panel-of-kanban-board-card";
 import {
 	type AddReferenceRelationDialogDraft,
@@ -15,6 +15,7 @@ import {
 import {
 	assertReferenceRelationDirectlyAsWebUiUserFromExplicitUserGesture,
 	classifyInterWorkUnitRelationAssertionWriteFailure,
+	type TriggeringExplicitUserGestureEvent,
 } from "@/runtime/work-unit-relation-assertion-write-query";
 
 export interface WorkUnitRelationAddReferenceRelationDialogFormController {
@@ -25,8 +26,8 @@ export interface WorkUnitRelationAddReferenceRelationDialogFormController {
 	isReferenceRelationAssertionSubmissionInFlight: boolean;
 	// runtime 拒绝（或网络失败）时给用户看的话；含 runtime 原句。
 	referenceRelationAssertionWriteFailureMessage: string | null;
-	// 只能绑在提交按钮的 onClick 上（见文件头）。
-	referenceRelationAssertionSubmitButtonClickHandler: MouseEventHandler<HTMLButtonElement>;
+	// 只由提交按钮或表单快捷键的显式用户手势调用（见文件头）。
+	submitReferenceRelationFromExplicitUserGesture: (event: TriggeringExplicitUserGestureEvent) => void | Promise<void>;
 }
 
 export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
@@ -58,8 +59,8 @@ export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
 		subjectKanbanBoardCardTaskId,
 	});
 
-	const referenceRelationAssertionSubmitButtonClickHandler: MouseEventHandler<HTMLButtonElement> = (
-		submitButtonClickEvent,
+	const submitReferenceRelationFromExplicitUserGesture = (
+		submitUserGestureEvent: TriggeringExplicitUserGestureEvent,
 	) => {
 		setHasAttemptedSubmission(true);
 		if (!currentDraftValidationOutcome.isDraftReadyForSubmission || isReferenceRelationAssertionSubmissionInFlight) {
@@ -67,7 +68,7 @@ export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
 		}
 		setIsReferenceRelationAssertionSubmissionInFlight(true);
 		setReferenceRelationAssertionWriteFailureMessage(null);
-		assertReferenceRelationDirectlyAsWebUiUserFromExplicitUserGesture(submitButtonClickEvent, {
+		return assertReferenceRelationDirectlyAsWebUiUserFromExplicitUserGesture(submitUserGestureEvent, {
 			workspaceId: subjectKanbanBoardCardWorkspaceId,
 			referenceRelationAssertion:
 				currentDraftValidationOutcome.referenceRelationAssertionRequestWithoutClientCharacteristics,
@@ -99,6 +100,6 @@ export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
 				: [],
 		isReferenceRelationAssertionSubmissionInFlight,
 		referenceRelationAssertionWriteFailureMessage,
-		referenceRelationAssertionSubmitButtonClickHandler,
+		submitReferenceRelationFromExplicitUserGesture,
 	};
 }

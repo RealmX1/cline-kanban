@@ -25,6 +25,24 @@ function CommentsHarness(): React.ReactElement {
 }
 
 describe("TaskCommentsPanel", () => {
+	it("新增和编辑评论的提交组合键只保存当前评论", async () => {
+		await act(async () => renderPanel(root, <CommentsHarness />));
+		const newComment = container.querySelector("textarea")!;
+		await act(async () => setControlledTextareaValue(newComment, "新评论"));
+		await act(async () =>
+			newComment.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })),
+		);
+		const existingComment = container.querySelectorAll("textarea")[1]!;
+		expect(existingComment?.value).toBe("新评论");
+		await act(async () => setControlledTextareaValue(existingComment, "修改后的评论"));
+		await act(async () =>
+			existingComment.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true })),
+		);
+		expect(container.querySelectorAll("textarea")).toHaveLength(2);
+		expect(existingComment.value).toBe("修改后的评论");
+		expect(container.querySelector<HTMLButtonElement>('[aria-label="Save task comment"]')?.disabled).toBe(true);
+	});
+
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
