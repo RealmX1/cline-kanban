@@ -62,7 +62,7 @@ for (const touch of [false, true]) {
 							`restart-arguments-${touch ? "touch" : "desktop"}-${compact ? "compact" : "toolbar"}.png`,
 						),
 				});
-				await page.getByRole("button", { name: "重启会话", exact: true }).click();
+				await page.getByRole("textbox", { name: "额外启动参数", exact: true }).press("Meta+Enter");
 				await expect(dialog).toHaveCount(0);
 				expect(requests).toHaveLength(1);
 				expect(requests[0]!.additionalAgentStartupArgumentsForThisRestart).toEqual(["--cd", "/explicit path", ""]);

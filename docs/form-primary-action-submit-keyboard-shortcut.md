@@ -11,6 +11,7 @@ macOS 使用 `Command+Enter`，Windows/Linux 使用 `Ctrl+Enter`，触发当前�
 | 关系与结案 | 关系详情加入草稿、保存关系变更、添加关系、结案信息、未验证原因 |
 | 项目与设置 | 添加项目、初始化 Git、克隆项目、项目图标与颜色、运行时设置 |
 | 原生表单 | 路径导航、解锁表单 |
+| 会话调试 | Codex 带参数重启弹窗 |
 
 Prompt/Command 库保留自动保存，并在编辑区域消费提交组合键。删除确认、终端输入和停维护的 Cline 专属表单没有新增适配。没有新增快捷键配置、依赖或后端协议。
 
@@ -36,6 +37,7 @@ Prompt/Command 库保留自动保存，并在编辑区域消费提交组合键�
 | `runtime-settings-dialog.test.tsx` | 两种组合键统一保存，失败保留密钥草稿后重试 |
 | `passcode-gate.test.tsx`、`remote-file-browser-dialog.test.tsx` | 原生提交校验、请求锁、失败重试及路径导航不触发外层选择 |
 | `task-prompt-composer-submit-keyboard-shortcut.test.tsx` | 无回调时冒泡、有回调时消费、图片准备门禁 |
+| `agent-session-restart-with-additional-startup-arguments-dialog.test.tsx` | 两种提交组合键复用参数解析、普通 Enter 与组字不重启 |
 | `task-editor-dialog.interaction.test.tsx` | 原有快捷动作继续生效，组字事件不穿透到 document 快捷键 |
 | `work-unit-relation-asserted-relations-and-add-reference-relation-dialog.test.tsx` | 点击与键盘复用端点校验，原始事件不丢失 |
 | `tests/form-primary-action-submit-keyboard-shortcut.spec.ts` | Chromium 真实键盘、CDP 真实组字、长按、Portal 与 Diff 共存、项目添加、嵌套关系和可信事件 |

@@ -3,6 +3,10 @@ import { useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 
 export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
 	open,
@@ -24,6 +28,26 @@ export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const submissionInProgressRef = useRef(false);
+	const submitRestartWithAdditionalStartupArguments = async () => {
+		if (submissionInProgressRef.current || disabled) return;
+		setErrorMessage(null);
+		try {
+			const arguments_ = parseAdditionalAgentStartupArguments(argumentText);
+			submissionInProgressRef.current = true;
+			setIsSubmitting(true);
+			await onRestartAgentSession(arguments_);
+			onOpenChange(false);
+		} catch (error) {
+			setErrorMessage(error instanceof Error ? error.message : String(error));
+		} finally {
+			submissionInProgressRef.current = false;
+			setIsSubmitting(false);
+		}
+	};
+	const handleRestartWithArgumentsPrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submitRestartWithAdditionalStartupArguments,
+		disabled: isSubmitting || disabled,
+	});
 	return (
 		<Dialog
 			open={open}
@@ -35,22 +59,10 @@ export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
 			<DialogHeader title="带参数重启 Codex" />
 			<form
 				className="flex min-h-0 flex-1 flex-col"
-				onSubmit={async (event) => {
+				onKeyDown={handleRestartWithArgumentsPrimaryActionKeyDown}
+				onSubmit={(event) => {
 					event.preventDefault();
-					if (submissionInProgressRef.current || disabled) return;
-					setErrorMessage(null);
-					try {
-						const arguments_ = parseAdditionalAgentStartupArguments(argumentText);
-						submissionInProgressRef.current = true;
-						setIsSubmitting(true);
-						await onRestartAgentSession(arguments_);
-						onOpenChange(false);
-					} catch (error) {
-						setErrorMessage(error instanceof Error ? error.message : String(error));
-					} finally {
-						submissionInProgressRef.current = false;
-						setIsSubmitting(false);
-					}
+					void submitRestartWithAdditionalStartupArguments();
 				}}
 			>
 				<DialogBody className="space-y-3">
@@ -91,6 +103,7 @@ export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
 						取消
 					</Button>
 					<Button
+						{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 						type="submit"
 						variant={isAgentSessionInActiveTurn ? "danger" : "primary"}
 						disabled={isSubmitting || disabled}

@@ -44,6 +44,36 @@ describe("Codex 带参数重启弹窗", () => {
 			document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
 		);
 	}
+	it.each(["metaKey", "ctrlKey"])("%s+Enter 复用参数解析与重启入口", async (submitShortcutModifierPropertyName) => {
+		await render();
+		await fill('--cd "/path with spaces" ""');
+		await act(async () =>
+			document.querySelector("textarea")!.dispatchEvent(
+				new KeyboardEvent("keydown", {
+					key: "Enter",
+					[submitShortcutModifierPropertyName]: true,
+					bubbles: true,
+					cancelable: true,
+				}),
+			),
+		);
+		expect(restart).toHaveBeenCalledOnce();
+		expect(restart).toHaveBeenCalledWith(["--cd", "/path with spaces", ""]);
+		expect(close).toHaveBeenCalledWith(false);
+	});
+	it("普通 Enter、组字和长按不触发重启", async () => {
+		await render();
+		for (const properties of [{}, { ctrlKey: true, isComposing: true }, { metaKey: true, repeat: true }]) {
+			await act(async () =>
+				document
+					.querySelector("textarea")!
+					.dispatchEvent(
+						new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...properties }),
+					),
+			);
+		}
+		expect(restart).not.toHaveBeenCalled();
+	});
 	it("取消不重启，空输入可提交", async () => {
 		await render();
 		await act(async () =>
