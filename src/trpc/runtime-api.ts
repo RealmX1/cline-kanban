@@ -7,6 +7,7 @@ import { runtimeAutomaticAgentFailureContinuationActionRequestSchema } from "../
 import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
+import { requestSessionOwnedBackgroundAgentExecutionCancellation } from "../state/session-owned-background-agent-executions";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -2034,6 +2035,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				let summary: RuntimeTaskSessionSummary | null = null;
 				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
+					await requestSessionOwnedBackgroundAgentExecutionCancellation({
+						workspaceId: workspaceScope.workspaceId,
+						taskId: taskConversationSessionId,
+					}).catch((error: unknown) => {
+						logAgentSessionRetentionWarning(
+							`后台 Agent 取消请求写入失败 taskId=${taskConversationSessionId} error=${String(error)}`,
+						);
+					});
 					const acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
 					const clineSummary = acpSummary
 						? null

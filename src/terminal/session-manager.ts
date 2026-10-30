@@ -4,6 +4,7 @@ import {
 	persistAutomaticAgentFailureContinuation,
 	readAutomaticAgentFailureContinuations,
 } from "../state/automatic-agent-failure-continuation-store";
+import { hasSessionOwnedBackgroundAgentExecutionRequiringRetention } from "../state/session-owned-background-agent-executions";
 import {
 	type AutomaticFailureContinuationAttemptResult,
 	claudeAutomaticFailureContinuationMayStartWrite,
@@ -7985,6 +7986,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	async inspectCodexNativeTurnBeforeReviewSessionReclamation(
 		taskId: string,
 	): Promise<"allow_reclamation" | "defer_reclamation"> {
+		const workspaceId = this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+		if (workspaceId && (await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({ workspaceId, taskId }))) {
+			return "defer_reclamation";
+		}
 		const entry = this.entries.get(taskId);
 		if (!entry?.active || !isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary))
 			return "allow_reclamation";

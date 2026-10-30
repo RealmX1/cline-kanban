@@ -112,6 +112,7 @@ function createScheduler(
 	harness: SchedulerHarness,
 	options: {
 		nowMs?: number;
+		hasBackgroundAgentExecutionRequiringRetention?: () => Promise<boolean>;
 		reclaim?: (request: AgentSessionReclamationRequest) => Promise<RuntimeAgentSessionReclamationOutcome>;
 		markPendingUserDecisionsReclaimed?: (workspaceId: string, taskId: string, reclaimedAt: number) => Promise<number>;
 		inspectNativeTurnExecutionBeforeReviewReclamation?: Parameters<
@@ -122,6 +123,8 @@ function createScheduler(
 	const nowMs = options.nowMs ?? NOW;
 	return createAgentSessionInactivityReclamationScheduler({
 		now: () => nowMs,
+		hasBackgroundAgentExecutionRequiringRetention:
+			options.hasBackgroundAgentExecutionRequiringRetention ?? (async () => false),
 		getTaskSessionSummary: (_workspaceId, taskId) => harness.summaryByTaskId.get(taskId) ?? null,
 		inspectNativeTurnExecutionBeforeReviewReclamation: options.inspectNativeTurnExecutionBeforeReviewReclamation,
 		reclaimAgentSession: async (request) => {
@@ -570,4 +573,25 @@ describe("回收结果回调", () => {
 		expect(onReclamationOutcome.mock.calls[0]?.[0]?.workspaceId).toBe(WORKSPACE_ID);
 		expect(onReclamationOutcome.mock.calls[0]?.[0]?.outcome?.rootProcessExitConfirmed).toBe(true);
 	});
+});
+
+describe("后台 Agent 优先于闲置与 park 回收", () => {
+	it.each(["agent_response_generation_stopped", "session_parked_awaiting_dispatched_background_work"] as const)(
+		"%s 等待退出证据后自动接续回收",
+		async (retentionAnchorKind) => {
+			const harness = createHarness();
+			harness.records.push(makeRecord({ retentionAnchorKind }));
+			harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+			let retentionRequired = true;
+			const scheduler = createScheduler(harness, {
+				hasBackgroundAgentExecutionRequiringRetention: async () => retentionRequired,
+			});
+			await scheduler.runSweepNow();
+			expect(harness.reclaimRequests).toHaveLength(0);
+			expect(harness.pendingUserDecisionReclaimMarkings).toHaveLength(0);
+			retentionRequired = false;
+			await scheduler.runSweepNow();
+			expect(harness.reclaimRequests).toHaveLength(1);
+		},
+	);
 });

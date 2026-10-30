@@ -3,6 +3,7 @@ import { ClaudeCodeForkedSessionWorkBranchExecutor } from "agent-conversation-ex
 import { z } from "zod";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { recordModelProviderUsage } from "../model-provider-access/model-provider-usage-record";
+import { createSessionOwnedBackgroundAgentExecutor } from "../state/session-owned-background-agent-executions";
 import type { PersistedIndependentTaskCreationDraft } from "./persisted-creation-draft";
 
 export const generatedIndependentTaskDefinitionSchema = z.object({
@@ -22,7 +23,9 @@ export function sourceAgentDraftGenerationUnavailableReason(
 }
 
 export async function generateIndependentTaskDraftWithSourceAgentFork(input: {
+	workspaceId: string;
 	record: PersistedIndependentTaskCreationDraft;
+	signal?: AbortSignal;
 	artifactDirectory: string;
 	prompt: string;
 }) {
@@ -32,7 +35,14 @@ export async function generateIndependentTaskDraftWithSourceAgentFork(input: {
 	if (unavailable || !seed || !replay || !seed.sourceSessionWorkingDirectoryPath)
 		throw new Error(unavailable ?? "来源分身参数缺失。");
 	const startedAt = Date.now();
-	const result = await new ClaudeCodeForkedSessionWorkBranchExecutor().start({
+	const executor = createSessionOwnedBackgroundAgentExecutor({
+		workspaceId: input.workspaceId,
+		taskId: input.record.draft.sourceTaskConversationSessionId,
+		runtimeSessionIncarnationId: input.record.sourceSummary?.runtimeSessionIncarnationId ?? null,
+		purpose: "source_agent_draft_generation",
+		executor: new ClaudeCodeForkedSessionWorkBranchExecutor(),
+	});
+	const result = await executor.start({
 		parentSession: {
 			harnessKind: "claude_code",
 			nativeSessionId: seed.sourceSessionId,
@@ -56,7 +66,7 @@ export async function generateIndependentTaskDraftWithSourceAgentFork(input: {
 			required: ["suggestedTaskDescription", "title", "initialPrompt"],
 			additionalProperties: false,
 		},
-		timeoutMs: 120_000,
+		signal: input.signal,
 	});
 	await lockedFileSystem.writeTextFileAtomic(
 		join(input.artifactDirectory, "source-agent-generation-result.json"),

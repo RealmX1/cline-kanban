@@ -26,6 +26,7 @@ import {
 	supersedeAgentSessionRetentionDeadlinesForTask,
 	updateAgentSessionReclamationProgress,
 } from "../state/agent-session-reclamation-deadline-store";
+import { hasSessionOwnedBackgroundAgentExecutionRequiringRetention } from "../state/session-owned-background-agent-executions";
 import { isAgentSessionRetentionDeadlineBearing } from "./agent-session-response-generation-stop-observer";
 
 // tick 间隔：小时级的宽限期下，60 秒的判定粒度绰绰有余，而扫描成本（每 workspace 读一个小 JSON）
@@ -80,6 +81,7 @@ export interface CreateAgentSessionInactivityReclamationSchedulerOptions {
 	// （服务重启、项目被移除、会话已被清理）⇒ 没有可回收的运行时，记录置 superseded。
 	getTaskSessionSummary: (workspaceId: string, taskId: string) => RuntimeTaskSessionSummary | null;
 	reclaimAgentSession: AgentSessionReclamationExecutor;
+	hasBackgroundAgentExecutionRequiringRetention?: typeof hasSessionOwnedBackgroundAgentExecutionRequiringRetention;
 	inspectNativeTurnExecutionBeforeReviewReclamation?: (
 		workspaceId: string,
 		taskId: string,
@@ -173,6 +175,23 @@ export function createAgentSessionInactivityReclamationScheduler(
 		result: AgentSessionReclamationSweepResult,
 		nowMs: number,
 	): Promise<void> => {
+		const requiresRetention = await (
+			options.hasBackgroundAgentExecutionRequiringRetention ??
+			hasSessionOwnedBackgroundAgentExecutionRequiringRetention
+		)({ workspaceId, taskId: record.taskId });
+		if (requiresRetention) {
+			logAgentSessionRetentionInfo(
+				`background-agent-reclamation-deferred workspaceId=${workspaceId} taskId=${record.taskId} recoveryCondition=native_process_exit_or_original_result_available`,
+			);
+			return;
+		}
+		const refreshedSummary = options.getTaskSessionSummary(workspaceId, record.taskId);
+		if (
+			!isReclamationDeadlineStillCurrentForSession(record, refreshedSummary) ||
+			!refreshedSummary ||
+			!isAgentSessionRetentionDeadlineBearing(refreshedSummary)
+		)
+			return;
 		// 本次是第几次尝试。**必须在写账本之前算好**：账本实现可能返回同一个记录对象，
 		// 事后再读 record.reclamationAttemptCount 会把已经自增过的值又加一次，退避时长直接翻倍。
 		const attemptCount = record.reclamationAttemptCount + 1;
