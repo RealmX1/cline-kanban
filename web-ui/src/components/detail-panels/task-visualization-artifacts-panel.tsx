@@ -442,7 +442,11 @@ export function TaskVisualizationArtifactsPanel({
 					referrerPolicy="no-referrer"
 					className="min-h-0 w-full flex-1 border-0 bg-white"
 				/>
-			) : !isPreparing && !previewError && !initialSelectionError && !controller.automaticPreviewError ? (
+			) : !isPreparing &&
+				!previewError &&
+				!initialSelectionError &&
+				!controller.automaticPreviewError &&
+				!controller.error ? (
 				<div className="flex min-h-0 flex-1 flex-col justify-center gap-2 p-4 text-sm text-text-secondary">
 					<p>
 						{controller.isLoading
