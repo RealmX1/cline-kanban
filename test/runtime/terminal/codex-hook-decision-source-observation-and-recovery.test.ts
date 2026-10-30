@@ -31,6 +31,8 @@ beforeEach(async () => {
 	fixture.path = await realpath(fixture.path);
 	vi.stubEnv("HOME", fixture.path);
 	sourceHome = join(fixture.path, ".codex");
+	vi.stubEnv("CODEX_HOME", sourceHome);
+	vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
 	await mkdir(sourceHome);
 	await writeFile(join(sourceHome, "config.toml"), 'model="initial-model"\n');
 	storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
@@ -81,6 +83,9 @@ async function writer() {
 		workspaceId: "fixture-workspace",
 		conversationSessionId: randomUUID(),
 		runtimeSessionIncarnationId: randomUUID(),
+		// 来源恢复用例没有真实会话元数据宿主，显式保留 Task 局部权限。
+		sessionPermissionMode: "bypass_all_permission_prompts",
+		sessionPermissionSelectionSource: "task_local",
 	});
 }
 async function decideHook(

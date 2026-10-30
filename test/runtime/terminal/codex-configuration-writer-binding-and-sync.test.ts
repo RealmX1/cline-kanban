@@ -147,9 +147,18 @@ function service(
 	services.push(instance);
 	return instance;
 }
-function nativeOwnerMock(input: { failBeforeWrite?: boolean; loseFirstReceipt?: boolean; wrongOwner?: boolean } = {}) {
+function nativeOwnerMock(
+	input: {
+		failBeforeWrite?: boolean;
+		loseFirstReceipt?: boolean;
+		wrongOwner?: boolean;
+		currentHookHash?: string;
+		beforeFirstConfigurationRead?: (configurationFilePath: string) => Promise<void>;
+	} = {},
+) {
 	const writes: Record<string, unknown>[] = [];
 	let receiptLost = false;
+	let configurationReadCallbackCalled = false;
 	return {
 		writes,
 		connect: async <T>(
@@ -169,7 +178,24 @@ function nativeOwnerMock(input: { failBeforeWrite?: boolean; loseFirstReceipt?: 
 								? ["another-thread"]
 								: [summary.agentNativeConversationSessionIdentity?.nativeSessionId],
 						};
-					if (method === "config/read")
+					if (method === "hooks/list")
+						return {
+							data: [
+								{
+									hooks: [
+										{
+											key: `${summary.codexConfigurationWriterBinding?.configurationHomeDirectoryPath}/hooks.json:stop:0:0`,
+											currentHash: input.currentHookHash ?? "fixture-hash",
+										},
+									],
+								},
+							],
+						};
+					if (method === "config/read") {
+						if (!configurationReadCallbackCalled) {
+							configurationReadCallbackCalled = true;
+							await input.beforeFirstConfigurationRead?.(filePath);
+						}
 						return {
 							config: parse(await readFile(filePath, "utf8")),
 							layers: [
@@ -179,6 +205,7 @@ function nativeOwnerMock(input: { failBeforeWrite?: boolean; loseFirstReceipt?: 
 								},
 							],
 						};
+					}
 					if (method === "config/batchWrite") {
 						writes.push(parameters);
 						expect(parameters.expectedVersion).toBe(configurationDigest(await readFile(filePath, "utf8")));
@@ -317,7 +344,13 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 	it("禁用、显式不信任、删除及较新的重新启用都进入未来默认", async () => {
 		const first = await writer("first");
 		const sync = service();
-		for (const decision of [{ enabled: false }, { enabled: true, trusted_hash: "new-hash" }, {}] as TomlTable[]) {
+		for (const decision of [
+			{ enabled: false },
+			{ enabled: true, trusted_hash: "new-hash", trusted_content_hash: "content-hash" },
+			{ enabled: false, trusted_hash: "new-hash", trusted_content_hash: "content-hash" },
+			{ enabled: true, trusted_hash: "new-hash" },
+			{},
+		] as TomlTable[]) {
 			await decideHook(first, decision);
 			await vi.waitFor(
 				async () => {
@@ -353,6 +386,172 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			"trusted_hash",
 		);
 	});
+	it.each([
+		{
+			currentHookHash: "sha256:definition/sha256:content",
+			trustedContentHash: "sha256:content",
+			expectedStatus: "applied",
+		},
+		{
+			currentHookHash: "sha256:definition/sha256:changed-content",
+			trustedContentHash: "sha256:content",
+			expectedStatus: "not_applicable",
+		},
+		{
+			currentHookHash: "sha256:changed-definition/sha256:content",
+			trustedContentHash: "sha256:content",
+			expectedStatus: "not_applicable",
+		},
+		{ currentHookHash: "sha256:definition", trustedContentHash: "sha256:content", expectedStatus: "not_applicable" },
+		{ currentHookHash: "sha256:definition", trustedContentHash: undefined, expectedStatus: "applied" },
+		{
+			currentHookHash: "sha256:definition/sha256:content",
+			trustedContentHash: undefined,
+			expectedStatus: "not_applicable",
+		},
+	])(
+		"双哈希决定按原生完整指纹核验：$currentHookHash，内容绑定 $trustedContentHash",
+		async ({ currentHookHash, trustedContentHash, expectedStatus }) => {
+			const first = await writer("first"),
+				second = await writer("second");
+			const decision = {
+				enabled: true,
+				trusted_hash: "sha256:definition",
+				...(trustedContentHash === undefined ? {} : { trusted_content_hash: trustedContentHash }),
+			};
+			await decideHook(first, decision);
+			const owner = nativeOwnerMock({ currentHookHash });
+			const sync = service(owner.connect);
+			await sync.scan();
+			const change = (await sync.getState()).changes.find((item) => item.sourceWriterId === first.writerId);
+			expect(change).toBeDefined();
+			const result = await sync.synchronize({
+				changeId: change?.changeId ?? "",
+				expectedVersion: change?.version ?? 0,
+				idempotencyKey: randomUUID(),
+				synchronizeExistingSessions: true,
+			});
+			expect(result.changes.find((item) => item.changeId === change?.changeId)?.targets[0].status).toBe(
+				expectedStatus,
+			);
+			expect(owner.writes).toHaveLength(expectedStatus === "applied" ? 1 : 0);
+			const configuration = parse(
+				await readFile(join(second.configurationHomeDirectoryPath, "config.toml"), "utf8"),
+			);
+			expect(configuration.hooks).toMatchObject({
+				state: {
+					[`${second.configurationHomeDirectoryPath}/hooks.json:stop:0:0`]:
+						expectedStatus === "applied" ? decision : { trusted_hash: "fixture-hash" },
+				},
+			});
+		},
+	);
+	it.each([
+		{
+			sourceContentHash: "sha256:content",
+			targetTrustChangesDuringRequest: false,
+			expectedSynchronizationStatus: "applied",
+		},
+		{
+			sourceContentHash: "sha256:other-content",
+			targetTrustChangesDuringRequest: false,
+			expectedSynchronizationStatus: "not_applicable",
+		},
+		{
+			sourceContentHash: "sha256:content",
+			targetTrustChangesDuringRequest: true,
+			expectedSynchronizationStatus: "conflict",
+		},
+	])(
+		"内容指纹已变化时，纯禁用保留目标原有信任：$sourceContentHash，中途变化 $targetTrustChangesDuringRequest",
+		async ({ sourceContentHash, targetTrustChangesDuringRequest, expectedSynchronizationStatus }) => {
+			const confirmedHookTrustState = {
+				enabled: true,
+				trusted_hash: "sha256:definition",
+				trusted_content_hash: "sha256:content",
+			};
+			const sourceConfigurationFilePath = join(sourceHome, "config.toml");
+			const sourceConfigurationTable = parse(await readFile(sourceConfigurationFilePath, "utf8"));
+			sourceConfigurationTable.hooks = { state: { [`${sourceHome}/hooks.json:stop:0:0`]: confirmedHookTrustState } };
+			await writeFile(sourceConfigurationFilePath, stringify(sourceConfigurationTable));
+			const originWriterBinding = await writer("disable-origin");
+			const targetWriterBinding = await writer("disable-target");
+			const disabledHookTrustState = {
+				...confirmedHookTrustState,
+				enabled: false,
+				trusted_content_hash: sourceContentHash,
+			};
+			await decideHook(originWriterBinding, disabledHookTrustState);
+			const nativeOwnerConnectionMock = nativeOwnerMock({
+				currentHookHash: "sha256:definition/sha256:changed-content",
+				beforeFirstConfigurationRead: targetTrustChangesDuringRequest
+					? async (configurationFilePath) => {
+							const changedTargetConfigurationTable = parse(await readFile(configurationFilePath, "utf8"));
+							changedTargetConfigurationTable.hooks = {
+								state: {
+									[`${targetWriterBinding.configurationHomeDirectoryPath}/hooks.json:stop:0:0`]: {
+										...confirmedHookTrustState,
+										trusted_content_hash: "sha256:changed-content",
+									},
+								},
+							};
+							await writeFile(configurationFilePath, stringify(changedTargetConfigurationTable));
+						}
+					: undefined,
+			});
+			let allowExplicitSynchronizationOwnerConnection = false;
+			const configurationSynchronizationService = service(async (summary, operation) => {
+				if (!allowExplicitSynchronizationOwnerConnection) throw new Error("测试等待显式同步后连接原所有者");
+				return nativeOwnerConnectionMock.connect(summary, operation);
+			});
+			await configurationSynchronizationService.scan();
+			const disableChange = (await configurationSynchronizationService.getState()).changes.find(
+				(change) => change.sourceWriterId === originWriterBinding.writerId,
+			);
+			if (!disableChange) throw new Error("缺少纯禁用测试的变更记录");
+			allowExplicitSynchronizationOwnerConnection = true;
+			const synchronizationResult = await configurationSynchronizationService.synchronize({
+				changeId: disableChange.changeId,
+				expectedVersion: disableChange.version,
+				idempotencyKey: randomUUID(),
+				synchronizeExistingSessions: true,
+			});
+			expect(
+				synchronizationResult.changes.find((change) => change.changeId === disableChange.changeId)?.targets[0]
+					.status,
+			).toBe(expectedSynchronizationStatus);
+			expect(nativeOwnerConnectionMock.writes).toHaveLength(expectedSynchronizationStatus === "applied" ? 1 : 0);
+			const targetConfigurationTable = parse(
+				await readFile(join(targetWriterBinding.configurationHomeDirectoryPath, "config.toml"), "utf8"),
+			);
+			expect(targetConfigurationTable.hooks).toMatchObject({
+				state: {
+					[`${targetWriterBinding.configurationHomeDirectoryPath}/hooks.json:stop:0:0`]: {
+						...confirmedHookTrustState,
+						trusted_content_hash: targetTrustChangesDuringRequest
+							? "sha256:changed-content"
+							: confirmedHookTrustState.trusted_content_hash,
+						enabled: expectedSynchronizationStatus !== "applied",
+					},
+				},
+			});
+			if (expectedSynchronizationStatus === "applied") {
+				await configurationSynchronizationService.close();
+				const resumedTargetWriterBinding = await writer("disable-target", targetWriterBinding);
+				const resumedConfigurationTable = parse(
+					await readFile(join(resumedTargetWriterBinding.configurationHomeDirectoryPath, "config.toml"), "utf8"),
+				);
+				expect(resumedConfigurationTable.hooks).toMatchObject({
+					state: {
+						[`${resumedTargetWriterBinding.configurationHomeDirectoryPath}/hooks.json:stop:0:0`]: {
+							...confirmedHookTrustState,
+							enabled: false,
+						},
+					},
+				});
+			}
+		},
+	);
 	it("定义变化和启动参数不会冒用已确认信任，敏感值不进入公开状态", async () => {
 		const first = await writer("first"),
 			second = await writer("second");

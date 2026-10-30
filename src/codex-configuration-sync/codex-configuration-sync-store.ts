@@ -135,6 +135,7 @@ export interface CodexConfigurationSyncStore {
 			hookSourceKey: string;
 			definitionDigest: string;
 			trustedHash: string | null;
+			trustedContentHash?: string | null;
 			version: number;
 		}
 	>;
@@ -188,6 +189,7 @@ const storeSchema = z.object({
 				hookSourceKey: z.string(),
 				definitionDigest: z.string(),
 				trustedHash: z.string().nullable(),
+				trustedContentHash: z.string().nullable().optional(),
 				version: z.number(),
 			}),
 		)

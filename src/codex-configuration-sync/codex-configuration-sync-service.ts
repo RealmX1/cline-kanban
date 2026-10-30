@@ -965,7 +965,18 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				const nativeId = summary.agentNativeConversationSessionIdentity?.nativeSessionId;
 				const loaded = z.object({ data: z.array(z.string()) }).parse(await port.request("thread/loaded/list", {}));
 				if (!nativeId || !loaded.data.includes(nativeId)) throw new Error("原线程未加载");
-				if (configurationTable(change.value?.value) && typeof change.value.value.trusted_hash === "string") {
+				const targetHookState = current[change.fieldKey]?.value;
+				// 纯禁用保留目标已有全部信任字段，内容变化不应阻止关闭 hook。
+				const isHookDisablePreservingExistingTrust =
+					configurationTable(change.value?.value) &&
+					change.value.value.enabled === false &&
+					configurationTable(targetHookState) &&
+					isDeepStrictEqual({ ...targetHookState, enabled: false }, change.value.value);
+				if (
+					configurationTable(change.value?.value) &&
+					typeof change.value.value.trusted_hash === "string" &&
+					!isHookDisablePreservingExistingTrust
+				) {
 					const hooks = z
 						.object({
 							data: z.array(
@@ -973,15 +984,21 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							),
 						})
 						.parse(await port.request("hooks/list", { cwds: [summary.workspacePath] }));
-					const expectedHash = change.value.value.trusted_hash;
+					const expectedNativeHookFingerprint =
+						typeof change.value.value.trusted_content_hash === "string"
+							? `${change.value.value.trusted_hash}/${change.value.value.trusted_content_hash}`
+							: change.value.value.trusted_hash;
 					if (
 						!hooks.data
 							.flatMap((item) => item.hooks)
-							.some((hook) => hook.key === nativeKeyPath.at(-1) && hook.currentHash === expectedHash)
+							.some(
+								(hook) =>
+									hook.key === nativeKeyPath.at(-1) && hook.currentHash === expectedNativeHookFingerprint,
+							)
 					) {
 						await update({
 							status: "not_applicable",
-							reason: "原生定义哈希与待继承的信任哈希不匹配。",
+							reason: "原生 hook 指纹与待继承的定义哈希或内容哈希不匹配。",
 							recoveryCondition: null,
 						});
 						return;
@@ -1034,6 +1051,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					layer = confirmedLayer;
 				}
 				if (!versionBoundTargetFields) throw new Error("目标配置持续变化，等待稳定证据后自动恢复");
+				const versionBoundHookState = versionBoundTargetFields[change.fieldKey]?.value;
+				if (
+					isHookDisablePreservingExistingTrust &&
+					(!configurationTable(versionBoundHookState) ||
+						!isDeepStrictEqual({ ...versionBoundHookState, enabled: false }, change.value?.value))
+				)
+					throw new Error("纯禁用核验期间目标信任状态已变化，等待稳定状态后自动重验。");
 				if (
 					!change.codexConfigurationProfileId &&
 					!sameConfigurationField(

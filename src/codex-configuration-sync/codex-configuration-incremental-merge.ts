@@ -37,7 +37,7 @@ export function mergeObservedCodexConfigurationWriter(
 				const candidate =
 					configurationTable(profileState) && configurationTable(value.value)
 						? { ...value, value: { ...profileState, trusted_hash: value.value.trusted_hash } }
-						: value;
+						: { ...value, value: {} };
 				const confirmed = reuseConfirmedCodexHookTrust(store, writer.binding.sourceIdentity, fieldKey, candidate);
 				if (
 					!sameConfigurationField(candidate, confirmed) &&
@@ -90,7 +90,7 @@ export function mergeObservedCodexConfigurationWriter(
 					const candidate =
 						configurationTable(profileState) && configurationTable(value.value)
 							? { ...value, value: { ...profileState, trusted_hash: value.value.trusted_hash } }
-							: value;
+							: { ...value, value: {} };
 					const confirmed = reuseConfirmedCodexHookTrust(
 						store,
 						writer.binding.sourceIdentity,
