@@ -3088,60 +3088,66 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
 	});
 
-	it("refreshes Codex terminals with the same resume shape as restoring a done card", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
-			agentId: "codex",
-			label: "OpenAI Codex",
-			command: "codex",
-			binary: "codex",
-			args: [],
-		});
-
-		const terminalManager = {
-			getSummary: vi.fn(() =>
-				createSummary({
-					agentId: "codex",
-					workspacePath: "/tmp/existing-worktree",
-					startedAt: 1_700_000_000_000,
-					lastOutputAt: null,
-				}),
-			),
-			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "codex";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.refreshTaskTerminal(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1", cols: 120, rows: 40 },
-		);
-
-		expect(response.ok).toBe(true);
-		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({
+	it.each([undefined, [], ["--cd", "/explicit restart"]])(
+		"Codex 重启保留原生续跑形状并传递单次参数 %j",
+		async (additionalAgentStartupArgumentsForThisRestart) => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 				agentId: "codex",
-				prompt: "",
-				images: undefined,
-				startInPlanMode: undefined,
-				resumeFromTrash: true,
-			}),
-			expect.any(String),
-		);
-		expect(response.mode).toBe("resume");
-	});
+				label: "OpenAI Codex",
+				command: "codex",
+				binary: "codex",
+				args: [],
+			});
+
+			const terminalManager = {
+				getSummary: vi.fn(() =>
+					createSummary({
+						agentId: "codex",
+						workspacePath: "/tmp/existing-worktree",
+						startedAt: 1_700_000_000_000,
+						lastOutputAt: null,
+					}),
+				),
+				refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => {
+					const runtimeConfigState = createRuntimeConfigState();
+					runtimeConfigState.selectedAgentId = "codex";
+					return runtimeConfigState;
+				}),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.refreshTaskTerminal(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", cols: 120, rows: 40, additionalAgentStartupArgumentsForThisRestart },
+			);
+
+			expect(response.ok).toBe(true);
+			expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+				expect.objectContaining({
+					agentId: "codex",
+					prompt: "",
+					images: undefined,
+					startInPlanMode: undefined,
+					resumeFromTrash: true,
+					...(additionalAgentStartupArgumentsForThisRestart !== undefined
+						? { additionalAgentStartupArgumentsForThisRestart }
+						: {}),
+				}),
+				expect.any(String),
+			);
+			expect(response.mode).toBe("resume");
+		},
+	);
 
 	// ── 「首轮未结束被硬中断 → 重启后 TUI 全白且重启按钮不可用」的回归护栏 ────────────────────
 	// 中断后 agentId 是最容易丢的字段。以前 refreshTaskTerminal 在解析卡片**之前**就以「没有活体

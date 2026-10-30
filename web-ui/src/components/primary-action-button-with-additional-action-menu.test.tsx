@@ -1,7 +1,7 @@
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
+import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 
 const reactActEnvironment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 let previousReactActEnvironment: boolean | undefined;
@@ -13,7 +13,7 @@ afterAll(() => {
 	reactActEnvironment.IS_REACT_ACT_ENVIRONMENT = previousReactActEnvironment;
 });
 
-it("触摸首次点击只展开；附加选项单独执行，鼠标点击保留主操作", async () => {
+it("触屏主按钮直接执行，独立入口仅展开附加动作", async () => {
 	const primary = vi.fn();
 	const extra = vi.fn();
 	const host = document.createElement("div");
@@ -22,14 +22,14 @@ it("触摸首次点击只展开；附加选项单独执行，鼠标点击保留�
 	function Harness() {
 		const [open, setOpen] = useState(false);
 		return (
-			<TaskCardPrimaryActionWithQuickOptions
+			<PrimaryActionButtonWithAdditionalActionMenu
 				open={open}
 				onOpenChange={setOpen}
 				icon={null}
 				primaryLabel="直接完成"
 				primaryAccessibleLabel="直接完成"
 				onPrimaryAction={primary}
-				quickOption={{ label: "评论后完成", onSelect: extra }}
+				additionalAction={{ label: "评论后完成", onSelect: extra }}
 			/>
 		);
 	}
@@ -42,6 +42,11 @@ it("触摸首次点击只展开；附加选项单独执行，鼠标点击保留�
 			trigger.dispatchEvent(pointerDown);
 			trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
 		});
+		expect(primary).toHaveBeenCalledOnce();
+		primary.mockClear();
+		const expand = host.querySelector<HTMLButtonElement>('[aria-label="展开直接完成附加操作"]')!;
+		await act(async () => expand.click());
+		expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(1);
 		expect(primary).not.toHaveBeenCalled();
 		const option = document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="评论后完成"]');
 		expect(option).not.toBeNull();
@@ -68,7 +73,7 @@ it("菜单打开后禁用会通知受控父级关闭，恢复可用不会自动�
 	function Harness({ disabled }: { disabled: boolean }) {
 		const [open, setOpen] = useState(false);
 		return (
-			<TaskCardPrimaryActionWithQuickOptions
+			<PrimaryActionButtonWithAdditionalActionMenu
 				open={open}
 				onOpenChange={(nextOpen) => {
 					onOpenChange(nextOpen);
@@ -78,7 +83,7 @@ it("菜单打开后禁用会通知受控父级关闭，恢复可用不会自动�
 				primaryLabel="直接完成"
 				primaryAccessibleLabel="直接完成"
 				onPrimaryAction={() => {}}
-				quickOption={{ label: "评论后完成", onSelect: () => {} }}
+				additionalAction={{ label: "评论后完成", onSelect: () => {} }}
 				disabled={disabled}
 			/>
 		);
@@ -101,21 +106,21 @@ it("菜单打开后禁用会通知受控父级关闭，恢复可用不会自动�
 	}
 });
 
-it("触屏打开会话保持向下，鼠标进入与父级重渲不改方向；关闭后的悬停新会话向上", async () => {
+it("附加动作始终向下展开，鼠标、触屏与父级重渲保持一致", async () => {
 	const host = document.createElement("div");
 	document.body.append(host);
 	const root = createRoot(host);
 	function Harness() {
 		const [open, setOpen] = useState(false);
 		return (
-			<TaskCardPrimaryActionWithQuickOptions
+			<PrimaryActionButtonWithAdditionalActionMenu
 				open={open}
 				onOpenChange={setOpen}
 				icon={null}
 				primaryLabel="直接完成"
 				primaryAccessibleLabel="直接完成"
 				onPrimaryAction={() => {}}
-				quickOption={{ label: "评论后完成", onSelect: () => {} }}
+				additionalAction={{ label: "评论后完成", onSelect: () => {} }}
 			/>
 		);
 	}
@@ -128,8 +133,7 @@ it("触屏打开会话保持向下，鼠标进入与父级重渲不改方向；�
 		await act(async () => root.render(<Harness />));
 		const trigger = host.querySelector("button")!;
 		await act(async () => {
-			trigger.dispatchEvent(pointerEvent("pointerdown", "touch"));
-			trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+			host.querySelector<HTMLButtonElement>('[aria-label="展开直接完成附加操作"]')!.click();
 		});
 		expect(document.querySelector('[role="menu"]')?.getAttribute("data-side")).toBe("bottom");
 		await act(async () => trigger.dispatchEvent(pointerEvent("pointerover", "mouse")));
@@ -139,7 +143,7 @@ it("触屏打开会话保持向下，鼠标进入与父级重渲不改方向；�
 		expect(document.querySelector('[role="menu"]')).toBeNull();
 		await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
 		await act(async () => trigger.dispatchEvent(pointerEvent("pointerover", "mouse")));
-		expect(document.querySelector('[role="menu"]')?.getAttribute("data-side")).toBe("top");
+		expect(document.querySelector('[role="menu"]')?.getAttribute("data-side")).toBe("bottom");
 	} finally {
 		await act(async () => root.unmount());
 		host.remove();
@@ -160,14 +164,14 @@ it("首个菜单项获得焦点后立即按 Escape 仍关闭菜单并回焦触�
 	function Harness() {
 		const [open, setOpen] = useState(false);
 		return (
-			<TaskCardPrimaryActionWithQuickOptions
+			<PrimaryActionButtonWithAdditionalActionMenu
 				open={open}
 				onOpenChange={setOpen}
 				icon={null}
 				primaryLabel="直接完成"
 				primaryAccessibleLabel="直接完成"
 				onPrimaryAction={() => {}}
-				quickOption={{ label: "评论后完成", onSelect: () => {} }}
+				additionalAction={{ label: "评论后完成", onSelect: () => {} }}
 			/>
 		);
 	}

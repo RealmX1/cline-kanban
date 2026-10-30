@@ -89,6 +89,72 @@ afterEach(() => {
 });
 
 describe("续接预检在任何销毁动作之前", () => {
+	it.each([["resume", "explicit-native-id"], ["fork", "explicit-native-id"], ["--last"]])(
+		"显式选择 %j 由原生核验，不拿旧本地转录拦截或冒认身份",
+		async (...additionalAgentStartupArgumentsForThisRestart) => {
+			const instance = manager();
+			hydrate(instance);
+			await instance.refreshTaskTerminal({
+				...request(),
+				resumeFromTrash: true,
+				additionalAgentStartupArgumentsForThisRestart,
+			});
+			expect(ptySessionSpawnMock).toHaveBeenCalledOnce();
+			expect(
+				prepareAgentLaunchMock.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing,
+			).toBeUndefined();
+			expect(instance.getSummary(request().taskId)?.agentNativeConversationSessionIdentity).toBeNull();
+		},
+	);
+
+	it("显式远程连接保留默认续跑目标，但不要求目标有本地转录", async () => {
+		const instance = manager();
+		hydrate(instance);
+		await instance.refreshTaskTerminal({
+			...request(),
+			resumeFromTrash: true,
+			additionalAgentStartupArgumentsForThisRestart: ["--remote", "unix:///explicit.sock"],
+		});
+		expect(
+			prepareAgentLaunchMock.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing,
+		).toMatchObject({ sourceSessionId: nativeSessionId });
+		expect(instance.getSummary(request().taskId)?.agentNativeConversationSessionIdentity).toBeNull();
+	});
+	it.each([
+		["--future-option", "--last"],
+		["--future-option", "--remote", "unix:///tmp/other.sock"],
+	])("未知选项后缀不能绕过当前原生会话的本地预检：%j", async (...additional) => {
+		const instance = manager();
+		hydrate(instance);
+		await expect(
+			instance.refreshTaskTerminal({
+				...request(),
+				resumeFromTrash: true,
+				additionalAgentStartupArgumentsForThisRestart: additional,
+			}),
+		).rejects.toThrow(nativeSessionId);
+		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		expect(instance.getSummary(request().taskId)?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+			nativeSessionId,
+		);
+	});
+	it.each([
+		["--model", "--cd", "/path"],
+		["--sandbox", "--ask-for-approval", "never"],
+	])("已知选项缺值在停止旧 PTY 前拒绝：%j", async (...additional) => {
+		const instance = manager();
+		await instance.startTaskSession(request());
+		const oldProcess = ptySessionSpawnMock.mock.results[0]?.value;
+		await expect(
+			instance.refreshTaskTerminal({
+				...request(),
+				additionalAgentStartupArgumentsForThisRestart: additional,
+			}),
+		).rejects.toThrow("缺少参数值");
+		expect(oldProcess.stop).not.toHaveBeenCalled();
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+		expect(instance.getSummary(request().taskId)?.pid).toBe(1234);
+	});
 	it.each(["start", "refresh"])("%s 对缺失原生身份的交接目标零 spawn，保留现场并指出恢复入口", async (operation) => {
 		const instance = manager();
 		hydrate(instance);

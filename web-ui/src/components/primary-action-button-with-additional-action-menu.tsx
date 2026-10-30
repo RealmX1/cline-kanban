@@ -1,16 +1,19 @@
 import * as RadixPopover from "@radix-ui/react-popover";
+import { ChevronDown } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef } from "react";
-import { Button } from "@/components/ui/button";
+import { Button, type ButtonSize, type ButtonVariant } from "@/components/ui/button";
 
-export function TaskCardPrimaryActionWithQuickOptions({
+export function PrimaryActionButtonWithAdditionalActionMenu({
 	open,
 	onOpenChange,
 	icon,
 	primaryLabel,
 	primaryAccessibleLabel,
 	onPrimaryAction,
-	quickOption,
+	additionalAction,
 	disabled = false,
+	variant = "ghost",
+	size = "xs",
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -18,13 +21,14 @@ export function TaskCardPrimaryActionWithQuickOptions({
 	primaryLabel: string;
 	primaryAccessibleLabel: string;
 	onPrimaryAction: () => void;
-	quickOption: { label: string; icon?: ReactNode; onSelect: () => void };
+	additionalAction: { label: string; icon?: ReactNode; onSelect: () => void };
 	disabled?: boolean;
+	variant?: ButtonVariant;
+	size?: ButtonSize;
 }) {
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const menuRef = useRef<HTMLDivElement>(null);
 	const menuId = useId();
-	const lastPointerTypeRef = useRef("");
 	const openingInteractionRef = useRef<"hover" | "touch" | "keyboard">("hover");
 	const restoreTriggerFocusAfterEscapeRef = useRef(false);
 	const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -61,8 +65,8 @@ export function TaskCardPrimaryActionWithQuickOptions({
 				<Button
 					ref={triggerRef}
 					icon={icon}
-					variant="ghost"
-					size="xs"
+					variant={variant}
+					size={size}
 					disabled={disabled}
 					className="[@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
 					aria-label={primaryAccessibleLabel}
@@ -72,7 +76,6 @@ export function TaskCardPrimaryActionWithQuickOptions({
 					onMouseDown={(event) => event.stopPropagation()}
 					onPointerDown={(event) => {
 						event.stopPropagation();
-						lastPointerTypeRef.current = event.pointerType;
 					}}
 					onPointerEnter={(event) => {
 						if (event.pointerType === "touch" || disabled) return;
@@ -86,33 +89,46 @@ export function TaskCardPrimaryActionWithQuickOptions({
 					}}
 					onClick={(event) => {
 						event.stopPropagation();
-						if (lastPointerTypeRef.current === "touch" && event.detail !== 0) {
-							// EXPERIMENT_NODE: 原生端可评估按住后滑动选择附加操作，Web 暂用点按展开。
-							if (!open) openingInteractionRef.current = "touch";
-							cancelScheduledClose();
-							onOpenChange(!open);
-							return;
-						}
 						activateOption(onPrimaryAction);
 					}}
 					onKeyDown={(event) => {
 						event.stopPropagation();
 						if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 							event.preventDefault();
-							if (!open) openingInteractionRef.current = "keyboard";
+							openingInteractionRef.current = "keyboard";
+							if (open) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
 							onOpenChange(true);
 						}
 					}}
 				/>
 			</RadixPopover.Anchor>
+			<Button
+				icon={<ChevronDown size={12} />}
+				variant={variant}
+				size={size}
+				disabled={disabled}
+				className="hidden [@media(any-pointer:coarse)]:inline-flex [@media(any-pointer:coarse)]:min-h-11 [@media(any-pointer:coarse)]:min-w-8"
+				aria-label={`展开${primaryLabel}附加操作`}
+				aria-haspopup="menu"
+				aria-expanded={open && !disabled}
+				aria-controls={open && !disabled ? menuId : undefined}
+				onMouseDown={(event) => event.stopPropagation()}
+				onPointerDown={(event) => event.stopPropagation()}
+				onClick={(event) => {
+					event.stopPropagation();
+					cancelScheduledClose();
+					openingInteractionRef.current = "touch";
+					onOpenChange(!open);
+				}}
+			/>
 			<RadixPopover.Portal>
 				<RadixPopover.Content
 					data-mobile-focus-view-idle-collapse-suspension=""
 					ref={menuRef}
 					id={menuId}
 					role="menu"
-					aria-label={`${primaryLabel}快捷操作`}
-					side={openingInteractionRef.current === "touch" ? "bottom" : "top"}
+					aria-label={`${primaryLabel}附加操作`}
+					side="bottom"
 					align="end"
 					sideOffset={4}
 					collisionPadding={8}
@@ -158,21 +174,13 @@ export function TaskCardPrimaryActionWithQuickOptions({
 				>
 					<Button
 						role="menuitem"
+						aria-label={additionalAction.label}
 						variant="ghost"
+						icon={additionalAction.icon}
 						className="min-h-8 justify-start px-3 text-text-primary [@media(pointer:coarse)]:min-h-11"
-						onClick={() => activateOption(onPrimaryAction)}
+						onClick={() => activateOption(additionalAction.onSelect)}
 					>
-						{primaryLabel}
-					</Button>
-					<Button
-						role="menuitem"
-						aria-label={quickOption.label}
-						variant="ghost"
-						icon={quickOption.icon}
-						className="min-h-8 justify-start px-3 text-text-primary [@media(pointer:coarse)]:min-h-11"
-						onClick={() => activateOption(quickOption.onSelect)}
-					>
-						{quickOption.label}
+						{additionalAction.label}
 					</Button>
 				</RadixPopover.Content>
 			</RadixPopover.Portal>

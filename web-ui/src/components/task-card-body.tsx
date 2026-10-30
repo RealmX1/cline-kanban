@@ -56,11 +56,11 @@ import {
 } from "@/components/detail-panels/cline-model-picker-options";
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 import { ProjectIcon } from "@/components/project-visual-identity";
 import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
-import { TaskCardPrimaryActionWithQuickOptions } from "@/components/task-card-primary-action-with-quick-options";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskCardStickers } from "@/components/task-card-stickers";
 import { TaskClosureSummaryAndHistory } from "@/components/task-closure-summary-and-history";
@@ -1587,7 +1587,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							/>
 						</Tooltip>
 					) : (
-						<TaskCardPrimaryActionWithQuickOptions
+						<PrimaryActionButtonWithAdditionalActionMenu
 							open={openedQuickActionMenu === "prompt"}
 							onOpenChange={(open) =>
 								setOpenedQuickActionMenu((current) => (open ? "prompt" : current === "prompt" ? null : current))
@@ -1596,7 +1596,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							primaryLabel="查看原始 Prompt"
 							primaryAccessibleLabel="View original prompt"
 							onPrimaryAction={() => setIsPromptViewerOpen(true)}
-							quickOption={{
+							additionalAction={{
 								label: "复制原始 Prompt",
 								icon: <Copy size={14} />,
 								onSelect: () => {
@@ -1674,7 +1674,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{!card.taskShelvingState?.isShelved && (columnId === "review" || columnId === "validation") ? (
-						<TaskCardPrimaryActionWithQuickOptions
+						<PrimaryActionButtonWithAdditionalActionMenu
 							open={openedQuickActionMenu === "done"}
 							onOpenChange={(open) =>
 								setOpenedQuickActionMenu((current) => (open ? "done" : current === "done" ? null : current))
@@ -1684,7 +1684,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							primaryAccessibleLabel="结案任务"
 							disabled={isMoveToTrashLoading || !onMoveToTrash}
 							onPrimaryAction={() => onMoveToTrash?.(card.id)}
-							quickOption={{
+							additionalAction={{
 								label: "添加评论并结案…",
 								icon: <MessagesSquare size={14} />,
 								onSelect: () => onMoveToTrash?.(card.id, { requestTaskCommentBeforeMovingIntoDone: true }),

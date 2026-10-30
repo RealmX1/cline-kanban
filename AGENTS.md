@@ -105,6 +105,7 @@ web-ui：
 | `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
+| `docs/codex-session-restart-additional-startup-arguments.md` | Codex 单次重启参数、覆盖规则、原生旁路与实际 argv/身份/目录证据 |
 | `docs/task-initial-prompt-structured-markup.md` | 任务起草的来源与阶段标签、实际默认设置选择、共享指导注入及历史兼容边界 |
 | `DEVELOPMENT.md` | dev/dogfood 工作流、tmux 长驻约定、hook 事件→状态迁移映射 |
 | `test/README.md` | 测试执行形态与 git 安全契约 |

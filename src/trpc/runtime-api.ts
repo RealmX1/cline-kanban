@@ -1844,6 +1844,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 				const refreshTaskTerminalRequest = {
 					taskId: body.taskId,
+					...(body.additionalAgentStartupArgumentsForThisRestart !== undefined
+						? {
+								additionalAgentStartupArgumentsForThisRestart:
+									body.additionalAgentStartupArgumentsForThisRestart,
+							}
+						: {}),
 					// 补回这两个字段（此前重建请求把它们丢了）：
 					//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
 					//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
