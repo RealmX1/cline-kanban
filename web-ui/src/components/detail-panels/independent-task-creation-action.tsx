@@ -4,6 +4,10 @@ import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useIndependentTaskCreation } from "@/hooks/use-independent-task-creation";
 import {
 	independentTaskCreationClient,
@@ -54,6 +58,20 @@ export function IndependentTaskCreationAction({
 	}, [creation.open]);
 	const unavailable =
 		draft?.status === "waiting_for_source_turn" || draft?.status === "created" || draft?.status === "creating";
+	const primaryActionDisabled =
+		isPreparingDescriptionImages ||
+		isPreparingInitialPromptImages ||
+		busy ||
+		!draft ||
+		draft.contextCapturedAt === null ||
+		Boolean(unavailable) ||
+		!draft.title.trim() ||
+		!draft.initialPrompt.trim() ||
+		(draft.contextInheritance === "fork_source_conversation" && Boolean(draft.forkUnavailableReason));
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: () => creation.create(allowIncompleteContext),
+		disabled: primaryActionDisabled,
+	});
 	return (
 		<div
 			className="px-2 pb-2"
@@ -72,6 +90,7 @@ export function IndependentTaskCreationAction({
 				</a>
 			))}
 			<Dialog
+				onKeyDown={handlePrimaryActionKeyDown}
 				open={creation.open}
 				onOpenChange={(value) => {
 					if (!value && !busy) void creation.close();
@@ -311,18 +330,8 @@ export function IndependentTaskCreationAction({
 					</Button>
 					{!draft?.createdTaskId && (
 						<Button
-							disabled={
-								isPreparingDescriptionImages ||
-								isPreparingInitialPromptImages ||
-								busy ||
-								!draft ||
-								draft.contextCapturedAt === null ||
-								Boolean(unavailable) ||
-								!draft.title.trim() ||
-								!draft.initialPrompt.trim() ||
-								(draft.contextInheritance === "fork_source_conversation" &&
-									Boolean(draft.forkUnavailableReason))
-							}
+							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+							disabled={primaryActionDisabled}
 							onClick={() => void creation.create(allowIncompleteContext)}
 						>
 							{draft?.worktreeSource === "local_main_after_source_task_landed"

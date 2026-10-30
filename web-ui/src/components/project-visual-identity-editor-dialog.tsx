@@ -16,6 +16,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { resetProjectVisualIdentity, saveProjectVisualIdentity } from "@/runtime/project-visual-identity-query";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 
@@ -92,8 +96,13 @@ export function ProjectVisualIdentityEditorDialog({
 			setIsSaving(false);
 		}
 	}
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: save,
+		disabled: isSaving || isReadingImage,
+	});
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			open
 			onOpenChange={(open) => {
 				if (!open && !isSaving) onClose();
@@ -248,6 +257,7 @@ export function ProjectVisualIdentityEditorDialog({
 					className="min-h-11"
 					variant="primary"
 					disabled={isSaving || isReadingImage}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 					onClick={() => void save()}
 				>
 					{isSaving ? "正在保存…" : "保存"}

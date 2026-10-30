@@ -15,10 +15,10 @@ import {
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
-
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useFormPrimaryActionSubmitKeyboardShortcut } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { type PromptScope, type StoredPrompt, usePromptLibrary } from "@/hooks/use-prompt-library";
 
 const COLLAPSED_PROMPT_TEXTAREA_VISIBLE_LINE_COUNT = 4;
@@ -302,12 +302,17 @@ function PromptRow({
 	const isGlobal = prompt.scope === "global";
 	const canFill = prompt.text.trim().length > 0 && !isPreparingPromptImages;
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
+	const consumeAutosavedEditorSubmitShortcut = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: () => {},
+		disabled: true,
+	});
 	const isReusableCommand = prompt.entryKind === "reusable_command";
 	const isUsed = prompt.draftUsage?.markedUsedAtEpochMs != null;
 
 	return (
 		<div
 			ref={rowRef}
+			onKeyDown={consumeAutosavedEditorSubmitShortcut}
 			data-prompt-library-entry-id={prompt.id}
 			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
 			onPointerEnter={() => setIsPointerHoveringPromptRow(true)}

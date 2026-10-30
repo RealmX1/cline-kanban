@@ -1,10 +1,13 @@
 import { ArrowUp, ChevronRight, Folder, FolderOpen, GitBranch } from "lucide-react";
 import { type FormEvent, type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeDirectoryListEntry, RuntimeDirectoryListResponse } from "@/runtime/types";
 import { serverRootLabel, splitServerPath, toUiRelative } from "@/utils/server-path";
@@ -110,10 +113,15 @@ export function RemoteFileBrowserDialog({
 		onSelect(currentPath);
 	}, [currentPath, onSelect]);
 
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleSelect,
+		disabled: isLoading || !currentPath,
+	});
 	const breadcrumbSegments = buildBreadcrumbs(currentPath, rootPath);
 
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			open={open}
 			onOpenChange={onOpenChange}
 			contentClassName="max-w-xl"
@@ -139,7 +147,12 @@ export function RemoteFileBrowserDialog({
 				<Button variant="default" onClick={() => onOpenChange(false)}>
 					Cancel
 				</Button>
-				<Button variant="primary" onClick={handleSelect} disabled={isLoading || !currentPath}>
+				<Button
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+					variant="primary"
+					onClick={handleSelect}
+					disabled={isLoading || !currentPath}
+				>
 					Select
 				</Button>
 			</DialogFooter>
@@ -177,6 +190,10 @@ function RemoteFileBrowserContent({
 	error: string | null;
 	entries: RuntimeDirectoryListEntry[];
 }): ReactElement {
+	const handlePathPrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: onPathInputSubmit,
+		disabled: isLoading || !pathInput.trim(),
+	});
 	return (
 		<>
 			{/* Root path indicator */}
@@ -187,7 +204,7 @@ function RemoteFileBrowserContent({
 			</div>
 
 			{/* Path input */}
-			<form onSubmit={onPathInputSubmit} className="px-4">
+			<form onKeyDown={handlePathPrimaryActionKeyDown} onSubmit={onPathInputSubmit} className="px-4">
 				<input
 					type="text"
 					value={pathInput}

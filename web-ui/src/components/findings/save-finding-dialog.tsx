@@ -1,3 +1,7 @@
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 // 「存为 finding」表单对话框（蓝图 §D.2.1，v1 人工保存主路径）。
 // 由聊天面板按消息打开：正文已按「选区优先、否则消息摘录」预填并截断到契约上限；
 // 锚三元由调用方经位置性映射 + 投影解析（不可锚 = null → freeform 降级，绝不伪造锚）。
@@ -112,11 +116,17 @@ export function SaveFindingDialog({
 		}
 	};
 
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleSave,
+		disabled: !canSave,
+	});
+
 	// 快照定格后字段只读（保存中自然也只读）。
 	const fieldsDisabled = isSaving || submissionSnapshot !== null;
 
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			open
 			onOpenChange={(nextOpen) => {
 				if (!nextOpen && !isSaving) {
@@ -184,6 +194,7 @@ export function SaveFindingDialog({
 					onClick={() => {
 						void handleSave();
 					}}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 					disabled={!canSave}
 				>
 					{isSaving ? (

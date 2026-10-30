@@ -115,6 +115,40 @@ test("无便签卡片可从动作区添加首张便签，默认展开且不增�
 	expect(await card.boundingBox()).toEqual(before);
 });
 
+for (const [host, taskId, modifier] of [
+	["board", "main-task", "Meta"],
+	["focus", "focus-task", "Control"],
+] as const) {
+	test(`${host} 便签的 ${modifier}+Enter 新增、失败重试、编辑与重新打开保持一致`, async ({ page }) => {
+		const fixture = await openStickerCards(page);
+		const card = page.locator(`[data-sticker-host='${host}']`);
+		await card.locator("[data-task-sticker-stub]").click();
+		const overlay = page.locator("[data-task-sticker-overlay]");
+		await overlay.getByRole("button", { name: "添加便签", exact: true }).click();
+		const editor = page.getByRole("textbox", { name: "便签正文" });
+		await editor.fill("快捷保存\n保留换行");
+		fixture.failNextSave();
+		await editor.press(`${modifier}+Enter`);
+		await expect(overlay.getByRole("alert")).toContainText("隔离保存故障");
+		await expect(editor).toHaveValue("快捷保存\n保留换行");
+		await editor.press(`${modifier}+Enter`);
+		await expect(editor).toHaveCount(0);
+		expect(fixture.mutations[0]).toEqual(fixture.mutations[1]);
+		expect(fixture.cards.get(taskId)!.taskStickerEntries).toHaveLength(3);
+		await overlay.getByRole("button", { name: "编辑便签", exact: true }).last().click();
+		await editor.fill("修改后仍保留的便签");
+		await editor.press(`${modifier}+Enter`);
+		await expect(editor).toHaveCount(0);
+		expect(fixture.cards.get(taskId)!.taskStickerEntries).toHaveLength(3);
+		await fixture.mount();
+		await page.locator(`[data-sticker-host='${host}'] [data-task-sticker-stub]`).click();
+		await expect(
+			page.locator("[data-task-sticker-overlay]").getByText("修改后仍保留的便签", { exact: true }),
+		).toBeVisible();
+		expect(fixture.pageErrors).toEqual([]);
+	});
+}
+
 test("悬停保持输入焦点和卡片布局，跨入浮层不关闭，折叠后重新 hover 与刷新仍收起", async ({ page }) => {
 	await page.setViewportSize({ width: 1200, height: 850 });
 	const fixture = await openStickerCards(page);
