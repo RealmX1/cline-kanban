@@ -15,6 +15,16 @@ import {
 import { getWorkspaceDirectoryPath } from "../../../src/state/workspace-state";
 import { createTempDir } from "../../utilities/temp-dir";
 
+// Git/npm 安装产物使用原生 ESM namespace；经模块工厂隔离导出，不能直接 spyOn 原件。
+vi.mock("agent-conversation-exploration-thread-graph/harness-claude-code", async (importOriginal) => ({
+	...(await importOriginal<typeof nativeProcesses>()),
+	readNativeSystemBootIdentity: vi.fn(),
+	observeExecutionOwnedProcesses: vi.fn(),
+	readNativeProcessOwnershipSnapshot: vi.fn(),
+	signalMatchingOwnedProcesses: vi.fn(),
+	confirmOwnedProcessCancellation: vi.fn(),
+}));
+
 let isolatedHome: ReturnType<typeof createTempDir>;
 const owner = { workspaceId: "isolated-workspace", taskId: "parent-task" };
 const request: ForkedWorkBranchRequest = {
@@ -42,10 +52,14 @@ const nativeSnapshot = new Map([
 ]);
 
 beforeEach(() => {
+	vi.resetAllMocks();
 	isolatedHome = createTempDir("background-agent-retention-home-");
 	vi.stubEnv("HOME", isolatedHome.path);
-	vi.spyOn(nativeProcesses, "readNativeSystemBootIdentity").mockResolvedValue("boot-generation-1");
-	vi.spyOn(nativeProcesses, "observeExecutionOwnedProcesses").mockImplementation(async (input) => {
+	vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(new Map());
+	vi.mocked(nativeProcesses.signalMatchingOwnedProcesses).mockResolvedValue("confirmed");
+	vi.mocked(nativeProcesses.confirmOwnedProcessCancellation).mockResolvedValue("confirmed");
+	vi.mocked(nativeProcesses.readNativeSystemBootIdentity).mockResolvedValue("boot-generation-1");
+	vi.mocked(nativeProcesses.observeExecutionOwnedProcesses).mockImplementation(async (input) => {
 		const current = await nativeProcesses.readNativeProcessOwnershipSnapshot();
 		return {
 			ownedStartIdentities: new Map(
@@ -80,9 +94,7 @@ async function originalRecordPath(): Promise<string> {
 
 describe("后台 Agent 持久归属与恢复", () => {
 	it("控制器退出后不重复派发活进程，退出证据恢复后自动解除回收保护", async () => {
-		const snapshot = vi
-			.spyOn(nativeProcesses, "readNativeProcessOwnershipSnapshot")
-			.mockResolvedValue(nativeSnapshot);
+		const snapshot = vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(nativeSnapshot);
 		const first = ownedExecutor({
 			start: async (input) => {
 				await input.beforeProcessSpawn?.();
@@ -108,10 +120,8 @@ describe("后台 Agent 持久归属与恢复", () => {
 	});
 
 	it("重启后显式取消仍能按持久身份清理，并单独保存确认", async () => {
-		const snapshot = vi
-			.spyOn(nativeProcesses, "readNativeProcessOwnershipSnapshot")
-			.mockResolvedValue(nativeSnapshot);
-		const terminate = vi.spyOn(nativeProcesses, "signalMatchingOwnedProcesses").mockImplementation(async () => {
+		const snapshot = vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(nativeSnapshot);
+		const terminate = vi.mocked(nativeProcesses.signalMatchingOwnedProcesses).mockImplementation(async () => {
 			snapshot.mockResolvedValue(new Map());
 			return "confirmed";
 		});
@@ -246,9 +256,9 @@ describe("后台 Agent 持久归属与恢复", () => {
 	});
 
 	it("首次 PID 回报前的缺证保留未知，原生开机代际变化后自动解除", async () => {
-		vi.spyOn(nativeProcesses, "readNativeProcessOwnershipSnapshot").mockResolvedValue(new Map());
+		vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(new Map());
 		vi.mocked(nativeProcesses.observeExecutionOwnedProcesses).mockRejectedValue(new Error("原生归属查询不可用"));
-		const terminate = vi.spyOn(nativeProcesses, "signalMatchingOwnedProcesses");
+		const terminate = vi.mocked(nativeProcesses.signalMatchingOwnedProcesses);
 		await expect(
 			ownedExecutor({
 				start: async (input) => {
