@@ -9,6 +9,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { TaskCommentBeforeMoveIntoDoneController } from "@/hooks/use-task-comment-before-move-into-done";
 
 export function TaskCommentBeforeMoveIntoDoneDialog({
@@ -35,8 +39,30 @@ export function TaskCommentBeforeMoveIntoDoneDialog({
 		setLocalError(null);
 	}, [requestId, savedCommentText, request?.closure]);
 	const submitting = request?.phase === "submitting" || resolvingIdentity;
+	const submitClosure = async () => {
+		if (!request || submitting || !draft.outcome) return;
+		setResolvingIdentity(true);
+		try {
+			const details = await resolveTaskClosureFormDetails(draft, request.workspaceId);
+			onSubmit(commentText, {
+				closureRequestId: request.closureRequestId,
+				expectedTaskUpdatedAtEpochMs: request.expectedTaskUpdatedAtEpochMs,
+				details,
+				selectedArtifactRelativePaths: nonemptyClosureFormLines(draft.selectedArtifactPathsText),
+			});
+		} catch (error) {
+			setLocalError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setResolvingIdentity(false);
+		}
+	};
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submitClosure,
+		disabled: submitting || !draft.outcome || !request,
+	});
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			onOpenAutoFocus={(event) => {
 				event.preventDefault();
 				textareaRef.current?.focus();
@@ -82,21 +108,8 @@ export function TaskCommentBeforeMoveIntoDoneDialog({
 					variant="primary"
 					disabled={submitting || !draft.outcome}
 					icon={submitting ? <Spinner size={14} /> : undefined}
-					onClick={() => {
-						if (!request) return;
-						setResolvingIdentity(true);
-						void resolveTaskClosureFormDetails(draft, request.workspaceId)
-							.then((details) =>
-								onSubmit(commentText, {
-									closureRequestId: request.closureRequestId,
-									expectedTaskUpdatedAtEpochMs: request.expectedTaskUpdatedAtEpochMs,
-									details,
-									selectedArtifactRelativePaths: nonemptyClosureFormLines(draft.selectedArtifactPathsText),
-								}),
-							)
-							.catch((error: unknown) => setLocalError(error instanceof Error ? error.message : String(error)))
-							.finally(() => setResolvingIdentity(false));
-					}}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+					onClick={() => void submitClosure()}
 				>
 					归档并结案
 				</Button>

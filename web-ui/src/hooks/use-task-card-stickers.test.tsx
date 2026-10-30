@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TaskCardStickers } from "@/components/task-card-stickers";
 import type { BoardCard } from "@/types";
 import { type TaskCardStickersController, useTaskCardStickers } from "./use-task-card-stickers";
 
@@ -36,13 +37,17 @@ function Harness({
 	taskCard = card,
 	workspaceId = "workspace",
 	readOnly = false,
+	renderOverlay = false,
 }: {
 	taskCard?: BoardCard;
 	workspaceId?: string;
 	readOnly?: boolean;
+	renderOverlay?: boolean;
 }) {
 	controller = useTaskCardStickers({ card: taskCard, workspaceId, readOnly, isDragging: false });
-	return <div ref={controller.cardElementRef} />;
+	return (
+		<div ref={controller.cardElementRef}>{renderOverlay ? <TaskCardStickers controller={controller} /> : null}</div>
+	);
 }
 beforeEach(() => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -63,6 +68,38 @@ afterEach(() => {
 });
 
 describe("卡片便签浮层控制", () => {
+	it.each([false, true])("便签快捷保存走现有新增或编辑入口（编辑=%s），失败后可重试", async (editing) => {
+		await act(async () => root.render(<Harness renderOverlay />));
+		await act(async () => {
+			if (editing) {
+				controller.activate();
+				controller.startEditing(card.taskStickerEntries![0]!);
+			} else controller.startNew();
+		});
+		act(() => controller.setDraftText("快捷保存正文"));
+		mutateSticker.mockRejectedValueOnce(new Error("暂时不可用"));
+		const press = async (options: KeyboardEventInit) => {
+			await act(async () =>
+				document
+					.querySelector('textarea[aria-label="便签正文"]')!
+					.dispatchEvent(
+						new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options }),
+					),
+			);
+		};
+		await press({ metaKey: true });
+		expect(mutateSticker).toHaveBeenCalledTimes(1);
+		expect(controller.editor?.stickerText).toBe("快捷保存正文");
+		await press({ ctrlKey: true, repeat: true });
+		expect(mutateSticker).toHaveBeenCalledTimes(1);
+		await press({ ctrlKey: true });
+		expect(mutateSticker).toHaveBeenCalledTimes(2);
+		expect(mutateSticker.mock.lastCall?.[1].mutation).toMatchObject({
+			operation: editing ? "update_text" : "create",
+			stickerText: "快捷保存正文",
+		});
+	});
+
 	it("初始不读取，hover 不修改折叠状态，离开延迟 200ms 关闭，进入浮层取消关闭", async () => {
 		await act(async () => root.render(<Harness />));
 		expect(readCard).not.toHaveBeenCalled();

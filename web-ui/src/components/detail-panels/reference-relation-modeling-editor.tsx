@@ -27,6 +27,10 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { buildRelationTaskCardPreviewTargetFromDisplayEntry } from "@/hooks/relation-task-card-preview-target";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { ReferenceRelationModelingEditorController } from "@/hooks/use-reference-relation-modeling-editor";
 import { useRelationTaskCardPreview } from "@/hooks/use-relation-task-card-preview";
 import type { TaskEditorClipboardTaskSelectionRequest } from "@/hooks/use-task-editor-clipboard-task-reference";
@@ -36,7 +40,10 @@ import {
 	listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogInputs,
 	validateAddReferenceRelationDialogDraftIntoAssertionRequest,
 } from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
-import { collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent } from "@/runtime/work-unit-relation-assertion-write-query";
+import {
+	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
+	type TriggeringExplicitUserGestureEvent,
+} from "@/runtime/work-unit-relation-assertion-write-query";
 import { resolveRelationModelingCounterpart } from "@/runtime/work-unit-relation-modeling-query";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
@@ -455,8 +462,40 @@ export function ReferenceRelationModelingEditor({
 		}
 	}
 	const selectedKind = form.selectedReferenceRelationKind;
+	const relationSaveDisabled =
+		!taskId ||
+		!controller.hasChanges ||
+		controller.saving ||
+		creationInFlight ||
+		!controller.ready ||
+		hasUnstagedRelationForm ||
+		readOnly;
+	const saveRelationsFromExplicitUserGesture = (event: TriggeringExplicitUserGestureEvent) => {
+		if (!taskId || relationSaveDisabled) return;
+		const characteristics = collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(event);
+		return controller
+			.applyToTask(taskId, characteristics)
+			.then(onRelationsSaved)
+			.catch(() => undefined);
+	};
+	const handleRelationSaveKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: saveRelationsFromExplicitUserGesture,
+		disabled: relationSaveDisabled,
+	});
+	const relationDetailsSubmitDisabled =
+		resolving ||
+		controller.saving ||
+		creationInFlight ||
+		readOnly ||
+		Boolean(editingDraft) ||
+		!(editing || form.selectedCounterpartKanbanBoardCard);
+	const handleRelationDetailsKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: () => addFormToDraft(),
+		disabled: relationDetailsSubmitDisabled,
+	});
 	const relationModelingContents = (
 		<section
+			onKeyDown={handleRelationSaveKeyDown}
 			aria-label="任务关系建模"
 			className="@container flex min-w-0 flex-col gap-3 py-3 text-xs text-text-primary"
 		>
@@ -526,6 +565,7 @@ export function ReferenceRelationModelingEditor({
 				) : null}
 				{formOpen ? (
 					<div
+						onKeyDown={handleRelationDetailsKeyDown}
 						className="flex flex-col gap-3 rounded-md border border-border-bright bg-surface-1 p-3"
 						role="group"
 						aria-label={editing ? "修改参照关系" : "新增参照关系"}
@@ -662,7 +702,12 @@ export function ReferenceRelationModelingEditor({
 						) : null}
 						<div className="flex gap-2">
 							{!editingDraft && (editing || form.selectedCounterpartKanbanBoardCard) ? (
-								<Button size="xs" disabled={resolving} onClick={() => void addFormToDraft()}>
+								<Button
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+									size="xs"
+									disabled={relationDetailsSubmitDisabled}
+									onClick={() => void addFormToDraft()}
+								>
 									{resolving ? "正在核对身份…" : editing ? "保存详情到草稿" : "添加关系到草稿"}
 								</Button>
 							) : resolving ? (
@@ -1031,21 +1076,9 @@ export function ReferenceRelationModelingEditor({
 					<div className="flex gap-2">
 						<Button
 							size="xs"
-							disabled={
-								!controller.hasChanges ||
-								controller.saving ||
-								!controller.ready ||
-								hasUnstagedRelationForm ||
-								readOnly
-							}
-							onClick={(event) => {
-								const characteristics =
-									collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(event);
-								void controller
-									.applyToTask(taskId, characteristics)
-									.then(onRelationsSaved)
-									.catch(() => undefined);
-							}}
+							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+							disabled={relationSaveDisabled}
+							onClick={(event) => void saveRelationsFromExplicitUserGesture(event)}
 						>
 							{controller.saving ? "正在保存关系…" : "保存关系变更"}
 						</Button>

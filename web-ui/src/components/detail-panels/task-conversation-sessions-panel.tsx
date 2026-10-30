@@ -14,6 +14,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
@@ -282,6 +286,12 @@ export function TaskConversationSessionsPanel({
 		}
 	};
 
+	const primaryActionDisabled =
+		isTaskAgentExecutionDisabled || !isSessionCreationSupported || isCreating || isPreparingQuestionImages;
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: createSession,
+		disabled: primaryActionDisabled,
+	});
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
@@ -448,6 +458,7 @@ export function TaskConversationSessionsPanel({
 				) : null}
 			</div>
 			<Dialog
+				onKeyDown={handlePrimaryActionKeyDown}
 				open={isCreationDialogOpen}
 				onOpenChange={(open) => {
 					if (!isCreating) setCreationDialogOpen(open);
@@ -575,12 +586,8 @@ export function TaskConversationSessionsPanel({
 							size="sm"
 							fill
 							className="mt-3"
-							disabled={
-								isTaskAgentExecutionDisabled ||
-								!isSessionCreationSupported ||
-								isCreating ||
-								isPreparingQuestionImages
-							}
+							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+							disabled={primaryActionDisabled}
 							onClick={() => void createSession()}
 						>
 							{isCreating ? "Creating…" : "Create session"}
